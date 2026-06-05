@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "sessionId": "c7cb0998-fdee-4809-ae2b-b372fb605c13",
+  "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
-  "startedAt": "2026-06-05T14:12:10.379Z",
-  "updatedAt": "2026-06-05T14:19:51.772Z",
+  "startedAt": "2026-06-05T14:20:18.917Z",
+  "updatedAt": "2026-06-05T14:27:08.132Z",
   "currentIteration": 0,
   "maxIterations": 10,
   "tasksCompleted": 0,
@@ -32,7 +32,7 @@
       {
         "id": "Johnny-kgc.1",
         "title": "US-001: Project scaffolding",
-        "status": "open",
+        "status": "completed",
         "completedInSession": false
       },
       {

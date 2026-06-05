@@ -34,30 +34,22 @@
 	<title>Johnny</title>
 </svelte:head>
 
-<main>
-	<h1>Johnny</h1>
-	<p>Google Meet AI meeting bot.</p>
+<h1>Johnny</h1>
+<p>Google Meet AI meeting bot.</p>
 
-	<section class="health">
-		<h2>Backend health</h2>
-		{#if status === 'loading' || status === 'idle'}
-			<p>Checking…</p>
-		{:else if status === 'ok'}
-			<p class="ok">Backend is reachable.</p>
-		{:else}
-			<p class="error">Backend unreachable{error ? `: ${error}` : ''}</p>
-		{/if}
-		<button type="button" onclick={checkHealth}>Re-check</button>
-	</section>
-</main>
+<section class="health">
+	<h2>Backend health</h2>
+	{#if status === 'loading' || status === 'idle'}
+		<p>Checking…</p>
+	{:else if status === 'ok'}
+		<p class="ok">Backend is reachable.</p>
+	{:else}
+		<p class="error">Backend unreachable{error ? `: ${error}` : ''}</p>
+	{/if}
+	<button type="button" onclick={checkHealth}>Re-check</button>
+</section>
 
 <style>
-	main {
-		font-family: system-ui, sans-serif;
-		max-width: 40rem;
-		margin: 2rem auto;
-		padding: 0 1rem;
-	}
 	.health {
 		margin-top: 2rem;
 	}
