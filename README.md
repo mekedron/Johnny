@@ -41,8 +41,20 @@ Once both are running, open <http://localhost:5173> and the home page will fetch
 
 ## Full stack
 
-The complete stack (API, worker, frontend, PostgreSQL+pgvector, Redis) runs via
-Docker Compose:
+The fastest path is the interactive setup wizard. From `backend/`:
+
+```bash
+uv sync
+uv run johnny-setup     # or: uv run python -m johnny.wizard
+```
+
+The wizard checks prerequisites, generates `FERNET_KEY`, walks you through
+Google OAuth, downloads local models (faster-whisper / Piper / Ollama),
+registers providers via the API, runs smoke tests, and opens the UI. It is
+re-runnable and supports a `--non-interactive answers.yaml` mode for CI.
+
+To do it manually instead, the complete stack (API, worker, frontend,
+PostgreSQL+pgvector, Redis) runs via Docker Compose:
 
 ```bash
 cp .env.example .env    # fill in secrets as needed
@@ -52,6 +64,8 @@ docker compose up
 The api is reachable at <http://localhost:8000>, the frontend at
 <http://localhost:5173>. Postgres listens on the internal compose network only;
 connect via `docker compose exec postgres psql -U johnny`.
+
+See `docs/SETUP_LOCAL.md` for the full manual setup walkthrough.
 
 ### Meet-worker image
 

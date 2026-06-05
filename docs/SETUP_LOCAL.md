@@ -8,6 +8,21 @@ local PostgreSQL.
 
 Every command block is copy-pasteable. Every model has a direct download link.
 
+> **Want a faster path?** The interactive setup wizard runs every step in this
+> guide for you: prerequisite checks, `.env` + `FERNET_KEY` generation, Google
+> OAuth, provider registration, model downloads, smoke tests, and stack
+> bring-up. From `backend/`:
+>
+> ```bash
+> uv sync
+> uv run johnny-setup
+> # or: uv run python -m johnny.wizard
+> ```
+>
+> The wizard is re-runnable, detects already-completed steps, and supports a
+> `--non-interactive answers.yaml` mode for CI / scripted setups. Use this
+> guide as the manual reference; use the wizard for day-to-day setup.
+
 ---
 
 ## 0. What you will end up with

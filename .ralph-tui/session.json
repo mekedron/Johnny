@@ -3,10 +3,10 @@
   "sessionId": "93eda9f4-6fc6-4aec-a6f6-7c9916b5653f",
   "status": "running",
   "startedAt": "2026-06-05T22:19:54.215Z",
-  "updatedAt": "2026-06-05T22:25:30.832Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-05T22:48:50.853Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -56,8 +56,8 @@
       {
         "id": "Johnny-mxx",
         "title": "Write local-first setup guide with copy-paste commands and direct download links",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.5",
@@ -241,7 +241,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-mxx",
+      "taskTitle": "Write local-first setup guide with copy-paste commands and direct download links",
+      "taskCompleted": true,
+      "durationMs": 302467,
+      "startedAt": "2026-06-05T22:20:27.518Z",
+      "endedAt": "2026-06-05T22:25:29.985Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

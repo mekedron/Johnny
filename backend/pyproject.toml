@@ -20,7 +20,16 @@ dependencies = [
     "httpx>=0.28.0",
     "websockets>=14.0",
     "docker>=7.1.0",
+    "rich>=13.9.0",
+    "click>=8.1.0",
+    "pyyaml>=6.0.0",
+    "python-dotenv>=1.0.0",
 ]
+
+[project.scripts]
+# `johnny-setup` becomes the entrypoint for the interactive setup wizard
+# (Johnny-61y). Invokable directly after `uv sync` without `-m`.
+johnny-setup = "johnny.wizard.cli:main"
 
 [project.optional-dependencies]
 # Heavy ML dep for on-device STT. Only the meet-worker image needs it
@@ -38,6 +47,7 @@ dev = [
     "ruff>=0.8.0",
     "mypy>=1.13.0",
     "aiosqlite>=0.20.0",
+    "types-PyYAML>=6.0.0",
 ]
 
 [build-system]

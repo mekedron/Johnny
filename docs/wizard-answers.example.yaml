@@ -1,0 +1,63 @@
+# Example answers file for the Johnny setup wizard's --non-interactive mode.
+#
+# Usage:
+#   uv run johnny-setup --non-interactive docs/wizard-answers.example.yaml
+#
+# Every key below corresponds to one prompt the wizard would ask in
+# interactive mode. Keys you omit fall back to the prompt's default; keys
+# without defaults (secrets, OAuth IDs) MUST be present or the wizard
+# aborts with a clear error.
+#
+# A complete local-first run looks like this:
+
+# --- Google OAuth (replace with your real desktop OAuth client values) ---
+google_reconfigure: false           # only consulted if .env already has these
+google_open_browser: false          # set true to open Cloud Console
+google_client_id: REPLACE-WITH-YOUR-DESKTOP-OAUTH-CLIENT-ID
+google_client_secret: REPLACE-WITH-YOUR-DESKTOP-OAUTH-CLIENT-SECRET
+
+# --- Stack control -----------------------------------------------------
+compose_up: true                    # confirm `docker compose up -d`
+build_meet_worker: true             # build the meet-worker image if missing
+
+# --- STT provider (Speech-to-Text) -------------------------------------
+# Choices indexed from 0. 0 = Local (recommended), 1 = Cloud.
+stt_hosting: 0
+# Among local STT options, 0 = faster-whisper.
+stt_provider: 0
+# Whisper model: 0=tiny.en, 1=base.en (RECOMMENDED), 2=small.en, 3=medium.en, 4=large-v3
+whisper_model_stt: 1
+
+# --- LLM provider ------------------------------------------------------
+llm_hosting: 0                      # 0 = Local Ollama
+llm_provider: 0
+# 0 = Llama 3.1 8B (RECOMMENDED), 1 = Qwen 2.5 7B, 2 = Qwen 2.5 3B
+ollama_model_llm: 0
+# Ollama ignores api_key contents but the field is required.
+llm_openai-compatible_api_key: ollama
+
+# --- TTS provider (Text-to-Speech) -------------------------------------
+tts_hosting: 0                      # 0 = Local Piper
+tts_provider: 0
+# 0 = en_US-amy-medium (RECOMMENDED), 1 = en_US-ryan-medium, 2 = en_GB-alan-medium
+piper_voice_tts: 0
+
+# --- Finish ------------------------------------------------------------
+open_ui: true
+
+# --- Cloud provider examples (commented out — uncomment to use) --------
+#
+# To use Deepgram cloud STT instead, set:
+#   stt_hosting: 1
+#   stt_provider: 0              # 0 = Deepgram
+#   stt_deepgram_api_key: dg_xxxxxxxxxxxxxxx
+#
+# To use Anthropic cloud LLM instead, set:
+#   llm_hosting: 1
+#   llm_provider: 0              # 0 = Anthropic
+#   llm_anthropic_api_key: sk-ant-xxxxxxxxxxxx
+#
+# To use ElevenLabs cloud TTS instead, set:
+#   tts_hosting: 1
+#   tts_provider: 0              # 0 = ElevenLabs
+#   tts_elevenlabs_api_key: el_xxxxxxxxxxxxxxx
