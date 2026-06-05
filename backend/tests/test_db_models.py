@@ -95,5 +95,6 @@ def test_enums_have_expected_members() -> None:
         "suppressed",
         "pending",
         "rejected",
+        "suggested",
     }
     assert {e.value for e in ProviderKind} == {"stt", "llm", "tts"}

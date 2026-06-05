@@ -13,7 +13,12 @@ import type { BotSession } from '$lib/sessions';
 
 const API_BASE: string = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
 
-export type DecisionOutcome = 'spoken' | 'suppressed' | 'pending' | 'rejected';
+export type DecisionOutcome =
+	| 'spoken'
+	| 'suppressed'
+	| 'pending'
+	| 'rejected'
+	| 'suggested';
 
 export type BotMode =
 	| 'listen_only'
@@ -66,7 +71,8 @@ export const DECISION_OUTCOME_LABEL: Record<DecisionOutcome, string> = {
 	spoken: 'Spoken',
 	suppressed: 'Suppressed',
 	pending: 'Pending',
-	rejected: 'Rejected'
+	rejected: 'Rejected',
+	suggested: 'Suggested'
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

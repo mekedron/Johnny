@@ -25,7 +25,9 @@ from typing import Literal
 
 from johnny.voice_pipeline.events import RouterDecisionMade
 
-DecisionOutcome = Literal["spoken", "suppressed", "pending", "rejected"]
+DecisionOutcome = Literal[
+    "spoken", "suppressed", "pending", "rejected", "suggested"
+]
 
 
 @dataclass(frozen=False, slots=True)

@@ -196,6 +196,7 @@ async def test_sink_maps_outcome_strings_to_enums(db_session: Session) -> None:
     await sink.record(_make_event(), outcome="pending")
     await sink.record(_make_event(), outcome="rejected")
     await sink.record(_make_event(), outcome="spoken")
+    await sink.record(_make_event(), outcome="suggested")
     rows = db_session.scalars(sa.select(AgentDecision).order_by(AgentDecision.id)).all()
     outcomes = [r.outcome for r in rows]
     assert outcomes == [
@@ -203,6 +204,7 @@ async def test_sink_maps_outcome_strings_to_enums(db_session: Session) -> None:
         DecisionOutcome.PENDING,
         DecisionOutcome.REJECTED,
         DecisionOutcome.SPOKEN,
+        DecisionOutcome.SUGGESTED,
     ]
 
 

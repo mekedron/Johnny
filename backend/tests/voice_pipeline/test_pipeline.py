@@ -2707,3 +2707,307 @@ async def test_pipeline_approval_required_below_threshold_skips_gate(
     assert "approval_resolved" not in types
     # Decisions recorded as suppressed (not rejected).
     assert all(r.outcome == "suppressed" for r in dsink.snapshot())
+
+
+# --- US-026: Listen-only and Suggest-only modes ----------------------------
+
+
+async def test_listen_only_mode_skips_router_and_tts_emits_only_transcripts(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Listen-only must never run the router, never emit decisions / utterances,
+    and never play audio — regardless of ``speak=True``."""
+    from johnny.voice_pipeline import InMemoryUtteranceSink
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    router = _FakeRouterLLM(
+        decisions=[{"should_speak": True, "confidence": 1.0, "reason": "x"}]
+    )
+    tts = _FakeTTS()
+    dsink = InMemoryDecisionSink()
+    usink = InMemoryUtteranceSink()
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two"]),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["resp"]),
+        tts=tts,
+        event_bus=bus,
+        config=PipelineConfig(
+            # speak=True deliberately set — mode must override
+            speak=True,
+            mode="listen_only",
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+        ),
+        decision_sink=dsink,
+        utterance_sink=usink,
+    )
+    await pipeline.run()
+    types = [e.type for e in bus.snapshot()]
+    # Only transcripts: no decisions, no utterances, no agent_spoke,
+    # no agent_suggested.
+    assert types == ["transcript_finalized", "transcript_finalized"]
+    # Router LLM never called.
+    assert router.calls == []
+    # TTS never invoked, no audio played.
+    assert tts.calls == []
+    assert transport.played == []
+    # No persisted decisions or utterances.
+    assert dsink.snapshot() == []
+    assert usink.snapshot() == []
+
+
+async def test_suggest_only_mode_runs_router_emits_agent_suggested_no_tts(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Suggest-only runs the router and emits AgentSuggested when the router
+    approves, but never invokes the answer LLM or plays audio."""
+    from johnny.voice_pipeline import AgentSuggested, InMemoryUtteranceSink
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    router = _FakeRouterLLM(
+        decisions=[
+            {
+                "should_speak": True,
+                "confidence": 0.9,
+                "reason": "addresses you",
+                "reply_type": "answer",
+                "suggested_reply": "Sounds good!",
+            },
+            {
+                "should_speak": False,
+                "confidence": 0.2,
+                "reason": "not about me",
+            },
+        ]
+    )
+    answer = _FakeAnswerLLM(answers=["resp"])
+    tts = _FakeTTS()
+    dsink = InMemoryDecisionSink()
+    usink = InMemoryUtteranceSink()
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hello", "world"]),
+        router_llm=router,
+        answer_llm=answer,
+        tts=tts,
+        event_bus=bus,
+        config=PipelineConfig(
+            speak=True,
+            mode="suggest_only",
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.7,
+        ),
+        decision_sink=dsink,
+        utterance_sink=usink,
+    )
+    await pipeline.run()
+    events = bus.snapshot()
+    types = [e.type for e in events]
+    # First utterance: transcript → router_decision → agent_suggested.
+    # Second utterance: transcript → router_decision (no should_speak, no suggestion).
+    assert types == [
+        "transcript_finalized",
+        "router_decision_made",
+        "agent_suggested",
+        "transcript_finalized",
+        "router_decision_made",
+    ]
+    # AgentSuggested carries the suggested reply.
+    suggested = [e for e in events if e.type == "agent_suggested"]
+    assert len(suggested) == 1
+    assert isinstance(suggested[0], AgentSuggested)
+    assert suggested[0].suggested_reply == "Sounds good!"
+    assert suggested[0].reason == "addresses you"
+    assert suggested[0].reply_type == "answer"
+    # Answer LLM and TTS are NOT invoked.
+    assert answer.calls == []
+    assert tts.calls == []
+    assert transport.played == []
+    # No utterances persisted.
+    assert usink.snapshot() == []
+    # Decision rows persisted: first as 'suggested', second as 'suppressed'.
+    records = dsink.snapshot()
+    assert len(records) == 2
+    assert records[0].outcome == "suggested"
+    assert records[1].outcome == "suppressed"
+
+
+async def test_suggest_only_below_threshold_does_not_emit_agent_suggested(
+    two_utterance_pcm: bytes,
+) -> None:
+    """When router says should_speak=True but confidence < threshold,
+    suggest-only suppresses just like any other mode."""
+    from johnny.voice_pipeline import InMemoryUtteranceSink
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    router = _FakeRouterLLM(
+        decisions=[
+            {
+                "should_speak": True,
+                "confidence": 0.3,
+                "reason": "weak",
+                "suggested_reply": "maybe",
+            }
+        ]
+    )
+    answer = _FakeAnswerLLM(answers=["resp"])
+    tts = _FakeTTS()
+    dsink = InMemoryDecisionSink()
+    usink = InMemoryUtteranceSink()
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two"]),
+        router_llm=router,
+        answer_llm=answer,
+        tts=tts,
+        event_bus=bus,
+        config=PipelineConfig(
+            mode="suggest_only",
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.7,
+        ),
+        decision_sink=dsink,
+        utterance_sink=usink,
+    )
+    await pipeline.run()
+    types = [e.type for e in bus.snapshot()]
+    # No agent_suggested emitted because confidence was below threshold.
+    assert "agent_suggested" not in types
+    # All persisted decisions are 'suppressed'.
+    assert all(r.outcome == "suppressed" for r in dsink.snapshot())
+    # No utterances, no TTS, no audio.
+    assert usink.snapshot() == []
+    assert tts.calls == []
+    assert transport.played == []
+
+
+async def test_suggest_only_should_speak_false_suppresses_no_suggestion(
+    two_utterance_pcm: bytes,
+) -> None:
+    """When router says should_speak=False in suggest-only mode, no
+    AgentSuggested fires — only the decision is recorded."""
+    from johnny.voice_pipeline import InMemoryUtteranceSink
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    router = _FakeRouterLLM(
+        decisions=[
+            {"should_speak": False, "confidence": 0.1, "reason": "noise"}
+        ]
+    )
+    answer = _FakeAnswerLLM(answers=["resp"])
+    tts = _FakeTTS()
+    dsink = InMemoryDecisionSink()
+    usink = InMemoryUtteranceSink()
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two"]),
+        router_llm=router,
+        answer_llm=answer,
+        tts=tts,
+        event_bus=bus,
+        config=PipelineConfig(
+            mode="suggest_only",
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+        decision_sink=dsink,
+        utterance_sink=usink,
+    )
+    await pipeline.run()
+    types = [e.type for e in bus.snapshot()]
+    assert "agent_suggested" not in types
+    assert "agent_spoke" not in types
+    assert answer.calls == []
+    assert tts.calls == []
+    assert usink.snapshot() == []
+
+
+async def test_listen_only_mode_persists_transcripts_for_audit(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Listen-only persists transcripts — that IS the audit trail for the mode."""
+    from johnny.voice_pipeline import InMemoryTranscriptSink
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    tsink = InMemoryTranscriptSink()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hello", "world"]),
+        router_llm=_FakeRouterLLM(decisions=[]),
+        answer_llm=_FakeAnswerLLM(answers=[]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            mode="listen_only",
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+        ),
+        transcript_sink=tsink,
+    )
+    await pipeline.run()
+    records = tsink.snapshot()
+    assert len(records) == 2
+    assert records[0].text == "hello"
+    assert records[1].text == "world"
+
+
+async def test_mode_constants_match_db_string_values() -> None:
+    """Pipeline mode constants must match the DB BotMode enum values so the
+    string passed from MeetingConfig.mode wires through without translation."""
+    from app.db.models import BotMode
+    from johnny.voice_pipeline import (
+        APPROVAL_REQUIRED_MODE,
+        LIMITED_AUTO_SPEAK_MODE,
+        LISTEN_ONLY_MODE,
+        NON_SPEAKING_MODES,
+        SUGGEST_ONLY_MODE,
+    )
+
+    assert LISTEN_ONLY_MODE == BotMode.LISTEN_ONLY.value
+    assert SUGGEST_ONLY_MODE == BotMode.SUGGEST_ONLY.value
+    assert APPROVAL_REQUIRED_MODE == BotMode.APPROVAL_REQUIRED.value
+    assert LIMITED_AUTO_SPEAK_MODE == BotMode.LIMITED_AUTO_SPEAK.value
+    assert NON_SPEAKING_MODES == {LISTEN_ONLY_MODE, SUGGEST_ONLY_MODE}

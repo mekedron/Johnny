@@ -35,8 +35,9 @@ def test_to_wire_type_maps_known_internal_names() -> None:
 
 def test_to_wire_type_passes_through_unmapped() -> None:
     # Future event types (calendar_event_changed, transcript_partial,
-    # approval_pending, agent_spoke) pass through unchanged.
+    # approval_pending, agent_spoke, agent_suggested) pass through unchanged.
     assert to_wire_type("agent_spoke") == "agent_spoke"
+    assert to_wire_type("agent_suggested") == "agent_suggested"
     assert to_wire_type("calendar_event_changed") == "calendar_event_changed"
     assert to_wire_type("transcript_partial") == "transcript_partial"
     assert to_wire_type("approval_pending") == "approval_pending"
@@ -254,6 +255,29 @@ def test_session_ws_handles_approval_pending_passthrough(
         envelope = ws.receive_json()
     assert envelope["type"] == "approval_pending"
     assert envelope["suggested_reply"] == "yes"
+
+
+def test_session_ws_handles_agent_suggested_passthrough(
+    client: TestClient, stream: InMemoryEventStream
+) -> None:
+    """``agent_suggested`` is the suggest-only UI notification — the wire
+    type passes through unchanged so the per-session feed can render it."""
+    with client.websocket_connect("/ws/sessions/sess-1") as ws:
+        _push(
+            stream,
+            f"{SESSION_CHANNEL_PREFIX}sess-1",
+            {
+                "type": "agent_suggested",
+                "suggested_reply": "Hello",
+                "decision_id": 7,
+                "reason": "addressed bot",
+                "timestamp_ms": 3,
+            },
+        )
+        envelope = ws.receive_json()
+    assert envelope["type"] == "agent_suggested"
+    assert envelope["suggested_reply"] == "Hello"
+    assert envelope["decision_id"] == 7
 
 
 def test_global_ws_forwards_calendar_changes(

@@ -35,6 +35,7 @@ export type SessionEventType =
 	| 'approval_pending'
 	| 'approval_resolved'
 	| 'agent_spoke'
+	| 'agent_suggested'
 	| 'session_status_change';
 
 export type GlobalEventType = 'session_status_change' | 'calendar_event_changed';
@@ -97,6 +98,16 @@ export interface AgentSpokeEvent extends BaseEnvelope {
 	matched_allowed_reply?: string | null;
 }
 
+export interface AgentSuggestedEvent extends BaseEnvelope {
+	type: 'agent_suggested';
+	suggested_reply: string;
+	timestamp_ms: number;
+	decision_id?: number | null;
+	reason?: string;
+	reply_type?: string | null;
+	session_id?: string | null;
+}
+
 export interface SessionStatusChangeEvent extends BaseEnvelope {
 	type: 'session_status_change';
 	status: BotSessionStatus;
@@ -121,6 +132,7 @@ export type SessionEvent =
 	| ApprovalPendingEvent
 	| ApprovalResolvedEvent
 	| AgentSpokeEvent
+	| AgentSuggestedEvent
 	| SessionStatusChangeEvent;
 
 export type GlobalEvent = SessionStatusChangeEvent | CalendarEventChangedEvent;

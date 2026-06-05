@@ -8,6 +8,7 @@ import pytest
 
 from johnny.voice_pipeline.events import (
     AgentSpoke,
+    AgentSuggested,
     ApprovalPending,
     ApprovalResolved,
     RouterDecisionMade,
@@ -260,4 +261,57 @@ def test_event_to_dict_approval_resolved() -> None:
         "timestamp_ms": 42,
         "session_id": "s",
         "type": "approval_resolved",
+    }
+
+
+def test_agent_suggested_defaults() -> None:
+    ev = AgentSuggested(suggested_reply="Hello", timestamp_ms=100)
+    assert ev.suggested_reply == "Hello"
+    assert ev.timestamp_ms == 100
+    assert ev.decision_id is None
+    assert ev.reason == ""
+    assert ev.reply_type is None
+    assert ev.session_id is None
+    assert ev.type == "agent_suggested"
+
+
+def test_agent_suggested_full() -> None:
+    ev = AgentSuggested(
+        suggested_reply="I agree.",
+        timestamp_ms=5_000,
+        decision_id=42,
+        reason="direct ask",
+        reply_type="acknowledgement",
+        session_id="sess-3",
+    )
+    assert ev.decision_id == 42
+    assert ev.reason == "direct ask"
+    assert ev.reply_type == "acknowledgement"
+    assert ev.session_id == "sess-3"
+
+
+def test_agent_suggested_is_frozen() -> None:
+    ev = AgentSuggested(suggested_reply="x", timestamp_ms=0)
+    with pytest.raises(FrozenInstanceError):
+        ev.suggested_reply = "y"  # type: ignore[misc]
+
+
+def test_event_to_dict_agent_suggested() -> None:
+    ev = AgentSuggested(
+        suggested_reply="Hello",
+        timestamp_ms=10,
+        decision_id=7,
+        reason="addresses you",
+        reply_type="answer",
+        session_id="s",
+    )
+    d = event_to_dict(ev)
+    assert d == {
+        "suggested_reply": "Hello",
+        "timestamp_ms": 10,
+        "decision_id": 7,
+        "reason": "addresses you",
+        "reply_type": "answer",
+        "session_id": "s",
+        "type": "agent_suggested",
     }

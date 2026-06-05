@@ -68,6 +68,7 @@ class DecisionOutcome(enum.StrEnum):
     SUPPRESSED = "suppressed"
     PENDING = "pending"
     REJECTED = "rejected"
+    SUGGESTED = "suggested"
 
 
 def _str_enum_values(enum_cls: type[enum.Enum]) -> list[str]:

@@ -19,6 +19,7 @@ from typing import Any, Literal
 TranscriptEventType = Literal["transcript_finalized"]
 RouterEventType = Literal["router_decision_made"]
 AgentEventType = Literal["agent_spoke"]
+AgentSuggestedEventType = Literal["agent_suggested"]
 SessionStatusEventType = Literal["session_status_changed"]
 ApprovalPendingEventType = Literal["approval_pending"]
 ApprovalResolvedEventType = Literal["approval_resolved"]
@@ -74,6 +75,28 @@ class AgentSpoke:
     matched_allowed_reply: str | None = None
     session_id: str | None = None
     type: AgentEventType = "agent_spoke"
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSuggested:
+    """Router approved a reply but the bot is in suggest-only mode.
+
+    Emitted when the meeting is configured for ``suggest_only`` mode and
+    a router decision passes the confidence threshold. No audio is
+    synthesised; the suggestion is delivered as a UI notification so the
+    user can decide what to do with it manually. Mirrors the shape of
+    :class:`ApprovalPending` minus the timeout (no approval round happens
+    in suggest-only mode — the decision row's outcome is already
+    ``suggested`` when this event fires).
+    """
+
+    suggested_reply: str
+    timestamp_ms: int
+    decision_id: int | None = None
+    reason: str = ""
+    reply_type: str | None = None
+    session_id: str | None = None
+    type: AgentSuggestedEventType = "agent_suggested"
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +165,7 @@ PipelineEvent = (
     TranscriptFinalized
     | RouterDecisionMade
     | AgentSpoke
+    | AgentSuggested
     | SessionStatusChanged
     | ApprovalPending
     | ApprovalResolved
@@ -161,6 +185,7 @@ def event_to_dict(event: PipelineEvent) -> dict[str, Any]:
 
 __all__ = [
     "AgentSpoke",
+    "AgentSuggested",
     "ApprovalPending",
     "ApprovalResolution",
     "ApprovalResolved",

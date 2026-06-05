@@ -19,6 +19,7 @@
 	import {
 		subscribeToSession,
 		type AgentSpokeEvent,
+		type AgentSuggestedEvent,
 		type ApprovalPendingEvent,
 		type ApprovalResolvedEvent,
 		type RouterDecisionEvent,
@@ -212,6 +213,8 @@
 				return handleApprovalResolved(event);
 			case 'agent_spoke':
 				return handleAgentSpoke(event);
+			case 'agent_suggested':
+				return handleAgentSuggested(event);
 			case 'session_status_change':
 				return handleStatus(event);
 		}
@@ -317,6 +320,30 @@
 		if (idx >= 0) {
 			const next = [...decisions];
 			next[idx] = { ...next[idx], outcome: 'spoken', matchedReply: matched };
+			decisions = next;
+		}
+	}
+
+	function handleAgentSuggested(ev: AgentSuggestedEvent) {
+		// Suggest-only mode: the router approved a reply but the bot won't
+		// speak. Reflect the suggestion in the decision feed so the user
+		// sees what the bot would have said. Locate the row by decision_id
+		// when present, otherwise update the most recent suppressed/pending
+		// row that has the same suggested_reply.
+		const targetId = typeof ev.decision_id === 'number' ? ev.decision_id : null;
+		const suggested = typeof ev.suggested_reply === 'string' ? ev.suggested_reply : '';
+		const idx = decisions.findIndex((d) =>
+			targetId !== null
+				? d.decisionId === targetId
+				: d.suggestedReply === suggested
+		);
+		if (idx >= 0) {
+			const next = [...decisions];
+			next[idx] = {
+				...next[idx],
+				outcome: 'suggested',
+				suggestedReply: suggested || next[idx].suggestedReply
+			};
 			decisions = next;
 		}
 	}
@@ -911,6 +938,10 @@
 	.outcome-rejected {
 		background: #fee2e2;
 		color: #991b1b;
+	}
+	.outcome-suggested {
+		background: #ede9fe;
+		color: #5b21b6;
 	}
 	.decision-confidence {
 		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

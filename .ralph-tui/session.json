@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T21:06:01.910Z",
-  "currentIteration": 29,
+  "updatedAt": "2026-06-05T21:22:50.208Z",
+  "currentIteration": 30,
   "maxIterations": 10,
-  "tasksCompleted": 29,
+  "tasksCompleted": 30,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -218,8 +218,8 @@
       {
         "id": "Johnny-kgc.32",
         "title": "US-032: Live transcript and approval UI",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.33",
@@ -525,6 +525,16 @@
       "durationMs": 1728215,
       "startedAt": "2026-06-05T20:24:46.298Z",
       "endedAt": "2026-06-05T20:53:34.513Z"
+    },
+    {
+      "iteration": 30,
+      "status": "completed",
+      "taskId": "Johnny-kgc.32",
+      "taskTitle": "US-032: Live transcript and approval UI",
+      "taskCompleted": true,
+      "durationMs": 727023,
+      "startedAt": "2026-06-05T20:53:53.636Z",
+      "endedAt": "2026-06-05T21:06:00.659Z"
     }
   ],
   "skippedTaskIds": [],

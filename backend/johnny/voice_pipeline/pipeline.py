@@ -46,6 +46,7 @@ from johnny.voice_pipeline.decision_sink import (
 from johnny.voice_pipeline.event_bus import EventBus
 from johnny.voice_pipeline.events import (
     AgentSpoke,
+    AgentSuggested,
     ApprovalPending,
     ApprovalResolved,
     RouterDecisionMade,
@@ -76,6 +77,21 @@ Configurable per session via :class:`PipelineConfig.approval_timeout_seconds`.
 """
 
 APPROVAL_REQUIRED_MODE = "approval_required"
+LISTEN_ONLY_MODE = "listen_only"
+SUGGEST_ONLY_MODE = "suggest_only"
+LIMITED_AUTO_SPEAK_MODE = "limited_auto_speak"
+
+NON_SPEAKING_MODES: frozenset[str] = frozenset(
+    {LISTEN_ONLY_MODE, SUGGEST_ONLY_MODE}
+)
+"""Modes in which the bot must NOT generate audio.
+
+Enforced server-side in :meth:`VoicePipeline._process_utterance`: even
+when ``speak=True`` and the router approves, no answer LLM call and no
+TTS frames are produced. Listen-only also skips the router entirely;
+suggest-only runs the router so the UI can show the suggested reply,
+but the answer stage is replaced by an :class:`AgentSuggested` event.
+"""
 
 _SENTENCE_BOUNDARY = re.compile(r"(?:[.!?]+[\"')\]]*\s+)|(?:\n+)")
 """Matches sentence-ending punctuation followed by whitespace, or one+ newlines.
@@ -94,11 +110,15 @@ class PipelineConfig:
     so a single set of provider instances can serve many meetings with
     different behaviours.
 
-    ``mode`` is the four-state ``BotMode`` value (string) — included in the
-    router prompt so the model can adjust its decision (e.g. tend to
-    suggest more in ``suggest_only`` mode). The pipeline does NOT enforce
-    mode constraints itself; that is the caller's responsibility (e.g.
-    ``speak=False`` for listen-only / suggest-only).
+    ``mode`` is the four-state ``BotMode`` value (string) — both
+    included in the router prompt so the model can adjust its decision
+    AND enforced server-side: ``listen_only`` skips the router stage
+    entirely, ``suggest_only`` runs the router but replaces the answer
+    stage with an :class:`AgentSuggested` event, ``approval_required``
+    drives the approval round before speaking, ``limited_auto_speak``
+    answers freely (subject to ``allowed_replies``). The legacy
+    ``speak=False`` flag is retained for tests and stays equivalent to
+    listen-only for the router-skip semantics.
     """
 
     instructions: str = ""
@@ -270,6 +290,13 @@ class VoicePipeline:
         self._remember_transcript(transcript)
         await self._persist_transcript(transcript, utterance)
 
+        # Mode-based server-side enforcement (US-026). Listen-only never
+        # runs the router so no router_decision / agent_spoke /
+        # agent_suggested events can be emitted; suggest-only runs the
+        # router for UI suggestions but the answer stage is replaced by
+        # an :class:`AgentSuggested` event below.
+        if self.config.mode == LISTEN_ONLY_MODE:
+            return
         if not self.config.speak:
             return
 
@@ -295,6 +322,11 @@ class VoicePipeline:
         if decision.confidence < self.config.confidence_threshold:
             await self._persist_decision(decision_event, "suppressed")
             return
+
+        if self.config.mode == SUGGEST_ONLY_MODE:
+            await self._handle_suggest_only(decision, decision_event)
+            return
+
         if self._is_rate_limited():
             logger.info(
                 "limited-auto-speak rate limit hit for session=%s "
@@ -317,6 +349,33 @@ class VoicePipeline:
         await self._persist_decision(
             decision_event,
             "spoken" if spoke else "suppressed",
+        )
+
+    async def _handle_suggest_only(
+        self,
+        decision: RouterDecision,
+        decision_event: RouterDecisionMade,
+    ) -> None:
+        """Persist a ``suggested`` decision and emit :class:`AgentSuggested`.
+
+        Suggest-only mode never invokes the answer LLM and never produces
+        TTS frames. The decision row's permanent outcome is ``suggested``
+        (distinct from ``suppressed`` so audit queries can separate
+        "router approved but mode prevented speaking" from "router said
+        no"). The UI consumes :class:`AgentSuggested` to surface the
+        suggestion as an in-app notification — no service worker push,
+        because suggest-only does not require user action.
+        """
+        decision_id = await self._persist_decision(decision_event, "suggested")
+        await self.event_bus.publish(
+            AgentSuggested(
+                decision_id=decision_id,
+                suggested_reply=(decision.suggested_reply or "").strip(),
+                reason=decision.reason,
+                reply_type=decision.reply_type,
+                timestamp_ms=self._now_ms(),
+                session_id=self.config.session_id,
+            )
         )
 
     async def _handle_approval_required(
@@ -993,7 +1052,11 @@ __all__ = [
     "DEFAULT_RATE_LIMIT_MAX_UTTERANCES",
     "DEFAULT_RATE_LIMIT_WINDOW_MS",
     "DEFAULT_TRANSCRIPT_WINDOW_SIZE",
+    "LIMITED_AUTO_SPEAK_MODE",
+    "LISTEN_ONLY_MODE",
+    "NON_SPEAKING_MODES",
     "PipelineConfig",
     "RouterDecision",
+    "SUGGEST_ONLY_MODE",
     "VoicePipeline",
 ]

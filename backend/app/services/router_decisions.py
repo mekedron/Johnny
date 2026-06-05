@@ -67,6 +67,7 @@ _OUTCOME_MAP: dict[PipelineOutcome, DecisionOutcome] = {
     "suppressed": DecisionOutcome.SUPPRESSED,
     "pending": DecisionOutcome.PENDING,
     "rejected": DecisionOutcome.REJECTED,
+    "suggested": DecisionOutcome.SUGGESTED,
 }
 
 

@@ -33,6 +33,7 @@ from johnny.voice_pipeline.event_bus import (
 )
 from johnny.voice_pipeline.events import (
     AgentSpoke,
+    AgentSuggested,
     ApprovalPending,
     ApprovalResolution,
     ApprovalResolved,
@@ -44,9 +45,14 @@ from johnny.voice_pipeline.events import (
     event_to_dict,
 )
 from johnny.voice_pipeline.pipeline import (
+    APPROVAL_REQUIRED_MODE,
     DEFAULT_CONFIDENCE_THRESHOLD,
     DEFAULT_MODE,
     DEFAULT_TRANSCRIPT_WINDOW_SIZE,
+    LIMITED_AUTO_SPEAK_MODE,
+    LISTEN_ONLY_MODE,
+    NON_SPEAKING_MODES,
+    SUGGEST_ONLY_MODE,
     PipelineConfig,
     RouterDecision,
     VoicePipeline,
@@ -76,11 +82,17 @@ from johnny.voice_pipeline.vad import (
 )
 
 __all__ = [
+    "APPROVAL_REQUIRED_MODE",
     "DEFAULT_CONFIDENCE_THRESHOLD",
     "DEFAULT_MODE",
     "DEFAULT_TRANSCRIPT_WINDOW_SIZE",
     "DEFAULT_VAD_THRESHOLD",
+    "LIMITED_AUTO_SPEAK_MODE",
+    "LISTEN_ONLY_MODE",
+    "NON_SPEAKING_MODES",
+    "SUGGEST_ONLY_MODE",
     "AgentSpoke",
+    "AgentSuggested",
     "ApprovalGate",
     "ApprovalOutcome",
     "ApprovalPending",
