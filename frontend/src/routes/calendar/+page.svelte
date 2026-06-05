@@ -35,6 +35,15 @@
 	let error = $state<string | null>(null);
 	let selectedEvent = $state<CalendarEvent | null>(null);
 
+	const selectedAccount = $derived(
+		selectedAccountId === null
+			? null
+			: (accounts.find((a) => a.id === selectedAccountId) ?? null)
+	);
+	const selectedAccountNeedsReauth = $derived(
+		selectedAccount?.token_health === 'needs_reauth'
+	);
+
 	// Per-meeting configuration form state.
 	let templates = $state<Template[]>([]);
 	let templatesLoaded = $state(false);
@@ -97,6 +106,14 @@
 	async function loadEvents() {
 		if (selectedAccountId === null) {
 			summary = null;
+			return;
+		}
+		// Skip the network round-trip when the backend would refuse with
+		// 409 anyway — the empty-state offers a Settings deep link
+		// instead of a generic red error banner.
+		if (selectedAccountNeedsReauth) {
+			summary = null;
+			error = null;
 			return;
 		}
 		loadingEvents = true;
@@ -401,6 +418,21 @@
 			No Google accounts connected. <a href="/settings">Add an account</a> from Settings
 			to sync your calendar.
 		</p>
+	{:else if selectedAccountNeedsReauth && selectedAccount}
+		<section class="reauth-empty" role="status" data-testid="calendar-reauth-empty">
+			<h2>Reconnect this account</h2>
+			<p>
+				The stored refresh token for
+				<strong>{selectedAccount.email}</strong> can't be decrypted, so calendar
+				events can't be fetched. This usually means the <code>FERNET_KEY</code>
+				was rotated since the account was connected.
+			</p>
+			<p class="reauth-actions">
+				<a class="reauth-link" href={`/settings#account-${selectedAccount.id}`}>
+					Go to Settings → reconnect
+				</a>
+			</p>
+		</section>
 	{:else if summary}
 		<section class="meta" data-testid="calendar-meta">
 			<span>
@@ -802,6 +834,48 @@
 		color: #6b7280;
 		font-style: italic;
 		margin: 1.5rem 0 0;
+	}
+
+	.reauth-empty {
+		margin: 1.5rem 0 0;
+		padding: 1rem 1.25rem;
+		border: 1px solid #fed7aa;
+		background: #fff7ed;
+		border-radius: 8px;
+		color: #7c2d12;
+	}
+	.reauth-empty h2 {
+		margin: 0 0 0.4rem;
+		font-size: 1rem;
+		color: #9a3412;
+	}
+	.reauth-empty p {
+		margin: 0 0 0.5rem;
+		color: #7c2d12;
+		max-width: 60ch;
+	}
+	.reauth-empty code {
+		background: #ffedd5;
+		border: 1px solid #fed7aa;
+		padding: 0.05rem 0.3rem;
+		border-radius: 4px;
+		font-size: 0.85em;
+	}
+	.reauth-actions {
+		margin-top: 0.75rem;
+	}
+	.reauth-link {
+		display: inline-block;
+		padding: 0.45rem 0.85rem;
+		background: #f97316;
+		color: #ffffff;
+		font-weight: 600;
+		font-size: 0.85rem;
+		border-radius: 6px;
+		text-decoration: none;
+	}
+	.reauth-link:hover {
+		background: #ea580c;
 	}
 
 	.meta {

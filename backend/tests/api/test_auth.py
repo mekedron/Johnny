@@ -510,6 +510,8 @@ def test_list_accounts_returns_default_user_first(
     assert rows[0]["is_default_user"] is True
     assert rows[1]["role"] == "bot"
     assert rows[1]["is_default_user"] is False
+    # All healthy rows surface token_health == "ok".
+    assert all(r["token_health"] == "ok" for r in rows)
     # And tokens are not leaked.
     for row in rows:
         assert "refresh_token_encrypted" not in row
@@ -525,6 +527,81 @@ def test_list_accounts_empty(client: TestClient) -> None:
 def test_get_account_404_for_unknown_id(client: TestClient) -> None:
     resp = client.get("/auth/google/accounts/999")
     assert resp.status_code == 404
+
+
+def test_list_accounts_marks_undecryptable_row_as_needs_reauth(
+    db_session: Session,
+    crypto: CredentialCrypto,
+    settings_override: Settings,
+) -> None:
+    """A row encrypted with a previous Fernet key must surface as needs_reauth.
+
+    Simulates a FERNET_KEY rotation: the DB row's ciphertext was produced
+    by ``legacy_crypto``; the API endpoint is wired with ``crypto`` (the
+    new key). The list response must mark that row's ``token_health`` as
+    ``"needs_reauth"`` without any Google round-trip.
+    """
+    legacy_crypto = CredentialCrypto(Fernet.generate_key())
+    # One healthy row (encrypted with the current key) plus one stale
+    # row (encrypted with the legacy key).
+    healthy = _add_account(db_session, crypto, email="ok@example.com")
+    stale = _add_account(
+        db_session, legacy_crypto, email="broken@example.com"
+    )
+    db_session.commit()
+
+    def _override_session() -> Iterator[Session]:
+        try:
+            yield db_session
+            db_session.commit()
+        except Exception:
+            db_session.rollback()
+            raise
+
+    app.dependency_overrides[get_session] = _override_session
+    app.dependency_overrides[get_crypto] = lambda: crypto
+    app.dependency_overrides[get_settings] = lambda: settings_override
+    try:
+        with TestClient(app) as cl:
+            resp = cl.get("/auth/google/accounts")
+    finally:
+        app.dependency_overrides.clear()
+    assert resp.status_code == 200, resp.text
+    rows = {r["id"]: r for r in resp.json()}
+    assert rows[healthy.id]["token_health"] == "ok"
+    assert rows[stale.id]["token_health"] == "needs_reauth"
+
+
+def test_get_account_reports_token_health(
+    db_session: Session,
+    crypto: CredentialCrypto,
+    settings_override: Settings,
+) -> None:
+    """Single-account GET surfaces the same token_health field as the list."""
+    legacy_crypto = CredentialCrypto(Fernet.generate_key())
+    stale = _add_account(
+        db_session, legacy_crypto, email="broken@example.com"
+    )
+    db_session.commit()
+
+    def _override_session() -> Iterator[Session]:
+        try:
+            yield db_session
+            db_session.commit()
+        except Exception:
+            db_session.rollback()
+            raise
+
+    app.dependency_overrides[get_session] = _override_session
+    app.dependency_overrides[get_crypto] = lambda: crypto
+    app.dependency_overrides[get_settings] = lambda: settings_override
+    try:
+        with TestClient(app) as cl:
+            resp = cl.get(f"/auth/google/accounts/{stale.id}")
+    finally:
+        app.dependency_overrides.clear()
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["token_health"] == "needs_reauth"
 
 
 # --- PATCH /accounts/{id} --------------------------------------------------

@@ -42,7 +42,7 @@ import html
 import logging
 import secrets
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import HTMLResponse
@@ -57,6 +57,7 @@ from app.db.models import AccountRole, GoogleAccount, MeetingConfig
 from app.security.crypto import CredentialCrypto
 from app.services.google_client import (
     GoogleApiClientError,
+    can_decrypt_refresh_token,
     revoke_account,
     upsert_account_from_tokens,
 )
@@ -103,8 +104,17 @@ class CallbackRequest(BaseModel):
     state: str = Field(min_length=1, max_length=128)
 
 
+TokenHealth = Literal["ok", "needs_reauth"]
+
+
 class AccountRead(BaseModel):
-    """Public view of a :class:`GoogleAccount` row (no tokens exposed)."""
+    """Public view of a :class:`GoogleAccount` row (no tokens exposed).
+
+    ``token_health`` is computed at response time by attempting a no-op
+    decrypt of the stored refresh token. ``"needs_reauth"`` means the
+    Fernet key has rotated (or the ciphertext is corrupt) and the user
+    must re-run the OAuth flow. No Google round-trip is performed.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -113,8 +123,26 @@ class AccountRead(BaseModel):
     role: AccountRole
     is_default_user: bool
     token_expires_at: datetime | None
+    token_health: TokenHealth = "ok"
     created_at: datetime
     updated_at: datetime
+
+
+def _account_read(row: GoogleAccount, crypto: CredentialCrypto) -> AccountRead:
+    """Build :class:`AccountRead` and fill in ``token_health``."""
+    health: TokenHealth = (
+        "ok" if can_decrypt_refresh_token(account=row, crypto=crypto) else "needs_reauth"
+    )
+    return AccountRead(
+        id=row.id,
+        email=row.email,
+        role=row.role,
+        is_default_user=row.is_default_user,
+        token_expires_at=row.token_expires_at,
+        token_health=health,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
 
 
 class AccountUpdate(BaseModel):
@@ -294,7 +322,7 @@ async def callback(
         crypto=crypto,
         settings=settings,
     )
-    return AccountRead.model_validate(row)
+    return _account_read(row, crypto)
 
 
 @router.get("/callback", response_class=HTMLResponse, include_in_schema=False)
@@ -379,7 +407,7 @@ def __js_string(value: str) -> str:
 
 
 @router.get("/accounts", response_model=list[AccountRead])
-def list_accounts(session: SessionDep) -> list[AccountRead]:
+def list_accounts(session: SessionDep, crypto: CryptoDep) -> list[AccountRead]:
     """List every connected Google account.
 
     Ordered by ``is_default_user`` first (so the default user account
@@ -391,14 +419,16 @@ def list_accounts(session: SessionDep) -> list[AccountRead]:
             GoogleAccount.id.asc(),
         )
     ).all()
-    return [AccountRead.model_validate(row) for row in rows]
+    return [_account_read(row, crypto) for row in rows]
 
 
 @router.get("/accounts/{account_id}", response_model=AccountRead)
-def get_account(account_id: int, session: SessionDep) -> AccountRead:
+def get_account(
+    account_id: int, session: SessionDep, crypto: CryptoDep
+) -> AccountRead:
     """Fetch one account by id."""
     row = _get_account_or_404(session, account_id)
-    return AccountRead.model_validate(row)
+    return _account_read(row, crypto)
 
 
 @router.patch("/accounts/{account_id}", response_model=AccountRead)
@@ -406,6 +436,7 @@ def update_account(
     account_id: int,
     payload: AccountUpdate,
     session: SessionDep,
+    crypto: CryptoDep,
 ) -> AccountRead:
     """Patch role and/or default-user flag for an account.
 
@@ -427,7 +458,7 @@ def update_account(
         session.rollback()
         raise HTTPException(status_code=409, detail="account update failed") from exc
     session.refresh(row)
-    return AccountRead.model_validate(row)
+    return _account_read(row, crypto)
 
 
 @router.delete("/accounts/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -485,6 +516,8 @@ __all__ = [
     "CallbackRequest",
     "StartRequest",
     "StartResponse",
+    "TokenHealth",
+    "_account_read",
     "_consume_state",
     "_exchange_and_persist",
     "_peek_state",

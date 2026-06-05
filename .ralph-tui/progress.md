@@ -22,6 +22,21 @@ after each iteration and it's included in prompts for context.
   prereqs`) and patch via the bare name. For stdlib indirection (e.g.
   `models.shutil.which`), use `patch("johnny.wizard.models.shutil.which")`
   with the full dotted path string instead of `patch.object`.
+- **Typed exception subclasses for HTTP mapping**: when one error path
+  needs a different HTTP status / detail shape than a sibling, subclass
+  the broader exception so existing `except BroaderError:` catches keep
+  working, and order the FastAPI `except` blocks subclass-first.
+  Example: `TokenUndecryptableError(GoogleApiClientError)` carries
+  structured `account_id` / `email`; `calendar.py` catches it first,
+  returns 409 with `{code: "account_needs_reauth", …}`, then falls back
+  to the generic 502 mapper.
+- **`token_health` pattern for credential rows**: store a server-only
+  `token_health: Literal["ok", "needs_reauth"]` on read-models, computed
+  by attempting a no-op Fernet decrypt of the existing ciphertext column.
+  Zero round-trips, fast enough for list endpoints. UI keys off the
+  literal to render Reconnect affordances and skip doomed fetches
+  client-side. See `backend/app/api/auth.py:_account_read` and
+  `frontend/src/routes/calendar/+page.svelte` for the pattern.
 
 ---
 
@@ -102,5 +117,90 @@ after each iteration and it's included in prompts for context.
     let the API container reach it. The wizard prompts for an
     `api_key` placeholder of `ollama` because the field is required by
     `POST /providers` even though Ollama ignores it.
+---
+
+## 2026-06-06 - Johnny-q1x
+- Surfaced undecryptable Google refresh tokens as a recoverable state
+  instead of a dead-end 502 in the Calendar view.
+- Backend:
+  - New `TokenUndecryptableError(GoogleApiClientError)` carrying
+    structured `account_id` + `email`; raised from
+    `GoogleApiClient._decrypt_refresh_token` and
+    `revoke_account` when the stored ciphertext fails to decrypt.
+  - `AccountRead` now exposes a `token_health: Literal["ok",
+    "needs_reauth"]` field, computed via the new
+    `can_decrypt_refresh_token(account, crypto)` helper. No Google
+    round-trip — a single Fernet decrypt attempt against the existing
+    column. Wired into list / get / patch endpoints via `_account_read`.
+  - `GET /calendar/events` now catches the typed error first and
+    returns HTTP 409 with `{code: "account_needs_reauth", account_id,
+    email, message}` so the UI can branch. The generic 502 mapper
+    still handles every other GoogleApiClient failure.
+  - The calendar polling worker logs and *skips* accounts in this
+    state rather than counting them as transient errors — the user has
+    to act via the UI before the row can be polled again.
+- Frontend:
+  - `Account.token_health` field added; Settings page renders a
+    "Token unreadable — reconnect" badge plus a primary **Reconnect**
+    button that re-runs OAuth with the row's existing role / default
+    flags (server-side upsert by email replaces the row in place).
+  - Calendar page detects `token_health == "needs_reauth"` on the
+    selected account, skips the `/calendar/events` fetch entirely, and
+    renders an empty-state card with a deep link to
+    `/settings#account-N`. Each account row gets `id="account-{id}"`
+    so the hash navigates correctly.
+- Docs:
+  - `docs/SETUP_LOCAL.md` §3 now leads with a key-loss recovery
+    callout pointing the user at Settings → Reconnect / Disconnect,
+    plus a headless `curl` recovery snippet. The destructive
+    "delete encrypted rows" suggestion is gone.
+- Tests:
+  - `tests/services/test_google_client.py` — 4 new tests covering the
+    typed error and `can_decrypt_refresh_token` helper.
+  - `tests/services/test_calendar_polling.py` — 1 new test confirming
+    undecryptable accounts are skipped (zero errors, zero HTTP calls).
+  - `tests/api/test_calendar.py` — 1 new test asserting the 409 shape.
+  - `tests/api/test_auth.py` — 2 new tests confirming `token_health`
+    on `GET /accounts` and `GET /accounts/{id}`.
+  - 1297 backend tests pass (was 1289), `ruff` clean, `mypy` clean,
+    `pnpm typecheck` and `pnpm lint` clean.
+- Verified live via chrome-devtools MCP against the rebuilt Compose
+  stack. Inserted a fake row whose ciphertext can't decrypt under the
+  current `FERNET_KEY`; confirmed the badge / Reconnect button appear
+  on /settings and the empty-state with the deep link appears on
+  /calendar. Screenshots saved to
+  `docs/screenshots/settings-reconnect-badge.png` and
+  `docs/screenshots/calendar-reauth-empty.png`.
+- Files changed:
+  `backend/app/services/google_client.py`,
+  `backend/app/services/calendar_polling.py`,
+  `backend/app/api/auth.py`,
+  `backend/app/api/calendar.py`,
+  `backend/tests/services/test_google_client.py`,
+  `backend/tests/services/test_calendar_polling.py`,
+  `backend/tests/api/test_auth.py`,
+  `backend/tests/api/test_calendar.py`,
+  `frontend/src/lib/accounts.ts`,
+  `frontend/src/routes/settings/+page.svelte`,
+  `frontend/src/routes/calendar/+page.svelte`,
+  `docs/SETUP_LOCAL.md`,
+  `docs/screenshots/settings-reconnect-badge.png` (new),
+  `docs/screenshots/calendar-reauth-empty.png` (new),
+  `.ralph-tui/progress.md`.
+- **Learnings:**
+  - The subclass-first ordering of FastAPI `except` blocks matters:
+    `TokenUndecryptableError` extends `GoogleApiClientError`, so the
+    409 branch has to come before the generic 502 mapper or the parent
+    swallows it.
+  - SvelteKit Svelte 5 `$derived` on a state-array `find()` is the
+    right shape for "the selected account": the picker store is
+    `selectedAccountId` (number id, survives reloads), and the
+    derived `selectedAccount` recomputes when either the id or the
+    accounts list changes — including after `loadAccounts()` reruns
+    post-OAuth.
+  - When verifying live, the `johnny-api` container needs a full
+    rebuild (`docker compose build api`) since the image bakes the
+    source; bind-mount dev workflow is not wired in
+    `docker-compose.yml`. Plan ~30s for the rebuild.
 ---
 

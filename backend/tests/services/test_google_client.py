@@ -19,6 +19,8 @@ from app.services import google_client as gc
 from app.services.google_client import (
     GoogleApiClient,
     GoogleApiClientError,
+    TokenUndecryptableError,
+    can_decrypt_refresh_token,
     upsert_account_from_tokens,
 )
 
@@ -452,3 +454,57 @@ async def test_revoke_account_still_deletes_row_when_endpoint_fails(
         http_client=_mock_client(handler),
     )
     assert session.scalars(sa.select(GoogleAccount)).all() == []
+
+
+# --- Undecryptable refresh token paths ------------------------------------
+
+
+async def test_refresh_raises_typed_error_when_refresh_token_undecryptable(
+    session: Session, crypto: CredentialCrypto, settings: Settings
+) -> None:
+    """A FERNET_KEY rotation surfaces as :class:`TokenUndecryptableError`."""
+    expired = datetime.now(UTC) - timedelta(minutes=1)
+    account = _make_account(session, crypto, expires_at=expired)
+    # Simulate post-rotation: a fresh CredentialCrypto with a new key
+    # cannot decrypt rows written with the old key.
+    rotated = CredentialCrypto(Fernet.generate_key())
+    client = GoogleApiClient(
+        session=session, account=account, crypto=rotated, settings=settings
+    )
+    with pytest.raises(TokenUndecryptableError) as exc:
+        await client.get_access_token()
+    assert exc.value.account_id == account.id
+    assert exc.value.email == account.email
+    # TokenUndecryptableError subclasses GoogleApiClientError so legacy
+    # callers that catch the broader type still work.
+    assert isinstance(exc.value, GoogleApiClientError)
+    await client.aclose()
+
+
+async def test_revoke_account_raises_typed_error_when_undecryptable(
+    session: Session, crypto: CredentialCrypto
+) -> None:
+    account = _make_account(session, crypto)
+    rotated = CredentialCrypto(Fernet.generate_key())
+    with pytest.raises(TokenUndecryptableError) as exc:
+        await gc.revoke_account(
+            session=session,
+            account=account,
+            crypto=rotated,
+        )
+    assert exc.value.account_id == account.id
+
+
+def test_can_decrypt_refresh_token_true_for_valid_row(
+    session: Session, crypto: CredentialCrypto
+) -> None:
+    account = _make_account(session, crypto)
+    assert can_decrypt_refresh_token(account=account, crypto=crypto) is True
+
+
+def test_can_decrypt_refresh_token_false_after_key_rotation(
+    session: Session, crypto: CredentialCrypto
+) -> None:
+    account = _make_account(session, crypto)
+    rotated = CredentialCrypto(Fernet.generate_key())
+    assert can_decrypt_refresh_token(account=account, crypto=rotated) is False

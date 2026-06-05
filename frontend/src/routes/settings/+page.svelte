@@ -23,6 +23,7 @@
 	let formError = $state<string | null>(null);
 	let popupRef: Window | null = null;
 	let lastAuthorizeUrl = $state<string | null>(null);
+	let reconnectingId = $state<number | null>(null);
 
 	async function loadAccounts() {
 		loading = true;
@@ -56,6 +57,7 @@
 		loadAccounts();
 		showForm = false;
 		lastAuthorizeUrl = null;
+		reconnectingId = null;
 		if (popupRef && !popupRef.closed) {
 			try {
 				popupRef.close();
@@ -122,6 +124,30 @@
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
 			busyId = null;
+		}
+	}
+
+	async function onReconnect(account: Account) {
+		reconnectingId = account.id;
+		error = null;
+		try {
+			const resp = await startOAuth({
+				role: account.role,
+				is_default_user: account.is_default_user
+			});
+			lastAuthorizeUrl = resp.authorize_url;
+			popupRef = window.open(
+				resp.authorize_url,
+				'johnny-oauth-reconnect',
+				'width=520,height=720'
+			);
+			if (!popupRef) {
+				error =
+					'Popup was blocked. Use the "Open consent in a new tab" link below to continue.';
+			}
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+			reconnectingId = null;
 		}
 	}
 
@@ -205,8 +231,10 @@
 			<ul class="account-list">
 				{#each accounts as account (account.id)}
 					<li
+						id={`account-${account.id}`}
 						class="account"
 						class:default={account.is_default_user}
+						class:needs-reauth={account.token_health === 'needs_reauth'}
 						data-testid={`account-row-${account.id}`}
 					>
 						<div class="account-main">
@@ -218,6 +246,15 @@
 								{#if account.is_default_user}
 									<span class="badge default-badge">Default user</span>
 								{/if}
+								{#if account.token_health === 'needs_reauth'}
+									<span
+										class="badge reauth-badge"
+										title="The stored refresh token can't be decrypted. Reconnect to restore this account."
+										data-testid={`reauth-badge-${account.id}`}
+									>
+										Token unreadable — reconnect
+									</span>
+								{/if}
 							</div>
 							<dl class="account-meta">
 								<dt>Token expires:</dt>
@@ -225,8 +262,26 @@
 								<dt>Added:</dt>
 								<dd>{formatExpiry(account.created_at)}</dd>
 							</dl>
+							{#if account.token_health === 'needs_reauth'}
+								<p class="reauth-explainer">
+									This account's stored refresh token can no longer be decrypted
+									(usually because <code>FERNET_KEY</code> was rotated). Reconnecting
+									runs the Google sign-in flow again and replaces the row in place.
+								</p>
+							{/if}
 						</div>
 						<div class="account-actions">
+							{#if account.token_health === 'needs_reauth'}
+								<button
+									type="button"
+									class="primary"
+									onclick={() => onReconnect(account)}
+									disabled={reconnectingId === account.id || busyId === account.id}
+									data-testid={`reconnect-button-${account.id}`}
+								>
+									{reconnectingId === account.id ? 'Opening…' : 'Reconnect'}
+								</button>
+							{/if}
 							<label class="role-select">
 								<span class="visually-hidden">Role</span>
 								<select
@@ -261,6 +316,14 @@
 					</li>
 				{/each}
 			</ul>
+			{#if lastAuthorizeUrl && reconnectingId !== null}
+				<p class="reauth-fallback">
+					Popup blocked or didn't open?
+					<a href={lastAuthorizeUrl} target="_blank" rel="noopener noreferrer">
+						Open consent in a new tab
+					</a>
+				</p>
+			{/if}
 		{/if}
 	</section>
 </div>
@@ -414,6 +477,36 @@
 	.account.default {
 		border-color: #4f46e5;
 		background: #eef2ff;
+	}
+	.account.needs-reauth {
+		border-color: #f97316;
+		background: #fff7ed;
+	}
+	.reauth-badge {
+		background: #f97316;
+		color: #ffffff;
+	}
+	.reauth-explainer {
+		margin: 0.5rem 0 0;
+		font-size: 0.85rem;
+		color: #7c2d12;
+		max-width: 60ch;
+	}
+	.reauth-explainer code {
+		background: #fff7ed;
+		border: 1px solid #fed7aa;
+		padding: 0.05rem 0.3rem;
+		border-radius: 4px;
+		font-size: 0.8rem;
+	}
+	.reauth-fallback {
+		margin: 0.75rem 0 0;
+		font-size: 0.85rem;
+		color: #4b5563;
+	}
+	.reauth-fallback a {
+		color: #4f46e5;
+		text-decoration: underline;
 	}
 	.account-main {
 		flex: 1;

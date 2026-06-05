@@ -350,3 +350,58 @@ def test_list_events_default_window_used_when_omitted(
     assert seen_params
     # The maxResults parameter is always set by the sync helper.
     assert "maxResults" in seen_params[0]
+
+
+def test_list_events_returns_409_when_refresh_token_undecryptable(
+    db_session: Session,
+    crypto: CredentialCrypto,
+    settings_override: Settings,
+) -> None:
+    """Stored row from a previous FERNET_KEY surfaces as 409 + structured detail.
+
+    The frontend keys off ``code == 'account_needs_reauth'`` to render the
+    Reconnect affordance instead of a generic error banner.
+    """
+    # Use a *different* crypto to encrypt the account row (simulating a
+    # prior FERNET_KEY) than the one injected into the API dependency
+    # (the rotated current key).
+    legacy_crypto = CredentialCrypto(Fernet.generate_key())
+    account = _make_account(
+        db_session, legacy_crypto, email="legacy@example.com"
+    )
+    # Force the access token expired so the client must reach for the
+    # (undecryptable) refresh token.
+    account.token_expires_at = datetime.now(UTC) - timedelta(minutes=1)
+    db_session.flush()
+
+    def _override_session() -> Iterator[Session]:
+        try:
+            yield db_session
+            db_session.commit()
+        except Exception:
+            db_session.rollback()
+            raise
+
+    def _override_crypto() -> CredentialCrypto:
+        return crypto
+
+    def _override_settings() -> Settings:
+        return settings_override
+
+    app.dependency_overrides[get_session] = _override_session
+    app.dependency_overrides[get_crypto] = _override_crypto
+    app.dependency_overrides[get_settings] = _override_settings
+    try:
+        with TestClient(app) as test_client:
+            resp = test_client.get(
+                f"/calendar/events?account_id={account.id}"
+            )
+    finally:
+        app.dependency_overrides.clear()
+    assert resp.status_code == 409, resp.text
+    body = resp.json()
+    detail = body["detail"]
+    assert detail["code"] == "account_needs_reauth"
+    assert detail["account_id"] == account.id
+    assert detail["email"] == "legacy@example.com"
+    assert "Reconnect" in detail["message"]

@@ -33,7 +33,11 @@ from app.services.calendar_sync import (
     list_account_events,
     sync_account_events,
 )
-from app.services.google_client import GoogleApiClient, GoogleApiClientError
+from app.services.google_client import (
+    GoogleApiClient,
+    GoogleApiClientError,
+    TokenUndecryptableError,
+)
 from app.services.google_oauth import GoogleOAuthError
 
 logger = logging.getLogger(__name__)
@@ -113,6 +117,20 @@ async def list_events(
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"calendar fetch failed: {exc}",
+            ) from exc
+        except TokenUndecryptableError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "account_needs_reauth",
+                    "account_id": exc.account_id,
+                    "email": exc.email,
+                    "message": (
+                        "The stored refresh token cannot be decrypted "
+                        "(FERNET_KEY likely rotated). Reconnect this account "
+                        "from Settings to continue."
+                    ),
+                },
             ) from exc
         except GoogleApiClientError as exc:
             raise HTTPException(

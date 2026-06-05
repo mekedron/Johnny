@@ -3,10 +3,10 @@
   "sessionId": "93eda9f4-6fc6-4aec-a6f6-7c9916b5653f",
   "status": "running",
   "startedAt": "2026-06-05T22:19:54.215Z",
-  "updatedAt": "2026-06-05T22:48:50.853Z",
-  "currentIteration": 1,
+  "updatedAt": "2026-06-05T23:01:54.094Z",
+  "currentIteration": 2,
   "maxIterations": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 2,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -251,6 +251,16 @@
       "durationMs": 302467,
       "startedAt": "2026-06-05T22:20:27.518Z",
       "endedAt": "2026-06-05T22:25:29.985Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "Johnny-61y",
+      "taskTitle": "Build interactive CLI setup wizard for Johnny",
+      "taskCompleted": true,
+      "durationMs": 1376957,
+      "startedAt": "2026-06-05T22:25:52.736Z",
+      "endedAt": "2026-06-05T22:48:49.693Z"
     }
   ],
   "skippedTaskIds": [],

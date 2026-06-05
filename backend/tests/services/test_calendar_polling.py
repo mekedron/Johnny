@@ -463,3 +463,39 @@ async def test_polling_result_is_zero_when_no_accounts(
     assert result.polled_account_count == 0
     assert result.created_count == 0
     assert pub.published == []
+
+
+async def test_poll_skips_account_with_undecryptable_token_without_counting_error(
+    session: Session,
+    crypto: CredentialCrypto,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A FERNET_KEY rotation must not stall the loop — skip silently.
+
+    The polling pass is fire-and-forget; an account whose tokens are
+    unrecoverable should be skipped (the user reconnects via the UI)
+    rather than being counted as a transient error that gets retried
+    every poll forever.
+    """
+    # Encrypt the account row with a *different* crypto so the polling
+    # session's crypto cannot decrypt it. The legacy crypto isn't used
+    # again — the row is left dangling, exactly as it would be after a
+    # FERNET_KEY rotation.
+    legacy = CredentialCrypto(Fernet.generate_key())
+    _make_account_with_config(session, legacy, email="stale@example.com")
+
+    # No HTTP handler — we should never reach the wire.
+    def handler(_: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("HTTP call must not happen for undecryptable account")
+
+    _stub_google_client(monkeypatch, handler)
+    pub = _FakePublisher()
+    result = await poll_meeting_config_calendars(
+        session=session, crypto=crypto, settings=settings, publisher=pub
+    )
+    assert result.polled_account_count == 1
+    assert result.error_count == 0
+    assert result.created_count == 0
+    assert result.updated_count == 0
+    assert pub.published == []

@@ -40,7 +40,11 @@ from app.services.calendar_sync import (
     CalendarSyncError,
     sync_account_events,
 )
-from app.services.google_client import GoogleApiClient, GoogleApiClientError
+from app.services.google_client import (
+    GoogleApiClient,
+    GoogleApiClientError,
+    TokenUndecryptableError,
+)
 from app.services.google_oauth import GoogleOAuthError
 
 logger = logging.getLogger(__name__)
@@ -237,6 +241,15 @@ async def poll_meeting_config_calendars(
                 result = await sync_account_events(
                     session=session, client=client, window_days=window_days
                 )
+            except TokenUndecryptableError as exc:
+                # The user must re-run OAuth — there's nothing this loop can
+                # do. Skip silently rather than counting a transient error.
+                logger.info(
+                    "skipping calendar poll for account id=%s — needs reauth: %s",
+                    account.id,
+                    exc,
+                )
+                continue
             except (CalendarSyncError, GoogleApiClientError, GoogleOAuthError) as exc:
                 logger.warning(
                     "calendar poll failed for account id=%s: %s", account.id, exc

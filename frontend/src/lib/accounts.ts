@@ -15,12 +15,15 @@ export const ACCOUNT_ROLE_LABEL: Record<AccountRole, string> = {
 	bot: 'Bot'
 };
 
+export type TokenHealth = 'ok' | 'needs_reauth';
+
 export interface Account {
 	id: number;
 	email: string;
 	role: AccountRole;
 	is_default_user: boolean;
 	token_expires_at: string | null;
+	token_health: TokenHealth;
 	created_at: string;
 	updated_at: string;
 }

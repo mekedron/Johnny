@@ -97,8 +97,39 @@ won't work yet. We fill `.env` next.
 
 ## 3. Generate the encryption key
 
-`FERNET_KEY` encrypts Google tokens and provider credentials at rest. Generate
-it once and keep it; if you lose it, all encrypted rows must be deleted.
+> **🔑 Key-loss recovery (read this first)**
+>
+> `FERNET_KEY` encrypts Google tokens and provider credentials at rest.
+> **Persist this value across restarts.** If you lose it (rotate the value
+> in `.env`, mount over the file, etc.), every previously-stored Google
+> account and provider credential becomes unreadable.
+>
+> The recovery is **not** to drop the postgres volume. The Settings page and
+> the disconnect endpoint detect undecryptable rows and let you clean them
+> up safely:
+>
+> 1. Open <http://localhost:5173/settings>. Each broken account shows a
+>    **Token unreadable — reconnect** badge.
+> 2. Click **Reconnect** to re-run Google OAuth; the row is replaced in
+>    place (keyed by email).
+> 3. Alternatively, click **Disconnect** to remove the row, then **Add
+>    account** to start fresh.
+>
+> Headless / scripted recovery (no UI):
+>
+> ```bash
+> # List broken accounts (token_health == "needs_reauth"):
+> curl -s http://localhost:8000/auth/google/accounts \
+>   | python3 -c 'import json,sys; [print(a["id"], a["email"]) for a in json.load(sys.stdin) if a["token_health"]=="needs_reauth"]'
+> # Disconnect each one (force=true also cascades any meeting_configs):
+> curl -s -X DELETE "http://localhost:8000/auth/google/accounts/<id>?force=true"
+> ```
+>
+> `/calendar/events` returns HTTP 409 with `{code: "account_needs_reauth"}`
+> for these rows; the Calendar page shows an empty-state with a deep link
+> to Settings instead of a generic error.
+
+`FERNET_KEY` encrypts Google tokens and provider credentials at rest.
 
 Use this stdlib-only one-liner — it produces a valid Fernet key (32 random
 bytes, URL-safe base64) without needing the `cryptography` package installed

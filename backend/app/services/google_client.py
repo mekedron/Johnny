@@ -47,6 +47,24 @@ class GoogleApiClientError(Exception):
     """Raised when a request through :class:`GoogleApiClient` cannot proceed."""
 
 
+class TokenUndecryptableError(GoogleApiClientError):
+    """Raised when a stored refresh token cannot be decrypted.
+
+    Typically the ``FERNET_KEY`` was rotated after the OAuth row was
+    stored, or the postgres volume outlived the host's ``.env``. The
+    account is unrecoverable without re-running the OAuth flow — callers
+    map this to ``account_needs_reauth`` so the UI can offer a Reconnect
+    affordance instead of surfacing the bare decrypt error.
+    """
+
+    def __init__(self, account_id: int, email: str) -> None:
+        super().__init__(
+            f"refresh token for account {account_id} ({email}) is undecryptable"
+        )
+        self.account_id = account_id
+        self.email = email
+
+
 class GoogleApiClient:
     """Wrapper that injects a valid bearer token into every Google API call.
 
@@ -97,8 +115,8 @@ class GoogleApiClient:
         try:
             return self._crypto.decrypt(self._account.refresh_token_encrypted)
         except Exception as exc:
-            raise GoogleApiClientError(
-                f"failed to decrypt refresh token for account {self._account.id}"
+            raise TokenUndecryptableError(
+                account_id=self._account.id, email=self._account.email
             ) from exc
 
     def _decrypt_access_token(self) -> str | None:
@@ -230,8 +248,8 @@ async def revoke_account(
     try:
         refresh_token = crypto.decrypt(account.refresh_token_encrypted)
     except Exception as exc:
-        raise GoogleApiClientError(
-            f"failed to decrypt refresh token for account {account.id}"
+        raise TokenUndecryptableError(
+            account_id=account.id, email=account.email
         ) from exc
     try:
         await revoke_token(token=refresh_token, http_client=http_client)
@@ -288,6 +306,22 @@ def upsert_account_from_tokens(
     return existing
 
 
+def can_decrypt_refresh_token(
+    *, account: GoogleAccount, crypto: CredentialCrypto
+) -> bool:
+    """Return ``True`` if the stored refresh token decrypts with ``crypto``.
+
+    Used to compute the ``token_health`` field surfaced by the accounts
+    API. Cheap: the call is a single Fernet decrypt of an existing column
+    and never round-trips to Google.
+    """
+    try:
+        crypto.decrypt(account.refresh_token_encrypted)
+    except Exception:
+        return False
+    return True
+
+
 def _clear_other_defaults(session: Session, keep: GoogleAccount) -> None:
     """Ensure at most one account row has ``is_default_user=True``."""
     others: Iterable[GoogleAccount] = session.query(GoogleAccount).filter(
@@ -304,6 +338,8 @@ __all__ = [
     "GoogleApiClient",
     "GoogleApiClientError",
     "REFRESH_LEEWAY_S",
+    "TokenUndecryptableError",
+    "can_decrypt_refresh_token",
     "revoke_account",
     "upsert_account_from_tokens",
 ]
