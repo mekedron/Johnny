@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T14:49:35.326Z",
-  "currentIteration": 2,
+  "updatedAt": "2026-06-05T14:57:42.625Z",
+  "currentIteration": 3,
   "maxIterations": 10,
-  "tasksCompleted": 2,
+  "tasksCompleted": 3,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -38,8 +38,8 @@
       {
         "id": "Johnny-kgc.2",
         "title": "US-002: Docker Compose stack",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.3",
@@ -255,6 +255,16 @@
       "durationMs": 585333,
       "startedAt": "2026-06-05T14:27:25.621Z",
       "endedAt": "2026-06-05T14:37:10.954Z"
+    },
+    {
+      "iteration": 3,
+      "status": "completed",
+      "taskId": "Johnny-kgc.2",
+      "taskTitle": "US-002: Docker Compose stack",
+      "taskCompleted": true,
+      "durationMs": 724027,
+      "startedAt": "2026-06-05T14:37:30.442Z",
+      "endedAt": "2026-06-05T14:49:34.469Z"
     }
   ],
   "skippedTaskIds": [],

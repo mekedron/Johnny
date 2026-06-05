@@ -105,6 +105,18 @@ services:
       retries: 5
       start_period: 30s
 
+  # Base image for per-session meet-worker containers (Playwright +
+  # Chromium + Xvfb + PulseAudio). The "meet-worker" profile keeps the
+  # service out of `docker compose up` — the scheduler spawns one of
+  # these per active session via the Docker SDK (US-029/US-030).
+  # Build with: `docker compose --profile meet-worker build meet-worker`.
+  meet-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.meet-worker
+    image: johnny-meet-worker:latest
+    profiles: ["meet-worker"]
+
 volumes:
   postgres_data:
   redis_data:

@@ -53,6 +53,25 @@ The api is reachable at <http://localhost:8000>, the frontend at
 <http://localhost:5173>. Postgres listens on the internal compose network only;
 connect via `docker compose exec postgres psql -U johnny`.
 
+### Meet-worker image
+
+Per-meeting bot sessions run in their own short-lived container based on
+the `johnny-meet-worker` image (Playwright + Chromium + Xvfb + PulseAudio).
+The image is built but not started by default — the session scheduler
+spawns one container per active Meet via the Docker SDK.
+
+Build it:
+
+```bash
+docker compose --profile meet-worker build meet-worker
+```
+
+Verify the A/V environment standalone:
+
+```bash
+docker run --rm johnny-meet-worker:latest    # prints "self-check OK"
+```
+
 ## Quality gates
 
 Backend (from `backend/`):

@@ -1,0 +1,43 @@
+# Meet-worker base image: Playwright + Chromium running under Xvfb with
+# PulseAudio providing a virtual sink (browser playback) and virtual
+# source (browser microphone). One container is spawned per active
+# Google Meet session by the scheduler (US-029/US-030); the main Compose
+# stack only *builds* the image so it's available when the spawner
+# needs it.
+
+FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/workspace \
+    DISPLAY=:99 \
+    JOHNNY_SINK_NAME=johnny_speaker \
+    JOHNNY_SOURCE_NAME=johnny_mic \
+    XDG_RUNTIME_DIR=/tmp/runtime-johnny
+
+# System A/V environment:
+#   * xvfb           — virtual X server so Chromium can render headed
+#   * x11-utils      — xdpyinfo, used by the entrypoint readiness check
+#   * pulseaudio     — userspace audio daemon
+#   * pulseaudio-utils — pactl, for module loading and selfcheck
+#   * dbus-x11       — Chromium needs a session DBus to start cleanly
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        xvfb \
+        x11-utils \
+        pulseaudio \
+        pulseaudio-utils \
+        dbus-x11 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# Only the `johnny` package is needed in this image; the FastAPI/SQLAlchemy
+# stack lives in `app` and ships with the api/worker image instead. The
+# selfcheck has no third-party Python deps — it only shells out to pactl.
+COPY johnny ./johnny
+
+COPY meet-worker-entrypoint.sh /usr/local/bin/meet-worker-entrypoint.sh
+RUN chmod +x /usr/local/bin/meet-worker-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/meet-worker-entrypoint.sh"]
+CMD ["python", "-m", "johnny.meet_worker.selfcheck"]
