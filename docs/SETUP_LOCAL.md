@@ -24,16 +24,25 @@ Every command block is copy-pasteable. Every model has a direct download link.
 
 ## 1. Prerequisites
 
-Install these once per machine.
+This guide runs **everything inside Docker**. You do **not** need to install
+Python, Node, or any backend dependencies on the host for the steps below.
+
+**Required:**
 
 | Tool | Why | Install |
 |------|-----|---------|
 | Docker Desktop / Engine + Compose v2 | Runs the whole stack | <https://docs.docker.com/get-docker/> |
-| `uv` (Python package manager) | Backend deps & local commands | <https://docs.astral.sh/uv/getting-started/installation/> |
-| `pnpm` 9+ and Node.js 20+ | Frontend deps & dev mode | <https://pnpm.io/installation> |
-| Python 3.12+ | Required by backend `pyproject.toml` | Comes with `uv`; or `brew install python@3.12` |
 | Git | Cloning | <https://git-scm.com/downloads> |
-| Ollama (recommended LLM runtime) | Local LLM serving | <https://ollama.com/download> |
+| Python 3 (any 3.9+) | One-shot Fernet key generation in §3 — ships with macOS and most Linux; or use the `openssl` fallback below | <https://www.python.org/downloads/> |
+| Ollama (recommended LLM runtime) | Local LLM serving on the host (not in Compose) | <https://ollama.com/download> |
+
+**Optional — only if you also want to run the backend / frontend / wizard
+outside Docker:**
+
+| Tool | Why | Install |
+|------|-----|---------|
+| `uv` (Python package manager) | Backend dev (`cd backend && uv sync`), interactive setup wizard | <https://docs.astral.sh/uv/getting-started/installation/> |
+| `pnpm` 9+ and Node.js 20+ | Frontend dev mode (`cd frontend && pnpm install && pnpm dev`) | <https://pnpm.io/installation> |
 
 **Disk space budget**
 
@@ -76,8 +85,18 @@ won't work yet. We fill `.env` next.
 `FERNET_KEY` encrypts Google tokens and provider credentials at rest. Generate
 it once and keep it; if you lose it, all encrypted rows must be deleted.
 
+Use this stdlib-only one-liner — it produces a valid Fernet key (32 random
+bytes, URL-safe base64) without needing the `cryptography` package installed
+on the host:
+
 ```bash
-python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+python3 -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
+```
+
+No Python 3? Use `openssl` instead:
+
+```bash
+openssl rand 32 | base64 | tr '+/' '-_' | tr -d '\n'; echo
 ```
 
 Open `.env` and paste the output into `FERNET_KEY=`.
