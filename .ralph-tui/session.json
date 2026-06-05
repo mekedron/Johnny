@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T18:53:47.409Z",
-  "currentIteration": 21,
+  "updatedAt": "2026-06-05T19:09:24.648Z",
+  "currentIteration": 22,
   "maxIterations": 10,
-  "tasksCompleted": 21,
+  "tasksCompleted": 22,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -146,8 +146,8 @@
       {
         "id": "Johnny-kgc.20",
         "title": "US-020: Google Meet join automation",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.21",
@@ -445,6 +445,16 @@
       "durationMs": 820756,
       "startedAt": "2026-06-05T18:26:08.405Z",
       "endedAt": "2026-06-05T18:39:49.161Z"
+    },
+    {
+      "iteration": 22,
+      "status": "completed",
+      "taskId": "Johnny-kgc.20",
+      "taskTitle": "US-020: Google Meet join automation",
+      "taskCompleted": true,
+      "durationMs": 818710,
+      "startedAt": "2026-06-05T18:40:07.862Z",
+      "endedAt": "2026-06-05T18:53:46.572Z"
     }
   ],
   "skippedTaskIds": [],

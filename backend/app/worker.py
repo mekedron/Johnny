@@ -1,16 +1,21 @@
 """Background worker process.
 
-Two responsibilities at runtime:
+Three responsibilities at runtime:
 
 * Liveness — write a heartbeat file consumed by the container healthcheck.
-* Periodic background jobs — currently the transcript-embedding pass
-  (US-033 AC #5). The cadence defaults to once per 24 hours; override
-  via ``JOHNNY_EMBEDDING_INTERVAL_SECONDS``.
+* Calendar polling — every ``JOHNNY_CALENDAR_POLL_INTERVAL_SECONDS``
+  (default 300s = 5 min) re-syncs Google Calendar for every account
+  that has at least one meeting_config attached, publishing
+  ``calendar_event_changed`` events to Redis pub/sub for the UI
+  (US-007).
+* Nightly embedding pass — computes transcript embeddings (US-033 AC
+  #5). Cadence defaults to 24 h; override via
+  ``JOHNNY_EMBEDDING_INTERVAL_SECONDS``.
 
-A real task queue (Celery / Dramatiq) lands in US-007 / US-029; until then
-this in-process loop is the scheduler. The job functions themselves
-(``run_embedding_pass``) are wired up so the future Celery beat can call
-them directly.
+A real task queue (Celery / Dramatiq) is still pending; until then this
+in-process loop is the scheduler. The job functions themselves
+(``run_embedding_pass``, ``run_polling_pass``) are wired up so the
+future Celery beat can call them directly.
 """
 
 from __future__ import annotations
@@ -23,6 +28,11 @@ from pathlib import Path
 
 from app.config import get_settings
 from app.db.session import session_scope
+from app.services.calendar_polling import (
+    DEFAULT_POLL_INTERVAL_SECONDS,
+    get_poll_interval_seconds,
+    run_polling_pass,
+)
 from app.services.transcripts import (
     StaticEmbeddingProvider,
     compute_pending_embeddings,
@@ -71,9 +81,19 @@ async def run_embedding_pass() -> int:
         return await compute_pending_embeddings(session, embedder)
 
 
-def _should_run_embedding(now: float, last_run: float, interval: float) -> bool:
-    """Whether the embedding pass is due. Pure for unit-testability."""
+def _should_run(now: float, last_run: float, interval: float) -> bool:
+    """Whether a periodic job is due. Pure for unit-testability."""
     return now - last_run >= interval
+
+
+def _should_run_embedding(now: float, last_run: float, interval: float) -> bool:
+    """Back-compat alias for the embedding-specific helper."""
+    return _should_run(now, last_run, interval)
+
+
+def _should_run_calendar_poll(now: float, last_run: float, interval: float) -> bool:
+    """Back-compat alias for the calendar-poll-specific helper."""
+    return _should_run(now, last_run, interval)
 
 
 def main() -> None:
@@ -83,18 +103,38 @@ def main() -> None:
     )
     settings = get_settings()
     embedding_interval = get_embedding_interval_seconds()
+    poll_interval = get_poll_interval_seconds()
     logger.info(
-        "worker starting; database_url=%s redis_url=%s embedding_interval=%ds",
+        "worker starting; database_url=%s redis_url=%s embedding_interval=%ds "
+        "calendar_poll_interval=%ds (default=%ds)",
         settings.database_url,
         settings.redis_url,
         embedding_interval,
+        poll_interval,
+        DEFAULT_POLL_INTERVAL_SECONDS,
     )
 
     last_embedding_at = 0.0
+    last_poll_at = 0.0
     while True:
         write_heartbeat()
         now = time.time()
-        if _should_run_embedding(now, last_embedding_at, embedding_interval):
+        if _should_run(now, last_poll_at, poll_interval):
+            try:
+                result = asyncio.run(run_polling_pass())
+                logger.info(
+                    "calendar poll complete: accounts=%d created=%d updated=%d "
+                    "deleted=%d errors=%d",
+                    result.polled_account_count,
+                    result.created_count,
+                    result.updated_count,
+                    result.deleted_count,
+                    result.error_count,
+                )
+            except Exception:
+                logger.exception("calendar poll failed")
+            last_poll_at = now
+        if _should_run(now, last_embedding_at, embedding_interval):
             try:
                 count = asyncio.run(run_embedding_pass())
                 logger.info("embedding pass complete: %d rows", count)
