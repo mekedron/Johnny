@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T16:00:01.362Z",
-  "currentIteration": 7,
+  "updatedAt": "2026-06-05T16:11:58.228Z",
+  "currentIteration": 8,
   "maxIterations": 10,
-  "tasksCompleted": 7,
+  "tasksCompleted": 8,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -134,8 +134,8 @@
       {
         "id": "Johnny-kgc.18",
         "title": "US-018: Provider configuration UI",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.19",
@@ -305,6 +305,16 @@
       "durationMs": 1236976,
       "startedAt": "2026-06-05T15:20:53.573Z",
       "endedAt": "2026-06-05T15:41:30.549Z"
+    },
+    {
+      "iteration": 8,
+      "status": "completed",
+      "taskId": "Johnny-kgc.18",
+      "taskTitle": "US-018: Provider configuration UI",
+      "taskCompleted": true,
+      "durationMs": 1091235,
+      "startedAt": "2026-06-05T15:41:49.312Z",
+      "endedAt": "2026-06-05T16:00:00.547Z"
     }
   ],
   "skippedTaskIds": [],

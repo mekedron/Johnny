@@ -36,6 +36,13 @@ from app.providers.base import (
     UnknownProviderError,
     get_registry,
 )
+from app.providers.piper_tts import PiperTTS
+from app.providers.piper_tts import register as _register_piper_tts
+
+# Auto-register stdlib-only adapters at package import. Adapters whose
+# import would pull in heavy optional deps (torch, openai, etc.) must
+# register lazily from their own modules instead.
+_register_piper_tts(replace=True)
 
 __all__ = [
     "ChatMessage",
@@ -43,6 +50,7 @@ __all__ = [
     "LLMError",
     "LLMProvider",
     "LLMResponse",
+    "PiperTTS",
     "ProviderConfig",
     "ProviderError",
     "ProviderFactory",
