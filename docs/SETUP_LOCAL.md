@@ -507,7 +507,86 @@ and a Disconnect button.
 
 ---
 
-## 15. First-run smoke test (Listen-only)
+## 15. You finished — now verify (one command)
+
+Before joining a real Meet, run the end-to-end smoke test. It verifies that
+your populated `.env` actually produces a working stack and that every
+configured provider key responds. Each check is independent and prints
+`[PASS] / [SKIP] / [FAIL]` with a one-line reason; the command exits 0 only
+when every non-SKIP check passed.
+
+```bash
+cd backend
+uv run johnny-smoke --project-root ..
+# or, from the project root:
+# uv --project backend run johnny-smoke --project-root .
+```
+
+Example output:
+
+```
+[PASS] compose services      — healthy: api, worker, frontend, postgres, redis
+[PASS] api /health           — 200 OK at http://localhost:8000/health
+[PASS] alembic upgrade head  — schema is up to date
+[PASS] FERNET_KEY            — round-trip OK
+[PASS] Google OAuth config   — consent URL builds for http://localhost:8000/...
+[PASS] OPENAI_API_KEY        — models.list returned 200, 47 models
+[SKIP] ANTHROPIC_API_KEY     — not set in .env
+[PASS] DEEPGRAM_API_KEY      — projects.list returned 200
+[PASS] ELEVENLABS_API_KEY    — voices returned 200, 23 voices
+[SKIP] GOOGLE_API_KEY        — not set in .env
+[PASS] Ollama reachable      — http://localhost:11434, 2 models (llama3.1, ...)
+[PASS] Whisper models dir    — base.en present in johnny_whisper_models
+[PASS] Piper voices dir      — en_US-amy-medium present in johnny_piper_models
+[PASS] Docker launcher       — daemon reachable, johnny-meet-worker:latest found
+[PASS] WS /ws/global         — upgrade accepted at ws://localhost:8000/ws/global
+[PASS] Frontend              — 200 OK at http://localhost:5173
+
+13 PASS · 2 SKIP · 0 FAIL
+```
+
+What each row means:
+
+- **compose services / api /health / alembic** — the stack is up and the
+  database schema is current. If the stack is down, pass `--start-stack`
+  to bring it up first.
+- **FERNET_KEY** — your key encrypts + decrypts a sample value cleanly.
+  A failure here means you generated an invalid key or pasted the
+  Python literal `b'...'` instead of the decoded ASCII.
+- **Google OAuth config** — `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
+  and `GOOGLE_OAUTH_REDIRECT_URI` are populated and the consent URL builds.
+  Does not require user consent.
+- **Provider keys** — `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+  `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `GOOGLE_API_KEY` each get a
+  cheap `list models` / `list voices` / `list projects` probe.
+  Blank keys SKIP — never FAIL. Wrong keys FAIL with the API's own
+  HTTP status and error message so you can copy-paste it back to .env.
+- **Ollama reachable** — host-side `GET /api/tags` enumerates the local
+  LLMs you have pulled. SKIP if Ollama is not running (only required for
+  a local LLM).
+- **Whisper / Piper models dir** — the named Docker volumes
+  (`johnny_whisper_models`, `johnny_piper_models`) contain the model
+  files. Empty volumes FAIL with the exact path to download them from.
+- **Docker launcher** — when `JOHNNY_USE_DOCKER_LAUNCHER=true`, the
+  API/worker can talk to the Docker daemon and the meet-worker image is
+  built. SKIP if the flag is off (no-op launcher).
+- **WS /ws/global** — the WebSocket upgrade handshake completes
+  cleanly. SKIPs cleanly if the API is down.
+- **Frontend** — `http://localhost:5173` returns 200.
+
+Useful flags:
+
+- `--start-stack` — run `docker compose up -d` before checking if the
+  stack is down.
+- `--api-url` / `--frontend-url` / `--ollama-url` — point at non-default
+  hosts/ports.
+
+Once every non-SKIP check is PASS, you are ready to join a real Meet —
+proceed to §16 below.
+
+---
+
+## 16. First-run smoke test (Listen-only)
 
 1. **Create a test meeting** on your personal Google Calendar (or any calendar
    you connected as `user`). Set the start time to 5 minutes from now. Add a

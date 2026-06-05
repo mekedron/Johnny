@@ -65,7 +65,18 @@ The api is reachable at <http://localhost:8000>, the frontend at
 <http://localhost:5173>. Postgres listens on the internal compose network only;
 connect via `docker compose exec postgres psql -U johnny`.
 
-See `docs/SETUP_LOCAL.md` for the full manual setup walkthrough.
+Once `.env` is filled in and the stack is up, verify everything works:
+
+```bash
+cd backend
+uv run johnny-smoke --project-root ..
+```
+
+The smoke test prints one PASS / SKIP / FAIL row per check (compose health,
+migrations, Fernet, Google OAuth config, provider credentials, local model
+dirs, Ollama reachability, Docker launcher, WS upgrade, frontend) and exits
+non-zero if any non-SKIP check failed. See `docs/SETUP_LOCAL.md` §15 for the
+full reference; manual setup walkthrough is in the same document.
 
 ### Meet-worker image
 

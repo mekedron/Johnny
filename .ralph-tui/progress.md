@@ -37,6 +37,22 @@ after each iteration and it's included in prompts for context.
   literal to render Reconnect affordances and skip doomed fetches
   client-side. See `backend/app/api/auth.py:_account_read` and
   `frontend/src/routes/calendar/+page.svelte` for the pattern.
+- **PASS/SKIP/FAIL smoke-check shape**: integration probes that need to
+  surface "is this configuration usable" return a `SmokeResult` (status
+  enum + one-line `detail` + optional structured `info` dict). Each
+  check is independent, never raises, and maps connection errors /
+  HTTP non-200 to a `FAIL` with the API's own error message. SKIPs are
+  for optional providers with blank keys — they never cause non-zero
+  exit. Pattern lives in `backend/johnny/smoketest/{models,checks,runner}.py`;
+  reused for any future "verify this works end-to-end" command. New
+  checks plug in by adding a `check_*` function and one line to
+  `runner.run_all()` in fixed order.
+- **`docker compose ps --format json` parsing**: newer Compose v2 emits
+  one JSON object per line (NDJSON); older versions emit a single JSON
+  array. Parsers in this repo handle both — see
+  `johnny.smoketest.checks.check_compose_services_healthy`. The
+  capitalized keys `Service`, `Health`, `State` are the canonical ones
+  (Compose >= v2.21).
 
 ---
 
@@ -204,3 +220,72 @@ after each iteration and it's included in prompts for context.
     `docker-compose.yml`. Plan ~30s for the rebuild.
 ---
 
+
+## 2026-06-06 - Johnny-f7k
+- Built `backend/johnny/smoketest/` — end-to-end smoke test that takes a
+  populated `.env` and answers "is this configuration usable, and where
+  does it break?". Single command: `uv run johnny-smoke` (or
+  `python -m johnny.smoketest`), exits 0 iff every non-SKIP check passed.
+- 16 checks in fixed order: Compose services healthy
+  (api/worker/frontend/postgres/redis), `/health`, `alembic upgrade head`
+  via `docker compose exec`, FERNET_KEY round-trip, Google OAuth consent
+  URL builds, OPENAI/ANTHROPIC/DEEPGRAM/ELEVENLABS/GOOGLE_API_KEY each
+  hits a cheap `list models` / `list voices` / `list projects` endpoint
+  (skipped if blank in `.env`), Ollama `/api/tags` on host (SKIP if
+  unreachable), Whisper + Piper model dirs via `docker run -v vol:mount
+  alpine ls`, Docker launcher (if `JOHNNY_USE_DOCKER_LAUNCHER=true`,
+  verify daemon + meet-worker image), WS `/ws/global` handshake via raw
+  socket (avoids websockets dep), frontend `GET / 200`.
+- Output is a colored table the user can scan top-to-bottom:
+  `[PASS] api /health           — 200 OK at http://localhost:8000/health`
+  with a `N PASS · N SKIP · N FAIL` summary line. Failures carry the
+  remote API's own status + body so users can copy-paste to .env fixes.
+- Modules: `models.py` (`SmokeResult`, `SmokeStatus`, `exit_code`),
+  `checks.py` (one function per check, never raises), `runner.py` (calls
+  every check in order, inserts a SKIP for alembic if API is down,
+  optionally `docker compose up -d` first via `--start-stack`),
+  `cli.py` (Click entrypoint, Rich rendering), `__main__.py`.
+- Added `[project.scripts] johnny-smoke = "johnny.smoketest.cli:main"`.
+- Tests: `tests/smoketest/{test_models,test_checks,test_runner,test_cli}.py`
+  — 72 new tests, all passing. WebSocket test spawns a one-shot loopback
+  TCP listener that returns 101 Switching Protocols; the connection-refused
+  case targets reserved port 1. Compose JSON parser tested against both
+  NDJSON (newer Compose) and array (older Compose) outputs.
+- Docs: new `docs/SETUP_LOCAL.md` §15 "You finished — now verify (one
+  command)" leads with the smoke test, example output, per-row meanings.
+  Old §15 (Listen-only run) renumbered to §16. README.md gets a short
+  reference to `johnny-smoke` right after `docker compose up`.
+- Verified live against the real Compose stack with the actual `.env`
+  in the repo: 11 PASS · 1 SKIP · 4 FAIL on first run — correctly caught
+  a stale ELEVENLABS_API_KEY (401), empty Whisper / Piper volumes, and
+  the disabled Docker launcher (SKIP, not FAIL — correct behavior).
+- 1369 backend tests pass (was 1297, +72), `ruff` clean, `mypy` clean,
+  `pnpm typecheck` clean, `pnpm lint` clean.
+- Files changed: `backend/johnny/smoketest/{__init__,__main__,models,checks,runner,cli}.py`,
+  `backend/tests/smoketest/{__init__,test_models,test_checks,test_runner,test_cli}.py`,
+  `backend/pyproject.toml`, `docs/SETUP_LOCAL.md`, `README.md`,
+  `.ralph-tui/progress.md`.
+- **Learnings:**
+  - The strict-mypy submodule rule (from Johnny-61y learnings) bites
+    smoke tests the same way it bites wizard tests: patching
+    `checks.shutil.which` via `patch.object` fails strict mypy; the
+    escape hatch is `patch("johnny.smoketest.checks.shutil.which", ...)`
+    with the full dotted path string. Already in the codebase patterns
+    list — confirmed it generalizes.
+  - `docker compose ps --format json` switched output shape between v1
+    and v2.21+: older versions emit a single JSON array, newer emit
+    NDJSON. Production parsers in this repo handle both. The key set
+    (capitalised `Service`, `Health`, `State`) is stable since v2.0.
+  - Services without an explicit healthcheck have empty `Health` but
+    `State="running"`; the smoke check treats either as healthy
+    (mirror the way Compose itself does).
+  - For the WebSocket upgrade check we send a raw HTTP/1.1 upgrade
+    handshake over a socket rather than pulling in `websockets` (which
+    is already a backend dep, but the smoke check is standalone). The
+    server accepts any opaque base64 `Sec-WebSocket-Key` — RFC 6455 only
+    cares that the header is present.
+  - The Ollama check has to hit `localhost:11434` from the host, not
+    `host.docker.internal` — the smoke test runs *on the host*, the
+    `.env`-style `host.docker.internal` URL is only for in-Compose
+    consumers. This matches the wizard's own Ollama handling.
+---

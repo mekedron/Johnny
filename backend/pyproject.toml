@@ -30,6 +30,9 @@ dependencies = [
 # `johnny-setup` becomes the entrypoint for the interactive setup wizard
 # (Johnny-61y). Invokable directly after `uv sync` without `-m`.
 johnny-setup = "johnny.wizard.cli:main"
+# `johnny-smoke` runs the post-setup smoke test (Johnny-f7k). Verifies a
+# populated .env produces a working stack and provider responses.
+johnny-smoke = "johnny.smoketest.cli:main"
 
 [project.optional-dependencies]
 # Heavy ML dep for on-device STT. Only the meet-worker image needs it
