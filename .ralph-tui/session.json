@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T18:39:49.996Z",
-  "currentIteration": 20,
+  "updatedAt": "2026-06-05T18:53:47.409Z",
+  "currentIteration": 21,
   "maxIterations": 10,
-  "tasksCompleted": 20,
+  "tasksCompleted": 21,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -62,8 +62,8 @@
       {
         "id": "Johnny-kgc.6",
         "title": "US-006: Multi-account management",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.7",
@@ -435,6 +435,16 @@
       "durationMs": 661597,
       "startedAt": "2026-06-05T18:14:47.686Z",
       "endedAt": "2026-06-05T18:25:49.283Z"
+    },
+    {
+      "iteration": 21,
+      "status": "completed",
+      "taskId": "Johnny-kgc.6",
+      "taskTitle": "US-006: Multi-account management",
+      "taskCompleted": true,
+      "durationMs": 820756,
+      "startedAt": "2026-06-05T18:26:08.405Z",
+      "endedAt": "2026-06-05T18:39:49.161Z"
     }
   ],
   "skippedTaskIds": [],

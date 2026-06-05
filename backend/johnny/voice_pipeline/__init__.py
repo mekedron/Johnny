@@ -27,6 +27,8 @@ from johnny.voice_pipeline.events import (
     AgentSpoke,
     PipelineEvent,
     RouterDecisionMade,
+    SessionStatus,
+    SessionStatusChanged,
     TranscriptFinalized,
     event_to_dict,
 )
@@ -87,6 +89,8 @@ __all__ = [
     "RedisEventBus",
     "RouterDecision",
     "RouterDecisionMade",
+    "SessionStatus",
+    "SessionStatusChanged",
     "SileroVAD",
     "TranscriptFinalized",
     "TranscriptRecord",

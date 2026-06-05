@@ -19,6 +19,9 @@ from typing import Any, Literal
 TranscriptEventType = Literal["transcript_finalized"]
 RouterEventType = Literal["router_decision_made"]
 AgentEventType = Literal["agent_spoke"]
+SessionStatusEventType = Literal["session_status_changed"]
+
+SessionStatus = Literal["scheduled", "joining", "joined", "ended", "failed"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +73,29 @@ class AgentSpoke:
     type: AgentEventType = "agent_spoke"
 
 
-PipelineEvent = TranscriptFinalized | RouterDecisionMade | AgentSpoke
+@dataclass(frozen=True, slots=True)
+class SessionStatusChanged:
+    """The bot session moved to a new lifecycle status.
+
+    Emitted by the meet-worker driver (US-020) on transitions like
+    ``joining`` → ``joined`` or ``joining`` → ``failed``. The API
+    subscriber listens on the same channel as the voice events,
+    applies the corresponding update to ``bot_sessions.status`` (and
+    ``error_reason`` for failures), and re-broadcasts on the global
+    WebSocket channel so the calendar view updates live (US-031).
+
+    ``error_reason`` is set when ``status == "failed"``; for other
+    transitions it is ``None``.
+    """
+
+    status: SessionStatus
+    timestamp_ms: int
+    session_id: str | None = None
+    error_reason: str | None = None
+    type: SessionStatusEventType = "session_status_changed"
+
+
+PipelineEvent = TranscriptFinalized | RouterDecisionMade | AgentSpoke | SessionStatusChanged
 """Union of every event the pipeline emits."""
 
 
@@ -88,6 +113,8 @@ __all__ = [
     "AgentSpoke",
     "PipelineEvent",
     "RouterDecisionMade",
+    "SessionStatus",
+    "SessionStatusChanged",
     "TranscriptFinalized",
     "event_to_dict",
 ]

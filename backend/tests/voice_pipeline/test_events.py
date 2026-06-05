@@ -9,6 +9,7 @@ import pytest
 from johnny.voice_pipeline.events import (
     AgentSpoke,
     RouterDecisionMade,
+    SessionStatusChanged,
     TranscriptFinalized,
     event_to_dict,
 )
@@ -130,3 +131,46 @@ def test_event_to_dict_agent() -> None:
     assert d["text"] == "Yes"
     assert d["audio_duration_ms"] == 300
     assert d["type"] == "agent_spoke"
+
+
+def test_session_status_changed_defaults() -> None:
+    ev = SessionStatusChanged(status="joining", timestamp_ms=100)
+    assert ev.status == "joining"
+    assert ev.timestamp_ms == 100
+    assert ev.session_id is None
+    assert ev.error_reason is None
+    assert ev.type == "session_status_changed"
+
+
+def test_session_status_changed_failed_carries_reason() -> None:
+    ev = SessionStatusChanged(
+        status="failed",
+        timestamp_ms=4_200,
+        session_id="sess-1",
+        error_reason="Meeting has not started yet",
+    )
+    assert ev.status == "failed"
+    assert ev.session_id == "sess-1"
+    assert ev.error_reason == "Meeting has not started yet"
+
+
+def test_session_status_changed_is_frozen() -> None:
+    ev = SessionStatusChanged(status="joined", timestamp_ms=0)
+    with pytest.raises(FrozenInstanceError):
+        ev.status = "ended"  # type: ignore[misc]
+
+
+def test_event_to_dict_session_status() -> None:
+    ev = SessionStatusChanged(
+        status="joined",
+        timestamp_ms=15,
+        session_id="s",
+    )
+    d = event_to_dict(ev)
+    assert d == {
+        "status": "joined",
+        "timestamp_ms": 15,
+        "session_id": "s",
+        "error_reason": None,
+        "type": "session_status_changed",
+    }
