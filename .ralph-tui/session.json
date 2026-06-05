@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T16:45:28.847Z",
-  "currentIteration": 11,
+  "updatedAt": "2026-06-05T16:59:00.800Z",
+  "currentIteration": 12,
   "maxIterations": 10,
-  "tasksCompleted": 11,
+  "tasksCompleted": 12,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -110,8 +110,8 @@
       {
         "id": "Johnny-kgc.14",
         "title": "US-014: Cloud LLM adapters",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.15",
@@ -345,6 +345,16 @@
       "durationMs": 521792,
       "startedAt": "2026-06-05T16:23:36.564Z",
       "endedAt": "2026-06-05T16:32:18.356Z"
+    },
+    {
+      "iteration": 12,
+      "status": "completed",
+      "taskId": "Johnny-kgc.14",
+      "taskTitle": "US-014: Cloud LLM adapters",
+      "taskCompleted": true,
+      "durationMs": 770384,
+      "startedAt": "2026-06-05T16:32:37.628Z",
+      "endedAt": "2026-06-05T16:45:28.012Z"
     }
   ],
   "skippedTaskIds": [],

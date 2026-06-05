@@ -29,6 +29,7 @@ from app.providers import (
 from johnny.voice_pipeline import (
     AgentSpoke,
     EnergyVAD,
+    InMemoryDecisionSink,
     InMemoryEventBus,
     JohnnyTransport,
     PipelineConfig,
@@ -36,11 +37,13 @@ from johnny.voice_pipeline import (
     TranscriptFinalized,
     VoicePipeline,
 )
+from johnny.voice_pipeline.decision_sink import DecisionSink
 from johnny.voice_pipeline.pipeline import (
     RouterDecision,
     _match_allowed_reply,
     _parse_router_response,
     _pcm_duration_ms,
+    _serialize_raw_output,
 )
 
 # --- fake transport --------------------------------------------------------
@@ -125,6 +128,7 @@ class _FakeRouterLLM(LLMProvider):
         self._idx = 0
         self.last_messages: Sequence[ChatMessage] | None = None
         self.last_response_format: dict[str, Any] | None = None
+        self.calls: list[Sequence[ChatMessage]] = []
 
     @property
     def name(self) -> str:
@@ -138,6 +142,7 @@ class _FakeRouterLLM(LLMProvider):
     ) -> LLMResponse:
         self.last_messages = messages
         self.last_response_format = response_format
+        self.calls.append(list(messages))
         if self._idx >= len(self._decisions):
             decision = self._decisions[-1]
         else:
@@ -519,3 +524,471 @@ def test_pipeline_config_frozen() -> None:
     cfg = PipelineConfig(vad_threshold=0.3)
     with pytest.raises(FrozenInstanceError):
         cfg.vad_threshold = 0.5  # type: ignore[misc]
+
+
+# --- US-023: rolling transcript window, mode, last decision in prompt ----
+
+
+async def test_router_prompt_includes_mode_threshold_and_instructions(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Mode + threshold are always in the system prompt so the router can
+    adjust behaviour; instructions are appended when configured."""
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    router = _FakeRouterLLM(
+        decisions=[{"should_speak": False, "confidence": 0.2, "reason": "skip"}]
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hello team", "anything else"]),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            instructions="Be brief",
+            context="standup",
+            mode="approval_required",
+            confidence_threshold=0.85,
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+        ),
+    )
+    await pipeline.run()
+    assert router.last_messages is not None
+    system_msg = router.last_messages[0]
+    assert system_msg.role == "system"
+    assert system_msg.content is not None
+    assert "Mode: approval_required" in system_msg.content
+    assert "Confidence threshold for speaking: 0.85" in system_msg.content
+    assert "Meeting instructions: Be brief" in system_msg.content
+    assert "Context: standup" in system_msg.content
+
+
+async def test_router_prompt_includes_rolling_transcript_window(
+    two_utterance_pcm: bytes,
+) -> None:
+    """The second router invocation should see the first transcript in the
+    rolling window so it can spot when a topic has already been addressed."""
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    router = _FakeRouterLLM(
+        decisions=[
+            {"should_speak": False, "confidence": 0.1, "reason": "first"},
+            {"should_speak": False, "confidence": 0.1, "reason": "second"},
+        ]
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hello team", "anything else"]),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05, end_of_speech_ms=300, transcript_window_size=5
+        ),
+    )
+    await pipeline.run()
+    # last_messages is from the SECOND call (router was called twice)
+    assert router.last_messages is not None
+    user_msg = router.last_messages[1]
+    assert user_msg.role == "user"
+    assert user_msg.content is not None
+    assert "Recent conversation:" in user_msg.content
+    assert "hello team" in user_msg.content  # prior transcript in window
+    assert "Latest transcript: anything else" in user_msg.content
+
+
+async def test_router_prompt_includes_last_decision_on_second_turn(
+    two_utterance_pcm: bytes,
+) -> None:
+    """After the first decision, the router prompt for the second utterance
+    should embed the prior decision so the model doesn't repeat itself."""
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    router = _FakeRouterLLM(
+        decisions=[
+            {
+                "should_speak": True,
+                "confidence": 0.9,
+                "reason": "direct ask",
+                "reply_type": "answer",
+                "suggested_reply": "ok",
+            },
+            {"should_speak": False, "confidence": 0.1, "reason": "noise"},
+        ]
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two"]),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["ok"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05, end_of_speech_ms=300, confidence_threshold=0.5
+        ),
+    )
+    await pipeline.run()
+    assert router.last_messages is not None
+    second_user_msg = router.last_messages[1]
+    assert second_user_msg.content is not None
+    assert "Last router decision" in second_user_msg.content
+    assert "direct ask" in second_user_msg.content
+
+
+async def test_router_prompt_no_last_decision_on_first_turn(
+    two_utterance_pcm: bytes,
+) -> None:
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    router = _FakeRouterLLM(
+        decisions=[{"should_speak": False, "confidence": 0.1, "reason": "skip"}]
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["only one"]),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(vad_threshold=0.05, end_of_speech_ms=300),
+    )
+    await pipeline.run()
+    assert router.calls  # at least one router invocation
+    first_user_msg = router.calls[0][1]
+    assert first_user_msg.content is not None
+    assert "Last router decision" not in first_user_msg.content
+
+
+# --- US-023: event carries full input_window and raw_output --------------
+
+
+async def test_router_decision_event_includes_input_window_and_raw_output(
+    two_utterance_pcm: bytes,
+) -> None:
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hello", "world"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {
+                    "should_speak": True,
+                    "confidence": 0.95,
+                    "reason": "asked",
+                    "reply_type": "answer",
+                    "suggested_reply": "hi",
+                }
+            ]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["hi"]),
+        tts=_FakeTTS(),
+        event_bus=bus,
+        config=PipelineConfig(
+            instructions="Be terse",
+            context="meeting",
+            mode="limited_auto_speak",
+            allowed_replies=("hi", "bye"),
+            confidence_threshold=0.5,
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+        ),
+    )
+    await pipeline.run()
+    decisions = [e for e in bus.snapshot() if e.type == "router_decision_made"]
+    assert decisions
+    first = decisions[0]
+    assert isinstance(first, RouterDecisionMade)
+    iw = first.input_window
+    assert iw["instructions"] == "Be terse"
+    assert iw["context"] == "meeting"
+    assert iw["mode"] == "limited_auto_speak"
+    assert iw["allowed_replies"] == ["hi", "bye"]
+    assert iw["confidence_threshold"] == pytest.approx(0.5)
+    assert iw["last_decision"] is None  # first turn
+    window: list[dict[str, Any]] = iw["transcript_window"]
+    assert len(window) == 1
+    assert window[0]["text"] == "hello"
+    assert window[0]["is_current"] is True
+
+    raw = first.raw_output
+    assert "text" in raw
+    assert "structured" in raw
+    assert raw["structured"]["reason"] == "asked"
+
+
+# --- US-023: decision sink persistence ----------------------------------
+
+
+async def test_pipeline_persists_decisions_with_spoken_outcome(
+    two_utterance_pcm: bytes,
+) -> None:
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    sink = InMemoryDecisionSink()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {"should_speak": True, "confidence": 0.95, "reason": "yes"},
+                {"should_speak": False, "confidence": 0.1, "reason": "no"},
+            ]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["hi"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            confidence_threshold=0.5,
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            bot_session_id=42,
+        ),
+        decision_sink=sink,
+    )
+    await pipeline.run()
+    records = sink.snapshot()
+    assert len(records) == 2
+    assert records[0].outcome == "spoken"
+    assert records[0].bot_session_id == 42
+    assert records[1].outcome == "suppressed"
+    assert records[1].bot_session_id == 42
+
+
+async def test_pipeline_persists_decision_when_below_threshold(
+    two_utterance_pcm: bytes,
+) -> None:
+    """should_speak=True but confidence < threshold → outcome=suppressed."""
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    sink = InMemoryDecisionSink()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": True, "confidence": 0.3, "reason": "weak"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            confidence_threshold=0.7,
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+        ),
+        decision_sink=sink,
+    )
+    await pipeline.run()
+    records = sink.snapshot()
+    assert len(records) == 2
+    assert all(r.outcome == "suppressed" for r in records)
+
+
+async def test_pipeline_does_not_persist_when_speak_false(
+    two_utterance_pcm: bytes,
+) -> None:
+    """speak=False short-circuits the router entirely; no persistence either."""
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    sink = InMemoryDecisionSink()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": True, "confidence": 0.95, "reason": "x"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(speak=False, vad_threshold=0.05, end_of_speech_ms=300),
+        decision_sink=sink,
+    )
+    await pipeline.run()
+    assert sink.snapshot() == []
+
+
+async def test_pipeline_default_decision_sink_is_noop(two_utterance_pcm: bytes) -> None:
+    """When no decision_sink is supplied, the pipeline still works (uses Noop)."""
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": False, "confidence": 0.1, "reason": "no"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(vad_threshold=0.05, end_of_speech_ms=300),
+    )
+    # Should not raise — uses NoopDecisionSink by default.
+    await pipeline.run()
+
+
+async def test_pipeline_decision_sink_failure_does_not_crash(
+    two_utterance_pcm: bytes,
+) -> None:
+    """A failing sink is logged and swallowed; the audio loop keeps going."""
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+
+    class _BrokenSink(DecisionSink):
+        async def record(self, decision, *, outcome="pending", bot_session_id=None):  # type: ignore[no-untyped-def]
+            del decision, outcome, bot_session_id
+            raise RuntimeError("db unavailable")
+
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": False, "confidence": 0.1, "reason": "no"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(vad_threshold=0.05, end_of_speech_ms=300),
+        decision_sink=_BrokenSink(),
+    )
+    await pipeline.run()  # must not raise
+
+
+# --- US-023: transcript window bounding ---------------------------------
+
+
+async def test_pipeline_transcript_window_bounded() -> None:
+    """The rolling transcript window is bounded by ``transcript_window_size``."""
+    # Use minimal pipeline directly — just exercise _remember_transcript and
+    # _build_input_window without spinning up the full audio loop.
+    transport = _BufferedTransport(frames=[])
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=[]),
+        router_llm=_FakeRouterLLM(decisions=[]),
+        answer_llm=_FakeAnswerLLM(answers=[]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(transcript_window_size=3),
+    )
+    for i in range(5):
+        pipeline._remember_transcript(
+            TranscriptFinalized(text=f"t{i}", timestamp_ms=i * 100)
+        )
+    assert len(pipeline._transcript_history) == 3
+    assert [t.text for t in pipeline._transcript_history] == ["t2", "t3", "t4"]
+
+
+def test_pipeline_config_has_us023_defaults() -> None:
+    cfg = PipelineConfig()
+    assert cfg.mode == "limited_auto_speak"
+    assert cfg.transcript_window_size == 6
+    assert cfg.bot_session_id is None
+
+
+def test_serialize_raw_output_shape() -> None:
+    from app.providers import LLMResponse
+
+    response = LLMResponse(
+        text="raw text",
+        finish_reason="stop",
+        structured_output={"should_speak": True, "confidence": 0.9, "reason": "x"},
+    )
+    decision = _parse_router_response(response)
+    raw = _serialize_raw_output(response, decision)
+    assert raw["text"] == "raw text"
+    assert raw["finish_reason"] == "stop"
+    assert raw["structured"]["should_speak"] is True
+    assert raw["structured"]["confidence"] == pytest.approx(0.9)
+
+
+async def test_pipeline_emits_router_event_with_threshold_in_input_window(
+    two_utterance_pcm: bytes,
+) -> None:
+    """The threshold actually used for the gating decision is captured for audit."""
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": False, "confidence": 0.0, "reason": "n"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=bus,
+        config=PipelineConfig(
+            confidence_threshold=0.42,
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+        ),
+    )
+    await pipeline.run()
+    decisions = [e for e in bus.snapshot() if isinstance(e, RouterDecisionMade)]
+    assert decisions
+    assert decisions[0].input_window["confidence_threshold"] == pytest.approx(0.42)

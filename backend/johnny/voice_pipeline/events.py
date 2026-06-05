@@ -13,7 +13,7 @@ session; left ``None`` for in-process tests that don't need correlation).
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 TranscriptEventType = Literal["transcript_finalized"]
@@ -38,7 +38,12 @@ class RouterDecisionMade:
     """The router LLM's structured decision about whether to speak.
 
     Mirrors the shape persisted to ``agent_decisions`` so subscribers can
-    write through with minimal mapping.
+    write through with minimal mapping. ``input_window`` carries the full
+    prompt context fed to the router (rolling transcript window, mode,
+    instructions, allowed_replies, threshold, last decision) so the row
+    in ``agent_decisions`` is reproducible post-hoc. ``raw_output`` carries
+    the raw LLM response (text + parsed structured output + finish_reason)
+    for audit and debugging.
     """
 
     should_speak: bool
@@ -48,6 +53,8 @@ class RouterDecisionMade:
     reply_type: str | None = None
     suggested_reply: str | None = None
     session_id: str | None = None
+    input_window: dict[str, Any] = field(default_factory=dict)
+    raw_output: dict[str, Any] = field(default_factory=dict)
     type: RouterEventType = "router_decision_made"
 
 

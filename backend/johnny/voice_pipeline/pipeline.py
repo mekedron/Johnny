@@ -31,6 +31,11 @@ from app.providers import (
     TTSProvider,
 )
 from app.providers.base import PCM_SAMPLE_RATE_HZ
+from johnny.voice_pipeline.decision_sink import (
+    DecisionOutcome,
+    DecisionSink,
+    NoopDecisionSink,
+)
 from johnny.voice_pipeline.event_bus import EventBus
 from johnny.voice_pipeline.events import (
     AgentSpoke,
@@ -46,6 +51,8 @@ DEFAULT_MAX_UTTERANCE_MS = 30_000
 DEFAULT_END_OF_SPEECH_MS = 600
 DEFAULT_FRAME_DURATION_MS = 20
 DEFAULT_CONFIDENCE_THRESHOLD = 0.7
+DEFAULT_TRANSCRIPT_WINDOW_SIZE = 6
+DEFAULT_MODE = "limited_auto_speak"
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,18 +62,27 @@ class PipelineConfig:
     Threshold and timing knobs are surfaced separately from the providers
     so a single set of provider instances can serve many meetings with
     different behaviours.
+
+    ``mode`` is the four-state ``BotMode`` value (string) — included in the
+    router prompt so the model can adjust its decision (e.g. tend to
+    suggest more in ``suggest_only`` mode). The pipeline does NOT enforce
+    mode constraints itself; that is the caller's responsibility (e.g.
+    ``speak=False`` for listen-only / suggest-only).
     """
 
     instructions: str = ""
     context: str = ""
     allowed_replies: tuple[str, ...] = ()
     speak: bool = True
+    mode: str = DEFAULT_MODE
     vad_threshold: float = DEFAULT_VAD_THRESHOLD
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD
     end_of_speech_ms: int = DEFAULT_END_OF_SPEECH_MS
     max_utterance_ms: int = DEFAULT_MAX_UTTERANCE_MS
     frame_duration_ms: int = DEFAULT_FRAME_DURATION_MS
+    transcript_window_size: int = DEFAULT_TRANSCRIPT_WINDOW_SIZE
     session_id: str | None = None
+    bot_session_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +128,7 @@ class VoicePipeline:
         tts: TTSProvider,
         event_bus: EventBus,
         config: PipelineConfig | None = None,
+        decision_sink: DecisionSink | None = None,
     ) -> None:
         self.transport = transport
         self.vad = vad
@@ -121,8 +138,11 @@ class VoicePipeline:
         self.tts = tts
         self.event_bus = event_bus
         self.config = config or PipelineConfig()
+        self.decision_sink = decision_sink or NoopDecisionSink()
         self._session_started_at: float = 0.0
         self._utterance_count = 0
+        self._transcript_history: list[TranscriptFinalized] = []
+        self._last_decision: RouterDecisionMade | None = None
 
     # ------------------------------------------------------------------
     # Public lifecycle
@@ -191,11 +211,13 @@ class VoicePipeline:
         if transcript is None:
             return
         await self.event_bus.publish(transcript)
+        self._remember_transcript(transcript)
 
         if not self.config.speak:
             return
 
-        decision = await self._run_router(transcript)
+        input_window = self._build_input_window(transcript)
+        decision, raw_response = await self._run_router(transcript, input_window)
         decision_event = RouterDecisionMade(
             should_speak=decision.should_speak,
             confidence=decision.confidence,
@@ -204,15 +226,24 @@ class VoicePipeline:
             suggested_reply=decision.suggested_reply,
             timestamp_ms=self._now_ms(),
             session_id=self.config.session_id,
+            input_window=input_window,
+            raw_output=_serialize_raw_output(raw_response, decision),
         )
         await self.event_bus.publish(decision_event)
+        self._last_decision = decision_event
 
         if not decision.should_speak:
+            await self._persist_decision(decision_event, "suppressed")
             return
         if decision.confidence < self.config.confidence_threshold:
+            await self._persist_decision(decision_event, "suppressed")
             return
 
-        await self._answer_and_speak(transcript, decision)
+        spoke = await self._answer_and_speak(transcript, decision)
+        await self._persist_decision(
+            decision_event,
+            "spoken" if spoke else "suppressed",
+        )
 
     # ------------------------------------------------------------------
     # Stage implementations
@@ -247,28 +278,32 @@ class VoicePipeline:
             session_id=self.config.session_id,
         )
 
-    async def _run_router(self, transcript: TranscriptFinalized) -> RouterDecision:
-        messages = self._router_messages(transcript)
+    async def _run_router(
+        self,
+        transcript: TranscriptFinalized,
+        input_window: dict[str, Any],
+    ) -> tuple[RouterDecision, LLMResponse]:
+        messages = self._router_messages(transcript, input_window)
         response = await self.router_llm.chat(
             messages,
             response_format=_ROUTER_SCHEMA,
         )
-        return _parse_router_response(response)
+        return _parse_router_response(response), response
 
     async def _answer_and_speak(
         self,
         transcript: TranscriptFinalized,
         decision: RouterDecision,
-    ) -> None:
+    ) -> bool:
         messages = self._answer_messages(transcript, decision)
         answer_response = await self.answer_llm.chat(messages)
         raw_text = answer_response.text.strip()
         if not raw_text:
-            return
+            return False
         if self.config.allowed_replies:
             matched = _match_allowed_reply(raw_text, self.config.allowed_replies)
             if matched is None:
-                return
+                return False
             text = matched
         else:
             text = raw_text
@@ -276,7 +311,7 @@ class VoicePipeline:
         async for frame in self.tts.synthesize_stream(text):
             audio_bytes += frame
         if not audio_bytes:
-            return
+            return False
         await self.transport.play_frames(
             [audio_bytes], source_rate=PCM_SAMPLE_RATE_HZ
         )
@@ -290,17 +325,24 @@ class VoicePipeline:
             session_id=self.config.session_id,
         )
         await self.event_bus.publish(spoke)
+        return True
 
     # ------------------------------------------------------------------
     # Prompt construction
 
     def _router_messages(
-        self, transcript: TranscriptFinalized
+        self,
+        transcript: TranscriptFinalized,
+        input_window: dict[str, Any],
     ) -> list[ChatMessage]:
         system = (
             "You are the gating router for an AI meeting bot. Decide whether "
             "the bot should speak in response to the latest transcript. "
             "Reply as JSON matching the supplied schema."
+        )
+        system += f"\n\nMode: {self.config.mode}"
+        system += (
+            f"\nConfidence threshold for speaking: {self.config.confidence_threshold:.2f}"
         )
         if self.config.instructions:
             system += f"\n\nMeeting instructions: {self.config.instructions}"
@@ -311,9 +353,27 @@ class VoicePipeline:
                 "\n\nAllowed replies (the answer stage will pick verbatim from "
                 f"this list): {list(self.config.allowed_replies)}"
             )
+
+        user_parts: list[str] = []
+        window: list[dict[str, Any]] = input_window.get("transcript_window", [])
+        if len(window) > 1:
+            history = window[:-1]
+            user_parts.append("Recent conversation:")
+            for entry in history:
+                speaker = entry.get("speaker") or "speaker"
+                user_parts.append(f"- {speaker}: {entry.get('text', '')}")
+            user_parts.append("")
+        last_decision = input_window.get("last_decision")
+        if last_decision is not None:
+            user_parts.append(
+                "Last router decision (do not repeat without new reason): "
+                f"{json.dumps(last_decision, separators=(',', ':'))}"
+            )
+            user_parts.append("")
+        user_parts.append(f"Latest transcript: {transcript.text}")
         return [
             ChatMessage(role="system", content=system),
-            ChatMessage(role="user", content=transcript.text),
+            ChatMessage(role="user", content="\n".join(user_parts)),
         ]
 
     def _answer_messages(
@@ -347,6 +407,66 @@ class VoicePipeline:
     def _now_ms(self) -> int:
         loop = asyncio.get_running_loop()
         return int((loop.time() - self._session_started_at) * 1000)
+
+    def _remember_transcript(self, transcript: TranscriptFinalized) -> None:
+        """Append ``transcript`` to the rolling history and bound its size."""
+        self._transcript_history.append(transcript)
+        window_size = max(1, self.config.transcript_window_size)
+        if len(self._transcript_history) > window_size:
+            del self._transcript_history[: len(self._transcript_history) - window_size]
+
+    def _build_input_window(
+        self, transcript: TranscriptFinalized
+    ) -> dict[str, Any]:
+        """Snapshot every input the router sees, for prompt & persistence."""
+        return {
+            "transcript_window": [
+                {
+                    "text": t.text,
+                    "speaker": t.speaker,
+                    "timestamp_ms": t.timestamp_ms,
+                    "confidence": t.confidence,
+                    "is_current": t is transcript,
+                }
+                for t in self._transcript_history
+            ],
+            "instructions": self.config.instructions,
+            "context": self.config.context,
+            "allowed_replies": list(self.config.allowed_replies),
+            "mode": self.config.mode,
+            "confidence_threshold": self.config.confidence_threshold,
+            "last_decision": self._last_decision_summary(),
+        }
+
+    def _last_decision_summary(self) -> dict[str, Any] | None:
+        if self._last_decision is None:
+            return None
+        return {
+            "should_speak": self._last_decision.should_speak,
+            "confidence": self._last_decision.confidence,
+            "reason": self._last_decision.reason,
+            "reply_type": self._last_decision.reply_type,
+            "suggested_reply": self._last_decision.suggested_reply,
+            "timestamp_ms": self._last_decision.timestamp_ms,
+        }
+
+    async def _persist_decision(
+        self,
+        event: RouterDecisionMade,
+        outcome: DecisionOutcome,
+    ) -> None:
+        try:
+            await self.decision_sink.record(
+                event,
+                outcome=outcome,
+                bot_session_id=self.config.bot_session_id,
+            )
+        except Exception:
+            logger.exception(
+                "decision sink failed for session=%s outcome=%s",
+                self.config.session_id,
+                outcome,
+            )
 
 
 # --- module-level helpers --------------------------------------------------
@@ -409,11 +529,29 @@ def _pcm_duration_ms(byte_count: int, sample_rate: int) -> int:
     return int(samples * 1000 / sample_rate)
 
 
+def _serialize_raw_output(
+    response: LLMResponse,
+    decision: RouterDecision,
+) -> dict[str, Any]:
+    """Flatten an :class:`LLMResponse` for storage in ``agent_decisions.raw_output``.
+
+    Both the model's free-text output and the parsed structured payload are
+    captured so a post-hoc review can see exactly what the router said.
+    """
+    return {
+        "text": response.text,
+        "finish_reason": response.finish_reason,
+        "structured": decision.raw,
+    }
+
+
 __all__ = [
     "DEFAULT_CONFIDENCE_THRESHOLD",
     "DEFAULT_END_OF_SPEECH_MS",
     "DEFAULT_FRAME_DURATION_MS",
     "DEFAULT_MAX_UTTERANCE_MS",
+    "DEFAULT_MODE",
+    "DEFAULT_TRANSCRIPT_WINDOW_SIZE",
     "PipelineConfig",
     "RouterDecision",
     "VoicePipeline",
