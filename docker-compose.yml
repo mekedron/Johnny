@@ -116,14 +116,16 @@ services:
       dockerfile: Dockerfile.meet-worker
     image: johnny-meet-worker:latest
     profiles: ["meet-worker"]
-    # Per-session containers attach this volume so downloaded Piper voice
-    # models survive restarts. The scheduler (US-029/US-030) will mount
-    # the same named volume into each spawned container.
+    # Per-session containers attach these volumes so downloaded model
+    # files survive restarts. The scheduler (US-029/US-030) will mount
+    # the same named volumes into each spawned container.
     volumes:
       - piper_models:/var/lib/johnny/piper-models
+      - whisper_models:/var/lib/johnny/whisper-models
 
 volumes:
   postgres_data:
   redis_data:
   worker_state:
   piper_models:
+  whisper_models:

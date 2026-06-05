@@ -20,6 +20,14 @@ dependencies = [
     "httpx>=0.28.0",
 ]
 
+[project.optional-dependencies]
+# Heavy ML dep for on-device STT. Only the meet-worker image needs it
+# at runtime; the API container imports the adapter lazily and never
+# touches the library unless a session actually uses faster-whisper.
+local-stt = [
+    "faster-whisper>=1.0.0",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.3.0",

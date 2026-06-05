@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T17:40:03.676Z",
-  "currentIteration": 15,
+  "updatedAt": "2026-06-05T17:51:01.463Z",
+  "currentIteration": 16,
   "maxIterations": 10,
-  "tasksCompleted": 15,
+  "tasksCompleted": 16,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -194,8 +194,8 @@
       {
         "id": "Johnny-kgc.28",
         "title": "US-028: Limited auto-speak mode",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.29",
@@ -385,6 +385,16 @@
       "durationMs": 642488,
       "startedAt": "2026-06-05T17:21:00.038Z",
       "endedAt": "2026-06-05T17:31:42.526Z"
+    },
+    {
+      "iteration": 16,
+      "status": "completed",
+      "taskId": "Johnny-kgc.28",
+      "taskTitle": "US-028: Limited auto-speak mode",
+      "taskCompleted": true,
+      "durationMs": 482435,
+      "startedAt": "2026-06-05T17:32:00.153Z",
+      "endedAt": "2026-06-05T17:40:02.588Z"
     }
   ],
   "skippedTaskIds": [],

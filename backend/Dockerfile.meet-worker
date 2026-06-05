@@ -33,10 +33,11 @@ WORKDIR /workspace
 
 # Runtime deps the voice pipeline needs at import time. The pipeline talks
 # to Redis pub/sub for live event fanout (US-031 subscriber); httpx is the
-# HTTP client used by the cloud TTS adapters (US-016). FastAPI and
-# SQLAlchemy are still deliberately absent — the pipeline depends only on
-# the pure-Python provider ABCs in `app/providers/base.py`.
-RUN pip install --no-cache-dir redis==8.0.0 httpx==0.28.1
+# HTTP client used by the cloud TTS adapters (US-016); faster-whisper is
+# the local STT backend (US-013, lazy-imported by the adapter). FastAPI
+# and SQLAlchemy are still deliberately absent — the pipeline depends
+# only on the pure-Python provider ABCs in `app/providers/base.py`.
+RUN pip install --no-cache-dir redis==8.0.0 httpx==0.28.1 faster-whisper==1.0.3
 
 # The `johnny` package owns the meet-worker runtime (selfcheck, audio
 # bridge, voice pipeline). The pipeline imports the provider ABCs from
