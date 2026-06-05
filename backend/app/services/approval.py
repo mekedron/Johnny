@@ -1,0 +1,219 @@
+"""Redis-backed approval gate + helpers for the API approve/reject endpoints.
+
+The voice pipeline lives in the meet-worker container and is
+SQLAlchemy-free. The API container exposes endpoints the user (browser
+or service worker) hits to approve / reject a pending agent decision.
+Both processes share a Redis pub/sub channel:
+
+* ``johnny.approval.{session_id}`` — control channel. Messages look like
+  ``{"decision_id": N, "action": "approve" | "reject"}``. The API
+  publishes on it; the meet-worker subscribes.
+
+The same Redis instance is the one already used for the live event
+stream (US-031), so no additional infrastructure is required.
+
+This module:
+
+* :class:`RedisApprovalGate` — production :class:`ApprovalGate` the
+  meet-worker uses. Lazy-connects to Redis on the first
+  :meth:`request_approval` call and reuses one ``pubsub`` for the rest
+  of the session.
+* :func:`approval_channel` / :func:`publish_approval` — small helpers
+  the API endpoints call to push approve/reject messages onto the
+  right channel.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from typing import TYPE_CHECKING, Any
+
+from johnny.voice_pipeline.approval import (
+    ApprovalGate,
+    ApprovalOutcome,
+    ApprovalRequest,
+)
+
+if TYPE_CHECKING:
+    from redis.asyncio import Redis
+
+logger = logging.getLogger(__name__)
+
+APPROVAL_CHANNEL_PREFIX = "johnny.approval."
+"""Redis pub/sub channel prefix for approve/reject control messages."""
+
+
+def approval_channel(session_id: str) -> str:
+    """Build the Redis pub/sub channel name for one session."""
+    return f"{APPROVAL_CHANNEL_PREFIX}{session_id}"
+
+
+class RedisApprovalGate(ApprovalGate):
+    """Wait for an approve/reject message on a Redis pub/sub channel.
+
+    One gate per running session: ``session_id`` is bound at construction
+    time, and every approval round subscribes to the same channel. The
+    first :meth:`request_approval` lazily connects; subsequent calls
+    reuse the existing ``pubsub`` so a long session does not churn
+    connections.
+
+    The control channel is shared between sessions only by namespace
+    (different ``session_id``s land on different channels), so two
+    parallel sessions never see each other's approvals.
+    """
+
+    def __init__(
+        self,
+        *,
+        redis_url: str,
+        session_id: str,
+    ) -> None:
+        self._redis_url = redis_url
+        self._session_id = session_id
+        self._client: Any | None = None
+        self._pubsub: Any | None = None
+        self._lock = asyncio.Lock()
+
+    async def _connect(self) -> Any:
+        if self._pubsub is not None:
+            return self._pubsub
+        from redis.asyncio import Redis as RedisClient
+
+        self._client = RedisClient.from_url(
+            self._redis_url, decode_responses=False
+        )
+        pubsub = self._client.pubsub(ignore_subscribe_messages=True)
+        await pubsub.subscribe(approval_channel(self._session_id))
+        self._pubsub = pubsub
+        return pubsub
+
+    async def request_approval(self, request: ApprovalRequest) -> ApprovalOutcome:
+        async with self._lock:
+            pubsub = await self._connect()
+        try:
+            return await asyncio.wait_for(
+                _await_decision(pubsub, request.decision_id),
+                timeout=request.timeout_s,
+            )
+        except TimeoutError:
+            return "timeout"
+        except Exception:
+            logger.exception(
+                "redis approval gate: error awaiting decision_id=%d",
+                request.decision_id,
+            )
+            return "timeout"
+
+    async def close(self) -> None:
+        if self._pubsub is not None:
+            try:
+                await self._pubsub.unsubscribe(
+                    approval_channel(self._session_id)
+                )
+            except Exception:
+                logger.exception("approval gate: error unsubscribing")
+            try:
+                aclose = getattr(self._pubsub, "aclose", None)
+                if aclose is not None:
+                    await aclose()
+                else:
+                    await self._pubsub.close()
+            except Exception:
+                logger.exception("approval gate: error closing pubsub")
+            self._pubsub = None
+        if self._client is not None:
+            try:
+                await self._client.aclose()
+            except Exception:
+                logger.exception("approval gate: error closing redis client")
+            self._client = None
+
+
+async def _await_decision(pubsub: Any, decision_id: int) -> ApprovalOutcome:
+    """Read messages until one matches ``decision_id`` (or stream ends).
+
+    Other decision ids' messages are ignored — they belong to other
+    rounds that are either past or running concurrently. Malformed JSON
+    or messages without the expected fields are dropped with a warning.
+    """
+    while True:
+        # ``get_message(timeout=1.0)`` returns ``None`` on no message and
+        # is cancel-safe; see the WS bridge for the same rationale.
+        try:
+            raw = await pubsub.get_message(
+                ignore_subscribe_messages=True, timeout=1.0
+            )
+        except TimeoutError:
+            continue
+        if raw is None:
+            continue
+        kind = raw.get("type")
+        if kind != "message":
+            continue
+        data = raw.get("data")
+        if isinstance(data, bytes):
+            try:
+                data = data.decode("utf-8")
+            except UnicodeDecodeError:
+                logger.warning("approval gate: dropping non-utf8 message")
+                continue
+        if not isinstance(data, str):
+            continue
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError:
+            logger.warning(
+                "approval gate: dropping malformed json: %r", data[:200]
+            )
+            continue
+        if not isinstance(payload, dict):
+            continue
+        msg_decision_id = payload.get("decision_id")
+        if not isinstance(msg_decision_id, int) or msg_decision_id != decision_id:
+            continue
+        action = payload.get("action")
+        if action == "approve":
+            return "approved"
+        if action == "reject":
+            return "rejected"
+        logger.warning(
+            "approval gate: ignoring unknown action %r for decision_id=%d",
+            action,
+            decision_id,
+        )
+
+
+async def publish_approval(
+    redis_client: Redis,
+    session_id: str,
+    decision_id: int,
+    action: ApprovalOutcome,
+) -> int:
+    """Push an approve/reject message onto the session's approval channel.
+
+    Used by the API approve/reject endpoints. ``action`` is one of
+    ``"approved"`` / ``"rejected"`` — translated to the wire form
+    ``"approve"`` / ``"reject"`` that the meet-worker recognises.
+
+    Returns the number of subscribers Redis delivered to. ``0`` means
+    no listener was attached, which usually indicates the session is
+    not actually running approval-required or the timeout window has
+    already closed; the caller can surface this as a 409 if desired.
+    """
+    if action not in ("approved", "rejected"):
+        raise ValueError(f"unknown action: {action!r}")
+    wire_action = "approve" if action == "approved" else "reject"
+    payload = {"decision_id": decision_id, "action": wire_action}
+    channel = approval_channel(session_id)
+    result = await redis_client.publish(channel, json.dumps(payload))
+    return int(result)
+
+
+__all__ = [
+    "APPROVAL_CHANNEL_PREFIX",
+    "RedisApprovalGate",
+    "approval_channel",
+    "publish_approval",
+]

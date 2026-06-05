@@ -11,6 +11,14 @@ Structured events are emitted to an :class:`EventBus` (Redis pub/sub in
 production, in-memory for tests) so the API / UI can stream live updates.
 """
 
+from johnny.voice_pipeline.approval import (
+    ApprovalGate,
+    ApprovalOutcome,
+    ApprovalRequest,
+    AsyncIOApprovalGate,
+    InMemoryApprovalGate,
+    NoopApprovalGate,
+)
 from johnny.voice_pipeline.decision_sink import (
     DecisionOutcome,
     DecisionRecord,
@@ -25,6 +33,9 @@ from johnny.voice_pipeline.event_bus import (
 )
 from johnny.voice_pipeline.events import (
     AgentSpoke,
+    ApprovalPending,
+    ApprovalResolution,
+    ApprovalResolved,
     PipelineEvent,
     RouterDecisionMade,
     SessionStatus,
@@ -70,17 +81,26 @@ __all__ = [
     "DEFAULT_TRANSCRIPT_WINDOW_SIZE",
     "DEFAULT_VAD_THRESHOLD",
     "AgentSpoke",
+    "ApprovalGate",
+    "ApprovalOutcome",
+    "ApprovalPending",
+    "ApprovalRequest",
+    "ApprovalResolution",
+    "ApprovalResolved",
+    "AsyncIOApprovalGate",
     "DecisionOutcome",
     "DecisionRecord",
     "DecisionSink",
     "EnergyVAD",
     "EventBus",
+    "InMemoryApprovalGate",
     "InMemoryDecisionSink",
     "InMemoryEventBus",
     "InMemoryTranscriptSink",
     "InMemoryUtteranceSink",
     "JohnnyTransport",
     "LocalAudioTransport",
+    "NoopApprovalGate",
     "NoopDecisionSink",
     "NoopTranscriptSink",
     "NoopUtteranceSink",

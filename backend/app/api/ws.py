@@ -4,11 +4,11 @@ Two endpoints:
 
 * ``WS /ws/sessions/{session_id}`` — streams every pipeline event for a
   given bot session: ``transcript_partial``, ``transcript_final``,
-  ``router_decision``, ``approval_pending``, ``agent_spoke``,
-  ``session_status_change``. The voice pipeline publishes these to the
-  Redis channel ``johnny.session.{session_id}`` via
-  :class:`johnny.voice_pipeline.event_bus.RedisEventBus`; the WS endpoint
-  subscribes and fans them out to the connected browser.
+  ``router_decision``, ``approval_pending``, ``approval_resolved``,
+  ``agent_spoke``, ``session_status_change``. The voice pipeline
+  publishes these to the Redis channel ``johnny.session.{session_id}``
+  via :class:`johnny.voice_pipeline.event_bus.RedisEventBus`; the WS
+  endpoint subscribes and fans them out to the connected browser.
 
 * ``WS /ws/global`` — streams cross-cutting notifications used by the
   calendar view and the status panel: calendar-event changes (published

@@ -17,10 +17,14 @@ WORKDIR /workspace
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project --no-dev
 
-# Copy source and install the project itself.
+# Copy source and install the project itself. The `johnny/` package
+# carries SQLAlchemy-free voice-pipeline modules (e.g. `ApprovalGate`,
+# event dataclasses) that `app.services.*` imports — required from
+# US-027 onward.
 COPY alembic.ini ./
 COPY alembic ./alembic
 COPY app ./app
+COPY johnny ./johnny
 RUN uv sync --frozen --no-dev
 
 EXPOSE 8000

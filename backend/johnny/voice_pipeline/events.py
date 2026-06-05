@@ -20,8 +20,11 @@ TranscriptEventType = Literal["transcript_finalized"]
 RouterEventType = Literal["router_decision_made"]
 AgentEventType = Literal["agent_spoke"]
 SessionStatusEventType = Literal["session_status_changed"]
+ApprovalPendingEventType = Literal["approval_pending"]
+ApprovalResolvedEventType = Literal["approval_resolved"]
 
 SessionStatus = Literal["scheduled", "joining", "joined", "ended", "failed"]
+ApprovalResolution = Literal["approved", "rejected", "timeout"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +98,54 @@ class SessionStatusChanged:
     type: SessionStatusEventType = "session_status_changed"
 
 
-PipelineEvent = TranscriptFinalized | RouterDecisionMade | AgentSpoke | SessionStatusChanged
+@dataclass(frozen=True, slots=True)
+class ApprovalPending:
+    """Router said the bot should speak; awaiting human approval.
+
+    Emitted when a meeting is configured for ``approval_required`` mode
+    and a router decision passes the confidence threshold. The pipeline
+    persists the corresponding ``agent_decisions`` row first with
+    ``outcome='pending'`` and then emits this event so the UI / browser
+    notification can pull the row by ``decision_id``. Approve / reject
+    actions hit the backend, which publishes an :class:`ApprovalResolved`
+    event so subscribers learn the outcome.
+    """
+
+    decision_id: int
+    suggested_reply: str
+    timestamp_ms: int
+    timeout_s: float
+    reason: str = ""
+    reply_type: str | None = None
+    session_id: str | None = None
+    type: ApprovalPendingEventType = "approval_pending"
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalResolved:
+    """A previously pending approval was decided (or timed out).
+
+    Mirrors the resolution side of :class:`ApprovalPending` so subscribers
+    can clear their UI / dismiss the browser notification. ``resolution``
+    is the human's choice (``approved`` / ``rejected``) or ``timeout``
+    when no response came within the configured window.
+    """
+
+    decision_id: int
+    resolution: ApprovalResolution
+    timestamp_ms: int
+    session_id: str | None = None
+    type: ApprovalResolvedEventType = "approval_resolved"
+
+
+PipelineEvent = (
+    TranscriptFinalized
+    | RouterDecisionMade
+    | AgentSpoke
+    | SessionStatusChanged
+    | ApprovalPending
+    | ApprovalResolved
+)
 """Union of every event the pipeline emits."""
 
 
@@ -111,6 +161,9 @@ def event_to_dict(event: PipelineEvent) -> dict[str, Any]:
 
 __all__ = [
     "AgentSpoke",
+    "ApprovalPending",
+    "ApprovalResolution",
+    "ApprovalResolved",
     "PipelineEvent",
     "RouterDecisionMade",
     "SessionStatus",

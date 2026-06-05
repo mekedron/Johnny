@@ -98,7 +98,7 @@ class SqlAlchemyDecisionSink(DecisionSink):
         *,
         outcome: PipelineOutcome = "pending",
         bot_session_id: int | None = None,
-    ) -> None:
+    ) -> int | None:
         row = AgentDecision(
             bot_session_id=bot_session_id or self._bot_session_id,
             should_speak=decision.should_speak,
@@ -111,6 +111,23 @@ class SqlAlchemyDecisionSink(DecisionSink):
             outcome=_OUTCOME_MAP.get(outcome, DecisionOutcome.PENDING),
         )
         self._session.add(row)
+        self._session.commit()
+        return int(row.id) if row.id is not None else None
+
+    async def update_outcome(
+        self,
+        decision_id: int,
+        outcome: PipelineOutcome,
+    ) -> None:
+        row = self._session.get(AgentDecision, decision_id)
+        if row is None:
+            logger.warning(
+                "decision_id=%s not found when updating outcome to %s",
+                decision_id,
+                outcome,
+            )
+            return
+        row.outcome = _OUTCOME_MAP.get(outcome, DecisionOutcome.PENDING)
         self._session.commit()
 
 

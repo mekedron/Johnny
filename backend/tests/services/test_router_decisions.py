@@ -284,3 +284,34 @@ async def test_sink_implements_decision_sink_abc() -> None:
     from johnny.voice_pipeline.decision_sink import DecisionSink
 
     assert issubclass(SqlAlchemyDecisionSink, DecisionSink)
+
+
+async def test_sink_record_returns_decision_id(db_session: Session) -> None:
+    """``record`` returns the persisted row's primary key (US-027)."""
+    sink = SqlAlchemyDecisionSink(db_session, bot_session_id=42)
+    decision_id = await sink.record(_make_event(), outcome="pending")
+    row = db_session.scalars(sa.select(AgentDecision)).one()
+    assert decision_id == row.id
+
+
+async def test_sink_update_outcome_flips_existing_row(db_session: Session) -> None:
+    """``update_outcome`` flips an existing row's outcome (US-027 approval flow)."""
+    sink = SqlAlchemyDecisionSink(db_session, bot_session_id=1)
+    decision_id = await sink.record(_make_event(), outcome="pending")
+    assert decision_id is not None
+    await sink.update_outcome(decision_id, "spoken")
+    row = db_session.scalars(sa.select(AgentDecision)).one()
+    assert row.outcome == DecisionOutcome.SPOKEN
+
+
+async def test_sink_update_outcome_unknown_id_logs_warning(
+    db_session: Session,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Updating a non-existent decision_id logs a warning and returns silently."""
+    import logging
+
+    sink = SqlAlchemyDecisionSink(db_session, bot_session_id=1)
+    with caplog.at_level(logging.WARNING, logger="app.services.router_decisions"):
+        await sink.update_outcome(9999, "rejected")
+    assert any("not found" in rec.message for rec in caplog.records)

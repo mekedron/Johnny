@@ -91,9 +91,39 @@ async def test_decision_sink_close_is_default_noop() -> None:
     await sink.close()  # should not raise
 
 
-def test_decision_record_frozen() -> None:
-    from dataclasses import FrozenInstanceError
+def test_decision_record_is_mutable_for_outcome_update() -> None:
+    """``DecisionRecord`` allows ``outcome`` updates so the in-memory sink
+    can reflect ``update_outcome`` calls. The frozen wrapper used to be
+    convenient but blocked the approval-required flow (US-027)."""
+    rec = DecisionRecord(decision=_make_event(), outcome="pending", bot_session_id=1)
+    rec.outcome = "spoken"
+    assert rec.outcome == "spoken"
 
-    rec = DecisionRecord(decision=_make_event(), outcome="spoken", bot_session_id=1)
-    with pytest.raises(FrozenInstanceError):
-        rec.outcome = "suppressed"  # type: ignore[misc]
+
+async def test_in_memory_sink_record_returns_id_and_update_outcome() -> None:
+    """``record`` returns a synthetic id; ``update_outcome`` flips by id."""
+    sink = InMemoryDecisionSink()
+    first = await sink.record(_make_event(reason="a"), outcome="pending")
+    second = await sink.record(_make_event(reason="b"), outcome="pending")
+    assert first is not None
+    assert second is not None
+    assert first != second
+    await sink.update_outcome(first, "spoken")
+    snap = sink.snapshot()
+    by_reason = {r.decision.reason: r for r in snap}
+    assert by_reason["a"].outcome == "spoken"
+    assert by_reason["b"].outcome == "pending"
+
+
+async def test_in_memory_sink_update_outcome_unknown_id_noop() -> None:
+    sink = InMemoryDecisionSink()
+    await sink.record(_make_event())
+    await sink.update_outcome(9999, "rejected")
+    assert sink.snapshot()[0].outcome == "pending"
+
+
+async def test_noop_sink_record_returns_none() -> None:
+    sink = NoopDecisionSink()
+    assert await sink.record(_make_event()) is None
+    # ``update_outcome`` default no-op should not raise.
+    await sink.update_outcome(1, "rejected")

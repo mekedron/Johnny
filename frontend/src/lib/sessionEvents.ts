@@ -33,6 +33,7 @@ export type SessionEventType =
 	| 'transcript_final'
 	| 'router_decision'
 	| 'approval_pending'
+	| 'approval_resolved'
 	| 'agent_spoke'
 	| 'session_status_change';
 
@@ -71,8 +72,21 @@ export interface RouterDecisionEvent extends BaseEnvelope {
 
 export interface ApprovalPendingEvent extends BaseEnvelope {
 	type: 'approval_pending';
+	decision_id: number;
 	suggested_reply: string;
 	timestamp_ms: number;
+	timeout_s: number;
+	reason?: string;
+	reply_type?: string | null;
+	session_id?: string | null;
+}
+
+export interface ApprovalResolvedEvent extends BaseEnvelope {
+	type: 'approval_resolved';
+	decision_id: number;
+	resolution: 'approved' | 'rejected' | 'timeout';
+	timestamp_ms: number;
+	session_id?: string | null;
 }
 
 export interface AgentSpokeEvent extends BaseEnvelope {
@@ -105,6 +119,7 @@ export type SessionEvent =
 	| TranscriptFinalEvent
 	| RouterDecisionEvent
 	| ApprovalPendingEvent
+	| ApprovalResolvedEvent
 	| AgentSpokeEvent
 	| SessionStatusChangeEvent;
 

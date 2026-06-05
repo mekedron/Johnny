@@ -33,6 +33,11 @@ from app.providers import (
     TTSProvider,
 )
 from app.providers.base import PCM_SAMPLE_RATE_HZ
+from johnny.voice_pipeline.approval import (
+    ApprovalGate,
+    ApprovalRequest,
+    NoopApprovalGate,
+)
 from johnny.voice_pipeline.decision_sink import (
     DecisionOutcome,
     DecisionSink,
@@ -41,6 +46,8 @@ from johnny.voice_pipeline.decision_sink import (
 from johnny.voice_pipeline.event_bus import EventBus
 from johnny.voice_pipeline.events import (
     AgentSpoke,
+    ApprovalPending,
+    ApprovalResolved,
     RouterDecisionMade,
     TranscriptFinalized,
 )
@@ -62,6 +69,13 @@ DEFAULT_TRANSCRIPT_WINDOW_SIZE = 6
 DEFAULT_MODE = "limited_auto_speak"
 DEFAULT_RATE_LIMIT_MAX_UTTERANCES = 3
 DEFAULT_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000
+DEFAULT_APPROVAL_TIMEOUT_SECONDS = 15.0
+"""Auto-reject window for ``approval_required`` mode (US-027).
+
+Configurable per session via :class:`PipelineConfig.approval_timeout_seconds`.
+"""
+
+APPROVAL_REQUIRED_MODE = "approval_required"
 
 _SENTENCE_BOUNDARY = re.compile(r"(?:[.!?]+[\"')\]]*\s+)|(?:\n+)")
 """Matches sentence-ending punctuation followed by whitespace, or one+ newlines.
@@ -100,6 +114,7 @@ class PipelineConfig:
     transcript_window_size: int = DEFAULT_TRANSCRIPT_WINDOW_SIZE
     rate_limit_max_utterances: int = DEFAULT_RATE_LIMIT_MAX_UTTERANCES
     rate_limit_window_ms: int = DEFAULT_RATE_LIMIT_WINDOW_MS
+    approval_timeout_seconds: float = DEFAULT_APPROVAL_TIMEOUT_SECONDS
     session_id: str | None = None
     bot_session_id: int | None = None
 
@@ -150,6 +165,7 @@ class VoicePipeline:
         decision_sink: DecisionSink | None = None,
         utterance_sink: UtteranceSink | None = None,
         transcript_sink: TranscriptSink | None = None,
+        approval_gate: ApprovalGate | None = None,
     ) -> None:
         self.transport = transport
         self.vad = vad
@@ -162,6 +178,7 @@ class VoicePipeline:
         self.decision_sink = decision_sink or NoopDecisionSink()
         self.utterance_sink = utterance_sink or NoopUtteranceSink()
         self.transcript_sink = transcript_sink or NoopTranscriptSink()
+        self.approval_gate = approval_gate or NoopApprovalGate()
         self._session_started_at: float = 0.0
         self._utterance_count = 0
         self._transcript_history: list[TranscriptFinalized] = []
@@ -290,12 +307,105 @@ class VoicePipeline:
             await self._persist_decision(decision_event, "suppressed")
             return
 
+        if self.config.mode == APPROVAL_REQUIRED_MODE:
+            await self._handle_approval_required(transcript, decision, decision_event)
+            return
+
         spoke = await self._answer_and_speak(transcript, decision)
         if spoke:
             self._recent_utterance_times.append(self._now_ms())
         await self._persist_decision(
             decision_event,
             "spoken" if spoke else "suppressed",
+        )
+
+    async def _handle_approval_required(
+        self,
+        transcript: TranscriptFinalized,
+        decision: RouterDecision,
+        decision_event: RouterDecisionMade,
+    ) -> None:
+        """Drive the approval round before letting the answer LLM run.
+
+        Order of operations:
+
+        1. Insert the decision row with ``outcome='pending'`` so the API
+           has a stable ``decision_id`` to expose to the UI.
+        2. Emit :class:`ApprovalPending` with that id + the suggested
+           reply for the live UI and the browser push notification.
+        3. Await :meth:`ApprovalGate.request_approval` for up to
+           ``approval_timeout_seconds`` seconds.
+        4. On ``approved``: run the answer LLM + TTS; on success flip
+           the decision row to ``spoken``, on failure flip to ``rejected``.
+        5. On ``rejected`` / ``timeout``: flip the decision row to
+           ``rejected`` and log a one-line audit hint.
+        6. Always publish :class:`ApprovalResolved` so subscribers can
+           clear their UI / dismiss the notification.
+        """
+        suggested = (decision.suggested_reply or "").strip()
+        decision_id = await self._persist_decision(decision_event, "pending")
+        if decision_id is None:
+            logger.warning(
+                "approval_required: decision sink returned no id for session=%s — "
+                "skipping approval round; treating as rejected",
+                self.config.session_id,
+            )
+            await self.event_bus.publish(
+                ApprovalResolved(
+                    decision_id=0,
+                    resolution="rejected",
+                    timestamp_ms=self._now_ms(),
+                    session_id=self.config.session_id,
+                )
+            )
+            return
+
+        timeout_s = max(0.1, float(self.config.approval_timeout_seconds))
+        pending_event = ApprovalPending(
+            decision_id=decision_id,
+            suggested_reply=suggested,
+            timestamp_ms=self._now_ms(),
+            timeout_s=timeout_s,
+            reason=decision.reason,
+            reply_type=decision.reply_type,
+            session_id=self.config.session_id,
+        )
+        await self.event_bus.publish(pending_event)
+
+        outcome = await self.approval_gate.request_approval(
+            ApprovalRequest(
+                decision_id=decision_id,
+                suggested_reply=suggested,
+                timeout_s=timeout_s,
+                session_id=self.config.session_id,
+            )
+        )
+
+        resolution = outcome
+        if outcome == "approved":
+            spoke = await self._answer_and_speak(transcript, decision)
+            if spoke:
+                self._recent_utterance_times.append(self._now_ms())
+                await self.decision_sink.update_outcome(decision_id, "spoken")
+            else:
+                await self.decision_sink.update_outcome(decision_id, "rejected")
+                resolution = "rejected"
+        else:
+            if outcome == "timeout":
+                logger.info(
+                    "approval_required: decision_id=%d timed out after %.1fs — auto-rejected",
+                    decision_id,
+                    timeout_s,
+                )
+            await self.decision_sink.update_outcome(decision_id, "rejected")
+
+        await self.event_bus.publish(
+            ApprovalResolved(
+                decision_id=decision_id,
+                resolution=resolution,
+                timestamp_ms=self._now_ms(),
+                session_id=self.config.session_id,
+            )
         )
 
     # ------------------------------------------------------------------
@@ -739,9 +849,9 @@ class VoicePipeline:
         self,
         event: RouterDecisionMade,
         outcome: DecisionOutcome,
-    ) -> None:
+    ) -> int | None:
         try:
-            await self.decision_sink.record(
+            return await self.decision_sink.record(
                 event,
                 outcome=outcome,
                 bot_session_id=self.config.bot_session_id,
@@ -752,6 +862,7 @@ class VoicePipeline:
                 self.config.session_id,
                 outcome,
             )
+            return None
 
     async def _persist_utterance(
         self,
@@ -872,6 +983,8 @@ def _serialize_prompt(messages: Sequence[ChatMessage]) -> str:
 
 
 __all__ = [
+    "APPROVAL_REQUIRED_MODE",
+    "DEFAULT_APPROVAL_TIMEOUT_SECONDS",
     "DEFAULT_CONFIDENCE_THRESHOLD",
     "DEFAULT_END_OF_SPEECH_MS",
     "DEFAULT_FRAME_DURATION_MS",

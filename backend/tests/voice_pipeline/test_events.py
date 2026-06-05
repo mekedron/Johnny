@@ -8,6 +8,8 @@ import pytest
 
 from johnny.voice_pipeline.events import (
     AgentSpoke,
+    ApprovalPending,
+    ApprovalResolved,
     RouterDecisionMade,
     SessionStatusChanged,
     TranscriptFinalized,
@@ -173,4 +175,89 @@ def test_event_to_dict_session_status() -> None:
         "session_id": "s",
         "error_reason": None,
         "type": "session_status_changed",
+    }
+
+
+def test_approval_pending_defaults() -> None:
+    ev = ApprovalPending(
+        decision_id=11,
+        suggested_reply="yes",
+        timestamp_ms=10,
+        timeout_s=15.0,
+    )
+    assert ev.decision_id == 11
+    assert ev.suggested_reply == "yes"
+    assert ev.timeout_s == pytest.approx(15.0)
+    assert ev.reason == ""
+    assert ev.reply_type is None
+    assert ev.session_id is None
+    assert ev.type == "approval_pending"
+
+
+def test_approval_pending_is_frozen() -> None:
+    ev = ApprovalPending(decision_id=1, suggested_reply="x", timestamp_ms=0, timeout_s=1.0)
+    with pytest.raises(FrozenInstanceError):
+        ev.decision_id = 2  # type: ignore[misc]
+
+
+def test_approval_pending_full() -> None:
+    ev = ApprovalPending(
+        decision_id=22,
+        suggested_reply="On it.",
+        timestamp_ms=5_000,
+        timeout_s=30.0,
+        reason="direct ask",
+        reply_type="acknowledgement",
+        session_id="sess-7",
+    )
+    assert ev.reason == "direct ask"
+    assert ev.reply_type == "acknowledgement"
+    assert ev.session_id == "sess-7"
+
+
+def test_event_to_dict_approval_pending() -> None:
+    ev = ApprovalPending(
+        decision_id=3, suggested_reply="x", timestamp_ms=1, timeout_s=2.0
+    )
+    d = event_to_dict(ev)
+    assert d["type"] == "approval_pending"
+    assert d["decision_id"] == 3
+    assert d["timeout_s"] == pytest.approx(2.0)
+
+
+def test_approval_resolved_defaults() -> None:
+    ev = ApprovalResolved(
+        decision_id=7,
+        resolution="approved",
+        timestamp_ms=10,
+    )
+    assert ev.decision_id == 7
+    assert ev.resolution == "approved"
+    assert ev.session_id is None
+    assert ev.type == "approval_resolved"
+
+
+def test_approval_resolved_supports_rejected_timeout() -> None:
+    from typing import Literal, get_args
+
+    for outcome in get_args(Literal["approved", "rejected", "timeout"]):
+        ev = ApprovalResolved(
+            decision_id=1,
+            resolution=outcome,
+            timestamp_ms=0,
+        )
+        assert ev.resolution == outcome
+
+
+def test_event_to_dict_approval_resolved() -> None:
+    ev = ApprovalResolved(
+        decision_id=11, resolution="rejected", timestamp_ms=42, session_id="s"
+    )
+    d = event_to_dict(ev)
+    assert d == {
+        "decision_id": 11,
+        "resolution": "rejected",
+        "timestamp_ms": 42,
+        "session_id": "s",
+        "type": "approval_resolved",
     }

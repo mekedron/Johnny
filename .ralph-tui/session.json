@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T20:24:27.534Z",
-  "currentIteration": 27,
+  "updatedAt": "2026-06-05T20:53:35.604Z",
+  "currentIteration": 28,
   "maxIterations": 10,
-  "tasksCompleted": 27,
+  "tasksCompleted": 28,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -206,8 +206,8 @@
       {
         "id": "Johnny-kgc.30",
         "title": "US-030: Per-session container spawning",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.31",
@@ -505,6 +505,16 @@
       "durationMs": 1209316,
       "startedAt": "2026-06-05T19:47:33.589Z",
       "endedAt": "2026-06-05T20:07:42.905Z"
+    },
+    {
+      "iteration": 28,
+      "status": "completed",
+      "taskId": "Johnny-kgc.30",
+      "taskTitle": "US-030: Per-session container spawning",
+      "taskCompleted": true,
+      "durationMs": 984537,
+      "startedAt": "2026-06-05T20:08:02.127Z",
+      "endedAt": "2026-06-05T20:24:26.664Z"
     }
   ],
   "skippedTaskIds": [],

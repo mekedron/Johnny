@@ -2207,7 +2207,10 @@ async def test_pipeline_rate_limit_not_enforced_without_allowed_replies(
         tts=_FakeTTS(),
         event_bus=InMemoryEventBus(),
         config=PipelineConfig(
-            mode="approval_required",
+            # Use the default free-speak mode so this test stays focused
+            # on the rate-limit behaviour (approval_required adds its own
+            # gate that's tested elsewhere).
+            mode="limited_auto_speak",
             vad_threshold=0.05,
             end_of_speech_ms=300,
             confidence_threshold=0.5,
@@ -2333,3 +2336,374 @@ async def test_is_rate_limited_prunes_outside_window(
     pipeline._recent_utterance_times = [now_ms - 100_000, now_ms]
     assert pipeline._is_rate_limited() is False
     assert pipeline._recent_utterance_times == [now_ms]
+
+
+# --- approval-required mode (US-027) --------------------------------------
+
+
+async def test_pipeline_approval_required_approves_and_speaks(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Approved → answer LLM runs, TTS plays, decision row flipped to spoken."""
+    from johnny.voice_pipeline import (
+        InMemoryApprovalGate,
+        InMemoryDecisionSink,
+        InMemoryUtteranceSink,
+    )
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    bus = InMemoryEventBus()
+    dsink = InMemoryDecisionSink()
+    usink = InMemoryUtteranceSink()
+    gate = InMemoryApprovalGate(scripted=["approved"], default_outcome="rejected")
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hello team", "anything?"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {
+                    "should_speak": True,
+                    "confidence": 0.95,
+                    "reason": "asked",
+                    "suggested_reply": "yes",
+                },
+                {"should_speak": False, "confidence": 0.1, "reason": "noise"},
+            ]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["Sure!"]),
+        tts=_FakeTTS(frame_count=2),
+        event_bus=bus,
+        config=PipelineConfig(
+            mode="approval_required",
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            approval_timeout_seconds=2.0,
+            session_id="sess-A",
+        ),
+        decision_sink=dsink,
+        utterance_sink=usink,
+        approval_gate=gate,
+    )
+
+    await pipeline.run()
+
+    types = [e.type for e in bus.snapshot()]
+    # Two utterances. First triggers approval flow (approved); second
+    # suppressed by router.
+    assert "approval_pending" in types
+    assert "approval_resolved" in types
+    # agent_spoke fires only on approval.
+    assert types.count("agent_spoke") == 1
+
+    # Decision sink: first decision approved → spoken; second suppressed.
+    records = dsink.snapshot()
+    assert len(records) == 2
+    spoken_record = next(r for r in records if r.decision.should_speak)
+    assert spoken_record.outcome == "spoken"
+    suppressed_record = next(r for r in records if not r.decision.should_speak)
+    assert suppressed_record.outcome == "suppressed"
+
+    # Utterance sink saw exactly the approved spoken reply.
+    utterances = usink.snapshot()
+    assert len(utterances) == 1
+    assert utterances[0].output_text == "Sure!"
+
+    # Approval gate was invoked once with the right shape.
+    assert len(gate.requests) == 1
+    assert gate.requests[0].suggested_reply == "yes"
+    assert gate.requests[0].timeout_s == 2.0
+    assert gate.requests[0].session_id == "sess-A"
+
+    # Final emitted ApprovalResolved should be "approved".
+    resolved = next(
+        e for e in bus.snapshot() if e.type == "approval_resolved"
+    )
+    assert resolved.resolution == "approved"
+
+
+async def test_pipeline_approval_required_rejected_stays_silent(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Rejection: TTS does not run, decision flips to rejected, no utterance row."""
+    from johnny.voice_pipeline import (
+        InMemoryApprovalGate,
+        InMemoryDecisionSink,
+        InMemoryUtteranceSink,
+    )
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    bus = InMemoryEventBus()
+    dsink = InMemoryDecisionSink()
+    usink = InMemoryUtteranceSink()
+    gate = InMemoryApprovalGate(scripted=["rejected"], default_outcome="timeout")
+    tts = _FakeTTS()
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hello team", "noise"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {
+                    "should_speak": True,
+                    "confidence": 0.95,
+                    "reason": "ask",
+                    "suggested_reply": "yes",
+                },
+                {"should_speak": False, "confidence": 0.1, "reason": "noise"},
+            ]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["nope"]),
+        tts=tts,
+        event_bus=bus,
+        config=PipelineConfig(
+            mode="approval_required",
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            approval_timeout_seconds=2.0,
+        ),
+        decision_sink=dsink,
+        utterance_sink=usink,
+        approval_gate=gate,
+    )
+
+    await pipeline.run()
+
+    types = [e.type for e in bus.snapshot()]
+    assert "approval_pending" in types
+    assert "approval_resolved" in types
+    # No agent_spoke event because TTS never ran for the approved reply.
+    assert "agent_spoke" not in types
+    # TTS adapter was never invoked.
+    assert tts.calls == []
+    # No utterance row — bot stayed silent.
+    assert usink.snapshot() == []
+
+    records = dsink.snapshot()
+    spoken_record = next(r for r in records if r.decision.should_speak)
+    assert spoken_record.outcome == "rejected"
+
+    resolved = next(
+        e for e in bus.snapshot() if e.type == "approval_resolved"
+    )
+    assert resolved.resolution == "rejected"
+
+
+async def test_pipeline_approval_required_timeout_auto_rejects(
+    two_utterance_pcm: bytes,
+) -> None:
+    """No human response inside the window ⇒ auto-rejected, decision logged."""
+    from johnny.voice_pipeline import (
+        InMemoryApprovalGate,
+        InMemoryDecisionSink,
+        InMemoryUtteranceSink,
+    )
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    bus = InMemoryEventBus()
+    dsink = InMemoryDecisionSink()
+    usink = InMemoryUtteranceSink()
+    # Empty script + default timeout → both utterances time out.
+    gate = InMemoryApprovalGate(scripted=[], default_outcome="timeout")
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hello", "again"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {
+                    "should_speak": True,
+                    "confidence": 0.95,
+                    "reason": "ask",
+                    "suggested_reply": "yes",
+                },
+                {
+                    "should_speak": True,
+                    "confidence": 0.95,
+                    "reason": "ask",
+                    "suggested_reply": "yes",
+                },
+            ]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=bus,
+        config=PipelineConfig(
+            mode="approval_required",
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            approval_timeout_seconds=0.5,
+        ),
+        decision_sink=dsink,
+        utterance_sink=usink,
+        approval_gate=gate,
+    )
+
+    await pipeline.run()
+
+    records = dsink.snapshot()
+    assert len(records) == 2
+    assert all(r.outcome == "rejected" for r in records)
+    # No utterance played.
+    assert usink.snapshot() == []
+
+    resolutions = [
+        e.resolution
+        for e in bus.snapshot()
+        if e.type == "approval_resolved"
+    ]
+    assert resolutions == ["timeout", "timeout"]
+
+
+async def test_pipeline_approval_required_pending_event_carries_decision_id(
+    two_utterance_pcm: bytes,
+) -> None:
+    """``approval_pending`` event includes the persisted decision_id."""
+    from johnny.voice_pipeline import (
+        ApprovalPending,
+        InMemoryApprovalGate,
+        InMemoryDecisionSink,
+    )
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    bus = InMemoryEventBus()
+    dsink = InMemoryDecisionSink()
+    gate = InMemoryApprovalGate(scripted=["rejected", "rejected"])
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["a", "b"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {
+                    "should_speak": True,
+                    "confidence": 0.95,
+                    "reason": "ask",
+                    "suggested_reply": "yes",
+                }
+            ]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=bus,
+        config=PipelineConfig(
+            mode="approval_required",
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            approval_timeout_seconds=2.0,
+            session_id="sess-D",
+        ),
+        decision_sink=dsink,
+        approval_gate=gate,
+    )
+
+    await pipeline.run()
+
+    pending_events = [
+        e for e in bus.snapshot() if isinstance(e, ApprovalPending)
+    ]
+    # Two utterances, both should_speak → two pending events.
+    assert len(pending_events) == 2
+    # Each event carries a non-zero decision_id, the suggested_reply,
+    # and the requested timeout.
+    for evt in pending_events:
+        assert evt.decision_id > 0
+        assert evt.suggested_reply == "yes"
+        assert evt.timeout_s == pytest.approx(2.0)
+        assert evt.session_id == "sess-D"
+    # Each pending event's decision_id matches one of the persisted
+    # decision rows.
+    pending_ids = {evt.decision_id for evt in pending_events}
+    recorded_ids = {
+        r.decision_id for r in dsink.snapshot() if r.decision_id is not None
+    }
+    assert pending_ids == recorded_ids
+    # All decisions are now rejected.
+    assert all(r.outcome == "rejected" for r in dsink.snapshot())
+
+
+async def test_pipeline_approval_required_below_threshold_skips_gate(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Low-confidence decisions skip the gate entirely (suppressed pre-approval)."""
+    from johnny.voice_pipeline import (
+        InMemoryApprovalGate,
+        InMemoryDecisionSink,
+    )
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    bus = InMemoryEventBus()
+    dsink = InMemoryDecisionSink()
+    gate = InMemoryApprovalGate(scripted=["approved", "approved"])
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["a", "b"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {
+                    "should_speak": True,
+                    "confidence": 0.30,
+                    "reason": "uncertain",
+                    "suggested_reply": "yes",
+                }
+            ]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=bus,
+        config=PipelineConfig(
+            mode="approval_required",
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.7,
+            approval_timeout_seconds=1.0,
+        ),
+        decision_sink=dsink,
+        approval_gate=gate,
+    )
+
+    await pipeline.run()
+
+    # Gate was never called — both utterances rejected at threshold check.
+    assert gate.requests == []
+    # No approval events emitted.
+    types = {e.type for e in bus.snapshot()}
+    assert "approval_pending" not in types
+    assert "approval_resolved" not in types
+    # Decisions recorded as suppressed (not rejected).
+    assert all(r.outcome == "suppressed" for r in dsink.snapshot())

@@ -9,7 +9,29 @@
 		stopSession,
 		type BotSession
 	} from '$lib/sessions';
-	import { subscribeToGlobal, type Subscription } from '$lib/sessionEvents';
+	import {
+		subscribeToGlobal,
+		subscribeToSession,
+		type Subscription,
+		type SessionEvent,
+		type ApprovalPendingEvent,
+		type ApprovalResolvedEvent
+	} from '$lib/sessionEvents';
+	import {
+		bootstrapNotifications,
+		clearApprovalNotification,
+		showApprovalNotification,
+		type NotificationPermissionLike
+	} from '$lib/notifications';
+	import { approveDecision, rejectDecision } from '$lib/decisions';
+
+	interface PendingApproval {
+		botSessionId: number;
+		decisionId: number;
+		suggestedReply: string;
+		reason: string;
+		expiresAt: number;
+	}
 
 	let { children } = $props();
 
@@ -30,6 +52,12 @@
 	let stoppingSessionIds = $state<Set<number>>(new Set());
 	let sessionsTimer: ReturnType<typeof setInterval> | null = null;
 	let globalEventsSubscription: Subscription | null = null;
+	let pendingApprovals = $state<PendingApproval[]>([]);
+	let approvalSubscriptions: Map<number, Subscription> = new Map();
+	let approvalTimers: Map<number, ReturnType<typeof setTimeout>> = new Map();
+	let resolvingDecisionIds = $state<Set<number>>(new Set());
+	let approvalErrorMessage = $state<string | null>(null);
+	let notificationPermission = $state<NotificationPermissionLike>('default');
 
 	function isActive(href: string): boolean {
 		const path = page.url.pathname;
@@ -58,6 +86,165 @@
 			sessionsErrorMessage = null;
 		} catch (err) {
 			sessionsErrorMessage = err instanceof Error ? err.message : 'Failed to load sessions';
+		}
+		syncApprovalSubscriptions();
+	}
+
+	function syncApprovalSubscriptions() {
+		const liveStatuses = new Set(['scheduled', 'joining', 'joined']);
+		const wantedIds = new Set(
+			activeSessions
+				.filter((s) => liveStatuses.has(s.status))
+				.map((s) => s.id)
+		);
+		// Subscribe to any session we don't have a sub for yet.
+		for (const sessionId of wantedIds) {
+			if (!approvalSubscriptions.has(sessionId)) {
+				approvalSubscriptions.set(
+					sessionId,
+					subscribeToSession(String(sessionId), {
+						onEvent: (event) => handleSessionEvent(sessionId, event)
+					})
+				);
+			}
+		}
+		// Drop subs for sessions that ended.
+		for (const [id, sub] of approvalSubscriptions.entries()) {
+			if (!wantedIds.has(id)) {
+				sub.close();
+				approvalSubscriptions.delete(id);
+				dropApprovalsForSession(id);
+			}
+		}
+	}
+
+	function dropApprovalsForSession(sessionId: number) {
+		const stillPending = pendingApprovals.filter(
+			(p) => p.botSessionId !== sessionId
+		);
+		for (const p of pendingApprovals) {
+			if (p.botSessionId === sessionId) {
+				clearApprovalNotification(p.decisionId);
+				const t = approvalTimers.get(p.decisionId);
+				if (t !== undefined) {
+					clearTimeout(t);
+					approvalTimers.delete(p.decisionId);
+				}
+			}
+		}
+		pendingApprovals = stillPending;
+	}
+
+	function handleSessionEvent(sessionId: number, event: SessionEvent) {
+		if (event.type === 'approval_pending') {
+			handleApprovalPending(sessionId, event as ApprovalPendingEvent);
+		} else if (event.type === 'approval_resolved') {
+			handleApprovalResolved(event as ApprovalResolvedEvent);
+		}
+	}
+
+	function handleApprovalPending(sessionId: number, ev: ApprovalPendingEvent) {
+		const timeoutS =
+			typeof ev.timeout_s === 'number' && ev.timeout_s > 0
+				? ev.timeout_s
+				: 15;
+		const expiresAt = Date.now() + timeoutS * 1000;
+		const existingIdx = pendingApprovals.findIndex(
+			(p) => p.decisionId === ev.decision_id
+		);
+		const pending: PendingApproval = {
+			botSessionId: sessionId,
+			decisionId: ev.decision_id,
+			suggestedReply: ev.suggested_reply ?? '',
+			reason: ev.reason ?? '',
+			expiresAt
+		};
+		if (existingIdx >= 0) {
+			const next = [...pendingApprovals];
+			next[existingIdx] = pending;
+			pendingApprovals = next;
+		} else {
+			pendingApprovals = [...pendingApprovals, pending];
+		}
+		// Auto-clear when the backend's window closes — keeps the UI tidy
+		// even if the `approval_resolved` event never arrives.
+		const existingTimer = approvalTimers.get(ev.decision_id);
+		if (existingTimer !== undefined) clearTimeout(existingTimer);
+		approvalTimers.set(
+			ev.decision_id,
+			setTimeout(
+				() => expireApproval(ev.decision_id),
+				timeoutS * 1000 + 500
+			)
+		);
+
+		void showApprovalNotification({
+			botSessionId: sessionId,
+			decisionId: ev.decision_id,
+			suggestedReply: pending.suggestedReply,
+			reason: pending.reason,
+			timeoutS
+		});
+	}
+
+	function handleApprovalResolved(ev: ApprovalResolvedEvent) {
+		removePendingApproval(ev.decision_id);
+		void clearApprovalNotification(ev.decision_id);
+	}
+
+	function expireApproval(decisionId: number) {
+		removePendingApproval(decisionId);
+		void clearApprovalNotification(decisionId);
+	}
+
+	function removePendingApproval(decisionId: number) {
+		const timer = approvalTimers.get(decisionId);
+		if (timer !== undefined) {
+			clearTimeout(timer);
+			approvalTimers.delete(decisionId);
+		}
+		pendingApprovals = pendingApprovals.filter(
+			(p) => p.decisionId !== decisionId
+		);
+	}
+
+	async function approvePending(decisionId: number) {
+		const target = pendingApprovals.find((p) => p.decisionId === decisionId);
+		if (!target) return;
+		resolvingDecisionIds = new Set([...resolvingDecisionIds, decisionId]);
+		approvalErrorMessage = null;
+		try {
+			await approveDecision(target.botSessionId, decisionId);
+			removePendingApproval(decisionId);
+			void clearApprovalNotification(decisionId);
+		} catch (err) {
+			approvalErrorMessage =
+				err instanceof Error
+					? err.message
+					: 'Failed to approve decision';
+		} finally {
+			const next = new Set(resolvingDecisionIds);
+			next.delete(decisionId);
+			resolvingDecisionIds = next;
+		}
+	}
+
+	async function rejectPending(decisionId: number) {
+		const target = pendingApprovals.find((p) => p.decisionId === decisionId);
+		if (!target) return;
+		resolvingDecisionIds = new Set([...resolvingDecisionIds, decisionId]);
+		approvalErrorMessage = null;
+		try {
+			await rejectDecision(target.botSessionId, decisionId);
+			removePendingApproval(decisionId);
+			void clearApprovalNotification(decisionId);
+		} catch (err) {
+			approvalErrorMessage =
+				err instanceof Error ? err.message : 'Failed to reject decision';
+		} finally {
+			const next = new Set(resolvingDecisionIds);
+			next.delete(decisionId);
+			resolvingDecisionIds = next;
 		}
 	}
 
@@ -99,6 +286,9 @@
 		globalEventsSubscription = subscribeToGlobal({
 			onEvent: handleGlobalEvent
 		});
+		void bootstrapNotifications().then((permission) => {
+			notificationPermission = permission;
+		});
 	});
 
 	onDestroy(() => {
@@ -113,6 +303,14 @@
 			globalEventsSubscription.close();
 			globalEventsSubscription = null;
 		}
+		for (const sub of approvalSubscriptions.values()) {
+			sub.close();
+		}
+		approvalSubscriptions.clear();
+		for (const timer of approvalTimers.values()) {
+			clearTimeout(timer);
+		}
+		approvalTimers.clear();
 	});
 </script>
 
@@ -193,6 +391,70 @@
 							>
 								{stoppingSessionIds.has(session.id) ? 'Stopping…' : 'Leave now'}
 							</button>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		</section>
+
+		<section
+			class="approval-panel"
+			aria-label="Pending approvals"
+			data-testid="approval-panel"
+		>
+			<header class="status-header">
+				<span class="status-title">Pending approvals</span>
+				<span class="status-count" data-testid="approval-count">
+					{pendingApprovals.length}
+				</span>
+			</header>
+			{#if approvalErrorMessage}
+				<p class="status-error" role="alert">{approvalErrorMessage}</p>
+			{/if}
+			{#if notificationPermission === 'denied'}
+				<p class="status-empty" data-testid="approval-perm-denied">
+					Notifications denied — approvals appear here only.
+				</p>
+			{/if}
+			{#if pendingApprovals.length === 0}
+				<p class="status-empty">No pending approvals</p>
+			{:else}
+				<ul class="status-list">
+					{#each pendingApprovals as approval (approval.decisionId)}
+						<li
+							class="approval-item"
+							data-testid="approval-{approval.decisionId}"
+						>
+							<div class="approval-meta">
+								<span class="status-id">Session #{approval.botSessionId}</span>
+								<span class="approval-id">Decision #{approval.decisionId}</span>
+							</div>
+							<p class="approval-reply">"{approval.suggestedReply}"</p>
+							{#if approval.reason}
+								<p class="approval-reason">{approval.reason}</p>
+							{/if}
+							<div class="approval-actions">
+								<button
+									class="approval-approve"
+									type="button"
+									disabled={resolvingDecisionIds.has(approval.decisionId)}
+									onclick={() => approvePending(approval.decisionId)}
+								>
+									{resolvingDecisionIds.has(approval.decisionId)
+										? '…'
+										: 'Approve'}
+								</button>
+								<button
+									class="approval-reject"
+									type="button"
+									disabled={resolvingDecisionIds.has(approval.decisionId)}
+									onclick={() => rejectPending(approval.decisionId)}
+								>
+									{resolvingDecisionIds.has(approval.decisionId)
+										? '…'
+										: 'Reject'}
+								</button>
+							</div>
 						</li>
 					{/each}
 				</ul>
@@ -407,6 +669,77 @@
 		background: #e5e7eb;
 	}
 	.status-stop:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+
+	.approval-panel {
+		padding: 1rem 1.25rem;
+		border-top: 1px solid #e5e7eb;
+		font-size: 0.85rem;
+	}
+	.approval-item {
+		display: flex;
+		flex-direction: column;
+		gap: 0.4rem;
+		background: #fff7ed;
+		border: 1px solid #fdba74;
+		border-radius: 6px;
+		padding: 0.6rem 0.7rem;
+	}
+	.approval-meta {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		font-size: 0.7rem;
+		color: #6b7280;
+	}
+	.approval-id {
+		font-weight: 600;
+		color: #9a3412;
+	}
+	.approval-reply {
+		margin: 0;
+		font-weight: 600;
+		color: #1f2937;
+	}
+	.approval-reason {
+		margin: 0;
+		font-size: 0.75rem;
+		color: #6b7280;
+		font-style: italic;
+	}
+	.approval-actions {
+		display: flex;
+		gap: 0.4rem;
+	}
+	.approval-approve,
+	.approval-reject {
+		flex: 1;
+		appearance: none;
+		border: 0;
+		border-radius: 4px;
+		padding: 0.35rem 0.5rem;
+		font-size: 0.78rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+	.approval-approve {
+		background: #16a34a;
+		color: #ffffff;
+	}
+	.approval-approve:hover:not(:disabled) {
+		background: #15803d;
+	}
+	.approval-reject {
+		background: #fee2e2;
+		color: #991b1b;
+	}
+	.approval-reject:hover:not(:disabled) {
+		background: #fecaca;
+	}
+	.approval-approve:disabled,
+	.approval-reject:disabled {
 		opacity: 0.6;
 		cursor: not-allowed;
 	}
