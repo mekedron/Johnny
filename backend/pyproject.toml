@@ -13,6 +13,8 @@ dependencies = [
     "alembic>=1.14.0",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.6.0",
+    "psycopg[binary]>=3.2.0",
+    "pgvector>=0.3.6",
 ]
 
 [dependency-groups]
@@ -22,6 +24,7 @@ dev = [
     "httpx>=0.28.0",
     "ruff>=0.8.0",
     "mypy>=1.13.0",
+    "aiosqlite>=0.20.0",
 ]
 
 [build-system]
@@ -53,3 +56,7 @@ plugins = ["pydantic.mypy"]
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_decorators = false
+
+[[tool.mypy.overrides]]
+module = "pgvector.*"
+ignore_missing_imports = true

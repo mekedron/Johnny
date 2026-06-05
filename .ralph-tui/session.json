@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T14:27:08.132Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-05T14:37:11.779Z",
+  "currentIteration": 1,
   "maxIterations": 10,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -50,8 +50,8 @@
       {
         "id": "Johnny-kgc.4",
         "title": "US-004: SvelteKit application shell",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.5",
@@ -235,7 +235,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-kgc.4",
+      "taskTitle": "US-004: SvelteKit application shell",
+      "taskCompleted": true,
+      "durationMs": 389281,
+      "startedAt": "2026-06-05T14:20:38.021Z",
+      "endedAt": "2026-06-05T14:27:07.302Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],
