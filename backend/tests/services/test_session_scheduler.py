@@ -376,6 +376,54 @@ async def test_start_session_creates_row_and_calls_launcher(
 
 
 @pytest.mark.asyncio
+async def test_start_session_passes_instructions_and_context_to_launcher(
+    db_session: Session,
+) -> None:
+    """Effective instructions/context = template base + meeting override."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    # Customize template + meeting overrides
+    cfg.profile_template.base_instructions = "Be polite."
+    cfg.profile_template.base_context = "Engineering team standup."
+    cfg.instructions = "Stay quiet unless asked."
+    cfg.context = "Today: new hire intros."
+    db_session.flush()
+
+    launcher = NoopContainerLauncher()
+    await start_session_for_meeting(
+        db_session, meeting=cfg, launcher=launcher
+    )
+    assert len(launcher.started) == 1
+    ctx = launcher.started[0]
+    assert ctx.instructions == "Be polite.\n\nStay quiet unless asked."
+    assert ctx.context == "Engineering team standup.\n\nToday: new hire intros."
+    assert ctx.mode == BotMode.LISTEN_ONLY.value
+
+
+@pytest.mark.asyncio
+async def test_start_session_handles_empty_override_text(
+    db_session: Session,
+) -> None:
+    """Missing overrides fall back to template-only text — no extra separator."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    cfg.profile_template.base_instructions = "Only template instructions."
+    cfg.instructions = None
+    db_session.flush()
+    launcher = NoopContainerLauncher()
+    await start_session_for_meeting(
+        db_session, meeting=cfg, launcher=launcher
+    )
+    assert launcher.started[0].instructions == "Only template instructions."
+
+
+@pytest.mark.asyncio
 async def test_start_session_rejects_disabled_meeting(db_session: Session) -> None:
     cfg = _seed_full_meeting(
         db_session,

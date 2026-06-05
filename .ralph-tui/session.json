@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T20:07:43.761Z",
-  "currentIteration": 26,
+  "updatedAt": "2026-06-05T20:24:27.534Z",
+  "currentIteration": 27,
   "maxIterations": 10,
-  "tasksCompleted": 26,
+  "tasksCompleted": 27,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -212,8 +212,8 @@
       {
         "id": "Johnny-kgc.31",
         "title": "US-031: WebSocket for live updates",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.32",
@@ -495,6 +495,16 @@
       "durationMs": 879312,
       "startedAt": "2026-06-05T19:32:35.189Z",
       "endedAt": "2026-06-05T19:47:14.501Z"
+    },
+    {
+      "iteration": 27,
+      "status": "completed",
+      "taskId": "Johnny-kgc.31",
+      "taskTitle": "US-031: WebSocket for live updates",
+      "taskCompleted": true,
+      "durationMs": 1209316,
+      "startedAt": "2026-06-05T19:47:33.589Z",
+      "endedAt": "2026-06-05T20:07:42.905Z"
     }
   ],
   "skippedTaskIds": [],

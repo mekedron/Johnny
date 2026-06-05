@@ -14,6 +14,11 @@ x-backend-env: &backend-env
   DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
   ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
   JOHNNY_CALENDAR_POLL_INTERVAL_SECONDS: ${JOHNNY_CALENDAR_POLL_INTERVAL_SECONDS:-300}
+  JOHNNY_USE_DOCKER_LAUNCHER: ${JOHNNY_USE_DOCKER_LAUNCHER:-true}
+  JOHNNY_MEET_WORKER_IMAGE: ${JOHNNY_MEET_WORKER_IMAGE:-johnny-meet-worker:latest}
+  JOHNNY_CONTAINER_MONITOR_INTERVAL_SECONDS: ${JOHNNY_CONTAINER_MONITOR_INTERVAL_SECONDS:-30}
+  JOHNNY_CONTAINER_PRUNE_INTERVAL_SECONDS: ${JOHNNY_CONTAINER_PRUNE_INTERVAL_SECONDS:-3600}
+  JOHNNY_CONTAINER_PRUNE_AGE_SECONDS: ${JOHNNY_CONTAINER_PRUNE_AGE_SECONDS:-86400}
 
 services:
   postgres:
@@ -58,6 +63,11 @@ services:
         condition: service_healthy
     ports:
       - "8000:8000"
+    # Mount the host docker socket so the API can spawn meet-worker
+    # containers via the Docker SDK (US-030). Keeping this read-write
+    # is required to start/stop/remove containers.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test:
         - "CMD"
@@ -81,6 +91,9 @@ services:
         condition: service_healthy
     volumes:
       - worker_state:/var/lib/johnny/worker
+      # Same docker socket mount as the API — the worker drives the
+      # periodic scheduler / monitor / prune passes (US-030).
+      - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test:
         - "CMD"

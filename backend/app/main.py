@@ -22,7 +22,13 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Run seeders on startup; nothing to tear down on shutdown."""
+    """Run seeders on startup and wire the container launcher.
+
+    The launcher choice is governed by ``JOHNNY_USE_DOCKER_LAUNCHER``;
+    when unset, the API stays with the no-op launcher (matches the test
+    runner / local dev experience). When set, the Docker SDK launcher
+    is used so manual ``/sessions/start`` calls actually spawn a worker.
+    """
     try:
         from app.db.session import session_scope
         from app.services.templates import seed_initial_templates
@@ -31,6 +37,20 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             seed_initial_templates(session)
     except Exception as exc:  # noqa: BLE001 — seeding must never crash boot
         logger.warning("template seeding skipped: %s", exc)
+
+    try:
+        from app.api.sessions import set_launcher
+        from app.services.docker_launcher import (
+            DockerContainerLauncher,
+            should_use_docker_launcher,
+        )
+
+        if should_use_docker_launcher():
+            set_launcher(DockerContainerLauncher())
+            logger.info("DockerContainerLauncher wired into /sessions API")
+    except Exception as exc:  # noqa: BLE001 — launcher wiring must not crash boot
+        logger.warning("docker launcher wiring skipped: %s", exc)
+
     yield
 
 

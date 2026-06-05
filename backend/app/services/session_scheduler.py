@@ -33,8 +33,9 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -106,6 +107,11 @@ class LaunchContext:
     naming stays predictable across implementations; the launcher may
     ignore it and pick its own name as long as it returns the actual
     name in :class:`LaunchResult`.
+
+    ``instructions`` and ``provider_config`` are passed as environment
+    variables to the meet-worker by the Docker launcher (US-030) so the
+    pipeline knows what to say and which providers are active. Defaults
+    keep the scheduler's no-op path unchanged.
     """
 
     bot_session_id: int
@@ -114,6 +120,10 @@ class LaunchContext:
     identity_account_id: int
     meet_link: str
     container_name: str
+    mode: str = ""
+    instructions: str = ""
+    context: str = ""
+    provider_config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -258,6 +268,17 @@ def list_active_sessions(session: Session) -> list[BotSession]:
 # --- Start / stop --------------------------------------------------------
 
 
+def _combine_text(base: str | None, override: str | None) -> str:
+    """Concatenate template base text with the meeting-level override.
+
+    Used to build the effective instructions / context the meet-worker
+    receives via environment variables. Empty strings are skipped so the
+    result has no leading or trailing separator.
+    """
+    parts = [part for part in (base, override) if part]
+    return "\n\n".join(parts)
+
+
 def _validate_meeting_for_launch(meeting: MeetingConfig) -> str:
     """Return the meet_link or raise ``ValueError`` if the meeting cannot launch."""
     if not meeting.enabled:
@@ -304,6 +325,11 @@ async def start_session_for_meeting(
     session.add(row)
     session.flush()
 
+    template = meeting.profile_template
+    base_instructions = template.base_instructions if template is not None else ""
+    base_context = template.base_context if template is not None else ""
+    effective_instructions = _combine_text(base_instructions, meeting.instructions)
+    effective_context = _combine_text(base_context, meeting.context)
     ctx = LaunchContext(
         bot_session_id=row.id,
         meeting_config_id=meeting.id,
@@ -311,6 +337,9 @@ async def start_session_for_meeting(
         identity_account_id=meeting.identity_account_id,
         meet_link=meet_link,
         container_name=container_name_for_session(row.id),
+        mode=str(meeting.mode.value if hasattr(meeting.mode, "value") else meeting.mode),
+        instructions=effective_instructions,
+        context=effective_context,
     )
     try:
         result = await launcher.start(ctx)
