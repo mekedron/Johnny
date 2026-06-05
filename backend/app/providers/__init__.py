@@ -38,6 +38,8 @@ from app.providers.base import (
     UnknownProviderError,
     get_registry,
 )
+from app.providers.deepgram_stt import DeepgramSTT
+from app.providers.deepgram_stt import register as _register_deepgram_stt
 from app.providers.elevenlabs_tts import ElevenLabsTTS
 from app.providers.elevenlabs_tts import register as _register_elevenlabs_tts
 from app.providers.faster_whisper_stt import FasterWhisperSTT
@@ -48,6 +50,8 @@ from app.providers.openai_compatible_llm import OpenAICompatibleLLM
 from app.providers.openai_compatible_llm import register as _register_openai_compatible_llm
 from app.providers.openai_llm import OpenAILLM
 from app.providers.openai_llm import register as _register_openai_llm
+from app.providers.openai_realtime_stt import OpenAIRealtimeSTT
+from app.providers.openai_realtime_stt import register as _register_openai_realtime_stt
 from app.providers.openai_tts import OpenAITTS
 from app.providers.openai_tts import register as _register_openai_tts
 from app.providers.piper_tts import PiperTTS
@@ -68,11 +72,14 @@ _register_openai_llm(replace=True)
 _register_anthropic_llm(replace=True)
 _register_gemini_llm(replace=True)
 _register_faster_whisper_stt(replace=True)
+_register_deepgram_stt(replace=True)
+_register_openai_realtime_stt(replace=True)
 
 __all__ = [
     "AnthropicLLM",
     "ChatMessage",
     "ChatRole",
+    "DeepgramSTT",
     "ElevenLabsTTS",
     "FasterWhisperSTT",
     "GeminiLLM",
@@ -81,6 +88,7 @@ __all__ = [
     "LLMResponse",
     "OpenAICompatibleLLM",
     "OpenAILLM",
+    "OpenAIRealtimeSTT",
     "OpenAITTS",
     "PiperTTS",
     "ProviderConfig",
