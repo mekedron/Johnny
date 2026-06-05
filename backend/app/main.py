@@ -15,6 +15,7 @@ from app.api.meeting_configs import router as meeting_configs_router
 from app.api.providers import router as providers_router
 from app.api.sessions import router as sessions_router
 from app.api.templates import router as templates_router
+from app.api.ws import router as ws_router
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ app.include_router(meeting_configs_router)
 app.include_router(providers_router)
 app.include_router(sessions_router)
 app.include_router(templates_router)
+app.include_router(ws_router)
 
 
 @app.get("/health")

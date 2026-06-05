@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T19:47:15.347Z",
-  "currentIteration": 25,
+  "updatedAt": "2026-06-05T20:07:43.761Z",
+  "currentIteration": 26,
   "maxIterations": 10,
-  "tasksCompleted": 25,
+  "tasksCompleted": 26,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -200,8 +200,8 @@
       {
         "id": "Johnny-kgc.29",
         "title": "US-029: Bot session scheduler",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.30",
@@ -485,6 +485,16 @@
       "durationMs": 688169,
       "startedAt": "2026-06-05T19:20:47.457Z",
       "endedAt": "2026-06-05T19:32:15.626Z"
+    },
+    {
+      "iteration": 26,
+      "status": "completed",
+      "taskId": "Johnny-kgc.29",
+      "taskTitle": "US-029: Bot session scheduler",
+      "taskCompleted": true,
+      "durationMs": 879312,
+      "startedAt": "2026-06-05T19:32:35.189Z",
+      "endedAt": "2026-06-05T19:47:14.501Z"
     }
   ],
   "skippedTaskIds": [],

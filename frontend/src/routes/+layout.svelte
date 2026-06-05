@@ -9,6 +9,7 @@
 		stopSession,
 		type BotSession
 	} from '$lib/sessions';
+	import { subscribeToGlobal, type Subscription } from '$lib/sessionEvents';
 
 	let { children } = $props();
 
@@ -28,6 +29,7 @@
 	let sessionsErrorMessage = $state<string | null>(null);
 	let stoppingSessionIds = $state<Set<number>>(new Set());
 	let sessionsTimer: ReturnType<typeof setInterval> | null = null;
+	let globalEventsSubscription: Subscription | null = null;
 
 	function isActive(href: string): boolean {
 		const path = page.url.pathname;
@@ -80,11 +82,23 @@
 		}
 	}
 
+	function handleGlobalEvent() {
+		// Both event types can shift what's "active": a calendar-event
+		// change can add/remove a meeting from view; a session_status_change
+		// alters status badges and may remove sessions from the active list.
+		// A refetch keeps the source-of-truth in the server and avoids
+		// hand-merging WebSocket events with REST list responses.
+		void refreshActiveSessions();
+	}
+
 	onMount(() => {
 		refreshAccount();
 		refreshActiveSessions();
 		sessionsTimer = setInterval(refreshActiveSessions, SESSIONS_POLL_INTERVAL_MS);
 		window.addEventListener('message', handleOAuthMessage);
+		globalEventsSubscription = subscribeToGlobal({
+			onEvent: handleGlobalEvent
+		});
 	});
 
 	onDestroy(() => {
@@ -94,6 +108,10 @@
 		}
 		if (typeof window !== 'undefined') {
 			window.removeEventListener('message', handleOAuthMessage);
+		}
+		if (globalEventsSubscription !== null) {
+			globalEventsSubscription.close();
+			globalEventsSubscription = null;
 		}
 	});
 </script>
