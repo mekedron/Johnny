@@ -1,7 +1,11 @@
-"""Bot session HTTP endpoints (US-029).
+"""Bot session HTTP endpoints (US-029, US-032).
 
 * ``GET    /sessions/active`` — list every non-terminal bot_session for
   the UI scheduler status panel.
+* ``GET    /sessions/{id}``    — single-session detail for the live view
+  (US-032): includes session metadata plus recent transcripts,
+  decisions, and utterances so the UI can render the three panes with
+  prior context before the WebSocket starts streaming live events.
 * ``POST   /sessions/start``  — manual "Join now"; takes a calendar
   event id, finds its meeting_config, and invokes
   :func:`start_session_for_meeting` immediately (bypassing the
@@ -24,17 +28,22 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_session
 from app.db.models import (
+    AgentDecision,
+    AgentUtterance,
+    BotMode,
     BotSession,
     BotSessionStatus,
     CalendarEvent,
+    DecisionOutcome,
     MeetingConfig,
+    TranscriptChunk,
 )
 from app.services.bot_sessions import BotSessionNotFoundError
 from app.services.session_scheduler import (
@@ -96,6 +105,66 @@ class ActiveSessionsResponse(BaseModel):
     sessions: list[BotSessionRead]
 
 
+class TranscriptChunkRead(BaseModel):
+    """Audit-trail view of a finalised transcript chunk."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    bot_session_id: int
+    start_offset_ms: int
+    end_offset_ms: int
+    speaker: str | None
+    text: str
+    created_at: datetime
+
+
+class AgentDecisionRead(BaseModel):
+    """One router decision row for the decision feed."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    bot_session_id: int
+    should_speak: bool
+    confidence: float
+    reason: str
+    reply_type: str | None
+    suggested_reply: str | None
+    outcome: DecisionOutcome
+    created_at: datetime
+
+
+class AgentUtteranceRead(BaseModel):
+    """One spoken utterance for the audit trail."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    bot_session_id: int
+    agent_decision_id: int | None
+    mode: BotMode
+    output_text: str
+    audio_duration_ms: int | None
+    matched_allowed_reply: str | None
+    created_at: datetime
+
+
+class SessionDetailResponse(BaseModel):
+    """Full detail for a single bot session.
+
+    The three lists carry recent history so the live view has context
+    on first paint; new events arrive over the WebSocket and are merged
+    client-side.
+    """
+
+    session: BotSessionRead
+    transcripts: list[TranscriptChunkRead]
+    decisions: list[AgentDecisionRead]
+    utterances: list[AgentUtteranceRead]
+    pending_decisions: list[AgentDecisionRead]
+
+
 # --- Helpers ---------------------------------------------------------------
 
 
@@ -135,6 +204,72 @@ def list_active(session: SessionDep) -> ActiveSessionsResponse:
     """List every non-terminal bot_session."""
     rows = list_active_sessions(session)
     return ActiveSessionsResponse(sessions=[_to_read(r) for r in rows])
+
+
+# Default caps for the initial-state lists. The live view subscribes to
+# the WebSocket for new events, so the lists are bounded — recent
+# context, not a full history dump (the /history route handles that).
+DEFAULT_DETAIL_LIMIT = 100
+MAX_DETAIL_LIMIT = 500
+
+
+@router.get("/{bot_session_id}", response_model=SessionDetailResponse)
+def get_session_detail(
+    bot_session_id: int,
+    session: SessionDep,
+    limit: Annotated[
+        int,
+        Query(ge=1, le=MAX_DETAIL_LIMIT),
+    ] = DEFAULT_DETAIL_LIMIT,
+) -> SessionDetailResponse:
+    """Return session metadata plus recent transcript / decision / utterance rows.
+
+    The live view (US-032) calls this on mount to seed the three panes
+    with prior context, then subscribes to ``/ws/sessions/{id}`` for
+    incremental updates. ``pending_decisions`` is a small projection
+    of ``decisions`` containing only the rows still awaiting approval
+    — saves the UI from filtering client-side.
+    """
+    row = session.get(BotSession, bot_session_id)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="bot_session not found",
+        )
+
+    transcripts = list(
+        session.scalars(
+            select(TranscriptChunk)
+            .where(TranscriptChunk.bot_session_id == row.id)
+            .order_by(TranscriptChunk.start_offset_ms.asc(), TranscriptChunk.id.asc())
+            .limit(limit)
+        ).all()
+    )
+    decisions = list(
+        session.scalars(
+            select(AgentDecision)
+            .where(AgentDecision.bot_session_id == row.id)
+            .order_by(AgentDecision.created_at.desc(), AgentDecision.id.desc())
+            .limit(limit)
+        ).all()
+    )
+    utterances = list(
+        session.scalars(
+            select(AgentUtterance)
+            .where(AgentUtterance.bot_session_id == row.id)
+            .order_by(AgentUtterance.created_at.desc(), AgentUtterance.id.desc())
+            .limit(limit)
+        ).all()
+    )
+    pending = [d for d in decisions if d.outcome == DecisionOutcome.PENDING]
+
+    return SessionDetailResponse(
+        session=_to_read(row),
+        transcripts=[TranscriptChunkRead.model_validate(t) for t in transcripts],
+        decisions=[AgentDecisionRead.model_validate(d) for d in decisions],
+        utterances=[AgentUtteranceRead.model_validate(u) for u in utterances],
+        pending_decisions=[AgentDecisionRead.model_validate(d) for d in pending],
+    )
 
 
 @router.post(
@@ -212,8 +347,12 @@ async def stop_now(
 
 __all__ = [
     "ActiveSessionsResponse",
+    "AgentDecisionRead",
+    "AgentUtteranceRead",
     "BotSessionRead",
+    "SessionDetailResponse",
     "StartSessionPayload",
+    "TranscriptChunkRead",
     "get_launcher",
     "router",
     "set_launcher",

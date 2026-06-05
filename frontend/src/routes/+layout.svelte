@@ -378,7 +378,13 @@
 					{#each activeSessions as session (session.id)}
 						<li class="status-item" data-testid="status-session-{session.id}">
 							<div class="status-row">
-								<span class="status-id">#{session.id}</span>
+								<a
+									class="status-id status-link"
+									href={`/sessions/${session.id}`}
+									onclick={closeSidebar}
+								>
+									#{session.id}
+								</a>
 								<span class="status-pill status-pill-{session.status}">
 									{BOT_SESSION_STATUS_LABEL[session.status]}
 								</span>
@@ -628,6 +634,13 @@
 	.status-id {
 		font-weight: 600;
 		color: #1f2937;
+	}
+	.status-link {
+		text-decoration: none;
+	}
+	.status-link:hover {
+		color: #4f46e5;
+		text-decoration: underline;
 	}
 	.status-pill {
 		font-size: 0.7rem;

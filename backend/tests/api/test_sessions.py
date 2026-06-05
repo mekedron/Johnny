@@ -1,4 +1,4 @@
-"""Tests for the /sessions HTTP API (US-029)."""
+"""Tests for the /sessions HTTP API (US-029, US-032)."""
 
 from __future__ import annotations
 
@@ -15,13 +15,17 @@ from app.api.sessions import set_launcher
 from app.db import Base
 from app.db.models import (
     AccountRole,
+    AgentDecision,
+    AgentUtterance,
     BotMode,
     BotSession,
     BotSessionStatus,
     CalendarEvent,
+    DecisionOutcome,
     GoogleAccount,
     MeetingConfig,
     ProfileTemplate,
+    TranscriptChunk,
 )
 from app.main import app
 from app.services.session_scheduler import (
@@ -48,6 +52,9 @@ def engine() -> sa.Engine:
             ProfileTemplate.__table__,  # type: ignore[list-item]
             MeetingConfig.__table__,  # type: ignore[list-item]
             BotSession.__table__,  # type: ignore[list-item]
+            TranscriptChunk.__table__,  # type: ignore[list-item]
+            AgentDecision.__table__,  # type: ignore[list-item]
+            AgentUtterance.__table__,  # type: ignore[list-item]
         ],
     )
     return eng
@@ -299,3 +306,163 @@ def test_stop_is_idempotent_for_terminal_session(
     assert res.json()["status"] == "ended"
     # Launcher was not invoked.
     assert launcher.stopped == []
+
+
+# --- GET /sessions/{id} (US-032) ------------------------------------------
+
+
+def test_get_session_detail_404_for_unknown(client: TestClient) -> None:
+    res = client.get("/sessions/9999")
+    assert res.status_code == 404
+
+
+def test_get_session_detail_empty_lists(
+    client: TestClient, db_session: Session
+) -> None:
+    _, cfg = _seed_meeting(db_session)
+    row = BotSession(
+        meeting_config_id=cfg.id, status=BotSessionStatus.JOINED
+    )
+    db_session.add(row)
+    db_session.commit()
+    res = client.get(f"/sessions/{row.id}")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["session"]["id"] == row.id
+    assert body["session"]["status"] == "joined"
+    assert body["transcripts"] == []
+    assert body["decisions"] == []
+    assert body["utterances"] == []
+    assert body["pending_decisions"] == []
+
+
+def test_get_session_detail_includes_recent_history(
+    client: TestClient, db_session: Session
+) -> None:
+    _, cfg = _seed_meeting(db_session)
+    row = BotSession(
+        meeting_config_id=cfg.id, status=BotSessionStatus.JOINED
+    )
+    db_session.add(row)
+    db_session.flush()
+    # Two transcripts ordered by start_offset_ms.
+    db_session.add(
+        TranscriptChunk(
+            bot_session_id=row.id,
+            start_offset_ms=0,
+            end_offset_ms=1500,
+            speaker="alice",
+            text="hello world",
+        )
+    )
+    db_session.add(
+        TranscriptChunk(
+            bot_session_id=row.id,
+            start_offset_ms=2000,
+            end_offset_ms=4500,
+            speaker=None,
+            text="follow up",
+        )
+    )
+    # One spoken decision, one pending decision.
+    spoken = AgentDecision(
+        bot_session_id=row.id,
+        should_speak=True,
+        confidence=0.9,
+        reason="user asked a yes/no question",
+        reply_type="affirmative",
+        suggested_reply="Yes.",
+        input_window={"transcript": "...?"},
+        raw_output={"raw": "stuff"},
+        outcome=DecisionOutcome.SPOKEN,
+    )
+    pending = AgentDecision(
+        bot_session_id=row.id,
+        should_speak=True,
+        confidence=0.6,
+        reason="ambiguous follow-up",
+        reply_type="clarify",
+        suggested_reply="Could you clarify?",
+        input_window={"transcript": "...?"},
+        raw_output={"raw": "more"},
+        outcome=DecisionOutcome.PENDING,
+    )
+    db_session.add(spoken)
+    db_session.add(pending)
+    db_session.flush()
+    db_session.add(
+        AgentUtterance(
+            bot_session_id=row.id,
+            agent_decision_id=spoken.id,
+            mode=BotMode.APPROVAL_REQUIRED,
+            prompt="hidden",
+            output_text="Yes.",
+            audio_duration_ms=450,
+            matched_allowed_reply="Yes.",
+        )
+    )
+    db_session.commit()
+
+    res = client.get(f"/sessions/{row.id}")
+    assert res.status_code == 200, res.text
+    body = res.json()
+
+    assert body["session"]["id"] == row.id
+    transcripts = body["transcripts"]
+    assert [t["text"] for t in transcripts] == ["hello world", "follow up"]
+    assert transcripts[0]["speaker"] == "alice"
+    assert transcripts[1]["speaker"] is None
+
+    decisions = body["decisions"]
+    assert len(decisions) == 2
+    # Decisions sorted newest first.
+    outcomes = {d["id"]: d["outcome"] for d in decisions}
+    assert outcomes[spoken.id] == "spoken"
+    assert outcomes[pending.id] == "pending"
+
+    utterances = body["utterances"]
+    assert len(utterances) == 1
+    assert utterances[0]["output_text"] == "Yes."
+    assert utterances[0]["matched_allowed_reply"] == "Yes."
+
+    pending_decisions = body["pending_decisions"]
+    assert len(pending_decisions) == 1
+    assert pending_decisions[0]["id"] == pending.id
+
+
+def test_get_session_detail_respects_limit(
+    client: TestClient, db_session: Session
+) -> None:
+    _, cfg = _seed_meeting(db_session)
+    row = BotSession(
+        meeting_config_id=cfg.id, status=BotSessionStatus.JOINED
+    )
+    db_session.add(row)
+    db_session.flush()
+    for i in range(5):
+        db_session.add(
+            TranscriptChunk(
+                bot_session_id=row.id,
+                start_offset_ms=i * 1000,
+                end_offset_ms=(i + 1) * 1000,
+                text=f"chunk-{i}",
+            )
+        )
+    db_session.commit()
+    res = client.get(f"/sessions/{row.id}?limit=3")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert len(body["transcripts"]) == 3
+    # Limit picks the earliest by start_offset_ms.
+    assert [t["text"] for t in body["transcripts"]] == [
+        "chunk-0",
+        "chunk-1",
+        "chunk-2",
+    ]
+
+
+def test_get_session_detail_rejects_invalid_limit(client: TestClient) -> None:
+    res = client.get("/sessions/1?limit=0")
+    assert res.status_code == 422
+    res = client.get("/sessions/1?limit=1000")
+    assert res.status_code == 422

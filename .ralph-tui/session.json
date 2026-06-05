@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T20:53:35.604Z",
-  "currentIteration": 28,
+  "updatedAt": "2026-06-05T21:06:01.910Z",
+  "currentIteration": 29,
   "maxIterations": 10,
-  "tasksCompleted": 28,
+  "tasksCompleted": 29,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -188,8 +188,8 @@
       {
         "id": "Johnny-kgc.27",
         "title": "US-027: Approval-required mode with browser push",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.28",
@@ -515,6 +515,16 @@
       "durationMs": 984537,
       "startedAt": "2026-06-05T20:08:02.127Z",
       "endedAt": "2026-06-05T20:24:26.664Z"
+    },
+    {
+      "iteration": 29,
+      "status": "completed",
+      "taskId": "Johnny-kgc.27",
+      "taskTitle": "US-027: Approval-required mode with browser push",
+      "taskCompleted": true,
+      "durationMs": 1728215,
+      "startedAt": "2026-06-05T20:24:46.298Z",
+      "endedAt": "2026-06-05T20:53:34.513Z"
     }
   ],
   "skippedTaskIds": [],
