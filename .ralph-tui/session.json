@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T14:37:11.779Z",
-  "currentIteration": 1,
+  "updatedAt": "2026-06-05T14:49:35.326Z",
+  "currentIteration": 2,
   "maxIterations": 10,
-  "tasksCompleted": 1,
+  "tasksCompleted": 2,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -44,8 +44,8 @@
       {
         "id": "Johnny-kgc.3",
         "title": "US-003: Database schema and migrations",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.4",
@@ -245,6 +245,16 @@
       "durationMs": 389281,
       "startedAt": "2026-06-05T14:20:38.021Z",
       "endedAt": "2026-06-05T14:27:07.302Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "Johnny-kgc.3",
+      "taskTitle": "US-003: Database schema and migrations",
+      "taskCompleted": true,
+      "durationMs": 585333,
+      "startedAt": "2026-06-05T14:27:25.621Z",
+      "endedAt": "2026-06-05T14:37:10.954Z"
     }
   ],
   "skippedTaskIds": [],

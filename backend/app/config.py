@@ -18,6 +18,10 @@ class Settings(BaseSettings):
         default="postgresql+psycopg://johnny:johnny@localhost:5432/johnny",
         description="SQLAlchemy URL for the primary PostgreSQL database.",
     )
+    redis_url: str = Field(
+        default="redis://localhost:6379/0",
+        description="Connection URL for the Redis instance (task queues, pub/sub).",
+    )
 
 
 @lru_cache(maxsize=1)

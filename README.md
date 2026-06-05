@@ -16,7 +16,7 @@ frontend/   SvelteKit UI (TypeScript, managed by pnpm)
 
 - [uv](https://docs.astral.sh/uv/) for Python dependency management
 - [pnpm](https://pnpm.io/) and Node.js 20+ for the frontend
-- Docker (with Compose) for the full stack — see US-002
+- Docker (with Compose) for the full stack
 
 ## Local development
 
@@ -42,11 +42,16 @@ Once both are running, open <http://localhost:5173> and the home page will fetch
 ## Full stack
 
 The complete stack (API, worker, frontend, PostgreSQL+pgvector, Redis) runs via
-Docker Compose (added in US-002):
+Docker Compose:
 
 ```bash
+cp .env.example .env    # fill in secrets as needed
 docker compose up
 ```
+
+The api is reachable at <http://localhost:8000>, the frontend at
+<http://localhost:5173>. Postgres listens on the internal compose network only;
+connect via `docker compose exec postgres psql -U johnny`.
 
 ## Quality gates
 
