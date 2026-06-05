@@ -821,3 +821,22 @@ transparent refresh-token rotation.
 - **`ChangePublisher` ABC + Redis pub/sub `johnny.global.<topic>` channel pattern**: domain-level UI broadcasts (calendar changes, future provider-credential changes, future template changes) get a top-level `johnny.global.<topic>` channel and a thin `ChangePublisher` ABC the worker code accepts via DI. Production uses `RedisCalendarPublisher`; tests inject a `_FakePublisher` collecting payloads into a list. Mirrors the per-session `johnny.session.<id>` channel pattern from the voice pipeline's `RedisEventBus` but at a global scope. Subscribers (US-031) pattern-match on `johnny.global.*` for cross-cutting UI fan-out.
 - **`JOHNNY_CALENDAR_POLL_INTERVAL_SECONDS` follows the existing `JOHNNY_<X>_INTERVAL_SECONDS` pattern**: env var name, parse helper, clamp-to-1, fallback-to-default-on-malformed. Same shape as `JOHNNY_EMBEDDING_INTERVAL_SECONDS`. New periodic worker jobs should follow the same convention so operators have one mental model for cadence configuration.
 ---
+
+## 2026-06-05 - Johnny-kgc.8
+- Implemented US-008 Calendar view UI
+- Files changed:
+  - frontend/src/lib/calendar.ts (new) — typed client for /calendar/events + grouping/formatting helpers
+  - frontend/src/routes/calendar/+page.svelte (replaced) — full calendar list with grouped-by-day events, account picker, refresh, detail panel
+- **Learnings:**
+  - Frontend api-base CORS: backend allows `http://localhost:5173`, not `http://127.0.0.1:5173`. Always navigate via `localhost` for dev browser verification — visiting `127.0.0.1` triggers a CORS-blocked preflight that surfaces as a misleading "Failed to fetch" error in the UI.
+  - Svelte 5 a11y on row clickables: `tabindex={n}` on a non-interactive `<div>` without a `role` raises `a11y_no_noninteractive_tabindex`. The clean fix is to branch the markup with `{#if has_meet_link}<div role="button" tabindex="0" …>{:else}<div aria-disabled="true" …>` instead of dynamically toggling `role`/`tabindex` on one element. Bonus: the dimmed branch doesn't need keyboard event handlers.
+  - `role="dialog"` requires an interactive (focusable / focus-manageable) element. `<aside role="dialog">` raises `a11y_no_noninteractive_element_to_interactive_role`. Use a plain `<div>` for the panel container even when "aside" feels semantically nicer.
+  - To verify the calendar UI without a Google account, stub `sync_account_events` at import time via a small launcher script and run uvicorn from that — sidesteps the live Google fetch while exercising the real list_account_events path and the full UI render pipeline. Cleaner than monkey-patching every test fixture or adding a debug GET endpoint.
+  - `list_account_events` filters by `end_time >= now`, so demo seeds for "today" must use future times — otherwise the events vanish from the UI and the screenshot suggests the page is broken when it's actually working as designed.
+
+### Codebase pattern promotions
+- **Frontend api-base CORS dev gotcha**: backend allows `http://localhost:5173` only. Always navigate browser verification via `localhost` (not `127.0.0.1`) — the latter triggers a CORS-blocked preflight that surfaces as a misleading "Failed to fetch" error in the UI even though the server is up. Same allow-list applies to popups, OAuth callbacks, etc.
+- **Svelte 5 a11y for conditionally-clickable rows**: instead of dynamically toggling `role` / `tabindex` on one `<div>` (which trips `a11y_no_noninteractive_tabindex`), branch the markup: `{#if clickable}<div role="button" tabindex="0" onclick onkeydown>...{:else}<div aria-disabled="true">...{/if}`. The non-clickable branch doesn't need keyboard handlers either, so it's also cleaner.
+- **`role="dialog"` requires an interactive container**: `<aside role="dialog">` raises `a11y_no_noninteractive_element_to_interactive_role`. Use a plain `<div role="dialog">` for popovers/side panels even when `<aside>` feels semantically nicer.
+- **Dev-time stub of `sync_account_events` for browser verification**: write a tiny launcher script `import app.api.calendar as c; c.sync_account_events = _noop_sync; uvicorn.run(...)` — sidesteps the live Google fetch while exercising the real `list_account_events` + full UI render pipeline. Cleaner than monkey-patching every test fixture or adding a debug GET endpoint.
+---

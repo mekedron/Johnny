@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T19:09:24.648Z",
-  "currentIteration": 22,
+  "updatedAt": "2026-06-05T19:20:27.185Z",
+  "currentIteration": 23,
   "maxIterations": 10,
-  "tasksCompleted": 22,
+  "tasksCompleted": 23,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -68,8 +68,8 @@
       {
         "id": "Johnny-kgc.7",
         "title": "US-007: Calendar fetch and polling worker",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.8",
@@ -455,6 +455,16 @@
       "durationMs": 818710,
       "startedAt": "2026-06-05T18:40:07.862Z",
       "endedAt": "2026-06-05T18:53:46.572Z"
+    },
+    {
+      "iteration": 23,
+      "status": "completed",
+      "taskId": "Johnny-kgc.7",
+      "taskTitle": "US-007: Calendar fetch and polling worker",
+      "taskCompleted": true,
+      "durationMs": 916972,
+      "startedAt": "2026-06-05T18:54:06.568Z",
+      "endedAt": "2026-06-05T19:09:23.540Z"
     }
   ],
   "skippedTaskIds": [],
