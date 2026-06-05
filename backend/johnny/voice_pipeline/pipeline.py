@@ -60,6 +60,8 @@ DEFAULT_FRAME_DURATION_MS = 20
 DEFAULT_CONFIDENCE_THRESHOLD = 0.7
 DEFAULT_TRANSCRIPT_WINDOW_SIZE = 6
 DEFAULT_MODE = "limited_auto_speak"
+DEFAULT_RATE_LIMIT_MAX_UTTERANCES = 3
+DEFAULT_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000
 
 _SENTENCE_BOUNDARY = re.compile(r"(?:[.!?]+[\"')\]]*\s+)|(?:\n+)")
 """Matches sentence-ending punctuation followed by whitespace, or one+ newlines.
@@ -96,6 +98,8 @@ class PipelineConfig:
     max_utterance_ms: int = DEFAULT_MAX_UTTERANCE_MS
     frame_duration_ms: int = DEFAULT_FRAME_DURATION_MS
     transcript_window_size: int = DEFAULT_TRANSCRIPT_WINDOW_SIZE
+    rate_limit_max_utterances: int = DEFAULT_RATE_LIMIT_MAX_UTTERANCES
+    rate_limit_window_ms: int = DEFAULT_RATE_LIMIT_WINDOW_MS
     session_id: str | None = None
     bot_session_id: int | None = None
 
@@ -163,6 +167,7 @@ class VoicePipeline:
         self._transcript_history: list[TranscriptFinalized] = []
         self._last_decision: RouterDecisionMade | None = None
         self._interrupt_event = asyncio.Event()
+        self._recent_utterance_times: list[int] = []
 
     # ------------------------------------------------------------------
     # Public lifecycle
@@ -273,8 +278,21 @@ class VoicePipeline:
         if decision.confidence < self.config.confidence_threshold:
             await self._persist_decision(decision_event, "suppressed")
             return
+        if self._is_rate_limited():
+            logger.info(
+                "limited-auto-speak rate limit hit for session=%s "
+                "(max=%d in window=%dms; recent=%d) — suppressing utterance",
+                self.config.session_id,
+                self.config.rate_limit_max_utterances,
+                self.config.rate_limit_window_ms,
+                len(self._recent_utterance_times),
+            )
+            await self._persist_decision(decision_event, "suppressed")
+            return
 
         spoke = await self._answer_and_speak(transcript, decision)
+        if spoke:
+            self._recent_utterance_times.append(self._now_ms())
         await self._persist_decision(
             decision_event,
             "spoken" if spoke else "suppressed",
@@ -618,6 +636,31 @@ class VoicePipeline:
         loop = asyncio.get_running_loop()
         return int((loop.time() - self._session_started_at) * 1000)
 
+    def _is_rate_limited(self) -> bool:
+        """Return True when the limited-auto-speak rate limit is exceeded.
+
+        Only enforced when ``allowed_replies`` is set — that's the
+        operational marker for Limited auto-speak mode. Setting either
+        ``rate_limit_max_utterances`` or ``rate_limit_window_ms`` to a
+        non-positive value disables the limit. The recent-utterance list
+        is pruned in place each time this is called.
+        """
+        if not self.config.allowed_replies:
+            return False
+        if (
+            self.config.rate_limit_max_utterances <= 0
+            or self.config.rate_limit_window_ms <= 0
+        ):
+            return False
+        window_start = self._now_ms() - self.config.rate_limit_window_ms
+        self._recent_utterance_times = [
+            t for t in self._recent_utterance_times if t > window_start
+        ]
+        return (
+            len(self._recent_utterance_times)
+            >= self.config.rate_limit_max_utterances
+        )
+
     def _remember_transcript(self, transcript: TranscriptFinalized) -> None:
         """Append ``transcript`` to the rolling history and bound its size."""
         self._transcript_history.append(transcript)
@@ -834,6 +877,8 @@ __all__ = [
     "DEFAULT_FRAME_DURATION_MS",
     "DEFAULT_MAX_UTTERANCE_MS",
     "DEFAULT_MODE",
+    "DEFAULT_RATE_LIMIT_MAX_UTTERANCES",
+    "DEFAULT_RATE_LIMIT_WINDOW_MS",
     "DEFAULT_TRANSCRIPT_WINDOW_SIZE",
     "PipelineConfig",
     "RouterDecision",

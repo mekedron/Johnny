@@ -68,6 +68,19 @@ def two_utterance_pcm(two_utterance_wav: Path) -> bytes:
     return _read_wav_pcm(two_utterance_wav)
 
 
+@pytest.fixture
+def four_utterance_pcm(tmp_path: Path) -> bytes:
+    """Four speech bursts separated by silence — for rate-limit tests."""
+    samples: list[int] = []
+    samples.extend(_silence_samples(200))
+    for _ in range(4):
+        samples.extend(_tone_samples(600))
+        samples.extend(_silence_samples(800))
+    wav_path = tmp_path / "four_utterances.wav"
+    _write_wav(wav_path, samples)
+    return _read_wav_pcm(wav_path)
+
+
 def chunk_pcm(pcm: bytes, chunk_size: int = BYTES_PER_FRAME) -> Iterable[bytes]:
     for i in range(0, len(pcm), chunk_size):
         yield pcm[i : i + chunk_size]

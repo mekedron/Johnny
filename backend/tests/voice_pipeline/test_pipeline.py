@@ -2086,3 +2086,250 @@ async def test_pipeline_transcript_sink_failure_does_not_crash(
         transcript_sink=_BrokenSink(),
     )
     await pipeline.run()  # must not raise
+
+
+# --- US-028: Limited auto-speak rate limiting ---------------------------
+
+
+def test_pipeline_config_has_rate_limit_defaults() -> None:
+    """Default rate limit: max 3 utterances per 5-minute (300_000 ms) window."""
+    cfg = PipelineConfig()
+    assert cfg.rate_limit_max_utterances == 3
+    assert cfg.rate_limit_window_ms == 5 * 60 * 1000
+
+
+async def test_pipeline_rate_limits_limited_auto_speak_after_max_utterances(
+    four_utterance_pcm: bytes,
+) -> None:
+    """Limited-auto-speak with max=2 speaks the first two then suppresses the rest."""
+    from johnny.voice_pipeline import InMemoryUtteranceSink
+
+    frame_size = 640
+    frames = [
+        four_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(four_utterance_pcm), frame_size)
+        if i + frame_size <= len(four_utterance_pcm)
+    ]
+    sink = InMemoryUtteranceSink()
+    dsink = InMemoryDecisionSink()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two", "three", "four"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": True, "confidence": 0.95, "reason": "ok"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["yes", "no", "yes", "no"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            mode="limited_auto_speak",
+            allowed_replies=("yes", "no"),
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            rate_limit_max_utterances=2,
+            rate_limit_window_ms=10 * 60 * 1000,
+        ),
+        utterance_sink=sink,
+        decision_sink=dsink,
+    )
+    await pipeline.run()
+    # Only the first two utterances were spoken — the third and fourth
+    # were rate-limited.
+    utterances = sink.snapshot()
+    assert len(utterances) == 2
+    decisions = dsink.snapshot()
+    outcomes = [d.outcome for d in decisions]
+    assert outcomes.count("spoken") == 2
+    assert outcomes.count("suppressed") >= 2
+
+
+async def test_pipeline_rate_limit_disabled_when_max_zero(
+    four_utterance_pcm: bytes,
+) -> None:
+    """max_utterances=0 disables the limit entirely."""
+    from johnny.voice_pipeline import InMemoryUtteranceSink
+
+    frame_size = 640
+    frames = [
+        four_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(four_utterance_pcm), frame_size)
+        if i + frame_size <= len(four_utterance_pcm)
+    ]
+    sink = InMemoryUtteranceSink()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two", "three", "four"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": True, "confidence": 0.95, "reason": "ok"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["yes", "no", "yes", "no"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            mode="limited_auto_speak",
+            allowed_replies=("yes", "no"),
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            rate_limit_max_utterances=0,
+            rate_limit_window_ms=300_000,
+        ),
+        utterance_sink=sink,
+    )
+    await pipeline.run()
+    assert len(sink.snapshot()) == 4
+
+
+async def test_pipeline_rate_limit_not_enforced_without_allowed_replies(
+    four_utterance_pcm: bytes,
+) -> None:
+    """Without allowed_replies set, the rate limit doesn't apply (free-text path)."""
+    from johnny.voice_pipeline import InMemoryUtteranceSink
+
+    frame_size = 640
+    frames = [
+        four_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(four_utterance_pcm), frame_size)
+        if i + frame_size <= len(four_utterance_pcm)
+    ]
+    sink = InMemoryUtteranceSink()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two", "three", "four"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": True, "confidence": 0.95, "reason": "ok"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["a", "b", "c", "d"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            mode="approval_required",
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            rate_limit_max_utterances=1,
+            rate_limit_window_ms=10 * 60 * 1000,
+        ),
+        utterance_sink=sink,
+    )
+    await pipeline.run()
+    # All four utterances spoken because rate limit only applies to
+    # limited-auto-speak (allowed_replies set).
+    assert len(sink.snapshot()) == 4
+
+
+async def test_pipeline_rate_limited_decision_records_suppressed(
+    four_utterance_pcm: bytes,
+) -> None:
+    """Rate-limited utterances surface in the decision sink as ``suppressed``."""
+    frame_size = 640
+    frames = [
+        four_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(four_utterance_pcm), frame_size)
+        if i + frame_size <= len(four_utterance_pcm)
+    ]
+    dsink = InMemoryDecisionSink()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two", "three", "four"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": True, "confidence": 0.95, "reason": "ok"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["yes", "no", "yes", "no"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            mode="limited_auto_speak",
+            allowed_replies=("yes", "no"),
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            rate_limit_max_utterances=1,
+            rate_limit_window_ms=10 * 60 * 1000,
+        ),
+        decision_sink=dsink,
+    )
+    await pipeline.run()
+    records = dsink.snapshot()
+    # 4 utterances → 4 decisions. First "spoken", remaining "suppressed".
+    assert len(records) == 4
+    assert records[0].outcome == "spoken"
+    assert all(r.outcome == "suppressed" for r in records[1:])
+
+
+def test_is_rate_limited_returns_false_without_allowed_replies() -> None:
+    """The rate limit is a no-op when allowed_replies is empty."""
+    transport = _BufferedTransport(frames=[])
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=[]),
+        router_llm=_FakeRouterLLM(decisions=[]),
+        answer_llm=_FakeAnswerLLM(answers=[]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            rate_limit_max_utterances=1,
+            rate_limit_window_ms=1,
+        ),
+    )
+    # Stuff "recent utterances" in directly — without allowed_replies the
+    # helper still returns False.
+    pipeline._recent_utterance_times = [0, 1, 2]
+    assert pipeline._is_rate_limited() is False
+
+
+async def test_is_rate_limited_returns_true_when_full(
+    two_utterance_pcm: bytes,  # noqa: ARG001 — only need a running event loop
+) -> None:
+    """When recent count >= max within the window, helper returns True."""
+    transport = _BufferedTransport(frames=[])
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=[]),
+        router_llm=_FakeRouterLLM(decisions=[]),
+        answer_llm=_FakeAnswerLLM(answers=[]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            allowed_replies=("yes",),
+            rate_limit_max_utterances=2,
+            rate_limit_window_ms=10 * 60 * 1000,
+        ),
+    )
+    # Seed two recent timestamps "just now"
+    now_ms = pipeline._now_ms()
+    pipeline._recent_utterance_times = [now_ms, now_ms]
+    assert pipeline._is_rate_limited() is True
+
+
+async def test_is_rate_limited_prunes_outside_window(
+    two_utterance_pcm: bytes,  # noqa: ARG001 — only need a running event loop
+) -> None:
+    """Timestamps older than the window are pruned in place when checked."""
+    transport = _BufferedTransport(frames=[])
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=[]),
+        router_llm=_FakeRouterLLM(decisions=[]),
+        answer_llm=_FakeAnswerLLM(answers=[]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            allowed_replies=("yes",),
+            rate_limit_max_utterances=2,
+            rate_limit_window_ms=1000,
+        ),
+    )
+    now_ms = pipeline._now_ms()
+    # One ancient, one recent → prune leaves 1, not limited
+    pipeline._recent_utterance_times = [now_ms - 100_000, now_ms]
+    assert pipeline._is_rate_limited() is False
+    assert pipeline._recent_utterance_times == [now_ms]

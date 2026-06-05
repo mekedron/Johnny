@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T17:31:43.359Z",
-  "currentIteration": 14,
+  "updatedAt": "2026-06-05T17:40:03.676Z",
+  "currentIteration": 15,
   "maxIterations": 10,
-  "tasksCompleted": 14,
+  "tasksCompleted": 15,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -224,8 +224,8 @@
       {
         "id": "Johnny-kgc.33",
         "title": "US-033: Transcript and audit persistence",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.34",
@@ -375,6 +375,16 @@
       "durationMs": 1283626,
       "startedAt": "2026-06-05T16:59:17.811Z",
       "endedAt": "2026-06-05T17:20:41.437Z"
+    },
+    {
+      "iteration": 15,
+      "status": "completed",
+      "taskId": "Johnny-kgc.33",
+      "taskTitle": "US-033: Transcript and audit persistence",
+      "taskCompleted": true,
+      "durationMs": 642488,
+      "startedAt": "2026-06-05T17:21:00.038Z",
+      "endedAt": "2026-06-05T17:31:42.526Z"
     }
   ],
   "skippedTaskIds": [],
