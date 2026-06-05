@@ -72,6 +72,19 @@ Verify the A/V environment standalone:
 docker run --rm johnny-meet-worker:latest    # prints "self-check OK"
 ```
 
+## Local LLM providers
+
+The `openai-compatible` LLM adapter targets any OpenAI-compatible chat
+completions endpoint. Configure via the Providers page with `base_url`
+and `model`:
+
+- **vLLM (Qwen):** `base_url=http://vllm:8000/v1`, `model=Qwen/Qwen2.5-7B-Instruct`
+- **Ollama (Llama):** `base_url=http://ollama:11434/v1`, `model=llama3.1:8b`
+
+Set `tool_format=hermes` for Hermes-style fine-tunes that emit
+`<tool_call>{...}</tool_call>` markers instead of OpenAI-native
+`tool_calls`.
+
 ## Quality gates
 
 Backend (from `backend/`):

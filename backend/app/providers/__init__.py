@@ -38,6 +38,8 @@ from app.providers.base import (
 )
 from app.providers.elevenlabs_tts import ElevenLabsTTS
 from app.providers.elevenlabs_tts import register as _register_elevenlabs_tts
+from app.providers.openai_compatible_llm import OpenAICompatibleLLM
+from app.providers.openai_compatible_llm import register as _register_openai_compatible_llm
 from app.providers.openai_tts import OpenAITTS
 from app.providers.openai_tts import register as _register_openai_tts
 from app.providers.piper_tts import PiperTTS
@@ -50,6 +52,7 @@ from app.providers.piper_tts import register as _register_piper_tts
 _register_piper_tts(replace=True)
 _register_openai_tts(replace=True)
 _register_elevenlabs_tts(replace=True)
+_register_openai_compatible_llm(replace=True)
 
 __all__ = [
     "ChatMessage",
@@ -58,6 +61,7 @@ __all__ = [
     "LLMError",
     "LLMProvider",
     "LLMResponse",
+    "OpenAICompatibleLLM",
     "OpenAITTS",
     "PiperTTS",
     "ProviderConfig",

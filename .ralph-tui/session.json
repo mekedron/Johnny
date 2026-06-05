@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T16:23:18.813Z",
-  "currentIteration": 9,
+  "updatedAt": "2026-06-05T16:32:19.161Z",
+  "currentIteration": 10,
   "maxIterations": 10,
-  "tasksCompleted": 9,
+  "tasksCompleted": 10,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -122,8 +122,8 @@
       {
         "id": "Johnny-kgc.16",
         "title": "US-016: Cloud TTS adapters",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.17",
@@ -325,6 +325,16 @@
       "durationMs": 698666,
       "startedAt": "2026-06-05T16:00:18.728Z",
       "endedAt": "2026-06-05T16:11:57.394Z"
+    },
+    {
+      "iteration": 10,
+      "status": "completed",
+      "taskId": "Johnny-kgc.16",
+      "taskTitle": "US-016: Cloud TTS adapters",
+      "taskCompleted": true,
+      "durationMs": 661616,
+      "startedAt": "2026-06-05T16:12:16.138Z",
+      "endedAt": "2026-06-05T16:23:17.754Z"
     }
   ],
   "skippedTaskIds": [],
