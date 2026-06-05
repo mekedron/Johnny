@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T16:11:58.228Z",
-  "currentIteration": 8,
+  "updatedAt": "2026-06-05T16:23:18.813Z",
+  "currentIteration": 9,
   "maxIterations": 10,
-  "tasksCompleted": 8,
+  "tasksCompleted": 9,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -128,8 +128,8 @@
       {
         "id": "Johnny-kgc.17",
         "title": "US-017: Local TTS adapter",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.18",
@@ -315,6 +315,16 @@
       "durationMs": 1091235,
       "startedAt": "2026-06-05T15:41:49.312Z",
       "endedAt": "2026-06-05T16:00:00.547Z"
+    },
+    {
+      "iteration": 9,
+      "status": "completed",
+      "taskId": "Johnny-kgc.17",
+      "taskTitle": "US-017: Local TTS adapter",
+      "taskCompleted": true,
+      "durationMs": 698666,
+      "startedAt": "2026-06-05T16:00:18.728Z",
+      "endedAt": "2026-06-05T16:11:57.394Z"
     }
   ],
   "skippedTaskIds": [],

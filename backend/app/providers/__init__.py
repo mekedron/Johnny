@@ -36,20 +36,29 @@ from app.providers.base import (
     UnknownProviderError,
     get_registry,
 )
+from app.providers.elevenlabs_tts import ElevenLabsTTS
+from app.providers.elevenlabs_tts import register as _register_elevenlabs_tts
+from app.providers.openai_tts import OpenAITTS
+from app.providers.openai_tts import register as _register_openai_tts
 from app.providers.piper_tts import PiperTTS
 from app.providers.piper_tts import register as _register_piper_tts
 
-# Auto-register stdlib-only adapters at package import. Adapters whose
-# import would pull in heavy optional deps (torch, openai, etc.) must
+# Auto-register adapters whose imports only pull in stdlib + httpx (a
+# lightweight runtime dep already required by FastAPI / tests). Adapters
+# whose imports require heavy optional deps (torch, openai-sdk, etc.) must
 # register lazily from their own modules instead.
 _register_piper_tts(replace=True)
+_register_openai_tts(replace=True)
+_register_elevenlabs_tts(replace=True)
 
 __all__ = [
     "ChatMessage",
     "ChatRole",
+    "ElevenLabsTTS",
     "LLMError",
     "LLMProvider",
     "LLMResponse",
+    "OpenAITTS",
     "PiperTTS",
     "ProviderConfig",
     "ProviderError",
