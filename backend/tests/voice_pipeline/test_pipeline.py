@@ -1888,3 +1888,201 @@ async def test_pipeline_interrupt_state_clears_between_utterances(
     records = sink.snapshot()
     assert len(records) == 1
     assert records[0].output_text == "Second answer"
+
+
+# --- US-033: transcript persistence -------------------------------------
+
+
+async def test_pipeline_persists_finalised_transcripts(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Every finalised transcript is recorded to the transcript sink."""
+    from johnny.voice_pipeline import InMemoryTranscriptSink
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    sink = InMemoryTranscriptSink()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hello team", "any updates"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": False, "confidence": 0.1, "reason": "n"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            session_id="sess-x",
+            bot_session_id=42,
+        ),
+        transcript_sink=sink,
+    )
+    await pipeline.run()
+    records = sink.snapshot()
+    assert len(records) == 2
+    assert [r.text for r in records] == ["hello team", "any updates"]
+    for r in records:
+        assert r.session_id == "sess-x"
+        assert r.bot_session_id == 42
+        assert r.start_offset_ms >= 0
+        assert r.end_offset_ms >= r.start_offset_ms
+
+
+async def test_pipeline_transcript_persistence_carries_speaker_and_confidence(
+    two_utterance_pcm: bytes,
+) -> None:
+    """speaker / confidence from STT events flow through to the sink."""
+    from app.providers import STTProvider, TranscriptEvent
+    from johnny.voice_pipeline import InMemoryTranscriptSink
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+
+    class _STTWithSpeaker(STTProvider):
+        def __init__(self) -> None:
+            self._idx = 0
+
+        @property
+        def name(self) -> str:
+            return "stt-speaker"
+
+        async def transcribe_stream(
+            self,
+            audio_iter: AsyncIterator[bytes],
+        ) -> AsyncIterator[TranscriptEvent]:
+            async for _ in audio_iter:
+                pass
+            self._idx += 1
+            yield TranscriptEvent(
+                text=f"text-{self._idx}",
+                is_final=True,
+                timestamp_ms=self._idx * 1000,
+                confidence=0.8,
+                speaker=f"speaker-{self._idx}",
+            )
+
+    sink = InMemoryTranscriptSink()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_STTWithSpeaker(),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": False, "confidence": 0.0, "reason": "n"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(vad_threshold=0.05, end_of_speech_ms=300),
+        transcript_sink=sink,
+    )
+    await pipeline.run()
+    records = sink.snapshot()
+    assert len(records) == 2
+    assert records[0].speaker == "speaker-1"
+    assert records[0].confidence == pytest.approx(0.8)
+
+
+async def test_pipeline_transcript_offsets_match_utterance_duration(
+    two_utterance_pcm: bytes,
+) -> None:
+    """start_offset_ms = end_offset_ms - utterance_duration (derived from PCM len)."""
+    from johnny.voice_pipeline import InMemoryTranscriptSink
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    sink = InMemoryTranscriptSink()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": False, "confidence": 0.1, "reason": "n"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(vad_threshold=0.05, end_of_speech_ms=300),
+        transcript_sink=sink,
+    )
+    await pipeline.run()
+    records = sink.snapshot()
+    assert len(records) == 2
+    # Each utterance from _FakeSTT has timestamp_ms = idx * 1000.
+    # The first utterance is non-empty PCM so start_offset_ms should be
+    # < end_offset_ms.
+    for r in records:
+        assert r.end_offset_ms > r.start_offset_ms
+
+
+async def test_pipeline_default_transcript_sink_is_noop(
+    two_utterance_pcm: bytes,
+) -> None:
+    """No transcript_sink supplied → uses NoopTranscriptSink, run completes."""
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": False, "confidence": 0.0, "reason": "n"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(vad_threshold=0.05, end_of_speech_ms=300),
+    )
+    await pipeline.run()  # uses NoopTranscriptSink — must not raise
+
+
+async def test_pipeline_transcript_sink_failure_does_not_crash(
+    two_utterance_pcm: bytes,
+) -> None:
+    """A failing transcript sink is logged and swallowed; audio loop keeps going."""
+    from johnny.voice_pipeline import TranscriptSink
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+
+    class _BrokenSink(TranscriptSink):
+        async def record(self, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            raise RuntimeError("db unavailable")
+
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": False, "confidence": 0.0, "reason": "n"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(vad_threshold=0.05, end_of_speech_ms=300),
+        transcript_sink=_BrokenSink(),
+    )
+    await pipeline.run()  # must not raise

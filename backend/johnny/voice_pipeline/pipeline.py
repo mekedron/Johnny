@@ -44,6 +44,10 @@ from johnny.voice_pipeline.events import (
     RouterDecisionMade,
     TranscriptFinalized,
 )
+from johnny.voice_pipeline.transcript_sink import (
+    NoopTranscriptSink,
+    TranscriptSink,
+)
 from johnny.voice_pipeline.transport import JohnnyTransport
 from johnny.voice_pipeline.utterance_sink import NoopUtteranceSink, UtteranceSink
 from johnny.voice_pipeline.vad import DEFAULT_VAD_THRESHOLD, VADAnalyzer
@@ -141,6 +145,7 @@ class VoicePipeline:
         config: PipelineConfig | None = None,
         decision_sink: DecisionSink | None = None,
         utterance_sink: UtteranceSink | None = None,
+        transcript_sink: TranscriptSink | None = None,
     ) -> None:
         self.transport = transport
         self.vad = vad
@@ -152,6 +157,7 @@ class VoicePipeline:
         self.config = config or PipelineConfig()
         self.decision_sink = decision_sink or NoopDecisionSink()
         self.utterance_sink = utterance_sink or NoopUtteranceSink()
+        self.transcript_sink = transcript_sink or NoopTranscriptSink()
         self._session_started_at: float = 0.0
         self._utterance_count = 0
         self._transcript_history: list[TranscriptFinalized] = []
@@ -240,6 +246,7 @@ class VoicePipeline:
             return
         await self.event_bus.publish(transcript)
         self._remember_transcript(transcript)
+        await self._persist_transcript(transcript, utterance)
 
         if not self.config.speak:
             return
@@ -652,6 +659,38 @@ class VoicePipeline:
             "suggested_reply": self._last_decision.suggested_reply,
             "timestamp_ms": self._last_decision.timestamp_ms,
         }
+
+    async def _persist_transcript(
+        self,
+        transcript: TranscriptFinalized,
+        utterance: bytes,
+    ) -> None:
+        """Persist the finalised transcript to the configured sink.
+
+        ``transcript.timestamp_ms`` is the pipeline-time offset at which the
+        STT stage emitted the finalised chunk (treated as ``end_offset_ms``).
+        ``start_offset_ms`` is derived by subtracting the utterance's audio
+        duration (PCM length / sample rate) — accurate to within the VAD's
+        end-of-speech trim, which is fine for transcript audit views.
+        """
+        utterance_duration_ms = _pcm_duration_ms(len(utterance), PCM_SAMPLE_RATE_HZ)
+        end_offset_ms = transcript.timestamp_ms
+        start_offset_ms = max(0, end_offset_ms - utterance_duration_ms)
+        try:
+            await self.transcript_sink.record(
+                text=transcript.text,
+                start_offset_ms=start_offset_ms,
+                end_offset_ms=end_offset_ms,
+                speaker=transcript.speaker,
+                confidence=transcript.confidence,
+                session_id=self.config.session_id,
+                bot_session_id=self.config.bot_session_id,
+            )
+        except Exception:
+            logger.exception(
+                "transcript sink failed for session=%s",
+                self.config.session_id,
+            )
 
     async def _persist_decision(
         self,

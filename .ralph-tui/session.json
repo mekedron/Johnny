@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T17:20:42.271Z",
-  "currentIteration": 13,
+  "updatedAt": "2026-06-05T17:31:43.359Z",
+  "currentIteration": 14,
   "maxIterations": 10,
-  "tasksCompleted": 13,
+  "tasksCompleted": 14,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -170,8 +170,8 @@
       {
         "id": "Johnny-kgc.24",
         "title": "US-024: Answer LLM and TTS chain",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.25",
@@ -365,6 +365,16 @@
       "durationMs": 793670,
       "startedAt": "2026-06-05T16:45:46.327Z",
       "endedAt": "2026-06-05T16:58:59.997Z"
+    },
+    {
+      "iteration": 14,
+      "status": "completed",
+      "taskId": "Johnny-kgc.24",
+      "taskTitle": "US-024: Answer LLM and TTS chain",
+      "taskCompleted": true,
+      "durationMs": 1283626,
+      "startedAt": "2026-06-05T16:59:17.811Z",
+      "endedAt": "2026-06-05T17:20:41.437Z"
     }
   ],
   "skippedTaskIds": [],

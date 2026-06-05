@@ -38,6 +38,12 @@ from johnny.voice_pipeline.pipeline import (
     RouterDecision,
     VoicePipeline,
 )
+from johnny.voice_pipeline.transcript_sink import (
+    InMemoryTranscriptSink,
+    NoopTranscriptSink,
+    TranscriptRecord,
+    TranscriptSink,
+)
 from johnny.voice_pipeline.transport import (
     JohnnyTransport,
     LocalAudioTransport,
@@ -69,10 +75,12 @@ __all__ = [
     "EventBus",
     "InMemoryDecisionSink",
     "InMemoryEventBus",
+    "InMemoryTranscriptSink",
     "InMemoryUtteranceSink",
     "JohnnyTransport",
     "LocalAudioTransport",
     "NoopDecisionSink",
+    "NoopTranscriptSink",
     "NoopUtteranceSink",
     "PipelineConfig",
     "PipelineEvent",
@@ -81,6 +89,8 @@ __all__ = [
     "RouterDecisionMade",
     "SileroVAD",
     "TranscriptFinalized",
+    "TranscriptRecord",
+    "TranscriptSink",
     "UtteranceRecord",
     "UtteranceSink",
     "VADAnalyzer",
