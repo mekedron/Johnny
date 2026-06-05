@@ -156,6 +156,10 @@ after each iteration and it's included in prompts for context.
 - **Two-stage delete confirmation in a single button slot (US-034)**: `confirmingDelete: bool = $state(false)`. `handleDelete()` flips it on first click + returns; second click executes. Render-time: when `confirmingDelete`, the slot shows a warning span + "Yes, delete" + "Cancel" — when false, just "Delete". No modal, no `window.confirm` (which blocks the event loop and looks dated). Clears on error so the user can re-confirm. (Promoted from US-034.)
 - **CORS hides `Content-Disposition` from JS, not from `<a download>` (US-034)**: a server-set `Content-Disposition: attachment; filename="..."` is correctly sent on the wire but reading `res.headers.get('content-disposition')` from `fetch` returns `null` because CORS doesn't expose that header to script by default. The browser still honors it on direct navigation, so `<a href="..." download="...">` works fine. Don't reach for `Access-Control-Expose-Headers` just to verify headers from a console script — `curl -D -` from the host confirms the server is correct. (Promoted from US-034.)
 - **Docker compose without source mount: every code change needs `compose build` + `compose up -d` (US-034)**: neither `api` nor `frontend` mount source as a volume in this project — both `image`s are built from Dockerfiles. So a `docker compose restart api` reloads the *same* image. Workflow: edit → `docker compose build <service>` → `docker compose up -d <service>` → wait for healthcheck. The api container has the docker.sock mount but that's for the launcher (US-030), not source. (Promoted from US-034.)
+- **Three-hook test-fake pattern for multi-object SDK adapters (US-025)**: when the adapter wraps a heavy SDK whose surface spans multiple object types (Room + AudioSource + AudioStream + AudioFrame for LiveKit; equivalent groupings for any RTC / queue / message-broker library), expose ONE overridable hook per "interaction boundary" — `_connect()` for the session+resource construction, `_build_audio_stream(track)` for wrapping a remote object, `_build_audio_frame(...)` for outbound payload assembly. Tests subclass with the three overrides and inject in-memory fakes. Scales the `_create_client()` / `_load_model()` / `_spawn_process()` single-hook pattern up to multi-object SDKs without test-only abstractions leaking into production code. (Promoted from US-025.)
+- **`importlib.util.find_spec("pkg") is None` for "is the optional dep installed?" in tests (US-025)**: when a test asserts behaviour both with AND without an optional library installed, `import livekit.rtc` at module scope makes mypy strict fail with `import-not-found` in environments missing the lib. `importlib.util.find_spec("livekit")` returns `None` without importing anything — strict-mode clean, runtime-branchable, no `# type: ignore` needed. Pair with the adapter's lazy-import hook so production fails loudly only when the missing-dep path is actually selected. Same shape works for any optional dep with a test that must run in both states. (Promoted from US-025.)
+- **Env-driven transport / backend factory (US-025)**: when a feature has a default backend and an alternate "use stronger infra" backend, expose selection through ONE env var + one factory function (`create_transport_from_env`). The factory accepts both an injectable `env` dict (for unit tests — pass a literal map instead of monkeypatching `os.environ`) AND an injectable default-resource factory (e.g. `bridge_factory` for the local-mode default `MeetAudioBridge`). Both seams are orthogonal — production passes neither; tests pass exactly the ones they need. Returns the ABC (`JohnnyTransport`) so callers don't have to import either concrete type. Pattern works equally well for "default in-process, optional external service" pairs elsewhere (e.g. embedder backends, task queues, container launchers). (Promoted from US-025.)
+- **Opt-in smoke tests via a registered pytest marker (US-025)**: when an integration smoke needs real external infra (LiveKit dev server, etc.) that CI can't easily host, keep the smoke in a separate `test_<feature>_smoke.py` with module-level `pytestmark = pytest.mark.skipif(...)` that checks BOTH the opt-in env vars AND `find_spec()` for the heavy library. Register the marker in `pyproject.toml`'s `[tool.pytest.ini_options].markers` so `--strict-markers` doesn't warn. Module docstring documents the `docker run` setup recipe. Filter to just smokes via `pytest -m <marker>`. Default `pytest -q` collects them but skips cleanly. (Promoted from US-025.)
 
 ---
 
@@ -1212,4 +1216,113 @@ and a JSON export endpoint.
     any code change requires `docker compose build <service> && up -d
     <service>`. Reload alone does nothing. Same gotcha for the worker
     container.
+---
+
+## 2026-06-06 - Johnny-kgc.25
+- Implemented US-025 LiveKit transport adapter so the voice pipeline can run
+  inside a LiveKit room as an alternative to the meet-worker's local PulseAudio
+  bridge. The pipeline itself is unchanged — only the `JohnnyTransport` instance
+  swaps. Selection is driven by a single env var (`JOHNNY_TRANSPORT=livekit`)
+  with `local` (default) preserving existing behaviour.
+- Files changed:
+  - `backend/johnny/voice_pipeline/livekit_transport.py` (new) —
+    `LiveKitTransport` class lazy-imports `livekit.rtc` inside three overridable
+    hooks (`_connect`, `_build_audio_stream`, `_build_audio_frame`) so tests
+    inject fakes without ever touching the SDK. Capture uses the same bounded
+    `asyncio.Queue` + drop-oldest pattern as `MeetAudioBridge`. Playback
+    resamples on demand and stops cleanly on source errors.
+  - `backend/johnny/voice_pipeline/transport.py` — added env-driven factory
+    `create_transport_from_env()` plus constants (`JOHNNY_TRANSPORT`,
+    `LOCAL_TRANSPORT`, `LIVEKIT_TRANSPORT`, `SUPPORTED_TRANSPORTS`). Imports
+    `MeetAudioBridge` lazily inside the function so test code that only wants
+    the LiveKit path doesn't pull in audio-bridge module-load cost.
+  - `backend/johnny/voice_pipeline/__init__.py` — re-exports `LiveKitTransport`,
+    `livekit_config_from_env`, `create_transport_from_env`, and the four
+    transport constants.
+  - `backend/tests/voice_pipeline/test_livekit_transport.py` (new) — 39 tests
+    covering constructor validation, lifecycle (start/stop/async-ctx idempotent),
+    capture path (yields frames, drops oldest when bounded, ignores non-audio
+    tracks, returns on stop), playback path (writes to source, resamples,
+    accepts async iterables, stops on error, skips empty frames), env-driven
+    factory (defaults, local/livekit selection, case-insensitivity, missing-var
+    errors, unknown-value rejection), `livekit_config_from_env()` reading
+    `LIVEKIT_*` env vars, optional-SDK detection via `importlib.util.find_spec`,
+    audio-kind detection by name/value.
+  - `backend/tests/voice_pipeline/test_livekit_smoke.py` (new) — opt-in
+    pytest-marked smoke tests (`livekit_smoke` marker) skipped by default
+    unless `JOHNNY_LIVEKIT_SMOKE_URL` + `JOHNNY_LIVEKIT_SMOKE_TOKEN` are set AND
+    `livekit` is installed. Docstring documents `docker run livekit/livekit-server --dev`
+    setup recipe.
+  - `backend/pyproject.toml` — registered the `livekit_smoke` pytest marker so
+    `pytest --strict-markers` doesn't warn.
+  - `README.md` — added "Voice transport (US-025)" section with the one-line
+    env-var swap example and the local LiveKit dev-server smoke-test recipe.
+  - `.env.example` — documented `JOHNNY_TRANSPORT` + `LIVEKIT_URL` /
+    `LIVEKIT_TOKEN` / `LIVEKIT_ROOM` / `LIVEKIT_IDENTITY` with comments
+    explaining when they're required.
+  - `docker-compose.yml` — added the same five env vars to the shared
+    `x-backend-env` anchor so the API, worker, and (future) meet-worker
+    entrypoint all see them.
+- **Learnings:**
+  - **Three-hook test-fake pattern for SDK-backed transports (US-025)**: when
+    the transport wraps a heavy SDK whose surface spans multiple object types
+    (Room, AudioSource, AudioStream, AudioFrame), expose ONE hook per
+    "interaction boundary" — `_connect()` for room+source construction,
+    `_build_audio_stream(track)` for wrapping a remote track, `_build_audio_frame(...)`
+    for assembling the playback frame. Tests subclass with the three overrides
+    and inject in-memory fakes. Keeps the real adapter code free of test-only
+    abstractions while making every SDK interaction injectable. Same shape as
+    `FasterWhisperSTT._load_model` (one hook) and the cloud TTS adapters'
+    `_create_client` (one hook), scaled up to multi-object SDKs.
+  - **`importlib.util.find_spec(...) is None` for "is the optional dep
+    installed?" checks in tests**: when a test asserts behaviour both with AND
+    without an optional library, `import livekit.rtc` at module scope makes
+    mypy strict fail in environments where the library isn't installed. Use
+    `importlib.util.find_spec("livekit")` instead — it returns `None` without
+    importing anything, satisfies strict mode (no `import-not-found` warning),
+    and lets the test branch on availability at runtime. Pair with the
+    adapter's `_get_rtc_module()` lazy-import hook so production fails loudly
+    only when the LiveKit transport is actually selected.
+  - **Env-var factory ABI for transport selection**:
+    `create_transport_from_env(*, bridge_factory=None, env=None)` lets the
+    caller swap both the LocalAudioTransport's bridge construction (production
+    passes a configured `MeetAudioBridge`; tests can pass a fake bridge) AND
+    the env-source dict (production reads `os.environ`; tests pass a literal
+    dict). Two orthogonal injection seams in one factory — cleaner than
+    monkeypatching `os.environ` for unit tests and cleaner than constructing
+    transports manually for prod wiring. Returns a `JohnnyTransport` so the
+    caller doesn't have to import the concrete type.
+  - **Sentinel handler-registration in the lifecycle hook**: when the SDK's
+    event model is "decorator registers callback at construction time"
+    (`@room.on("track_subscribed") def on_track(...)`), the test's
+    `_RecordingTransport._connect` mirrors the production hook by calling
+    `room.on("track_subscribed", self._on_track_subscribed)` against the
+    fake room. Then `_FakeRoom.dispatch_track_subscribed(track)` synchronously
+    invokes the registered handler — same shape as the SDK would, but
+    deterministic. Without registering in `_connect`, the handler would never
+    be wired and `dispatch_track_subscribed` would fire into a void.
+  - **`livekit-rtc` audio kind detection without importing rtc.TrackKind**: the
+    SDK exposes `rtc.TrackKind.KIND_AUDIO` (enum), but tests can't import it
+    without the SDK installed. `_is_audio_kind(kind)` falls back through three
+    shapes: `.name` string contains "AUDIO", `.value` is integer 1 (the SDK
+    constant), or the value itself is a string with "AUDIO". Production and
+    test fakes both satisfy at least one branch. Pattern: when detecting enum
+    membership across SDK-vs-fake, use duck typing on `name`/`value` rather
+    than `isinstance(kind, rtc.TrackKind)`.
+  - **Lazy import inside factory function** for `MeetAudioBridge` in
+    `create_transport_from_env`: the factory module is in
+    `johnny.voice_pipeline.transport` which is a "pipeline-side" module. Moving
+    the `MeetAudioBridge` import inside the function (rather than at module
+    top) avoids creating a hard `voice_pipeline → meet_worker` import path
+    for callers that only want the LiveKit transport. The `TYPE_CHECKING`
+    block already imports it for type annotations; the runtime import only
+    fires when the local path is actually selected.
+  - **Opt-in smoke tests via a registered pytest marker**: smoke tests that
+    need real external infra (LiveKit dev server, etc.) live in a separate
+    `test_livekit_smoke.py` file with a `pytestmark = pytest.mark.skipif(...)`
+    at module level that checks env vars AND `find_spec("livekit")`. Register
+    the marker in `pyproject.toml`'s `[tool.pytest.ini_options].markers` so
+    `--strict-markers` doesn't warn. Filter to just smoke tests via
+    `pytest -m livekit_smoke` or `pytest -k livekit_smoke`. Pattern works for
+    any "test needs external service that CI can't easily provide".
 ---

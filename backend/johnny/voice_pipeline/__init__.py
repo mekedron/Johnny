@@ -44,6 +44,10 @@ from johnny.voice_pipeline.events import (
     TranscriptFinalized,
     event_to_dict,
 )
+from johnny.voice_pipeline.livekit_transport import (
+    LiveKitTransport,
+    livekit_config_from_env,
+)
 from johnny.voice_pipeline.pipeline import (
     APPROVAL_REQUIRED_MODE,
     DEFAULT_CONFIDENCE_THRESHOLD,
@@ -64,8 +68,14 @@ from johnny.voice_pipeline.transcript_sink import (
     TranscriptSink,
 )
 from johnny.voice_pipeline.transport import (
+    DEFAULT_TRANSPORT,
+    LIVEKIT_TRANSPORT,
+    LOCAL_TRANSPORT,
+    SUPPORTED_TRANSPORTS,
+    TRANSPORT_ENV_VAR,
     JohnnyTransport,
     LocalAudioTransport,
+    create_transport_from_env,
 )
 from johnny.voice_pipeline.utterance_sink import (
     InMemoryUtteranceSink,
@@ -86,11 +96,16 @@ __all__ = [
     "DEFAULT_CONFIDENCE_THRESHOLD",
     "DEFAULT_MODE",
     "DEFAULT_TRANSCRIPT_WINDOW_SIZE",
+    "DEFAULT_TRANSPORT",
     "DEFAULT_VAD_THRESHOLD",
     "LIMITED_AUTO_SPEAK_MODE",
     "LISTEN_ONLY_MODE",
+    "LIVEKIT_TRANSPORT",
+    "LOCAL_TRANSPORT",
     "NON_SPEAKING_MODES",
     "SUGGEST_ONLY_MODE",
+    "SUPPORTED_TRANSPORTS",
+    "TRANSPORT_ENV_VAR",
     "AgentSpoke",
     "AgentSuggested",
     "ApprovalGate",
@@ -111,6 +126,7 @@ __all__ = [
     "InMemoryTranscriptSink",
     "InMemoryUtteranceSink",
     "JohnnyTransport",
+    "LiveKitTransport",
     "LocalAudioTransport",
     "NoopApprovalGate",
     "NoopDecisionSink",
@@ -132,5 +148,7 @@ __all__ = [
     "VADAnalyzer",
     "VADResult",
     "VoicePipeline",
+    "create_transport_from_env",
     "event_to_dict",
+    "livekit_config_from_env",
 ]

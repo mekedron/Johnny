@@ -2,20 +2,32 @@
 
 The pipeline is transport-agnostic. The default :class:`LocalAudioTransport`
 bridges to :class:`MeetAudioBridge` (PulseAudio inside the meet-worker
-container). The same interface is implemented by US-025's
-``LiveKitTransport`` so the pipeline can run inside a LiveKit room when
-stronger realtime infra is wanted; the only thing that changes is the
-transport instance handed to :class:`VoicePipeline`.
+container). The same interface is implemented by
+:class:`johnny.voice_pipeline.livekit_transport.LiveKitTransport` so the
+pipeline can run inside a LiveKit room when stronger realtime infra is
+wanted; the only thing that changes is the transport instance handed to
+:class:`VoicePipeline`.
+
+US-025 calls for "transport selection is a single config flag": set
+``JOHNNY_TRANSPORT=livekit`` and have the meet-worker entrypoint call
+:func:`create_transport_from_env`, no pipeline code changes required.
 """
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterable, AsyncIterator, Iterable
+from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from johnny.meet_worker.audio_bridge import MeetAudioBridge
+
+DEFAULT_TRANSPORT = "local"
+LIVEKIT_TRANSPORT = "livekit"
+LOCAL_TRANSPORT = "local"
+TRANSPORT_ENV_VAR = "JOHNNY_TRANSPORT"
+SUPPORTED_TRANSPORTS: frozenset[str] = frozenset({LOCAL_TRANSPORT, LIVEKIT_TRANSPORT})
 
 
 class JohnnyTransport(ABC):
@@ -100,7 +112,93 @@ class LocalAudioTransport(JohnnyTransport):
         await self._bridge.play_frames(frames, source_rate=source_rate)
 
 
+def create_transport_from_env(
+    *,
+    bridge_factory: Callable[[], MeetAudioBridge] | None = None,
+    env: dict[str, str] | None = None,
+) -> JohnnyTransport:
+    """Build a :class:`JohnnyTransport` from a single env var.
+
+    Reads ``JOHNNY_TRANSPORT`` (default ``local``) and returns:
+
+    * ``local`` → :class:`LocalAudioTransport` wrapping the
+      :class:`MeetAudioBridge` produced by ``bridge_factory`` (defaults
+      to constructing :class:`MeetAudioBridge` with the production
+      Pulse defaults). This is the development default; nothing changes
+      for existing callers.
+    * ``livekit`` →
+      :class:`johnny.voice_pipeline.livekit_transport.LiveKitTransport`
+      configured from ``LIVEKIT_URL`` / ``LIVEKIT_TOKEN`` /
+      ``LIVEKIT_ROOM`` / ``LIVEKIT_IDENTITY``.
+
+    Any other value raises :class:`ValueError` so misconfiguration fails
+    loudly at startup instead of silently falling back. ``env`` is an
+    optional override used by tests; production passes ``None`` so we
+    read :data:`os.environ`.
+    """
+    env_map = env if env is not None else dict(os.environ)
+    name = env_map.get(TRANSPORT_ENV_VAR, DEFAULT_TRANSPORT).strip().lower()
+    if name in {"", LOCAL_TRANSPORT}:
+        from johnny.meet_worker.audio_bridge import MeetAudioBridge
+
+        bridge = bridge_factory() if bridge_factory is not None else MeetAudioBridge()
+        return LocalAudioTransport(bridge)
+    if name == LIVEKIT_TRANSPORT:
+        from johnny.voice_pipeline.livekit_transport import (
+            LiveKitTransport,
+            livekit_config_from_env,
+        )
+
+        cfg = _resolve_livekit_config(env_map, livekit_config_from_env)
+        return LiveKitTransport(
+            url=cfg["url"],
+            token=cfg["token"],
+            room_name=cfg["room_name"] or None,
+            identity=cfg["identity"],
+        )
+    raise ValueError(
+        f"{TRANSPORT_ENV_VAR}={name!r} is not supported; "
+        f"choose one of {sorted(SUPPORTED_TRANSPORTS)}"
+    )
+
+
+def _resolve_livekit_config(
+    env_map: dict[str, str],
+    default_loader: Callable[[], dict[str, str]],
+) -> dict[str, str]:
+    """Look up LiveKit env vars from ``env_map`` (test-injected) or fallback.
+
+    Keeping the env-source override here (rather than mutating
+    :data:`os.environ` inside tests) makes ``create_transport_from_env``
+    deterministic and unit-testable without monkeypatching.
+    """
+    if env_map is os.environ or env_map == dict(os.environ):
+        return default_loader()
+    url = env_map.get("LIVEKIT_URL", "").strip()
+    token = env_map.get("LIVEKIT_TOKEN", "").strip()
+    room_name = env_map.get("LIVEKIT_ROOM", "").strip()
+    identity = env_map.get("LIVEKIT_IDENTITY", "").strip() or "johnny-bot"
+    missing: list[str] = []
+    if not url:
+        missing.append("LIVEKIT_URL")
+    if not token:
+        missing.append("LIVEKIT_TOKEN")
+    if missing:
+        raise ValueError(
+            "JOHNNY_TRANSPORT=livekit requires "
+            + ", ".join(missing)
+            + " to be set"
+        )
+    return {"url": url, "token": token, "room_name": room_name, "identity": identity}
+
+
 __all__ = [
+    "DEFAULT_TRANSPORT",
+    "LIVEKIT_TRANSPORT",
+    "LOCAL_TRANSPORT",
+    "SUPPORTED_TRANSPORTS",
+    "TRANSPORT_ENV_VAR",
     "JohnnyTransport",
     "LocalAudioTransport",
+    "create_transport_from_env",
 ]

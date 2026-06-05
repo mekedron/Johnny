@@ -101,6 +101,38 @@ Set `tool_format=hermes` for Hermes-style fine-tunes that emit
 `<tool_call>{...}</tool_call>` markers instead of OpenAI-native
 `tool_calls`.
 
+## Voice transport (US-025)
+
+The voice pipeline runs over a swappable transport. The default —
+`LocalAudioTransport` wrapping the meet-worker's PulseAudio bridge —
+is selected automatically. To run the pipeline inside a LiveKit room
+instead, set one env var:
+
+```bash
+JOHNNY_TRANSPORT=livekit \
+LIVEKIT_URL=wss://livekit.example \
+LIVEKIT_TOKEN=<join-token> \
+LIVEKIT_ROOM=<room-name> \
+LIVEKIT_IDENTITY=johnny-bot
+```
+
+`johnny.voice_pipeline.create_transport_from_env()` reads `JOHNNY_TRANSPORT`
+and returns either `LocalAudioTransport` (default `local`) or
+`LiveKitTransport` (`livekit`); the pipeline doesn't change. The LiveKit
+SDK (`pip install livekit`) is only required when this flag is set.
+
+### Local LiveKit dev server + smoke test
+
+```bash
+docker run --rm -p 7880:7880 -p 7881:7881 -p 7882:7882/udp \
+    -e LIVEKIT_KEYS="devkey: secret" \
+    livekit/livekit-server --dev
+
+JOHNNY_LIVEKIT_SMOKE_URL=ws://localhost:7880 \
+JOHNNY_LIVEKIT_SMOKE_TOKEN=<token-minted-with-livekit-cli> \
+uv run pytest -k livekit_smoke -v
+```
+
 ## Quality gates
 
 Backend (from `backend/`):
