@@ -31,6 +31,21 @@ class Settings(BaseSettings):
             "print(Fernet.generate_key().decode())\""
         ),
     )
+    google_client_id: str | None = Field(
+        default=None,
+        description="OAuth 2.0 client ID for the desktop Google client (US-005).",
+    )
+    google_client_secret: str | None = Field(
+        default=None,
+        description="OAuth 2.0 client secret for the desktop Google client (US-005).",
+    )
+    google_oauth_redirect_uri: str = Field(
+        default="http://localhost:8000/auth/google/callback",
+        description=(
+            "Redirect URI the Google consent screen sends the user back to. "
+            "Must match a registered URI on the OAuth client."
+        ),
+    )
 
 
 @lru_cache(maxsize=1)

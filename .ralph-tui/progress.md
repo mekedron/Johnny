@@ -99,6 +99,13 @@ after each iteration and it's included in prompts for context.
 - **PATCH endpoint cross-field validation must run AFTER applying the patch**: Pydantic `@model_validator(mode="after")` on a PATCH payload sees only the fields the client sent — it can't check rules like "mode=X requires non-empty list Y" when either field may be omitted. Pattern: parse permissively, apply the patch to the ORM row in memory, then validate `row.field_a` against `row.field_b`, then `session.rollback()` + `raise HTTPException(422)` *before* `session.flush()`. The same rule on the matching POST endpoint *can* use a model validator because the create payload carries every field. (Promoted from US-010.)
 - **FastAPI lifespan + resilient seeders**: The modern startup hook is `@asynccontextmanager async def lifespan(app): ...; yield` registered via `FastAPI(lifespan=lifespan)`. Import DB modules (`session_scope`, models) *inside* the function so `import app.main` stays decoupled from the engine. Wrap seeders in `try/except Exception` and log a warning on failure — boot must succeed even if the DB hasn't been migrated yet, since the API container can start before migrations land in fresh deployments. (Promoted from US-010.)
 - **Cascade-delete with `?force=true` when the FK is non-nullable + RESTRICT**: `meeting_configs.profile_template_id` is NOT NULL with `ondelete="RESTRICT"`, so neither real cascade-delete nor "detach to NULL" works. The pragmatic pattern: default DELETE returns HTTP 409 with structured detail `{"message": "...", "meeting_config_count": N}` so the UI can warn ("Used by N meeting configs — delete anyway?"); `?force=true` explicitly `DELETE`s the dependents first, then the parent row. Simpler than adding a `deleted_at` soft-delete column for an MVP, and the structured detail lets the frontend branch on the count without parsing the message. (Promoted from US-010.)
+- **OAuth helpers vs persistent client split (US-005 pattern)**: `app/services/google_oauth.py` is SQLAlchemy-free — pure async helpers that talk HTTP to Google (`build_authorize_url`, `exchange_code_for_tokens`, `refresh_access_token`, `fetch_userinfo`, `revoke_token`). `app/services/google_client.py` binds those helpers to a `GoogleAccount` row + a SQLAlchemy session, owns refresh-token rotation persistence, and is the single entrypoint for all Google API calls. Mirrors the `app/providers/base.py` (ABCs, no SQLAlchemy) / `app/providers/loader.py` (SQL-backed) split — keeps voice-pipeline / meet-worker code free of SQLAlchemy if they only need OAuth math. (Promoted from US-005.)
+- **httpx helper "client ownership" pattern**: Each top-level async helper accepts `http_client: httpx.AsyncClient | None = None`. When `None`, builds a per-call client and closes it in `finally`; when supplied, just uses it and leaves the caller responsible for closing. Production code shares a long-lived client when desired (e.g. inside `GoogleApiClient`); tests inject `httpx.AsyncClient(transport=httpx.MockTransport(handler))`. Cleaner than monkey-patching httpx internals. (Promoted from US-005.)
+- **401-retry with mid-request refresh in shared API client**: `GoogleApiClient.request` fetches a token, sends the request, and if the response is 401 forces a fresh refresh and retries *exactly once*. Google occasionally invalidates tokens server-side before the stated expiry; the single retry keeps every caller of `client.request()` free of refresh logic. Other status codes (403, 5xx) are returned unchanged for the caller to inspect. The refresh persists the rotated access token (and refresh token, if Google issued a new one) via `session.flush()` so subsequent calls in the same request lifecycle see the updated state. (Promoted from US-005.)
+- **SQLite drops timezones from `DateTime(timezone=True)`**: On PostgreSQL the column is `TIMESTAMPTZ`; on SQLite the value round-trips as naive. Any production code that compares a database-loaded `expires_at` against `datetime.now(UTC)` must defensively coerce `expires_at.tzinfo is None` → `replace(tzinfo=UTC)` before comparing. Same goes for assertions in unit tests that load and compare datetimes. Doesn't matter for `INSERT` (SQLAlchemy serialises both naive and tz-aware), only for `SELECT`. (Promoted from US-005.)
+- **Cascade-aware single-table SQLite fixture**: `Base.metadata.create_all(bind=eng, tables=[Model.__table__])` works *unless* the model has a `relationship(cascade="all, delete-orphan")` to another table, in which case `session.delete()` issues a `SELECT FROM child` that requires the child table to exist too. `GoogleAccount.calendar_events` is the canonical example — any test fixture that does `session.delete(account)` must include `CalendarEvent.__table__` in the `tables=[...]` arg even if the test never touches calendar events. Easier to spot when you remember `delete-orphan` requires loading first. (Promoted from US-005.)
+- **In-memory pending state for single-process OAuth flows**: A module-level `dict[str, _PendingState]` (with `_remember_state` / `_consume_state` / `_peek_state` helpers) is sufficient for the OAuth callback round-trip in a single-user, single-process app. Pop on use so replays fail. An `autouse=True` fixture clears the dict between tests to preserve isolation. Sufficient until we need multi-process or HA — then swap for Redis with TTL. Don't reach for a session-storage abstraction prematurely. (Promoted from US-005.)
+- **`auth_module._pending_states` access in tests is a feature, not a smell**: Tests need to pre-seed the in-memory state map (to simulate "user clicked /start, server remembered, now hitting /callback") and inspect it post-call (to assert "state was consumed"). Importing the module as `from app.api import auth as auth_module` and reaching into `auth_module._pending_states` / `_remember_state` / `_peek_state` is the cleanest way — adding a public API just for tests pollutes the surface. The leading-underscore name signals "private to the module" and the test integration is documented in the test file. (Promoted from US-005.)
 
 ---
 
@@ -626,4 +633,113 @@ after each iteration and it's included in prompts for context.
 ### Codebase pattern promotions
 - **Patch endpoint validates against post-merge row state**: When a PATCH may omit fields but the validity rule is cross-field (e.g. "mode=X requires non-empty list Y"), don't try to enforce on the payload — apply patch to the row, then check `row.field_a` against `row.field_b`, then `session.rollback()` + `raise HTTPException(422)` before `session.flush()`. Avoids the dead-end of trying to write a Pydantic validator that knows the current DB state.
 - **FastAPI lifespan as the modern startup hook**: `@asynccontextmanager async def lifespan(app): ...; yield; ...` registered via `FastAPI(lifespan=lifespan)`. Defer DB imports until inside the function so importing `app.main` stays decoupled from the DB engine init. Wrap seeders in `try/except` so a not-yet-migrated DB doesn't crash boot — log a warning and continue.
+---
+
+## 2026-06-05 - Johnny-kgc.5
+**US-005 Google OAuth 2.0 desktop flow.**
+
+Implemented the desktop OAuth 2.0 authorization-code flow against
+Google's standard endpoints, with a shared client wrapper that all
+future Google API calls (calendar, userinfo) go through to get
+transparent refresh-token rotation.
+
+### Files created
+- `backend/app/services/google_oauth.py` — pure async helpers:
+  `build_authorize_url`, `exchange_code_for_tokens`, `refresh_access_token`,
+  `fetch_userinfo`, `revoke_token`. All accept an optional `http_client`
+  so `httpx.MockTransport` can drive them in tests; the default
+  constructs a per-call `httpx.AsyncClient` and closes it in `finally`.
+  Errors map to `GoogleOAuthError`.
+- `backend/app/services/google_client.py` — `GoogleApiClient` wrapper +
+  `upsert_account_from_tokens` + `revoke_account`. The client is bound
+  to one `GoogleAccount` row and one SQLAlchemy session; on every
+  `request()` it checks token freshness (with 60s leeway), refreshes
+  if needed, retries once on 401, and persists rotated refresh tokens
+  back to the encrypted row.
+- `backend/app/api/auth.py` — `POST /auth/google/start` returns the
+  consent URL with a server-generated `state`; `POST /auth/google/callback`
+  exchanges the code, fetches userinfo, and upserts a `google_accounts`
+  row. State map is in-memory (single-user, single-process). Returns
+  `AccountRead` (no token material exposed).
+- `backend/tests/services/test_google_oauth.py` (16 tests),
+  `backend/tests/services/test_google_client.py` (14 tests),
+  `backend/tests/api/test_auth.py` (13 tests).
+
+### Files modified
+- `backend/app/config.py` — added `google_client_id`,
+  `google_client_secret`, `google_oauth_redirect_uri`.
+- `backend/app/main.py` — registered `auth_router`.
+
+### Learnings
+- **httpx over `google-auth` SDK for OAuth flows**: The `google-auth`
+  package pulls a long transitive dependency chain
+  (`requests`+`cachetools`+`pyasn1`+...). Since the desktop OAuth
+  protocol is just POST to a couple of well-known endpoints with form
+  data and bearer tokens for userinfo, doing it directly via httpx
+  is ~50 lines per helper and keeps `httpx.MockTransport` available
+  for tests. Mirrors the existing cloud-LLM adapter pattern.
+- **Refresh-token rotation: persist whichever token Google emits**:
+  Google's token endpoint *usually* omits `refresh_token` in
+  refresh responses (rotation is rare), but occasionally returns
+  a new one. The parser uses `fallback_refresh_token` so callers
+  always have a valid token to persist, but `GoogleApiClient._refresh`
+  detects rotation (`new != old`) and re-encrypts. Tests cover both
+  paths.
+- **SQLite drops timezones from `DateTime(timezone=True)`**: The
+  ORM column is `DateTime(timezone=True)` so PostgreSQL stores
+  `TIMESTAMPTZ`, but SQLite stores text and returns naive values
+  on read. `_access_token_is_fresh` defensively coerces naive
+  `expires_at` to UTC before comparing. Same pattern needed in tests
+  that compare round-tripped datetimes.
+- **Cascade-aware single-table SQLite fixtures**: `GoogleAccount` has a
+  `calendar_events: relationship(cascade="all, delete-orphan")`.
+  `session.delete(account)` then issues a `SELECT FROM calendar_events`
+  to load related rows. The single-table fixture pattern doesn't work
+  alone — include `CalendarEvent.__table__` in the `tables=[...]`
+  arg even if the test never touches calendar events. Same gotcha
+  applies to any FK relationship with `cascade="all, delete-orphan"`.
+- **FastAPI `Depends(get_settings)` doesn't reach module-level
+  `_get_crypto()`**: `get_crypto` in `app/api/deps.py` calls the
+  module-level `app.security.crypto.get_crypto`, which reads
+  `get_settings()` directly (not via `Depends`). Overriding only
+  `app.dependency_overrides[get_settings]` won't propagate to the
+  crypto dep — tests that exercise the no-FERNET-KEY path must
+  also override `get_crypto` (or set the global `Settings`).
+- **In-memory pending-state map for OAuth `state`**: Single-user,
+  single-process means a `dict[str, _PendingState]` at module
+  level is sufficient. Pop on use (`_consume_state`) so replays
+  fail. The auth tests autoclear the map in a fixture so test
+  isolation is preserved. If we ever scale to multi-process,
+  swap for Redis with TTL.
+- **Verbatim secret check on response**: The provider tests
+  asserted `assert "sk-test" not in resp.text` to guarantee no
+  secret leaks. The OAuth tests apply the same idea: after
+  `/callback`, assert the JSON has no `refresh_token` /
+  `access_token` / `*_encrypted` keys. Cheap and catches future
+  drift if someone adds a "debug" field to `AccountRead`.
+
+### Codebase pattern promotions
+- **Auth & API client split — OAuth helpers vs persistent wrapper**:
+  `app/services/google_oauth.py` is pure (no SQLAlchemy, no DB) —
+  it just talks HTTP to Google. `app/services/google_client.py`
+  binds an OAuth flow to a `GoogleAccount` row + a SQLAlchemy
+  session and handles persistence of rotated tokens. This split
+  mirrors the existing provider-base (ABCs in `app/providers/base.py`,
+  SQL-backed loader in `app/providers/loader.py`) and keeps the
+  voice pipeline / future meet-worker free of SQLAlchemy if they
+  only need OAuth math.
+- **httpx adapter "ownership" pattern for top-level helpers**:
+  Each helper accepts `http_client: httpx.AsyncClient | None = None`.
+  When `None`, the helper constructs a per-call client and closes
+  it in `finally`; when supplied, the helper just uses it and
+  leaves the caller to close. Lets production code share a long-lived
+  client when desired (e.g. inside `GoogleApiClient`) while tests
+  inject a `httpx.MockTransport`-backed client.
+- **401-retry with mid-request refresh**: `GoogleApiClient.request`
+  fetches a token, sends the request, and if the response is 401
+  forces a fresh refresh and retries *exactly once*. Google
+  occasionally invalidates tokens server-side before the stated
+  expiry; the single retry keeps the user-facing API code free
+  of refresh logic. Other status codes (403, 5xx) are returned
+  unchanged for the caller to handle.
 ---
