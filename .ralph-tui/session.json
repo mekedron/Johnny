@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T15:11:46.660Z",
-  "currentIteration": 4,
+  "updatedAt": "2026-06-05T15:20:34.834Z",
+  "currentIteration": 5,
   "maxIterations": 10,
-  "tasksCompleted": 4,
+  "tasksCompleted": 5,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -152,8 +152,8 @@
       {
         "id": "Johnny-kgc.21",
         "title": "US-021: Audio bridge",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.22",
@@ -275,6 +275,16 @@
       "durationMs": 468007,
       "startedAt": "2026-06-05T14:49:53.729Z",
       "endedAt": "2026-06-05T14:57:41.736Z"
+    },
+    {
+      "iteration": 5,
+      "status": "completed",
+      "taskId": "Johnny-kgc.21",
+      "taskTitle": "US-021: Audio bridge",
+      "taskCompleted": true,
+      "durationMs": 824000,
+      "startedAt": "2026-06-05T14:58:01.828Z",
+      "endedAt": "2026-06-05T15:11:45.828Z"
     }
   ],
   "skippedTaskIds": [],

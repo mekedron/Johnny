@@ -1,0 +1,382 @@
+"""Abstract base classes and registry for swappable STT / LLM / TTS providers.
+
+The voice pipeline never imports a concrete adapter. It depends only on the
+:class:`STTProvider`, :class:`LLMProvider`, and :class:`TTSProvider` ABCs and
+the :class:`ProviderRegistry` defined here. Adapter modules call
+``get_registry().register(kind, name, factory)`` at import time; the runtime
+resolves rows in ``provider_credentials`` against the registry to instantiate
+live providers.
+
+Audio frames carried by :class:`STTProvider` and :class:`TTSProvider` are
+16 kHz mono signed-16-bit little-endian PCM, matching the meet-worker audio
+bridge format.
+"""
+
+from __future__ import annotations
+
+import json
+from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator, Callable, Iterable, Sequence
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.db.models import ProviderCredential, ProviderKind
+
+PCM_SAMPLE_RATE_HZ = 16_000
+PCM_SAMPLE_WIDTH_BYTES = 2
+PCM_CHANNELS = 1
+
+ChatRole = Literal["system", "user", "assistant", "tool"]
+
+
+# --- Errors ---------------------------------------------------------------
+
+
+class ProviderError(Exception):
+    """Base class for any provider-side failure."""
+
+
+class STTError(ProviderError):
+    """Raised when an STT adapter fails (auth, transport, decode, etc.)."""
+
+
+class LLMError(ProviderError):
+    """Raised when an LLM adapter fails (auth, rate limit, schema, etc.)."""
+
+
+class TTSError(ProviderError):
+    """Raised when a TTS adapter fails (auth, transport, synth, etc.)."""
+
+
+class UnknownProviderError(ProviderError, KeyError):
+    """No factory is registered for the requested ``(kind, name)`` pair."""
+
+    def __init__(self, kind: ProviderKind, name: str) -> None:
+        self.kind = kind
+        self.name = name
+        super().__init__(f"no provider registered for {kind.value}:{name}")
+
+
+# --- Value objects ---------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptEvent:
+    """A unit of STT output, partial or final.
+
+    ``timestamp_ms`` is the offset since the start of the audio stream, not
+    wall-clock time. ``confidence`` is provider-specific in [0, 1] when known.
+    """
+
+    text: str
+    is_final: bool
+    timestamp_ms: int
+    confidence: float | None = None
+    speaker: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolDefinition:
+    """Declarative tool/function the LLM is permitted to call."""
+
+    name: str
+    description: str
+    parameters: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCall:
+    """A single tool/function invocation requested by the LLM."""
+
+    id: str
+    name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ChatMessage:
+    """A single turn in an LLM chat context."""
+
+    role: ChatRole
+    content: str | None = None
+    tool_calls: tuple[ToolCall, ...] = field(default_factory=tuple)
+    tool_call_id: str | None = None
+    name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LLMResponse:
+    """A completed LLM response.
+
+    ``text`` always carries the model's free-text output (empty string when
+    the response is pure tool calls). ``structured_output`` is the parsed
+    object when ``response_format`` was supplied; otherwise ``None``.
+    """
+
+    text: str
+    finish_reason: str
+    tool_calls: tuple[ToolCall, ...] = field(default_factory=tuple)
+    structured_output: Any = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderConfig:
+    """Adapter-agnostic configuration passed to every provider factory.
+
+    ``credentials`` holds decrypted secrets (api keys, tokens) freshly
+    materialized from the DB. ``options`` carries non-secret settings such
+    as ``model``, ``voice_id``, ``base_url``, or sample-rate overrides.
+    ``display_name`` is the user-facing label for logging / UI surfaces.
+    """
+
+    kind: ProviderKind
+    provider_name: str
+    display_name: str
+    credentials: dict[str, str] = field(default_factory=dict)
+    options: dict[str, Any] = field(default_factory=dict)
+
+
+# --- ABCs ------------------------------------------------------------------
+
+
+class _ProviderBase(ABC):
+    """Shared lifecycle for STT / LLM / TTS providers."""
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Canonical provider name (e.g. ``"deepgram"``, ``"openai"``)."""
+
+    async def close(self) -> None:  # noqa: B027 — intentional non-abstract hook
+        """Release any held resources (HTTP sessions, model handles).
+
+        Default is a no-op so simple stateless adapters need not override.
+        """
+
+
+class STTProvider(_ProviderBase):
+    """Streaming speech-to-text adapter contract."""
+
+    @abstractmethod
+    def transcribe_stream(
+        self,
+        audio_iter: AsyncIterator[bytes],
+    ) -> AsyncIterator[TranscriptEvent]:
+        """Stream :class:`TranscriptEvent` objects from PCM input.
+
+        ``audio_iter`` yields chunks of 16 kHz mono signed-16-bit PCM.
+        Implementations are async generators (``async def`` with ``yield``);
+        the ABC just declares the contract. Both partial and final events
+        may be emitted; consumers identify finals via ``event.is_final``.
+        """
+
+
+class LLMProvider(_ProviderBase):
+    """Chat-completion adapter contract."""
+
+    @abstractmethod
+    async def chat(
+        self,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[ToolDefinition] | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        """Produce a chat completion.
+
+        ``tools`` enables function/tool calling. ``response_format`` is a
+        JSON Schema describing the expected structured output; the parsed
+        object is returned on :attr:`LLMResponse.structured_output`.
+        Adapters raise :class:`LLMError` on transport / schema failure.
+        """
+
+
+class TTSProvider(_ProviderBase):
+    """Streaming text-to-speech adapter contract."""
+
+    @abstractmethod
+    def synthesize_stream(
+        self,
+        text: str,
+        voice_id: str | None = None,
+    ) -> AsyncIterator[bytes]:
+        """Stream 16 kHz mono signed-16-bit PCM frames for ``text``.
+
+        ``voice_id`` overrides the provider-default voice. Implementations
+        are async generators; the ABC declares the contract only.
+        """
+
+
+ProviderInstance = STTProvider | LLMProvider | TTSProvider
+"""Runtime union of every provider ABC."""
+
+ProviderFactory = Callable[[ProviderConfig], ProviderInstance]
+"""A callable that produces a configured provider instance.
+
+Adapter classes themselves are factories — ``DeepgramSTT(config)`` returns an
+:class:`STTProvider` because ``__init__`` matches ``Callable[..., Self]``.
+"""
+
+
+# --- Registry --------------------------------------------------------------
+
+
+class ProviderRegistry:
+    """Maps ``(ProviderKind, provider_name)`` to a factory callable.
+
+    Adapter modules register their factories at import time (or via an
+    explicit registration hook). Loading at startup is a two-step dance:
+    register the available factories first, then call
+    :func:`load_active_providers` to materialize live instances from the
+    active rows in ``provider_credentials``.
+    """
+
+    def __init__(self) -> None:
+        self._factories: dict[tuple[ProviderKind, str], ProviderFactory] = {}
+
+    def register(
+        self,
+        kind: ProviderKind,
+        name: str,
+        factory: ProviderFactory,
+        *,
+        replace: bool = False,
+    ) -> None:
+        """Register ``factory`` under ``(kind, name)``.
+
+        Raises :class:`ValueError` if a factory is already registered and
+        ``replace`` is False — protects against accidental shadowing when
+        two adapter modules use the same name.
+        """
+        key = (kind, name)
+        if key in self._factories and not replace:
+            raise ValueError(
+                f"provider already registered for {kind.value}:{name}; "
+                "pass replace=True to override"
+            )
+        self._factories[key] = factory
+
+    def unregister(self, kind: ProviderKind, name: str) -> None:
+        """Remove the factory for ``(kind, name)`` if present."""
+        self._factories.pop((kind, name), None)
+
+    def get(self, kind: ProviderKind, name: str) -> ProviderFactory:
+        """Return the factory for ``(kind, name)`` or raise :class:`UnknownProviderError`."""
+        try:
+            return self._factories[(kind, name)]
+        except KeyError as exc:
+            raise UnknownProviderError(kind, name) from exc
+
+    def has(self, kind: ProviderKind, name: str) -> bool:
+        return (kind, name) in self._factories
+
+    def names(self, kind: ProviderKind) -> list[str]:
+        """All provider names registered under ``kind``, sorted for stability."""
+        return sorted(n for k, n in self._factories if k == kind)
+
+    def kinds(self) -> set[ProviderKind]:
+        """All distinct kinds present in the registry."""
+        return {k for k, _ in self._factories}
+
+    def clear(self) -> None:
+        """Remove every registration. Intended for tests only."""
+        self._factories.clear()
+
+    def instantiate(self, config: ProviderConfig) -> ProviderInstance:
+        """Look up the factory for ``config`` and invoke it."""
+        factory = self.get(config.kind, config.provider_name)
+        return factory(config)
+
+
+_global_registry = ProviderRegistry()
+
+
+def get_registry() -> ProviderRegistry:
+    """Return the process-wide :class:`ProviderRegistry` singleton."""
+    return _global_registry
+
+
+# --- Startup loader --------------------------------------------------------
+
+
+CredentialDecryptor = Callable[[str], dict[str, str]]
+
+
+def _identity_decryptor(blob: str) -> dict[str, str]:
+    """Default decryptor: assume ``credentials_encrypted`` is already a JSON map.
+
+    Real deployments inject a Fernet-backed decryptor via :func:`load_active_providers`'s
+    ``decrypt`` parameter. This default exists for tests that don't exercise the
+    encryption layer (added in US-005 / US-018).
+    """
+    parsed = json.loads(blob)
+    if not isinstance(parsed, dict):
+        raise ValueError("credentials_encrypted must decode to a JSON object")
+    return {str(k): str(v) for k, v in parsed.items()}
+
+
+def load_active_providers(
+    session: Session,
+    *,
+    registry: ProviderRegistry | None = None,
+    decrypt: CredentialDecryptor | None = None,
+    kinds: Iterable[ProviderKind] | None = None,
+) -> dict[ProviderKind, ProviderInstance]:
+    """Materialize the active provider per kind from ``provider_credentials``.
+
+    Returns a mapping of :class:`ProviderKind` to the instantiated provider.
+    Kinds with no active row are absent from the result. Raises
+    :class:`UnknownProviderError` if an active row references a
+    ``provider_name`` that is not registered, so misconfiguration fails fast
+    at startup rather than mid-meeting.
+    """
+    reg = registry if registry is not None else get_registry()
+    dec = decrypt if decrypt is not None else _identity_decryptor
+
+    stmt = select(ProviderCredential).where(ProviderCredential.is_active.is_(True))
+    if kinds is not None:
+        stmt = stmt.where(ProviderCredential.kind.in_(list(kinds)))
+
+    active: dict[ProviderKind, ProviderInstance] = {}
+    for row in session.scalars(stmt).all():
+        config = ProviderConfig(
+            kind=row.kind,
+            provider_name=row.provider_name,
+            display_name=row.display_name,
+            credentials=dec(row.credentials_encrypted),
+            options=dict(row.config or {}),
+        )
+        instance = reg.instantiate(config)
+        active[row.kind] = instance
+    return active
+
+
+__all__ = [
+    "ChatMessage",
+    "ChatRole",
+    "CredentialDecryptor",
+    "LLMError",
+    "LLMProvider",
+    "LLMResponse",
+    "PCM_CHANNELS",
+    "PCM_SAMPLE_RATE_HZ",
+    "PCM_SAMPLE_WIDTH_BYTES",
+    "ProviderConfig",
+    "ProviderError",
+    "ProviderFactory",
+    "ProviderInstance",
+    "ProviderRegistry",
+    "STTError",
+    "STTProvider",
+    "TTSError",
+    "TTSProvider",
+    "ToolCall",
+    "ToolDefinition",
+    "TranscriptEvent",
+    "UnknownProviderError",
+    "get_registry",
+    "load_active_providers",
+]
