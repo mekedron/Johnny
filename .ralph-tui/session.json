@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T21:22:50.208Z",
-  "currentIteration": 30,
+  "updatedAt": "2026-06-05T21:42:07.746Z",
+  "currentIteration": 31,
   "maxIterations": 10,
-  "tasksCompleted": 30,
+  "tasksCompleted": 31,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -182,8 +182,8 @@
       {
         "id": "Johnny-kgc.26",
         "title": "US-026: Listen-only and Suggest-only modes",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.27",
@@ -535,6 +535,16 @@
       "durationMs": 727023,
       "startedAt": "2026-06-05T20:53:53.636Z",
       "endedAt": "2026-06-05T21:06:00.659Z"
+    },
+    {
+      "iteration": 31,
+      "status": "completed",
+      "taskId": "Johnny-kgc.26",
+      "taskTitle": "US-026: Listen-only and Suggest-only modes",
+      "taskCompleted": true,
+      "durationMs": 987855,
+      "startedAt": "2026-06-05T21:06:21.256Z",
+      "endedAt": "2026-06-05T21:22:49.111Z"
     }
   ],
   "skippedTaskIds": [],

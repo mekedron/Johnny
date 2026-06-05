@@ -150,6 +150,12 @@ after each iteration and it's included in prompts for context.
 - **Mode-first, speak-second precedence in the pipeline (US-026)**: server-side mode enforcement runs BEFORE the legacy `speak: bool` flag is consulted. `if self.config.mode == LISTEN_ONLY_MODE: return` comes first; `if not self.config.speak: return` is the redundant safety net. This satisfies "client-side bug cannot cause the bot to speak in a non-speaking mode" because the mode value originates from `meeting.mode` in the scheduler (server-side DB), not from a request body. New modes drop in by extending `NON_SPEAKING_MODES` frozenset and adding a `_handle_<mode>` method called in the same gating ladder. (Promoted from US-026.)
 - **Six-touch new-DecisionOutcome migration (US-026)**: adding a new outcome value (e.g. `SUGGESTED`) is six edits: (1) new `enum.StrEnum` member in `app/db/models.py`, (2) new `Literal` value in `johnny/voice_pipeline/decision_sink.py:DecisionOutcome`, (3) new `_OUTCOME_MAP` entry in `app/services/router_decisions.py`, (4) new alembic migration that `op.drop_constraint("ck_agent_decisions_outcome", "agent_decisions", type_="check")` + `op.create_check_constraint(...)` with the extended tuple — works on Postgres (enforced) and SQLite (no-op), (5) `DecisionOutcome` Literal in `frontend/src/lib/sessionDetail.ts`, (6) `DECISION_OUTCOME_LABEL` entry + `.outcome-<name>` CSS class in the session view. Same pattern applies to any future enum-with-CHECK column. (Promoted from US-026.)
 - **`AgentSuggested` event with `decision_id: int | None` (US-026)**: when the persistence sink may return `None` (e.g. `NoopDecisionSink`), the event field is `int | None` rather than guarding emission. The UI's `handleAgentSuggested` falls back to matching the decision row by `suggested_reply` text when `decision_id` is missing. Cleaner than suppressing the event at the source — preserves visibility into "noop sink swallowed the row" without breaking the live feed. (Promoted from US-026.)
+- **Dialect-dispatched pgvector queries (US-034)**: `TranscriptChunk.embedding.cosine_distance([...])` compiles to `<=>` which SQLite (test fixture) cannot parse. Pattern: `if session.bind.dialect.name == "postgresql": <pgvector path> else: <python-side cosine path>`. The python path loads every embedded row (filter by `bot_session_id` to bound cost) and applies a stdlib cosine helper, sorts by score desc, slices to `limit`. Production gets indexable vector search; tests stay portable. Score normalisation: `score = max(0, min(1, 1 - cosine_distance))` so the API exposes a `[0, 1]` similarity instead of pgvector's `[0, 2]` distance. (Promoted from US-034.)
+- **`set_<resource>_embedder` injection pattern (US-034)**: same module-level + `set_x()` / `get_x()` shape as `set_launcher` (US-029) — the embedder used to vectorise a search query is held in `_embedder: EmbeddingProvider = StaticEmbeddingProvider()` at module scope in `app/api/history.py` with `set_search_embedder(...)` for production startup + test injection. FastAPI dep `Annotated[EmbeddingProvider, Depends(get_search_embedder)]`. Cleaner than `app.dependency_overrides[get_search_embedder]` because the same singleton serves a future scheduled re-search worker too. (Promoted from US-034.)
+- **History list aggregation via LEFT JOIN + GROUP BY + DISTINCT (US-034)**: when paginating a list with per-row counts across 3+ child tables (transcripts/decisions/utterances), the naive `COUNT(child.id)` multiplies when there are multiple joined tables (one row per cartesian product). `COUNT(DISTINCT child.id)` per child fixes that. Single query for the paginated page; separate `select(func.count()).select_from(BotSession).where(...)` for the unbounded `total` (the GROUP BY rows aren't easily wrapped). `ORDER BY ended_at DESC NULLS LAST, id DESC` keeps recent sessions first and breaks ties deterministically. (Promoted from US-034.)
+- **Two-stage delete confirmation in a single button slot (US-034)**: `confirmingDelete: bool = $state(false)`. `handleDelete()` flips it on first click + returns; second click executes. Render-time: when `confirmingDelete`, the slot shows a warning span + "Yes, delete" + "Cancel" — when false, just "Delete". No modal, no `window.confirm` (which blocks the event loop and looks dated). Clears on error so the user can re-confirm. (Promoted from US-034.)
+- **CORS hides `Content-Disposition` from JS, not from `<a download>` (US-034)**: a server-set `Content-Disposition: attachment; filename="..."` is correctly sent on the wire but reading `res.headers.get('content-disposition')` from `fetch` returns `null` because CORS doesn't expose that header to script by default. The browser still honors it on direct navigation, so `<a href="..." download="...">` works fine. Don't reach for `Access-Control-Expose-Headers` just to verify headers from a console script — `curl -D -` from the host confirms the server is correct. (Promoted from US-034.)
+- **Docker compose without source mount: every code change needs `compose build` + `compose up -d` (US-034)**: neither `api` nor `frontend` mount source as a volume in this project — both `image`s are built from Dockerfiles. So a `docker compose restart api` reloads the *same* image. Workflow: edit → `docker compose build <service>` → `docker compose up -d <service>` → wait for healthcheck. The api container has the docker.sock mount but that's for the launcher (US-030), not source. (Promoted from US-034.)
 
 ---
 
@@ -1117,4 +1123,93 @@ row idempotently.
   - **New decision outcome via three-touch migration**: (1) `enum.StrEnum` member in `app/db/models.py`; (2) `Literal` member in `johnny/voice_pipeline/decision_sink.py`; (3) `_OUTCOME_MAP` entry in `app/services/router_decisions.py`. The CHECK-constraint migration is one drop + recreate via `op.drop_constraint` + `op.create_check_constraint` — both work on Postgres and SQLite (SQLite doesn't enforce CHECK by default). Frontend mirrors: `DecisionOutcome` Literal + `DECISION_OUTCOME_LABEL` entry + CSS class. Adding any future outcome value follows the same six-touch pattern.
   - **`AgentSuggested.decision_id: int | None`**: matches `DecisionSink.record(...) -> int | None` — the noop sink returns `None`. The event is still emitted (so the UI fires) but with `decision_id=None`. Frontend's `handleAgentSuggested` falls back to matching by `suggested_reply` text when the id is missing. Cleaner than guarding the event at emission time and losing visibility into "noop sink swallowed the row".
   - **Promoted to top of patterns**: the **mode-first, speak-second precedence** + **six-touch new-outcome migration** patterns are reusable for any future BotMode addition or decision outcome value.
+---
+
+## 2026-06-05 — Johnny-kgc.34 (US-034)
+Built the post-meeting history view end-to-end: paginated list of past
+sessions with aggregated counts + duration, a read-only audit detail page
+per session, pgvector-backed transcript search, manual delete (cascade),
+and a JSON export endpoint.
+
+### Files created
+- `backend/app/services/history.py` — pure service layer. `list_past_sessions`
+  uses LEFT JOIN + GROUP BY for per-row count aggregation in a single
+  query (avoids N+1). `search_transcripts` dispatches on dialect:
+  pgvector `cosine_distance` on PostgreSQL, plain Python cosine on
+  SQLite (test fixture). `export_session` builds a JSON-safe dict with
+  ISO datetimes and explicit float-list embeddings.
+- `backend/app/api/history.py` — FastAPI router with five endpoints:
+  list, detail, delete, export download, search. The search endpoint
+  takes a string query, runs it through an injected `EmbeddingProvider`
+  (defaults to `StaticEmbeddingProvider`; production wires in a real
+  embedder via `set_search_embedder`), then calls `search_transcripts`.
+- `backend/tests/services/test_history.py` — 29 tests covering listing
+  (terminal-only, counts, ordering, pagination, validation), detail
+  (404 + unbounded), delete (cascade), export, and search (ordering,
+  session filter, skipping unembedded rows, limit, validation).
+- `backend/tests/api/test_history.py` — 17 tests over the HTTP layer
+  including pagination params, 404s, 204 + cascade for delete, JSON
+  download headers, and embedder error → 502 mapping.
+- `frontend/src/lib/history.ts` — typed client mirroring
+  `sessions.ts`/`templates.ts`. Adds `formatDuration` and
+  `formatDateRange` helpers used by the list page.
+- `frontend/src/routes/history/[id]/+page.svelte` — detail view with
+  three read-only panes (transcript, decisions, utterances), session
+  metadata, a per-session search bar, Export JSON `<a download>` link,
+  and two-stage delete confirmation.
+
+### Files modified
+- `backend/app/main.py` — registered `history_router`.
+- `frontend/src/routes/history/+page.svelte` — replaced the placeholder
+  with the real list view: search bar, sortable-looking table, pagination.
+
+### Verification
+- `uv run pytest`: 1112 passed (46 new for history).
+- `uv run ruff check` / `uv run mypy`: clean.
+- `pnpm typecheck` / `pnpm lint`: clean.
+- Browser: rebuilt `api` + `frontend` containers, seeded three demo
+  sessions, captured screenshots of `/history` and `/history/2`. Verified
+  DELETE returns 204 and the row + cascade vanish. Verified
+  `Content-Disposition: attachment; filename="johnny-session-2.json"` is
+  set on the export response (the JS-level `null` in the browser was
+  CORS hiding the header from script, but the `<a download>` link works
+  because it bypasses CORS for direct navigation).
+
+### Learnings:
+  - **pgvector `cosine_distance` on `TranscriptChunk.embedding` compiles
+    to `<=>` which SQLite cannot parse.** Test fixtures that use the
+    single-table SQLite pattern can't execute pgvector similarity
+    queries. Solution: dispatch on `session.bind.dialect.name ==
+    'postgresql'` in the service function — pgvector path on Postgres,
+    Python-side cosine fallback on SQLite. Keeps tests fast and the
+    production query indexable.
+  - **`StaticEmbeddingProvider` returns a zero-vector for every input**,
+    which is fine for filling the `embedding` column (US-033) but makes
+    cosine similarity meaningless in production until a real embedder
+    is wired up. The endpoint is functional but every transcript scores
+    equally — the architectural hook is `set_search_embedder` (mirrors
+    `set_launcher` from US-029).
+  - **CORS hides `Content-Disposition` from JS by default**, but the
+    server still sends it; HTML `<a download>` triggers a real download
+    regardless. To verify the server header from inside the browser you
+    need either curl from the host or an `Access-Control-Expose-Headers:
+    Content-Disposition` middleware setting. Not worth changing CORS for
+    a feature that uses `<a download>`.
+  - **Six-touch list endpoint pattern**: when paginating with `total +
+    sessions[]`, the per-row aggregation query and the count query are
+    separate. LEFT JOIN with `COUNT(DISTINCT child.id)` for the
+    per-row counts (avoids row multiplication when there are multiple
+    child tables); a separate `select(func.count()).select_from(...)`
+    for `total` because the GROUP BY rows can't easily be wrapped in a
+    count.
+  - **Two-stage delete confirmation in a single button** — `if
+    (!confirmingDelete) { confirmingDelete = true; return; }` toggles
+    state on first click; second click executes. Pairs with a "Cancel"
+    sibling button rendered only when `confirmingDelete=true`. No
+    modal, no `window.confirm` (which blocks the event loop).
+  - **Docker compose dev gotcha**: neither `api` nor `frontend` mount
+    source as a volume in this project — they build from Dockerfiles. So
+    any code change requires `docker compose build <service> && up -d
+    <service>`. Reload alone does nothing. Same gotcha for the worker
+    container.
 ---
