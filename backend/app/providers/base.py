@@ -5,7 +5,12 @@ The voice pipeline never imports a concrete adapter. It depends only on the
 the :class:`ProviderRegistry` defined here. Adapter modules call
 ``get_registry().register(kind, name, factory)`` at import time; the runtime
 resolves rows in ``provider_credentials`` against the registry to instantiate
-live providers.
+live providers via :func:`app.providers.loader.load_active_providers`.
+
+This module is **SQLAlchemy-free** so the meet-worker image (which only ships
+the ``johnny`` package + a minimal copy of provider ABCs) can import it
+without pulling in the ORM stack. DB-coupled wiring lives in
+``app/providers/loader.py``.
 
 Audio frames carried by :class:`STTProvider` and :class:`TTSProvider` are
 16 kHz mono signed-16-bit little-endian PCM, matching the meet-worker audio
@@ -14,22 +19,25 @@ bridge format.
 
 from __future__ import annotations
 
-import json
+import enum
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Callable, Iterable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
-
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from app.db.models import ProviderCredential, ProviderKind
 
 PCM_SAMPLE_RATE_HZ = 16_000
 PCM_SAMPLE_WIDTH_BYTES = 2
 PCM_CHANNELS = 1
 
 ChatRole = Literal["system", "user", "assistant", "tool"]
+
+
+class ProviderKind(enum.StrEnum):
+    """Categorical role of a provider in the pipeline."""
+
+    STT = "stt"
+    LLM = "llm"
+    TTS = "tts"
 
 
 # --- Errors ---------------------------------------------------------------
@@ -230,8 +238,8 @@ class ProviderRegistry:
     Adapter modules register their factories at import time (or via an
     explicit registration hook). Loading at startup is a two-step dance:
     register the available factories first, then call
-    :func:`load_active_providers` to materialize live instances from the
-    active rows in ``provider_credentials``.
+    :func:`app.providers.loader.load_active_providers` to materialize live
+    instances from the active rows in ``provider_credentials``.
     """
 
     def __init__(self) -> None:
@@ -299,65 +307,9 @@ def get_registry() -> ProviderRegistry:
     return _global_registry
 
 
-# --- Startup loader --------------------------------------------------------
-
-
-CredentialDecryptor = Callable[[str], dict[str, str]]
-
-
-def _identity_decryptor(blob: str) -> dict[str, str]:
-    """Default decryptor: assume ``credentials_encrypted`` is already a JSON map.
-
-    Real deployments inject a Fernet-backed decryptor via :func:`load_active_providers`'s
-    ``decrypt`` parameter. This default exists for tests that don't exercise the
-    encryption layer (added in US-005 / US-018).
-    """
-    parsed = json.loads(blob)
-    if not isinstance(parsed, dict):
-        raise ValueError("credentials_encrypted must decode to a JSON object")
-    return {str(k): str(v) for k, v in parsed.items()}
-
-
-def load_active_providers(
-    session: Session,
-    *,
-    registry: ProviderRegistry | None = None,
-    decrypt: CredentialDecryptor | None = None,
-    kinds: Iterable[ProviderKind] | None = None,
-) -> dict[ProviderKind, ProviderInstance]:
-    """Materialize the active provider per kind from ``provider_credentials``.
-
-    Returns a mapping of :class:`ProviderKind` to the instantiated provider.
-    Kinds with no active row are absent from the result. Raises
-    :class:`UnknownProviderError` if an active row references a
-    ``provider_name`` that is not registered, so misconfiguration fails fast
-    at startup rather than mid-meeting.
-    """
-    reg = registry if registry is not None else get_registry()
-    dec = decrypt if decrypt is not None else _identity_decryptor
-
-    stmt = select(ProviderCredential).where(ProviderCredential.is_active.is_(True))
-    if kinds is not None:
-        stmt = stmt.where(ProviderCredential.kind.in_(list(kinds)))
-
-    active: dict[ProviderKind, ProviderInstance] = {}
-    for row in session.scalars(stmt).all():
-        config = ProviderConfig(
-            kind=row.kind,
-            provider_name=row.provider_name,
-            display_name=row.display_name,
-            credentials=dec(row.credentials_encrypted),
-            options=dict(row.config or {}),
-        )
-        instance = reg.instantiate(config)
-        active[row.kind] = instance
-    return active
-
-
 __all__ = [
     "ChatMessage",
     "ChatRole",
-    "CredentialDecryptor",
     "LLMError",
     "LLMProvider",
     "LLMResponse",
@@ -368,6 +320,7 @@ __all__ = [
     "ProviderError",
     "ProviderFactory",
     "ProviderInstance",
+    "ProviderKind",
     "ProviderRegistry",
     "STTError",
     "STTProvider",
@@ -378,5 +331,4 @@ __all__ = [
     "TranscriptEvent",
     "UnknownProviderError",
     "get_registry",
-    "load_active_providers",
 ]

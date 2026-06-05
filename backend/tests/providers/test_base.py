@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from app.db import Base
-from app.db.models import ProviderCredential, ProviderKind
+from app.db.models import ProviderCredential
 from app.providers.base import (
     ChatMessage,
     LLMError,
@@ -20,6 +20,7 @@ from app.providers.base import (
     LLMResponse,
     ProviderConfig,
     ProviderError,
+    ProviderKind,
     ProviderRegistry,
     STTError,
     STTProvider,
@@ -30,8 +31,8 @@ from app.providers.base import (
     TTSProvider,
     UnknownProviderError,
     get_registry,
-    load_active_providers,
 )
+from app.providers.loader import load_active_providers
 
 # --- Stub providers used across the ABC tests ------------------------------
 

@@ -32,6 +32,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeEngine
 
 from app.db.base import Base
+from app.providers.base import ProviderKind as ProviderKind
 
 EMBEDDING_DIM = 1536
 
@@ -66,12 +67,6 @@ class DecisionOutcome(enum.StrEnum):
     SUPPRESSED = "suppressed"
     PENDING = "pending"
     REJECTED = "rejected"
-
-
-class ProviderKind(enum.StrEnum):
-    STT = "stt"
-    LLM = "llm"
-    TTS = "tts"
 
 
 def _bot_mode_column() -> SAEnum:

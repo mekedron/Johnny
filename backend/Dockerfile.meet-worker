@@ -5,7 +5,7 @@
 # stack only *builds* the image so it's available when the spawner
 # needs it.
 
-FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy
+FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -31,9 +31,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /workspace
 
-# Only the `johnny` package is needed in this image; the FastAPI/SQLAlchemy
-# stack lives in `app` and ships with the api/worker image instead. The
-# selfcheck has no third-party Python deps — it only shells out to pactl.
+# Runtime deps the voice pipeline needs at import time. The pipeline talks
+# to Redis pub/sub for live event fanout (US-031 subscriber). FastAPI and
+# SQLAlchemy are still deliberately absent — the pipeline depends only on
+# the pure-Python provider ABCs in `app/providers/base.py`.
+RUN pip install --no-cache-dir redis==8.0.0
+
+# The `johnny` package owns the meet-worker runtime (selfcheck, audio
+# bridge, voice pipeline). The pipeline imports the provider ABCs from
+# `app.providers.base` (no SQLAlchemy involved); we ship just the
+# providers subpackage and the empty `app/__init__.py` so Python sees
+# `app` as a package. `app/providers/loader.py` ships too but is only
+# imported by code that has SQLAlchemy on PYTHONPATH — meet-worker never
+# does, so it stays inert here.
+COPY app/__init__.py ./app/__init__.py
+COPY app/providers ./app/providers
 COPY johnny ./johnny
 
 COPY meet-worker-entrypoint.sh /usr/local/bin/meet-worker-entrypoint.sh
