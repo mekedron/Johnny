@@ -201,6 +201,23 @@ class LLMProvider(_ProviderBase):
         Adapters raise :class:`LLMError` on transport / schema failure.
         """
 
+    async def stream_chat(
+        self,
+        messages: Sequence[ChatMessage],
+    ) -> AsyncIterator[str]:
+        """Stream the assistant's free-text response as deltas.
+
+        The default implementation calls :meth:`chat` and yields the full
+        text as a single delta, so adapters that don't implement true
+        streaming still satisfy the contract. Adapters that *do* stream
+        (OpenAI, Anthropic, Gemini, etc.) should override and yield as
+        soon as bytes arrive — the voice pipeline uses this to start
+        TTS as early as possible.
+        """
+        response = await self.chat(messages)
+        if response.text:
+            yield response.text
+
 
 class TTSProvider(_ProviderBase):
     """Streaming text-to-speech adapter contract."""

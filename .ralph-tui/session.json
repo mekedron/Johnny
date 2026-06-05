@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T16:59:00.800Z",
-  "currentIteration": 12,
+  "updatedAt": "2026-06-05T17:20:42.271Z",
+  "currentIteration": 13,
   "maxIterations": 10,
-  "tasksCompleted": 12,
+  "tasksCompleted": 13,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -164,8 +164,8 @@
       {
         "id": "Johnny-kgc.23",
         "title": "US-023: Router LLM and decision schema",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.24",
@@ -355,6 +355,16 @@
       "durationMs": 770384,
       "startedAt": "2026-06-05T16:32:37.628Z",
       "endedAt": "2026-06-05T16:45:28.012Z"
+    },
+    {
+      "iteration": 13,
+      "status": "completed",
+      "taskId": "Johnny-kgc.23",
+      "taskTitle": "US-023: Router LLM and decision schema",
+      "taskCompleted": true,
+      "durationMs": 793670,
+      "startedAt": "2026-06-05T16:45:46.327Z",
+      "endedAt": "2026-06-05T16:58:59.997Z"
     }
   ],
   "skippedTaskIds": [],

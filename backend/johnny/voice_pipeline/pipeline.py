@@ -18,9 +18,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator
+import re
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from app.providers import (
     ChatMessage,
@@ -43,6 +45,7 @@ from johnny.voice_pipeline.events import (
     TranscriptFinalized,
 )
 from johnny.voice_pipeline.transport import JohnnyTransport
+from johnny.voice_pipeline.utterance_sink import NoopUtteranceSink, UtteranceSink
 from johnny.voice_pipeline.vad import DEFAULT_VAD_THRESHOLD, VADAnalyzer
 
 logger = logging.getLogger(__name__)
@@ -53,6 +56,14 @@ DEFAULT_FRAME_DURATION_MS = 20
 DEFAULT_CONFIDENCE_THRESHOLD = 0.7
 DEFAULT_TRANSCRIPT_WINDOW_SIZE = 6
 DEFAULT_MODE = "limited_auto_speak"
+
+_SENTENCE_BOUNDARY = re.compile(r"(?:[.!?]+[\"')\]]*\s+)|(?:\n+)")
+"""Matches sentence-ending punctuation followed by whitespace, or one+ newlines.
+
+Used to flush complete sentences from the streaming LLM into the TTS as
+soon as they arrive so time-to-first-audio is bounded by the first
+sentence rather than the full response.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +140,7 @@ class VoicePipeline:
         event_bus: EventBus,
         config: PipelineConfig | None = None,
         decision_sink: DecisionSink | None = None,
+        utterance_sink: UtteranceSink | None = None,
     ) -> None:
         self.transport = transport
         self.vad = vad
@@ -139,10 +151,12 @@ class VoicePipeline:
         self.event_bus = event_bus
         self.config = config or PipelineConfig()
         self.decision_sink = decision_sink or NoopDecisionSink()
+        self.utterance_sink = utterance_sink or NoopUtteranceSink()
         self._session_started_at: float = 0.0
         self._utterance_count = 0
         self._transcript_history: list[TranscriptFinalized] = []
         self._last_decision: RouterDecisionMade | None = None
+        self._interrupt_event = asyncio.Event()
 
     # ------------------------------------------------------------------
     # Public lifecycle
@@ -153,6 +167,20 @@ class VoicePipeline:
         self._session_started_at = loop.time()
         async for utterance in self._utterances():
             await self._process_utterance(utterance)
+
+    def interrupt(self) -> None:
+        """Stop the current answer stage's LLM stream and TTS playback.
+
+        Sets an :class:`asyncio.Event` checked between LLM deltas and TTS
+        frames; the answer loop exits within one frame's worth of time
+        (~20 ms typical) plus the time to ``aclose`` the streaming
+        generators. Well under the 500 ms budget mandated by US-024's
+        acceptance criteria.
+
+        After interrupt fires, the pipeline keeps processing the next
+        utterance — interrupt aborts *one* answer, not the whole session.
+        """
+        self._interrupt_event.set()
 
     # ------------------------------------------------------------------
     # Utterance collection (VAD-driven segmentation)
@@ -295,37 +323,193 @@ class VoicePipeline:
         transcript: TranscriptFinalized,
         decision: RouterDecision,
     ) -> bool:
+        """Generate the answer, stream into TTS, play, persist utterance.
+
+        Returns ``True`` only when audio frames were actually streamed to
+        the transport. Returns ``False`` when:
+
+        * the answer LLM produced empty text;
+        * ``allowed_replies`` is set and no candidate matched;
+        * the user interrupted before audio started playing.
+        """
+        self._interrupt_event.clear()
         messages = self._answer_messages(transcript, decision)
-        answer_response = await self.answer_llm.chat(messages)
-        raw_text = answer_response.text.strip()
-        if not raw_text:
-            return False
+        prompt_text = _serialize_prompt(messages)
+
+        collected: list[bytes]
         if self.config.allowed_replies:
-            matched = _match_allowed_reply(raw_text, self.config.allowed_replies)
-            if matched is None:
+            picked = await self._select_allowed_reply(messages)
+            if picked is None or self._interrupt_event.is_set():
                 return False
-            text = matched
+            text = picked
+            collected = await self._play_text_streamed(text)
         else:
-            text = raw_text
-        audio_bytes = b""
-        async for frame in self.tts.synthesize_stream(text):
-            audio_bytes += frame
-        if not audio_bytes:
+            text, collected = await self._stream_answer_into_tts(messages)
+            if not text or not collected:
+                return False
+
+        if not collected:
             return False
-        await self.transport.play_frames(
-            [audio_bytes], source_rate=PCM_SAMPLE_RATE_HZ
-        )
-        spoke = AgentSpoke(
+
+        audio_bytes = b"".join(collected)
+        audio_ms = _pcm_duration_ms(len(audio_bytes), PCM_SAMPLE_RATE_HZ)
+        matched_allowed_reply = text if self.config.allowed_replies else None
+
+        spoke_event = AgentSpoke(
             text=text,
-            audio_duration_ms=_pcm_duration_ms(
-                len(audio_bytes), PCM_SAMPLE_RATE_HZ
-            ),
+            audio_duration_ms=audio_ms,
             timestamp_ms=self._now_ms(),
-            matched_allowed_reply=text if self.config.allowed_replies else None,
+            matched_allowed_reply=matched_allowed_reply,
             session_id=self.config.session_id,
         )
-        await self.event_bus.publish(spoke)
+        await self.event_bus.publish(spoke_event)
+        await self._persist_utterance(
+            prompt=prompt_text,
+            output_text=text,
+            audio_duration_ms=audio_ms,
+            matched_allowed_reply=matched_allowed_reply,
+        )
         return True
+
+    async def _select_allowed_reply(
+        self,
+        messages: list[ChatMessage],
+    ) -> str | None:
+        """In Limited-auto-speak mode, force the LLM to pick from the list.
+
+        Uses a JSON-schema ``response_format`` with an ``enum`` constraint
+        on the allowed-reply set. Adapters that honour structured output
+        will return the choice on ``LLMResponse.structured_output``;
+        adapters that don't fall back to free text, which is then matched
+        verbatim against the allowed list (case-insensitive). If no match
+        is found, the utterance is suppressed — the bot stays silent
+        rather than say something risky.
+        """
+        schema = {
+            "type": "object",
+            "properties": {
+                "selected_reply": {
+                    "type": "string",
+                    "enum": list(self.config.allowed_replies),
+                },
+            },
+            "required": ["selected_reply"],
+        }
+        response = await self.answer_llm.chat(messages, response_format=schema)
+        candidate: str | None = None
+        if isinstance(response.structured_output, dict):
+            picked = response.structured_output.get("selected_reply")
+            if isinstance(picked, str):
+                candidate = picked
+        if candidate is None and response.text:
+            candidate = response.text.strip()
+        if candidate is None:
+            return None
+        return _match_allowed_reply(candidate, self.config.allowed_replies)
+
+    async def _stream_answer_into_tts(
+        self,
+        messages: list[ChatMessage],
+    ) -> tuple[str, list[bytes]]:
+        """Stream LLM tokens into TTS, flushing per-sentence to the transport.
+
+        The LLM's streaming output is buffered until a sentence boundary
+        is reached; each complete sentence is then handed off to TTS,
+        whose frames are pushed into the transport as they arrive. This
+        minimises time-to-first-audio because TTS starts as soon as the
+        first sentence is ready rather than waiting for the whole answer.
+
+        Returns ``(full_text, all_played_frames)``. Either side can be
+        empty if the LLM produced no text or if the user interrupted
+        before any audio was played.
+        """
+        full_text_parts: list[str] = []
+        all_frames: list[bytes] = []
+        sentence_buffer = ""
+
+        agen = cast(
+            AsyncGenerator[str, None],
+            self.answer_llm.stream_chat(messages),
+        )
+        try:
+            async for delta in agen:
+                if self._interrupt_event.is_set():
+                    break
+                if not delta:
+                    continue
+                sentence_buffer += delta
+                full_text_parts.append(delta)
+                while True:
+                    match = _SENTENCE_BOUNDARY.search(sentence_buffer)
+                    if match is None:
+                        break
+                    sentence = sentence_buffer[: match.end()].strip()
+                    sentence_buffer = sentence_buffer[match.end() :]
+                    if sentence:
+                        await self._play_text_streamed(
+                            sentence, collected=all_frames
+                        )
+                        if self._interrupt_event.is_set():
+                            break
+                if self._interrupt_event.is_set():
+                    break
+            # Final flush — any trailing text without a sentence boundary
+            tail = sentence_buffer.strip()
+            if tail and not self._interrupt_event.is_set():
+                await self._play_text_streamed(tail, collected=all_frames)
+        finally:
+            with suppress(Exception):
+                await agen.aclose()
+
+        return "".join(full_text_parts).strip(), all_frames
+
+    async def _play_text_streamed(
+        self,
+        text: str,
+        collected: list[bytes] | None = None,
+    ) -> list[bytes]:
+        """Synthesise ``text`` and stream frames into the transport.
+
+        ``collected`` is appended to in-place when provided so the caller
+        can accumulate frames across multiple sentences. Returns the same
+        list (or a fresh one) so callers that don't pre-allocate can
+        still measure total audio.
+        """
+        target = collected if collected is not None else []
+        await self.transport.play_frames(
+            self._tts_frame_iter(text, target),
+            source_rate=PCM_SAMPLE_RATE_HZ,
+        )
+        return target
+
+    async def _tts_frame_iter(
+        self,
+        text: str,
+        collected: list[bytes],
+    ) -> AsyncIterator[bytes]:
+        """Stream TTS frames for ``text``, recording each to ``collected``.
+
+        The interrupt event is checked before each yield so a user
+        interrupt aborts within at most one frame's worth of audio (~20 ms
+        typical). ``aclose`` is propagated to the upstream TTS generator
+        in the ``finally`` block so the adapter can tear down its
+        subprocess / HTTP connection cleanly.
+        """
+        tts_gen = cast(
+            AsyncGenerator[bytes, None],
+            self.tts.synthesize_stream(text),
+        )
+        try:
+            async for frame in tts_gen:
+                if self._interrupt_event.is_set():
+                    break
+                if not frame:
+                    continue
+                collected.append(frame)
+                yield frame
+        finally:
+            with suppress(Exception):
+                await tts_gen.aclose()
 
     # ------------------------------------------------------------------
     # Prompt construction
@@ -381,6 +565,14 @@ class VoicePipeline:
         transcript: TranscriptFinalized,
         decision: RouterDecision,
     ) -> list[ChatMessage]:
+        """Build the prompt for the answer LLM.
+
+        The system message carries the static settings (instructions,
+        context, router hint, allowed-reply constraint when set). The
+        user message embeds the rolling transcript window so the model
+        can reference recent turns, with the latest transcript marked
+        explicitly so the model knows what it is responding to.
+        """
         system = (
             "You are an AI meeting participant. Produce a concise spoken "
             "reply to the latest transcript."
@@ -396,9 +588,20 @@ class VoicePipeline:
                 "\n\nYou MUST pick verbatim from these allowed replies: "
                 f"{list(self.config.allowed_replies)}"
             )
+
+        user_parts: list[str] = []
+        if len(self._transcript_history) > 1:
+            history = self._transcript_history[:-1]
+            user_parts.append("Recent conversation:")
+            for entry in history:
+                speaker = entry.speaker or "speaker"
+                user_parts.append(f"- {speaker}: {entry.text}")
+            user_parts.append("")
+        user_parts.append(f"Latest transcript: {transcript.text}")
+
         return [
             ChatMessage(role="system", content=system),
-            ChatMessage(role="user", content=transcript.text),
+            ChatMessage(role="user", content="\n".join(user_parts)),
         ]
 
     # ------------------------------------------------------------------
@@ -466,6 +669,30 @@ class VoicePipeline:
                 "decision sink failed for session=%s outcome=%s",
                 self.config.session_id,
                 outcome,
+            )
+
+    async def _persist_utterance(
+        self,
+        *,
+        prompt: str,
+        output_text: str,
+        audio_duration_ms: int,
+        matched_allowed_reply: str | None,
+    ) -> None:
+        try:
+            await self.utterance_sink.record(
+                mode=self.config.mode,
+                prompt=prompt,
+                output_text=output_text,
+                audio_duration_ms=audio_duration_ms,
+                matched_allowed_reply=matched_allowed_reply,
+                session_id=self.config.session_id,
+                bot_session_id=self.config.bot_session_id,
+            )
+        except Exception:
+            logger.exception(
+                "utterance sink failed for session=%s",
+                self.config.session_id,
             )
 
 
@@ -543,6 +770,23 @@ def _serialize_raw_output(
         "finish_reason": response.finish_reason,
         "structured": decision.raw,
     }
+
+
+def _serialize_prompt(messages: Sequence[ChatMessage]) -> str:
+    """Serialise the answer-LLM prompt for storage in ``agent_utterances.prompt``.
+
+    JSON-encodes the role+content of every message so the post-hoc audit
+    view can render the exact prompt that produced the spoken utterance.
+    Tool calls / tool_call_ids are omitted because the answer stage uses
+    plain chat messages; if those become relevant later, extend the dict.
+    """
+    return json.dumps(
+        [
+            {"role": m.role, "content": m.content or ""}
+            for m in messages
+        ],
+        separators=(",", ":"),
+    )
 
 
 __all__ = [

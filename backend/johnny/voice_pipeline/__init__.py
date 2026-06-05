@@ -42,6 +42,12 @@ from johnny.voice_pipeline.transport import (
     JohnnyTransport,
     LocalAudioTransport,
 )
+from johnny.voice_pipeline.utterance_sink import (
+    InMemoryUtteranceSink,
+    NoopUtteranceSink,
+    UtteranceRecord,
+    UtteranceSink,
+)
 from johnny.voice_pipeline.vad import (
     DEFAULT_VAD_THRESHOLD,
     EnergyVAD,
@@ -63,9 +69,11 @@ __all__ = [
     "EventBus",
     "InMemoryDecisionSink",
     "InMemoryEventBus",
+    "InMemoryUtteranceSink",
     "JohnnyTransport",
     "LocalAudioTransport",
     "NoopDecisionSink",
+    "NoopUtteranceSink",
     "PipelineConfig",
     "PipelineEvent",
     "RedisEventBus",
@@ -73,6 +81,8 @@ __all__ = [
     "RouterDecisionMade",
     "SileroVAD",
     "TranscriptFinalized",
+    "UtteranceRecord",
+    "UtteranceSink",
     "VADAnalyzer",
     "VADResult",
     "VoicePipeline",

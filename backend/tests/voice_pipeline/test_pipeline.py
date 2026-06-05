@@ -8,6 +8,7 @@ expected events fire in the expected order — the AC for US-022.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterable, AsyncIterator, Iterable, Sequence
 from pathlib import Path
@@ -160,6 +161,8 @@ class _FakeAnswerLLM(LLMProvider):
         self._answers = list(answers)
         self._idx = 0
         self.last_messages: Sequence[ChatMessage] | None = None
+        self.last_response_format: dict[str, Any] | None = None
+        self.calls: list[Sequence[ChatMessage]] = []
 
     @property
     def name(self) -> str:
@@ -169,9 +172,11 @@ class _FakeAnswerLLM(LLMProvider):
         self,
         messages: Sequence[ChatMessage],
         tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
-        response_format: dict[str, Any] | None = None,  # noqa: ARG002
+        response_format: dict[str, Any] | None = None,
     ) -> LLMResponse:
         self.last_messages = messages
+        self.last_response_format = response_format
+        self.calls.append(list(messages))
         if self._idx >= len(self._answers):
             text = self._answers[-1]
         else:
@@ -295,7 +300,12 @@ async def test_pipeline_emits_events_in_order_for_two_utterance_wav(
 
     assert stt.calls == 2
     assert tts.calls == ["Hi"]
-    assert len(transport.played) == 1  # one utterance spoken, one suppressed
+    # Streaming: each TTS frame is played individually (3 frames for the first
+    # utterance, 0 for the suppressed second). Total bytes match the expected
+    # audio duration captured on the AgentSpoke event.
+    assert len(transport.played) == 3
+    assert sum(len(f) for f in transport.played) > 0
+    assert transport.played_source_rate == 16_000
 
 
 # --- pipeline behaviour edge cases ----------------------------------------
@@ -992,3 +1002,889 @@ async def test_pipeline_emits_router_event_with_threshold_in_input_window(
     decisions = [e for e in bus.snapshot() if isinstance(e, RouterDecisionMade)]
     assert decisions
     assert decisions[0].input_window["confidence_threshold"] == pytest.approx(0.42)
+
+
+# --- US-024: streaming answer LLM into TTS -------------------------------
+
+
+class _StreamingAnswerLLM(LLMProvider):
+    """Answer LLM that overrides ``stream_chat`` with per-token deltas."""
+
+    def __init__(self, deltas: list[str]) -> None:
+        self._deltas = list(deltas)
+        self.calls: list[Sequence[ChatMessage]] = []
+        self.chat_called = 0
+
+    @property
+    def name(self) -> str:
+        return "streaming-answer"
+
+    async def chat(
+        self,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
+        response_format: dict[str, Any] | None = None,  # noqa: ARG002
+    ) -> LLMResponse:
+        self.chat_called += 1
+        return LLMResponse(text="".join(self._deltas), finish_reason="stop")
+
+    async def stream_chat(
+        self,
+        messages: Sequence[ChatMessage],
+    ) -> AsyncIterator[str]:
+        self.calls.append(list(messages))
+        for delta in self._deltas:
+            yield delta
+
+
+async def test_pipeline_uses_stream_chat_for_answer_llm(
+    two_utterance_pcm: bytes,
+) -> None:
+    """The pipeline calls ``stream_chat`` (not ``chat``) on the answer LLM."""
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    answer = _StreamingAnswerLLM(deltas=["Hel", "lo ", "there"])
+    tts = _FakeTTS(frame_count=2)
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hi"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+                {"should_speak": False, "confidence": 0.1, "reason": "second skip"},
+            ]
+        ),
+        answer_llm=answer,
+        tts=tts,
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+    await pipeline.run()
+    # stream_chat was called for the answer stage; chat() was NOT used.
+    assert len(answer.calls) == 1
+    assert answer.chat_called == 0
+    # TTS received the full concatenated text since deltas had no sentence
+    # boundaries → single flush at the end of the stream.
+    assert tts.calls == ["Hello there"]
+
+
+async def test_pipeline_flushes_sentences_to_tts_as_they_arrive(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Each complete sentence triggers a TTS call so audio starts streaming early."""
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    # Two sentences separated by ". " (sentence boundary). Each should
+    # generate its own TTS call.
+    answer = _StreamingAnswerLLM(deltas=["Hello there. ", "How are you?"])
+    tts = _FakeTTS(frame_count=2)
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["greet"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+                {"should_speak": False, "confidence": 0.1, "reason": "second skip"},
+            ]
+        ),
+        answer_llm=answer,
+        tts=tts,
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+    await pipeline.run()
+    # First call: "Hello there." (boundary `". "`).
+    # Second call: "How are you?" (final flush).
+    assert tts.calls == ["Hello there.", "How are you?"]
+
+
+async def test_pipeline_stream_chat_default_implementation_yields_full_text() -> None:
+    """LLMProvider.stream_chat default yields the full chat() text once."""
+
+    class _Plain(LLMProvider):
+        @property
+        def name(self) -> str:
+            return "plain"
+
+        async def chat(
+            self,
+            messages: Sequence[ChatMessage],
+            tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
+            response_format: dict[str, Any] | None = None,  # noqa: ARG002
+        ) -> LLMResponse:
+            del messages
+            return LLMResponse(text="hello world", finish_reason="stop")
+
+    adapter = _Plain()
+    deltas: list[str] = []
+    async for delta in adapter.stream_chat([ChatMessage(role="user", content="x")]):
+        deltas.append(delta)
+    assert deltas == ["hello world"]
+
+
+async def test_pipeline_stream_chat_default_yields_nothing_when_text_empty() -> None:
+    class _Plain(LLMProvider):
+        @property
+        def name(self) -> str:
+            return "plain"
+
+        async def chat(
+            self,
+            messages: Sequence[ChatMessage],
+            tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
+            response_format: dict[str, Any] | None = None,  # noqa: ARG002
+        ) -> LLMResponse:
+            del messages
+            return LLMResponse(text="", finish_reason="stop")
+
+    adapter = _Plain()
+    deltas: list[str] = []
+    async for delta in adapter.stream_chat([ChatMessage(role="user", content="x")]):
+        deltas.append(delta)
+    assert deltas == []
+
+
+# --- US-024: TTS streaming into transport --------------------------------
+
+
+async def test_pipeline_streams_tts_frames_individually_to_transport(
+    two_utterance_pcm: bytes,
+) -> None:
+    """The pipeline streams TTS frames as they arrive (not buffered to a blob)."""
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    tts = _FakeTTS(frame_count=5)
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hi"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+                {"should_speak": False, "confidence": 0.1, "reason": "second skip"},
+            ]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["hi"]),
+        tts=tts,
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+    await pipeline.run()
+    # Five TTS frames → five individual entries in transport.played.
+    assert len(transport.played) == 5
+    assert transport.played_source_rate == 16_000
+
+
+# --- US-024: structured output for allowed_replies -----------------------
+
+
+async def test_pipeline_uses_structured_output_for_allowed_replies(
+    two_utterance_pcm: bytes,
+) -> None:
+    """When allowed_replies is set, response_format is sent and used for selection."""
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+
+    class _StructuredAnswerLLM(LLMProvider):
+        def __init__(self) -> None:
+            self.last_response_format: dict[str, Any] | None = None
+
+        @property
+        def name(self) -> str:
+            return "structured-answer"
+
+        async def chat(
+            self,
+            messages: Sequence[ChatMessage],
+            tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
+            response_format: dict[str, Any] | None = None,
+        ) -> LLMResponse:
+            del messages
+            self.last_response_format = response_format
+            return LLMResponse(
+                text="",
+                finish_reason="stop",
+                structured_output={"selected_reply": "yes"},
+            )
+
+    answer = _StructuredAnswerLLM()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["are we good"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": True, "confidence": 0.95, "reason": "ok"}]
+        ),
+        answer_llm=answer,
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            allowed_replies=("yes", "no"),
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+    await pipeline.run()
+    assert answer.last_response_format is not None
+    schema = answer.last_response_format
+    sel = schema["properties"]["selected_reply"]
+    assert sel["enum"] == ["yes", "no"]
+    assert "selected_reply" in schema["required"]
+
+
+async def test_pipeline_structured_output_picks_allowed_reply(
+    two_utterance_pcm: bytes,
+) -> None:
+    """When the LLM returns structured_output, the picked reply is used."""
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+
+    class _StructuredLLM(LLMProvider):
+        @property
+        def name(self) -> str:
+            return "structured"
+
+        async def chat(
+            self,
+            messages: Sequence[ChatMessage],
+            tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
+            response_format: dict[str, Any] | None = None,  # noqa: ARG002
+        ) -> LLMResponse:
+            del messages
+            return LLMResponse(
+                text="",
+                finish_reason="stop",
+                structured_output={"selected_reply": "no"},
+            )
+
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["asked"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+                {"should_speak": False, "confidence": 0.1, "reason": "second skip"},
+            ]
+        ),
+        answer_llm=_StructuredLLM(),
+        tts=_FakeTTS(),
+        event_bus=bus,
+        config=PipelineConfig(
+            allowed_replies=("yes", "no"),
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+    await pipeline.run()
+    spokes = [e for e in bus.snapshot() if isinstance(e, AgentSpoke)]
+    assert len(spokes) == 1
+    assert spokes[0].text == "no"
+    assert spokes[0].matched_allowed_reply == "no"
+
+
+# --- US-024: answer prompt includes meeting context & transcript window --
+
+
+async def test_answer_prompt_includes_instructions_context_suggested_reply(
+    two_utterance_pcm: bytes,
+) -> None:
+    """The answer LLM system message includes instructions, context, and router hint."""
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    answer = _FakeAnswerLLM(answers=["Hi"])
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hello"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {
+                    "should_speak": True,
+                    "confidence": 0.9,
+                    "reason": "asked",
+                    "reply_type": "ack",
+                    "suggested_reply": "Hi",
+                }
+            ]
+        ),
+        answer_llm=answer,
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            instructions="Be polite",
+            context="standup",
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+    await pipeline.run()
+    assert answer.last_messages is not None
+    system_msg = answer.last_messages[0]
+    assert system_msg.role == "system"
+    assert system_msg.content is not None
+    assert "Meeting instructions: Be polite" in system_msg.content
+    assert "Context: standup" in system_msg.content
+    assert "Router suggested: Hi" in system_msg.content
+
+
+async def test_answer_prompt_includes_transcript_window(
+    two_utterance_pcm: bytes,
+) -> None:
+    """The answer LLM's user message includes the rolling transcript history."""
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    answer = _FakeAnswerLLM(answers=["Hi", "Sure"])
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["first thing", "second thing"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": True, "confidence": 0.9, "reason": "ok"}]
+        ),
+        answer_llm=answer,
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+    await pipeline.run()
+    # The second answer call should see the first transcript in the history.
+    assert len(answer.calls) == 2
+    second_user_msg = answer.calls[1][1]
+    assert second_user_msg.content is not None
+    assert "Recent conversation:" in second_user_msg.content
+    assert "first thing" in second_user_msg.content
+    assert "Latest transcript: second thing" in second_user_msg.content
+
+
+async def test_answer_prompt_no_history_on_first_turn(
+    two_utterance_pcm: bytes,
+) -> None:
+    """The first answer call's user message does not include a Recent conversation block."""
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    answer = _FakeAnswerLLM(answers=["Hi"])
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["only one"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": True, "confidence": 0.9, "reason": "ok"}]
+        ),
+        answer_llm=answer,
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+    await pipeline.run()
+    assert answer.calls
+    first_user_msg = answer.calls[0][1]
+    assert first_user_msg.content is not None
+    assert "Recent conversation:" not in first_user_msg.content
+
+
+# --- US-024: utterance persistence ---------------------------------------
+
+
+async def test_pipeline_persists_utterance_after_speaking(
+    two_utterance_pcm: bytes,
+) -> None:
+    """When the bot speaks, the utterance is recorded with the right fields."""
+    from johnny.voice_pipeline import InMemoryUtteranceSink
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    sink = InMemoryUtteranceSink()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hi", "bye"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+                {"should_speak": False, "confidence": 0.1, "reason": "no"},
+            ]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["Hello", "Goodbye"]),
+        tts=_FakeTTS(frame_count=3),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            mode="limited_auto_speak",
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            session_id="sess-x",
+            bot_session_id=77,
+        ),
+        utterance_sink=sink,
+    )
+    await pipeline.run()
+    records = sink.snapshot()
+    assert len(records) == 1  # Only the first utterance was spoken
+    rec = records[0]
+    assert rec.mode == "limited_auto_speak"
+    assert rec.output_text == "Hello"
+    assert rec.audio_duration_ms > 0
+    assert rec.session_id == "sess-x"
+    assert rec.bot_session_id == 77
+    assert rec.matched_allowed_reply is None
+    # Prompt is JSON of the message list passed to the answer LLM.
+    assert rec.prompt.startswith("[")
+    assert "Latest transcript: hi" in rec.prompt
+
+
+async def test_pipeline_persists_utterance_with_matched_allowed_reply(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Limited-auto-speak utterance records the matched allowed reply."""
+    from johnny.voice_pipeline import InMemoryUtteranceSink
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    sink = InMemoryUtteranceSink()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["ask"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": True, "confidence": 0.95, "reason": "ok"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["yes"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            allowed_replies=("yes", "no"),
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+        utterance_sink=sink,
+    )
+    await pipeline.run()
+    rec = sink.snapshot()[0]
+    assert rec.output_text == "yes"
+    assert rec.matched_allowed_reply == "yes"
+
+
+async def test_pipeline_does_not_persist_utterance_when_suppressed(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Decision says don't speak → no utterance recorded."""
+    from johnny.voice_pipeline import InMemoryUtteranceSink
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    sink = InMemoryUtteranceSink()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["a", "b"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": False, "confidence": 0.1, "reason": "n"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+        utterance_sink=sink,
+    )
+    await pipeline.run()
+    assert sink.snapshot() == []
+
+
+async def test_pipeline_does_not_persist_utterance_when_allowed_reply_no_match(
+    two_utterance_pcm: bytes,
+) -> None:
+    """No allowed-reply match → utterance not persisted."""
+    from johnny.voice_pipeline import InMemoryUtteranceSink
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    sink = InMemoryUtteranceSink()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["ask"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": True, "confidence": 0.95, "reason": "ok"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["maybe"]),  # not in allowed_replies
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            allowed_replies=("yes", "no"),
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+        utterance_sink=sink,
+    )
+    await pipeline.run()
+    assert sink.snapshot() == []
+
+
+async def test_pipeline_default_utterance_sink_is_noop(
+    two_utterance_pcm: bytes,
+) -> None:
+    """When no utterance_sink is supplied, the pipeline still works (uses Noop)."""
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hi"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": True, "confidence": 0.95, "reason": "ok"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["Hi"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+    # Should not raise — uses NoopUtteranceSink by default.
+    await pipeline.run()
+
+
+async def test_pipeline_utterance_sink_failure_does_not_crash(
+    two_utterance_pcm: bytes,
+) -> None:
+    """A failing utterance sink is logged and swallowed; audio loop keeps going."""
+    from johnny.voice_pipeline import UtteranceSink
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+
+    class _BrokenSink(UtteranceSink):
+        async def record(self, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            raise RuntimeError("db unavailable")
+
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hi"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": True, "confidence": 0.95, "reason": "ok"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["Hi"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+        utterance_sink=_BrokenSink(),
+    )
+    await pipeline.run()  # must not raise
+
+
+# --- US-024: cancellation / interrupt -----------------------------------
+
+
+async def test_pipeline_interrupt_before_speak_skips_audio(
+    two_utterance_pcm: bytes,
+) -> None:
+    """interrupt() set before _answer_and_speak starts → no audio played, no utterance."""
+    from johnny.voice_pipeline import InMemoryUtteranceSink
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+
+    class _CheckInterruptAnswerLLM(LLMProvider):
+        def __init__(self, pipeline_ref: list[Any]) -> None:
+            self._pipeline_ref = pipeline_ref
+
+        @property
+        def name(self) -> str:
+            return "check-interrupt"
+
+        async def chat(
+            self,
+            messages: Sequence[ChatMessage],
+            tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
+            response_format: dict[str, Any] | None = None,  # noqa: ARG002
+        ) -> LLMResponse:
+            del messages
+            return LLMResponse(text="", finish_reason="stop")
+
+        async def stream_chat(
+            self,
+            messages: Sequence[ChatMessage],
+        ) -> AsyncIterator[str]:
+            del messages
+            # Set interrupt early so the loop bails out before any text.
+            self._pipeline_ref[0].interrupt()
+            return
+            yield  # pragma: no cover — required to make this a generator
+
+    pipeline_ref: list[Any] = [None]
+    transport = _BufferedTransport(frames=frames)
+    sink = InMemoryUtteranceSink()
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hi"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": True, "confidence": 0.95, "reason": "ok"}]
+        ),
+        answer_llm=_CheckInterruptAnswerLLM(pipeline_ref),
+        tts=_FakeTTS(frame_count=5),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+        utterance_sink=sink,
+    )
+    pipeline_ref[0] = pipeline
+    await pipeline.run()
+    assert transport.played == []
+    assert sink.snapshot() == []
+
+
+async def test_pipeline_interrupt_during_tts_truncates_audio(
+    two_utterance_pcm: bytes,
+) -> None:
+    """interrupt() mid-TTS → loop exits early, partial audio played."""
+    import time as _time
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+
+    interrupt_signal = asyncio.Event()
+
+    class _SlowTTS(TTSProvider):
+        def __init__(self) -> None:
+            self.frames_yielded = 0
+
+        @property
+        def name(self) -> str:
+            return "slow"
+
+        async def synthesize_stream(
+            self,
+            text: str,  # noqa: ARG002
+            voice_id: str | None = None,  # noqa: ARG002
+        ) -> AsyncIterator[bytes]:
+            for i in range(200):
+                yield bytes(640)
+                self.frames_yielded += 1
+                if i == 3:
+                    interrupt_signal.set()
+                await asyncio.sleep(0.001)
+
+    transport = _BufferedTransport(frames=frames)
+    tts = _SlowTTS()
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hi"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+                {"should_speak": False, "confidence": 0.1, "reason": "second skip"},
+            ]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["a long answer"]),
+        tts=tts,
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+
+    async def _trigger_interrupt() -> None:
+        await interrupt_signal.wait()
+        pipeline.interrupt()
+
+    interrupt_task = asyncio.create_task(_trigger_interrupt())
+    start = _time.monotonic()
+    await pipeline.run()
+    elapsed = _time.monotonic() - start
+    await interrupt_task
+
+    # Audio was truncated: should have played some frames but not all 200.
+    assert 0 < len(transport.played) < 200
+    # Wall-clock: 200 frames * 1ms sleep = 200ms if not interrupted. With
+    # interrupt, should finish well under 500ms.
+    assert elapsed < 0.5
+
+
+async def test_pipeline_interrupt_state_clears_between_utterances(
+    two_utterance_pcm: bytes,
+) -> None:
+    """interrupt() set during utterance N does NOT persist to utterance N+1."""
+    from johnny.voice_pipeline import InMemoryUtteranceSink
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+
+    class _InterruptFirstStreamLLM(LLMProvider):
+        def __init__(self, pipeline_ref: list[Any]) -> None:
+            self._pipeline_ref = pipeline_ref
+            self._calls = 0
+
+        @property
+        def name(self) -> str:
+            return "interrupt-first"
+
+        async def chat(
+            self,
+            messages: Sequence[ChatMessage],
+            tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
+            response_format: dict[str, Any] | None = None,  # noqa: ARG002
+        ) -> LLMResponse:
+            del messages
+            return LLMResponse(text="", finish_reason="stop")
+
+        async def stream_chat(
+            self,
+            messages: Sequence[ChatMessage],
+        ) -> AsyncIterator[str]:
+            del messages
+            self._calls += 1
+            if self._calls == 1:
+                # Interrupt the first utterance.
+                self._pipeline_ref[0].interrupt()
+                return
+                yield  # pragma: no cover
+            else:
+                # Second utterance proceeds normally.
+                yield "Second answer"
+
+    pipeline_ref: list[Any] = [None]
+    sink = InMemoryUtteranceSink()
+    transport = _BufferedTransport(frames=frames)
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+                {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+            ]
+        ),
+        answer_llm=_InterruptFirstStreamLLM(pipeline_ref),
+        tts=_FakeTTS(frame_count=2),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+        utterance_sink=sink,
+    )
+    pipeline_ref[0] = pipeline
+    await pipeline.run()
+    # Only the second utterance produced audio + persisted record.
+    records = sink.snapshot()
+    assert len(records) == 1
+    assert records[0].output_text == "Second answer"
