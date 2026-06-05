@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T15:41:31.635Z",
-  "currentIteration": 6,
+  "updatedAt": "2026-06-05T16:00:01.362Z",
+  "currentIteration": 7,
   "maxIterations": 10,
-  "tasksCompleted": 6,
+  "tasksCompleted": 7,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -158,8 +158,8 @@
       {
         "id": "Johnny-kgc.22",
         "title": "US-022: Pipecat pipeline with Silero VAD",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.23",
@@ -295,6 +295,16 @@
       "durationMs": 507684,
       "startedAt": "2026-06-05T15:12:06.303Z",
       "endedAt": "2026-06-05T15:20:33.987Z"
+    },
+    {
+      "iteration": 7,
+      "status": "completed",
+      "taskId": "Johnny-kgc.22",
+      "taskTitle": "US-022: Pipecat pipeline with Silero VAD",
+      "taskCompleted": true,
+      "durationMs": 1236976,
+      "startedAt": "2026-06-05T15:20:53.573Z",
+      "endedAt": "2026-06-05T15:41:30.549Z"
     }
   ],
   "skippedTaskIds": [],

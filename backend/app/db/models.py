@@ -25,6 +25,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB
@@ -69,6 +70,13 @@ class DecisionOutcome(enum.StrEnum):
     REJECTED = "rejected"
 
 
+def _str_enum_values(enum_cls: type[enum.Enum]) -> list[str]:
+    """Return enum members' ``.value`` strings — used so SAEnum stores the
+    lowercase value (matching the migrations' CHECK constraints) instead of
+    the default ``.name`` (uppercase)."""
+    return [str(member.value) for member in enum_cls]
+
+
 def _bot_mode_column() -> SAEnum:
     return SAEnum(
         BotMode,
@@ -76,6 +84,7 @@ def _bot_mode_column() -> SAEnum:
         native_enum=False,
         length=32,
         validate_strings=True,
+        values_callable=_str_enum_values,
     )
 
 
@@ -101,7 +110,13 @@ class GoogleAccount(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True)
     role: Mapped[AccountRole] = mapped_column(
-        SAEnum(AccountRole, name="account_role", native_enum=False, length=16),
+        SAEnum(
+            AccountRole,
+            name="account_role",
+            native_enum=False,
+            length=16,
+            values_callable=_str_enum_values,
+        ),
         nullable=False,
     )
     refresh_token_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
@@ -222,6 +237,7 @@ class BotSession(TimestampMixin, Base):
             name="bot_session_status",
             native_enum=False,
             length=32,
+            values_callable=_str_enum_values,
         ),
         nullable=False,
         default=BotSessionStatus.SCHEDULED,
@@ -293,6 +309,7 @@ class AgentDecision(Base):
             name="decision_outcome",
             native_enum=False,
             length=32,
+            values_callable=_str_enum_values,
         ),
         nullable=False,
         default=DecisionOutcome.PENDING,
@@ -340,12 +357,27 @@ class AgentUtterance(Base):
 class ProviderCredential(TimestampMixin, Base):
     __tablename__ = "provider_credentials"
     __table_args__ = (
-        UniqueConstraint("kind", "provider_name", "display_name", name="uq_provider_credentials"),
+        UniqueConstraint(
+            "kind", "provider_name", "display_name", name="uq_provider_credentials"
+        ),
+        Index(
+            "uq_provider_credentials_active_per_kind",
+            "kind",
+            unique=True,
+            postgresql_where=text("is_active"),
+            sqlite_where=text("is_active"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     kind: Mapped[ProviderKind] = mapped_column(
-        SAEnum(ProviderKind, name="provider_kind", native_enum=False, length=16),
+        SAEnum(
+            ProviderKind,
+            name="provider_kind",
+            native_enum=False,
+            length=16,
+            values_callable=_str_enum_values,
+        ),
         nullable=False,
     )
     provider_name: Mapped[str] = mapped_column(String(64), nullable=False)
