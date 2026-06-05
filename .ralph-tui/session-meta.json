@@ -1,0 +1,30 @@
+{
+  "id": "c7cb0998-fdee-4809-ae2b-b372fb605c13",
+  "status": "interrupted",
+  "startedAt": "2026-06-05T14:11:54.272Z",
+  "updatedAt": "2026-06-05T14:19:50.281Z",
+  "agentPlugin": "claude",
+  "trackerPlugin": "beads-bv",
+  "epicId": "Johnny-kgc",
+  "epicIds": [
+    "Johnny-kgc"
+  ],
+  "executionScopes": [
+    {
+      "id": "Johnny-kgc",
+      "title": "Johnny — Google Meet AI Meeting Bot",
+      "type": "epic",
+      "description": "Johnny is a single-user AI assistant that joins Google Meet meetings on the user's behalf and can listen, transcribe, suggest replies, ask for approval, or speak autonomously within configured constraints.\n\nRuns as a daemon stack (Docker Compose) with a SvelteKit web UI for calendar browsing, per-meeting configuration, and real-time approval/transcript visibility.\n\nBuilt around three swappable layers:\n1. Meeting connector — Playwright+Chromium driving a real Google Meet session\n2. Voice-agent pipeline — Pipecat with LiveKit transport adapter\n3. Provider-agnostic STT/LLM/TTS adapters — cloud and local from day one\n\nAll meeting data (transcripts, router decisions, agent utterances) persisted to PostgreSQL with pgvector for transcript search.\n\n## Goals\n- Mark calendar events for Johnny to attend, with per-meeting context and behavior mode\n- Four bot modes: listen-only, suggest-only, approval-required, limited auto-speak\n- Provider adapters from day one (OpenAI, Anthropic, Gemini, Deepgram, ElevenLabs, faster-whisper, vLLM/Ollama, Piper)\n- Local Docker Compose with PostgreSQL, Redis, FastAPI, SvelteKit, isolated meet-worker containers per active meeting\n- Join as dedicated bot Google account or user's own account, configurable per meeting\n- Persist full meeting audit log for post-meeting review",
+      "metadata": {
+        "dependencyCount": 0,
+        "dependentCount": 0
+      }
+    }
+  ],
+  "currentIteration": 0,
+  "maxIterations": 50,
+  "totalTasks": 0,
+  "tasksCompleted": 0,
+  "cwd": "/Users/nikita/Projects/Johnny",
+  "endedAt": "2026-06-05T14:19:50.280Z"
+}

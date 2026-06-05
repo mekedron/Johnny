@@ -3,3 +3,36 @@
 .dolt/
 *.db
 .beads-credential-key
+
+# bv (beads viewer) local config and caches
+.bv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Node / SvelteKit
+node_modules/
+.svelte-kit/
+frontend/build/
+frontend/.vercel/
+frontend/.netlify/
+
+# Editors / OS
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# Env
+.env
+.env.local
+.env.*.local

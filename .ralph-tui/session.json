@@ -1,0 +1,243 @@
+{
+  "version": 1,
+  "sessionId": "c7cb0998-fdee-4809-ae2b-b372fb605c13",
+  "status": "running",
+  "startedAt": "2026-06-05T14:12:10.379Z",
+  "updatedAt": "2026-06-05T14:19:51.772Z",
+  "currentIteration": 0,
+  "maxIterations": 10,
+  "tasksCompleted": 0,
+  "isPaused": false,
+  "agentPlugin": "claude",
+  "trackerState": {
+    "plugin": "beads-bv",
+    "epicId": "Johnny-kgc",
+    "epicIds": [
+      "Johnny-kgc"
+    ],
+    "executionScopes": [
+      {
+        "id": "Johnny-kgc",
+        "title": "Johnny — Google Meet AI Meeting Bot",
+        "type": "epic",
+        "description": "Johnny is a single-user AI assistant that joins Google Meet meetings on the user's behalf and can listen, transcribe, suggest replies, ask for approval, or speak autonomously within configured constraints.\n\nRuns as a daemon stack (Docker Compose) with a SvelteKit web UI for calendar browsing, per-meeting configuration, and real-time approval/transcript visibility.\n\nBuilt around three swappable layers:\n1. Meeting connector — Playwright+Chromium driving a real Google Meet session\n2. Voice-agent pipeline — Pipecat with LiveKit transport adapter\n3. Provider-agnostic STT/LLM/TTS adapters — cloud and local from day one\n\nAll meeting data (transcripts, router decisions, agent utterances) persisted to PostgreSQL with pgvector for transcript search.\n\n## Goals\n- Mark calendar events for Johnny to attend, with per-meeting context and behavior mode\n- Four bot modes: listen-only, suggest-only, approval-required, limited auto-speak\n- Provider adapters from day one (OpenAI, Anthropic, Gemini, Deepgram, ElevenLabs, faster-whisper, vLLM/Ollama, Piper)\n- Local Docker Compose with PostgreSQL, Redis, FastAPI, SvelteKit, isolated meet-worker containers per active meeting\n- Join as dedicated bot Google account or user's own account, configurable per meeting\n- Persist full meeting audit log for post-meeting review",
+        "metadata": {
+          "dependencyCount": 0,
+          "dependentCount": 0
+        }
+      }
+    ],
+    "totalTasks": 34,
+    "tasks": [
+      {
+        "id": "Johnny-kgc.1",
+        "title": "US-001: Project scaffolding",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.2",
+        "title": "US-002: Docker Compose stack",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.3",
+        "title": "US-003: Database schema and migrations",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.4",
+        "title": "US-004: SvelteKit application shell",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.5",
+        "title": "US-005: Google OAuth 2.0 desktop flow",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.6",
+        "title": "US-006: Multi-account management",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.7",
+        "title": "US-007: Calendar fetch and polling worker",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.8",
+        "title": "US-008: Calendar view UI",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.9",
+        "title": "US-009: Per-meeting bot configuration form",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.10",
+        "title": "US-010: Profile templates CRUD",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.11",
+        "title": "US-011: Provider adapter interfaces",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.12",
+        "title": "US-012: Cloud STT adapters",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.13",
+        "title": "US-013: Local STT adapter",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.14",
+        "title": "US-014: Cloud LLM adapters",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.15",
+        "title": "US-015: Local LLM adapter",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.16",
+        "title": "US-016: Cloud TTS adapters",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.17",
+        "title": "US-017: Local TTS adapter",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.18",
+        "title": "US-018: Provider configuration UI",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.19",
+        "title": "US-019: Meet worker base container",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.20",
+        "title": "US-020: Google Meet join automation",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.21",
+        "title": "US-021: Audio bridge",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.22",
+        "title": "US-022: Pipecat pipeline with Silero VAD",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.23",
+        "title": "US-023: Router LLM and decision schema",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.24",
+        "title": "US-024: Answer LLM and TTS chain",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.25",
+        "title": "US-025: LiveKit transport adapter",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.26",
+        "title": "US-026: Listen-only and Suggest-only modes",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.27",
+        "title": "US-027: Approval-required mode with browser push",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.28",
+        "title": "US-028: Limited auto-speak mode",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.29",
+        "title": "US-029: Bot session scheduler",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.30",
+        "title": "US-030: Per-session container spawning",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.31",
+        "title": "US-031: WebSocket for live updates",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.32",
+        "title": "US-032: Live transcript and approval UI",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.33",
+        "title": "US-033: Transcript and audit persistence",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc.34",
+        "title": "US-034: Post-meeting history view",
+        "status": "open",
+        "completedInSession": false
+      }
+    ]
+  },
+  "iterations": [],
+  "skippedTaskIds": [],
+  "cwd": "/Users/nikita/Projects/Johnny",
+  "activeTaskIds": [],
+  "subagentPanelVisible": false
+}

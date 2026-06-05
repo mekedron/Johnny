@@ -1,0 +1,2 @@
+{"id":"int-4e6cc0ab","kind":"field_change","created_at":"2026-06-05T14:12:43.606172Z","actor":"Nikita R","issue_id":"Johnny-kgc.1","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
+{"id":"int-09e4f886","kind":"field_change","created_at":"2026-06-05T14:18:01.234985Z","actor":"Nikita R","issue_id":"Johnny-kgc.1","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Backend (uv+FastAPI) and frontend (pnpm+SvelteKit) scaffolding complete with /health endpoint, Johnny home page, README, and all 5 quality gates green."}}
