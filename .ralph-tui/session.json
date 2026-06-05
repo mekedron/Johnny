@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
+  "sessionId": "93eda9f4-6fc6-4aec-a6f6-7c9916b5653f",
   "status": "running",
-  "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T21:56:30.321Z",
-  "currentIteration": 32,
-  "maxIterations": 10,
-  "tasksCompleted": 32,
+  "startedAt": "2026-06-05T22:19:54.215Z",
+  "updatedAt": "2026-06-05T22:25:30.832Z",
+  "currentIteration": 0,
+  "maxIterations": 0,
+  "tasksCompleted": 0,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -27,7 +27,7 @@
         }
       }
     ],
-    "totalTasks": 34,
+    "totalTasks": 35,
     "tasks": [
       {
         "id": "Johnny-kgc.1",
@@ -39,524 +39,209 @@
         "id": "Johnny-kgc.2",
         "title": "US-002: Docker Compose stack",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.3",
         "title": "US-003: Database schema and migrations",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.4",
         "title": "US-004: SvelteKit application shell",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-mxx",
+        "title": "Write local-first setup guide with copy-paste commands and direct download links",
+        "status": "open",
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.5",
         "title": "US-005: Google OAuth 2.0 desktop flow",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.6",
         "title": "US-006: Multi-account management",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.7",
         "title": "US-007: Calendar fetch and polling worker",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.8",
         "title": "US-008: Calendar view UI",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.9",
         "title": "US-009: Per-meeting bot configuration form",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.10",
         "title": "US-010: Profile templates CRUD",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.11",
         "title": "US-011: Provider adapter interfaces",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.12",
         "title": "US-012: Cloud STT adapters",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.13",
         "title": "US-013: Local STT adapter",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.14",
         "title": "US-014: Cloud LLM adapters",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.15",
         "title": "US-015: Local LLM adapter",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.16",
         "title": "US-016: Cloud TTS adapters",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.17",
         "title": "US-017: Local TTS adapter",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.18",
         "title": "US-018: Provider configuration UI",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.19",
         "title": "US-019: Meet worker base container",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.20",
         "title": "US-020: Google Meet join automation",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.21",
         "title": "US-021: Audio bridge",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.22",
         "title": "US-022: Pipecat pipeline with Silero VAD",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.23",
         "title": "US-023: Router LLM and decision schema",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.24",
         "title": "US-024: Answer LLM and TTS chain",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.25",
         "title": "US-025: LiveKit transport adapter",
-        "status": "open",
+        "status": "completed",
         "completedInSession": false
       },
       {
         "id": "Johnny-kgc.26",
         "title": "US-026: Listen-only and Suggest-only modes",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.27",
         "title": "US-027: Approval-required mode with browser push",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.28",
         "title": "US-028: Limited auto-speak mode",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.29",
         "title": "US-029: Bot session scheduler",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.30",
         "title": "US-030: Per-session container spawning",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.31",
         "title": "US-031: WebSocket for live updates",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.32",
         "title": "US-032: Live transcript and approval UI",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.33",
         "title": "US-033: Transcript and audit persistence",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-kgc.34",
         "title": "US-034: Post-meeting history view",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       }
     ]
   },
-  "iterations": [
-    {
-      "iteration": 1,
-      "status": "completed",
-      "taskId": "Johnny-kgc.4",
-      "taskTitle": "US-004: SvelteKit application shell",
-      "taskCompleted": true,
-      "durationMs": 389281,
-      "startedAt": "2026-06-05T14:20:38.021Z",
-      "endedAt": "2026-06-05T14:27:07.302Z"
-    },
-    {
-      "iteration": 2,
-      "status": "completed",
-      "taskId": "Johnny-kgc.3",
-      "taskTitle": "US-003: Database schema and migrations",
-      "taskCompleted": true,
-      "durationMs": 585333,
-      "startedAt": "2026-06-05T14:27:25.621Z",
-      "endedAt": "2026-06-05T14:37:10.954Z"
-    },
-    {
-      "iteration": 3,
-      "status": "completed",
-      "taskId": "Johnny-kgc.2",
-      "taskTitle": "US-002: Docker Compose stack",
-      "taskCompleted": true,
-      "durationMs": 724027,
-      "startedAt": "2026-06-05T14:37:30.442Z",
-      "endedAt": "2026-06-05T14:49:34.469Z"
-    },
-    {
-      "iteration": 4,
-      "status": "completed",
-      "taskId": "Johnny-kgc.19",
-      "taskTitle": "US-019: Meet worker base container",
-      "taskCompleted": true,
-      "durationMs": 468007,
-      "startedAt": "2026-06-05T14:49:53.729Z",
-      "endedAt": "2026-06-05T14:57:41.736Z"
-    },
-    {
-      "iteration": 5,
-      "status": "completed",
-      "taskId": "Johnny-kgc.21",
-      "taskTitle": "US-021: Audio bridge",
-      "taskCompleted": true,
-      "durationMs": 824000,
-      "startedAt": "2026-06-05T14:58:01.828Z",
-      "endedAt": "2026-06-05T15:11:45.828Z"
-    },
-    {
-      "iteration": 6,
-      "status": "completed",
-      "taskId": "Johnny-kgc.11",
-      "taskTitle": "US-011: Provider adapter interfaces",
-      "taskCompleted": true,
-      "durationMs": 507684,
-      "startedAt": "2026-06-05T15:12:06.303Z",
-      "endedAt": "2026-06-05T15:20:33.987Z"
-    },
-    {
-      "iteration": 7,
-      "status": "completed",
-      "taskId": "Johnny-kgc.22",
-      "taskTitle": "US-022: Pipecat pipeline with Silero VAD",
-      "taskCompleted": true,
-      "durationMs": 1236976,
-      "startedAt": "2026-06-05T15:20:53.573Z",
-      "endedAt": "2026-06-05T15:41:30.549Z"
-    },
-    {
-      "iteration": 8,
-      "status": "completed",
-      "taskId": "Johnny-kgc.18",
-      "taskTitle": "US-018: Provider configuration UI",
-      "taskCompleted": true,
-      "durationMs": 1091235,
-      "startedAt": "2026-06-05T15:41:49.312Z",
-      "endedAt": "2026-06-05T16:00:00.547Z"
-    },
-    {
-      "iteration": 9,
-      "status": "completed",
-      "taskId": "Johnny-kgc.17",
-      "taskTitle": "US-017: Local TTS adapter",
-      "taskCompleted": true,
-      "durationMs": 698666,
-      "startedAt": "2026-06-05T16:00:18.728Z",
-      "endedAt": "2026-06-05T16:11:57.394Z"
-    },
-    {
-      "iteration": 10,
-      "status": "completed",
-      "taskId": "Johnny-kgc.16",
-      "taskTitle": "US-016: Cloud TTS adapters",
-      "taskCompleted": true,
-      "durationMs": 661616,
-      "startedAt": "2026-06-05T16:12:16.138Z",
-      "endedAt": "2026-06-05T16:23:17.754Z"
-    },
-    {
-      "iteration": 11,
-      "status": "completed",
-      "taskId": "Johnny-kgc.15",
-      "taskTitle": "US-015: Local LLM adapter",
-      "taskCompleted": true,
-      "durationMs": 521792,
-      "startedAt": "2026-06-05T16:23:36.564Z",
-      "endedAt": "2026-06-05T16:32:18.356Z"
-    },
-    {
-      "iteration": 12,
-      "status": "completed",
-      "taskId": "Johnny-kgc.14",
-      "taskTitle": "US-014: Cloud LLM adapters",
-      "taskCompleted": true,
-      "durationMs": 770384,
-      "startedAt": "2026-06-05T16:32:37.628Z",
-      "endedAt": "2026-06-05T16:45:28.012Z"
-    },
-    {
-      "iteration": 13,
-      "status": "completed",
-      "taskId": "Johnny-kgc.23",
-      "taskTitle": "US-023: Router LLM and decision schema",
-      "taskCompleted": true,
-      "durationMs": 793670,
-      "startedAt": "2026-06-05T16:45:46.327Z",
-      "endedAt": "2026-06-05T16:58:59.997Z"
-    },
-    {
-      "iteration": 14,
-      "status": "completed",
-      "taskId": "Johnny-kgc.24",
-      "taskTitle": "US-024: Answer LLM and TTS chain",
-      "taskCompleted": true,
-      "durationMs": 1283626,
-      "startedAt": "2026-06-05T16:59:17.811Z",
-      "endedAt": "2026-06-05T17:20:41.437Z"
-    },
-    {
-      "iteration": 15,
-      "status": "completed",
-      "taskId": "Johnny-kgc.33",
-      "taskTitle": "US-033: Transcript and audit persistence",
-      "taskCompleted": true,
-      "durationMs": 642488,
-      "startedAt": "2026-06-05T17:21:00.038Z",
-      "endedAt": "2026-06-05T17:31:42.526Z"
-    },
-    {
-      "iteration": 16,
-      "status": "completed",
-      "taskId": "Johnny-kgc.28",
-      "taskTitle": "US-028: Limited auto-speak mode",
-      "taskCompleted": true,
-      "durationMs": 482435,
-      "startedAt": "2026-06-05T17:32:00.153Z",
-      "endedAt": "2026-06-05T17:40:02.588Z"
-    },
-    {
-      "iteration": 17,
-      "status": "completed",
-      "taskId": "Johnny-kgc.13",
-      "taskTitle": "US-013: Local STT adapter",
-      "taskCompleted": true,
-      "durationMs": 638216,
-      "startedAt": "2026-06-05T17:40:22.173Z",
-      "endedAt": "2026-06-05T17:51:00.389Z"
-    },
-    {
-      "iteration": 18,
-      "status": "completed",
-      "taskId": "Johnny-kgc.12",
-      "taskTitle": "US-012: Cloud STT adapters",
-      "taskCompleted": true,
-      "durationMs": 713919,
-      "startedAt": "2026-06-05T17:51:19.585Z",
-      "endedAt": "2026-06-05T18:03:13.504Z"
-    },
-    {
-      "iteration": 19,
-      "status": "completed",
-      "taskId": "Johnny-kgc.10",
-      "taskTitle": "US-010: Profile templates CRUD",
-      "taskCompleted": true,
-      "durationMs": 656984,
-      "startedAt": "2026-06-05T18:03:32.327Z",
-      "endedAt": "2026-06-05T18:14:29.311Z"
-    },
-    {
-      "iteration": 20,
-      "status": "completed",
-      "taskId": "Johnny-kgc.5",
-      "taskTitle": "US-005: Google OAuth 2.0 desktop flow",
-      "taskCompleted": true,
-      "durationMs": 661597,
-      "startedAt": "2026-06-05T18:14:47.686Z",
-      "endedAt": "2026-06-05T18:25:49.283Z"
-    },
-    {
-      "iteration": 21,
-      "status": "completed",
-      "taskId": "Johnny-kgc.6",
-      "taskTitle": "US-006: Multi-account management",
-      "taskCompleted": true,
-      "durationMs": 820756,
-      "startedAt": "2026-06-05T18:26:08.405Z",
-      "endedAt": "2026-06-05T18:39:49.161Z"
-    },
-    {
-      "iteration": 22,
-      "status": "completed",
-      "taskId": "Johnny-kgc.20",
-      "taskTitle": "US-020: Google Meet join automation",
-      "taskCompleted": true,
-      "durationMs": 818710,
-      "startedAt": "2026-06-05T18:40:07.862Z",
-      "endedAt": "2026-06-05T18:53:46.572Z"
-    },
-    {
-      "iteration": 23,
-      "status": "completed",
-      "taskId": "Johnny-kgc.7",
-      "taskTitle": "US-007: Calendar fetch and polling worker",
-      "taskCompleted": true,
-      "durationMs": 916972,
-      "startedAt": "2026-06-05T18:54:06.568Z",
-      "endedAt": "2026-06-05T19:09:23.540Z"
-    },
-    {
-      "iteration": 24,
-      "status": "completed",
-      "taskId": "Johnny-kgc.8",
-      "taskTitle": "US-008: Calendar view UI",
-      "taskCompleted": true,
-      "durationMs": 642548,
-      "startedAt": "2026-06-05T19:09:43.794Z",
-      "endedAt": "2026-06-05T19:20:26.342Z"
-    },
-    {
-      "iteration": 25,
-      "status": "completed",
-      "taskId": "Johnny-kgc.9",
-      "taskTitle": "US-009: Per-meeting bot configuration form",
-      "taskCompleted": true,
-      "durationMs": 688169,
-      "startedAt": "2026-06-05T19:20:47.457Z",
-      "endedAt": "2026-06-05T19:32:15.626Z"
-    },
-    {
-      "iteration": 26,
-      "status": "completed",
-      "taskId": "Johnny-kgc.29",
-      "taskTitle": "US-029: Bot session scheduler",
-      "taskCompleted": true,
-      "durationMs": 879312,
-      "startedAt": "2026-06-05T19:32:35.189Z",
-      "endedAt": "2026-06-05T19:47:14.501Z"
-    },
-    {
-      "iteration": 27,
-      "status": "completed",
-      "taskId": "Johnny-kgc.31",
-      "taskTitle": "US-031: WebSocket for live updates",
-      "taskCompleted": true,
-      "durationMs": 1209316,
-      "startedAt": "2026-06-05T19:47:33.589Z",
-      "endedAt": "2026-06-05T20:07:42.905Z"
-    },
-    {
-      "iteration": 28,
-      "status": "completed",
-      "taskId": "Johnny-kgc.30",
-      "taskTitle": "US-030: Per-session container spawning",
-      "taskCompleted": true,
-      "durationMs": 984537,
-      "startedAt": "2026-06-05T20:08:02.127Z",
-      "endedAt": "2026-06-05T20:24:26.664Z"
-    },
-    {
-      "iteration": 29,
-      "status": "completed",
-      "taskId": "Johnny-kgc.27",
-      "taskTitle": "US-027: Approval-required mode with browser push",
-      "taskCompleted": true,
-      "durationMs": 1728215,
-      "startedAt": "2026-06-05T20:24:46.298Z",
-      "endedAt": "2026-06-05T20:53:34.513Z"
-    },
-    {
-      "iteration": 30,
-      "status": "completed",
-      "taskId": "Johnny-kgc.32",
-      "taskTitle": "US-032: Live transcript and approval UI",
-      "taskCompleted": true,
-      "durationMs": 727023,
-      "startedAt": "2026-06-05T20:53:53.636Z",
-      "endedAt": "2026-06-05T21:06:00.659Z"
-    },
-    {
-      "iteration": 31,
-      "status": "completed",
-      "taskId": "Johnny-kgc.26",
-      "taskTitle": "US-026: Listen-only and Suggest-only modes",
-      "taskCompleted": true,
-      "durationMs": 987855,
-      "startedAt": "2026-06-05T21:06:21.256Z",
-      "endedAt": "2026-06-05T21:22:49.111Z"
-    },
-    {
-      "iteration": 32,
-      "status": "completed",
-      "taskId": "Johnny-kgc.34",
-      "taskTitle": "US-034: Post-meeting history view",
-      "taskCompleted": true,
-      "durationMs": 1138010,
-      "startedAt": "2026-06-05T21:23:08.820Z",
-      "endedAt": "2026-06-05T21:42:06.830Z"
-    }
-  ],
+  "iterations": [],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],
