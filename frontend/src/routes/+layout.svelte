@@ -1,6 +1,8 @@
 <script lang="ts">
+	import { onDestroy, onMount } from 'svelte';
 	import { page } from '$app/state';
 	import favicon from '$lib/assets/favicon.svg';
+	import { listAccounts, type Account } from '$lib/accounts';
 
 	let { children } = $props();
 
@@ -13,6 +15,7 @@
 	];
 
 	let sidebarOpen = $state(false);
+	let defaultAccount = $state<Account | null>(null);
 
 	function isActive(href: string): boolean {
 		const path = page.url.pathname;
@@ -22,6 +25,35 @@
 	function closeSidebar() {
 		sidebarOpen = false;
 	}
+
+	async function refreshAccount() {
+		try {
+			const accounts = await listAccounts();
+			defaultAccount = accounts.find((a) => a.is_default_user) ?? null;
+		} catch {
+			// Surfacing the error here would push it to every page; the
+			// Settings page already renders backend connection issues.
+			defaultAccount = null;
+		}
+	}
+
+	function handleOAuthMessage(event: MessageEvent) {
+		const data = event.data;
+		if (data && typeof data === 'object' && (data as { type?: unknown }).type === 'johnny:oauth') {
+			refreshAccount();
+		}
+	}
+
+	onMount(() => {
+		refreshAccount();
+		window.addEventListener('message', handleOAuthMessage);
+	});
+
+	onDestroy(() => {
+		if (typeof window !== 'undefined') {
+			window.removeEventListener('message', handleOAuthMessage);
+		}
+	});
 </script>
 
 <svelte:head>
@@ -42,7 +74,9 @@
 		<a class="brand" href="/">Johnny</a>
 		<div class="account" data-testid="account-indicator">
 			<span class="account-label">Account</span>
-			<span class="account-name">Not connected</span>
+			<span class="account-name">
+				{defaultAccount ? defaultAccount.email : 'Not connected'}
+			</span>
 		</div>
 	</header>
 

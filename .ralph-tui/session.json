@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T18:25:50.387Z",
-  "currentIteration": 19,
+  "updatedAt": "2026-06-05T18:39:49.996Z",
+  "currentIteration": 20,
   "maxIterations": 10,
-  "tasksCompleted": 19,
+  "tasksCompleted": 20,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -56,8 +56,8 @@
       {
         "id": "Johnny-kgc.5",
         "title": "US-005: Google OAuth 2.0 desktop flow",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.6",
@@ -425,6 +425,16 @@
       "durationMs": 656984,
       "startedAt": "2026-06-05T18:03:32.327Z",
       "endedAt": "2026-06-05T18:14:29.311Z"
+    },
+    {
+      "iteration": 20,
+      "status": "completed",
+      "taskId": "Johnny-kgc.5",
+      "taskTitle": "US-005: Google OAuth 2.0 desktop flow",
+      "taskCompleted": true,
+      "durationMs": 661597,
+      "startedAt": "2026-06-05T18:14:47.686Z",
+      "endedAt": "2026-06-05T18:25:49.283Z"
     }
   ],
   "skippedTaskIds": [],

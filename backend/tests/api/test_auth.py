@@ -18,7 +18,13 @@ from app.api import auth as auth_module
 from app.api.deps import get_crypto, get_session
 from app.config import Settings, get_settings
 from app.db import Base
-from app.db.models import AccountRole, CalendarEvent, GoogleAccount
+from app.db.models import (
+    AccountRole,
+    CalendarEvent,
+    GoogleAccount,
+    MeetingConfig,
+    ProfileTemplate,
+)
 from app.main import app
 from app.security.crypto import CredentialCrypto, decrypt_json  # noqa: F401
 from app.services.google_oauth import GoogleOAuthError, TokenResponse, UserInfo
@@ -36,6 +42,8 @@ def engine() -> sa.Engine:
         tables=[
             GoogleAccount.__table__,  # type: ignore[list-item]
             CalendarEvent.__table__,  # type: ignore[list-item]
+            ProfileTemplate.__table__,  # type: ignore[list-item]
+            MeetingConfig.__table__,  # type: ignore[list-item]
         ],
     )
     return eng
@@ -413,3 +421,278 @@ def test_account_read_excludes_tokens(client: TestClient) -> None:
     assert "access_token" not in body
     assert "refresh_token_encrypted" not in body
     assert "access_token_encrypted" not in body
+
+
+# --- GET /callback (browser redirect) -------------------------------------
+
+
+def test_get_callback_renders_success_html(
+    client: TestClient, db_session: Session
+) -> None:
+    state = "browser-state"
+    auth_module._remember_state(
+        state, auth_module._PendingState(role=AccountRole.USER, is_default_user=False)
+    )
+    with (
+        patch(
+            "app.api.auth.exchange_code_for_tokens",
+            new=AsyncMock(return_value=_fake_token_response()),
+        ),
+        patch(
+            "app.api.auth.fetch_userinfo",
+            new=AsyncMock(return_value=_fake_userinfo()),
+        ),
+    ):
+        resp = client.get(
+            "/auth/google/callback",
+            params={"code": "browser-code", "state": state},
+        )
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    body = resp.text
+    assert "alice@example.com" in body
+    assert "johnny:oauth" in body
+    # And the row was persisted just like the POST flow.
+    assert db_session.scalars(sa.select(GoogleAccount)).one().email == "alice@example.com"
+
+
+def test_get_callback_renders_error_html(client: TestClient) -> None:
+    # No pending state matches; consume_state returns None → 400.
+    resp = client.get(
+        "/auth/google/callback",
+        params={"code": "x", "state": "no-such-state"},
+    )
+    assert resp.status_code == 400
+    assert "text/html" in resp.headers["content-type"]
+    assert "Authentication failed" in resp.text
+
+
+# --- GET /accounts ---------------------------------------------------------
+
+
+def _add_account(
+    session: Session,
+    crypto: CredentialCrypto,
+    *,
+    email: str,
+    role: AccountRole = AccountRole.USER,
+    is_default_user: bool = False,
+) -> GoogleAccount:
+    row = GoogleAccount(
+        email=email,
+        role=role,
+        access_token_encrypted=crypto.encrypt("a"),
+        refresh_token_encrypted=crypto.encrypt("r"),
+        token_expires_at=datetime.now(UTC) + timedelta(hours=1),
+        is_default_user=is_default_user,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def test_list_accounts_returns_default_user_first(
+    client: TestClient,
+    db_session: Session,
+    crypto: CredentialCrypto,
+) -> None:
+    bot = _add_account(db_session, crypto, email="johnny-bot@example.com", role=AccountRole.BOT)
+    user = _add_account(
+        db_session, crypto, email="alice@example.com", is_default_user=True
+    )
+    db_session.commit()
+
+    resp = client.get("/auth/google/accounts")
+    assert resp.status_code == 200
+    rows = resp.json()
+    assert [r["id"] for r in rows] == [user.id, bot.id]
+    assert rows[0]["role"] == "user"
+    assert rows[0]["is_default_user"] is True
+    assert rows[1]["role"] == "bot"
+    assert rows[1]["is_default_user"] is False
+    # And tokens are not leaked.
+    for row in rows:
+        assert "refresh_token_encrypted" not in row
+        assert "access_token_encrypted" not in row
+
+
+def test_list_accounts_empty(client: TestClient) -> None:
+    resp = client.get("/auth/google/accounts")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_get_account_404_for_unknown_id(client: TestClient) -> None:
+    resp = client.get("/auth/google/accounts/999")
+    assert resp.status_code == 404
+
+
+# --- PATCH /accounts/{id} --------------------------------------------------
+
+
+def test_patch_account_changes_role(
+    client: TestClient, db_session: Session, crypto: CredentialCrypto
+) -> None:
+    row = _add_account(db_session, crypto, email="alice@example.com")
+    db_session.commit()
+    resp = client.patch(
+        f"/auth/google/accounts/{row.id}",
+        json={"role": "bot"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["role"] == "bot"
+    db_session.refresh(row)
+    assert row.role is AccountRole.BOT
+
+
+def test_patch_account_promotion_clears_other_default(
+    client: TestClient, db_session: Session, crypto: CredentialCrypto
+) -> None:
+    a = _add_account(
+        db_session, crypto, email="a@example.com", is_default_user=True
+    )
+    b = _add_account(
+        db_session, crypto, email="b@example.com", is_default_user=False
+    )
+    db_session.commit()
+
+    resp = client.patch(
+        f"/auth/google/accounts/{b.id}",
+        json={"is_default_user": True},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["is_default_user"] is True
+
+    db_session.expire_all()
+    refreshed_a = db_session.get(GoogleAccount, a.id)
+    refreshed_b = db_session.get(GoogleAccount, b.id)
+    assert refreshed_a is not None and refreshed_b is not None
+    assert refreshed_a.is_default_user is False
+    assert refreshed_b.is_default_user is True
+
+
+def test_patch_account_demote_leaves_zero_defaults(
+    client: TestClient, db_session: Session, crypto: CredentialCrypto
+) -> None:
+    row = _add_account(
+        db_session, crypto, email="a@example.com", is_default_user=True
+    )
+    db_session.commit()
+    resp = client.patch(
+        f"/auth/google/accounts/{row.id}",
+        json={"is_default_user": False},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["is_default_user"] is False
+
+
+def test_patch_account_404(client: TestClient) -> None:
+    resp = client.patch("/auth/google/accounts/999", json={"role": "bot"})
+    assert resp.status_code == 404
+
+
+def test_patch_account_rejects_bad_role(
+    client: TestClient, db_session: Session, crypto: CredentialCrypto
+) -> None:
+    row = _add_account(db_session, crypto, email="a@example.com")
+    db_session.commit()
+    resp = client.patch(
+        f"/auth/google/accounts/{row.id}", json={"role": "admin"}
+    )
+    assert resp.status_code == 422
+
+
+# --- DELETE /accounts/{id} -------------------------------------------------
+
+
+def test_delete_account_revokes_and_removes_row(
+    client: TestClient, db_session: Session, crypto: CredentialCrypto
+) -> None:
+    row = _add_account(db_session, crypto, email="a@example.com")
+    db_session.commit()
+
+    async_revoke = AsyncMock()
+    with patch("app.api.auth.revoke_account", new=async_revoke) as revoke_spy:
+        # Stub revoke_account to actually delete the row (its real
+        # behaviour) so the test reflects the integrated effect.
+        async def _stub_revoke(*, session: Session, account: GoogleAccount, **_: Any) -> None:
+            session.delete(account)
+
+        revoke_spy.side_effect = _stub_revoke
+        resp = client.delete(f"/auth/google/accounts/{row.id}")
+
+    assert resp.status_code == 204
+    assert revoke_spy.await_count == 1
+    assert db_session.scalars(sa.select(GoogleAccount)).all() == []
+
+
+def test_delete_account_404_for_unknown_id(client: TestClient) -> None:
+    with patch("app.api.auth.revoke_account", new=AsyncMock()) as spy:
+        resp = client.delete("/auth/google/accounts/999")
+    assert resp.status_code == 404
+    spy.assert_not_called()
+
+
+def test_delete_account_409_when_meeting_configs_reference_it(
+    client: TestClient,
+    db_session: Session,
+    crypto: CredentialCrypto,
+) -> None:
+    bot = _add_account(db_session, crypto, email="bot@example.com", role=AccountRole.BOT)
+    db_session.commit()
+
+    # Stub the count helper so we don't need to spin up the calendar /
+    # template fixtures just for this assertion.
+    with (
+        patch("app.api.auth._meeting_config_count", return_value=3),
+        patch("app.api.auth.revoke_account", new=AsyncMock()) as revoke_spy,
+    ):
+        resp = client.delete(f"/auth/google/accounts/{bot.id}")
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["meeting_config_count"] == 3
+    assert "force=true" in detail["message"]
+    revoke_spy.assert_not_called()
+    # Row is still present.
+    assert db_session.get(GoogleAccount, bot.id) is not None
+
+
+def test_delete_account_force_true_cascades_meeting_configs(
+    client: TestClient,
+    db_session: Session,
+    crypto: CredentialCrypto,
+) -> None:
+    bot = _add_account(db_session, crypto, email="bot@example.com", role=AccountRole.BOT)
+    db_session.commit()
+
+    async def _stub_revoke(*, session: Session, account: GoogleAccount, **_: Any) -> None:
+        session.delete(account)
+
+    with (
+        patch("app.api.auth._meeting_config_count", return_value=2),
+        patch("app.api.auth.revoke_account", new=AsyncMock(side_effect=_stub_revoke)) as revoke_spy,
+    ):
+        resp = client.delete(
+            f"/auth/google/accounts/{bot.id}", params={"force": "true"}
+        )
+    assert resp.status_code == 204
+    revoke_spy.assert_awaited_once()
+    assert db_session.get(GoogleAccount, bot.id) is None
+
+
+def test_delete_account_swallows_revoke_decrypt_failure(
+    client: TestClient, db_session: Session, crypto: CredentialCrypto
+) -> None:
+    row = _add_account(db_session, crypto, email="a@example.com")
+    db_session.commit()
+
+    from app.services.google_client import GoogleApiClientError
+
+    async def _boom(*, session: Session, account: GoogleAccount, **_: Any) -> None:
+        raise GoogleApiClientError("decrypt failed")
+
+    with patch("app.api.auth.revoke_account", new=AsyncMock(side_effect=_boom)):
+        resp = client.delete(f"/auth/google/accounts/{row.id}")
+    assert resp.status_code == 204
+    # Row is still deleted locally despite the revoke barf.
+    assert db_session.scalars(sa.select(GoogleAccount)).all() == []
