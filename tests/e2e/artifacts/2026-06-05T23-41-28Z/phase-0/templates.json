@@ -1,0 +1,42 @@
+[
+    {
+        "id": 2,
+        "name": "Approval-required client call",
+        "mode": "approval_required",
+        "base_instructions": "Listen carefully. When a clear question is asked or a clarification is needed, propose a concise reply and ask the user to approve before speaking. Never speak without explicit approval.",
+        "base_context": "External client meeting \u2014 tone is professional. Errors are costly, so default to caution and ask for approval before contributing.",
+        "allowed_replies": [],
+        "confidence_threshold": 0.75,
+        "meeting_config_count": 0,
+        "created_at": "2026-06-05T19:57:02.776814Z",
+        "updated_at": "2026-06-05T19:57:02.776814Z"
+    },
+    {
+        "id": 4,
+        "name": "Demo template",
+        "mode": "approval_required",
+        "base_instructions": "",
+        "base_context": "",
+        "allowed_replies": [
+            "Yes.",
+            "No.",
+            "Could you clarify?"
+        ],
+        "confidence_threshold": 0.7,
+        "meeting_config_count": 1,
+        "created_at": "2026-06-05T21:37:05.497771Z",
+        "updated_at": "2026-06-05T21:37:05.497771Z"
+    },
+    {
+        "id": 1,
+        "name": "Listen-only standup",
+        "mode": "listen_only",
+        "base_instructions": "Transcribe the meeting silently. Do not speak. Capture the standup updates so the user can review them later.",
+        "base_context": "Daily team standup format: each person shares yesterday's progress, today's plan, and any blockers.",
+        "allowed_replies": [],
+        "confidence_threshold": 0.7,
+        "meeting_config_count": 0,
+        "created_at": "2026-06-05T19:57:02.776814Z",
+        "updated_at": "2026-06-05T19:57:02.776814Z"
+    }
+]

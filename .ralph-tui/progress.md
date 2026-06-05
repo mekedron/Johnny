@@ -8,6 +8,32 @@ after each iteration and it's included in prompts for context.
 - **Provider plan = source of truth for both API-level and agent-driven UI tests.** `backend/tests/e2e/providers_ui/plans.py` declares one `ProviderPlan` per (kind, backend) row. The Python runner (`runner.py`) and the chrome-devtools driver recipe (`ui_driver.py`) both consume the same plans so a new provider only needs one new row to be covered everywhere. Plans carry SKIP gates (`credential_env`, `options_env`, `local_asset`, `probe_url`) so missing keys / models never produce a FAIL.
 - **`e2e_ui` pytest marker convention.** Opt-in end-to-end tests gate behind `pytest -m e2e_ui` (registered in `backend/pyproject.toml`). A session-scoped autouse fixture in `conftest.py` skips the whole selection with one actionable message when the API is unreachable instead of letting every test emit the same connection error.
 - **Encrypted-credentials test rows.** When seeding `provider_credentials` rows for tests, use the public `POST /providers` endpoint — never write to the DB directly. The endpoint runs the Fernet encryption that production uses, so a test row exercises the same path as a UI-created row.
+- **Readiness-first phase layout for journey tests.** Multi-phase E2E runs (Johnny-pdf, Johnny-f7k) precreate `tests/e2e/artifacts/<timestamp>/phase-N/` directories up-front and produce a single `report.json` whose top-level `summary` maps every phase to PASS / PARTIAL / FAIL / BLOCKED. When a phase is blocked, the JSON also lists the specific blockers (id, title, impact, remedy, related_beads) so the next runner can act without re-deriving the gap. Mirror the same data in `REPORT.md` for humans. The layout keeps every run comparable across iterations even when most phases are blocked, and matches the `report.json` schema produced by Johnny-upg so post-run dashboards can union the two.
+
+---
+
+## 2026-06-05 — Johnny-pdf
+
+Master functional validation readiness audit (Johnny-pdf).
+
+**What was implemented**
+- Phase-0 readiness audit captured at `tests/e2e/artifacts/2026-06-05T23-41-28Z/`: structured `report.json` with PASS / PARTIAL / FAIL / BLOCKED per phase, human-readable `REPORT.md`, UI baseline screenshots (calendar, providers, templates), and raw API snapshots for every endpoint that backs a Phase 0 criterion (auth_accounts, providers, templates, calendar_events, sessions_active, health, test_event_meeting_config, docker_ps).
+- Empty `phase-1/` through `phase-10/` directories precreated so the next (unblocked) run drops screenshots into the standard layout without reorganizing.
+- Hard-blocker list attached to the Johnny-pdf bead notes via `bd update --notes`. Six blockers cataloged with impact, remedy, and related beads.
+
+**Files changed**
+- `tests/e2e/artifacts/2026-06-05T23-41-28Z/report.json` — structured roll-up.
+- `tests/e2e/artifacts/2026-06-05T23-41-28Z/REPORT.md` — human-readable summary.
+- `tests/e2e/artifacts/2026-06-05T23-41-28Z/phase-0/*.png|*.json|*.txt` — readiness evidence.
+- `tests/e2e/artifacts/2026-06-05T23-41-28Z/phase-{1..10}/` — empty placeholders for the next run.
+- Johnny-pdf bead notes — full blocker catalog and re-run criteria.
+
+**Learnings**
+- Johnny-pdf cannot run unattended today: it depends on Johnny-ckz Part A (join-stuck bug fix) AND Part B (`uv run python -m johnny.e2e --mode=<mode>` — `backend/johnny/e2e` does not yet exist) AND active STT/LLM/TTS providers AND the observer account `nikita.rabykin@gmail.com` being connected AND either a human observer or an automated audio-injection path (second-Playwright-participant playing fixture WAV is the bead-recommended approach but not built).
+- `bd dep add <task> <epic>` rejects task → epic edges ("tasks can only block other tasks, not epics"). Record the relationship in the bead's free-text NOTES instead — it still shows up in `bd show` output and survives across pulls.
+- The Test event (id=11) was authored by the bot account (`nikita.rabykin@aikamatkat.fi`) rather than the user account (`nikita.rabykin@gmail.com`) called out in the bead convention. Either rewrite the convention or recreate the event under the user account once that account is connected.
+- The bot account's `token_expires_at` was within ~3 minutes of the audit start — token refresh will be required before any real join attempt the moment the wall clock crosses that boundary; the Johnny-q1x token-health surface is the right place for a re-auth prompt.
+- Phase 0 IS valuable even when subsequent phases are blocked: it produces a stable diff target that turns "is the environment ready?" from a half-hour click-through into a single `report.json` comparison.
 
 ---
 

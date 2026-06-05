@@ -1,0 +1,12 @@
+[
+    {
+        "id": 3,
+        "email": "nikita.rabykin@aikamatkat.fi",
+        "role": "bot",
+        "is_default_user": true,
+        "token_expires_at": "2026-06-05T23:45:28.251863Z",
+        "token_health": "ok",
+        "created_at": "2026-06-05T22:45:29.320822Z",
+        "updated_at": "2026-06-05T22:45:29.320822Z"
+    }
+]

@@ -1,0 +1,14 @@
+{
+    "id": 5,
+    "calendar_event_id": 11,
+    "profile_template_id": 4,
+    "identity_account_id": 3,
+    "mode": "approval_required",
+    "instructions": "Hey, just have a great conversation.",
+    "context": null,
+    "allowed_replies": null,
+    "confidence_threshold": null,
+    "enabled": true,
+    "created_at": "2026-06-05T22:47:28.770919Z",
+    "updated_at": "2026-06-05T22:47:28.770919Z"
+}

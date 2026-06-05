@@ -1,0 +1,665 @@
+{
+    "account_id": 3,
+    "window_days": 14,
+    "created_count": 0,
+    "updated_count": 0,
+    "deleted_count": 0,
+    "events": [
+        {
+            "id": 11,
+            "account_id": 3,
+            "external_id": "_6h1jcdpn68pjgba16t2j8b9k68q3ib9p8or48b9k8cpjee9k6l130e9m8g",
+            "summary": "Test",
+            "organizer": "nikita.rabykin@aikamatkat.fi",
+            "attendees": [
+                {
+                    "self": true,
+                    "email": "nikita.rabykin@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": true,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "nikita.rabykin@gmail.com",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "needsAction"
+                }
+            ],
+            "start_time": "2026-06-06T02:15:00Z",
+            "end_time": "2026-06-06T03:15:00Z",
+            "meet_link": "https://meet.google.com/bpa-ocqr-inn",
+            "has_meeting_config": true,
+            "has_meet_link": true,
+            "last_synced_at": "2026-06-05T23:41:53.736637Z",
+            "updated_at": "2026-06-05T23:41:22.830578Z"
+        },
+        {
+            "id": 5,
+            "account_id": 3,
+            "external_id": "2453560lgn5pjem97n8i4r4bsf_20260608T061500Z",
+            "summary": "Monday TTAll catch-up",
+            "organizer": "nicola.vahatalo@aikamatkat.fi",
+            "attendees": [
+                {
+                    "self": false,
+                    "email": "oksana@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "hien.nguyen@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": true,
+                    "email": "nikita.rabykin@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "anni.whiteland@timetravels.com",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "jonas.lehtinen@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "nicola.vahatalo@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": true,
+                    "display_name": "Nicola V\u00e4h\u00e4talo",
+                    "response_status": "declined"
+                },
+                {
+                    "self": false,
+                    "email": "victor.kozharin@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": "Victor Kozharin",
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "mikko.koistinen@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": "Mikko Koistinen",
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "triinu.lehtme@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "caroline.hardouin@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "julia.holma@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "olivia.olkkonen@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "silvija.solo@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "darja.frolova@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "mihaela.ivanova@timetravels.com",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "saurav@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "bettina.jansson@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "akvilina.arkadjevaite@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "maria.hajainen@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": "Maria Hajainen",
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "arcticlogcabins@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "samuel.lahti@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "ikram.bechari@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "mervi.nevala@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "vilte.dabasinske@timetravels.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "lena.shenina@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                }
+            ],
+            "start_time": "2026-06-08T06:15:00Z",
+            "end_time": "2026-06-08T07:00:00Z",
+            "meet_link": "https://meet.google.com/umb-otqu-yqi",
+            "has_meeting_config": false,
+            "has_meet_link": true,
+            "last_synced_at": "2026-06-05T23:41:53.736637Z",
+            "updated_at": "2026-06-05T23:41:22.830578Z"
+        },
+        {
+            "id": 6,
+            "account_id": 3,
+            "external_id": "gf6bapsu1o94rak9f3tqdr2q3e_20260610T114500Z",
+            "summary": "IT meeting",
+            "organizer": "nicola.vahatalo@aikamatkat.fi",
+            "attendees": [
+                {
+                    "self": false,
+                    "email": "nicola.vahatalo@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": true,
+                    "display_name": "Nicola V\u00e4h\u00e4talo",
+                    "response_status": "declined"
+                },
+                {
+                    "self": true,
+                    "email": "nikita.rabykin@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "mikko.koistinen@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": "Mikko Koistinen",
+                    "response_status": "needsAction"
+                }
+            ],
+            "start_time": "2026-06-10T11:45:00Z",
+            "end_time": "2026-06-10T12:45:00Z",
+            "meet_link": "https://meet.google.com/wuu-jyme-vkb",
+            "has_meeting_config": false,
+            "has_meet_link": true,
+            "last_synced_at": "2026-06-05T23:41:53.736637Z",
+            "updated_at": "2026-06-05T23:41:22.830578Z"
+        },
+        {
+            "id": 7,
+            "account_id": 3,
+            "external_id": "56i9215u774cevr9f2stj1abd8_20260611T103000Z",
+            "summary": "\u2615\ufe0f Feel Good Coffee Break \u2615\ufe0f",
+            "organizer": "anni.whiteland@aikamatkat.fi",
+            "attendees": [
+                {
+                    "self": false,
+                    "email": "anni.whiteland@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": true,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": true,
+                    "email": "nikita.rabykin@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "declined"
+                },
+                {
+                    "self": false,
+                    "email": "kaunas.office@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": "TTB / Kaunas office",
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "tta@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": "TTA / Timetravels-Aikamatkat",
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "tallinn@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": "TTE / Tallinn Office",
+                    "response_status": "needsAction"
+                }
+            ],
+            "start_time": "2026-06-11T10:30:00Z",
+            "end_time": "2026-06-11T10:45:00Z",
+            "meet_link": "https://meet.google.com/cxs-opnk-bzv",
+            "has_meeting_config": false,
+            "has_meet_link": true,
+            "last_synced_at": "2026-06-05T23:41:53.736637Z",
+            "updated_at": "2026-06-05T23:41:22.830578Z"
+        },
+        {
+            "id": 8,
+            "account_id": 3,
+            "external_id": "2453560lgn5pjem97n8i4r4bsf_20260615T061500Z",
+            "summary": "Monday TTAll catch-up",
+            "organizer": "nicola.vahatalo@aikamatkat.fi",
+            "attendees": [
+                {
+                    "self": false,
+                    "email": "oksana@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "hien.nguyen@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": true,
+                    "email": "nikita.rabykin@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "anni.whiteland@timetravels.com",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "jonas.lehtinen@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "nicola.vahatalo@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": true,
+                    "display_name": "Nicola V\u00e4h\u00e4talo",
+                    "response_status": "declined"
+                },
+                {
+                    "self": false,
+                    "email": "victor.kozharin@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": "Victor Kozharin",
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "mikko.koistinen@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": "Mikko Koistinen",
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "triinu.lehtme@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "caroline.hardouin@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "julia.holma@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "declined"
+                },
+                {
+                    "self": false,
+                    "email": "olivia.olkkonen@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "silvija.solo@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "darja.frolova@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "mihaela.ivanova@timetravels.com",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "saurav@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "bettina.jansson@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "akvilina.arkadjevaite@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "maria.hajainen@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": "Maria Hajainen",
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "arcticlogcabins@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "samuel.lahti@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "ikram.bechari@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "mervi.nevala@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "vilte.dabasinske@timetravels.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "lena.shenina@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                }
+            ],
+            "start_time": "2026-06-15T06:15:00Z",
+            "end_time": "2026-06-15T07:00:00Z",
+            "meet_link": "https://meet.google.com/umb-otqu-yqi",
+            "has_meeting_config": false,
+            "has_meet_link": true,
+            "last_synced_at": "2026-06-05T23:41:53.736637Z",
+            "updated_at": "2026-06-05T23:41:22.830578Z"
+        },
+        {
+            "id": 9,
+            "account_id": 3,
+            "external_id": "gf6bapsu1o94rak9f3tqdr2q3e_20260617T114500Z",
+            "summary": "IT meeting",
+            "organizer": "nicola.vahatalo@aikamatkat.fi",
+            "attendees": [
+                {
+                    "self": false,
+                    "email": "nicola.vahatalo@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": true,
+                    "display_name": "Nicola V\u00e4h\u00e4talo",
+                    "response_status": "declined"
+                },
+                {
+                    "self": true,
+                    "email": "nikita.rabykin@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": false,
+                    "email": "mikko.koistinen@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": "Mikko Koistinen",
+                    "response_status": "declined"
+                }
+            ],
+            "start_time": "2026-06-17T11:45:00Z",
+            "end_time": "2026-06-17T12:45:00Z",
+            "meet_link": "https://meet.google.com/wuu-jyme-vkb",
+            "has_meeting_config": false,
+            "has_meet_link": true,
+            "last_synced_at": "2026-06-05T23:41:53.736637Z",
+            "updated_at": "2026-06-05T23:41:22.830578Z"
+        },
+        {
+            "id": 10,
+            "account_id": 3,
+            "external_id": "56i9215u774cevr9f2stj1abd8_20260618T103000Z",
+            "summary": "\u2615\ufe0f Feel Good Coffee Break \u2615\ufe0f",
+            "organizer": "anni.whiteland@aikamatkat.fi",
+            "attendees": [
+                {
+                    "self": false,
+                    "email": "anni.whiteland@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": true,
+                    "display_name": null,
+                    "response_status": "accepted"
+                },
+                {
+                    "self": true,
+                    "email": "nikita.rabykin@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": null,
+                    "response_status": "declined"
+                },
+                {
+                    "self": false,
+                    "email": "kaunas.office@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": "TTB / Kaunas office",
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "tta@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": "TTA / Timetravels-Aikamatkat",
+                    "response_status": "needsAction"
+                },
+                {
+                    "self": false,
+                    "email": "tallinn@aikamatkat.fi",
+                    "optional": false,
+                    "organizer": false,
+                    "display_name": "TTE / Tallinn Office",
+                    "response_status": "needsAction"
+                }
+            ],
+            "start_time": "2026-06-18T10:30:00Z",
+            "end_time": "2026-06-18T10:45:00Z",
+            "meet_link": "https://meet.google.com/cxs-opnk-bzv",
+            "has_meeting_config": false,
+            "has_meet_link": true,
+            "last_synced_at": "2026-06-05T23:41:53.736637Z",
+            "updated_at": "2026-06-05T23:41:22.830578Z"
+        }
+    ]
+}

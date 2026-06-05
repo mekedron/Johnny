@@ -3,10 +3,10 @@
   "sessionId": "fb7755d9-c368-4618-bf5b-b19379bcccf7",
   "status": "running",
   "startedAt": "2026-06-05T23:19:19.219Z",
-  "updatedAt": "2026-06-05T23:38:24.338Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-05T23:44:37.070Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -32,8 +32,8 @@
       {
         "id": "Johnny-upg",
         "title": "End-to-end UI test of provider management via chrome-devtools-mcp",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc",
@@ -43,7 +43,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-upg",
+      "taskTitle": "End-to-end UI test of provider management via chrome-devtools-mcp",
+      "taskCompleted": true,
+      "durationMs": 1137883,
+      "startedAt": "2026-06-05T23:19:25.626Z",
+      "endedAt": "2026-06-05T23:38:23.509Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],
