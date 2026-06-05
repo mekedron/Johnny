@@ -9,6 +9,22 @@
 		type CalendarEvent,
 		type CalendarSyncSummary
 	} from '$lib/calendar';
+	import {
+		BOT_MODE_LABEL,
+		BOT_MODES,
+		listTemplates,
+		type BotMode,
+		type Template
+	} from '$lib/templates';
+	import {
+		deleteMeetingConfig,
+		formatAllowedRepliesText,
+		getMeetingConfig,
+		parseAllowedRepliesText,
+		upsertMeetingConfig,
+		type MeetingConfig,
+		type MeetingConfigUpsertPayload
+	} from '$lib/meetingConfigs';
 
 	let accounts = $state<Account[]>([]);
 	let selectedAccountId = $state<number | null>(null);
@@ -17,6 +33,26 @@
 	let loadingEvents = $state(false);
 	let error = $state<string | null>(null);
 	let selectedEvent = $state<CalendarEvent | null>(null);
+
+	// Per-meeting configuration form state.
+	let templates = $state<Template[]>([]);
+	let templatesLoaded = $state(false);
+	let templatesError = $state<string | null>(null);
+	let panelLoading = $state(false);
+	let panelError = $state<string | null>(null);
+	let panelSuccess = $state<string | null>(null);
+	let existingConfig = $state<MeetingConfig | null>(null);
+	let formEnabled = $state(false);
+	let formTemplateId = $state<number | null>(null);
+	let formIdentityId = $state<number | null>(null);
+	let formMode = $state<BotMode>('listen_only');
+	let formInstructions = $state('');
+	let formContext = $state('');
+	let formAllowedRepliesText = $state('');
+	let formThresholdText = $state('');
+	let formSaving = $state(false);
+	let formDeleting = $state(false);
+	let pendingDelete = $state(false);
 
 	const WINDOW_DAYS = 14;
 
@@ -84,10 +120,200 @@
 	function selectEvent(event: CalendarEvent) {
 		if (!event.has_meet_link) return;
 		selectedEvent = event;
+		void openConfigPanel(event);
 	}
 
 	function closeDetailPanel() {
 		selectedEvent = null;
+		existingConfig = null;
+		panelError = null;
+		panelSuccess = null;
+		pendingDelete = false;
+	}
+
+	async function openConfigPanel(event: CalendarEvent) {
+		panelLoading = true;
+		panelError = null;
+		panelSuccess = null;
+		pendingDelete = false;
+		try {
+			await Promise.all([ensureTemplatesLoaded(), loadConfig(event.id)]);
+			seedForm(existingConfig);
+		} catch (e) {
+			panelError = e instanceof Error ? e.message : String(e);
+		} finally {
+			panelLoading = false;
+		}
+	}
+
+	async function ensureTemplatesLoaded() {
+		if (templatesLoaded) return;
+		try {
+			templates = await listTemplates();
+			templatesLoaded = true;
+			templatesError = null;
+		} catch (e) {
+			templatesError = e instanceof Error ? e.message : String(e);
+			throw e;
+		}
+	}
+
+	async function loadConfig(eventId: number) {
+		existingConfig = await getMeetingConfig(eventId);
+	}
+
+	function seedForm(config: MeetingConfig | null) {
+		if (config) {
+			formEnabled = config.enabled;
+			formTemplateId = config.profile_template_id;
+			formIdentityId = config.identity_account_id;
+			formMode = config.mode;
+			formInstructions = config.instructions ?? '';
+			formContext = config.context ?? '';
+			formAllowedRepliesText = formatAllowedRepliesText(config.allowed_replies);
+			formThresholdText =
+				config.confidence_threshold !== null
+					? String(config.confidence_threshold)
+					: '';
+			return;
+		}
+		formEnabled = false;
+		formTemplateId = templates[0]?.id ?? null;
+		const defaultAccount =
+			accounts.find((a) => a.is_default_user && a.role === 'user') ?? accounts[0];
+		formIdentityId = defaultAccount?.id ?? null;
+		const seedTemplate = templates[0] ?? null;
+		formMode = seedTemplate?.mode ?? 'listen_only';
+		formInstructions = '';
+		formContext = '';
+		formAllowedRepliesText = '';
+		formThresholdText = '';
+	}
+
+	function onTemplateChange(event: Event) {
+		const value = (event.currentTarget as HTMLSelectElement).value;
+		const parsed = Number(value);
+		formTemplateId = Number.isFinite(parsed) ? parsed : null;
+		// Adopt the template's mode by default so the form pre-fills sanely
+		// when the user picks a new template; the mode selector lets them
+		// override it before save.
+		const tpl = templates.find((t) => t.id === formTemplateId);
+		if (tpl) formMode = tpl.mode;
+	}
+
+	function onIdentityChange(event: Event) {
+		const value = (event.currentTarget as HTMLSelectElement).value;
+		const parsed = Number(value);
+		formIdentityId = Number.isFinite(parsed) ? parsed : null;
+	}
+
+	function onModeChange(event: Event) {
+		const value = (event.currentTarget as HTMLSelectElement).value as BotMode;
+		formMode = value;
+	}
+
+	async function onEnableToggle(event: Event) {
+		const checked = (event.currentTarget as HTMLInputElement).checked;
+		if (checked) {
+			formEnabled = true;
+			panelSuccess = null;
+			return;
+		}
+		if (existingConfig) {
+			// Confirmation step before destructive delete.
+			pendingDelete = true;
+			return;
+		}
+		formEnabled = false;
+	}
+
+	async function confirmDelete() {
+		if (!selectedEvent || !existingConfig) return;
+		formDeleting = true;
+		panelError = null;
+		try {
+			await deleteMeetingConfig(selectedEvent.id);
+			existingConfig = null;
+			pendingDelete = false;
+			panelSuccess = 'Johnny disabled for this meeting.';
+			seedForm(null);
+			// Reflect the change in the calendar list without a full reload.
+			if (summary) {
+				const idx = summary.events.findIndex((e) => e.id === selectedEvent?.id);
+				if (idx !== -1) {
+					summary.events[idx] = {
+						...summary.events[idx],
+						has_meeting_config: false
+					};
+				}
+			}
+		} catch (e) {
+			panelError = e instanceof Error ? e.message : String(e);
+		} finally {
+			formDeleting = false;
+		}
+	}
+
+	function cancelDelete() {
+		pendingDelete = false;
+		formEnabled = true;
+	}
+
+	async function onSubmit(event: Event) {
+		event.preventDefault();
+		if (!selectedEvent) return;
+		if (formTemplateId === null) {
+			panelError = 'Pick a profile template.';
+			return;
+		}
+		if (formIdentityId === null) {
+			panelError = 'Pick an identity account.';
+			return;
+		}
+		const parsedThreshold = parseThreshold(formThresholdText);
+		if (parsedThreshold === 'invalid') {
+			panelError = 'Confidence threshold must be a number between 0 and 1.';
+			return;
+		}
+		formSaving = true;
+		panelError = null;
+		panelSuccess = null;
+		const payload: MeetingConfigUpsertPayload = {
+			profile_template_id: formTemplateId,
+			identity_account_id: formIdentityId,
+			mode: formMode,
+			instructions: formInstructions.trim() === '' ? null : formInstructions,
+			context: formContext.trim() === '' ? null : formContext,
+			allowed_replies: parseAllowedRepliesText(formAllowedRepliesText),
+			confidence_threshold: parsedThreshold,
+			enabled: true
+		};
+		try {
+			existingConfig = await upsertMeetingConfig(selectedEvent.id, payload);
+			formEnabled = true;
+			panelSuccess = 'Saved.';
+			if (summary) {
+				const idx = summary.events.findIndex((e) => e.id === selectedEvent?.id);
+				if (idx !== -1) {
+					summary.events[idx] = {
+						...summary.events[idx],
+						has_meeting_config: true
+					};
+				}
+			}
+		} catch (e) {
+			panelError = e instanceof Error ? e.message : String(e);
+		} finally {
+			formSaving = false;
+		}
+	}
+
+	function parseThreshold(value: string): number | null | 'invalid' {
+		const trimmed = value.trim();
+		if (trimmed.length === 0) return null;
+		const num = Number(trimmed);
+		if (!Number.isFinite(num) || num < 0 || num > 1) return 'invalid';
+		return num;
 	}
 
 	function handleRowKey(event: KeyboardEvent, evt: CalendarEvent) {
@@ -287,9 +513,184 @@
 				{/if}
 			</dd>
 		</dl>
-		<p class="detail-stub">
-			Per-meeting configuration (profile template, identity, mode) lands in the next story.
-		</p>
+
+		<section class="config" aria-labelledby="config-heading">
+			<h3 id="config-heading">Johnny configuration</h3>
+
+			{#if panelLoading}
+				<p class="empty">Loading configuration…</p>
+			{:else if templatesError}
+				<div class="alert error" role="alert">
+					Couldn't load templates: {templatesError}
+				</div>
+			{:else if templates.length === 0}
+				<div class="alert info" role="status">
+					No profile templates exist yet. <a href="/templates">Create one</a> first.
+				</div>
+			{:else if accounts.length === 0}
+				<div class="alert info" role="status">
+					No Google accounts connected. <a href="/settings">Add one</a> first.
+				</div>
+			{:else}
+				<form
+					class="config-form"
+					onsubmit={onSubmit}
+					data-testid="meeting-config-form"
+				>
+					<label class="toggle">
+						<input
+							type="checkbox"
+							checked={formEnabled || existingConfig !== null}
+							onchange={onEnableToggle}
+							disabled={formSaving || formDeleting}
+							data-testid="enable-toggle"
+						/>
+						<span>Enable Johnny for this meeting</span>
+					</label>
+
+					{#if pendingDelete}
+						<div class="alert warn" role="alert">
+							<p>
+								Disabling will delete the saved configuration for this meeting.
+								Continue?
+							</p>
+							<div class="confirm-actions">
+								<button
+									type="button"
+									class="danger"
+									onclick={confirmDelete}
+									disabled={formDeleting}
+									data-testid="confirm-delete"
+								>
+									{formDeleting ? 'Deleting…' : 'Yes, disable'}
+								</button>
+								<button
+									type="button"
+									onclick={cancelDelete}
+									disabled={formDeleting}
+								>
+									Cancel
+								</button>
+							</div>
+						</div>
+					{/if}
+
+					<fieldset disabled={!formEnabled && existingConfig === null}>
+						<label class="field">
+							<span class="field-label">Profile template</span>
+							<select
+								value={formTemplateId ?? ''}
+								onchange={onTemplateChange}
+								data-testid="template-select"
+							>
+								{#each templates as tpl (tpl.id)}
+									<option value={tpl.id}>
+										{tpl.name} ({BOT_MODE_LABEL[tpl.mode]})
+									</option>
+								{/each}
+							</select>
+						</label>
+
+						<label class="field">
+							<span class="field-label">Identity</span>
+							<select
+								value={formIdentityId ?? ''}
+								onchange={onIdentityChange}
+								data-testid="identity-select"
+							>
+								{#each accounts as account (account.id)}
+									<option value={account.id}>
+										{account.email} ({account.role === 'bot' ? 'bot' : 'user'})
+									</option>
+								{/each}
+							</select>
+						</label>
+
+						<label class="field">
+							<span class="field-label">Mode</span>
+							<select
+								value={formMode}
+								onchange={onModeChange}
+								data-testid="mode-select"
+							>
+								{#each BOT_MODES as mode (mode)}
+									<option value={mode}>{BOT_MODE_LABEL[mode]}</option>
+								{/each}
+							</select>
+						</label>
+
+						<label class="field">
+							<span class="field-label">Additional instructions</span>
+							<textarea
+								bind:value={formInstructions}
+								rows="3"
+								placeholder="Override or extend the template's base instructions for this meeting."
+								data-testid="instructions-input"
+							></textarea>
+						</label>
+
+						<label class="field">
+							<span class="field-label">Additional context</span>
+							<textarea
+								bind:value={formContext}
+								rows="3"
+								placeholder="Anything Johnny should know about this meeting."
+								data-testid="context-input"
+							></textarea>
+						</label>
+
+						<label class="field">
+							<span class="field-label">
+								Additional allowed replies
+								<span class="field-hint">one per line</span>
+							</span>
+							<textarea
+								bind:value={formAllowedRepliesText}
+								rows="3"
+								placeholder="Optional. Required when mode is 'Limited auto-speak' and the template doesn't already supply them."
+								data-testid="allowed-replies-input"
+							></textarea>
+						</label>
+
+						<label class="field">
+							<span class="field-label">
+								Confidence threshold
+								<span class="field-hint">0.0–1.0, blank to inherit</span>
+							</span>
+							<input
+								type="text"
+								inputmode="decimal"
+								bind:value={formThresholdText}
+								placeholder="e.g. 0.8"
+								data-testid="threshold-input"
+							/>
+						</label>
+
+						<div class="form-actions">
+							<button
+								type="submit"
+								class="primary"
+								disabled={formSaving || (!formEnabled && existingConfig === null)}
+								data-testid="save-button"
+							>
+								{formSaving ? 'Saving…' : existingConfig ? 'Save changes' : 'Enable Johnny'}
+							</button>
+							{#if panelSuccess}
+								<span class="success" role="status" data-testid="save-success">
+									{panelSuccess}
+								</span>
+							{/if}
+						</div>
+					</fieldset>
+
+					{#if panelError}
+						<div class="alert error" role="alert" data-testid="panel-error">
+							{panelError}
+						</div>
+					{/if}
+				</form>
+			{/if}
+		</section>
 	</div>
 {/if}
 
@@ -523,7 +924,7 @@
 		top: 56px;
 		right: 0;
 		bottom: 0;
-		width: min(420px, 100%);
+		width: min(480px, 100%);
 		background: #ffffff;
 		border-left: 1px solid #e5e7eb;
 		box-shadow: -4px 0 12px rgba(0, 0, 0, 0.08);
@@ -571,13 +972,130 @@
 		word-break: break-word;
 		color: #4b5563;
 	}
-	.detail-stub {
-		margin: 1.25rem 0 0;
-		padding: 0.75rem 0.9rem;
-		background: #f3f4f6;
+	.config {
+		margin-top: 1.5rem;
+		padding-top: 1.25rem;
+		border-top: 1px solid #e5e7eb;
+	}
+	.config h3 {
+		margin: 0 0 0.75rem;
+		font-size: 0.95rem;
+		font-weight: 600;
+		color: #111827;
+	}
+	.config-form {
+		display: grid;
+		gap: 0.85rem;
+	}
+	.toggle {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		padding: 0.5rem 0.75rem;
+		background: #f9fafb;
+		border: 1px solid #e5e7eb;
 		border-radius: 6px;
+		font-size: 0.9rem;
+		color: #1f2937;
+	}
+	.toggle input {
+		width: 18px;
+		height: 18px;
+		cursor: pointer;
+	}
+	.field {
+		display: grid;
+		gap: 0.3rem;
+	}
+	.field-label {
+		font-size: 0.8rem;
+		font-weight: 600;
+		color: #374151;
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		gap: 0.5rem;
+	}
+	.field-hint {
+		font-weight: 400;
+		color: #9ca3af;
+		font-size: 0.75rem;
+	}
+	.field select,
+	.field input[type='text'],
+	.field textarea {
+		padding: 0.5rem 0.65rem;
+		border: 1px solid #d1d5db;
+		border-radius: 6px;
+		background: #ffffff;
+		font: inherit;
+		font-size: 0.9rem;
+		color: #1f2937;
+		width: 100%;
+	}
+	.field textarea {
+		resize: vertical;
+		min-height: 60px;
+		font-family: inherit;
+	}
+	.field select:focus,
+	.field input:focus,
+	.field textarea:focus {
+		outline: 2px solid #4f46e5;
+		outline-offset: 1px;
+		border-color: #4f46e5;
+	}
+	fieldset {
+		border: 0;
+		padding: 0;
+		margin: 0;
+		display: grid;
+		gap: 0.85rem;
+	}
+	fieldset:disabled {
+		opacity: 0.5;
+	}
+	.form-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.85rem;
+		flex-wrap: wrap;
+	}
+	.primary {
+		background: #4f46e5;
+		color: #ffffff;
+		border-color: #4338ca;
+	}
+	.primary:hover:not(:disabled) {
+		background: #4338ca;
+	}
+	.danger {
+		background: #b91c1c;
+		color: #ffffff;
+		border-color: #991b1b;
+	}
+	.danger:hover:not(:disabled) {
+		background: #991b1b;
+	}
+	.success {
+		color: #065f46;
 		font-size: 0.85rem;
-		color: #6b7280;
+		font-weight: 600;
+	}
+	.alert.warn {
+		background: #fef3c7;
+		color: #92400e;
+		border: 1px solid #fde68a;
+	}
+	.alert.info {
+		background: #eff6ff;
+		color: #1e40af;
+		border: 1px solid #bfdbfe;
+	}
+	.confirm-actions {
+		display: flex;
+		gap: 0.5rem;
+		margin-top: 0.5rem;
 	}
 
 	@media (max-width: 640px) {
@@ -589,6 +1107,10 @@
 			top: 56px;
 			width: 100%;
 			border-left: 0;
+		}
+		.form-actions {
+			flex-direction: column;
+			align-items: stretch;
 		}
 	}
 </style>

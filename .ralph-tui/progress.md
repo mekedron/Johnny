@@ -112,6 +112,9 @@ after each iteration and it's included in prompts for context.
 - **`ChangePublisher` ABC + `johnny.global.<topic>` Redis pub/sub channel**: domain-level UI broadcasts (calendar changes, future provider-credential changes) get a top-level `johnny.global.<topic>` channel and a thin `ChangePublisher` ABC the worker accepts via DI. Production uses a Redis-backed implementation; tests inject a `_FakePublisher` collecting payloads into a list. Mirrors the per-session `johnny.session.<id>` channel from the voice pipeline's `RedisEventBus` but at a global scope. WebSocket subscribers pattern-match `johnny.global.*` for cross-cutting UI fan-out. (Promoted from US-007.)
 - **`JOHNNY_<X>_INTERVAL_SECONDS` env-var convention for periodic worker jobs**: standardised on (env var name → parse helper with `int()` → clamp to ≥1s → fallback to default on `ValueError`). Used by `JOHNNY_EMBEDDING_INTERVAL_SECONDS` (US-033) and `JOHNNY_CALENDAR_POLL_INTERVAL_SECONDS` (US-007). New periodic jobs should follow the same shape so operators have one mental model. (Promoted from US-007.)
 - **Second-precision ISO datetimes don't round-trip equal to `datetime.now(UTC)`**: a seeded `datetime.now(UTC) + timedelta(...)` carries microseconds; a mock response formatted via `strftime("%Y-%m-%dT%H:%M:%SZ")` drops them, so `_datetimes_differ(seeded, parsed)` returns True and a no-op sync looks like an update. Standardise on `.replace(microsecond=0)` for any seeded time you'll compare against a roundtripped ISO string. Google's wire format is always second-precision anyway. (Promoted from US-007.)
+- **PUT-as-upsert on singular sub-resource URLs**: when a child row is uniquely identified by its parent (e.g. `meeting_configs.calendar_event_id` is UNIQUE), prefer `PUT /parents/{parent_id}/child` returning 200 for both create and update over `POST` + later `PATCH`. The frontend uses one code path for "first save" and "edit"; the backend body is a single upsert branch. DELETE on the same URL is idempotent (204 even when no row exists) — the UI toggle doesn't have to track "was this enabled?". Different from collection resources where DELETE on missing → 404 is correct. (Promoted from US-009.)
+- **Effective-value validation for nullable per-meeting overrides**: when meeting configs override template defaults (`allowed_replies`, `confidence_threshold`), constraints like "limited_auto_speak requires non-empty replies" must check the *effective* value (override if set, else template base). Pattern: `effective = override if override is not None else template.field; if invalid(effective): 422`. Lets users pick a template that has the field and save without restating it. Bare `if override: 422` would force everyone to retype the template's replies. (Promoted from US-009.)
+- **In-place Svelte 5 `$state` array mutation for live list refresh**: after a mutating fetch (save/delete), update the cached list with `arr[idx] = { ...arr[idx], field: newValue }` instead of refetching. Svelte 5's `$state` is reactive on index assignment, so badges/indicators update instantly without a second round-trip. Use for any "child-record changed, parent list needs to reflect it" pattern. (Promoted from US-009.)
 
 ---
 
@@ -839,4 +842,86 @@ transparent refresh-token rotation.
 - **Svelte 5 a11y for conditionally-clickable rows**: instead of dynamically toggling `role` / `tabindex` on one `<div>` (which trips `a11y_no_noninteractive_tabindex`), branch the markup: `{#if clickable}<div role="button" tabindex="0" onclick onkeydown>...{:else}<div aria-disabled="true">...{/if}`. The non-clickable branch doesn't need keyboard handlers either, so it's also cleaner.
 - **`role="dialog"` requires an interactive container**: `<aside role="dialog">` raises `a11y_no_noninteractive_element_to_interactive_role`. Use a plain `<div role="dialog">` for popovers/side panels even when `<aside>` feels semantically nicer.
 - **Dev-time stub of `sync_account_events` for browser verification**: write a tiny launcher script `import app.api.calendar as c; c.sync_account_events = _noop_sync; uvicorn.run(...)` — sidesteps the live Google fetch while exercising the real `list_account_events` + full UI render pipeline. Cleaner than monkey-patching every test fixture or adding a debug GET endpoint.
+---
+## 2026-06-05 - Johnny-kgc.9
+**US-009 Per-meeting bot configuration form.**
+
+Implemented the per-meeting bot configuration form: an event-detail
+panel form for picking template/identity/mode + per-meeting overrides,
+backed by a new `/calendar/events/{event_id}/meeting-config` PUT/GET/
+DELETE API. The form lives in the existing calendar detail panel (no
+new route) and persists to `meeting_configs` via upsert semantics.
+Disabling "Enable Johnny" prompts for confirmation, then deletes the
+row idempotently.
+
+### Files created
+- `backend/app/api/meeting_configs.py` — APIRouter under
+  `/calendar/events`. `GET /{event_id}/meeting-config` returns the row
+  or 404, `PUT` upserts (create on first save, replace on subsequent),
+  `DELETE` drops the row (204 even when none exists, so the UI doesn't
+  branch on "was Johnny enabled?"). Validates the linked template and
+  account exist (422 if missing); enforces the limited-auto-speak
+  invariant against the *effective* allowed-replies (meeting override
+  if set, else template base). The `mode` field defaults to the
+  template's mode when omitted, so the form's mode selector is purely
+  for overrides.
+- `frontend/src/lib/meetingConfigs.ts` — typed client mirroring the
+  pattern from `accounts.ts`/`templates.ts`. `getMeetingConfig` maps
+  404 → `null` so callers don't need try/catch. `parseAllowedRepliesText`
+  splits a textarea by newline and returns `null` when blank (so the
+  API stores "no override" instead of an empty list).
+- `backend/tests/api/test_meeting_configs.py` — 19 tests covering get,
+  put-create, put-update, default-mode-from-template, delete (with
+  idempotency), and 422 validation for unknown template/account,
+  empty allowed-replies on limited-auto-speak, out-of-range threshold,
+  and explicit 0.0 threshold not being silently coerced.
+
+### Files modified
+- `backend/app/main.py` — registered `meeting_configs_router`.
+- `frontend/src/routes/calendar/+page.svelte` — extended the detail
+  panel with a `<section class="config">` form: enable toggle, template
+  select, identity select, mode select, three override textareas,
+  threshold input, save button. Save updates the calendar list's
+  `has_meeting_config` flag in-place (no full refetch) so the
+  "JOHNNY ENABLED" badge appears immediately. Disabling shows a yellow
+  confirm panel before calling delete.
+
+### Learnings
+- **PUT-as-upsert for child-of-parent resources**: when a row is
+  uniquely identified by its parent (here, `meeting_configs.calendar_event_id`
+  is UNIQUE), the cleanest REST shape is
+  `PUT /parents/{parent_id}/child` returning 200 for both create and
+  update. The frontend uses one code path (`upsertMeetingConfig`) for
+  the "enable for the first time" and "save changes" buttons. Mirrors
+  the singular-resource shape we already use for `/auth/google/start`.
+- **Default optional `mode` to the linked template's mode**: lets the
+  upsert payload omit `mode` and still produce a valid row, while
+  keeping the column NOT NULL so downstream pipeline code never has to
+  null-check it. The form still ships an explicit mode every time so
+  users can override the template's mode per meeting; the
+  default-from-template path is for API consumers (and for the
+  default-mode unit test).
+- **Validate against the *effective* allowed-replies, not just the
+  override**: `limited_auto_speak` requires non-empty replies, but the
+  override is nullable. Pattern: when the override is `None`, look at
+  the linked template's `allowed_replies` instead — only reject if
+  both are empty. This lets users pick the "Limited yes/no" template
+  and save without restating the phrases.
+- **Idempotent DELETE on a singular sub-resource**: returns 204 even
+  when no row exists (rather than 404). The UI toggles "Enable Johnny"
+  off; the backend doesn't make it think about whether a row was
+  there. Different from the templates DELETE pattern (404 on missing)
+  because here the resource is identified by the parent's id, so "no
+  row" is the natural state, not an error.
+- **`BotSession.__table__` needed in single-table SQLite test fixture
+  even though tests don't touch it**: deleting a `MeetingConfig` triggers
+  a SELECT against `bot_sessions` (cascade="all, delete-orphan"). Same
+  pattern as the `GoogleAccount.calendar_events` cascade noted in the
+  US-005 promotion: any model with a `delete-orphan` cascade pulls in
+  its child tables even if the test never references them.
+- **In-place mutation of `summary.events` updates the calendar list
+  without refetching**: Svelte 5's `$state` is reactive on array index
+  assignment. `summary.events[idx] = { ...summary.events[idx], has_meeting_config: true }`
+  re-renders the row's "JOHNNY ENABLED" badge instantly. Avoids the
+  jank of awaiting a full /calendar/events round-trip after save.
 ---
