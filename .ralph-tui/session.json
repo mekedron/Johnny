@@ -1,278 +1,49 @@
 {
   "version": 1,
-  "sessionId": "93eda9f4-6fc6-4aec-a6f6-7c9916b5653f",
+  "sessionId": "fb7755d9-c368-4618-bf5b-b19379bcccf7",
   "status": "running",
-  "startedAt": "2026-06-05T22:19:54.215Z",
-  "updatedAt": "2026-06-05T23:18:55.403Z",
-  "currentIteration": 3,
+  "startedAt": "2026-06-05T23:19:19.219Z",
+  "updatedAt": "2026-06-05T23:38:24.338Z",
+  "currentIteration": 0,
   "maxIterations": 0,
-  "tasksCompleted": 3,
+  "tasksCompleted": 0,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
     "plugin": "beads-bv",
-    "epicId": "Johnny-kgc",
+    "epicId": "Johnny-ckz",
     "epicIds": [
-      "Johnny-kgc"
+      "Johnny-ckz"
     ],
     "executionScopes": [
       {
-        "id": "Johnny-kgc",
-        "title": "Johnny — Google Meet AI Meeting Bot",
+        "id": "Johnny-ckz",
+        "title": "Fix join-meeting stuck-on-joining bug and build end-to-end Test-event validation harness",
         "type": "epic",
-        "description": "Johnny is a single-user AI assistant that joins Google Meet meetings on the user's behalf and can listen, transcribe, suggest replies, ask for approval, or speak autonomously within configured constraints.\n\nRuns as a daemon stack (Docker Compose) with a SvelteKit web UI for calendar browsing, per-meeting configuration, and real-time approval/transcript visibility.\n\nBuilt around three swappable layers:\n1. Meeting connector — Playwright+Chromium driving a real Google Meet session\n2. Voice-agent pipeline — Pipecat with LiveKit transport adapter\n3. Provider-agnostic STT/LLM/TTS adapters — cloud and local from day one\n\nAll meeting data (transcripts, router decisions, agent utterances) persisted to PostgreSQL with pgvector for transcript search.\n\n## Goals\n- Mark calendar events for Johnny to attend, with per-meeting context and behavior mode\n- Four bot modes: listen-only, suggest-only, approval-required, limited auto-speak\n- Provider adapters from day one (OpenAI, Anthropic, Gemini, Deepgram, ElevenLabs, faster-whisper, vLLM/Ollama, Piper)\n- Local Docker Compose with PostgreSQL, Redis, FastAPI, SvelteKit, isolated meet-worker containers per active meeting\n- Join as dedicated bot Google account or user's own account, configurable per meeting\n- Persist full meeting audit log for post-meeting review",
+        "description": "## Why this exists\n\nTwo interlocked problems:\n\n1. **Bug**: Clicking \"Join\" on any meeting transitions session state to \"joining\" and stays there forever. No information surfaces in any log. The full join -> transcribe -> decide -> speak pipeline cannot be validated until this is fixed.\n\n2. **No end-to-end validation**: We have no harness that exercises the real stack against a real Google Meet. Unit tests pass while the user-visible journey is broken. We need a reproducible test program that drives the full stack end-to-end.\n\nThese must be solved together: the harness is how we prove the bug is fixed and stays fixed.\n\n## Setup (testing environment)\n\n- Johnny (bot identity): nikita.rabykin@aikamatkat.fi\n- User (running tests, listening): nikita.rabykin@gmail.com\n- Test calendar event: exactly one Google Calendar event titled \"Test\", owned by the user account. The harness owns this event — it may rearrange, retitle, reschedule, or otherwise mutate it freely between runs.\n\n## What this delivers\n\n### Part A: Diagnose and fix the join-stuck bug\n\n- Add structured logging at every stage of the join path: scheduler dispatch, worker container spawn, Playwright navigation, Google sign-in, \"Join now\" click, bot_sessions.status transitions, audio bridge attach\n- Logs must include session_id and surface both in 'docker compose logs' and 'bot_sessions.logs'\n- UI session view must surface the most recent failure stage when join fails — no silent perpetual \"joining\"\n- Identify and fix the actual root cause (candidates: missing Chromium flags, Xvfb not started, account cookies missing, Meet \"Ask to join\" gate, container spawn failure, race between scheduler and worker)\n\n### Part B: End-to-end validation harness\n\nSingle command ('uv run python -m johnny.e2e --mode=<mode>' or 'make e2e MODE=<mode>') that:\n  1. Ensures the \"Test\" event exists, owned by user account, with both bot and user invited, Meet link attached\n  2. Reschedules the Test event to start within ~1 minute (so each run kicks off quickly without waiting for the original schedule)\n  3. Creates a meeting_config for the Test event with the chosen mode\n  4. Waits for scheduler to spawn the meet-worker container (or invokes the same code path directly)\n  5. Verifies the bot joins (Meet participant list includes Johnny, bot_sessions.status flips to \"joined\")\n  6. Injects a known audio sample into the meeting (second Playwright participant playing fixture audio, or synthetic injector piping audio into the room)\n  7. Verifies transcripts persisted to transcript_chunks with expected content\n  8. Verifies router decisions persisted to agent_decisions\n  9. In Limited auto-speak mode, verifies an utterance is persisted to agent_utterances\n  10. Tears down: bot leaves meeting, worker container stops, Test event reset for next run\n\n- Selectable mode: listen / suggest / approval / auto_speak_limited — every mode must pass independently\n- PASS/FAIL output per phase with diagnostic logs (same format as Johnny-f7k smoke test)\n- Exit code 0 only when every phase passes\n\n### Part C: Documentation\n\n- \"Running end-to-end\" section in docs/SETUP_LOCAL.md linking to the harness\n- Document the Test-event convention (one event named \"Test\", both identities invited, freely mutable)\n- Document how to swap modes and what each verifies\n\n## Parent relationship\n\nThis issue sits ABOVE Johnny-kgc — Johnny-kgc becomes its child. Rationale: this is the meta-validation gate proving the entire epic actually works end-to-end against real infrastructure. Johnny-kgc delivers features; this issue validates them.\n\n## Out of scope\n\n- Multi-tenant fixtures (single user, single Test event only)\n- Load / concurrent meeting tests\n- Replacing unit tests (this is additive)\n- CI integration (follow-up)",
         "metadata": {
           "dependencyCount": 0,
           "dependentCount": 0
         }
       }
     ],
-    "totalTasks": 35,
+    "totalTasks": 2,
     "tasks": [
       {
-        "id": "Johnny-kgc.1",
-        "title": "US-001: Project scaffolding",
-        "status": "completed",
+        "id": "Johnny-upg",
+        "title": "End-to-end UI test of provider management via chrome-devtools-mcp",
+        "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-kgc.2",
-        "title": "US-002: Docker Compose stack",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.3",
-        "title": "US-003: Database schema and migrations",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.4",
-        "title": "US-004: SvelteKit application shell",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-mxx",
-        "title": "Write local-first setup guide with copy-paste commands and direct download links",
-        "status": "completed",
-        "completedInSession": true
-      },
-      {
-        "id": "Johnny-kgc.5",
-        "title": "US-005: Google OAuth 2.0 desktop flow",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.6",
-        "title": "US-006: Multi-account management",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.7",
-        "title": "US-007: Calendar fetch and polling worker",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.8",
-        "title": "US-008: Calendar view UI",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.9",
-        "title": "US-009: Per-meeting bot configuration form",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.10",
-        "title": "US-010: Profile templates CRUD",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.11",
-        "title": "US-011: Provider adapter interfaces",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.12",
-        "title": "US-012: Cloud STT adapters",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.13",
-        "title": "US-013: Local STT adapter",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.14",
-        "title": "US-014: Cloud LLM adapters",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.15",
-        "title": "US-015: Local LLM adapter",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.16",
-        "title": "US-016: Cloud TTS adapters",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.17",
-        "title": "US-017: Local TTS adapter",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.18",
-        "title": "US-018: Provider configuration UI",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.19",
-        "title": "US-019: Meet worker base container",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.20",
-        "title": "US-020: Google Meet join automation",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.21",
-        "title": "US-021: Audio bridge",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.22",
-        "title": "US-022: Pipecat pipeline with Silero VAD",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.23",
-        "title": "US-023: Router LLM and decision schema",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.24",
-        "title": "US-024: Answer LLM and TTS chain",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.25",
-        "title": "US-025: LiveKit transport adapter",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.26",
-        "title": "US-026: Listen-only and Suggest-only modes",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.27",
-        "title": "US-027: Approval-required mode with browser push",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.28",
-        "title": "US-028: Limited auto-speak mode",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.29",
-        "title": "US-029: Bot session scheduler",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.30",
-        "title": "US-030: Per-session container spawning",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.31",
-        "title": "US-031: WebSocket for live updates",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.32",
-        "title": "US-032: Live transcript and approval UI",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.33",
-        "title": "US-033: Transcript and audit persistence",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc.34",
-        "title": "US-034: Post-meeting history view",
-        "status": "completed",
+        "id": "Johnny-kgc",
+        "title": "Johnny — Google Meet AI Meeting Bot",
+        "status": "open",
         "completedInSession": false
       }
     ]
   },
-  "iterations": [
-    {
-      "iteration": 1,
-      "status": "completed",
-      "taskId": "Johnny-mxx",
-      "taskTitle": "Write local-first setup guide with copy-paste commands and direct download links",
-      "taskCompleted": true,
-      "durationMs": 302467,
-      "startedAt": "2026-06-05T22:20:27.518Z",
-      "endedAt": "2026-06-05T22:25:29.985Z"
-    },
-    {
-      "iteration": 2,
-      "status": "completed",
-      "taskId": "Johnny-61y",
-      "taskTitle": "Build interactive CLI setup wizard for Johnny",
-      "taskCompleted": true,
-      "durationMs": 1376957,
-      "startedAt": "2026-06-05T22:25:52.736Z",
-      "endedAt": "2026-06-05T22:48:49.693Z"
-    },
-    {
-      "iteration": 3,
-      "status": "completed",
-      "taskId": "Johnny-q1x",
-      "taskTitle": "Surface undecryptable Google account tokens with a clear reconnect path",
-      "taskCompleted": true,
-      "durationMs": 761831,
-      "startedAt": "2026-06-05T22:49:11.355Z",
-      "endedAt": "2026-06-05T23:01:53.186Z"
-    }
-  ],
+  "iterations": [],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

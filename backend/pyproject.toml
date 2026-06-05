@@ -66,6 +66,7 @@ asyncio_mode = "auto"
 pythonpath = ["."]
 markers = [
     "livekit_smoke: opt-in smoke tests that exercise LiveKitTransport against a running dev server (US-025)",
+    "e2e_ui: opt-in end-to-end provider UI tests against a live Compose stack (Johnny-upg)",
 ]
 
 [tool.ruff]

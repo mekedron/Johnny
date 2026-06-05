@@ -1,0 +1,438 @@
+{
+  "started_at": "2026-06-05T23-28-42Z",
+  "finished_at": "2026-06-05T23-28-52Z",
+  "artifact_dir": "/Users/nikita/Projects/Johnny/tests/e2e/artifacts/2026-06-05T23-28-42Z",
+  "providers": [
+    {
+      "plan_id": "stt-deepgram",
+      "kind": "stt",
+      "provider_name": "deepgram",
+      "display_name": "e2e-stt-deepgram",
+      "outcome": "PASS",
+      "reason": "",
+      "steps": [
+        {
+          "name": "POST /providers",
+          "ok": true,
+          "detail": "id=9"
+        },
+        {
+          "name": "GET /providers (row visible)",
+          "ok": true,
+          "detail": "display_name=e2e-stt-deepgram found"
+        },
+        {
+          "name": "POST /providers/{id}/test",
+          "ok": true,
+          "detail": "STT smoke OK \u2014 0 transcript event(s)"
+        },
+        {
+          "name": "POST /providers/{id}/activate",
+          "ok": true,
+          "detail": "active.id=9"
+        },
+        {
+          "name": "exactly one active per kind",
+          "ok": true,
+          "detail": "active_count=1"
+        },
+        {
+          "name": "DELETE /providers/{id}",
+          "ok": true,
+          "detail": "row removed"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": 9
+    },
+    {
+      "plan_id": "stt-openai-realtime",
+      "kind": "stt",
+      "provider_name": "openai-realtime",
+      "display_name": "e2e-stt-openai-realtime",
+      "outcome": "FAIL",
+      "reason": "POST /providers/{id}/test: smoke call failed \u2014 openai-realtime error: The Realtime Beta API is no longer supported. Please use /v1/realtime for the GA API.",
+      "steps": [
+        {
+          "name": "POST /providers",
+          "ok": true,
+          "detail": "id=10"
+        },
+        {
+          "name": "GET /providers (row visible)",
+          "ok": true,
+          "detail": "display_name=e2e-stt-openai-realtime found"
+        },
+        {
+          "name": "POST /providers/{id}/test",
+          "ok": false,
+          "detail": "smoke call failed \u2014 openai-realtime error: The Realtime Beta API is no longer supported. Please use /v1/realtime for the GA API."
+        },
+        {
+          "name": "POST /providers/{id}/activate",
+          "ok": true,
+          "detail": "active.id=10"
+        },
+        {
+          "name": "exactly one active per kind",
+          "ok": true,
+          "detail": "active_count=1"
+        },
+        {
+          "name": "DELETE /providers/{id}",
+          "ok": true,
+          "detail": "row removed"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": 10
+    },
+    {
+      "plan_id": "stt-faster-whisper",
+      "kind": "stt",
+      "provider_name": "faster-whisper",
+      "display_name": "e2e-stt-faster-whisper",
+      "outcome": "SKIP",
+      "reason": "whisper_models volume empty \u2014 no local model available",
+      "steps": [],
+      "screenshots": [],
+      "provider_id": null
+    },
+    {
+      "plan_id": "llm-openai",
+      "kind": "llm",
+      "provider_name": "openai",
+      "display_name": "e2e-llm-openai",
+      "outcome": "PASS",
+      "reason": "",
+      "steps": [
+        {
+          "name": "POST /providers",
+          "ok": true,
+          "detail": "id=11"
+        },
+        {
+          "name": "GET /providers (row visible)",
+          "ok": true,
+          "detail": "display_name=e2e-llm-openai found"
+        },
+        {
+          "name": "POST /providers/{id}/test",
+          "ok": true,
+          "detail": "LLM smoke OK \u2014 finish_reason=stop \u2014 Hi there! How can I assist you today?"
+        },
+        {
+          "name": "POST /providers/{id}/activate",
+          "ok": true,
+          "detail": "active.id=11"
+        },
+        {
+          "name": "exactly one active per kind",
+          "ok": true,
+          "detail": "active_count=1"
+        },
+        {
+          "name": "DELETE /providers/{id}",
+          "ok": true,
+          "detail": "row removed"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": 11
+    },
+    {
+      "plan_id": "llm-anthropic",
+      "kind": "llm",
+      "provider_name": "anthropic",
+      "display_name": "e2e-llm-anthropic",
+      "outcome": "FAIL",
+      "reason": "POST /providers/{id}/test: smoke call failed \u2014 anthropic LLM HTTP 404: model: claude-3-5-haiku-20241022",
+      "steps": [
+        {
+          "name": "POST /providers",
+          "ok": true,
+          "detail": "id=12"
+        },
+        {
+          "name": "GET /providers (row visible)",
+          "ok": true,
+          "detail": "display_name=e2e-llm-anthropic found"
+        },
+        {
+          "name": "POST /providers/{id}/test",
+          "ok": false,
+          "detail": "smoke call failed \u2014 anthropic LLM HTTP 404: model: claude-3-5-haiku-20241022"
+        },
+        {
+          "name": "POST /providers/{id}/activate",
+          "ok": true,
+          "detail": "active.id=12"
+        },
+        {
+          "name": "exactly one active per kind",
+          "ok": true,
+          "detail": "active_count=1"
+        },
+        {
+          "name": "DELETE /providers/{id}",
+          "ok": true,
+          "detail": "row removed"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": 12
+    },
+    {
+      "plan_id": "llm-gemini",
+      "kind": "llm",
+      "provider_name": "gemini",
+      "display_name": "e2e-llm-gemini",
+      "outcome": "FAIL",
+      "reason": "POST /providers/{id}/test: smoke call failed \u2014 gemini LLM HTTP 404: models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateContent. Call ModelService.ListModels to see the list of available models and their supported methods.",
+      "steps": [
+        {
+          "name": "POST /providers",
+          "ok": true,
+          "detail": "id=13"
+        },
+        {
+          "name": "GET /providers (row visible)",
+          "ok": true,
+          "detail": "display_name=e2e-llm-gemini found"
+        },
+        {
+          "name": "POST /providers/{id}/test",
+          "ok": false,
+          "detail": "smoke call failed \u2014 gemini LLM HTTP 404: models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateContent. Call ModelService.ListModels to see the list of available models and their supported methods."
+        },
+        {
+          "name": "POST /providers/{id}/activate",
+          "ok": true,
+          "detail": "active.id=13"
+        },
+        {
+          "name": "exactly one active per kind",
+          "ok": true,
+          "detail": "active_count=1"
+        },
+        {
+          "name": "DELETE /providers/{id}",
+          "ok": true,
+          "detail": "row removed"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": 13
+    },
+    {
+      "plan_id": "llm-openai-compatible-ollama",
+      "kind": "llm",
+      "provider_name": "openai-compatible",
+      "display_name": "e2e-llm-ollama",
+      "outcome": "SKIP",
+      "reason": "Ollama not reachable at OLLAMA_BASE_URL / localhost:11434",
+      "steps": [],
+      "screenshots": [],
+      "provider_id": null
+    },
+    {
+      "plan_id": "tts-elevenlabs",
+      "kind": "tts",
+      "provider_name": "elevenlabs",
+      "display_name": "e2e-tts-elevenlabs",
+      "outcome": "FAIL",
+      "reason": "POST /providers/{id}/test: smoke call failed \u2014 elevenlabs TTS HTTP 401: Invalid API key",
+      "steps": [
+        {
+          "name": "POST /providers",
+          "ok": true,
+          "detail": "id=14"
+        },
+        {
+          "name": "GET /providers (row visible)",
+          "ok": true,
+          "detail": "display_name=e2e-tts-elevenlabs found"
+        },
+        {
+          "name": "POST /providers/{id}/test",
+          "ok": false,
+          "detail": "smoke call failed \u2014 elevenlabs TTS HTTP 401: Invalid API key"
+        },
+        {
+          "name": "POST /providers/{id}/activate",
+          "ok": true,
+          "detail": "active.id=14"
+        },
+        {
+          "name": "exactly one active per kind",
+          "ok": true,
+          "detail": "active_count=1"
+        },
+        {
+          "name": "DELETE /providers/{id}",
+          "ok": true,
+          "detail": "row removed"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": 14
+    },
+    {
+      "plan_id": "tts-openai",
+      "kind": "tts",
+      "provider_name": "openai",
+      "display_name": "e2e-tts-openai",
+      "outcome": "PASS",
+      "reason": "",
+      "steps": [
+        {
+          "name": "POST /providers",
+          "ok": true,
+          "detail": "id=15"
+        },
+        {
+          "name": "GET /providers (row visible)",
+          "ok": true,
+          "detail": "display_name=e2e-tts-openai found"
+        },
+        {
+          "name": "POST /providers/{id}/test",
+          "ok": true,
+          "detail": "TTS smoke OK \u2014 13598 byte(s)"
+        },
+        {
+          "name": "POST /providers/{id}/activate",
+          "ok": true,
+          "detail": "active.id=15"
+        },
+        {
+          "name": "exactly one active per kind",
+          "ok": true,
+          "detail": "active_count=1"
+        },
+        {
+          "name": "DELETE /providers/{id}",
+          "ok": true,
+          "detail": "row removed"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": 15
+    },
+    {
+      "plan_id": "tts-piper",
+      "kind": "tts",
+      "provider_name": "piper",
+      "display_name": "e2e-tts-piper",
+      "outcome": "SKIP",
+      "reason": "piper_models volume empty \u2014 no local voice available",
+      "steps": [],
+      "screenshots": [],
+      "provider_id": null
+    },
+    {
+      "plan_id": "stt-switch",
+      "kind": "stt",
+      "provider_name": "deepgram<->openai-realtime",
+      "display_name": "e2e-stt-switch",
+      "outcome": "PASS",
+      "reason": "",
+      "steps": [
+        {
+          "name": "activate A",
+          "ok": true,
+          "detail": "active=16"
+        },
+        {
+          "name": "activate B (switch)",
+          "ok": true,
+          "detail": "active=17"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": null
+    },
+    {
+      "plan_id": "llm-switch",
+      "kind": "llm",
+      "provider_name": "openai<->anthropic",
+      "display_name": "e2e-llm-switch",
+      "outcome": "PASS",
+      "reason": "",
+      "steps": [
+        {
+          "name": "activate A",
+          "ok": true,
+          "detail": "active=18"
+        },
+        {
+          "name": "activate B (switch)",
+          "ok": true,
+          "detail": "active=19"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": null
+    },
+    {
+      "plan_id": "tts-switch",
+      "kind": "tts",
+      "provider_name": "elevenlabs<->openai",
+      "display_name": "e2e-tts-switch",
+      "outcome": "PASS",
+      "reason": "",
+      "steps": [
+        {
+          "name": "activate A",
+          "ok": true,
+          "detail": "active=20"
+        },
+        {
+          "name": "activate B (switch)",
+          "ok": true,
+          "detail": "active=21"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": null
+    },
+    {
+      "plan_id": "edge-invalid-key",
+      "kind": "llm",
+      "provider_name": "anthropic",
+      "display_name": "e2e-edge-invalid-key",
+      "outcome": "PASS",
+      "reason": "",
+      "steps": [
+        {
+          "name": "POST /providers (bad key)",
+          "ok": true,
+          "detail": "id=22"
+        },
+        {
+          "name": "test rejects invalid key",
+          "ok": true,
+          "detail": "anthropic LLM HTTP 401: invalid x-api-key"
+        },
+        {
+          "name": "cleanup invalid-key row",
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "name": "duplicate display_name rejected",
+          "ok": true,
+          "detail": "HTTPStatusError"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": 22
+    }
+  ],
+  "totals": {
+    "PASS": 7,
+    "SKIP": 3,
+    "FAIL": 4
+  },
+  "exit_code": 1
+}
