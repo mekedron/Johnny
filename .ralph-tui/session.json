@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T14:57:42.625Z",
-  "currentIteration": 3,
+  "updatedAt": "2026-06-05T15:11:46.660Z",
+  "currentIteration": 4,
   "maxIterations": 10,
-  "tasksCompleted": 3,
+  "tasksCompleted": 4,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -140,8 +140,8 @@
       {
         "id": "Johnny-kgc.19",
         "title": "US-019: Meet worker base container",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.20",
@@ -265,6 +265,16 @@
       "durationMs": 724027,
       "startedAt": "2026-06-05T14:37:30.442Z",
       "endedAt": "2026-06-05T14:49:34.469Z"
+    },
+    {
+      "iteration": 4,
+      "status": "completed",
+      "taskId": "Johnny-kgc.19",
+      "taskTitle": "US-019: Meet worker base container",
+      "taskCompleted": true,
+      "durationMs": 468007,
+      "startedAt": "2026-06-05T14:49:53.729Z",
+      "endedAt": "2026-06-05T14:57:41.736Z"
     }
   ],
   "skippedTaskIds": [],
