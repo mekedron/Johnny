@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T16:32:19.161Z",
-  "currentIteration": 10,
+  "updatedAt": "2026-06-05T16:45:28.847Z",
+  "currentIteration": 11,
   "maxIterations": 10,
-  "tasksCompleted": 10,
+  "tasksCompleted": 11,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -116,8 +116,8 @@
       {
         "id": "Johnny-kgc.15",
         "title": "US-015: Local LLM adapter",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.16",
@@ -335,6 +335,16 @@
       "durationMs": 661616,
       "startedAt": "2026-06-05T16:12:16.138Z",
       "endedAt": "2026-06-05T16:23:17.754Z"
+    },
+    {
+      "iteration": 11,
+      "status": "completed",
+      "taskId": "Johnny-kgc.15",
+      "taskTitle": "US-015: Local LLM adapter",
+      "taskCompleted": true,
+      "durationMs": 521792,
+      "startedAt": "2026-06-05T16:23:36.564Z",
+      "endedAt": "2026-06-05T16:32:18.356Z"
     }
   ],
   "skippedTaskIds": [],

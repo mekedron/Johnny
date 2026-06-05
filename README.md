@@ -72,6 +72,22 @@ Verify the A/V environment standalone:
 docker run --rm johnny-meet-worker:latest    # prints "self-check OK"
 ```
 
+## Cloud LLM providers
+
+Dedicated adapters for the hosted APIs. Configure each via the Providers
+page; only `api_key` is required, all other options have sensible defaults.
+
+- **OpenAI** (`openai`) — defaults to `gpt-4o-mini`; override `model` for
+  `gpt-4o`, `o1-mini`, or anything else OpenAI hosts.
+- **Anthropic** (`anthropic`) — defaults to `claude-3-5-haiku-20241022`;
+  override `model` for `claude-3-5-sonnet-20241022`, `claude-opus-4-7`,
+  etc. Optional `max_tokens` (default 1024) and `anthropic_version`
+  (default `2023-06-01`).
+- **Gemini** (`gemini`) — defaults to `gemini-1.5-flash`; override
+  `model` for `gemini-1.5-pro`, `gemini-2.0-flash`, etc. Supports native
+  JSON-mode via `response_format` (sets `responseMimeType` +
+  `responseSchema`).
+
 ## Local LLM providers
 
 The `openai-compatible` LLM adapter targets any OpenAI-compatible chat

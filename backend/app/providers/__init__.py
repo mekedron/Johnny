@@ -14,6 +14,8 @@ ORM stack. Callers that need the DB-coupled loader must import it
 explicitly from :mod:`app.providers.loader`.
 """
 
+from app.providers.anthropic_llm import AnthropicLLM
+from app.providers.anthropic_llm import register as _register_anthropic_llm
 from app.providers.base import (
     ChatMessage,
     ChatRole,
@@ -38,8 +40,12 @@ from app.providers.base import (
 )
 from app.providers.elevenlabs_tts import ElevenLabsTTS
 from app.providers.elevenlabs_tts import register as _register_elevenlabs_tts
+from app.providers.gemini_llm import GeminiLLM
+from app.providers.gemini_llm import register as _register_gemini_llm
 from app.providers.openai_compatible_llm import OpenAICompatibleLLM
 from app.providers.openai_compatible_llm import register as _register_openai_compatible_llm
+from app.providers.openai_llm import OpenAILLM
+from app.providers.openai_llm import register as _register_openai_llm
 from app.providers.openai_tts import OpenAITTS
 from app.providers.openai_tts import register as _register_openai_tts
 from app.providers.piper_tts import PiperTTS
@@ -53,15 +59,21 @@ _register_piper_tts(replace=True)
 _register_openai_tts(replace=True)
 _register_elevenlabs_tts(replace=True)
 _register_openai_compatible_llm(replace=True)
+_register_openai_llm(replace=True)
+_register_anthropic_llm(replace=True)
+_register_gemini_llm(replace=True)
 
 __all__ = [
+    "AnthropicLLM",
     "ChatMessage",
     "ChatRole",
     "ElevenLabsTTS",
+    "GeminiLLM",
     "LLMError",
     "LLMProvider",
     "LLMResponse",
     "OpenAICompatibleLLM",
+    "OpenAILLM",
     "OpenAITTS",
     "PiperTTS",
     "ProviderConfig",
