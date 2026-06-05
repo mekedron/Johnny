@@ -3,6 +3,12 @@
 	import { page } from '$app/state';
 	import favicon from '$lib/assets/favicon.svg';
 	import { listAccounts, type Account } from '$lib/accounts';
+	import {
+		BOT_SESSION_STATUS_LABEL,
+		listActiveSessions,
+		stopSession,
+		type BotSession
+	} from '$lib/sessions';
 
 	let { children } = $props();
 
@@ -14,8 +20,14 @@
 		{ href: '/settings', label: 'Settings' }
 	];
 
+	const SESSIONS_POLL_INTERVAL_MS = 30_000;
+
 	let sidebarOpen = $state(false);
 	let defaultAccount = $state<Account | null>(null);
+	let activeSessions = $state<BotSession[]>([]);
+	let sessionsErrorMessage = $state<string | null>(null);
+	let stoppingSessionIds = $state<Set<number>>(new Set());
+	let sessionsTimer: ReturnType<typeof setInterval> | null = null;
 
 	function isActive(href: string): boolean {
 		const path = page.url.pathname;
@@ -37,6 +49,30 @@
 		}
 	}
 
+	async function refreshActiveSessions() {
+		try {
+			const res = await listActiveSessions();
+			activeSessions = res.sessions;
+			sessionsErrorMessage = null;
+		} catch (err) {
+			sessionsErrorMessage = err instanceof Error ? err.message : 'Failed to load sessions';
+		}
+	}
+
+	async function handleStopSession(sessionId: number) {
+		stoppingSessionIds = new Set([...stoppingSessionIds, sessionId]);
+		try {
+			await stopSession(sessionId);
+			await refreshActiveSessions();
+		} catch (err) {
+			sessionsErrorMessage = err instanceof Error ? err.message : 'Failed to stop session';
+		} finally {
+			const next = new Set(stoppingSessionIds);
+			next.delete(sessionId);
+			stoppingSessionIds = next;
+		}
+	}
+
 	function handleOAuthMessage(event: MessageEvent) {
 		const data = event.data;
 		if (data && typeof data === 'object' && (data as { type?: unknown }).type === 'johnny:oauth') {
@@ -46,10 +82,16 @@
 
 	onMount(() => {
 		refreshAccount();
+		refreshActiveSessions();
+		sessionsTimer = setInterval(refreshActiveSessions, SESSIONS_POLL_INTERVAL_MS);
 		window.addEventListener('message', handleOAuthMessage);
 	});
 
 	onDestroy(() => {
+		if (sessionsTimer !== null) {
+			clearInterval(sessionsTimer);
+			sessionsTimer = null;
+		}
 		if (typeof window !== 'undefined') {
 			window.removeEventListener('message', handleOAuthMessage);
 		}
@@ -106,6 +148,38 @@
 				{/each}
 			</ul>
 		</nav>
+		<section class="status-panel" aria-label="Bot sessions" data-testid="status-panel">
+			<header class="status-header">
+				<span class="status-title">Active sessions</span>
+				<span class="status-count" data-testid="status-count">{activeSessions.length}</span>
+			</header>
+			{#if sessionsErrorMessage}
+				<p class="status-error" role="alert">{sessionsErrorMessage}</p>
+			{:else if activeSessions.length === 0}
+				<p class="status-empty">No active sessions</p>
+			{:else}
+				<ul class="status-list">
+					{#each activeSessions as session (session.id)}
+						<li class="status-item" data-testid="status-session-{session.id}">
+							<div class="status-row">
+								<span class="status-id">#{session.id}</span>
+								<span class="status-pill status-pill-{session.status}">
+									{BOT_SESSION_STATUS_LABEL[session.status]}
+								</span>
+							</div>
+							<button
+								class="status-stop"
+								type="button"
+								disabled={stoppingSessionIds.has(session.id)}
+								onclick={() => handleStopSession(session.id)}
+							>
+								{stoppingSessionIds.has(session.id) ? 'Stopping…' : 'Leave now'}
+							</button>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		</section>
 	</aside>
 
 	<main class="content">
@@ -190,6 +264,8 @@
 		grid-area: sidebar;
 		background: #f3f4f6;
 		border-right: 1px solid #e5e7eb;
+		display: flex;
+		flex-direction: column;
 	}
 	.sidebar nav ul {
 		list-style: none;
@@ -211,6 +287,110 @@
 		border-left-color: #4f46e5;
 		font-weight: 600;
 		color: #312e81;
+	}
+
+	.status-panel {
+		margin-top: auto;
+		padding: 1rem 1.25rem;
+		border-top: 1px solid #e5e7eb;
+		font-size: 0.85rem;
+	}
+	.status-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: 0.5rem;
+	}
+	.status-title {
+		font-weight: 600;
+		color: #1f2937;
+	}
+	.status-count {
+		background: #1f2937;
+		color: #ffffff;
+		border-radius: 9999px;
+		padding: 0.1rem 0.5rem;
+		font-size: 0.75rem;
+		font-weight: 600;
+	}
+	.status-empty {
+		margin: 0;
+		color: #6b7280;
+		font-style: italic;
+	}
+	.status-error {
+		margin: 0;
+		color: #b91c1c;
+		font-size: 0.8rem;
+	}
+	.status-list {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+	.status-item {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+		background: #ffffff;
+		border: 1px solid #e5e7eb;
+		border-radius: 6px;
+		padding: 0.5rem 0.65rem;
+	}
+	.status-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+	}
+	.status-id {
+		font-weight: 600;
+		color: #1f2937;
+	}
+	.status-pill {
+		font-size: 0.7rem;
+		font-weight: 600;
+		padding: 0.1rem 0.5rem;
+		border-radius: 9999px;
+		text-transform: uppercase;
+		letter-spacing: 0.03em;
+	}
+	.status-pill-scheduled {
+		background: #fef3c7;
+		color: #92400e;
+	}
+	.status-pill-joining {
+		background: #dbeafe;
+		color: #1e40af;
+	}
+	.status-pill-joined {
+		background: #d1fae5;
+		color: #065f46;
+	}
+	.status-pill-ended,
+	.status-pill-failed {
+		background: #fee2e2;
+		color: #991b1b;
+	}
+	.status-stop {
+		appearance: none;
+		background: #f3f4f6;
+		border: 1px solid #d1d5db;
+		border-radius: 4px;
+		padding: 0.25rem 0.5rem;
+		font-size: 0.75rem;
+		font-weight: 500;
+		color: #1f2937;
+		cursor: pointer;
+	}
+	.status-stop:hover:not(:disabled) {
+		background: #e5e7eb;
+	}
+	.status-stop:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
 	}
 
 	.sidebar-backdrop {

@@ -3,10 +3,10 @@
   "sessionId": "a8794202-8e7e-40b2-afbe-6d491b0fd0a3",
   "status": "running",
   "startedAt": "2026-06-05T14:20:18.917Z",
-  "updatedAt": "2026-06-05T19:32:16.469Z",
-  "currentIteration": 24,
+  "updatedAt": "2026-06-05T19:47:15.347Z",
+  "currentIteration": 25,
   "maxIterations": 10,
-  "tasksCompleted": 24,
+  "tasksCompleted": 25,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -80,8 +80,8 @@
       {
         "id": "Johnny-kgc.9",
         "title": "US-009: Per-meeting bot configuration form",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-kgc.10",
@@ -475,6 +475,16 @@
       "durationMs": 642548,
       "startedAt": "2026-06-05T19:09:43.794Z",
       "endedAt": "2026-06-05T19:20:26.342Z"
+    },
+    {
+      "iteration": 25,
+      "status": "completed",
+      "taskId": "Johnny-kgc.9",
+      "taskTitle": "US-009: Per-meeting bot configuration form",
+      "taskCompleted": true,
+      "durationMs": 688169,
+      "startedAt": "2026-06-05T19:20:47.457Z",
+      "endedAt": "2026-06-05T19:32:15.626Z"
     }
   ],
   "skippedTaskIds": [],

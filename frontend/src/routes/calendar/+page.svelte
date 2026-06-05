@@ -25,6 +25,7 @@
 		type MeetingConfig,
 		type MeetingConfigUpsertPayload
 	} from '$lib/meetingConfigs';
+	import { startSession } from '$lib/sessions';
 
 	let accounts = $state<Account[]>([]);
 	let selectedAccountId = $state<number | null>(null);
@@ -53,6 +54,8 @@
 	let formSaving = $state(false);
 	let formDeleting = $state(false);
 	let pendingDelete = $state(false);
+	let joinNowBusy = $state(false);
+	let joinNowMessage = $state<string | null>(null);
 
 	const WINDOW_DAYS = 14;
 
@@ -316,6 +319,20 @@
 		return num;
 	}
 
+	async function handleJoinNow() {
+		if (!selectedEvent || !existingConfig) return;
+		joinNowBusy = true;
+		joinNowMessage = null;
+		try {
+			const session = await startSession(selectedEvent.id);
+			joinNowMessage = `Johnny is joining — session #${session.id}.`;
+		} catch (e) {
+			joinNowMessage = e instanceof Error ? e.message : String(e);
+		} finally {
+			joinNowBusy = false;
+		}
+	}
+
 	function handleRowKey(event: KeyboardEvent, evt: CalendarEvent) {
 		if (!evt.has_meet_link) return;
 		if (event.key === 'Enter' || event.key === ' ') {
@@ -513,6 +530,23 @@
 				{/if}
 			</dd>
 		</dl>
+
+		{#if existingConfig && selectedEvent.has_meet_link}
+			<div class="join-now" data-testid="join-now-row">
+				<button
+					type="button"
+					class="join-now-button"
+					disabled={joinNowBusy}
+					onclick={handleJoinNow}
+					data-testid="join-now-button"
+				>
+					{joinNowBusy ? 'Starting…' : 'Join now'}
+				</button>
+				{#if joinNowMessage}
+					<span class="join-now-message" role="status">{joinNowMessage}</span>
+				{/if}
+			</div>
+		{/if}
 
 		<section class="config" aria-labelledby="config-heading">
 			<h3 id="config-heading">Johnny configuration</h3>
@@ -971,6 +1005,38 @@
 		margin: 0;
 		word-break: break-word;
 		color: #4b5563;
+	}
+	.join-now {
+		margin-top: 1rem;
+		padding: 0.75rem 1rem;
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		background: #f0f9ff;
+		border: 1px solid #bae6fd;
+		border-radius: 6px;
+	}
+	.join-now-button {
+		appearance: none;
+		border: 0;
+		background: #0ea5e9;
+		color: #ffffff;
+		padding: 0.45rem 0.85rem;
+		border-radius: 4px;
+		font-weight: 600;
+		font-size: 0.85rem;
+		cursor: pointer;
+	}
+	.join-now-button:hover:not(:disabled) {
+		background: #0284c7;
+	}
+	.join-now-button:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+	.join-now-message {
+		font-size: 0.85rem;
+		color: #075985;
 	}
 	.config {
 		margin-top: 1.5rem;

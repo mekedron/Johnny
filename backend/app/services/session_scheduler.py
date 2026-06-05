@@ -1,0 +1,501 @@
+"""Bot session scheduler (US-029).
+
+Picks meetings that are about to start, spawns a meet-worker for each,
+and tears them down once the event ends. The "spawning" is delegated to
+a pluggable :class:`ContainerLauncher` — the default is a no-op that
+just records the call, so the scheduler itself can be exercised end-to-end
+without Docker. US-030 will land a Docker-backed launcher.
+
+Shape:
+
+* :func:`select_due_meetings` — find meeting_configs whose event starts
+  within the next ``join_window_seconds`` and has no active bot_session.
+* :func:`start_session_for_meeting` — create a ``scheduled`` bot_session
+  row, call ``launcher.start``, then transition to ``joining``. Errors
+  during launch are translated into ``failed``.
+* :func:`stop_session_by_id` — call ``launcher.stop`` and transition the
+  row to ``ended`` (or ``failed`` on launcher error). Idempotent for
+  rows already in a terminal state.
+* :func:`run_scheduler_pass` — opens a fresh session, runs both due-start
+  and due-stop sweeps in one go.
+
+The scheduler is intentionally synchronous from the ORM's point of view
+— ``session.flush`` is enough; the outer ``session_scope`` commits.
+The launcher's ``start`` / ``stop`` are async to leave room for future
+HTTP / Docker SDK calls without forcing every test to set up an event
+loop just for the no-op default.
+
+Manual UI actions (``POST /sessions/start``, ``POST /sessions/{id}/stop``)
+invoke the same start/stop helpers — see :mod:`app.api.sessions`.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.db.models import (
+    BotSession,
+    BotSessionStatus,
+    CalendarEvent,
+    MeetingConfig,
+)
+from app.services.bot_sessions import (
+    BotSessionNotFoundError,
+    mark_session_ended,
+    mark_session_failed,
+    mark_session_joining,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# Default look-ahead window: the AC says "starts within the next 2 minutes".
+DEFAULT_JOIN_WINDOW_SECONDS = 120
+# How long after end_time before we ask the launcher to stop the worker.
+DEFAULT_STOP_GRACE_SECONDS = 60
+# How often the worker's periodic loop ticks the scheduler.
+DEFAULT_SCHEDULER_INTERVAL_SECONDS = 60
+SCHEDULER_INTERVAL_ENV = "JOHNNY_SCHEDULER_INTERVAL_SECONDS"
+
+# Statuses that count as "this meeting already has a worker (or had one
+# scheduled) — don't queue another".
+_ACTIVE_STATUSES = (
+    BotSessionStatus.SCHEDULED,
+    BotSessionStatus.JOINING,
+    BotSessionStatus.JOINED,
+)
+_TERMINAL_STATUSES = (BotSessionStatus.ENDED, BotSessionStatus.FAILED)
+
+
+def get_scheduler_interval_seconds() -> int:
+    """Read ``JOHNNY_SCHEDULER_INTERVAL_SECONDS`` from the environment.
+
+    Defaults to 60 seconds when unset or malformed; clamps to at least
+    1 second so a misconfiguration can't spin the worker loop.
+    """
+    raw = os.environ.get(SCHEDULER_INTERVAL_ENV)
+    if raw is None:
+        return DEFAULT_SCHEDULER_INTERVAL_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "ignoring invalid %s=%r; using default %d",
+            SCHEDULER_INTERVAL_ENV,
+            raw,
+            DEFAULT_SCHEDULER_INTERVAL_SECONDS,
+        )
+        return DEFAULT_SCHEDULER_INTERVAL_SECONDS
+    return max(1, value)
+
+
+# --- Launcher protocol -----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LaunchContext:
+    """Inputs the launcher needs to spawn a meet-worker.
+
+    ``container_name`` is suggested by the scheduler so the launcher's
+    naming stays predictable across implementations; the launcher may
+    ignore it and pick its own name as long as it returns the actual
+    name in :class:`LaunchResult`.
+    """
+
+    bot_session_id: int
+    meeting_config_id: int
+    calendar_event_id: int
+    identity_account_id: int
+    meet_link: str
+    container_name: str
+
+
+@dataclass(frozen=True)
+class LaunchResult:
+    """What the launcher actually did.
+
+    ``container_name`` is persisted back to ``bot_sessions.container_name``
+    so an operator can correlate Docker objects with rows.
+    """
+
+    container_name: str
+
+
+class ContainerLauncher:
+    """Interface for "spawn / kill the meet-worker for this session".
+
+    The default implementation (:class:`NoopContainerLauncher`) does
+    nothing — useful for tests and for landing the scheduler before
+    US-030 wires the Docker SDK.
+    """
+
+    async def start(self, ctx: LaunchContext) -> LaunchResult:
+        raise NotImplementedError
+
+    async def stop(self, *, bot_session_id: int, container_name: str | None) -> None:
+        raise NotImplementedError
+
+
+class NoopContainerLauncher(ContainerLauncher):
+    """Recording no-op launcher. Useful for tests / scheduler-only deploys."""
+
+    def __init__(self) -> None:
+        self.started: list[LaunchContext] = []
+        self.stopped: list[tuple[int, str | None]] = []
+
+    async def start(self, ctx: LaunchContext) -> LaunchResult:
+        self.started.append(ctx)
+        return LaunchResult(container_name=ctx.container_name)
+
+    async def stop(self, *, bot_session_id: int, container_name: str | None) -> None:
+        self.stopped.append((bot_session_id, container_name))
+
+
+class LauncherError(RuntimeError):
+    """Raised by launcher implementations on irrecoverable failure."""
+
+
+def container_name_for_session(bot_session_id: int) -> str:
+    """Stable container name per session — matches US-030's convention."""
+    return f"meet-worker-session-{bot_session_id}"
+
+
+# --- Active-session detection ---------------------------------------------
+
+
+def _now() -> datetime:
+    """Indirection so tests can pin the clock without monkey-patching datetime."""
+    return datetime.now(UTC)
+
+
+def select_due_meetings(
+    session: Session,
+    *,
+    now: datetime | None = None,
+    join_window_seconds: int = DEFAULT_JOIN_WINDOW_SECONDS,
+) -> list[MeetingConfig]:
+    """Meeting configs whose event starts soon AND have no active session.
+
+    "Soon" = ``start_time <= now + join_window_seconds`` and
+    ``end_time > now`` (we don't try to join a meeting that already ended).
+    The meeting must be ``enabled``, its event must have a Meet link,
+    and there must be no bot_session row in scheduled/joining/joined
+    status for it.
+    """
+    moment = now or _now()
+    horizon = moment + timedelta(seconds=join_window_seconds)
+
+    # Distinct meeting configs whose event is due, that don't already
+    # have an active bot_session. We use a left-join + WHERE NULL pattern
+    # rather than EXISTS so the test fixture sees an executable plan on
+    # SQLite without coercing the dialect.
+    active_subq = (
+        select(BotSession.meeting_config_id)
+        .where(BotSession.status.in_(_ACTIVE_STATUSES))
+        .subquery()
+    )
+    stmt = (
+        select(MeetingConfig)
+        .join(CalendarEvent, CalendarEvent.id == MeetingConfig.calendar_event_id)
+        .where(MeetingConfig.enabled.is_(True))
+        .where(CalendarEvent.meet_link.is_not(None))
+        .where(CalendarEvent.start_time <= horizon)
+        .where(CalendarEvent.end_time > moment)
+        .where(MeetingConfig.id.not_in(select(active_subq)))
+        .order_by(CalendarEvent.start_time, MeetingConfig.id)
+    )
+    return list(session.scalars(stmt).all())
+
+
+def select_due_stops(
+    session: Session,
+    *,
+    now: datetime | None = None,
+    stop_grace_seconds: int = DEFAULT_STOP_GRACE_SECONDS,
+) -> list[BotSession]:
+    """Bot sessions whose event ended ``stop_grace_seconds`` ago.
+
+    Returns rows in ``scheduled`` / ``joining`` / ``joined`` whose
+    underlying event's ``end_time`` is in the past by at least the
+    grace window. Used by the periodic stop sweep.
+    """
+    moment = now or _now()
+    threshold = moment - timedelta(seconds=stop_grace_seconds)
+    stmt = (
+        select(BotSession)
+        .join(
+            MeetingConfig, MeetingConfig.id == BotSession.meeting_config_id
+        )
+        .join(
+            CalendarEvent, CalendarEvent.id == MeetingConfig.calendar_event_id
+        )
+        .where(BotSession.status.in_(_ACTIVE_STATUSES))
+        .where(CalendarEvent.end_time <= threshold)
+        .order_by(BotSession.id)
+    )
+    return list(session.scalars(stmt).all())
+
+
+def list_active_sessions(session: Session) -> list[BotSession]:
+    """Every non-terminal bot_session, ordered oldest-first.
+
+    Powers the "scheduler state" UI panel (US-029 AC #5).
+    """
+    stmt = (
+        select(BotSession)
+        .where(BotSession.status.in_(_ACTIVE_STATUSES))
+        .order_by(BotSession.id)
+    )
+    return list(session.scalars(stmt).all())
+
+
+# --- Start / stop --------------------------------------------------------
+
+
+def _validate_meeting_for_launch(meeting: MeetingConfig) -> str:
+    """Return the meet_link or raise ``ValueError`` if the meeting cannot launch."""
+    if not meeting.enabled:
+        raise ValueError(f"meeting_config id={meeting.id} is disabled")
+    event = meeting.calendar_event
+    if event is None:
+        raise ValueError(
+            f"meeting_config id={meeting.id} has no linked calendar_event"
+        )
+    if not event.meet_link:
+        raise ValueError(
+            f"calendar_event id={event.id} has no meet_link"
+        )
+    return event.meet_link
+
+
+async def start_session_for_meeting(
+    session: Session,
+    *,
+    meeting: MeetingConfig,
+    launcher: ContainerLauncher,
+) -> BotSession:
+    """Create the bot_session row and ask the launcher to start the worker.
+
+    Flow:
+
+    1. ``validate`` — checks enabled + has meet link.
+    2. Insert ``bot_sessions`` row in ``scheduled`` so its id exists
+       before we tell the launcher (the id is part of the container name).
+    3. ``await launcher.start(...)``. Any exception is recorded against
+       the row via :func:`mark_session_failed` and re-raised.
+    4. Persist the returned ``container_name`` and transition to
+       ``joining``.
+
+    Returns the persisted row. The session is left uncommitted; the
+    caller's outer transaction commits.
+    """
+    meet_link = _validate_meeting_for_launch(meeting)
+
+    row = BotSession(
+        meeting_config_id=meeting.id,
+        status=BotSessionStatus.SCHEDULED,
+    )
+    session.add(row)
+    session.flush()
+
+    ctx = LaunchContext(
+        bot_session_id=row.id,
+        meeting_config_id=meeting.id,
+        calendar_event_id=meeting.calendar_event_id,
+        identity_account_id=meeting.identity_account_id,
+        meet_link=meet_link,
+        container_name=container_name_for_session(row.id),
+    )
+    try:
+        result = await launcher.start(ctx)
+    except Exception as exc:
+        # Record the failure on the row before re-raising so the operator
+        # has a visible audit trail of the failed attempt.
+        try:
+            mark_session_failed(session, row.id, f"launcher.start failed: {exc}")
+        except BotSessionNotFoundError:  # pragma: no cover — flushed above
+            logger.exception("bot_session %s vanished mid-flow", row.id)
+        raise
+
+    row.container_name = result.container_name
+    mark_session_joining(session, row.id)
+    logger.info(
+        "started bot_session id=%s for meeting_config id=%s as container %s",
+        row.id,
+        meeting.id,
+        result.container_name,
+    )
+    return row
+
+
+async def stop_session_by_id(
+    session: Session,
+    *,
+    bot_session_id: int,
+    launcher: ContainerLauncher,
+) -> BotSession:
+    """Ask the launcher to stop the worker and transition the row to ``ended``.
+
+    Idempotent: rows already in ``ended`` / ``failed`` are returned
+    unchanged. A launcher error is recorded against the row as
+    ``failed`` with the exception message; the exception is re-raised so
+    the caller (manual stop endpoint or scheduler) can surface it.
+    """
+    row = session.get(BotSession, bot_session_id)
+    if row is None:
+        raise BotSessionNotFoundError(
+            f"no bot_sessions row with id={bot_session_id}"
+        )
+    if row.status in _TERMINAL_STATUSES:
+        return row
+
+    try:
+        await launcher.stop(
+            bot_session_id=row.id, container_name=row.container_name
+        )
+    except Exception as exc:
+        mark_session_failed(session, row.id, f"launcher.stop failed: {exc}")
+        raise
+
+    mark_session_ended(session, row.id)
+    logger.info(
+        "stopped bot_session id=%s (container=%s)",
+        row.id,
+        row.container_name,
+    )
+    return row
+
+
+# --- Periodic pass --------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SchedulerPassResult:
+    """Aggregate counts across one scheduler pass."""
+
+    started_count: int
+    stopped_count: int
+    error_count: int
+
+
+async def run_scheduler_pass_with_session(
+    session: Session,
+    *,
+    launcher: ContainerLauncher,
+    now: datetime | None = None,
+    join_window_seconds: int = DEFAULT_JOIN_WINDOW_SECONDS,
+    stop_grace_seconds: int = DEFAULT_STOP_GRACE_SECONDS,
+) -> SchedulerPassResult:
+    """Run one scheduler pass against the given session.
+
+    Per-row errors are caught (so one bad meeting / launcher hiccup
+    doesn't stall the whole pass) and aggregated into ``error_count``.
+    The caller's session must wrap a transaction; rows touched here
+    are flushed but not committed.
+    """
+    moment = now or _now()
+    started = 0
+    stopped = 0
+    errors = 0
+
+    # Start sweep.
+    due = select_due_meetings(
+        session,
+        now=moment,
+        join_window_seconds=join_window_seconds,
+    )
+    for meeting in due:
+        try:
+            await start_session_for_meeting(
+                session, meeting=meeting, launcher=launcher
+            )
+            started += 1
+        except (ValueError, LauncherError) as exc:
+            logger.warning(
+                "scheduler start failed meeting_config_id=%s: %s",
+                meeting.id,
+                exc,
+            )
+            errors += 1
+        except Exception:  # noqa: BLE001 — last-resort safety net
+            logger.exception(
+                "scheduler start crashed for meeting_config_id=%s",
+                meeting.id,
+            )
+            errors += 1
+
+    # Stop sweep.
+    due_stops = select_due_stops(
+        session, now=moment, stop_grace_seconds=stop_grace_seconds
+    )
+    for row in due_stops:
+        try:
+            await stop_session_by_id(
+                session, bot_session_id=row.id, launcher=launcher
+            )
+            stopped += 1
+        except (BotSessionNotFoundError, LauncherError) as exc:
+            logger.warning(
+                "scheduler stop failed bot_session_id=%s: %s",
+                row.id,
+                exc,
+            )
+            errors += 1
+        except Exception:  # noqa: BLE001 — last-resort safety net
+            logger.exception(
+                "scheduler stop crashed for bot_session_id=%s",
+                row.id,
+            )
+            errors += 1
+
+    return SchedulerPassResult(
+        started_count=started, stopped_count=stopped, error_count=errors
+    )
+
+
+async def run_scheduler_pass(
+    *,
+    launcher: ContainerLauncher | None = None,
+) -> SchedulerPassResult:
+    """Open a fresh DB session and run one pass.
+
+    Mirrors :func:`app.services.calendar_polling.run_polling_pass`.
+    Intended for the worker's periodic scheduler; when US-029 introduces
+    a real task queue, this becomes a registered beat task without changes.
+    """
+    from app.db.session import session_scope
+
+    chosen_launcher = launcher or NoopContainerLauncher()
+    with session_scope() as session:
+        return await run_scheduler_pass_with_session(
+            session, launcher=chosen_launcher
+        )
+
+
+__all__ = [
+    "ContainerLauncher",
+    "DEFAULT_JOIN_WINDOW_SECONDS",
+    "DEFAULT_SCHEDULER_INTERVAL_SECONDS",
+    "DEFAULT_STOP_GRACE_SECONDS",
+    "LaunchContext",
+    "LaunchResult",
+    "LauncherError",
+    "NoopContainerLauncher",
+    "SCHEDULER_INTERVAL_ENV",
+    "SchedulerPassResult",
+    "container_name_for_session",
+    "get_scheduler_interval_seconds",
+    "list_active_sessions",
+    "run_scheduler_pass",
+    "run_scheduler_pass_with_session",
+    "select_due_meetings",
+    "select_due_stops",
+    "start_session_for_meeting",
+    "stop_session_by_id",
+]
