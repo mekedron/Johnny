@@ -36,3 +36,5 @@ frontend/.netlify/
 .env
 .env.local
 .env.*.local
+
+client_secret*.json
