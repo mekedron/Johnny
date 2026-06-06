@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "sessionId": "753ca925-ded9-4c59-874c-a2ab93c33808",
+  "sessionId": "ac16aa9f-4368-43a4-abfd-83a447f722eb",
   "status": "running",
-  "startedAt": "2026-06-06T18:32:55.586Z",
-  "updatedAt": "2026-06-06T18:59:02.183Z",
+  "startedAt": "2026-06-06T19:05:49.851Z",
+  "updatedAt": "2026-06-06T19:20:05.632Z",
   "currentIteration": 0,
   "maxIterations": 0,
   "tasksCompleted": 0,
@@ -27,7 +27,7 @@
         }
       }
     ],
-    "totalTasks": 9,
+    "totalTasks": 10,
     "tasks": [
       {
         "id": "Johnny-stt.1",
@@ -80,6 +80,12 @@
       {
         "id": "Johnny-stt.9",
         "title": "Frontend migration: move ALL frontend to shadcn-svelte per llms.txt — foundation for all UI refactors (REQUIRES PLAN MODE)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-stt.10",
+        "title": "REDO: Frontend migration to shadcn-svelte — ACTUALLY migrate components (Johnny-stt.9 was closed after research only, no code shipped); every step verified via chrome-devtools MCP",
         "status": "open",
         "completedInSession": false
       }

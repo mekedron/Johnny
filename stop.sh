@@ -37,3 +37,18 @@ for legacy in johnny_piper_models johnny_whisper_models johnny_parakeet_models; 
     docker volume rm "$legacy"
   fi
 done
+
+# The frontend is served by the compose `frontend` service (vite dev in
+# a container, ports 5173:5173). If someone — usually a developer in a
+# hurry — also ran `pnpm dev` from ./frontend on the host, that process
+# survives terminal close (PPID becomes 1) and quietly steals port 5173
+# from the dockerized frontend on the next `./run.sh`. Compose down has
+# already released its own port forwarder, so anything still listening
+# here is a host process and is safe to terminate.
+for pid in $(lsof -nP -t -iTCP:5173 -sTCP:LISTEN 2>/dev/null || true); do
+  cmd=$(ps -p "$pid" -o comm= 2>/dev/null || true)
+  case "$cmd" in
+    com.docker.*|*vpnkit*|*docker-proxy*) ;;
+    *) kill "$pid" 2>/dev/null || true ;;
+  esac
+done

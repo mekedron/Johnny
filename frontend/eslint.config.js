@@ -24,6 +24,16 @@ export default ts.config(
 		}
 	},
 	{
+		files: ['src/lib/components/ui/**/*.svelte'],
+		rules: {
+			// shadcn-svelte primitives intentionally forward all unknown
+			// attributes via `...restProps`. They are not built as custom
+			// elements, so the customElement.props compiler warning is a
+			// false positive here.
+			'svelte/valid-compile': ['warn', { ignoreWarnings: true }]
+		}
+	},
+	{
 		ignores: [
 			'.svelte-kit/',
 			'build/',

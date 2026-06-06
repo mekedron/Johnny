@@ -1,6 +1,11 @@
 <script lang="ts">
+	import '../app.css';
 	import { onDestroy, onMount } from 'svelte';
 	import { page } from '$app/state';
+	import { ModeWatcher, toggleMode } from 'mode-watcher';
+	import SunIcon from '@lucide/svelte/icons/sun';
+	import MoonIcon from '@lucide/svelte/icons/moon';
+	import { Button } from '$lib/components/ui/button/index.js';
 	import favicon from '$lib/assets/favicon.svg';
 	import { listAccounts, type Account } from '$lib/accounts';
 	import {
@@ -319,6 +324,8 @@
 	<link rel="icon" href={favicon} />
 </svelte:head>
 
+<ModeWatcher />
+
 <div class="app-shell">
 	<header class="header">
 		<button
@@ -337,6 +344,22 @@
 				{defaultAccount ? defaultAccount.email : 'Not connected'}
 			</span>
 		</div>
+		<Button
+			onclick={toggleMode}
+			variant="ghost"
+			size="icon"
+			class="text-primary-foreground hover:bg-white/10 hover:text-primary-foreground"
+			data-testid="theme-toggle"
+			aria-label="Toggle theme"
+		>
+			<SunIcon
+				class="h-[1.2rem] w-[1.2rem] scale-100 rotate-0 !transition-all dark:scale-0 dark:-rotate-90"
+			/>
+			<MoonIcon
+				class="absolute h-[1.2rem] w-[1.2rem] scale-0 rotate-90 !transition-all dark:scale-100 dark:rotate-0"
+			/>
+			<span class="sr-only">Toggle theme</span>
+		</Button>
 	</header>
 
 	{#if sidebarOpen}
@@ -498,8 +521,6 @@
 	}
 	:global(body) {
 		font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
-		color: #111827;
-		background: #ffffff;
 	}
 
 	.app-shell {

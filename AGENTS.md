@@ -21,6 +21,31 @@ This rule sits at the top of this file because skipping it has repeatedly shippe
 
 ---
 
+## Top rule: Docker is the only runtime — never run services on the host
+
+Every long-running service in this project (frontend, api, worker, postgres, redis, meet-worker) is defined in `docker-compose.yml` and **must** be started, stopped, and exec'd through the compose stack. Do not run `pnpm dev`, `npm install`, `pip install`, `uvicorn`, `pytest`, `psql`, or any other "I'll just run it directly to test" shortcut on the host.
+
+Why this rule exists: a host-side `pnpm dev` for the frontend survives terminal close (its PPID becomes 1), silently steals port 5173 from the dockerized frontend, and `./run.sh` then fails to bind — a stray vite ran orphaned for 24 hours before anyone noticed it was masquerading as the "real" UI. Host language-runtime versions also drift from the container images and produce subtle "works on my machine" bugs. Both classes of mistake have shipped broken code to the user before; the rule exists because of it.
+
+**Use these — and only these — to interact with the stack:**
+
+- `./run.sh` — starts the full stack (`docker compose up -d --build`). Also sweeps any host orphan on 5173 before bringing the dockerized frontend up.
+- `./stop.sh` — full `docker compose down -v` reset. Also kills `meet-worker-session-*` orphan containers and any host process still listening on 5173.
+- `docker compose exec <service> <cmd>` — for any one-off command inside a running service. Examples:
+  - Backend tests: `docker compose exec api pytest`
+  - Frontend tests / build / lint: `docker compose exec frontend pnpm test` (or `pnpm build`, etc.)
+  - DB shell: `docker compose exec postgres psql -U postgres johnny`
+  - Redis CLI: `docker compose exec redis redis-cli`
+  - Open a shell: `docker compose exec api bash`
+- `docker compose logs -f [service]` — tail logs (omit the service name to follow all).
+- `docker compose build <service>` then `docker compose up -d <service>` — rebuild a single service after a dependency change without restarting everything.
+
+**Allowed on the host:** `git`, `bd`, `bv`, `gh`, file edits in the source tree (containers bind-mount source where applicable for hot reload), `docker` / `docker compose` itself, and the `start-chrome.sh` helper (per the browser-validation rule).
+
+**Not allowed on the host:** `pnpm` / `npm` / `pip` / `python` / `uvicorn` / `pytest` against project code, or a locally-installed `postgres` / `redis` / `node` used as a substitute for the container. If the stack is broken in a way that tempts you to bypass Docker, **stop and fix the compose-side problem** — bypassing it just ships bugs back to the user, and any host process you leave behind will fight the next `./run.sh` for ports and volumes.
+
+---
+
 This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
 
 > **Architecture in one line:** Issues live in a local Dolt database

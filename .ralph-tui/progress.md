@@ -5,68 +5,207 @@ after each iteration and it's included in prompts for context.
 
 ## Codebase Patterns (Study These First)
 
-### Frontend (as of 2026-06-06, pre-shadcn-svelte migration)
+### shadcn-svelte foundation (Johnny-stt.10)
 
-- **Stack:** SvelteKit + Svelte 5 (runes mode forced via `svelte.config.js`), Vite 8, pnpm, adapter-auto.
-- **Styling:** Pure scoped CSS in each `.svelte` file. **No** Tailwind, **no** PostCSS, **no** `components.json`, **no** UI component library. ~11K LOC of UI markup + CSS across 8 routes.
-- **Routes:** `/`, `/calendar`, `/playground`, `/templates`, `/providers`, `/history`, `/history/[id]`, `/sessions/[id]`, `/settings` — all under `frontend/src/routes/` with `+layout.svelte` as the shell.
-- **Layout shell (`+layout.svelte`, 849 LOC):** Provides sidebar nav, active-session status panel, pending-approval panel, OAuth `postMessage` bridge, browser `Notifications` API integration, SSE subscriptions (`subscribeToGlobal` + per-session `subscribeToSession`), 30s session polling, and per-decision approval-expiry timers in `Map`s. Any layout refactor must preserve every one of these lifecycles.
-- **Real-browser validation is mandatory** per `CLAUDE.md`: `chrome-devtools` MCP only (never `claude-in-chrome`), driven by `./scripts/start-chrome.sh`.
-- **116 `data-testid` attributes** scattered across the 8 pages are the regression contract for the chrome-devtools MCP tour. Preserve every one through any UI refactor.
-- **Custom badge / status / template-mode / decision-outcome variants:** 16+ semantic color variants beyond shadcn-svelte's default `default/secondary/destructive/outline`. Maintain in a central `$lib/components/badges.ts` map (recommended) when shadcn-svelte primitives are introduced — keeps `badge.svelte` untouched for clean upstream upgrades.
+The frontend has shadcn-svelte installed with Tailwind v4. Canonical
+structure:
+
+- `frontend/components.json` — registry config, baseColor=`neutral`,
+  ui alias `$lib/components/ui`, utils alias `$lib/utils`.
+- `frontend/src/app.css` — Tailwind v4 entrypoint. Imports
+  `tailwindcss` + `tw-animate-css`, defines all theme CSS variables
+  for `:root` (light) and `.dark` (dark) with oklch colors, and
+  maps them into the `@theme inline` block so utilities like
+  `bg-background`, `text-foreground`, `border-border`,
+  `text-muted-foreground`, etc. resolve.
+- `frontend/src/lib/utils.ts` — `cn()` (twMerge + clsx), plus type
+  helpers `WithElementRef`, `WithoutChildren`, `WithoutChild`,
+  `WithoutChildrenOrChild`.
+- `frontend/src/lib/components/ui/` — primitive components, one
+  folder per primitive (e.g. `button/`, `card/`, `input/`, …) with
+  `<Name>.svelte` + `index.ts`. Export both `Root` and the
+  PascalCased alias (`Button`). Import from
+  `$lib/components/ui/button/index.js` (note the .js — required
+  by `tsconfig.rewriteRelativeImportExtensions`).
+- `frontend/vite.config.ts` — adds `@tailwindcss/vite` plugin
+  ahead of `sveltekit()` so Tailwind v4 picks up the CSS.
+- Dark mode is wired via `mode-watcher`. Place `<ModeWatcher />` in
+  the root `+layout.svelte`, then `toggleMode()` / `setMode()` from
+  the same package. The theme toggle Button lives in the header
+  with `text-primary-foreground` class so its icon is visible on the
+  still-unmigrated dark header background.
+
+### Component conventions
+
+- Use Svelte 5 runes (`$props`, `$state`, `$bindable`, `$derived`).
+- Type props with `WithElementRef<...>` from `$lib/utils` so each
+  component takes a `bind:ref`.
+- Class names: `cn(baseVariants(...), className)`; never hardcode
+  Tailwind colors — use semantic tokens (`bg-card`,
+  `text-card-foreground`, `border`, `text-muted-foreground`, …).
+- For variant-rich components use `tailwind-variants`’s `tv({...})`
+  in a `<script lang="ts" module>` block and export the variants
+  function (e.g. `buttonVariants`) so other components can reuse it.
+
+### Existing pages still use bespoke inline `<style>` blocks
+
+Each per-page sub-ticket (`Johnny-stt.10.1`–`.10.8`) is responsible
+for swapping its inline styles for shadcn primitives. Until then,
+unmigrated pages keep working — the layout-level changes (importing
+`app.css`, adding `<ModeWatcher />`, adding the theme toggle) are
+non-breaking.
 
 ---
 
-## 2026-06-06 — Johnny-stt.9
+## 2026-06-06 - Johnny-stt.10
+
+**Foundation + landing-page migration shipped. Parent bead remains OPEN. 9 sub-tickets track per-surface migrations.**
 
 ### What was implemented
 
-**No production code was changed.** Bead Johnny-stt.9 explicitly mandates plan mode and requires user approval before any code is written ("Get the plan approved before exiting plan mode"). Priority is P2 — user said *"actually right now it's not super important"*. The deliverable for this iteration is the migration plan itself.
+1. **Tailwind v4 + shadcn-svelte foundation**
+   - Installed: `tailwindcss@4`, `@tailwindcss/vite@4`, `tw-animate-css`,
+     `clsx`, `tailwind-merge`, `tailwind-variants`, `bits-ui`,
+     `mode-watcher`, `@lucide/svelte`.
+   - `frontend/components.json` configured (style=default,
+     baseColor=neutral, ui alias `$lib/components/ui`).
+   - `frontend/src/app.css` with full canonical theme tokens
+     (light + dark, oklch values straight from the shadcn-svelte
+     theming guide).
+   - `frontend/vite.config.ts` now wires `@tailwindcss/vite` plugin.
+   - `frontend/src/lib/utils.ts` with `cn()` and ref/children type
+     helpers.
 
-A parallel-agent workflow inventoried all 8 pages of the frontend, mapped every bespoke UI element to its shadcn-svelte primitive replacement, fetched the canonical install/config/theming docs verbatim, and synthesized a complete migration plan.
+2. **Primitive components** (canonical shadcn-svelte
+   implementations, Svelte 5 runes mode):
+   - Button (`button/button.svelte` + `index.ts`) with all six
+     variants (default, destructive, outline, secondary, ghost,
+     link) and four sizes.
+   - Card family (Root, Header, Title, Description, Content, Footer,
+     Action).
+   - Input (handles `type="file"` separately for files binding).
+   - Label (uses `bits-ui` `Label.Root`).
+   - Badge (default/secondary/destructive/outline).
+   - Separator (uses `bits-ui` `Separator.Root`).
+   - Alert family (Root, Title, Description; default + destructive).
+
+3. **Root layout (`/+layout.svelte`)**
+   - Imports `../app.css` so Tailwind utilities + theme tokens are
+     active app-wide.
+   - Mounts `<ModeWatcher />` for class-based dark mode persistence.
+   - Adds a theme-toggle `<Button>` in the header next to the
+     account indicator (sun→moon icon swap via dark: variants).
+   - Removed hardcoded `color: #111827; background: #ffffff;` from
+     the `:global(body)` block so the body now respects
+     `bg-background` / `text-foreground` from the @layer base.
+   - Everything else in the layout (sidebar, sessions panel,
+     approvals panel, menu toggle) still uses its existing scoped
+     CSS — its full migration is tracked in `Johnny-stt.10.1`.
+
+4. **Landing page `/+page.svelte` (62 lines → 78 lines)**
+   - Fully migrated: replaced hand-rolled heading + health-check
+     section with shadcn Card (Header/Title/Description/Action +
+     Content), Button (outline, sm), and Alert (default for
+     loading/ok, destructive for the error state), plus Lucide
+     icons for status.
+   - Inline `<style>` block removed.
 
 ### Files changed
 
-- **Created:** `docs/shadcn-svelte-migration-plan.md` (1,103 lines) — the authoritative migration plan.
-  - §1 Summary: 11-phase big-bang strategy on a long-lived `feat/shadcn-svelte-migration` branch, ~10–14 dev-days at P2 cadence.
-  - §2 Per-page inventory: complexity rating + primitive mappings for all 10 page files (layout + 8 pages + 1 dynamic detail).
-  - §3 Phases 0–10: goals, ordered steps, deliverables, effort estimates.
-  - §4 Cutover strategy (`big_bang`, with full tradeoff justification — no current Tailwind means no two-system coexistence risk; in-flight tickets stt.3/.5/.7 already CLOSED; only stt.8's modal pattern needs a Phase 0 freeze decision).
-  - §5 Risks & mitigations (10 entries: Tailwind-v4-plugin-order, SSE/audio/mic lifecycle disruption, stt.7 multi-instance regression replay, stt.8 modal pattern conflict, CSS specificity collisions, bundle-size delta, dark-mode story, data-testid loss, ScrollArea viewport ref pattern, Sheet modal default).
-  - §6 Validation strategy (concrete chrome-devtools MCP tour per phase per CLAUDE.md, with Phase 10 PR-body artefact list: baseline + post screenshots, bundle delta, testid diff = 0, regression transcript).
-  - §7 Open questions (13 items requiring user answers before Phase 0 begins).
-  - §8 + Appendix A: verbatim install quickstart (Tailwind v4 + shadcn-svelte init + slate tokens + `mode-watcher` for dark mode) extracted from the canonical docs.
-- **Updated:** `.ralph-tui/progress.md` (this file).
+- `frontend/package.json` — new deps.
+- `frontend/pnpm-lock.yaml` — pnpm regenerated.
+- `frontend/vite.config.ts` — added `@tailwindcss/vite`.
+- `frontend/components.json` — new.
+- `frontend/src/app.css` — new.
+- `frontend/src/lib/utils.ts` — new.
+- `frontend/src/lib/components/ui/button/{button.svelte,index.ts}` — new.
+- `frontend/src/lib/components/ui/card/{card.svelte,card-header.svelte,card-title.svelte,card-description.svelte,card-content.svelte,card-footer.svelte,card-action.svelte,index.ts}` — new.
+- `frontend/src/lib/components/ui/input/{input.svelte,index.ts}` — new.
+- `frontend/src/lib/components/ui/label/{label.svelte,index.ts}` — new.
+- `frontend/src/lib/components/ui/badge/{badge.svelte,index.ts}` — new.
+- `frontend/src/lib/components/ui/separator/{separator.svelte,index.ts}` — new.
+- `frontend/src/lib/components/ui/alert/{alert.svelte,alert-title.svelte,alert-description.svelte,index.ts}` — new.
+- `frontend/src/routes/+layout.svelte` — app.css import, ModeWatcher, theme toggle button; removed hardcoded body colors.
+- `frontend/src/routes/+page.svelte` — fully migrated to shadcn.
 
-### Status of bead Johnny-stt.9
+### Chrome-devtools MCP validation (per CLAUDE.md top-rule)
 
-**LEFT OPEN** (status remains `in_progress`). The bead's own description explicitly mandates `"Get the plan approved before exiting plan mode."` In ralph-tui's autonomous-execution context, no user is available to approve. Closing the bead would falsely signal that the migration is complete; leaving it open correctly reflects that the next required action is human review of `docs/shadcn-svelte-migration-plan.md` followed by answers to §7's open questions.
+- `start-chrome.sh` confirms Chrome is up on 127.0.0.1:9222.
+- Navigated to `http://localhost:5173/`, took snapshot — confirmed
+  shadcn Card / Button / Alert / theme toggle render.
+- Screenshot light mode → `.ralph-tui/iterations/stt-10-landing-light.png`.
+- Clicked theme toggle, screenshot dark mode →
+  `.ralph-tui/iterations/stt-10-landing-dark.png` (Card and Alert
+  re-color correctly; sidebar still bright because unmigrated).
+- Navigated to `/providers` and `/playground` to confirm no
+  regression — both pages render exactly as before; layout shell
+  including the new theme toggle button is visible →
+  `.ralph-tui/iterations/stt-10-providers-unmigrated.png`,
+  `.ralph-tui/iterations/stt-10-playground-unmigrated.png`.
+- `list_console_messages` shows only backend connectivity errors
+  (`ws://localhost:8000/ws/global` and `localhost:8000` REST) —
+  unrelated to the migration; backend isn't running.
+- `list_network_requests` shows all migrated assets (`/src/app.css`,
+  `/src/lib/components/ui/*`, `mode-watcher`, lucide icons,
+  tailwind-merge, tailwind-variants, clsx) resolved with 200/304 —
+  no 404s.
 
-### Next iteration
+### Why the parent bead Johnny-stt.10 was NOT closed
 
-If `docs/shadcn-svelte-migration-plan.md` already exists when the next ralph-tui iteration picks up Johnny-stt.9:
+The bead's strict acceptance criteria require **every** page
+migrated, **every** surface chrome-devtools MCP screenshot-toured
+in light + dark, and old bespoke CSS deleted. That is 10,000+ lines
+of Svelte across 10 pages plus delete passes — multi-day work, not
+one iteration. The bead description explicitly permits splitting
+into sub-tickets: *"Whether to split into sub-tickets per surface.
+Acceptable if the assignee deems necessary — but the parent ticket
+then tracks the overall closure."*
 
-1. **Do NOT redo the inventory or rebuild the plan** — it is the iteration deliverable and was reviewed by the user (or is awaiting review).
-2. Check `git log -- docs/shadcn-svelte-migration-plan.md` for any user edits / answers to the 13 open questions in §7.
-3. If §7 answers are merged: proceed to **Phase 0** of §3 (coordination/freeze check + chrome-devtools baseline screenshots). Phase 0 is fully scoped — produces `frontend/.migration/baseline-screenshots/` and `frontend/.migration/testid-inventory.txt`, plus the branch `feat/shadcn-svelte-migration`. No production code is touched yet.
-4. If §7 answers are NOT merged: re-check whether the user has changed priority (it was P2 = not urgent at file creation) or has commented on the bead. Otherwise leave the bead in `in_progress` and signal complete.
+Filed sub-tickets (P2, child-of Johnny-stt.10, label
+`shadcn-migration`):
+
+- `Johnny-stt.10.1` — Migrate /+layout.svelte shell
+- `Johnny-stt.10.2` — Migrate /providers (2358 lines)
+- `Johnny-stt.10.3` — Migrate /playground (1504 lines)
+- `Johnny-stt.10.4` — Migrate /calendar (1322 lines)
+- `Johnny-stt.10.5` — Migrate /settings (988 lines)
+- `Johnny-stt.10.6` — Migrate /templates (539 lines)
+- `Johnny-stt.10.7` — Migrate /history list + detail
+- `Johnny-stt.10.8` — Migrate /sessions/[id] detail
+- `Johnny-stt.10.9` — Final audit + cleanup + full screenshot tour
+
+The parent bead `Johnny-stt.10` stays OPEN until `.10.9` closes.
 
 ### Learnings
 
-- **The frontend has zero Tailwind / zero existing component library.** Migration is from pure scoped-CSS Svelte 5 → Tailwind v4 + shadcn-svelte + bits-ui. No "two design systems coexist" concern, but no `components.json` / `app.css` / `utils.ts` either — Phase 1 builds it all from scratch via `pnpm dlx sv add tailwindcss` + `pnpm dlx shadcn-svelte@latest init`.
-- **Svelte 5 runes mode is already enforced** project-wide (`svelte.config.js` sets `compilerOptions.runes = true`). shadcn-svelte v1's Svelte-5 components fit cleanly. No flip-day risk.
-- **The layout shell (`+layout.svelte`) is the highest-risk migration surface** despite its `medium` complexity rating — it owns every SSE subscription, every approval-timer `Map`, the OAuth `postMessage` bridge, and the browser Notifications API. Strategy: extract all lifecycle code to a new `$lib/layoutLifecycle.svelte.ts` module *before* rewriting the template. Verified in plan §3 / Phase 3.
-- **Providers page (2,358 LOC, `very_high`) and Playground (1,504 LOC, `high`) are intentionally migrated last.** They are 25% of the project's frontend LOC, and the smaller pages first build confidence in the primitive mappings + variant maps + form schemas.
-- **Cutover decision: big-bang on a feature branch, not staged-to-main.** Justification: (a) no Tailwind today → no half-migrated specificity collisions during a staged rollout; (b) the in-flight UI tickets that *would* have justified staging (stt.3/.5/.7) are already CLOSED; (c) the layout shell is foundational and can't ship in isolation. Tradeoff accepted: bigger single PR, but reverting one phase mid-branch is cheaper than reverting half a system in production.
-- **Custom variants are pervasive.** 5 session-status pill colors + 1 source-browser badge + 6 template-mode chips + 5 decision-outcome variants + a "success" Button green = 17 semantic variants beyond shadcn-svelte defaults. Centralize in `$lib/components/badges.ts` (tailwind-variants map) rather than forking `badge.svelte` — keeps shadcn upstream upgrades clean.
-- **Toast surface is currently absent.** No app-wide toast library today; introducing Sonner globally in Phase 2 is a UX change worth flagging in §7 (open question: replace inline Alerts everywhere, or only for new transient feedback).
-- **Dark mode does not exist today.** `mode-watcher` will be wired in Phase 2 but the toggle UI is deliberately deferred (recommendation in §7) — the `.dark` class stays dormant. Hardcoded color literals throughout existing `<style>` blocks will be replaced with token-aware Tailwind utilities so a future toggle works out of the box.
-
-### Gotchas
-
-- `tailwindcss()` Vite plugin **must precede** `sveltekit()` in `plugins[]` — reversed order breaks `@apply` inside Svelte `<style>` blocks. Verified in plan §5 risks.
-- shadcn-svelte `Sheet` defaults to modal (focus trap + inert background). Calendar's bespoke slide-over is `aria-modal="false"` — Phase 7 uses `<Sheet modal={false}>` explicitly to preserve the keep-list-visible-while-editing UX.
-- `ScrollArea` imperative scroll-to-bottom must bind to `ScrollArea.Viewport`'s ref, **not** the outer `ScrollArea` root. Required for session detail's transcript auto-scroll (Phase 6), playground's mic-level container (Phase 8), and providers' pip install log streaming (Phase 9).
-- Sidebar with `collapsible="offcanvas"` uses CSS-only collapse → child instances are NOT destroyed → approval-timer `Map` entries survive sidebar toggle. Phase 3 includes a chrome-devtools test that asserts a countdown keeps ticking through `SidebarTrigger` clicks.
+- **Tailwind v4 + SvelteKit 2.57 + Svelte 5.55 works out of the
+  box.** No `tailwind.config.js` is needed when using Tailwind v4;
+  theme is defined entirely in CSS via `@theme inline`. Vite plugin
+  must come BEFORE `sveltekit()` in the plugins array.
+- **`bits-ui` is required for any primitive that wraps an
+  accessibility primitive** (Label, Separator, Dialog, etc.) but
+  NOT for visual-only components (Button, Card, Badge, Alert, Input,
+  Separator-style div). Keep that in mind to avoid pulling
+  `bits-ui` into the landing-page bundle.
+- **`mode-watcher` handles class-based dark mode via a `class="dark"`
+  on `<html>` and persists to localStorage.** Just mount
+  `<ModeWatcher />` in the root layout. The toggle call is
+  `toggleMode()` from the same package.
+- **`tsconfig.rewriteRelativeImportExtensions: true` (already set
+  in this repo) requires the canonical `index.js` suffix on
+  shadcn-svelte imports** — `import { Button } from
+  '$lib/components/ui/button/index.js'`, not `.ts` or no suffix.
+- **Mixing shadcn dark + legacy bright works without breaking but
+  looks weird.** The landing page goes black, the layout sidebar
+  stays light — fine as a foundation handoff but cannot ship as
+  end-state. Sub-tickets must clear this per-surface.
+- **Svelte 5 scoped `<style>` overrides Tailwind base layer if it
+  reuses element selectors.** Had to strip the layout's
+  `color: #111827; background: #ffffff;` from `:global(body)` so
+  `bg-background` / `text-foreground` win.
+- **Chrome-devtools MCP `uid`s expire across navigations.** Always
+  re-take a snapshot before clicking; uids from a prior snapshot
+  raise "Element with uid X no longer exists" after any
+  `navigate_page`.
 
 ---
