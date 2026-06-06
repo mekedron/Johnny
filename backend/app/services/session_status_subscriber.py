@@ -26,6 +26,14 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.db.models import (
+    AgentDecision,
+    AgentUtterance,
+    BotMode,
+    BotSession,
+    DecisionOutcome,
+    TranscriptChunk,
+)
 from app.db.session import session_scope
 from app.services.bot_sessions import (
     BotSessionNotFoundError,
@@ -40,6 +48,9 @@ logger = logging.getLogger(__name__)
 # Pattern matches every johnny.session.<session_id> channel.
 SESSION_CHANNEL_PATTERN = "johnny.session.*"
 SESSION_STATUS_EVENT_TYPE = "session_status_changed"
+TRANSCRIPT_EVENT_TYPE = "transcript_finalized"
+ROUTER_DECISION_EVENT_TYPE = "router_decision_made"
+AGENT_SPOKE_EVENT_TYPE = "agent_spoke"
 
 # Sleep this long between reconnect attempts when Redis is unreachable.
 RECONNECT_BACKOFF_S = 2.0
@@ -107,21 +118,147 @@ def apply_status_event(
     return True
 
 
+def apply_transcript_event(db: Session, payload: dict[str, Any]) -> bool:
+    """Insert one transcript_chunks row from a ``transcript_finalized`` event."""
+    if payload.get("type") != TRANSCRIPT_EVENT_TYPE:
+        return False
+    session_id = _coerce_int_id(payload.get("session_id"))
+    if session_id is None:
+        return False
+    text = payload.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return False
+    timestamp_ms = int(payload.get("timestamp_ms") or 0)
+    # The pipeline emits ``timestamp_ms`` as offset-from-start. We use it
+    # for both start/end since the event doesn't carry duration; future
+    # work can split partial vs final to widen this window.
+    row = TranscriptChunk(
+        bot_session_id=session_id,
+        start_offset_ms=timestamp_ms,
+        end_offset_ms=timestamp_ms,
+        speaker=payload.get("speaker"),
+        text=text,
+    )
+    db.add(row)
+    db.flush()
+    return True
+
+
+def apply_router_decision_event(db: Session, payload: dict[str, Any]) -> bool:
+    """Insert one agent_decisions row from a ``router_decision_made`` event."""
+    if payload.get("type") != ROUTER_DECISION_EVENT_TYPE:
+        return False
+    session_id = _coerce_int_id(payload.get("session_id"))
+    if session_id is None:
+        return False
+    should_speak = bool(payload.get("should_speak", False))
+    confidence = float(payload.get("confidence") or 0.0)
+    reason = str(payload.get("reason") or "")
+    reply_type = payload.get("reply_type")
+    suggested_reply = payload.get("suggested_reply")
+    # Default outcome reflects the router's stance — the answer stage
+    # may later flip it to spoken / suggested / etc. via separate events.
+    outcome = (
+        DecisionOutcome.SUPPRESSED if not should_speak else DecisionOutcome.PENDING
+    )
+    input_window = payload.get("input_window") or {}
+    raw_output = payload.get("raw_output") or {}
+    row = AgentDecision(
+        bot_session_id=session_id,
+        should_speak=should_speak,
+        confidence=confidence,
+        reason=reason,
+        reply_type=str(reply_type) if isinstance(reply_type, str) else None,
+        suggested_reply=(
+            str(suggested_reply) if isinstance(suggested_reply, str) else None
+        ),
+        outcome=outcome,
+        input_window=input_window if isinstance(input_window, dict) else {},
+        raw_output=raw_output if isinstance(raw_output, dict) else {},
+    )
+    db.add(row)
+    db.flush()
+    return True
+
+
+def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
+    """Insert one agent_utterances row from an ``agent_spoke`` event."""
+    if payload.get("type") != AGENT_SPOKE_EVENT_TYPE:
+        return False
+    session_id = _coerce_int_id(payload.get("session_id"))
+    if session_id is None:
+        return False
+    text = str(payload.get("text") or "")
+    duration = payload.get("audio_duration_ms")
+    matched = payload.get("matched_allowed_reply")
+    # Mode is taken from the bot session row at insert time so the
+    # utterance audit row mirrors the meeting's bot mode.
+    session_row = db.get(BotSession, session_id)
+    mode = BotMode.LISTEN_ONLY
+    if session_row is not None:
+        meeting = getattr(session_row, "meeting_config", None)
+        if meeting is not None and getattr(meeting, "mode", None) is not None:
+            mode = meeting.mode
+    # ``prompt`` is NOT NULL on the table. The pipeline's agent_spoke
+    # event doesn't carry the original prompt (the router decision row
+    # has the full input window already), so we record a placeholder so
+    # the audit trail still inserts.
+    row = AgentUtterance(
+        bot_session_id=session_id,
+        agent_decision_id=None,
+        mode=mode,
+        prompt="",
+        output_text=text,
+        audio_duration_ms=int(duration) if isinstance(duration, (int, float)) else None,
+        matched_allowed_reply=(
+            str(matched) if isinstance(matched, str) else None
+        ),
+    )
+    db.add(row)
+    db.flush()
+    return True
+
+
+def _coerce_int_id(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _apply_in_transaction(payload: dict[str, Any]) -> bool:
-    """Open a fresh session, apply the event, commit on success."""
+    """Open a fresh session, apply the event, commit on success.
+
+    Dispatches on ``payload["type"]`` so one subscriber persists every
+    pipeline event flavour: status changes, transcripts, decisions,
+    utterances. Other types pass through unchanged (the WebSocket fan-out
+    still receives them; we just don't write a DB row).
+    """
+    event_type = payload.get("type")
     try:
         with session_scope() as db:
             try:
-                return apply_status_event(db, payload)
+                if event_type == SESSION_STATUS_EVENT_TYPE:
+                    return apply_status_event(db, payload)
+                if event_type == TRANSCRIPT_EVENT_TYPE:
+                    return apply_transcript_event(db, payload)
+                if event_type == ROUTER_DECISION_EVENT_TYPE:
+                    return apply_router_decision_event(db, payload)
+                if event_type == AGENT_SPOKE_EVENT_TYPE:
+                    return apply_agent_spoke_event(db, payload)
             except BotSessionNotFoundError as exc:
                 logger.warning("status-sub: %s", exc)
                 return False
     except Exception:
         logger.exception(
-            "status-sub: failed to persist session_status_changed payload: %r",
+            "status-sub: failed to persist payload type=%s: %r",
+            event_type,
             payload,
         )
         return False
+    return False
 
 
 # --- Redis pub/sub plumbing ----------------------------------------------
@@ -226,9 +363,15 @@ async def run_subscriber(
 
 
 __all__ = [
+    "AGENT_SPOKE_EVENT_TYPE",
     "RECONNECT_BACKOFF_S",
+    "ROUTER_DECISION_EVENT_TYPE",
     "SESSION_CHANNEL_PATTERN",
     "SESSION_STATUS_EVENT_TYPE",
+    "TRANSCRIPT_EVENT_TYPE",
+    "apply_agent_spoke_event",
+    "apply_router_decision_event",
     "apply_status_event",
+    "apply_transcript_event",
     "run_subscriber",
 ]

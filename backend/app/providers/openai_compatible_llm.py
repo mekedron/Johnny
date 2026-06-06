@@ -260,7 +260,7 @@ class OpenAICompatibleLLM(LLMProvider):
         if tools and self._tool_format == "openai":
             body["tools"] = [_tool_to_dict(t) for t in tools]
         if response_format is not None:
-            body["response_format"] = response_format
+            body["response_format"] = _coerce_response_format(response_format)
 
         headers: dict[str, str] = {
             "Content-Type": "application/json",
@@ -366,6 +366,37 @@ class OpenAICompatibleLLM(LLMProvider):
             f"openai-compatible LLM HTTP {response.status_code}"
             + (f": {detail}" if detail else "")
         )
+
+
+def _coerce_response_format(value: dict[str, Any]) -> dict[str, Any]:
+    """Translate a raw JSON schema to OpenAI's expected response_format.
+
+    The pipeline passes a generic JSON schema (``{"type": "object",
+    "properties": {...}}``) — OpenAI's chat completions API rejects this
+    with 400 because it expects one of ``{"type": "json_object"}``,
+    ``{"type": "text"}``, or ``{"type": "json_schema", "json_schema":
+    {"name": ..., "schema": ...}}``. We auto-wrap raw schemas in
+    ``json_schema`` form so the pipeline keeps working without each
+    adapter knowing the schema shape.
+
+    Already-correct values pass through unchanged so non-OpenAI servers
+    (vLLM, Ollama) that accept the raw schema directly are untouched
+    when the caller hands them the right thing.
+    """
+    if not isinstance(value, dict):
+        return value
+    rf_type = value.get("type")
+    if rf_type in ("json_object", "json_schema", "text"):
+        return value
+    # Raw JSON schema (``type=object`` etc.) — wrap.
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "structured_response",
+            "schema": value,
+            "strict": False,
+        },
+    }
 
 
 def _message_to_dict(message: ChatMessage) -> dict[str, Any]:

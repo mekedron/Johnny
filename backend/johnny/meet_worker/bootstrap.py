@@ -332,6 +332,26 @@ async def _run_screenshot_loop(
         )
 
 
+def _provider_config_present(env: dict[str, str] | None = None) -> bool:
+    """Whether ``JOHNNY_PROVIDER_CONFIG`` contains a usable payload.
+
+    Empty string / ``{}`` / malformed JSON all count as absent, so the
+    bootstrap falls back to the logging-only capture pump rather than
+    crashing with a parse error mid-meeting.
+    """
+    import json as _json
+
+    src = env if env is not None else os.environ
+    raw = src.get("JOHNNY_PROVIDER_CONFIG", "").strip()
+    if not raw or raw == "{}":
+        return False
+    try:
+        parsed = _json.loads(raw)
+    except _json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict) and len(parsed) > 0
+
+
 async def _run_audio_capture_pump(
     bridge: MeetAudioBridge,
     *,
@@ -558,8 +578,10 @@ async def run(config: BootstrapConfig) -> int:
                 bridge = MeetAudioBridge()
                 pump_stop = asyncio.Event()
                 shot_stop = asyncio.Event()
+                pipeline_stop = asyncio.Event()
                 pump_task: asyncio.Task[None] | None = None
                 shot_task: asyncio.Task[None] | None = None
+                pipeline_task: asyncio.Task[None] | None = None
                 try:
                     try:
                         await bridge.start()
@@ -568,18 +590,47 @@ async def run(config: BootstrapConfig) -> int:
                             session_id=config.session_id,
                             msg="parec + pacat subprocesses spawned",
                         )
+                    except Exception as exc:  # noqa: BLE001 — capture is best-effort
+                        log_stage_error(
+                            STAGE_AUDIO_BRIDGE,
+                            session_id=config.session_id,
+                            error=exc,
+                        )
+
+                    # Either the voice pipeline OR the logging-only
+                    # capture pump runs — both call bridge.capture_frames()
+                    # and would compete for queue items. The pipeline is
+                    # the production path; the capture pump is a fallback
+                    # for diagnostics when no providers are configured.
+                    from johnny.meet_worker.pipeline_runner import (
+                        build_and_run_pipeline,
+                    )
+
+                    if _provider_config_present():
+                        pipeline_task = asyncio.create_task(
+                            build_and_run_pipeline(
+                                bridge,
+                                event_bus=bus,
+                                session_id=config.session_id,
+                                stop_event=pipeline_stop,
+                            )
+                        )
+                    else:
+                        log_stage(
+                            STAGE_AUDIO_BRIDGE,
+                            session_id=config.session_id,
+                            level=logging.WARNING,
+                            msg=(
+                                "no provider payload set; running "
+                                "audio capture pump only (no transcription)"
+                            ),
+                        )
                         pump_task = asyncio.create_task(
                             _run_audio_capture_pump(
                                 bridge,
                                 session_id=config.session_id,
                                 stop_event=pump_stop,
                             )
-                        )
-                    except Exception as exc:  # noqa: BLE001 — capture is best-effort
-                        log_stage_error(
-                            STAGE_AUDIO_BRIDGE,
-                            session_id=config.session_id,
-                            error=exc,
                         )
 
                     # Screenshot loop: every 15s save a frame so an
@@ -613,7 +664,8 @@ async def run(config: BootstrapConfig) -> int:
                 finally:
                     pump_stop.set()
                     shot_stop.set()
-                    for task in (pump_task, shot_task):
+                    pipeline_stop.set()
+                    for task in (pump_task, shot_task, pipeline_task):
                         if task is not None:
                             task.cancel()
                             with contextlib.suppress(

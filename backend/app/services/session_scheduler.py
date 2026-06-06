@@ -330,6 +330,29 @@ async def start_session_for_meeting(
     base_context = template.base_context if template is not None else ""
     effective_instructions = _combine_text(base_instructions, meeting.instructions)
     effective_context = _combine_text(base_context, meeting.context)
+
+    # Materialise the active provider rows so the meet-worker bootstrap
+    # can instantiate STT / LLM / TTS without DB access. ``crypto`` is
+    # the production CredentialCrypto by default; tests inject a
+    # NoopCrypto via the ``crypto`` kwarg. A startup misconfiguration
+    # (no FERNET_KEY) degrades gracefully to an empty payload so the
+    # bot still joins — it just runs in listen-only mode for that
+    # session.
+    provider_payload: dict[str, Any] = {}
+    try:
+        from app.security.crypto import CryptoError, get_crypto
+        from app.services.provider_payload import build_provider_payload
+
+        provider_payload = build_provider_payload(session, get_crypto())
+    except CryptoError as exc:
+        logger.warning(
+            "provider payload skipped — FERNET_KEY not configured (%s); "
+            "meet-worker will run without providers",
+            exc,
+        )
+    except Exception:  # noqa: BLE001 — never block a launch on payload errors
+        logger.exception("provider payload build failed; sending empty payload")
+
     ctx = LaunchContext(
         bot_session_id=row.id,
         meeting_config_id=meeting.id,
@@ -340,6 +363,7 @@ async def start_session_for_meeting(
         mode=str(meeting.mode.value if hasattr(meeting.mode, "value") else meeting.mode),
         instructions=effective_instructions,
         context=effective_context,
+        provider_config=provider_payload,
     )
     try:
         result = await launcher.start(ctx)
