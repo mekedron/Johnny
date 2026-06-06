@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pulseaudio \
         pulseaudio-utils \
         dbus-x11 \
+        scrot \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace

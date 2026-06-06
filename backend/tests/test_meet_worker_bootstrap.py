@@ -159,6 +159,13 @@ def test_classify_join_error_handles_unexpected_exception() -> None:
 # --- run() integration with fakes ----------------------------------------
 
 
+class _FakePage:
+    """Minimal Playwright Page test double — only what bootstrap touches."""
+
+    async def screenshot(self, **_kwargs: Any) -> None:
+        return None
+
+
 class _FakeOpenSession:
     """Async context manager test double for open_meeting_session."""
 
@@ -174,6 +181,10 @@ class _FakeOpenSession:
         self._is_alive_flag = is_alive
         self.entered = False
         self.exited = False
+        # Bootstrap reaches inside ``session._page`` to drive the
+        # screenshot loop; tests don't care what it does as long as
+        # nothing raises.
+        self._page = _FakePage()
 
     def __call__(self, **kwargs: Any) -> "_FakeOpenSession":
         # Stash the bus so __aenter__ can publish into it.
@@ -249,6 +260,24 @@ def test_run_publishes_failed_status_on_signin_error(monkeypatch: pytest.MonkeyP
     )
 
 
+class _FakeBridge:
+    """No-op MeetAudioBridge — start/stop succeed, capture yields nothing."""
+
+    sink_name = "johnny_speaker"
+    source_name = "johnny_mic"
+    sample_rate = 16000
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+    async def capture_frames(self) -> Any:
+        if False:  # pragma: no cover — generator stub
+            yield b""
+
+
 def test_run_returns_zero_when_signal_arrives(monkeypatch: pytest.MonkeyPatch) -> None:
     """run() exits 0 after a clean shutdown signal."""
     bus = InMemoryEventBus()
@@ -269,6 +298,7 @@ def test_run_returns_zero_when_signal_arrives(monkeypatch: pytest.MonkeyPatch) -
         bootstrap, "_idle_until_signal_or_disconnect", fake_idle
     )
     monkeypatch.setattr(bootstrap, "build_event_bus", lambda _url: bus)
+    monkeypatch.setattr(bootstrap, "MeetAudioBridge", lambda: _FakeBridge())
 
     config = BootstrapConfig(
         session_id="100",
@@ -307,6 +337,7 @@ def test_run_returns_six_when_browser_disconnects(monkeypatch: pytest.MonkeyPatc
         bootstrap, "_idle_until_signal_or_disconnect", fake_idle
     )
     monkeypatch.setattr(bootstrap, "build_event_bus", lambda _url: bus)
+    monkeypatch.setattr(bootstrap, "MeetAudioBridge", lambda: _FakeBridge())
 
     config = BootstrapConfig(
         session_id="101",

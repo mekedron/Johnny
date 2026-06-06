@@ -81,6 +81,26 @@ IN_MEETING_SELECTORS: tuple[str, ...] = (
     '[aria-label*="You can now talk"]',
     'div[role="region"][aria-label*="Meeting"]',
 )
+# Google shows this "Switch the call here" page when the bot account is
+# *already* in the call from another browser/device — common when a
+# previous meet-worker container didn't fully tear down before a new one
+# tried to join. Without explicit handling the new session sees no Join
+# Now button and times out (Johnny-d2g reliability bug). We click
+# "Switch here" so the new container takes over the call; the older
+# session loses the room (which it would have anyway when its container
+# was stopped).
+SWITCH_CALL_HERE_SELECTORS: tuple[str, ...] = (
+    'button:has-text("Switch here")',
+    '[aria-label*="Switch here"]',
+    'button:has-text("Switch the call here")',
+)
+# The smaller "Got it" button next to the Switch prompt — useful when
+# we'd rather dismiss the banner than switch. Currently unused; kept
+# documented for the alternative dismiss-and-look-for-Join-Now path.
+SWITCH_CALL_DISMISS_SELECTORS: tuple[str, ...] = (
+    'button:has-text("Got it")',
+    '[aria-label*="Dismiss"]',
+)
 MIC_OFF_SELECTORS: tuple[str, ...] = (
     '[aria-label*="Turn off microphone"]',
     'div[role="button"][data-is-muted="false"][data-tooltip*="microphone"]',
@@ -198,6 +218,7 @@ class MeetJoiner:
         access_denied_selectors: Sequence[str] = ACCESS_DENIED_SELECTORS,
         sign_in_required_selectors: Sequence[str] = SIGN_IN_REQUIRED_SELECTORS,
         in_meeting_selectors: Sequence[str] = IN_MEETING_SELECTORS,
+        switch_call_selectors: Sequence[str] = SWITCH_CALL_HERE_SELECTORS,
     ) -> None:
         if join_timeout_s <= 0 or preview_timeout_s <= 0 or poll_interval_s <= 0:
             raise ValueError(
@@ -219,21 +240,76 @@ class MeetJoiner:
         self._access_denied_selectors = tuple(access_denied_selectors)
         self._sign_in_required_selectors = tuple(sign_in_required_selectors)
         self._in_meeting_selectors = tuple(in_meeting_selectors)
+        self._switch_call_selectors = tuple(switch_call_selectors)
 
     async def join(self) -> JoinResult:
         """Run the full join flow. Emits status events on transitions."""
+        logger.info(
+            "join: starting flow session_id=%s meet_link=%s",
+            self._session_id,
+            self._meet_link,
+        )
         await self._publish_status("joining")
         try:
+            logger.info("join: stage=navigate session_id=%s", self._session_id)
             await self._navigate()
+            logger.info(
+                "join: stage=navigate done session_id=%s url=%s",
+                self._session_id,
+                getattr(self._page, "url", ""),
+            )
+
+            logger.info(
+                "join: stage=blocker_check session_id=%s", self._session_id
+            )
             await self._check_for_blockers()
+            logger.info(
+                "join: stage=blocker_check done session_id=%s (no blockers)",
+                self._session_id,
+            )
+
+            logger.info("join: stage=mute_av session_id=%s", self._session_id)
             await self._mute_av()
-            await self._click_join_button()
+            logger.info("join: stage=mute_av done session_id=%s", self._session_id)
+
+            # Handle the "Switch the call here" page Google shows when
+            # the bot account is already in the call from another
+            # session. Clicking "Switch here" takes over the room and
+            # transitions straight to in-meeting (no Join Now button
+            # exists in that flow).
+            switched = await self._handle_switch_call_prompt()
+
+            logger.info(
+                "join: stage=click_join session_id=%s switched=%s",
+                self._session_id,
+                switched,
+            )
+            await self._click_join_button(required=not switched)
+            logger.info(
+                "join: stage=click_join done session_id=%s", self._session_id
+            )
+
+            logger.info(
+                "join: stage=wait_joined session_id=%s (polling in-meeting selector)",
+                self._session_id,
+            )
             await self._wait_for_joined_state()
+            logger.info(
+                "join: stage=wait_joined done session_id=%s", self._session_id
+            )
         except MeetJoinError as exc:
+            logger.warning(
+                "join: failure session_id=%s exc=%s",
+                self._session_id,
+                exc,
+            )
             await self._publish_status("failed", error_reason=str(exc))
             raise
         except Exception as exc:
             msg = f"unexpected error during Meet join: {exc}"
+            logger.exception(
+                "join: unexpected error session_id=%s", self._session_id
+            )
             await self._publish_status("failed", error_reason=msg)
             raise MeetJoinError(msg) from exc
         result = JoinResult(
@@ -242,6 +318,7 @@ class MeetJoiner:
             joined_at_ms=_now_ms(),
         )
         await self._publish_status("joined")
+        logger.info("join: COMPLETE session_id=%s", self._session_id)
         return result
 
     async def _navigate(self) -> None:
@@ -286,16 +363,41 @@ class MeetJoiner:
                 required=False,
             )
 
-    async def _click_join_button(self) -> None:
+    async def _click_join_button(self, *, required: bool = True) -> None:
         clicked = await self._click_first_present(
             self._join_button_selectors,
             timeout_s=self._preview_timeout_s,
             what="Join now button",
-            required=True,
+            required=required,
         )
-        if not clicked:
+        if required and not clicked:
             # _click_first_present(required=True) raises on miss; defensive.
             raise MeetJoinError("Join now button click did not register")
+
+    async def _handle_switch_call_prompt(self) -> bool:
+        """Click "Switch here" if Meet shows the multi-device prompt.
+
+        Returns ``True`` when we clicked (and the caller should not
+        treat a missing Join Now button as a failure); ``False`` when
+        the prompt wasn't visible.
+
+        Best-effort: when the prompt isn't visible we return immediately.
+        When it is, clicking it transfers the call to this bot session
+        and Meet skips straight to in-meeting state in that flow.
+        """
+        if not await self._any_selector_visible(self._switch_call_selectors):
+            return False
+        logger.info(
+            "join: switch_call prompt detected — clicking 'Switch here' session_id=%s",
+            self._session_id,
+        )
+        clicked = await self._click_first_present(
+            self._switch_call_selectors,
+            timeout_s=self._preview_timeout_s,
+            what="Switch here button",
+            required=False,
+        )
+        return clicked
 
     async def _wait_for_joined_state(self) -> None:
         """Confirm the page is actually IN the meeting (positive signal).
@@ -519,6 +621,7 @@ async def open_meeting_session(
         try:
             context = await browser.new_context(**context_kwargs)
             page = await context.new_page()
+            _attach_browser_log_forwarders(page, session_id=session_id)
             joiner = MeetJoiner(
                 page,
                 meet_link=meet_link,
@@ -541,12 +644,100 @@ async def open_meeting_session(
                 await browser.close()
 
 
+def _attach_browser_log_forwarders(page: Any, *, session_id: str) -> None:
+    """Forward Chromium events to ``johnny.meet_worker.browser`` logger.
+
+    Without this, Meet's behaviour is opaque to the operator — JS errors
+    that crash the page never reach ``docker compose logs``. We forward:
+
+    * ``console`` — every console.log/info/warn/error from Meet's JS bundle
+    * ``pageerror`` — uncaught exceptions / promise rejections
+    * ``crash`` — renderer process crash (separate from page close)
+    * ``framenavigated`` — URL changes (useful for detecting silent
+      sign-out or "kicked from meeting" redirects)
+    * ``requestfailed`` — failed network requests (esp. to meet.google.com)
+
+    Lots of noise in steady state; cheap to filter at ``docker logs |
+    grep`` time. Worth it: when a join silently breaks, the first
+    diagnostic question is "what did the browser actually do?".
+    """
+    browser_logger = logging.getLogger("johnny.meet_worker.browser")
+
+    def _on_console(msg: Any) -> None:
+        try:
+            level = (msg.type or "log").lower()
+            text = msg.text
+            location = getattr(msg, "location", None) or {}
+            url = location.get("url") if isinstance(location, dict) else ""
+            browser_logger.log(
+                logging.INFO if level not in {"error", "warning"} else logging.WARNING,
+                "console session_id=%s level=%s url=%s text=%r",
+                session_id,
+                level,
+                url,
+                text,
+            )
+        except Exception:  # noqa: BLE001 — listener must never raise
+            browser_logger.exception("console handler crashed")
+
+    def _on_page_error(exc: Any) -> None:
+        try:
+            browser_logger.error(
+                "page_error session_id=%s error=%r", session_id, exc
+            )
+        except Exception:  # noqa: BLE001
+            browser_logger.exception("page_error handler crashed")
+
+    def _on_crash(_page: Any) -> None:
+        browser_logger.error(
+            "page_crash session_id=%s — renderer died", session_id
+        )
+
+    def _on_framenavigated(frame: Any) -> None:
+        try:
+            if frame.parent_frame is None:  # main frame only
+                browser_logger.info(
+                    "navigation session_id=%s url=%s",
+                    session_id,
+                    frame.url,
+                )
+        except Exception:  # noqa: BLE001
+            browser_logger.exception("framenavigated handler crashed")
+
+    def _on_request_failed(request: Any) -> None:
+        try:
+            # Filter to meet.google.com so we don't drown in third-party
+            # tracking failures.
+            url = request.url
+            if "google" not in url:
+                return
+            failure = (
+                request.failure if hasattr(request, "failure") else None
+            )
+            browser_logger.warning(
+                "request_failed session_id=%s method=%s url=%s failure=%s",
+                session_id,
+                request.method,
+                url,
+                failure,
+            )
+        except Exception:  # noqa: BLE001
+            browser_logger.exception("request_failed handler crashed")
+
+    page.on("console", _on_console)
+    page.on("pageerror", _on_page_error)
+    page.on("crash", _on_crash)
+    page.on("framenavigated", _on_framenavigated)
+    page.on("requestfailed", _on_request_failed)
+
+
 __all__ = [
     "ACCESS_DENIED_SELECTORS",
     "CAM_OFF_SELECTORS",
     "DEFAULT_JOIN_TIMEOUT_S",
     "DEFAULT_POLL_INTERVAL_S",
     "DEFAULT_PREVIEW_TIMEOUT_S",
+    "IN_MEETING_SELECTORS",
     "JOIN_BUTTON_SELECTORS",
     "JoinResult",
     "MEETING_NOT_STARTED_SELECTORS",
@@ -557,6 +748,10 @@ __all__ = [
     "MeetSignInError",
     "MeetingAccessDeniedError",
     "MeetingNotStartedError",
+    "OpenMeetingSession",
     "SIGN_IN_REQUIRED_SELECTORS",
+    "SWITCH_CALL_DISMISS_SELECTORS",
+    "SWITCH_CALL_HERE_SELECTORS",
     "join_meeting",
+    "open_meeting_session",
 ]

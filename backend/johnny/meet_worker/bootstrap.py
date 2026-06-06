@@ -24,6 +24,7 @@ the next bead in the parent epic.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import signal
@@ -32,7 +33,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from johnny.meet_worker import selfcheck
+from johnny.meet_worker.audio_bridge import MeetAudioBridge
 from johnny.meet_worker.log_stages import (
+    STAGE_AUDIO_BRIDGE,
     STAGE_BOOTSTRAP,
     STAGE_EVENT_BUS,
     STAGE_IN_MEETING,
@@ -286,6 +289,137 @@ def _classify_join_error(exc: BaseException) -> tuple[str, str]:
     return "playwright_launch", f"unexpected: {type(exc).__name__}: {exc}"
 
 
+async def _run_screenshot_loop(
+    page: Any,
+    *,
+    session_id: str,
+    stop_event: asyncio.Event,
+    interval_s: float = 15.0,
+    output_dir: Path = Path("/tmp/johnny-screenshots"),
+) -> None:
+    """Periodically write a screenshot to /tmp so an operator can inspect.
+
+    Without an exposed CDP port the only way to see what Chromium is
+    showing is to read the file off the container with ``docker cp``.
+    Saving every ``interval_s`` seconds means ``docker cp meet-worker-...
+    :/tmp/johnny-screenshots/<session_id>-latest.png .`` always returns
+    a fresh frame. Failures are logged but never fatal — a screenshot
+    crash must not take the bot out of the meeting.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
+            return
+        except TimeoutError:
+            pass
+        latest = output_dir / f"session-{session_id}-latest.png"
+        try:
+            await page.screenshot(path=str(latest), full_page=False)
+        except Exception as exc:  # noqa: BLE001 — screenshot is best-effort
+            log_stage(
+                STAGE_IN_MEETING,
+                session_id=session_id,
+                level=logging.WARNING,
+                msg=f"screenshot failed: {exc}",
+            )
+            continue
+        log_stage(
+            STAGE_IN_MEETING,
+            session_id=session_id,
+            path=str(latest),
+            msg="screenshot written (docker cp to copy out)",
+        )
+
+
+async def _run_audio_capture_pump(
+    bridge: MeetAudioBridge,
+    *,
+    session_id: str,
+    stop_event: asyncio.Event,
+    log_every_frames: int = 50,  # ~1s at 20ms/frame
+) -> None:
+    """Drain the audio bridge, logging frame stats periodically.
+
+    Without this loop the bridge captures frames into its queue and the
+    queue overflows + drops oldest — silently, with no visibility into
+    whether the meeting was producing any audio at all. The loop:
+
+    * Reads every frame the bridge yields,
+    * Tracks frame count, byte count, last-frame timestamp,
+    * Emits a log line every ``log_every_frames`` frames (default ~1s),
+    * Surfaces silence (>3s without a frame) as a WARNING.
+
+    A future change will fork this stream into VAD → STT → LLM → TTS. For
+    Johnny-d2g step 1 just having the audio flowing + logged is the
+    user-visible diagnostic improvement.
+    """
+    frame_count = 0
+    byte_count = 0
+    last_log_ts = asyncio.get_running_loop().time()
+    last_frame_ts = last_log_ts
+    log_stage(
+        STAGE_AUDIO_BRIDGE,
+        session_id=session_id,
+        msg=(
+            f"capture pump starting (sink={bridge.sink_name} "
+            f"source={bridge.source_name} sample_rate={bridge.sample_rate}Hz)"
+        ),
+    )
+
+    async def _silence_watchdog() -> None:
+        """Warn when no frames have arrived for >3 seconds."""
+        while not stop_event.is_set():
+            await asyncio.sleep(3.0)
+            if stop_event.is_set():
+                return
+            now = asyncio.get_running_loop().time()
+            if now - last_frame_ts > 3.0 and frame_count > 0:
+                log_stage(
+                    STAGE_AUDIO_BRIDGE,
+                    session_id=session_id,
+                    level=logging.WARNING,
+                    msg=(
+                        f"no audio frames for {now - last_frame_ts:.1f}s "
+                        f"(total frames captured so far: {frame_count})"
+                    ),
+                )
+
+    watchdog = asyncio.create_task(_silence_watchdog())
+    try:
+        async for frame in bridge.capture_frames():
+            if stop_event.is_set():
+                break
+            frame_count += 1
+            byte_count += len(frame)
+            last_frame_ts = asyncio.get_running_loop().time()
+            if frame_count % log_every_frames == 0:
+                now = last_frame_ts
+                window_s = max(0.001, now - last_log_ts)
+                avg_kbps = (byte_count * 8) / 1000 / max(0.001, now - last_log_ts)
+                log_stage(
+                    STAGE_AUDIO_BRIDGE,
+                    session_id=session_id,
+                    frames=frame_count,
+                    bytes=byte_count,
+                    window_s=f"{window_s:.2f}",
+                    kbps=f"{avg_kbps:.1f}",
+                    msg="audio capture flowing",
+                )
+                last_log_ts = now
+                byte_count = 0
+    finally:
+        watchdog.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await watchdog
+        log_stage(
+            STAGE_AUDIO_BRIDGE,
+            session_id=session_id,
+            frames=frame_count,
+            msg="capture pump stopping",
+        )
+
+
 async def _idle_until_signal_or_disconnect(
     session_id: str,
     *,
@@ -417,23 +551,77 @@ async def run(config: BootstrapConfig) -> int:
                 join_timeout_s=config.join_timeout_s,
                 headless=config.headless,
             ) as session:
-                # 4. Idle until SIGTERM or Chromium disconnect.
-                disconnect_reason = await _idle_until_signal_or_disconnect(
-                    config.session_id, is_alive=session.is_alive
-                )
-                if disconnect_reason is not None:
-                    log_stage_error(
-                        STAGE_IN_MEETING,
-                        session_id=config.session_id,
-                        error=disconnect_reason,
+                # 4. Wire the audio bridge so we actually capture meeting
+                # audio (Johnny-d2g). The bridge spawns parec/pacat
+                # subprocesses against PulseAudio's johnny_speaker sink
+                # and johnny_mic loopback.
+                bridge = MeetAudioBridge()
+                pump_stop = asyncio.Event()
+                shot_stop = asyncio.Event()
+                pump_task: asyncio.Task[None] | None = None
+                shot_task: asyncio.Task[None] | None = None
+                try:
+                    try:
+                        await bridge.start()
+                        log_stage(
+                            STAGE_AUDIO_BRIDGE,
+                            session_id=config.session_id,
+                            msg="parec + pacat subprocesses spawned",
+                        )
+                        pump_task = asyncio.create_task(
+                            _run_audio_capture_pump(
+                                bridge,
+                                session_id=config.session_id,
+                                stop_event=pump_stop,
+                            )
+                        )
+                    except Exception as exc:  # noqa: BLE001 — capture is best-effort
+                        log_stage_error(
+                            STAGE_AUDIO_BRIDGE,
+                            session_id=config.session_id,
+                            error=exc,
+                        )
+
+                    # Screenshot loop: every 15s save a frame so an
+                    # operator can ``docker cp`` it out without crashing
+                    # the bot's in-meeting state.
+                    shot_task = asyncio.create_task(
+                        _run_screenshot_loop(
+                            session._page,
+                            session_id=config.session_id,
+                            stop_event=shot_stop,
+                        )
                     )
-                    await _publish_status(
-                        bus,
-                        session_id=config.session_id,
-                        status="failed",
-                        error_reason=disconnect_reason,
+
+                    # 5. Idle until SIGTERM or Chromium disconnect.
+                    disconnect_reason = await _idle_until_signal_or_disconnect(
+                        config.session_id, is_alive=session.is_alive
                     )
-                    return 6
+                    if disconnect_reason is not None:
+                        log_stage_error(
+                            STAGE_IN_MEETING,
+                            session_id=config.session_id,
+                            error=disconnect_reason,
+                        )
+                        await _publish_status(
+                            bus,
+                            session_id=config.session_id,
+                            status="failed",
+                            error_reason=disconnect_reason,
+                        )
+                        return 6
+                finally:
+                    pump_stop.set()
+                    shot_stop.set()
+                    for task in (pump_task, shot_task):
+                        if task is not None:
+                            task.cancel()
+                            with contextlib.suppress(
+                                asyncio.CancelledError, Exception
+                            ):
+                                await task
+                    with contextlib.suppress(Exception):
+                        await bridge.stop()
         except (MeetJoinError, Exception) as exc:  # noqa: BLE001 — last-resort surface
             stage, reason = _classify_join_error(exc)
             log_stage_error(stage, session_id=config.session_id, error=exc)
@@ -472,7 +660,12 @@ async def run(config: BootstrapConfig) -> int:
 
 
 def _configure_logging() -> None:
-    """Bootstrap logging so every line carries the timestamp + level prefix."""
+    """Bootstrap logging so every line carries the timestamp + level prefix.
+
+    Default level is INFO; override with ``JOHNNY_LOG_LEVEL=DEBUG`` to
+    see every Playwright selector query and pipeline tick — useful when
+    debugging the silent failures Johnny-d2g surfaces.
+    """
     root = logging.getLogger()
     if root.handlers:
         # Honour the caller's existing configuration (tests inject one).
@@ -485,7 +678,9 @@ def _configure_logging() -> None:
         )
     )
     root.addHandler(handler)
-    root.setLevel(logging.INFO)
+    raw_level = os.environ.get("JOHNNY_LOG_LEVEL", "INFO").strip().upper()
+    level = getattr(logging, raw_level, logging.INFO)
+    root.setLevel(level if isinstance(level, int) else logging.INFO)
 
 
 def main(argv: list[str] | None = None) -> int:
