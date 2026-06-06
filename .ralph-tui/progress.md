@@ -424,3 +424,202 @@ baseline (documented in patterns at the top of this file).
 
 ---
 
+
+## 2026-06-07 — Johnny-fe.5 (REIMAGINE /settings)
+
+Replaced the 988-line custom-CSS settings page (hardcoded indigo, orange,
+teal colors, native `confirm()` dialogs, centered modals, awkward role
+select on every row) with a 1173-line shadcn-svelte + design-token
+rewrite. From-scratch IA redesign — not a 1:1 port.
+
+### Files changed
+
+- `frontend/src/routes/settings/+page.svelte` — full rewrite.
+  Deleted the entire `<style>` block (~370 lines of hardcoded hex
+  colors: `#4f46e5` indigo CTA, `#f97316` orange reauth, `#fff7ed`
+  cream backgrounds, `#fef2f2` red error, `#155e75` teal user-badge
+  text, `#9a3412` orange bot-badge text). Replaced with shadcn `Button`
+  / `Alert` and Tailwind utility classes mapped to DESIGN.md tokens
+  (`bg-card`, `bg-surface-1/2/3`, `text-foreground`,
+  `text-muted-foreground`, `border-border`, `border-border-strong`,
+  `border-warning`, `text-destructive`, `bg-primary`).
+
+### IA changes (the actual REIMAGINE)
+
+1. **Split "Connected accounts" into two purposeful sections.** Old
+   design dumped user + bot rows into one flat list with a "Role"
+   `<select>` on every row. New design has a `User identities`
+   section (the calendar source) and a `Meeting bots` section (the
+   identities Johnny signs in as), each with its own subtitle that
+   explains what that section does. The role-select is gone — role
+   is implicit in which section a card lives in. To change role you
+   click `Convert to bot` / `Convert to user` (ghost variant), which
+   moves the card to the other section.
+2. **One header CTA, contextual section CTAs.** Old design had two
+   header buttons: `Refresh` (noise) and `Add account` (indigo).
+   New design has a single `Add account` primary CTA in the header
+   (opens the sheet seeded with `user` role). Each populated section
+   gets a tiny `Add another` text link in its subtitle row (opens the
+   sheet seeded with that section's role). Each empty section gets an
+   outlined `Add user identity` / `Add bot identity` CTA. The Refresh
+   button is dropped — every mutation re-fetches.
+3. **Centered modal → right-side Sheet for Add account.** Old design
+   used a 480px centered modal. New design uses a 480px right-aligned
+   slide-in drawer with sticky header + footer + scrollable form body.
+   The list stays visible behind the sheet's `bg-black/50
+   backdrop-blur-sm` overlay.
+4. **`<select>` → radio-card group for role choice.** Old design used
+   a `<select>` with a wordy `<small>` underneath. New design uses two
+   tappable cards in a 2-column grid, each with an icon (User /
+   Bot), label, and one-line description. Selected card gets a
+   `border-foreground` border (NOT yellow, to preserve discipline) +
+   `bg-surface-2` tint + a `CheckIcon` in the top-right corner. The
+   "Set as default user" checkbox section only renders when `user` is
+   selected — irrelevant fields are hidden, not greyed-out (parallels
+   the templates page's mode-aware sections).
+5. **Native `confirm()` → AlertDialog with cascading-config inline
+   warning.** Old design used three different browser-native
+   `confirm()` calls: disconnect account, disconnect bot session, and
+   the 409-conflict force-delete. Two of them showed in one of two
+   places. New design uses two custom `role="alertdialog"` dialogs:
+   one for disconnect account (handles 409 by re-prompting with
+   `forceRequired: true` and an inline "This will also delete N
+   meeting configs" warning) and one for clearing the bot session.
+   Both have proper `aria-modal`, `aria-labelledby`,
+   `aria-describedby`, focus trapping (`tabindex="-1"`), and Esc
+   handling.
+6. **Bot-session storage_state UI moved inline + sheet.** Old design
+   buried the bot-session badge + help text inside the account row
+   as a nested `<div class="bot-session">`. New design treats the bot
+   session as a hairline-separated sub-section inside the bot card
+   (`border-t border-separator pt-3`): "Bot session: ● Connected"
+   with semantic green dot + saved-at + size, OR "Bot session: ● Not
+   connected" with a one-sentence helper about the
+   `storage_state.json`. The upload form moves to a right-side
+   560px Sheet (matching the Add account sheet) with a collapsible
+   `<details>` disclosure for the CLI-helper command (replacing the
+   always-visible `<pre>` block that previously dominated the
+   modal). The CLI command interpolates the bot's `account-id` and
+   `email` so operators can copy-paste verbatim.
+7. **Reauth callout: orange `<aside>` → shadcn Alert + amber card
+   border.** Old design used a custom `<aside>` panel with an
+   `#fff7ed` orange background, all-caps `TOKEN UNREADABLE —
+   RECONNECT` badge (violating gate 6), and an indigo `Reconnect`
+   button. New design uses an inline `<Alert.Root variant="default">`
+   with the `<TriangleAlertIcon class="text-warning">` warning icon,
+   a sentence-case "Token unreadable — reconnect required" title, and
+   an explanatory description. The card itself gets a 1px
+   `border-warning` (amber, oklch hue 55) to mark it visually
+   without bringing the brand yellow into the warning channel. The
+   Reconnect button is `outline` variant (NOT yellow) so the broken
+   state doesn't compete with the page-level `Add account` CTA.
+8. **Yellow discipline.** Yellow appears on EXACTLY: the
+   `Add account` page-CTA (one per surface), the sidebar nav active
+   accent + active-sessions status pill (layout-owned). Every other
+   primary path — `Set as default`, `Convert to bot/user`, `Reconnect`,
+   `Upload session`, `Replace session`, empty-state CTAs, the role
+   radio-card selection — is `outline` or `ghost`. The disconnect-
+   account confirmation uses `variant="destructive"` (the only red
+   appearance). Verified ≤3 yellow elements per viewport in both
+   modes (sidebar 2 + page header 1).
+9. **Default-user badge → yellow pill.** Old design used an
+   `#4f46e5` indigo `DEFAULT USER` chip in uppercase tracked
+   eyebrow. New design uses an inline `bg-primary
+   text-primary-foreground` pill with `<ShieldCheckIcon>` + "Default"
+   in sentence case. The badge is a brand-defined "signal" use
+   (status indicator earning yellow because it marks the canonical
+   calendar source).
+10. **Email rendered as mono.** Cards display `account.email` in
+    `font-mono` so addresses sit in the operator-deck register
+    (IDs/hosts/keys) rather than reading as prose. Date formatting
+    drops the seconds (was `6/6/2026, 11:14:57 PM`, now `Jun 6,
+    2026, 11:14 PM`) — operators don't need second precision for a
+    "token expires" or "added" field.
+
+### Verification (chrome-devtools MCP)
+
+Drove the page in both modes through every state on the seed
+`seed@johnny.test` user account (which has `token_health =
+needs_reauth`, so the reauth state is the default):
+- ✓ Dark mode: amber-bordered reauth user card, ≤3 yellows
+  per viewport (Add account + 2 sidebar)
+- ✓ Light mode: same discipline holds, same 3 yellows max
+- ✓ Add account sheet opens from header CTA; opens from `Add bot
+  identity` empty-state CTA seeded with `formRole='bot'`
+- ✓ Role radio-card swap: clicking Bot hides the "Set as default
+  user" section, clicking User restores it
+- ✓ Convert to bot moves the seed account into the Meeting bots
+  section; user identities section flips to its empty state
+- ✓ Bot card shows "Bot session: ● Not connected" + meet-worker
+  helper text; reauth Alert is shorter (no "Reconnect runs..."
+  paragraph)
+- ✓ Convert to user moves it back; section state flips correctly
+- ✓ Disconnect dialog opens with red-circle UnlinkIcon + email in
+  mono + "This cannot be undone." + Cancel / Disconnect buttons
+- ✓ Esc closes the sheet/dialog; backdrop-click closes both
+- ✓ HMR picked up every save (~600ms in dev mode)
+
+### Verification gates (DESIGN.md)
+
+| Gate | Status |
+| --- | --- |
+| 1. Body text on background ≥4.5:1 | ✓ (foundation, ~18:1 dark, ~16:1 light) |
+| 2. Placeholder on surface-3 ≥4.5:1 | ✓ (foundation) |
+| 3. Primary button label on primary ≥4.5:1 | ✓ (foundation, ~14:1) |
+| 4. Yellow ≤ 3 elements per viewport | ✓ (1 main CTA + sidebar nav + sidebar status = 3) |
+| 5. No card-in-card | ✓ (bot-session lives inside the bot card as a hairline-separated sub-section, not a nested card) |
+| 6. No uppercase tracked eyebrow | ✓ (sentence case throughout — section headings, button labels, status text) |
+| 7. Reduced motion honored | ✓ (foundation; no custom animations introduced) |
+| 8. Screenshot unambiguously NOT stock shadcn | ✓ (yellow CTA + amber warning border + mono email + dark surfaces + no indigo) |
+
+### Quality gates
+
+- `pnpm typecheck` → 0 errors, 0 warnings ✓
+- `pnpm lint` → 1 error in `providers/+page.svelte:235` (pre-existing
+  baseline `configuredRowsFor` unused const, explicitly noted in
+  Codebase Patterns) ✓
+
+### Learnings
+
+- **`token_health === 'needs_reauth'` is the implicit "default" state
+  for the seed account** because the seeded refresh token can't be
+  decrypted with the current `FERNET_KEY`. Any local dev workflow
+  that prefills accounts must consider that "reauth needed" is the
+  state new agents will see — design every account card around that
+  state, not around the happy path. If you want to test the
+  non-reauth flow locally you need a real OAuth round-trip; there's
+  no API helper for seeding a healthy account.
+- **`run.sh`'s port-5173 kill heuristic mismatches Docker's full
+  path on macOS.** The case-glob is `com.docker.*|*vpnkit*|*docker-
+  proxy*` but `ps -p $pid -o comm=` returns `/Applications/Docker.
+  app/Contents/MacOS/com.docker.backend` (with the leading path), so
+  the glob misses and the script kills Docker itself. Filed as a
+  follow-up; workaround is to bring the stack up directly with
+  `COMPOSE_FILE=docker-compose.yml:docker-compose.dev.yml docker
+  compose up -d --build` until run.sh is patched.
+- **Two parallel right-side Sheets with one window-level Esc handler
+  is cleaner than one Sheet component.** Each sheet has its own
+  `if showForm` / `if showBotSessionForm` block; a single
+  `handleSheetKeydown` on `<svelte:window>` dispatches Esc to
+  whichever modal is currently open (with a precedence chain: form →
+  bot-session → disconnect → disconnect-session). Avoids a generic
+  modal manager when there are only 4 distinct modal surfaces.
+- **`border-warning` on a card is enough signal — you don't need an
+  Alert AND a colored border AND a colored Reconnect button.** The
+  original page had three competing signals for "this is broken"
+  (orange card bg + orange badge + indigo button) and the dark mode
+  rendered as a literal yellow-orange screenshot. The new page has
+  amber card border + amber-icon Alert + neutral outline button. Same
+  message, three-quarters the visual chrome.
+- **Empty-state CTAs duplicate the page header CTA — make them
+  outline, not primary.** When user identities are populated AND bot
+  identities are empty (or vice versa), both the header `Add account`
+  CTA and the empty-state `Add bot identity` CTA render
+  simultaneously. If both are yellow, gate 4 fails (4 yellows). The
+  fix is to make empty-state CTAs `variant="outline"` — the header
+  CTA stays yellow as the page-level primary path. The templates
+  page got away with both-yellow because the empty state hides when
+  the list is populated (single section), but multi-section settings
+  pages can't rely on that.
+
+---
