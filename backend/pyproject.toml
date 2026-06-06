@@ -41,6 +41,14 @@ johnny-smoke = "johnny.smoketest.cli:main"
 local-stt = [
     "faster-whisper>=1.0.0",
 ]
+# On-device TTS. `piper-tts` ships the `piper` CLI used by the adapter
+# (subprocess that reads text on stdin, writes raw PCM on stdout). The
+# api/worker images install this so the providers `/test` smoke call
+# can synthesize; the meet-worker image installs it independently to
+# keep that image self-contained.
+local-tts = [
+    "piper-tts>=1.4.0",
+]
 
 [dependency-groups]
 dev = [

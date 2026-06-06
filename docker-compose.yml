@@ -70,13 +70,15 @@ services:
       - "8000:8000"
     # Mount the host docker socket so the API can spawn meet-worker
     # containers via the Docker SDK (US-030). Keeping this read-write
-    # is required to start/stop/remove containers. The `whisper_models`
-    # volume is shared with the meet-worker so the providers `/test`
-    # endpoint reuses any cached CTranslate2 weights (and writes new
-    # downloads into the same place future meet-workers will read from).
+    # is required to start/stop/remove containers. The model-cache
+    # volumes (whisper_models, piper_models) are shared with the
+    # meet-worker so the providers `/test` endpoint reuses any cached
+    # weights / voices (and writes new downloads into the same place
+    # future meet-workers will read from).
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - whisper_models:/var/lib/johnny/whisper-models
+      - piper_models:/var/lib/johnny/piper-models
     healthcheck:
       test:
         - "CMD"
@@ -103,10 +105,12 @@ services:
       # Same docker socket mount as the API — the worker drives the
       # periodic scheduler / monitor / prune passes (US-030).
       - /var/run/docker.sock:/var/run/docker.sock
-      # Share the whisper-model cache with api/meet-worker so any
-      # CTranslate2 weights downloaded by one service are visible to
-      # the others (the worker image is identical to the api image).
+      # Share the on-device model caches with api/meet-worker so any
+      # CTranslate2 weights / Piper voices downloaded by one service
+      # are visible to the others (the worker image is identical to
+      # the api image).
       - whisper_models:/var/lib/johnny/whisper-models
+      - piper_models:/var/lib/johnny/piper-models
     healthcheck:
       test:
         - "CMD"
