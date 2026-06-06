@@ -1,7 +1,7 @@
 /**
  * Capture a short mic recording as raw 16 kHz mono S16LE PCM (Johnny-ckz.15.2).
  *
- * Used by the `/settings/stt` catalog UI to feed the per-provider Test
+ * Used by the `/providers` STT tab to feed the per-provider Test
  * button — the same wire format the live voice pipeline produces, so a
  * successful catalog test means the provider will also work end-to-end.
  *

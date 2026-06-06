@@ -431,9 +431,10 @@ CryptoDep = Annotated[CredentialCrypto, Depends(get_crypto)]
 def list_stt_catalog() -> SttCatalogResponse:
     """Return every registered STT provider enriched with catalog metadata.
 
-    The ``/settings/stt`` UI calls this on mount to render one card per
-    installed STT provider (Johnny-ckz.15.2). Each entry carries the
-    same ``schema`` payload as ``GET /providers/schemas`` so the UI can
+    The ``/providers`` STT tab calls this on mount to render one card
+    per installed STT provider (Johnny-ckz.15.2 → unified under
+    Johnny-stt.5). Each entry carries the same ``schema`` payload as
+    ``GET /providers/schemas`` so the UI can
     render the per-provider config form inline, plus ``type``,
     ``streaming``, and ``model_count`` so users can pick the right
     provider without round-tripping to docs.
@@ -759,7 +760,7 @@ async def stt_test(
 ) -> SttTestResult:
     """Transcribe a short mic recording and report latency + cost.
 
-    The ``/settings/stt`` catalog UI captures ~5 s of 16 kHz mono S16LE
+    The ``/providers`` STT tab captures ~5 s of 16 kHz mono S16LE
     PCM from the user's microphone, posts it here as the raw request
     body, and renders the returned transcript next to the Test button.
     The endpoint is the user-facing companion to :func:`test_provider`:

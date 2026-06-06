@@ -373,10 +373,18 @@ class ParakeetSTT(STTProvider):
         try:
             nemo_asr = import_module("nemo.collections.asr")
         except ImportError as exc:
+            # Surface the underlying ImportError detail. Some failures
+            # here are genuinely "NeMo not installed", but others are
+            # version-conflict ImportErrors raised mid-import (e.g.
+            # transformers rejecting an incompatible tokenizers). The
+            # original generic "not installed" message wasted a debug
+            # round; embed the real reason so the next failure is
+            # obvious from the catalog UI alone.
             raise STTError(
-                "NVIDIA NeMo is not installed; install it via "
-                "`pip install nemo_toolkit[asr]` (the meet-worker image "
-                "ships it pre-installed)"
+                f"NeMo import failed: {exc}. If genuinely missing, "
+                "install via `pip install nemo_toolkit[asr]` "
+                "(api/meet-worker images install it when the "
+                "INSTALL_PARAKEET build arg is set)."
             ) from exc
         try:
             asr_model_cls = nemo_asr.models.ASRModel

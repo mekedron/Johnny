@@ -3,10 +3,10 @@
   "sessionId": "51aec77c-06d2-41a0-ab44-ea76c3bf8c41",
   "status": "running",
   "startedAt": "2026-06-06T16:31:22.596Z",
-  "updatedAt": "2026-06-06T17:11:16.929Z",
-  "currentIteration": 2,
+  "updatedAt": "2026-06-06T17:27:23.082Z",
+  "currentIteration": 3,
   "maxIterations": 0,
-  "tasksCompleted": 2,
+  "tasksCompleted": 3,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -44,8 +44,8 @@
       {
         "id": "Johnny-stt.3",
         "title": "Live streaming STT in playground chat input (mic icon + partial transcripts as user speaks)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-stt.4",
@@ -75,6 +75,16 @@
       "durationMs": 773533,
       "startedAt": "2026-06-06T16:35:44.577Z",
       "endedAt": "2026-06-06T16:48:38.110Z"
+    },
+    {
+      "iteration": 3,
+      "status": "completed",
+      "taskId": "Johnny-stt.3",
+      "taskTitle": "Live streaming STT in playground chat input (mic icon + partial transcripts as user speaks)",
+      "taskCompleted": true,
+      "durationMs": 1350601,
+      "startedAt": "2026-06-06T16:48:45.478Z",
+      "endedAt": "2026-06-06T17:11:16.079Z"
     }
   ],
   "skippedTaskIds": [],

@@ -104,8 +104,8 @@ export interface TestResult {
 /**
  * Catalog metadata for a single STT provider (Johnny-ckz.15.2).
  *
- * Returned by `GET /providers/stt_catalog`, used by the `/settings/stt`
- * UI to render one card per installed STT adapter. ``provider_type`` is
+ * Returned by `GET /providers/stt_catalog`, used by the `/providers` STT
+ * tab to render one card per installed STT adapter. ``provider_type`` is
  * "local" or "cloud"; ``streaming`` flags adapters that emit partial
  * transcripts before the user stops speaking; ``models`` is the value
  * list lifted from the adapter's ``model`` / ``model_id`` / ``model_size``
@@ -274,7 +274,7 @@ export function testProvider(id: number): Promise<TestResult> {
 
 /**
  * Fetch the STT catalog — every registered STT provider enriched with
- * the metadata the `/settings/stt` UI renders (type, streaming flag,
+ * the metadata the `/providers` STT tab renders (type, streaming flag,
  * model count, full schema). Returned in display order; the UI doesn't
  * re-sort.
  */

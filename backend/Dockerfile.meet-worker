@@ -59,16 +59,34 @@ RUN pip install --no-cache-dir \
 # tracked as a follow-up under the Johnny-stt epic. Conditional sits
 # before the `johnny` COPY so source edits don't bust the cache.
 ARG INSTALL_PARAKEET=1
-RUN if [ "$INSTALL_PARAKEET" = "1" ]; then \
-        apt-get update && apt-get install -y --no-install-recommends \
-            libsndfile1 \
-        && rm -rf /var/lib/apt/lists/* \
-        && pip install --no-cache-dir \
-            --index-url https://download.pytorch.org/whl/cpu \
-            torch torchaudio \
-        && pip install --no-cache-dir \
-            "nemo_toolkit[asr]>=2.5.0"; \
+# Arch-branched torch source — see backend/Dockerfile for the rationale.
+# Briefly: the PyTorch CPU index only ships linux_x86_64; on arm64 we
+# let NeMo pull torch transitively from PyPI (aarch64 wheels are CPU-
+# only by definition there).
+ARG TARGETARCH
+RUN set -e; \
+    if [ "$INSTALL_PARAKEET" = "1" ]; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends libsndfile1; \
+        rm -rf /var/lib/apt/lists/*; \
+        case "$TARGETARCH" in \
+            amd64) \
+                pip install --no-cache-dir \
+                    --index-url https://download.pytorch.org/whl/cpu \
+                    --extra-index-url https://pypi.org/simple \
+                    torch torchaudio \
+                ;; \
+        esac; \
+        pip install --no-cache-dir \
+            "nemo_toolkit[asr]>=2.5.0" \
+            "tokenizers<=0.23.0"; \
     fi
+# Tokenizers pin: nemo_toolkit[asr] resolves transformers ~=4.57.0
+# (requires tokenizers <=0.23.0), but the earlier faster-whisper
+# install above pinned tokenizers==0.23.1 first. Without re-pinning
+# here, the env ends up inconsistent and `import nemo.collections.asr`
+# fails at module load with a transformers version-check ImportError —
+# same root cause as in backend/Dockerfile.
 
 # The `johnny` package owns the meet-worker runtime (selfcheck, audio
 # bridge, voice pipeline). The pipeline imports the provider ABCs from
