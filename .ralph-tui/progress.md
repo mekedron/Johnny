@@ -138,3 +138,141 @@ remains OPEN; its work is the post-`.1`–`.8` cleanup + final tour.
   the session without restarting Chrome.
 
 ---
+
+## 2026-06-06 — Johnny-fe.8 (REIMAGINE /sessions/[id])
+
+Replaced the 1126-line live-session detail page with a 985-line
+shadcn-svelte + design-token rewrite. From-scratch IA redesign, not a
+1:1 port.
+
+### Files changed
+
+- `frontend/src/routes/sessions/[id]/+page.svelte` — full rewrite.
+  Deleted the entire `<style>` block (was ~400 lines of hardcoded hex
+  colors, bespoke `.status-pill-*` rules, custom `.outcome-*` chips,
+  duplicate timer formatting). Replaced with shadcn `Button` /
+  `Card` / `Alert` and Tailwind utility classes mapped to the
+  DESIGN.md tokens (`bg-card`, `text-foreground`, `text-muted-foreground`,
+  `border-border`, `bg-surface-2`, `text-warning`, `bg-primary`, etc).
+  Preserved every existing `data-testid` (`session-page`,
+  `session-status`, `transcript-pane`, `transcript-scroll`,
+  `bot-transcript-line`, `transcript-line`, `transcript-partial`,
+  `transcript-count`, `decisions-pane`, `decisions-count`,
+  `decision-row`, `approvals-pane`, `approval-row`,
+  `approval-countdown`, `approve-button`, `reject-button`,
+  `approval-error`, `end-session-button`, `reopen-playground-button`,
+  `connect-warn`, `stop-error`, `session-error-reason`) so any future
+  e2e tests stay green.
+
+### IA changes (the actual REIMAGINE)
+
+1. **Hoisted Pending Approval as the surface's primary action.** The
+   old three-column equal-weight layout buried the only thing the
+   operator *acts on in real time* (approvals) in the third column.
+   New design: when `pendingApprovals.length > 0`, a callout card with
+   a 2px Signal Yellow left-edge accent appears ABOVE the
+   transcript/decisions grid. The first Approve button is the surface's
+   only yellow primary; Reject is outline. Keyboard shortcuts `A` and
+   `R` route to the topmost pending approval (skipped when focus is
+   inside an input/textarea/contentEditable).
+2. **Two-column instead of three.** Transcript (2fr) + Decisions (1fr).
+   Pending approvals are no longer a third column — they're either a
+   hoisted callout (when actionable) or absent. This frees ~25% of
+   horizontal space for the transcript, which is the densest content.
+3. **Session metadata row.** Added a meta strip below the title:
+   `source · duration · connection state`. The duration ticks every
+   second from `started_at` for live sessions; freezes at `ended_at`
+   for terminal sessions. Connection state only renders when
+   disconnected and the session is non-terminal — when everything is
+   working we don't waste a viewport slot on "ok".
+4. **Yellow discipline.** The old page used yellow on `.status-pill-scheduled`
+   (`#fef3c7` bg), `.outcome-pending` (`#fef3c7`), `.transcript-line.partial`
+   (`#fffbeb`), and the approval card border (`#fdba74`). The new design
+   reserves Signal Yellow for: the live-pulse dot, the approval callout
+   accent, the topmost Approve CTA, and focus rings. Pending decisions
+   in the Decisions feed now use the amber `--warning` token at hue 55
+   (distinct from primary's hue 103), not yellow. Verified ≤3 yellow
+   elements per viewport in every captured screenshot.
+5. **Destructive primary.** End session is `Button variant="destructive"`
+   per DESIGN.md component spec — red, not yellow. The CTA *is* the
+   primary action of an active session, but yellow is for *positive*
+   primary CTAs only (Save changes, Start session, Approve reply).
+6. **Bot turns lose their indigo costume.** The old `.transcript-line.bot`
+   was `#eef2ff` bg with `#4338ca` "Johnny" text. New: a subtle
+   `bg-muted` step with a `BotIcon` + mono "Johnny" label. No purple,
+   no yellow — just a deliberate surface step.
+7. **Partial transcript marker.** The dashed-border treatment survives
+   but the bg/text now use tokens (`bg-surface-2`, dashed
+   `border-border`, italic `text-muted-foreground`). The "…partial"
+   chip uses `text-warning` so it reads as a transient state.
+8. **Outcome chips.** Custom inline `<span>` chips (not shadcn Badge,
+   because Badge's `default`/`secondary`/`destructive`/`outline`
+   variants don't map to the five outcome states). Each chip is
+   `border + 10% bg tint + foreground` of its semantic token:
+   `success` (spoken), `muted` (suppressed), `warning` (pending),
+   `destructive` (rejected), `info` (suggested). All readable AA
+   against `--surface-2`.
+
+### Verification (chrome-devtools MCP)
+
+| Gate | Result |
+| ---- | ------ |
+| 1. Body text contrast (`--ink` on `--background`) | ✅ (inherits from app.css foundation) |
+| 2. Placeholder contrast | ✅ (no placeholders on this page) |
+| 3. Primary button label contrast | ✅ (Approve uses `--primary-foreground` on `--primary`) |
+| 4. Yellow on ≤ 3 elements per viewport | ✅ (live dot + accent stripe + Approve = max 3) |
+| 5. No card-in-card | ✅ (Card.Root wraps lists; rows are `<li>` not `<Card>`) |
+| 6. No uppercase tracked eyebrow | ✅ ("LIVE" and outcome chips are status indicators, not eyebrows) |
+| 7. Reduced-motion honored | ✅ (`live-pulse` degrades via app.css gate) |
+| 8. Screenshot unambiguously NOT stock shadcn | ✅ (dark mode + signal yellow accents) |
+
+Screenshots:
+
+- `.ralph-tui/iterations/fe8_before_populated_dark.png` — old design, full populated state
+- `.ralph-tui/iterations/fe8_after_with_approval_dark_v2.png` — new design, dark mode, with pending approval callout
+- `.ralph-tui/iterations/fe8_after_no_approval_dark.png` — new design, dark mode, no pending approval (transcript + decisions only)
+- `.ralph-tui/iterations/fe8_after_light.png` — new design, light mode
+- `.ralph-tui/iterations/fe8_after_failed_light.png` — new design, terminal/failed state (`Failure stage` Alert, no End session button, no LIVE indicator)
+
+Quality gates: `pnpm check` 0 errors / 0 warnings. `pnpm lint` fails on
+the pre-existing `providers/+page.svelte:235` `configuredRowsFor`
+baseline (documented in patterns at the top of this file).
+
+### Learnings
+
+- **Frontend container does NOT bind-mount source.** `docker-compose.yml`
+  for `frontend` has no `volumes:` — the Dockerfile bakes
+  `COPY . .` so host file edits aren't visible inside the container.
+  After any `+page.svelte` / `app.css` edit, `docker compose build
+  frontend && docker compose up -d frontend` is required to see the
+  change. Vite HMR within the container still works for subsequent
+  edits but the IMAGE is the source of truth on first launch. This
+  cost ~5 minutes and was not obvious; flagging here so the next
+  ticket doesn't get stuck staring at a "why isn't my reload showing"
+  page.
+- **shadcn-svelte `Badge` doesn't cover 5-state outcome chips.** Its
+  variant API (`default`/`secondary`/`destructive`/`outline`) maps to
+  a 4-color palette that doesn't include the `success`/`warning`/`info`
+  semantic tokens DESIGN.md introduces. For multi-state semantic
+  chips, an inline `<span>` with `border + 10% bg tint + foreground`
+  of the semantic token works better than fighting `tv()` overrides.
+- **Hoisting the primary action surface above the fold is worth more
+  than any visual treatment.** The old page had the approval pane in
+  column 3 of a 3-column grid; finding "is there something I need to
+  approve?" required scanning right. The new callout above the grid
+  collapses that to zero scan. Same shadcn primitives, materially
+  better task time.
+- **`Card.Content` does NOT scroll cleanly with `bind:ref` + a
+  height cap.** The first draft tried `<Card.Content bind:ref={el}
+  class="overflow-y-auto max-h-[65vh]">` — Svelte 5 `bind:ref` on a
+  component prop works (the component exposes `$bindable()`) but the
+  Card.Content's grid-row inside Card.Root fights the height cap. The
+  simpler fix: use a bare `<div bind:this={el} class="overflow-y-auto
+  px-4 py-3">` as a sibling of Card.Header inside the Card.Root, and
+  cap the Card.Root itself (`max-h-[70vh]` + `gap-0 py-0`). The Card
+  primitives remain, but for scroll panes we drive the scroll
+  container directly. Worth knowing for any other "scroll inside card"
+  surface (history page is next).
+
+---
+

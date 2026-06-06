@@ -29,8 +29,9 @@ Why this rule exists: a host-side `pnpm dev` for the frontend survives terminal 
 
 **Use these — and only these — to interact with the stack:**
 
-- `./run.sh` — starts the full stack (`docker compose up -d --build`). Also sweeps any host orphan on 5173 before bringing the dockerized frontend up.
-- `./stop.sh` — full `docker compose down -v` reset. Also kills `meet-worker-session-*` orphan containers and any host process still listening on 5173.
+- `./run.sh` — starts the full stack in **production-shape** mode (source baked into images via `COPY`; code changes require an image rebuild). `docker compose up -d --build`. Also sweeps any host orphan on 5173 before bringing the dockerized frontend up.
+- `./run-dev.sh` — starts the full stack in **hot-reload mode**. Layers `docker-compose.dev.yml` on top of the base file, bind-mounts `./frontend` + `./backend` into the containers, swaps the api command for `uvicorn --reload` and the worker command for `watchfiles ... python -m app.worker`. Saves on the host trigger a reload in seconds — no rebuild needed for source changes. Dependency changes (`pyproject.toml` / `package.json`) still need `./run-dev.sh` to rerun, since they're installed at image-build time.
+- `./stop.sh` — full `docker compose down -v` reset. Also kills `meet-worker-session-*` orphan containers and any host process still listening on 5173. Works for both `./run.sh` and `./run-dev.sh` stacks.
 - `docker compose exec <service> <cmd>` — for any one-off command inside a running service. Examples:
   - Backend tests: `docker compose exec api pytest`
   - Frontend tests / build / lint: `docker compose exec frontend pnpm test` (or `pnpm build`, etc.)
@@ -40,7 +41,9 @@ Why this rule exists: a host-side `pnpm dev` for the frontend survives terminal 
 - `docker compose logs -f [service]` — tail logs (omit the service name to follow all).
 - `docker compose build <service>` then `docker compose up -d <service>` — rebuild a single service after a dependency change without restarting everything.
 
-**Allowed on the host:** `git`, `bd`, `bv`, `gh`, file edits in the source tree (containers bind-mount source where applicable for hot reload), `docker` / `docker compose` itself, and the `start-chrome.sh` helper (per the browser-validation rule).
+**Allowed on the host:** `git`, `bd`, `bv`, `gh`, file edits in the source tree, `docker` / `docker compose` itself, and the `start-chrome.sh` helper (per the browser-validation rule).
+
+**Choosing between `./run.sh` and `./run-dev.sh`**: use `./run-dev.sh` for normal day-to-day work — saves on the host reload in the container in seconds with no rebuild. Use `./run.sh` when you need to verify the production-shape image (e.g. before a release, or to confirm a fix lands in the baked image rather than relying on a bind mount). For either mode, dependency changes (`pyproject.toml`, `package.json`, `uv.lock`, `pnpm-lock.yaml`) still require rerunning the script so compose can rebuild the affected image layer.
 
 **Not allowed on the host:** `pnpm` / `npm` / `pip` / `python` / `uvicorn` / `pytest` against project code, or a locally-installed `postgres` / `redis` / `node` used as a substitute for the container. If the stack is broken in a way that tempts you to bypass Docker, **stop and fix the compose-side problem** — bypassing it just ships bugs back to the user, and any host process you leave behind will fight the next `./run.sh` for ports and volumes.
 

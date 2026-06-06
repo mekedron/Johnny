@@ -1,6 +1,15 @@
 <script lang="ts">
 	import { onDestroy, onMount, tick } from 'svelte';
 	import { page } from '$app/state';
+	import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
+	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
+	import SquareIcon from '@lucide/svelte/icons/square';
+	import BotIcon from '@lucide/svelte/icons/bot';
+	import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
+	import WifiOffIcon from '@lucide/svelte/icons/wifi-off';
+	import { Button } from '$lib/components/ui/button/index.js';
+	import * as Card from '$lib/components/ui/card/index.js';
+	import * as Alert from '$lib/components/ui/alert/index.js';
 	import {
 		BOT_SESSION_STATUS_LABEL,
 		stopSession,
@@ -71,7 +80,6 @@
 	let stopping = $state(false);
 	let stopError = $state<string | null>(null);
 
-	// Three feeds.
 	let transcripts = $state<TranscriptLine[]>([]);
 	let partial = $state<TranscriptLine | null>(null);
 	let decisions = $state<DecisionEntry[]>([]);
@@ -79,42 +87,93 @@
 	let resolvingDecisionIds = $state<Set<number>>(new Set());
 	let approvalErrorMessage = $state<string | null>(null);
 
-	// Connection state.
 	let connected = $state(false);
 	let connectError = $state<string | null>(null);
 
-	// Resources.
 	let subscription: Subscription | null = null;
 	let approvalTimers: Map<number, ReturnType<typeof setInterval>> = new Map();
-	let transcriptEl: HTMLDivElement | null = $state(null);
+	let transcriptEl = $state<HTMLDivElement | null>(null);
+	let durationTimer: ReturnType<typeof setInterval> | null = null;
+	let nowMs = $state(Date.now());
 
 	const isTerminal = $derived(
 		session !== null &&
 			(session.status === 'ended' || session.status === 'failed')
 	);
 
-	function statusClass(status: BotSessionStatus): string {
-		return `status-pill-${status}`;
+	const startedAtMs = $derived<number | null>(
+		session !== null && session.started_at !== null
+			? Date.parse(session.started_at)
+			: null
+	);
+	const endedAtMs = $derived<number | null>(
+		session !== null && session.ended_at !== null
+			? Date.parse(session.ended_at)
+			: null
+	);
+	const durationLabel = $derived(
+		startedAtMs === null
+			? ''
+			: formatDuration(startedAtMs, endedAtMs ?? nowMs)
+	);
+
+	function formatDuration(startMs: number, endMs: number): string {
+		if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return '';
+		const elapsed = Math.max(0, endMs - startMs);
+		const totalSeconds = Math.floor(elapsed / 1000);
+		const hours = Math.floor(totalSeconds / 3600);
+		const minutes = Math.floor((totalSeconds % 3600) / 60);
+		const seconds = totalSeconds % 60;
+		if (hours > 0) {
+			return `${hours}h ${String(minutes).padStart(2, '0')}m`;
+		}
+		return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
 	}
 
 	function formatTimestamp(ms: number): string {
 		if (!Number.isFinite(ms) || ms <= 0) return '';
-		const date = new Date(ms);
-		return date.toLocaleTimeString([], {
+		return new Date(ms).toLocaleTimeString([], {
 			hour: '2-digit',
 			minute: '2-digit',
 			second: '2-digit'
 		});
 	}
 
-	function relativeTimestamp(ms: number): string {
-		if (!Number.isFinite(ms) || ms <= 0) return '';
-		return formatTimestamp(ms);
-	}
-
 	function countdownSeconds(approval: PendingApproval): number {
 		const remaining = Math.max(0, approval.expiresAt - approval.now);
 		return Math.ceil(remaining / 1000);
+	}
+
+	function statusToneClass(status: BotSessionStatus): string {
+		switch (status) {
+			case 'joined':
+				return 'border-success/40 bg-success/10 text-foreground';
+			case 'joining':
+			case 'scheduled':
+				return 'border-info/40 bg-info/10 text-foreground';
+			case 'failed':
+				return 'border-destructive/40 bg-destructive/10 text-foreground';
+			case 'ended':
+			default:
+				return 'border-border bg-muted text-muted-foreground';
+		}
+	}
+
+	function outcomeToneClass(outcome: DecisionEntry['outcome']): string {
+		switch (outcome) {
+			case 'spoken':
+				return 'border-success/40 bg-success/10 text-foreground';
+			case 'suppressed':
+				return 'border-border bg-muted text-muted-foreground';
+			case 'pending':
+				return 'border-warning/40 bg-warning/10 text-foreground';
+			case 'rejected':
+				return 'border-destructive/40 bg-destructive/10 text-foreground';
+			case 'suggested':
+				return 'border-info/40 bg-info/10 text-foreground';
+			default:
+				return 'border-border bg-muted text-muted-foreground';
+		}
 	}
 
 	async function loadInitialDetail() {
@@ -134,8 +193,6 @@
 		session = detail.session;
 		const transcriptLines = detail.transcripts.map(transcriptToLine);
 		const utteranceLines = detail.utterances.map(utteranceToLine);
-		// Interleave bot utterances with participant transcripts so the
-		// transcript pane shows a complete chronological timeline.
 		transcripts = [...transcriptLines, ...utteranceLines].sort(
 			(a, b) => a.timestampMs - b.timestampMs
 		);
@@ -145,17 +202,14 @@
 				utteranceMap.set(u.agent_decision_id, u);
 			}
 		}
-		decisions = detail.decisions.map((d) => decisionRecordToEntry(d, utteranceMap.get(d.id) ?? null));
-		// Pending approvals from server-side state; live events refine
-		// them. We don't have a timeout on these, so we display them
-		// without a countdown until the live event fires (which carries
-		// `timeout_s`).
+		decisions = detail.decisions.map((d) =>
+			decisionRecordToEntry(d, utteranceMap.get(d.id) ?? null)
+		);
 		pendingApprovals = detail.pending_decisions.map((d) => ({
 			decisionId: d.id,
 			suggestedReply: d.suggested_reply ?? '',
 			reason: d.reason,
 			replyType: d.reply_type,
-			// 0 hides the countdown.
 			expiresAt: 0,
 			now: Date.now()
 		}));
@@ -265,8 +319,7 @@
 	function handleDecision(ev: RouterDecisionEvent) {
 		const entry: DecisionEntry = {
 			key: `live-d-${ev.seq}`,
-			decisionId:
-				typeof ev.decision_id === 'number' ? ev.decision_id : null,
+			decisionId: typeof ev.decision_id === 'number' ? ev.decision_id : null,
 			shouldSpeak: ev.should_speak,
 			confidence: ev.confidence,
 			reason: ev.reason,
@@ -308,7 +361,6 @@
 
 	function handleApprovalResolved(ev: ApprovalResolvedEvent) {
 		removePendingApproval(ev.decision_id);
-		// Reflect resolution in the decision feed entry too.
 		decisions = decisions.map((d) =>
 			d.decisionId === ev.decision_id
 				? {
@@ -325,25 +377,16 @@
 	}
 
 	function handleAgentSpoke(ev: AgentSpokeEvent) {
-		// We don't always have the decision_id on this event; if a
-		// pending approval was just satisfied, we expect an
-		// approval_resolved to clear it. The decision row outcome flips
-		// to 'spoken' once that happens.
 		const matched =
 			typeof ev.matched_allowed_reply === 'string'
 				? ev.matched_allowed_reply
 				: null;
-		// Promote the most recent pending decision to spoken if any.
 		const idx = decisions.findIndex((d) => d.outcome === 'pending');
 		if (idx >= 0) {
 			const next = [...decisions];
 			next[idx] = { ...next[idx], outcome: 'spoken', matchedReply: matched };
 			decisions = next;
 		}
-		// Surface the bot's utterance inline in the transcript timeline
-		// (Johnny-awh). The history pane is the audit trail of every
-		// utterance, so the transcript pane mirrors what participants in
-		// the meeting heard — including the bot.
 		const botLine: TranscriptLine = {
 			key: `live-spoke-${ev.seq}`,
 			text: ev.text,
@@ -357,13 +400,9 @@
 	}
 
 	function handleAgentSuggested(ev: AgentSuggestedEvent) {
-		// Suggest-only mode: the router approved a reply but the bot won't
-		// speak. Reflect the suggestion in the decision feed so the user
-		// sees what the bot would have said. Locate the row by decision_id
-		// when present, otherwise update the most recent suppressed/pending
-		// row that has the same suggested_reply.
 		const targetId = typeof ev.decision_id === 'number' ? ev.decision_id : null;
-		const suggested = typeof ev.suggested_reply === 'string' ? ev.suggested_reply : '';
+		const suggested =
+			typeof ev.suggested_reply === 'string' ? ev.suggested_reply : '';
 		const idx = decisions.findIndex((d) =>
 			targetId !== null
 				? d.decisionId === targetId
@@ -467,10 +506,33 @@
 	}
 
 	async function autoScrollTranscript() {
-		// Defer to after the DOM update so scrollTop reflects the new content.
 		await tick();
 		if (transcriptEl !== null) {
 			transcriptEl.scrollTop = transcriptEl.scrollHeight;
+		}
+	}
+
+	function handleKeydown(event: KeyboardEvent) {
+		const target = event.target;
+		if (target instanceof HTMLElement) {
+			if (
+				target.tagName === 'INPUT' ||
+				target.tagName === 'TEXTAREA' ||
+				target.tagName === 'SELECT' ||
+				target.isContentEditable
+			) {
+				return;
+			}
+		}
+		if (pendingApprovals.length === 0) return;
+		if (event.metaKey || event.ctrlKey || event.altKey) return;
+		const first = pendingApprovals[0];
+		if (event.key === 'a' || event.key === 'A') {
+			event.preventDefault();
+			void approvePending(first.decisionId);
+		} else if (event.key === 'r' || event.key === 'R') {
+			event.preventDefault();
+			void rejectPending(first.decisionId);
 		}
 	}
 
@@ -479,6 +541,9 @@
 			void autoScrollTranscript();
 		});
 		startSubscription();
+		durationTimer = setInterval(() => {
+			nowMs = Date.now();
+		}, 1000);
 	});
 
 	onDestroy(() => {
@@ -490,6 +555,10 @@
 			clearInterval(timer);
 		}
 		approvalTimers.clear();
+		if (durationTimer !== null) {
+			clearInterval(durationTimer);
+			durationTimer = null;
+		}
 	});
 </script>
 
@@ -497,630 +566,420 @@
 	<title>Session #{sessionIdStr} · Johnny</title>
 </svelte:head>
 
-<div class="page" data-testid="session-page">
-	<header class="page-header">
-		<div class="title-row">
-			<h1>Session #{sessionIdStr}</h1>
-			{#if session !== null}
-				<span class="status-pill {statusClass(session.status)}" data-testid="session-status">
-					{BOT_SESSION_STATUS_LABEL[session.status]}
-				</span>
-			{/if}
-			<span class="connection" class:connected aria-live="polite">
-				{connected ? 'Live' : 'Connecting…'}
-			</span>
+<svelte:window onkeydown={handleKeydown} />
+
+<div class="mx-auto flex max-w-7xl flex-col gap-6" data-testid="session-page">
+	<header class="flex flex-wrap items-start justify-between gap-4">
+		<div class="flex min-w-0 flex-col gap-1.5">
+			<div class="flex flex-wrap items-center gap-3">
+				<h1
+					class="m-0 text-2xl leading-tight font-semibold tracking-tight text-foreground"
+				>
+					Session <span class="font-mono">#{sessionIdStr}</span>
+				</h1>
+				{#if session !== null}
+					<span
+						class="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium {statusToneClass(
+							session.status
+						)}"
+						data-testid="session-status"
+					>
+						{BOT_SESSION_STATUS_LABEL[session.status]}
+					</span>
+					{#if !isTerminal && connected}
+						<span
+							class="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
+							aria-live="polite"
+						>
+							<span
+								aria-hidden="true"
+								class="live-pulse h-2 w-2 rounded-full bg-primary"
+							></span>
+							<span class="font-medium tracking-wide uppercase">Live</span>
+						</span>
+					{/if}
+				{/if}
+			</div>
+			<div
+				class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground"
+			>
+				{#if session !== null}
+					<span class="font-mono">{session.source}</span>
+					{#if durationLabel}
+						<span aria-hidden="true">·</span>
+						<time class="font-mono" data-testid="session-duration"
+							>{durationLabel}</time
+						>
+					{/if}
+					{#if !isTerminal && !connected}
+						<span aria-hidden="true">·</span>
+						<span
+							class="inline-flex items-center gap-1 text-warning"
+							data-testid="connection-state"
+						>
+							<WifiOffIcon class="size-3" /> Connecting…
+						</span>
+					{/if}
+				{/if}
+			</div>
 		</div>
-		<div class="header-actions">
-			<a href="/calendar" class="ghost">Back to calendar</a>
+		<div class="flex flex-wrap items-center gap-2">
+			<Button href="/calendar" variant="ghost" size="sm">
+				<ArrowLeftIcon /> Back
+			</Button>
 			{#if session !== null && session.source === 'browser' && !isTerminal}
-				<a
+				<Button
 					href={`/playground?session=${session.id}`}
-					class="primary reopen"
+					variant="outline"
+					size="sm"
 					data-testid="reopen-playground-button"
 				>
-					Reopen playground
-				</a>
+					<ExternalLinkIcon /> Reopen playground
+				</Button>
 			{/if}
-			<button
-				type="button"
-				class="end-session danger"
-				onclick={handleEndSession}
-				disabled={stopping || isTerminal}
-				data-testid="end-session-button"
-			>
-				{stopping ? 'Ending…' : 'End session'}
-			</button>
+			{#if !isTerminal}
+				<Button
+					variant="destructive"
+					size="sm"
+					onclick={handleEndSession}
+					disabled={stopping}
+					data-testid="end-session-button"
+				>
+					<SquareIcon /> {stopping ? 'Ending…' : 'End session'}
+				</Button>
+			{/if}
 		</div>
 	</header>
 
 	{#if loadError}
-		<div class="alert error" role="alert">{loadError}</div>
+		<Alert.Root variant="destructive" data-testid="load-error">
+			<CircleAlertIcon />
+			<Alert.Title>Failed to load session</Alert.Title>
+			<Alert.Description>{loadError}</Alert.Description>
+		</Alert.Root>
 	{/if}
 	{#if connectError}
-		<div class="alert warn" role="status" data-testid="connect-warn">
-			Live updates paused: {connectError}
+		<div
+			class="rounded-md border border-warning/30 bg-warning/10 px-4 py-3 text-sm"
+			role="status"
+			data-testid="connect-warn"
+		>
+			<div class="flex items-start gap-3">
+				<WifiOffIcon class="mt-0.5 size-4 shrink-0 text-warning" />
+				<div>
+					<p class="m-0 font-semibold text-foreground">Live updates paused</p>
+					<p class="m-0 text-muted-foreground">{connectError}</p>
+				</div>
+			</div>
 		</div>
 	{/if}
 	{#if stopError}
-		<div class="alert error" role="alert" data-testid="stop-error">{stopError}</div>
+		<Alert.Root variant="destructive" data-testid="stop-error">
+			<CircleAlertIcon />
+			<Alert.Title>Could not end session</Alert.Title>
+			<Alert.Description>{stopError}</Alert.Description>
+		</Alert.Root>
 	{/if}
 	{#if session !== null && session.error_reason}
-		<div
-			class="alert {session.status === 'failed' ? 'error' : 'warn'}"
-			role="alert"
-			data-testid="session-error-reason"
-		>
-			<strong>Failure stage:</strong> {session.error_reason}
-		</div>
+		{#if session.status === 'failed'}
+			<Alert.Root variant="destructive" data-testid="session-error-reason">
+				<CircleAlertIcon />
+				<Alert.Title>Failure stage</Alert.Title>
+				<Alert.Description>{session.error_reason}</Alert.Description>
+			</Alert.Root>
+		{:else}
+			<div
+				class="rounded-md border border-warning/30 bg-warning/10 px-4 py-3 text-sm"
+				role="status"
+				data-testid="session-error-reason"
+			>
+				<div class="flex items-start gap-3">
+					<CircleAlertIcon class="mt-0.5 size-4 shrink-0 text-warning" />
+					<div>
+						<p class="m-0 font-semibold text-foreground">Failure stage</p>
+						<p class="m-0 text-muted-foreground">{session.error_reason}</p>
+					</div>
+				</div>
+			</div>
+		{/if}
 	{/if}
 
 	{#if loading}
-		<p class="empty">Loading session…</p>
+		<p class="text-sm text-muted-foreground italic">Loading session…</p>
 	{:else if session === null}
-		<p class="empty">No session found.</p>
+		<Alert.Root variant="destructive">
+			<CircleAlertIcon />
+			<Alert.Title>Session not found</Alert.Title>
+			<Alert.Description>
+				This session does not exist or has been removed.
+			</Alert.Description>
+		</Alert.Root>
 	{:else}
-		<div class="panes">
-			<section class="pane transcript-pane" aria-label="Transcript" data-testid="transcript-pane">
-				<header class="pane-header">
-					<h2>Transcript</h2>
-					<span class="pane-count" data-testid="transcript-count">
-						{transcripts.length}
-					</span>
-				</header>
-				<div class="transcript-scroll" bind:this={transcriptEl} data-testid="transcript-scroll">
-					{#if transcripts.length === 0 && partial === null}
-						<p class="empty">Nothing transcribed yet.</p>
-					{:else}
-						<ul class="transcript-list">
-							{#each transcripts as line (line.key)}
-								<li
-									class="transcript-line"
-									class:partial={!line.isFinal}
-									class:bot={line.isBot}
-									data-testid={line.isBot ? 'bot-transcript-line' : 'transcript-line'}
-								>
-									<div class="transcript-meta">
-										{#if line.isBot}
-											<span class="speaker bot">{line.speaker}</span>
-										{:else if line.speaker}
-											<span class="speaker">{line.speaker}</span>
-										{:else}
-											<span class="speaker unknown">Speaker</span>
-										{/if}
-										<time class="ts">{relativeTimestamp(line.timestampMs)}</time>
-									</div>
-									<p class="transcript-text">{line.text}</p>
-								</li>
-							{/each}
-							{#if partial !== null}
-								<li
-									class="transcript-line partial"
-									data-testid="transcript-partial"
-								>
-									<div class="transcript-meta">
-										{#if partial.speaker}
-											<span class="speaker">{partial.speaker}</span>
-										{:else}
-											<span class="speaker unknown">Speaker</span>
-										{/if}
-										<span class="ts partial-tag">…partial</span>
-									</div>
-									<p class="transcript-text partial-text">{partial.text}</p>
-								</li>
-							{/if}
-						</ul>
-					{/if}
-				</div>
-			</section>
-
-			<section class="pane decisions-pane" aria-label="Decision feed" data-testid="decisions-pane">
-				<header class="pane-header">
-					<h2>Decisions</h2>
-					<span class="pane-count" data-testid="decisions-count">
-						{decisions.length}
-					</span>
-				</header>
-				{#if decisions.length === 0}
-					<p class="empty">No decisions yet.</p>
-				{:else}
-					<ul class="decision-list">
-						{#each decisions as d (d.key)}
-							<li class="decision" data-testid="decision-row">
-								<header class="decision-header">
-									<span class="decision-outcome outcome-{d.outcome}">
-										{DECISION_OUTCOME_LABEL[d.outcome as DecisionOutcome] ?? d.outcome}
-									</span>
-									<span class="decision-confidence" title="Router confidence">
-										{(d.confidence * 100).toFixed(0)}%
-									</span>
-									<time class="ts">{relativeTimestamp(d.timestampMs)}</time>
-								</header>
-								<p class="decision-reason">{d.reason}</p>
-								{#if d.suggestedReply}
-									<p class="decision-suggested">
-										<span class="muted">Suggested:</span>
-										<span>"{d.suggestedReply}"</span>
-									</p>
-								{/if}
-								{#if d.replyType}
-									<p class="decision-meta">
-										<span class="muted">Type:</span>
-										<span>{d.replyType}</span>
-									</p>
-								{/if}
-								{#if d.matchedReply}
-									<p class="decision-meta">
-										<span class="muted">Matched reply:</span>
-										<span>"{d.matchedReply}"</span>
-									</p>
-								{/if}
-							</li>
-						{/each}
-					</ul>
-				{/if}
-			</section>
-
+		{#if pendingApprovals.length > 0}
 			<section
-				class="pane approvals-pane"
+				class="flex flex-col gap-2"
 				aria-label="Pending approvals"
 				data-testid="approvals-pane"
 			>
-				<header class="pane-header">
-					<h2>Pending approvals</h2>
-					<span class="pane-count" data-testid="approvals-count">
-						{pendingApprovals.length}
-					</span>
-				</header>
 				{#if approvalErrorMessage}
-					<div class="alert error" role="alert" data-testid="approval-error">
-						{approvalErrorMessage}
-					</div>
+					<Alert.Root variant="destructive" data-testid="approval-error">
+						<CircleAlertIcon />
+						<Alert.Description>{approvalErrorMessage}</Alert.Description>
+					</Alert.Root>
 				{/if}
-				{#if pendingApprovals.length === 0}
-					<p class="empty">Nothing waiting for you.</p>
-				{:else}
-					<ul class="approval-list">
-						{#each pendingApprovals as approval (approval.decisionId)}
-							<li class="approval" data-testid="approval-row">
-								<header class="approval-header">
-									<span class="approval-id">Decision #{approval.decisionId}</span>
+				{#each pendingApprovals as approval, idx (approval.decisionId)}
+					<div
+						class="relative overflow-hidden rounded-md border border-border bg-card"
+						data-testid="approval-row"
+					>
+						<span
+							aria-hidden="true"
+							class="absolute top-0 left-0 h-full w-[2px] bg-primary"
+						></span>
+						<div
+							class="flex flex-col gap-3 px-4 py-3 pl-5 sm:flex-row sm:items-start sm:justify-between"
+						>
+							<div class="flex min-w-0 flex-col gap-1.5 sm:max-w-[64ch]">
+								<div class="flex flex-wrap items-baseline gap-3 text-xs">
+									<span class="font-mono font-semibold text-foreground"
+										>Awaiting approval</span
+									>
+									<span class="font-mono text-muted-foreground"
+										>Decision #{approval.decisionId}</span
+									>
 									{#if approval.expiresAt > 0}
 										<span
-											class="approval-countdown"
-											aria-label="Auto-reject in {countdownSeconds(approval)} seconds"
+											class="font-mono text-warning"
+											aria-label="Auto-reject in {countdownSeconds(
+												approval
+											)} seconds"
 											data-testid="approval-countdown"
 										>
 											{countdownSeconds(approval)}s
 										</span>
 									{/if}
-								</header>
-								<p class="approval-reply">"{approval.suggestedReply}"</p>
-								{#if approval.reason}
-									<p class="approval-reason">{approval.reason}</p>
-								{/if}
-								<div class="approval-actions">
-									<button
-										type="button"
-										class="approve"
-										disabled={resolvingDecisionIds.has(approval.decisionId)}
-										onclick={() => approvePending(approval.decisionId)}
-										data-testid="approve-button"
-									>
-										{resolvingDecisionIds.has(approval.decisionId)
-											? '…'
-											: 'Approve'}
-									</button>
-									<button
-										type="button"
-										class="reject"
-										disabled={resolvingDecisionIds.has(approval.decisionId)}
-										onclick={() => rejectPending(approval.decisionId)}
-										data-testid="reject-button"
-									>
-										{resolvingDecisionIds.has(approval.decisionId)
-											? '…'
-											: 'Reject'}
-									</button>
 								</div>
-							</li>
-						{/each}
-					</ul>
-				{/if}
+								<p class="m-0 text-base leading-snug font-medium text-foreground">
+									&ldquo;{approval.suggestedReply}&rdquo;
+								</p>
+								{#if approval.reason}
+									<p class="m-0 text-sm text-muted-foreground">
+										{approval.reason}
+									</p>
+								{/if}
+							</div>
+							<div class="flex shrink-0 items-center gap-2">
+								<Button
+									variant={idx === 0 ? 'default' : 'outline'}
+									size="sm"
+									disabled={resolvingDecisionIds.has(approval.decisionId)}
+									onclick={() => approvePending(approval.decisionId)}
+									data-testid="approve-button"
+								>
+									{resolvingDecisionIds.has(approval.decisionId)
+										? '…'
+										: 'Approve'}
+								</Button>
+								<Button
+									variant="outline"
+									size="sm"
+									disabled={resolvingDecisionIds.has(approval.decisionId)}
+									onclick={() => rejectPending(approval.decisionId)}
+									data-testid="reject-button"
+								>
+									{resolvingDecisionIds.has(approval.decisionId)
+										? '…'
+										: 'Reject'}
+								</Button>
+							</div>
+						</div>
+					</div>
+				{/each}
+				<p class="text-xs text-muted-foreground">
+					<kbd
+						class="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[0.65rem] font-semibold"
+						>A</kbd
+					>
+					approve
+					<span aria-hidden="true" class="mx-1">·</span>
+					<kbd
+						class="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[0.65rem] font-semibold"
+						>R</kbd
+					>
+					reject
+				</p>
 			</section>
+		{/if}
+
+		<div class="grid gap-5 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+			<Card.Root class="flex max-h-[70vh] flex-col gap-0 py-0" data-testid="transcript-pane">
+				<Card.Header
+					class="flex flex-row items-baseline justify-between border-b border-border px-4 py-3"
+				>
+					<Card.Title class="text-sm font-semibold tracking-wide"
+						>Transcript</Card.Title
+					>
+					<span
+						class="font-mono text-xs text-muted-foreground"
+						data-testid="transcript-count"
+					>
+						{transcripts.length}
+					</span>
+				</Card.Header>
+				<div
+					class="flex-1 overflow-y-auto px-4 py-3"
+					bind:this={transcriptEl}
+					data-testid="transcript-scroll"
+				>
+					{#if transcripts.length === 0 && partial === null}
+						<p class="text-sm text-muted-foreground italic">
+							Waiting for first speaker…
+						</p>
+					{:else}
+						<ul class="m-0 flex list-none flex-col gap-2 p-0">
+							{#each transcripts as line (line.key)}
+								<li
+									class="rounded-md border border-border px-3 py-2 {line.isBot
+										? 'bg-muted'
+										: 'bg-surface-2'}"
+									data-testid={line.isBot
+										? 'bot-transcript-line'
+										: 'transcript-line'}
+								>
+									<div
+										class="mb-1 flex items-baseline justify-between gap-3 text-xs"
+									>
+										{#if line.isBot}
+											<span
+												class="inline-flex items-center gap-1.5 font-mono font-semibold text-foreground"
+											>
+												<BotIcon class="size-3" />
+												{line.speaker}
+											</span>
+										{:else if line.speaker}
+											<span class="font-medium text-foreground">{line.speaker}</span>
+										{:else}
+											<span class="text-muted-foreground italic">Speaker</span>
+										{/if}
+										<time class="font-mono text-muted-foreground"
+											>{formatTimestamp(line.timestampMs)}</time
+										>
+									</div>
+									<p
+										class="m-0 text-sm leading-relaxed whitespace-pre-wrap text-foreground"
+									>
+										{line.text}
+									</p>
+								</li>
+							{/each}
+							{#if partial !== null}
+								<li
+									class="rounded-md border border-dashed border-border bg-surface-2 px-3 py-2"
+									data-testid="transcript-partial"
+								>
+									<div
+										class="mb-1 flex items-baseline justify-between gap-3 text-xs"
+									>
+										{#if partial.speaker}
+											<span class="font-medium text-foreground"
+												>{partial.speaker}</span
+											>
+										{:else}
+											<span class="text-muted-foreground italic">Speaker</span>
+										{/if}
+										<span class="font-mono text-warning">partial</span>
+									</div>
+									<p
+										class="m-0 text-sm leading-relaxed whitespace-pre-wrap text-muted-foreground italic"
+									>
+										{partial.text}
+									</p>
+								</li>
+							{/if}
+						</ul>
+					{/if}
+				</div>
+			</Card.Root>
+
+			<Card.Root class="flex max-h-[70vh] flex-col gap-0 py-0" data-testid="decisions-pane">
+				<Card.Header
+					class="flex flex-row items-baseline justify-between border-b border-border px-4 py-3"
+				>
+					<Card.Title class="text-sm font-semibold tracking-wide"
+						>Decisions</Card.Title
+					>
+					<span
+						class="font-mono text-xs text-muted-foreground"
+						data-testid="decisions-count"
+					>
+						{decisions.length}
+					</span>
+				</Card.Header>
+				<div class="flex-1 overflow-y-auto px-4 py-3">
+					{#if decisions.length === 0}
+						<p class="text-sm text-muted-foreground italic">No decisions yet.</p>
+					{:else}
+						<ul class="m-0 flex list-none flex-col gap-2 p-0">
+							{#each decisions as d (d.key)}
+								<li
+									class="rounded-md border border-border bg-surface-2 px-3 py-2"
+									data-testid="decision-row"
+								>
+									<div
+										class="mb-1.5 flex items-baseline justify-between gap-2 text-xs"
+									>
+										<span
+											class="inline-flex items-center rounded-sm border px-1.5 py-0.5 text-[0.65rem] font-semibold tracking-wide uppercase {outcomeToneClass(
+												d.outcome
+											)}"
+										>
+											{DECISION_OUTCOME_LABEL[d.outcome as DecisionOutcome] ??
+												d.outcome}
+										</span>
+										<span
+											class="font-mono text-muted-foreground"
+											title="Router confidence"
+										>
+											{(d.confidence * 100).toFixed(0)}%
+										</span>
+										<time class="font-mono text-muted-foreground"
+											>{formatTimestamp(d.timestampMs)}</time
+										>
+									</div>
+									<p class="m-0 mb-1 text-sm text-foreground">{d.reason}</p>
+									{#if d.suggestedReply}
+										<p class="m-0 mt-1 text-sm text-muted-foreground italic">
+											&ldquo;{d.suggestedReply}&rdquo;
+										</p>
+									{/if}
+									{#if d.replyType || d.matchedReply}
+										<div
+											class="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted-foreground"
+										>
+											{#if d.replyType}
+												<span
+													><span class="font-mono">type</span>
+													<span class="font-medium text-foreground"
+														>{d.replyType}</span
+													></span
+												>
+											{/if}
+											{#if d.matchedReply}
+												<span
+													><span class="font-mono">matched</span>
+													<span class="text-foreground"
+														>&ldquo;{d.matchedReply}&rdquo;</span
+													></span
+												>
+											{/if}
+										</div>
+									{/if}
+								</li>
+							{/each}
+						</ul>
+					{/if}
+				</div>
+			</Card.Root>
 		</div>
 	{/if}
 </div>
-
-<style>
-	.page {
-		max-width: 1280px;
-	}
-	.page-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		gap: 1rem;
-		flex-wrap: wrap;
-		margin-bottom: 1rem;
-	}
-	.title-row {
-		display: flex;
-		align-items: center;
-		gap: 0.75rem;
-		flex-wrap: wrap;
-	}
-	.title-row h1 {
-		margin: 0;
-		font-size: 1.5rem;
-	}
-	.header-actions {
-		display: flex;
-		gap: 0.6rem;
-		align-items: center;
-	}
-	a.ghost {
-		color: #4b5563;
-		text-decoration: none;
-		font-size: 0.85rem;
-		border: 1px solid #d1d5db;
-		border-radius: 6px;
-		padding: 0.4rem 0.7rem;
-	}
-	a.ghost:hover {
-		background: #f3f4f6;
-	}
-	.status-pill {
-		font-size: 0.72rem;
-		font-weight: 600;
-		padding: 0.18rem 0.55rem;
-		border-radius: 9999px;
-		text-transform: uppercase;
-		letter-spacing: 0.03em;
-	}
-	.status-pill-scheduled {
-		background: #fef3c7;
-		color: #92400e;
-	}
-	.status-pill-joining {
-		background: #dbeafe;
-		color: #1e40af;
-	}
-	.status-pill-joined {
-		background: #d1fae5;
-		color: #065f46;
-	}
-	.status-pill-ended,
-	.status-pill-failed {
-		background: #fee2e2;
-		color: #991b1b;
-	}
-	.connection {
-		font-size: 0.75rem;
-		color: #6b7280;
-		padding: 0.2rem 0.5rem;
-		background: #f3f4f6;
-		border-radius: 6px;
-	}
-	.connection.connected {
-		background: #ecfdf5;
-		color: #047857;
-	}
-	.end-session {
-		appearance: none;
-		border: 0;
-		border-radius: 6px;
-		font-weight: 600;
-		font-size: 0.85rem;
-		padding: 0.5rem 0.9rem;
-		cursor: pointer;
-	}
-	.danger {
-		background: #b91c1c;
-		color: #ffffff;
-	}
-	a.reopen {
-		display: inline-block;
-		padding: 0.5rem 0.9rem;
-		border-radius: 6px;
-		font-weight: 600;
-		font-size: 0.85rem;
-		background: #2563eb;
-		color: #ffffff;
-		text-decoration: none;
-	}
-	a.reopen:hover {
-		background: #1d4ed8;
-	}
-	.danger:hover:not(:disabled) {
-		background: #991b1b;
-	}
-	.danger:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	.alert {
-		padding: 0.6rem 0.85rem;
-		border-radius: 6px;
-		margin: 0 0 0.75rem;
-		font-size: 0.85rem;
-	}
-	.alert.error {
-		background: #fef2f2;
-		color: #991b1b;
-		border: 1px solid #fecaca;
-	}
-	.alert.warn {
-		background: #fef3c7;
-		color: #92400e;
-		border: 1px solid #fde68a;
-	}
-	.empty {
-		color: #6b7280;
-		font-style: italic;
-		margin: 1rem 0;
-	}
-
-	.panes {
-		display: grid;
-		grid-template-columns: 2fr 1.2fr 1.2fr;
-		gap: 1rem;
-		min-height: 60vh;
-	}
-	.pane {
-		background: #ffffff;
-		border: 1px solid #e5e7eb;
-		border-radius: 8px;
-		padding: 0.75rem 0.9rem;
-		display: flex;
-		flex-direction: column;
-		min-height: 60vh;
-	}
-	.pane-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: baseline;
-		gap: 0.5rem;
-		margin-bottom: 0.6rem;
-	}
-	.pane-header h2 {
-		margin: 0;
-		font-size: 0.95rem;
-		color: #111827;
-	}
-	.pane-count {
-		font-size: 0.75rem;
-		font-weight: 600;
-		color: #ffffff;
-		background: #1f2937;
-		border-radius: 9999px;
-		padding: 0.1rem 0.55rem;
-	}
-
-	.transcript-scroll {
-		overflow-y: auto;
-		flex: 1;
-		min-height: 0;
-		max-height: 65vh;
-		padding-right: 0.25rem;
-	}
-	.transcript-list {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 0.5rem;
-	}
-	.transcript-line {
-		background: #f9fafb;
-		border: 1px solid #e5e7eb;
-		border-radius: 6px;
-		padding: 0.45rem 0.6rem;
-	}
-	.transcript-line.partial {
-		background: #fffbeb;
-		border-color: #fde68a;
-		border-style: dashed;
-	}
-	.transcript-line.bot {
-		background: #eef2ff;
-		border-color: #c7d2fe;
-	}
-	.transcript-meta {
-		display: flex;
-		justify-content: space-between;
-		align-items: baseline;
-		gap: 0.5rem;
-		font-size: 0.7rem;
-		color: #6b7280;
-		margin-bottom: 0.2rem;
-	}
-	.speaker {
-		font-weight: 600;
-		color: #1f2937;
-	}
-	.speaker.bot {
-		color: #4338ca;
-	}
-	.speaker.unknown {
-		color: #6b7280;
-		font-weight: 500;
-		font-style: italic;
-	}
-	.partial-tag {
-		color: #92400e;
-		font-weight: 600;
-	}
-	.transcript-text {
-		margin: 0;
-		color: #111827;
-		font-size: 0.9rem;
-		white-space: pre-wrap;
-	}
-	.partial-text {
-		color: #92400e;
-		font-style: italic;
-	}
-
-	.decision-list,
-	.approval-list {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 0.5rem;
-		overflow-y: auto;
-		flex: 1;
-		max-height: 65vh;
-	}
-	.decision {
-		background: #f9fafb;
-		border: 1px solid #e5e7eb;
-		border-radius: 6px;
-		padding: 0.5rem 0.65rem;
-	}
-	.decision-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: baseline;
-		gap: 0.5rem;
-		margin-bottom: 0.25rem;
-	}
-	.decision-outcome {
-		font-size: 0.7rem;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-		padding: 0.1rem 0.5rem;
-		border-radius: 9999px;
-	}
-	.outcome-spoken {
-		background: #dcfce7;
-		color: #166534;
-	}
-	.outcome-suppressed {
-		background: #f3f4f6;
-		color: #4b5563;
-	}
-	.outcome-pending {
-		background: #fef3c7;
-		color: #92400e;
-	}
-	.outcome-rejected {
-		background: #fee2e2;
-		color: #991b1b;
-	}
-	.outcome-suggested {
-		background: #ede9fe;
-		color: #5b21b6;
-	}
-	.decision-confidence {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.75rem;
-		color: #4b5563;
-	}
-	.ts {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.7rem;
-		color: #6b7280;
-	}
-	.decision-reason {
-		margin: 0 0 0.25rem;
-		font-size: 0.85rem;
-		color: #1f2937;
-	}
-	.decision-suggested,
-	.decision-meta {
-		margin: 0.15rem 0;
-		font-size: 0.8rem;
-		color: #374151;
-	}
-	.muted {
-		color: #6b7280;
-		margin-right: 0.25rem;
-		font-weight: 600;
-	}
-
-	.approval {
-		background: #fff7ed;
-		border: 1px solid #fdba74;
-		border-radius: 6px;
-		padding: 0.55rem 0.7rem;
-		display: flex;
-		flex-direction: column;
-		gap: 0.35rem;
-	}
-	.approval-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: baseline;
-		gap: 0.5rem;
-		font-size: 0.75rem;
-	}
-	.approval-id {
-		font-weight: 600;
-		color: #9a3412;
-	}
-	.approval-countdown {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-weight: 600;
-		color: #b91c1c;
-	}
-	.approval-reply {
-		margin: 0;
-		font-weight: 600;
-		color: #1f2937;
-	}
-	.approval-reason {
-		margin: 0;
-		color: #6b7280;
-		font-style: italic;
-		font-size: 0.8rem;
-	}
-	.approval-actions {
-		display: flex;
-		gap: 0.4rem;
-		margin-top: 0.2rem;
-	}
-	.approve,
-	.reject {
-		flex: 1;
-		appearance: none;
-		border: 0;
-		border-radius: 4px;
-		padding: 0.35rem 0.5rem;
-		font-size: 0.78rem;
-		font-weight: 600;
-		cursor: pointer;
-	}
-	.approve {
-		background: #16a34a;
-		color: #ffffff;
-	}
-	.approve:hover:not(:disabled) {
-		background: #15803d;
-	}
-	.reject {
-		background: #fee2e2;
-		color: #991b1b;
-	}
-	.reject:hover:not(:disabled) {
-		background: #fecaca;
-	}
-	.approve:disabled,
-	.reject:disabled {
-		opacity: 0.6;
-		cursor: not-allowed;
-	}
-
-	@media (max-width: 1100px) {
-		.panes {
-			grid-template-columns: 1fr;
-		}
-		.pane {
-			min-height: 40vh;
-		}
-	}
-</style>

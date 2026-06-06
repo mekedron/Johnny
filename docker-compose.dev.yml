@@ -1,0 +1,71 @@
+# Overlay applied on top of docker-compose.yml when launched via
+# ./run-dev.sh. The base file stays unchanged (production-shape: source
+# is baked into the image via COPY) and this overlay swaps in host
+# bind mounts plus watcher-aware commands so saves on the host trigger
+# an in-container reload without rebuilding.
+#
+# macOS Docker Desktop note: native file-system events from host bind
+# mounts work via VirtioFS on recent Docker Desktop versions. If saves
+# are not detected, uncomment the polling env vars below — they trade
+# a bit of CPU for reliability.
+
+services:
+  # alembic in particular: mount source so a freshly-edited migration
+  # on the host is applied on the next ./run-dev.sh without an image
+  # rebuild.
+  migrate:
+    volumes:
+      - ./backend:/workspace
+
+  api:
+    volumes:
+      - ./backend:/workspace
+    # Replace the image CMD (`uvicorn app.main:app --host 0.0.0.0
+    # --port 8000`) with the reload variant. --reload-dir is scoped to
+    # the python source so noise (cache writes, alembic versions, etc.)
+    # does not trigger restarts. uvicorn[standard] is already in deps so
+    # the watchfiles backend is available — no install step at startup.
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /workspace/app
+      - --reload-dir
+      - /workspace/johnny
+    # environment:
+    #   WATCHFILES_FORCE_POLLING: "true"  # uncomment if --reload misses host saves
+
+  worker:
+    volumes:
+      - ./backend:/workspace
+    # Replace `python -m app.worker` with watchfiles wrapping the same
+    # invocation. watchfiles ships with uvicorn[standard] so the binary
+    # is already on PATH in /opt/venv/bin. --filter python skips
+    # restart on non-source changes (model dirs, caches).
+    command:
+      - watchfiles
+      - --filter
+      - python
+      - python -m app.worker
+      - /workspace/app
+      - /workspace/johnny
+    # environment:
+    #   WATCHFILES_FORCE_POLLING: "true"  # uncomment if saves are not detected
+
+  frontend:
+    volumes:
+      # Host source → container WORKDIR. vite dev (already the
+      # Dockerfile CMD) watches this and pushes HMR updates to the
+      # browser over the same 5173 socket.
+      - ./frontend:/workspace
+      # Anonymous volume preserves the image-installed node_modules so
+      # the bind above does not shadow them with the host's (possibly
+      # empty or wrong-arch) directory.
+      - /workspace/node_modules
+    # environment:
+    #   CHOKIDAR_USEPOLLING: "true"  # uncomment if vite HMR does not see saves
