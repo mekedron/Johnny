@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Johnny — your AI in every meeting, running on your own machine</title>
+<meta name="description" content="Johnny is an open-source, local-first AI agent that joins your Google Meet calls, transcribes, and speaks within limits you set. Self-host it free and run it 24/7." />
+<link rel="icon" type="image/svg+xml" href="favicon.svg" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+<link rel="stylesheet" href="game.css" />
+</head>
+<body class="dense full-glitch" data-density="compact" data-hero="video" style="--glitch: 2;">
+
+<canvas id="bg" aria-hidden="true"></canvas>
+
+<!-- icon sprite -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <g id="i-ear" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8.5a6.5 6.5 0 1 1 13 0c0 6-6 6-6 10a3.5 3.5 0 1 1-7 0"/><path d="M15 8.5a2.5 2.5 0 0 0-5 0v1a2 2 0 1 1 0 4"/></g>
+    <g id="i-msg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h8"/><path d="M8 13h6"/></g>
+    <g id="i-shield" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></g>
+    <g id="i-mic" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></g>
+    <g id="i-cpu" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></g>
+    <g id="i-lock" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></g>
+    <g id="i-cal" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/></g>
+    <g id="i-user" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 20a6 6 0 0 0-12 0"/><circle cx="12" cy="10" r="4"/></g>
+    <g id="i-audio" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 10v3"/><path d="M6 6v11"/><path d="M10 3v18"/><path d="M14 8v7"/><path d="M18 5v13"/><path d="M22 10v3"/></g>
+    <g id="i-box" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></g>
+    <g id="i-share" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></g>
+    <g id="i-book" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></g>
+    <g id="i-gh" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></g>
+    <g id="i-arrow" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></g>
+    <g id="i-term" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></g>
+    <g id="i-check" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></g>
+    <g id="i-zap" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></g>
+    <g id="i-globe" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></g>
+    <g id="i-server" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></g>
+    <g id="i-bot" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></g>
+    <g id="i-cam" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/></g>
+    <g id="i-phone" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13.832 16.568a1 1 0 0 0 1.213-.303l.355-.465A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2A18 18 0 0 1 2 6a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v3a2 2 0 0 1-.8 1.6l-.468.351a1 1 0 0 0-.292 1.233 14 14 0 0 0 6.392 6.384"/></g>
+    <g id="i-coffee" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v2"/><path d="M14 2v2"/><path d="M16 8a1 1 0 0 1 1 1v8a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1h14a4 4 0 0 0 0 8h-1"/><path d="M6 2v2"/></g>
+  </defs>
+</svg>
+
+<!-- ============ HUD NAV ============ -->
+<header class="hud">
+  <div class="wrap hud-inner">
+    <button class="hud-burger" id="burger" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="hudNav">
+      <span></span><span></span><span></span>
+    </button>
+    <a class="brand glitch" href="#top" data-persona-text>
+      <span class="sq"></span><span data-persona>Johnny</span><span class="tag">v0.1</span>
+    </a>
+    <nav class="hud-nav" id="hudNav">
+      <a href="#modes">Modes</a>
+      <a href="#local">Local-first</a>
+      <a href="#persona">Personas</a>
+      <a href="#calendar">Calendar</a>
+      <a href="#deploy">Deploy</a>
+      <a href="#mcp">MCP</a>
+    </nav>
+    <div class="hud-right">
+      <span class="hud-status"><span class="dot"></span>self-hosted</span>
+      <a class="btn btn-ghost btn-coffee icon-only" href="#support" title="Buy me a coffee" aria-label="Buy me a coffee"><svg class="ic" viewBox="0 0 24 24"><use href="#i-coffee"/></svg></a>
+      <a class="btn btn-ghost icon-only" href="https://github.com/mekedron/Johnny" target="_blank" rel="noopener" title="GitHub" aria-label="GitHub"><svg class="ic" viewBox="0 0 24 24"><use href="#i-gh"/></svg></a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+  <!-- ============ HERO ============ -->
+  <section class="hero wrap">
+    <div class="hero-grid">
+      <div class="hero-copy">
+        <p class="eyebrow">// open-source meeting agent · local-first</p>
+        <h1 class="display">Your AI in every meeting.<br /><span class="nm glitch" data-persona data-text="Johnny">Johnny</span> shows up so you don't.</h1>
+        <div class="hero-sub">
+          <p class="lede"><b style="color:var(--fg)" data-persona>Johnny</b> joins your Google Meet calls on your behalf — listening, transcribing, and speaking only within the limits you set. Give it a personality, a voice, and a calendar. It runs entirely on your machine.</p>
+          <div class="hero-cta">
+            <a class="btn btn-primary" href="#deploy"><svg class="ic" viewBox="0 0 24 24"><use href="#i-book"/></svg>Read the docs</a>
+            <a class="btn" href="https://github.com/mekedron/Johnny" target="_blank" rel="noopener"><svg class="ic" viewBox="0 0 24 24"><use href="#i-gh"/></svg>Clone the repo</a>
+          </div>
+          <div class="hero-meta">
+            <span class="chip"><span class="dot"></span>runs on-device</span>
+            <span class="chip"><span class="dot"></span>free to self-host</span>
+            <span class="chip cyan"><span class="dot live"></span>24/7 daemon</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- hero preview: live meeting view -->
+      <div class="hero-preview reveal">
+      <!-- video conference (Google Meet-style) -->
+      <div class="vconf notch notch-lg ticks" data-variant="video">
+        <div class="vconf-bar">
+          <span class="seg"><i></i><i></i><i></i></span>
+          <span>meet · q3-ops-sync</span>
+          <span class="rt">● rec 18:42</span>
+        </div>
+        <div class="vgrid" id="vgrid">
+          <div class="vtile" data-seat="0">
+            <div class="cam"><span class="mono">PN</span></div>
+            <div class="wv-mini"><span></span><span></span><span></span><span></span></div>
+            <span class="vname">Panam <em>· host</em></span>
+            <span class="vmic" data-mic>on</span>
+          </div>
+          <div class="vtile" data-seat="1">
+            <div class="cam"><span class="mono">JD</span></div>
+            <div class="wv-mini"><span></span><span></span><span></span><span></span></div>
+            <span class="vname">Judy</span>
+            <span class="vmic" data-mic>on</span>
+          </div>
+          <div class="vtile" data-seat="2">
+            <div class="cam"><span class="mono">VK</span></div>
+            <div class="wv-mini"><span></span><span></span><span></span><span></span></div>
+            <span class="vname">Viktor</span>
+            <span class="vmic" data-mic>on</span>
+          </div>
+          <div class="vtile bot" data-seat="3">
+            <div class="cam"><span class="mono" data-persona-initial>J</span><span class="ai-badge">AI</span></div>
+            <div class="wv-mini sig"><span></span><span></span><span></span><span></span></div>
+            <span class="vname"><span data-persona>Johnny</span> <em>· bot</em></span>
+            <span class="vmic" data-mic>on</span>
+          </div>
+        </div>
+        <div class="vcaption">
+          <span class="cc">CC</span>
+          <span class="cap-spk" id="capSpk">Panam</span>
+          <span class="cap-txt" id="capTxt">Let's lock the run on the Arasaka subnet before we wrap.</span>
+        </div>
+        <div class="vcontrols">
+          <button class="vbtn" title="Microphone"><svg viewBox="0 0 24 24"><use href="#i-mic"/></svg></button>
+          <button class="vbtn" title="Camera"><svg viewBox="0 0 24 24"><use href="#i-cam"/></svg></button>
+          <button class="vbtn on" title="Captions">CC</button>
+          <button class="vbtn" title="Share"><svg viewBox="0 0 24 24"><use href="#i-share"/></svg></button>
+          <button class="vbtn leave" title="Leave"><svg viewBox="0 0 24 24"><use href="#i-phone"/></svg></button>
+        </div>
+      </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ MODES ============ -->
+  <section class="section wrap" id="modes">
+    <div class="section-head reveal">
+      <p class="eyebrow">// behavior · server-enforced</p>
+      <h2 class="sec-title">Five ways to let it<br />in the room.</h2>
+        <p class="lede">Pick one per meeting — from silent note-taker to fully autonomous. A non-speaking mode makes speaking physically impossible: the constraint lives in the backend, not a checkbox the UI can lie about.</p>
+    </div>
+    <div class="modes-grid">
+      <article class="mode reveal">
+        <div class="idx"><span>01</span><span class="st">[ passive ]</span></div>
+        <div class="ic-wrap"><svg viewBox="0 0 24 24"><use href="#i-ear"/></svg></div>
+        <h3>Listen only</h3>
+        <p>Transcribes the whole call into a searchable, persisted log. Never reasons about speaking. The pure note-taker.</p>
+        <div class="tag">→ transcript + pgvector</div>
+      </article>
+      <article class="mode reveal">
+        <div class="idx"><span>02</span><span class="st">[ silent ]</span></div>
+        <div class="ic-wrap"><svg viewBox="0 0 24 24"><use href="#i-msg"/></svg></div>
+        <h3>Suggest only</h3>
+        <p>Routes every moment through the model and surfaces drafted replies in the UI — but the mouth stays closed. You decide what to say.</p>
+        <div class="tag">→ live suggestions</div>
+      </article>
+      <article class="mode reveal">
+        <div class="idx"><span>03</span><span class="st">[ gated ]</span></div>
+        <div class="ic-wrap"><svg viewBox="0 0 24 24"><use href="#i-shield"/></svg></div>
+        <h3>Approval required</h3>
+        <p>Pushes a reply to your browser with Approve / Reject. No answer in 15 seconds, it stays quiet. Auto-rejected and logged.</p>
+        <div class="tag">→ web push · audited</div>
+      </article>
+      <article class="mode reveal">
+        <div class="idx"><span>04</span><span class="st">[ allow-list ]</span></div>
+        <div class="ic-wrap"><svg viewBox="0 0 24 24"><use href="#i-mic"/></svg></div>
+        <h3>Limited auto-speak</h3>
+        <p>Speaks on its own — but only verbatim from your pre-approved phrase list. Rate-limited. No paraphrasing, no surprises.</p>
+        <div class="tag">→ allow-list only</div>
+      </article>
+      <article class="mode feature reveal">
+        <div class="idx"><span>05</span><span class="st">[ unleashed ]</span></div>
+        <div class="ic-wrap"><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg></div>
+        <h3>Autonomous</h3>
+        <p>Off the leash. It speaks for itself, freely — guided only by its personality and your standing instructions. Full presence in the room.</p>
+        <div class="tag">→ free generation</div>
+      </article>
+    </div>
+  </section>
+
+  <div class="wrap"><div class="divider"></div></div>
+
+  <!-- ============ LOCAL-FIRST ============ -->
+  <section class="section wrap" id="local">
+    <div class="split">
+      <div class="split-copy">
+        <p class="eyebrow">// nothing leaves the box</p>
+        <h2 class="sec-title">Local-first.<br />Free by default.</h2>
+        <p class="lede">Run speech-to-text, the LLM, and text-to-speech entirely on your own hardware — faster-whisper, Ollama, Piper. No API keys, no per-minute billing, no audio handed to a third party. Reach for the cloud only when you choose to.</p>
+        <ul class="feat-list">
+          <li><svg viewBox="0 0 24 24"><use href="#i-lock"/></svg><span><b>Audio never phones home.</b> The full pipeline can run offline on a single machine.</span></li>
+          <li><svg viewBox="0 0 24 24"><use href="#i-cpu"/></svg><span><b>Swap any layer without code.</b> STT, LLM and TTS are adapters — change them from the UI.</span></li>
+          <li><svg viewBox="0 0 24 24"><use href="#i-globe"/></svg><span><b>Cloud when it's worth it.</b> Drop in Claude, GPT-4o, Gemini, Deepgram or ElevenLabs per provider.</span></li>
+        </ul>
+      </div>
+      <div class="split-media reveal">
+        <div class="panel notch ticks" data-swap>
+          <div class="panel-bar"><span class="dot"></span>provider matrix</div>
+          <div class="panel-body">
+            <div class="swap-toggle notch-sm">
+              <button data-mode="local" class="on">Local · free</button>
+              <button data-mode="cloud">Cloud</button>
+            </div>
+            <div class="prov-grid"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PERSONA + VOICE ============ -->
+  <section class="section wrap" id="persona">
+    <div class="split rev">
+      <div class="split-media reveal">
+        <div class="panel notch ticks">
+          <div class="panel-bar"><span class="dot"></span>character.profile</div>
+          <div class="panel-body">
+            <div class="sheet">
+              <div class="sheet-row"><span class="lbl">handle</span><span class="val"><span class="em" data-persona>Johnny</span> // your_call_sign</span></div>
+              <div class="sheet-row"><span class="lbl">personality</span><span class="val mono">dry, fast, allergic to filler. interjects only when it adds signal.</span></div>
+              <div class="sheet-row"><span class="lbl">instructions</span><span class="val mono">defend the deadline. surface capacity overflows. never agree to scope creep.</span></div>
+              <div class="sheet-row"><span class="lbl">allow-list</span><span class="val mono">"noted." · "let's take it offline." · "that's a follow-up."</span></div>
+              <div class="sheet-row"><span class="lbl">router conf</span><span class="val">≥ 0.85 to speak</span></div>
+            </div>
+            <div class="voice-clone notch-sm">
+              <div class="wave2"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
+              <div class="txt"><b>Voice clone armed.</b> ElevenLabs voice ID bound — it speaks in <em data-persona>your</em> own voice.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="split-copy">
+        <p class="eyebrow">// build your own ghost</p>
+        <h2 class="sec-title">Give it a name.<br />A voice. A creed.</h2>
+        <p class="lede">The name is a placeholder — make your own character. Write its personality, its standing instructions, the exact phrases it's allowed to say. Save them as reusable templates and apply them to any meeting in one click.</p>
+        <ul class="feat-list">
+          <li><svg viewBox="0 0 24 24"><use href="#i-user"/></svg><span><b>Templates, not prompts.</b> "Listen-only standup", "approval-required client call" — reusable behavior presets.</span></li>
+          <li><svg viewBox="0 0 24 24"><use href="#i-audio"/></svg><span><b>Clone yourself with ElevenLabs.</b> Bind a custom voice and it speaks as a digital copy of you.</span></li>
+          <li><svg viewBox="0 0 24 24"><use href="#i-shield"/></svg><span><b>Per-meeting overrides.</b> Layer extra context, instructions and replies on top of any template.</span></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <div class="wrap"><div class="divider"></div></div>
+
+  <!-- ============ CALENDAR ============ -->
+  <section class="section wrap" id="calendar">
+    <div class="split">
+      <div class="split-copy">
+        <p class="eyebrow">// driven by your calendar</p>
+        <h2 class="sec-title">Mark the meeting.<br />It joins itself.</h2>
+        <p class="lede">Johnny reads your Google Calendar and parses the Meet link straight from each event. Flag the calls it should attend, attach context, and it spins up an isolated browser session and walks in — as a dedicated bot account or as you.</p>
+        <ul class="feat-list">
+          <li><svg viewBox="0 0 24 24"><use href="#i-cal"/></svg><span><b>Per-meeting context.</b> Attach instructions and a profile template to each event you assign.</span></li>
+          <li><svg viewBox="0 0 24 24"><use href="#i-zap"/></svg><span><b>Auto join &amp; leave.</b> A scheduler joins within seconds of start and tears the session down at the end.</span></li>
+          <li><svg viewBox="0 0 24 24"><use href="#i-server"/></svg><span><b>Isolated per session.</b> Each call runs in its own throwaway container — one bad meeting can't touch another.</span></li>
+        </ul>
+      </div>
+      <div class="split-media reveal">
+        <div class="panel notch ticks">
+          <div class="panel-bar"><span class="dot"></span>calendar · next 14 days</div>
+          <div class="panel-body">
+            <div class="cal">
+              <div class="cal-day">Tue · Jun 09</div>
+              <div class="cal-evt on">
+                <span class="time">09:30–10:00</span>
+                <span class="meta"><span class="nm">Q3 ops sync</span><span class="who">panam@ · +4 attendees</span></span>
+                <span class="assign">assigned</span>
+              </div>
+              <div class="cal-evt">
+                <span class="time">13:00–13:30</span>
+                <span class="meta"><span class="nm">Vendor — ferry capacity</span><span class="who">judy@ · +2</span></span>
+                <span class="assign">assign</span>
+              </div>
+              <div class="cal-day">Wed · Jun 10</div>
+              <div class="cal-evt on">
+                <span class="time">11:00–12:00</span>
+                <span class="meta"><span class="nm">Client call — Lapland tour</span><span class="who">external · +6</span></span>
+                <span class="assign">assigned</span>
+              </div>
+              <div class="cal-evt dim">
+                <span class="time">15:00–15:15</span>
+                <span class="meta"><span class="nm">1:1 (no Meet link)</span><span class="who">in person</span></span>
+                <span class="assign">—</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ DEPLOY ============ -->
+  <section class="section wrap" id="deploy">
+    <div class="section-head reveal" style="margin-bottom:48px">
+      <p class="eyebrow">// built to stay up</p>
+      <h2 class="sec-title">One stack. Up 24/7.</h2>
+      <p class="lede">The whole thing — API, worker, scheduler, Postgres + pgvector, Redis — comes up with one command. Run it on a homelab box or drop it into a Kubernetes cluster and leave it running.</p>
+    </div>
+    <div class="deploy-grid">
+      <div class="term notch reveal">
+        <div class="term-bar"><span class="dots"><i></i><i></i><i></i></span><span>~/johnny — bash</span></div>
+        <div class="term-body">
+<div class="row"><span class="mut"># clone &amp; bring up the full stack</span></div>
+<div class="row"><span class="pr">$</span> <span class="cm">git clone https://github.com/mekedron/Johnny &amp;&amp; cd Johnny</span></div>
+<div class="row"><span class="pr">$</span> <span class="cm">cp .env.example .env</span></div>
+<div class="row"><span class="pr">$</span> <span class="cm">docker compose up -d</span></div>
+<div class="row"><span class="mut"> ⤷ api · worker · postgres+pgvector · redis · web</span></div>
+<div class="row"><span class="ok">✓</span> <span class="mut">stack healthy — ui at</span> <span class="cy">localhost:5173</span></div>
+<div class="row">&nbsp;</div>
+<div class="row"><span class="pr">$</span> <span class="cm">uv run johnny-smoke</span></div>
+<div class="row"><span class="ok">PASS</span> <span class="mut">compose · migrations · oauth · models · ws</span></div>
+          <div class="copy-row">
+            <button class="copy-btn" data-copy="git clone https://github.com/mekedron/Johnny && cd Johnny && cp .env.example .env && docker compose up -d">copy install</button>
+          </div>
+        </div>
+      </div>
+      <div class="deploy-side">
+        <div class="spec notch-sm reveal">
+          <svg viewBox="0 0 24 24"><use href="#i-box"/></svg>
+          <div><div class="t">Docker Compose</div><div class="d">Five services, healthchecks and named volumes. <code>docker compose up</code> and you're live — no manual wiring.</div></div>
+        </div>
+        <div class="spec notch-sm reveal">
+          <svg viewBox="0 0 24 24"><use href="#i-server"/></svg>
+          <div><div class="t">Kubernetes-ready<span class="badge-soon">soon</span></div><div class="d">Built to run as a long-lived daemon. Park it in a cluster and let the scheduler spawn per-meeting workers on demand.</div></div>
+        </div>
+        <div class="spec notch-sm reveal" id="mcp">
+          <svg viewBox="0 0 24 24"><use href="#i-share"/></svg>
+          <div><div class="t">MCP &amp; agent control<span class="badge-soon">soon</span></div><div class="d">Hand tasks and per-meeting instructions to Johnny over an MCP server — wire it to OpenClaw, Hermes or any agent you run.</div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ CTA ============ -->
+  <section class="section wrap">
+    <div class="cta-band notch notch-lg ticks reveal">
+      <p class="eyebrow">// clone · configure · forget about it</p>
+      <h2 class="sec-title">Send <span class="nm glitch" style="color:var(--signal)" data-persona data-text="Johnny">Johnny</span> in.</h2>
+      <p class="lede" style="text-align:center;margin-inline:auto">Open source. Free to self-host. Yours to shape into any character you want.</p>
+      <div class="hero-cta">
+        <a class="btn btn-primary" href="#"><svg class="ic" viewBox="0 0 24 24"><use href="#i-book"/></svg>Read the docs</a>
+        <a class="btn" href="https://github.com/mekedron/Johnny" target="_blank" rel="noopener"><svg class="ic" viewBox="0 0 24 24"><use href="#i-gh"/></svg>Star on GitHub</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ SUPPORT / TIP JAR ============ -->
+  <section class="section wrap" id="support">
+    <div class="tip-band notch notch-lg ticks reveal">
+      <div class="tip-grid">
+        <div class="tip-copy">
+          <p class="eyebrow">// no corpo backing · one operator</p>
+          <h2 class="sec-title">Keep the <span class="hl">operator</span> caffeinated.</h2>
+          <p class="lede">No VC. No corpo. No telemetry tax — just one person building and running this whole rig on synth-coffee and pure spite. If <span data-persona>Johnny</span> ever covered a meeting for you, slip a few eddies in the tin and keep the lights — and the late-night commits — on.</p>
+          <div class="tip-meta">
+            <span class="chip amber"><span class="dot"></span>solo-maintained</span>
+            <span class="chip"><span class="dot"></span>MIT · free forever</span>
+            <span class="chip cyan"><span class="dot live"></span>100% to ramen &amp; rent</span>
+          </div>
+        </div>
+        <div class="tip-card notch-sm">
+          <div class="tip-card-bar">
+            <span class="seg"><i></i><i></i><i></i></span>
+            <span>street-vendor // payout</span>
+            <span class="rt">open</span>
+          </div>
+          <div class="tip-card-body">
+            <div class="tip-display">
+              <span class="cup"><svg viewBox="0 0 24 24"><use href="#i-coffee"/></svg></span>
+              <span class="meta">
+                <span class="big">Buy the dev a coffee</span>
+                <span class="sub">one cup → one more late-night patch</span>
+              </span>
+            </div>
+            <div class="tip-menu">
+              <div class="tip-row"><span>synth-espresso</span><span class="amber">+1 commit</span></div>
+              <div class="tip-row"><span>bowl of NiCola ramen</span><span class="amber">1 bug, flatlined</span></div>
+              <div class="tip-row"><span>tank of eddies</span><span class="amber">a weekend of features</span></div>
+            </div>
+            <a class="btn btn-coffee solid tip-btn" href="https://buymeacoffee.com/mekedron" target="_blank" rel="noopener"><svg class="ic" viewBox="0 0 24 24"><use href="#i-coffee"/></svg>Buy me a coffee</a>
+            <div class="tip-handle">payout → <b>@mekedron</b> · buymeacoffee.com</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ============ FOOTER ============ -->
+<footer class="footer wrap">
+  <div class="footer-grid">
+    <div>
+      <a class="brand" href="#top" style="margin-bottom:16px"><span class="sq"></span><span data-persona>Johnny</span></a>
+      <p class="colophon">A single-user, local-first AI agent for Google Meet. Joins, transcribes, and speaks within the limits you set — all on hardware you control.</p>
+    </div>
+    <div>
+      <h4>Product</h4>
+      <ul>
+        <li><a href="#modes">Behavior modes</a></li>
+        <li><a href="#local">Local-first</a></li>
+        <li><a href="#persona">Personas &amp; voice</a></li>
+        <li><a href="#calendar">Calendar sync</a></li>
+      </ul>
+    </div>
+    <div>
+      <h4>Build</h4>
+      <ul>
+        <li><a href="#deploy">Self-host</a></li>
+        <li><a href="#deploy">Quickstart</a></li>
+        <li><a href="#mcp">MCP &amp; agents</a></li>
+        <li><a href="https://github.com/mekedron/Johnny" target="_blank" rel="noopener">Repository</a></li>
+        <li><a href="https://buymeacoffee.com/mekedron" target="_blank" rel="noopener">Buy me a coffee</a></li>
+      </ul>
+    </div>
+    <div>
+      <h4>Stack</h4>
+      <ul>
+        <li><a href="#local">faster-whisper · Piper</a></li>
+        <li><a href="#local">Ollama · vLLM</a></li>
+        <li><a href="#persona">ElevenLabs voices</a></li>
+        <li><a href="#deploy">Docker · Postgres</a></li>
+      </ul>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <span>© 2026 <span data-persona>Johnny</span> — single-user, self-hosted.</span>
+    <span class="egg-hint"><span class="crosshair">⌖</span> 5 clicks in the void</span>
+    <span class="lic">MIT · free forever</span>
+  </div>
+</footer>
+
+<!-- React + Babel for the Tweaks panel only -->
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<script type="text/babel" src="tweaks-johnny.jsx"></script>
+<script src="bg.js"></script>
+<script src="app.js"></script>
+<script src="game.js"></script>
+</body>
+</html>

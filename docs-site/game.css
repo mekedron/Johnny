@@ -1,0 +1,207 @@
+/* ============================================================
+   DEFLECTION PROTOCOL — triple-click easter-egg mini-game
+   Cyberpunk shooter: pop awkward questions, fire back the dodge.
+   ============================================================ */
+
+.game-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background:
+    radial-gradient(130% 100% at 50% 0%, rgba(249,233,78,0.05), transparent 60%),
+    rgba(6,6,8,0.82);
+  cursor: none;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity .28s ease;
+  font-family: var(--mono);
+  -webkit-user-select: none;
+  user-select: none;
+}
+/* but keep text selectable inside the intro/debrief cards (e.g. for copying a phrase) */
+.game-card { -webkit-user-select: text; user-select: text; }
+.game-overlay.in { opacity: 1; }
+.game-overlay::before {
+  content: "";
+  position: absolute; inset: 0;
+  background: repeating-linear-gradient(0deg, rgba(255,255,255,0.03) 0 1px, transparent 1px 3px);
+  pointer-events: none;
+  mix-blend-mode: screen;
+}
+
+/* HUD */
+.game-hud {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 18px clamp(20px, 4vw, 48px);
+  z-index: 6;
+  pointer-events: none;
+}
+.game-hud .gtitle {
+  font-size: 13px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--signal);
+  white-space: nowrap;
+  display: flex; align-items: center; gap: 10px;
+}
+.game-hud .gtitle .rec { width: 8px; height: 8px; border-radius: 50%; background: var(--magenta); box-shadow: 0 0 10px var(--magenta); animation: blink 1.3s steps(1) infinite; }
+.game-hud .stat {
+  font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-mut);
+  display: flex; gap: 8px; align-items: baseline;
+}
+.game-hud .stat b { color: var(--fg); font-size: 16px; font-weight: 700; }
+.game-hud .stat.combo b { color: var(--cyan); }
+.game-hud .spacer { flex: 1; }
+.game-timebar {
+  position: absolute; top: 0; left: 0; height: 3px;
+  background: var(--signal); box-shadow: 0 0 12px var(--glow);
+  width: 100%; transform-origin: left; z-index: 7;
+  transition: transform .25s linear;
+}
+.game-exit {
+  pointer-events: auto;
+  position: absolute; top: 14px; right: clamp(16px, 4vw, 48px); z-index: 8;
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--fg-mut); background: rgba(6,6,8,0.6); border: 1px solid var(--line-2);
+  padding: 8px 14px; cursor: pointer; transition: all .15s;
+}
+.game-exit .x { font-size: 14px; line-height: 1; }
+.game-exit:hover { color: var(--magenta); border-color: var(--magenta); }
+
+/* floating question bubbles */
+.q-bubble {
+  position: absolute;
+  max-width: 268px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.03), transparent 50%), var(--bg-2);
+  border: 1px solid var(--line-2);
+  --cut: 11px;
+  clip-path: polygon(0 0, calc(100% - var(--cut)) 0, 100% var(--cut), 100% 100%, var(--cut) 100%, 0 calc(100% - var(--cut)));
+  padding: 13px 15px 14px;
+  color: var(--fg);
+  will-change: transform;
+  transition: border-color .12s, box-shadow .12s, transform .08s;
+}
+.q-bubble:hover { border-color: var(--signal); box-shadow: 0 0 22px -6px var(--glow); }
+.q-bubble .cat {
+  font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--fg-mut); display: flex; align-items: center; gap: 7px; margin-bottom: 7px;
+}
+.q-bubble .cat .pin { width: 6px; height: 6px; background: var(--cyan); box-shadow: 0 0 7px rgba(52,228,208,0.6); }
+.q-bubble .q { font-family: var(--sans); font-size: 15px; line-height: 1.35; font-weight: 500; }
+.q-bubble.pop { animation: qpop .26s cubic-bezier(.3,.7,.3,1) forwards; pointer-events: none; }
+@keyframes qpop { 0%{transform:scale(1)} 40%{transform:scale(1.12)} 100%{transform:scale(0.4);opacity:0;filter:blur(2px)} }
+
+/* Johnny's counter-phrase reply */
+.counter {
+  position: absolute;
+  z-index: 8;
+  max-width: 300px;
+  background: var(--signal);
+  color: var(--signal-ink);
+  --cut: 10px;
+  clip-path: polygon(var(--cut) 0, 100% 0, 100% calc(100% - var(--cut)), calc(100% - var(--cut)) 100%, 0 100%, 0 var(--cut));
+  padding: 12px 15px;
+  font-family: var(--sans); font-size: 15px; font-weight: 600; line-height: 1.3;
+  box-shadow: 0 0 30px -6px var(--glow);
+  pointer-events: none;
+  animation: counter-rise 1.7s ease-out forwards;
+}
+.counter .by { display:block; font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.16em; text-transform: uppercase; opacity: 0.7; margin-bottom: 3px; }
+@keyframes counter-rise {
+  0% { opacity: 0; transform: translateY(8px) scale(0.94); }
+  14% { opacity: 1; transform: translateY(0) scale(1); }
+  72% { opacity: 1; transform: translateY(-16px); }
+  100% { opacity: 0; transform: translateY(-42px); }
+}
+
+/* combo flash text */
+.combo-pop {
+  position: absolute; z-index: 8; pointer-events: none;
+  font-family: var(--mono); font-weight: 700; font-size: 13px; letter-spacing: 0.1em;
+  color: var(--cyan); text-shadow: 0 0 10px rgba(52,228,208,0.6);
+  animation: combo-fly .8s ease-out forwards;
+}
+@keyframes combo-fly { 0%{opacity:0;transform:translateY(0) scale(.8)} 25%{opacity:1;transform:scale(1.1)} 100%{opacity:0;transform:translateY(-34px)} }
+
+/* miss splash */
+.miss-x {
+  position: absolute; z-index: 8; pointer-events: none;
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em; color: var(--fg-mut);
+  animation: miss-fade .6s ease-out forwards;
+}
+@keyframes miss-fade { 0%{opacity:.0} 20%{opacity:.8} 100%{opacity:0;transform:translateY(-10px)} }
+
+/* custom reticle cursor */
+.game-reticle {
+  position: fixed; z-index: 9; top: 0; left: 0;
+  width: 46px; height: 46px; margin: -23px 0 0 -23px;
+  pointer-events: none;
+  will-change: transform;
+}
+.game-reticle svg { width: 100%; height: 100%; display: block; }
+.game-reticle.fire { animation: ret-fire .18s ease-out; }
+@keyframes ret-fire { 0%{transform:scale(1)} 45%{transform:scale(0.8)} 100%{transform:scale(1)} }
+
+/* intro + end card */
+.game-card {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+  z-index: 10; width: min(520px, 90vw);
+  background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent 40%), var(--bg-1);
+  border: 1px solid var(--line-2);
+  --cut: 20px;
+  clip-path: polygon(0 0, calc(100% - var(--cut)) 0, 100% var(--cut), 100% 100%, var(--cut) 100%, 0 calc(100% - var(--cut)));
+  padding: 40px 40px 36px;
+  text-align: center;
+  cursor: auto;
+}
+.game-card .gk { font-size: 11px; letter-spacing: 0.28em; text-transform: uppercase; color: var(--signal); margin: 0 0 14px; }
+.game-card h2 { font-family: var(--sans); font-size: clamp(28px,5vw,42px); text-transform: uppercase; letter-spacing: -0.02em; line-height: 0.96; margin: 0 0 16px; color: var(--fg); }
+.game-card p { font-family: var(--sans); color: var(--fg-dim); font-size: 15px; line-height: 1.55; margin: 0 auto 24px; max-width: 38ch; }
+.game-card .rank { font-family: var(--sans); font-size: clamp(26px,4.5vw,38px); font-weight: 700; text-transform: uppercase; color: var(--signal); letter-spacing: -0.01em; margin: 4px 0 6px; line-height: 1; }
+.game-card .scores { display: flex; justify-content: center; gap: 36px; margin: 22px 0 8px; }
+.game-card .scores .s { display: flex; flex-direction: column; gap: 4px; }
+.game-card .scores .s .n { font-family: var(--sans); font-size: 34px; font-weight: 700; color: var(--fg); line-height: 1; }
+.game-card .scores .s .l { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg-mut); }
+.game-card .best-line { font-size: 12px; color: var(--fg-mut); margin: 14px 0 0; }
+.game-card .best-line em { color: var(--signal); font-style: normal; }
+.game-card .gbtns { display: flex; gap: 12px; justify-content: center; margin-top: 26px; }
+.game-card .keyhint { font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-faint); margin-top: 18px; }
+.game-card .keyhint kbd { color: var(--fg-dim); border: 1px solid var(--line-2); padding: 1px 6px; font-family: var(--mono); font-size: 10px; }
+
+/* footer hint */
+.egg-hint { color: var(--fg-faint); opacity: 0.85; }
+.egg-hint .crosshair { color: var(--fg-mut); }
+
+@media (prefers-reduced-motion: reduce) {
+  .game-overlay, .q-bubble, .counter { transition: none; }
+}
+
+/* ---- touch / mobile ---- */
+@media (pointer: coarse) {
+  /* no mouse to follow — hide the reticle and give back a real tap cursor */
+  .game-overlay { cursor: auto; }
+  .game-reticle { display: none; }
+}
+@media (max-width: 600px) {
+  .game-hud {
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    padding: 14px 16px;
+    padding-right: 86px; /* clear the exit button */
+  }
+  .game-hud .gtitle { width: 100%; font-size: 11px; letter-spacing: 0.18em; }
+  .game-hud .spacer { display: none; }
+  .game-hud .stat { font-size: 11px; gap: 6px; }
+  .game-hud .stat b { font-size: 14px; }
+  .game-exit { top: 12px; right: 14px; padding: 10px 12px; }
+  .q-bubble { max-width: min(74vw, 240px); }
+  .game-card { padding: 28px 22px; }
+  .game-card .scores { gap: 24px; }
+  .game-card .scores .s .n { font-size: 28px; }
+  .game-card .gbtns { flex-wrap: wrap; }
+}
