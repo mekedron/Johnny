@@ -53,6 +53,7 @@ from johnny.voice_pipeline.pipeline import (
     DEFAULT_CONFIDENCE_THRESHOLD,
     DEFAULT_MODE,
     DEFAULT_TRANSCRIPT_WINDOW_SIZE,
+    FREE_AUTO_SPEAK_MODE,
     LIMITED_AUTO_SPEAK_MODE,
     LISTEN_ONLY_MODE,
     NON_SPEAKING_MODES,
@@ -93,6 +94,7 @@ from johnny.voice_pipeline.vad import (
 
 __all__ = [
     "APPROVAL_REQUIRED_MODE",
+    "FREE_AUTO_SPEAK_MODE",
     "DEFAULT_CONFIDENCE_THRESHOLD",
     "DEFAULT_MODE",
     "DEFAULT_TRANSCRIPT_WINDOW_SIZE",

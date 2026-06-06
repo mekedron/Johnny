@@ -80,6 +80,11 @@ APPROVAL_REQUIRED_MODE = "approval_required"
 LISTEN_ONLY_MODE = "listen_only"
 SUGGEST_ONLY_MODE = "suggest_only"
 LIMITED_AUTO_SPEAK_MODE = "limited_auto_speak"
+# Free-speech: chat without an allowed_replies allowlist and without
+# the approval round. The router still gates whether the bot speaks
+# (via confidence_threshold), so ambient chatter doesn't trigger
+# replies, but anything the model wants to say goes through.
+FREE_AUTO_SPEAK_MODE = "free_auto_speak"
 
 NON_SPEAKING_MODES: frozenset[str] = frozenset(
     {LISTEN_ONLY_MODE, SUGGEST_ONLY_MODE}
@@ -531,7 +536,15 @@ class VoicePipeline:
         prompt_text = _serialize_prompt(messages)
 
         collected: list[bytes]
-        if self.config.allowed_replies:
+        # Free-speech mode ignores allowed_replies — the bot is meant
+        # to chat naturally so we always stream the LLM's free-text
+        # response straight into TTS, regardless of any allowlist that
+        # might still be configured on the meeting.
+        use_allowlist = (
+            bool(self.config.allowed_replies)
+            and self.config.mode != FREE_AUTO_SPEAK_MODE
+        )
+        if use_allowlist:
             picked = await self._select_allowed_reply(messages)
             if picked is None or self._interrupt_event.is_set():
                 return False
@@ -547,7 +560,7 @@ class VoicePipeline:
 
         audio_bytes = b"".join(collected)
         audio_ms = _pcm_duration_ms(len(audio_bytes), PCM_SAMPLE_RATE_HZ)
-        matched_allowed_reply = text if self.config.allowed_replies else None
+        matched_allowed_reply = text if use_allowlist else None
 
         spoke_event = AgentSpoke(
             text=text,
@@ -1043,6 +1056,7 @@ def _serialize_prompt(messages: Sequence[ChatMessage]) -> str:
 
 __all__ = [
     "APPROVAL_REQUIRED_MODE",
+    "FREE_AUTO_SPEAK_MODE",
     "DEFAULT_APPROVAL_TIMEOUT_SECONDS",
     "DEFAULT_CONFIDENCE_THRESHOLD",
     "DEFAULT_END_OF_SPEECH_MS",

@@ -563,11 +563,19 @@ async def run(config: BootstrapConfig) -> int:
             msg="opening Chromium under Xvfb",
         )
         try:
+            # CRITICAL: do NOT mute the bot mic. Meet's mic toggle gates
+            # the virtual-mic audio Chromium sends upstream — if we leave
+            # it off, the TTS audio our pipeline writes into
+            # johnny_mic_loopback never reaches the meeting participants.
+            # Camera stays disabled because we never produce a video
+            # stream (the meet-worker has no real camera).
             async with open_meeting_session(
                 meet_link=config.meet_link,
                 session_id=config.session_id,
                 storage_state_path=storage_state,
                 event_bus=bus,
+                mute_mic=False,
+                disable_camera=True,
                 join_timeout_s=config.join_timeout_s,
                 headless=config.headless,
             ) as session:
