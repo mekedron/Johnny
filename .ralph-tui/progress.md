@@ -5,207 +5,136 @@ after each iteration and it's included in prompts for context.
 
 ## Codebase Patterns (Study These First)
 
-### shadcn-svelte foundation (Johnny-stt.10)
+### Design tokens (DESIGN.md → `frontend/src/app.css`)
 
-The frontend has shadcn-svelte installed with Tailwind v4. Canonical
-structure:
+The whole frontend reads tokens from CSS custom properties on `:root`
+(light) and `.dark`. **Shadcn-svelte component names are preserved**:
+`--background`, `--foreground`, `--primary`, `--card`, `--border`,
+`--ring`, `--sidebar`, etc. **Values** point at the DESIGN.md OKLCH
+scheme (Signal Yellow `oklch(0.927 0.176 103)` on near-black
+`oklch(0.13 0 0)`). Per-surface code should USE the named tokens — never
+hardcode Tailwind color classes (`bg-slate-900`, `text-white`,
+`bg-indigo-500`, `bg-purple-400`). When you see a hardcoded color in a
++page.svelte or +layout.svelte, that's a per-page reimagining task
+(`Johnny-fe.1`–`.8`), not a tokens task.
 
-- `frontend/components.json` — registry config, baseColor=`neutral`,
-  ui alias `$lib/components/ui`, utils alias `$lib/utils`.
-- `frontend/src/app.css` — Tailwind v4 entrypoint. Imports
-  `tailwindcss` + `tw-animate-css`, defines all theme CSS variables
-  for `:root` (light) and `.dark` (dark) with oklch colors, and
-  maps them into the `@theme inline` block so utilities like
-  `bg-background`, `text-foreground`, `border-border`,
-  `text-muted-foreground`, etc. resolve.
-- `frontend/src/lib/utils.ts` — `cn()` (twMerge + clsx), plus type
-  helpers `WithElementRef`, `WithoutChildren`, `WithoutChild`,
-  `WithoutChildrenOrChild`.
-- `frontend/src/lib/components/ui/` — primitive components, one
-  folder per primitive (e.g. `button/`, `card/`, `input/`, …) with
-  `<Name>.svelte` + `index.ts`. Export both `Root` and the
-  PascalCased alias (`Button`). Import from
-  `$lib/components/ui/button/index.js` (note the .js — required
-  by `tsconfig.rewriteRelativeImportExtensions`).
-- `frontend/vite.config.ts` — adds `@tailwindcss/vite` plugin
-  ahead of `sveltekit()` so Tailwind v4 picks up the CSS.
-- Dark mode is wired via `mode-watcher`. Place `<ModeWatcher />` in
-  the root `+layout.svelte`, then `toggleMode()` / `setMode()` from
-  the same package. The theme toggle Button lives in the header
-  with `text-primary-foreground` class so its icon is visible on the
-  still-unmigrated dark header background.
+Additional tokens DESIGN.md adds on top of the shadcn baseline:
+`--surface-1/2/3`, `--ink`, `--ink-muted`, `--ink-subtle`,
+`--ink-on-yellow`, `--border-strong`, `--separator`, `--primary-hover`,
+`--primary-pressed`, `--success`, `--warning`, `--info`, `--glow-primary`,
+motion vars (`--dur-fast/--dur-base/--ease-out-quart`...), z-index vars.
+The dark/light tokens both ship from the first commit (mode-watcher
+toggles `.dark` on `<html>`).
 
-### Component conventions
+### Signal Yellow discipline
 
-- Use Svelte 5 runes (`$props`, `$state`, `$bindable`, `$derived`).
-- Type props with `WithElementRef<...>` from `$lib/utils` so each
-  component takes a `bind:ref`.
-- Class names: `cn(baseVariants(...), className)`; never hardcode
-  Tailwind colors — use semantic tokens (`bg-card`,
-  `text-card-foreground`, `border`, `text-muted-foreground`, …).
-- For variant-rich components use `tailwind-variants`’s `tv({...})`
-  in a `<script lang="ts" module>` block and export the variants
-  function (e.g. `buttonVariants`) so other components can reuse it.
+`--primary` is yellow ONLY for: the ONE primary CTA per surface, the
+focus ring, the live-now indicator, the sidebar `aria-current="page"`
+accent, the brand mark on dark surfaces, the in-flight playground token.
+Test: cover the yellow with grey of the same value — if the page still
+reads, yellow is doing real work. If not, the structure is broken; fix
+structure first.
 
-### Existing pages still use bespoke inline `<style>` blocks
+### Live-pulse signature animation
 
-Each per-page sub-ticket (`Johnny-stt.10.1`–`.10.8`) is responsible
-for swapping its inline styles for shadcn primitives. Until then,
-unmigrated pages keep working — the layout-level changes (importing
-`app.css`, adding `<ModeWatcher />`, adding the theme toggle) are
-non-breaking.
+Use `class="live-pulse"` for the active-session dot / recording badge.
+The keyframe is defined in `app.css` and automatically degrades to a
+static, fully-opaque state via the `prefers-reduced-motion` media query.
+
+### Browser validation rule
+
+Every UI change MUST be driven through `chrome-devtools` MCP (NOT
+`claude-in-chrome`) before close. The MCP attaches to a long-lived
+Chrome on `http://127.0.0.1:9222` (started via `./scripts/start-chrome.sh`,
+which is idempotent). If `evaluate_script` returns "No page found", that
+is a stale-session bug — `wait_for` + `take_snapshot` re-establish it
+without restarting Chrome.
+
+### Lint baseline has a pre-existing error
+
+`pnpm lint` currently fails on `providers/+page.svelte:235` — an unused
+`configuredRowsFor` const. Not introduced by current work; do not chase
+it as a regression. Fix it in a `providers` page ticket
+(`Johnny-fe.2` / `Johnny-stt.7` follow-up).
 
 ---
 
-## 2026-06-06 - Johnny-stt.10
+## 2026-06-06 — Johnny-fe.9 (foundation pass)
 
-**Foundation + landing-page migration shipped. Parent bead remains OPEN. 9 sub-tickets track per-surface migrations.**
-
-### What was implemented
-
-1. **Tailwind v4 + shadcn-svelte foundation**
-   - Installed: `tailwindcss@4`, `@tailwindcss/vite@4`, `tw-animate-css`,
-     `clsx`, `tailwind-merge`, `tailwind-variants`, `bits-ui`,
-     `mode-watcher`, `@lucide/svelte`.
-   - `frontend/components.json` configured (style=default,
-     baseColor=neutral, ui alias `$lib/components/ui`).
-   - `frontend/src/app.css` with full canonical theme tokens
-     (light + dark, oklch values straight from the shadcn-svelte
-     theming guide).
-   - `frontend/vite.config.ts` now wires `@tailwindcss/vite` plugin.
-   - `frontend/src/lib/utils.ts` with `cn()` and ref/children type
-     helpers.
-
-2. **Primitive components** (canonical shadcn-svelte
-   implementations, Svelte 5 runes mode):
-   - Button (`button/button.svelte` + `index.ts`) with all six
-     variants (default, destructive, outline, secondary, ghost,
-     link) and four sizes.
-   - Card family (Root, Header, Title, Description, Content, Footer,
-     Action).
-   - Input (handles `type="file"` separately for files binding).
-   - Label (uses `bits-ui` `Label.Root`).
-   - Badge (default/secondary/destructive/outline).
-   - Separator (uses `bits-ui` `Separator.Root`).
-   - Alert family (Root, Title, Description; default + destructive).
-
-3. **Root layout (`/+layout.svelte`)**
-   - Imports `../app.css` so Tailwind utilities + theme tokens are
-     active app-wide.
-   - Mounts `<ModeWatcher />` for class-based dark mode persistence.
-   - Adds a theme-toggle `<Button>` in the header next to the
-     account indicator (sun→moon icon swap via dark: variants).
-   - Removed hardcoded `color: #111827; background: #ffffff;` from
-     the `:global(body)` block so the body now respects
-     `bg-background` / `text-foreground` from the @layer base.
-   - Everything else in the layout (sidebar, sessions panel,
-     approvals panel, menu toggle) still uses its existing scoped
-     CSS — its full migration is tracked in `Johnny-stt.10.1`.
-
-4. **Landing page `/+page.svelte` (62 lines → 78 lines)**
-   - Fully migrated: replaced hand-rolled heading + health-check
-     section with shadcn Card (Header/Title/Description/Action +
-     Content), Button (outline, sm), and Alert (default for
-     loading/ok, destructive for the error state), plus Lucide
-     icons for status.
-   - Inline `<style>` block removed.
+This iteration shipped the **design-token foundation** that every
+per-page ticket (`Johnny-fe.1`–`.8`) depends on, plus the
+chrome-devtools audit of the current state.
 
 ### Files changed
 
-- `frontend/package.json` — new deps.
-- `frontend/pnpm-lock.yaml` — pnpm regenerated.
-- `frontend/vite.config.ts` — added `@tailwindcss/vite`.
-- `frontend/components.json` — new.
-- `frontend/src/app.css` — new.
-- `frontend/src/lib/utils.ts` — new.
-- `frontend/src/lib/components/ui/button/{button.svelte,index.ts}` — new.
-- `frontend/src/lib/components/ui/card/{card.svelte,card-header.svelte,card-title.svelte,card-description.svelte,card-content.svelte,card-footer.svelte,card-action.svelte,index.ts}` — new.
-- `frontend/src/lib/components/ui/input/{input.svelte,index.ts}` — new.
-- `frontend/src/lib/components/ui/label/{label.svelte,index.ts}` — new.
-- `frontend/src/lib/components/ui/badge/{badge.svelte,index.ts}` — new.
-- `frontend/src/lib/components/ui/separator/{separator.svelte,index.ts}` — new.
-- `frontend/src/lib/components/ui/alert/{alert.svelte,alert-title.svelte,alert-description.svelte,index.ts}` — new.
-- `frontend/src/routes/+layout.svelte` — app.css import, ModeWatcher, theme toggle button; removed hardcoded body colors.
-- `frontend/src/routes/+page.svelte` — fully migrated to shadcn.
+- `frontend/src/app.css` — replaced the stock shadcn neutral baseline
+  with the DESIGN.md OKLCH token set in both `:root` (light) and `.dark`
+  (primary identity). Added all new tokens DESIGN.md introduces beyond
+  shadcn (surface-1/2/3, ink scale, border-strong/separator, status
+  colors picked NOT to compete with yellow, glow-primary, motion +
+  z-index vars). Added focus ring (2px Signal Yellow,
+  `:focus-visible` only), prefers-reduced-motion fallback, and the
+  signature `.live-pulse` keyframe.
+- `frontend/src/app.html` — added Inter + JetBrains Mono via Google
+  Fonts (`preconnect` + `display=swap`). Self-hosting via Vite font
+  pipeline is the production-readiness path; not part of the foundation
+  drop.
 
-### Chrome-devtools MCP validation (per CLAUDE.md top-rule)
+### Audit findings (chrome-devtools)
 
-- `start-chrome.sh` confirms Chrome is up on 127.0.0.1:9222.
-- Navigated to `http://localhost:5173/`, took snapshot — confirmed
-  shadcn Card / Button / Alert / theme toggle render.
-- Screenshot light mode → `.ralph-tui/iterations/stt-10-landing-light.png`.
-- Clicked theme toggle, screenshot dark mode →
-  `.ralph-tui/iterations/stt-10-landing-dark.png` (Card and Alert
-  re-color correctly; sidebar still bright because unmigrated).
-- Navigated to `/providers` and `/playground` to confirm no
-  regression — both pages render exactly as before; layout shell
-  including the new theme toggle button is visible →
-  `.ralph-tui/iterations/stt-10-providers-unmigrated.png`,
-  `.ralph-tui/iterations/stt-10-playground-unmigrated.png`.
-- `list_console_messages` shows only backend connectivity errors
-  (`ws://localhost:8000/ws/global` and `localhost:8000` REST) —
-  unrelated to the migration; backend isn't running.
-- `list_network_requests` shows all migrated assets (`/src/app.css`,
-  `/src/lib/components/ui/*`, `mode-watcher`, lucide icons,
-  tailwind-merge, tailwind-variants, clsx) resolved with 200/304 —
-  no 404s.
+Verification gates from DESIGN.md status:
 
-### Why the parent bead Johnny-stt.10 was NOT closed
+| Gate | Token | Dark | Light | Pass? |
+| ---- | ----- | ---- | ----- | ----- |
+| 1 | `--ink` on `--background` | 17.91 | 18.86 | ✅ |
+| 2 | `--ink-subtle` on `--surface-3` | 4.64 | 7.49 | ✅ (lifted from L=0.55→0.62 dark, L=0.60→0.40 light to clear AA) |
+| 3 | `--primary-foreground` on `--primary` | 16.09 | 16.09 | ✅ |
+| 7 | Reduced motion honored | — | — | ✅ (CSS gate + `.live-pulse` degrade) |
+| 8 | Screenshot unambiguously NOT stock shadcn | — | — | ✅ (dark + yellow scheme) |
+| 4 | Yellow on ≤ 3 elements per viewport | — | — | ⚠ BLOCKED on `.1`–`.8` — providers page currently uses yellow on > 3 chips |
+| 5 | No card-in-card | — | — | ⚠ BLOCKED on `.1`–`.8` — providers page has white cards inside its content card |
+| 6 | No uppercase tracked eyebrow | — | — | ⚠ BLOCKED on `.1`–`.8` — providers shows `ADD A NEW STT (SPEECH-TO-TEXT) PROVIDER`, `AUTHENTICATION`, `MODEL`, `ADVANCED` |
 
-The bead's strict acceptance criteria require **every** page
-migrated, **every** surface chrome-devtools MCP screenshot-toured
-in light + dark, and old bespoke CSS deleted. That is 10,000+ lines
-of Svelte across 10 pages plus delete passes — multi-day work, not
-one iteration. The bead description explicitly permits splitting
-into sub-tickets: *"Whether to split into sub-tickets per surface.
-Acceptable if the assignee deems necessary — but the parent ticket
-then tracks the overall closure."*
+Screenshots captured:
 
-Filed sub-tickets (P2, child-of Johnny-stt.10, label
-`shadcn-migration`):
+- `.ralph-tui/iterations/fe9_home_default.png` — light, header still uses hardcoded `bg-slate-900`
+- `.ralph-tui/iterations/fe9_home_dark.png` — dark, main content adopts the new tokens, shell does not
+- `.ralph-tui/iterations/fe9_providers_dark.png` — providers page in dark mode, all `.2` audit failures visible
 
-- `Johnny-stt.10.1` — Migrate /+layout.svelte shell
-- `Johnny-stt.10.2` — Migrate /providers (2358 lines)
-- `Johnny-stt.10.3` — Migrate /playground (1504 lines)
-- `Johnny-stt.10.4` — Migrate /calendar (1322 lines)
-- `Johnny-stt.10.5` — Migrate /settings (988 lines)
-- `Johnny-stt.10.6` — Migrate /templates (539 lines)
-- `Johnny-stt.10.7` — Migrate /history list + detail
-- `Johnny-stt.10.8` — Migrate /sessions/[id] detail
-- `Johnny-stt.10.9` — Final audit + cleanup + full screenshot tour
+### Verdict
 
-The parent bead `Johnny-stt.10` stays OPEN until `.10.9` closes.
+Final-audit gates 1, 2, 3, 7, 8 pass at the foundation level. Gates
+4, 5, 6 cannot pass until the per-page reimagining tickets
+(`Johnny-fe.1` through `Johnny-fe.8`) ship — they own the hardcoded
+header/sidebar colors, the duplicated cards, the uppercase eyebrows,
+and the undisciplined yellow on the providers chips. `Johnny-fe.9`
+remains OPEN; its work is the post-`.1`–`.8` cleanup + final tour.
 
 ### Learnings
 
-- **Tailwind v4 + SvelteKit 2.57 + Svelte 5.55 works out of the
-  box.** No `tailwind.config.js` is needed when using Tailwind v4;
-  theme is defined entirely in CSS via `@theme inline`. Vite plugin
-  must come BEFORE `sveltekit()` in the plugins array.
-- **`bits-ui` is required for any primitive that wraps an
-  accessibility primitive** (Label, Separator, Dialog, etc.) but
-  NOT for visual-only components (Button, Card, Badge, Alert, Input,
-  Separator-style div). Keep that in mind to avoid pulling
-  `bits-ui` into the landing-page bundle.
-- **`mode-watcher` handles class-based dark mode via a `class="dark"`
-  on `<html>` and persists to localStorage.** Just mount
-  `<ModeWatcher />` in the root layout. The toggle call is
-  `toggleMode()` from the same package.
-- **`tsconfig.rewriteRelativeImportExtensions: true` (already set
-  in this repo) requires the canonical `index.js` suffix on
-  shadcn-svelte imports** — `import { Button } from
-  '$lib/components/ui/button/index.js'`, not `.ts` or no suffix.
-- **Mixing shadcn dark + legacy bright works without breaking but
-  looks weird.** The landing page goes black, the layout sidebar
-  stays light — fine as a foundation handoff but cannot ship as
-  end-state. Sub-tickets must clear this per-surface.
-- **Svelte 5 scoped `<style>` overrides Tailwind base layer if it
-  reuses element selectors.** Had to strip the layout's
-  `color: #111827; background: #ffffff;` from `:global(body)` so
-  `bg-background` / `text-foreground` win.
-- **Chrome-devtools MCP `uid`s expire across navigations.** Always
-  re-take a snapshot before clicking; uids from a prior snapshot
-  raise "Element with uid X no longer exists" after any
-  `navigate_page`.
+- **Token replacement migrates components for free.** The DESIGN.md
+  note "shadcn-svelte components reference the existing tokens by name,
+  so a value-only replacement migrates the component set without
+  component edits" is correct in practice — `Button`, `Card`, `Alert`,
+  `Badge`, `Input`, `Label`, `Separator` all changed appearance via the
+  app.css edit alone.
+- **Hardcoded Tailwind colors in +layout.svelte are the per-page work**,
+  not foundation. The light-mode-only header (`bg-slate-900`) and
+  light sidebar in `.dark` mode prove this — the foundation tokens flow
+  through wherever the markup uses semantic classes (`bg-background`,
+  `text-foreground`, `bg-primary`), and break wherever a hex/Tailwind
+  literal is used.
+- **`--ink-subtle` at L=0.55 (dark) and L=0.60 (light) fails AA on
+  `--surface-3`** per DESIGN.md's own conjecture in §Input ("Placeholder
+  must still hit 4.5:1; verify after implementation"). Lifted to 0.62
+  (dark) and 0.40 (light) to clear 4.5:1 with margin.
+- **Google Fonts `display=swap` is enough for the foundation drop.**
+  Self-hosting via Vite is a production hardening pass, not blocking
+  for the design system. Note for future tickets: per CLAUDE.md font
+  rule "do not use Google Fonts CDN in production" — convert before
+  the README screenshot ships.
+- **chrome-devtools MCP `evaluate_script` was returning "No page
+  found"** intermittently. `wait_for` + `take_snapshot` re-establish
+  the session without restarting Chrome.
 
 ---

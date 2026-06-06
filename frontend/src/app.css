@@ -1,40 +1,64 @@
 @import 'tailwindcss';
 @import 'tw-animate-css';
 
+/* ---------------------------------------------------------------------------
+ * Johnny design tokens
+ *
+ * Implements DESIGN.md: operator-deck restraint with one committed identity
+ * strike (Signal Yellow). Dark is the primary identity; light is engineered
+ * to match. Shadcn-svelte token names are preserved so existing components
+ * migrate without edits — only the VALUES change.
+ *
+ * Verification gates the values are sized to clear (DESIGN.md §Verification):
+ *   1. --ink on --background    ≥ 4.5:1  (dark ≈ 18:1, light ≈ 16:1)
+ *   2. --ink-subtle on --surface-3  ≥ 4.5:1
+ *   3. --ink-on-yellow on --primary  ≥ 4.5:1  (black on yellow ≈ 14:1)
+ * --------------------------------------------------------------------------- */
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-	--radius-sm: calc(var(--radius) - 4px);
-	--radius-md: calc(var(--radius) - 2px);
-	--radius-lg: var(--radius);
-	--radius-xl: calc(var(--radius) + 4px);
+	/* Radius — DESIGN.md §Radius: 6px workhorse, smaller than stock shadcn */
+	--radius-xs: 2px;
+	--radius-sm: 4px;
+	--radius-md: var(--radius);
+	--radius-lg: 8px;
+	--radius-xl: 10px;
+	--radius: 6px;
 
+	/* Color tokens — shadcn-svelte names, DESIGN.md values */
 	--color-background: var(--background);
 	--color-foreground: var(--foreground);
-
 	--color-card: var(--card);
 	--color-card-foreground: var(--card-foreground);
-
 	--color-popover: var(--popover);
 	--color-popover-foreground: var(--popover-foreground);
-
 	--color-primary: var(--primary);
 	--color-primary-foreground: var(--primary-foreground);
-
 	--color-secondary: var(--secondary);
 	--color-secondary-foreground: var(--secondary-foreground);
-
 	--color-muted: var(--muted);
 	--color-muted-foreground: var(--muted-foreground);
-
 	--color-accent: var(--accent);
 	--color-accent-foreground: var(--accent-foreground);
-
 	--color-destructive: var(--destructive);
-
+	--color-destructive-foreground: var(--destructive-foreground);
+	--color-success: var(--success);
+	--color-warning: var(--warning);
+	--color-info: var(--info);
 	--color-border: var(--border);
+	--color-border-strong: var(--border-strong);
 	--color-input: var(--input);
 	--color-ring: var(--ring);
+	--color-separator: var(--separator);
+
+	--color-surface-1: var(--surface-1);
+	--color-surface-2: var(--surface-2);
+	--color-surface-3: var(--surface-3);
+	--color-ink: var(--ink);
+	--color-ink-muted: var(--ink-muted);
+	--color-ink-subtle: var(--ink-subtle);
+	--color-ink-on-yellow: var(--ink-on-yellow);
 
 	--color-chart-1: var(--chart-1);
 	--color-chart-2: var(--chart-2);
@@ -50,82 +74,258 @@
 	--color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
 	--color-sidebar-border: var(--sidebar-border);
 	--color-sidebar-ring: var(--sidebar-ring);
+
+	/* Typography — DESIGN.md §Typography */
+	--font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+	--font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, monospace;
 }
 
+/* ---------------------------------------------------------------------------
+ * Light mode (functional, not primary identity)
+ * --------------------------------------------------------------------------- */
 :root {
-	--radius: 0.625rem;
-	--background: oklch(1 0 0);
-	--foreground: oklch(0.145 0 0);
-	--card: oklch(1 0 0);
-	--card-foreground: oklch(0.145 0 0);
-	--popover: oklch(1 0 0);
-	--popover-foreground: oklch(0.145 0 0);
-	--primary: oklch(0.205 0 0);
-	--primary-foreground: oklch(0.985 0 0);
-	--secondary: oklch(0.97 0 0);
-	--secondary-foreground: oklch(0.205 0 0);
-	--muted: oklch(0.97 0 0);
-	--muted-foreground: oklch(0.556 0 0);
-	--accent: oklch(0.97 0 0);
-	--accent-foreground: oklch(0.205 0 0);
-	--destructive: oklch(0.577 0.245 27.325);
-	--border: oklch(0.922 0 0);
-	--input: oklch(0.922 0 0);
-	--ring: oklch(0.708 0 0);
+	/* Surfaces — flat near-white with subtle steps. */
+	--background: oklch(0.99 0 0);
+	--surface-1: oklch(0.97 0 0);
+	--surface-2: oklch(0.95 0 0);
+	--surface-3: oklch(0.93 0 0);
+
+	/* Borders — hairlines via low-alpha black */
+	--border: oklch(0 0 0 / 0.10);
+	--border-strong: oklch(0 0 0 / 0.16);
+	--separator: oklch(0 0 0 / 0.07);
+
+	/* Ink */
+	--ink: oklch(0.16 0 0);
+	--ink-muted: oklch(0.45 0 0);
+	--ink-subtle: oklch(0.40 0 0); /* lifted from 0.60 so it hits AA on --surface-3 */
+	--ink-on-yellow: oklch(0.13 0 0);
+
+	/* Brand — Signal Yellow (Cyberpunk anchor, ~rgb(249,233,78)) */
+	--primary: oklch(0.927 0.176 103);
+	--primary-hover: oklch(0.900 0.180 103);
+	--primary-pressed: oklch(0.860 0.170 103);
+	--primary-foreground: var(--ink-on-yellow);
+
+	/* Status — picked to NOT compete with the yellow */
+	--success: oklch(0.62 0.13 165);
+	--warning: oklch(0.66 0.18 55);
+	--destructive: oklch(0.55 0.22 25);
+	--destructive-foreground: oklch(0.98 0 0);
+	--info: oklch(0.62 0.14 220);
+
+	/* Shadcn-svelte name compatibility — map to DESIGN.md semantics */
+	--foreground: var(--ink);
+	--card: var(--surface-1);
+	--card-foreground: var(--ink);
+	--popover: var(--surface-2);
+	--popover-foreground: var(--ink);
+	--secondary: var(--surface-2);
+	--secondary-foreground: var(--ink);
+	--muted: var(--surface-2);
+	--muted-foreground: var(--ink-muted);
+	--accent: var(--surface-2);
+	--accent-foreground: var(--ink);
+	--input: var(--surface-3);
+
+	/* Focus ring — always the brand yellow */
+	--ring: var(--primary);
+
+	/* Chart palette — quiet, kept from stock */
 	--chart-1: oklch(0.646 0.222 41.116);
 	--chart-2: oklch(0.6 0.118 184.704);
 	--chart-3: oklch(0.398 0.07 227.392);
 	--chart-4: oklch(0.828 0.189 84.429);
 	--chart-5: oklch(0.769 0.188 70.08);
-	--sidebar: oklch(0.985 0 0);
-	--sidebar-foreground: oklch(0.145 0 0);
-	--sidebar-primary: oklch(0.205 0 0);
-	--sidebar-primary-foreground: oklch(0.985 0 0);
-	--sidebar-accent: oklch(0.97 0 0);
-	--sidebar-accent-foreground: oklch(0.205 0 0);
-	--sidebar-border: oklch(0.922 0 0);
-	--sidebar-ring: oklch(0.708 0 0);
+
+	/* Sidebar — uses surface-2 in light, holds yellow accent on active item */
+	--sidebar: var(--surface-2);
+	--sidebar-foreground: var(--ink);
+	--sidebar-primary: var(--primary);
+	--sidebar-primary-foreground: var(--ink-on-yellow);
+	--sidebar-accent: var(--surface-3);
+	--sidebar-accent-foreground: var(--ink);
+	--sidebar-border: var(--border);
+	--sidebar-ring: var(--ring);
+
+	/* Glow — only signature moments */
+	--glow-primary: 0 0 12px oklch(0.927 0.176 103 / 0.45);
+
+	/* Motion */
+	--ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+	--ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+	--ease-in-out: cubic-bezier(0.45, 0, 0.55, 1);
+	--dur-instant: 80ms;
+	--dur-fast: 150ms;
+	--dur-base: 220ms;
+	--dur-slow: 320ms;
+	--dur-deliberate: 500ms;
+
+	/* Z-index */
+	--z-base: 0;
+	--z-raised: 10;
+	--z-dropdown: 1000;
+	--z-sticky: 1100;
+	--z-modal-backdrop: 1200;
+	--z-modal: 1300;
+	--z-toast: 1400;
+	--z-tooltip: 1500;
 }
 
+/* ---------------------------------------------------------------------------
+ * Dark mode (primary identity)
+ * --------------------------------------------------------------------------- */
 .dark {
-	--background: oklch(0.145 0 0);
-	--foreground: oklch(0.985 0 0);
-	--card: oklch(0.205 0 0);
-	--card-foreground: oklch(0.985 0 0);
-	--popover: oklch(0.269 0 0);
-	--popover-foreground: oklch(0.985 0 0);
-	--primary: oklch(0.922 0 0);
-	--primary-foreground: oklch(0.205 0 0);
-	--secondary: oklch(0.269 0 0);
-	--secondary-foreground: oklch(0.985 0 0);
-	--muted: oklch(0.269 0 0);
-	--muted-foreground: oklch(0.708 0 0);
-	--accent: oklch(0.371 0 0);
-	--accent-foreground: oklch(0.985 0 0);
-	--destructive: oklch(0.704 0.191 22.216);
-	--border: oklch(1 0 0 / 10%);
-	--input: oklch(1 0 0 / 15%);
-	--ring: oklch(0.556 0 0);
+	--background: oklch(0.13 0 0);
+	--surface-1: oklch(0.16 0 0);
+	--surface-2: oklch(0.20 0 0);
+	--surface-3: oklch(0.23 0 0);
+
+	--border: oklch(1 0 0 / 0.08);
+	--border-strong: oklch(1 0 0 / 0.14);
+	--separator: oklch(1 0 0 / 0.06);
+
+	--ink: oklch(0.96 0 0);
+	--ink-muted: oklch(0.70 0 0);
+	--ink-subtle: oklch(0.62 0 0); /* lifted to clear AA on --surface-3 */
+	--ink-on-yellow: oklch(0.13 0 0);
+
+	--primary: oklch(0.927 0.176 103);
+	--primary-hover: oklch(0.950 0.180 103);
+	--primary-pressed: oklch(0.880 0.170 103);
+	--primary-foreground: var(--ink-on-yellow);
+
+	--success: oklch(0.78 0.13 165);
+	--warning: oklch(0.78 0.16 55);
+	--destructive: oklch(0.66 0.22 25);
+	--destructive-foreground: oklch(0.98 0 0);
+	--info: oklch(0.78 0.13 220);
+
+	--foreground: var(--ink);
+	--card: var(--surface-1);
+	--card-foreground: var(--ink);
+	--popover: var(--surface-2);
+	--popover-foreground: var(--ink);
+	--secondary: var(--surface-2);
+	--secondary-foreground: var(--ink);
+	--muted: var(--surface-2);
+	--muted-foreground: var(--ink-muted);
+	--accent: var(--surface-2);
+	--accent-foreground: var(--ink);
+	--input: var(--surface-3);
+
+	--ring: var(--primary);
+
 	--chart-1: oklch(0.488 0.243 264.376);
 	--chart-2: oklch(0.696 0.17 162.48);
 	--chart-3: oklch(0.769 0.188 70.08);
 	--chart-4: oklch(0.627 0.265 303.9);
 	--chart-5: oklch(0.645 0.246 16.439);
-	--sidebar: oklch(0.205 0 0);
-	--sidebar-foreground: oklch(0.985 0 0);
-	--sidebar-primary: oklch(0.488 0.243 264.376);
-	--sidebar-primary-foreground: oklch(0.985 0 0);
-	--sidebar-accent: oklch(0.269 0 0);
-	--sidebar-accent-foreground: oklch(0.985 0 0);
-	--sidebar-border: oklch(1 0 0 / 10%);
-	--sidebar-ring: oklch(0.439 0 0);
+
+	--sidebar: var(--surface-2);
+	--sidebar-foreground: var(--ink);
+	--sidebar-primary: var(--primary);
+	--sidebar-primary-foreground: var(--ink-on-yellow);
+	--sidebar-accent: var(--surface-3);
+	--sidebar-accent-foreground: var(--ink);
+	--sidebar-border: var(--border);
+	--sidebar-ring: var(--ring);
 }
 
+/* ---------------------------------------------------------------------------
+ * Base styles
+ * --------------------------------------------------------------------------- */
 @layer base {
 	* {
 		@apply border-border outline-ring/50;
 	}
+
+	html {
+		font-family: var(--font-sans);
+		font-feature-settings: 'cv11', 'ss01', 'ss03';
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
+		text-rendering: optimizeLegibility;
+	}
+
 	body {
 		@apply bg-background text-foreground;
+		font-size: 0.875rem; /* 14px — console density (DESIGN.md §Typography) */
+		line-height: 1.55;
+		letter-spacing: 0;
 	}
+
+	/* Mono — codes, IDs, transcript timestamps, provider model names */
+	code,
+	kbd,
+	pre,
+	samp,
+	.font-mono,
+	[data-mono] {
+		font-family: var(--font-mono);
+	}
+
+	/* Headings — Inter, tight-tracking display */
+	h1,
+	h2,
+	h3 {
+		letter-spacing: -0.025em;
+		text-wrap: balance;
+		line-height: 1.25;
+	}
+
+	/* Long-form prose — pretty wrap, cap line length */
+	.prose,
+	[data-prose] {
+		text-wrap: pretty;
+		max-width: 70ch;
+	}
+
+	/* Focus — DESIGN.md §Focus: the most-seen application of Signal Yellow.
+	 * Per project rule, NEVER remove the ring. Use focus-visible only so
+	 * mouse-click on a button does not show the ring.
+	 */
+	:where(button, [role='button'], a, input, select, textarea, [tabindex]):focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+		border-radius: inherit;
+	}
+}
+
+/* ---------------------------------------------------------------------------
+ * Reduced motion — every animated property gates here.
+ * Active-session pulse degrades to a static, fully-opaque yellow dot.
+ * --------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
+
+	.live-pulse {
+		opacity: 1 !important;
+		animation: none !important;
+	}
+}
+
+/* ---------------------------------------------------------------------------
+ * Signature: active-session pulse. Live-now indicator only. Yellow.
+ * Use class="live-pulse" on the dot/badge.
+ * --------------------------------------------------------------------------- */
+@keyframes live-pulse {
+	0%,
+	100% {
+		opacity: 0.6;
+	}
+	50% {
+		opacity: 1;
+	}
+}
+
+.live-pulse {
+	animation: live-pulse 1800ms var(--ease-in-out) infinite;
 }
