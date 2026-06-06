@@ -1,5 +1,21 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import CalendarIcon from '@lucide/svelte/icons/calendar';
+	import CalendarOffIcon from '@lucide/svelte/icons/calendar-off';
+	import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
+	import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
+	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
+	import VideoIcon from '@lucide/svelte/icons/video';
+	import UsersIcon from '@lucide/svelte/icons/users';
+	import UserIcon from '@lucide/svelte/icons/user';
+	import XIcon from '@lucide/svelte/icons/x';
+	import PlayIcon from '@lucide/svelte/icons/play';
+	import MonitorPlayIcon from '@lucide/svelte/icons/monitor-play';
+	import Trash2Icon from '@lucide/svelte/icons/trash-2';
+	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
+	import { Button } from '$lib/components/ui/button/index.js';
+	import * as Alert from '$lib/components/ui/alert/index.js';
+	import { Input } from '$lib/components/ui/input/index.js';
 	import { listAccounts, type Account } from '$lib/accounts';
 	import {
 		formatDayHeading,
@@ -29,6 +45,17 @@
 	import { startBrowserSession } from '$lib/browserSessions';
 	import { goto } from '$app/navigation';
 
+	const WINDOW_DAYS = 14;
+
+	const MODE_DESCRIPTION: Record<BotMode, string> = {
+		listen_only: 'Transcribe silently. Johnny never speaks.',
+		suggest_only: 'Propose replies in the UI. Operator decides whether to speak.',
+		approval_required: 'Propose a reply, then wait for operator approval before speaking.',
+		limited_auto_speak: 'Auto-speak — but only from a fixed allowlist below.',
+		free_auto_speak: 'Auto-speak any generated reply, no allowlist.',
+		autonomous: 'Free-form speech guided only by the instructions. No approval, no allowlist.'
+	};
+
 	let accounts = $state<Account[]>([]);
 	let selectedAccountId = $state<number | null>(null);
 	let summary = $state<CalendarSyncSummary | null>(null);
@@ -46,7 +73,6 @@
 		selectedAccount?.token_health === 'needs_reauth'
 	);
 
-	// Per-meeting configuration form state.
 	let templates = $state<Template[]>([]);
 	let templatesLoaded = $state(false);
 	let templatesError = $state<string | null>(null);
@@ -54,7 +80,6 @@
 	let panelError = $state<string | null>(null);
 	let panelSuccess = $state<string | null>(null);
 	let existingConfig = $state<MeetingConfig | null>(null);
-	let formEnabled = $state(false);
 	let formTemplateId = $state<number | null>(null);
 	let formIdentityId = $state<number | null>(null);
 	let formMode = $state<BotMode>('listen_only');
@@ -64,14 +89,12 @@
 	let formThresholdText = $state('');
 	let formSaving = $state(false);
 	let formDeleting = $state(false);
-	let pendingDelete = $state(false);
+	let askingDisable = $state(false);
 	let joinNowBusy = $state(false);
 	let joinNowMessage = $state<string | null>(null);
 	let joinNowSessionId = $state<number | null>(null);
 	let tryBotBusy = $state(false);
 	let tryBotMessage = $state<string | null>(null);
-
-	const WINDOW_DAYS = 14;
 
 	const groupedDays = $derived(
 		summary ? groupEventsByDay(summary.events) : []
@@ -80,11 +103,34 @@
 	const meetCount = $derived(
 		summary ? summary.events.filter((e) => e.has_meet_link).length : 0
 	);
-	const syncBadge = $derived(
-		summary
-			? `+${summary.created_count} new · ~${summary.updated_count} updated · −${summary.deleted_count} removed`
-			: ''
+	const configuredCount = $derived(
+		summary ? summary.events.filter((e) => e.has_meeting_config).length : 0
 	);
+	const syncDelta = $derived(
+		summary
+			? summary.created_count + summary.updated_count + summary.deleted_count
+			: 0
+	);
+	const requiresAllowedReplies = $derived(formMode === 'limited_auto_speak');
+	const requiresInstructions = $derived(formMode === 'autonomous');
+
+	const hasPendingChanges = $derived.by(() => {
+		if (!existingConfig) return true;
+		const allowed = formatAllowedRepliesText(existingConfig.allowed_replies);
+		const threshold =
+			existingConfig.confidence_threshold !== null
+				? String(existingConfig.confidence_threshold)
+				: '';
+		return (
+			formTemplateId !== existingConfig.profile_template_id ||
+			formIdentityId !== existingConfig.identity_account_id ||
+			formMode !== existingConfig.mode ||
+			formInstructions !== (existingConfig.instructions ?? '') ||
+			formContext !== (existingConfig.context ?? '') ||
+			formAllowedRepliesText !== allowed ||
+			formThresholdText !== threshold
+		);
+	});
 
 	async function loadAccounts() {
 		loadingAccounts = true;
@@ -113,9 +159,6 @@
 			summary = null;
 			return;
 		}
-		// Skip the network round-trip when the backend would refuse with
-		// 409 anyway — the empty-state offers a Settings deep link
-		// instead of a generic red error banner.
 		if (selectedAccountNeedsReauth) {
 			summary = null;
 			error = null;
@@ -142,25 +185,32 @@
 		void loadEvents();
 	}
 
-	function selectEvent(event: CalendarEvent) {
+	async function selectEvent(event: CalendarEvent) {
 		if (!event.has_meet_link) return;
 		selectedEvent = event;
-		void openConfigPanel(event);
+		await openConfigPanel(event);
 	}
 
 	function closeDetailPanel() {
+		if (formSaving || formDeleting) return;
 		selectedEvent = null;
 		existingConfig = null;
 		panelError = null;
 		panelSuccess = null;
-		pendingDelete = false;
+		askingDisable = false;
+		joinNowMessage = null;
+		joinNowSessionId = null;
+		tryBotMessage = null;
 	}
 
 	async function openConfigPanel(event: CalendarEvent) {
 		panelLoading = true;
 		panelError = null;
 		panelSuccess = null;
-		pendingDelete = false;
+		askingDisable = false;
+		joinNowMessage = null;
+		joinNowSessionId = null;
+		tryBotMessage = null;
 		try {
 			await Promise.all([ensureTemplatesLoaded(), loadConfig(event.id)]);
 			seedForm(existingConfig);
@@ -189,7 +239,6 @@
 
 	function seedForm(config: MeetingConfig | null) {
 		if (config) {
-			formEnabled = config.enabled;
 			formTemplateId = config.profile_template_id;
 			formIdentityId = config.identity_account_id;
 			formMode = config.mode;
@@ -202,7 +251,6 @@
 					: '';
 			return;
 		}
-		formEnabled = false;
 		formTemplateId = templates[0]?.id ?? null;
 		const defaultAccount =
 			accounts.find((a) => a.is_default_user && a.role === 'user') ?? accounts[0];
@@ -219,50 +267,22 @@
 		const value = (event.currentTarget as HTMLSelectElement).value;
 		const parsed = Number(value);
 		formTemplateId = Number.isFinite(parsed) ? parsed : null;
-		// Adopt the template's mode by default so the form pre-fills sanely
-		// when the user picks a new template; the mode selector lets them
-		// override it before save.
+		// Adopt the template's mode so the form pre-fills sanely; the
+		// operator may still override before save.
 		const tpl = templates.find((t) => t.id === formTemplateId);
 		if (tpl) formMode = tpl.mode;
 	}
 
-	function onIdentityChange(event: Event) {
-		const value = (event.currentTarget as HTMLSelectElement).value;
-		const parsed = Number(value);
-		formIdentityId = Number.isFinite(parsed) ? parsed : null;
-	}
-
-	function onModeChange(event: Event) {
-		const value = (event.currentTarget as HTMLSelectElement).value as BotMode;
-		formMode = value;
-	}
-
-	async function onEnableToggle(event: Event) {
-		const checked = (event.currentTarget as HTMLInputElement).checked;
-		if (checked) {
-			formEnabled = true;
-			panelSuccess = null;
-			return;
-		}
-		if (existingConfig) {
-			// Confirmation step before destructive delete.
-			pendingDelete = true;
-			return;
-		}
-		formEnabled = false;
-	}
-
-	async function confirmDelete() {
+	async function confirmDisable() {
 		if (!selectedEvent || !existingConfig) return;
 		formDeleting = true;
 		panelError = null;
 		try {
 			await deleteMeetingConfig(selectedEvent.id);
 			existingConfig = null;
-			pendingDelete = false;
+			askingDisable = false;
 			panelSuccess = 'Johnny disabled for this meeting.';
 			seedForm(null);
-			// Reflect the change in the calendar list without a full reload.
 			if (summary) {
 				const idx = summary.events.findIndex((e) => e.id === selectedEvent?.id);
 				if (idx !== -1) {
@@ -279,9 +299,9 @@
 		}
 	}
 
-	function cancelDelete() {
-		pendingDelete = false;
-		formEnabled = true;
+	function cancelDisable() {
+		if (formDeleting) return;
+		askingDisable = false;
 	}
 
 	async function onSubmit(event: Event) {
@@ -315,7 +335,6 @@
 		};
 		try {
 			existingConfig = await upsertMeetingConfig(selectedEvent.id, payload);
-			formEnabled = true;
 			panelSuccess = 'Saved.';
 			if (summary) {
 				const idx = summary.events.findIndex((e) => e.id === selectedEvent?.id);
@@ -364,9 +383,6 @@
 		try {
 			const session = await startBrowserSession({ event_id: selectedEvent.id });
 			tryBotMessage = `Opening browser session #${session.id}…`;
-			// Hand off to the playground page which owns the audio + UI.
-			// Pass session id via query string so the playground can attach
-			// to the existing session instead of starting a new one.
 			void goto(`/playground?session=${session.id}`);
 		} catch (e) {
 			tryBotMessage = e instanceof Error ? e.message : String(e);
@@ -379,12 +395,31 @@
 		if (!evt.has_meet_link) return;
 		if (event.key === 'Enter' || event.key === ' ') {
 			event.preventDefault();
-			selectEvent(evt);
+			void selectEvent(evt);
 		}
 	}
 
 	function attendeeCount(evt: CalendarEvent): number {
 		return evt.attendees?.length ?? 0;
+	}
+
+	function organizerShort(evt: CalendarEvent): string {
+		if (!evt.organizer) return '—';
+		const at = evt.organizer.indexOf('@');
+		return at > 0 ? evt.organizer.slice(0, at) : evt.organizer;
+	}
+
+	function handleKeydown(e: KeyboardEvent) {
+		if (e.key !== 'Escape') return;
+		if (askingDisable) {
+			e.preventDefault();
+			cancelDisable();
+			return;
+		}
+		if (selectedEvent !== null) {
+			e.preventDefault();
+			closeDetailPanel();
+		}
 	}
 
 	onMount(loadAccounts);
@@ -394,161 +429,269 @@
 	<title>Calendar · Johnny</title>
 </svelte:head>
 
-<div class="page">
-	<header class="page-header">
-		<div>
-			<h1>Calendar</h1>
-			<p class="lede">
-				Your upcoming meetings for the next {WINDOW_DAYS} days. Pick a meeting with a
-				Meet link to configure Johnny for it.
+<svelte:window onkeydown={handleKeydown} />
+
+<div class="mx-auto flex max-w-5xl flex-col gap-6">
+	<header class="flex flex-wrap items-end justify-between gap-4">
+		<div class="flex min-w-0 flex-col gap-1.5">
+			<h1
+				class="m-0 text-2xl leading-tight font-semibold tracking-tight text-foreground"
+			>
+				Calendar
+			</h1>
+			<p class="m-0 max-w-[64ch] text-sm text-muted-foreground">
+				Upcoming meetings · pick one with a Meet link to configure Johnny for
+				it.
 			</p>
 		</div>
-		<div class="header-actions">
-			{#if accounts.length > 1}
-				<label class="account-picker">
-					<span class="visually-hidden">Account</span>
+		<div class="flex items-center gap-2">
+			{#if accounts.length > 0}
+				<label class="flex items-center gap-2 text-sm">
+					<span class="sr-only">Account</span>
 					<select
 						value={selectedAccountId ?? ''}
 						onchange={onAccountChange}
-						disabled={loadingEvents}
+						disabled={loadingEvents || accounts.length < 2}
+						class="border-input flex h-9 min-w-[200px] rounded-md border bg-background px-3 py-1 font-mono text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-70"
 						data-testid="account-picker"
 					>
 						{#each accounts as account (account.id)}
 							<option value={account.id}>
-								{account.email}{account.role === 'bot' ? ' (bot)' : ''}
+								{account.email}{account.role === 'bot' ? ' · bot' : ''}
 							</option>
 						{/each}
 					</select>
 				</label>
 			{/if}
-			<button
-				type="button"
+			<Button
+				variant="ghost"
+				size="icon"
 				onclick={loadEvents}
 				disabled={loadingEvents || selectedAccountId === null}
+				aria-label="Refresh calendar"
+				title="Refresh"
 				data-testid="refresh-button"
 			>
-				{loadingEvents ? 'Refreshing…' : 'Refresh'}
-			</button>
+				<RefreshCwIcon class={loadingEvents ? 'animate-spin' : ''} />
+			</Button>
 		</div>
 	</header>
 
 	{#if error}
-		<div class="alert error" role="alert">{error}</div>
+		<Alert.Root variant="destructive" data-testid="calendar-error">
+			<CircleAlertIcon />
+			<Alert.Title>Couldn't load calendar</Alert.Title>
+			<Alert.Description>{error}</Alert.Description>
+		</Alert.Root>
 	{/if}
 
 	{#if loadingAccounts && accounts.length === 0}
-		<p class="empty">Loading accounts…</p>
+		<p class="text-sm text-muted-foreground italic">Loading accounts…</p>
 	{:else if accounts.length === 0}
-		<p class="empty">
-			No Google accounts connected. <a href="/settings">Add an account</a> from Settings
-			to sync your calendar.
-		</p>
+		<div
+			class="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed border-border bg-surface-1 px-6 py-16 text-center"
+			data-testid="calendar-empty-no-accounts"
+		>
+			<CalendarIcon class="size-8 text-ink-subtle" />
+			<p class="m-0 max-w-[40ch] text-sm text-muted-foreground">
+				No Google accounts connected. Add one from Settings to sync your
+				calendar.
+			</p>
+			<Button variant="outline" href="/settings">
+				Go to Settings
+			</Button>
+		</div>
 	{:else if selectedAccountNeedsReauth && selectedAccount}
-		<section class="reauth-empty" role="status" data-testid="calendar-reauth-empty">
-			<h2>Reconnect this account</h2>
-			<p>
-				The stored refresh token for
-				<strong>{selectedAccount.email}</strong> can't be decrypted, so calendar
-				events can't be fetched. This usually means the <code>FERNET_KEY</code>
-				was rotated since the account was connected.
-			</p>
-			<p class="reauth-actions">
-				<a class="reauth-link" href={`/settings#account-${selectedAccount.id}`}>
+		<div
+			class="flex flex-col gap-4 rounded-md border border-warning bg-surface-1 p-5"
+			role="status"
+			data-testid="calendar-reauth-empty"
+		>
+			<div class="flex items-start gap-3">
+				<TriangleAlertIcon class="size-5 shrink-0 text-warning" />
+				<div class="flex min-w-0 flex-col gap-1.5">
+					<h2
+						class="m-0 text-base leading-tight font-semibold tracking-tight text-foreground"
+					>
+						Reconnect this account
+					</h2>
+					<p class="m-0 max-w-[64ch] text-sm text-muted-foreground">
+						The stored refresh token for
+						<span class="font-mono text-foreground">{selectedAccount.email}</span>
+						can't be decrypted, so calendar events can't be fetched. This usually
+						means the
+						<code
+							class="rounded-xs border border-border bg-surface-2 px-1 py-0.5 font-mono text-xs text-foreground"
+							>FERNET_KEY</code
+						>
+						was rotated since the account was connected.
+					</p>
+				</div>
+			</div>
+			<div class="flex">
+				<Button variant="outline" href={`/settings#account-${selectedAccount.id}`}>
 					Go to Settings → reconnect
-				</a>
-			</p>
-		</section>
+				</Button>
+			</div>
+		</div>
 	{:else if summary}
-		<section class="meta" data-testid="calendar-meta">
-			<span>
-				<strong>{totalCount}</strong> event{totalCount === 1 ? '' : 's'} · {meetCount}
-				with Meet links
-			</span>
-			{#if summary.created_count > 0 || summary.updated_count > 0 || summary.deleted_count > 0}
-				<span class="sync-badge" data-testid="sync-badge">{syncBadge}</span>
+		<div
+			class="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-surface-1 px-4 py-2.5 text-sm"
+			data-testid="calendar-meta"
+		>
+			<div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+				<span class="text-foreground">
+					<span class="font-semibold">{totalCount}</span>
+					<span class="text-muted-foreground"
+						>meeting{totalCount === 1 ? '' : 's'}</span
+					>
+				</span>
+				<span class="text-muted-foreground">·</span>
+				<span class="inline-flex items-center gap-1.5 text-foreground">
+					<VideoIcon class="size-3.5 text-success" />
+					<span class="font-semibold">{meetCount}</span>
+					<span class="text-muted-foreground">with Meet</span>
+				</span>
+				{#if configuredCount > 0}
+					<span class="text-muted-foreground">·</span>
+					<span class="text-foreground">
+						<span class="font-semibold">{configuredCount}</span>
+						<span class="text-muted-foreground">configured</span>
+					</span>
+				{/if}
+			</div>
+			{#if syncDelta > 0}
+				<span
+					class="font-mono text-xs text-muted-foreground"
+					data-testid="sync-badge"
+					title={`${summary.created_count} created, ${summary.updated_count} updated, ${summary.deleted_count} removed in this sync`}
+				>
+					+{summary.created_count} ~{summary.updated_count} −{summary.deleted_count}
+				</span>
 			{/if}
-		</section>
+		</div>
 
 		{#if groupedDays.length === 0}
-			<p class="empty">
-				No upcoming meetings in the next {WINDOW_DAYS} days.
-			</p>
+			<div
+				class="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed border-border bg-surface-1 px-6 py-16 text-center"
+				data-testid="calendar-empty"
+			>
+				<CalendarOffIcon class="size-8 text-ink-subtle" />
+				<p class="m-0 max-w-[40ch] text-sm text-muted-foreground">
+					No meetings in the next {WINDOW_DAYS} days.
+				</p>
+			</div>
 		{:else}
-			<ol class="day-list" data-testid="day-list">
+			<ol class="m-0 flex list-none flex-col gap-6 p-0" data-testid="day-list">
 				{#each groupedDays as group (group.dayKey)}
-					<li class="day">
-						<h2 class="day-heading" data-testid={`day-${group.dayKey}`}>
-							{formatDayHeading(group.date)}
-							<span class="day-date">{group.date.toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
-						</h2>
-						<ul class="event-list">
+					<li class="flex flex-col gap-2.5">
+						<div
+							class="flex items-baseline gap-3 border-b border-separator pb-1.5"
+							data-testid={`day-${group.dayKey}`}
+						>
+							<h2
+								class="m-0 text-base leading-tight font-semibold tracking-tight text-foreground"
+							>
+								{formatDayHeading(group.date)}
+							</h2>
+							<span class="font-mono text-xs text-muted-foreground">
+								{group.date.toLocaleDateString([], {
+									month: 'short',
+									day: 'numeric'
+								})}
+							</span>
+							<span class="ml-auto text-xs text-ink-subtle">
+								{group.events.length} event{group.events.length === 1 ? '' : 's'}
+							</span>
+						</div>
+						<ul class="m-0 flex list-none flex-col gap-1.5 p-0">
 							{#each group.events as evt (evt.id)}
-								<li
-									class="event"
-									class:dimmed={!evt.has_meet_link}
-									class:configured={evt.has_meeting_config}
-									data-testid={`event-${evt.id}`}
-								>
-									{#if evt.has_meet_link}
+								{@const clickable = evt.has_meet_link}
+								{@const isSelected = selectedEvent?.id === evt.id}
+								<li data-testid={`event-${evt.id}`}>
+									<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+									<div
+										class="group grid grid-cols-[110px_1fr_auto] items-center gap-3 rounded-md border bg-card px-3 py-2.5 transition-colors duration-150 {clickable
+											? 'border-border cursor-pointer hover:border-border-strong hover:bg-surface-2 focus-within:border-border-strong'
+											: 'border-dashed border-border opacity-60'} {isSelected
+											? '!border-foreground bg-surface-2'
+											: ''}"
+										role={clickable ? 'button' : 'group'}
+										tabindex={clickable ? 0 : -1}
+										aria-label={clickable
+											? `${evt.summary ?? 'Untitled event'} ${formatTimeRange(evt.start_time, evt.end_time)}`
+											: undefined}
+										aria-disabled={clickable ? undefined : 'true'}
+										aria-pressed={clickable ? isSelected : undefined}
+										onclick={clickable ? () => selectEvent(evt) : undefined}
+										onkeydown={(e) => handleRowKey(e, evt)}
+									>
 										<div
-											class="event-clickable"
-											role="button"
-											tabindex="0"
-											aria-label={`${evt.summary ?? 'Untitled event'} ${formatTimeRange(evt.start_time, evt.end_time)}`}
-											onclick={() => selectEvent(evt)}
-											onkeydown={(e) => handleRowKey(e, evt)}
+											class="flex flex-col gap-0.5 font-mono text-xs leading-tight text-foreground"
 										>
-											<div class="event-time">{formatTimeRange(evt.start_time, evt.end_time)}</div>
-											<div class="event-main">
-												<div class="event-title">
-													<strong>{evt.summary ?? 'Untitled event'}</strong>
-													{#if evt.has_meeting_config}
-														<span class="badge configured-badge" title="Johnny is configured for this meeting">
-															Johnny enabled
-														</span>
-													{/if}
-												</div>
-												<div class="event-details">
-													{#if evt.organizer}
-														<span class="detail-chip">
-															<span class="detail-label">Organizer:</span> {evt.organizer}
-														</span>
-													{/if}
-													<span class="detail-chip">
-														<span class="detail-label">Attendees:</span>
-														{attendeeCount(evt)}
+											<span class="font-medium">
+												{formatTimeRange(evt.start_time, evt.end_time)}
+											</span>
+										</div>
+										<div class="flex min-w-0 flex-col gap-1">
+											<div class="flex items-center gap-2">
+												<span
+													class="truncate text-sm font-medium text-foreground"
+													title={evt.summary ?? undefined}
+												>
+													{evt.summary ?? 'Untitled event'}
+												</span>
+												{#if evt.has_meeting_config}
+													<span
+														class="inline-flex shrink-0 items-center gap-1 rounded-pill border border-border bg-surface-2 px-1.5 py-0.5 text-[0.65rem] font-medium text-foreground"
+														title="Johnny is configured for this meeting"
+														data-testid={`event-${evt.id}-enabled`}
+													>
+														<span
+															class="size-1.5 rounded-full bg-success"
+															aria-hidden="true"
+														></span>
+														<span>Enabled</span>
 													</span>
-													<span class="detail-chip meet-chip" title="Meet link available">
-														<span class="dot" aria-hidden="true"></span>
-														Meet link
+												{/if}
+											</div>
+											<div
+												class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"
+											>
+												{#if evt.organizer}
+													<span class="inline-flex items-center gap-1">
+														<UserIcon class="size-3" />
+														<span class="truncate" title={evt.organizer}>
+															{organizerShort(evt)}
+														</span>
 													</span>
-												</div>
+												{/if}
+												<span class="inline-flex items-center gap-1">
+													<UsersIcon class="size-3" />
+													<span>{attendeeCount(evt)}</span>
+												</span>
+												{#if evt.has_meet_link}
+													<span
+														class="inline-flex items-center gap-1 text-success"
+														title="Google Meet link available"
+													>
+														<VideoIcon class="size-3" />
+														<span>Meet</span>
+													</span>
+												{:else}
+													<span class="text-ink-subtle">No Meet link</span>
+												{/if}
 											</div>
 										</div>
-									{:else}
-										<div class="event-clickable not-clickable" aria-disabled="true">
-											<div class="event-time">{formatTimeRange(evt.start_time, evt.end_time)}</div>
-											<div class="event-main">
-												<div class="event-title">
-													<strong>{evt.summary ?? 'Untitled event'}</strong>
-												</div>
-												<div class="event-details">
-													{#if evt.organizer}
-														<span class="detail-chip">
-															<span class="detail-label">Organizer:</span> {evt.organizer}
-														</span>
-													{/if}
-													<span class="detail-chip">
-														<span class="detail-label">Attendees:</span>
-														{attendeeCount(evt)}
-													</span>
-													<span class="detail-chip no-meet-chip" title="No Google Meet link">
-														No Meet link
-													</span>
-												</div>
-											</div>
-										</div>
-									{/if}
+										{#if clickable}
+											<span
+												class="text-xs text-ink-subtle transition-colors group-hover:text-foreground"
+												aria-hidden="true"
+											>
+												Configure →
+											</span>
+										{/if}
+									</div>
 								</li>
 							{/each}
 						</ul>
@@ -557,766 +700,499 @@
 			</ol>
 		{/if}
 	{:else if loadingEvents}
-		<p class="empty">Syncing calendar…</p>
+		<p class="text-sm text-muted-foreground italic">Syncing calendar…</p>
 	{/if}
 </div>
 
 {#if selectedEvent}
-	<div class="detail-panel" role="dialog" aria-modal="false" aria-labelledby="detail-heading">
-		<header class="detail-header">
-			<h2 id="detail-heading">{selectedEvent.summary ?? 'Untitled event'}</h2>
-			<button type="button" class="close-button" onclick={closeDetailPanel} aria-label="Close">
-				×
-			</button>
-		</header>
-		<dl class="detail-list">
-			<dt>Time</dt>
-			<dd>{formatTimeRange(selectedEvent.start_time, selectedEvent.end_time)}</dd>
-			<dt>Organizer</dt>
-			<dd>{selectedEvent.organizer ?? '—'}</dd>
-			<dt>Attendees</dt>
-			<dd>{attendeeCount(selectedEvent)}</dd>
-			<dt>Meet link</dt>
-			<dd>
-				{#if selectedEvent.meet_link}
-					<a href={selectedEvent.meet_link} target="_blank" rel="noopener noreferrer">
-						{selectedEvent.meet_link}
-					</a>
-				{:else}
-					—
-				{/if}
-			</dd>
-		</dl>
-
-		{#if existingConfig && selectedEvent.has_meet_link}
-			<div class="join-now" data-testid="join-now-row">
-				<button
-					type="button"
-					class="join-now-button"
-					disabled={joinNowBusy}
-					onclick={handleJoinNow}
-					data-testid="join-now-button"
+	<div
+		class="fixed inset-0 z-[var(--z-modal-backdrop)] bg-black/50 backdrop-blur-sm"
+		role="presentation"
+		onclick={closeDetailPanel}
+		onkeydown={() => {}}
+	></div>
+	<aside
+		class="fixed top-0 right-0 z-[var(--z-modal)] flex h-full w-full max-w-[560px] flex-col border-l border-border bg-card shadow-[var(--shadow-modal)]"
+		aria-label="Meeting detail"
+		data-testid="detail-panel"
+	>
+		<div
+			class="flex flex-col gap-3 border-b border-border px-6 py-4"
+			role="dialog"
+			aria-modal="false"
+			aria-labelledby="detail-heading"
+			tabindex="-1"
+		>
+			<div class="flex items-start justify-between gap-3">
+				<div class="flex min-w-0 flex-col gap-1">
+					<h2
+						id="detail-heading"
+						class="m-0 text-lg leading-tight font-semibold tracking-tight text-foreground"
+					>
+						{selectedEvent.summary ?? 'Untitled event'}
+					</h2>
+					<div
+						class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"
+					>
+						<span class="font-mono text-foreground">
+							{formatTimeRange(selectedEvent.start_time, selectedEvent.end_time)}
+						</span>
+						<span aria-hidden="true">·</span>
+						<span class="font-mono">
+							{new Date(selectedEvent.start_time).toLocaleDateString([], {
+								weekday: 'short',
+								month: 'short',
+								day: 'numeric'
+							})}
+						</span>
+					</div>
+				</div>
+				<Button
+					variant="ghost"
+					size="icon"
+					onclick={closeDetailPanel}
+					disabled={formSaving || formDeleting}
+					aria-label="Close detail panel"
 				>
-					{joinNowBusy ? 'Starting…' : 'Join now'}
-				</button>
-				<button
-					type="button"
-					class="try-bot-button"
-					disabled={tryBotBusy}
-					onclick={handleTryWithBot}
-					data-testid="try-bot-button"
-					title="Open an in-browser voice chat with Johnny using this meeting's context — no Google Meet needed."
-				>
-					{tryBotBusy ? 'Opening…' : 'Try with bot'}
-				</button>
-				{#if joinNowMessage}
-					<span class="join-now-message" role="status">
-						{joinNowMessage}
-						{#if joinNowSessionId !== null}
-							<a class="join-now-link" href={`/sessions/${joinNowSessionId}`}>
-								View live session →
-							</a>
-						{/if}
-					</span>
-				{/if}
-				{#if tryBotMessage}
-					<span class="join-now-message" role="status">
-						{tryBotMessage}
-					</span>
-				{/if}
+					<XIcon />
+				</Button>
 			</div>
-		{/if}
+			<dl
+				class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1.5 text-xs"
+			>
+				<dt class="text-muted-foreground">Organizer</dt>
+				<dd class="m-0 truncate font-mono text-foreground">
+					{selectedEvent.organizer ?? '—'}
+				</dd>
+				<dt class="text-muted-foreground">Attendees</dt>
+				<dd class="m-0 text-foreground">{attendeeCount(selectedEvent)}</dd>
+				<dt class="text-muted-foreground">Meet link</dt>
+				<dd class="m-0 min-w-0">
+					{#if selectedEvent.meet_link}
+						<a
+							class="inline-flex items-center gap-1 truncate font-mono text-foreground underline decoration-border-strong decoration-1 underline-offset-2 hover:decoration-primary"
+							href={selectedEvent.meet_link}
+							target="_blank"
+							rel="noopener noreferrer"
+						>
+							<span class="truncate">{selectedEvent.meet_link}</span>
+							<ExternalLinkIcon class="size-3 shrink-0" />
+						</a>
+					{:else}
+						<span class="text-ink-subtle">—</span>
+					{/if}
+				</dd>
+			</dl>
+		</div>
 
-		<section class="config" aria-labelledby="config-heading">
-			<h3 id="config-heading">Johnny configuration</h3>
-
+		<div
+			class="flex min-h-0 flex-1 flex-col overflow-y-auto"
+			data-testid="detail-body"
+		>
 			{#if panelLoading}
-				<p class="empty">Loading configuration…</p>
+				<p class="px-6 py-5 text-sm italic text-muted-foreground">
+					Loading configuration…
+				</p>
 			{:else if templatesError}
-				<div class="alert error" role="alert">
-					Couldn't load templates: {templatesError}
+				<div class="px-6 py-5">
+					<Alert.Root variant="destructive">
+						<CircleAlertIcon />
+						<Alert.Title>Couldn't load templates</Alert.Title>
+						<Alert.Description>{templatesError}</Alert.Description>
+					</Alert.Root>
 				</div>
 			{:else if templates.length === 0}
-				<div class="alert info" role="status">
-					No profile templates exist yet. <a href="/templates">Create one</a> first.
+				<div class="px-6 py-5">
+					<Alert.Root>
+						<CircleAlertIcon />
+						<Alert.Title>No templates yet</Alert.Title>
+						<Alert.Description>
+							Create a profile template before configuring this meeting.
+						</Alert.Description>
+					</Alert.Root>
+					<div class="mt-3">
+						<Button variant="outline" href="/templates">
+							Create a template
+						</Button>
+					</div>
 				</div>
 			{:else if accounts.length === 0}
-				<div class="alert info" role="status">
-					No Google accounts connected. <a href="/settings">Add one</a> first.
+				<div class="px-6 py-5">
+					<Alert.Root>
+						<CircleAlertIcon />
+						<Alert.Title>No accounts connected</Alert.Title>
+						<Alert.Description>
+							Connect a Google account before configuring this meeting.
+						</Alert.Description>
+					</Alert.Root>
 				</div>
 			{:else}
+				{#if existingConfig}
+					<section
+						class="border-b border-separator px-6 py-4"
+						data-testid="join-now-row"
+					>
+						<div class="mb-2 flex items-baseline justify-between">
+							<h3
+								class="m-0 text-xs font-medium tracking-tight text-muted-foreground"
+							>
+								Start session
+							</h3>
+							<span class="text-[0.65rem] text-ink-subtle">
+								Configured · {BOT_MODE_LABEL[existingConfig.mode]}
+							</span>
+						</div>
+						<div class="flex flex-wrap items-center gap-2">
+							<Button
+								variant={hasPendingChanges ? 'outline' : 'default'}
+								onclick={handleJoinNow}
+								disabled={joinNowBusy || tryBotBusy}
+								title={hasPendingChanges
+									? 'Save your changes first.'
+									: undefined}
+								data-testid="join-now-button"
+							>
+								<PlayIcon />
+								{joinNowBusy ? 'Joining…' : 'Join now'}
+							</Button>
+							<Button
+								variant="outline"
+								onclick={handleTryWithBot}
+								disabled={tryBotBusy || joinNowBusy}
+								title="Open an in-browser voice chat with Johnny using this meeting's context — no Google Meet needed."
+								data-testid="try-bot-button"
+							>
+								<MonitorPlayIcon />
+								{tryBotBusy ? 'Opening…' : 'Try in browser'}
+							</Button>
+						</div>
+						{#if joinNowMessage}
+							<p
+								class="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
+								role="status"
+							>
+								<span>{joinNowMessage}</span>
+								{#if joinNowSessionId !== null}
+									<a
+										class="text-foreground underline decoration-border-strong decoration-1 underline-offset-2 hover:decoration-primary"
+										href={`/sessions/${joinNowSessionId}`}
+									>
+										View live session →
+									</a>
+								{/if}
+							</p>
+						{/if}
+						{#if tryBotMessage}
+							<p
+								class="mt-2 text-xs text-muted-foreground"
+								role="status"
+							>
+								{tryBotMessage}
+							</p>
+						{/if}
+					</section>
+				{/if}
+
 				<form
-					class="config-form"
+					class="flex min-h-0 flex-1 flex-col"
 					onsubmit={onSubmit}
 					data-testid="meeting-config-form"
 				>
-					<label class="toggle">
-						<input
-							type="checkbox"
-							checked={formEnabled || existingConfig !== null}
-							onchange={onEnableToggle}
-							disabled={formSaving || formDeleting}
-							data-testid="enable-toggle"
-						/>
-						<span>Enable Johnny for this meeting</span>
-					</label>
-
-					{#if pendingDelete}
-						<div class="alert warn" role="alert">
-							<p>
-								Disabling will delete the saved configuration for this meeting.
-								Continue?
-							</p>
-							<div class="confirm-actions">
-								<button
-									type="button"
-									class="danger"
-									onclick={confirmDelete}
-									disabled={formDeleting}
-									data-testid="confirm-delete"
+					<div class="flex flex-1 flex-col gap-5 px-6 py-5">
+						<div class="flex items-baseline justify-between">
+							<h3
+								class="m-0 text-xs font-medium tracking-tight text-muted-foreground"
+							>
+								{existingConfig
+									? 'Johnny configuration'
+									: 'Configure Johnny for this meeting'}
+							</h3>
+							{#if panelSuccess}
+								<span
+									class="text-xs font-medium text-success"
+									role="status"
+									data-testid="save-success"
 								>
-									{formDeleting ? 'Deleting…' : 'Yes, disable'}
-								</button>
-								<button
-									type="button"
-									onclick={cancelDelete}
-									disabled={formDeleting}
-								>
-									Cancel
-								</button>
-							</div>
+									{panelSuccess}
+								</span>
+							{/if}
 						</div>
-					{/if}
 
-					<fieldset disabled={!formEnabled && existingConfig === null}>
-						<label class="field">
-							<span class="field-label">Profile template</span>
+						<section class="flex flex-col gap-2">
+							<label
+								for="mc-template"
+								class="text-sm leading-none font-medium text-foreground"
+								>Profile template</label
+							>
 							<select
+								id="mc-template"
 								value={formTemplateId ?? ''}
 								onchange={onTemplateChange}
+								class="border-input flex h-9 w-full rounded-md border bg-background px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
 								data-testid="template-select"
 							>
 								{#each templates as tpl (tpl.id)}
 									<option value={tpl.id}>
-										{tpl.name} ({BOT_MODE_LABEL[tpl.mode]})
+										{tpl.name} · {BOT_MODE_LABEL[tpl.mode]}
 									</option>
 								{/each}
 							</select>
-						</label>
+						</section>
 
-						<label class="field">
-							<span class="field-label">Identity</span>
+						<section class="flex flex-col gap-2">
+							<label
+								for="mc-identity"
+								class="text-sm leading-none font-medium text-foreground"
+								>Identity</label
+							>
 							<select
-								value={formIdentityId ?? ''}
-								onchange={onIdentityChange}
+								id="mc-identity"
+								bind:value={formIdentityId}
+								class="border-input flex h-9 w-full rounded-md border bg-background px-3 py-1 font-mono text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
 								data-testid="identity-select"
 							>
 								{#each accounts as account (account.id)}
 									<option value={account.id}>
-										{account.email} ({account.role === 'bot' ? 'bot' : 'user'})
+										{account.email} · {account.role}
 									</option>
 								{/each}
 							</select>
-						</label>
+						</section>
 
-						<label class="field">
-							<span class="field-label">Mode</span>
+						<section class="flex flex-col gap-2">
+							<label
+								for="mc-mode"
+								class="text-sm leading-none font-medium text-foreground"
+								>Mode</label
+							>
 							<select
-								value={formMode}
-								onchange={onModeChange}
+								id="mc-mode"
+								bind:value={formMode}
+								class="border-input flex h-9 w-full rounded-md border bg-background px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
 								data-testid="mode-select"
 							>
 								{#each BOT_MODES as mode (mode)}
 									<option value={mode}>{BOT_MODE_LABEL[mode]}</option>
 								{/each}
 							</select>
-						</label>
+							<p
+								class="m-0 text-xs text-muted-foreground"
+								data-testid="mode-help"
+							>
+								{MODE_DESCRIPTION[formMode]}
+							</p>
+						</section>
 
-						<label class="field">
-							<span class="field-label">Additional instructions</span>
+						<section class="flex flex-col gap-2">
+							<label
+								for="mc-instructions"
+								class="text-sm leading-none font-medium text-foreground"
+							>
+								Additional instructions
+								{#if requiresInstructions}
+									<span
+										class="ml-1 text-destructive"
+										aria-hidden="true">*</span
+									>
+								{/if}
+							</label>
 							<textarea
+								id="mc-instructions"
 								bind:value={formInstructions}
 								rows="3"
-								placeholder="Override or extend the template's base instructions for this meeting."
+								required={requiresInstructions}
+								placeholder="Override or extend the template's instructions for this meeting."
+								class="border-input flex w-full rounded-md border bg-background px-3 py-2 font-mono text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
 								data-testid="instructions-input"
 							></textarea>
-						</label>
+							{#if requiresInstructions}
+								<p class="m-0 text-xs text-warning">
+									Required in Autonomous mode — the only governance for what
+									Johnny will say.
+								</p>
+							{/if}
+						</section>
 
-						<label class="field">
-							<span class="field-label">Additional context</span>
+						<section class="flex flex-col gap-2">
+							<label
+								for="mc-context"
+								class="text-sm leading-none font-medium text-foreground"
+								>Additional context</label
+							>
 							<textarea
+								id="mc-context"
 								bind:value={formContext}
 								rows="3"
-								placeholder="Anything Johnny should know about this meeting."
+								placeholder="Anything Johnny should know — project, audience, history."
+								class="border-input flex w-full rounded-md border bg-background px-3 py-2 font-mono text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
 								data-testid="context-input"
 							></textarea>
-						</label>
+						</section>
 
-						<label class="field">
-							<span class="field-label">
-								Additional allowed replies
-								<span class="field-hint">one per line</span>
-							</span>
-							<textarea
-								bind:value={formAllowedRepliesText}
-								rows="3"
-								placeholder="Optional. Required when mode is 'Limited auto-speak' and the template doesn't already supply them."
-								data-testid="allowed-replies-input"
-							></textarea>
-						</label>
+						{#if requiresAllowedReplies}
+							<section
+								class="flex flex-col gap-2"
+								data-testid="allowed-section"
+							>
+								<label
+									for="mc-allowed"
+									class="text-sm leading-none font-medium text-foreground"
+								>
+									Additional allowed replies
+								</label>
+								<textarea
+									id="mc-allowed"
+									bind:value={formAllowedRepliesText}
+									rows="3"
+									placeholder={'Yes\nNo\nCould you repeat that?'}
+									class="border-input flex w-full rounded-md border bg-background px-3 py-2 font-mono text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
+									data-testid="allowed-replies-input"
+								></textarea>
+								<p class="m-0 text-xs text-muted-foreground">
+									One reply per line. Combined with the template's replies.
+								</p>
+							</section>
+						{/if}
 
-						<label class="field">
-							<span class="field-label">
-								Confidence threshold
-								<span class="field-hint">0.0–1.0, blank to inherit</span>
-							</span>
-							<input
-								type="text"
-								inputmode="decimal"
+						<section class="flex flex-col gap-2">
+							<div class="flex items-baseline justify-between gap-3">
+								<label
+									for="mc-threshold"
+									class="text-sm leading-none font-medium text-foreground"
+									>Confidence threshold</label
+								>
+								<span class="text-xs text-ink-subtle">0.0–1.0 · blank inherits</span>
+							</div>
+							<Input
+								id="mc-threshold"
 								bind:value={formThresholdText}
+								inputmode="decimal"
 								placeholder="e.g. 0.8"
+								class="font-mono"
 								data-testid="threshold-input"
 							/>
-						</label>
+						</section>
+					</div>
 
-						<div class="form-actions">
-							<button
-								type="submit"
-								class="primary"
-								disabled={formSaving || (!formEnabled && existingConfig === null)}
-								data-testid="save-button"
-							>
-								{formSaving ? 'Saving…' : existingConfig ? 'Save changes' : 'Enable Johnny'}
-							</button>
-							{#if panelSuccess}
-								<span class="success" role="status" data-testid="save-success">
-									{panelSuccess}
-								</span>
+					<footer
+						class="sticky bottom-0 flex flex-col gap-3 border-t border-border bg-card px-6 py-4"
+					>
+						{#if panelError}
+							<Alert.Root variant="destructive" data-testid="panel-error">
+								<CircleAlertIcon />
+								<Alert.Description>{panelError}</Alert.Description>
+							</Alert.Root>
+						{/if}
+						<div class="flex flex-wrap items-center justify-between gap-2">
+							{#if existingConfig}
+								<Button
+									type="button"
+									variant="ghost"
+									onclick={() => (askingDisable = true)}
+									disabled={formSaving || formDeleting}
+									class="text-destructive hover:bg-destructive/10 hover:text-destructive"
+									data-testid="disable-button"
+								>
+									<Trash2Icon />
+									Disable
+								</Button>
+							{:else}
+								<span></span>
 							{/if}
+							<div class="flex items-center gap-2">
+								<Button
+									type="button"
+									variant="outline"
+									onclick={closeDetailPanel}
+									disabled={formSaving || formDeleting}
+								>
+									Close
+								</Button>
+								<Button
+									type="submit"
+									variant={existingConfig !== null && !hasPendingChanges
+										? 'outline'
+										: 'default'}
+									disabled={formSaving ||
+										formDeleting ||
+										(existingConfig !== null && !hasPendingChanges)}
+									data-testid="save-button"
+								>
+									{formSaving
+										? 'Saving…'
+										: existingConfig
+											? hasPendingChanges
+												? 'Save changes'
+												: 'Saved'
+											: 'Enable Johnny'}
+								</Button>
+							</div>
 						</div>
-					</fieldset>
-
-					{#if panelError}
-						<div class="alert error" role="alert" data-testid="panel-error">
-							{panelError}
-						</div>
-					{/if}
+					</footer>
 				</form>
 			{/if}
-		</section>
-	</div>
+		</div>
+	</aside>
+
+	{#if askingDisable && existingConfig}
+		<div
+			class="fixed inset-0 z-[calc(var(--z-modal)+1)] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+			role="presentation"
+			onclick={cancelDisable}
+			onkeydown={() => {}}
+		>
+			<div
+				class="flex w-full max-w-md flex-col gap-4 rounded-md border border-border bg-card p-5 shadow-[var(--shadow-modal)]"
+				role="alertdialog"
+				aria-modal="true"
+				aria-labelledby="disable-heading"
+				aria-describedby="disable-body"
+				tabindex="-1"
+				onclick={(e) => e.stopPropagation()}
+				onkeydown={() => {}}
+				data-testid="disable-dialog"
+			>
+				<div class="flex items-start gap-3">
+					<div
+						class="flex size-9 shrink-0 items-center justify-center rounded-full bg-destructive/10 text-destructive"
+					>
+						<Trash2Icon class="size-4" />
+					</div>
+					<div class="flex flex-1 flex-col gap-1.5">
+						<h3
+							id="disable-heading"
+							class="m-0 text-base leading-tight font-semibold tracking-tight text-foreground"
+						>
+							Disable Johnny for this meeting?
+						</h3>
+						<p id="disable-body" class="m-0 text-sm text-muted-foreground">
+							The saved configuration for
+							<span class="font-medium text-foreground"
+								>{selectedEvent.summary ?? 'this meeting'}</span
+							>
+							will be removed. You can re-enable it later by reopening the
+							meeting and saving a new configuration.
+						</p>
+					</div>
+				</div>
+				<div class="flex items-center justify-end gap-2">
+					<Button
+						variant="outline"
+						onclick={cancelDisable}
+						disabled={formDeleting}
+					>
+						Cancel
+					</Button>
+					<Button
+						variant="destructive"
+						onclick={confirmDisable}
+						disabled={formDeleting}
+						data-testid="confirm-delete"
+					>
+						{formDeleting ? 'Disabling…' : 'Disable'}
+					</Button>
+				</div>
+			</div>
+		</div>
+	{/if}
 {/if}
-
-<style>
-	.page {
-		max-width: 960px;
-	}
-	.page-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: flex-start;
-		gap: 1.5rem;
-		flex-wrap: wrap;
-	}
-	.lede {
-		max-width: 60ch;
-		color: #4b5563;
-		margin: 0.25rem 0 0;
-	}
-	.header-actions {
-		display: flex;
-		gap: 0.5rem;
-		align-items: center;
-		flex-shrink: 0;
-	}
-	.account-picker select {
-		padding: 0.45rem 0.6rem;
-		border-radius: 6px;
-		border: 1px solid #d1d5db;
-		background: #ffffff;
-		font: inherit;
-		min-width: 180px;
-	}
-	.visually-hidden {
-		position: absolute;
-		width: 1px;
-		height: 1px;
-		padding: 0;
-		margin: -1px;
-		overflow: hidden;
-		clip: rect(0 0 0 0);
-		white-space: nowrap;
-		border: 0;
-	}
-
-	button {
-		padding: 0.45rem 0.9rem;
-		border: 1px solid #d1d5db;
-		background: #ffffff;
-		color: #1f2937;
-		border-radius: 6px;
-		cursor: pointer;
-		font-size: 0.9rem;
-	}
-	button:hover:not(:disabled) {
-		background: #f9fafb;
-	}
-	button:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	.alert {
-		padding: 0.75rem 1rem;
-		border-radius: 6px;
-		margin: 1rem 0;
-	}
-	.alert.error {
-		background: #fef2f2;
-		color: #991b1b;
-		border: 1px solid #fecaca;
-	}
-
-	.empty {
-		color: #6b7280;
-		font-style: italic;
-		margin: 1.5rem 0 0;
-	}
-
-	.reauth-empty {
-		margin: 1.5rem 0 0;
-		padding: 1rem 1.25rem;
-		border: 1px solid #fed7aa;
-		background: #fff7ed;
-		border-radius: 8px;
-		color: #7c2d12;
-	}
-	.reauth-empty h2 {
-		margin: 0 0 0.4rem;
-		font-size: 1rem;
-		color: #9a3412;
-	}
-	.reauth-empty p {
-		margin: 0 0 0.5rem;
-		color: #7c2d12;
-		max-width: 60ch;
-	}
-	.reauth-empty code {
-		background: #ffedd5;
-		border: 1px solid #fed7aa;
-		padding: 0.05rem 0.3rem;
-		border-radius: 4px;
-		font-size: 0.85em;
-	}
-	.reauth-actions {
-		margin-top: 0.75rem;
-	}
-	.reauth-link {
-		display: inline-block;
-		padding: 0.45rem 0.85rem;
-		background: #f97316;
-		color: #ffffff;
-		font-weight: 600;
-		font-size: 0.85rem;
-		border-radius: 6px;
-		text-decoration: none;
-	}
-	.reauth-link:hover {
-		background: #ea580c;
-	}
-
-	.meta {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		flex-wrap: wrap;
-		gap: 0.75rem;
-		margin: 1.25rem 0 0;
-		padding: 0.6rem 0.9rem;
-		background: #f9fafb;
-		border: 1px solid #e5e7eb;
-		border-radius: 8px;
-		font-size: 0.9rem;
-		color: #374151;
-	}
-	.sync-badge {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.8rem;
-		color: #4b5563;
-	}
-
-	.day-list {
-		list-style: none;
-		padding: 0;
-		margin: 1.5rem 0 0;
-		display: grid;
-		gap: 1.5rem;
-	}
-	.day-heading {
-		display: flex;
-		align-items: baseline;
-		gap: 0.75rem;
-		font-size: 1rem;
-		margin: 0 0 0.5rem;
-		padding-bottom: 0.4rem;
-		border-bottom: 1px solid #e5e7eb;
-	}
-	.day-date {
-		font-weight: 400;
-		font-size: 0.85rem;
-		color: #6b7280;
-	}
-
-	.event-list {
-		list-style: none;
-		padding: 0;
-		margin: 0;
-		display: grid;
-		gap: 0.5rem;
-	}
-	.event {
-		border: 1px solid #e5e7eb;
-		border-radius: 8px;
-		background: #ffffff;
-		transition: border-color 0.15s ease, box-shadow 0.15s ease;
-	}
-	.event:hover:not(.dimmed) {
-		border-color: #4f46e5;
-		box-shadow: 0 1px 3px rgba(79, 70, 229, 0.15);
-	}
-	.event.dimmed {
-		opacity: 0.55;
-		background: #f9fafb;
-	}
-	.event.configured {
-		border-left: 3px solid #4f46e5;
-	}
-	.event-clickable {
-		display: grid;
-		grid-template-columns: 130px 1fr;
-		gap: 1rem;
-		padding: 0.85rem 1rem;
-		text-align: left;
-		width: 100%;
-		background: transparent;
-		border: 0;
-		font: inherit;
-		color: inherit;
-		border-radius: inherit;
-	}
-	.event:not(.dimmed) .event-clickable {
-		cursor: pointer;
-	}
-	.event-clickable.not-clickable {
-		cursor: not-allowed;
-	}
-	.event-clickable:focus-visible {
-		outline: 2px solid #4f46e5;
-		outline-offset: 2px;
-	}
-	.event-time {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.85rem;
-		color: #374151;
-		white-space: nowrap;
-	}
-	.event-main {
-		min-width: 0;
-	}
-	.event-title {
-		display: flex;
-		align-items: baseline;
-		gap: 0.5rem;
-		flex-wrap: wrap;
-	}
-	.event-details {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.5rem 0.85rem;
-		margin-top: 0.35rem;
-		font-size: 0.85rem;
-		color: #4b5563;
-	}
-	.detail-chip {
-		display: inline-flex;
-		gap: 0.3rem;
-		align-items: center;
-	}
-	.detail-label {
-		font-weight: 600;
-		color: #1f2937;
-	}
-	.meet-chip {
-		color: #065f46;
-	}
-	.meet-chip .dot {
-		display: inline-block;
-		width: 0.55rem;
-		height: 0.55rem;
-		border-radius: 999px;
-		background: #10b981;
-	}
-	.no-meet-chip {
-		color: #9ca3af;
-	}
-	.badge {
-		font-size: 0.65rem;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		padding: 0.1rem 0.45rem;
-		border-radius: 999px;
-		background: #e0e7ff;
-		color: #312e81;
-		font-weight: 600;
-	}
-	.configured-badge {
-		background: #4f46e5;
-		color: #ffffff;
-	}
-
-	.detail-panel {
-		position: fixed;
-		top: 56px;
-		right: 0;
-		bottom: 0;
-		width: min(480px, 100%);
-		background: #ffffff;
-		border-left: 1px solid #e5e7eb;
-		box-shadow: -4px 0 12px rgba(0, 0, 0, 0.08);
-		padding: 1.25rem 1.5rem;
-		overflow-y: auto;
-		z-index: 40;
-	}
-	.detail-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: flex-start;
-		gap: 1rem;
-	}
-	.detail-header h2 {
-		margin: 0;
-		font-size: 1.05rem;
-		line-height: 1.3;
-	}
-	.close-button {
-		font-size: 1.5rem;
-		padding: 0 0.5rem;
-		line-height: 1;
-		background: transparent;
-		border: 0;
-		cursor: pointer;
-		color: #6b7280;
-	}
-	.close-button:hover {
-		color: #1f2937;
-	}
-	.detail-list {
-		margin: 1rem 0 0;
-		display: grid;
-		grid-template-columns: max-content 1fr;
-		column-gap: 0.75rem;
-		row-gap: 0.5rem;
-		font-size: 0.9rem;
-	}
-	.detail-list dt {
-		font-weight: 600;
-		color: #374151;
-	}
-	.detail-list dd {
-		margin: 0;
-		word-break: break-word;
-		color: #4b5563;
-	}
-	.join-now {
-		margin-top: 1rem;
-		padding: 0.75rem 1rem;
-		display: flex;
-		align-items: center;
-		gap: 0.75rem;
-		background: #f0f9ff;
-		border: 1px solid #bae6fd;
-		border-radius: 6px;
-	}
-	.join-now-button {
-		appearance: none;
-		border: 0;
-		background: #0ea5e9;
-		color: #ffffff;
-		padding: 0.45rem 0.85rem;
-		border-radius: 4px;
-		font-weight: 600;
-		font-size: 0.85rem;
-		cursor: pointer;
-	}
-	.join-now-button:hover:not(:disabled) {
-		background: #0284c7;
-	}
-	.join-now-button:disabled {
-		opacity: 0.6;
-		cursor: not-allowed;
-	}
-	.try-bot-button {
-		appearance: none;
-		border: 1px solid #6d28d9;
-		background: #f5f3ff;
-		color: #5b21b6;
-		padding: 0.45rem 0.85rem;
-		border-radius: 4px;
-		font-weight: 600;
-		font-size: 0.85rem;
-		cursor: pointer;
-		margin-left: 0.5rem;
-	}
-	.try-bot-button:hover:not(:disabled) {
-		background: #ede9fe;
-	}
-	.try-bot-button:disabled {
-		opacity: 0.6;
-		cursor: not-allowed;
-	}
-	.join-now-message {
-		font-size: 0.85rem;
-		color: #075985;
-	}
-	.config {
-		margin-top: 1.5rem;
-		padding-top: 1.25rem;
-		border-top: 1px solid #e5e7eb;
-	}
-	.config h3 {
-		margin: 0 0 0.75rem;
-		font-size: 0.95rem;
-		font-weight: 600;
-		color: #111827;
-	}
-	.config-form {
-		display: grid;
-		gap: 0.85rem;
-	}
-	.toggle {
-		display: flex;
-		align-items: center;
-		gap: 0.6rem;
-		padding: 0.5rem 0.75rem;
-		background: #f9fafb;
-		border: 1px solid #e5e7eb;
-		border-radius: 6px;
-		font-size: 0.9rem;
-		color: #1f2937;
-	}
-	.toggle input {
-		width: 18px;
-		height: 18px;
-		cursor: pointer;
-	}
-	.field {
-		display: grid;
-		gap: 0.3rem;
-	}
-	.field-label {
-		font-size: 0.8rem;
-		font-weight: 600;
-		color: #374151;
-		display: flex;
-		justify-content: space-between;
-		align-items: baseline;
-		gap: 0.5rem;
-	}
-	.field-hint {
-		font-weight: 400;
-		color: #9ca3af;
-		font-size: 0.75rem;
-	}
-	.field select,
-	.field input[type='text'],
-	.field textarea {
-		padding: 0.5rem 0.65rem;
-		border: 1px solid #d1d5db;
-		border-radius: 6px;
-		background: #ffffff;
-		font: inherit;
-		font-size: 0.9rem;
-		color: #1f2937;
-		width: 100%;
-	}
-	.field textarea {
-		resize: vertical;
-		min-height: 60px;
-		font-family: inherit;
-	}
-	.field select:focus,
-	.field input:focus,
-	.field textarea:focus {
-		outline: 2px solid #4f46e5;
-		outline-offset: 1px;
-		border-color: #4f46e5;
-	}
-	fieldset {
-		border: 0;
-		padding: 0;
-		margin: 0;
-		display: grid;
-		gap: 0.85rem;
-	}
-	fieldset:disabled {
-		opacity: 0.5;
-	}
-	.form-actions {
-		display: flex;
-		align-items: center;
-		gap: 0.85rem;
-		flex-wrap: wrap;
-	}
-	.primary {
-		background: #4f46e5;
-		color: #ffffff;
-		border-color: #4338ca;
-	}
-	.primary:hover:not(:disabled) {
-		background: #4338ca;
-	}
-	.danger {
-		background: #b91c1c;
-		color: #ffffff;
-		border-color: #991b1b;
-	}
-	.danger:hover:not(:disabled) {
-		background: #991b1b;
-	}
-	.success {
-		color: #065f46;
-		font-size: 0.85rem;
-		font-weight: 600;
-	}
-	.alert.warn {
-		background: #fef3c7;
-		color: #92400e;
-		border: 1px solid #fde68a;
-	}
-	.alert.info {
-		background: #eff6ff;
-		color: #1e40af;
-		border: 1px solid #bfdbfe;
-	}
-	.confirm-actions {
-		display: flex;
-		gap: 0.5rem;
-		margin-top: 0.5rem;
-	}
-
-	@media (max-width: 640px) {
-		.event-clickable {
-			grid-template-columns: 1fr;
-			gap: 0.4rem;
-		}
-		.detail-panel {
-			top: 56px;
-			width: 100%;
-			border-left: 0;
-		}
-		.form-actions {
-			flex-direction: column;
-			align-items: stretch;
-		}
-	}
-</style>

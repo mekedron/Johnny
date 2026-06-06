@@ -57,6 +57,283 @@ without restarting Chrome.
 it as a regression. Fix it in a `providers` page ticket
 (`Johnny-fe.2` / `Johnny-stt.7` follow-up).
 
+### Pending-change-aware primary discipline
+
+When a surface has TWO actions that could both legitimately be primary
+(e.g., `Save changes` and `Join now` on a configured-meeting sheet),
+adopt a `hasPendingChanges` derived flag and swap variants so that
+*exactly one* button is yellow at any moment:
+
+- New config (no `existingConfig`): submit = yellow `Enable Johnny`,
+  Join now hidden.
+- Saved + no pending changes: Join now = yellow, submit = outline
+  `Saved` (disabled).
+- Saved + pending changes: submit = yellow `Save changes`, Join now =
+  outline (with tooltip "Save your changes first").
+
+Pattern lives in `calendar/+page.svelte` and resolves the gate-4 risk
+of "2+ yellows competing for the operator's attention" without removing
+either action.
+
+
+---
+
+## 2026-06-07 — Johnny-fe.4 (REIMAGINE /calendar)
+
+Replaced the 1322-line custom-CSS calendar page with a 1180-line
+shadcn-svelte + design-token rewrite. From-scratch IA redesign — not a
+1:1 port.
+
+### Files changed
+
+- `frontend/src/routes/calendar/+page.svelte` — full rewrite.
+  Deleted the entire `<style>` block (~510 lines of hardcoded hex
+  colors: `#4f46e5` indigo configured-border + badge, `#f97316` orange
+  reauth CTA, `#fff7ed` cream reauth bg, `#0ea5e9` cyan Join now,
+  `#6d28d9`/`#f5f3ff` purple Try-with-bot, `#10b981` green Meet dot,
+  `#fef3c7`/`#92400e` amber warn). Replaced with shadcn `Button` /
+  `Alert` / `Input` and Tailwind utility classes mapped to DESIGN.md
+  tokens (`bg-card`, `bg-surface-1/2/3`, `text-foreground`,
+  `text-muted-foreground`, `border-border`, `border-border-strong`,
+  `border-warning`, `text-warning`, `text-success`, `text-destructive`,
+  `bg-primary`). Preserved every `data-testid` (`account-picker`,
+  `refresh-button`, `calendar-reauth-empty`, `calendar-meta`,
+  `sync-badge`, `day-list`, `day-${key}`, `event-${id}`,
+  `event-${id}-enabled`, `meeting-config-form`, `template-select`,
+  `identity-select`, `mode-select`, `instructions-input`,
+  `context-input`, `allowed-replies-input`, `threshold-input`,
+  `save-button`, `save-success`, `join-now-row`, `join-now-button`,
+  `try-bot-button`, `panel-error`, `disable-button`, `disable-dialog`,
+  `confirm-delete`).
+
+### IA changes (the actual REIMAGINE)
+
+1. **Killed the colored-rainbow row.** Old design used indigo on the
+   configured row (left-border accent + `Johnny enabled` chip), cyan
+   on Join now, orange-cream on reauth, purple on Try with bot, plus
+   green Meet link dot — a five-color palette competing on a single
+   list view. New design: ONE green status dot on the "Enabled" pill,
+   identical neutral row treatment for all events (only the dashed
+   border + opacity-60 distinguishes "no Meet link"), and yellow
+   reserved for the actual primary CTA inside the configure sheet.
+2. **Account picker always shows, even with 1 account.** Old design
+   hid the `<select>` when `accounts.length <= 1`, leaving the
+   operator no indication of which calendar source the page is
+   reading. New design renders the select disabled with the email
+   visible as a chip — the source of truth is always on screen. Disabled
+   styling (`opacity-70`, no caret) signals "fixed for now" without
+   removing context.
+3. **Refresh became an icon button.** Old `Refresh` (full-text
+   secondary button) competed visually with the account picker. New
+   design: `<RefreshCwIcon>` ghost icon button (32×32), spinning
+   during fetch via `animate-spin`. Saves header real estate; the
+   action is still discoverable via `title="Refresh"` and the
+   `aria-label`.
+4. **Meta strip uses semantic tokens.** Old design had a single grey
+   bar with mono sync-badge text. New design replaces it with a flex
+   strip on `bg-surface-1`: `7 meetings · 7 with Meet · 1 configured`,
+   each count `font-semibold` with `text-muted-foreground` labels. The
+   sync-badge stays mono and right-aligned, showing `+N ~M −X` with a
+   tooltip ("created/updated/removed in this sync") — operators don't
+   need to parse those numbers at-a-glance; they need the deltas at
+   reach when something looks wrong.
+5. **Day headings + count.** Old design used a 16px heading
+   (`<h2>`) with the date inline. New design: heading + mono date
+   chip on left, `N event(s)` count on right (`text-ink-subtle`). The
+   border-bottom is `border-separator` (hairline) instead of the old
+   `border-bottom: 1px solid #e5e7eb`. Cleaner visual rhythm with the
+   neutral surface tokens.
+6. **Event rows.** Old design: grey card with indigo border for
+   configured + indigo badge + green Meet dot in a chip. New design: a
+   1px `border-border` card with 110px mono time column + content +
+   "Configure →" affordance on hover. Configured events get a small
+   pill on the title row: green status dot + "Enabled" — no left
+   border, no badge color. The hover state is `border-border-strong`
+   + `bg-surface-2` — same affordance for every clickable row,
+   indistinguishable in color from each other.
+7. **Reauth empty state.** Old design used a 230x150 orange-cream
+   `<aside>` panel with the email in `<strong>` and an indigo
+   `Reconnect` link. New design: `border-warning` bordered card on
+   `bg-surface-1` with `<TriangleAlertIcon class="text-warning">` on
+   the left, sentence-case heading, email + `FERNET_KEY` both in
+   mono, and an outline (not yellow) `Go to Settings → reconnect`
+   button. Matches the settings-page reauth treatment (Johnny-fe.5)
+   for cross-page consistency.
+8. **Detail panel → right-side Sheet.** Old design was a 480px
+   fixed-position div with a 56px top offset to clear the layout
+   header — when the operator clicked an event, the panel covered
+   half the screen but ALSO sat *under* the page header, creating an
+   awkward visual gap. New design: 560px right-side Sheet that opens
+   over a backdrop (`bg-black/50 backdrop-blur-sm`) and is
+   `z-[var(--z-modal)]`, with sticky header (event title + meta strip
+   + organizer/attendee dl) and sticky footer (Disable / Close / Save).
+   The list rows behind get a subtle dim from the backdrop, which
+   makes the operator-mode focus explicit.
+9. **Sheet split into 3 stacked sections.**
+   - **Header (sticky):** event title + time + day chip + dl
+     metadata (organizer, attendees, meet link).
+   - **Start session (only when `existingConfig` exists):** "Join now"
+     + "Try in browser" buttons, with a "Configured · Mode" subtitle
+     on the right. Hairline separator below.
+   - **Johnny configuration:** the form. Sticky footer with the
+     destructive `Disable` (ghost variant, leading TrashIcon) on the
+     LEFT, then `Close` (outline) and `Save changes`/`Enable Johnny`
+     (variant swaps) on the RIGHT. Disable is far from Save so a
+     misclick is unlikely.
+10. **Pending-change-aware primary.** Two derived states drive
+    button variants on the sheet:
+    - `hasPendingChanges = $derived.by(...)` compares every form
+      field to `existingConfig`.
+    - When `existingConfig === null`: Save = yellow `Enable Johnny`.
+    - When `existingConfig !== null && !hasPendingChanges`: Save =
+      outline `Saved` (disabled); Join now = yellow.
+    - When `existingConfig !== null && hasPendingChanges`: Save =
+      yellow `Save changes`; Join now = outline (tooltip "Save your
+      changes first.").
+    Exactly one yellow CTA active at a time → gate 4 holds.
+11. **Mode-aware sections.** Like the templates page (Johnny-fe.6):
+    "Additional allowed replies" renders only when mode =
+    `limited_auto_speak`; "Additional instructions" gets `required`
+    + `*` marker + amber helper when mode = `autonomous`; mode help
+    text below the select updates on every selection.
+12. **Killed the `enable-toggle`.** Old design had a `<label class
+    ="toggle"><input type="checkbox">` row at the top of the form;
+    unchecking it triggered a confirmation flow ("Disabling will
+    delete the saved configuration for this meeting. Continue?")
+    inside an inline yellow `.alert.warn`. New design: there is no
+    enable-toggle. To enable Johnny, fill the form and submit. To
+    disable, click the destructive `Disable` button → AlertDialog
+    with `role="alertdialog"` + Esc/backdrop close + Cancel +
+    destructive Disable confirmation. Same outcome, half the form
+    surface, no awkward checkbox-as-mode-switch.
+13. **Removed the `enable-toggle` "implicit-on" footgun.** Old design
+    had `checked={formEnabled || existingConfig !== null}` — a
+    checkbox that was checked even when `formEnabled` was false,
+    because an existing config implied "currently enabled". This was
+    confusing: the operator clicked an event with a saved config
+    and saw a checked box they'd never checked. New design: no
+    checkbox at all. The form exists IF AND ONLY IF the operator is
+    actively configuring; the saved state is communicated by the
+    presence of the "Start session" section + the "Enabled" pill on
+    the event row.
+
+### Verification (chrome-devtools MCP, dark + light)
+
+Drove every state through the real Chrome instance pointing at
+`http://localhost:5173/calendar`:
+- ✓ List loads with 7 real events from the connected Google account
+  (nikita.rabykin@aikamatkat.fi). Day grouping correct; "Tomorrow"
+  label resolves vs. absolute weekday for further days.
+- ✓ Dark mode: sidebar Calendar nav active accent (1 yellow); rest of
+  list = 0 yellow → gate 4 holds.
+- ✓ Light mode: same hierarchy, same 0 yellow on main; sidebar still
+  carries 1 (layout-owned).
+- ✓ Clicked "Monday TTAll catch-up" → sheet slides in from right,
+  meta dl populated, mode select swaps help text dynamically
+  (Approval required → Limited auto-speak shows "Additional allowed
+  replies" section; → Autonomous shows `*` + amber warning, hides
+  allowed-replies).
+- ✓ Set context, clicked Enable Johnny → "Saved." status renders in
+  success green, "Start session" section appears with yellow Join now
+  + outline Try in browser, Save button switches to outline `Saved`
+  (disabled), Disable button appears in footer.
+- ✓ Modified context → Save flips to yellow `Save changes`, Join now
+  switches to outline with tooltip. Confirmed only one yellow CTA at
+  any moment.
+- ✓ Disable → AlertDialog with destructive red TrashIcon, sentence-
+  case heading, body explains what gets removed, Cancel (outline) +
+  Disable (destructive red). Confirmed → status "Johnny disabled for
+  this meeting." appears, Start session section disappears,
+  "Enabled" pill on the event row vanishes after refresh.
+- ✓ Added a synthetic bad-token bot account → switched to it via
+  account picker → reauth state renders correctly (amber-bordered
+  card, TriangleAlertIcon, sentence-case heading, mono email + code,
+  outline reconnect button). Confirmed in both modes.
+- ✓ Esc closes the sheet; Esc inside an open AlertDialog closes the
+  dialog first, leaving the sheet open. Backdrop click on either
+  layer closes that layer.
+
+### Verification gates (DESIGN.md)
+
+| Gate | Status |
+| --- | --- |
+| 1. Body text on background ≥4.5:1 | ✓ (foundation, ~18:1 dark, ~16:1 light) |
+| 2. Placeholder on surface-3 ≥4.5:1 | ✓ (foundation) |
+| 3. Primary button label on primary ≥4.5:1 | ✓ (foundation, ~14:1) |
+| 4. Yellow ≤ 3 elements per viewport | ✓ (list view: 1 sidebar; sheet open without pending changes: 1 sidebar + Join now = 2; with pending: 1 sidebar + Save changes + focus ring = 3 max) |
+| 5. No card-in-card | ✓ (sheet is a slide-in panel, not a card; event rows are flat with no nested cards; "Start session" / "Johnny configuration" sections are separated by hairlines, not nested cards) |
+| 6. No uppercase tracked eyebrow | ✓ (sentence case throughout: "Start session", "Johnny configuration", "Profile template", etc.) |
+| 7. Reduced motion honored | ✓ (foundation; no custom animations introduced; `animate-spin` on refresh icon is the only motion and it ceases on `prefers-reduced-motion: reduce` via the global gate) |
+| 8. Screenshot unambiguously NOT stock shadcn | ✓ (mono time + Lucide icons + green-success Meet chip + yellow primary CTA + dark surfaces + no indigo/purple/cyan anywhere) |
+
+### Quality gates
+
+- `pnpm check` (svelte-check) → 0 errors, 0 warnings ✓
+- `pnpm lint` → 1 error in `providers/+page.svelte:235` (pre-existing
+  baseline `configuredRowsFor`, documented in Codebase Patterns) ✓
+
+### Screenshots in `.validation/Johnny-fe.4/`
+
+- `01-before-light-reauth.png` / `02-before-dark-reauth.png` —
+  reference of the previous design's orange-cream reauth empty state
+  (seed account, the only state the previous design exercised without
+  a real Google calendar).
+- `04-after-dark-list-actual.png` / `11-after-light-list.png` — new
+  list view in both modes with real Google data.
+- `05-after-dark-sheet-new.png` — sheet open, no existing config,
+  yellow `Enable Johnny` is the only CTA.
+- `06-after-dark-mode-limited.png` — Limited auto-speak mode shows
+  the "Additional allowed replies" section.
+- `07-after-dark-mode-autonomous.png` — Autonomous mode shows `*` +
+  amber warning under Instructions.
+- `08-after-dark-sheet-configured.png` — Saved state, before the
+  variant-swap refinement (Saved button was still yellow at 50%
+  opacity — superseded by `14-` below).
+- `09-after-dark-disable-dialog.png` — AlertDialog for disable.
+- `12-after-light-reauth.png` / `13-after-dark-reauth.png` — amber-
+  bordered reauth card in both modes for a synthetic bad-token bot
+  account.
+- `14-after-dark-configured-saved-outline.png` — final saved state:
+  Save = outline `Saved`, Join now = yellow.
+- `15-after-dark-configured-pending.png` / `16-after-dark-pending-final.png`
+  — pending-changes states. `15-` was before the Join-now-becomes-
+  outline refinement; `16-` is the final shipped behaviour with Join
+  now = outline + Save = yellow when changes are pending.
+
+### Learnings
+
+- **Svelte 5 `a11y_no_noninteractive_tabindex` fires even when the
+  `role` is a dynamic ternary** — e.g., `role={clickable ? 'button'
+  : 'group'} tabindex={clickable ? 0 : -1}` triggers the warning
+  because the static analyzer doesn't trust the runtime resolution.
+  The cleanest fix is a single `<!-- svelte-ignore
+  a11y_no_noninteractive_tabindex -->` comment over the element;
+  rewriting into two `{#if}` branches doubles the markup for no
+  user-visible benefit.
+- **`bind:value={formIdentityId}` cleanly two-ways even with `value`
+  being a `number | null`** — Svelte 5 auto-coerces select values
+  through the bind. No need for the manual `onchange` + `Number()`
+  parse the original page used for every select.
+- **The `Edit` tool tracks file state across edits, and a linter run
+  between `Read` and `Edit` invalidates the cached read.** Hit this
+  when removing an unused import — the lint had auto-fixed the file
+  in the meantime. Re-Reading the file before the Edit is the
+  correct recovery, even when the change is small.
+- **`evaluate_script` reliably returns "No page found" inside a
+  long-running validation session.** The workaround (`wait_for` +
+  `take_snapshot` to re-establish) sometimes fails too — for
+  contrast checks etc., fall back to inspecting the captured PNGs
+  visually rather than burning iterations trying to recover the
+  CDP session.
+- **Yellow discipline benefits from `hasPendingChanges`.** Without
+  this derived flag, the configured-meeting sheet has TWO actions
+  the operator might call "primary" — Save and Join now — and the
+  naive choice (both yellow) blows gate 4 if a focus ring + sidebar
+  bring the visible count to 4. The flag-driven swap makes the
+  semantic clear: "save first, then start". The tooltip on the
+  outline Join now ("Save your changes first.") removes the
+  ambiguity for the operator.
+
 ---
 
 ## 2026-06-06 — Johnny-fe.6 (REIMAGINE /templates)
