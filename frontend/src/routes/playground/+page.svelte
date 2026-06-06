@@ -1,6 +1,23 @@
 <script lang="ts">
-	import { onDestroy, onMount } from 'svelte';
+	import { onDestroy, onMount, tick } from 'svelte';
 	import { page } from '$app/state';
+	import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
+	import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
+	import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
+	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
+	import MicIcon from '@lucide/svelte/icons/mic';
+	import MicOffIcon from '@lucide/svelte/icons/mic-off';
+	import OctagonXIcon from '@lucide/svelte/icons/octagon-x';
+	import PlayIcon from '@lucide/svelte/icons/play';
+	import SendIcon from '@lucide/svelte/icons/send-horizontal';
+	import SquareIcon from '@lucide/svelte/icons/square';
+	import Volume2Icon from '@lucide/svelte/icons/volume-2';
+	import VolumeXIcon from '@lucide/svelte/icons/volume-x';
+	import BotIcon from '@lucide/svelte/icons/bot';
+	import UserIcon from '@lucide/svelte/icons/user';
+	import { Button } from '$lib/components/ui/button/index.js';
+	import * as Alert from '$lib/components/ui/alert/index.js';
+	import { Input } from '$lib/components/ui/input/index.js';
 	import {
 		audioWebSocketUrl,
 		postBrowserText,
@@ -49,10 +66,26 @@
 		timestamp: number;
 	}
 
+	const MODE_DESCRIPTION: Record<BotMode, string> = {
+		listen_only: 'Transcribe silently. Johnny never speaks.',
+		suggest_only: 'Propose replies in the UI. Operator decides whether to speak.',
+		approval_required: 'Propose a reply, then wait for operator approval before speaking.',
+		limited_auto_speak: 'Auto-speak — but only from a fixed allowlist below.',
+		free_auto_speak: 'Auto-speak any generated reply, no allowlist.',
+		autonomous: 'Free-form speech guided only by the instructions. No approval, no allowlist.'
+	};
+
+	// Same field classes as the templates page: native select/textarea styled
+	// to match the Input field. Wrapped here for reuse across the form.
+	const FIELD_CLASS =
+		'border-input bg-background flex w-full rounded-md border px-3 py-2 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50';
+
 	// --- Configuration state ----------------------------------------------
 
 	let persona = $state('Concise, friendly conversation partner.');
-	let systemPrompt = $state('Respond directly without any speaker label, bot name, role prefix, or text before the actual message.');
+	let systemPrompt = $state(
+		'Respond directly without any speaker label, bot name, role prefix, or text before the actual message.'
+	);
 	let mode = $state<BotMode>('free_auto_speak');
 	let selectedTemplateId = $state<number | null>(null);
 	let contextInjection = $state('');
@@ -85,10 +118,6 @@
 	let textPending = $state(false);
 
 	// --- Dictation mic (Johnny-stt.3) -------------------------------------
-	// State machine: idle → starting → recording → stopping → idle.
-	// While `dictating` is true the chat input shows live partials and
-	// the session mic is muted so the bot doesn't react to the user
-	// talking to the textarea instead of the bot.
 	type DictationState = 'idle' | 'starting' | 'recording' | 'stopping';
 	let dictationState = $state<DictationState>('idle');
 	let dictationPartial = $state('');
@@ -111,6 +140,7 @@
 	let lastDecisionAt = $state<number>(0);
 	let lastSpokenAt = $state<number>(0);
 	let subscription: Subscription | null = null;
+	let transcriptEl = $state<HTMLDivElement | null>(null);
 
 	const isLive = $derived(liveSession !== null);
 
@@ -228,8 +258,7 @@
 		}
 		// Compose the effective system prompt: template instructions
 		// (if a template is picked) + the explicit prompt + any context
-		// injection. This keeps the playground exercising the same
-		// prompt-rendering surface as a real session.
+		// injection. Same prompt-rendering surface as a real session.
 		const parts: string[] = [];
 		if (selectedTemplateId !== null) {
 			const tpl = templates.find((t) => t.id === selectedTemplateId);
@@ -264,6 +293,8 @@
 			liveSession = session;
 			subscribeToLiveEvents(session.id);
 			if (supportsMic) await wireAudio(session);
+			await tick();
+			scrollTranscriptToBottom();
 		} catch (err) {
 			errorMessage = err instanceof Error ? err.message : String(err);
 		} finally {
@@ -344,6 +375,8 @@
 			} else {
 				micUnsupported = true;
 			}
+			await tick();
+			scrollTranscriptToBottom();
 		} catch (err) {
 			errorMessage = err instanceof Error ? err.message : String(err);
 		} finally {
@@ -469,6 +502,18 @@
 
 	function appendTranscript(line: TranscriptLine) {
 		transcript = [...transcript.filter((l) => l.key !== line.key), line];
+		void scrollTranscriptToBottomSoon();
+	}
+
+	async function scrollTranscriptToBottomSoon() {
+		await tick();
+		scrollTranscriptToBottom();
+	}
+
+	function scrollTranscriptToBottom() {
+		if (transcriptEl !== null) {
+			transcriptEl.scrollTop = transcriptEl.scrollHeight;
+		}
 	}
 
 	async function endSession() {
@@ -607,23 +652,24 @@
 
 	function interruptBot() {
 		// Johnny-ckz.13: explicit Stop button so the user always has a
-		// UI escape hatch — voice barge-in is the primary path, but this
-		// button is the guaranteed cut. requestInterrupt() drops any
-		// scheduled audio locally (cuts within one frame) and tells the
-		// server to drain its TTS queue, so the bot truly yields the
-		// floor.
+		// UI escape hatch. requestInterrupt() drops scheduled audio and
+		// tells the server to drain its TTS queue.
 		audioSession?.requestInterrupt();
-		// Reset the "speaking" state immediately so the UI indicator
-		// flips to idle without waiting for the next onSpeakingChange
-		// — the cut already happened in the AudioContext.
 		isSpeaking = false;
 	}
 
+	function handleComposerKeydown(e: KeyboardEvent) {
+		// Enter to send, Shift+Enter for newline — chat convention.
+		if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+			e.preventDefault();
+			void sendText();
+		}
+	}
+
 	onDestroy(() => {
-		// Stop audio (and its WS) on navigation away — but do NOT call
-		// stopBrowserSession. Per Johnny-ckz.11, closing the tab leaves
-		// the session live so the user can reopen it from the session
-		// detail page.
+		// Stop audio on navigation away — but do NOT call stopBrowserSession.
+		// Per Johnny-ckz.11, closing the tab leaves the session live so the
+		// user can reopen it from the session detail page.
 		void audioSession?.stop();
 		void dictationSession?.abort();
 		dictationSession = null;
@@ -636,869 +682,576 @@
 	<title>Playground · Johnny</title>
 </svelte:head>
 
-<div class="page">
-	<header class="page-header">
-		<div>
-			<h1>Playground</h1>
-			<p class="lede">
-				Talk to Johnny directly in the browser — no calendar event, no Google Meet. Exercise
-				templates, decision modes, and per-session providers without touching production
-				settings.
-			</p>
-		</div>
+<div class="mx-auto flex w-full max-w-[960px] flex-col gap-6">
+	<header class="flex flex-col gap-1">
+		<h1
+			class="m-0 text-2xl leading-tight font-semibold tracking-tight text-foreground"
+		>
+			Playground
+		</h1>
+		<p class="m-0 max-w-[64ch] text-sm text-muted-foreground">
+			Talk to Johnny in the browser. Same router, approval, and TTS code paths as a real meeting — without a calendar event.
+		</p>
 	</header>
 
 	{#if errorMessage}
-		<div class="alert error" role="alert" data-testid="playground-error">
-			{errorMessage}
-		</div>
+		<Alert.Root variant="destructive" data-testid="playground-error">
+			<CircleAlertIcon />
+			<Alert.Title>Something went wrong</Alert.Title>
+			<Alert.Description>{errorMessage}</Alert.Description>
+		</Alert.Root>
 	{/if}
 
 	{#if !isLive}
-		<section class="setup" aria-labelledby="setup-heading">
-			<h2 id="setup-heading">Configure</h2>
-
-			{#if loadingMetadata}
-				<p class="hint">Loading templates and providers…</p>
-			{/if}
-
-			<label class="field">
-				<span>Decision mode</span>
-				<select bind:value={mode} data-testid="playground-mode-select">
-					{#each BOT_MODES as m (m)}
-						<option value={m}>{BOT_MODE_LABEL[m]}</option>
-					{/each}
-				</select>
-				<span class="hint">
-					Switching mode in the playground drives the same router / approval / TTS code paths a
-					real meeting would. <em>Free auto-speak</em> is the default for casual chat.
-				</span>
-			</label>
-
-			<label class="field">
-				<span>Template (optional)</span>
-				<select
-					bind:value={selectedTemplateId}
-					data-testid="playground-template-select"
-				>
-					<option value={null}>— No template (free playground) —</option>
-					{#each templates as t (t.id)}
-						<option value={t.id}>{t.name}</option>
-					{/each}
-				</select>
-				<span class="hint">
-					Templates layer instructions and base context on top of your persona / system prompt
-					— same render path as a real session.
-				</span>
-			</label>
-
-			<label class="field">
-				<span>Persona</span>
-				<input
-					type="text"
-					bind:value={persona}
-					placeholder="e.g. concise, friendly conversation partner"
-					maxlength="200"
-					data-testid="playground-persona-input"
-				/>
-				<span class="hint">Short description that shapes the bot's tone.</span>
-			</label>
-
-			<details class="advanced" bind:open={advancedOpen}>
-				<summary>Advanced</summary>
-				<div class="advanced-body">
-					<label class="field">
-						<span>Custom system prompt (optional)</span>
-						<textarea
-							bind:value={systemPrompt}
-							rows="4"
-							placeholder="Add to (or replace) the template's instructions"
-							data-testid="playground-system-prompt"
-						></textarea>
-					</label>
-
-					<label class="field">
-						<span>Context injection (optional)</span>
-						<textarea
-							bind:value={contextInjection}
-							rows="3"
-							placeholder="Paste fake calendar metadata, attendees, document snippets, etc."
-							data-testid="playground-context-input"
-						></textarea>
-						<span class="hint">
-							Appended to the system prompt as <code>Additional context</code> so the playground
-							can simulate per-event surfaces without a real calendar event.
-						</span>
-					</label>
-
-					{#each ['stt', 'llm', 'tts'] as const as kind (kind)}
-						{@const list = providers[kind]}
-						<label class="field provider-field">
-							<span>{kind.toUpperCase()} provider override</span>
-							<select
-								data-testid={`playground-${kind}-override`}
-								value={providerOverrides[kind] ?? ''}
-								onchange={(e) => {
-									const v = (e.target as HTMLSelectElement).value;
-									providerOverrides[kind] = v === '' ? null : Number(v);
-								}}
-							>
-								<option value="">— Use active default —</option>
-								{#each list as p (p.id)}
-									<option value={p.id}>
-										{p.display_name}{p.is_active ? ' (active)' : ''}
-									</option>
-								{/each}
-							</select>
-						</label>
-					{/each}
-					<span class="hint">
-						Provider overrides apply for this session only — global active rows are not
-						touched.
-					</span>
+		<!-- ============================================================
+		     SETUP STATE — configure mode, template, persona, then start.
+		     ============================================================ -->
+		<section
+			class="flex flex-col rounded-md border border-border bg-card"
+			aria-labelledby="setup-heading"
+		>
+			<header class="flex items-baseline justify-between gap-3 border-b border-separator px-5 py-4">
+				<div class="flex flex-col gap-0.5">
+					<h2
+						id="setup-heading"
+						class="m-0 text-base leading-tight font-semibold tracking-tight text-foreground"
+					>
+						Configure
+					</h2>
+					<p class="m-0 text-xs text-muted-foreground">
+						Defaults match a casual free-chat session. Drop into Advanced for prompt or provider overrides.
+					</p>
 				</div>
-			</details>
+				{#if loadingMetadata}
+					<span class="text-xs italic text-muted-foreground">
+						Loading templates and providers…
+					</span>
+				{/if}
+			</header>
 
-			<button
-				type="button"
-				class="primary"
-				disabled={starting || loadingMetadata}
-				onclick={startSession}
-				data-testid="playground-start-button"
-			>
-				{starting ? 'Starting…' : 'Start session'}
-			</button>
+			<div class="flex flex-col gap-5 px-5 py-5">
+				<!-- Decision mode -->
+				<div class="flex flex-col gap-1.5">
+					<label
+						for="pg-mode"
+						class="text-sm leading-none font-medium text-foreground"
+					>
+						Decision mode
+					</label>
+					<select
+						id="pg-mode"
+						bind:value={mode}
+						class="{FIELD_CLASS} h-9"
+						data-testid="playground-mode-select"
+					>
+						{#each BOT_MODES as m (m)}
+							<option value={m}>{BOT_MODE_LABEL[m]}</option>
+						{/each}
+					</select>
+					<p class="m-0 text-xs text-muted-foreground">
+						{MODE_DESCRIPTION[mode]}
+					</p>
+				</div>
+
+				<!-- Template -->
+				<div class="flex flex-col gap-1.5">
+					<label
+						for="pg-template"
+						class="text-sm leading-none font-medium text-foreground"
+					>
+						Template <span class="text-ink-subtle font-normal">· optional</span>
+					</label>
+					<select
+						id="pg-template"
+						bind:value={selectedTemplateId}
+						class="{FIELD_CLASS} h-9"
+						data-testid="playground-template-select"
+					>
+						<option value={null}>No template — free playground</option>
+						{#each templates as t (t.id)}
+							<option value={t.id}>{t.name}</option>
+						{/each}
+					</select>
+					<p class="m-0 text-xs text-muted-foreground">
+						Layers template instructions and base context on top of your persona / system prompt.
+					</p>
+				</div>
+
+				<!-- Persona -->
+				<div class="flex flex-col gap-1.5">
+					<label
+						for="pg-persona"
+						class="text-sm leading-none font-medium text-foreground"
+					>
+						Persona
+					</label>
+					<Input
+						id="pg-persona"
+						bind:value={persona}
+						maxlength={200}
+						placeholder="e.g. concise, friendly conversation partner"
+						data-testid="playground-persona-input"
+					/>
+					<p class="m-0 text-xs text-muted-foreground">
+						Short description that shapes the bot's tone.
+					</p>
+				</div>
+
+				<!-- Advanced (collapsible) -->
+				<div class="flex flex-col">
+					<button
+						type="button"
+						class="flex items-center gap-2 self-start rounded-sm py-1 text-sm font-medium text-foreground transition-colors hover:text-ink-muted"
+						aria-expanded={advancedOpen}
+						aria-controls="pg-advanced"
+						onclick={() => (advancedOpen = !advancedOpen)}
+						data-testid="playground-advanced-toggle"
+					>
+						{#if advancedOpen}
+							<ChevronDownIcon class="size-4" />
+						{:else}
+							<ChevronRightIcon class="size-4" />
+						{/if}
+						Advanced
+						<span class="text-xs font-normal text-ink-subtle">
+							· system prompt, context, provider overrides
+						</span>
+					</button>
+
+					{#if advancedOpen}
+						<div
+							id="pg-advanced"
+							class="mt-3 flex flex-col gap-5 rounded-md border border-separator bg-surface-1 px-4 py-4"
+						>
+							<div class="flex flex-col gap-1.5">
+								<label
+									for="pg-prompt"
+									class="text-sm leading-none font-medium text-foreground"
+								>
+									System prompt
+								</label>
+								<textarea
+									id="pg-prompt"
+									bind:value={systemPrompt}
+									rows={4}
+									class="{FIELD_CLASS} resize-y"
+									placeholder="Add to (or replace) the template's instructions"
+									data-testid="playground-system-prompt"
+								></textarea>
+							</div>
+
+							<div class="flex flex-col gap-1.5">
+								<label
+									for="pg-context"
+									class="text-sm leading-none font-medium text-foreground"
+								>
+									Context injection
+								</label>
+								<textarea
+									id="pg-context"
+									bind:value={contextInjection}
+									rows={3}
+									class="{FIELD_CLASS} resize-y"
+									placeholder="Paste fake calendar metadata, attendees, document snippets…"
+									data-testid="playground-context-input"
+								></textarea>
+								<p class="m-0 text-xs text-muted-foreground">
+									Appended as <code class="rounded-xs bg-surface-2 px-1 py-0.5 text-[0.7rem]">Additional context</code>
+									so the playground can simulate per-event surfaces without a real calendar event.
+								</p>
+							</div>
+
+							<div class="grid gap-3 sm:grid-cols-3">
+								{#each ['stt', 'llm', 'tts'] as const as kind (kind)}
+									{@const list = providers[kind]}
+									<div class="flex flex-col gap-1.5">
+										<label
+											for={`pg-${kind}`}
+											class="text-sm leading-none font-medium text-foreground"
+										>
+											{kind.toUpperCase()} provider
+										</label>
+										<select
+											id={`pg-${kind}`}
+											data-testid={`playground-${kind}-override`}
+											value={providerOverrides[kind] ?? ''}
+											class="{FIELD_CLASS} h-9"
+											onchange={(e) => {
+												const v = (e.target as HTMLSelectElement).value;
+												providerOverrides[kind] = v === '' ? null : Number(v);
+											}}
+										>
+											<option value="">Use active default</option>
+											{#each list as p (p.id)}
+												<option value={p.id}>
+													{p.display_name}{p.is_active ? ' · active' : ''}
+												</option>
+											{/each}
+										</select>
+									</div>
+								{/each}
+							</div>
+							<p class="m-0 text-xs text-muted-foreground">
+								Provider overrides apply for this session only — global active rows are not touched.
+							</p>
+						</div>
+					{/if}
+				</div>
+			</div>
+
+			<footer class="flex items-center justify-end gap-3 border-t border-separator px-5 py-4">
+				<Button
+					disabled={starting || loadingMetadata}
+					onclick={startSession}
+					data-testid="playground-start-button"
+				>
+					<PlayIcon />
+					{starting ? 'Starting…' : 'Start session'}
+				</Button>
+			</footer>
 		</section>
 	{:else if liveSession}
-		<section class="live" aria-labelledby="live-heading">
-			<header class="live-header">
-				<h2 id="live-heading">Live session #{liveSession.id}</h2>
-				<div class="state-row">
-					<span
-						class="state-indicator state-{liveState}"
-						data-testid="live-state"
-						data-state={liveState}
-					>
-						<span class="state-dot" aria-hidden="true"></span>
-						{liveStateLabel[liveState]}
-					</span>
-					{#if audioReady}
-						<span class="status-text live" data-testid="audio-live">audio ready</span>
-					{:else if micDenied}
-						<span class="status-text muted" data-testid="audio-mic-denied">
-							mic denied — text only
+		<!-- ============================================================
+		     LIVE STATE — transcript thread + voice controls + composer.
+		     ============================================================ -->
+		<section
+			class="flex flex-col rounded-md border border-border bg-card"
+			aria-labelledby="live-heading"
+		>
+			<!-- Session header: title + live pulse + chips -->
+			<header
+				class="flex flex-wrap items-start justify-between gap-3 border-b border-separator px-5 py-4"
+			>
+				<div class="flex min-w-0 flex-col gap-1.5">
+					<div class="flex flex-wrap items-center gap-3">
+						<h2
+							id="live-heading"
+							class="m-0 text-base leading-tight font-semibold tracking-tight text-foreground"
+						>
+							Session <span class="font-mono">#{liveSession.id}</span>
+						</h2>
+						<span
+							class="inline-flex items-center gap-1.5 text-xs"
+							aria-live="polite"
+							data-testid="live-state"
+							data-state={liveState}
+						>
+							<span
+								aria-hidden="true"
+								class="live-pulse h-2 w-2 rounded-full bg-primary"
+							></span>
+							<span class="font-medium text-foreground">
+								{liveStateLabel[liveState]}
+							</span>
 						</span>
-					{:else if micUnsupported}
-						<span class="status-text muted">mic unavailable in this browser</span>
-					{:else}
-						<span class="status-text">audio starting…</span>
+						{#if audioReady}
+							<span class="text-xs text-success" data-testid="audio-live">
+								Audio ready
+							</span>
+						{:else if micDenied}
+							<span class="text-xs text-warning" data-testid="audio-mic-denied">
+								Mic denied — text only
+							</span>
+						{:else if micUnsupported}
+							<span class="text-xs text-warning">
+								Mic unavailable in this browser
+							</span>
+						{:else}
+							<span class="text-xs text-muted-foreground">Audio starting…</span>
+						{/if}
+					</div>
+					{#if activeChips.length > 0}
+						<div
+							class="flex flex-wrap items-center gap-1.5"
+							data-testid="live-chips"
+						>
+							{#each activeChips as chip (chip.label + chip.value)}
+								<span
+									class="inline-flex items-center gap-1.5 rounded-xs border border-border bg-surface-2 px-1.5 py-0.5 font-mono text-[0.7rem] text-muted-foreground"
+									title={`${chip.label}: ${chip.value}`}
+								>
+									<span class="font-semibold text-ink-subtle">{chip.label}</span>
+									<span class="text-foreground">{chip.value}</span>
+								</span>
+							{/each}
+						</div>
 					{/if}
+				</div>
+
+				<div class="flex flex-wrap items-center gap-2">
+					<Button
+						variant="outline"
+						size="sm"
+						onclick={interruptBot}
+						data-testid="playground-interrupt-button"
+						title="Stop the bot immediately (voice barge-in also works while it's speaking)"
+					>
+						<OctagonXIcon /> Interrupt
+					</Button>
+					<Button
+						variant="ghost"
+						size="sm"
+						href={`/sessions/${liveSession.id}`}
+						target="_blank"
+						rel="noopener"
+					>
+						<ExternalLinkIcon /> Open detail
+					</Button>
+					<Button
+						variant="destructive"
+						size="sm"
+						disabled={stopping}
+						onclick={endSession}
+						data-testid="playground-end-button"
+					>
+						<SquareIcon /> {stopping ? 'Ending…' : 'End session'}
+					</Button>
 				</div>
 			</header>
 
-			<div class="chips" data-testid="live-chips">
-				{#each activeChips as chip (chip.label + chip.value)}
-					<span class="chip" title={`${chip.label}: ${chip.value}`}>
-						<span class="chip-label">{chip.label}</span>
-						<span class="chip-value">{chip.value}</span>
-					</span>
-				{/each}
-			</div>
-
-			<div class="live-grid">
-				<div class="transcript-pane" aria-label="Live transcript">
-					{#if transcript.length === 0}
-						<p class="empty">No conversation yet — say something to get started.</p>
-					{:else}
-						{#each transcript as line (line.key)}
-							<div class="line line-{line.speaker}" class:partial={!line.isFinal}>
-								<span class="who">{line.speaker === 'user' ? 'You' : 'Bot'}</span>
-								<span class="what">{line.text}</span>
-							</div>
-						{/each}
-					{/if}
+			<!-- Voice control strip: speaker / mic level / mic mute -->
+			<div
+				class="grid gap-4 border-b border-separator px-5 py-3 sm:grid-cols-2"
+				aria-label="Voice controls"
+			>
+				<!-- Speaker -->
+				<div class="flex items-center gap-3">
+					<button
+						type="button"
+						class="flex shrink-0 items-center justify-center rounded-sm p-1.5 text-ink-muted transition-colors hover:bg-surface-2 hover:text-foreground"
+						onclick={toggleSpeakerMute}
+						data-testid="toggle-speaker"
+						aria-pressed={speakerMuted}
+						aria-label={speakerMuted ? 'Unmute speaker' : 'Mute speaker'}
+						title={speakerMuted ? 'Unmute speaker' : 'Mute speaker'}
+					>
+						{#if speakerMuted}
+							<VolumeXIcon class="size-4 text-destructive" />
+						{:else}
+							<Volume2Icon class="size-4" />
+						{/if}
+					</button>
+					<label
+						class="flex min-w-0 flex-1 items-center gap-2 text-xs text-muted-foreground"
+					>
+						<span class="shrink-0 font-medium text-foreground">Speaker</span>
+						<input
+							type="range"
+							min="0"
+							max="100"
+							value={Math.round(volume * 100)}
+							oninput={onVolumeChange}
+							disabled={speakerMuted}
+							class="h-1 min-w-0 flex-1 [accent-color:var(--color-foreground)] disabled:opacity-50"
+							data-testid="volume-slider"
+							aria-label="Speaker volume"
+						/>
+						<span
+							class="w-9 shrink-0 text-right font-mono tabular-nums"
+							class:opacity-50={speakerMuted}
+						>
+							{Math.round(volume * 100)}%
+						</span>
+					</label>
 				</div>
 
-				<div class="controls-pane" aria-label="Live controls">
-					<div class="control-group">
-						<label class="control">
-							<span>Speaker volume</span>
-							<input
-								type="range"
-								min="0"
-								max="100"
-								value={Math.round(volume * 100)}
-								oninput={onVolumeChange}
-								disabled={speakerMuted}
-								data-testid="volume-slider"
-								aria-label="Speaker volume"
-							/>
-							<span class="control-value">{Math.round(volume * 100)}%</span>
-						</label>
-						<button
-							type="button"
-							class="toggle"
-							class:on={speakerMuted}
-							onclick={toggleSpeakerMute}
-							data-testid="toggle-speaker"
+				<!-- Mic -->
+				<div class="flex items-center gap-3" data-testid="mic-level">
+					<button
+						type="button"
+						class="flex shrink-0 items-center justify-center rounded-sm p-1.5 text-ink-muted transition-colors hover:bg-surface-2 hover:text-foreground"
+						onclick={toggleMicMute}
+						data-testid="toggle-mic"
+						aria-pressed={micMuted}
+						aria-label={micMuted ? 'Unmute mic' : 'Mute mic'}
+						title={micMuted ? 'Unmute mic' : 'Mute mic'}
+					>
+						{#if micMuted}
+							<MicOffIcon class="size-4 text-destructive" />
+						{:else}
+							<MicIcon class="size-4" />
+						{/if}
+					</button>
+					<div class="flex min-w-0 flex-1 items-center gap-2 text-xs text-muted-foreground">
+						<span class="shrink-0 font-medium text-foreground">Mic</span>
+						<div
+							class="relative h-1 min-w-0 flex-1 overflow-hidden rounded-pill bg-surface-3"
+							role="meter"
+							aria-valuemin="0"
+							aria-valuemax="100"
+							aria-valuenow={Math.round(micLevel * 100)}
+							aria-label="Mic input level"
 						>
-							{speakerMuted ? 'Unmute speaker' : 'Mute speaker'}
-						</button>
-					</div>
-
-					<div class="control-group">
-						<div class="mic-level" data-testid="mic-level">
-							<span>Mic input</span>
 							<div
-								class="meter"
-								role="meter"
-								aria-valuemin="0"
-								aria-valuemax="100"
-								aria-valuenow={Math.round(micLevel * 100)}
-							>
-								<div class="meter-fill" style:width={`${Math.round(micLevel * 100)}%`}></div>
-							</div>
+								class="h-full rounded-pill transition-[width] duration-100"
+								class:bg-foreground={!micMuted}
+								class:bg-ink-subtle={micMuted}
+								style:width={`${Math.round(micLevel * 100)}%`}
+							></div>
 						</div>
-						<button
-							type="button"
-							class="toggle"
-							class:on={micMuted}
-							onclick={toggleMicMute}
-							data-testid="toggle-mic"
+						<span
+							class="w-9 shrink-0 text-right font-mono tabular-nums"
+							class:opacity-50={micMuted}
 						>
-							{micMuted ? 'Unmute mic' : 'Mute mic'}
-						</button>
-					</div>
-
-					<div class="actions">
-						<button
-							type="button"
-							class="interrupt"
-							onclick={interruptBot}
-							data-testid="playground-interrupt-button"
-							aria-label="Stop the bot from speaking"
-							title="Stop the bot immediately (voice barge-in also works while it's speaking)"
-						>
-							Stop bot
-						</button>
-						<a
-							class="secondary"
-							href={`/sessions/${liveSession.id}`}
-							target="_blank"
-							rel="noopener"
-						>
-							Open session detail
-						</a>
-						<button
-							type="button"
-							class="danger"
-							disabled={stopping}
-							onclick={endSession}
-							data-testid="playground-end-button"
-						>
-							{stopping ? 'Ending…' : 'End session'}
-						</button>
+							{Math.round(micLevel * 100)}%
+						</span>
 					</div>
 				</div>
 			</div>
 
+			<!-- Transcript pane -->
+			<div
+				bind:this={transcriptEl}
+				class="flex max-h-[55vh] min-h-[320px] flex-col gap-2 overflow-y-auto px-5 py-4"
+				aria-label="Live transcript"
+				data-testid="transcript-pane"
+			>
+				{#if transcript.length === 0}
+					<div
+						class="m-auto flex max-w-[36ch] flex-col items-center gap-2 text-center"
+					>
+						<MicIcon class="size-6 text-ink-subtle" />
+						<p class="m-0 text-sm text-muted-foreground">
+							Speak into the mic or type below to start the conversation.
+						</p>
+					</div>
+				{:else}
+					{#each transcript as line (line.key)}
+						{@const isBot = line.speaker === 'bot'}
+						<div
+							class="flex flex-col gap-1 rounded-md px-3 py-2"
+							class:bg-surface-2={isBot}
+							class:border={isBot && !line.isFinal}
+							class:border-border={!line.isFinal}
+							class:border-dashed={!line.isFinal}
+							class:italic={!line.isFinal}
+							data-testid={isBot ? 'bot-line' : line.isFinal ? 'user-line' : 'partial-line'}
+						>
+							<div
+								class="flex items-center gap-1.5 font-mono text-[0.7rem] font-semibold tracking-wide"
+								class:text-ink-subtle={!isBot}
+								class:text-foreground={isBot}
+							>
+								{#if isBot}
+									<BotIcon class="size-3" />
+									<span>Johnny</span>
+								{:else}
+									<UserIcon class="size-3" />
+									<span>You</span>
+								{/if}
+								{#if !line.isFinal}
+									<span class="font-sans font-normal text-warning">· partial</span>
+								{/if}
+							</div>
+							<p
+								class="m-0 text-sm leading-snug"
+								class:text-foreground={line.isFinal}
+								class:text-muted-foreground={!line.isFinal}
+							>
+								{line.text}
+							</p>
+						</div>
+					{/each}
+				{/if}
+			</div>
+
+			<!-- Composer -->
 			<form
-				class="text-input"
+				class="flex flex-col gap-2 border-t border-separator px-5 py-4"
 				onsubmit={(e) => {
 					e.preventDefault();
 					void sendText();
 				}}
 			>
-				<label class="field">
-					<span>
-						Text input (always available — works when mic is muted/denied)
-						{#if dictationState === 'recording' && dictationProviderLabel}
-							<span class="hint dictation-hint" data-testid="dictation-provider-label">
-								· Dictating via {dictationProviderLabel}
-							</span>
+				<div class="flex items-start gap-2">
+					<textarea
+						bind:value={textInput}
+						rows={2}
+						class="{FIELD_CLASS} resize-none"
+						class:!border-destructive={dictationState === 'recording'}
+						placeholder={dictationState === 'recording'
+							? 'Listening… speak now to dictate'
+							: 'Type a message, or press the mic to dictate'}
+						disabled={textPending}
+						onkeydown={handleComposerKeydown}
+						data-testid="playground-text-input"
+						data-partial-transcript={dictationState === 'recording'
+							? dictationPartial
+							: undefined}
+						data-dictation-state={dictationState}
+					></textarea>
+					<button
+						type="button"
+						class="flex h-9 shrink-0 items-center gap-1.5 rounded-md border px-3 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+						class:border-border={dictationState === 'idle' || dictationState === 'starting' || dictationState === 'stopping'}
+						class:bg-background={dictationState === 'idle' || dictationState === 'starting' || dictationState === 'stopping'}
+						class:text-foreground={dictationState === 'idle' || dictationState === 'starting' || dictationState === 'stopping'}
+						class:hover:bg-accent={dictationState === 'idle'}
+						class:border-destructive={dictationState === 'recording'}
+						class:bg-destructive={dictationState === 'recording'}
+						class:text-destructive-foreground={dictationState === 'recording'}
+						onclick={toggleDictation}
+						disabled={dictationState === 'starting' || dictationState === 'stopping'}
+						aria-pressed={dictationState === 'recording'}
+						aria-label={dictationState === 'recording'
+							? 'Stop dictation'
+							: dictationState === 'idle'
+								? 'Start dictation'
+								: 'Dictation transitioning'}
+						title={dictationState === 'recording'
+							? 'Stop dictation'
+							: 'Start dictation — speak to fill the chat input'}
+						data-testid="playground-mic-button"
+					>
+						{#if dictationState === 'recording'}
+							<span
+								class="h-2 w-2 shrink-0 rounded-full bg-destructive-foreground live-pulse"
+								aria-hidden="true"
+							></span>
+							Rec
+						{:else if dictationState === 'starting'}
+							<span class="italic text-ink-subtle">…</span>
+						{:else if dictationState === 'stopping'}
+							<span class="italic text-ink-subtle">Stopping…</span>
+						{:else}
+							<MicIcon class="size-4" />
+							Mic
 						{/if}
+					</button>
+					<Button type="submit" variant="outline" size="default" disabled={textPending}>
+						<SendIcon />
+						{textPending ? 'Sending…' : 'Send'}
+					</Button>
+				</div>
+
+				<div class="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+					<span>
+						<kbd
+							class="rounded-xs border border-border bg-surface-2 px-1 py-0.5 font-mono text-[0.7rem]"
+							>Enter</kbd
+						> sends ·
+						<kbd
+							class="rounded-xs border border-border bg-surface-2 px-1 py-0.5 font-mono text-[0.7rem]"
+							>Shift+Enter</kbd
+						> newline
 					</span>
-					<div class="text-input-row">
-						<textarea
-							bind:value={textInput}
-							rows="2"
-							placeholder={
-								dictationState === 'recording'
-									? 'Listening… speak now to dictate'
-									: 'Type or press the mic to dictate'
-							}
-							disabled={textPending}
-							data-testid="playground-text-input"
-							data-partial-transcript={dictationState === 'recording'
-								? dictationPartial
-								: undefined}
-							data-dictation-state={dictationState}
-						></textarea>
-						<button
-							type="button"
-							class="mic-btn"
-							class:recording={dictationState === 'recording'}
-							class:starting={dictationState === 'starting' ||
-								dictationState === 'stopping'}
-							onclick={toggleDictation}
-							disabled={dictationState === 'starting' || dictationState === 'stopping'}
-							aria-pressed={dictationState === 'recording'}
-							aria-label={
-								dictationState === 'recording'
-									? 'Stop dictation'
-									: dictationState === 'idle'
-										? 'Start dictation (mic)'
-										: 'Dictation transitioning'
-							}
-							title={
-								dictationState === 'recording'
-									? 'Stop dictation'
-									: 'Start dictation — speak to fill the chat input'
-							}
-							data-testid="playground-mic-button"
-						>
-							{#if dictationState === 'recording'}
-								<span class="mic-dot" aria-hidden="true"></span>
-								Rec
-							{:else if dictationState === 'starting'}
-								…
-							{:else if dictationState === 'stopping'}
-								Stopping…
-							{:else}
-								<span aria-hidden="true">🎙</span>
-								Mic
-							{/if}
-						</button>
-					</div>
-				</label>
+					{#if dictationState === 'recording' && dictationProviderLabel}
+						<span data-testid="dictation-provider-label">
+							Dictating via <span class="font-mono text-foreground">{dictationProviderLabel}</span>
+						</span>
+					{/if}
+				</div>
+
 				{#if dictationError}
-					<div class="dictation-error" role="alert" data-testid="dictation-error">
+					<div
+						class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+						role="alert"
+						data-testid="dictation-error"
+					>
 						{dictationError}
 					</div>
 				{/if}
-				<button type="submit" class="secondary" disabled={textPending}>
-					{textPending ? 'Sending…' : 'Send text'}
-				</button>
 			</form>
 		</section>
 	{/if}
 </div>
-
-<style>
-	.page {
-		max-width: 1000px;
-		margin: 0 auto;
-		padding: 32px 16px;
-	}
-
-	.page-header h1 {
-		margin: 0 0 8px;
-	}
-
-	.lede {
-		margin: 0 0 24px;
-		color: var(--muted, #555);
-	}
-
-	.setup,
-	.live {
-		display: flex;
-		flex-direction: column;
-		gap: 16px;
-		padding: 24px;
-		border: 1px solid var(--border, #ddd);
-		border-radius: 8px;
-		background: var(--surface, #fff);
-	}
-
-	.field {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-	}
-
-	.field > span {
-		font-weight: 600;
-	}
-
-	.hint {
-		font-weight: 400;
-		font-size: 0.875rem;
-		color: var(--muted, #666);
-	}
-
-	.field input,
-	.field textarea,
-	.field select {
-		padding: 8px;
-		border: 1px solid var(--border, #ccc);
-		border-radius: 4px;
-		font: inherit;
-		background: #fff;
-	}
-
-	.advanced {
-		border: 1px solid var(--border, #ddd);
-		border-radius: 6px;
-		padding: 0;
-	}
-
-	.advanced summary {
-		cursor: pointer;
-		padding: 12px 16px;
-		font-weight: 600;
-		list-style: none;
-	}
-
-	.advanced summary::-webkit-details-marker {
-		display: none;
-	}
-
-	.advanced summary::before {
-		content: '▶';
-		display: inline-block;
-		margin-right: 8px;
-		font-size: 0.7rem;
-		transition: transform 0.15s ease;
-	}
-
-	.advanced[open] summary::before {
-		transform: rotate(90deg);
-	}
-
-	.advanced-body {
-		padding: 0 16px 16px;
-		display: flex;
-		flex-direction: column;
-		gap: 16px;
-	}
-
-	.provider-field > span {
-		font-weight: 600;
-	}
-
-	button.primary,
-	button.secondary,
-	button.danger,
-	button.toggle,
-	a.secondary {
-		padding: 8px 16px;
-		border-radius: 4px;
-		font: inherit;
-		cursor: pointer;
-		border: 1px solid transparent;
-		text-decoration: none;
-		display: inline-block;
-		text-align: center;
-	}
-
-	button.primary {
-		background: var(--primary, #2563eb);
-		color: #fff;
-	}
-
-	button.secondary,
-	a.secondary {
-		background: transparent;
-		color: var(--primary, #2563eb);
-		border-color: currentColor;
-	}
-
-	button.danger {
-		background: #dc2626;
-		color: #fff;
-	}
-
-	button.interrupt {
-		background: #f59e0b;
-		color: #1f2937;
-		border-color: #d97706;
-		font-weight: 600;
-	}
-
-	button.interrupt:hover {
-		background: #fbbf24;
-	}
-
-	button.toggle {
-		background: transparent;
-		color: #374151;
-		border-color: #d1d5db;
-	}
-
-	button.toggle.on {
-		background: #fee2e2;
-		color: #991b1b;
-		border-color: #fca5a5;
-	}
-
-	button:disabled {
-		opacity: 0.6;
-		cursor: not-allowed;
-	}
-
-	.live-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		flex-wrap: wrap;
-		gap: 12px;
-	}
-
-	.live-header h2 {
-		margin: 0;
-	}
-
-	.state-row {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-	}
-
-	.state-indicator {
-		display: inline-flex;
-		align-items: center;
-		gap: 8px;
-		padding: 6px 12px;
-		border-radius: 999px;
-		font-weight: 600;
-		font-size: 0.875rem;
-		border: 1px solid transparent;
-	}
-
-	.state-dot {
-		width: 10px;
-		height: 10px;
-		border-radius: 50%;
-	}
-
-	.state-idle {
-		background: #f3f4f6;
-		color: #374151;
-	}
-	.state-idle .state-dot {
-		background: #9ca3af;
-	}
-
-	.state-listening {
-		background: #dbeafe;
-		color: #1d4ed8;
-		border-color: #93c5fd;
-	}
-	.state-listening .state-dot {
-		background: #2563eb;
-		animation: pulse 1.2s ease-in-out infinite;
-	}
-
-	.state-thinking {
-		background: #fef3c7;
-		color: #92400e;
-		border-color: #fcd34d;
-	}
-	.state-thinking .state-dot {
-		background: #d97706;
-		animation: pulse 0.8s ease-in-out infinite;
-	}
-
-	.state-speaking {
-		background: #dcfce7;
-		color: #166534;
-		border-color: #86efac;
-	}
-	.state-speaking .state-dot {
-		background: #16a34a;
-		animation: pulse 0.6s ease-in-out infinite;
-	}
-
-	@keyframes pulse {
-		0%,
-		100% {
-			transform: scale(1);
-			opacity: 1;
-		}
-		50% {
-			transform: scale(1.4);
-			opacity: 0.7;
-		}
-	}
-
-	.status-text {
-		color: var(--muted, #555);
-		font-size: 0.875rem;
-	}
-
-	.status-text.live {
-		color: #16a34a;
-	}
-
-	.status-text.muted {
-		color: #b45309;
-	}
-
-	.chips {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 6px;
-	}
-
-	.chip {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		padding: 4px 10px;
-		border-radius: 999px;
-		font-size: 0.75rem;
-		background: #f3f4f6;
-		color: #374151;
-		border: 1px solid #e5e7eb;
-	}
-
-	.chip-label {
-		font-weight: 700;
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-	}
-
-	.chip-value {
-		font-weight: 500;
-	}
-
-	.live-grid {
-		display: grid;
-		grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr);
-		gap: 16px;
-	}
-
-	@media (max-width: 768px) {
-		.live-grid {
-			grid-template-columns: 1fr;
-		}
-	}
-
-	.transcript-pane {
-		min-height: 280px;
-		max-height: 480px;
-		overflow-y: auto;
-		padding: 12px;
-		background: #f9fafb;
-		border: 1px solid #e5e7eb;
-		border-radius: 6px;
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-	}
-
-	.line {
-		display: flex;
-		gap: 8px;
-		font-size: 0.9rem;
-	}
-
-	.line-user .who {
-		color: #2563eb;
-		font-weight: 600;
-	}
-
-	.line-bot .who {
-		color: #7c3aed;
-		font-weight: 600;
-	}
-
-	.line.partial .what {
-		color: #6b7280;
-		font-style: italic;
-	}
-
-	.who {
-		min-width: 36px;
-	}
-
-	.empty {
-		color: var(--muted, #6b7280);
-		text-align: center;
-		font-style: italic;
-		margin: auto;
-	}
-
-	.controls-pane {
-		display: flex;
-		flex-direction: column;
-		gap: 16px;
-		padding: 12px;
-		background: #fafafa;
-		border: 1px solid #e5e7eb;
-		border-radius: 6px;
-	}
-
-	.control-group {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-	}
-
-	.control {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-	}
-
-	.control > span {
-		font-weight: 600;
-		font-size: 0.875rem;
-	}
-
-	.control input[type='range'] {
-		width: 100%;
-	}
-
-	.control-value {
-		font-weight: 500;
-		font-size: 0.875rem;
-		color: var(--muted, #555);
-	}
-
-	.mic-level {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-	}
-
-	.mic-level > span {
-		font-weight: 600;
-		font-size: 0.875rem;
-	}
-
-	.meter {
-		width: 100%;
-		height: 8px;
-		background: #e5e7eb;
-		border-radius: 4px;
-		overflow: hidden;
-	}
-
-	.meter-fill {
-		height: 100%;
-		background: linear-gradient(90deg, #34d399 0%, #facc15 60%, #f97316 90%);
-		transition: width 0.08s ease;
-	}
-
-	.actions {
-		display: flex;
-		gap: 12px;
-		flex-wrap: wrap;
-	}
-
-	.text-input {
-		display: flex;
-		flex-direction: column;
-		gap: 12px;
-	}
-
-	.alert {
-		padding: 12px 16px;
-		border-radius: 6px;
-		margin-bottom: 16px;
-	}
-
-	.alert.error {
-		background: #fef2f2;
-		color: #991b1b;
-		border: 1px solid #fecaca;
-	}
-
-	.text-input-row {
-		display: flex;
-		gap: 8px;
-		align-items: flex-start;
-	}
-
-	.text-input-row textarea {
-		flex: 1 1 auto;
-		min-width: 0;
-		padding: 8px;
-		border: 1px solid var(--border, #ccc);
-		border-radius: 4px;
-		font: inherit;
-		background: #fff;
-	}
-
-	.text-input-row textarea[data-dictation-state='recording'] {
-		border-color: #dc2626;
-		background: #fff8f8;
-	}
-
-	.mic-btn {
-		flex: 0 0 auto;
-		padding: 8px 14px;
-		border: 1px solid var(--border, #ccc);
-		border-radius: 4px;
-		background: #fff;
-		font: inherit;
-		cursor: pointer;
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		min-width: 72px;
-		justify-content: center;
-	}
-
-	.mic-btn:hover:not(:disabled) {
-		background: #f3f4f6;
-	}
-
-	.mic-btn:disabled {
-		opacity: 0.6;
-		cursor: progress;
-	}
-
-	.mic-btn.recording {
-		background: #dc2626;
-		color: #fff;
-		border-color: #b91c1c;
-		font-weight: 600;
-	}
-
-	.mic-btn.recording:hover {
-		background: #b91c1c;
-	}
-
-	.mic-btn.starting {
-		font-style: italic;
-		color: #6b7280;
-	}
-
-	.mic-dot {
-		width: 8px;
-		height: 8px;
-		border-radius: 50%;
-		background: #fff;
-		animation: mic-pulse 0.9s ease-in-out infinite;
-	}
-
-	@keyframes mic-pulse {
-		0%,
-		100% {
-			transform: scale(1);
-			opacity: 1;
-		}
-		50% {
-			transform: scale(1.6);
-			opacity: 0.45;
-		}
-	}
-
-	.dictation-hint {
-		margin-left: 8px;
-		color: #6b7280;
-		font-weight: 400;
-	}
-
-	.dictation-error {
-		padding: 8px 12px;
-		border-radius: 4px;
-		background: #fef2f2;
-		color: #991b1b;
-		border: 1px solid #fecaca;
-		font-size: 0.875rem;
-	}
-</style>

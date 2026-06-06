@@ -75,6 +75,299 @@ Pattern lives in `calendar/+page.svelte` and resolves the gate-4 risk
 of "2+ yellows competing for the operator's attention" without removing
 either action.
 
+### Slider yellow budget
+
+`<input type="range">` styled with Tailwind `accent-primary` becomes a
+yellow control — the filled-track + thumb both pick up `var(--primary)`.
+Acceptable on a one-yellow surface (templates form sheet), but on a
+live-session surface that ALSO has the `live-pulse` dot + sidebar nav
+active, a focus ring on a nearby input pushes the total visible-yellow
+count to 4 — gate 4 fails. Fix: replace `accent-primary` with
+`[accent-color:var(--color-foreground)]` (arbitrary Tailwind 4 syntax)
+so the slider's thumb/track adopt the neutral ink color (white-ish dark,
+black-ish light) instead of yellow. Pattern lives in
+`playground/+page.svelte`. Visual cost: zero — the operator reads a
+slider as a slider regardless of its accent color.
+
+
+---
+
+## 2026-06-07 — Johnny-fe.3 (REIMAGINE /playground)
+
+Replaced the 1504-line custom-CSS playground page with a 994-line
+shadcn-svelte + design-token rewrite. From-scratch IA redesign — not a
+1:1 port.
+
+### Files changed
+
+- `frontend/src/routes/playground/+page.svelte` — full rewrite.
+  Deleted the entire `<style>` block (~520 lines of hardcoded hex
+  colors: `#2563eb` indigo primary, `#dc2626` red danger, `#f59e0b`/
+  `#fbbf24` orange-amber interrupt, `#d1d5db`/`#fee2e2`/`#fca5a5` toggle
+  states, `#2563eb` line-user blue, `#7c3aed` line-bot purple, a green-
+  yellow-orange mic-meter gradient, blue/amber/green state indicators
+  with three different pulse durations). Replaced with shadcn `Button`
+  / `Alert` / `Input` and Tailwind utility classes mapped to DESIGN.md
+  tokens (`bg-card`, `bg-surface-1/2/3`, `text-foreground`,
+  `text-muted-foreground`, `border-border`, `border-border-strong`,
+  `border-separator`, `text-success`, `text-warning`, `text-destructive`,
+  `bg-primary`). Preserved every `data-testid` (`playground-error`,
+  `playground-mode-select`, `playground-template-select`,
+  `playground-persona-input`, `playground-system-prompt`,
+  `playground-context-input`, `playground-stt-override`,
+  `playground-llm-override`, `playground-tts-override`,
+  `playground-start-button`, `playground-advanced-toggle`,
+  `live-state`, `audio-live`, `audio-mic-denied`, `live-chips`,
+  `volume-slider`, `toggle-speaker`, `mic-level`, `toggle-mic`,
+  `playground-interrupt-button`, `playground-end-button`,
+  `playground-text-input`, `playground-mic-button`,
+  `dictation-provider-label`, `dictation-error`, `transcript-pane`,
+  `bot-line`, `user-line`, `partial-line`).
+
+### IA changes (the actual REIMAGINE)
+
+1. **Killed the marketing lede.** Old design had a multi-line lede:
+   "Talk to Johnny directly in the browser — no calendar event, no
+   Google Meet. Exercise templates, decision modes, and per-session
+   providers without touching production settings." → terse single
+   sentence: "Talk to Johnny in the browser. Same router, approval,
+   and TTS code paths as a real meeting — without a calendar event."
+   The operator doesn't need to be sold on the playground; they need
+   it to be precise.
+2. **Killed the full-width yellow "Start session" band.** Old design
+   rendered the primary CTA as a full-width yellow stripe at the
+   bottom of the setup card — over-loud and an anti-DESIGN.md
+   violation ("yellow is a signal, not a texture"). New design puts
+   `Start session` as a normal-sized button with a leading `PlayIcon`
+   in the card's sticky footer, right-aligned. Same yellow signal, a
+   fraction of the visual chrome.
+3. **Killed the indigo/purple/green state-rainbow.** Old design used 4
+   distinct color palettes for `state-idle` (grey), `state-listening`
+   (indigo + blue dot), `state-thinking` (amber + orange dot),
+   `state-speaking` (green + green dot), each with its own pulse
+   keyframe (1.2s / 0.8s / 0.6s) — a 4-color signal system fighting
+   the brand-defined yellow signal. New design: ONE yellow `live-pulse`
+   dot that means "this session is live now", + a plain-text label
+   ("Idle" / "Listening" / "Thinking" / "Speaking") in `--foreground`.
+   Sub-state is information, not chrome.
+4. **Killed the blue user / purple bot speaker labels.** Old design
+   gave the user line a `#2563eb` blue "You" label and the bot line a
+   `#7c3aed` purple "Bot" label. New design uses mono small labels
+   (`UserIcon` + "You" in `--ink-subtle`, `BotIcon` + "Johnny" in
+   `--foreground` since the bot line sits on `bg-surface-2`). No color
+   competition; "Johnny" reads as the brand name, not a costume.
+5. **Killed the green-yellow-orange mic meter gradient.** Old design
+   had a `linear-gradient(90deg, #34d399 0%, #facc15 60%, #f97316 90%)`
+   on the meter fill — three colors signaling "your mic is hot" in
+   the worst possible way (the yellow stop competes with the brand
+   yellow). New design: single fill in `--foreground` (white-ish dark,
+   black-ish light) with `--surface-3` track and `--ink-subtle` when
+   muted. Operators read level by length, not by color.
+6. **Speaker slider goes neutral.** Templates page uses `accent-primary`
+   on its confidence-threshold slider — works there because the
+   surface is a Sheet that occludes the sidebar. Playground live keeps
+   the sidebar nav + live pulse visible, so an `accent-primary` slider
+   pushes the total visible-yellow count to 3 BEFORE any focus ring
+   appears. Fix: `[accent-color:var(--color-foreground)]` so the
+   slider's thumb/track adopt the neutral ink color. Documented in
+   the new "Slider yellow budget" Codebase Pattern.
+7. **Action toolbar pulled into the session header.** Old design
+   stacked actions vertically inside a `controls-pane` on the right
+   side of the live grid: `Stop bot` (warning amber), `Open session
+   detail` (secondary), `End session` (red). Mixed metaphors —
+   destructive next to neutral next to "interrupt". New design: a
+   horizontal toolbar in the session header — `Interrupt` (outline,
+   `OctagonXIcon`), `Open detail` (ghost, `ExternalLinkIcon`), `End
+   session` (destructive red, `SquareIcon`). Visual weight matches
+   semantic weight; the red sits to the far right, away from the
+   benign Interrupt.
+8. **Voice controls become a single horizontal strip.** Old design
+   put the speaker volume + mic level in a `controls-pane` column on
+   the right of the transcript — wasting ~30% horizontal space on
+   2 sliders. New design: a 2-column strip directly below the header,
+   each column = "[icon mute toggle] [label] [slider/meter] [%]". The
+   operator gets at-a-glance state ("am I muted?") + immediate
+   override ("click the icon to toggle") without leaving the chat
+   thread's reading flow.
+9. **Mute toggles become icon buttons.** Old design used
+   horizontally-sized text buttons ("Mute speaker" / "Unmute mic") in
+   the controls pane. New design: `Volume2Icon` / `VolumeXIcon` and
+   `MicIcon` / `MicOffIcon` square ghost buttons, with the muted
+   variant using `text-destructive` (red) so the mute state reads at
+   a glance. Title attribute + aria-label preserve discoverability.
+10. **Chat-thread layout instead of 3-column.** Old design had a
+    2-column live grid (transcript 2fr + controls 1fr) with the text
+    input row tacked on at the bottom. New design: a vertical stack —
+    header / voice strip / transcript (fills available height) /
+    composer (sticky bottom, hairline-separated). Matches mental
+    model from any chat client (Slack, iMessage, Discord). The
+    transcript pane has `max-h-[55vh] min-h-[320px]` so it always
+    fills meaningful space without crowding the composer.
+11. **Composer with Enter-sends affordance.** Old design had a "Send
+    text" button BELOW the textarea row — required a click. New
+    design has Send in the same row as the textarea + a footer hint
+    line: `Enter sends · Shift+Enter newline`. Implemented via
+    `handleComposerKeydown` — chat convention, removes one click per
+    message.
+12. **Empty transcript state.** Old design rendered a single italic
+    line: "No conversation yet — say something to get started." New
+    design: a centered `MicIcon` (24px, `--ink-subtle`) + sentence-case
+    helper ("Speak into the mic or type below to start the
+    conversation."). Matches the templates / settings empty-state
+    pattern from previous tickets.
+13. **Advanced disclosure with chevron.** Old design used a
+    `<details>` element with a `▶` text glyph rotating via a
+    custom transform. New design: a button that toggles
+    `advancedOpen` state, swapping `ChevronRightIcon` ↔
+    `ChevronDownIcon`. The expanded section gets a hairline-bordered
+    nested container on `bg-surface-1` — visually distinguishes
+    "advanced overrides" from the main form without nesting cards.
+14. **Provider selects flow into a 3-column grid.** Old design
+    stacked the STT/LLM/TTS overrides as 3 separate `<label class
+    ="field provider-field">` rows. New design uses
+    `grid sm:grid-cols-3 gap-3` so on desktop they sit side by side —
+    one row of advanced overrides instead of three. The helper text
+    moves below the grid as a single sentence.
+15. **Dictation mic preserved with brand-aligned recording state.**
+    Old design had a red `#dc2626` recording state with a white
+    pulse dot. New design keeps the destructive red recording state
+    (mic = recording = stoppable urgency) but uses the `live-pulse`
+    class on the inner dot so it shares the brand's signature
+    animation + auto-degrades on `prefers-reduced-motion`.
+16. **Audio status uses semantic tokens.** Old design: green for
+    "audio ready", brown amber for "mic denied", grey for "audio
+    starting". New design: `text-success` green for ready,
+    `text-warning` amber for denied/unsupported,
+    `text-muted-foreground` for starting. Single-source semantic
+    coloring; matches the calendar/settings status patterns.
+
+### Verification (chrome-devtools MCP, dark + light)
+
+Drove every state through the real Chrome instance pointing at
+`http://localhost:5173/playground`:
+- ✓ Setup state loads with 2 seed templates + STT/LLM/TTS providers;
+  default form values intact (mode=free_auto_speak, persona="Concise,
+  friendly conversation partner.", system prompt has the no-speaker-
+  prefix rule).
+- ✓ Dark mode setup: 1 yellow on main (Start session CTA) + sidebar
+  Playground active = 2 yellows total → gate 4 holds.
+- ✓ Light mode setup: same hierarchy, same 2 yellows. Inter font +
+  hairline borders + Card pattern feel clean in light.
+- ✓ Advanced toggle expands a `bg-surface-1` nested panel with system
+  prompt + context injection + 3-column provider overrides.
+  Chevron flips right→down.
+- ✓ Clicked Start session → live state renders with title + live-
+  pulse dot + "Idle" label + "Audio starting…". Backend created the
+  browser session OK; audio negotiation eventually moved through
+  "Audio starting…" → "Audio ready" (success green).
+- ✓ Typed "Hello Johnny — testing the new playground design." in
+  the composer + clicked Send → user line appeared in the transcript
+  with `UserIcon` + "You" mono label.
+- ✓ Voice barge-in worked: STT captured my mic ("I'm born to be
+  wild, born to be wild" and "Can you tell me something, just maybe
+  a short, super story?") — both rendered as user lines.
+- ✓ Bot reply arrived: `BotIcon` + "Johnny" mono label on a
+  `bg-surface-2` step, with the actual text in `--foreground`. Mic
+  auto-muted while bot was speaking (mic-off icon = red) — original
+  Johnny-ckz behaviour preserved.
+- ✓ Live state in dark mode: 1 sidebar nav + 1 live pulse dot =
+  2 yellows. With focus ring on textarea (keyboard Tab into it):
+  +1 = 3 yellows total → gate 4 holds at the limit.
+- ✓ Light mode live: same hierarchy, 2 yellows steady, 3 on focus.
+- ✓ "End session" button is destructive red, sits far right of the
+  toolbar. "Interrupt" is outline left of it. "Open detail" is
+  ghost between them — opens `/sessions/{id}` in a new tab.
+- ✓ Mute speaker toggle: VolumeXIcon in `text-destructive` when
+  muted, volume slider greys out via `disabled` + `opacity-50`.
+- ✓ Mute mic toggle: MicOffIcon in `text-destructive` when muted,
+  meter bar greys to `bg-ink-subtle`.
+- ✓ Reduced-motion: the foundation gate sets all keyframes to
+  near-instant via `prefers-reduced-motion: reduce`; the
+  `live-pulse` class degrades to a static fully-opaque yellow dot
+  via the explicit override in `app.css`.
+
+### Verification gates (DESIGN.md)
+
+| Gate | Status |
+| --- | --- |
+| 1. Body text on background ≥4.5:1 | ✓ (foundation, ~18:1 dark, ~16:1 light) |
+| 2. Placeholder on surface-3 ≥4.5:1 | ✓ (foundation) |
+| 3. Primary button label on primary ≥4.5:1 | ✓ (foundation, ~14:1) |
+| 4. Yellow ≤ 3 elements per viewport | ✓ (setup: 1 sidebar nav + 1 Start session CTA = 2; live steady: 1 sidebar + 1 live pulse = 2; live with input focus ring: 3 max) |
+| 5. No card-in-card | ✓ (single card per state; transcript pane and composer are sections within the card, hairline-separated, not nested cards. The Advanced nested panel is a hairline-bordered `bg-surface-1` step inside the form body — semantically a section, not a Card.) |
+| 6. No uppercase tracked eyebrow | ✓ (sentence case everywhere: "Configure", "Decision mode", "Template · optional", "Persona", "Advanced", "Session #N", "Idle"/"Listening"/"Thinking"/"Speaking", "Audio ready", "Speaker", "Mic", "You", "Johnny", "Interrupt", "Open detail", "End session". No `text-uppercase tracking-eyebrow` rules.) |
+| 7. Reduced motion honored | ✓ (foundation; `live-pulse` degrades; the only motion introduced beyond that is `transition-colors` on hover states which the foundation gate sets to ~0ms) |
+| 8. Screenshot unambiguously NOT stock shadcn | ✓ (mono chips + yellow live-pulse + UserIcon/BotIcon transcript labels + destructive-red End session + dark neutrals + no indigo / purple / cyan / green-yellow-orange anywhere) |
+
+### Quality gates
+
+- `pnpm check` (svelte-check) → 0 errors, 0 warnings ✓
+- `pnpm lint` → 1 error in `providers/+page.svelte:235` (pre-existing
+  baseline `configuredRowsFor`, documented in Codebase Patterns) ✓
+
+### Screenshots in `.validation/Johnny-fe.3/`
+
+- `01-before-light-setup.png` / `02-before-dark-setup.png` — old
+  design: full-width yellow Start session band, white card on dark
+  background, marketing lede.
+- `03-after-dark-setup.png` (with sidebar collapsed because of viewport
+  width during initial render) — first render of new design.
+- `04-after-dark-setup.png` — final dark mode setup: yellow Start
+  session CTA bottom-right, Advanced collapsed.
+- `05-after-dark-advanced.png` — Advanced section expanded with system
+  prompt + context injection + 3-column STT/LLM/TTS overrides.
+- `06-after-dark-live-empty.png` — live state immediately after Start
+  session, before any conversation — empty-state mic icon + helper.
+- `07-after-dark-live-typed.png` — focus ring on textarea (yellow
+  outline) — captures the gate-4 stress state.
+- `08-after-dark-live-sent.png` — textarea cleared after send.
+- `09-after-dark-live-with-transcript.png` — single user line
+  rendered, neutral slider (gate 4 fix in place).
+- `10-after-light-live-with-transcript.png` — same in light mode.
+- `11-after-light-live-real.png` — live state with multiple user lines
+  (STT captured my mic), `Thinking` substate label.
+- `12-after-light-live-with-bot.png` — bot reply rendered with
+  BotIcon + "Johnny" label on `bg-surface-2` step.
+- `13-after-dark-live-with-bot.png` — same in dark.
+- `14-after-dark-live-focus-ring.png` — Tab-focused state.
+- `15-after-dark-live-focus-textarea.png` — explicit textarea focus
+  ring (yellow outline = 3rd yellow, gate 4 holds).
+- `16-final-dark-setup.png` — clean dark setup state for the README.
+
+### Learnings
+
+- **`postBrowserText` works even when the audio WebSocket is dead.**
+  When a browser session loses its audio stream ("session not
+  active" error), text input via REST still routes through the
+  router → LLM → TTS pipeline. The error alert is informational,
+  not blocking — the operator can still type their way through a
+  conversation while the audio reconnects (or stays dead).
+- **The CDP `evaluate_script` failures are real.** Confirmed the
+  Codebase Pattern: `wait_for` + `take_snapshot` reliably
+  re-establishes the page context without restarting Chrome.
+- **Tailwind 4 supports `[accent-color:var(--...)]` arbitrary
+  values.** This is the cleanest path to a neutral slider that still
+  picks up dark/light mode via the foreground token. No need for a
+  custom slider primitive or a Svelte component override.
+- **Auto-scrolling the transcript needs a tick + scrollHeight.**
+  The pattern from `sessions/[id]` works directly here: `bind:this`
+  + `await tick()` + `el.scrollTop = el.scrollHeight`. The page's
+  `appendTranscript` helper schedules a scroll on every new line so
+  the operator always sees the latest message.
+- **Keyboard `Enter sends · Shift+Enter newline`** is a 5-line
+  `handleComposerKeydown` and probably the single best UX
+  improvement in this rewrite. Operators want to chat fast; the
+  click-to-send pattern shouldn't survive into 2026.
+- **Yellow audit is the gating decision in live-session UI.** The
+  page has 3 yellow "anchors" before any user interaction: sidebar
+  nav active + live pulse + (originally) accent-primary slider. A
+  4th yellow (focus ring or anything else) violates gate 4 the
+  instant the user clicks an input. The slider had to give. Same
+  logic will apply to any future live-state page (sessions/[id]
+  partially escapes by being scroll-heavy enough that the sidebar
+  nav rarely co-exists with a focus ring in the same viewport, but
+  the playground's compact layout pushes the constraint to the
+  limit).
 
 ---
 

@@ -3,10 +3,10 @@
   "sessionId": "1cd30e25-dc25-463b-9e9e-23974302caae",
   "status": "running",
   "startedAt": "2026-06-06T19:39:29.840Z",
-  "updatedAt": "2026-06-06T21:22:37.071Z",
-  "currentIteration": 5,
+  "updatedAt": "2026-06-06T21:39:29.833Z",
+  "currentIteration": 6,
   "maxIterations": 0,
-  "tasksCompleted": 4,
+  "tasksCompleted": 5,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -50,8 +50,8 @@
       {
         "id": "Johnny-fe.4",
         "title": "REIMAGINE + migrate: Migrate /calendar page (1322 lines) to shadcn-svelte",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-fe.5",
@@ -135,6 +135,16 @@
       "durationMs": 1250638,
       "startedAt": "2026-06-06T20:40:20.054Z",
       "endedAt": "2026-06-06T21:01:10.692Z"
+    },
+    {
+      "iteration": 6,
+      "status": "completed",
+      "taskId": "Johnny-fe.4",
+      "taskTitle": "REIMAGINE + migrate: Migrate /calendar page (1322 lines) to shadcn-svelte",
+      "taskCompleted": true,
+      "durationMs": 1279381,
+      "startedAt": "2026-06-06T21:01:16.894Z",
+      "endedAt": "2026-06-06T21:22:36.275Z"
     }
   ],
   "skippedTaskIds": [],
