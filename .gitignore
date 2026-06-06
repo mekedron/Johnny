@@ -46,3 +46,19 @@ client_secret*.json
 # scratch dirs.
 .validation/
 .validation-*/
+
+# Chrome profile used by the chrome-devtools MCP server (./scripts/start-chrome.sh
+# attaches Chrome on 127.0.0.1:9222 to this profile). Pure runtime cache /
+# cookies / extension state — must never be committed; was previously the
+# largest source of repo bloat.
+.chrome-profile/
+
+# ralph-tui runtime artifacts — agent iteration logs and per-iteration
+# screenshots. Scratch data, not source. The .ralph-tui/config.toml /
+# progress.md / live/ files are intentionally tracked when present.
+.ralph-tui/iterations/
+.ralph-tui/screenshots/
+.ralph-tui/reports/
+
+# impeccable design-tool live state — local scratch.
+.impeccable/
