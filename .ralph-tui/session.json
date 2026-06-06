@@ -3,10 +3,10 @@
   "sessionId": "10afcece-cc40-43a0-8f7d-e7372e7ab552",
   "status": "running",
   "startedAt": "2026-06-06T05:38:50.502Z",
-  "updatedAt": "2026-06-06T06:20:49.804Z",
-  "currentIteration": 2,
+  "updatedAt": "2026-06-06T06:28:36.925Z",
+  "currentIteration": 3,
   "maxIterations": 0,
-  "tasksCompleted": 2,
+  "tasksCompleted": 3,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -50,8 +50,8 @@
       {
         "id": "Johnny-awh",
         "title": "Persist bot utterances to meeting history (everything the bot says)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-vgl",
@@ -141,6 +141,16 @@
       "durationMs": 1177972,
       "startedAt": "2026-06-06T05:49:21.665Z",
       "endedAt": "2026-06-06T06:08:59.637Z"
+    },
+    {
+      "iteration": 3,
+      "status": "completed",
+      "taskId": "Johnny-awh",
+      "taskTitle": "Persist bot utterances to meeting history (everything the bot says)",
+      "taskCompleted": true,
+      "durationMs": 702892,
+      "startedAt": "2026-06-06T06:09:06.049Z",
+      "endedAt": "2026-06-06T06:20:48.941Z"
     }
   ],
   "skippedTaskIds": [],

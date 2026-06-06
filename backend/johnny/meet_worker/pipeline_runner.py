@@ -56,6 +56,8 @@ from johnny.meet_worker.log_stages import (
 from johnny.voice_pipeline import (
     APPROVAL_REQUIRED_MODE,
     DEFAULT_VAD_THRESHOLD,
+    SPEAKING_MODES,
+    SUGGEST_ONLY_MODE,
     EnergyVAD,
     EventBus,
     LocalAudioTransport,
@@ -302,8 +304,12 @@ async def _assemble_pipeline(
         context=context,
     )
 
-    # If TTS is missing but the mode would speak, fall back to listen.
-    if tts is None and mode in {"limited_auto_speak", "approval_required"}:
+    # If TTS is missing but the mode would speak, degrade to suggest_only
+    # so the router still records decisions and the UI surfaces them as
+    # suggestions instead of silently failing mid-pipeline (Johnny-vgl —
+    # free_auto_speak was previously left out of this set, so a missing
+    # TTS produced a "decided to speak" audit row with no audible reply).
+    if tts is None and mode in SPEAKING_MODES:
         log_stage(
             STAGE_AUDIO_BRIDGE,
             session_id=session_id,
@@ -315,7 +321,7 @@ async def _assemble_pipeline(
         )
         config = PipelineConfig(
             session_id=session_id,
-            mode="suggest_only",
+            mode=SUGGEST_ONLY_MODE,
             instructions=instructions,
             context=context,
         )

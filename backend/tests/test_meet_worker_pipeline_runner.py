@@ -40,7 +40,10 @@ from johnny.meet_worker.pipeline_runner import (
 )
 from johnny.voice_pipeline import (
     APPROVAL_REQUIRED_MODE,
+    FREE_AUTO_SPEAK_MODE,
+    LIMITED_AUTO_SPEAK_MODE,
     LISTEN_ONLY_MODE,
+    SUGGEST_ONLY_MODE,
     NoopApprovalGate,
     VoicePipeline,
 )
@@ -295,5 +298,47 @@ async def test_assemble_pipeline_no_tts_degrades_and_skips_approval_gate(
         env=env,
     )
 
-    assert pipeline.config.mode == "suggest_only"
+    assert pipeline.config.mode == SUGGEST_ONLY_MODE
+    assert isinstance(pipeline.approval_gate, NoopApprovalGate)
+
+
+@pytest.mark.parametrize(
+    "speaking_mode",
+    [APPROVAL_REQUIRED_MODE, LIMITED_AUTO_SPEAK_MODE, FREE_AUTO_SPEAK_MODE],
+)
+async def test_assemble_pipeline_no_tts_degrades_every_speaking_mode(
+    _registered_fake_providers: Any,
+    speaking_mode: str,
+) -> None:
+    """Every mode that would produce audio degrades to suggest_only when TTS
+    is missing — keeps decisions auditable and prevents the silent-failure
+    regression where ``free_auto_speak`` shipped a "decided to speak" row
+    with no audible reply (Johnny-vgl)."""
+    env = _provider_payload(speaking_mode, include_tts=False)
+
+    pipeline = await _assemble_pipeline(
+        cast(MeetAudioBridge, _FakeBridge()),
+        event_bus=InMemoryEventBus(),
+        session_id="42",
+        env=env,
+    )
+
+    assert pipeline.config.mode == SUGGEST_ONLY_MODE
+
+
+async def test_assemble_pipeline_keeps_mode_when_tts_present(
+    _registered_fake_providers: Any,
+) -> None:
+    """Sanity counterpart: with TTS configured, free_auto_speak survives
+    assembly unchanged so the bot can actually speak."""
+    env = _provider_payload(FREE_AUTO_SPEAK_MODE)
+
+    pipeline = await _assemble_pipeline(
+        cast(MeetAudioBridge, _FakeBridge()),
+        event_bus=InMemoryEventBus(),
+        session_id="42",
+        env=env,
+    )
+
+    assert pipeline.config.mode == FREE_AUTO_SPEAK_MODE
     assert isinstance(pipeline.approval_gate, NoopApprovalGate)

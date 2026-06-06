@@ -98,6 +98,19 @@ suggest-only runs the router so the UI can show the suggested reply,
 but the answer stage is replaced by an :class:`AgentSuggested` event.
 """
 
+SPEAKING_MODES: frozenset[str] = frozenset(
+    {APPROVAL_REQUIRED_MODE, LIMITED_AUTO_SPEAK_MODE, FREE_AUTO_SPEAK_MODE}
+)
+"""Modes that depend on a working TTS provider to produce audio.
+
+Used by :func:`johnny.meet_worker.pipeline_runner._assemble_pipeline` to
+decide whether a missing TTS provider must trigger the degradation to
+``suggest_only``. Keeping this list in one place means a new speaking
+mode automatically picks up the degradation path instead of silently
+shipping a regression where the router approves a reply but TTS can't
+play it (the Johnny-vgl free_auto_speak symptom).
+"""
+
 _SENTENCE_BOUNDARY = re.compile(r"(?:[.!?]+[\"')\]]*\s+)|(?:\n+)")
 """Matches sentence-ending punctuation followed by whitespace, or one+ newlines.
 
@@ -1073,6 +1086,7 @@ __all__ = [
     "NON_SPEAKING_MODES",
     "PipelineConfig",
     "RouterDecision",
+    "SPEAKING_MODES",
     "SUGGEST_ONLY_MODE",
     "VoicePipeline",
 ]

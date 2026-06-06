@@ -82,6 +82,7 @@ def test_enums_have_expected_members() -> None:
         "suggest_only",
         "approval_required",
         "limited_auto_speak",
+        "free_auto_speak",
     }
     assert {e.value for e in BotSessionStatus} == {
         "scheduled",

@@ -2994,15 +2994,144 @@ async def test_listen_only_mode_persists_transcripts_for_audit(
     assert records[1].text == "world"
 
 
+async def test_free_auto_speak_speaks_without_approval_or_allowlist(
+    two_utterance_pcm: bytes,
+) -> None:
+    """free_auto_speak streams the answer LLM straight into TTS, skipping
+    both the approval round and the allowed-reply matcher (Johnny-vgl).
+
+    Pins the spec so a future refactor of ``_process_utterance``'s mode
+    dispatch doesn't silently change which collaborator is invoked.
+    """
+    from johnny.voice_pipeline import (
+        FREE_AUTO_SPEAK_MODE,
+        InMemoryUtteranceSink,
+        NoopApprovalGate,
+    )
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    tts = _FakeTTS(frame_count=3)
+    answer = _FakeAnswerLLM(answers=["Nice to meet you all."])
+    dsink = InMemoryDecisionSink()
+    usink = InMemoryUtteranceSink()
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["are you here", "thanks"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {
+                    "should_speak": True,
+                    "confidence": 0.95,
+                    "reason": "direct ask",
+                    "suggested_reply": "Yes",
+                },
+                {"should_speak": False, "confidence": 0.1, "reason": "noise"},
+            ]
+        ),
+        answer_llm=answer,
+        tts=tts,
+        event_bus=bus,
+        config=PipelineConfig(
+            mode=FREE_AUTO_SPEAK_MODE,
+            # allowed_replies present to prove the mode bypasses the allowlist.
+            allowed_replies=("yes", "no"),
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+        approval_gate=NoopApprovalGate(),
+        decision_sink=dsink,
+        utterance_sink=usink,
+    )
+    await pipeline.run()
+
+    types = [e.type for e in bus.snapshot()]
+    # Speaks (not "suggested") and never published an approval round.
+    assert "agent_spoke" in types
+    assert "agent_suggested" not in types
+    assert "approval_pending" not in types
+
+    spokes = [e for e in bus.snapshot() if isinstance(e, AgentSpoke)]
+    assert len(spokes) == 1
+    # Free-form output goes through verbatim — not coerced into "yes"/"no".
+    assert spokes[0].text == "Nice to meet you all."
+    assert spokes[0].matched_allowed_reply is None
+
+    records = dsink.snapshot()
+    assert len(records) == 2
+    assert records[0].outcome == "spoken"
+    assert records[1].outcome == "suppressed"
+
+    utterances = usink.snapshot()
+    assert len(utterances) == 1
+    assert utterances[0].mode == FREE_AUTO_SPEAK_MODE
+    assert utterances[0].output_text == "Nice to meet you all."
+    assert utterances[0].matched_allowed_reply is None
+
+
+async def test_free_auto_speak_router_below_threshold_suppresses(
+    two_utterance_pcm: bytes,
+) -> None:
+    """The router's confidence_threshold still gates free_auto_speak so
+    ambient chatter doesn't trigger replies — same gate as every other
+    speaking mode (Johnny-vgl: confirm the threshold is honoured)."""
+    from johnny.voice_pipeline import FREE_AUTO_SPEAK_MODE
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    tts = _FakeTTS()
+    dsink = InMemoryDecisionSink()
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["soft chatter"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {"should_speak": True, "confidence": 0.3, "reason": "weak"},
+            ]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["resp"]),
+        tts=tts,
+        event_bus=bus,
+        config=PipelineConfig(
+            mode=FREE_AUTO_SPEAK_MODE,
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.7,
+        ),
+        decision_sink=dsink,
+    )
+    await pipeline.run()
+
+    assert "agent_spoke" not in [e.type for e in bus.snapshot()]
+    assert tts.calls == []
+    assert all(r.outcome == "suppressed" for r in dsink.snapshot())
+
+
 async def test_mode_constants_match_db_string_values() -> None:
     """Pipeline mode constants must match the DB BotMode enum values so the
     string passed from MeetingConfig.mode wires through without translation."""
     from app.db.models import BotMode
     from johnny.voice_pipeline import (
         APPROVAL_REQUIRED_MODE,
+        FREE_AUTO_SPEAK_MODE,
         LIMITED_AUTO_SPEAK_MODE,
         LISTEN_ONLY_MODE,
         NON_SPEAKING_MODES,
+        SPEAKING_MODES,
         SUGGEST_ONLY_MODE,
     )
 
@@ -3010,4 +3139,15 @@ async def test_mode_constants_match_db_string_values() -> None:
     assert SUGGEST_ONLY_MODE == BotMode.SUGGEST_ONLY.value
     assert APPROVAL_REQUIRED_MODE == BotMode.APPROVAL_REQUIRED.value
     assert LIMITED_AUTO_SPEAK_MODE == BotMode.LIMITED_AUTO_SPEAK.value
+    assert FREE_AUTO_SPEAK_MODE == BotMode.FREE_AUTO_SPEAK.value
     assert NON_SPEAKING_MODES == {LISTEN_ONLY_MODE, SUGGEST_ONLY_MODE}
+    assert SPEAKING_MODES == {
+        APPROVAL_REQUIRED_MODE,
+        LIMITED_AUTO_SPEAK_MODE,
+        FREE_AUTO_SPEAK_MODE,
+    }
+    # Every DB-known mode is classified as either non-speaking or speaking
+    # — adding a new BotMode without picking a side will fail this check.
+    all_modes = {m.value for m in BotMode}
+    assert NON_SPEAKING_MODES | SPEAKING_MODES == all_modes
+    assert NON_SPEAKING_MODES.isdisjoint(SPEAKING_MODES)

@@ -45,7 +45,84 @@ after each iteration and it's included in prompts for context.
   uses that id; if that row is still PENDING (approval_required mode
   after approve), the same transaction flips it to SPOKEN. Production's
   PENDING → SPOKEN audit flip lives here, NOT in the pipeline.
+- **Speaking-mode classification lives in two constants.**
+  `johnny.voice_pipeline.NON_SPEAKING_MODES` (listen_only / suggest_only)
+  and `SPEAKING_MODES` (approval_required / limited_auto_speak /
+  free_auto_speak) partition `BotMode`. A test in
+  `test_pipeline.py::test_mode_constants_match_db_string_values`
+  enforces the partition, so adding a new `BotMode` value forces the
+  author to classify it. The TTS-missing degradation in
+  `pipeline_runner._assemble_pipeline` reads `SPEAKING_MODES` so any
+  future speaking mode automatically downgrades to `suggest_only`
+  when TTS is absent instead of silently producing no audio.
 
+---
+
+## 2026-06-06 - Johnny-vgl
+- Standardized the bot speech decision logic across BotMode so
+  `free_auto_speak` (and any future speaking mode) inherits the same
+  TTS-missing degradation as `limited_auto_speak` / `approval_required`.
+  The reported bug — bot in free mode showed a confident suggested
+  reply but never spoke aloud — happens when TTS is absent: the
+  pipeline ran the answer LLM, hit `_NoopTTS` (zero frames), returned
+  early from `_answer_and_speak`, and the subscriber still wrote
+  `outcome=spoken` (it switches on mode, not actual frame count). The
+  fix degrades to `suggest_only` upfront so the UI/audit get
+  consistent suggestion semantics instead of an optimistic
+  spoke-but-silent row.
+- Files changed:
+  - `backend/johnny/voice_pipeline/pipeline.py` — new `SPEAKING_MODES`
+    frozenset (`approval_required` + `limited_auto_speak` +
+    `free_auto_speak`) exported alongside `NON_SPEAKING_MODES`.
+  - `backend/johnny/voice_pipeline/__init__.py` — re-exports
+    `SPEAKING_MODES`.
+  - `backend/johnny/meet_worker/pipeline_runner.py` — TTS-missing
+    degradation now reads `SPEAKING_MODES` instead of an inline
+    `{"limited_auto_speak", "approval_required"}` literal. Pulls in
+    `SUGGEST_ONLY_MODE` constant from the package for the rewrite
+    target instead of hard-coding the string.
+  - `backend/tests/test_db_models.py` — pinned `BotMode` enum members
+    now include `free_auto_speak` (the previously-failing assertion
+    flagged in earlier Johnny-cdw notes).
+  - `backend/tests/voice_pipeline/test_pipeline.py` —
+    `test_mode_constants_match_db_string_values` extended to assert
+    `FREE_AUTO_SPEAK_MODE` matches `BotMode.FREE_AUTO_SPEAK.value`,
+    plus a `SPEAKING_MODES` assertion and a partition check (every
+    `BotMode` falls on exactly one side of speaking / non-speaking).
+    Two new pipeline behaviour tests pin the `free_auto_speak`
+    semantics: speaks free-form text (bypasses the allowlist + the
+    approval gate, emits `AgentSpoke` not `AgentSuggested`,
+    persists `outcome=spoken`), and respects the router's
+    `confidence_threshold` so ambient chatter doesn't trigger a reply.
+  - `backend/tests/test_meet_worker_pipeline_runner.py` — new
+    parametrized test asserts every member of `SPEAKING_MODES`
+    degrades to `suggest_only` when TTS is missing (regression pin
+    for the silent-failure path), plus a sanity counterpart that
+    `free_auto_speak` survives assembly unchanged when TTS is
+    configured. Existing test now uses `SUGGEST_ONLY_MODE` constant.
+- **Learnings:**
+  - Free-mode "decided to speak but silent" is two writers disagreeing:
+    `_answer_and_speak` returns False when `_NoopTTS` yields no
+    frames, but `apply_router_decision_event` already wrote
+    `outcome=spoken` from the mode alone — so an audit row claims
+    speech happened when none did. Degrading the mode early is the
+    cleanest fix; alternatives would require either threading a
+    "spoke=false" signal back to the subscriber or making the
+    subscriber wait for an `agent_spoke` event before writing the
+    outcome (much larger change).
+  - Inline `{"limited_auto_speak", "approval_required"}` literals are
+    the kind of thing that quietly rot when a new mode lands. Naming
+    the set (`SPEAKING_MODES`) plus a test that partitions every
+    `BotMode` value across `SPEAKING_MODES` / `NON_SPEAKING_MODES`
+    makes the next addition fail fast instead of silently shipping a
+    regression.
+  - Frontend already classifies modes correctly
+    (`frontend/src/lib/templates.ts`, `frontend/src/lib/sessionDetail.ts`
+    both list `free_auto_speak`), and the `DECISION_OUTCOME_LABEL`
+    map covers every outcome. The "Suggested:" text the user saw was
+    just `agent_decisions.suggested_reply` rendering — that field is
+    populated by the router LLM regardless of mode, so it's not a
+    UI bug; the bug was the pipeline's silent no-op.
 ---
 
 ## 2026-06-06 - Johnny-cdw
