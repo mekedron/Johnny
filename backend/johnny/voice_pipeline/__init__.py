@@ -19,6 +19,9 @@ from johnny.voice_pipeline.approval import (
     InMemoryApprovalGate,
     NoopApprovalGate,
 )
+from johnny.voice_pipeline.browser_transport import (
+    BrowserAudioTransport,
+)
 from johnny.voice_pipeline.decision_sink import (
     DecisionOutcome,
     DecisionRecord,
@@ -138,6 +141,7 @@ __all__ = [
     "ApprovalResolved",
     "AsyncIOApprovalGate",
     "BargeInDecision",
+    "BrowserAudioTransport",
     "DecisionOutcome",
     "DecisionRecord",
     "DecisionSink",

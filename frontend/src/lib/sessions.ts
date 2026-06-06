@@ -13,9 +13,12 @@ export type BotSessionStatus =
 	| 'ended'
 	| 'failed';
 
+export type BotSessionSource = 'meet' | 'browser';
+
 export interface BotSession {
 	id: number;
-	meeting_config_id: number;
+	meeting_config_id: number | null;
+	source: BotSessionSource;
 	status: BotSessionStatus;
 	container_name: string | null;
 	started_at: string | null;

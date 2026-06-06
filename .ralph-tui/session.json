@@ -3,10 +3,10 @@
   "sessionId": "8f0c3abd-f08d-40a2-8208-2be1c6e3a4bb",
   "status": "running",
   "startedAt": "2026-06-06T11:07:44.490Z",
-  "updatedAt": "2026-06-06T11:51:39.005Z",
-  "currentIteration": 1,
+  "updatedAt": "2026-06-06T12:17:22.223Z",
+  "currentIteration": 2,
   "maxIterations": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 2,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -176,8 +176,8 @@
       {
         "id": "Johnny-ckz.4",
         "title": "Run the two-bot voice-interrupt harness end-to-end against real models, fix any bugs it surfaces",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-ckz.5",
@@ -251,6 +251,16 @@
       "durationMs": 656276,
       "startedAt": "2026-06-06T11:07:55.571Z",
       "endedAt": "2026-06-06T11:18:51.847Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "Johnny-ckz.4",
+      "taskTitle": "Run the two-bot voice-interrupt harness end-to-end against real models, fix any bugs it surfaces",
+      "taskCompleted": true,
+      "durationMs": 1955930,
+      "startedAt": "2026-06-06T11:19:01.820Z",
+      "endedAt": "2026-06-06T11:51:37.750Z"
     }
   ],
   "skippedTaskIds": [],

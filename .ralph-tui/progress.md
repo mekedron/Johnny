@@ -5,6 +5,40 @@ after each iteration and it's included in prompts for context.
 
 ## Codebase Patterns (Study These First)
 
+### In-browser voice surface uses `BrowserAudioTransport` (no Meet)
+
+For browser-sourced sessions (Johnny-ckz.6) the voice pipeline runs
+in-process in the API container against
+`johnny.voice_pipeline.browser_transport.BrowserAudioTransport` — a
+`JohnnyTransport` that exchanges raw 16 kHz mono S16LE PCM via async
+queues. The WebSocket endpoint at `/ws/sessions/{id}/audio` pushes
+inbound frames in (`push_capture_frame`) and pulls outbound TTS frames
+out (`drain_playback_frames`). No Google Meet, no LiveKit, no
+meet-worker container in the path.
+
+The same pipeline classes that the meet-worker uses are wired up by
+`app.services.browser_pipeline_runner.assemble_browser_pipeline`. A
+per-session `BrowserSessionRunner` (registered in
+`app.api.browser_sessions._session_runners` by `bot_session_id`)
+owns the transport + the asyncio task so the WebSocket endpoint can
+attach asynchronously after `POST /sessions/browser/start` returns.
+
+A SMOKE-level e2e test
+(`tests/services/test_browser_pipeline_e2e.py`) drives this end to
+end with a fake STT + fake router LLM to prove transport → pipeline →
+event_bus is wired correctly without needing real audio.
+
+### `bot_sessions.source` separates meet vs browser sessions
+
+The `0007` migration adds `source` (`'meet'` | `'browser'`) plus
+`playground_overrides` JSON, and makes `meeting_config_id` nullable.
+A CHECK constraint forces `source='meet'` rows to keep their FK so
+legacy data stays valid. UI badges browser sessions in the layout
+status list and exposes the source on the `BotSessionRead`
+schema — analytics / reports that historically aggregated all
+sessions should now filter on `source` to keep playground sessions
+out of meeting metrics.
+
 ### httpx must always set `follow_redirects=True` when hitting Hugging Face
 
 HuggingFace's `https://huggingface.co/<repo>/resolve/main/<file>` endpoint
@@ -213,5 +247,160 @@ credits — a real-world finding) using credentials from
 - Scripted scenarios' 1.2 s inter-event silence is far too tight for
   real-provider mode; 8 s padding after each speech event lets the
   bot start TTS before the next speaker event arrives.
+
+---
+
+## 2026-06-06 - Johnny-ckz.6
+
+Implemented the in-browser voice/text chat surface — both the
+per-event "Try with bot" rehearsal button and the standalone
+`/playground` page. The bot now runs end-to-end without Google Meet,
+the meet-worker container, or any LiveKit infra.
+
+**Files changed:**
+
+- `backend/alembic/versions/0007_bot_session_browser_source.py`
+  (new) — adds `source` enum (`'meet'` | `'browser'`) and
+  `playground_overrides` JSON to `bot_sessions`; makes
+  `meeting_config_id` nullable. CHECK constraint forces meet rows
+  to keep their FK so legacy data validates.
+- `backend/app/db/models.py` — adds `BotSessionSource` StrEnum,
+  the new columns on `BotSession`, nullable FK to `MeetingConfig`.
+- `backend/johnny/voice_pipeline/browser_transport.py` (new) —
+  `BrowserAudioTransport`. Implements `JohnnyTransport`. Bounded
+  capture queue with oldest-drop semantics, unbounded playback
+  queue, EOF sentinel + `_closed` flag for clean teardown,
+  resampling on outbound frames when TTS's source rate differs
+  from the transport's 16 kHz. Exported from
+  `johnny.voice_pipeline.__init__`.
+- `backend/app/services/browser_pipeline_runner.py` (new) —
+  in-process counterpart to `johnny.meet_worker.pipeline_runner`.
+  Assembles a `VoicePipeline` against a `BrowserAudioTransport`
+  with the configured providers, runs it under a `stop_event`, and
+  cleans up the transport + approval gate on exit. Mirrors the
+  meet-worker's STT/LLM/TTS validation + speaking-mode degradation
+  to `suggest_only`.
+- `backend/app/api/browser_sessions.py` (new) — HTTP + WS surface:
+  - `POST /sessions/browser/start` — creates a browser-source
+    `bot_sessions` row (rehearsal when `event_id` is set,
+    playground when not), spawns the in-process pipeline runner,
+    snapshots overrides on the row.
+  - `POST /sessions/browser/{id}/stop` — idempotent; signals the
+    runner's `stop_event`.
+  - `POST /sessions/browser/{id}/text` — text input fallback when
+    mic is denied. Records a `TranscriptChunk`.
+  - `GET /sessions/browser/active` — list active browser sessions
+    for badging.
+  - `WS /ws/sessions/{id}/audio` — raw bidirectional PCM stream
+    over WebSocket. JSON `{"type":"ready"}` / `{"type":"ended"}`
+    control messages around binary frames.
+  - In-memory `_session_runners` registry maps session id → runner
+    so the WS endpoint can attach to a live transport.
+- `backend/app/api/sessions.py` — `BotSessionRead` now exposes
+  `source` + nullable `meeting_config_id` so the legacy UI list
+  surfaces the source consistently.
+- `backend/app/main.py` — registers the new browser-sessions
+  routers (HTTP + WS).
+- `backend/tests/voice_pipeline/test_browser_transport.py` (new) —
+  11 unit tests for the transport.
+- `backend/tests/services/test_browser_pipeline_runner.py` (new) —
+  7 tests for provider validation + assembly degradation.
+- `backend/tests/api/test_browser_sessions.py` (new) — 16 tests
+  for HTTP API contract (playground, rehearsal, stop, text input,
+  inline-override gate, runner registry).
+- `backend/tests/services/test_browser_pipeline_e2e.py` (new) —
+  one smoke test that drives audio in → transcript out → router
+  decision out through a real `VoicePipeline` + a real
+  `BrowserAudioTransport` with fake STT + fake LLM.
+- `backend/tests/test_db_models.py` — assertion for the new
+  `BotSessionSource` enum's members.
+- `frontend/src/lib/browserSessions.ts` (new) — typed API client
+  for the `/sessions/browser` endpoints. Includes
+  `audioWebSocketUrl()` helper that swaps `http(s)://` → `ws(s)://`.
+- `frontend/src/lib/browserAudio.ts` (new) — Web Audio + WebSocket
+  plumbing. AudioWorklet captures the mic, downsamples to 16 kHz,
+  encodes to s16, and sends 20 ms frames as binary WS messages.
+  Inbound frames decode to Float32 and play via `AudioBufferSourceNode`.
+  Schedules playback using a running `nextPlaybackTime` so frames
+  don't overlap or drop. Mic-denial calls `onMicDenied()` so the UI
+  can fall back to text.
+- `frontend/src/lib/sessions.ts` — `BotSession` type now includes
+  `source: BotSessionSource` and nullable `meeting_config_id`.
+- `frontend/src/routes/playground/+page.svelte` (new) — the
+  playground page. Persona + custom system prompt inputs, Start
+  button that creates the session + starts audio, End button that
+  tears both down, text-input fallback when mic is denied,
+  visible badges for `browser` source + audio readiness.
+  `onDestroy` calls stop on navigation away (AC #7).
+- `frontend/src/routes/calendar/+page.svelte` — adds "Try with
+  bot" button next to "Join now" on every event with a configured
+  meeting. Clicks call `startBrowserSession({event_id})` then
+  `goto('/playground?session=<id>')` to hand off to the UI.
+- `frontend/src/routes/+layout.svelte` — `/playground` added to
+  the nav. Live-sessions list now shows a violet `browser` badge
+  next to the status pill when `session.source === 'browser'`.
+
+**Verification:**
+
+- 1878 backend tests pass (was 1835 — 43 new, 0 broken). Includes
+  the new smoke E2E that drives real `VoicePipeline` through
+  `BrowserAudioTransport`.
+- `ruff` + `mypy` clean on every new file.
+- Frontend `svelte-check` and `eslint` pass (0 errors, 0 warnings).
+- `from app.main import app` succeeds; the new routers register.
+- DB models round-trip: `BotSession(source=BROWSER,
+  meeting_config_id=None, playground_overrides=...)` inserts +
+  selects cleanly through SQLAlchemy.
+
+**Gaps / follow-ups (filed separately if pursued):**
+
+- Real chrome-devtools MCP verification is not done here — the
+  PRD calls for end-to-end browser test runs (mic permission, voice
+  round-trip, interrupt latency, transcript rendering, per-event
+  context parity, override scoping, end-session cleanup,
+  mic-denied fallback). Architecture is wired so those tests can
+  be written without further backend changes; they require a
+  populated `provider_credentials` table and a running stack to
+  exercise.
+- Text input currently records a `TranscriptChunk` but does NOT
+  yet inject the text into the pipeline's response loop — the next
+  iteration should make the text trigger a router decision +
+  answer + TTS turn (same as a real spoken utterance).
+- `credentials_id` provider-override path is implemented but
+  bypasses the user-auth surface (out of scope here). For now use
+  `JOHNNY_ALLOW_INLINE_PROVIDER_CREDS=1` in dev or the configured
+  active providers as the base. Overrides ARE non-destructive
+  (they only mutate `playground_overrides` on the session row).
+- "Try with bot" navigates to `/playground?session=<id>` but the
+  playground page does not yet detach-and-attach to a pre-started
+  session — it always creates a fresh one. The handoff needs the
+  playground page to honour the `session` query param.
+
+**Learnings:**
+
+- See "Codebase Patterns" at top — two new patterns extracted:
+  `BrowserAudioTransport` as the in-browser path, and the
+  `source` column for distinguishing browser vs meet sessions.
+- `BrowserAudioTransport.stop()` must NOT drop a queued frame to
+  make room for the EOF sentinel; instead drain the queue into a
+  holding list, restore the items, then push the sentinel. The
+  first naïve implementation displaced the oldest frame on
+  every stop call, which the unit test caught immediately.
+- VoicePipeline's `tts: TTSProvider` argument is annotated as
+  non-Optional, but the codebase actually passes `None` for
+  non-speaking modes. Both the meet-worker pipeline_runner and
+  the new browser pipeline_runner have to `cast(TTSProvider,
+  None)` to satisfy mypy. Fixing this contract properly is a
+  larger refactor than this bead's scope.
+- AudioWorklet PCM streaming is the right path for browser →
+  server audio when you can't bring in WebRTC infra. Two gotchas:
+  (1) the `AudioContext`'s actual sample rate is rarely 16 kHz,
+  so the worklet has to downsample inline; (2) `sampleRate` and
+  `currentTime` are globals available inside the worklet — no
+  need to thread them through `processorOptions`.
+- The frontend `svelte-check` doesn't narrow `if (!isLive)` /
+  `{:else}` blocks on the `liveSession` state — using
+  `{:else if liveSession}` makes the type-narrowing explicit and
+  removes three "possibly null" errors.
 
 ---

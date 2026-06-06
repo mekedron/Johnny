@@ -10,6 +10,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.auth import router as auth_router
+from app.api.browser_sessions import router as browser_sessions_router
+from app.api.browser_sessions import ws_router as browser_sessions_ws_router
 from app.api.calendar import router as calendar_router
 from app.api.decisions import router as decisions_router
 from app.api.history import router as history_router
@@ -77,6 +79,8 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(browser_sessions_router)
+app.include_router(browser_sessions_ws_router)
 app.include_router(calendar_router)
 app.include_router(decisions_router)
 app.include_router(history_router)

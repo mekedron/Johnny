@@ -12,6 +12,7 @@ from app.db.models import (
     EMBEDDING_DIM,
     AccountRole,
     BotMode,
+    BotSessionSource,
     BotSessionStatus,
     DecisionOutcome,
     ProviderKind,
@@ -92,6 +93,7 @@ def test_enums_have_expected_members() -> None:
         "ended",
         "failed",
     }
+    assert {e.value for e in BotSessionSource} == {"meet", "browser"}
     assert {e.value for e in DecisionOutcome} == {
         "spoken",
         "suppressed",

@@ -76,6 +76,20 @@ class BotSessionStatus(enum.StrEnum):
     FAILED = "failed"
 
 
+class BotSessionSource(enum.StrEnum):
+    """Origin of a :class:`BotSession`.
+
+    ``MEET`` is the legacy path — meet-worker container joins a Google
+    Meet room. ``BROWSER`` is the in-browser surface (Johnny-ckz.6):
+    audio flows over a WebSocket between the browser and the API
+    process, no Meet involved. The split lets the UI badge them
+    differently in the session list and keeps analytics clean.
+    """
+
+    MEET = "meet"
+    BROWSER = "browser"
+
+
 class DecisionOutcome(enum.StrEnum):
     SPOKEN = "spoken"
     SUPPRESSED = "suppressed"
@@ -242,9 +256,25 @@ class BotSession(TimestampMixin, Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    meeting_config_id: Mapped[int] = mapped_column(
+    # Nullable since Johnny-ckz.6: playground sessions have no calendar
+    # event and so no meeting_config row. The 0007 migration keeps a
+    # CHECK constraint that forces source='meet' rows to still carry an
+    # FK, so meet sessions are still tied to a real meeting_config.
+    meeting_config_id: Mapped[int | None] = mapped_column(
         ForeignKey("meeting_configs.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    source: Mapped[BotSessionSource] = mapped_column(
+        SAEnum(
+            BotSessionSource,
+            name="bot_session_source",
+            native_enum=False,
+            length=16,
+            values_callable=_str_enum_values,
+        ),
         nullable=False,
+        default=BotSessionSource.MEET,
+        server_default=BotSessionSource.MEET.value,
     )
     status: Mapped[BotSessionStatus] = mapped_column(
         SAEnum(
@@ -262,8 +292,25 @@ class BotSession(TimestampMixin, Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     logs: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Browser-session-only: snapshots provider/system-prompt overrides
+    # the user picked for this single playground run so the pipeline
+    # can apply them without mutating the global active-provider
+    # selection. Shape:
+    #
+    #   {
+    #     "providers": {<kind>: {"provider_name": ..., "credentials":
+    #         {...}, "options": {...}, "display_name": ...}, ...},
+    #     "system_prompt": "<str>",
+    #     "persona": "<str>",
+    #     "calendar_event_id": <int|null>
+    #   }
+    playground_overrides: Mapped[dict[str, Any] | None] = mapped_column(
+        _json_column(), nullable=True
+    )
 
-    meeting_config: Mapped[MeetingConfig] = relationship(back_populates="bot_sessions")
+    meeting_config: Mapped[MeetingConfig | None] = relationship(
+        back_populates="bot_sessions"
+    )
     transcript_chunks: Mapped[list[TranscriptChunk]] = relationship(
         back_populates="bot_session", cascade="all, delete-orphan"
     )

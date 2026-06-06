@@ -26,6 +26,8 @@
 		type MeetingConfigUpsertPayload
 	} from '$lib/meetingConfigs';
 	import { startSession } from '$lib/sessions';
+	import { startBrowserSession } from '$lib/browserSessions';
+	import { goto } from '$app/navigation';
 
 	let accounts = $state<Account[]>([]);
 	let selectedAccountId = $state<number | null>(null);
@@ -66,6 +68,8 @@
 	let joinNowBusy = $state(false);
 	let joinNowMessage = $state<string | null>(null);
 	let joinNowSessionId = $state<number | null>(null);
+	let tryBotBusy = $state(false);
+	let tryBotMessage = $state<string | null>(null);
 
 	const WINDOW_DAYS = 14;
 
@@ -353,6 +357,24 @@
 		}
 	}
 
+	async function handleTryWithBot() {
+		if (!selectedEvent || !existingConfig) return;
+		tryBotBusy = true;
+		tryBotMessage = null;
+		try {
+			const session = await startBrowserSession({ event_id: selectedEvent.id });
+			tryBotMessage = `Opening browser session #${session.id}…`;
+			// Hand off to the playground page which owns the audio + UI.
+			// Pass session id via query string so the playground can attach
+			// to the existing session instead of starting a new one.
+			void goto(`/playground?session=${session.id}`);
+		} catch (e) {
+			tryBotMessage = e instanceof Error ? e.message : String(e);
+		} finally {
+			tryBotBusy = false;
+		}
+	}
+
 	function handleRowKey(event: KeyboardEvent, evt: CalendarEvent) {
 		if (!evt.has_meet_link) return;
 		if (event.key === 'Enter' || event.key === ' ') {
@@ -577,6 +599,16 @@
 				>
 					{joinNowBusy ? 'Starting…' : 'Join now'}
 				</button>
+				<button
+					type="button"
+					class="try-bot-button"
+					disabled={tryBotBusy}
+					onclick={handleTryWithBot}
+					data-testid="try-bot-button"
+					title="Open an in-browser voice chat with Johnny using this meeting's context — no Google Meet needed."
+				>
+					{tryBotBusy ? 'Opening…' : 'Try with bot'}
+				</button>
 				{#if joinNowMessage}
 					<span class="join-now-message" role="status">
 						{joinNowMessage}
@@ -585,6 +617,11 @@
 								View live session →
 							</a>
 						{/if}
+					</span>
+				{/if}
+				{#if tryBotMessage}
+					<span class="join-now-message" role="status">
+						{tryBotMessage}
 					</span>
 				{/if}
 			</div>
@@ -1115,6 +1152,25 @@
 		background: #0284c7;
 	}
 	.join-now-button:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+	.try-bot-button {
+		appearance: none;
+		border: 1px solid #6d28d9;
+		background: #f5f3ff;
+		color: #5b21b6;
+		padding: 0.45rem 0.85rem;
+		border-radius: 4px;
+		font-weight: 600;
+		font-size: 0.85rem;
+		cursor: pointer;
+		margin-left: 0.5rem;
+	}
+	.try-bot-button:hover:not(:disabled) {
+		background: #ede9fe;
+	}
+	.try-bot-button:disabled {
 		opacity: 0.6;
 		cursor: not-allowed;
 	}

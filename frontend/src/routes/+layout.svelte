@@ -37,6 +37,7 @@
 
 	const navItems = [
 		{ href: '/calendar', label: 'Calendar' },
+		{ href: '/playground', label: 'Playground' },
 		{ href: '/templates', label: 'Templates' },
 		{ href: '/providers', label: 'Providers' },
 		{ href: '/history', label: 'History' },
@@ -388,6 +389,15 @@
 								<span class="status-pill status-pill-{session.status}">
 									{BOT_SESSION_STATUS_LABEL[session.status]}
 								</span>
+								{#if session.source === 'browser'}
+									<span
+										class="status-source-pill source-browser"
+										data-testid="session-source-{session.id}"
+										title="Browser session — voice/text chat without Google Meet"
+									>
+										browser
+									</span>
+								{/if}
 							</div>
 							{#if session.error_reason}
 								<p
@@ -674,6 +684,19 @@
 	.status-pill-failed {
 		background: #fee2e2;
 		color: #991b1b;
+	}
+	.status-source-pill {
+		display: inline-block;
+		padding: 0.1rem 0.4rem;
+		border-radius: 999px;
+		font-size: 0.65rem;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		font-weight: 600;
+	}
+	.status-source-pill.source-browser {
+		background: #ede9fe;
+		color: #6d28d9;
 	}
 	.status-reason {
 		margin: 0;

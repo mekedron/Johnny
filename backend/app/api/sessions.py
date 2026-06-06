@@ -39,6 +39,7 @@ from app.db.models import (
     AgentUtterance,
     BotMode,
     BotSession,
+    BotSessionSource,
     BotSessionStatus,
     CalendarEvent,
     DecisionOutcome,
@@ -78,12 +79,20 @@ def get_launcher() -> ContainerLauncher:
 
 
 class BotSessionRead(BaseModel):
-    """Public view of a :class:`BotSession` row."""
+    """Public view of a :class:`BotSession` row.
+
+    ``source`` is ``meet`` for legacy / scheduled meet-worker sessions
+    and ``browser`` for in-browser playground or rehearsal sessions
+    (Johnny-ckz.6). Lets the UI badge them differently in the list.
+    ``meeting_config_id`` is nullable because playground sessions have
+    no calendar event.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    meeting_config_id: int
+    meeting_config_id: int | None
+    source: BotSessionSource
     status: BotSessionStatus
     container_name: str | None
     started_at: datetime | None
