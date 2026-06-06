@@ -49,6 +49,13 @@ local-stt = [
 local-tts = [
     "piper-tts>=1.4.0",
 ]
+# Host-side helpers (auth-state seeder for Johnny-ckz.1). Installs
+# Playwright on the host so the operator can open Chromium headed,
+# sign into Google as the bot account, and persist the resulting
+# storage_state.json into the shared docker volume.
+auth-seed = [
+    "playwright>=1.49.0",
+]
 
 [dependency-groups]
 dev = [

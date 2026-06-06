@@ -65,6 +65,7 @@
 	let pendingDelete = $state(false);
 	let joinNowBusy = $state(false);
 	let joinNowMessage = $state<string | null>(null);
+	let joinNowSessionId = $state<number | null>(null);
 
 	const WINDOW_DAYS = 14;
 
@@ -340,8 +341,10 @@
 		if (!selectedEvent || !existingConfig) return;
 		joinNowBusy = true;
 		joinNowMessage = null;
+		joinNowSessionId = null;
 		try {
 			const session = await startSession(selectedEvent.id);
+			joinNowSessionId = session.id;
 			joinNowMessage = `Johnny is joining — session #${session.id}.`;
 		} catch (e) {
 			joinNowMessage = e instanceof Error ? e.message : String(e);
@@ -575,7 +578,14 @@
 					{joinNowBusy ? 'Starting…' : 'Join now'}
 				</button>
 				{#if joinNowMessage}
-					<span class="join-now-message" role="status">{joinNowMessage}</span>
+					<span class="join-now-message" role="status">
+						{joinNowMessage}
+						{#if joinNowSessionId !== null}
+							<a class="join-now-link" href={`/sessions/${joinNowSessionId}`}>
+								View live session →
+							</a>
+						{/if}
+					</span>
 				{/if}
 			</div>
 		{/if}

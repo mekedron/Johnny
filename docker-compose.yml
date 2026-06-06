@@ -16,6 +16,15 @@ x-backend-env: &backend-env
   JOHNNY_CALENDAR_POLL_INTERVAL_SECONDS: ${JOHNNY_CALENDAR_POLL_INTERVAL_SECONDS:-300}
   JOHNNY_USE_DOCKER_LAUNCHER: ${JOHNNY_USE_DOCKER_LAUNCHER:-true}
   JOHNNY_MEET_WORKER_IMAGE: ${JOHNNY_MEET_WORKER_IMAGE:-johnny-meet-worker:latest}
+  # docker compose prefixes volume names with the project name (default
+  # ``johnny``), so the launcher inside this container needs the same
+  # prefixed names — otherwise spawned meet-workers see empty named
+  # volumes instead of the shared model / auth state. Override
+  # COMPOSE_PROJECT_NAME if you renamed the project.
+  JOHNNY_MEET_WORKER_NETWORK: ${JOHNNY_MEET_WORKER_NETWORK:-johnny_default}
+  JOHNNY_MEET_WORKER_AUTH_VOLUME: ${JOHNNY_MEET_WORKER_AUTH_VOLUME:-johnny_google_auth_state}
+  JOHNNY_MEET_WORKER_WHISPER_VOLUME: ${JOHNNY_MEET_WORKER_WHISPER_VOLUME:-johnny_whisper_models}
+  JOHNNY_MEET_WORKER_PIPER_VOLUME: ${JOHNNY_MEET_WORKER_PIPER_VOLUME:-johnny_piper_models}
   JOHNNY_CONTAINER_MONITOR_INTERVAL_SECONDS: ${JOHNNY_CONTAINER_MONITOR_INTERVAL_SECONDS:-30}
   JOHNNY_CONTAINER_PRUNE_INTERVAL_SECONDS: ${JOHNNY_CONTAINER_PRUNE_INTERVAL_SECONDS:-3600}
   JOHNNY_CONTAINER_PRUNE_AGE_SECONDS: ${JOHNNY_CONTAINER_PRUNE_AGE_SECONDS:-86400}
@@ -79,6 +88,12 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - whisper_models:/var/lib/johnny/whisper-models
       - piper_models:/var/lib/johnny/piper-models
+      # google_auth_state holds the Playwright storage_state.json files
+      # per bot account so the meet-worker can sign into Google without
+      # an interactive OAuth round-trip per session (Johnny-ckz.1).
+      # The API mounts it read-write so a setup helper can seed cookies;
+      # the meet-worker mounts the same volume read-only.
+      - google_auth_state:/var/lib/johnny/google-auth
     healthcheck:
       test:
         - "CMD"
@@ -111,6 +126,10 @@ services:
       # the api image).
       - whisper_models:/var/lib/johnny/whisper-models
       - piper_models:/var/lib/johnny/piper-models
+      # Same shared google-auth volume as the API (read-write here so
+      # an admin endpoint or one-time helper can refresh stored cookies
+      # from inside the worker process if needed).
+      - google_auth_state:/var/lib/johnny/google-auth
     healthcheck:
       test:
         - "CMD"
@@ -161,3 +180,4 @@ volumes:
   worker_state:
   piper_models:
   whisper_models:
+  google_auth_state:

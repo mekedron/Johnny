@@ -63,6 +63,22 @@ DEFAULT_MEET_WORKER_IMAGE = "johnny-meet-worker:latest"
 MEET_WORKER_IMAGE_ENV = "JOHNNY_MEET_WORKER_IMAGE"
 USE_DOCKER_LAUNCHER_ENV = "JOHNNY_USE_DOCKER_LAUNCHER"
 
+# Network + volume defaults for spawned meet-worker containers. These can
+# be overridden via env vars at process startup so a non-Compose
+# deployment can swap them out, but the defaults match the docker-compose
+# stack so the API/worker process boots correctly out of the box.
+MEET_WORKER_NETWORK_ENV = "JOHNNY_MEET_WORKER_NETWORK"
+DEFAULT_MEET_WORKER_NETWORK = "johnny_default"
+MEET_WORKER_AUTH_VOLUME_ENV = "JOHNNY_MEET_WORKER_AUTH_VOLUME"
+DEFAULT_MEET_WORKER_AUTH_VOLUME = "google_auth_state"
+DEFAULT_MEET_WORKER_AUTH_TARGET = "/var/lib/johnny/google-auth"
+MEET_WORKER_WHISPER_VOLUME_ENV = "JOHNNY_MEET_WORKER_WHISPER_VOLUME"
+DEFAULT_MEET_WORKER_WHISPER_VOLUME = "whisper_models"
+DEFAULT_MEET_WORKER_WHISPER_TARGET = "/var/lib/johnny/whisper-models"
+MEET_WORKER_PIPER_VOLUME_ENV = "JOHNNY_MEET_WORKER_PIPER_VOLUME"
+DEFAULT_MEET_WORKER_PIPER_VOLUME = "piper_models"
+DEFAULT_MEET_WORKER_PIPER_TARGET = "/var/lib/johnny/piper-models"
+
 DEFAULT_STOP_TIMEOUT_SECONDS = 10
 DEFAULT_LOG_TAIL_LINES = 500
 DEFAULT_PRUNE_AGE_SECONDS = 24 * 60 * 60
@@ -126,6 +142,63 @@ class _DockerClient(typing.Protocol):
 def get_meet_worker_image() -> str:
     """Image tag the launcher uses by default."""
     return os.environ.get(MEET_WORKER_IMAGE_ENV, DEFAULT_MEET_WORKER_IMAGE)
+
+
+def get_meet_worker_network() -> str | None:
+    """Compose network name the launcher attaches spawned containers to.
+
+    Returning ``None`` lets the Docker daemon pick its default
+    (``bridge``) — useful for test setups outside Compose. In Compose
+    the default points at ``johnny_default`` so the meet-worker can
+    reach the ``redis`` / ``postgres`` services by name.
+    """
+    raw = os.environ.get(MEET_WORKER_NETWORK_ENV, DEFAULT_MEET_WORKER_NETWORK)
+    raw = raw.strip()
+    return raw or None
+
+
+def _read_volume_env(env_name: str, default: str) -> str | None:
+    """Return the configured volume name, or ``None`` to skip mounting."""
+    raw = os.environ.get(env_name, default).strip()
+    if raw.lower() in {"", "0", "false", "off", "none"}:
+        return None
+    return raw
+
+
+def get_meet_worker_volumes() -> dict[str, dict[str, str]]:
+    """Volume mounts each spawned meet-worker receives.
+
+    Three sources today:
+
+    * ``google_auth_state`` → ``/var/lib/johnny/google-auth`` (read-only)
+      — Playwright ``storage_state.json`` files per bot account so the
+      browser loads straight into the signed-in Google session.
+    * ``whisper_models`` → ``/var/lib/johnny/whisper-models`` — shared
+      CTranslate2 cache so cold-start STT downloads are reused.
+    * ``piper_models`` → ``/var/lib/johnny/piper-models`` — TTS voices.
+
+    Returns a Docker SDK-compatible mapping. An operator can disable any
+    mount by setting the matching env var to ``none``.
+    """
+    out: dict[str, dict[str, str]] = {}
+    auth = _read_volume_env(
+        MEET_WORKER_AUTH_VOLUME_ENV, DEFAULT_MEET_WORKER_AUTH_VOLUME
+    )
+    if auth is not None:
+        # Read-only so the meet-worker can't accidentally corrupt the
+        # shared sign-in cookies on disk.
+        out[auth] = {"bind": DEFAULT_MEET_WORKER_AUTH_TARGET, "mode": "ro"}
+    whisper = _read_volume_env(
+        MEET_WORKER_WHISPER_VOLUME_ENV, DEFAULT_MEET_WORKER_WHISPER_VOLUME
+    )
+    if whisper is not None:
+        out[whisper] = {"bind": DEFAULT_MEET_WORKER_WHISPER_TARGET, "mode": "rw"}
+    piper = _read_volume_env(
+        MEET_WORKER_PIPER_VOLUME_ENV, DEFAULT_MEET_WORKER_PIPER_VOLUME
+    )
+    if piper is not None:
+        out[piper] = {"bind": DEFAULT_MEET_WORKER_PIPER_TARGET, "mode": "rw"}
+    return out
 
 
 def should_use_docker_launcher() -> bool:
@@ -234,14 +307,25 @@ class DockerContainerLauncher(ContainerLauncher):
         extra_environment: dict[str, str] | None = None,
         volumes: dict[str, dict[str, str]] | None = None,
         network: str | None = None,
+        redis_url: str | None = None,
         client: _DockerClient | None = None,
     ) -> None:
         self._image = image or get_meet_worker_image()
         self._stop_timeout_seconds = stop_timeout_seconds
         self._log_tail_lines = log_tail_lines
         self._extra_environment = dict(extra_environment or {})
-        self._volumes = volumes
-        self._network = network
+        # If the caller didn't override volumes/network/redis_url, pull
+        # the defaults from env vars. This keeps tests that pass
+        # ``volumes={}`` / ``network=None`` explicit while letting the
+        # production wiring (``DockerContainerLauncher()`` with no args
+        # in ``app/main.py`` / ``app/worker.py``) Just Work.
+        self._volumes = volumes if volumes is not None else get_meet_worker_volumes()
+        self._network = network if network is not None else get_meet_worker_network()
+        self._redis_url = (
+            redis_url
+            if redis_url is not None
+            else os.environ.get("REDIS_URL", "").strip() or None
+        )
         self._client: _DockerClient | None = client
 
     @property
@@ -424,6 +508,13 @@ class DockerContainerLauncher(ContainerLauncher):
             "JOHNNY_CONTEXT": ctx.context or "",
             "JOHNNY_PROVIDER_CONFIG": json.dumps(ctx.provider_config or {}),
         }
+        # JOHNNY_REDIS_URL lets the meet-worker connect its event bus to
+        # the same Redis the API/worker process uses. Without it the
+        # bootstrap falls back to InMemoryEventBus and status updates
+        # never reach the API's status subscriber — the bug behind
+        # Johnny-ckz.1's "perpetual joining".
+        if self._redis_url:
+            env["JOHNNY_REDIS_URL"] = self._redis_url
         env.update(self._extra_environment)
         return env
 

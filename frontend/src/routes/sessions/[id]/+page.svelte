@@ -503,6 +503,15 @@
 	{#if stopError}
 		<div class="alert error" role="alert" data-testid="stop-error">{stopError}</div>
 	{/if}
+	{#if session !== null && session.error_reason}
+		<div
+			class="alert {session.status === 'failed' ? 'error' : 'warn'}"
+			role="alert"
+			data-testid="session-error-reason"
+		>
+			<strong>Failure stage:</strong> {session.error_reason}
+		</div>
+	{/if}
 
 	{#if loading}
 		<p class="empty">Loading session…</p>

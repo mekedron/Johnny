@@ -389,6 +389,14 @@
 									{BOT_SESSION_STATUS_LABEL[session.status]}
 								</span>
 							</div>
+							{#if session.error_reason}
+								<p
+									class="status-reason"
+									data-testid="status-session-{session.id}-reason"
+								>
+									{session.error_reason}
+								</p>
+							{/if}
 							<button
 								class="status-stop"
 								type="button"
@@ -666,6 +674,13 @@
 	.status-pill-failed {
 		background: #fee2e2;
 		color: #991b1b;
+	}
+	.status-reason {
+		margin: 0;
+		font-size: 0.7rem;
+		color: #991b1b;
+		line-height: 1.3;
+		word-break: break-word;
 	}
 	.status-stop {
 		appearance: none;

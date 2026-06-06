@@ -9,6 +9,7 @@ import pytest
 from johnny.meet_worker.meet_join import (
     ACCESS_DENIED_SELECTORS,
     CAM_OFF_SELECTORS,
+    IN_MEETING_SELECTORS,
     JOIN_BUTTON_SELECTORS,
     MEETING_NOT_STARTED_SELECTORS,
     MIC_OFF_SELECTORS,
@@ -54,12 +55,17 @@ class _FakePage:
         *,
         initial_visible: set[str] | None = None,
         vanish_on_click: set[str] | None = None,
+        appear_on_click: dict[str, set[str]] | None = None,
         goto_raises: BaseException | None = None,
         query_raises: dict[str, BaseException] | None = None,
         click_raises: dict[str, BaseException] | None = None,
     ) -> None:
         self.visible: set[str] = set(initial_visible or ())
         self.vanish_on_click: set[str] = set(vanish_on_click or ())
+        # ``appear_on_click[X]`` is the set of selectors that become
+        # visible after clicking X. Used to simulate the post-join
+        # transition where the in-meeting toolbar replaces the preview.
+        self.appear_on_click: dict[str, set[str]] = dict(appear_on_click or {})
         self._goto_raises = goto_raises
         self._query_raises = dict(query_raises or {})
         self._click_raises = dict(click_raises or {})
@@ -87,6 +93,8 @@ class _FakePage:
             raise self._click_raises[selector]
         if selector in self.vanish_on_click:
             self.visible.discard(selector)
+        if selector in self.appear_on_click:
+            self.visible.update(self.appear_on_click[selector])
 
     async def title(self) -> str:
         return "Meet"
@@ -112,6 +120,19 @@ def _joiner(page: _FakePage, **overrides: Any) -> MeetJoiner:
     )
     defaults.update(overrides)
     return MeetJoiner(page, **defaults)
+
+
+def _happy_appear() -> dict[str, set[str]]:
+    """Clicking the join button reveals the in-meeting toolbar.
+
+    Mirrors production behaviour: ``_wait_for_joined_state`` looks for
+    one of :data:`IN_MEETING_SELECTORS` to appear after the click —
+    the positive signal that we actually entered the meeting (the bug
+    behind the original silent "perpetual joining" was that the bot
+    treated the join button disappearing as success, which also fires
+    on a browser disconnect).
+    """
+    return {sel: {IN_MEETING_SELECTORS[0]} for sel in JOIN_BUTTON_SELECTORS}
 
 
 # --- Constructor validation ------------------------------------------------
@@ -140,6 +161,7 @@ async def test_join_navigates_to_meet_link() -> None:
     page = _FakePage(
         initial_visible={JOIN_BUTTON_SELECTORS[0]},
         vanish_on_click={JOIN_BUTTON_SELECTORS[0]},
+        appear_on_click=_happy_appear(),
     )
     result = await _joiner(page).join()
     assert isinstance(result, JoinResult)
@@ -153,6 +175,7 @@ async def test_join_clicks_join_now_button() -> None:
     page = _FakePage(
         initial_visible={JOIN_BUTTON_SELECTORS[0]},
         vanish_on_click={JOIN_BUTTON_SELECTORS[0]},
+        appear_on_click=_happy_appear(),
     )
     await _joiner(page).join()
     click_actions = [a for a in page.actions if a[0] == "click"]
@@ -171,6 +194,7 @@ async def test_join_dismisses_camera_and_mic_prompts() -> None:
             MIC_OFF_SELECTORS[0],
             CAM_OFF_SELECTORS[0],
         },
+        appear_on_click=_happy_appear(),
     )
     await _joiner(page).join()
     clicked = [a[1] for a in page.actions if a[0] == "click"]
@@ -182,6 +206,7 @@ async def test_join_does_not_click_mic_when_disabled() -> None:
     page = _FakePage(
         initial_visible={JOIN_BUTTON_SELECTORS[0], MIC_OFF_SELECTORS[0]},
         vanish_on_click={JOIN_BUTTON_SELECTORS[0], MIC_OFF_SELECTORS[0]},
+        appear_on_click=_happy_appear(),
     )
     await _joiner(page, mute_mic=False).join()
     clicked = [a[1] for a in page.actions if a[0] == "click"]
@@ -192,6 +217,7 @@ async def test_join_does_not_click_camera_when_disabled() -> None:
     page = _FakePage(
         initial_visible={JOIN_BUTTON_SELECTORS[0], CAM_OFF_SELECTORS[0]},
         vanish_on_click={JOIN_BUTTON_SELECTORS[0], CAM_OFF_SELECTORS[0]},
+        appear_on_click=_happy_appear(),
     )
     await _joiner(page, disable_camera=False).join()
     clicked = [a[1] for a in page.actions if a[0] == "click"]
@@ -204,6 +230,7 @@ async def test_join_falls_back_to_secondary_join_selector() -> None:
     page = _FakePage(
         initial_visible={fallback},
         vanish_on_click={fallback},
+        appear_on_click={fallback: {IN_MEETING_SELECTORS[0]}},
     )
     await _joiner(page).join()
     clicked = [a[1] for a in page.actions if a[0] == "click"]
@@ -247,9 +274,17 @@ async def test_blocker_check_prefers_sign_in_over_other_states() -> None:
 # --- Timeouts -------------------------------------------------------------
 
 
-async def test_join_raises_timeout_when_join_button_persists() -> None:
-    """Join button stays visible after click — joined-state poll times out."""
-    page = _FakePage(initial_visible={JOIN_BUTTON_SELECTORS[0]})
+async def test_join_raises_timeout_when_in_meeting_signal_never_appears() -> None:
+    """Click registers but no in-meeting selector appears — joined-state poll times out.
+
+    Mirrors the production failure where Chromium disconnects mid-join
+    (selectors return None) — the positive-signal check refuses to
+    accept silence as success.
+    """
+    page = _FakePage(
+        initial_visible={JOIN_BUTTON_SELECTORS[0]},
+        vanish_on_click={JOIN_BUTTON_SELECTORS[0]},
+    )
     with pytest.raises(MeetJoinTimeoutError):
         await _joiner(page, join_timeout_s=0.15).join()
 
@@ -273,6 +308,7 @@ async def test_join_emits_joining_then_joined_on_success() -> None:
     page = _FakePage(
         initial_visible={JOIN_BUTTON_SELECTORS[0]},
         vanish_on_click={JOIN_BUTTON_SELECTORS[0]},
+        appear_on_click=_happy_appear(),
     )
     bus = InMemoryEventBus()
     await _joiner(page, event_bus=bus).join()
@@ -317,6 +353,7 @@ async def test_join_no_event_bus_is_a_noop() -> None:
     page = _FakePage(
         initial_visible={JOIN_BUTTON_SELECTORS[0]},
         vanish_on_click={JOIN_BUTTON_SELECTORS[0]},
+        appear_on_click=_happy_appear(),
     )
     result = await _joiner(page, event_bus=None).join()
     assert result.session_id == SESSION_ID
@@ -332,6 +369,7 @@ async def test_publish_failure_does_not_break_join() -> None:
     page = _FakePage(
         initial_visible={JOIN_BUTTON_SELECTORS[0]},
         vanish_on_click={JOIN_BUTTON_SELECTORS[0]},
+        appear_on_click=_happy_appear(),
     )
     # Should NOT raise — publish errors are swallowed.
     result = await _joiner(page, event_bus=_BrokenBus()).join()

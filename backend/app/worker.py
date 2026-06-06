@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -63,6 +64,7 @@ from app.services.session_scheduler import (
     get_scheduler_interval_seconds,
     run_scheduler_pass_with_session,
 )
+from app.services.session_status_subscriber import run_subscriber
 from app.services.transcripts import (
     StaticEmbeddingProvider,
     compute_pending_embeddings,
@@ -170,6 +172,29 @@ def _should_run_calendar_poll(now: float, last_run: float, interval: float) -> b
     return _should_run(now, last_run, interval)
 
 
+def _start_status_subscriber_thread(redis_url: str) -> threading.Thread:
+    """Run the session-status Redis→DB subscriber in a daemon thread.
+
+    The subscriber owns its own event loop so the periodic scheduler
+    loop can stay synchronous. ``daemon=True`` means a KeyboardInterrupt
+    on the main loop tears the subscriber down without an explicit
+    join — the process exit is the shutdown signal.
+    """
+
+    def _run() -> None:
+        try:
+            asyncio.run(run_subscriber(redis_url))
+        except Exception:
+            logger.exception("session-status subscriber crashed")
+
+    thread = threading.Thread(
+        target=_run, name="session-status-subscriber", daemon=True
+    )
+    thread.start()
+    logger.info("session-status subscriber started in background thread")
+    return thread
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -183,6 +208,7 @@ def main() -> None:
     prune_interval = get_prune_interval_seconds()
     prune_age_seconds = get_prune_age_seconds()
     launcher = _build_launcher()
+    _start_status_subscriber_thread(settings.redis_url)
     logger.info(
         "worker starting; database_url=%s redis_url=%s embedding_interval=%ds "
         "calendar_poll_interval=%ds scheduler_interval=%ds "

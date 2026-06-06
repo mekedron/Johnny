@@ -41,6 +41,7 @@ WORKDIR /workspace
 # deliberately absent — the pipeline depends only on the pure-Python
 # provider ABCs in `app/providers/base.py`.
 RUN pip install --no-cache-dir \
+        playwright==1.49.0 \
         redis==8.0.0 \
         httpx==0.28.1 \
         websockets==14.1 \
@@ -62,4 +63,9 @@ COPY meet-worker-entrypoint.sh /usr/local/bin/meet-worker-entrypoint.sh
 RUN chmod +x /usr/local/bin/meet-worker-entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/meet-worker-entrypoint.sh"]
-CMD ["python", "-m", "johnny.meet_worker.selfcheck"]
+# Boot the meet-worker bootstrap: structured logging, selfcheck, Google
+# sign-in via storage_state, Playwright join, idle in-meeting until the
+# parent container stops us. The selfcheck-only CMD that used to live
+# here is the root cause of Johnny-ckz.1 (bot never actually joined the
+# meeting because nothing called join_meeting()).
+CMD ["python", "-m", "johnny.meet_worker"]

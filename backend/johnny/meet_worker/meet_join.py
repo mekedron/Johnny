@@ -38,7 +38,7 @@ import contextlib
 import importlib
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -69,6 +69,17 @@ JOIN_BUTTON_SELECTORS: tuple[str, ...] = (
     'button:has-text("Join now")',
     '[aria-label*="Join now"]',
     'div[role="button"]:has-text("Join now")',
+)
+# Positive in-meeting markers. We wait for one of these to APPEAR after
+# clicking Join so a browser disconnect (which would also make the Join
+# button disappear) doesn't falsely register as "joined". Tried in order;
+# first visible match wins.
+IN_MEETING_SELECTORS: tuple[str, ...] = (
+    '[aria-label*="Leave call"]',
+    'button[jsname="CQylAd"]',  # the red leave-call button
+    '[data-call-ended]',
+    '[aria-label*="You can now talk"]',
+    'div[role="region"][aria-label*="Meeting"]',
 )
 MIC_OFF_SELECTORS: tuple[str, ...] = (
     '[aria-label*="Turn off microphone"]',
@@ -186,6 +197,7 @@ class MeetJoiner:
         meeting_not_started_selectors: Sequence[str] = MEETING_NOT_STARTED_SELECTORS,
         access_denied_selectors: Sequence[str] = ACCESS_DENIED_SELECTORS,
         sign_in_required_selectors: Sequence[str] = SIGN_IN_REQUIRED_SELECTORS,
+        in_meeting_selectors: Sequence[str] = IN_MEETING_SELECTORS,
     ) -> None:
         if join_timeout_s <= 0 or preview_timeout_s <= 0 or poll_interval_s <= 0:
             raise ValueError(
@@ -206,6 +218,7 @@ class MeetJoiner:
         self._meeting_not_started_selectors = tuple(meeting_not_started_selectors)
         self._access_denied_selectors = tuple(access_denied_selectors)
         self._sign_in_required_selectors = tuple(sign_in_required_selectors)
+        self._in_meeting_selectors = tuple(in_meeting_selectors)
 
     async def join(self) -> JoinResult:
         """Run the full join flow. Emits status events on transitions."""
@@ -285,20 +298,28 @@ class MeetJoiner:
             raise MeetJoinError("Join now button click did not register")
 
     async def _wait_for_joined_state(self) -> None:
-        """Confirm the page navigated past the preview screen.
+        """Confirm the page is actually IN the meeting (positive signal).
 
-        Once the join button is clicked, the Meet UI replaces the preview
-        with the in-meeting toolbar. The simplest cross-rollout signal:
-        the Join now selectors disappear. We poll until that happens or
-        the join timeout elapses.
+        Originally the check was "Join now selectors disappeared" — but
+        that fires falsely when the browser crashes mid-navigation: the
+        page disconnects, query_selector raises, ``_safe_query_selector``
+        returns None, and the bot misreports "joined" while the
+        meeting room sees nothing (the symptom that fooled
+        Johnny-ckz.1's initial fix).
+
+        Positive signal: poll for one of :data:`IN_MEETING_SELECTORS`
+        (the leave-call button etc.) to APPEAR. We still treat the Join
+        now button disappearing as progress, but require the in-meeting
+        signal to confirm the join.
         """
         deadline = time.monotonic() + self._join_timeout_s
         while time.monotonic() < deadline:
-            if not await self._any_selector_visible(self._join_button_selectors):
+            if await self._any_selector_visible(self._in_meeting_selectors):
                 return
             await asyncio.sleep(self._poll_interval_s)
         raise MeetJoinTimeoutError(
-            f"Did not reach in-meeting state within {self._join_timeout_s:.1f}s"
+            f"Did not reach in-meeting state within {self._join_timeout_s:.1f}s "
+            f"(no in-meeting selector visible: {list(self._in_meeting_selectors)})"
         )
 
     async def _click_first_present(
@@ -386,23 +407,87 @@ async def join_meeting(
     preview_timeout_s: float = DEFAULT_PREVIEW_TIMEOUT_S,
     headless: bool = False,
 ) -> JoinResult:
-    """Open a real Chromium browser and run the join flow.
+    """Open a real Chromium browser, join the meeting, then tear down.
 
-    Production entry point for the meet-worker. Playwright is imported
-    lazily so this module stays importable in environments without the
-    package (the API and worker containers, the tests).
+    Production entry point for one-shot joins (and unit tests). The
+    browser is closed before the function returns; the meet-worker
+    bootstrap that needs the browser to STAY in the meeting uses
+    :func:`open_meeting_session` instead.
+    """
+    async with open_meeting_session(
+        meet_link=meet_link,
+        session_id=session_id,
+        storage_state_path=storage_state_path,
+        event_bus=event_bus,
+        mute_mic=mute_mic,
+        disable_camera=disable_camera,
+        join_timeout_s=join_timeout_s,
+        preview_timeout_s=preview_timeout_s,
+        headless=headless,
+    ) as session:
+        return session.result
 
-    The browser is launched with ``--use-fake-ui-for-media-stream`` so
-    Chromium auto-accepts microphone/camera permission for the Meet
-    origin — combined with PulseAudio's virtual sink/source from the
-    entrypoint script (US-019), this lets Meet capture from / play to
-    the bridges that the voice pipeline drives.
 
-    When ``storage_state_path`` is provided and exists, the context is
-    initialised with the prior sign-in cookies + localStorage so the
-    bot loads straight into the joined-in identity. Missing file or
-    expired cookies surface as :class:`MeetSignInError` at the blocker
-    check.
+@dataclass
+class OpenMeetingSession:
+    """Handle a meet-worker holds while the bot is in the meeting.
+
+    Yielded by :func:`open_meeting_session`. The caller idles until the
+    parent container is told to stop, then exits the ``async with``
+    block — Playwright tears down the browser cleanly.
+
+    ``result`` is the :class:`JoinResult` from the join flow.
+    ``is_alive()`` returns ``False`` once the page or browser has
+    disconnected, which the bootstrap polls to detect a mid-meeting
+    Chromium crash.
+    """
+
+    result: JoinResult
+    _browser: Any
+    _context: Any
+    _page: Any
+
+    async def is_alive(self) -> bool:
+        """Whether the underlying Chromium is still connected.
+
+        Polls a cheap selector. A disconnected browser raises and we
+        return ``False`` so the bootstrap can exit the idle loop with
+        a real ``error_reason`` instead of waiting forever.
+        """
+        try:
+            # ``page.title()`` is a round-trip that fails fast on a
+            # disconnected browser, unlike pure-Python attributes which
+            # cache the last known value.
+            await self._page.title()
+            return True
+        except Exception:
+            return False
+
+
+@contextlib.asynccontextmanager
+async def open_meeting_session(
+    *,
+    meet_link: str,
+    session_id: str,
+    storage_state_path: Path | None = None,
+    event_bus: EventBus | None = None,
+    mute_mic: bool = True,
+    disable_camera: bool = True,
+    join_timeout_s: float = DEFAULT_JOIN_TIMEOUT_S,
+    preview_timeout_s: float = DEFAULT_PREVIEW_TIMEOUT_S,
+    headless: bool = False,
+) -> AsyncIterator[OpenMeetingSession]:
+    """Open Chromium, run the join flow, and hold the browser open.
+
+    Production entry point for the meet-worker bootstrap. The browser
+    stays alive for the lifetime of the ``async with`` block — so the
+    bot stays in the meeting until the caller exits. Closing the
+    context manager tears the browser down cleanly (the bot leaves the
+    meeting).
+
+    Playwright is imported lazily so this module stays importable in
+    environments without the package (the API and worker containers,
+    the tests).
     """
     try:
         pw_module = importlib.import_module("playwright.async_api")
@@ -444,7 +529,13 @@ async def join_meeting(
                 join_timeout_s=join_timeout_s,
                 preview_timeout_s=preview_timeout_s,
             )
-            return await joiner.join()
+            result = await joiner.join()
+            yield OpenMeetingSession(
+                result=result,
+                _browser=browser,
+                _context=context,
+                _page=page,
+            )
         finally:
             with contextlib.suppress(Exception):
                 await browser.close()
