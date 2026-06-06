@@ -991,3 +991,255 @@ def test_play_sample_does_not_alter_test_endpoint_behaviour(client: TestClient) 
     # The smoke endpoint synthesises a fixed "hi" string and returns JSON,
     # not WAV — the play endpoint sends the demo phrase.
     assert _SampleTTS.last_text == "hi"
+
+
+# --- export endpoint (Johnny-k3z) ------------------------------------------
+
+
+def test_export_empty_returns_zero_providers(client: TestClient) -> None:
+    """A fresh stack with no providers exports a valid empty file."""
+    resp = client.get("/providers/export")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/json")
+    data = resp.json()
+    assert data == {"version": 1, "providers": []}
+
+
+def test_export_filename_uses_today_yyyy_mm_dd(client: TestClient) -> None:
+    """Content-Disposition follows johnny-providers-YYYY-MM-DD.json per spec."""
+    from datetime import UTC, datetime
+
+    resp = client.get("/providers/export")
+    assert resp.status_code == 200
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    expected = f'attachment; filename="johnny-providers-{today}.json"'
+    assert resp.headers["content-disposition"] == expected
+
+
+def test_export_attachment_disposition_set(client: TestClient) -> None:
+    """The download header is present so the browser saves rather than navigates."""
+    resp = client.get("/providers/export")
+    assert "attachment" in resp.headers["content-disposition"]
+
+
+def test_export_without_secrets_omits_credentials(client: TestClient) -> None:
+    """Default mode (no `with_secrets`) returns empty credentials dicts."""
+    get_registry().register(ProviderKind.STT, "ok-stt", _OKSTT)
+    client.post(
+        "/providers",
+        json=_create_payload(credentials={"api_key": "sk-VERY-SECRET"}),
+    )
+    resp = client.get("/providers/export")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["providers"]) == 1
+    entry = data["providers"][0]
+    assert entry["credentials"] == {}
+    # The plaintext secret must not leak anywhere in the response.
+    assert "sk-VERY-SECRET" not in resp.text
+
+
+def test_export_with_secrets_includes_decrypted_credentials(client: TestClient) -> None:
+    get_registry().register(ProviderKind.STT, "ok-stt", _OKSTT)
+    client.post(
+        "/providers",
+        json=_create_payload(credentials={"api_key": "sk-roundtrip"}),
+    )
+    resp = client.get("/providers/export", params={"with_secrets": "true"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["providers"]) == 1
+    assert data["providers"][0]["credentials"] == {"api_key": "sk-roundtrip"}
+
+
+def test_export_with_secrets_false_explicit(client: TestClient) -> None:
+    """An explicit `with_secrets=false` matches the default behaviour."""
+    get_registry().register(ProviderKind.STT, "ok-stt", _OKSTT)
+    client.post(
+        "/providers",
+        json=_create_payload(credentials={"api_key": "sk-explicit"}),
+    )
+    resp = client.get("/providers/export", params={"with_secrets": "false"})
+    data = resp.json()
+    assert data["providers"][0]["credentials"] == {}
+    assert "sk-explicit" not in resp.text
+
+
+def test_export_includes_all_kinds(client: TestClient) -> None:
+    get_registry().register(ProviderKind.STT, "ok-stt", _OKSTT)
+    get_registry().register(ProviderKind.LLM, "ok-llm", _OKLLM)
+    get_registry().register(ProviderKind.TTS, "ok-tts", _OKTTS)
+    client.post("/providers", json=_create_payload(kind="stt", display_name="S"))
+    client.post(
+        "/providers",
+        json=_create_payload(kind="llm", provider_name="ok-llm", display_name="L"),
+    )
+    client.post(
+        "/providers",
+        json=_create_payload(kind="tts", provider_name="ok-tts", display_name="T"),
+    )
+    resp = client.get("/providers/export")
+    data = resp.json()
+    kinds = {p["kind"] for p in data["providers"]}
+    assert kinds == {"stt", "llm", "tts"}
+
+
+def test_export_preserves_provider_metadata(client: TestClient) -> None:
+    """kind, provider_name, display_name, options, is_active all round-trip."""
+    get_registry().register(ProviderKind.LLM, "ok-llm", _OKLLM)
+    created = client.post(
+        "/providers",
+        json=_create_payload(
+            kind="llm",
+            provider_name="ok-llm",
+            display_name="My LLM",
+            options={"model": "gpt-4o-mini", "temperature": 0.2},
+        ),
+    ).json()
+    client.post(f"/providers/{created['id']}/activate")
+    resp = client.get("/providers/export")
+    data = resp.json()
+    entry = data["providers"][0]
+    assert entry["kind"] == "llm"
+    assert entry["provider_name"] == "ok-llm"
+    assert entry["display_name"] == "My LLM"
+    assert entry["options"] == {"model": "gpt-4o-mini", "temperature": 0.2}
+    assert entry["is_active"] is True
+
+
+def test_export_version_matches_seeder(client: TestClient) -> None:
+    """Export version must equal the seeder's SUPPORTED_FILE_VERSION."""
+    from app.services.providers_seed import SUPPORTED_FILE_VERSION
+
+    resp = client.get("/providers/export")
+    assert resp.json()["version"] == SUPPORTED_FILE_VERSION
+
+
+def test_export_round_trips_through_seeder(
+    client: TestClient,
+    db_session: Session,
+    crypto: CredentialCrypto,
+) -> None:
+    """Export → wipe DB → import via seeder reproduces the same provider state."""
+    import json as _json
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    from app.services.providers_seed import SeedMode, seed_providers_from_file
+
+    get_registry().register(ProviderKind.STT, "ok-stt", _OKSTT)
+    get_registry().register(ProviderKind.LLM, "ok-llm", _OKLLM)
+    client.post(
+        "/providers",
+        json=_create_payload(
+            kind="stt",
+            provider_name="ok-stt",
+            display_name="STT primary",
+            credentials={"api_key": "stt-key"},
+            options={"model": "nova-2"},
+        ),
+    )
+    llm = client.post(
+        "/providers",
+        json=_create_payload(
+            kind="llm",
+            provider_name="ok-llm",
+            display_name="LLM primary",
+            credentials={"api_key": "llm-key"},
+            options={"model": "gpt-4o-mini"},
+        ),
+    ).json()
+    client.post(f"/providers/{llm['id']}/activate")
+
+    # Export with secrets so import reproduces an end-to-end usable state.
+    resp = client.get("/providers/export", params={"with_secrets": "true"})
+    body = resp.json()
+
+    # Wipe and re-seed via the seeder using the same JSON.
+    db_session.query(ProviderCredential).delete()
+    db_session.commit()
+
+    with TemporaryDirectory() as tmp:
+        p = Path(tmp) / "providers.json"
+        p.write_text(_json.dumps(body), encoding="utf-8")
+        result = seed_providers_from_file(
+            db_session, crypto, path=p, mode=SeedMode.INSERT_ONLY
+        )
+
+    assert len(result.created) == 2
+    rows = db_session.query(ProviderCredential).order_by(
+        ProviderCredential.kind
+    ).all()
+    assert {r.kind for r in rows} == {ProviderKind.LLM, ProviderKind.STT}
+    active = [r for r in rows if r.is_active]
+    assert len(active) == 1
+    assert active[0].kind is ProviderKind.LLM
+
+
+def test_export_corrupted_ciphertext_yields_empty_credentials(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    """A row with un-decryptable ciphertext exports with empty credentials.
+
+    The export endpoint refuses to 500 on a bad row — the user can still
+    download the rest of the inventory and fix the broken entry by hand.
+    """
+    get_registry().register(ProviderKind.STT, "ok-stt", _OKSTT)
+    created = client.post("/providers", json=_create_payload()).json()
+    # Sabotage the row directly so decryption will fail.
+    row = db_session.get(ProviderCredential, created["id"])
+    assert row is not None
+    row.credentials_encrypted = "not-a-real-fernet-token"
+    db_session.commit()
+
+    resp = client.get("/providers/export", params={"with_secrets": "true"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["providers"]) == 1
+    assert data["providers"][0]["credentials"] == {}
+
+
+def test_export_is_pretty_printed(client: TestClient) -> None:
+    """Export body is human-readable (indented) so users can diff / edit by hand."""
+    resp = client.get("/providers/export")
+    assert "\n" in resp.text
+    # Two-space indent — same as the example file.
+    assert '  "version"' in resp.text or '  "providers"' in resp.text
+
+
+def test_export_no_store_cache_control(client: TestClient) -> None:
+    """Browsers must not cache the export (could contain secrets)."""
+    resp = client.get("/providers/export", params={"with_secrets": "true"})
+    assert resp.headers.get("cache-control") == "no-store"
+
+
+def test_export_does_not_overlap_with_dynamic_routes(client: TestClient) -> None:
+    """`/providers/export` resolves to the export endpoint, not /{provider_id}."""
+    # If FastAPI accidentally tried to coerce 'export' to int and routed it
+    # to `/providers/{provider_id}/...`, we'd see a 422 here. The fact that
+    # an unauth'd GET returns 200 with valid JSON confirms the route binding.
+    resp = client.get("/providers/export")
+    assert resp.status_code == 200
+
+
+def test_export_orders_by_kind_and_display_name(client: TestClient) -> None:
+    """Export order matches the list endpoint for reproducible diffs."""
+    get_registry().register(ProviderKind.STT, "ok-stt", _OKSTT)
+    get_registry().register(ProviderKind.LLM, "ok-llm", _OKLLM)
+    # Create out-of-order: LLM "Zebra", STT "Alpha", LLM "Antelope".
+    client.post(
+        "/providers",
+        json=_create_payload(kind="llm", provider_name="ok-llm", display_name="Zebra"),
+    )
+    client.post("/providers", json=_create_payload(kind="stt", display_name="Alpha"))
+    client.post(
+        "/providers",
+        json=_create_payload(
+            kind="llm", provider_name="ok-llm", display_name="Antelope"
+        ),
+    )
+    resp = client.get("/providers/export")
+    names = [p["display_name"] for p in resp.json()["providers"]]
+    # ordered by (kind, display_name): llm/Antelope, llm/Zebra, stt/Alpha
+    assert names == ["Antelope", "Zebra", "Alpha"]

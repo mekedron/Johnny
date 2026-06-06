@@ -250,6 +250,77 @@ export async function playSample(id: number): Promise<Blob> {
 	return res.blob();
 }
 
+export interface ExportResult {
+	blob: Blob;
+	filename: string;
+}
+
+/**
+ * Download every configured provider as a single JSON file (Johnny-k3z).
+ * The body shape matches the import format consumed by the startup
+ * seeder, so an export → file → re-import roundtrip reproduces the
+ * exact provider state.
+ *
+ * Pass `withSecrets: true` to embed plaintext credentials in the
+ * download — required if the user wants the file to fully restore on
+ * import, but it makes the resulting file itself a secret. The
+ * returned `filename` comes from the server's `Content-Disposition`
+ * header (default `johnny-providers-YYYY-MM-DD.json`) so the saved
+ * file matches what the operator sees in their downloads folder.
+ */
+export async function exportProviders(withSecrets: boolean): Promise<ExportResult> {
+	const params = new URLSearchParams({ with_secrets: withSecrets ? 'true' : 'false' });
+	const res = await fetch(`${API_BASE}/providers/export?${params.toString()}`, {
+		method: 'GET'
+	});
+	if (!res.ok) {
+		let detail: string | null = null;
+		try {
+			const body = await res.json();
+			detail = extractDetail(body);
+		} catch {
+			// Non-JSON error body — fall through.
+		}
+		throw new Error(detail ?? `HTTP ${res.status}`);
+	}
+	const blob = await res.blob();
+	const disposition = res.headers.get('Content-Disposition') ?? '';
+	const filename = parseFilenameFromDisposition(disposition) ?? defaultExportFilename();
+	return { blob, filename };
+}
+
+/** Parse the `filename="…"` parameter out of a Content-Disposition header. */
+function parseFilenameFromDisposition(header: string): string | null {
+	const match = header.match(/filename="([^"]+)"/i);
+	return match ? match[1] : null;
+}
+
+/** Fallback when the server didn't send a Content-Disposition header. */
+function defaultExportFilename(): string {
+	const today = new Date().toISOString().slice(0, 10);
+	return `johnny-providers-${today}.json`;
+}
+
+/**
+ * Trigger a browser download of `blob` as `filename`. Mints a temporary
+ * object URL, clicks a hidden anchor, then revokes the URL so the blob
+ * doesn't linger in memory. Idiomatic across modern browsers.
+ */
+export function downloadBlob(blob: Blob, filename: string): void {
+	const url = URL.createObjectURL(blob);
+	try {
+		const a = document.createElement('a');
+		a.href = url;
+		a.download = filename;
+		a.style.display = 'none';
+		document.body.appendChild(a);
+		a.click();
+		document.body.removeChild(a);
+	} finally {
+		URL.revokeObjectURL(url);
+	}
+}
+
 /**
  * Build the form's initial `values` dict from a schema. Number/checkbox
  * defaults are coerced to the right primitive type so Svelte's bindings

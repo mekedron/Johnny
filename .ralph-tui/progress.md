@@ -177,6 +177,32 @@ in-flight precondition was satisfied — otherwise the test could pass
 because there was nothing to interrupt, which would be a regression
 in disguise.
 
+### Provider export endpoint mirrors the seed schema (Johnny-k3z)
+`GET /providers/export` returns the SAME JSON shape the seeder consumes,
+so an export → file → re-import roundtrip reproduces provider state
+exactly. `with_secrets=false` (default) emits empty credentials dicts —
+the file is safe to share/commit. `with_secrets=true` decrypts and
+inlines plaintext keys. The endpoint never 500s on a corrupt ciphertext;
+that row just exports with empty credentials so the rest of the
+inventory remains downloadable. Imports `SUPPORTED_FILE_VERSION` from
+`providers_seed` so any future schema bump fails loudly at both sides
+together. Filename is `johnny-providers-YYYY-MM-DD.json` (UTC date),
+served via `Content-Disposition: attachment` + `Cache-Control: no-store`
+so browsers neither cache nor preview secrets. Route is `/export`
+literal (not `/{id}/export`) to avoid colliding with provider-id routes
+— FastAPI matches `/export` before any dynamic int path because the
+route is registered before them in source order.
+
+### Browser blob download via temporary `<a download>` + revokeObjectURL
+`frontend/src/lib/providers.ts::downloadBlob` is the canonical pattern
+for any "fetch a file → save it" UI: mint an object URL, append a
+hidden `<a>` to the DOM, click it, then revoke the URL. This is
+preferable to opening in a new tab (browsers may render JSON inline
+instead of saving) or to `window.open(url)` (URL leaks until the
+window closes). The companion `parseFilenameFromDisposition` pulls
+the `filename="..."` token out of `Content-Disposition` so the saved
+filename matches the server's choice rather than a generic blob name.
+
 ### Provider seed file shape is the interchange format (Johnny-d3e / Johnny-k3z)
 `/config/providers.json` (and the future export endpoint Johnny-k3z)
 share a single schema defined in
@@ -657,4 +683,74 @@ second prompt because the prompt builder slices `history[:current_pos]`.
     roundtrip can't deactivate a provider, which would be surprising.
     Insert-only mode never touches the flag because the whole point
     of that mode is "don't clobber UI state".
+---
+
+## 2026-06-06 - Johnny-k3z
+- Added one-click export of every provider configuration as a single
+  JSON file matching the Johnny-d3e seeder schema. The user can keep
+  the file as a backup, move it to a new machine, or drop it into
+  `config/providers.json` so the next stack startup re-seeds the rows.
+- New endpoint `GET /providers/export?with_secrets={true|false}`. Body
+  is the same `{"version": 1, "providers": [...]}` shape the seeder
+  expects. Default `with_secrets=false` returns empty credential dicts
+  so the file is safe to share or commit. `with_secrets=true` decrypts
+  and inlines plaintext keys; a corrupt-ciphertext row exports with
+  empty credentials rather than 500ing the whole download. The endpoint
+  imports `SUPPORTED_FILE_VERSION` from `providers_seed` so any future
+  schema bump touches both sides together.
+- Response headers: `Content-Disposition: attachment; filename=
+  "johnny-providers-YYYY-MM-DD.json"` (UTC date) and
+  `Cache-Control: no-store` so the browser saves the download instead
+  of previewing it, and a `with_secrets=true` payload never lands in
+  HTTP cache. Pretty-printed JSON (2-space indent) so users can diff
+  / edit the file by hand.
+- Frontend `providers.ts` gets `exportProviders(withSecrets)` returning
+  `{blob, filename}` (filename parsed from `Content-Disposition` so the
+  saved file matches the server's choice) plus a reusable `downloadBlob`
+  helper that mints an object URL, clicks a hidden `<a download>`, then
+  revokes the URL — the canonical browser pattern for blob downloads.
+- `/providers` UI gets an "Export configuration" button next to
+  Refresh/Add. Click opens a modal with an explicit "Include API keys
+  and other secrets" checkbox (off by default) plus copy explaining
+  the tradeoff. Errors surface inline; the modal also can't be
+  dismissed mid-download to avoid race-y URL leaks.
+- Files changed:
+  - `backend/app/api/providers.py` — new endpoint + UTC import +
+    `SUPPORTED_FILE_VERSION` import.
+  - `backend/tests/api/test_providers.py` — 15 new tests (empty
+    export, filename format, attachment disposition, with/without
+    secrets, all kinds, metadata round-trip, version matches seeder,
+    full export → seeder import round-trip, corrupt ciphertext path,
+    pretty-printed body, no-store cache header, route precedence,
+    ordering by kind + display_name).
+  - `frontend/src/lib/providers.ts` — `exportProviders`,
+    `downloadBlob`, `parseFilenameFromDisposition`.
+  - `frontend/src/routes/providers/+page.svelte` — Export button,
+    modal, checkbox-row styles.
+- **Learnings:**
+  - The seeder's `parse_providers_file` accepts an empty `credentials:
+    {}` (via `_ensure_str_mapping`'s `None → {}` coercion when the key
+    is missing, plus the empty-dict identity path), so an
+    `with_secrets=false` export is still a valid import payload — it
+    just leaves credentials blank on the re-imported row. That's the
+    desired behaviour: "no secrets" mode is for share/commit cases
+    where the recipient pastes keys in by hand.
+  - FastAPI route precedence is source order: `/providers/export` had
+    to be declared in this file *before* any `GET /providers/{id}`
+    route would have shadowed it as a 422. Since there's no
+    `GET /providers/{id}` route in this codebase, the ordering risk is
+    only latent — but the regression test pins the literal route so a
+    future addition can't accidentally break it.
+  - `Content-Disposition: attachment; filename="..."` makes the
+    browser save the response rather than navigate to it; combined
+    with the `<a download="...">` click trick on the client, the saved
+    filename matches the server's `YYYY-MM-DD` choice without the
+    client needing to know the date. The fallback
+    `parseFilenameFromDisposition → defaultExportFilename` keeps the
+    UI working even if a proxy strips the header.
+  - Parsing the filename out of `Content-Disposition` with a single
+    regex (`/filename="([^"]+)"/`) is enough for this case (no
+    international encoding, no quoted-string escapes) — adding RFC
+    6266 encoding handling would be premature complexity for a
+    server we control.
 ---

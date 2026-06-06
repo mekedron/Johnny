@@ -5,6 +5,8 @@
 		createProvider,
 		deactivateProvider,
 		deleteProvider,
+		downloadBlob,
+		exportProviders,
 		findSchema,
 		groupedFields,
 		GROUP_LABEL,
@@ -61,6 +63,11 @@
 	let addErrors = $state<Record<string, string>>({});
 	let addSubmitting = $state(false);
 	let addBanner = $state<string | null>(null);
+
+	let showExport = $state(false);
+	let exportWithSecrets = $state(false);
+	let exportSubmitting = $state(false);
+	let exportError = $state<string | null>(null);
 
 	const addSchema = $derived(findSchema(schemas, addKind, addProviderName));
 
@@ -288,6 +295,31 @@
 		}
 	}
 
+	function openExport() {
+		showExport = true;
+		exportWithSecrets = false;
+		exportError = null;
+	}
+
+	function closeExport() {
+		if (exportSubmitting) return;
+		showExport = false;
+	}
+
+	async function runExport() {
+		exportSubmitting = true;
+		exportError = null;
+		try {
+			const { blob, filename } = await exportProviders(exportWithSecrets);
+			downloadBlob(blob, filename);
+			showExport = false;
+		} catch (e) {
+			exportError = e instanceof Error ? e.message : String(e);
+		} finally {
+			exportSubmitting = false;
+		}
+	}
+
 	function stopSample(id: number) {
 		const handle = playingHandles.get(id);
 		if (!handle) return;
@@ -369,6 +401,13 @@
 		<div class="header-actions">
 			<button type="button" onclick={load} disabled={loading}>
 				{loading ? 'Refreshing…' : 'Refresh'}
+			</button>
+			<button
+				type="button"
+				onclick={openExport}
+				data-testid="export-button"
+			>
+				Export configuration
 			</button>
 			<button type="button" class="primary" onclick={openAdd}>Add provider</button>
 		</div>
@@ -624,6 +663,57 @@
 				</button>
 			</div>
 		</form>
+	</div>
+{/if}
+
+{#if showExport}
+	<div
+		class="modal-backdrop"
+		role="dialog"
+		aria-modal="true"
+		aria-labelledby="export-heading"
+	>
+		<div class="modal" data-testid="export-modal">
+			<header class="modal-header">
+				<h2 id="export-heading">Export configuration</h2>
+				<button type="button" class="icon" onclick={closeExport} aria-label="Close">×</button>
+			</header>
+			<p class="lede">
+				Download every configured provider as a JSON file you can keep as a backup,
+				move to another machine, or commit to <code>config/providers.json</code> so
+				the next stack startup re-seeds these rows automatically.
+			</p>
+			<label class="checkbox-row">
+				<input
+					type="checkbox"
+					bind:checked={exportWithSecrets}
+					data-testid="export-with-secrets"
+				/>
+				<span>
+					<strong>Include API keys and other secrets</strong>
+					<small>
+						Without secrets, the file restores names, kinds, and options — you'll re-enter keys
+						by hand on import. With secrets, the file itself becomes the secret store; treat it
+						accordingly.
+					</small>
+				</span>
+			</label>
+			{#if exportError}
+				<div class="alert error" data-testid="export-error">{exportError}</div>
+			{/if}
+			<div class="modal-actions">
+				<button type="button" onclick={closeExport} disabled={exportSubmitting}>Cancel</button>
+				<button
+					type="button"
+					class="primary"
+					onclick={runExport}
+					disabled={exportSubmitting}
+					data-testid="export-download"
+				>
+					{exportSubmitting ? 'Preparing…' : 'Download'}
+				</button>
+			</div>
+		</div>
 	</div>
 {/if}
 
@@ -1010,6 +1100,35 @@
 		justify-content: flex-end;
 		gap: 0.5rem;
 		margin-top: 0.25rem;
+	}
+
+	.checkbox-row {
+		display: grid;
+		grid-template-columns: auto 1fr;
+		gap: 0.6rem;
+		align-items: start;
+		padding: 0.85rem 1rem;
+		border: 1px solid #e5e7eb;
+		border-radius: 8px;
+	}
+	.checkbox-row input[type='checkbox'] {
+		margin-top: 0.2rem;
+	}
+	.checkbox-row span {
+		display: grid;
+		gap: 0.2rem;
+		font-size: 0.9rem;
+	}
+	.checkbox-row small {
+		color: #6b7280;
+		font-size: 0.8rem;
+	}
+	.modal code {
+		background: #f3f4f6;
+		padding: 0 0.25rem;
+		border-radius: 4px;
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		font-size: 0.85em;
 	}
 
 	@media (max-width: 640px) {

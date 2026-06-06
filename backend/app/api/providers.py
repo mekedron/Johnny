@@ -15,7 +15,7 @@ import io
 import json
 import wave
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -46,6 +46,7 @@ from app.providers.schema_validation import (
     validate_payload,
 )
 from app.security.crypto import CredentialCrypto, CryptoError, decrypt_json, encrypt_json
+from app.services.providers_seed import SUPPORTED_FILE_VERSION
 
 router = APIRouter(prefix="/providers", tags=["providers"])
 
@@ -615,6 +616,89 @@ async def play_sample(
         headers={
             "Cache-Control": "no-store",
             "Content-Disposition": 'inline; filename="sample.wav"',
+        },
+    )
+
+
+# --- export endpoint -------------------------------------------------------
+
+
+@router.get(
+    "/export",
+    responses={
+        200: {"content": {"application/json": {}}},
+    },
+)
+def export_providers(
+    session: SessionDep,
+    crypto: CryptoDep,
+    with_secrets: bool = False,
+) -> Response:
+    """Download every configured provider as a single JSON file (Johnny-k3z).
+
+    The response body matches the schema consumed by the startup seeder
+    (:mod:`app.services.providers_seed`) so an ``export → file → import``
+    roundtrip reproduces the exact provider state. Filename follows the
+    ``johnny-providers-YYYY-MM-DD.json`` convention so multiple backups
+    sort naturally.
+
+    The ``with_secrets`` query parameter (default ``false``) controls
+    whether credentials are exported:
+
+    * ``false`` — credentials become empty dicts. The file is safe to
+      share with teammates or check into a repo; re-importing fills in
+      the structured options but leaves credentials blank, so the user
+      must paste their keys back in via the UI.
+    * ``true`` — credentials are decrypted and embedded in plaintext.
+      The resulting file IS the secret store and must be handled like
+      one. The endpoint refuses to silently include partial secrets:
+      a row whose ciphertext can't be decrypted exports as an empty
+      credentials dict (corruption is surfaced via the importer's
+      validation on re-load, not silently passed through).
+    """
+    rows = session.scalars(
+        select(ProviderCredential).order_by(
+            ProviderCredential.kind,
+            ProviderCredential.display_name,
+            ProviderCredential.id,
+        )
+    ).all()
+
+    providers: list[dict[str, Any]] = []
+    for row in rows:
+        credentials: dict[str, str] = {}
+        if with_secrets:
+            try:
+                credentials = decrypt_json(crypto, row.credentials_encrypted)
+            except (CryptoError, ValueError, json.JSONDecodeError):
+                # Corrupted ciphertext / key mismatch: leave credentials empty
+                # rather than 500ing — the user can still recover the rest of
+                # the inventory and re-enter the broken row's secrets by hand.
+                credentials = {}
+        providers.append(
+            {
+                "kind": row.kind.value,
+                "provider_name": row.provider_name,
+                "display_name": row.display_name,
+                "credentials": credentials,
+                "options": dict(row.config or {}),
+                "is_active": row.is_active,
+            }
+        )
+
+    payload = {
+        "version": SUPPORTED_FILE_VERSION,
+        "providers": providers,
+    }
+    body = json.dumps(payload, indent=2, sort_keys=False)
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    filename = f"johnny-providers-{today}.json"
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'attachment; filename="{filename}"',
         },
     )
 
