@@ -1671,6 +1671,32 @@ def test_stt_catalog_returns_registered_stt_providers(client: TestClient) -> Non
     assert fw["field_schema"]["provider_name"] == FW_NAME
 
 
+def test_stt_catalog_surfaces_parakeet(client: TestClient) -> None:
+    """Parakeet must appear in /stt_catalog with local + cost=$0 metadata.
+
+    Acceptance criterion from Johnny-stt.1: the provider is discoverable
+    via the STT catalog so the catalog UI renders a card for it. This
+    test fails loudly if the registration or the STT_CATALOG_METADATA
+    entry is removed in a future refactor.
+    """
+    from app.providers.parakeet_stt import PROVIDER_NAME as PARAKEET_NAME
+    from app.providers.parakeet_stt import ParakeetSTT
+
+    get_registry().register(ProviderKind.STT, PARAKEET_NAME, ParakeetSTT, replace=True)
+    resp = client.get("/providers/stt_catalog")
+    assert resp.status_code == 200
+    body = resp.json()
+    names = {entry["provider_name"] for entry in body["providers"]}
+    assert PARAKEET_NAME in names
+    parakeet = next(e for e in body["providers"] if e["provider_name"] == PARAKEET_NAME)
+    assert parakeet["provider_type"] == "local"
+    # cost reporting via stt_test relies on this being a recognized
+    # local provider — see _estimate_stt_cost.
+    assert parakeet["model_count"] > 0
+    assert "nvidia/parakeet-tdt-0.6b-v3" in parakeet["models"]
+    assert parakeet["display_name"].startswith("NVIDIA Parakeet")
+
+
 def test_stt_catalog_returns_empty_when_no_providers_registered(
     client: TestClient,
 ) -> None:

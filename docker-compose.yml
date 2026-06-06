@@ -34,6 +34,7 @@ x-backend-env: &backend-env
   # the legacy ``johnny_*_models`` volumes yet.
   JOHNNY_MEET_WORKER_WHISPER_VOLUME: ${JOHNNY_MEET_WORKER_WHISPER_VOLUME:-${HOME}/.johnny/whisper-models}
   JOHNNY_MEET_WORKER_PIPER_VOLUME: ${JOHNNY_MEET_WORKER_PIPER_VOLUME:-${HOME}/.johnny/piper-models}
+  JOHNNY_MEET_WORKER_PARAKEET_VOLUME: ${JOHNNY_MEET_WORKER_PARAKEET_VOLUME:-${HOME}/.johnny/parakeet-models}
   JOHNNY_CONTAINER_MONITOR_INTERVAL_SECONDS: ${JOHNNY_CONTAINER_MONITOR_INTERVAL_SECONDS:-30}
   JOHNNY_CONTAINER_PRUNE_INTERVAL_SECONDS: ${JOHNNY_CONTAINER_PRUNE_INTERVAL_SECONDS:-3600}
   JOHNNY_CONTAINER_PRUNE_AGE_SECONDS: ${JOHNNY_CONTAINER_PRUNE_AGE_SECONDS:-86400}
@@ -118,6 +119,7 @@ services:
       # creates these dirs idempotently on first boot.
       - ${HOME}/.johnny/whisper-models:/var/lib/johnny/whisper-models
       - ${HOME}/.johnny/piper-models:/var/lib/johnny/piper-models
+      - ${HOME}/.johnny/parakeet-models:/var/lib/johnny/parakeet-models
       # google_auth_state holds the Playwright storage_state.json files
       # per bot account so the meet-worker can sign into Google without
       # an interactive OAuth round-trip per session (Johnny-ckz.1).
@@ -165,6 +167,7 @@ services:
       # the api image). Host bind mounts — see api notes above.
       - ${HOME}/.johnny/whisper-models:/var/lib/johnny/whisper-models
       - ${HOME}/.johnny/piper-models:/var/lib/johnny/piper-models
+      - ${HOME}/.johnny/parakeet-models:/var/lib/johnny/parakeet-models
       # Same shared google-auth volume as the API (read-write here so
       # an admin endpoint or one-time helper can refresh stored cookies
       # from inside the worker process if needed).
@@ -212,6 +215,7 @@ services:
     volumes:
       - ${HOME}/.johnny/piper-models:/var/lib/johnny/piper-models
       - ${HOME}/.johnny/whisper-models:/var/lib/johnny/whisper-models
+      - ${HOME}/.johnny/parakeet-models:/var/lib/johnny/parakeet-models
 
 volumes:
   postgres_data:

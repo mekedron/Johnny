@@ -83,6 +83,11 @@ DEFAULT_MEET_WORKER_PIPER_VOLUME = (
     str(Path.home() / ".johnny" / "piper-models")
 )
 DEFAULT_MEET_WORKER_PIPER_TARGET = "/var/lib/johnny/piper-models"
+MEET_WORKER_PARAKEET_VOLUME_ENV = "JOHNNY_MEET_WORKER_PARAKEET_VOLUME"
+DEFAULT_MEET_WORKER_PARAKEET_VOLUME = (
+    str(Path.home() / ".johnny" / "parakeet-models")
+)
+DEFAULT_MEET_WORKER_PARAKEET_TARGET = "/var/lib/johnny/parakeet-models"
 
 DEFAULT_STOP_TIMEOUT_SECONDS = 10
 DEFAULT_LOG_TAIL_LINES = 500
@@ -185,6 +190,10 @@ def get_meet_worker_volumes() -> dict[str, dict[str, str]]:
     * ``~/.johnny/piper-models`` (or named volume) →
       ``/var/lib/johnny/piper-models`` — Piper TTS voices, same UX
       reasoning as whisper.
+    * ``~/.johnny/parakeet-models`` (or named volume) →
+      ``/var/lib/johnny/parakeet-models`` — NeMo Parakeet ASR
+      checkpoints (Johnny-stt.1), same host-bind-mount UX as the
+      others so the ~600 MB download is reused across containers.
 
     Returns a Docker SDK-compatible mapping. An operator can disable any
     mount by setting the matching env var to ``none``. An absolute path
@@ -209,6 +218,14 @@ def get_meet_worker_volumes() -> dict[str, dict[str, str]]:
     )
     if piper is not None:
         out[piper] = {"bind": DEFAULT_MEET_WORKER_PIPER_TARGET, "mode": "rw"}
+    parakeet = _read_volume_env(
+        MEET_WORKER_PARAKEET_VOLUME_ENV, DEFAULT_MEET_WORKER_PARAKEET_VOLUME
+    )
+    if parakeet is not None:
+        out[parakeet] = {
+            "bind": DEFAULT_MEET_WORKER_PARAKEET_TARGET,
+            "mode": "rw",
+        }
     return out
 
 

@@ -56,6 +56,8 @@ from app.providers.openai_realtime_stt import OpenAIRealtimeSTT
 from app.providers.openai_realtime_stt import register as _register_openai_realtime_stt
 from app.providers.openai_tts import OpenAITTS
 from app.providers.openai_tts import register as _register_openai_tts
+from app.providers.parakeet_stt import ParakeetSTT
+from app.providers.parakeet_stt import register as _register_parakeet_stt
 from app.providers.piper_tts import PiperTTS
 from app.providers.piper_tts import register as _register_piper_tts
 from app.providers.schema import (
@@ -86,6 +88,7 @@ _register_openai_llm(replace=True)
 _register_anthropic_llm(replace=True)
 _register_gemini_llm(replace=True)
 _register_faster_whisper_stt(replace=True)
+_register_parakeet_stt(replace=True)
 _register_deepgram_stt(replace=True)
 _register_openai_realtime_stt(replace=True)
 _register_elevenlabs_stt(replace=True)
@@ -111,6 +114,7 @@ __all__ = [
     "OpenAILLM",
     "OpenAIRealtimeSTT",
     "OpenAITTS",
+    "ParakeetSTT",
     "PiperTTS",
     "ProviderConfig",
     "ProviderError",

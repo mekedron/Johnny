@@ -362,6 +362,16 @@ STT_CATALOG_METADATA: dict[str, dict[str, Any]] = {
         "streaming": False,
         "cost_per_minute_usd": 0.0,
     },
+    "parakeet": {
+        # NVIDIA NeMo Parakeet. Runs entirely on-device — no audio leaves
+        # the host. The TDT 0.6 B v3 default checkpoint is streaming-
+        # capable architecturally (Cache-Aware Streaming inference);
+        # the live-chat consumer that exercises partials ships in
+        # Johnny-stt.3 — flip ``streaming`` to True there.
+        "type": "local",
+        "streaming": False,
+        "cost_per_minute_usd": 0.0,
+    },
     "deepgram": {
         "type": "cloud",
         "streaming": True,
