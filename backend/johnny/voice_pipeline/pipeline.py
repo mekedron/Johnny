@@ -52,6 +52,10 @@ from johnny.voice_pipeline.events import (
     RouterDecisionMade,
     TranscriptFinalized,
 )
+from johnny.voice_pipeline.transcript_history import (
+    NoopTranscriptHistoryLoader,
+    TranscriptHistoryLoader,
+)
 from johnny.voice_pipeline.transcript_sink import (
     NoopTranscriptSink,
     TranscriptSink,
@@ -66,11 +70,48 @@ DEFAULT_MAX_UTTERANCE_MS = 30_000
 DEFAULT_END_OF_SPEECH_MS = 600
 DEFAULT_FRAME_DURATION_MS = 20
 DEFAULT_CONFIDENCE_THRESHOLD = 0.7
-DEFAULT_TRANSCRIPT_WINDOW_SIZE = 6
+DEFAULT_TRANSCRIPT_WINDOW_SIZE = 0
+"""Rolling window cap on in-memory transcript history.
+
+``0`` (the default since Johnny-ckz.3) means "no cap" — the pipeline
+keeps every finalised transcript for the session, and feeds the full
+list to the router and answer LLMs unless ``context_token_budget`` is
+exceeded, in which case the oldest entries are collapsed into a cached
+summary. Setting a positive value reinstates the legacy hard cap (oldest
+turns dropped without summarisation) — used by tests that want to pin
+exact behaviour.
+"""
 DEFAULT_MODE = "limited_auto_speak"
 DEFAULT_RATE_LIMIT_MAX_UTTERANCES = 3
 DEFAULT_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000
 DEFAULT_APPROVAL_TIMEOUT_SECONDS = 15.0
+DEFAULT_CONTEXT_TOKEN_BUDGET = 0
+"""Token budget for the rolling transcript window plus static context.
+
+``0`` (the default) means "no budget enforced" — the pipeline emits the
+full transcript history regardless of size. Set to a positive value to
+trigger summarisation of older transcripts once the estimated token
+count exceeds the budget. Token count is estimated as
+``len(text) / TOKEN_CHARS_PER_TOKEN`` to avoid a hard dependency on a
+tokeniser.
+"""
+DEFAULT_SUMMARY_MAX_SENTENCES = 4
+"""Sentence-count cap for the summarisation prompt."""
+DEFAULT_SUMMARY_RECENT_KEEP = 2
+"""Minimum recent transcripts kept verbatim during summarisation.
+
+Even when the recent slice exceeds the token budget on its own, the
+pipeline keeps at least this many of the newest transcripts verbatim so
+the LLM always sees the immediate context.
+"""
+TOKEN_CHARS_PER_TOKEN = 4
+"""Rough chars-per-token ratio used when no tokeniser is plugged in.
+
+The 4-chars-per-token heuristic is standard for English-ish content and
+is good enough for budget guards — we don't need precision, just an
+upper bound that prevents the prompt from blowing past the provider's
+hard context window.
+"""
 """Auto-reject window for ``approval_required`` mode (US-027).
 
 Configurable per session via :class:`PipelineConfig.approval_timeout_seconds`.
@@ -141,6 +182,14 @@ class PipelineConfig:
 
     instructions: str = ""
     context: str = ""
+    calendar_context: str = ""
+    """Calendar event description merged into the system prompt.
+
+    Distinct from ``context`` (the user-typed pre-meeting brief) so
+    audits can tell them apart and so the meeting owner can change the
+    static context without losing the calendar-derived background that
+    every attendee already sees on the event page.
+    """
     allowed_replies: tuple[str, ...] = ()
     speak: bool = True
     mode: str = DEFAULT_MODE
@@ -150,6 +199,9 @@ class PipelineConfig:
     max_utterance_ms: int = DEFAULT_MAX_UTTERANCE_MS
     frame_duration_ms: int = DEFAULT_FRAME_DURATION_MS
     transcript_window_size: int = DEFAULT_TRANSCRIPT_WINDOW_SIZE
+    context_token_budget: int = DEFAULT_CONTEXT_TOKEN_BUDGET
+    summary_max_sentences: int = DEFAULT_SUMMARY_MAX_SENTENCES
+    summary_recent_keep: int = DEFAULT_SUMMARY_RECENT_KEEP
     rate_limit_max_utterances: int = DEFAULT_RATE_LIMIT_MAX_UTTERANCES
     rate_limit_window_ms: int = DEFAULT_RATE_LIMIT_WINDOW_MS
     approval_timeout_seconds: float = DEFAULT_APPROVAL_TIMEOUT_SECONDS
@@ -204,6 +256,7 @@ class VoicePipeline:
         utterance_sink: UtteranceSink | None = None,
         transcript_sink: TranscriptSink | None = None,
         approval_gate: ApprovalGate | None = None,
+        transcript_history_loader: TranscriptHistoryLoader | None = None,
     ) -> None:
         self.transport = transport
         self.vad = vad
@@ -217,12 +270,22 @@ class VoicePipeline:
         self.utterance_sink = utterance_sink or NoopUtteranceSink()
         self.transcript_sink = transcript_sink or NoopTranscriptSink()
         self.approval_gate = approval_gate or NoopApprovalGate()
+        self.transcript_history_loader = (
+            transcript_history_loader or NoopTranscriptHistoryLoader()
+        )
         self._session_started_at: float = 0.0
         self._utterance_count = 0
         self._transcript_history: list[TranscriptFinalized] = []
         self._last_decision: RouterDecisionMade | None = None
         self._interrupt_event = asyncio.Event()
         self._recent_utterance_times: list[int] = []
+        # Cached summary of the oldest transcripts. Stored as
+        # ``(summarised_through_index, summary_text)``: the summary
+        # covers ``_transcript_history[0:summarised_through_index]``. We
+        # re-summarise only when the cutoff index advances past the
+        # cached one, and we feed the previous summary back in so the
+        # call is incremental rather than recomputing from scratch.
+        self._history_summary: tuple[int, str] | None = None
 
     # ------------------------------------------------------------------
     # Public lifecycle
@@ -231,8 +294,47 @@ class VoicePipeline:
         """Run the pipeline until the transport's capture stream ends."""
         loop = asyncio.get_running_loop()
         self._session_started_at = loop.time()
+        await self._rehydrate_transcript_history()
         async for utterance in self._utterances():
             await self._process_utterance(utterance)
+
+    async def _rehydrate_transcript_history(self) -> None:
+        """Seed ``_transcript_history`` from prior persisted transcripts.
+
+        Container respawns mid-session would otherwise start the
+        in-memory history at zero — the bot would forget everything
+        spoken before the restart. The loader pulls the durable rows
+        for this session and we replace the in-memory history with
+        them (in chronological order).
+
+        The default loader is a no-op so test setups that don't
+        configure a loader keep their old behaviour. Loader exceptions
+        are logged and the run continues with an empty history —
+        better to lose context than to refuse to start.
+        """
+        try:
+            prior = await self.transcript_history_loader.load(
+                session_id=self.config.session_id,
+                bot_session_id=self.config.bot_session_id,
+            )
+        except Exception:
+            logger.exception(
+                "transcript history loader failed for session=%s — "
+                "starting with empty history",
+                self.config.session_id,
+            )
+            return
+        if not prior:
+            return
+        self._transcript_history = list(prior)
+        # Rehydration resets any cached summary so the next prompt
+        # build recomputes against the loaded history.
+        self._history_summary = None
+        logger.info(
+            "rehydrated %d transcript chunks for session=%s",
+            len(prior),
+            self.config.session_id,
+        )
 
     def interrupt(self) -> None:
         """Stop the current answer stage's LLM stream and TTS playback.
@@ -318,7 +420,7 @@ class VoicePipeline:
         if not self.config.speak:
             return
 
-        input_window = self._build_input_window(transcript)
+        input_window = await self._build_input_window(transcript)
         decision, raw_response = await self._run_router(transcript, input_window)
         decision_event = RouterDecisionMade(
             should_speak=decision.should_speak,
@@ -753,6 +855,8 @@ class VoicePipeline:
             system += f"\n\nMeeting instructions: {self.config.instructions}"
         if self.config.context:
             system += f"\n\nContext: {self.config.context}"
+        if self.config.calendar_context:
+            system += f"\n\nCalendar event description: {self.config.calendar_context}"
         if self.config.allowed_replies:
             system += (
                 "\n\nAllowed replies (the answer stage will pick verbatim from "
@@ -760,6 +864,10 @@ class VoicePipeline:
             )
 
         user_parts: list[str] = []
+        summary = input_window.get("summary")
+        if isinstance(summary, dict) and summary.get("text"):
+            user_parts.append(f"Earlier (summary): {summary['text']}")
+            user_parts.append("")
         window: list[dict[str, Any]] = input_window.get("transcript_window", [])
         if len(window) > 1:
             history = window[:-1]
@@ -789,10 +897,15 @@ class VoicePipeline:
         """Build the prompt for the answer LLM.
 
         The system message carries the static settings (instructions,
-        context, router hint, allowed-reply constraint when set). The
-        user message embeds the rolling transcript window so the model
-        can reference recent turns, with the latest transcript marked
-        explicitly so the model knows what it is responding to.
+        context, calendar description, router hint, allowed-reply
+        constraint when set). The user message embeds the rolling
+        transcript window so the model can reference recent turns,
+        with the latest transcript marked explicitly so the model knows
+        what it is responding to.
+
+        Reads the same ``_history_summary`` cache as the router build —
+        when the budget guard kicked in for the router pass it also
+        kicks in here, so both LLMs see the same earlier-context line.
         """
         system = (
             "You are an AI meeting participant. Produce a concise spoken "
@@ -802,6 +915,8 @@ class VoicePipeline:
             system += f"\n\nMeeting instructions: {self.config.instructions}"
         if self.config.context:
             system += f"\n\nContext: {self.config.context}"
+        if self.config.calendar_context:
+            system += f"\n\nCalendar event description: {self.config.calendar_context}"
         if decision.suggested_reply:
             system += f"\n\nRouter suggested: {decision.suggested_reply}"
         if self.config.allowed_replies:
@@ -810,11 +925,26 @@ class VoicePipeline:
                 f"{list(self.config.allowed_replies)}"
             )
 
-        user_parts: list[str] = []
-        if len(self._transcript_history) > 1:
-            history = self._transcript_history[:-1]
+        history = self._transcript_history[:-1]
+        cutoff = 0
+        if self._history_summary is not None:
+            cutoff_idx, summary_text = self._history_summary
+            # The summary always covers a *strict* prefix of history.
+            # We never want to render a transcript twice (once in the
+            # summary, once verbatim below), so clamp cutoff to the
+            # cached prefix length.
+            cutoff = min(cutoff_idx, len(history))
+            user_parts: list[str] = []
+            if cutoff > 0 and summary_text:
+                user_parts.append(f"Earlier (summary): {summary_text}")
+                user_parts.append("")
+        else:
+            user_parts = []
+
+        recent = history[cutoff:]
+        if recent:
             user_parts.append("Recent conversation:")
-            for entry in history:
+            for entry in recent:
                 speaker = entry.speaker or "speaker"
                 user_parts.append(f"- {speaker}: {entry.text}")
             user_parts.append("")
@@ -858,17 +988,43 @@ class VoicePipeline:
         )
 
     def _remember_transcript(self, transcript: TranscriptFinalized) -> None:
-        """Append ``transcript`` to the rolling history and bound its size."""
-        self._transcript_history.append(transcript)
-        window_size = max(1, self.config.transcript_window_size)
-        if len(self._transcript_history) > window_size:
-            del self._transcript_history[: len(self._transcript_history) - window_size]
+        """Append ``transcript`` to the rolling history.
 
-    def _build_input_window(
+        Behaviour is two-tiered:
+
+        * ``transcript_window_size <= 0`` (the post Johnny-ckz.3 default)
+          → unbounded; the pipeline keeps every transcript for the
+          session and lets :meth:`_build_input_window` apply a
+          token-budgeted summary when needed.
+        * Positive value → legacy hard cap. The oldest transcripts are
+          dropped without summarisation. Used by tests that pin exact
+          behaviour, and as an escape hatch if the LLM-side
+          summarisation has to be disabled.
+        """
+        self._transcript_history.append(transcript)
+        window_size = self.config.transcript_window_size
+        if window_size > 0 and len(self._transcript_history) > window_size:
+            dropped = len(self._transcript_history) - window_size
+            del self._transcript_history[:dropped]
+            self._invalidate_history_summary_after_drop(dropped)
+
+    async def _build_input_window(
         self, transcript: TranscriptFinalized
     ) -> dict[str, Any]:
-        """Snapshot every input the router sees, for prompt & persistence."""
-        return {
+        """Snapshot every input the router sees, for prompt & persistence.
+
+        When ``context_token_budget`` is set and the estimated token
+        count of the full history (+ static context) exceeds it, the
+        oldest transcripts are replaced by a cached summary string so
+        the router LLM sees an ``Earlier (summary): …`` line followed
+        by the recent verbatim transcripts. The split is recorded on
+        the snapshot's ``summary`` field so audits can reproduce the
+        exact prompt the router saw — full or summarised.
+        """
+        history_segment, summary_segment = await self._segment_history_for_budget(
+            transcript
+        )
+        snapshot: dict[str, Any] = {
             "transcript_window": [
                 {
                     "text": t.text,
@@ -877,16 +1033,145 @@ class VoicePipeline:
                     "confidence": t.confidence,
                     "is_current": t is transcript,
                 }
-                for t in self._transcript_history
+                for t in history_segment
             ],
             "instructions": self.config.instructions,
             "context": self.config.context,
+            "calendar_context": self.config.calendar_context,
             "allowed_replies": list(self.config.allowed_replies),
             "mode": self.config.mode,
             "confidence_threshold": self.config.confidence_threshold,
             "approval_timeout_seconds": self.config.approval_timeout_seconds,
             "last_decision": self._last_decision_summary(),
+            "transcript_total_count": len(self._transcript_history),
         }
+        if summary_segment is not None:
+            snapshot["summary"] = summary_segment
+        return snapshot
+
+    async def _segment_history_for_budget(
+        self, transcript: TranscriptFinalized
+    ) -> tuple[list[TranscriptFinalized], dict[str, Any] | None]:
+        """Split ``_transcript_history`` into (verbatim recent, summary of older).
+
+        Returns ``(recent_transcripts, summary_info)`` where:
+
+        * When the budget is unset or the full history fits, the
+          verbatim slice IS the full history and ``summary_info`` is
+          ``None``.
+        * When the budget is exceeded, we walk newest→oldest gathering
+          recent transcripts up to the recent-side budget; everything
+          older is summarised into a short string. ``summary_info`` is
+          a dict carrying the ``text`` of the summary plus the
+          ``summarised_through_index`` and ``summarised_count`` so the
+          audit row can reproduce what the LLM saw.
+        """
+        budget = self.config.context_token_budget
+        if budget <= 0:
+            return list(self._transcript_history), None
+
+        history = self._transcript_history
+        static_tokens = _estimate_tokens(self.config.instructions) + _estimate_tokens(
+            self.config.context
+        ) + _estimate_tokens(self.config.calendar_context)
+        full_tokens = static_tokens + sum(
+            _estimate_tokens(t.text) for t in history
+        )
+        if full_tokens <= budget:
+            return list(history), None
+
+        # Reserve ~1/4 of the budget for the summary header so the
+        # recent verbatim slice gets the lion's share. Floor at 1 to
+        # avoid pathological 0-token reservations.
+        summary_budget = max(1, budget // 4)
+        recent_budget = max(1, budget - static_tokens - summary_budget)
+        keep_min = max(1, self.config.summary_recent_keep)
+
+        recent_idx = len(history)
+        recent_tokens = 0
+        while recent_idx > 0:
+            candidate = history[recent_idx - 1]
+            candidate_tokens = _estimate_tokens(candidate.text)
+            within_budget = recent_tokens + candidate_tokens <= recent_budget
+            must_keep = (len(history) - recent_idx) < keep_min
+            if not within_budget and not must_keep:
+                break
+            recent_idx -= 1
+            recent_tokens += candidate_tokens
+        # Cap at len(history) - 1 so we always summarise at least one
+        # transcript — otherwise we'd return the full history and the
+        # budget guard would have nothing to do.
+        cutoff = min(recent_idx, max(0, len(history) - keep_min))
+        if cutoff <= 0:
+            return list(history), None
+
+        summary_text = await self._summarise_through(cutoff)
+        return list(history[cutoff:]), {
+            "text": summary_text,
+            "summarised_through_index": cutoff,
+            "summarised_count": cutoff,
+        }
+
+    async def _summarise_through(self, cutoff: int) -> str:
+        """Return a cached or freshly-computed summary of ``history[0:cutoff]``.
+
+        Cache key is the cutoff index. When a prior summary covered a
+        smaller cutoff we feed it into the next call as ``Prior summary``
+        so the LLM doesn't recompute from scratch — keeps the call
+        cheap as the meeting grows.
+        """
+        if self._history_summary is not None:
+            prev_idx, prev_text = self._history_summary
+            if prev_idx == cutoff:
+                return prev_text
+        else:
+            prev_idx = 0
+            prev_text = ""
+
+        new_chunks = self._transcript_history[prev_idx:cutoff]
+        max_sentences = max(1, self.config.summary_max_sentences)
+        system = (
+            "You compress meeting transcripts into a short audit summary "
+            f"for an AI meeting bot. Reply with <= {max_sentences} "
+            "sentences capturing decisions, open questions, names, and "
+            "concrete numbers. No preamble, no bullet list."
+        )
+        user_parts: list[str] = []
+        if prev_text:
+            user_parts.append(f"Prior summary:\n{prev_text}\n")
+        user_parts.append("New transcript lines to fold in:")
+        for entry in new_chunks:
+            speaker = entry.speaker or "speaker"
+            user_parts.append(f"- {speaker}: {entry.text}")
+        messages = [
+            ChatMessage(role="system", content=system),
+            ChatMessage(role="user", content="\n".join(user_parts)),
+        ]
+        try:
+            response = await self.router_llm.chat(messages)
+        except Exception:
+            logger.exception(
+                "summary LLM call failed for session=%s; falling back to "
+                "prior summary",
+                self.config.session_id,
+            )
+            return prev_text or _fallback_summary(new_chunks)
+        text = (response.text or "").strip()
+        if not text:
+            text = prev_text or _fallback_summary(new_chunks)
+        self._history_summary = (cutoff, text)
+        return text
+
+    def _invalidate_history_summary_after_drop(self, dropped: int) -> None:
+        """Adjust the cached summary cutoff after a hard-cap drop."""
+        if self._history_summary is None:
+            return
+        prev_idx, prev_text = self._history_summary
+        new_idx = prev_idx - dropped
+        if new_idx <= 0:
+            self._history_summary = None
+        else:
+            self._history_summary = (new_idx, prev_text)
 
     def _last_decision_summary(self) -> dict[str, Any] | None:
         if self._last_decision is None:
@@ -1036,6 +1321,34 @@ def _pcm_duration_ms(byte_count: int, sample_rate: int) -> int:
     return int(samples * 1000 / sample_rate)
 
 
+def _estimate_tokens(text: str | None) -> int:
+    """Rough token count from character length / :data:`TOKEN_CHARS_PER_TOKEN`.
+
+    Plenty for budget guards (we just need an upper bound that prevents
+    the prompt from exceeding the provider's hard context window) and
+    avoids a hard dependency on the model-specific tokeniser.
+    """
+    if not text:
+        return 0
+    return max(1, len(text) // TOKEN_CHARS_PER_TOKEN)
+
+
+def _fallback_summary(chunks: Sequence[TranscriptFinalized]) -> str:
+    """Cheap summary used when the summarisation LLM call fails.
+
+    The first ~280 characters of concatenated transcripts is a poor
+    substitute for an LLM summary but it keeps SOME context in the
+    prompt so the bot doesn't lose everything when the summariser is
+    transiently unavailable.
+    """
+    if not chunks:
+        return ""
+    joined = " ".join(c.text for c in chunks if c.text)
+    if len(joined) <= 280:
+        return joined
+    return joined[:277] + "..."
+
+
 def _serialize_raw_output(
     response: LLMResponse,
     decision: RouterDecision,
@@ -1074,12 +1387,15 @@ __all__ = [
     "FREE_AUTO_SPEAK_MODE",
     "DEFAULT_APPROVAL_TIMEOUT_SECONDS",
     "DEFAULT_CONFIDENCE_THRESHOLD",
+    "DEFAULT_CONTEXT_TOKEN_BUDGET",
     "DEFAULT_END_OF_SPEECH_MS",
     "DEFAULT_FRAME_DURATION_MS",
     "DEFAULT_MAX_UTTERANCE_MS",
     "DEFAULT_MODE",
     "DEFAULT_RATE_LIMIT_MAX_UTTERANCES",
     "DEFAULT_RATE_LIMIT_WINDOW_MS",
+    "DEFAULT_SUMMARY_MAX_SENTENCES",
+    "DEFAULT_SUMMARY_RECENT_KEEP",
     "DEFAULT_TRANSCRIPT_WINDOW_SIZE",
     "LIMITED_AUTO_SPEAK_MODE",
     "LISTEN_ONLY_MODE",
@@ -1088,5 +1404,6 @@ __all__ = [
     "RouterDecision",
     "SPEAKING_MODES",
     "SUGGEST_ONLY_MODE",
+    "TOKEN_CHARS_PER_TOKEN",
     "VoicePipeline",
 ]

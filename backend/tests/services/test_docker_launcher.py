@@ -281,6 +281,7 @@ def _make_ctx(
     mode: str = "listen_only",
     instructions: str = "Stay quiet unless asked.",
     context: str = "Standup with the platform team.",
+    calendar_context: str = "",
     provider_config: dict[str, Any] | None = None,
 ) -> LaunchContext:
     return LaunchContext(
@@ -293,6 +294,7 @@ def _make_ctx(
         mode=mode,
         instructions=instructions,
         context=context,
+        calendar_context=calendar_context,
         provider_config=provider_config or {"stt": "deepgram"},
     )
 
@@ -318,7 +320,23 @@ async def test_start_runs_container_with_env_and_labels(
     assert env["JOHNNY_MODE"] == "listen_only"
     assert env["JOHNNY_INSTRUCTIONS"] == "Stay quiet unless asked."
     assert env["JOHNNY_CONTEXT"] == "Standup with the platform team."
+    # No calendar description set → empty string env var, NOT a missing
+    # key (a missing key would crash the launcher's _build_environment
+    # downstream consumers).
+    assert env["JOHNNY_CALENDAR_CONTEXT"] == ""
     assert json.loads(env["JOHNNY_PROVIDER_CONFIG"]) == {"stt": "deepgram"}
+
+
+@pytest.mark.asyncio
+async def test_start_passes_calendar_context_env_var(
+    launcher: _StubLauncher, fake_client: _FakeDockerClient
+) -> None:
+    """Johnny-ckz.3: calendar_context flows to JOHNNY_CALENDAR_CONTEXT."""
+    ctx = _make_ctx(calendar_context="Quarterly planning sync agenda.")
+    await launcher.start(ctx)
+    _, kwargs = fake_client.containers.run_calls[0]
+    env = kwargs["environment"]
+    assert env["JOHNNY_CALENDAR_CONTEXT"] == "Quarterly planning sync agenda."
     labels = kwargs["labels"]
     assert labels[JOHNNY_CONTAINER_LABEL] == JOHNNY_LABEL_VALUE
     assert labels[JOHNNY_SESSION_ID_LABEL] == "1"

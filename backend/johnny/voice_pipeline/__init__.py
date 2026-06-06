@@ -63,6 +63,11 @@ from johnny.voice_pipeline.pipeline import (
     RouterDecision,
     VoicePipeline,
 )
+from johnny.voice_pipeline.transcript_history import (
+    InMemoryTranscriptHistoryLoader,
+    NoopTranscriptHistoryLoader,
+    TranscriptHistoryLoader,
+)
 from johnny.voice_pipeline.transcript_sink import (
     InMemoryTranscriptSink,
     NoopTranscriptSink,
@@ -127,6 +132,7 @@ __all__ = [
     "InMemoryApprovalGate",
     "InMemoryDecisionSink",
     "InMemoryEventBus",
+    "InMemoryTranscriptHistoryLoader",
     "InMemoryTranscriptSink",
     "InMemoryUtteranceSink",
     "JohnnyTransport",
@@ -134,6 +140,7 @@ __all__ = [
     "LocalAudioTransport",
     "NoopApprovalGate",
     "NoopDecisionSink",
+    "NoopTranscriptHistoryLoader",
     "NoopTranscriptSink",
     "NoopUtteranceSink",
     "PipelineConfig",
@@ -145,6 +152,7 @@ __all__ = [
     "SessionStatusChanged",
     "SileroVAD",
     "TranscriptFinalized",
+    "TranscriptHistoryLoader",
     "TranscriptRecord",
     "TranscriptSink",
     "UtteranceRecord",

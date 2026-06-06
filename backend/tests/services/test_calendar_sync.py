@@ -123,6 +123,7 @@ def _event_payload(
     *,
     external_id: str = "evt-1",
     summary: str | None = "Standup",
+    description: str | None = None,
     start: str = "2026-07-01T10:00:00Z",
     end: str = "2026-07-01T10:30:00Z",
     hangout_link: str | None = "https://meet.google.com/aaa-bbb-ccc",
@@ -139,6 +140,8 @@ def _event_payload(
     }
     if summary is not None:
         body["summary"] = summary
+    if description is not None:
+        body["description"] = description
     if hangout_link is not None:
         body["hangoutLink"] = hangout_link
     if organizer_email is not None:
@@ -209,6 +212,23 @@ def test_parse_event_payload_extracts_required_fields() -> None:
     assert parsed.meet_link == "https://meet.google.com/aaa-bbb-ccc"
     assert parsed.etag == '"etag-value"'
     assert parsed.cancelled is False
+    # Description defaults to None when the calendar event omits it.
+    assert parsed.description is None
+
+
+def test_parse_event_payload_captures_description() -> None:
+    """Johnny-ckz.3: description text rides into the parsed event."""
+    parsed = _parse_event_payload(
+        _event_payload(description="Q3 launch readiness review.")
+    )
+    assert parsed is not None
+    assert parsed.description == "Q3 launch readiness review."
+
+
+def test_parse_event_payload_treats_empty_description_as_none() -> None:
+    parsed = _parse_event_payload(_event_payload(description=""))
+    assert parsed is not None
+    assert parsed.description is None
 
 
 def test_parse_event_payload_rejects_missing_id() -> None:
@@ -395,6 +415,81 @@ async def test_sync_unchanged_row_reports_no_update(
     assert result.updated_count == 0
     assert result.created_count == 0
     assert all(c.kind == "unchanged" for c in result.changes)
+
+
+async def test_sync_persists_event_description(
+    session: Session, crypto: CredentialCrypto, settings: Settings
+) -> None:
+    """Johnny-ckz.3: a new event's description column is populated from Google."""
+    account = _make_account(session, crypto)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    _event_payload(
+                        external_id="evt-d",
+                        description="Q3 launch readiness review.",
+                    )
+                ]
+            },
+        )
+
+    client = _make_client(
+        session=session, account=account, crypto=crypto,
+        settings=settings, handler=handler,
+    )
+    await sync_account_events(session=session, client=client)
+    await client.aclose()
+
+    row = session.scalar(
+        sa.select(CalendarEvent).where(CalendarEvent.external_id == "evt-d")
+    )
+    assert row is not None
+    assert row.description == "Q3 launch readiness review."
+
+
+async def test_sync_updates_changed_description(
+    session: Session, crypto: CredentialCrypto, settings: Settings
+) -> None:
+    """A change in the description text counts as an update + invalidates etag."""
+    account = _make_account(session, crypto)
+    initial = CalendarEvent(
+        account_id=account.id,
+        external_id="evt-d",
+        summary="Standup",
+        description="old description",
+        start_time=datetime(2026, 7, 1, 10, 0, tzinfo=UTC),
+        end_time=datetime(2026, 7, 1, 10, 30, tzinfo=UTC),
+        meet_link="https://meet.google.com/aaa-bbb-ccc",
+    )
+    session.add(initial)
+    session.flush()
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    _event_payload(
+                        external_id="evt-d",
+                        description="new description with agenda",
+                    )
+                ]
+            },
+        )
+
+    client = _make_client(
+        session=session, account=account, crypto=crypto,
+        settings=settings, handler=handler,
+    )
+    result = await sync_account_events(session=session, client=client)
+    await client.aclose()
+
+    assert result.updated_count == 1
+    session.flush()
+    assert initial.description == "new description with agenda"
 
 
 async def test_sync_deletes_cancelled_events(

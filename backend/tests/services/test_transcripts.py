@@ -13,6 +13,7 @@ from app.db.models import EMBEDDING_DIM, TranscriptChunk
 from app.services.transcripts import (
     EmbeddingDimensionError,
     EmbeddingProvider,
+    SqlAlchemyTranscriptHistoryLoader,
     SqlAlchemyTranscriptSink,
     StaticEmbeddingProvider,
     compute_pending_embeddings,
@@ -156,12 +157,20 @@ def _insert_chunk(
     text: str = "t",
     start: int = 0,
     end: int = 100,
+    start_offset_ms: int | None = None,
+    end_offset_ms: int | None = None,
+    speaker: str | None = None,
     embedding: list[float] | None = None,
 ) -> TranscriptChunk:
+    # Accept both the legacy ``start``/``end`` shorthand and the explicit
+    # ``start_offset_ms``/``end_offset_ms`` column names — the loader
+    # tests find the column-named version more readable next to the
+    # production code that uses the same names.
     row = TranscriptChunk(
         bot_session_id=bot_session_id,
-        start_offset_ms=start,
-        end_offset_ms=end,
+        start_offset_ms=start_offset_ms if start_offset_ms is not None else start,
+        end_offset_ms=end_offset_ms if end_offset_ms is not None else end,
+        speaker=speaker,
         text=text,
         embedding=embedding,
     )
@@ -338,3 +347,76 @@ def test_count_pending_embeddings_mixed(db_session: Session) -> None:
     _insert_chunk(db_session, text="c", embedding=embedded_vec)
     _insert_chunk(db_session, text="d")
     assert count_pending_embeddings(db_session) == 2
+
+
+# --- SqlAlchemyTranscriptHistoryLoader (Johnny-ckz.3) ----------------------
+
+
+async def test_history_loader_returns_chronological_transcripts(
+    db_session: Session,
+) -> None:
+    _insert_chunk(
+        db_session,
+        bot_session_id=42,
+        text="first thing",
+        start_offset_ms=0,
+        end_offset_ms=1000,
+        speaker="alice",
+    )
+    _insert_chunk(
+        db_session,
+        bot_session_id=42,
+        text="second thing",
+        start_offset_ms=1000,
+        end_offset_ms=2000,
+        speaker="bob",
+    )
+    # A different session's chunks must not bleed into the result.
+    _insert_chunk(
+        db_session,
+        bot_session_id=99,
+        text="other session",
+        start_offset_ms=0,
+        end_offset_ms=500,
+    )
+    db_session.commit()
+
+    loader = SqlAlchemyTranscriptHistoryLoader(db_session)
+    out = await loader.load(session_id=None, bot_session_id=42)
+
+    assert [t.text for t in out] == ["first thing", "second thing"]
+    assert [t.timestamp_ms for t in out] == [1000, 2000]
+    assert [t.speaker for t in out] == ["alice", "bob"]
+
+
+async def test_history_loader_returns_empty_when_no_bot_session_id(
+    db_session: Session,
+) -> None:
+    loader = SqlAlchemyTranscriptHistoryLoader(db_session)
+    out = await loader.load(session_id="anything", bot_session_id=None)
+    assert out == []
+
+
+async def test_history_loader_returns_empty_for_unknown_bot_session(
+    db_session: Session,
+) -> None:
+    loader = SqlAlchemyTranscriptHistoryLoader(db_session)
+    out = await loader.load(session_id=None, bot_session_id=12345)
+    assert out == []
+
+
+async def test_history_loader_respects_limit(db_session: Session) -> None:
+    for i in range(5):
+        _insert_chunk(
+            db_session,
+            bot_session_id=7,
+            text=f"chunk {i}",
+            start_offset_ms=i * 1000,
+            end_offset_ms=i * 1000 + 500,
+        )
+    db_session.commit()
+    loader = SqlAlchemyTranscriptHistoryLoader(db_session, limit=3)
+
+    out = await loader.load(session_id=None, bot_session_id=7)
+
+    assert [t.text for t in out] == ["chunk 0", "chunk 1", "chunk 2"]

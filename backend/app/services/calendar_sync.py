@@ -256,6 +256,7 @@ class _ParsedEvent:
     start_time: datetime
     end_time: datetime
     summary: str | None
+    description: str | None
     organizer: str | None
     attendees: list[dict[str, Any]] | None
     meet_link: str | None
@@ -282,6 +283,12 @@ def _parse_event_payload(payload: dict[str, Any]) -> _ParsedEvent | None:
         return None
     summary_raw = payload.get("summary")
     summary = str(summary_raw) if isinstance(summary_raw, str) and summary_raw else None
+    description_raw = payload.get("description")
+    description = (
+        str(description_raw)
+        if isinstance(description_raw, str) and description_raw
+        else None
+    )
     etag_raw = payload.get("etag")
     etag = str(etag_raw) if isinstance(etag_raw, str) and etag_raw else None
     return _ParsedEvent(
@@ -289,6 +296,7 @@ def _parse_event_payload(payload: dict[str, Any]) -> _ParsedEvent | None:
         start_time=start or datetime.now(UTC),
         end_time=end or datetime.now(UTC),
         summary=summary,
+        description=description,
         organizer=_extract_organizer(payload),
         attendees=_extract_attendees(payload),
         meet_link=_extract_meet_link(payload),
@@ -346,6 +354,7 @@ def _apply_parsed_event(
             account_id=account.id,
             external_id=parsed.external_id,
             summary=parsed.summary,
+            description=parsed.description,
             organizer=parsed.organizer,
             attendees=parsed.attendees,
             start_time=parsed.start_time,
@@ -363,6 +372,9 @@ def _apply_parsed_event(
     changed = False
     if existing.summary != parsed.summary:
         existing.summary = parsed.summary
+        changed = True
+    if existing.description != parsed.description:
+        existing.description = parsed.description
         changed = True
     if existing.organizer != parsed.organizer:
         existing.organizer = parsed.organizer

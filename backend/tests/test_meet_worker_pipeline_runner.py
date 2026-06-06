@@ -32,11 +32,20 @@ from app.services.approval import RedisApprovalGate
 from johnny.meet_worker import pipeline_runner
 from johnny.meet_worker.audio_bridge import MeetAudioBridge
 from johnny.meet_worker.pipeline_runner import (
+    API_BASE_URL_ENV,
+    CALENDAR_CONTEXT_ENV,
+    CONTEXT_ENV,
+    CONTEXT_TOKEN_BUDGET_ENV,
+    INSTRUCTIONS_ENV,
     PROVIDER_CONFIG_ENV,
     REDIS_URL_ENV,
+    SESSION_ID_ENV,
     PipelineSetupError,
     _assemble_pipeline,
     _build_approval_gate,
+    _build_transcript_history_loader,
+    _resolve_bot_session_id,
+    _resolve_token_budget,
 )
 from johnny.voice_pipeline import (
     APPROVAL_REQUIRED_MODE,
@@ -342,3 +351,175 @@ async def test_assemble_pipeline_keeps_mode_when_tts_present(
 
     assert pipeline.config.mode == FREE_AUTO_SPEAK_MODE
     assert isinstance(pipeline.approval_gate, NoopApprovalGate)
+
+
+# --- Johnny-ckz.3 environment wiring -------------------------------------
+
+
+def test_resolve_token_budget_returns_zero_for_unset_env() -> None:
+    assert _resolve_token_budget({}, session_id="42") == 0
+
+
+def test_resolve_token_budget_parses_positive_integer() -> None:
+    env = {CONTEXT_TOKEN_BUDGET_ENV: "12000"}
+    assert _resolve_token_budget(env, session_id="42") == 12000
+
+
+def test_resolve_token_budget_clamps_negative_to_zero() -> None:
+    env = {CONTEXT_TOKEN_BUDGET_ENV: "-5"}
+    assert _resolve_token_budget(env, session_id="42") == 0
+
+
+def test_resolve_token_budget_warns_and_falls_back_on_invalid_env(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    env = {CONTEXT_TOKEN_BUDGET_ENV: "not-a-number"}
+    with caplog.at_level(logging.WARNING):
+        out = _resolve_token_budget(env, session_id="42")
+    assert out == 0
+    assert any(
+        CONTEXT_TOKEN_BUDGET_ENV in rec.message and "not-a-number" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_resolve_bot_session_id_parses_integer() -> None:
+    env = {SESSION_ID_ENV: "37"}
+    assert _resolve_bot_session_id(env, session_id="37") == 37
+
+
+def test_resolve_bot_session_id_returns_none_for_missing_env() -> None:
+    assert _resolve_bot_session_id({}, session_id="x") is None
+
+
+def test_resolve_bot_session_id_warns_on_non_integer(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    env = {SESSION_ID_ENV: "abc"}
+    with caplog.at_level(logging.WARNING):
+        out = _resolve_bot_session_id(env, session_id="abc")
+    assert out is None
+    assert any(
+        "non-integer" in rec.message and SESSION_ID_ENV in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_build_transcript_history_loader_returns_none_without_api_url(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        loader = _build_transcript_history_loader(
+            session_id="42", api_base_url=None
+        )
+    assert loader is None
+    assert any(
+        API_BASE_URL_ENV in rec.message and "rehydration disabled" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_build_transcript_history_loader_returns_http_loader_when_url_set() -> None:
+    from johnny.meet_worker.transcript_loader import HttpTranscriptHistoryLoader
+
+    loader = _build_transcript_history_loader(
+        session_id="42",
+        api_base_url="http://api:8000",
+    )
+    assert isinstance(loader, HttpTranscriptHistoryLoader)
+
+
+async def test_assemble_pipeline_wires_calendar_context_and_budget(
+    _registered_fake_providers: Any,
+) -> None:
+    """Env vars flow into PipelineConfig as calendar_context + token budget."""
+    env = _provider_payload(LIMITED_AUTO_SPEAK_MODE)
+    env[INSTRUCTIONS_ENV] = "be brief"
+    env[CONTEXT_ENV] = "manual brief"
+    env[CALENDAR_CONTEXT_ENV] = "Q3 planning sync agenda."
+    env[CONTEXT_TOKEN_BUDGET_ENV] = "5000"
+    env[SESSION_ID_ENV] = "42"
+
+    pipeline = await _assemble_pipeline(
+        cast(MeetAudioBridge, _FakeBridge()),
+        event_bus=InMemoryEventBus(),
+        session_id="42",
+        env=env,
+    )
+
+    assert pipeline.config.instructions == "be brief"
+    assert pipeline.config.context == "manual brief"
+    assert pipeline.config.calendar_context == "Q3 planning sync agenda."
+    assert pipeline.config.context_token_budget == 5000
+    assert pipeline.config.bot_session_id == 42
+
+
+async def test_assemble_pipeline_calendar_context_survives_tts_degradation(
+    _registered_fake_providers: Any,
+) -> None:
+    """When TTS is missing the runner rebuilds PipelineConfig in suggest_only —
+    calendar_context must survive that rebuild so audits stay reproducible."""
+    env = _provider_payload(APPROVAL_REQUIRED_MODE, include_tts=False)
+    env[CALENDAR_CONTEXT_ENV] = "Calendar event description text."
+    env[CONTEXT_TOKEN_BUDGET_ENV] = "8000"
+
+    pipeline = await _assemble_pipeline(
+        cast(MeetAudioBridge, _FakeBridge()),
+        event_bus=InMemoryEventBus(),
+        session_id="42",
+        env=env,
+    )
+
+    assert pipeline.config.mode == SUGGEST_ONLY_MODE
+    assert pipeline.config.calendar_context == "Calendar event description text."
+    assert pipeline.config.context_token_budget == 8000
+
+
+async def test_assemble_pipeline_threads_transcript_history_loader(
+    _registered_fake_providers: Any,
+) -> None:
+    """JOHNNY_API_BASE_URL → pipeline.transcript_history_loader is the HTTP impl."""
+    from johnny.meet_worker.transcript_loader import HttpTranscriptHistoryLoader
+
+    env = _provider_payload(LIMITED_AUTO_SPEAK_MODE)
+    env[API_BASE_URL_ENV] = "http://api:8000"
+    env[SESSION_ID_ENV] = "42"
+
+    pipeline = await _assemble_pipeline(
+        cast(MeetAudioBridge, _FakeBridge()),
+        event_bus=InMemoryEventBus(),
+        session_id="42",
+        env=env,
+    )
+
+    assert isinstance(
+        pipeline.transcript_history_loader, HttpTranscriptHistoryLoader
+    )
+
+
+async def test_assemble_pipeline_uses_noop_loader_when_api_url_absent(
+    _registered_fake_providers: Any,
+) -> None:
+    """Without JOHNNY_API_BASE_URL the pipeline keeps its safe Noop default."""
+    from johnny.voice_pipeline import NoopTranscriptHistoryLoader
+
+    env = _provider_payload(LIMITED_AUTO_SPEAK_MODE)
+    env[SESSION_ID_ENV] = "42"
+    env.pop(API_BASE_URL_ENV, None)
+
+    pipeline = await _assemble_pipeline(
+        cast(MeetAudioBridge, _FakeBridge()),
+        event_bus=InMemoryEventBus(),
+        session_id="42",
+        env=env,
+    )
+
+    assert isinstance(
+        pipeline.transcript_history_loader, NoopTranscriptHistoryLoader
+    )

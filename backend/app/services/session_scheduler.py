@@ -123,6 +123,13 @@ class LaunchContext:
     mode: str = ""
     instructions: str = ""
     context: str = ""
+    calendar_context: str = ""
+    """Calendar event description — pre-meeting context from the event itself.
+
+    Passed alongside ``context`` (the user-typed brief) so the bot sees
+    both. Kept distinct so an audit can tell them apart and so the user
+    can edit one without disturbing the other.
+    """
     provider_config: dict[str, Any] = field(default_factory=dict)
 
 
@@ -353,6 +360,11 @@ async def start_session_for_meeting(
     except Exception:  # noqa: BLE001 — never block a launch on payload errors
         logger.exception("provider payload build failed; sending empty payload")
 
+    calendar_description = ""
+    event = meeting.calendar_event
+    if event is not None and event.description:
+        calendar_description = event.description
+
     ctx = LaunchContext(
         bot_session_id=row.id,
         meeting_config_id=meeting.id,
@@ -363,6 +375,7 @@ async def start_session_for_meeting(
         mode=str(meeting.mode.value if hasattr(meeting.mode, "value") else meeting.mode),
         instructions=effective_instructions,
         context=effective_context,
+        calendar_context=calendar_description,
         provider_config=provider_payload,
     )
     try:

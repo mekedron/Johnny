@@ -25,6 +25,8 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from sqlalchemy import func, select
 
 from app.db.models import EMBEDDING_DIM, TranscriptChunk
+from johnny.voice_pipeline.events import TranscriptFinalized
+from johnny.voice_pipeline.transcript_history import TranscriptHistoryLoader
 from johnny.voice_pipeline.transcript_sink import TranscriptSink
 
 if TYPE_CHECKING:
@@ -207,10 +209,64 @@ def count_pending_embeddings(session: Session) -> int:
     return int(result or 0)
 
 
+class SqlAlchemyTranscriptHistoryLoader(TranscriptHistoryLoader):
+    """DB-backed loader for restoring transcript history on session resume.
+
+    Used by the API process (which has SQLAlchemy access) and by tests
+    that want to verify the round-trip persistence → rehydration path
+    without spinning up the HTTP loader. Production (the meet-worker
+    container) talks to the API via
+    :class:`johnny.meet_worker.transcript_loader.HttpTranscriptHistoryLoader`
+    because the worker container is intentionally SQLAlchemy-free.
+
+    The session is held for the lifetime of the loader; intended for
+    short-lived test setups, not long-running services.
+    """
+
+    def __init__(
+        self,
+        session: Session,
+        *,
+        limit: int | None = None,
+    ) -> None:
+        self._session = session
+        self._limit = limit
+
+    async def load(
+        self,
+        *,
+        session_id: str | None,
+        bot_session_id: int | None,
+    ) -> list[TranscriptFinalized]:
+        del session_id  # bot_session_id is authoritative for DB lookup
+        if bot_session_id is None:
+            return []
+        stmt = (
+            select(TranscriptChunk)
+            .where(TranscriptChunk.bot_session_id == bot_session_id)
+            .order_by(
+                TranscriptChunk.start_offset_ms.asc(),
+                TranscriptChunk.id.asc(),
+            )
+        )
+        if self._limit is not None:
+            stmt = stmt.limit(self._limit)
+        rows = list(self._session.scalars(stmt).all())
+        return [
+            TranscriptFinalized(
+                text=row.text,
+                timestamp_ms=row.end_offset_ms,
+                speaker=row.speaker,
+            )
+            for row in rows
+        ]
+
+
 __all__ = [
     "DEFAULT_EMBEDDING_BATCH_SIZE",
     "EmbeddingDimensionError",
     "EmbeddingProvider",
+    "SqlAlchemyTranscriptHistoryLoader",
     "SqlAlchemyTranscriptSink",
     "StaticEmbeddingProvider",
     "compute_pending_embeddings",

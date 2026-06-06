@@ -951,7 +951,12 @@ async def test_pipeline_transcript_window_bounded() -> None:
 def test_pipeline_config_has_us023_defaults() -> None:
     cfg = PipelineConfig()
     assert cfg.mode == "limited_auto_speak"
-    assert cfg.transcript_window_size == 6
+    # Johnny-ckz.3 dropped the hard 6-turn cap. The default is now
+    # "unbounded" (0) — :meth:`_build_input_window` enforces a token
+    # budget instead.
+    assert cfg.transcript_window_size == 0
+    assert cfg.context_token_budget == 0
+    assert cfg.calendar_context == ""
     assert cfg.bot_session_id is None
 
 
@@ -3151,3 +3156,375 @@ async def test_mode_constants_match_db_string_values() -> None:
     all_modes = {m.value for m in BotMode}
     assert NON_SPEAKING_MODES | SPEAKING_MODES == all_modes
     assert NON_SPEAKING_MODES.isdisjoint(SPEAKING_MODES)
+
+
+# --- Johnny-ckz.3: whole-meeting context handling ------------------------
+
+
+def _bare_pipeline(
+    *,
+    router: _FakeRouterLLM | None = None,
+    answer: _FakeAnswerLLM | None = None,
+    config: PipelineConfig | None = None,
+    transcript_history_loader: Any | None = None,
+) -> VoicePipeline:
+    """Build a minimal pipeline that only exercises prompt-building logic.
+
+    The audio stages (transport / VAD / STT / TTS) are stubbed because
+    these tests poke ``_remember_transcript`` / ``_build_input_window``
+    / ``_answer_messages`` directly rather than running ``run()``.
+    """
+    return VoicePipeline(
+        transport=_BufferedTransport(frames=[]),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=[]),
+        router_llm=router or _FakeRouterLLM(decisions=[]),
+        answer_llm=answer or _FakeAnswerLLM(answers=[]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=config or PipelineConfig(),
+        transcript_history_loader=transcript_history_loader,
+    )
+
+
+async def test_history_unbounded_by_default_no_token_budget() -> None:
+    """Default config keeps every transcript and emits the whole window."""
+    pipeline = _bare_pipeline()
+    transcripts = [
+        TranscriptFinalized(text=f"line {i}", timestamp_ms=i * 100)
+        for i in range(20)
+    ]
+    for t in transcripts:
+        pipeline._remember_transcript(t)
+
+    snapshot = await pipeline._build_input_window(transcripts[-1])
+
+    assert len(pipeline._transcript_history) == 20
+    assert len(snapshot["transcript_window"]) == 20
+    assert snapshot.get("summary") is None
+    assert snapshot["transcript_total_count"] == 20
+
+
+async def test_history_token_budget_triggers_summarisation() -> None:
+    """When estimated tokens exceed budget, oldest transcripts are summarised."""
+
+    class _SummaryRouter(_FakeRouterLLM):
+        def __init__(self) -> None:
+            super().__init__(decisions=[])
+            self.summary_calls: list[Sequence[ChatMessage]] = []
+
+        async def chat(
+            self,
+            messages: Sequence[ChatMessage],
+            tools: Sequence[ToolDefinition] | None = None,
+            response_format: dict[str, Any] | None = None,
+        ) -> LLMResponse:
+            # The summariser uses chat() without response_format. The
+            # router decision path passes response_format, so we can
+            # tell them apart and only intercept the summary call.
+            if response_format is None:
+                self.summary_calls.append(list(messages))
+                return LLMResponse(
+                    text="Earlier: customers discussed timelines.",
+                    finish_reason="stop",
+                )
+            return await super().chat(messages, tools, response_format)
+
+    router = _SummaryRouter()
+    # Tiny budget guarantees the guard triggers; each entry is ~14
+    # chars → 3 tokens.
+    cfg = PipelineConfig(context_token_budget=20, summary_recent_keep=2)
+    pipeline = _bare_pipeline(router=router, config=cfg)
+    transcripts = [
+        TranscriptFinalized(
+            text=f"transcript chunk number {i} from the meeting body",
+            timestamp_ms=i * 100,
+        )
+        for i in range(10)
+    ]
+    for t in transcripts:
+        pipeline._remember_transcript(t)
+
+    snapshot = await pipeline._build_input_window(transcripts[-1])
+
+    assert len(router.summary_calls) == 1
+    assert snapshot.get("summary") is not None
+    assert snapshot["summary"]["text"].startswith("Earlier")
+    assert snapshot["summary"]["summarised_count"] > 0
+    # Recent verbatim slice keeps at least summary_recent_keep entries
+    assert len(snapshot["transcript_window"]) >= 2
+    # Total count reflects the whole history, not the summary slice
+    assert snapshot["transcript_total_count"] == 10
+
+
+async def test_summary_cache_reused_until_cutoff_advances() -> None:
+    """Two successive builds with the same cutoff don't recompute the summary."""
+
+    class _CountingRouter(_FakeRouterLLM):
+        def __init__(self) -> None:
+            super().__init__(decisions=[])
+            self.summary_call_count = 0
+
+        async def chat(
+            self,
+            messages: Sequence[ChatMessage],
+            tools: Sequence[ToolDefinition] | None = None,
+            response_format: dict[str, Any] | None = None,
+        ) -> LLMResponse:
+            if response_format is None:
+                self.summary_call_count += 1
+                return LLMResponse(
+                    text=f"summary call #{self.summary_call_count}",
+                    finish_reason="stop",
+                )
+            return await super().chat(messages, tools, response_format)
+
+    router = _CountingRouter()
+    cfg = PipelineConfig(context_token_budget=20, summary_recent_keep=2)
+    pipeline = _bare_pipeline(router=router, config=cfg)
+    transcripts = [
+        TranscriptFinalized(
+            text=f"transcript chunk number {i} from the meeting body",
+            timestamp_ms=i * 100,
+        )
+        for i in range(10)
+    ]
+    for t in transcripts:
+        pipeline._remember_transcript(t)
+
+    first = await pipeline._build_input_window(transcripts[-1])
+    second = await pipeline._build_input_window(transcripts[-1])
+
+    assert router.summary_call_count == 1
+    assert first["summary"]["text"] == second["summary"]["text"]
+
+
+async def test_summary_fallback_when_llm_raises() -> None:
+    """A summariser exception falls back to the concatenated transcripts."""
+
+    class _BrokenRouter(_FakeRouterLLM):
+        def __init__(self) -> None:
+            super().__init__(decisions=[])
+
+        async def chat(
+            self,
+            messages: Sequence[ChatMessage],
+            tools: Sequence[ToolDefinition] | None = None,
+            response_format: dict[str, Any] | None = None,
+        ) -> LLMResponse:
+            if response_format is None:
+                raise RuntimeError("summary down")
+            return await super().chat(messages, tools, response_format)
+
+    router = _BrokenRouter()
+    cfg = PipelineConfig(context_token_budget=20, summary_recent_keep=2)
+    pipeline = _bare_pipeline(router=router, config=cfg)
+    transcripts = [
+        TranscriptFinalized(
+            text=f"transcript chunk number {i} from the meeting body",
+            timestamp_ms=i * 100,
+        )
+        for i in range(10)
+    ]
+    for t in transcripts:
+        pipeline._remember_transcript(t)
+
+    snapshot = await pipeline._build_input_window(transcripts[-1])
+
+    assert snapshot["summary"]["text"]  # non-empty fallback
+    # Pipeline still emits a usable window even when the summariser fails
+    assert len(snapshot["transcript_window"]) >= 2
+
+
+async def test_rehydrate_seeds_history_from_loader_on_run() -> None:
+    """The pipeline reloads prior transcripts at run() startup."""
+    from johnny.voice_pipeline import InMemoryTranscriptHistoryLoader
+
+    prior = [
+        TranscriptFinalized(text="prior 1", timestamp_ms=100),
+        TranscriptFinalized(text="prior 2", timestamp_ms=200),
+    ]
+    loader = InMemoryTranscriptHistoryLoader(transcripts=prior)
+    pipeline = _bare_pipeline(transcript_history_loader=loader)
+
+    # Drive the rehydration directly; this matches what run() invokes
+    # before the utterance loop starts.
+    await pipeline._rehydrate_transcript_history()
+
+    assert [t.text for t in pipeline._transcript_history] == ["prior 1", "prior 2"]
+    assert loader.calls == [(None, None)]
+
+
+async def test_rehydrate_swallows_loader_exception() -> None:
+    """A loader exception leaves history empty rather than failing startup."""
+
+    class _BrokenLoader:
+        async def load(
+            self, *, session_id: str | None, bot_session_id: int | None
+        ) -> list[TranscriptFinalized]:
+            del session_id, bot_session_id
+            raise RuntimeError("loader down")
+
+        async def close(self) -> None:  # pragma: no cover
+            return None
+
+    pipeline = _bare_pipeline(transcript_history_loader=_BrokenLoader())
+
+    await pipeline._rehydrate_transcript_history()
+
+    assert pipeline._transcript_history == []
+
+
+def _build_summary_router(summary_text: str) -> _FakeRouterLLM:
+    """Helper: a router LLM that intercepts the summary call only."""
+
+    class _SummaryRouter(_FakeRouterLLM):
+        def __init__(self) -> None:
+            super().__init__(decisions=[])
+
+        async def chat(
+            self,
+            messages: Sequence[ChatMessage],
+            tools: Sequence[ToolDefinition] | None = None,
+            response_format: dict[str, Any] | None = None,
+        ) -> LLMResponse:
+            if response_format is None:
+                return LLMResponse(text=summary_text, finish_reason="stop")
+            return await super().chat(messages, tools, response_format)
+
+    return _SummaryRouter()
+
+
+def _budget_breaking_transcripts(
+    count: int = 8,
+) -> list[TranscriptFinalized]:
+    return [
+        TranscriptFinalized(
+            text=f"transcript chunk number {i} from the meeting body",
+            timestamp_ms=i * 100,
+        )
+        for i in range(count)
+    ]
+
+
+async def test_input_window_snapshot_includes_calendar_context_and_summary() -> None:
+    """Audit row stores the same calendar context + summary the LLM saw."""
+    cfg = PipelineConfig(
+        context="Manual context note",
+        calendar_context="Q3 planning sync with launch reviewers.",
+        context_token_budget=20,
+        summary_recent_keep=2,
+    )
+    pipeline = _bare_pipeline(
+        router=_build_summary_router("Earlier: planning."),
+        config=cfg,
+    )
+    transcripts = _budget_breaking_transcripts()
+    for t in transcripts:
+        pipeline._remember_transcript(t)
+
+    snapshot = await pipeline._build_input_window(transcripts[-1])
+
+    assert snapshot["context"] == "Manual context note"
+    assert snapshot["calendar_context"] == "Q3 planning sync with launch reviewers."
+    assert snapshot["summary"]["text"] == "Earlier: planning."
+
+
+async def test_router_prompt_includes_calendar_context_and_summary() -> None:
+    """Calendar description and summary both reach the router system prompt."""
+    router = _build_summary_router("Earlier: planning.")
+    cfg = PipelineConfig(
+        instructions="be brief",
+        calendar_context="Project kickoff with the marketing team.",
+        context_token_budget=20,
+        summary_recent_keep=2,
+    )
+    pipeline = _bare_pipeline(router=router, config=cfg)
+    transcripts = _budget_breaking_transcripts()
+    for t in transcripts:
+        pipeline._remember_transcript(t)
+
+    snapshot = await pipeline._build_input_window(transcripts[-1])
+    messages = pipeline._router_messages(transcripts[-1], snapshot)
+    system_content = messages[0].content or ""
+    user_content = messages[1].content or ""
+
+    assert "Calendar event description: Project kickoff" in system_content
+    assert "Earlier (summary): Earlier: planning." in user_content
+
+
+async def test_answer_prompt_includes_calendar_context_and_summary() -> None:
+    """Answer LLM sees the calendar description and the cached summary line."""
+    cfg = PipelineConfig(
+        calendar_context="Weekly product standup.",
+        context_token_budget=20,
+        summary_recent_keep=2,
+    )
+    pipeline = _bare_pipeline(
+        router=_build_summary_router("Earlier: ten minutes of agenda review."),
+        config=cfg,
+    )
+    transcripts = _budget_breaking_transcripts()
+    for t in transcripts:
+        pipeline._remember_transcript(t)
+
+    # Trigger the summary build so _history_summary gets populated.
+    await pipeline._build_input_window(transcripts[-1])
+
+    decision = RouterDecision(
+        should_speak=True, confidence=0.9, reason="ack", suggested_reply=None
+    )
+    messages = pipeline._answer_messages(transcripts[-1], decision)
+    system_content = messages[0].content or ""
+    user_content = messages[1].content or ""
+
+    assert "Calendar event description: Weekly product standup." in system_content
+    assert "Earlier (summary): Earlier: ten minutes of agenda review." in user_content
+
+
+def test_estimate_tokens_uses_chars_per_token_heuristic() -> None:
+    """The internal token estimator returns ``len // 4`` (floored at 1)."""
+    from johnny.voice_pipeline.pipeline import _estimate_tokens
+
+    assert _estimate_tokens(None) == 0
+    assert _estimate_tokens("") == 0
+    assert _estimate_tokens("a") == 1  # floor at 1 for any non-empty string
+    assert _estimate_tokens("12345678") == 2  # 8 chars / 4
+    assert _estimate_tokens("x" * 400) == 100
+
+
+async def test_unbounded_history_with_large_window_no_summary() -> None:
+    """When budget is large the full history is emitted verbatim."""
+    pipeline = _bare_pipeline(
+        config=PipelineConfig(context_token_budget=10_000, summary_recent_keep=2)
+    )
+    transcripts = [
+        TranscriptFinalized(text=f"chunk {i}", timestamp_ms=i * 100)
+        for i in range(15)
+    ]
+    for t in transcripts:
+        pipeline._remember_transcript(t)
+
+    snapshot = await pipeline._build_input_window(transcripts[-1])
+
+    assert snapshot.get("summary") is None
+    assert len(snapshot["transcript_window"]) == 15
+
+
+async def test_legacy_transcript_window_size_still_caps_history() -> None:
+    """``transcript_window_size > 0`` reinstates the legacy hard cap."""
+    pipeline = _bare_pipeline(
+        config=PipelineConfig(transcript_window_size=4)
+    )
+    for i in range(10):
+        pipeline._remember_transcript(
+            TranscriptFinalized(text=f"line {i}", timestamp_ms=i * 100)
+        )
+
+    assert len(pipeline._transcript_history) == 4
+    assert [t.text for t in pipeline._transcript_history] == [
+        "line 6",
+        "line 7",
+        "line 8",
+        "line 9",
+    ]

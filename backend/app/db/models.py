@@ -155,6 +155,7 @@ class CalendarEvent(TimestampMixin, Base):
     )
     external_id: Mapped[str] = mapped_column(String(255), nullable=False)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     organizer: Mapped[str | None] = mapped_column(String(320), nullable=True)
     attendees: Mapped[list[dict[str, Any]] | None] = mapped_column(_json_column(), nullable=True)
     start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

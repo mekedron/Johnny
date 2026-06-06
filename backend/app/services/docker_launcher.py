@@ -506,6 +506,7 @@ class DockerContainerLauncher(ContainerLauncher):
             "JOHNNY_MODE": ctx.mode or "",
             "JOHNNY_INSTRUCTIONS": ctx.instructions or "",
             "JOHNNY_CONTEXT": ctx.context or "",
+            "JOHNNY_CALENDAR_CONTEXT": ctx.calendar_context or "",
             "JOHNNY_PROVIDER_CONFIG": json.dumps(ctx.provider_config or {}),
         }
         # JOHNNY_REDIS_URL lets the meet-worker connect its event bus to

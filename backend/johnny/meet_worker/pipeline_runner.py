@@ -75,8 +75,11 @@ PROVIDER_CONFIG_ENV = "JOHNNY_PROVIDER_CONFIG"
 MODE_ENV = "JOHNNY_MODE"
 INSTRUCTIONS_ENV = "JOHNNY_INSTRUCTIONS"
 CONTEXT_ENV = "JOHNNY_CONTEXT"
+CALENDAR_CONTEXT_ENV = "JOHNNY_CALENDAR_CONTEXT"
 SESSION_ID_ENV = "JOHNNY_SESSION_ID"
 REDIS_URL_ENV = "JOHNNY_REDIS_URL"
+API_BASE_URL_ENV = "JOHNNY_API_BASE_URL"
+CONTEXT_TOKEN_BUDGET_ENV = "JOHNNY_CONTEXT_TOKEN_BUDGET"
 
 # Fallback to EnergyVAD when SileroVAD's heavy onnx model isn't loadable
 # (e.g. file missing, torch absent in environment). EnergyVAD is crude
@@ -295,13 +298,19 @@ async def _assemble_pipeline(
     mode = _resolve_mode(env)
     instructions = env.get(INSTRUCTIONS_ENV, "")
     context = env.get(CONTEXT_ENV, "")
+    calendar_context = env.get(CALENDAR_CONTEXT_ENV, "")
+    token_budget = _resolve_token_budget(env, session_id=session_id)
+    bot_session_id = _resolve_bot_session_id(env, session_id=session_id)
 
     # PipelineConfig accepts session_id so events carry it.
     config = PipelineConfig(
         session_id=session_id,
+        bot_session_id=bot_session_id,
         mode=mode,
         instructions=instructions,
         context=context,
+        calendar_context=calendar_context,
+        context_token_budget=token_budget,
     )
 
     # If TTS is missing but the mode would speak, degrade to suggest_only
@@ -321,9 +330,12 @@ async def _assemble_pipeline(
         )
         config = PipelineConfig(
             session_id=session_id,
+            bot_session_id=bot_session_id,
             mode=SUGGEST_ONLY_MODE,
             instructions=instructions,
             context=context,
+            calendar_context=calendar_context,
+            context_token_budget=token_budget,
         )
 
     # Wire the approval gate when mode requires it. Without this, the
@@ -334,6 +346,11 @@ async def _assemble_pipeline(
         mode=config.mode,
         session_id=session_id,
         redis_url=env.get(REDIS_URL_ENV, "").strip() or None,
+    )
+
+    transcript_history_loader = _build_transcript_history_loader(
+        session_id=session_id,
+        api_base_url=env.get(API_BASE_URL_ENV, "").strip() or None,
     )
 
     # Pipeline requires both router_llm and answer_llm. For now use the
@@ -348,8 +365,105 @@ async def _assemble_pipeline(
         event_bus=event_bus,
         config=config,
         approval_gate=approval_gate,
+        transcript_history_loader=transcript_history_loader,
     )
     return pipeline
+
+
+def _resolve_token_budget(
+    env: dict[str, str], *, session_id: str
+) -> int:
+    """Read ``JOHNNY_CONTEXT_TOKEN_BUDGET`` defaulting to 0 (unbounded).
+
+    A positive value triggers the pipeline's summarisation step once
+    the in-memory history overflows. Operators can set this per
+    deployment to keep prompts inside the provider's hard context
+    window (e.g. ``75% * max_context`` per the bead's recommendation).
+    """
+    raw = env.get(CONTEXT_TOKEN_BUDGET_ENV, "").strip()
+    if not raw:
+        return 0
+    try:
+        value = int(raw)
+    except ValueError:
+        log_stage(
+            STAGE_AUDIO_BRIDGE,
+            session_id=session_id,
+            level=logging.WARNING,
+            msg=(
+                f"ignoring invalid {CONTEXT_TOKEN_BUDGET_ENV}={raw!r}; "
+                f"continuing with unbounded transcript history"
+            ),
+        )
+        return 0
+    return max(0, value)
+
+
+def _resolve_bot_session_id(
+    env: dict[str, str], *, session_id: str
+) -> int | None:
+    """``JOHNNY_SESSION_ID`` is the bot_session row id as a string.
+
+    Reused as the integer ``bot_session_id`` for the history loader's
+    DB lookup. Returns ``None`` when unset or malformed so the pipeline
+    falls back to its noop loader rather than crashing on a bad env.
+    """
+    raw = env.get(SESSION_ID_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        log_stage(
+            STAGE_AUDIO_BRIDGE,
+            session_id=session_id,
+            level=logging.WARNING,
+            msg=(
+                f"non-integer {SESSION_ID_ENV}={raw!r}; "
+                f"transcript history rehydration disabled"
+            ),
+        )
+        return None
+
+
+def _build_transcript_history_loader(
+    *,
+    session_id: str,
+    api_base_url: str | None,
+) -> Any:
+    """Construct the transcript history loader for container restart rehydration.
+
+    Returns ``None`` (so VoicePipeline falls back to its default
+    :class:`NoopTranscriptHistoryLoader`) when no API URL is configured —
+    in which case the bot loses prior context on container restart but
+    still functions. When ``JOHNNY_API_BASE_URL`` IS set, builds an
+    HTTP-backed loader that pulls past transcript chunks from the API
+    on pipeline startup so the bot keeps continuity across restarts.
+    """
+    if not api_base_url:
+        log_stage(
+            STAGE_AUDIO_BRIDGE,
+            session_id=session_id,
+            level=logging.INFO,
+            msg=(
+                f"{API_BASE_URL_ENV} not set — transcript rehydration disabled; "
+                f"a container restart mid-session will reset context"
+            ),
+        )
+        return None
+    # Lazy import: keeps voice_pipeline module-import time light and
+    # avoids pulling httpx into tests that don't use it.
+    from johnny.meet_worker.transcript_loader import HttpTranscriptHistoryLoader
+
+    log_stage(
+        STAGE_AUDIO_BRIDGE,
+        session_id=session_id,
+        msg=(
+            f"transcript history loader wired to {api_base_url} — "
+            f"prior transcripts will be rehydrated on startup"
+        ),
+    )
+    return HttpTranscriptHistoryLoader(api_base_url=api_base_url)
 
 
 def _build_approval_gate(
@@ -443,11 +557,15 @@ class _NoopTTS(TTSProvider):
 
 
 __all__ = [
+    "API_BASE_URL_ENV",
+    "CALENDAR_CONTEXT_ENV",
     "CONTEXT_ENV",
+    "CONTEXT_TOKEN_BUDGET_ENV",
     "INSTRUCTIONS_ENV",
     "MODE_ENV",
     "PROVIDER_CONFIG_ENV",
     "REDIS_URL_ENV",
+    "SESSION_ID_ENV",
     "PipelineSetupError",
     "build_and_run_pipeline",
 ]

@@ -55,6 +55,41 @@ after each iteration and it's included in prompts for context.
   `pipeline_runner._assemble_pipeline` reads `SPEAKING_MODES` so any
   future speaking mode automatically downgrades to `suggest_only`
   when TTS is absent instead of silently producing no audio.
+- **Transcript history is unbounded by default, capped by token budget.**
+  Since Johnny-ckz.3, `DEFAULT_TRANSCRIPT_WINDOW_SIZE = 0` means "no
+  hard cap" — the pipeline keeps every finalised transcript for the
+  session. `PipelineConfig.context_token_budget` (env var
+  `JOHNNY_CONTEXT_TOKEN_BUDGET`) caps the prompt size instead;
+  when over budget the oldest transcripts are collapsed into a
+  cached summary via `router_llm.chat()` (no `response_format` →
+  distinct from the router decision call). The cache stores
+  `(summarised_through_index, summary_text)` and feeds the previous
+  summary back to the LLM when the cutoff advances so re-summarisation
+  is incremental, not recomputing from scratch. A positive
+  `transcript_window_size` reinstates the legacy hard cap as an escape
+  hatch for tests / disabling summarisation.
+- **TranscriptHistoryLoader is the rehydration seam.** The pipeline's
+  `run()` calls `transcript_history_loader.load()` before the first
+  utterance to seed `_transcript_history` from durable storage —
+  needed so a container restart mid-session doesn't reset context.
+  ABC lives in `johnny.voice_pipeline.transcript_history`; production
+  uses `johnny.meet_worker.transcript_loader.HttpTranscriptHistoryLoader`
+  (calls `GET /sessions/{id}` against `JOHNNY_API_BASE_URL`) because
+  the meet-worker container is SQLAlchemy-free.
+  `app.services.transcripts.SqlAlchemyTranscriptHistoryLoader` exists
+  for API-side tests of the persistence round-trip. Default is
+  `NoopTranscriptHistoryLoader` — without `JOHNNY_API_BASE_URL` the
+  pipeline starts each session fresh (logged at INFO so operators see
+  the missed rehydration in production).
+- **Calendar event description is a separate context layer.** The
+  `calendar_events.description` column (added Johnny-ckz.3) feeds
+  `JOHNNY_CALENDAR_CONTEXT` → `PipelineConfig.calendar_context`,
+  rendered as `Calendar event description: <text>` in both the router
+  and answer LLM system prompts. Kept distinct from
+  `PipelineConfig.context` (the user-typed brief) so audits can tell
+  them apart and so editing one doesn't disturb the other. The
+  `_build_input_window` snapshot stores both verbatim so a
+  reproducible audit row can show what the LLM saw.
 
 ---
 
@@ -355,4 +390,129 @@ after each iteration and it's included in prompts for context.
     frontend already branches on.
   - Pre-existing test `tests/test_db_models.py::test_enums_have_expected_members`
     is still failing (see Johnny-cdw notes). Not touched in this bead.
+---
+
+## 2026-06-06 - Johnny-ckz.3
+- Lifted the 6-turn rolling-window cap, replaced it with a token-budgeted
+  window that summarises older transcripts when needed, plumbed the
+  Google Calendar event description into a separate context layer in
+  the system prompt, and added a rehydration seam so a container
+  restart mid-session doesn't reset the bot's memory of what was said.
+- Files changed (backend):
+  - `johnny/voice_pipeline/pipeline.py` — `DEFAULT_TRANSCRIPT_WINDOW_SIZE`
+    is now `0` (unbounded). New `PipelineConfig` fields:
+    `calendar_context`, `context_token_budget`, `summary_max_sentences`,
+    `summary_recent_keep`. `_build_input_window` is now async and applies
+    a token-budget guard: when over budget, oldest transcripts are
+    collapsed into a cached summary (`_history_summary`) built via the
+    router LLM, recent transcripts kept verbatim. The snapshot dict
+    carries the summary text + cutoff so audit rows reproduce exactly
+    what the LLM saw. `_remember_transcript` only enforces the legacy
+    hard cap when `transcript_window_size > 0`. `_router_messages`
+    and `_answer_messages` now render `Calendar event description: …`
+    and `Earlier (summary): …` lines when present. `VoicePipeline.run()`
+    calls `_rehydrate_transcript_history()` before the utterance loop
+    to seed `_transcript_history` from the injected loader.
+  - `johnny/voice_pipeline/transcript_history.py` — NEW. Defines
+    `TranscriptHistoryLoader` ABC + `NoopTranscriptHistoryLoader`
+    (default) + `InMemoryTranscriptHistoryLoader` (tests).
+  - `johnny/voice_pipeline/__init__.py` — exports the new loader types.
+  - `johnny/meet_worker/transcript_loader.py` — NEW.
+    `HttpTranscriptHistoryLoader` GETs `/sessions/{id}` against
+    `JOHNNY_API_BASE_URL` and maps the response to `TranscriptFinalized`
+    events. Lazy `httpx.AsyncClient`, INFO log when no API URL is set,
+    swallows network errors and returns `[]` so a flaky API never
+    blocks startup.
+  - `johnny/meet_worker/pipeline_runner.py` — new env vars
+    `JOHNNY_CALENDAR_CONTEXT`, `JOHNNY_API_BASE_URL`,
+    `JOHNNY_CONTEXT_TOKEN_BUDGET`. `_assemble_pipeline` now threads
+    calendar_context + token budget into `PipelineConfig` (including
+    the rebuilt config in the TTS-missing degradation path) and builds
+    a transcript history loader from the env. New helpers
+    `_resolve_token_budget`, `_resolve_bot_session_id`,
+    `_build_transcript_history_loader` for testability.
+  - `app/db/models.py` — `CalendarEvent.description: Mapped[str | None]`.
+  - `alembic/versions/0005_calendar_event_description.py` — NEW.
+    Adds the `description` column (nullable, no backfill since Google
+    omits the field for events without one).
+  - `app/services/calendar_sync.py` — `_ParsedEvent` gained
+    `description`; `_parse_event_payload` extracts it from the Google
+    payload; `_apply_parsed_event` upserts it and counts a description
+    change as an update.
+  - `app/services/session_scheduler.py` — `LaunchContext.calendar_context`
+    field; `start_session_for_meeting` populates it from
+    `meeting.calendar_event.description`.
+  - `app/services/docker_launcher.py` — emits
+    `JOHNNY_CALENDAR_CONTEXT` env var (always set, empty string when
+    absent so consumers can read it unconditionally).
+  - `app/services/transcripts.py` — `SqlAlchemyTranscriptHistoryLoader`
+    queries `transcript_chunks` by `bot_session_id`, returns
+    `TranscriptFinalized` events in chronological order. Used by
+    API-side tests of the persistence round-trip.
+- Test changes:
+  - `tests/voice_pipeline/test_pipeline.py` — 13 new tests covering
+    unbounded history default, token-budget summarisation, summary
+    cache reuse, summary fallback on LLM error, rehydration on `run()`,
+    loader-exception swallowing, calendar context + summary in snapshot
+    / router prompt / answer prompt, `_estimate_tokens` heuristic,
+    large-budget no-summary path, and legacy `transcript_window_size`
+    cap still working.
+  - `tests/voice_pipeline/test_transcript_history.py` — NEW. Pins
+    Noop and InMemory loader semantics.
+  - `tests/services/test_transcripts.py` — 4 new tests for the
+    SqlAlchemy loader (chronological order, scoping to bot_session_id,
+    empty for unknown id, limit applied). `_insert_chunk` helper
+    extended to accept the explicit column-named kwargs.
+  - `tests/services/test_calendar_sync.py` — `_event_payload` helper
+    learned a `description` kwarg; 4 new tests (parse extracts text,
+    empty string → None, insert persists the column, change counts
+    as update).
+  - `tests/services/test_session_scheduler.py` — new test asserting
+    the calendar event description rides into `LaunchContext.calendar_context`.
+  - `tests/services/test_docker_launcher.py` — `_make_ctx` learned
+    `calendar_context`; new test pinning the env var emission.
+  - `tests/test_meet_worker_pipeline_runner.py` — 13 new tests
+    covering env-var resolution (`_resolve_token_budget`,
+    `_resolve_bot_session_id`, `_build_transcript_history_loader`)
+    and the calendar/budget/loader wiring path through
+    `_assemble_pipeline` (including survival of calendar_context
+    across the TTS-missing degradation rewrite).
+  - `tests/test_meet_worker_transcript_loader.py` — NEW. 7 tests
+    for the HTTP loader: payload mapping, invalid-row skipping,
+    unexpected-shape handling, missing bot_session_id, success path
+    against `httpx.MockTransport`, network-error fallback, trailing-
+    slash URL normalisation.
+- **Learnings:**
+  - The pipeline now does an LLM call (the summariser) from inside
+    `_build_input_window`, which is on the per-utterance hot path.
+    Cache reuse and the incremental "prior summary + new chunks"
+    prompt keep this from being a real cost; without those a 60-minute
+    meeting would re-summarise ~60 times per turn. The
+    `_history_summary` tuple is the seam — bump-only by `cutoff`,
+    invalidated on rehydration, adjusted by hard-cap drops.
+  - The summariser is `router_llm.chat()` without `response_format` —
+    the same fake-LLM test harness can distinguish the summary call
+    from the router decision call by branching on whether
+    `response_format` is `None`. Cheap polymorphism, no separate
+    `summary_llm` field on the pipeline.
+  - The bead asked the budget to "default to 75 % of the provider's
+    max context", but the pipeline has no provider-context awareness —
+    different LLM adapters expose different metadata. Resolved by
+    keeping the default at `0` (unbounded) and exposing
+    `JOHNNY_CONTEXT_TOKEN_BUDGET` so operators set it explicitly per
+    deployment. Documenting the 75 % heuristic in pipeline.py docstrings
+    so the policy isn't lost.
+  - Rehydration crosses the SQLAlchemy-free boundary. The meet-worker
+    can't `import sqlalchemy`, so the production loader is the HTTP
+    one against the API's existing `GET /sessions/{id}`. The endpoint
+    is unauthenticated which is convenient for the meet-worker but
+    worth re-evaluating when the auth surface expands —
+    `tests/test_meet_worker_transcript_loader.py` pins the wire
+    format so the contract is explicit.
+  - The HTTP loader silently degrades to `[]` on network errors.
+    Combined with the INFO log when `JOHNNY_API_BASE_URL` is absent,
+    rehydration failures present as "bot lost context after restart"
+    rather than "bot refused to start" — the right trade-off because
+    we can't block on a flaky API just to recover context, but
+    operators need the log line to spot the silent gap.
 ---

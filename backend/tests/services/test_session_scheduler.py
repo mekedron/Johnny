@@ -401,6 +401,31 @@ async def test_start_session_passes_instructions_and_context_to_launcher(
     assert ctx.instructions == "Be polite.\n\nStay quiet unless asked."
     assert ctx.context == "Engineering team standup.\n\nToday: new hire intros."
     assert ctx.mode == BotMode.LISTEN_ONLY.value
+    # No calendar description was set → empty calendar_context.
+    assert ctx.calendar_context == ""
+
+
+@pytest.mark.asyncio
+async def test_start_session_passes_calendar_description_as_context(
+    db_session: Session,
+) -> None:
+    """Johnny-ckz.3: calendar event description rides into LaunchContext."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    cfg.calendar_event.description = "Q3 launch readiness review.\nAttendees: leads."
+    db_session.flush()
+
+    launcher = NoopContainerLauncher()
+    await start_session_for_meeting(
+        db_session, meeting=cfg, launcher=launcher
+    )
+    ctx = launcher.started[0]
+    assert ctx.calendar_context == (
+        "Q3 launch readiness review.\nAttendees: leads."
+    )
 
 
 @pytest.mark.asyncio
