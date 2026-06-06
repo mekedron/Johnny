@@ -948,3 +948,117 @@ them yet so the adapter just propagates the top-level `text`.
     code changes were needed to make ElevenLabs appear in the STT
     dropdown. Same goes for the structured settings form.
 ---
+
+### Interrupt e2e harness uses real-time-paced transport (Johnny-2bw)
+The unit suites' `_BufferedTransport` is fine for behaviour checks but
+useless for latency-budget assertions — it yields every frame as fast as
+the consumer pulls. `johnny.e2e.interrupt` ships a `PacedScriptedTransport`
+that `asyncio.sleep(frame_duration_ms / 1000)`s between frames; that is
+the *only* way to make "interrupt cut within 500 ms" meaningful, because
+fast barge-in fires synchronously from the VAD loop and the only delay
+budget is real wall-clock. Captured frames are tagged (`event_tag`) so
+the runner can recover monotonic timestamps for "the interrupt started"
+and "the bot's first AgentSpoke completed" — those two are what the
+500-ms budget is measured against.
+
+### Per-sentence TTS flush multiplies wall-clock latency in scripted harnesses
+`_stream_answer_into_tts` flushes per sentence — every period in the
+answer is a separate `tts.synthesize_stream` call. With a 5-sentence
+answer and a `PacedTTS(frame_count=100, frame_period_s=0.02)` that's 5 ×
+2 s = 10 s of TTS wall-clock per response. The harness's
+`_scenario_budget_s` baked in a 5-s safety buffer that was tight enough
+to trip on scenarios that exercised TWO complete answers (e.g. cough
+scenario where the cough utterance gets a SENTINEL transcript and the
+router reuses its last decision → second redundant answer). Two
+workarounds in the harness:
+* Override `answer_text` per scenario when only the interrupt mechanic is
+  under test — a single-sentence reply keeps wall-clock tight.
+* Always script ONE router_decision per finalised utterance. The
+  `SwitchingRouterLLM` reuses the last decision when scripted ones run
+  out, which is correct production behaviour but a trap in tests where
+  the second utterance is incidental (cough, sentinel, etc.).
+
+### Interrupt-to-cut latency is measured to first AgentSpoke, not last played frame
+The naive measurement — "interrupt onset to the LAST played frame" —
+breaks for `new_question` style barge-in scenarios where the bot fires a
+follow-up answer immediately after the interrupt cut: those follow-up
+frames blow the budget by seconds. The right boundary is the END of the
+INTERRUPTED bot answer, which corresponds to the FIRST `AgentSpoke`
+event's `timestamp_ms` (published just after `_stream_answer_into_tts`
+returns). Convert it to wall-clock via
+`pipeline._session_started_at + first_spoke.timestamp_ms / 1000.0`; the
+transport's monotonic timestamps live in the same `loop.time()` frame so
+subtraction is direct. This is what makes the clarification scenario
+pass with delta_ms=147 instead of delta_ms=9383.
+
+### Bead Johnny-arh: _interrupt_event resets between responses
+After a successful fast barge-in fires, asserting
+`pipeline._interrupt_event.is_set() == True` at end-of-run is wrong —
+`_respond_to_transcript_inner` clears the event at the very start of
+each NEW response (the Johnny-arh fix). By the time the run finishes,
+any later response that *wasn't* interrupted will have cleared the
+event back to False. The reliable evidence that fast barge-in fired is
+`pipeline._fast_barge_in_count > 0` (or, for the classifier path, the
+specific verdict on `barge_in_calls[-1]`). The harness uses the count.
+
+## 2026-06-06 - Johnny-2bw
+- Built `johnny.e2e.interrupt`, an automated two-bot interrupt-reproduction
+  harness for the voice pipeline. Runs as
+  `uv run python -m johnny.e2e.interrupt` and produces a pass/fail report
+  plus a per-run JSON artifact in `tests/e2e/artifacts/<timestamp>-interrupt/`.
+- Four scenarios mirror the bead's required reproductions:
+  * `stop_interrupts_long_answer` — the headline session-160 bug. Verifies
+    fast-barge-in cuts TTS within 500 ms and the bot yields the floor.
+  * `clarification_redirects_long_answer` — `new_question` barge-in: cut
+    THEN follow up. Verifies the follow-up actually emits.
+  * `stt_keeps_running_during_bot_speech` — Johnny-har contract: all
+    participant transcripts reach `transcript_chunks` even while bot is
+    speaking. Mid-bot side chat lands in both the sink AND the event bus.
+  * `cough_does_not_interrupt` — 80 ms cough below the 160 ms fast-path
+    threshold doesn't trigger interrupt; bot completes its TTS in full.
+- Each scenario runs in 4–11 s wall-clock at real frame pacing (20 ms /
+  frame); full suite completes in ~27 s, well inside the bead's 5-min
+  budget with margin for 10× repetition. 3/3 consecutive runs passed
+  cleanly during smoke testing.
+- Files changed:
+  - `backend/johnny/e2e/__init__.py` (new package).
+  - `backend/johnny/e2e/interrupt/__init__.py` — re-exports.
+  - `backend/johnny/e2e/interrupt/__main__.py` — CLI (argparse + report).
+  - `backend/johnny/e2e/interrupt/audio.py` — PCM frame synth (tone,
+    silence, cough) at 16 kHz / 20 ms / mono / s16le.
+  - `backend/johnny/e2e/interrupt/transport.py` — `PacedScriptedTransport`
+    (real-time per-frame `asyncio.sleep`, tagged capture log, timestamped
+    play log).
+  - `backend/johnny/e2e/interrupt/providers.py` — `ScriptedSlowSTT`,
+    `SwitchingRouterLLM`, `ScriptedAnswerLLM`, `PacedTTS` mimicking
+    production timing without touching the network.
+  - `backend/johnny/e2e/interrupt/scenarios.py` — four declarative
+    `Scenario` definitions plus `scenarios_by_name` for `--only`.
+  - `backend/johnny/e2e/interrupt/runner.py` — frame expansion, pipeline
+    wiring, per-assertion evaluation.
+  - `backend/johnny/e2e/interrupt/report.py` — `ScenarioResult` /
+    `SuiteReport` / `render_summary` / `write_report`.
+  - `backend/tests/e2e/interrupt/` — 41 tests covering audio synth, the
+    paced transport's pacing behaviour, scripted providers, scenario
+    catalog invariants, runner end-to-end against the real pipeline, and
+    the report shape. All pass; full pytest run shows no regressions
+    against the 1807-test suite.
+- **Learnings:**
+  - The harness's real-time pacing IS the assertion. Without it, fast
+    barge-in fires at a non-deterministic offset and "cut within 500 ms"
+    becomes meaningless. With it, the assertion routinely measures
+    delta_ms≈150 (well under budget) so a regression that drops the
+    latency back to 1.5-3 s would fail loudly.
+  - Scripted providers don't need network access to test the interrupt
+    path end-to-end — what matters is the *timing* of STT (per-utterance
+    sleep), of the answer LLM (per-delta sleep), and of TTS (per-frame
+    sleep). Together they let the production VoicePipeline drive its
+    full state machine through the harness with no provider mocks
+    inside the pipeline itself.
+  - The harness *currently runs at the VoicePipeline level*, not at the
+    meet-worker-container level. That's what the bead explicitly allows
+    as a fallback when "Meet-in-the-loop is too fragile for CI". The
+    scenarios are pure-data so a future container variant can consume
+    the same definitions to drive a Playwright-mic-pipe variant — that
+    is the natural next iteration.
+---
