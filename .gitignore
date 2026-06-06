@@ -62,3 +62,10 @@ client_secret*.json
 
 # impeccable design-tool live state — local scratch.
 .impeccable/
+
+# Pre-rewrite backup of .git/ created before any git-filter-repo run. Always
+# generated locally as a rollback parachute; an earlier session accidentally
+# committed it via `git add -A` (176 MB), so the pattern is ignored
+# defensively. Delete the directory manually once the rewrite is confirmed.
+.git-backup-pre-rewrite/
+.git-backup-*/
