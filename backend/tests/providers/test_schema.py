@@ -201,3 +201,59 @@ def test_required_fields_are_grouped_with_auth_first() -> None:
                     f"{adapter.__name__}.{field.name} is a required secret "
                     f"but lives in group {field.group}"
                 )
+
+
+LLM_ADAPTERS = [AnthropicLLM, GeminiLLM, OpenAILLM, OpenAICompatibleLLM]
+
+
+@pytest.mark.parametrize("adapter", LLM_ADAPTERS)
+def test_every_llm_adapter_exposes_disable_thinking_checkbox(adapter: type) -> None:
+    """Every LLM provider must offer a uniform 'Disable thinking' checkbox."""
+    schema = adapter.field_schema()
+    field = schema.field("disable_thinking")
+    assert field is not None, (
+        f"{adapter.__name__} does not declare 'disable_thinking' — UI "
+        f"requires this checkbox on every LLM provider"
+    )
+    assert field.type is FieldType.CHECKBOX
+    assert field.group is FieldGroup.ADVANCED
+    assert isinstance(field.default, bool)
+    assert field.help_text, (
+        f"{adapter.__name__}.disable_thinking has no help_text explaining "
+        f"per-provider semantics"
+    )
+
+
+@pytest.mark.parametrize("adapter", LLM_ADAPTERS)
+def test_every_llm_adapter_exposes_top_p_knob(adapter: type) -> None:
+    """Nucleus sampling is a useful universal advanced knob; require it on every LLM."""
+    schema = adapter.field_schema()
+    field = schema.field("top_p")
+    assert field is not None, f"{adapter.__name__} missing 'top_p' field"
+    assert field.type is FieldType.NUMBER
+    assert field.group is FieldGroup.ADVANCED
+
+
+def test_disable_thinking_splits_into_options_bucket() -> None:
+    """disable_thinking is non-secret and must land in the options dict, not credentials."""
+    schema = OpenAILLM.field_schema()
+    credentials, options = split_values(
+        schema,
+        {"api_key": "sk-test", "disable_thinking": True},
+    )
+    assert "disable_thinking" not in credentials
+    assert options["disable_thinking"] is True
+
+
+def test_disable_thinking_accepts_string_truthy_values() -> None:
+    """HTML forms post checkbox state as 'true'/'false' strings — must coerce."""
+    schema = OpenAICompatibleLLM.field_schema()
+    _, options = split_values(
+        schema,
+        {
+            "model": "qwen3:8b",
+            "base_url": "http://localhost:11434/v1",
+            "disable_thinking": "true",
+        },
+    )
+    assert options["disable_thinking"] is True

@@ -298,6 +298,59 @@ export function installPiperVoice(
 	);
 }
 
+export interface PiperVoiceRemoveResult {
+	key: string;
+	installed: boolean;
+	onnx_removed: boolean;
+	onnx_json_removed: boolean;
+}
+
+/**
+ * Delete a Piper voice (`.onnx` + `.onnx.json`) from the provider's
+ * `model_dir`. The provider row itself is not mutated — if the deleted
+ * voice happens to be the row's currently-saved `voice_id`, the row
+ * keeps that string and the next synth call will surface a clear
+ * "voice not found" error rather than silently switching voices.
+ */
+export function removePiperVoice(
+	id: number,
+	voiceKey: string
+): Promise<PiperVoiceRemoveResult> {
+	return request<PiperVoiceRemoveResult>(
+		`/providers/${id}/voices/${encodeURIComponent(voiceKey)}`,
+		{ method: 'DELETE' }
+	);
+}
+
+/**
+ * Synthesise the canonical demo phrase via this provider, but with
+ * `voice_id` overridden for this single call only — the saved row is
+ * untouched. Returns the WAV blob the caller wires into an `<Audio>`
+ * element. Used by the Piper voice browser modal so the user can
+ * preview a freshly-installed voice without saving the provider first.
+ */
+export async function previewPiperVoice(
+	id: number,
+	voiceKey: string
+): Promise<Blob> {
+	const res = await fetch(`${API_BASE}/providers/${id}/play_sample`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ voice_id: voiceKey })
+	});
+	if (!res.ok) {
+		let detail: string | null = null;
+		try {
+			const body = await res.json();
+			detail = extractDetail(body);
+		} catch {
+			// Non-JSON error body — fall through.
+		}
+		throw new Error(detail ?? `HTTP ${res.status}`);
+	}
+	return res.blob();
+}
+
 export interface ExportResult {
 	blob: Blob;
 	filename: string;

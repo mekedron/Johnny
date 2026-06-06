@@ -16,6 +16,8 @@
 		listProviders,
 		listSchemas,
 		playSample,
+		previewPiperVoice,
+		removePiperVoice,
 		PROVIDER_KIND_LABEL,
 		PROVIDER_KINDS,
 		testProvider,
@@ -379,6 +381,7 @@
 		for (const id of [...playingHandles.keys()]) {
 			stopSample(id);
 		}
+		stopVoicePreview();
 	});
 
 	function fieldInputId(prefix: string, fieldName: string): string {
@@ -401,6 +404,17 @@
 	let installingVoice = $state<string | null>(null);
 	let installError = $state<string | null>(null);
 	let voiceModelDir = $state<string>('');
+
+	// Per-row preview / remove state for inside the Browse-voices modal.
+	// The preview handle is a single global slot — playing voice B stops
+	// voice A so the user doesn't get overlapping audio. The URL is
+	// revoked on stop/unmount so we don't leak audio blobs.
+	let previewingVoice = $state<string | null>(null);
+	let previewLoadingVoice = $state<string | null>(null);
+	let previewError = $state<string | null>(null);
+	let removingVoice = $state<string | null>(null);
+	let removeError = $state<string | null>(null);
+	let voicePreviewHandle: { audio: HTMLAudioElement; url: string } | null = null;
 
 	function isPiperProvider(p: Provider): boolean {
 		return p.kind === 'tts' && p.provider_name === 'piper';
@@ -434,11 +448,85 @@
 		}
 	}
 
+	function stopVoicePreview() {
+		if (voicePreviewHandle) {
+			try {
+				voicePreviewHandle.audio.pause();
+				voicePreviewHandle.audio.currentTime = 0;
+			} catch {
+				// pause/seek may race with `ended`; ignore
+			}
+			URL.revokeObjectURL(voicePreviewHandle.url);
+			voicePreviewHandle = null;
+		}
+		previewingVoice = null;
+	}
+
 	function closeVoiceBrowser() {
+		stopVoicePreview();
 		voiceBrowserId = null;
 		voiceFilter = '';
 		voiceError = null;
 		installError = null;
+		previewError = null;
+		removeError = null;
+	}
+
+	async function onPreviewVoice(p: Provider, voice: PiperVoice) {
+		// Toggle: clicking Play on the currently-playing row stops it.
+		if (previewingVoice === voice.key) {
+			stopVoicePreview();
+			return;
+		}
+		stopVoicePreview();
+		previewError = null;
+		previewLoadingVoice = voice.key;
+		try {
+			const blob = await previewPiperVoice(p.id, voice.key);
+			const url = URL.createObjectURL(blob);
+			const audio = new Audio(url);
+			audio.addEventListener('ended', stopVoicePreview);
+			audio.addEventListener('error', () => {
+				previewError = 'Audio playback failed';
+				stopVoicePreview();
+			});
+			voicePreviewHandle = { audio, url };
+			previewingVoice = voice.key;
+			try {
+				await audio.play();
+			} catch (e) {
+				previewError = e instanceof Error ? e.message : String(e);
+				stopVoicePreview();
+			}
+		} catch (e) {
+			previewError = e instanceof Error ? e.message : String(e);
+		} finally {
+			previewLoadingVoice = null;
+		}
+	}
+
+	async function onRemoveVoice(p: Provider, voice: PiperVoice) {
+		const ok = window.confirm(
+			`Remove ${voice.key}?\n\nThe .onnx and .onnx.json files will be deleted from ${voiceModelDir || 'model_dir'}. You can reinstall later from the same modal.`
+		);
+		if (!ok) return;
+		// If we're previewing this exact voice, stop first so we don't try to
+		// play a freshly-deleted file.
+		if (previewingVoice === voice.key) {
+			stopVoicePreview();
+		}
+		removingVoice = voice.key;
+		removeError = null;
+		try {
+			await removePiperVoice(p.id, voice.key);
+			voiceList = voiceList.map((v) =>
+				v.key === voice.key ? { ...v, installed: false } : v
+			);
+		} catch (e) {
+			removeError = e instanceof Error ? e.message : String(e);
+		} finally {
+			removingVoice = null;
+		}
 	}
 
 	async function onInstallVoice(p: Provider, voice: PiperVoice) {
@@ -872,10 +960,37 @@
 									{#if voice.installed}
 										<button
 											type="button"
+											onclick={() => onPreviewVoice(browserProvider, voice)}
+											disabled={previewLoadingVoice !== null && previewLoadingVoice !== voice.key}
+											data-testid={`preview-${voice.key}`}
+											aria-label={previewingVoice === voice.key
+												? `Stop preview of ${voice.key}`
+												: `Play preview of ${voice.key}`}
+										>
+											{#if previewLoadingVoice === voice.key}
+												Loading…
+											{:else if previewingVoice === voice.key}
+												Stop
+											{:else}
+												Play
+											{/if}
+										</button>
+										<button
+											type="button"
 											onclick={() => useVoice(browserProvider, voice)}
 											data-testid={`use-${voice.key}`}
 										>
 											Use this voice
+										</button>
+										<button
+											type="button"
+											class="danger"
+											onclick={() => onRemoveVoice(browserProvider, voice)}
+											disabled={removingVoice !== null}
+											data-testid={`remove-${voice.key}`}
+											aria-label={`Remove ${voice.key}`}
+										>
+											{removingVoice === voice.key ? 'Removing…' : 'Remove'}
 										</button>
 									{:else}
 										<button
@@ -896,6 +1011,12 @@
 			{/if}
 			{#if installError}
 				<div class="alert error" data-testid="install-error">{installError}</div>
+			{/if}
+			{#if previewError}
+				<div class="alert error" data-testid="preview-error">{previewError}</div>
+			{/if}
+			{#if removeError}
+				<div class="alert error" data-testid="remove-error">{removeError}</div>
 			{/if}
 			<div class="modal-actions">
 				<button type="button" onclick={closeVoiceBrowser}>Close</button>

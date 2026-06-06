@@ -638,6 +638,59 @@ def test_voice_is_installed_true_only_when_both_files_present(
     assert voice_is_installed(str(tmp_path), "vx") is True
 
 
+def test_remove_voice_deletes_both_files(tmp_path: Path) -> None:
+    from app.providers.piper_tts import remove_voice, voice_is_installed
+
+    (tmp_path / "vx.onnx").write_bytes(b"\x00\x01")
+    (tmp_path / "vx.onnx.json").write_text("{}")
+    assert voice_is_installed(str(tmp_path), "vx") is True
+
+    result = remove_voice("vx", str(tmp_path))
+    assert result == {
+        "key": "vx",
+        "installed": False,
+        "onnx_removed": True,
+        "onnx_json_removed": True,
+    }
+    assert not (tmp_path / "vx.onnx").exists()
+    assert not (tmp_path / "vx.onnx.json").exists()
+    assert voice_is_installed(str(tmp_path), "vx") is False
+
+
+def test_remove_voice_handles_partial_install(tmp_path: Path) -> None:
+    from app.providers.piper_tts import remove_voice
+
+    # Only the .onnx is present — simulate an interrupted download.
+    (tmp_path / "vx.onnx").write_bytes(b"")
+
+    result = remove_voice("vx", str(tmp_path))
+    assert result["onnx_removed"] is True
+    assert result["onnx_json_removed"] is False
+    assert result["installed"] is False
+    assert not (tmp_path / "vx.onnx").exists()
+
+
+def test_remove_voice_raises_when_neither_file_present(tmp_path: Path) -> None:
+    from app.providers.piper_tts import remove_voice
+
+    with pytest.raises(FileNotFoundError, match="vx"):
+        remove_voice("vx", str(tmp_path))
+
+
+def test_remove_voice_does_not_touch_other_voices(tmp_path: Path) -> None:
+    from app.providers.piper_tts import remove_voice
+
+    (tmp_path / "vx.onnx").write_bytes(b"")
+    (tmp_path / "vx.onnx.json").write_text("{}")
+    (tmp_path / "vy.onnx").write_bytes(b"")
+    (tmp_path / "vy.onnx.json").write_text("{}")
+
+    remove_voice("vx", str(tmp_path))
+
+    assert (tmp_path / "vy.onnx").exists()
+    assert (tmp_path / "vy.onnx.json").exists()
+
+
 def test_coerce_catalog_marks_installed_voices(tmp_path: Path) -> None:
     from app.providers.piper_tts import _coerce_catalog
 

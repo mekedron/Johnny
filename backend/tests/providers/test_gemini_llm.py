@@ -181,6 +181,28 @@ def test_init_default_timeout() -> None:
     assert adapter._timeout_s == pytest.approx(DEFAULT_TIMEOUT_S)
 
 
+def test_init_top_p_and_top_k_default_to_none() -> None:
+    adapter = GeminiLLM(_config())
+    assert adapter.top_p is None
+    assert adapter.top_k is None
+
+
+def test_init_respects_top_p_and_top_k() -> None:
+    adapter = GeminiLLM(_config(top_p=0.85, top_k=64))
+    assert adapter.top_p == pytest.approx(0.85)
+    assert adapter.top_k == 64
+
+
+def test_init_disable_thinking_defaults_false() -> None:
+    adapter = GeminiLLM(_config())
+    assert adapter.disable_thinking is False
+
+
+def test_init_disable_thinking_explicit_true() -> None:
+    adapter = GeminiLLM(_config(disable_thinking=True))
+    assert adapter.disable_thinking is True
+
+
 # --- Request shape ---------------------------------------------------------
 
 
@@ -267,6 +289,31 @@ async def test_chat_sends_generation_config_with_defaults() -> None:
         DEFAULT_TEMPERATURE
     )
     assert body["generationConfig"]["maxOutputTokens"] == DEFAULT_MAX_OUTPUT_TOKENS
+    # disable_thinking is False by default → no thinkingConfig in the body.
+    assert "thinkingConfig" not in body["generationConfig"]
+    assert "topP" not in body["generationConfig"]
+    assert "topK" not in body["generationConfig"]
+
+
+async def test_chat_generation_config_includes_top_p_and_top_k() -> None:
+    adapter = _FakeGeminiLLM(
+        _config(top_p=0.9, top_k=32),
+        handler=_ok_handler(_generate_response()),
+    )
+    await adapter.chat([ChatMessage(role="user", content="hi")])
+    body = json.loads(adapter.requests[0].content)
+    assert body["generationConfig"]["topP"] == pytest.approx(0.9)
+    assert body["generationConfig"]["topK"] == 32
+
+
+async def test_chat_disable_thinking_sets_thinking_budget_to_zero() -> None:
+    adapter = _FakeGeminiLLM(
+        _config(disable_thinking=True),
+        handler=_ok_handler(_generate_response()),
+    )
+    await adapter.chat([ChatMessage(role="user", content="hi")])
+    body = json.loads(adapter.requests[0].content)
+    assert body["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 0}
 
 
 async def test_chat_serializes_assistant_tool_calls_as_function_call_parts() -> None:

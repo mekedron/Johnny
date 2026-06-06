@@ -146,10 +146,12 @@ class _SampleTTS(TTSProvider):
     """TTS adapter that records the synthesised text for assertions."""
 
     last_text: str | None = None
+    last_voice_id: str | None = None
     closed: bool = False
 
     def __init__(self, config: ProviderConfig) -> None:
         self._config = config
+        type(self).last_voice_id = config.options.get("voice_id")
 
     @property
     def name(self) -> str:
@@ -991,6 +993,149 @@ def test_play_sample_does_not_alter_test_endpoint_behaviour(client: TestClient) 
     # The smoke endpoint synthesises a fixed "hi" string and returns JSON,
     # not WAV — the play endpoint sends the demo phrase.
     assert _SampleTTS.last_text == "hi"
+
+
+def test_play_sample_voice_id_override_propagates_to_factory(client: TestClient) -> None:
+    """A voice_id in the request body overrides the row's saved config."""
+    get_registry().register(ProviderKind.TTS, "sample-tts", _SampleTTS)
+    created = client.post(
+        "/providers",
+        json=_create_payload(
+            kind="tts",
+            provider_name="sample-tts",
+            display_name="Card",
+            options={"voice_id": "saved-voice"},
+        ),
+    ).json()
+    _SampleTTS.last_voice_id = None
+
+    resp = client.post(
+        f"/providers/{created['id']}/play_sample",
+        json={"voice_id": "preview-voice"},
+    )
+    assert resp.status_code == 200
+    # The factory ran with the override, not the saved value.
+    assert _SampleTTS.last_voice_id == "preview-voice"
+
+    # The saved row is still the original voice — the override was ephemeral.
+    listed = client.get("/providers").json()
+    row = next(p for p in listed["tts"] if p["id"] == created["id"])
+    assert row["options"]["voice_id"] == "saved-voice"
+
+
+def test_play_sample_without_body_uses_saved_voice_id(client: TestClient) -> None:
+    """No body means historic behavior — saved options drive the factory."""
+    get_registry().register(ProviderKind.TTS, "sample-tts", _SampleTTS)
+    created = client.post(
+        "/providers",
+        json=_create_payload(
+            kind="tts",
+            provider_name="sample-tts",
+            display_name="Card",
+            options={"voice_id": "saved-voice"},
+        ),
+    ).json()
+    _SampleTTS.last_voice_id = None
+
+    resp = client.post(f"/providers/{created['id']}/play_sample")
+    assert resp.status_code == 200
+    assert _SampleTTS.last_voice_id == "saved-voice"
+
+
+def test_play_sample_rejects_extra_body_fields(client: TestClient) -> None:
+    """Tight schema — unknown body keys must 422 so typos surface early."""
+    get_registry().register(ProviderKind.TTS, "sample-tts", _SampleTTS)
+    created = _make_tts(client)
+    resp = client.post(
+        f"/providers/{created['id']}/play_sample",
+        json={"voice_id": "x", "unexpected": True},
+    )
+    assert resp.status_code == 422
+
+
+# --- DELETE /voices/{key} (piper) ------------------------------------------
+
+
+def test_remove_voice_deletes_files_for_piper_provider(
+    client: TestClient, tmp_path
+) -> None:
+    """DELETE removes the .onnx and .onnx.json files and returns installed=false."""
+    (tmp_path / "vx.onnx").write_bytes(b"\x00")
+    (tmp_path / "vx.onnx.json").write_text("{}")
+    created = client.post(
+        "/providers",
+        json=_create_payload(
+            kind="tts",
+            provider_name="piper",
+            display_name="Piper",
+            options={"model_dir": str(tmp_path)},
+        ),
+    ).json()
+
+    resp = client.delete(f"/providers/{created['id']}/voices/vx")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {
+        "key": "vx",
+        "installed": False,
+        "onnx_removed": True,
+        "onnx_json_removed": True,
+    }
+    assert not (tmp_path / "vx.onnx").exists()
+    assert not (tmp_path / "vx.onnx.json").exists()
+
+
+def test_remove_voice_returns_404_when_not_installed(
+    client: TestClient, tmp_path
+) -> None:
+    created = client.post(
+        "/providers",
+        json=_create_payload(
+            kind="tts",
+            provider_name="piper",
+            display_name="Piper",
+            options={"model_dir": str(tmp_path)},
+        ),
+    ).json()
+    resp = client.delete(f"/providers/{created['id']}/voices/missing")
+    assert resp.status_code == 404
+    assert "missing" in resp.json()["detail"]
+
+
+def test_remove_voice_rejects_non_piper_provider(client: TestClient) -> None:
+    get_registry().register(ProviderKind.TTS, "sample-tts", _SampleTTS)
+    created = _make_tts(client)
+    resp = client.delete(f"/providers/{created['id']}/voices/vx")
+    assert resp.status_code == 400
+    assert "piper" in resp.json()["detail"].lower()
+
+
+def test_remove_voice_does_not_mutate_provider_row(
+    client: TestClient, tmp_path
+) -> None:
+    """Deleting the currently-saved voice leaves the row's voice_id untouched.
+
+    The user surfaces the inconsistency on the next synth call instead of
+    being silently switched to a different voice.
+    """
+    (tmp_path / "vx.onnx").write_bytes(b"")
+    (tmp_path / "vx.onnx.json").write_text("{}")
+    created = client.post(
+        "/providers",
+        json=_create_payload(
+            kind="tts",
+            provider_name="piper",
+            display_name="Piper",
+            options={"model_dir": str(tmp_path), "voice_id": "vx"},
+        ),
+    ).json()
+
+    resp = client.delete(f"/providers/{created['id']}/voices/vx")
+    assert resp.status_code == 200
+
+    listed = client.get("/providers").json()
+    row = next(p for p in listed["tts"] if p["id"] == created["id"])
+    assert row["options"]["voice_id"] == "vx"
 
 
 # --- export endpoint (Johnny-k3z) ------------------------------------------

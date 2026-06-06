@@ -13,6 +13,7 @@ from johnny.voice_pipeline.events import (
     ApprovalResolved,
     RouterDecisionMade,
     SessionStatusChanged,
+    TranscriptFiltered,
     TranscriptFinalized,
     event_to_dict,
 )
@@ -315,3 +316,89 @@ def test_event_to_dict_agent_suggested() -> None:
         "session_id": "s",
         "type": "agent_suggested",
     }
+
+
+# --- TranscriptFiltered (Johnny-ckz.14) -----------------------------------
+
+
+def test_transcript_filtered_defaults() -> None:
+    ev = TranscriptFiltered(text="uh", timestamp_ms=42, reason="stoplist_match")
+    assert ev.text == "uh"
+    assert ev.timestamp_ms == 42
+    assert ev.reason == "stoplist_match"
+    assert ev.speaker is None
+    assert ev.confidence is None
+    assert ev.audio_duration_ms is None
+    assert ev.session_id is None
+    assert ev.type == "transcript_filtered"
+
+
+def test_transcript_filtered_full() -> None:
+    ev = TranscriptFiltered(
+        text="............",
+        timestamp_ms=10,
+        reason="punctuation_only",
+        speaker="participant-2",
+        confidence=0.4,
+        audio_duration_ms=620,
+        session_id="sess-9",
+    )
+    assert ev.reason == "punctuation_only"
+    assert ev.audio_duration_ms == 620
+    assert ev.speaker == "participant-2"
+
+
+def test_transcript_filtered_is_frozen() -> None:
+    ev = TranscriptFiltered(text="x", timestamp_ms=0, reason="empty")
+    with pytest.raises(FrozenInstanceError):
+        ev.text = "y"  # type: ignore[misc]
+
+
+def test_event_to_dict_transcript_filtered() -> None:
+    ev = TranscriptFiltered(
+        text="uh",
+        timestamp_ms=5_000,
+        reason="stoplist_match",
+        speaker="alice",
+        confidence=0.55,
+        audio_duration_ms=300,
+        session_id="sess-1",
+    )
+    d = event_to_dict(ev)
+    assert d == {
+        "text": "uh",
+        "timestamp_ms": 5_000,
+        "reason": "stoplist_match",
+        "speaker": "alice",
+        "confidence": 0.55,
+        "audio_duration_ms": 300,
+        "session_id": "sess-1",
+        "type": "transcript_filtered",
+    }
+
+
+def test_transcript_filtered_reason_supports_all_documented_values() -> None:
+    """Constructor accepts every documented reason — pins the Literal contract."""
+    from typing import Literal, get_args
+
+    from johnny.voice_pipeline.events import TranscriptFilteredReason
+
+    reasons = get_args(TranscriptFilteredReason)
+    assert set(reasons) == {
+        "audio_too_short",
+        "empty",
+        "punctuation_only",
+        "too_short",
+        "stoplist_match",
+        "low_confidence",
+    }
+    for reason in reasons:
+        ev = TranscriptFiltered(
+            text="x",
+            timestamp_ms=0,
+            reason=reason,  # type: ignore[arg-type]
+        )
+        assert ev.reason == reason
+    # Also confirm the Literal/typing import path is intact for downstream
+    # consumers that branch on the reason value.
+    assert Literal[*reasons] is not None

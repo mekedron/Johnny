@@ -50,6 +50,8 @@ from johnny.voice_pipeline.events import (
     ApprovalPending,
     ApprovalResolved,
     RouterDecisionMade,
+    TranscriptFiltered,
+    TranscriptFilteredReason,
     TranscriptFinalized,
 )
 from johnny.voice_pipeline.transcript_history import (
@@ -115,6 +117,91 @@ cap is more conservative. The meeting config can override
 ``rate_limit_max_utterances`` to raise or lower it per meeting.
 """
 DEFAULT_APPROVAL_TIMEOUT_SECONDS = 15.0
+DEFAULT_NOISE_FILTER_ENABLED = True
+"""Whether to gate STT artifacts before the router LLM (Johnny-ckz.14).
+
+When ``True`` (the default), each STT candidate is run through a
+layered noise check: the VAD-cut audio fragment must be at least
+``noise_filter_min_audio_ms`` long, the transcript text must clear a
+length floor + a per-provider stoplist (filler tokens like ``uh``,
+Whisper hallucinations like ``you``, pure-punctuation strings like
+``............``), and the reported STT confidence — when provided —
+must meet ``noise_filter_min_confidence``. Failures are dropped before
+:meth:`VoicePipeline._respond_to_transcript` so the bot does not reply
+to ghost turns, but a :class:`TranscriptFiltered` event is published so
+the activity log can audit what the gate caught.
+"""
+DEFAULT_NOISE_FILTER_MIN_AUDIO_MS = 250
+"""Minimum VAD-detected speech duration (ms) for an utterance to reach STT.
+
+Coughs, lip-smacks, and keyboard clicks rarely exceed ~150 ms even
+when VAD scores them as speech. Setting the floor at 250 ms catches
+those without blocking short legitimate words: 'no' / 'yes' / 'okay'
+take 150–400 ms of audio, so a real speaker pronouncing them — and
+naturally accompanying the word with breath, attack, decay — comfortably
+exceeds the 250 ms floor in practice. The pre-Johnny-ckz.14 default of
+zero meant every VAD burst, no matter how short, paid the STT round-trip
++ router LLM cost on every cough.
+"""
+DEFAULT_NOISE_FILTER_MIN_CHARS = 2
+"""Minimum transcript character count (after stripping whitespace).
+
+Single-character transcripts ('a', 'i', 'o', single letters Whisper
+emits during silence) never carry meaningful intent, so the floor is
+2. 'no' is 2 characters, so the floor still admits the regression
+control case the bead lists.
+"""
+DEFAULT_NOISE_FILTER_MIN_CONFIDENCE = 0.0
+"""STT confidence floor; ``0.0`` disables the check.
+
+Providers vary in whether they emit confidence scores at all and what
+range they use (Deepgram: log-prob, OpenAI Whisper: avg-token-prob).
+Leaving the default at 0 keeps the gate opt-in per provider — a future
+per-provider tuning task can flip it on once the calibration is known.
+"""
+DEFAULT_NOISE_STOPLIST: tuple[str, ...] = (
+    # --- Whisper hallucinations during silence ------------------------
+    # The Whisper family is famous for emitting these tokens when fed
+    # audio with no real speech (the model is trained to always produce
+    # *something* per chunk). Only the unambiguous patterns are listed
+    # here — anything that could plausibly be a real one-word reply
+    # ('thanks', 'bye', 'okay') is deliberately omitted so the gate
+    # never drops a legitimate short turn.
+    "you",
+    "thank you",
+    "thanks for watching",
+    "thank you for watching",
+    "subtitles by the amara.org community",
+    # --- Filler / hesitation tokens -----------------------------------
+    # Even when these are a real human utterance, the bot replying to
+    # a lone 'uh' is universally wrong — the speaker has not yet taken
+    # the floor. The router would treat them as a turn; the gate does
+    # not.
+    "uh",
+    "uhh",
+    "um",
+    "umm",
+    "hm",
+    "hmm",
+    "mm",
+    "mmm",
+    "ah",
+    "ahh",
+    "eh",
+    "oh",
+    "mhm",
+    "mmhm",
+)
+"""Default lowercased stoplist for the noise gate (Johnny-ckz.14).
+
+Matched after stripping outer punctuation/whitespace and lowercasing,
+so ``" Uh. "`` matches ``uh``. Entries that overlap with legitimate
+short turns ('yes', 'no', 'okay', 'thanks', 'bye') are deliberately
+omitted — the bead specifies these short utterances must continue to
+drive replies. Operators tune the per-provider list via
+:attr:`PipelineConfig.noise_filter_stoplist` once they observe a
+specific provider's actual hallucination distribution.
+"""
 DEFAULT_CONTEXT_TOKEN_BUDGET = 0
 """Token budget for the rolling transcript window plus static context.
 
@@ -212,6 +299,25 @@ _SENTENCE_BOUNDARY = re.compile(r"(?:[.!?]+[\"')\]]*\s+)|(?:\n+)")
 Used to flush complete sentences from the streaming LLM into the TTS as
 soon as they arrive so time-to-first-audio is bounded by the first
 sentence rather than the full response.
+"""
+
+_PUNCTUATION_STRIP_CHARS = ".,;:!?-_'\"…·•—–-()[]{}<>\\/|*&^%$#@~`+="
+"""Outer characters stripped when normalising a transcript for the noise check.
+
+The noise stoplist holds tokens like ``uh`` without punctuation; STT
+providers often surface them as ``Uh.`` / ``"uh,"`` / ``...uh...``.
+Stripping these outer characters lets a single canonical entry catch
+every spelling without bloating the stoplist with punctuation variants.
+"""
+
+_PUNCTUATION_ONLY_RE = re.compile(r"^[\s\W_]+$")
+"""Matches strings consisting entirely of whitespace, symbols, or punctuation.
+
+Catches the dot/ellipsis sequences the bead reported ('............')
+plus stray '?' / '!' / '...' fragments Whisper produces during pure
+silence. ``[\\s\\W_]`` covers Unicode whitespace, all non-word
+characters, and the underscore (which is a 'word' character to ``\\w``
+but is treated as punctuation here).
 """
 
 BARGE_IN_CATEGORIES: tuple[str, ...] = (
@@ -316,6 +422,42 @@ class PipelineConfig:
     runs as a post-hoc observability log even when the fast path fires
     — see :meth:`VoicePipeline._maybe_barge_in` for the generation guard
     that prevents stale verdicts from aborting unrelated responses.
+    """
+    noise_filter_enabled: bool = DEFAULT_NOISE_FILTER_ENABLED
+    """Master switch for the STT noise gate (Johnny-ckz.14).
+
+    When ``False`` every STT candidate goes through to the router
+    regardless of duration / length / confidence / stoplist match —
+    used by tests that pin the pre-Johnny-ckz.14 behaviour, and as
+    a per-meeting escape hatch if a future provider's built-in VAD
+    makes the second-layer filter actively unhelpful (the gate is
+    additive, not replacement, so this knob lets operators opt out).
+    """
+    noise_filter_min_audio_ms: int = DEFAULT_NOISE_FILTER_MIN_AUDIO_MS
+    """VAD-cut audio duration below which STT is skipped entirely (Johnny-ckz.14).
+
+    Set to ``0`` to send every VAD burst to STT regardless of length.
+    See :data:`DEFAULT_NOISE_FILTER_MIN_AUDIO_MS` for the tuning notes.
+    """
+    noise_filter_min_chars: int = DEFAULT_NOISE_FILTER_MIN_CHARS
+    """Transcript character floor; transcripts strictly shorter are dropped (Johnny-ckz.14).
+
+    Set to ``0`` to disable the length check.
+    """
+    noise_filter_min_confidence: float = DEFAULT_NOISE_FILTER_MIN_CONFIDENCE
+    """STT confidence floor (Johnny-ckz.14); ``0`` (default) disables the check.
+
+    Only consulted when the STT provider populates
+    :attr:`TranscriptEvent.confidence`. Providers that don't report
+    confidence still get the rest of the gate.
+    """
+    noise_filter_stoplist: tuple[str, ...] = DEFAULT_NOISE_STOPLIST
+    """Lowercased noise tokens dropped before reaching the router (Johnny-ckz.14).
+
+    Per-provider tuning is supported by passing a different tuple; the
+    default catches Whisper hallucinations + common filler tokens. Pass
+    an empty tuple to disable the stoplist while still keeping the
+    length / duration / confidence layers active.
     """
     session_id: str | None = None
     bot_session_id: int | None = None
@@ -760,9 +902,41 @@ class VoicePipeline:
             return
         self._utterance_count += 1
 
+        audio_duration_ms = _pcm_duration_ms(len(utterance), PCM_SAMPLE_RATE_HZ)
+        # Pre-STT noise gate (Johnny-ckz.14): VAD-cut audio shorter than
+        # the floor is treated as a cough / lip-smack / click and never
+        # reaches STT. Skipping the round-trip is cheaper than letting
+        # STT hallucinate a token we then drop on the post-STT pass.
+        if self._is_audio_below_noise_floor(audio_duration_ms):
+            await self._publish_noise_filtered(
+                text="",
+                reason="audio_too_short",
+                speaker=None,
+                confidence=None,
+                audio_duration_ms=audio_duration_ms,
+            )
+            return
+
         transcript = await self._run_stt(utterance)
         if transcript is None:
             return
+
+        # Post-STT noise gate (Johnny-ckz.14): drop transcripts that fail
+        # the layered content check (length, punctuation-only, stoplist,
+        # confidence). The event still publishes a TranscriptFiltered so
+        # the activity log (Johnny-ckz.7) can show what was caught and
+        # the operator can tune the stoplist over time.
+        noise_reason = self._classify_transcript_as_noise(transcript)
+        if noise_reason is not None:
+            await self._publish_noise_filtered(
+                text=transcript.text,
+                reason=noise_reason,
+                speaker=transcript.speaker,
+                confidence=transcript.confidence,
+                audio_duration_ms=audio_duration_ms,
+            )
+            return
+
         await self.event_bus.publish(transcript)
         self._remember_transcript(transcript)
         await self._persist_transcript(transcript, utterance)
@@ -802,6 +976,109 @@ class VoicePipeline:
             and self._response_in_flight
             and self.config.speak
             and self.config.mode in SPEAKING_MODES
+        )
+
+    def _is_audio_below_noise_floor(self, audio_duration_ms: int) -> bool:
+        """Whether the VAD-cut audio is too short to be a real turn (Johnny-ckz.14).
+
+        Reads :attr:`PipelineConfig.noise_filter_min_audio_ms`. A floor
+        of ``0`` (or :attr:`noise_filter_enabled` flipped off) disables
+        the check, in which case every VAD burst — no matter how short
+        — is sent to STT.
+        """
+        if not self.config.noise_filter_enabled:
+            return False
+        floor = self.config.noise_filter_min_audio_ms
+        if floor <= 0:
+            return False
+        return audio_duration_ms < floor
+
+    def _classify_transcript_as_noise(
+        self, transcript: TranscriptFinalized
+    ) -> TranscriptFilteredReason | None:
+        """Decide whether ``transcript`` should be dropped by the noise gate.
+
+        Returns a :data:`TranscriptFilteredReason` when the transcript
+        fails any of the configured checks (length floor, punctuation-
+        only, stoplist match, confidence floor); returns ``None`` when
+        the transcript should flow through to the router unchanged.
+
+        Order is deliberate: cheaper checks first (length, punctuation),
+        then the stoplist lookup, then the confidence floor. The
+        stoplist comparison normalises outer punctuation/whitespace and
+        lowercases so a single canonical entry catches every spelling
+        an STT provider might emit ('Uh.', '"uh,"', '... uh ...').
+        """
+        if not self.config.noise_filter_enabled:
+            return None
+
+        text = transcript.text or ""
+        stripped = text.strip()
+        if not stripped:
+            return "empty"
+        if _PUNCTUATION_ONLY_RE.fullmatch(stripped):
+            return "punctuation_only"
+        if len(stripped) < self.config.noise_filter_min_chars:
+            return "too_short"
+        normalised = stripped.strip(_PUNCTUATION_STRIP_CHARS).strip().lower()
+        if not normalised:
+            # All meaningful content was outer punctuation. Caught above
+            # by the punctuation-only check for almost every realistic
+            # case, but keep this as a defence-in-depth so a future
+            # tweak to the regex doesn't silently let pure-punctuation
+            # text through.
+            return "punctuation_only"
+        if normalised in self.config.noise_filter_stoplist:
+            return "stoplist_match"
+        if (
+            self.config.noise_filter_min_confidence > 0
+            and transcript.confidence is not None
+            and transcript.confidence < self.config.noise_filter_min_confidence
+        ):
+            return "low_confidence"
+        return None
+
+    async def _publish_noise_filtered(
+        self,
+        *,
+        text: str,
+        reason: TranscriptFilteredReason,
+        speaker: str | None,
+        confidence: float | None,
+        audio_duration_ms: int | None,
+    ) -> None:
+        """Emit a :class:`TranscriptFiltered` event for the dropped candidate.
+
+        Logged at ``info`` so production tails can spot a noisy mic or a
+        mis-tuned stoplist without enabling debug. The event is published
+        on the normal session bus so the activity log (Johnny-ckz.7) can
+        surface dropped turns in the UI.
+        """
+        event = TranscriptFiltered(
+            text=text,
+            timestamp_ms=self._now_ms(),
+            reason=reason,
+            speaker=speaker,
+            confidence=confidence,
+            audio_duration_ms=audio_duration_ms,
+            session_id=self.config.session_id,
+        )
+        try:
+            await self.event_bus.publish(event)
+        except Exception:
+            logger.exception(
+                "failed to publish transcript_filtered for session=%s reason=%s",
+                self.config.session_id,
+                reason,
+            )
+        logger.info(
+            "noise gate dropped candidate for session=%s reason=%s "
+            "audio_ms=%s confidence=%s text=%r",
+            self.config.session_id,
+            reason,
+            audio_duration_ms,
+            confidence,
+            text,
         )
 
     async def _maybe_barge_in(
@@ -2088,6 +2365,11 @@ __all__ = [
     "DEFAULT_FRAME_DURATION_MS",
     "DEFAULT_MAX_UTTERANCE_MS",
     "DEFAULT_MODE",
+    "DEFAULT_NOISE_FILTER_ENABLED",
+    "DEFAULT_NOISE_FILTER_MIN_AUDIO_MS",
+    "DEFAULT_NOISE_FILTER_MIN_CHARS",
+    "DEFAULT_NOISE_FILTER_MIN_CONFIDENCE",
+    "DEFAULT_NOISE_STOPLIST",
     "DEFAULT_RATE_LIMIT_MAX_UTTERANCES",
     "DEFAULT_RATE_LIMIT_WINDOW_MS",
     "DEFAULT_SUMMARY_MAX_SENTENCES",

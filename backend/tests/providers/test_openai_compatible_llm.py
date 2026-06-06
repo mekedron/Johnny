@@ -192,6 +192,35 @@ def test_init_default_timeout() -> None:
     assert adapter._timeout_s == pytest.approx(DEFAULT_TIMEOUT_S)
 
 
+def test_init_tuning_knobs_default_to_none() -> None:
+    adapter = OpenAICompatibleLLM(_config())
+    assert adapter.top_p is None
+    assert adapter.top_k is None
+    assert adapter.frequency_penalty is None
+    assert adapter.presence_penalty is None
+    assert adapter.seed is None
+    assert adapter.disable_thinking is False
+
+
+def test_init_respects_tuning_knobs() -> None:
+    adapter = OpenAICompatibleLLM(
+        _config(
+            top_p=0.9,
+            top_k=64,
+            frequency_penalty=0.5,
+            presence_penalty=-0.25,
+            seed=42,
+            disable_thinking=True,
+        )
+    )
+    assert adapter.top_p == pytest.approx(0.9)
+    assert adapter.top_k == 64
+    assert adapter.frequency_penalty == pytest.approx(0.5)
+    assert adapter.presence_penalty == pytest.approx(-0.25)
+    assert adapter.seed == 42
+    assert adapter.disable_thinking is True
+
+
 # --- Request shape ---------------------------------------------------------
 
 
@@ -256,6 +285,114 @@ async def test_chat_omits_max_tokens_by_default() -> None:
     await adapter.chat([ChatMessage(role="user", content="hi")])
     body = json.loads(adapter.requests[0].content)
     assert "max_tokens" not in body
+
+
+async def test_chat_omits_tuning_knobs_by_default() -> None:
+    adapter = _FakeOpenAICompatibleLLM(_config(), handler=_ok_handler(_chat_completion()))
+    await adapter.chat([ChatMessage(role="user", content="hi")])
+    body = json.loads(adapter.requests[0].content)
+    for key in (
+        "top_p",
+        "top_k",
+        "frequency_penalty",
+        "presence_penalty",
+        "seed",
+        "think",
+        "chat_template_kwargs",
+    ):
+        assert key not in body, f"{key!r} unexpectedly present in default body"
+
+
+async def test_chat_forwards_tuning_knobs_when_set() -> None:
+    adapter = _FakeOpenAICompatibleLLM(
+        _config(
+            top_p=0.85,
+            top_k=20,
+            frequency_penalty=0.4,
+            presence_penalty=-0.1,
+            seed=7,
+        ),
+        handler=_ok_handler(_chat_completion()),
+    )
+    await adapter.chat([ChatMessage(role="user", content="hi")])
+    body = json.loads(adapter.requests[0].content)
+    assert body["top_p"] == pytest.approx(0.85)
+    assert body["top_k"] == 20
+    assert body["frequency_penalty"] == pytest.approx(0.4)
+    assert body["presence_penalty"] == pytest.approx(-0.1)
+    assert body["seed"] == 7
+
+
+async def test_chat_disable_thinking_sets_top_level_think_false() -> None:
+    adapter = _FakeOpenAICompatibleLLM(
+        _config(disable_thinking=True),
+        handler=_ok_handler(_chat_completion()),
+    )
+    await adapter.chat([ChatMessage(role="user", content="hi")])
+    body = json.loads(adapter.requests[0].content)
+    # think MUST be top-level, not nested under options — per Ollama docs.
+    assert body["think"] is False
+    assert "options" not in body or "think" not in body.get("options", {})
+
+
+async def test_chat_disable_thinking_sets_chat_template_kwargs_enable_thinking_false() -> None:
+    # Qwen3.6 and vLLM-hosted Qwen3 series ignore `think: false` and
+    # `/no_think`. The canonical knob is `chat_template_kwargs:
+    # {enable_thinking: false}` at the top level of the request body.
+    adapter = _FakeOpenAICompatibleLLM(
+        _config(disable_thinking=True),
+        handler=_ok_handler(_chat_completion()),
+    )
+    await adapter.chat([ChatMessage(role="user", content="hi")])
+    body = json.loads(adapter.requests[0].content)
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+async def test_chat_disable_thinking_prepends_no_think_to_existing_system_message() -> None:
+    adapter = _FakeOpenAICompatibleLLM(
+        _config(disable_thinking=True),
+        handler=_ok_handler(_chat_completion()),
+    )
+    await adapter.chat(
+        [
+            ChatMessage(role="system", content="be brief"),
+            ChatMessage(role="user", content="hi"),
+        ]
+    )
+    body = json.loads(adapter.requests[0].content)
+    assert body["messages"][0] == {
+        "role": "system",
+        "content": "/no_think\nbe brief",
+    }
+    assert body["messages"][1] == {"role": "user", "content": "hi"}
+
+
+async def test_chat_disable_thinking_inserts_system_message_when_none_present() -> None:
+    adapter = _FakeOpenAICompatibleLLM(
+        _config(disable_thinking=True),
+        handler=_ok_handler(_chat_completion()),
+    )
+    await adapter.chat([ChatMessage(role="user", content="hi")])
+    body = json.loads(adapter.requests[0].content)
+    assert body["messages"][0] == {"role": "system", "content": "/no_think"}
+    assert body["messages"][1] == {"role": "user", "content": "hi"}
+
+
+async def test_chat_disable_thinking_does_not_mutate_messages_when_off() -> None:
+    adapter = _FakeOpenAICompatibleLLM(
+        _config(disable_thinking=False),
+        handler=_ok_handler(_chat_completion()),
+    )
+    await adapter.chat(
+        [
+            ChatMessage(role="system", content="be brief"),
+            ChatMessage(role="user", content="hi"),
+        ]
+    )
+    body = json.loads(adapter.requests[0].content)
+    assert body["messages"][0] == {"role": "system", "content": "be brief"}
+    assert "think" not in body
+    assert "chat_template_kwargs" not in body
 
 
 async def test_chat_forwards_response_format() -> None:

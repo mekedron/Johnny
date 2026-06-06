@@ -269,10 +269,17 @@ class OpenAICompatibleLLM(LLMProvider):
                     type=FieldType.CHECKBOX,
                     default=False,
                     help_text=(
-                        "For Qwen3 / DeepSeek-R1 via Ollama: send top-level "
-                        "'think: false' and prepend '/no_think' to the first "
-                        "system message. Harmless on servers that don't "
-                        "honor it."
+                        "Sends three mechanisms in parallel: top-level "
+                        "'think: false' (Ollama Qwen3 / Qwen3.5), "
+                        "'chat_template_kwargs: {enable_thinking: false}' "
+                        "(Qwen3.6 / vLLM), and a '/no_think' system prefix "
+                        "(Qwen3 soft switch). Harmless on servers that "
+                        "ignore unknown keys. NOTE: Ollama models whose "
+                        "chat template is the bare '{{ .Prompt }}' (e.g. "
+                        "the Qwen3.6 uncensored remixes) have no thinking "
+                        "control branch and ignore all three — you must "
+                        "install a Modelfile with a proper Qwen3 chat "
+                        "template or switch to a non-bare build."
                     ),
                     group=FieldGroup.ADVANCED,
                 ),
@@ -415,14 +422,34 @@ class OpenAICompatibleLLM(LLMProvider):
     def _apply_disable_thinking_to_body(self, body: dict[str, Any]) -> None:
         """Mutate ``body`` so the upstream model skips its reasoning trace.
 
-        Default behavior targets Ollama's ``think`` parameter: setting it
-        to ``false`` (top-level, not nested under ``options``) suppresses
-        the ``<think>...</think>`` chain on Qwen3 / DeepSeek-R1-style
-        models. Servers that don't honor it (OpenAI, vLLM, OpenRouter)
-        ignore unknown body keys. Subclasses override this when they
-        prefer a different mechanism (e.g. OpenAI's ``reasoning_effort``).
+        Sends three known mechanisms in parallel so the request works
+        across the variants in the wild:
+
+        * ``think: false`` (top-level, not under ``options``) — Ollama's
+          built-in toggle. Works for Qwen3 / Qwen3.5 and most DeepSeek-R1
+          builds whose chat template references ``$.Think``.
+        * ``chat_template_kwargs: {"enable_thinking": false}`` — the
+          canonical Qwen3.6 / vLLM mechanism. Required because Qwen3.6
+          dropped the ``/think`` / ``/no_think`` soft switches and the
+          ``think`` flag has no effect on its chat template.
+        * The ``/no_think`` system prefix (added in :meth:`chat`) — Qwen3
+          (original) soft switch; ignored by Qwen3.6 templates that lack
+          the control logic.
+
+        Caveat: Ollama-hosted models whose chat template is the bare
+        ``{{ .Prompt }}`` (e.g. the ``Qwen3.6-35B-A3B-Uncensored-…``
+        family) ignore *all three* mechanisms because the template
+        contains no thinking-control branches. For those models the
+        user must either (a) install a Modelfile that wraps the model
+        in a proper Qwen3 chat template, or (b) switch to a build that
+        ships with one. The adapter cannot rewrite a server-side
+        template from the client.
+
+        Subclasses override this when they prefer a different mechanism
+        (e.g. OpenAI's ``reasoning_effort``).
         """
         body["think"] = False
+        body["chat_template_kwargs"] = {"enable_thinking": False}
 
     def _disable_thinking_system_prefix(self) -> str | None:
         """Return text to prepend to the first system message, or ``None``.

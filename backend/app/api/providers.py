@@ -51,6 +51,9 @@ from app.providers.piper_tts import (
 from app.providers.piper_tts import (
     fetch_voice_catalog as piper_fetch_voice_catalog,
 )
+from app.providers.piper_tts import (
+    remove_voice as piper_remove_voice,
+)
 from app.providers.schema import ProviderSchema
 from app.providers.schema_validation import (
     FieldValidationError,
@@ -169,6 +172,31 @@ class VoiceInstallResponse(BaseModel):
     onnx_bytes: int
     onnx_json_bytes: int
     already_present: bool
+
+
+class VoiceRemoveResponse(BaseModel):
+    """Response payload for ``DELETE /providers/{id}/voices/{key}``."""
+
+    key: str
+    installed: bool
+    onnx_removed: bool
+    onnx_json_removed: bool
+
+
+class PlaySampleRequest(BaseModel):
+    """Optional request body for ``POST /providers/{id}/play_sample``.
+
+    The body is optional — calling without a body preserves the historic
+    behavior of synthesising with the row's saved config. When provided,
+    ``voice_id`` overrides the row's ``options["voice_id"]`` for this
+    single synth call only; the database row is *not* mutated. This is
+    what the Piper voice browser modal uses to preview an installed
+    voice without forcing the user to re-save the provider first.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    voice_id: str | None = Field(default=None, max_length=256)
 
 
 # --- Helpers ---------------------------------------------------------------
@@ -577,6 +605,7 @@ async def play_sample(
     provider_id: int,
     session: SessionDep,
     crypto: CryptoDep,
+    overrides: PlaySampleRequest | None = None,
 ) -> Response:
     """Synthesize a short demo phrase via this provider and return WAV audio.
 
@@ -586,6 +615,13 @@ async def play_sample(
     committing the provider to a live meeting. The response body is a
     self-contained RIFF/WAV at 16 kHz mono S16LE so the browser can play
     it inline with a plain ``Audio`` element.
+
+    Optional request body:
+
+    * ``voice_id`` — override ``options["voice_id"]`` for this single
+      synth call only. The saved row is **not** mutated. The Piper voice
+      browser modal uses this to preview a freshly-installed voice
+      without forcing the user to save the provider first.
     """
     row = _get_row_or_404(session, provider_id)
 
@@ -610,12 +646,16 @@ async def play_sample(
             detail=f"failed to decrypt credentials: {exc}",
         ) from exc
 
+    options = dict(row.config or {})
+    if overrides is not None and overrides.voice_id is not None:
+        options["voice_id"] = overrides.voice_id
+
     config = ProviderConfig(
         kind=row.kind,
         provider_name=row.provider_name,
         display_name=row.display_name,
         credentials=creds,
-        options=dict(row.config or {}),
+        options=options,
     )
 
     try:
@@ -752,6 +792,44 @@ async def install_voice(
     except Exception as exc:  # noqa: BLE001 — surface download errors
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return VoiceInstallResponse(**result)
+
+
+@router.delete(
+    "/{provider_id}/voices/{voice_key}",
+    response_model=VoiceRemoveResponse,
+)
+def remove_voice_endpoint(
+    provider_id: int,
+    voice_key: str,
+    session: SessionDep,
+) -> VoiceRemoveResponse:
+    """Delete a Piper voice from this provider's ``model_dir``.
+
+    Removes both ``<voice_key>.onnx`` and ``<voice_key>.onnx.json`` from
+    the filesystem. Useful from the voice browser modal so the user can
+    reclaim disk space without dropping into a shell. The provider row
+    itself is *not* mutated: if the deleted voice happens to be the row's
+    currently-saved ``voice_id``, the row keeps that string and the next
+    synth call will raise the same "voice not found" error it would have
+    raised after any manual deletion — surfacing the inconsistency
+    quickly rather than silently switching voices.
+
+    Returns HTTP 400 when the row isn't a Piper TTS adapter, HTTP 404
+    when neither voice file is present (idempotency caller can detect),
+    and HTTP 502 on filesystem permission errors.
+    """
+    row = _require_piper_row(session, provider_id)
+    model_dir = _piper_model_dir(row)
+    try:
+        result = piper_remove_voice(voice_key, model_dir)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"failed to remove voice {voice_key!r}: {exc}",
+        ) from exc
+    return VoiceRemoveResponse(**result)
 
 
 # --- export endpoint -------------------------------------------------------

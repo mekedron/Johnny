@@ -47,7 +47,7 @@
 	// --- Configuration state ----------------------------------------------
 
 	let persona = $state('Concise, friendly conversation partner.');
-	let systemPrompt = $state('');
+	let systemPrompt = $state('Respond directly without any speaker label, bot name, role prefix, or text before the actual message.');
 	let mode = $state<BotMode>('free_auto_speak');
 	let selectedTemplateId = $state<number | null>(null);
 	let contextInjection = $state('');

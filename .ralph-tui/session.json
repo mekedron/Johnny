@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "sessionId": "47618889-b8db-42d2-988e-f3dbe0c65c3c",
+  "sessionId": "e226e3c5-adc1-481f-bc49-85d000e1bf13",
   "status": "running",
-  "startedAt": "2026-06-06T13:41:52.273Z",
-  "updatedAt": "2026-06-06T13:55:56.725Z",
+  "startedAt": "2026-06-06T14:49:12.419Z",
+  "updatedAt": "2026-06-06T15:12:38.125Z",
   "currentIteration": 0,
   "maxIterations": 0,
   "tasksCompleted": 0,
@@ -27,7 +27,7 @@
         }
       }
     ],
-    "totalTasks": 45,
+    "totalTasks": 51,
     "tasks": [
       {
         "id": "Johnny-ckz.1",
@@ -42,8 +42,26 @@
         "completedInSession": false
       },
       {
+        "id": "Johnny-c8t",
+        "title": "Playground audio path never opens WebSocket — no voice, no bot replies (Johnny-ckz.6 regression)",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
         "id": "Johnny-ckz.3",
         "title": "Bot carries the whole meeting's context (not a 6-turn rolling window) when routing and answering",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.4",
+        "title": "Run the two-bot voice-interrupt harness end-to-end against real models, fix any bugs it surfaces",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.5",
+        "title": "Local Piper follow-up: voice catalog fetcher fails on HF 307 redirect, plus model dirs must move to host bind mounts (~/.johnny/...)",
         "status": "completed",
         "completedInSession": false
       },
@@ -66,27 +84,45 @@
         "completedInSession": false
       },
       {
-        "id": "Johnny-ckz.4",
-        "title": "Run the two-bot voice-interrupt harness end-to-end against real models, fix any bugs it surfaces",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.5",
-        "title": "Local Piper follow-up: voice catalog fetcher fails on HF 307 redirect, plus model dirs must move to host bind mounts (~/.johnny/...)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
         "id": "Johnny-ckz.6",
         "title": "In-browser voice/text chat with the bot — per-event 'Try with bot' button + standalone playground (no Meet required)",
         "status": "completed",
         "completedInSession": false
       },
       {
+        "id": "Johnny-wyd",
+        "title": "Barge-in classifier LLM ReadTimeouts against Ollama Qwen 35B — every timeout is a missed interrupt + log noise",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-klh",
+        "title": "Playground transcripts label every speaker=null row as 'You' — including STT hallucinations and any non-user rows",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-31g",
+        "title": "STT hallucinations from silence: faster-whisper produces 'Does Olam A.P.I.', '. . . .', etc. on quiet mic and persists them as transcripts",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
         "id": "Johnny-ckz.7",
         "title": "Per-session activity / timing log surfaced in chat history (per-turn pipeline events with durations)",
         "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.8",
+        "title": "Profile + tune end-to-end voice latency on real local STT/TTS/LLM, and add in-UI optimization tips on each provider settings page",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.9",
+        "title": "bot_sessions schema drift: ORM expects 'source' and 'playground_overrides' columns that don't exist — worker monitor + /sessions/active both 500",
+        "status": "completed",
         "completedInSession": false
       },
       {
@@ -186,14 +222,14 @@
         "completedInSession": false
       },
       {
-        "id": "Johnny-ckz.8",
-        "title": "Profile + tune end-to-end voice latency on real local STT/TTS/LLM, and add in-UI optimization tips on each provider settings page",
-        "status": "open",
+        "id": "Johnny-ckz.10",
+        "title": "Validate in-browser live chat / live talking (Johnny-ckz.6) end-to-end via chrome-devtools MCP — pure verification, file follow-up bugs for any gap",
+        "status": "completed",
         "completedInSession": false
       },
       {
-        "id": "Johnny-ckz.9",
-        "title": "bot_sessions schema drift: ORM expects 'source' and 'playground_overrides' columns that don't exist — worker monitor + /sessions/active both 500",
+        "id": "Johnny-ckz.11",
+        "title": "Playground / live mode: no audio playback (critical) + needs template-driven mode picker, volume control, and resume-from-session-page UX",
         "status": "completed",
         "completedInSession": false
       },
@@ -228,15 +264,15 @@
         "completedInSession": false
       },
       {
-        "id": "Johnny-ckz.10",
-        "title": "Validate in-browser live chat / live talking (Johnny-ckz.6) end-to-end via chrome-devtools MCP — pure verification, file follow-up bugs for any gap",
+        "id": "Johnny-ckz.12",
+        "title": "STT provider settings: 'Record sample' button to verify transcription end-to-end (symmetric to existing TTS demo)",
         "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-ckz.11",
-        "title": "Playground / live mode: no audio playback (critical) + needs template-driven mode picker, volume control, and resume-from-session-page UX",
-        "status": "completed",
+        "id": "Johnny-ckz.13",
+        "title": "Playground: voice barge-in does nothing — bot ignores user speech mid-utterance (interrupt bug recurring on WebRTC transport)",
+        "status": "open",
         "completedInSession": false
       },
       {
@@ -252,8 +288,8 @@
         "completedInSession": false
       },
       {
-        "id": "Johnny-ckz.12",
-        "title": "STT provider settings: 'Record sample' button to verify transcription end-to-end (symmetric to existing TTS demo)",
+        "id": "Johnny-ckz.14",
+        "title": "Playground: STT artifacts ('you', 'uh', '...' dot sequences) trigger AI replies — no noise-floor / floor-management gate before invoking LLM",
         "status": "open",
         "completedInSession": false
       },

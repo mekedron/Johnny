@@ -432,6 +432,43 @@ async def download_voice(
             await client.aclose()
 
 
+def remove_voice(voice_key: str, model_dir: str) -> dict[str, Any]:
+    """Delete the ``.onnx`` and ``.onnx.json`` files for ``voice_key``.
+
+    Returns a dict describing what happened so the UI can update in
+    place without a follow-up catalog round-trip::
+
+        {"key": "...", "installed": False,
+         "onnx_removed": bool, "onnx_json_removed": bool}
+
+    Raises :class:`FileNotFoundError` when neither file exists — the
+    caller should surface that as a 404 to the user. Permission errors
+    propagate as :class:`OSError`; the caller surfaces them as 502.
+    Partial removals (one file present, one missing) succeed: the
+    presence flag flips to False either way because :func:`is_installed`
+    requires both files.
+    """
+    base = Path(model_dir)
+    onnx = base / f"{voice_key}.onnx"
+    onnx_json = base / f"{voice_key}.onnx.json"
+    onnx_existed = onnx.exists()
+    json_existed = onnx_json.exists()
+    if not onnx_existed and not json_existed:
+        raise FileNotFoundError(
+            f"voice {voice_key!r} is not installed in {model_dir!r}"
+        )
+    if onnx_existed:
+        onnx.unlink()
+    if json_existed:
+        onnx_json.unlink()
+    return {
+        "key": voice_key,
+        "installed": False,
+        "onnx_removed": onnx_existed,
+        "onnx_json_removed": json_existed,
+    }
+
+
 class PiperTTS(TTSProvider):
     """Streaming TTS via the local Piper binary.
 

@@ -17,12 +17,31 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 TranscriptEventType = Literal["transcript_finalized"]
+TranscriptFilteredEventType = Literal["transcript_filtered"]
 RouterEventType = Literal["router_decision_made"]
 AgentEventType = Literal["agent_spoke"]
 AgentSuggestedEventType = Literal["agent_suggested"]
 SessionStatusEventType = Literal["session_status_changed"]
 ApprovalPendingEventType = Literal["approval_pending"]
 ApprovalResolvedEventType = Literal["approval_resolved"]
+
+TranscriptFilteredReason = Literal[
+    "audio_too_short",
+    "empty",
+    "punctuation_only",
+    "too_short",
+    "stoplist_match",
+    "low_confidence",
+]
+"""Why the noise gate dropped a candidate turn (Johnny-ckz.14).
+
+``audio_too_short`` fires before STT — the VAD-cut audio fragment is
+shorter than ``noise_filter_min_audio_ms`` (cough, lip-smack, click).
+``empty`` / ``punctuation_only`` / ``too_short`` / ``stoplist_match``
+fire after STT when the transcript text fails the content gate.
+``low_confidence`` fires when the STT provider reports a confidence
+below ``noise_filter_min_confidence``.
+"""
 
 SessionStatus = Literal["scheduled", "joining", "joined", "ended", "failed"]
 ApprovalResolution = Literal["approved", "rejected", "timeout"]
@@ -38,6 +57,36 @@ class TranscriptFinalized:
     confidence: float | None = None
     session_id: str | None = None
     type: TranscriptEventType = "transcript_finalized"
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptFiltered:
+    """An STT candidate dropped by the noise gate before the router (Johnny-ckz.14).
+
+    Emitted in place of :class:`TranscriptFinalized` when the audio
+    fragment or its transcribed text fails the noise floor — Whisper
+    hallucinations (``you``, ``uh``, dot sequences), sub-threshold
+    confidence scores, or VAD bursts too short to be real speech. The
+    bot never sees these so it cannot reply to them; the event is still
+    published so the activity log (Johnny-ckz.7) can show the operator
+    what was caught and the stoplist can be tuned. ``reason`` mirrors
+    the layered defence — see :data:`TranscriptFilteredReason` for the
+    legal values.
+
+    ``audio_duration_ms`` is ``None`` when the gate fired post-STT and
+    the audio length was not threaded through (currently always set
+    by the pipeline, but kept optional so adapters that do their own
+    filtering don't have to fabricate a value).
+    """
+
+    text: str
+    timestamp_ms: int
+    reason: TranscriptFilteredReason
+    speaker: str | None = None
+    confidence: float | None = None
+    audio_duration_ms: int | None = None
+    session_id: str | None = None
+    type: TranscriptFilteredEventType = "transcript_filtered"
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +219,7 @@ class ApprovalResolved:
 
 PipelineEvent = (
     TranscriptFinalized
+    | TranscriptFiltered
     | RouterDecisionMade
     | AgentSpoke
     | AgentSuggested
@@ -200,6 +250,8 @@ __all__ = [
     "RouterDecisionMade",
     "SessionStatus",
     "SessionStatusChanged",
+    "TranscriptFiltered",
+    "TranscriptFilteredReason",
     "TranscriptFinalized",
     "event_to_dict",
 ]

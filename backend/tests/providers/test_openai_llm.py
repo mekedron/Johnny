@@ -198,6 +198,81 @@ async def test_chat_uses_configured_model_in_body() -> None:
     assert body["model"] == "gpt-4o"
 
 
+async def test_chat_disable_thinking_omits_think_field_on_openai_native() -> None:
+    # OpenAI's hosted endpoint can reject unknown body keys, so OpenAILLM
+    # MUST NOT send the Ollama-specific ``think`` field or the vLLM /
+    # Qwen ``chat_template_kwargs`` field even when the user checks
+    # "Disable thinking".
+    adapter = _FakeOpenAILLM(
+        _config(disable_thinking=True),
+        handler=_ok_handler(_chat_completion()),
+    )
+    await adapter.chat([ChatMessage(role="user", content="hi")])
+    body = json.loads(adapter.requests[0].content)
+    assert "think" not in body
+    assert "chat_template_kwargs" not in body
+
+
+async def test_chat_disable_thinking_does_not_prepend_no_think_for_openai() -> None:
+    # ``/no_think`` is a Qwen-specific control token; we don't want it
+    # polluting OpenAI requests.
+    adapter = _FakeOpenAILLM(
+        _config(disable_thinking=True),
+        handler=_ok_handler(_chat_completion()),
+    )
+    await adapter.chat(
+        [
+            ChatMessage(role="system", content="be brief"),
+            ChatMessage(role="user", content="hi"),
+        ]
+    )
+    body = json.loads(adapter.requests[0].content)
+    assert body["messages"][0] == {"role": "system", "content": "be brief"}
+
+
+async def test_chat_disable_thinking_sets_reasoning_effort_for_o_series() -> None:
+    adapter = _FakeOpenAILLM(
+        _config(model="o3-mini", disable_thinking=True),
+        handler=_ok_handler(_chat_completion()),
+    )
+    await adapter.chat([ChatMessage(role="user", content="hi")])
+    body = json.loads(adapter.requests[0].content)
+    assert body["reasoning_effort"] == "minimal"
+
+
+async def test_chat_disable_thinking_sets_reasoning_effort_for_gpt5() -> None:
+    adapter = _FakeOpenAILLM(
+        _config(model="gpt-5", disable_thinking=True),
+        handler=_ok_handler(_chat_completion()),
+    )
+    await adapter.chat([ChatMessage(role="user", content="hi")])
+    body = json.loads(adapter.requests[0].content)
+    assert body["reasoning_effort"] == "minimal"
+
+
+async def test_chat_disable_thinking_skips_reasoning_effort_for_gpt4o() -> None:
+    # gpt-4o is not a reasoning model — sending reasoning_effort to it
+    # would error from the OpenAI API.
+    adapter = _FakeOpenAILLM(
+        _config(model="gpt-4o", disable_thinking=True),
+        handler=_ok_handler(_chat_completion()),
+    )
+    await adapter.chat([ChatMessage(role="user", content="hi")])
+    body = json.loads(adapter.requests[0].content)
+    assert "reasoning_effort" not in body
+
+
+async def test_chat_default_omits_reasoning_effort_and_think() -> None:
+    adapter = _FakeOpenAILLM(
+        _config(model="o3-mini"),  # default disable_thinking=False
+        handler=_ok_handler(_chat_completion()),
+    )
+    await adapter.chat([ChatMessage(role="user", content="hi")])
+    body = json.loads(adapter.requests[0].content)
+    assert "reasoning_effort" not in body
+    assert "think" not in body
+
+
 # --- Contract --------------------------------------------------------------
 
 

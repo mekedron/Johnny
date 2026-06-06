@@ -436,6 +436,423 @@ async def test_pipeline_silence_only_input_emits_nothing() -> None:
     assert bus.snapshot() == []
 
 
+# --- Johnny-ckz.14: STT noise gate before router ---------------------------
+
+
+@pytest.mark.parametrize(
+    "noise_text",
+    [
+        "you",
+        "Uh.",
+        "  hm  ",
+        "...HMM!",
+        "thank you",
+        "Thanks for watching!",
+        "............",
+        "...",
+        "?!?!?",
+        "  …  ",
+        "a",  # below the 2-char floor
+    ],
+)
+async def test_noise_gate_drops_stoplist_and_punctuation_and_short(
+    two_utterance_pcm: bytes, noise_text: str
+) -> None:
+    """STT artifacts ('you', 'uh', '...') are filtered before the router (Johnny-ckz.14).
+
+    The router must never see these — the bug they reproduce is the bot
+    'replying' to a ghost turn because Whisper emitted a single token
+    during silence. Every flavour (single filler, punctuation-only,
+    sub-floor length, multi-word Whisper hallucination) is covered by
+    the same gate.
+    """
+    from johnny.voice_pipeline import TranscriptFiltered
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    bus = InMemoryEventBus()
+    router = _FakeRouterLLM(
+        decisions=[
+            # Decision should never be consumed — router must not be
+            # invoked once the gate fires.
+            {"should_speak": True, "confidence": 1.0, "reason": "should not run"},
+        ]
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=[noise_text, noise_text]),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["should not run"]),
+        tts=_FakeTTS(),
+        event_bus=bus,
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            session_id="sess-noise",
+        ),
+    )
+    await pipeline.run()
+
+    # No router decision, no agent speak — the gate held the floor.
+    assert router.calls == [], f"router invoked for noise text {noise_text!r}"
+    event_types = [e.type for e in bus.snapshot()]
+    assert "router_decision_made" not in event_types
+    assert "agent_spoke" not in event_types
+    assert "transcript_finalized" not in event_types
+
+    # Both VAD bursts produce a transcript_filtered event so the
+    # activity log can render what was dropped.
+    filtered = [e for e in bus.snapshot() if isinstance(e, TranscriptFiltered)]
+    assert len(filtered) == 2
+    assert all(e.session_id == "sess-noise" for e in filtered)
+    assert all(e.reason in {"stoplist_match", "punctuation_only", "too_short"} for e in filtered)
+
+
+async def test_noise_gate_passes_short_legit_replies_unchanged(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Regression check: 'yes' / 'no' / 'okay' are NOT dropped (Johnny-ckz.14 AC #3).
+
+    The bead explicitly forbids over-filtering these single-word turns —
+    if a user replies 'yes' to the bot's question, the bot must continue
+    the conversation.
+    """
+    from johnny.voice_pipeline import TranscriptFiltered
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    bus = InMemoryEventBus()
+    router = _FakeRouterLLM(
+        decisions=[
+            {
+                "should_speak": True,
+                "confidence": 0.9,
+                "reason": "direct affirmation",
+                "suggested_reply": "great",
+            },
+            {
+                "should_speak": False,
+                "confidence": 0.2,
+                "reason": "ack",
+            },
+        ]
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        # Two short real replies — both must drive a router decision.
+        stt=_FakeSTT(transcripts=["yes", "okay"]),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["acknowledged"]),
+        tts=_FakeTTS(),
+        event_bus=bus,
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+    await pipeline.run()
+
+    # Router saw both transcripts.
+    assert len(router.calls) == 2
+    assert [e.type for e in bus.snapshot()].count("transcript_finalized") == 2
+    # No filtered events.
+    assert [e for e in bus.snapshot() if isinstance(e, TranscriptFiltered)] == []
+
+
+async def test_noise_gate_disabled_lets_everything_through(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Setting ``noise_filter_enabled=False`` restores pre-Johnny-ckz.14 behaviour.
+
+    Operators must be able to opt out per-meeting in case a future
+    provider's built-in VAD already covers the same ground; turning the
+    gate off must NOT also turn off transcript persistence — the router
+    just sees every candidate the way it did before the gate landed.
+    """
+    from johnny.voice_pipeline import TranscriptFiltered
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    bus = InMemoryEventBus()
+    router = _FakeRouterLLM(
+        decisions=[
+            {"should_speak": False, "confidence": 0.0, "reason": "x"},
+            {"should_speak": False, "confidence": 0.0, "reason": "x"},
+        ]
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        # Tokens that WOULD be filtered when the gate is on.
+        stt=_FakeSTT(transcripts=["uh", "you"]),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=bus,
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            noise_filter_enabled=False,
+        ),
+    )
+    await pipeline.run()
+
+    # Gate off → router sees both, no filtered events.
+    assert len(router.calls) == 2
+    assert [e for e in bus.snapshot() if isinstance(e, TranscriptFiltered)] == []
+
+
+async def test_noise_gate_drops_low_confidence_transcripts(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Confidence floor catches sub-threshold STT outputs even when the text looks fine.
+
+    Some STT providers emit a confidence score with each final; sub-
+    threshold scores correlate with the kinds of hallucinated content
+    the text-only gate can miss (model is uncertain → output is
+    untrustworthy). Verified against the same surface so a future
+    refactor doesn't accidentally drop the confidence check.
+    """
+    from johnny.voice_pipeline import TranscriptFiltered
+
+    class _LowConfidenceSTT(STTProvider):
+        @property
+        def name(self) -> str:
+            return "low-conf-stt"
+
+        async def transcribe_stream(
+            self,
+            audio_iter: AsyncIterator[bytes],
+        ) -> AsyncIterator[TranscriptEvent]:
+            async for _ in audio_iter:
+                pass
+            # Text alone would pass every other check.
+            yield TranscriptEvent(
+                text="hello there",
+                is_final=True,
+                timestamp_ms=1000,
+                confidence=0.1,
+            )
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    bus = InMemoryEventBus()
+    router = _FakeRouterLLM(
+        decisions=[{"should_speak": True, "confidence": 0.95, "reason": "x"}]
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_LowConfidenceSTT(),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=bus,
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            noise_filter_min_confidence=0.6,
+        ),
+    )
+    await pipeline.run()
+
+    assert router.calls == []
+    filtered = [e for e in bus.snapshot() if isinstance(e, TranscriptFiltered)]
+    assert len(filtered) >= 1
+    assert all(e.reason == "low_confidence" for e in filtered)
+    assert filtered[0].confidence == 0.1
+
+
+async def test_noise_gate_skips_stt_on_too_short_audio(tmp_path: Path) -> None:
+    """A VAD-detected burst shorter than ``noise_filter_min_audio_ms`` never
+    reaches STT (Johnny-ckz.14).
+
+    Skipping the STT round-trip is the leverage point: a noisy mic
+    triggers many short VAD bursts per minute, and paying the STT cost
+    on each one would burn the user's provider budget before the post-
+    STT content gate even ran.
+    """
+    import array
+    import math
+    import wave
+
+    from johnny.voice_pipeline import TranscriptFiltered
+
+    sample_rate = 16_000
+    # 100 ms tone (below the 250 ms default floor), padded with silence.
+    n_tone = sample_rate * 100 // 1000
+    n_silence = sample_rate * 400 // 1000
+    samples = [0] * n_silence
+    samples.extend(
+        int(12_000 * math.sin(2 * math.pi * 440 * i / sample_rate))
+        for i in range(n_tone)
+    )
+    samples.extend([0] * n_silence)
+    wav_path = tmp_path / "short_burst.wav"
+    with wave.open(str(wav_path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(array.array("h", samples).tobytes())
+    with wave.open(str(wav_path), "rb") as wf:
+        pcm = wf.readframes(wf.getnframes())
+
+    frame_size = 640  # 20 ms @ 16 kHz
+    frames = [
+        pcm[i : i + frame_size]
+        for i in range(0, len(pcm), frame_size)
+        if i + frame_size <= len(pcm)
+    ]
+
+    transport = _BufferedTransport(frames=frames)
+    stt = _FakeSTT(transcripts=["should-not-be-called"])
+    router = _FakeRouterLLM(
+        decisions=[{"should_speak": True, "confidence": 1.0, "reason": "x"}]
+    )
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=stt,
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=bus,
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=200,
+            noise_filter_min_audio_ms=250,
+            session_id="sess-short-audio",
+        ),
+    )
+    await pipeline.run()
+
+    # STT was never called for the sub-threshold burst.
+    assert stt.calls == 0
+    assert router.calls == []
+    filtered = [e for e in bus.snapshot() if isinstance(e, TranscriptFiltered)]
+    assert len(filtered) >= 1
+    assert all(e.reason == "audio_too_short" for e in filtered)
+    assert filtered[0].session_id == "sess-short-audio"
+    # The audio duration is recorded so the activity log can show it.
+    assert filtered[0].audio_duration_ms is not None
+    assert filtered[0].audio_duration_ms < 250
+
+
+async def test_noise_gate_carries_audio_duration_on_post_stt_filter(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Post-STT filtered events still record the VAD-cut audio length.
+
+    Lets the activity log show 'dropped: "uh" (audio 600 ms, conf 0.9)'
+    so operators can see whether the gate was triggered by a long burst
+    of real speech that STT mis-transcribed, or a brief cough.
+    """
+    from johnny.voice_pipeline import TranscriptFiltered
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    bus = InMemoryEventBus()
+    router = _FakeRouterLLM(
+        decisions=[{"should_speak": False, "confidence": 0.0, "reason": "x"}]
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["you", "uh"]),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=bus,
+        config=PipelineConfig(
+            vad_threshold=0.05, end_of_speech_ms=300
+        ),
+    )
+    await pipeline.run()
+
+    filtered = [e for e in bus.snapshot() if isinstance(e, TranscriptFiltered)]
+    assert len(filtered) == 2
+    for evt in filtered:
+        # Audio duration ≈ 600 ms tone burst.
+        assert evt.audio_duration_ms is not None
+        assert evt.audio_duration_ms > 400
+        assert evt.confidence == 0.9  # carried through from _FakeSTT
+        assert evt.reason == "stoplist_match"
+
+
+def test_default_noise_stoplist_omits_legit_short_replies() -> None:
+    """The default stoplist must NOT contain 'yes' / 'no' / 'okay' / 'thanks' /
+    'bye' (Johnny-ckz.14 AC #3).
+
+    These short turns are unambiguously real speech the bot must respond
+    to. Anyone tempted to add them later for tighter filtering should
+    see this test fail and reconsider — the bead lists them as the
+    regression-control set.
+    """
+    from johnny.voice_pipeline import DEFAULT_NOISE_STOPLIST
+
+    for legit in ("yes", "no", "okay", "thanks", "bye", "hello", "hi"):
+        assert legit not in DEFAULT_NOISE_STOPLIST
+
+
+def test_default_noise_stoplist_contains_known_whisper_artifacts() -> None:
+    """The default stoplist catches the specific tokens the bead reported.
+
+    The user observed 'you', 'uh', 'hm' (plus dot sequences and Whisper's
+    'thank you for watching' tail). The first three are pure stoplist
+    matches; dot sequences land via the punctuation-only path; the
+    'thanks for watching' family is multi-word so it lives in the
+    stoplist explicitly.
+    """
+    from johnny.voice_pipeline import DEFAULT_NOISE_STOPLIST
+
+    for token in ("you", "uh", "um", "hm", "hmm", "thank you", "thanks for watching"):
+        assert token in DEFAULT_NOISE_STOPLIST
+
+
+def test_pipeline_config_noise_filter_defaults() -> None:
+    """Defaults match the documented sane-floor settings.
+
+    Pins the contract so a future refactor of :class:`PipelineConfig`
+    can't silently flip the gate off or relax the floors below what
+    the bead's acceptance criteria validated against.
+    """
+    cfg = PipelineConfig()
+    assert cfg.noise_filter_enabled is True
+    assert cfg.noise_filter_min_chars == 2
+    assert cfg.noise_filter_min_audio_ms == 250
+    assert cfg.noise_filter_min_confidence == 0.0
+    assert cfg.noise_filter_stoplist  # non-empty default
+
+
 # --- helpers ---------------------------------------------------------------
 
 
@@ -2618,7 +3035,7 @@ async def test_pipeline_approval_required_pending_event_carries_decision_id(
     pipeline = VoicePipeline(
         transport=transport,
         vad=EnergyVAD(threshold=0.05),
-        stt=_FakeSTT(transcripts=["a", "b"]),
+        stt=_FakeSTT(transcripts=["hello team", "any questions"]),
         router_llm=_FakeRouterLLM(
             decisions=[
                 {
@@ -5257,7 +5674,7 @@ async def test_fast_barge_in_log_line_includes_session_id(
     pipeline = VoicePipeline(
         transport=transport,
         vad=EnergyVAD(threshold=0.05),
-        stt=_SlowFakeSTT(transcripts=["a", "b", "c", "d"]),
+        stt=_SlowFakeSTT(transcripts=["alpha", "bravo", "charlie", "delta"]),
         router_llm=router,
         answer_llm=_FakeAnswerLLM(answers=["reply"]),
         tts=_StallingTTS(),
@@ -5267,6 +5684,12 @@ async def test_fast_barge_in_log_line_includes_session_id(
             end_of_speech_ms=300,
             confidence_threshold=0.5,
             session_id="session-test-fast-barge",
+            # Pre-Johnny-ckz.14 behaviour — this test asserts on the
+            # fast barge-in log line, not on the noise gate. Disabling
+            # the gate keeps the synthetic single-burst transcripts
+            # ('alpha', 'bravo', ...) flowing through the response loop
+            # so the bot's TTS actually starts and gets interrupted.
+            noise_filter_enabled=False,
         ),
     )
 
