@@ -14,8 +14,12 @@ RUN pip install --no-cache-dir uv==0.11.19
 WORKDIR /workspace
 
 # Install runtime dependencies first so the layer is reused unless deps change.
+# `--extra local-stt` pulls in faster-whisper so the providers `/test`
+# endpoint can run a real smoke call against on-device STT; without it
+# the smoke call dies on `import faster_whisper`. The meet-worker image
+# installs its own pinned copy via pip; this layer covers the api/worker.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-install-project --no-dev
+RUN uv sync --frozen --no-install-project --no-dev --extra local-stt
 
 # Copy source and install the project itself. The `johnny/` package
 # carries SQLAlchemy-free voice-pipeline modules (e.g. `ApprovalGate`,
@@ -25,7 +29,7 @@ COPY alembic.ini ./
 COPY alembic ./alembic
 COPY app ./app
 COPY johnny ./johnny
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --extra local-stt
 
 EXPOSE 8000
 
