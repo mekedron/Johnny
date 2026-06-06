@@ -3132,7 +3132,9 @@ async def test_mode_constants_match_db_string_values() -> None:
     from app.db.models import BotMode
     from johnny.voice_pipeline import (
         APPROVAL_REQUIRED_MODE,
+        AUTONOMOUS_MODE,
         FREE_AUTO_SPEAK_MODE,
+        FREE_FORM_MODES,
         LIMITED_AUTO_SPEAK_MODE,
         LISTEN_ONLY_MODE,
         NON_SPEAKING_MODES,
@@ -3145,17 +3147,291 @@ async def test_mode_constants_match_db_string_values() -> None:
     assert APPROVAL_REQUIRED_MODE == BotMode.APPROVAL_REQUIRED.value
     assert LIMITED_AUTO_SPEAK_MODE == BotMode.LIMITED_AUTO_SPEAK.value
     assert FREE_AUTO_SPEAK_MODE == BotMode.FREE_AUTO_SPEAK.value
+    assert AUTONOMOUS_MODE == BotMode.AUTONOMOUS.value
     assert NON_SPEAKING_MODES == {LISTEN_ONLY_MODE, SUGGEST_ONLY_MODE}
     assert SPEAKING_MODES == {
         APPROVAL_REQUIRED_MODE,
         LIMITED_AUTO_SPEAK_MODE,
         FREE_AUTO_SPEAK_MODE,
+        AUTONOMOUS_MODE,
     }
+    assert FREE_FORM_MODES == {FREE_AUTO_SPEAK_MODE, AUTONOMOUS_MODE}
+    # Free-form modes must be a subset of speaking modes — if a free-form
+    # mode forgets to register itself as speaking, TTS-missing degradation
+    # never kicks in for it (the Johnny-vgl silent-failure bug).
+    assert FREE_FORM_MODES.issubset(SPEAKING_MODES)
     # Every DB-known mode is classified as either non-speaking or speaking
     # — adding a new BotMode without picking a side will fail this check.
     all_modes = {m.value for m in BotMode}
     assert NON_SPEAKING_MODES | SPEAKING_MODES == all_modes
     assert NON_SPEAKING_MODES.isdisjoint(SPEAKING_MODES)
+
+
+# --- Johnny-ckz.2: autonomous mode -----------------------------------------
+
+
+async def test_autonomous_speaks_without_approval_or_allowlist(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Autonomous mode streams the answer LLM straight into TTS, skipping
+    both the approval round and the allowed-reply matcher (Johnny-ckz.2).
+
+    Mirrors free_auto_speak's spec; pins that adding AUTONOMOUS to the
+    pipeline's free-form set doesn't accidentally route through the
+    approval gate or coerce the LLM output into an allowlist phrase.
+    """
+    from johnny.voice_pipeline import (
+        AUTONOMOUS_MODE,
+        InMemoryUtteranceSink,
+        NoopApprovalGate,
+    )
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    tts = _FakeTTS(frame_count=3)
+    answer = _FakeAnswerLLM(answers=["Happy to help — here's the plan."])
+    dsink = InMemoryDecisionSink()
+    usink = InMemoryUtteranceSink()
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["are you here", "thanks"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {
+                    "should_speak": True,
+                    "confidence": 0.95,
+                    "reason": "direct ask",
+                    "suggested_reply": "Yes",
+                },
+                {"should_speak": False, "confidence": 0.1, "reason": "noise"},
+            ]
+        ),
+        answer_llm=answer,
+        tts=tts,
+        event_bus=bus,
+        config=PipelineConfig(
+            mode=AUTONOMOUS_MODE,
+            # allowed_replies present to prove autonomous bypasses the allowlist.
+            allowed_replies=("yes", "no"),
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            instructions="Help the host run the meeting.",
+            # Disable the rate limit so this test only exercises the
+            # free-form-with-approval-bypass path.
+            rate_limit_max_utterances=0,
+        ),
+        approval_gate=NoopApprovalGate(),
+        decision_sink=dsink,
+        utterance_sink=usink,
+    )
+    await pipeline.run()
+
+    types = [e.type for e in bus.snapshot()]
+    assert "agent_spoke" in types
+    assert "agent_suggested" not in types
+    assert "approval_pending" not in types
+
+    spokes = [e for e in bus.snapshot() if isinstance(e, AgentSpoke)]
+    assert len(spokes) == 1
+    assert spokes[0].text == "Happy to help — here's the plan."
+    assert spokes[0].matched_allowed_reply is None
+
+    records = dsink.snapshot()
+    assert len(records) == 2
+    assert records[0].outcome == "spoken"
+    assert records[1].outcome == "suppressed"
+
+    utterances = usink.snapshot()
+    assert len(utterances) == 1
+    assert utterances[0].mode == AUTONOMOUS_MODE
+    assert utterances[0].output_text == "Happy to help — here's the plan."
+    assert utterances[0].matched_allowed_reply is None
+
+
+async def test_autonomous_router_below_threshold_suppresses(
+    two_utterance_pcm: bytes,
+) -> None:
+    """The router's confidence_threshold still gates autonomous mode —
+    ambient chatter must not trigger a reply even though the mode is
+    otherwise free to speak whenever it pleases."""
+    from johnny.voice_pipeline import AUTONOMOUS_MODE
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    tts = _FakeTTS()
+    dsink = InMemoryDecisionSink()
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["soft chatter"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {"should_speak": True, "confidence": 0.3, "reason": "weak"},
+            ]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["resp"]),
+        tts=tts,
+        event_bus=bus,
+        config=PipelineConfig(
+            mode=AUTONOMOUS_MODE,
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.7,
+            instructions="Be a good meeting participant.",
+        ),
+        decision_sink=dsink,
+    )
+    await pipeline.run()
+
+    assert "agent_spoke" not in [e.type for e in bus.snapshot()]
+    assert tts.calls == []
+    assert all(r.outcome == "suppressed" for r in dsink.snapshot())
+
+
+async def test_autonomous_rate_limit_suppresses_without_allowlist(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Autonomous mode enforces the per-session rate limit even when
+    ``allowed_replies`` is empty. The first utterance speaks; the second
+    is suppressed by the cap (max=1 in this test).
+
+    free_auto_speak only applies the cap when allowed_replies is set —
+    autonomous is the production-ready free-form mode where the cap is
+    always required to control cost + talking-over-others (Johnny-ckz.2).
+    """
+    from johnny.voice_pipeline import AUTONOMOUS_MODE, InMemoryUtteranceSink
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    tts = _FakeTTS(frame_count=2)
+    dsink = InMemoryDecisionSink()
+    usink = InMemoryUtteranceSink()
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["question one", "question two"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {
+                    "should_speak": True,
+                    "confidence": 0.95,
+                    "reason": "direct ask 1",
+                    "suggested_reply": "ok",
+                },
+                {
+                    "should_speak": True,
+                    "confidence": 0.95,
+                    "reason": "direct ask 2",
+                    "suggested_reply": "ok",
+                },
+            ]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["first", "second"]),
+        tts=tts,
+        event_bus=bus,
+        config=PipelineConfig(
+            mode=AUTONOMOUS_MODE,
+            allowed_replies=(),
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            instructions="Speak when spoken to.",
+            rate_limit_max_utterances=1,
+            rate_limit_window_ms=5 * 60 * 1000,
+        ),
+        decision_sink=dsink,
+        utterance_sink=usink,
+    )
+    await pipeline.run()
+
+    records = dsink.snapshot()
+    assert len(records) == 2
+    # First utterance was spoken, second hit the rate cap.
+    outcomes = [r.outcome for r in records]
+    assert outcomes == ["spoken", "suppressed"]
+
+    # Only one utterance reached the sink — the cap suppressed the second.
+    utterances = usink.snapshot()
+    assert len(utterances) == 1
+    assert utterances[0].mode == AUTONOMOUS_MODE
+
+
+async def test_free_auto_speak_rate_limit_not_applied_without_allowlist(
+    two_utterance_pcm: bytes,
+) -> None:
+    """free_auto_speak deliberately leaves the cap unenforced when no
+    allowlist is configured (prototype-friendly), while AUTONOMOUS does
+    enforce it. This test pins the difference so a future refactor that
+    consolidates the rate-limit gate keeps the two modes distinct."""
+    from johnny.voice_pipeline import FREE_AUTO_SPEAK_MODE
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    tts = _FakeTTS(frame_count=2)
+    dsink = InMemoryDecisionSink()
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["q1", "q2"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {
+                    "should_speak": True,
+                    "confidence": 0.95,
+                    "reason": "ask 1",
+                    "suggested_reply": "ok",
+                },
+                {
+                    "should_speak": True,
+                    "confidence": 0.95,
+                    "reason": "ask 2",
+                    "suggested_reply": "ok",
+                },
+            ]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["first", "second"]),
+        tts=tts,
+        event_bus=bus,
+        config=PipelineConfig(
+            mode=FREE_AUTO_SPEAK_MODE,
+            allowed_replies=(),
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            # Cap of 1 would suppress the second if free-mode applied it.
+            rate_limit_max_utterances=1,
+            rate_limit_window_ms=5 * 60 * 1000,
+        ),
+        decision_sink=dsink,
+    )
+    await pipeline.run()
+
+    records = dsink.snapshot()
+    assert len(records) == 2
+    assert [r.outcome for r in records] == ["spoken", "spoken"]
 
 
 # --- Johnny-ckz.3: whole-meeting context handling ------------------------

@@ -22,6 +22,11 @@ verbatim so a user can deliberately blank out a base instruction.
 When mode is ``limited_auto_speak``, the effective allowed-replies list
 (meeting override OR template base) must be non-empty; we reject the
 PUT with HTTP 422 if it would leave the pipeline with nothing to say.
+
+When mode is ``autonomous``, the effective instructions (meeting
+override OR template base) must be non-empty — autonomous mode has no
+allowlist or approval round, so the instructions are the only
+governance for what the bot says. Save fails with HTTP 422 otherwise.
 """
 
 from __future__ import annotations
@@ -148,6 +153,36 @@ def _validate_limited_auto_speak(
         )
 
 
+def _validate_autonomous(
+    mode: BotMode,
+    instructions_override: str | None,
+    template: ProfileTemplate,
+) -> None:
+    """Reject save when autonomous mode would have no instructions.
+
+    Effective instructions = meeting override (when explicitly set to a
+    non-empty string) else template base. Either source must yield a
+    non-empty value because autonomous mode has no allowlist or approval
+    round; the instructions are the only governance for the bot's
+    free-form output.
+    """
+    if mode is not BotMode.AUTONOMOUS:
+        return
+    if instructions_override is not None and instructions_override.strip():
+        return
+    template_instructions = (template.base_instructions or "").strip()
+    if template_instructions:
+        return
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            "instructions must be non-empty when mode is 'autonomous' "
+            "(either set per-meeting overrides, or use a template that has "
+            "non-empty base_instructions)"
+        ),
+    )
+
+
 def _get_config_for_event(
     session: Session, event_id: int
 ) -> MeetingConfig | None:
@@ -198,6 +233,7 @@ def upsert_meeting_config(
 
     mode = payload.mode if payload.mode is not None else template.mode
     _validate_limited_auto_speak(mode, payload.allowed_replies, template)
+    _validate_autonomous(mode, payload.instructions, template)
 
     existing = _get_config_for_event(session, event_id)
     if existing is None:

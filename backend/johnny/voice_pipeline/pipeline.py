@@ -84,6 +84,14 @@ exact behaviour.
 DEFAULT_MODE = "limited_auto_speak"
 DEFAULT_RATE_LIMIT_MAX_UTTERANCES = 3
 DEFAULT_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000
+DEFAULT_AUTONOMOUS_RATE_LIMIT_MAX_UTTERANCES = 2
+"""Lower default cap for autonomous mode.
+
+Each autonomous utterance is free-form (so longer + more expensive)
+than a limited_auto_speak pick from a short allowlist, so the default
+cap is more conservative. The meeting config can override
+``rate_limit_max_utterances`` to raise or lower it per meeting.
+"""
 DEFAULT_APPROVAL_TIMEOUT_SECONDS = 15.0
 DEFAULT_CONTEXT_TOKEN_BUDGET = 0
 """Token budget for the rolling transcript window plus static context.
@@ -126,6 +134,14 @@ LIMITED_AUTO_SPEAK_MODE = "limited_auto_speak"
 # (via confidence_threshold), so ambient chatter doesn't trigger
 # replies, but anything the model wants to say goes through.
 FREE_AUTO_SPEAK_MODE = "free_auto_speak"
+# Autonomous: like FREE_AUTO_SPEAK in pipeline behaviour (no allowlist,
+# no approval round, router gates via confidence_threshold), but the
+# rate limit is always enforced (regardless of ``allowed_replies``)
+# and templates / meeting configs are validated to require non-empty
+# instructions before they save. Instructions are the only governance
+# for what the bot says, so blank instructions in autonomous mode are
+# never a valid configuration.
+AUTONOMOUS_MODE = "autonomous"
 
 NON_SPEAKING_MODES: frozenset[str] = frozenset(
     {LISTEN_ONLY_MODE, SUGGEST_ONLY_MODE}
@@ -140,7 +156,12 @@ but the answer stage is replaced by an :class:`AgentSuggested` event.
 """
 
 SPEAKING_MODES: frozenset[str] = frozenset(
-    {APPROVAL_REQUIRED_MODE, LIMITED_AUTO_SPEAK_MODE, FREE_AUTO_SPEAK_MODE}
+    {
+        APPROVAL_REQUIRED_MODE,
+        LIMITED_AUTO_SPEAK_MODE,
+        FREE_AUTO_SPEAK_MODE,
+        AUTONOMOUS_MODE,
+    }
 )
 """Modes that depend on a working TTS provider to produce audio.
 
@@ -150,6 +171,17 @@ decide whether a missing TTS provider must trigger the degradation to
 mode automatically picks up the degradation path instead of silently
 shipping a regression where the router approves a reply but TTS can't
 play it (the Johnny-vgl free_auto_speak symptom).
+"""
+
+FREE_FORM_MODES: frozenset[str] = frozenset(
+    {FREE_AUTO_SPEAK_MODE, AUTONOMOUS_MODE}
+)
+"""Speaking modes that bypass the ``allowed_replies`` allowlist.
+
+Used by :meth:`VoicePipeline._answer_and_speak` to decide whether the
+LLM's free-text output should stream straight into TTS or be coerced to
+an allowed reply. Centralising the membership makes future free-form
+modes inherit the bypass automatically.
 """
 
 _SENTENCE_BOUNDARY = re.compile(r"(?:[.!?]+[\"')\]]*\s+)|(?:\n+)")
@@ -651,13 +683,14 @@ class VoicePipeline:
         prompt_text = _serialize_prompt(messages)
 
         collected: list[bytes]
-        # Free-speech mode ignores allowed_replies — the bot is meant
-        # to chat naturally so we always stream the LLM's free-text
-        # response straight into TTS, regardless of any allowlist that
-        # might still be configured on the meeting.
+        # Free-form modes (free_auto_speak / autonomous) ignore
+        # allowed_replies — the bot is meant to chat naturally so we
+        # always stream the LLM's free-text response straight into TTS,
+        # regardless of any allowlist that might still be configured on
+        # the meeting.
         use_allowlist = (
             bool(self.config.allowed_replies)
-            and self.config.mode != FREE_AUTO_SPEAK_MODE
+            and self.config.mode not in FREE_FORM_MODES
         )
         if use_allowlist:
             picked = await self._select_allowed_reply(messages)
@@ -963,15 +996,26 @@ class VoicePipeline:
         return int((loop.time() - self._session_started_at) * 1000)
 
     def _is_rate_limited(self) -> bool:
-        """Return True when the limited-auto-speak rate limit is exceeded.
+        """Return True when the per-session utterance cap is exceeded.
 
-        Only enforced when ``allowed_replies`` is set — that's the
-        operational marker for Limited auto-speak mode. Setting either
-        ``rate_limit_max_utterances`` or ``rate_limit_window_ms`` to a
-        non-positive value disables the limit. The recent-utterance list
-        is pruned in place each time this is called.
+        Enforced when either:
+
+        * ``allowed_replies`` is set (the operational marker for
+          Limited auto-speak mode), OR
+        * the mode is ``autonomous`` (free-form output with no
+          allowlist — capped explicitly to limit cost + over-talking).
+
+        ``free_auto_speak`` is deliberately *not* rate-limited so
+        prototypes / dev sessions can iterate freely; AUTONOMOUS is the
+        production-ready free-form mode where the cap is required.
+
+        Setting either ``rate_limit_max_utterances`` or
+        ``rate_limit_window_ms`` to a non-positive value disables the
+        limit. The recent-utterance list is pruned in place each time
+        this is called.
         """
-        if not self.config.allowed_replies:
+        is_autonomous = self.config.mode == AUTONOMOUS_MODE
+        if not self.config.allowed_replies and not is_autonomous:
             return False
         if (
             self.config.rate_limit_max_utterances <= 0
@@ -1384,8 +1428,11 @@ def _serialize_prompt(messages: Sequence[ChatMessage]) -> str:
 
 __all__ = [
     "APPROVAL_REQUIRED_MODE",
+    "AUTONOMOUS_MODE",
     "FREE_AUTO_SPEAK_MODE",
+    "FREE_FORM_MODES",
     "DEFAULT_APPROVAL_TIMEOUT_SECONDS",
+    "DEFAULT_AUTONOMOUS_RATE_LIMIT_MAX_UTTERANCES",
     "DEFAULT_CONFIDENCE_THRESHOLD",
     "DEFAULT_CONTEXT_TOKEN_BUDGET",
     "DEFAULT_END_OF_SPEECH_MS",

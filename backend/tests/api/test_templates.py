@@ -163,6 +163,86 @@ def test_create_limited_auto_speak_with_replies_ok(client: TestClient) -> None:
     assert resp.json()["allowed_replies"] == ["Yes", "No", "Could you repeat that?"]
 
 
+def test_create_autonomous_requires_instructions(client: TestClient) -> None:
+    resp = client.post(
+        "/templates",
+        json=_create_payload(mode="autonomous", base_instructions=""),
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert "base_instructions" in str(body["detail"])
+    assert "autonomous" in str(body["detail"])
+
+
+def test_create_autonomous_whitespace_only_instructions_rejected(
+    client: TestClient,
+) -> None:
+    resp = client.post(
+        "/templates",
+        json=_create_payload(mode="autonomous", base_instructions="   \n\t "),
+    )
+    assert resp.status_code == 422
+
+
+def test_create_autonomous_with_instructions_ok(client: TestClient) -> None:
+    resp = client.post(
+        "/templates",
+        json=_create_payload(
+            mode="autonomous",
+            base_instructions="Speak when addressed by name.",
+        ),
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["mode"] == "autonomous"
+    # Autonomous deliberately does NOT require allowed_replies; the empty
+    # list shouldn't trigger any validation error.
+    assert body["allowed_replies"] == []
+
+
+def test_update_to_autonomous_without_instructions_fails(client: TestClient) -> None:
+    created = client.post("/templates", json=_create_payload()).json()
+    # Clear instructions in same patch as the mode flip — server should
+    # see the post-patch row with mode=autonomous + empty instructions
+    # and reject.
+    resp = client.patch(
+        f"/templates/{created['id']}",
+        json={"mode": "autonomous", "base_instructions": ""},
+    )
+    assert resp.status_code == 422
+    assert "autonomous" in str(resp.json()["detail"])
+
+
+def test_update_to_autonomous_with_instructions_ok(client: TestClient) -> None:
+    created = client.post(
+        "/templates",
+        json=_create_payload(base_instructions="Run the meeting smoothly."),
+    ).json()
+    resp = client.patch(
+        f"/templates/{created['id']}",
+        json={"mode": "autonomous"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "autonomous"
+    assert body["base_instructions"] == "Run the meeting smoothly."
+
+
+def test_update_clearing_instructions_on_autonomous_fails(client: TestClient) -> None:
+    created = client.post(
+        "/templates",
+        json=_create_payload(
+            mode="autonomous",
+            base_instructions="Help the host.",
+        ),
+    ).json()
+    resp = client.patch(
+        f"/templates/{created['id']}",
+        json={"base_instructions": ""},
+    )
+    assert resp.status_code == 422
+
+
 def test_create_duplicate_name_returns_409(client: TestClient) -> None:
     assert client.post("/templates", json=_create_payload()).status_code == 201
     resp = client.post("/templates", json=_create_payload())

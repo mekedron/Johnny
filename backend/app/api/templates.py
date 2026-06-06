@@ -55,6 +55,20 @@ class TemplateBase(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_autonomous_has_instructions(self) -> TemplateBase:
+        # Autonomous mode runs free-form generation governed only by
+        # the template's instructions; blank instructions would leave
+        # the bot to invent its own behaviour, which is exactly what we
+        # need to prevent at the configuration boundary.
+        if self.mode is BotMode.AUTONOMOUS and not self.base_instructions.strip():
+            raise ValueError(
+                "base_instructions must be non-empty when mode is 'autonomous' "
+                "— autonomous mode has no allowlist or approval round, so the "
+                "instructions are the only governance for what the bot says"
+            )
+        return self
+
 
 class TemplateCreate(TemplateBase):
     """Payload for creating a profile template."""
@@ -208,6 +222,16 @@ def update_template(
             detail=(
                 "allowed_replies must be a non-empty list when mode is "
                 "'limited_auto_speak'"
+            ),
+        )
+    if row.mode is BotMode.AUTONOMOUS and not (row.base_instructions or "").strip():
+        session.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "base_instructions must be non-empty when mode is 'autonomous' "
+                "— autonomous mode has no allowlist or approval round, so the "
+                "instructions are the only governance for what the bot says"
             ),
         )
 

@@ -365,6 +365,151 @@ def test_put_limited_auto_speak_with_empty_overrides_and_no_template_replies(
     assert "allowed_replies" in str(resp.json()["detail"])
 
 
+# --- Johnny-ckz.2: autonomous mode validation ------------------------------
+
+
+@pytest.fixture
+def seed_template_autonomous(db_session: Session) -> ProfileTemplate:
+    """Template configured for autonomous mode with non-empty instructions."""
+    row = ProfileTemplate(
+        name="Autonomous",
+        mode=BotMode.AUTONOMOUS,
+        base_instructions="Be a helpful meeting participant.",
+        base_context="",
+        allowed_replies=[],
+        confidence_threshold=0.8,
+    )
+    db_session.add(row)
+    db_session.commit()
+    db_session.refresh(row)
+    return row
+
+
+@pytest.fixture
+def seed_template_listen_blank(db_session: Session) -> ProfileTemplate:
+    """Listen-only template with deliberately blank instructions —
+    used to verify autonomous-mode validation rejects falling through
+    to a template whose instructions are empty."""
+    row = ProfileTemplate(
+        name="Blank listen",
+        mode=BotMode.LISTEN_ONLY,
+        base_instructions="",
+        base_context="",
+        allowed_replies=[],
+        confidence_threshold=0.7,
+    )
+    db_session.add(row)
+    db_session.commit()
+    db_session.refresh(row)
+    return row
+
+
+def test_put_autonomous_with_template_instructions_ok(
+    client: TestClient,
+    seed_event: CalendarEvent,
+    seed_template_autonomous: ProfileTemplate,
+    seed_account: GoogleAccount,
+) -> None:
+    """Autonomous mode with a template providing instructions and no
+    per-meeting override should save successfully."""
+    payload = _upsert_payload(
+        profile_template_id=seed_template_autonomous.id,
+        identity_account_id=seed_account.id,
+        mode="autonomous",
+        instructions=None,
+        allowed_replies=None,
+    )
+    resp = client.put(
+        f"/calendar/events/{seed_event.id}/meeting-config", json=payload
+    )
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["mode"] == "autonomous"
+
+
+def test_put_autonomous_with_per_meeting_instructions_ok(
+    client: TestClient,
+    seed_event: CalendarEvent,
+    seed_template_listen_blank: ProfileTemplate,
+    seed_account: GoogleAccount,
+) -> None:
+    """Template instructions blank but per-meeting override populated
+    → still acceptable; the override is the governance source."""
+    payload = _upsert_payload(
+        profile_template_id=seed_template_listen_blank.id,
+        identity_account_id=seed_account.id,
+        mode="autonomous",
+        instructions="Drive the meeting for the host.",
+        allowed_replies=None,
+    )
+    resp = client.put(
+        f"/calendar/events/{seed_event.id}/meeting-config", json=payload
+    )
+    assert resp.status_code == 200, resp.json()
+
+
+def test_put_autonomous_blank_override_and_blank_template_rejected(
+    client: TestClient,
+    seed_event: CalendarEvent,
+    seed_template_listen_blank: ProfileTemplate,
+    seed_account: GoogleAccount,
+) -> None:
+    """Both sources blank → rejected with 422 and a clear message."""
+    payload = _upsert_payload(
+        profile_template_id=seed_template_listen_blank.id,
+        identity_account_id=seed_account.id,
+        mode="autonomous",
+        instructions=None,
+        allowed_replies=None,
+    )
+    resp = client.put(
+        f"/calendar/events/{seed_event.id}/meeting-config", json=payload
+    )
+    assert resp.status_code == 422
+    assert "instructions" in str(resp.json()["detail"])
+    assert "autonomous" in str(resp.json()["detail"])
+
+
+def test_put_autonomous_whitespace_override_treated_as_blank(
+    client: TestClient,
+    seed_event: CalendarEvent,
+    seed_template_listen_blank: ProfileTemplate,
+    seed_account: GoogleAccount,
+) -> None:
+    """Whitespace-only instructions count as blank for validation."""
+    payload = _upsert_payload(
+        profile_template_id=seed_template_listen_blank.id,
+        identity_account_id=seed_account.id,
+        mode="autonomous",
+        instructions="   \n\t ",
+        allowed_replies=None,
+    )
+    resp = client.put(
+        f"/calendar/events/{seed_event.id}/meeting-config", json=payload
+    )
+    assert resp.status_code == 422
+
+
+def test_put_autonomous_does_not_require_allowed_replies(
+    client: TestClient,
+    seed_event: CalendarEvent,
+    seed_template_autonomous: ProfileTemplate,
+    seed_account: GoogleAccount,
+) -> None:
+    """Autonomous deliberately ignores allowed_replies — empty list ok."""
+    payload = _upsert_payload(
+        profile_template_id=seed_template_autonomous.id,
+        identity_account_id=seed_account.id,
+        mode="autonomous",
+        instructions="Take notes and answer.",
+        allowed_replies=[],
+    )
+    resp = client.put(
+        f"/calendar/events/{seed_event.id}/meeting-config", json=payload
+    )
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["allowed_replies"] == []
+
+
 def test_put_rejects_threshold_out_of_range(
     client: TestClient,
     seed_event: CalendarEvent,

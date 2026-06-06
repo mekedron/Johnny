@@ -49,6 +49,7 @@ from johnny.meet_worker.pipeline_runner import (
 )
 from johnny.voice_pipeline import (
     APPROVAL_REQUIRED_MODE,
+    AUTONOMOUS_MODE,
     FREE_AUTO_SPEAK_MODE,
     LIMITED_AUTO_SPEAK_MODE,
     LISTEN_ONLY_MODE,
@@ -313,7 +314,12 @@ async def test_assemble_pipeline_no_tts_degrades_and_skips_approval_gate(
 
 @pytest.mark.parametrize(
     "speaking_mode",
-    [APPROVAL_REQUIRED_MODE, LIMITED_AUTO_SPEAK_MODE, FREE_AUTO_SPEAK_MODE],
+    [
+        APPROVAL_REQUIRED_MODE,
+        LIMITED_AUTO_SPEAK_MODE,
+        FREE_AUTO_SPEAK_MODE,
+        AUTONOMOUS_MODE,
+    ],
 )
 async def test_assemble_pipeline_no_tts_degrades_every_speaking_mode(
     _registered_fake_providers: Any,

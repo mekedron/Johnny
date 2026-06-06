@@ -87,6 +87,13 @@
 				formSubmitting = false;
 				return;
 			}
+			if (formMode === 'autonomous' && formInstructions.trim() === '') {
+				formError =
+					'Instructions must be non-empty for Autonomous mode — they are the only ' +
+					'governance for what the bot says (no approval round, no allowlist).';
+				formSubmitting = false;
+				return;
+			}
 			const payload: TemplateCreatePayload = {
 				name: formName.trim(),
 				mode: formMode,
@@ -242,13 +249,20 @@
 						<option value={m}>{BOT_MODE_LABEL[m]}</option>
 					{/each}
 				</select>
+				{#if formMode === 'autonomous'}
+					<small>
+						Autonomous: no approval round, no allowlist — the bot speaks free-form
+						guided only by the instructions below. A per-session rate limit applies.
+					</small>
+				{/if}
 			</label>
 			<label>
-				<span>Base instructions</span>
+				<span>Base instructions{formMode === 'autonomous' ? ' (required)' : ''}</span>
 				<textarea
 					bind:value={formInstructions}
 					rows="3"
 					placeholder="What Johnny should do in this meeting."
+					required={formMode === 'autonomous'}
 				></textarea>
 			</label>
 			<label>
@@ -415,6 +429,14 @@
 	.mode-badge.mode-limited_auto_speak {
 		background: #fee2e2;
 		color: #991b1b;
+	}
+	.mode-badge.mode-free_auto_speak {
+		background: #fde68a;
+		color: #92400e;
+	}
+	.mode-badge.mode-autonomous {
+		background: #fce7f3;
+		color: #9d174d;
 	}
 	.ref-badge {
 		font-size: 0.75rem;

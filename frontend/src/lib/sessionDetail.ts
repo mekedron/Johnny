@@ -25,7 +25,8 @@ export type BotMode =
 	| 'suggest_only'
 	| 'approval_required'
 	| 'limited_auto_speak'
-	| 'free_auto_speak';
+	| 'free_auto_speak'
+	| 'autonomous';
 
 export interface TranscriptChunk {
 	id: number;

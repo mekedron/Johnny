@@ -3,10 +3,10 @@
   "sessionId": "10afcece-cc40-43a0-8f7d-e7372e7ab552",
   "status": "running",
   "startedAt": "2026-06-06T05:38:50.502Z",
-  "updatedAt": "2026-06-06T07:02:22.995Z",
-  "currentIteration": 5,
+  "updatedAt": "2026-06-06T07:18:17.395Z",
+  "currentIteration": 6,
   "maxIterations": 0,
-  "tasksCompleted": 5,
+  "tasksCompleted": 6,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -92,8 +92,8 @@
       {
         "id": "Johnny-ckz.3",
         "title": "Bot carries the whole meeting's context (not a 6-turn rolling window) when routing and answering",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-466",
@@ -171,6 +171,16 @@
       "durationMs": 512446,
       "startedAt": "2026-06-06T06:28:42.326Z",
       "endedAt": "2026-06-06T06:37:14.772Z"
+    },
+    {
+      "iteration": 6,
+      "status": "completed",
+      "taskId": "Johnny-ckz.3",
+      "taskTitle": "Bot carries the whole meeting's context (not a 6-turn rolling window) when routing and answering",
+      "taskCompleted": true,
+      "durationMs": 1500853,
+      "startedAt": "2026-06-06T06:37:21.290Z",
+      "endedAt": "2026-06-06T07:02:22.143Z"
     }
   ],
   "skippedTaskIds": [],

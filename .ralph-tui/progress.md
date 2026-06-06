@@ -45,16 +45,32 @@ after each iteration and it's included in prompts for context.
   uses that id; if that row is still PENDING (approval_required mode
   after approve), the same transaction flips it to SPOKEN. Production's
   PENDING → SPOKEN audit flip lives here, NOT in the pipeline.
-- **Speaking-mode classification lives in two constants.**
+- **Speaking-mode classification lives in three constants.**
   `johnny.voice_pipeline.NON_SPEAKING_MODES` (listen_only / suggest_only)
   and `SPEAKING_MODES` (approval_required / limited_auto_speak /
-  free_auto_speak) partition `BotMode`. A test in
-  `test_pipeline.py::test_mode_constants_match_db_string_values`
-  enforces the partition, so adding a new `BotMode` value forces the
-  author to classify it. The TTS-missing degradation in
+  free_auto_speak / autonomous) partition `BotMode`.
+  `FREE_FORM_MODES` (free_auto_speak / autonomous) is the subset of
+  speaking modes that bypass the `allowed_replies` allowlist. A test
+  in `test_pipeline.py::test_mode_constants_match_db_string_values`
+  enforces the partition and the `FREE_FORM_MODES ⊆ SPEAKING_MODES`
+  invariant, so adding a new `BotMode` value forces the author to
+  classify it. The TTS-missing degradation in
   `pipeline_runner._assemble_pipeline` reads `SPEAKING_MODES` so any
   future speaking mode automatically downgrades to `suggest_only`
-  when TTS is absent instead of silently producing no audio.
+  when TTS is absent instead of silently producing no audio;
+  `_answer_and_speak` reads `FREE_FORM_MODES` to decide allowlist
+  bypass without inline mode literals.
+- **AUTONOMOUS vs FREE_AUTO_SPEAK semantics.** Both modes share the
+  speaking pipeline (no allowlist, no approval round, router gates
+  via confidence_threshold). The differences are governance:
+  AUTONOMOUS always enforces the per-session rate limit (lower
+  default cap of 2 vs 3) and templates / meeting_configs reject
+  blank instructions because instructions are the only governance.
+  FREE_AUTO_SPEAK is the dev-friendly variant: cap unenforced
+  without an allowlist, instructions are optional. Adding a future
+  free-form mode is one-line: append to `FREE_FORM_MODES` and
+  `SPEAKING_MODES`; if it needs rate limiting, special-case the
+  mode in `_is_rate_limited`.
 - **Transcript history is unbounded by default, capped by token budget.**
   Since Johnny-ckz.3, `DEFAULT_TRANSCRIPT_WINDOW_SIZE = 0` means "no
   hard cap" — the pipeline keeps every finalised transcript for the
@@ -91,6 +107,149 @@ after each iteration and it's included in prompts for context.
   `_build_input_window` snapshot stores both verbatim so a
   reproducible audit row can show what the LLM saw.
 
+---
+
+## 2026-06-06 - Johnny-ckz.2
+- Added `BotMode.AUTONOMOUS` as the production-ready free-form speech
+  mode. AUTONOMOUS shares the pipeline path with FREE_AUTO_SPEAK (no
+  allowlist, no approval gate; router's confidence_threshold still
+  gates whether the bot speaks), but with two distinguishing
+  production constraints: the per-session rate limit is always
+  enforced (regardless of `allowed_replies`) with a lower default
+  cap (2 vs 3), and templates/meeting_configs reject blank
+  instructions because instructions are the only governance for what
+  the bot says.
+- Files changed (backend):
+  - `app/db/models.py` — `BotMode.AUTONOMOUS = "autonomous"`.
+  - `alembic/versions/0006_bot_mode_autonomous.py` — NEW. Extends the
+    CHECK constraints on `profile_templates.mode`,
+    `meeting_configs.mode`, and `agent_utterances.mode` to include
+    `autonomous`. Follows the same pattern as 0004 (free_auto_speak).
+  - `johnny/voice_pipeline/pipeline.py` — new `AUTONOMOUS_MODE`
+    constant, added to `SPEAKING_MODES`. New `FREE_FORM_MODES`
+    frozenset groups FREE_AUTO_SPEAK + AUTONOMOUS so
+    `_answer_and_speak` decides allowlist bypass from the set rather
+    than an inline `!=` check. `_is_rate_limited` now enforces the
+    cap when mode is `autonomous` even with empty `allowed_replies`
+    (the operational distinction between AUTONOMOUS and
+    FREE_AUTO_SPEAK). New `DEFAULT_AUTONOMOUS_RATE_LIMIT_MAX_UTTERANCES`
+    constant defaults to 2 (vs 3 for limited_auto_speak) since
+    autonomous utterances are free-form and longer.
+  - `johnny/voice_pipeline/__init__.py` — re-exports `AUTONOMOUS_MODE`,
+    `FREE_FORM_MODES`, `DEFAULT_AUTONOMOUS_RATE_LIMIT_MAX_UTTERANCES`.
+  - `app/api/templates.py` — `_validate_autonomous_has_instructions`
+    model validator on the create payload, plus a parallel post-patch
+    check on update so a partial PATCH that flips mode→autonomous
+    while leaving instructions blank also fails.
+  - `app/api/meeting_configs.py` — new `_validate_autonomous` helper
+    runs alongside `_validate_limited_auto_speak`; reads the
+    effective instructions (per-meeting override OR template base)
+    and rejects with 422 + a clear message when both are blank.
+    Whitespace-only override is treated as blank (same as the
+    template fallback).
+  - `app/services/session_status_subscriber.py` —
+    `apply_router_decision_event` extends the `mode in (...)` set so
+    autonomous router decisions land as `outcome=spoken` (the audit
+    semantics are identical to limited_auto_speak/free_auto_speak).
+- Files changed (frontend):
+  - `lib/templates.ts` — `BotMode` union, `BOT_MODES` list, and
+    `BOT_MODE_LABEL` map all extended with `'autonomous'` /
+    `'Autonomous'`.
+  - `lib/sessionDetail.ts` — `BotMode` union extended.
+  - `routes/templates/+page.svelte` — form validation rejects an
+    empty instructions textarea when mode is autonomous (matches the
+    backend rule), the instructions field gets a `(required)` suffix
+    and `required` attribute in autonomous mode, the mode picker
+    surfaces a small note about "no approval round, no allowlist,
+    per-session rate limit", and `.mode-badge.mode-autonomous` gets
+    a distinct pink colour.
+- Test changes:
+  - `tests/test_db_models.py` — pinned `BotMode` enum members now
+    include `autonomous`.
+  - `tests/voice_pipeline/test_pipeline.py` — 4 new tests:
+    - `test_autonomous_speaks_without_approval_or_allowlist` —
+      mirrors the free_auto_speak spec test; pins that AUTONOMOUS
+      bypasses allowlist + approval and routes through the free-form
+      LLM-into-TTS path even when allowed_replies is configured.
+    - `test_autonomous_router_below_threshold_suppresses` — the
+      router's `confidence_threshold` still gates AUTONOMOUS so
+      ambient chatter doesn't trigger a reply.
+    - `test_autonomous_rate_limit_suppresses_without_allowlist` —
+      cap=1, two router approvals → first speaks, second is
+      suppressed (proves the rate limit applies in AUTONOMOUS even
+      with empty allowed_replies).
+    - `test_free_auto_speak_rate_limit_not_applied_without_allowlist`
+      — control test pinning that FREE_AUTO_SPEAK deliberately
+      *does not* apply the cap without allowed_replies (so a future
+      refactor that consolidates the gate keeps the two modes
+      distinct).
+    - `test_mode_constants_match_db_string_values` extended to
+      assert `AUTONOMOUS_MODE`, `FREE_FORM_MODES`, and the
+      `FREE_FORM_MODES.issubset(SPEAKING_MODES)` invariant.
+  - `tests/test_meet_worker_pipeline_runner.py` — the
+    parametrize list in
+    `test_assemble_pipeline_no_tts_degrades_every_speaking_mode`
+    gained `AUTONOMOUS_MODE` so the TTS-missing degradation path
+    automatically covers it.
+  - `tests/api/test_templates.py` — 6 new tests for the autonomous
+    instructions validation (create with blank rejected, whitespace-
+    only rejected, create with instructions ok, PATCH to autonomous
+    while clearing instructions rejected, PATCH to autonomous on a
+    template with instructions ok, PATCH clearing instructions on
+    an autonomous row rejected).
+  - `tests/api/test_meeting_configs.py` — 5 new tests for the
+    autonomous instructions validation: template-provided
+    instructions accepted, per-meeting override accepted when
+    template is blank, both blank rejected, whitespace-only override
+    rejected, allowed_replies emptiness not required.
+- Migration verified: `alembic upgrade head` ran cleanly on the live
+  Postgres (0004 → 0005 → 0006), and `pg_get_constraintdef` on the
+  three `ck_*_mode` constraints confirms `'autonomous'` is now in
+  each CHECK list.
+- Quality gates: `uv run pytest` 1577 collected, 1563 passed, 14
+  skipped (pre-existing). `uv run ruff check` and `uv run mypy` have
+  7 + 7 pre-existing errors in `johnny/meet_worker/bootstrap.py` and
+  test files unrelated to this work (verified by `git stash` then
+  re-running). Frontend: `pnpm typecheck` 0 errors, `pnpm lint` no
+  issues.
+- **Learnings:**
+  - The bead was filed assuming 4 BotMode values, but the codebase
+    already had a 5th (`free_auto_speak`, added in Johnny-d2g /
+    standardised in Johnny-vgl). FREE_AUTO_SPEAK already implements
+    "speak free-form, bypass allowlist and approval gate" — the
+    behavioural piece of the AUTONOMOUS request. The two meaningful
+    differences for AUTONOMOUS are governance: rate limit always
+    on (FREE_AUTO_SPEAK leaves it off when allowed_replies is
+    empty) and non-empty instructions are required at the
+    configuration boundary. So AUTONOMOUS lands as the
+    "production-ready" sibling of FREE_AUTO_SPEAK rather than a
+    rename — keeps FREE_AUTO_SPEAK as the dev-friendly free-form
+    mode and adds AUTONOMOUS for the supervised-instruction case.
+  - The autonomous validation has to live in *two* places on the
+    meeting_configs API: the upsert checks the post-merge effective
+    instructions (template-provided OR per-meeting override) so a
+    template that has good instructions doesn't force every
+    meeting_config to re-paste them. Mirror the existing
+    `_validate_limited_auto_speak` pattern for consistency.
+  - Centralising the "free-form" classification into a
+    `FREE_FORM_MODES` frozenset (rather than `mode !=
+    FREE_AUTO_SPEAK_MODE` literals) follows the same playbook as
+    the `SPEAKING_MODES` set in Johnny-vgl — adding a future
+    free-form mode means appending to one set, not editing every
+    site that checks "is this an allowlist-bypass mode?". The
+    `FREE_FORM_MODES.issubset(SPEAKING_MODES)` assertion is the
+    invariant that fails fast if someone adds a free-form mode
+    without classifying it as speaking (which would break the
+    TTS-missing degradation path the same way free_auto_speak
+    silently broke in pre-Johnny-vgl).
+  - Rate-limit semantics differ between the two free-form modes by
+    design: FREE_AUTO_SPEAK is intentionally cap-free without an
+    allowlist so dev sessions can iterate; AUTONOMOUS always
+    enforces the cap because it's the supervised production-ready
+    variant. The new "rate_limit_not_applied" control test exists
+    so a well-meaning future refactor that "unifies" the gate
+    doesn't silently break the prototype-friendly behaviour of
+    FREE_AUTO_SPEAK.
 ---
 
 ## 2026-06-06 - Johnny-upg (rerun against freshly-rebuilt stack)

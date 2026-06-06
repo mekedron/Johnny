@@ -58,6 +58,14 @@ class BotMode(enum.StrEnum):
     # router's confidence_threshold still gates whether the bot speaks
     # at all, so noise + ambient chatter still get filtered.
     FREE_AUTO_SPEAK = "free_auto_speak"
+    # Autonomous: free-form generation governed solely by the profile
+    # template's instructions and context. No allowed_replies allowlist,
+    # no approval round; the router's confidence_threshold and a
+    # per-session rate limit (default cap lower than limited_auto_speak
+    # since utterances are longer) keep cost + over-talking in check.
+    # Validation requires non-empty instructions because those are the
+    # only governance for what the bot will say.
+    AUTONOMOUS = "autonomous"
 
 
 class BotSessionStatus(enum.StrEnum):
