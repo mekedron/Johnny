@@ -145,7 +145,21 @@ def apply_transcript_event(db: Session, payload: dict[str, Any]) -> bool:
 
 
 def apply_router_decision_event(db: Session, payload: dict[str, Any]) -> bool:
-    """Insert one agent_decisions row from a ``router_decision_made`` event."""
+    """Insert one agent_decisions row from a ``router_decision_made`` event.
+
+    Choose the row's ``outcome`` based on the pipeline mode so the UI
+    doesn't get spurious "pending approval" cards in auto-speak modes:
+
+    * approval_required + should_speak: ``pending`` — the human is
+      expected to approve / reject.
+    * limited_auto_speak / free_auto_speak + should_speak: ``spoken``
+      — the answer + TTS stages run immediately, no human in the
+      loop. (If TTS fails, the audit row is slightly optimistic; the
+      missing ``agent_utterances`` row distinguishes a real failure.)
+    * suggest_only + should_speak: ``suggested`` — UI surfaces the
+      suggested reply but no audio is produced.
+    * any mode + not should_speak: ``suppressed``.
+    """
     if payload.get("type") != ROUTER_DECISION_EVENT_TYPE:
         return False
     session_id = _coerce_int_id(payload.get("session_id"))
@@ -156,13 +170,25 @@ def apply_router_decision_event(db: Session, payload: dict[str, Any]) -> bool:
     reason = str(payload.get("reason") or "")
     reply_type = payload.get("reply_type")
     suggested_reply = payload.get("suggested_reply")
-    # Default outcome reflects the router's stance — the answer stage
-    # may later flip it to spoken / suggested / etc. via separate events.
-    outcome = (
-        DecisionOutcome.SUPPRESSED if not should_speak else DecisionOutcome.PENDING
-    )
-    input_window = payload.get("input_window") or {}
-    raw_output = payload.get("raw_output") or {}
+    input_window_raw = payload.get("input_window") or {}
+    input_window = input_window_raw if isinstance(input_window_raw, dict) else {}
+    raw_output_raw = payload.get("raw_output") or {}
+    raw_output = raw_output_raw if isinstance(raw_output_raw, dict) else {}
+    mode = ""
+    if isinstance(input_window, dict):
+        mode = str(input_window.get("mode") or "").strip()
+    if not should_speak:
+        outcome = DecisionOutcome.SUPPRESSED
+    elif mode == "approval_required":
+        outcome = DecisionOutcome.PENDING
+    elif mode == "suggest_only":
+        outcome = DecisionOutcome.SUGGESTED
+    elif mode in ("limited_auto_speak", "free_auto_speak"):
+        outcome = DecisionOutcome.SPOKEN
+    else:
+        # Unknown / listen_only — leave as suppressed; the bot isn't
+        # going to speak anyway.
+        outcome = DecisionOutcome.SUPPRESSED
     row = AgentDecision(
         bot_session_id=session_id,
         should_speak=should_speak,
@@ -173,8 +199,8 @@ def apply_router_decision_event(db: Session, payload: dict[str, Any]) -> bool:
             str(suggested_reply) if isinstance(suggested_reply, str) else None
         ),
         outcome=outcome,
-        input_window=input_window if isinstance(input_window, dict) else {},
-        raw_output=raw_output if isinstance(raw_output, dict) else {},
+        input_window=input_window,
+        raw_output=raw_output,
     )
     db.add(row)
     db.flush()
