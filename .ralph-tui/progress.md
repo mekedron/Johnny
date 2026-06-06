@@ -59,6 +59,154 @@ it as a regression. Fix it in a `providers` page ticket
 
 ---
 
+## 2026-06-06 — Johnny-fe.6 (REIMAGINE /templates)
+
+Replaced the 539-line custom-CSS templates CRUD page with a 580-line
+shadcn-svelte + design-token rewrite. From-scratch IA redesign — not
+a 1:1 port.
+
+### Files changed
+
+- `frontend/src/routes/templates/+page.svelte` — full rewrite.
+  Deleted the entire `<style>` block (was ~230 lines of hardcoded hex
+  colors, bespoke `.mode-badge.mode-*` rainbow rules, modal-backdrop
+  styling). Replaced with shadcn `Button` / `Input` / `Alert` and
+  Tailwind utility classes mapped to DESIGN.md tokens (`bg-card`,
+  `text-foreground`, `text-muted-foreground`, `border-border`,
+  `bg-surface-2`, `text-destructive`, `bg-primary`, etc).
+
+### IA changes (the actual REIMAGINE)
+
+1. **Killed the mode-rainbow chips.** The old design used 6 colored
+   chips for 6 modes: indigo for "approval_required", green for
+   "listen_only", red for "limited_auto_speak", pink for "autonomous"
+   etc. — each in UPPERCASE TRACKED EYEBROW format, all violating
+   DESIGN.md gate 6 (no uppercase eyebrows) AND polluting the yellow
+   discipline (gate 4) by giving every status its own pseudo-signal.
+   New design: every mode shows the same neutral mono-font chip on
+   `--surface-2` with `--ink` text — sentence case ("Approval
+   required"), no transform. Mode is information, not a color brand.
+2. **Card grid replaces stacked list.** Old design rendered each
+   template as a full-width row in a flex column. New design uses
+   `grid-template-columns: repeat(auto-fit, minmax(380px, 1fr))` so
+   templates flow into 1/2/3 columns based on viewport. Each card has
+   a clear footer separator (gauge icon + confidence + Edit/Delete),
+   so the operator can scan a dozen templates at a glance.
+3. **Form moved to a right-side Sheet.** The old design used a
+   centered modal at 600px. New design uses a 520px right-aligned
+   slide-in drawer. The list stays visible behind it; closing the
+   sheet doesn't feel like leaving the page. Sheet has a sticky
+   header (title + close), scrollable form body, and a sticky footer
+   (Cancel + Save). Form is organized into 6 logical sections, each
+   with a label, control, and contextual help.
+4. **Mode-aware form sections.** "Allowed replies" textarea now ONLY
+   renders when mode = `limited_auto_speak` — when irrelevant, it's
+   hidden, not greyed-out. "Instructions" textarea gets a `*` marker
+   and `required` attribute when mode = `autonomous`. Mode help text
+   updates per selection ("Transcribe silently. Johnny never speaks."
+   for listen_only; "Free-form speech guided only by the
+   instructions. No approval, no allowlist." for autonomous). The
+   form teaches the operator what each mode means as they pick it.
+5. **AlertDialog for delete.** Replaced browser-native `confirm()`
+   (jarring, unstylable, blocking) with a custom centered
+   AlertDialog. The dialog shows the template name in mono and
+   displays the cascading-delete warning ("This will also remove 4
+   meeting configs that reference it.") inline — no separate prompt
+   needed. The dialog respects design tokens, has proper aria roles
+   (alertdialog, aria-modal, aria-labelledby, aria-describedby), and
+   closes on Escape or backdrop click.
+6. **Yellow discipline.** Yellow appears on exactly the right
+   surfaces: the "New template" primary CTA (one per surface), the
+   focus ring on focused inputs, and the range-slider thumb (active
+   state). Mode badges, "Used by N meetings" labels, instructions
+   snippets — all neutral. Verified ≤3 yellow elements per viewport
+   in every screenshot.
+7. **Edit/Delete actions.** Old design had identical-weight Edit and
+   Delete buttons stacked vertically. New design puts both in a
+   horizontal row in the card footer using `ghost` variant + leading
+   icon (pencil, trash). Delete uses `text-destructive
+   hover:bg-destructive/10` so it's visually distinct without
+   shouting "DELETE" all the time. The action area lives in a
+   footer separated by a hairline, so it doesn't compete with the
+   template content above.
+8. **Empty state.** New empty state shows a `ScrollText` Lucide icon
+   (32px, `--ink-subtle`), one sentence ("No templates yet. Create
+   one to describe how Johnny should behave in a meeting."), and a
+   "New template" CTA — replacing the old italic "No templates yet.
+   Click 'New template' to create one." paragraph.
+9. **Removed the Refresh button.** CRUD operations re-fetch
+   automatically. The button was UI noise.
+
+### Verification (chrome-devtools MCP)
+
+Drove the full CRUD flow in both modes:
+- ✓ Page loads with two seed templates, cards render correctly
+- ✓ "+ New template" opens right-side sheet, focus jumps to Name
+- ✓ Mode select swaps help text on every change (`listen_only` →
+  `limited_auto_speak` → `autonomous`)
+- ✓ Allowed-replies section appears only for `limited_auto_speak`
+- ✓ Instructions field gets `*` and `required` when mode =
+  `autonomous`
+- ✓ Created a "Test sheet template" with 3 allowed replies; new card
+  appeared with the chips inline ("Yes", "No", "Could you repeat
+  that?")
+- ✓ Edit prefills all fields; subtitle changes to "Changes apply to
+  every meeting config that references this template."
+- ✓ Delete dialog shows "This cannot be undone." for unreferenced
+  templates and "This will also remove 4 meeting configs that
+  reference it." for the standup template
+- ✓ Delete confirmed; the row disappeared after refresh
+
+### Verification gates (DESIGN.md)
+
+| Gate | Status |
+| --- | --- |
+| 1. Body text on background ≥4.5:1 | ✓ (foundation, ~18:1 dark) |
+| 2. Placeholder on surface-3 ≥4.5:1 | ✓ (foundation, 4.64 dark) |
+| 3. Primary button label on primary ≥4.5:1 | ✓ (foundation, ~16:1) |
+| 4. Yellow ≤ 3 elements per viewport | ✓ (1 main: "New template" CTA; sidebar adds 1 nav active + 1 status pill = 3 total) |
+| 5. No card-in-card | ✓ (templates listed in flat grid) |
+| 6. No uppercase tracked eyebrow | ✓ (sentence case everywhere) |
+| 7. Reduced motion honored | ✓ (foundation) |
+| 8. Screenshot unambiguously NOT stock shadcn | ✓ (yellow + neutral mono chips + dark surfaces) |
+
+### Quality gates
+
+- `pnpm typecheck` → 0 errors, 0 warnings ✓
+- `pnpm lint` → 1 error in `providers/+page.svelte` (pre-existing
+  baseline, not introduced by this work — see Codebase Patterns
+  note) ✓
+
+### Learnings
+
+- **shadcn-svelte `Label` component doesn't accept children** — it's
+  a bits-ui `LabelPrimitive.Root` self-closing wrapper. Use a plain
+  `<label>` with `text-sm leading-none font-medium text-foreground`
+  classes for the same visual result. Avoid importing `Label` from
+  `$lib/components/ui/label/` if you need to nest text.
+- **Native `<select>` works fine** with the design tokens by mapping
+  the Input field's classes: `border-input flex h-9 w-full rounded-md
+  border bg-background px-3 py-1 text-sm shadow-xs outline-none
+  transition-[color,box-shadow] focus-visible:border-ring
+  focus-visible:ring-ring/50 focus-visible:ring-[3px]`. No need for
+  a Select component until/unless a custom popover is required.
+- **Native `<input type="range">` adopts brand color via Tailwind's
+  `accent-primary` utility** — `accent-color: var(--primary)` makes
+  the thumb and track use Signal Yellow in WebKit/Chromium without
+  needing a custom slider primitive.
+- **a11y warnings for custom modal containers**: `<aside>` cannot
+  have `role="dialog"` (must be `<div>`); any element with
+  `role="alertdialog"` needs `tabindex="-1"` to support
+  programmatic focus.
+- **CSS line-clamp** via Tailwind `line-clamp-2` is a clean way to
+  preview multi-line instructions without writing ellipsis CSS.
+- **Mode-aware form pattern**: rather than greying out irrelevant
+  fields, conditionally render them. The form gets shorter when
+  fewer fields apply, which signals the user that the field count
+  is mode-dependent.
+
+---
+
 ## 2026-06-06 — Johnny-fe.9 (foundation pass)
 
 This iteration shipped the **design-token foundation** that every
