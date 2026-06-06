@@ -3,10 +3,10 @@
   "sessionId": "79f70c67-bb19-4cbc-940f-b02dbec38449",
   "status": "running",
   "startedAt": "2026-06-06T07:53:57.289Z",
-  "updatedAt": "2026-06-06T08:50:48.015Z",
-  "currentIteration": 2,
+  "updatedAt": "2026-06-06T08:58:43.547Z",
+  "currentIteration": 3,
   "maxIterations": 0,
-  "tasksCompleted": 2,
+  "tasksCompleted": 3,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -110,8 +110,8 @@
       {
         "id": "Johnny-4ph",
         "title": "Trigger bot Google sign-in from the UI (no CLI helper)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-6ij",
@@ -141,6 +141,16 @@
       "durationMs": 1538194,
       "startedAt": "2026-06-06T08:09:54.974Z",
       "endedAt": "2026-06-06T08:35:33.168Z"
+    },
+    {
+      "iteration": 3,
+      "status": "completed",
+      "taskId": "Johnny-4ph",
+      "taskTitle": "Add UI button to trigger bot Google sign-in (CLI helper stays as alternative)",
+      "taskCompleted": true,
+      "durationMs": 906498,
+      "startedAt": "2026-06-06T08:35:40.622Z",
+      "endedAt": "2026-06-06T08:50:47.120Z"
     }
   ],
   "skippedTaskIds": [],

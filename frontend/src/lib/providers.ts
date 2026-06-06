@@ -227,6 +227,30 @@ export function testProvider(id: number): Promise<TestResult> {
 }
 
 /**
+ * Synthesise a short demo phrase via this provider and return the WAV
+ * audio as a Blob. Only valid for TTS providers — STT/LLM rows return
+ * HTTP 400. The caller wraps the blob in an object URL and feeds it to
+ * an `Audio` element so the user can hear the configured voice before
+ * wiring it into a live meeting.
+ */
+export async function playSample(id: number): Promise<Blob> {
+	const res = await fetch(`${API_BASE}/providers/${id}/play_sample`, {
+		method: 'POST'
+	});
+	if (!res.ok) {
+		let detail: string | null = null;
+		try {
+			const body = await res.json();
+			detail = extractDetail(body);
+		} catch {
+			// Non-JSON error body — fall through.
+		}
+		throw new Error(detail ?? `HTTP ${res.status}`);
+	}
+	return res.blob();
+}
+
+/**
  * Build the form's initial `values` dict from a schema. Number/checkbox
  * defaults are coerced to the right primitive type so Svelte's bindings
  * stay consistent — the previous textarea-based form just used strings

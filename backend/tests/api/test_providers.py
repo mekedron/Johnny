@@ -142,6 +142,62 @@ class _CrashingFactory(STTProvider):
             yield TranscriptEvent(text="", is_final=True, timestamp_ms=0)
 
 
+class _SampleTTS(TTSProvider):
+    """TTS adapter that records the synthesised text for assertions."""
+
+    last_text: str | None = None
+    closed: bool = False
+
+    def __init__(self, config: ProviderConfig) -> None:
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "sample-tts"
+
+    async def synthesize_stream(
+        self, text: str, voice_id: str | None = None
+    ) -> AsyncIterator[bytes]:
+        type(self).last_text = text
+        # 32 bytes of audible-looking PCM (one full S16 sample per frame).
+        yield b"\x10\x00" * 8
+        yield b"\x20\x00" * 8
+
+
+class _EmptyTTS(TTSProvider):
+    """TTS adapter that yields no PCM at all — should surface as 502."""
+
+    def __init__(self, config: ProviderConfig) -> None:
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "empty-tts"
+
+    async def synthesize_stream(
+        self, text: str, voice_id: str | None = None
+    ) -> AsyncIterator[bytes]:
+        if False:
+            yield b""
+
+
+class _FailingTTS(TTSProvider):
+    """TTS adapter that raises mid-stream."""
+
+    def __init__(self, config: ProviderConfig) -> None:
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "failing-tts"
+
+    async def synthesize_stream(
+        self, text: str, voice_id: str | None = None
+    ) -> AsyncIterator[bytes]:
+        yield b"\x00\x00" * 4
+        raise RuntimeError("synthetic tts failure")
+
+
 # --- Fixtures --------------------------------------------------------------
 
 
@@ -814,3 +870,124 @@ def test_create_without_schema_provider_still_works_with_legacy_payload(
         },
     )
     assert resp.status_code == 201
+
+
+# --- play_sample endpoint --------------------------------------------------
+
+
+def _make_tts(client: TestClient, provider_name: str = "sample-tts") -> dict[str, Any]:
+    data: dict[str, Any] = client.post(
+        "/providers",
+        json=_create_payload(
+            kind="tts",
+            provider_name=provider_name,
+            display_name=f"{provider_name} card",
+        ),
+    ).json()
+    return data
+
+
+def test_play_sample_returns_wav_for_tts_provider(client: TestClient) -> None:
+    import wave
+
+    get_registry().register(ProviderKind.TTS, "sample-tts", _SampleTTS)
+    created = _make_tts(client)
+    resp = client.post(f"/providers/{created['id']}/play_sample")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("audio/wav")
+    body = resp.content
+    assert body[:4] == b"RIFF"
+    assert body[8:12] == b"WAVE"
+    # Decode the RIFF/WAV and confirm canonical PCM params.
+    import io
+
+    with wave.open(io.BytesIO(body), "rb") as wf:
+        assert wf.getnchannels() == 1
+        assert wf.getsampwidth() == 2
+        assert wf.getframerate() == 16_000
+        # Two 16-byte yields of two-byte samples = 32 PCM bytes.
+        assert wf.getnframes() == 16
+
+
+def test_play_sample_uses_demo_phrase(client: TestClient) -> None:
+    from app.api.providers import TTS_SAMPLE_PHRASE
+
+    get_registry().register(ProviderKind.TTS, "sample-tts", _SampleTTS)
+    created = _make_tts(client)
+    _SampleTTS.last_text = None
+    resp = client.post(f"/providers/{created['id']}/play_sample")
+    assert resp.status_code == 200
+    assert _SampleTTS.last_text == TTS_SAMPLE_PHRASE
+
+
+def test_play_sample_rejects_stt_provider(client: TestClient) -> None:
+    get_registry().register(ProviderKind.STT, "ok-stt", _OKSTT)
+    created = client.post("/providers", json=_create_payload()).json()
+    resp = client.post(f"/providers/{created['id']}/play_sample")
+    assert resp.status_code == 400
+    assert "tts" in resp.json()["detail"].lower()
+
+
+def test_play_sample_rejects_llm_provider(client: TestClient) -> None:
+    get_registry().register(ProviderKind.LLM, "ok-llm", _OKLLM)
+    created = client.post(
+        "/providers",
+        json=_create_payload(kind="llm", provider_name="ok-llm", display_name="L"),
+    ).json()
+    resp = client.post(f"/providers/{created['id']}/play_sample")
+    assert resp.status_code == 400
+
+
+def test_play_sample_missing_provider_returns_404(client: TestClient) -> None:
+    resp = client.post("/providers/9999/play_sample")
+    assert resp.status_code == 404
+
+
+def test_play_sample_unknown_factory_returns_502(client: TestClient) -> None:
+    created = client.post(
+        "/providers",
+        json=_create_payload(
+            kind="tts", provider_name="never-registered", display_name="Ghost"
+        ),
+    ).json()
+    resp = client.post(f"/providers/{created['id']}/play_sample")
+    assert resp.status_code == 502
+
+
+def test_play_sample_synthesis_error_returns_502(client: TestClient) -> None:
+    get_registry().register(ProviderKind.TTS, "failing-tts", _FailingTTS)
+    created = client.post(
+        "/providers",
+        json=_create_payload(
+            kind="tts", provider_name="failing-tts", display_name="Fail"
+        ),
+    ).json()
+    resp = client.post(f"/providers/{created['id']}/play_sample")
+    assert resp.status_code == 502
+    assert "synthesis failed" in resp.json()["detail"]
+
+
+def test_play_sample_empty_audio_returns_502(client: TestClient) -> None:
+    get_registry().register(ProviderKind.TTS, "empty-tts", _EmptyTTS)
+    created = client.post(
+        "/providers",
+        json=_create_payload(
+            kind="tts", provider_name="empty-tts", display_name="Silent"
+        ),
+    ).json()
+    resp = client.post(f"/providers/{created['id']}/play_sample")
+    assert resp.status_code == 502
+    assert "no audio" in resp.json()["detail"]
+
+
+def test_play_sample_does_not_alter_test_endpoint_behaviour(client: TestClient) -> None:
+    """Test endpoint must keep its smoke-call semantics (does not return audio)."""
+    get_registry().register(ProviderKind.TTS, "sample-tts", _SampleTTS)
+    created = _make_tts(client)
+    resp = client.post(f"/providers/{created['id']}/test")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    # The smoke endpoint synthesises a fixed "hi" string and returns JSON,
+    # not WAV — the play endpoint sends the demo phrase.
+    assert _SampleTTS.last_text == "hi"

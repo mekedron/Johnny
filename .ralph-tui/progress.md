@@ -90,6 +90,37 @@ respond loop in. Without this, the only timing where barge-in fires
 is when the response loop is genuinely wedged in a long stage —
 which doesn't naturally happen with fake providers.
 
+### Serving TTS PCM as in-browser-playable WAV (Johnny-6ij)
+All TTS providers yield 16 kHz mono signed-16-bit LE PCM (the
+canonical meet-worker audio format). To return that as a playable
+`audio/wav` response, `app/api/providers.py::_pcm_to_wav_bytes`
+uses the stdlib `wave` module directly against a `BytesIO`:
+```py
+buf = io.BytesIO()
+with wave.open(buf, "wb") as wf:
+    wf.setnchannels(PCM_CHANNELS)
+    wf.setsampwidth(PCM_SAMPLE_WIDTH_BYTES)
+    wf.setframerate(PCM_SAMPLE_RATE_HZ)
+    wf.writeframes(pcm)
+return buf.getvalue()
+```
+That emits a valid 44-byte RIFF header followed by the raw samples —
+every modern browser plays it from a `new Audio(URL.createObjectURL(blob))`
+with no decoder shim. Pattern is reusable any time the API needs to
+return synthesised audio inline.
+
+### Per-card Audio + revokeObjectURL on every teardown path
+The `/providers` page can have multiple TTS cards playing samples at
+once. The reactive Svelte rune (`$state`) doesn't tear down browser
+resources for you — if you only revoke the object URL on the Stop
+button, you leak the blob whenever playback ends naturally, errors,
+or the user navigates away. The page keeps a plain
+`Map<number, {audio, url}>` for the live handles plus a `$state`
+array of playing ids for reactivity, and calls
+`URL.revokeObjectURL` from FOUR places: Stop click, `audio.ended`
+listener, `audio.error` listener, and `onDestroy`. Forget any one
+and you leak a few KB of WAV every preview.
+
 ---
 
 ## 2026-06-06 - Johnny-4ph
@@ -235,5 +266,57 @@ which doesn't naturally happen with fake providers.
     appends the cutoff still works because we always summarise a strict
     prefix (oldest entries), and the current transcript may be anywhere
     after that prefix.
+---
+
+## 2026-06-06 - Johnny-6ij
+- Added a `Play` button on every TTS provider card on `/providers` so the
+  user can hear the configured voice before wiring it into a real Meet.
+  The existing `Test` button is unchanged — it stays a config-validity
+  smoke check. `Play` is an additional, explicit voice-quality preview.
+- New endpoint `POST /providers/{provider_id}/play_sample`: synthesizes
+  a fixed demo phrase via the provider, wraps the raw 16 kHz mono S16LE
+  PCM into a RIFF/WAV container with `wave.open(BytesIO)`, and returns
+  `audio/wav` so the browser can play it inline with an `Audio`
+  element. STT/LLM rows return 400 (kind mismatch); synthesis errors
+  surface as 502 with the error message in `detail` so the UI can show
+  it under the card.
+- New `playSample(id)` in `frontend/src/lib/providers.ts` returns the
+  WAV as a `Blob`. The page mints an object URL, hands it to a fresh
+  `Audio`, and tracks the live `(audio, url)` pair in a `Map` keyed by
+  provider id. The `ended` listener — plus an `error` listener and the
+  `onDestroy` hook — calls `URL.revokeObjectURL` so we don't leak
+  blobs on natural finish, navigation, or hard playback failure.
+- Per-provider playback state: each TTS card has its own
+  `Play / Loading… / Stop` state. Multiple providers can play
+  simultaneously without stepping on each other (`playingHandles` is
+  a `Map<number, Handle>`; `playingIds` is the reactive `$state` that
+  Svelte tracks for the button label).
+- Files changed:
+  - `backend/app/api/providers.py` (new endpoint + WAV helper)
+  - `backend/tests/api/test_providers.py` (9 new tests covering WAV
+    shape, demo phrase wiring, non-TTS rejection, missing factory,
+    synthesis failure, empty audio, and Test-endpoint invariance)
+  - `frontend/src/lib/providers.ts` (new `playSample` blob fetcher)
+  - `frontend/src/routes/providers/+page.svelte` (button UI, per-card
+    playback state, cleanup hooks, error surface)
+- **Learnings:**
+  - The Python stdlib `wave` module accepts a `BytesIO` directly as
+    its file argument — no need to write to a tmp file. With
+    `setnchannels(1)/setsampwidth(2)/setframerate(16000)`, it emits
+    a valid 44-byte RIFF header followed by raw PCM that every
+    browser plays without a decoder shim. This is the path of least
+    resistance for serving streamed TTS as a playable response.
+  - `URL.createObjectURL` blobs leak until you explicitly call
+    `revokeObjectURL`. The reactive Svelte rune (`$state`) doesn't
+    automatically tear down browser-level resources, so storing the
+    `(audio, url)` handle in a plain `Map` and revoking on every
+    teardown path (Stop click, `ended`, `error`, `onDestroy`) is
+    necessary to avoid leaks across navigations.
+  - The `Test` endpoint synthesises the string `"hi"` — that's
+    intentionally cheap so a config-validity check doesn't burn a
+    full sentence's worth of TTS quota every time. The new `Play`
+    endpoint uses a richer phrase ("Hi there! This is a quick voice
+    sample so you can hear how I sound.") because it's specifically
+    a *voice-quality* preview, not a config check.
 ---
 

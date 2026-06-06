@@ -11,12 +11,14 @@ any sibling rows before flipping the requested row on.
 
 from __future__ import annotations
 
+import io
 import json
+import wave
 from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -25,6 +27,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_crypto, get_session
 from app.db.models import ProviderCredential
 from app.providers.base import (
+    PCM_CHANNELS,
     PCM_SAMPLE_RATE_HZ,
     PCM_SAMPLE_WIDTH_BYTES,
     ChatMessage,
@@ -486,6 +489,134 @@ async def test_provider(
             await instance.close()
         except Exception:  # noqa: BLE001, S110 — cleanup best-effort
             pass
+
+
+# --- play sample endpoint --------------------------------------------------
+
+# A short, neutral phrase the user hears when previewing a TTS voice. Picked
+# to exercise common phonemes (sibilants, vowels, "th") so the user can judge
+# pronunciation, cadence, and gender at a glance without committing to a full
+# meeting. Kept short to bound synthesis cost.
+TTS_SAMPLE_PHRASE = (
+    "Hi there! This is a quick voice sample so you can hear how I sound."
+)
+
+
+def _pcm_to_wav_bytes(pcm: bytes) -> bytes:
+    """Wrap raw 16 kHz mono S16LE PCM in a RIFF/WAV container.
+
+    All TTS adapters yield this canonical format (see
+    :data:`PCM_SAMPLE_RATE_HZ`) so the browser can play the response with
+    a plain ``<audio>`` tag — no decoder shim needed.
+    """
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(PCM_CHANNELS)
+        wf.setsampwidth(PCM_SAMPLE_WIDTH_BYTES)
+        wf.setframerate(PCM_SAMPLE_RATE_HZ)
+        wf.writeframes(pcm)
+    return buf.getvalue()
+
+
+@router.post(
+    "/{provider_id}/play_sample",
+    responses={
+        200: {"content": {"audio/wav": {}}},
+        400: {"description": "Provider is not a TTS provider"},
+        404: {"description": "Provider not found"},
+        502: {"description": "Synthesis failed"},
+    },
+)
+async def play_sample(
+    provider_id: int,
+    session: SessionDep,
+    crypto: CryptoDep,
+) -> Response:
+    """Synthesize a short demo phrase via this provider and return WAV audio.
+
+    Only valid for TTS providers — STT/LLM rows return 400. Unlike
+    :func:`test_provider`, which is a config-validity smoke test, this is
+    a voice-quality preview the user explicitly clicks to hear before
+    committing the provider to a live meeting. The response body is a
+    self-contained RIFF/WAV at 16 kHz mono S16LE so the browser can play
+    it inline with a plain ``Audio`` element.
+    """
+    row = _get_row_or_404(session, provider_id)
+
+    if row.kind is not ProviderKind.TTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"play_sample only supports TTS providers, not {row.kind.value}",
+        )
+
+    registry = get_registry()
+    if not registry.has(row.kind, row.provider_name):
+        raise HTTPException(
+            status_code=502,
+            detail=f"no factory registered for tts:{row.provider_name}",
+        )
+
+    try:
+        creds = decrypt_json(crypto, row.credentials_encrypted)
+    except (CryptoError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"failed to decrypt credentials: {exc}",
+        ) from exc
+
+    config = ProviderConfig(
+        kind=row.kind,
+        provider_name=row.provider_name,
+        display_name=row.display_name,
+        credentials=creds,
+        options=dict(row.config or {}),
+    )
+
+    try:
+        instance = registry.instantiate(config)
+    except UnknownProviderError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"provider factory missing: {exc}",
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 — surface any factory error
+        raise HTTPException(
+            status_code=502,
+            detail=f"provider construction failed: {exc}",
+        ) from exc
+
+    assert isinstance(instance, TTSProvider)
+    try:
+        chunks: list[bytes] = []
+        async for frame in instance.synthesize_stream(TTS_SAMPLE_PHRASE):
+            chunks.append(frame)
+        pcm = b"".join(chunks)
+    except Exception as exc:  # noqa: BLE001 — surface any synth error
+        raise HTTPException(
+            status_code=502,
+            detail=f"synthesis failed: {exc}",
+        ) from exc
+    finally:
+        try:
+            await instance.close()
+        except Exception:  # noqa: BLE001, S110 — cleanup best-effort
+            pass
+
+    if not pcm:
+        raise HTTPException(
+            status_code=502,
+            detail="synthesis produced no audio",
+        )
+
+    wav_bytes = _pcm_to_wav_bytes(pcm)
+    return Response(
+        content=wav_bytes,
+        media_type="audio/wav",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": 'inline; filename="sample.wav"',
+        },
+    )
 
 
 async def _smoke_test(

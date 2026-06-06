@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import {
 		activateProvider,
 		createProvider,
@@ -11,6 +11,7 @@
 		initialValues,
 		listProviders,
 		listSchemas,
+		playSample,
 		PROVIDER_KIND_LABEL,
 		PROVIDER_KINDS,
 		testProvider,
@@ -34,6 +35,18 @@
 	let testResults = $state<Record<number, TestResult>>({});
 	let testingId = $state<number | null>(null);
 	let busyId = $state<number | null>(null);
+
+	// Per-provider sample-playback state. Each entry holds the live `Audio`
+	// element + the object URL we minted from the WAV blob so we can revoke
+	// it on stop / unmount (otherwise we leak ~tens of KB per sample). The
+	// fact that an entry exists in `playingHandles` is the source of truth
+	// for "is this provider currently playing"; the audio element's
+	// `ended` event clears it back to nothing.
+	type PlaybackHandle = { audio: HTMLAudioElement; url: string };
+	const playingHandles: Map<number, PlaybackHandle> = new Map();
+	let playingIds = $state<number[]>([]);
+	let loadingSampleId = $state<number | null>(null);
+	let sampleError = $state<Record<number, string>>({});
 
 	let editingId = $state<number | null>(null);
 	let editValues = $state<Record<string, unknown>>({});
@@ -275,6 +288,64 @@
 		}
 	}
 
+	function stopSample(id: number) {
+		const handle = playingHandles.get(id);
+		if (!handle) return;
+		try {
+			handle.audio.pause();
+			handle.audio.currentTime = 0;
+		} catch {
+			// Pause/seek can race with `ended`; ignore.
+		}
+		URL.revokeObjectURL(handle.url);
+		playingHandles.delete(id);
+		playingIds = playingIds.filter((x) => x !== id);
+	}
+
+	async function onPlaySample(p: Provider) {
+		if (playingHandles.has(p.id)) {
+			stopSample(p.id);
+			return;
+		}
+		loadingSampleId = p.id;
+		// Clear any prior error so retrying after a failure doesn't show stale text.
+		if (sampleError[p.id]) delete sampleError[p.id];
+		try {
+			const blob = await playSample(p.id);
+			const url = URL.createObjectURL(blob);
+			const audio = new Audio(url);
+			audio.addEventListener('ended', () => stopSample(p.id));
+			audio.addEventListener('error', () => {
+				sampleError[p.id] = 'Audio playback failed';
+				stopSample(p.id);
+			});
+			playingHandles.set(p.id, { audio, url });
+			playingIds = [...playingIds, p.id];
+			try {
+				await audio.play();
+			} catch (e) {
+				sampleError[p.id] = e instanceof Error ? e.message : String(e);
+				stopSample(p.id);
+			}
+		} catch (e) {
+			sampleError[p.id] = e instanceof Error ? e.message : String(e);
+		} finally {
+			loadingSampleId = null;
+		}
+	}
+
+	function isPlaying(id: number): boolean {
+		return playingIds.includes(id);
+	}
+
+	onDestroy(() => {
+		// Tear down every active playback so we don't leak Audio elements or
+		// object URLs across navigations.
+		for (const id of [...playingHandles.keys()]) {
+			stopSample(id);
+		}
+	});
+
 	function fieldInputId(prefix: string, fieldName: string): string {
 		return `${prefix}-${fieldName}`;
 	}
@@ -367,6 +438,12 @@
 										{#if r.detail}<span class="detail">— {r.detail}</span>{/if}
 									</div>
 								{/if}
+								{#if sampleError[provider.id]}
+									<div class="test-result fail" data-testid={`sample-error-${provider.id}`}>
+										<strong>Sample failed:</strong>
+										{sampleError[provider.id]}
+									</div>
+								{/if}
 
 								{#if editingId === provider.id && schema}
 									<form
@@ -407,6 +484,22 @@
 								>
 									{testingId === provider.id ? 'Testing…' : 'Test'}
 								</button>
+								{#if provider.kind === 'tts'}
+									<button
+										type="button"
+										onclick={() => onPlaySample(provider)}
+										disabled={loadingSampleId === provider.id}
+										data-testid={`play-${provider.id}`}
+									>
+										{#if loadingSampleId === provider.id}
+											Loading…
+										{:else if isPlaying(provider.id)}
+											Stop
+										{:else}
+											Play
+										{/if}
+									</button>
+								{/if}
 								{#if editingId !== provider.id}
 									<button type="button" onclick={() => openEdit(provider)} disabled={!schema}>
 										Edit
