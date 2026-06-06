@@ -42,7 +42,7 @@ export interface HistoryListResponse {
 
 export interface HistorySessionRecord {
 	id: number;
-	meeting_config_id: number;
+	meeting_config_id: number | null;
 	status: BotSessionStatus;
 	container_name: string | null;
 	started_at: string | null;

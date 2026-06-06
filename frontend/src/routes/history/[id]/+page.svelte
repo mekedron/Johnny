@@ -2,6 +2,18 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page as pageStore } from '$app/state';
+	import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
+	import DownloadIcon from '@lucide/svelte/icons/download';
+	import Trash2Icon from '@lucide/svelte/icons/trash-2';
+	import SearchIcon from '@lucide/svelte/icons/search';
+	import XIcon from '@lucide/svelte/icons/x';
+	import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
+	import BotIcon from '@lucide/svelte/icons/bot';
+	import MicIcon from '@lucide/svelte/icons/mic';
+	import MessageSquareIcon from '@lucide/svelte/icons/message-square';
+	import Volume2Icon from '@lucide/svelte/icons/volume-2';
+	import { Button } from '$lib/components/ui/button/index.js';
+	import * as Alert from '$lib/components/ui/alert/index.js';
 	import { BOT_SESSION_STATUS_LABEL } from '$lib/sessions';
 	import {
 		DECISION_OUTCOME_LABEL,
@@ -33,6 +45,9 @@
 	let searchError = $state<string | null>(null);
 	let searchHits = $state<TranscriptSearchHit[]>([]);
 	let searchActive = $state(false);
+
+	type Tab = 'transcript' | 'decisions' | 'utterances';
+	let activeTab = $state<Tab>('transcript');
 
 	const exportHref = $derived(exportHistoryUrl(sessionId));
 
@@ -116,7 +131,59 @@
 		if (value === null) return '—';
 		const d = new Date(value);
 		if (Number.isNaN(d.getTime())) return value;
-		return d.toLocaleString();
+		return d.toLocaleString([], {
+			year: 'numeric',
+			month: 'short',
+			day: 'numeric',
+			hour: '2-digit',
+			minute: '2-digit'
+		});
+	}
+
+	function formatDurationFromTimestamps(
+		started: string | null,
+		ended: string | null
+	): string {
+		if (started === null || ended === null) return '—';
+		const s = Date.parse(started);
+		const e = Date.parse(ended);
+		if (!Number.isFinite(s) || !Number.isFinite(e)) return '—';
+		const ms = Math.max(0, e - s);
+		const totalSeconds = Math.floor(ms / 1000);
+		const h = Math.floor(totalSeconds / 3600);
+		const m = Math.floor((totalSeconds % 3600) / 60);
+		const sec = totalSeconds % 60;
+		if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`;
+		if (m > 0) return `${m}m ${String(sec).padStart(2, '0')}s`;
+		return `${sec}s`;
+	}
+
+	function statusToneClass(status: HistoryDetail['session']['status']): string {
+		switch (status) {
+			case 'ended':
+				return 'border-success/40 bg-success/10 text-foreground';
+			case 'failed':
+				return 'border-destructive/40 bg-destructive/10 text-foreground';
+			default:
+				return 'border-info/40 bg-info/10 text-foreground';
+		}
+	}
+
+	function outcomeToneClass(outcome: string): string {
+		switch (outcome) {
+			case 'spoken':
+				return 'border-success/40 bg-success/10 text-foreground';
+			case 'suppressed':
+				return 'border-border bg-muted text-muted-foreground';
+			case 'pending':
+				return 'border-warning/40 bg-warning/10 text-foreground';
+			case 'rejected':
+				return 'border-destructive/40 bg-destructive/10 text-foreground';
+			case 'suggested':
+				return 'border-info/40 bg-info/10 text-foreground';
+			default:
+				return 'border-border bg-muted text-muted-foreground';
+		}
 	}
 
 	function utterancesForDecision(
@@ -149,21 +216,11 @@
 			createdAt: u.created_at,
 			isBot: true
 		}));
-		// Interleave participant transcripts with bot utterances by
-		// created_at so the timeline is complete (Johnny-awh).
 		return [...lines, ...utterances].sort(
 			(a, b) =>
 				(a.createdAt ? Date.parse(a.createdAt) : 0) -
 				(b.createdAt ? Date.parse(b.createdAt) : 0)
 		);
-	}
-
-	function decisionsForRender(d: HistoryDetail): AgentDecisionRecord[] {
-		return d.decisions;
-	}
-
-	function utterancesForRender(d: HistoryDetail): AgentUtteranceRecord[] {
-		return d.utterances;
 	}
 
 	onMount(() => {
@@ -175,138 +232,243 @@
 	<title>Session #{sessionIdStr} · History · Johnny</title>
 </svelte:head>
 
-<div class="page" data-testid="history-detail">
-	<header class="page-header">
-		<div class="title-row">
-			<a href="/history" class="back-link">← History</a>
-			<h1>Session #{sessionIdStr}</h1>
+<div
+	class="mx-auto flex max-w-7xl flex-col gap-6"
+	data-testid="history-detail"
+>
+	<header class="flex flex-wrap items-start justify-between gap-4">
+		<div class="flex min-w-0 flex-col gap-1.5">
+			<div class="flex flex-wrap items-center gap-3">
+				<h1
+					class="m-0 text-2xl leading-tight font-semibold tracking-tight text-foreground"
+				>
+					Session <span class="font-mono">#{sessionIdStr}</span>
+				</h1>
+				{#if detail !== null}
+					<span
+						class="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium {statusToneClass(
+							detail.session.status
+						)}"
+						data-testid="session-status"
+					>
+						{BOT_SESSION_STATUS_LABEL[detail.session.status]}
+					</span>
+				{/if}
+			</div>
 			{#if detail !== null}
-				<span class="status-pill status-pill-{detail.session.status}">
-					{BOT_SESSION_STATUS_LABEL[detail.session.status]}
-				</span>
+				<div
+					class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"
+				>
+					<span class="inline-flex items-baseline gap-1">
+						<span>Started</span>
+						<time class="font-mono text-foreground">
+							{formatDateTime(detail.session.started_at)}
+						</time>
+					</span>
+					<span aria-hidden="true">·</span>
+					<span class="inline-flex items-baseline gap-1">
+						<span>Ended</span>
+						<time class="font-mono text-foreground">
+							{formatDateTime(detail.session.ended_at)}
+						</time>
+					</span>
+					<span aria-hidden="true">·</span>
+					<span class="inline-flex items-baseline gap-1">
+						<span>Duration</span>
+						<span class="font-mono text-foreground">
+							{formatDurationFromTimestamps(
+								detail.session.started_at,
+								detail.session.ended_at
+							)}
+						</span>
+					</span>
+					{#if detail.session.container_name}
+						<span aria-hidden="true">·</span>
+						<span class="inline-flex items-baseline gap-1">
+							<span>Container</span>
+							<span class="font-mono text-foreground">
+								{detail.session.container_name}
+							</span>
+						</span>
+					{/if}
+				</div>
 			{/if}
 		</div>
-		<div class="header-actions">
-			<a
-				class="action export"
+		<div class="flex flex-wrap items-center gap-2">
+			<Button href="/history" variant="ghost" size="sm">
+				<ArrowLeftIcon /> Back
+			</Button>
+			<Button
 				href={exportHref}
+				variant="outline"
+				size="sm"
 				download={`johnny-session-${sessionIdStr}.json`}
 				data-testid="export-button"
 			>
-				Export JSON
-			</a>
+				<DownloadIcon /> Export JSON
+			</Button>
 			{#if !confirmingDelete}
-				<button
-					type="button"
-					class="action danger"
+				<Button
+					variant="outline"
+					size="sm"
 					onclick={handleDelete}
 					data-testid="delete-button"
 				>
-					Delete
-				</button>
+					<Trash2Icon /> Delete
+				</Button>
 			{:else}
-				<span class="confirm-text">Delete this session?</span>
-				<button
-					type="button"
-					class="action danger"
+				<span
+					class="text-xs font-medium text-destructive"
+					data-testid="delete-confirm-prompt"
+				>
+					Delete this session?
+				</span>
+				<Button
+					variant="destructive"
+					size="sm"
 					onclick={handleDelete}
 					disabled={deleting}
 					data-testid="delete-confirm"
 				>
 					{deleting ? 'Deleting…' : 'Yes, delete'}
-				</button>
-				<button
-					type="button"
-					class="action"
+				</Button>
+				<Button
+					variant="ghost"
+					size="sm"
 					onclick={cancelDelete}
 					disabled={deleting}
 				>
 					Cancel
-				</button>
+				</Button>
 			{/if}
 		</div>
 	</header>
 
 	{#if loadError}
-		<p class="alert error" role="alert">{loadError}</p>
+		<Alert.Root variant="destructive" data-testid="load-error">
+			<CircleAlertIcon />
+			<Alert.Title>Failed to load session</Alert.Title>
+			<Alert.Description>{loadError}</Alert.Description>
+		</Alert.Root>
 	{/if}
 	{#if deleteError}
-		<p class="alert error" role="alert" data-testid="delete-error">{deleteError}</p>
+		<Alert.Root variant="destructive" data-testid="delete-error">
+			<CircleAlertIcon />
+			<Alert.Title>Could not delete session</Alert.Title>
+			<Alert.Description>{deleteError}</Alert.Description>
+		</Alert.Root>
 	{/if}
 
 	{#if loading}
-		<p class="empty">Loading session…</p>
+		<p class="text-sm text-muted-foreground italic">Loading session…</p>
 	{:else if detail === null}
-		<p class="empty">No session found.</p>
+		<Alert.Root variant="destructive">
+			<CircleAlertIcon />
+			<Alert.Title>Session not found</Alert.Title>
+			<Alert.Description>
+				This session does not exist or has been removed.
+			</Alert.Description>
+		</Alert.Root>
 	{:else}
-		<section class="meta-grid" aria-label="Session metadata">
-			<div>
-				<span class="meta-label">Started</span>
-				<span class="meta-value">{formatDateTime(detail.session.started_at)}</span>
-			</div>
-			<div>
-				<span class="meta-label">Ended</span>
-				<span class="meta-value">{formatDateTime(detail.session.ended_at)}</span>
-			</div>
-			<div>
-				<span class="meta-label">Container</span>
-				<span class="meta-value">{detail.session.container_name ?? '—'}</span>
-			</div>
-			{#if detail.session.error_reason}
-				<div class="full">
-					<span class="meta-label">Error reason</span>
-					<span class="meta-value error-text">{detail.session.error_reason}</span>
-				</div>
-			{/if}
-		</section>
+		{#if detail.session.error_reason}
+			<Alert.Root
+				variant={detail.session.status === 'failed' ? 'destructive' : 'default'}
+				data-testid="session-error-reason"
+			>
+				<CircleAlertIcon />
+				<Alert.Title>
+					{detail.session.status === 'failed'
+						? 'Failure stage'
+						: 'Session note'}
+				</Alert.Title>
+				<Alert.Description>{detail.session.error_reason}</Alert.Description>
+			</Alert.Root>
+		{/if}
 
-		<section class="search" aria-label="Search this session">
+		<section
+			class="flex flex-col gap-3"
+			aria-label="Search this session"
+		>
 			<form
 				onsubmit={(event) => {
 					event.preventDefault();
 					void runSearch();
 				}}
+				class="flex flex-wrap items-center gap-2"
 			>
-				<div class="search-row">
+				<div
+					class="flex flex-1 items-center gap-2 rounded-md border border-border-strong bg-surface-3 px-3 has-focus-visible:border-ring"
+				>
+					<SearchIcon class="size-4 shrink-0 text-muted-foreground" />
 					<input
 						type="search"
-						placeholder="Search within this session…"
+						placeholder="Search within this session"
 						bind:value={searchQuery}
 						data-testid="search-input"
+						class="h-9 w-full flex-1 border-0 bg-transparent text-sm text-foreground placeholder:text-ink-subtle focus:outline-none"
 					/>
-					<button
-						type="submit"
-						disabled={searchBusy || searchQuery.trim().length === 0}
-						data-testid="search-button"
-					>
-						{searchBusy ? 'Searching…' : 'Search'}
-					</button>
 					{#if searchActive}
-						<button type="button" class="clear" onclick={clearSearch}>
-							Clear
+						<button
+							type="button"
+							onclick={clearSearch}
+							class="text-muted-foreground hover:text-foreground"
+							aria-label="Clear search"
+						>
+							<XIcon class="size-4" />
 						</button>
 					{/if}
 				</div>
+				<Button
+					type="submit"
+					disabled={searchBusy || searchQuery.trim().length === 0}
+					data-testid="search-button"
+				>
+					{searchBusy ? 'Searching…' : 'Search'}
+				</Button>
 			</form>
+
 			{#if searchError}
-				<p class="alert error" role="alert">{searchError}</p>
+				<Alert.Root variant="destructive">
+					<CircleAlertIcon />
+					<Alert.Description>{searchError}</Alert.Description>
+				</Alert.Root>
 			{/if}
 			{#if searchActive}
 				{#if searchHits.length === 0}
-					<p class="empty">No matches in this session.</p>
+					<p
+						class="py-4 text-center text-sm text-muted-foreground italic"
+					>
+						No matches in this session.
+					</p>
 				{:else}
-					<ul class="search-results" data-testid="search-results">
+					<ul
+						class="m-0 flex max-h-[280px] list-none flex-col gap-2 overflow-y-auto p-0"
+						data-testid="search-results"
+					>
 						{#each searchHits as hit (hit.chunk.id)}
-							<li class="search-hit">
-								<div class="search-hit-meta">
-									<span class="ts">{formatTimestamp(hit.chunk.created_at)}</span>
-									<span class="score">{(hit.score * 100).toFixed(0)}%</span>
+							<li
+								class="rounded-md border border-border bg-surface-1 px-3 py-2"
+							>
+								<div
+									class="mb-1 flex items-baseline justify-between gap-3 text-xs"
+								>
+									<time class="font-mono text-muted-foreground">
+										{formatTimestamp(hit.chunk.created_at)}
+									</time>
+									<span
+										class="font-mono text-muted-foreground"
+										title="Cosine similarity"
+									>
+										{(hit.score * 100).toFixed(0)}%
+									</span>
 								</div>
-								<p>
+								<p class="m-0 text-sm leading-snug text-foreground">
 									{#if hit.chunk.speaker}
-										<span class="speaker">{hit.chunk.speaker}:</span>
+										<span class="font-medium text-foreground">
+											{hit.chunk.speaker}:
+										</span>
 									{/if}
-									{hit.chunk.text}
+									<span class="text-muted-foreground">{hit.chunk.text}</span>
 								</p>
 							</li>
 						{/each}
@@ -315,91 +477,206 @@
 			{/if}
 		</section>
 
-		<div class="panes">
-			<section
-				class="pane transcript-pane"
-				aria-label="Transcript"
-				data-testid="transcript-pane"
+		<div
+			class="flex flex-col gap-3"
+			data-testid="tabs-container"
+		>
+			<div
+				role="tablist"
+				aria-label="Session details"
+				class="flex items-center gap-1 border-b border-border"
 			>
-				<header class="pane-header">
-					<h2>Transcript</h2>
-					<span class="pane-count" data-testid="transcript-count">
+				<button
+					type="button"
+					role="tab"
+					aria-selected={activeTab === 'transcript'}
+					aria-controls="tab-transcript"
+					id="tab-transcript-trigger"
+					onclick={() => (activeTab = 'transcript')}
+					data-testid="tab-transcript"
+					class="-mb-px inline-flex items-center gap-2 border-b-2 px-3 py-2 text-sm font-medium transition-colors {activeTab ===
+					'transcript'
+						? 'border-foreground text-foreground'
+						: 'border-transparent text-muted-foreground hover:text-foreground'}"
+				>
+					<MicIcon class="size-3.5" />
+					Transcript
+					<span
+						class="font-mono text-xs text-muted-foreground"
+						data-testid="transcript-count"
+					>
 						{transcriptsForRender(detail).length}
 					</span>
-				</header>
-				<div class="pane-scroll">
+				</button>
+				<button
+					type="button"
+					role="tab"
+					aria-selected={activeTab === 'decisions'}
+					aria-controls="tab-decisions"
+					id="tab-decisions-trigger"
+					onclick={() => (activeTab = 'decisions')}
+					data-testid="tab-decisions"
+					class="-mb-px inline-flex items-center gap-2 border-b-2 px-3 py-2 text-sm font-medium transition-colors {activeTab ===
+					'decisions'
+						? 'border-foreground text-foreground'
+						: 'border-transparent text-muted-foreground hover:text-foreground'}"
+				>
+					<MessageSquareIcon class="size-3.5" />
+					Decisions
+					<span
+						class="font-mono text-xs text-muted-foreground"
+						data-testid="decisions-count"
+					>
+						{detail.decisions.length}
+					</span>
+				</button>
+				<button
+					type="button"
+					role="tab"
+					aria-selected={activeTab === 'utterances'}
+					aria-controls="tab-utterances"
+					id="tab-utterances-trigger"
+					onclick={() => (activeTab = 'utterances')}
+					data-testid="tab-utterances"
+					class="-mb-px inline-flex items-center gap-2 border-b-2 px-3 py-2 text-sm font-medium transition-colors {activeTab ===
+					'utterances'
+						? 'border-foreground text-foreground'
+						: 'border-transparent text-muted-foreground hover:text-foreground'}"
+				>
+					<Volume2Icon class="size-3.5" />
+					Utterances
+					<span
+						class="font-mono text-xs text-muted-foreground"
+						data-testid="utterances-count"
+					>
+						{detail.utterances.length}
+					</span>
+				</button>
+			</div>
+
+			{#if activeTab === 'transcript'}
+				<div
+					role="tabpanel"
+					id="tab-transcript"
+					aria-labelledby="tab-transcript-trigger"
+					data-testid="transcript-pane"
+					class="rounded-md border border-border bg-surface-1"
+				>
 					{#if transcriptsForRender(detail).length === 0}
-						<p class="empty">No transcripts recorded.</p>
+						<p class="px-4 py-12 text-center text-sm text-muted-foreground italic">
+							No transcripts recorded.
+						</p>
 					{:else}
-						<ul class="transcript-list">
+						<ul
+							class="m-0 flex max-h-[68vh] list-none flex-col overflow-y-auto p-0"
+						>
 							{#each transcriptsForRender(detail) as line (line.key)}
 								<li
-									class="transcript-line"
-									class:bot={line.isBot}
-									data-testid={line.isBot ? 'bot-transcript-line' : 'transcript-line'}
+									class="border-b border-separator px-4 py-3 last:border-b-0 {line.isBot
+										? 'bg-surface-2/40'
+										: ''}"
+									data-testid={line.isBot
+										? 'bot-transcript-line'
+										: 'transcript-line'}
 								>
-									<div class="transcript-meta">
+									<div
+										class="mb-1 flex items-baseline justify-between gap-3 text-xs"
+									>
 										{#if line.isBot}
-											<span class="speaker bot">{line.speaker}</span>
+											<span
+												class="inline-flex items-center gap-1.5 font-medium text-foreground"
+											>
+												<BotIcon class="size-3" />
+												{line.speaker}
+											</span>
 										{:else if line.speaker}
-											<span class="speaker">{line.speaker}</span>
+											<span class="font-medium text-foreground">
+												{line.speaker}
+											</span>
 										{:else}
-											<span class="speaker unknown">Speaker</span>
+											<span class="text-muted-foreground italic">Speaker</span>
 										{/if}
-										<time class="ts">{formatTimestamp(line.createdAt)}</time>
+										<time class="font-mono text-muted-foreground">
+											{formatTimestamp(line.createdAt)}
+										</time>
 									</div>
-									<p class="transcript-text">{line.text}</p>
+									<p
+										class="m-0 text-sm leading-relaxed whitespace-pre-wrap text-foreground"
+									>
+										{line.text}
+									</p>
 								</li>
 							{/each}
 						</ul>
 					{/if}
 				</div>
-			</section>
-
-			<section
-				class="pane decisions-pane"
-				aria-label="Decision feed"
-				data-testid="decisions-pane"
-			>
-				<header class="pane-header">
-					<h2>Decisions</h2>
-					<span class="pane-count" data-testid="decisions-count">
-						{decisionsForRender(detail).length}
-					</span>
-				</header>
-				<div class="pane-scroll">
-					{#if decisionsForRender(detail).length === 0}
-						<p class="empty">No decisions recorded.</p>
+			{:else if activeTab === 'decisions'}
+				<div
+					role="tabpanel"
+					id="tab-decisions"
+					aria-labelledby="tab-decisions-trigger"
+					data-testid="decisions-pane"
+					class="rounded-md border border-border bg-surface-1"
+				>
+					{#if detail.decisions.length === 0}
+						<p class="px-4 py-12 text-center text-sm text-muted-foreground italic">
+							No decisions recorded.
+						</p>
 					{:else}
-						<ul class="decision-list">
-							{#each decisionsForRender(detail) as d (d.id)}
-								<li class="decision">
-									<header class="decision-header">
-										<span class="decision-outcome outcome-{d.outcome}">
-											{DECISION_OUTCOME_LABEL[d.outcome as DecisionOutcome] ?? d.outcome}
+						<ul
+							class="m-0 flex max-h-[68vh] list-none flex-col overflow-y-auto p-0"
+						>
+							{#each detail.decisions as d (d.id)}
+								<li class="border-b border-separator px-4 py-3 last:border-b-0">
+									<div
+										class="mb-1.5 flex items-baseline justify-between gap-2 text-xs"
+									>
+										<span
+											class="inline-flex items-center rounded-sm border px-1.5 py-0.5 text-[0.65rem] font-semibold tracking-wide uppercase {outcomeToneClass(
+												d.outcome
+											)}"
+										>
+											{DECISION_OUTCOME_LABEL[d.outcome as DecisionOutcome] ??
+												d.outcome}
 										</span>
-										<span class="decision-confidence">
+										<span
+											class="font-mono text-muted-foreground"
+											title="Router confidence"
+										>
 											{(d.confidence * 100).toFixed(0)}%
 										</span>
-										<time class="ts">{formatTimestamp(d.created_at)}</time>
-									</header>
-									<p class="decision-reason">{d.reason}</p>
+										<time class="font-mono text-muted-foreground">
+											{formatTimestamp(d.created_at)}
+										</time>
+									</div>
+									<p class="m-0 mb-1 text-sm leading-relaxed text-foreground">
+										{d.reason}
+									</p>
 									{#if d.suggested_reply}
-										<p class="decision-suggested">
-											<span class="muted">Suggested:</span>
-											<span>"{d.suggested_reply}"</span>
+										<p
+											class="m-0 mt-1 text-sm text-muted-foreground italic"
+										>
+											&ldquo;{d.suggested_reply}&rdquo;
 										</p>
 									{/if}
 									{#if d.reply_type}
-										<p class="decision-meta">
-											<span class="muted">Type:</span>
-											<span>{d.reply_type}</span>
-										</p>
+										<div
+											class="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted-foreground"
+										>
+											<span>
+												<span class="font-mono">type</span>
+												<span class="font-medium text-foreground">
+													{d.reply_type}
+												</span>
+											</span>
+										</div>
 									{/if}
-									{#each utterancesForDecision(d, utterancesForRender(detail)) as u (u.id)}
-										<p class="decision-meta">
-											<span class="muted">Spoken:</span>
-											<span>"{u.output_text}"</span>
+									{#each utterancesForDecision(d, detail.utterances) as u (u.id)}
+										<p class="m-0 mt-1 text-xs text-muted-foreground">
+											<span class="font-mono">spoken:</span>
+											<span class="text-foreground">
+												&ldquo;{u.output_text}&rdquo;
+											</span>
 										</p>
 									{/each}
 								</li>
@@ -407,441 +684,69 @@
 						</ul>
 					{/if}
 				</div>
-			</section>
-
-			<section
-				class="pane utterances-pane"
-				aria-label="Utterances"
-				data-testid="utterances-pane"
-			>
-				<header class="pane-header">
-					<h2>Utterances</h2>
-					<span class="pane-count" data-testid="utterances-count">
-						{utterancesForRender(detail).length}
-					</span>
-				</header>
-				<div class="pane-scroll">
-					{#if utterancesForRender(detail).length === 0}
-						<p class="empty">Johnny didn't speak.</p>
+			{:else}
+				<div
+					role="tabpanel"
+					id="tab-utterances"
+					aria-labelledby="tab-utterances-trigger"
+					data-testid="utterances-pane"
+					class="rounded-md border border-border bg-surface-1"
+				>
+					{#if detail.utterances.length === 0}
+						<p class="px-4 py-12 text-center text-sm text-muted-foreground italic">
+							Johnny didn't speak in this session.
+						</p>
 					{:else}
-						<ul class="utterance-list">
-							{#each utterancesForRender(detail) as u (u.id)}
-								<li class="utterance">
-									<header class="utterance-header">
-										<span class="mode-tag">{u.mode}</span>
-										<time class="ts">{formatTimestamp(u.created_at)}</time>
-									</header>
-									<p class="utterance-text">"{u.output_text}"</p>
-									{#if u.matched_allowed_reply}
-										<p class="utterance-meta">
-											<span class="muted">Matched reply:</span>
-											<span>"{u.matched_allowed_reply}"</span>
-										</p>
-									{/if}
-									{#if u.audio_duration_ms !== null}
-										<p class="utterance-meta">
-											<span class="muted">Duration:</span>
-											<span>{(u.audio_duration_ms / 1000).toFixed(2)}s</span>
-										</p>
+						<ul
+							class="m-0 flex max-h-[68vh] list-none flex-col overflow-y-auto p-0"
+						>
+							{#each detail.utterances as u (u.id)}
+								<li class="border-b border-separator px-4 py-3 last:border-b-0">
+									<div
+										class="mb-1.5 flex items-baseline justify-between gap-2 text-xs"
+									>
+										<span
+											class="inline-flex items-center rounded-sm border border-border bg-muted px-1.5 py-0.5 font-mono text-[0.65rem] tracking-wide text-muted-foreground uppercase"
+										>
+											{u.mode}
+										</span>
+										<time class="font-mono text-muted-foreground">
+											{formatTimestamp(u.created_at)}
+										</time>
+									</div>
+									<p
+										class="m-0 text-sm leading-relaxed text-foreground"
+									>
+										&ldquo;{u.output_text}&rdquo;
+									</p>
+									{#if u.matched_allowed_reply || u.audio_duration_ms !== null}
+										<div
+											class="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted-foreground"
+										>
+											{#if u.matched_allowed_reply}
+												<span>
+													<span class="font-mono">matched:</span>
+													<span class="text-foreground">
+														&ldquo;{u.matched_allowed_reply}&rdquo;
+													</span>
+												</span>
+											{/if}
+											{#if u.audio_duration_ms !== null}
+												<span>
+													<span class="font-mono">duration:</span>
+													<span class="text-foreground">
+														{(u.audio_duration_ms / 1000).toFixed(2)}s
+													</span>
+												</span>
+											{/if}
+										</div>
 									{/if}
 								</li>
 							{/each}
 						</ul>
 					{/if}
 				</div>
-			</section>
+			{/if}
 		</div>
 	{/if}
 </div>
-
-<style>
-	.page {
-		max-width: 1280px;
-	}
-	.page-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		gap: 1rem;
-		flex-wrap: wrap;
-		margin-bottom: 1rem;
-	}
-	.title-row {
-		display: flex;
-		align-items: center;
-		gap: 0.75rem;
-		flex-wrap: wrap;
-	}
-	.title-row h1 {
-		margin: 0;
-		font-size: 1.5rem;
-	}
-	.back-link {
-		color: #4b5563;
-		text-decoration: none;
-		font-size: 0.85rem;
-		border: 1px solid #d1d5db;
-		border-radius: 6px;
-		padding: 0.35rem 0.65rem;
-	}
-	.back-link:hover {
-		background: #f3f4f6;
-	}
-	.header-actions {
-		display: flex;
-		gap: 0.6rem;
-		align-items: center;
-		flex-wrap: wrap;
-	}
-	.action {
-		appearance: none;
-		border: 1px solid #d1d5db;
-		background: #ffffff;
-		color: #1f2937;
-		text-decoration: none;
-		border-radius: 6px;
-		padding: 0.4rem 0.75rem;
-		font-size: 0.85rem;
-		font-weight: 600;
-		cursor: pointer;
-	}
-	.action.export {
-		background: #4f46e5;
-		color: #ffffff;
-		border-color: #4338ca;
-	}
-	.action.export:hover {
-		background: #4338ca;
-	}
-	.action.danger {
-		background: #b91c1c;
-		color: #ffffff;
-		border-color: #991b1b;
-	}
-	.action.danger:hover:not(:disabled) {
-		background: #991b1b;
-	}
-	.action:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-	.confirm-text {
-		font-size: 0.85rem;
-		color: #b91c1c;
-		font-weight: 600;
-	}
-
-	.status-pill {
-		font-size: 0.72rem;
-		font-weight: 600;
-		padding: 0.18rem 0.55rem;
-		border-radius: 9999px;
-		text-transform: uppercase;
-		letter-spacing: 0.03em;
-	}
-	.status-pill-ended {
-		background: #dcfce7;
-		color: #166534;
-	}
-	.status-pill-failed {
-		background: #fee2e2;
-		color: #991b1b;
-	}
-	.status-pill-scheduled,
-	.status-pill-joining,
-	.status-pill-joined {
-		background: #dbeafe;
-		color: #1e40af;
-	}
-
-	.alert {
-		padding: 0.6rem 0.85rem;
-		border-radius: 6px;
-		margin: 0 0 0.75rem;
-		font-size: 0.85rem;
-	}
-	.alert.error {
-		background: #fef2f2;
-		color: #991b1b;
-		border: 1px solid #fecaca;
-	}
-	.empty {
-		color: #6b7280;
-		font-style: italic;
-		margin: 1rem 0;
-	}
-
-	.meta-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-		gap: 0.5rem 1rem;
-		background: #f9fafb;
-		border: 1px solid #e5e7eb;
-		border-radius: 6px;
-		padding: 0.65rem 0.85rem;
-		margin-bottom: 1rem;
-		font-size: 0.85rem;
-	}
-	.meta-grid > div {
-		display: flex;
-		flex-direction: column;
-	}
-	.meta-grid .full {
-		grid-column: 1 / -1;
-	}
-	.meta-label {
-		font-size: 0.7rem;
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-		color: #6b7280;
-	}
-	.meta-value {
-		font-weight: 500;
-		color: #1f2937;
-	}
-	.error-text {
-		color: #991b1b;
-		white-space: pre-wrap;
-	}
-
-	.search {
-		background: #ffffff;
-		border: 1px solid #e5e7eb;
-		border-radius: 8px;
-		padding: 0.7rem 0.9rem;
-		margin-bottom: 1rem;
-	}
-	.search-row {
-		display: flex;
-		gap: 0.5rem;
-	}
-	.search-row input {
-		flex: 1;
-		padding: 0.45rem 0.65rem;
-		border: 1px solid #d1d5db;
-		border-radius: 6px;
-		font-size: 0.9rem;
-	}
-	.search-row button {
-		appearance: none;
-		border: 0;
-		border-radius: 6px;
-		padding: 0.45rem 0.85rem;
-		font-size: 0.85rem;
-		font-weight: 600;
-		cursor: pointer;
-		background: #4f46e5;
-		color: #ffffff;
-	}
-	.search-row button:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-	.search-row button.clear {
-		background: #f3f4f6;
-		color: #374151;
-	}
-	.search-results {
-		list-style: none;
-		margin: 0.65rem 0 0;
-		padding: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 0.4rem;
-		max-height: 240px;
-		overflow-y: auto;
-	}
-	.search-hit {
-		background: #f9fafb;
-		border: 1px solid #e5e7eb;
-		border-radius: 6px;
-		padding: 0.45rem 0.6rem;
-	}
-	.search-hit-meta {
-		display: flex;
-		justify-content: space-between;
-		font-size: 0.75rem;
-		color: #6b7280;
-		margin-bottom: 0.2rem;
-	}
-	.search-hit p {
-		margin: 0;
-		font-size: 0.88rem;
-		color: #111827;
-	}
-	.score {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-weight: 600;
-		color: #4f46e5;
-	}
-
-	.panes {
-		display: grid;
-		grid-template-columns: 2fr 1.4fr 1.2fr;
-		gap: 1rem;
-		min-height: 60vh;
-	}
-	.pane {
-		background: #ffffff;
-		border: 1px solid #e5e7eb;
-		border-radius: 8px;
-		padding: 0.75rem 0.9rem;
-		display: flex;
-		flex-direction: column;
-		min-height: 60vh;
-	}
-	.pane-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: baseline;
-		gap: 0.5rem;
-		margin-bottom: 0.6rem;
-	}
-	.pane-header h2 {
-		margin: 0;
-		font-size: 0.95rem;
-		color: #111827;
-	}
-	.pane-count {
-		font-size: 0.75rem;
-		font-weight: 600;
-		color: #ffffff;
-		background: #1f2937;
-		border-radius: 9999px;
-		padding: 0.1rem 0.55rem;
-	}
-	.pane-scroll {
-		overflow-y: auto;
-		flex: 1;
-		min-height: 0;
-		max-height: 65vh;
-		padding-right: 0.25rem;
-	}
-
-	.transcript-list,
-	.decision-list,
-	.utterance-list {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 0.5rem;
-	}
-	.transcript-line,
-	.decision,
-	.utterance {
-		background: #f9fafb;
-		border: 1px solid #e5e7eb;
-		border-radius: 6px;
-		padding: 0.45rem 0.6rem;
-	}
-	.transcript-line.bot {
-		background: #eef2ff;
-		border-color: #c7d2fe;
-	}
-	.transcript-meta,
-	.decision-header,
-	.utterance-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: baseline;
-		gap: 0.5rem;
-		font-size: 0.7rem;
-		color: #6b7280;
-		margin-bottom: 0.2rem;
-	}
-	.speaker {
-		font-weight: 600;
-		color: #1f2937;
-	}
-	.speaker.bot {
-		color: #4338ca;
-	}
-	.speaker.unknown {
-		color: #6b7280;
-		font-style: italic;
-		font-weight: 500;
-	}
-	.transcript-text,
-	.utterance-text {
-		margin: 0;
-		color: #111827;
-		font-size: 0.9rem;
-		white-space: pre-wrap;
-	}
-	.ts {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.7rem;
-		color: #6b7280;
-	}
-
-	.decision-outcome {
-		font-size: 0.7rem;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-		padding: 0.1rem 0.5rem;
-		border-radius: 9999px;
-	}
-	.outcome-spoken {
-		background: #dcfce7;
-		color: #166534;
-	}
-	.outcome-suppressed {
-		background: #f3f4f6;
-		color: #4b5563;
-	}
-	.outcome-pending {
-		background: #fef3c7;
-		color: #92400e;
-	}
-	.outcome-rejected {
-		background: #fee2e2;
-		color: #991b1b;
-	}
-	.outcome-suggested {
-		background: #ede9fe;
-		color: #5b21b6;
-	}
-	.decision-confidence {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.75rem;
-		color: #4b5563;
-	}
-	.decision-reason {
-		margin: 0 0 0.25rem;
-		font-size: 0.85rem;
-		color: #1f2937;
-	}
-	.decision-suggested,
-	.decision-meta,
-	.utterance-meta {
-		margin: 0.15rem 0;
-		font-size: 0.8rem;
-		color: #374151;
-	}
-	.muted {
-		color: #6b7280;
-		margin-right: 0.25rem;
-		font-weight: 600;
-	}
-
-	.mode-tag {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.7rem;
-		color: #374151;
-		background: #e5e7eb;
-		border-radius: 4px;
-		padding: 0.1rem 0.35rem;
-	}
-
-	@media (max-width: 1100px) {
-		.panes {
-			grid-template-columns: 1fr;
-		}
-		.pane {
-			min-height: 40vh;
-		}
-	}
-</style>

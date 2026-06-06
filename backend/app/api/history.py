@@ -148,7 +148,7 @@ class HistorySessionRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    meeting_config_id: int
+    meeting_config_id: int | None
     status: BotSessionStatus
     container_name: str | None
     started_at: datetime | None

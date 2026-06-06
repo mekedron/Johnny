@@ -1,5 +1,13 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import SearchIcon from '@lucide/svelte/icons/search';
+	import XIcon from '@lucide/svelte/icons/x';
+	import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left';
+	import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
+	import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
+	import ArchiveIcon from '@lucide/svelte/icons/archive';
+	import { Button } from '$lib/components/ui/button/index.js';
+	import * as Alert from '$lib/components/ui/alert/index.js';
 	import { BOT_MODE_LABEL } from '$lib/templates';
 	import { BOT_SESSION_STATUS_LABEL } from '$lib/sessions';
 	import {
@@ -83,8 +91,15 @@
 		return page?.sessions ?? [];
 	}
 
-	function statusClass(status: PastSessionSummary['status']): string {
-		return `status-pill-${status}`;
+	function statusToneClass(status: PastSessionSummary['status']): string {
+		switch (status) {
+			case 'ended':
+				return 'border-success/40 bg-success/10 text-foreground';
+			case 'failed':
+				return 'border-destructive/40 bg-destructive/10 text-foreground';
+			default:
+				return 'border-info/40 bg-info/10 text-foreground';
+		}
 	}
 
 	onMount(() => {
@@ -96,71 +111,121 @@
 	<title>History · Johnny</title>
 </svelte:head>
 
-<div class="page" data-testid="history-page">
-	<header class="page-header">
-		<h1>History</h1>
-		<p class="subtitle">Past meeting sessions and audit logs.</p>
+<div class="mx-auto flex max-w-7xl flex-col gap-6" data-testid="history-page">
+	<header class="flex flex-col gap-1.5">
+		<h1
+			class="m-0 text-2xl leading-tight font-semibold tracking-tight text-foreground"
+		>
+			History
+		</h1>
+		<p class="m-0 text-sm text-muted-foreground">
+			Past meeting sessions and audit logs.
+		</p>
 	</header>
 
-	<section class="search" aria-label="Search transcripts" data-testid="search-panel">
+	<section
+		class="flex flex-col gap-3"
+		aria-label="Search transcripts"
+		data-testid="search-panel"
+	>
 		<form
 			onsubmit={(event) => {
 				event.preventDefault();
 				void runSearch();
 			}}
+			class="flex flex-wrap items-center gap-2"
 		>
-			<label for="transcript-search" class="visually-hidden">Search transcripts</label>
-			<div class="search-row">
+			<label for="transcript-search" class="sr-only">Search transcripts</label>
+			<div
+				class="flex flex-1 items-center gap-2 rounded-md border border-border-strong bg-surface-3 px-3 has-focus-visible:border-ring"
+			>
+				<SearchIcon class="size-4 shrink-0 text-muted-foreground" />
 				<input
 					id="transcript-search"
 					type="search"
-					placeholder="Search transcripts (semantic)…"
+					placeholder="Search transcripts across all sessions"
 					bind:value={searchQuery}
 					data-testid="search-input"
+					class="h-9 w-full flex-1 border-0 bg-transparent text-sm text-foreground placeholder:text-ink-subtle focus:outline-none"
 				/>
-				<button
-					type="submit"
-					disabled={searchBusy || searchQuery.trim().length === 0}
-					data-testid="search-button"
-				>
-					{searchBusy ? 'Searching…' : 'Search'}
-				</button>
 				{#if searchActive}
 					<button
 						type="button"
-						class="clear"
 						onclick={clearSearch}
+						class="text-muted-foreground hover:text-foreground"
 						data-testid="search-clear"
+						aria-label="Clear search"
 					>
-						Clear
+						<XIcon class="size-4" />
 					</button>
 				{/if}
 			</div>
+			<Button
+				type="submit"
+				disabled={searchBusy || searchQuery.trim().length === 0}
+				data-testid="search-button"
+			>
+				{searchBusy ? 'Searching…' : 'Search'}
+			</Button>
 		</form>
+
 		{#if searchError}
-			<p class="error" role="alert" data-testid="search-error">{searchError}</p>
+			<Alert.Root variant="destructive" data-testid="search-error">
+				<CircleAlertIcon />
+				<Alert.Title>Search failed</Alert.Title>
+				<Alert.Description>{searchError}</Alert.Description>
+			</Alert.Root>
 		{/if}
+
 		{#if searchActive}
+			<div
+				class="flex items-center justify-between border-b border-separator pb-2 text-xs text-muted-foreground"
+			>
+				<span data-testid="search-result-count">
+					{searchHits.length}
+					{searchHits.length === 1 ? 'match' : 'matches'} for
+					<span class="font-mono text-foreground">"{searchQuery.trim()}"</span>
+				</span>
+			</div>
+
 			{#if searchHits.length === 0}
-				<p class="empty" data-testid="search-empty">No matches.</p>
+				<p
+					class="py-6 text-center text-sm text-muted-foreground italic"
+					data-testid="search-empty"
+				>
+					No matches.
+				</p>
 			{:else}
-				<ul class="search-results" data-testid="search-results">
+				<ul
+					class="m-0 flex max-h-[360px] list-none flex-col gap-2 overflow-y-auto p-0"
+					data-testid="search-results"
+				>
 					{#each searchHits as hit (hit.chunk.id)}
-						<li class="search-hit">
-							<header class="search-hit-meta">
-								<a href={`/history/${hit.chunk.bot_session_id}`} class="session-link">
-									Session #{hit.chunk.bot_session_id}
-								</a>
-								<span class="score" title="Cosine similarity (1.0 = identical)">
-									{(hit.score * 100).toFixed(0)}%
-								</span>
-							</header>
-							<p class="search-text">
-								{#if hit.chunk.speaker}
-									<span class="speaker">{hit.chunk.speaker}:</span>
-								{/if}
-								{hit.chunk.text}
-							</p>
+						<li>
+							<a
+								href={`/history/${hit.chunk.bot_session_id}`}
+								class="block rounded-md border border-border bg-surface-1 px-3 py-2 transition-colors hover:border-border-strong hover:bg-surface-2"
+							>
+								<header class="mb-1 flex items-baseline justify-between gap-3 text-xs">
+									<span class="font-mono font-semibold text-foreground">
+										Session #{hit.chunk.bot_session_id}
+									</span>
+									<span
+										class="font-mono text-muted-foreground"
+										title="Cosine similarity (1.0 = identical)"
+									>
+										{(hit.score * 100).toFixed(0)}%
+									</span>
+								</header>
+								<p class="m-0 text-sm leading-snug text-foreground">
+									{#if hit.chunk.speaker}
+										<span class="font-medium text-foreground">
+											{hit.chunk.speaker}:
+										</span>
+									{/if}
+									<span class="text-muted-foreground">{hit.chunk.text}</span>
+								</p>
+							</a>
 						</li>
 					{/each}
 				</ul>
@@ -168,275 +233,187 @@
 		{/if}
 	</section>
 
-	<section class="list" aria-label="Past sessions">
+	<section
+		class="flex flex-col gap-3"
+		aria-label="Past sessions"
+		data-testid="sessions-section"
+	>
 		{#if error}
-			<p class="error" role="alert" data-testid="history-error">{error}</p>
+			<Alert.Root variant="destructive" data-testid="history-error">
+				<CircleAlertIcon />
+				<Alert.Title>Failed to load history</Alert.Title>
+				<Alert.Description>{error}</Alert.Description>
+			</Alert.Root>
 		{:else if loading}
-			<p class="empty">Loading sessions…</p>
+			<p class="text-sm text-muted-foreground italic">Loading sessions…</p>
 		{:else if sessionsForRender().length === 0}
-			<p class="empty" data-testid="history-empty">No past sessions yet.</p>
+			<div
+				class="flex flex-col items-center gap-3 rounded-md border border-dashed border-border bg-surface-1 px-6 py-12 text-center"
+				data-testid="history-empty"
+			>
+				<ArchiveIcon class="size-8 text-ink-subtle" strokeWidth={1.5} />
+				<p class="m-0 max-w-[42ch] text-sm text-muted-foreground">
+					Past sessions will appear here once Johnny finishes its first
+					meeting.
+				</p>
+			</div>
 		{:else}
-			<table class="sessions" data-testid="sessions-table">
-				<thead>
-					<tr>
-						<th scope="col">Date</th>
-						<th scope="col">Meeting</th>
-						<th scope="col">Mode</th>
-						<th scope="col">Status</th>
-						<th scope="col">Duration</th>
-						<th scope="col" class="num">Transcripts</th>
-						<th scope="col" class="num">Decisions</th>
-						<th scope="col" class="num">Utterances</th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each sessionsForRender() as session (session.id)}
-						<tr data-testid="session-row-{session.id}">
-							<td>
-								<a href={`/history/${session.id}`} class="session-link">
-									{formatDateRange(session.started_at, session.ended_at)}
-								</a>
-							</td>
-							<td>
-								<a href={`/history/${session.id}`} class="session-link">
-									{session.meeting_summary ?? `Session #${session.id}`}
-								</a>
-							</td>
-							<td>{BOT_MODE_LABEL[session.mode]}</td>
-							<td>
-								<span class="status-pill {statusClass(session.status)}">
-									{BOT_SESSION_STATUS_LABEL[session.status]}
-								</span>
-							</td>
-							<td>{formatDuration(session.duration_ms)}</td>
-							<td class="num">{session.transcript_count}</td>
-							<td class="num">{session.decision_count}</td>
-							<td class="num">{session.utterance_count}</td>
+			<div
+				class="overflow-hidden rounded-md border border-border bg-surface-1"
+			>
+				<table class="w-full border-collapse text-sm" data-testid="sessions-table">
+					<thead class="border-b border-border bg-surface-2/40 text-left text-xs">
+						<tr>
+							<th
+								scope="col"
+								class="px-4 py-2.5 font-medium tracking-wide text-muted-foreground"
+							>
+								When
+							</th>
+							<th
+								scope="col"
+								class="px-4 py-2.5 font-medium tracking-wide text-muted-foreground"
+							>
+								Meeting
+							</th>
+							<th
+								scope="col"
+								class="px-4 py-2.5 font-medium tracking-wide text-muted-foreground"
+							>
+								Mode
+							</th>
+							<th
+								scope="col"
+								class="px-4 py-2.5 font-medium tracking-wide text-muted-foreground"
+							>
+								Status
+							</th>
+							<th
+								scope="col"
+								class="px-4 py-2.5 text-right font-medium tracking-wide text-muted-foreground"
+							>
+								Duration
+							</th>
+							<th
+								scope="col"
+								class="px-4 py-2.5 text-right font-medium tracking-wide text-muted-foreground"
+							>
+								Lines
+							</th>
+							<th
+								scope="col"
+								class="px-4 py-2.5 text-right font-medium tracking-wide text-muted-foreground"
+							>
+								Decisions
+							</th>
+							<th
+								scope="col"
+								class="px-4 py-2.5 text-right font-medium tracking-wide text-muted-foreground"
+							>
+								Spoken
+							</th>
 						</tr>
-					{/each}
-				</tbody>
-			</table>
-		{/if}
+					</thead>
+					<tbody>
+						{#each sessionsForRender() as session (session.id)}
+							<tr
+								class="border-b border-separator transition-colors last:border-b-0 hover:bg-surface-2/60"
+								data-testid="session-row-{session.id}"
+							>
+								<td class="px-4 py-3 text-foreground">
+									<a
+										href={`/history/${session.id}`}
+										class="flex flex-col gap-0.5 outline-none focus-visible:underline focus-visible:underline-offset-4"
+									>
+										<span class="font-mono text-xs text-muted-foreground">
+											#{session.id}
+										</span>
+										<span class="text-sm text-foreground">
+											{formatDateRange(session.started_at, session.ended_at)}
+										</span>
+									</a>
+								</td>
+								<td class="px-4 py-3 text-foreground">
+									<a
+										href={`/history/${session.id}`}
+										class="block max-w-[40ch] truncate outline-none focus-visible:underline focus-visible:underline-offset-4"
+										title={session.meeting_summary ?? `Session #${session.id}`}
+									>
+										{session.meeting_summary ?? `Session #${session.id}`}
+									</a>
+								</td>
+								<td class="px-4 py-3 text-sm text-muted-foreground">
+									{BOT_MODE_LABEL[session.mode]}
+								</td>
+								<td class="px-4 py-3">
+									<span
+										class="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium {statusToneClass(
+											session.status
+										)}"
+									>
+										{BOT_SESSION_STATUS_LABEL[session.status]}
+									</span>
+								</td>
+								<td
+									class="px-4 py-3 text-right font-mono text-xs text-muted-foreground"
+								>
+									{formatDuration(session.duration_ms)}
+								</td>
+								<td
+									class="px-4 py-3 text-right font-mono text-xs text-foreground"
+								>
+									{session.transcript_count}
+								</td>
+								<td
+									class="px-4 py-3 text-right font-mono text-xs text-foreground"
+								>
+									{session.decision_count}
+								</td>
+								<td
+									class="px-4 py-3 text-right font-mono text-xs text-foreground"
+								>
+									{session.utterance_count}
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
 
-		{#if page !== null && page.total > PAGE_SIZE}
-			<nav class="pager" aria-label="Pagination">
-				<button type="button" onclick={prevPage} disabled={offset === 0}>
-					Previous
-				</button>
-				<span class="pager-info" data-testid="pager-info">
-					{offset + 1}–{Math.min(offset + PAGE_SIZE, page.total)} of {page.total}
-				</span>
-				<button
-					type="button"
-					onclick={nextPage}
-					disabled={offset + PAGE_SIZE >= page.total}
+			{#if page !== null && page.total > PAGE_SIZE}
+				<nav
+					class="flex items-center justify-between gap-3 pt-1"
+					aria-label="Pagination"
 				>
-					Next
-				</button>
-			</nav>
+					<span
+						class="font-mono text-xs text-muted-foreground"
+						data-testid="pager-info"
+					>
+						{offset + 1}–{Math.min(offset + PAGE_SIZE, page.total)} of
+						{page.total}
+					</span>
+					<div class="flex items-center gap-1.5">
+						<Button
+							type="button"
+							variant="outline"
+							size="sm"
+							onclick={prevPage}
+							disabled={offset === 0}
+						>
+							<ChevronLeftIcon /> Previous
+						</Button>
+						<Button
+							type="button"
+							variant="outline"
+							size="sm"
+							onclick={nextPage}
+							disabled={offset + PAGE_SIZE >= page.total}
+						>
+							Next <ChevronRightIcon />
+						</Button>
+					</div>
+				</nav>
+			{/if}
 		{/if}
 	</section>
 </div>
-
-<style>
-	.page {
-		max-width: 1200px;
-	}
-	.page-header h1 {
-		margin: 0 0 0.25rem;
-	}
-	.subtitle {
-		margin: 0 0 1.25rem;
-		color: #6b7280;
-	}
-
-	.search {
-		background: #ffffff;
-		border: 1px solid #e5e7eb;
-		border-radius: 8px;
-		padding: 0.85rem 1rem;
-		margin-bottom: 1.5rem;
-	}
-	.search-row {
-		display: flex;
-		gap: 0.5rem;
-	}
-	.search-row input {
-		flex: 1;
-		padding: 0.5rem 0.7rem;
-		border: 1px solid #d1d5db;
-		border-radius: 6px;
-		font-size: 0.9rem;
-	}
-	.search-row button {
-		appearance: none;
-		border: 0;
-		border-radius: 6px;
-		padding: 0.5rem 0.9rem;
-		font-size: 0.85rem;
-		font-weight: 600;
-		cursor: pointer;
-		background: #4f46e5;
-		color: #ffffff;
-	}
-	.search-row button:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-	.search-row button.clear {
-		background: #f3f4f6;
-		color: #374151;
-	}
-	.visually-hidden {
-		position: absolute;
-		width: 1px;
-		height: 1px;
-		overflow: hidden;
-		clip: rect(0 0 0 0);
-		white-space: nowrap;
-	}
-	.search-results {
-		list-style: none;
-		margin: 0.75rem 0 0;
-		padding: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 0.5rem;
-		max-height: 360px;
-		overflow-y: auto;
-	}
-	.search-hit {
-		background: #f9fafb;
-		border: 1px solid #e5e7eb;
-		border-radius: 6px;
-		padding: 0.55rem 0.7rem;
-	}
-	.search-hit-meta {
-		display: flex;
-		justify-content: space-between;
-		align-items: baseline;
-		font-size: 0.75rem;
-		color: #6b7280;
-		margin-bottom: 0.25rem;
-	}
-	.score {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-weight: 600;
-		color: #4f46e5;
-	}
-	.search-text {
-		margin: 0;
-		font-size: 0.9rem;
-		color: #111827;
-	}
-	.speaker {
-		font-weight: 600;
-		margin-right: 0.25rem;
-	}
-
-	.list {
-		background: #ffffff;
-		border: 1px solid #e5e7eb;
-		border-radius: 8px;
-		padding: 0.5rem 0.75rem;
-	}
-	.empty {
-		color: #6b7280;
-		font-style: italic;
-		padding: 1rem 0.5rem;
-		margin: 0;
-	}
-	.error {
-		color: #b91c1c;
-		background: #fef2f2;
-		border: 1px solid #fecaca;
-		border-radius: 6px;
-		padding: 0.6rem 0.8rem;
-		margin: 0.5rem 0;
-	}
-
-	.sessions {
-		width: 100%;
-		border-collapse: collapse;
-		font-size: 0.9rem;
-	}
-	.sessions th,
-	.sessions td {
-		text-align: left;
-		padding: 0.55rem 0.7rem;
-		border-bottom: 1px solid #f3f4f6;
-	}
-	.sessions th {
-		font-size: 0.75rem;
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-		color: #6b7280;
-	}
-	.sessions tbody tr:hover {
-		background: #f9fafb;
-	}
-	.num {
-		text-align: right;
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-	}
-	.session-link {
-		color: #1f2937;
-		text-decoration: none;
-		font-weight: 500;
-	}
-	.session-link:hover {
-		color: #4f46e5;
-		text-decoration: underline;
-	}
-
-	.status-pill {
-		font-size: 0.7rem;
-		font-weight: 600;
-		padding: 0.1rem 0.5rem;
-		border-radius: 9999px;
-		text-transform: uppercase;
-		letter-spacing: 0.03em;
-		white-space: nowrap;
-	}
-	.status-pill-ended {
-		background: #dcfce7;
-		color: #166534;
-	}
-	.status-pill-failed {
-		background: #fee2e2;
-		color: #991b1b;
-	}
-	.status-pill-scheduled,
-	.status-pill-joining,
-	.status-pill-joined {
-		background: #dbeafe;
-		color: #1e40af;
-	}
-
-	.pager {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: 0.75rem;
-		padding: 0.75rem;
-		border-top: 1px solid #f3f4f6;
-		margin-top: 0.5rem;
-	}
-	.pager button {
-		appearance: none;
-		background: #f3f4f6;
-		border: 1px solid #d1d5db;
-		border-radius: 6px;
-		padding: 0.3rem 0.75rem;
-		font-size: 0.85rem;
-		cursor: pointer;
-	}
-	.pager button:disabled {
-		opacity: 0.45;
-		cursor: not-allowed;
-	}
-	.pager-info {
-		font-size: 0.85rem;
-		color: #4b5563;
-	}
-</style>
