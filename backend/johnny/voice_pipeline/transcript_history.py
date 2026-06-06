@@ -19,6 +19,20 @@ from abc import ABC, abstractmethod
 
 from johnny.voice_pipeline.events import TranscriptFinalized
 
+BOT_SPEAKER_LABEL = "Bot (you)"
+"""Speaker label used for the bot's own prior utterances in the history (Johnny-7qp).
+
+The in-memory ``VoicePipeline._transcript_history`` list mixes participant
+transcripts and the bot's own utterances so the router and answer LLMs
+can recall what THEY said — without this, the bot couldn't answer "what
+did you just say?" because its own prior speech never reached the prompt.
+
+Loader implementations tag rehydrated bot utterances with this label so
+the in-memory list survives container restarts with the same shape it
+had during the live session. The pipeline's prompt builders explain the
+label to the LLM in the system message.
+"""
+
 
 class TranscriptHistoryLoader(ABC):
     """Loads any prior transcripts for a session at pipeline startup."""
@@ -83,6 +97,7 @@ class InMemoryTranscriptHistoryLoader(TranscriptHistoryLoader):
 
 
 __all__ = [
+    "BOT_SPEAKER_LABEL",
     "InMemoryTranscriptHistoryLoader",
     "NoopTranscriptHistoryLoader",
     "TranscriptHistoryLoader",

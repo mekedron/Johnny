@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
+from datetime import UTC, datetime
 
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from app.db import Base
-from app.db.models import EMBEDDING_DIM, TranscriptChunk
+from app.db.models import EMBEDDING_DIM, AgentUtterance, BotMode, TranscriptChunk
 from app.services.transcripts import (
     EmbeddingDimensionError,
     EmbeddingProvider,
@@ -19,6 +20,7 @@ from app.services.transcripts import (
     compute_pending_embeddings,
     count_pending_embeddings,
 )
+from johnny.voice_pipeline.transcript_history import BOT_SPEAKER_LABEL
 
 
 @pytest.fixture
@@ -28,9 +30,13 @@ def engine() -> sa.Engine:
         connect_args={"check_same_thread": False},
         poolclass=sa.pool.StaticPool,
     )
-    # Only the transcript_chunks table — FK to bot_sessions is not enforced
-    # by SQLite, so the table-only fixture works.
-    Base.metadata.create_all(bind=eng, tables=[TranscriptChunk.__table__])  # type: ignore[list-item]
+    # Just the two tables we need — FK to bot_sessions is not enforced
+    # by SQLite so the table-only fixture works for both transcripts
+    # and bot utterances.
+    Base.metadata.create_all(
+        bind=eng,
+        tables=[TranscriptChunk.__table__, AgentUtterance.__table__],  # type: ignore[list-item]
+    )
     return eng
 
 
@@ -161,6 +167,7 @@ def _insert_chunk(
     end_offset_ms: int | None = None,
     speaker: str | None = None,
     embedding: list[float] | None = None,
+    created_at: datetime | None = None,
 ) -> TranscriptChunk:
     # Accept both the legacy ``start``/``end`` shorthand and the explicit
     # ``start_offset_ms``/``end_offset_ms`` column names — the loader
@@ -174,6 +181,8 @@ def _insert_chunk(
         text=text,
         embedding=embedding,
     )
+    if created_at is not None:
+        row.created_at = created_at
     session.add(row)
     session.commit()
     return row
@@ -420,3 +429,120 @@ async def test_history_loader_respects_limit(db_session: Session) -> None:
     out = await loader.load(session_id=None, bot_session_id=7)
 
     assert [t.text for t in out] == ["chunk 0", "chunk 1", "chunk 2"]
+
+
+# --- Johnny-7qp: rehydration includes bot utterances --------------------
+
+
+def _insert_utterance(
+    session: Session,
+    *,
+    bot_session_id: int = 1,
+    output_text: str = "bot reply",
+    mode: BotMode = BotMode.LIMITED_AUTO_SPEAK,
+    audio_duration_ms: int | None = None,
+    created_at: datetime | None = None,
+) -> AgentUtterance:
+    row = AgentUtterance(
+        bot_session_id=bot_session_id,
+        mode=mode,
+        prompt="<prompt>",
+        output_text=output_text,
+        audio_duration_ms=audio_duration_ms,
+    )
+    if created_at is not None:
+        row.created_at = created_at
+    session.add(row)
+    session.commit()
+    return row
+
+
+def _ts(seconds_offset: int) -> datetime:
+    """Build a deterministic ``created_at`` value with sub-second resolution.
+
+    SQLite's ``CURRENT_TIMESTAMP`` only has second-level precision, so
+    inserting transcripts and utterances back-to-back in the same test
+    would give them identical timestamps and break the chronological
+    merge. Setting ``created_at`` explicitly keeps the ordering test
+    deterministic without changing production behaviour.
+    """
+    return datetime(2026, 6, 6, 10, 0, seconds_offset, tzinfo=UTC)
+
+
+async def test_history_loader_merges_bot_utterances_into_history(
+    db_session: Session,
+) -> None:
+    """Bot utterances appear in the loader output tagged with BOT_SPEAKER_LABEL."""
+    _insert_chunk(
+        db_session,
+        bot_session_id=42,
+        text="hi team, status?",
+        start_offset_ms=0,
+        end_offset_ms=1000,
+        speaker="alice",
+        created_at=_ts(0),
+    )
+    _insert_utterance(
+        db_session,
+        bot_session_id=42,
+        output_text="infra is being upgraded",
+        created_at=_ts(5),
+    )
+    _insert_chunk(
+        db_session,
+        bot_session_id=42,
+        text="what did you just say?",
+        start_offset_ms=2000,
+        end_offset_ms=2500,
+        speaker="alice",
+        created_at=_ts(10),
+    )
+
+    loader = SqlAlchemyTranscriptHistoryLoader(db_session)
+    out = await loader.load(session_id=None, bot_session_id=42)
+
+    speakers = [t.speaker for t in out]
+    texts = [t.text for t in out]
+    assert BOT_SPEAKER_LABEL in speakers
+    bot_idx = speakers.index(BOT_SPEAKER_LABEL)
+    # The bot's reply must sit between the two participant turns chronologically.
+    assert texts[bot_idx] == "infra is being upgraded"
+    assert texts[:bot_idx] == ["hi team, status?"]
+    assert texts[bot_idx + 1 :] == ["what did you just say?"]
+
+
+async def test_history_loader_filters_bot_utterances_by_session(
+    db_session: Session,
+) -> None:
+    """A different session's utterances must not leak into the result."""
+    _insert_utterance(db_session, bot_session_id=42, output_text="mine")
+    _insert_utterance(db_session, bot_session_id=99, output_text="not mine")
+
+    loader = SqlAlchemyTranscriptHistoryLoader(db_session)
+    out = await loader.load(session_id=None, bot_session_id=42)
+
+    assert [t.text for t in out] == ["mine"]
+    assert all(t.speaker == BOT_SPEAKER_LABEL for t in out)
+
+
+async def test_history_loader_returns_only_bot_utterances_when_no_transcripts(
+    db_session: Session,
+) -> None:
+    """A session with only bot turns (suppressed participants) still rehydrates."""
+    _insert_utterance(db_session, bot_session_id=7, output_text="bot intro")
+
+    loader = SqlAlchemyTranscriptHistoryLoader(db_session)
+    out = await loader.load(session_id=None, bot_session_id=7)
+
+    assert [t.text for t in out] == ["bot intro"]
+    assert out[0].speaker == BOT_SPEAKER_LABEL
+
+
+async def test_history_loader_skips_bot_utterances_for_missing_session(
+    db_session: Session,
+) -> None:
+    """Loader with no bot_session_id returns an empty list even with rows present."""
+    _insert_utterance(db_session, bot_session_id=42, output_text="x")
+
+    loader = SqlAlchemyTranscriptHistoryLoader(db_session)
+    assert await loader.load(session_id=None, bot_session_id=None) == []

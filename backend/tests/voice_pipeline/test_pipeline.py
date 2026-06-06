@@ -5383,3 +5383,233 @@ def test_barge_in_config_default_enabled() -> None:
 def test_barge_in_config_can_disable() -> None:
     cfg = PipelineConfig(enable_barge_in=False)
     assert cfg.enable_barge_in is False
+
+
+# --- Johnny-7qp: bot's own utterances reach prompt history ----------------
+
+
+async def test_bot_utterance_appended_to_history_after_speaking(
+    two_utterance_pcm: bytes,
+) -> None:
+    """After the bot speaks, its text lands in ``_transcript_history`` as a
+    ``Bot (you)`` entry so the next router/answer prompt can reference it."""
+    from johnny.voice_pipeline import BOT_SPEAKER_LABEL
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hi there", "and another thing"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {"should_speak": True, "confidence": 0.9, "reason": "ok"},
+                {"should_speak": False, "confidence": 0.1, "reason": "skip"},
+            ]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["Hello back to you."]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+    await pipeline.run()
+
+    bot_entries = [
+        t for t in pipeline._transcript_history if t.speaker == BOT_SPEAKER_LABEL
+    ]
+    assert [t.text for t in bot_entries] == ["Hello back to you."]
+
+
+async def test_remember_bot_utterance_strips_and_skips_empty() -> None:
+    """Empty / whitespace-only bot utterances never enter the history."""
+    pipeline = _bare_pipeline()
+
+    pipeline._remember_bot_utterance("", 100)
+    pipeline._remember_bot_utterance("   ", 200)
+    pipeline._remember_bot_utterance("  real text  ", 300)
+
+    assert len(pipeline._transcript_history) == 1
+    assert pipeline._transcript_history[0].text == "real text"
+
+
+async def test_remember_bot_utterance_uses_bot_speaker_label() -> None:
+    """Direct call tags the entry with :data:`BOT_SPEAKER_LABEL`."""
+    from johnny.voice_pipeline import BOT_SPEAKER_LABEL
+
+    pipeline = _bare_pipeline()
+    pipeline._remember_bot_utterance("we're upgrading infrastructure", 12345)
+
+    entry = pipeline._transcript_history[0]
+    assert entry.speaker == BOT_SPEAKER_LABEL
+    assert entry.timestamp_ms == 12345
+
+
+async def test_remember_bot_utterance_respects_window_cap() -> None:
+    """Bot utterances count toward ``transcript_window_size`` like transcripts."""
+    pipeline = _bare_pipeline(config=PipelineConfig(transcript_window_size=2))
+    pipeline._remember_transcript(TranscriptFinalized(text="p1", timestamp_ms=10))
+    pipeline._remember_bot_utterance("b1", 20)
+    pipeline._remember_transcript(TranscriptFinalized(text="p2", timestamp_ms=30))
+
+    # Window of 2 keeps the two most-recent entries; the first transcript is dropped.
+    assert [t.text for t in pipeline._transcript_history] == ["b1", "p2"]
+
+
+async def test_answer_prompt_renders_bot_history_with_label() -> None:
+    """The answer LLM's user message shows the bot's prior reply as a Bot line."""
+    from johnny.voice_pipeline import BOT_SPEAKER_LABEL
+
+    pipeline = _bare_pipeline()
+    pipeline._remember_transcript(
+        TranscriptFinalized(text="hey what's the status?", timestamp_ms=10, speaker="alice")
+    )
+    pipeline._remember_bot_utterance(
+        "we're upgrading infrastructure and making servers more reliable", 20
+    )
+    current = TranscriptFinalized(
+        text="wait, what did you just say?", timestamp_ms=30, speaker="alice"
+    )
+    pipeline._remember_transcript(current)
+
+    decision = RouterDecision(
+        should_speak=True, confidence=0.9, reason="ack", suggested_reply=None
+    )
+    messages = pipeline._answer_messages(current, decision)
+    user_content = messages[1].content or ""
+
+    assert "Recent conversation:" in user_content
+    assert f"- {BOT_SPEAKER_LABEL}: we're upgrading infrastructure" in user_content
+    assert "- alice: hey what's the status?" in user_content
+    assert "Latest transcript: wait, what did you just say?" in user_content
+
+
+async def test_answer_prompt_system_message_explains_bot_label() -> None:
+    """The system prompt names the ``Bot (you)`` convention so the LLM treats those
+    lines as its own prior speech."""
+    from johnny.voice_pipeline import BOT_SPEAKER_LABEL
+
+    pipeline = _bare_pipeline()
+    transcript = TranscriptFinalized(text="hi", timestamp_ms=10, speaker="alice")
+    pipeline._remember_transcript(transcript)
+
+    decision = RouterDecision(
+        should_speak=True, confidence=0.9, reason="ok", suggested_reply=None
+    )
+    system_content = pipeline._answer_messages(transcript, decision)[0].content or ""
+
+    assert BOT_SPEAKER_LABEL in system_content
+    assert "your" in system_content.lower() or "you" in system_content.lower()
+
+
+async def test_router_prompt_renders_bot_history_with_label() -> None:
+    """The router prompt also surfaces bot history under the same label."""
+    from johnny.voice_pipeline import BOT_SPEAKER_LABEL
+
+    pipeline = _bare_pipeline()
+    pipeline._remember_transcript(
+        TranscriptFinalized(text="status?", timestamp_ms=10, speaker="alice")
+    )
+    pipeline._remember_bot_utterance("infra is being upgraded", 20)
+    current = TranscriptFinalized(
+        text="what did you just say?", timestamp_ms=30, speaker="alice"
+    )
+    pipeline._remember_transcript(current)
+
+    snapshot = await pipeline._build_input_window(current)
+    messages = pipeline._router_messages(current, snapshot)
+    user_content = messages[1].content or ""
+    system_content = messages[0].content or ""
+
+    assert f"- {BOT_SPEAKER_LABEL}: infra is being upgraded" in user_content
+    assert BOT_SPEAKER_LABEL in system_content
+
+
+async def test_answer_prompt_lets_bot_recall_prior_utterance_round_trip(
+    two_utterance_pcm: bytes,
+) -> None:
+    """End-to-end repro of Johnny-7qp acceptance: after the bot says X and the
+    user asks 'what did you just say?', the answer LLM's prompt contains X.
+
+    Uses ``_SlowFakeSTT`` so the response loop has a natural interleave
+    point between transcripts — without it, the buffered transport
+    fixture lets the transcribe loop burn through every utterance
+    before the bot has spoken a single word, which is unrealistic
+    timing (and would put the bot utterance *after* transcript 2 in
+    the in-memory order)."""
+    from johnny.voice_pipeline import BOT_SPEAKER_LABEL
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    bot_first_reply = (
+        "We are upgrading the database servers and making the cluster more reliable."
+    )
+    answer = _FakeAnswerLLM(answers=[bot_first_reply, "I just said the servers."])
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_SlowFakeSTT(
+            transcripts=[
+                "what's the infrastructure roadmap?",
+                "wait, what did you just say?",
+            ]
+        ),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {"should_speak": True, "confidence": 0.9, "reason": "direct ask"},
+                {"should_speak": True, "confidence": 0.9, "reason": "follow-up"},
+            ]
+        ),
+        answer_llm=answer,
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            # Disable barge-in so the classifier doesn't steal our
+            # _FakeRouterLLM decisions for its own use.
+            enable_barge_in=False,
+        ),
+    )
+    await pipeline.run()
+
+    assert len(answer.calls) == 2
+    second_call = answer.calls[1]
+    second_user_msg = second_call[1].content or ""
+    # The bot's first reply must be present verbatim in the second prompt
+    # so the LLM can quote / paraphrase its own prior statement.
+    assert bot_first_reply in second_user_msg
+    assert f"{BOT_SPEAKER_LABEL}:" in second_user_msg
+
+
+# --- Johnny-7qp: rehydration of bot utterances --------------------------
+
+
+async def test_history_unbounded_default_includes_bot_history_in_snapshot() -> None:
+    """A snapshot built when history contains bot turns surfaces them in the window."""
+    from johnny.voice_pipeline import BOT_SPEAKER_LABEL
+
+    pipeline = _bare_pipeline()
+    pipeline._remember_transcript(
+        TranscriptFinalized(text="hello", timestamp_ms=10, speaker="alice")
+    )
+    pipeline._remember_bot_utterance("hi alice", 20)
+    current = TranscriptFinalized(text="how are you", timestamp_ms=30, speaker="alice")
+    pipeline._remember_transcript(current)
+
+    snapshot = await pipeline._build_input_window(current)
+    speakers = [entry.get("speaker") for entry in snapshot["transcript_window"]]
+    assert BOT_SPEAKER_LABEL in speakers
+    assert snapshot["transcript_total_count"] == 3

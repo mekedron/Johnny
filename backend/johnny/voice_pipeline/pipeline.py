@@ -53,6 +53,7 @@ from johnny.voice_pipeline.events import (
     TranscriptFinalized,
 )
 from johnny.voice_pipeline.transcript_history import (
+    BOT_SPEAKER_LABEL,
     NoopTranscriptHistoryLoader,
     TranscriptHistoryLoader,
 )
@@ -1169,6 +1170,7 @@ class VoicePipeline:
             audio_duration_ms=audio_ms,
             matched_allowed_reply=matched_allowed_reply,
         )
+        self._remember_bot_utterance(text, spoke_event.timestamp_ms)
         return True
 
     async def _select_allowed_reply(
@@ -1324,6 +1326,13 @@ class VoicePipeline:
             "the bot should speak in response to the latest transcript. "
             "Reply as JSON matching the supplied schema."
         )
+        system += (
+            f"\n\nIn the 'Recent conversation' list below, lines prefixed "
+            f"'{BOT_SPEAKER_LABEL}:' are the bot's OWN earlier utterances "
+            "(yours). Every other speaker label is a meeting participant. "
+            "Use the bot's prior lines to avoid repeating yourself and to "
+            "stay coherent with what you already said."
+        )
         system += f"\n\nMode: {self.config.mode}"
         system += (
             f"\nConfidence threshold for speaking: {self.config.confidence_threshold:.2f}"
@@ -1398,6 +1407,14 @@ class VoicePipeline:
         system = (
             "You are an AI meeting participant. Produce a concise spoken "
             "reply to the latest transcript."
+        )
+        system += (
+            f"\n\nIn the 'Recent conversation' list below, lines prefixed "
+            f"'{BOT_SPEAKER_LABEL}:' are YOUR own earlier utterances in this "
+            "meeting — treat them as your prior speech. Every other speaker "
+            "label is a meeting participant. When the latest participant "
+            "asks you to repeat or refer to what you just said, ground your "
+            "answer in the verbatim text of those prior bot lines."
         )
         if self.config.instructions:
             system += f"\n\nMeeting instructions: {self.config.instructions}"
@@ -1515,6 +1532,38 @@ class VoicePipeline:
           summarisation has to be disabled.
         """
         self._transcript_history.append(transcript)
+        self._enforce_history_window()
+
+    def _remember_bot_utterance(self, text: str, timestamp_ms: int) -> None:
+        """Append a bot utterance to the rolling history (Johnny-7qp).
+
+        The bot's own prior speech is mixed into ``_transcript_history``
+        next to participant transcripts so subsequent router and answer
+        prompts can recall it — that's what lets the bot answer "what
+        did you just say?" with the actual content it just spoke. The
+        entry is tagged with :data:`BOT_SPEAKER_LABEL` so the prompt
+        builders and the rehydration loaders can tell bot turns apart
+        from participant turns.
+
+        Empty strings are skipped: an empty bot turn carries no
+        recallable content and would just pollute the history with
+        ``"Bot (you):"`` lines.
+        """
+        text = text.strip()
+        if not text:
+            return
+        self._transcript_history.append(
+            TranscriptFinalized(
+                text=text,
+                timestamp_ms=timestamp_ms,
+                speaker=BOT_SPEAKER_LABEL,
+                session_id=self.config.session_id,
+            )
+        )
+        self._enforce_history_window()
+
+    def _enforce_history_window(self) -> None:
+        """Apply the optional hard-cap on ``_transcript_history`` size."""
         window_size = self.config.transcript_window_size
         if window_size > 0 and len(self._transcript_history) > window_size:
             dropped = len(self._transcript_history) - window_size

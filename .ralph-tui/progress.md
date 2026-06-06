@@ -177,6 +177,116 @@ in-flight precondition was satisfied — otherwise the test could pass
 because there was nothing to interrupt, which would be a regression
 in disguise.
 
+### Bot's own utterances live in `_transcript_history` as `Bot (you)` (Johnny-7qp)
+The pipeline now mixes participant transcripts AND the bot's own
+utterances into a single `_transcript_history` list so the router /
+answer LLM prompts can recall what the bot itself just said. Without
+this, the bot couldn't answer "what did you just say?" or "repeat
+that" — its own prior speech never reached the prompt. After every
+successful `_answer_and_speak`, `_remember_bot_utterance(text, ts)`
+appends a `TranscriptFinalized` with `speaker=BOT_SPEAKER_LABEL`
+(`"Bot (you)"`, defined in `transcript_history.py` so the
+SQLAlchemy-free meet-worker module can import it). The system prompts
+in `_router_messages` and `_answer_messages` explicitly tell the LLM
+that lines prefixed `Bot (you):` are its own prior speech.
+
+Rehydration after a container restart pulls BOTH `transcript_chunks`
+and `agent_utterances` rows for the session, merges them
+chronologically by `created_at`, and emits bot utterances as
+`TranscriptFinalized(speaker=BOT_SPEAKER_LABEL, text=output_text)`.
+Both the SQL-backed and HTTP-backed loaders do this — the API
+endpoint already returns utterances with `created_at`, so the HTTP
+loader just merges them client-side. Tests that exercise the SQL
+loader must set `created_at` explicitly because SQLite's
+`CURRENT_TIMESTAMP` is second-precision and back-to-back inserts in
+the same test would otherwise collide.
+
+The `current_pos` identity check in `_answer_messages` /
+`_router_messages` is unaffected: the participant transcript object
+passed in is still the one in the list, regardless of the bot
+entries mixed around it. With buffered transport (no per-frame
+await), tests of the round-trip recall path need `_SlowFakeSTT`
+(20 ms per utterance) so the respond loop has time to flip
+`_response_in_flight` and append the bot utterance between
+transcripts — without that, both transcripts land in history before
+the first response runs, and the bot utterance is appended at the
+end (after the second transcript), which doesn't surface in the
+second prompt because the prompt builder slices `history[:current_pos]`.
+
+---
+
+## 2026-06-06 - Johnny-7qp
+- Fixed bot losing its own conversation context: the LLM prompts now
+  surface every prior bot utterance alongside participant transcripts
+  in the same `_transcript_history` list, so the bot can quote /
+  paraphrase what it just said when asked to repeat itself.
+- Added `BOT_SPEAKER_LABEL = "Bot (you)"` in
+  `johnny.voice_pipeline.transcript_history` (the SQLAlchemy-free
+  module both loaders import). The label is unlikely to collide with
+  a real Meet display name and reads correctly in the prompt without
+  extra translation.
+- `VoicePipeline._remember_bot_utterance(text, timestamp_ms)` appends
+  a `TranscriptFinalized(speaker=BOT_SPEAKER_LABEL, ...)` to
+  `_transcript_history` after every successful `_answer_and_speak`.
+  Empty / whitespace-only output is skipped. The existing window-size
+  cap (`_enforce_history_window`, extracted out of `_remember_transcript`)
+  applies to bot entries too.
+- System prompts in both `_router_messages` and `_answer_messages`
+  now include a paragraph explaining that `Bot (you):` lines are the
+  bot's own prior utterances — so when a participant says "repeat
+  what you just said", the answer LLM grounds its reply in the
+  verbatim text of those prior bot lines.
+- Rehydration loaders updated:
+  - `SqlAlchemyTranscriptHistoryLoader` now queries both
+    `transcript_chunks` and `agent_utterances` and merges by
+    `created_at` (tie-break: transcripts before utterances so
+    "participant spoke, bot replied" order survives a same-second
+    insert).
+  - `HttpTranscriptHistoryLoader._payload_to_transcripts` now folds
+    the API's `utterances` list into the result, parsing ISO-8601
+    `created_at` (both `Z` and `+00:00` forms) to keep ordering
+    deterministic. Unparseable / missing dates fall back to wire
+    order so an older API can't break rehydration.
+- Files changed:
+  - `backend/johnny/voice_pipeline/pipeline.py` — `_remember_bot_utterance`,
+    prompt builders, post-speech bookkeeping.
+  - `backend/johnny/voice_pipeline/transcript_history.py` —
+    `BOT_SPEAKER_LABEL` constant + `__all__` export.
+  - `backend/johnny/voice_pipeline/__init__.py` — re-export.
+  - `backend/app/services/transcripts.py` — SQL loader merges bot
+    utterances.
+  - `backend/johnny/meet_worker/transcript_loader.py` — HTTP loader
+    parses utterances + chronological merge.
+  - `backend/tests/voice_pipeline/test_pipeline.py` — 9 new tests
+    (recall round-trip, prompt rendering, label semantics, window
+    cap interaction, system message wording).
+  - `backend/tests/services/test_transcripts.py` — 4 new SQL-loader
+    tests + the `AgentUtterance.__table__` fixture addition.
+  - `backend/tests/test_meet_worker_transcript_loader.py` — 6 new
+    HTTP-loader tests covering the merge, blank text, unparseable
+    dates, and the `+00:00` form.
+- **Learnings:**
+  - The `current_pos` identity check (`t is transcript`) makes mixing
+    bot and participant entries safe without a separate list. The
+    participant transcript passed into the prompt builder is always
+    the one in `_transcript_history`, so the slicing works regardless
+    of how many bot entries are interleaved around it.
+  - With the unbuffered `_FakeSTT` + `_BufferedTransport` test fixtures,
+    both transcripts can be transcribed before the respond loop ever
+    runs. That means the bot utterance is appended AFTER transcript 2
+    in the list — which doesn't surface in transcript 2's prompt
+    because `history[:current_pos]` cuts it off. `_SlowFakeSTT`
+    (20 ms per utterance) restores realistic interleaving; this is
+    the same pattern the barge-in tests use.
+  - SQLite's `func.now()` is second-precision, so back-to-back inserts
+    in the same test get identical `created_at` values and break the
+    chronological merge assertion. Set `created_at` explicitly on the
+    ORM instance before `commit()` (the `_ts(seconds_offset)` helper)
+    to make the merge order deterministic without affecting prod.
+  - The API's `GET /sessions/{id}` endpoint already returns
+    `utterances` with `created_at` — no DB migration was needed.
+    The HTTP loader just had to start consuming that field and
+    interleave it with the transcripts list.
 ---
 
 ## 2026-06-06 - Johnny-4ph

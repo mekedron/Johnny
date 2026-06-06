@@ -20,6 +20,7 @@ from johnny.meet_worker.transcript_loader import (
     _payload_to_transcripts,
 )
 from johnny.voice_pipeline.events import TranscriptFinalized
+from johnny.voice_pipeline.transcript_history import BOT_SPEAKER_LABEL
 
 
 def test_payload_to_transcripts_maps_session_detail_payload() -> None:
@@ -156,6 +157,147 @@ async def test_load_swallows_network_errors_and_returns_empty(
         "transcript rehydration HTTP call failed" in rec.message
         for rec in caplog.records
     )
+
+
+# --- Johnny-7qp: HTTP loader pulls in bot utterances --------------------
+
+
+def test_payload_to_transcripts_merges_utterances_chronologically() -> None:
+    """Bot utterances interleave with participant transcripts by ``created_at``."""
+    payload: dict[str, Any] = {
+        "transcripts": [
+            {
+                "text": "status?",
+                "end_offset_ms": 1000,
+                "speaker": "alice",
+                "created_at": "2026-06-06T10:00:00Z",
+            },
+            {
+                "text": "what did you just say?",
+                "end_offset_ms": 4000,
+                "speaker": "alice",
+                "created_at": "2026-06-06T10:00:10Z",
+            },
+        ],
+        "utterances": [
+            {
+                "output_text": "infra is being upgraded",
+                "audio_duration_ms": 800,
+                "created_at": "2026-06-06T10:00:05Z",
+            }
+        ],
+    }
+
+    out = _payload_to_transcripts(payload)
+
+    texts = [t.text for t in out]
+    speakers = [t.speaker for t in out]
+    assert texts == [
+        "status?",
+        "infra is being upgraded",
+        "what did you just say?",
+    ]
+    assert speakers == ["alice", BOT_SPEAKER_LABEL, "alice"]
+
+
+def test_payload_to_transcripts_handles_missing_utterances_key() -> None:
+    """Older payload shapes without ``utterances`` still produce transcripts."""
+    payload: dict[str, Any] = {
+        "transcripts": [
+            {"text": "hi", "end_offset_ms": 100, "speaker": "alice"},
+        ],
+    }
+    out = _payload_to_transcripts(payload)
+    assert [t.text for t in out] == ["hi"]
+
+
+def test_payload_to_transcripts_skips_blank_utterance_text() -> None:
+    """Empty / whitespace ``output_text`` values are dropped — they carry no recall."""
+    payload: dict[str, Any] = {
+        "utterances": [
+            {"output_text": "   ", "created_at": "2026-06-06T10:00:00Z"},
+            {"output_text": "", "created_at": "2026-06-06T10:00:01Z"},
+            {"output_text": "real reply", "created_at": "2026-06-06T10:00:02Z"},
+        ],
+    }
+    out = _payload_to_transcripts(payload)
+    assert [t.text for t in out] == ["real reply"]
+    assert out[0].speaker == BOT_SPEAKER_LABEL
+
+
+def test_payload_to_transcripts_handles_unparseable_created_at() -> None:
+    """A bogus created_at value falls back to wire order, not a crash."""
+    payload: dict[str, Any] = {
+        "transcripts": [
+            {"text": "first", "end_offset_ms": 1, "created_at": "not-a-date"},
+        ],
+        "utterances": [
+            {"output_text": "second", "created_at": "also-bad"},
+        ],
+    }
+    out = _payload_to_transcripts(payload)
+    assert [t.text for t in out] == ["first", "second"]
+
+
+def test_payload_to_transcripts_handles_utc_offset_form() -> None:
+    """Non-Z ISO timestamps (``+00:00`` form) sort correctly."""
+    payload: dict[str, Any] = {
+        "transcripts": [
+            {
+                "text": "later",
+                "end_offset_ms": 2000,
+                "created_at": "2026-06-06T10:00:10+00:00",
+            }
+        ],
+        "utterances": [
+            {
+                "output_text": "earlier bot",
+                "created_at": "2026-06-06T10:00:00+00:00",
+            }
+        ],
+    }
+    out = _payload_to_transcripts(payload)
+    assert [t.text for t in out] == ["earlier bot", "later"]
+
+
+@pytest.mark.asyncio
+async def test_load_includes_utterances_from_api_response() -> None:
+    """Live HTTP loader pulls both transcripts and utterances from /sessions/{id}."""
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=json.dumps(
+                {
+                    "transcripts": [
+                        {
+                            "text": "hi",
+                            "end_offset_ms": 100,
+                            "speaker": "alice",
+                            "created_at": "2026-06-06T10:00:00Z",
+                        }
+                    ],
+                    "utterances": [
+                        {
+                            "output_text": "hello alice",
+                            "created_at": "2026-06-06T10:00:01Z",
+                        }
+                    ],
+                }
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+
+    transport = httpx.MockTransport(_handler)
+    loader = HttpTranscriptHistoryLoader(api_base_url="http://api:8000")
+    loader._client = httpx.AsyncClient(transport=transport, timeout=1.0)
+    try:
+        out = await loader.load(session_id=None, bot_session_id=42)
+    finally:
+        await loader.close()
+
+    assert [t.text for t in out] == ["hi", "hello alice"]
+    assert out[1].speaker == BOT_SPEAKER_LABEL
 
 
 @pytest.mark.asyncio

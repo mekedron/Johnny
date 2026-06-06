@@ -24,9 +24,12 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from sqlalchemy import func, select
 
-from app.db.models import EMBEDDING_DIM, TranscriptChunk
+from app.db.models import EMBEDDING_DIM, AgentUtterance, TranscriptChunk
 from johnny.voice_pipeline.events import TranscriptFinalized
-from johnny.voice_pipeline.transcript_history import TranscriptHistoryLoader
+from johnny.voice_pipeline.transcript_history import (
+    BOT_SPEAKER_LABEL,
+    TranscriptHistoryLoader,
+)
 from johnny.voice_pipeline.transcript_sink import TranscriptSink
 
 if TYPE_CHECKING:
@@ -219,6 +222,13 @@ class SqlAlchemyTranscriptHistoryLoader(TranscriptHistoryLoader):
     :class:`johnny.meet_worker.transcript_loader.HttpTranscriptHistoryLoader`
     because the worker container is intentionally SQLAlchemy-free.
 
+    Returns participant transcripts AND the bot's own prior utterances
+    merged into a single chronological list (Johnny-7qp) so the live
+    pipeline rebuilds the same mixed-history shape it would have had
+    without a restart. Bot utterances are tagged with
+    :data:`BOT_SPEAKER_LABEL` so the prompt builders can render them
+    as the bot's own speech instead of as anonymous participant text.
+
     The session is held for the lifetime of the loader; intended for
     short-lived test setups, not long-running services.
     """
@@ -241,6 +251,25 @@ class SqlAlchemyTranscriptHistoryLoader(TranscriptHistoryLoader):
         del session_id  # bot_session_id is authoritative for DB lookup
         if bot_session_id is None:
             return []
+        transcripts = self._load_participant_transcripts(bot_session_id)
+        utterances = self._load_bot_utterances(bot_session_id)
+        # Merge chronologically by created_at. Both tables get their
+        # created_at from func.now() at insert, so within a single
+        # session the values reflect actual conversation order. Ties
+        # (which shouldn't happen but for paranoia) sort transcripts
+        # first to keep the "participant spoke, bot replied" order.
+        merged = sorted(
+            [(t.created_at, 0, t) for t in transcripts]
+            + [(u.created_at, 1, u) for u in utterances],
+            key=lambda item: (item[0], item[1]),
+        )
+        if self._limit is not None:
+            merged = merged[: self._limit]
+        return [_row_to_transcript_event(row) for _, _, row in merged]
+
+    def _load_participant_transcripts(
+        self, bot_session_id: int
+    ) -> list[TranscriptChunk]:
         stmt = (
             select(TranscriptChunk)
             .where(TranscriptChunk.bot_session_id == bot_session_id)
@@ -251,15 +280,42 @@ class SqlAlchemyTranscriptHistoryLoader(TranscriptHistoryLoader):
         )
         if self._limit is not None:
             stmt = stmt.limit(self._limit)
-        rows = list(self._session.scalars(stmt).all())
-        return [
-            TranscriptFinalized(
-                text=row.text,
-                timestamp_ms=row.end_offset_ms,
-                speaker=row.speaker,
-            )
-            for row in rows
-        ]
+        return list(self._session.scalars(stmt).all())
+
+    def _load_bot_utterances(self, bot_session_id: int) -> list[AgentUtterance]:
+        stmt = (
+            select(AgentUtterance)
+            .where(AgentUtterance.bot_session_id == bot_session_id)
+            .order_by(AgentUtterance.created_at.asc(), AgentUtterance.id.asc())
+        )
+        if self._limit is not None:
+            stmt = stmt.limit(self._limit)
+        return list(self._session.scalars(stmt).all())
+
+
+def _row_to_transcript_event(
+    row: TranscriptChunk | AgentUtterance,
+) -> TranscriptFinalized:
+    """Translate a DB row into a :class:`TranscriptFinalized` event.
+
+    The pipeline's in-memory history carries only one timestamp per
+    entry. For transcripts we use ``end_offset_ms`` (the live pipeline's
+    own value when the chunk finalised). For bot utterances we don't
+    have a session-relative offset column, so we use the absolute
+    ``created_at`` epoch — its only purpose post-rehydration is
+    chronological ordering, which is preserved either way.
+    """
+    if isinstance(row, TranscriptChunk):
+        return TranscriptFinalized(
+            text=row.text,
+            timestamp_ms=row.end_offset_ms,
+            speaker=row.speaker,
+        )
+    return TranscriptFinalized(
+        text=row.output_text,
+        timestamp_ms=int(row.created_at.timestamp() * 1000),
+        speaker=BOT_SPEAKER_LABEL,
+    )
 
 
 __all__ = [

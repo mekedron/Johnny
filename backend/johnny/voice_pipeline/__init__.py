@@ -70,6 +70,7 @@ from johnny.voice_pipeline.pipeline import (
     VoicePipeline,
 )
 from johnny.voice_pipeline.transcript_history import (
+    BOT_SPEAKER_LABEL,
     InMemoryTranscriptHistoryLoader,
     NoopTranscriptHistoryLoader,
     TranscriptHistoryLoader,
@@ -126,6 +127,7 @@ __all__ = [
     "SUGGEST_ONLY_MODE",
     "SUPPORTED_TRANSPORTS",
     "TRANSPORT_ENV_VAR",
+    "BOT_SPEAKER_LABEL",
     "AgentSpoke",
     "AgentSuggested",
     "ApprovalGate",
