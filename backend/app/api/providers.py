@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import io
 import json
+import time
 import wave
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -131,6 +132,50 @@ class TestResult(BaseModel):
     ok: bool
     message: str
     detail: str | None = None
+
+
+class SttTestResult(BaseModel):
+    """Outcome of an STT mic-recording test (Johnny-ckz.15.2).
+
+    Mirrors the shape of :class:`TestResult` but adds the user-visible
+    transcript + latency + cost the catalog UI renders next to its Test
+    button. ``cost_usd`` is ``None`` for local providers (no per-second
+    cost to report) and for cloud providers without a published rate.
+    """
+
+    ok: bool
+    transcript: str
+    latency_ms: int
+    cost_usd: float | None = None
+    audio_ms: int
+    message: str | None = None
+    detail: str | None = None
+
+
+class SttCatalogEntry(BaseModel):
+    """One entry in the STT catalog response (Johnny-ckz.15.2).
+
+    Carries the schema fields the catalog UI shows at a glance (display
+    name, summary, type, streaming flag, model count) so it can render
+    cards without computing those metadata bits from raw schemas.
+    """
+
+    provider_name: str
+    display_name: str
+    summary: str
+    signup_url: str | None = None
+    # "local" — runs on-device, no per-minute cost; "cloud" — audio leaves host.
+    provider_type: str
+    streaming: bool
+    model_count: int
+    models: list[str]
+    field_schema: dict[str, Any]
+
+
+class SttCatalogResponse(BaseModel):
+    """All registered STT providers with catalog metadata."""
+
+    providers: list[SttCatalogEntry]
 
 
 class SchemaListResponse(BaseModel):
@@ -300,11 +345,91 @@ def _raise_validation_errors(errors: list[FieldValidationError]) -> None:
     )
 
 
+# --- STT catalog metadata --------------------------------------------------
+
+# Each entry maps a registered STT provider_name to its catalog metadata.
+# ``type`` is "local" when the adapter runs the model on-device (no network
+# I/O, no per-minute cost) and "cloud" when audio leaves the host. ``streaming``
+# means partial transcripts arrive before the user finishes speaking — only
+# matters for the live-chat surface in Johnny-ckz.15.7, but the catalog UI
+# surfaces it so users can pick the right provider for their use case.
+# ``cost_per_minute_usd`` is a published per-minute rate used to render an
+# estimate next to the Test transcript; ``None`` means "we don't have a rate
+# we trust" (the UI just hides the cost line for that provider).
+STT_CATALOG_METADATA: dict[str, dict[str, Any]] = {
+    "faster-whisper": {
+        "type": "local",
+        "streaming": False,
+        "cost_per_minute_usd": 0.0,
+    },
+    "deepgram": {
+        "type": "cloud",
+        "streaming": True,
+        # https://deepgram.com/pricing — Nova-2 streaming, list pay-as-you-go.
+        "cost_per_minute_usd": 0.0043,
+    },
+    "elevenlabs": {
+        "type": "cloud",
+        "streaming": False,
+        # https://elevenlabs.io/pricing — Scribe v2 batch list rate.
+        "cost_per_minute_usd": 0.0067,
+    },
+    "openai-realtime": {
+        "type": "cloud",
+        "streaming": True,
+        # OpenAI Realtime API whisper-1 input audio rate, approximated to
+        # the per-minute equivalent so the catalog can show *something*.
+        "cost_per_minute_usd": 0.006,
+    },
+}
+
+
+def _stt_catalog_entry(schema: ProviderSchema) -> SttCatalogEntry:
+    """Enrich an :class:`ProviderSchema` with catalog metadata for the UI."""
+    meta = STT_CATALOG_METADATA.get(
+        schema.provider_name,
+        {"type": "cloud", "streaming": False, "cost_per_minute_usd": None},
+    )
+    model_field = schema.field("model") or schema.field("model_id") or schema.field("model_size")
+    if model_field is not None and model_field.options:
+        models = [opt.value for opt in model_field.options]
+    else:
+        models = []
+    return SttCatalogEntry(
+        provider_name=schema.provider_name,
+        display_name=schema.display_name,
+        summary=schema.summary,
+        signup_url=schema.signup_url,
+        provider_type=str(meta.get("type", "cloud")),
+        streaming=bool(meta.get("streaming", False)),
+        model_count=len(models),
+        models=models,
+        field_schema=schema.to_dict(),
+    )
+
+
 # --- Endpoints -------------------------------------------------------------
 
 
 SessionDep = Annotated[Session, Depends(get_session)]
 CryptoDep = Annotated[CredentialCrypto, Depends(get_crypto)]
+
+
+@router.get("/stt_catalog", response_model=SttCatalogResponse)
+def list_stt_catalog() -> SttCatalogResponse:
+    """Return every registered STT provider enriched with catalog metadata.
+
+    The ``/settings/stt`` UI calls this on mount to render one card per
+    installed STT provider (Johnny-ckz.15.2). Each entry carries the
+    same ``schema`` payload as ``GET /providers/schemas`` so the UI can
+    render the per-provider config form inline, plus ``type``,
+    ``streaming``, and ``model_count`` so users can pick the right
+    provider without round-tripping to docs.
+    """
+    schemas = _all_schemas()[ProviderKind.STT]
+    return SttCatalogResponse(
+        providers=[_stt_catalog_entry(s) for s in schemas],
+    )
 
 
 @router.get("/schemas", response_model=SchemaListResponse)
@@ -563,6 +688,222 @@ async def test_provider(
             await instance.close()
         except Exception:  # noqa: BLE001, S110 — cleanup best-effort
             pass
+
+
+# --- stt mic test endpoint -------------------------------------------------
+
+# Hard cap on the audio body the UI can send to the catalog Test button. 5 s of
+# 16 kHz mono S16LE PCM is 160_000 bytes; a ceiling of ~1 MiB (~32 s) is
+# generous enough that a user can hold the button for a while without
+# hitting the cap, while keeping a misbehaving client from spending a
+# provider's quota on a 10-minute upload.
+STT_TEST_MAX_AUDIO_BYTES = 1024 * 1024
+
+
+def _wav_to_pcm_or_raw(audio: bytes) -> bytes:
+    """Return raw 16 kHz S16LE PCM bytes from a WAV blob, or pass through.
+
+    The catalog UI captures audio through an AudioWorklet that already
+    produces 16 kHz mono S16LE samples, so the simplest wire format is
+    raw PCM. Some clients (cURL, Postman) find it easier to send a WAV
+    blob; this helper strips the RIFF header so the STT adapter always
+    sees raw samples. Bodies without a RIFF prefix are assumed to
+    already be raw PCM and returned unchanged.
+    """
+    if len(audio) >= 12 and audio[:4] == b"RIFF" and audio[8:12] == b"WAVE":
+        try:
+            with wave.open(io.BytesIO(audio), "rb") as wf:
+                pcm = wf.readframes(wf.getnframes())
+                return pcm
+        except wave.Error:
+            return audio
+    return audio
+
+
+def _estimate_stt_cost(provider_name: str, audio_ms: int) -> float | None:
+    """Return the catalog-rate cost in USD for ``audio_ms`` of audio, or None.
+
+    Local providers report $0 (so the UI shows a tidy "$0.00" line
+    rather than nothing). Cloud providers we have a published rate for
+    report the rate × duration; providers without one return ``None``
+    so the UI hides the cost line for that adapter.
+    """
+    meta = STT_CATALOG_METADATA.get(provider_name)
+    if meta is None:
+        return None
+    rate = meta.get("cost_per_minute_usd")
+    if rate is None:
+        return None
+    minutes = audio_ms / 1000.0 / 60.0
+    return round(float(rate) * minutes, 6)
+
+
+@router.post("/{provider_id}/stt_test", response_model=SttTestResult)
+async def stt_test(
+    provider_id: int,
+    request: Request,
+    session: SessionDep,
+    crypto: CryptoDep,
+) -> SttTestResult:
+    """Transcribe a short mic recording and report latency + cost.
+
+    The ``/settings/stt`` catalog UI captures ~5 s of 16 kHz mono S16LE
+    PCM from the user's microphone, posts it here as the raw request
+    body, and renders the returned transcript next to the Test button.
+    The endpoint is the user-facing companion to :func:`test_provider`:
+    that one feeds silence to verify wiring; this one feeds real audio
+    so the user can judge quality and pronunciation handling.
+
+    Accepts either raw PCM bytes or a WAV blob (the RIFF header is
+    stripped before forwarding to the adapter). Rejects non-STT
+    providers with 400 so the UI doesn't accidentally fire this at an
+    LLM or TTS row, and 413 when the body exceeds
+    :data:`STT_TEST_MAX_AUDIO_BYTES` to bound provider spend.
+    """
+    row = _get_row_or_404(session, provider_id)
+    if row.kind is not ProviderKind.STT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"stt_test only supports STT providers, not {row.kind.value}",
+        )
+
+    audio = await request.body()
+    if len(audio) > STT_TEST_MAX_AUDIO_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"audio body {len(audio)} bytes exceeds limit "
+                f"{STT_TEST_MAX_AUDIO_BYTES}"
+            ),
+        )
+    pcm = _wav_to_pcm_or_raw(audio)
+    if not pcm:
+        raise HTTPException(
+            status_code=400,
+            detail="audio body is empty",
+        )
+
+    sample_bytes = PCM_SAMPLE_RATE_HZ * PCM_SAMPLE_WIDTH_BYTES
+    audio_ms = int(len(pcm) * 1000 / sample_bytes) if sample_bytes else 0
+
+    registry = get_registry()
+    if not registry.has(row.kind, row.provider_name):
+        return SttTestResult(
+            ok=False,
+            transcript="",
+            latency_ms=0,
+            cost_usd=None,
+            audio_ms=audio_ms,
+            message=f"no factory registered for stt:{row.provider_name}",
+        )
+
+    try:
+        creds = decrypt_json(crypto, row.credentials_encrypted)
+    except (CryptoError, ValueError, json.JSONDecodeError) as exc:
+        return SttTestResult(
+            ok=False,
+            transcript="",
+            latency_ms=0,
+            cost_usd=None,
+            audio_ms=audio_ms,
+            message="failed to decrypt credentials",
+            detail=str(exc),
+        )
+
+    config = ProviderConfig(
+        kind=row.kind,
+        provider_name=row.provider_name,
+        display_name=row.display_name,
+        credentials=creds,
+        options=dict(row.config or {}),
+    )
+
+    try:
+        instance = registry.instantiate(config)
+    except UnknownProviderError as exc:
+        return SttTestResult(
+            ok=False,
+            transcript="",
+            latency_ms=0,
+            cost_usd=None,
+            audio_ms=audio_ms,
+            message="provider factory missing",
+            detail=str(exc),
+        )
+    except Exception as exc:  # noqa: BLE001 — surface factory errors to the UI
+        return SttTestResult(
+            ok=False,
+            transcript="",
+            latency_ms=0,
+            cost_usd=None,
+            audio_ms=audio_ms,
+            message="provider construction failed",
+            detail=str(exc),
+        )
+
+    assert isinstance(instance, STTProvider)
+
+    async def _one_chunk() -> AsyncIterator[bytes]:
+        # Feed the full utterance as one chunk — the pipeline normally
+        # streams 20 ms frames, but the catalog test only cares about
+        # the final transcript so we let the adapter buffer the whole
+        # body itself.
+        yield pcm
+
+    transcript_pieces: list[str] = []
+    started = time.monotonic()
+    try:
+        async for event in instance.transcribe_stream(_one_chunk()):
+            # The catalog UI only renders the final concatenated text;
+            # partial deltas would just flash on screen and disappear.
+            if not event.is_final:
+                continue
+            text = (event.text or "").strip()
+            if text:
+                transcript_pieces.append(text)
+    except Exception as exc:  # noqa: BLE001 — surface transcription errors
+        latency_ms = int((time.monotonic() - started) * 1000)
+        return SttTestResult(
+            ok=False,
+            transcript="",
+            latency_ms=latency_ms,
+            cost_usd=_estimate_stt_cost(row.provider_name, audio_ms),
+            audio_ms=audio_ms,
+            message="transcription failed",
+            detail=str(exc),
+        )
+    finally:
+        try:
+            await instance.close()
+        except Exception:  # noqa: BLE001, S110 — cleanup best-effort
+            pass
+
+    latency_ms = int((time.monotonic() - started) * 1000)
+    transcript = " ".join(transcript_pieces).strip()
+    cost_usd = _estimate_stt_cost(row.provider_name, audio_ms)
+
+    if not transcript:
+        # Provider succeeded but produced no usable text — still a useful
+        # signal (mic muted, silence, noise gate). Report ok=False so the
+        # UI shows an empty-transcript warning rather than a green checkmark.
+        return SttTestResult(
+            ok=False,
+            transcript="",
+            latency_ms=latency_ms,
+            cost_usd=cost_usd,
+            audio_ms=audio_ms,
+            message="provider returned no transcript",
+            detail="The microphone audio may be silent or below the provider's noise floor.",
+        )
+
+    return SttTestResult(
+        ok=True,
+        transcript=transcript,
+        latency_ms=latency_ms,
+        cost_usd=cost_usd,
+        audio_ms=audio_ms,
+        message=f"Transcribed {audio_ms} ms in {latency_ms} ms",
+    )
 
 
 # --- play sample endpoint --------------------------------------------------
@@ -958,6 +1299,9 @@ __all__ = [
     "ProviderRead",
     "ProviderUpdate",
     "SchemaListResponse",
+    "SttCatalogEntry",
+    "SttCatalogResponse",
+    "SttTestResult",
     "TestResult",
     "router",
 ]

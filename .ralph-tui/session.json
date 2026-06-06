@@ -1,354 +1,61 @@
 {
   "version": 1,
-  "sessionId": "e226e3c5-adc1-481f-bc49-85d000e1bf13",
+  "sessionId": "51aec77c-06d2-41a0-ab44-ea76c3bf8c41",
   "status": "running",
-  "startedAt": "2026-06-06T14:49:12.419Z",
-  "updatedAt": "2026-06-06T16:00:00.440Z",
-  "currentIteration": 1,
+  "startedAt": "2026-06-06T16:31:22.596Z",
+  "updatedAt": "2026-06-06T16:35:37.446Z",
+  "currentIteration": 0,
   "maxIterations": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 0,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
     "plugin": "beads-bv",
-    "epicId": "Johnny-ckz",
+    "epicId": "Johnny-stt",
     "epicIds": [
-      "Johnny-ckz"
+      "Johnny-stt"
     ],
     "executionScopes": [
       {
-        "id": "Johnny-ckz",
-        "title": "Johnny meeting bot — ongoing work, fixes, and end-to-end validation",
+        "id": "Johnny-stt",
+        "title": "STT provider catalog: VoiceInk parity + NVIDIA Parakeet + streaming-in-chat",
         "type": "epic",
-        "description": "## Why this exists\n\nUmbrella epic for the Johnny Google Meet AI Meeting Bot post-MVP work.\n\nThe original join-stuck bug (Johnny-ckz.1) is fixed and the bot now reliably joins meetings (commit 979447e). The remaining scope spans:\n- End-to-end validation against real Google Meet (across all modes)\n- Adding/refining bot behavior modes (Autonomous, free-mode speech logic)\n- Provider integration polish (TTS demo playback, ElevenLabs verification, openai-realtime fix)\n- UX improvements (UI-driven Google sign-in, full-meeting context vs rolling window)\n- Smoke tests and provider management UI tests\n\nAll child issues here are tracked under this single epic.\n\n## Acceptance\n\n- All child issues closed\n- Bot has been validated end-to-end across every mode against a real Google Meet\n- Provider management surface is polished and tested via UI",
+        "description": "## Why this epic\n\nFirst-class speech-to-text provider catalog for Johnny with the same breadth as VoiceInk (`/Users/nikita/Projects/VoiceInk`), plus NVIDIA Parakeet (`nvidia/parakeet-tdt-0.6b-v3`) as a fast local + streaming-capable option that VoiceInk doesn't ship.\n\n## What ships under this epic\n\n1. **Parakeet provider** (Johnny-stt.1) — `nvidia/parakeet-tdt-0.6b-v3`. Local, fast, streaming-capable. The priority piece.\n2. **Catalog UI with Test button** (Johnny-stt.2) — model browser per provider, per-model Test button, latency + cost shown. Mirrors the existing Piper voice catalog UX (`Johnny-ckz.5`).\n3. **Live streaming transcription in playground chat** (Johnny-stt.3) — mic icon + live partial transcripts as user speaks. Default: Parakeet local; fallback cloud streaming providers.\n4. **VoiceInk parity bundle** (Johnny-stt.4) — Gemini, AssemblyAI, Groq, FluidAudio (P4 backlog). Whisper / Deepgram / ElevenLabs / OpenAI Realtime already exist in `backend/app/providers/`.\n\n## Reference\n\n- VoiceInk providers: `/Users/nikita/Projects/VoiceInk/VoiceInk/Transcription/{Cloud,Streaming,Whisper,FluidAudio}/`\n- Existing Johnny providers: `backend/app/providers/{faster_whisper,deepgram,elevenlabs,openai_realtime}_stt.py`\n- Parakeet on HuggingFace: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3\n\n## Out of scope\n\n- Speaker diarization (separate, harder problem).\n- Wake-word activation (separate feature).\n- Replacing the existing TTS provider catalog (this is STT-only).\n\n## History\n\nMigrated from Johnny-ckz.15 (formerly a child of Johnny-ckz) on 2026-06-06 to live as an independent top-level epic.",
         "metadata": {
           "dependencyCount": 0,
           "dependentCount": 0
         }
       }
     ],
-    "totalTasks": 51,
+    "totalTasks": 4,
     "tasks": [
       {
-        "id": "Johnny-ckz.1",
-        "title": "Bot join hangs at 'Johnny is joining — session #N': bot never appears in Meet, Active sessions stays 0, no logs",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.2",
-        "title": "Add 'Autonomous' mode: bot speaks freely per profile instructions, no whitelist, no approval gate",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-c8t",
-        "title": "Playground audio path never opens WebSocket — no voice, no bot replies (Johnny-ckz.6 regression)",
+        "id": "Johnny-stt.1",
+        "title": "Add NVIDIA Parakeet STT provider (local, streaming-capable) — nvidia/parakeet-tdt-0.6b-v3",
         "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-ckz.3",
-        "title": "Bot carries the whole meeting's context (not a 6-turn rolling window) when routing and answering",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.4",
-        "title": "Run the two-bot voice-interrupt harness end-to-end against real models, fix any bugs it surfaces",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.5",
-        "title": "Local Piper follow-up: voice catalog fetcher fails on HF 307 redirect, plus model dirs must move to host bind mounts (~/.johnny/...)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-4c0",
-        "title": "Local Piper TTS: smoke test fails with opaque 'exit code 1' — need easy voice install + real error surfacing",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ze3",
-        "title": "Voice interrupt doesn't actually work end-to-end: bot ignores user speech mid-utterance (reopens Johnny-har / Johnny-di9)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-d2g",
-        "title": "Bot joined but voice pipeline never runs: no transcription, no decisions, no speech, no audio bridge",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.6",
-        "title": "In-browser voice/text chat with the bot — per-event 'Try with bot' button + standalone playground (no Meet required)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-wyd",
-        "title": "Barge-in classifier LLM ReadTimeouts against Ollama Qwen 35B — every timeout is a missed interrupt + log noise",
+        "id": "Johnny-stt.2",
+        "title": "STT provider catalog UI with per-provider Test button (mic record + transcribe + latency/cost)",
         "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-klh",
-        "title": "Playground transcripts label every speaker=null row as 'You' — including STT hallucinations and any non-user rows",
+        "id": "Johnny-stt.3",
+        "title": "Live streaming STT in playground chat input (mic icon + partial transcripts as user speaks)",
         "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-31g",
-        "title": "STT hallucinations from silence: faster-whisper produces 'Does Olam A.P.I.', '. . . .', etc. on quiet mic and persists them as transcripts",
+        "id": "Johnny-stt.4",
+        "title": "VoiceInk parity: add Gemini, AssemblyAI, Groq, FluidAudio STT providers (bundle)",
         "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.7",
-        "title": "Per-session activity / timing log surfaced in chat history (per-turn pipeline events with durations)",
-        "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.8",
-        "title": "Profile + tune end-to-end voice latency on real local STT/TTS/LLM, and add in-UI optimization tips on each provider settings page",
-        "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.9",
-        "title": "bot_sessions schema drift: ORM expects 'source' and 'playground_overrides' columns that don't exist — worker monitor + /sessions/active both 500",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ajc",
-        "title": "Active session 'Leave now' button: UI marks session ended but bot stays in the Google Meet",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-3ha",
-        "title": "Active LLM provider sometimes gets unselected (TTS and STT are not affected)",
-        "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-1zg",
-        "title": "Add ElevenLabs as an STT provider (missing from Add Provider dropdown when kind=stt)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-arh",
-        "title": "Bot speaks over user mid-sentence: partial transcripts trigger responses before user finishes",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-2bw",
-        "title": "Build automated two-bot test harness to reproduce voice-interrupt failure (simulated speaker vs Johnny)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-7qp",
-        "title": "Bot loses conversation context mid-session: can't recall its own prior utterances",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-di9",
-        "title": "Voice-triggered barge-in: user can interrupt the bot mid-utterance by speaking",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-har",
-        "title": "STT transcription of participants must never pause while bot is speaking or thinking",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-cdw",
-        "title": "Approving a pending suggestion doesn't make the bot actually speak it",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-hn6",
-        "title": "Pending approvals don't appear in UI until page is refreshed",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-awh",
-        "title": "Persist bot utterances to meeting history (everything the bot says)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-vgl",
-        "title": "Review and standardize bot free mode speech decision logic",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-jrd",
-        "title": "Verify ElevenLabs TTS provider works end-to-end with updated API key",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-pdf",
-        "title": "Execute comprehensive end-to-end validation: bot joins real Google Meet and exercises every product feature across all modes",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-upg",
-        "title": "End-to-end UI test of provider management via chrome-devtools-mcp",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-f7k",
-        "title": "Smoke-test populated .env: bring stack up and verify end-to-end",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.10",
-        "title": "Validate in-browser live chat / live talking (Johnny-ckz.6) end-to-end via chrome-devtools MCP — pure verification, file follow-up bugs for any gap",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.11",
-        "title": "Playground / live mode: no audio playback (critical) + needs template-driven mode picker, volume control, and resume-from-session-page UX",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-g2n",
-        "title": "ElevenLabs TTS: handle 'exceeds quota' 401 gracefully in the response loop",
-        "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-tjd",
-        "title": "Interrupt harness real-mode: clarification assertion shape doesn't match real behavior",
-        "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-gft",
-        "title": "Interrupt harness real-mode: stop scenario flakes when LLM round-trip is slow",
-        "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-9eq",
-        "title": "LLM providers: fetch model list dynamically from each provider's API instead of hardcoding",
-        "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-uga",
-        "title": "ElevenLabs e2e plan uses library voice incompatible with free tier",
-        "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.12",
-        "title": "STT provider settings: 'Record sample' button to verify transcription end-to-end (symmetric to existing TTS demo)",
-        "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.13",
-        "title": "Playground: voice barge-in does nothing — bot ignores user speech mid-utterance (interrupt bug recurring on WebRTC transport)",
-        "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-466",
-        "title": "openai-realtime STT adapter targets deprecated Realtime Beta API",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc",
-        "title": "Johnny — Google Meet AI Meeting Bot",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.14",
-        "title": "Playground: STT artifacts ('you', 'uh', '...' dot sequences) trigger AI replies — no noise-floor / floor-management gate before invoking LLM",
-        "status": "completed",
-        "completedInSession": true
-      },
-      {
-        "id": "Johnny-qow",
-        "title": "Add no-CLI bot sign-in: in-browser Chromium via noVNC helper container",
-        "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-4da",
-        "title": "Read Google Docs/Sheets URLs linked in calendar event description and include as pre-meeting context",
-        "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-dsy",
-        "title": "Cross-session continuity: rehydrate prior session summary for recurring events",
-        "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-4ph",
-        "title": "Add UI button to trigger bot Google sign-in (CLI helper stays as alternative)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-6ij",
-        "title": "TTS providers: separate Play button to hear a demo phrase, with Stop while playing",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-d3e",
-        "title": "Seed providers from JSON/config file on startup",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-k3z",
-        "title": "Export all provider configurations as JSON from the UI",
-        "status": "completed",
         "completedInSession": false
       }
     ]
   },
-  "iterations": [
-    {
-      "iteration": 1,
-      "status": "completed",
-      "taskId": "Johnny-ckz.14",
-      "taskTitle": "Playground: STT artifacts ('you', 'uh', '...' dot sequences) trigger AI replies — no noise-floor / floor-management gate before invoking LLM",
-      "taskCompleted": true,
-      "durationMs": 1394796,
-      "startedAt": "2026-06-06T14:49:22.548Z",
-      "endedAt": "2026-06-06T15:12:37.344Z"
-    }
-  ],
+  "iterations": [],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

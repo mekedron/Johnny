@@ -1605,3 +1605,278 @@ def test_install_voice_propagates_download_error_as_502(
 def test_install_voice_missing_provider_returns_404(client: TestClient) -> None:
     resp = client.post("/providers/9999/voices/en_US-amy-medium/install")
     assert resp.status_code == 404
+
+
+# --- STT catalog + stt_test endpoints (Johnny-ckz.15.2) --------------------
+
+
+class _EchoSTT(STTProvider):
+    """STT adapter that emits one final transcript built from the audio size.
+
+    Lets stt_test assertions cover both the success path (a non-empty
+    transcript flows back to the caller) and the empty-output path
+    (a zero-byte body yields no transcript).
+    """
+
+    def __init__(self, config: ProviderConfig) -> None:
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "echo-stt"
+
+    async def transcribe_stream(
+        self, audio_iter: AsyncIterator[bytes]
+    ) -> AsyncIterator[TranscriptEvent]:
+        total = 0
+        async for chunk in audio_iter:
+            total += len(chunk)
+        if total == 0:
+            return
+        yield TranscriptEvent(
+            text=f"heard {total} bytes",
+            is_final=True,
+            timestamp_ms=0,
+            confidence=0.9,
+        )
+
+
+def _make_stt_row(client: TestClient, provider_name: str = "echo-stt") -> dict[str, Any]:
+    """Create a minimal STT row pointed at ``provider_name``."""
+    resp = client.post(
+        "/providers",
+        json=_create_payload(provider_name=provider_name, display_name="Catalog test"),
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+def test_stt_catalog_returns_registered_stt_providers(client: TestClient) -> None:
+    """The catalog UI fetches schemas + metadata in one shot."""
+    from app.providers.faster_whisper_stt import FasterWhisperSTT
+    from app.providers.faster_whisper_stt import PROVIDER_NAME as FW_NAME
+
+    get_registry().register(ProviderKind.STT, FW_NAME, FasterWhisperSTT)
+    resp = client.get("/providers/stt_catalog")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "providers" in body
+    names = {entry["provider_name"] for entry in body["providers"]}
+    assert FW_NAME in names
+    fw = next(e for e in body["providers"] if e["provider_name"] == FW_NAME)
+    assert fw["provider_type"] == "local"
+    assert fw["streaming"] is False
+    assert fw["model_count"] > 0  # whisper has a populated model_size select
+    assert isinstance(fw["models"], list)
+    assert fw["field_schema"]["provider_name"] == FW_NAME
+
+
+def test_stt_catalog_returns_empty_when_no_providers_registered(
+    client: TestClient,
+) -> None:
+    """No registered STT adapters → empty providers list (not 500)."""
+    resp = client.get("/providers/stt_catalog")
+    assert resp.status_code == 200
+    assert resp.json() == {"providers": []}
+
+
+def test_stt_test_returns_transcript_and_latency(client: TestClient) -> None:
+    """Happy path — adapter yields a final event; endpoint reports it back."""
+    get_registry().register(ProviderKind.STT, "echo-stt", _EchoSTT)
+    created = _make_stt_row(client)
+    pcm = b"\x10\x00" * 8_000  # 16_000 bytes ≈ 0.5 s of 16 kHz S16LE PCM
+    resp = client.post(
+        f"/providers/{created['id']}/stt_test",
+        content=pcm,
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["transcript"] == "heard 16000 bytes"
+    assert body["latency_ms"] >= 0
+    assert body["audio_ms"] == 500
+    # echo-stt is not in STT_CATALOG_METADATA → cost is None.
+    assert body["cost_usd"] is None
+
+
+def test_stt_test_estimates_cost_for_cloud_providers(client: TestClient) -> None:
+    """A provider in STT_CATALOG_METADATA reports a USD cost estimate."""
+    from app.api.providers import STT_CATALOG_METADATA
+
+    # Use a stable name we know is in the catalog.
+    get_registry().register(ProviderKind.STT, "deepgram", _EchoSTT)
+    created = client.post(
+        "/providers",
+        json=_create_payload(provider_name="deepgram", display_name="DG"),
+    ).json()
+    pcm = b"\x10\x00" * 16_000  # 32_000 bytes = 1.0 s
+    resp = client.post(
+        f"/providers/{created['id']}/stt_test",
+        content=pcm,
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["audio_ms"] == 1000
+    # 1 s at $0.0043/min ≈ $0.0000716 — checked against catalog rate.
+    rate = STT_CATALOG_METADATA["deepgram"]["cost_per_minute_usd"]
+    expected = round(rate * (1000 / 60_000), 6)
+    assert body["cost_usd"] == expected
+
+
+def test_stt_test_reports_zero_cost_for_local_providers(client: TestClient) -> None:
+    """Local providers always report $0 — gives the UI a tidy line to render."""
+    get_registry().register(ProviderKind.STT, "faster-whisper", _EchoSTT)
+    created = client.post(
+        "/providers",
+        json=_create_payload(provider_name="faster-whisper", display_name="FW"),
+    ).json()
+    pcm = b"\x10\x00" * 8_000
+    resp = client.post(
+        f"/providers/{created['id']}/stt_test",
+        content=pcm,
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["cost_usd"] == 0.0
+
+
+def test_stt_test_accepts_wav_blob_and_strips_header(client: TestClient) -> None:
+    """WAV bodies are decoded; non-PCM bytes are not forwarded to the STT."""
+    import io as _io
+    import wave as _wave
+
+    get_registry().register(ProviderKind.STT, "echo-stt", _EchoSTT)
+    created = _make_stt_row(client)
+    pcm = b"\x10\x00" * 8_000  # 16 000 bytes of PCM data
+    buf = _io.BytesIO()
+    with _wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16_000)
+        wf.writeframes(pcm)
+    wav_bytes = buf.getvalue()
+
+    resp = client.post(
+        f"/providers/{created['id']}/stt_test",
+        content=wav_bytes,
+        headers={"Content-Type": "audio/wav"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    # echo-stt reports total bytes — the wav header (44 bytes) must be stripped.
+    assert body["transcript"] == "heard 16000 bytes"
+
+
+def test_stt_test_rejects_non_stt_provider(client: TestClient) -> None:
+    """The endpoint is STT-only; LLM / TTS rows must 400 with a clear detail."""
+    get_registry().register(ProviderKind.LLM, "ok-llm", _OKLLM)
+    created = client.post(
+        "/providers",
+        json=_create_payload(kind="llm", provider_name="ok-llm", display_name="L"),
+    ).json()
+    resp = client.post(
+        f"/providers/{created['id']}/stt_test",
+        content=b"\x00" * 4,
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert resp.status_code == 400
+    assert "stt" in resp.json()["detail"].lower()
+
+
+def test_stt_test_rejects_empty_body(client: TestClient) -> None:
+    """Empty body is a UI bug; surface 400 instead of running the STT."""
+    get_registry().register(ProviderKind.STT, "echo-stt", _EchoSTT)
+    created = _make_stt_row(client)
+    resp = client.post(
+        f"/providers/{created['id']}/stt_test",
+        content=b"",
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert resp.status_code == 400
+
+
+def test_stt_test_rejects_oversized_body(client: TestClient) -> None:
+    """Oversized body is rejected before construction so we don't burn quota."""
+    from app.api.providers import STT_TEST_MAX_AUDIO_BYTES
+
+    get_registry().register(ProviderKind.STT, "echo-stt", _EchoSTT)
+    created = _make_stt_row(client)
+    too_big = b"\x00" * (STT_TEST_MAX_AUDIO_BYTES + 1)
+    resp = client.post(
+        f"/providers/{created['id']}/stt_test",
+        content=too_big,
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert resp.status_code == 413
+
+
+def test_stt_test_returns_ok_false_when_provider_yields_nothing(
+    client: TestClient,
+) -> None:
+    """An ok=False payload + empty-transcript message is the soft-failure UX."""
+
+    class _SilentSTT(STTProvider):
+        def __init__(self, config: ProviderConfig) -> None:
+            self._config = config
+
+        @property
+        def name(self) -> str:
+            return "silent-stt"
+
+        async def transcribe_stream(
+            self, audio_iter: AsyncIterator[bytes]
+        ) -> AsyncIterator[TranscriptEvent]:
+            async for _ in audio_iter:
+                pass
+            # No yield: the provider succeeded but had nothing to say.
+            if False:
+                yield TranscriptEvent(text="", is_final=True, timestamp_ms=0)
+
+    get_registry().register(ProviderKind.STT, "silent-stt", _SilentSTT)
+    created = client.post(
+        "/providers",
+        json=_create_payload(provider_name="silent-stt", display_name="Silent"),
+    ).json()
+    resp = client.post(
+        f"/providers/{created['id']}/stt_test",
+        content=b"\x10\x00" * 8_000,
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["transcript"] == ""
+    assert "no transcript" in (body["message"] or "")
+
+
+def test_stt_test_returns_ok_false_when_provider_raises(client: TestClient) -> None:
+    """Adapter exceptions become ok=False + detail, not 500."""
+    get_registry().register(ProviderKind.STT, "failing-stt", _FailingSTT)
+    created = client.post(
+        "/providers",
+        json=_create_payload(provider_name="failing-stt", display_name="Fail"),
+    ).json()
+    resp = client.post(
+        f"/providers/{created['id']}/stt_test",
+        content=b"\x10\x00" * 8_000,
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert "synthetic auth failure" in (body["detail"] or "")
+
+
+def test_stt_test_missing_provider_returns_404(client: TestClient) -> None:
+    resp = client.post(
+        "/providers/9999/stt_test",
+        content=b"\x10\x00" * 8_000,
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert resp.status_code == 404

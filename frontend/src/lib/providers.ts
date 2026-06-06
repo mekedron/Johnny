@@ -102,6 +102,52 @@ export interface TestResult {
 }
 
 /**
+ * Catalog metadata for a single STT provider (Johnny-ckz.15.2).
+ *
+ * Returned by `GET /providers/stt_catalog`, used by the `/settings/stt`
+ * UI to render one card per installed STT adapter. ``provider_type`` is
+ * "local" or "cloud"; ``streaming`` flags adapters that emit partial
+ * transcripts before the user stops speaking; ``models`` is the value
+ * list lifted from the adapter's ``model`` / ``model_id`` / ``model_size``
+ * select field (empty when the adapter has no enumerated models).
+ */
+export interface SttCatalogEntry {
+	provider_name: string;
+	display_name: string;
+	summary: string;
+	signup_url: string | null;
+	provider_type: 'local' | 'cloud';
+	streaming: boolean;
+	model_count: number;
+	models: string[];
+	field_schema: ProviderSchema;
+}
+
+export interface SttCatalogResponse {
+	providers: SttCatalogEntry[];
+}
+
+/**
+ * Result of a mic-recording STT test (Johnny-ckz.15.2).
+ *
+ * ``transcript`` is the final, concatenated text the provider returned.
+ * ``latency_ms`` is the wall-clock duration of the adapter call (not
+ * the upload). ``cost_usd`` is the published per-minute rate × audio
+ * duration; ``null`` for providers without a known rate. ``audio_ms`` is
+ * the duration of the audio actually sent, useful when the user holds
+ * the Test button longer than the default 5 s window.
+ */
+export interface SttTestResult {
+	ok: boolean;
+	transcript: string;
+	latency_ms: number;
+	cost_usd: number | null;
+	audio_ms: number;
+	message: string | null;
+	detail: string | null;
+}
+
+/**
  * Structured server-side validation error. Surfaces 422 detail entries
  * back to the caller with a flat `{field: message}` lookup the form
  * uses to render inline messages next to the relevant input.
@@ -224,6 +270,48 @@ export function deactivateProvider(id: number): Promise<Provider> {
 
 export function testProvider(id: number): Promise<TestResult> {
 	return request<TestResult>(`/providers/${id}/test`, { method: 'POST' });
+}
+
+/**
+ * Fetch the STT catalog — every registered STT provider enriched with
+ * the metadata the `/settings/stt` UI renders (type, streaming flag,
+ * model count, full schema). Returned in display order; the UI doesn't
+ * re-sort.
+ */
+export function listSttCatalog(): Promise<SttCatalogResponse> {
+	return request<SttCatalogResponse>('/providers/stt_catalog');
+}
+
+/**
+ * Submit a mic recording to the STT provider's test endpoint
+ * (Johnny-ckz.15.2). ``pcm`` is raw 16 kHz mono S16LE audio captured
+ * via the browser's AudioWorklet — the same format the live pipeline
+ * uses end-to-end. Returns the transcript, the wall-clock latency, and
+ * a per-minute-rate cost estimate when one is known.
+ */
+export async function sttTestRecording(
+	id: number,
+	pcm: ArrayBuffer
+): Promise<SttTestResult> {
+	const res = await fetch(`${API_BASE}/providers/${id}/stt_test`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/octet-stream' },
+		body: pcm
+	});
+	let body: unknown = null;
+	const text = await res.text();
+	if (text.length > 0) {
+		try {
+			body = JSON.parse(text);
+		} catch {
+			body = text;
+		}
+	}
+	if (!res.ok) {
+		const detail = extractDetail(body) ?? `HTTP ${res.status}`;
+		throw new Error(detail);
+	}
+	return body as SttTestResult;
 }
 
 /**

@@ -1,30 +1,29 @@
 {
-  "id": "e226e3c5-adc1-481f-bc49-85d000e1bf13",
-  "status": "interrupted",
-  "startedAt": "2026-06-06T14:49:05.906Z",
-  "updatedAt": "2026-06-06T15:59:58.774Z",
+  "id": "51aec77c-06d2-41a0-ab44-ea76c3bf8c41",
+  "status": "running",
+  "startedAt": "2026-06-06T16:31:20.198Z",
+  "updatedAt": "2026-06-06T16:31:20.198Z",
   "agentPlugin": "claude",
   "trackerPlugin": "beads-bv",
-  "epicId": "Johnny-ckz",
+  "epicId": "Johnny-stt",
   "epicIds": [
-    "Johnny-ckz"
+    "Johnny-stt"
   ],
   "executionScopes": [
     {
-      "id": "Johnny-ckz",
-      "title": "Johnny meeting bot — ongoing work, fixes, and end-to-end validation",
+      "id": "Johnny-stt",
+      "title": "STT provider catalog: VoiceInk parity + NVIDIA Parakeet + streaming-in-chat",
       "type": "epic",
-      "description": "## Why this exists\n\nUmbrella epic for the Johnny Google Meet AI Meeting Bot post-MVP work.\n\nThe original join-stuck bug (Johnny-ckz.1) is fixed and the bot now reliably joins meetings (commit 979447e). The remaining scope spans:\n- End-to-end validation against real Google Meet (across all modes)\n- Adding/refining bot behavior modes (Autonomous, free-mode speech logic)\n- Provider integration polish (TTS demo playback, ElevenLabs verification, openai-realtime fix)\n- UX improvements (UI-driven Google sign-in, full-meeting context vs rolling window)\n- Smoke tests and provider management UI tests\n\nAll child issues here are tracked under this single epic.\n\n## Acceptance\n\n- All child issues closed\n- Bot has been validated end-to-end across every mode against a real Google Meet\n- Provider management surface is polished and tested via UI",
+      "description": "## Why this epic\n\nFirst-class speech-to-text provider catalog for Johnny with the same breadth as VoiceInk (`/Users/nikita/Projects/VoiceInk`), plus NVIDIA Parakeet (`nvidia/parakeet-tdt-0.6b-v3`) as a fast local + streaming-capable option that VoiceInk doesn't ship.\n\n## What ships under this epic\n\n1. **Parakeet provider** (Johnny-stt.1) — `nvidia/parakeet-tdt-0.6b-v3`. Local, fast, streaming-capable. The priority piece.\n2. **Catalog UI with Test button** (Johnny-stt.2) — model browser per provider, per-model Test button, latency + cost shown. Mirrors the existing Piper voice catalog UX (`Johnny-ckz.5`).\n3. **Live streaming transcription in playground chat** (Johnny-stt.3) — mic icon + live partial transcripts as user speaks. Default: Parakeet local; fallback cloud streaming providers.\n4. **VoiceInk parity bundle** (Johnny-stt.4) — Gemini, AssemblyAI, Groq, FluidAudio (P4 backlog). Whisper / Deepgram / ElevenLabs / OpenAI Realtime already exist in `backend/app/providers/`.\n\n## Reference\n\n- VoiceInk providers: `/Users/nikita/Projects/VoiceInk/VoiceInk/Transcription/{Cloud,Streaming,Whisper,FluidAudio}/`\n- Existing Johnny providers: `backend/app/providers/{faster_whisper,deepgram,elevenlabs,openai_realtime}_stt.py`\n- Parakeet on HuggingFace: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3\n\n## Out of scope\n\n- Speaker diarization (separate, harder problem).\n- Wake-word activation (separate feature).\n- Replacing the existing TTS provider catalog (this is STT-only).\n\n## History\n\nMigrated from Johnny-ckz.15 (formerly a child of Johnny-ckz) on 2026-06-06 to live as an independent top-level epic.",
       "metadata": {
         "dependencyCount": 0,
         "dependentCount": 0
       }
     }
   ],
-  "currentIteration": 1,
+  "currentIteration": 0,
   "maxIterations": 0,
   "totalTasks": 0,
-  "tasksCompleted": 1,
-  "cwd": "/Users/nikita/Projects/Johnny",
-  "endedAt": "2026-06-06T15:59:58.773Z"
+  "tasksCompleted": 0,
+  "cwd": "/Users/nikita/Projects/Johnny"
 }

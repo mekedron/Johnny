@@ -318,6 +318,21 @@
 		<div class="alert error" role="alert">{error}</div>
 	{/if}
 
+	<section class="settings-shortcuts" aria-label="Settings shortcuts">
+		<a
+			class="shortcut-card"
+			href="/settings/stt"
+			data-testid="settings-shortcut-stt"
+		>
+			<strong>Speech-to-text providers</strong>
+			<span>
+				Browse installed STT adapters, configure credentials, and run a
+				5-second mic test to compare transcript quality, latency, and
+				cost.
+			</span>
+		</a>
+	</section>
+
 	<section class="accounts-section" data-testid="accounts-section">
 		<h2>Connected accounts</h2>
 		{#if accounts.length === 0}
@@ -669,6 +684,35 @@ uv run python -m johnny.tools.seed_auth_state \
 		background: #fef2f2;
 		color: #991b1b;
 		border: 1px solid #fecaca;
+	}
+
+	.settings-shortcuts {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+		gap: 0.75rem;
+		margin-top: 1.5rem;
+	}
+	.shortcut-card {
+		display: grid;
+		gap: 0.3rem;
+		padding: 0.9rem 1rem;
+		border: 1px solid #e5e7eb;
+		border-radius: 8px;
+		background: #ffffff;
+		text-decoration: none;
+		color: inherit;
+	}
+	.shortcut-card:hover {
+		border-color: #4f46e5;
+		background: #eef2ff;
+	}
+	.shortcut-card strong {
+		font-size: 0.95rem;
+		color: #1f2937;
+	}
+	.shortcut-card span {
+		font-size: 0.85rem;
+		color: #4b5563;
 	}
 
 	.accounts-section {
