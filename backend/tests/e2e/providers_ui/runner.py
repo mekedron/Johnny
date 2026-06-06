@@ -231,7 +231,7 @@ def _run_negative_checks(api: JohnnyAPI, report: Report) -> None:
         "provider_name": "anthropic",
         "display_name": edge_report.display_name,
         "credentials": {"api_key": "sk-ant-invalid-deadbeef"},
-        "options": {"model": "claude-3-5-haiku-20241022"},
+        "options": {"model": "claude-haiku-4-5"},
     }
     try:
         created = api.create_provider(bad_payload)
@@ -254,7 +254,7 @@ def _run_negative_checks(api: JohnnyAPI, report: Report) -> None:
             "provider_name": "anthropic",
             "display_name": "e2e-edge-duplicate",
             "credentials": {"api_key": "sk-ant-placeholder"},
-            "options": {"model": "claude-3-5-haiku-20241022"},
+            "options": {"model": "claude-haiku-4-5"},
         }
         first = api.create_provider(dup_payload)
         first_id = int(first["id"])

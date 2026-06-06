@@ -44,7 +44,7 @@ def test_invalid_api_key_is_rejected_by_smoke_test(johnny_api: JohnnyAPI) -> Non
             "provider_name": "anthropic",
             "display_name": "e2e-edge-invalid-key",
             "credentials": {"api_key": "sk-ant-invalid-deadbeef"},
-            "options": {"model": "claude-3-5-haiku-20241022"},
+            "options": {"model": "claude-haiku-4-5"},
         }
     )
     try:
@@ -63,7 +63,7 @@ def test_duplicate_display_name_is_rejected(johnny_api: JohnnyAPI) -> None:
         "provider_name": "anthropic",
         "display_name": "e2e-edge-duplicate",
         "credentials": {"api_key": "sk-ant-placeholder"},
-        "options": {"model": "claude-3-5-haiku-20241022"},
+        "options": {"model": "claude-haiku-4-5"},
     }
     first = johnny_api.create_provider(payload)
     try:
@@ -84,7 +84,7 @@ def test_activate_demotes_previous_active(johnny_api: JohnnyAPI) -> None:
             "provider_name": "anthropic",
             "display_name": "e2e-edge-switch-a",
             "credentials": {"api_key": os.environ["ANTHROPIC_API_KEY"].strip()},
-            "options": {"model": "claude-3-5-haiku-20241022"},
+            "options": {"model": "claude-haiku-4-5"},
         }
     )
     b = johnny_api.create_provider(
@@ -93,7 +93,7 @@ def test_activate_demotes_previous_active(johnny_api: JohnnyAPI) -> None:
             "provider_name": "anthropic",
             "display_name": "e2e-edge-switch-b",
             "credentials": {"api_key": os.environ["ANTHROPIC_API_KEY"].strip()},
-            "options": {"model": "claude-3-5-haiku-20241022"},
+            "options": {"model": "claude-haiku-4-5"},
         }
     )
     try:

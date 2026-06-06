@@ -58,6 +58,73 @@ after each iteration and it's included in prompts for context.
 
 ---
 
+## 2026-06-06 - Johnny-upg (rerun against freshly-rebuilt stack)
+- Reopened bead requested a full rerun against the rebuilt stack. Brought
+  the stack up (`docker compose up -d`, 5/5 services healthy), reran
+  the API harness, drove the `/providers` UI via chrome-devtools-mcp,
+  and patched a stale model name in the harness itself that had
+  rotted past Anthropic's schema cleanup.
+- Files changed:
+  - `backend/tests/e2e/providers_ui/runner.py` — `_run_negative_checks`
+    invalid-key and duplicate-name payloads now use `claude-haiku-4-5`
+    (the current cheapest valid Anthropic model). The previous
+    `claude-3-5-haiku-20241022` is no longer in the provider field
+    schema's allowed values, so it 422'd at create-time and the edge
+    case never reached the smoke test.
+  - `backend/tests/e2e/providers_ui/test_edges.py` — same model bump
+    across all three edge-case tests (invalid key, duplicate name,
+    activate-demotes-previous). All four occurrences replaced.
+- New bead filed:
+  - **Johnny-uga** — ElevenLabs e2e plan uses library voice
+    (`21m00Tcm4TlvDq8ikWAM` / Rachel) incompatible with the free tier.
+    The .env key is valid (Johnny-jrd) but the voice itself is
+    paywalled, so the smoke test hits HTTP 402. Plan should either
+    point at a non-library voice or SKIP when the free tier is
+    detected. Depends-on: Johnny-upg.
+- Run results after fix:
+  - CLI: **10 PASS · 2 SKIP · 2 FAIL** (deepgram, openai LLM/TTS,
+    anthropic, gemini, Ollama, all three switch checks, edge cases).
+    SKIPs are faster-whisper + piper (empty model volumes).
+    FAILs are pre-existing: Johnny-466 (openai-realtime adapter
+    targets deprecated beta API) and Johnny-uga (above).
+  - pytest `-m e2e_ui`: **9 passed · 2 failed · 2 skipped** — same
+    two pre-existing regressions; the three edge-case tests now
+    pass after the model bump.
+  - UI walk (chrome-devtools-mcp, OpenAI LLM): empty-state →
+    open modal → schema-aware form filled (display name + API key) →
+    submit → row visible → Test reports `LLM smoke OK —
+    finish_reason=stop — Hi there! How can I assist you today?` →
+    Activate flips the row's ACTIVE badge and the `Active:` tag in
+    the kind header → opening a fresh modal and submitting without
+    an API key triggers the browser's required-field error → Delete
+    (with patched `window.confirm`) removes the row from both UI
+    and API. 8 screenshots saved under
+    `tests/e2e/artifacts/Johnny-upg-2026-06-06-rerun/screenshots/`.
+- `ruff check` + `mypy --strict` both clean on the 13 harness files.
+  No console errors during the chrome-devtools walk.
+- **Learnings:**
+  - Provider field schemas now drive a strict allowlist on `options`
+    fields — any test fixture that hard-codes a model name that
+    dropped off the catalog will 422 at create-time before reaching
+    the smoke test. The harness plan itself uses `claude-haiku-4-5`
+    via `plans.py` (correct), but two stale edge-case payloads in
+    `runner.py` + three in `test_edges.py` hadn't been updated. The
+    failure mode looks like a harness bug ("HTTPStatusError 422") but
+    it's the schema doing its job — a "wait, the schema correctly
+    rejected an outdated model name" moment masquerading as a
+    regression.
+  - "Closed because the API key works" (Johnny-jrd) ≠ "closed because
+    the smoke test passes" — for ElevenLabs the voice id is a
+    second-layer credential that the free tier paywalls separately.
+    Worth re-running the harness after every "key works" verification
+    to catch this kind of partial fix.
+  - The chrome-devtools snapshot's role+name model survives this
+    page's churn perfectly: every button / textbox / combobox the
+    `ui_driver.py` descriptors reference resolved cleanly with no
+    selector tweaks, even though the form is now schema-aware
+    (post-Johnny-mma) instead of the original generic textareas.
+---
+
 ## 2026-06-06 - Johnny-vgl
 - Standardized the bot speech decision logic across BotMode so
   `free_auto_speak` (and any future speaking mode) inherits the same
