@@ -524,6 +524,20 @@ def test_pipeline_config_defaults() -> None:
     assert cfg.session_id is None
 
 
+def test_default_end_of_speech_ms_is_800() -> None:
+    """Default end-of-speech threshold is 800 ms (Johnny-arh).
+
+    600 ms (the legacy default) was shorter than common mid-sentence
+    thinking pauses, so the bot would treat the pause as end-of-turn
+    and start answering before the user finished. 800 ms covers natural
+    hesitations while still feeling responsive at true end-of-turn.
+    """
+    from johnny.voice_pipeline.pipeline import DEFAULT_END_OF_SPEECH_MS
+
+    assert DEFAULT_END_OF_SPEECH_MS == 800
+    assert PipelineConfig().end_of_speech_ms == 800
+
+
 def test_pipeline_config_frozen() -> None:
     from dataclasses import FrozenInstanceError
 
@@ -5613,3 +5627,364 @@ async def test_history_unbounded_default_includes_bot_history_in_snapshot() -> N
     speakers = [entry.get("speaker") for entry in snapshot["transcript_window"]]
     assert BOT_SPEAKER_LABEL in speakers
     assert snapshot["transcript_total_count"] == 3
+
+
+# --- Johnny-arh: bot does not speak over user mid-sentence ----------------
+
+
+def _make_pcm_with_pause(
+    pause_ms: int,
+    tone_ms: int = 600,
+    leading_silence_ms: int = 200,
+    trailing_silence_ms: int = 200,
+) -> bytes:
+    """Synthesise: silence → tone → pause (silence) → tone → silence.
+
+    Used to verify VAD endpointing: with ``end_of_speech_ms > pause_ms``
+    the two tones merge into ONE utterance (the pause is below the
+    end-of-turn threshold). With ``end_of_speech_ms <= pause_ms`` they
+    split into two utterances. 16 kHz mono S16LE matches the pipeline's
+    canonical capture format so the transport can feed it straight
+    through without a WAV header.
+    """
+    import array
+    import math
+
+    def _tone(duration_ms: int) -> list[int]:
+        n = 16_000 * duration_ms // 1000
+        return [
+            int(12_000 * math.sin(2 * math.pi * 440 * i / 16_000))
+            for i in range(n)
+        ]
+
+    def _silence(duration_ms: int) -> list[int]:
+        return [0] * (16_000 * duration_ms // 1000)
+
+    samples: list[int] = []
+    samples.extend(_silence(leading_silence_ms))
+    samples.extend(_tone(tone_ms))
+    samples.extend(_silence(pause_ms))
+    samples.extend(_tone(tone_ms))
+    samples.extend(_silence(trailing_silence_ms))
+    return array.array("h", samples).tobytes()
+
+
+async def test_natural_mid_sentence_pause_below_default_does_not_split(
+) -> None:
+    """A 700 ms thinking pause is absorbed at the new 800 ms default (Johnny-arh).
+
+    Two tones separated by 700 ms of silence MUST merge into a single
+    utterance when the default end-of-speech threshold (800 ms) is in
+    effect. With the legacy 600 ms threshold the same pause would have
+    split into two utterances and the bot would have answered after the
+    first tone — the regression Johnny-arh fixes.
+    """
+    from johnny.voice_pipeline import InMemoryTranscriptSink
+
+    pcm = _make_pcm_with_pause(pause_ms=700)
+    frames = _frames_from_pcm(pcm)
+    tsink = InMemoryTranscriptSink()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["first half", "second half"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": False, "confidence": 0.1, "reason": "x"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        # No end_of_speech_ms override — exercise the new 800 ms default.
+        config=PipelineConfig(vad_threshold=0.05),
+        transcript_sink=tsink,
+    )
+    await pipeline.run()
+    records = tsink.snapshot()
+    assert len(records) == 1, (
+        f"700 ms pause < 800 ms threshold should keep the utterance whole; "
+        f"got {len(records)} records: {[r.text for r in records]}"
+    )
+
+
+async def test_natural_mid_sentence_pause_above_threshold_splits() -> None:
+    """A 900 ms silence is treated as end-of-turn at the 800 ms threshold.
+
+    Companion to the test above: when the silence DOES exceed the
+    threshold, the pipeline must finalise the first utterance so the
+    bot can respond. Guards against an over-correction that disables
+    endpointing entirely.
+    """
+    from johnny.voice_pipeline import InMemoryTranscriptSink
+
+    pcm = _make_pcm_with_pause(pause_ms=900)
+    frames = _frames_from_pcm(pcm)
+    tsink = InMemoryTranscriptSink()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["first half", "second half"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": False, "confidence": 0.1, "reason": "x"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(vad_threshold=0.05),
+        transcript_sink=tsink,
+    )
+    await pipeline.run()
+    records = tsink.snapshot()
+    assert len(records) == 2, (
+        f"900 ms pause > 800 ms threshold should split into two utterances; "
+        f"got {len(records)} records"
+    )
+
+
+async def test_user_resume_during_router_aborts_answer(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Interrupt fired during router LLM call aborts the answer (Johnny-arh).
+
+    Simulates the race that prompted the bead: the bot is responding to
+    utterance N (router LLM is still in flight) when the user resumes
+    speaking. The fast barge-in fires :meth:`VoicePipeline.interrupt`
+    synchronously from the VAD loop, which sets ``_interrupt_event``.
+    The previous code immediately cleared the event at the start of
+    ``_answer_and_speak`` — so the bot would speak over the user. After
+    Johnny-arh the event survives the router stage and the response is
+    suppressed: no TTS, no utterance row, decision row marked
+    ``suppressed``.
+    """
+    from johnny.voice_pipeline import InMemoryDecisionSink, InMemoryUtteranceSink
+
+    frames = _frames_from_pcm(two_utterance_pcm)
+
+    pipeline_ref: list[VoicePipeline | None] = [None]
+    router_gate = asyncio.Event()
+    router_entered = asyncio.Event()
+
+    class _GatedRouterLLM(LLMProvider):
+        """Router that waits for ``router_gate`` before returning.
+
+        Simulates a slow LLM call so the test can fire the interrupt
+        WHILE the router is still in flight — the exact race condition
+        the Johnny-arh fix targets.
+        """
+
+        @property
+        def name(self) -> str:
+            return "gated-router"
+
+        async def chat(
+            self,
+            messages: Sequence[ChatMessage],  # noqa: ARG002
+            tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
+            response_format: dict[str, Any] | None = None,  # noqa: ARG002
+        ) -> LLMResponse:
+            router_entered.set()
+            # Fire the interrupt from the same task so it's guaranteed
+            # to land before the chat call returns — mirrors what the
+            # VAD fast-barge-in does on the transcribe-loop side.
+            pipe = pipeline_ref[0]
+            assert pipe is not None
+            pipe.interrupt()
+            await router_gate.wait()
+            return LLMResponse(
+                text='{"should_speak": true, "confidence": 0.95, "reason": "ok"}',
+                finish_reason="stop",
+                structured_output={
+                    "should_speak": True,
+                    "confidence": 0.95,
+                    "reason": "ok",
+                },
+            )
+
+        async def stream_chat(
+            self,
+            messages: Sequence[ChatMessage],
+        ) -> AsyncIterator[str]:
+            del messages
+            return
+            yield  # pragma: no cover — required to be a generator
+
+    transport = _BufferedTransport(frames=frames)
+    answer_llm = _FakeAnswerLLM(answers=["bot would have spoken this"])
+    tts = _FakeTTS(frame_count=10)
+    decision_sink = InMemoryDecisionSink()
+    utterance_sink = InMemoryUtteranceSink()
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hello", "world"]),
+        router_llm=_GatedRouterLLM(),
+        answer_llm=answer_llm,
+        tts=tts,
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            # Disable barge-in so the only interrupt source is our
+            # gated router — keeps the assertion focused on the
+            # router-stage cancellation path.
+            enable_barge_in=False,
+        ),
+        decision_sink=decision_sink,
+        utterance_sink=utterance_sink,
+    )
+    pipeline_ref[0] = pipeline
+
+    run_task = asyncio.create_task(pipeline.run())
+    try:
+        await asyncio.wait_for(router_entered.wait(), timeout=2.0)
+        # Interrupt is set inside the router. Release it so the response
+        # loop can complete and the rest of the pipeline drains.
+        router_gate.set()
+        await asyncio.wait_for(run_task, timeout=2.0)
+    finally:
+        router_gate.set()
+        if not run_task.done():
+            run_task.cancel()
+            try:
+                await run_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+    # No TTS frames played — the answer stage was suppressed.
+    assert tts.calls == [], (
+        f"answer_and_speak ran despite interrupt being set: {tts.calls}"
+    )
+    # No utterance persisted — the bot never spoke.
+    assert utterance_sink.snapshot() == []
+    # Answer LLM never invoked — saved the cost.
+    assert answer_llm.calls == []
+    # Decision was persisted as suppressed (audit trail).
+    records = decision_sink.snapshot()
+    assert len(records) >= 1
+    assert records[0].outcome == "suppressed"
+
+
+async def test_interrupt_cleared_at_response_start_not_in_answer_and_speak(
+    two_utterance_pcm: bytes,
+) -> None:
+    """The interrupt event is cleared once per response, BEFORE the router.
+
+    Pins Johnny-arh's invariant: the only place ``_interrupt_event`` is
+    cleared in the response path is the start of
+    ``_respond_to_transcript_inner``. Re-introducing a clear inside
+    ``_answer_and_speak`` would mask the race — the router stage runs
+    without an interrupt check, so a barge-in fired during that window
+    must remain set when the answer stage starts.
+    """
+    from johnny.voice_pipeline import pipeline as pipeline_module
+
+    source = pipeline_module.__file__
+    assert source is not None
+    text = Path(source).read_text(encoding="utf-8")
+    # There should be exactly one ``_interrupt_event.clear()`` call in
+    # production code — inside ``_respond_to_transcript_inner``.
+    clear_count = text.count("self._interrupt_event.clear()")
+    assert clear_count == 1, (
+        f"expected exactly one _interrupt_event.clear() call in pipeline.py, "
+        f"found {clear_count}"
+    )
+
+    # And the call must be in `_respond_to_transcript_inner`, not in
+    # `_answer_and_speak`. Walk the relevant function bodies and check.
+    import ast
+
+    module = ast.parse(text)
+    found_in: list[str] = []
+    for node in ast.walk(module):
+        if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
+            body_text = ast.get_source_segment(text, node) or ""
+            if "self._interrupt_event.clear()" in body_text:
+                found_in.append(node.name)
+    assert found_in == ["_respond_to_transcript_inner"], (
+        f"_interrupt_event.clear() must live in _respond_to_transcript_inner "
+        f"only, found in {found_in}"
+    )
+
+
+async def test_user_resume_during_router_does_not_emit_agent_spoke(
+    two_utterance_pcm: bytes,
+) -> None:
+    """No ``AgentSpoke`` event when the response is cancelled mid-router.
+
+    Subscribers (UI, decision audit) rely on ``AgentSpoke`` to render
+    "the bot said X" — emitting it for a cancelled response would
+    surface a phantom utterance the user never heard.
+    """
+    from johnny.voice_pipeline.events import AgentSpoke
+
+    frames = _frames_from_pcm(two_utterance_pcm)
+    pipeline_ref: list[VoicePipeline | None] = [None]
+    router_gate = asyncio.Event()
+    router_entered = asyncio.Event()
+
+    class _GatedRouterLLM(LLMProvider):
+        @property
+        def name(self) -> str:
+            return "gated-router"
+
+        async def chat(
+            self,
+            messages: Sequence[ChatMessage],  # noqa: ARG002
+            tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
+            response_format: dict[str, Any] | None = None,  # noqa: ARG002
+        ) -> LLMResponse:
+            router_entered.set()
+            pipe = pipeline_ref[0]
+            assert pipe is not None
+            pipe.interrupt()
+            await router_gate.wait()
+            return LLMResponse(
+                text='{"should_speak": true, "confidence": 0.95, "reason": "ok"}',
+                finish_reason="stop",
+                structured_output={
+                    "should_speak": True,
+                    "confidence": 0.95,
+                    "reason": "ok",
+                },
+            )
+
+        async def stream_chat(
+            self,
+            messages: Sequence[ChatMessage],
+        ) -> AsyncIterator[str]:
+            del messages
+            return
+            yield  # pragma: no cover
+
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hello", "world"]),
+        router_llm=_GatedRouterLLM(),
+        answer_llm=_FakeAnswerLLM(answers=["nope"]),
+        tts=_FakeTTS(),
+        event_bus=bus,
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            enable_barge_in=False,
+        ),
+    )
+    pipeline_ref[0] = pipeline
+
+    run_task = asyncio.create_task(pipeline.run())
+    try:
+        await asyncio.wait_for(router_entered.wait(), timeout=2.0)
+        router_gate.set()
+        await asyncio.wait_for(run_task, timeout=2.0)
+    finally:
+        router_gate.set()
+        if not run_task.done():
+            run_task.cancel()
+
+    spoke = [e for e in bus.snapshot() if isinstance(e, AgentSpoke)]
+    assert spoke == [], (
+        f"AgentSpoke fired for a cancelled response: {[e.text for e in spoke]}"
+    )

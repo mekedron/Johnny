@@ -229,6 +229,38 @@ the loop (not row-by-row) so the partial unique index
 `(kind) WHERE is_active` is never transiently violated. Same write
 the `POST /providers/{id}/activate` endpoint performs.
 
+### End-of-turn endpointing: 800 ms silence + interrupt-survives-router (Johnny-arh)
+The bot's "user has finished speaking" trigger is VAD-driven silence detection
+in `VoicePipeline._utterances()`: once N consecutive silence frames are seen
+(where `N = end_of_speech_ms / frame_duration_ms`), the buffered utterance
+yields and runs through STT → router → answer → TTS. The default
+`end_of_speech_ms` is now **800 ms** (was 600 ms — too short for natural
+mid-sentence thinking pauses, so the bot would jump in over a user's own
+multi-clause sentence). 800 ms covers the 200–700 ms hesitation pauses
+typical of natural speech while still feeling responsive at true end-of-turn.
+
+Race condition fix layered on top of the threshold bump: there's a window
+between an utterance finalising and TTS starting (router LLM stage ≈ 200 ms)
+where the user can resume speaking. Fast barge-in (Johnny-ze3) fires
+`interrupt()` from the VAD speech-onset trigger, setting `_interrupt_event`.
+The legacy code cleared `_interrupt_event` at the start of
+`_answer_and_speak` — which immediately wiped any fire that landed during
+the router stage, so the bot proceeded to speak over the user.
+
+The fix moves the clear from `_answer_and_speak` to the very start of
+`_respond_to_transcript_inner` (BEFORE the router). Then a post-router
+`if self._interrupt_event.is_set(): persist(suppressed); return` short-
+circuits the answer LLM call entirely. Net effect: every response gets
+exactly ONE clear (at its own start); any interrupt fired during its
+router/answer/TTS lifetime sticks through to the end.
+
+A regression-pin test (`test_interrupt_cleared_at_response_start_not_in_answer_and_speak`)
+greps the AST of `pipeline.py` to assert there's exactly one
+`self._interrupt_event.clear()` call AND that it lives inside
+`_respond_to_transcript_inner`. If a future refactor reintroduces the
+clear in `_answer_and_speak`, the test breaks loudly with an explicit
+"the Johnny-arh race regression is back" signal.
+
 ### Bot's own utterances live in `_transcript_history` as `Bot (you)` (Johnny-7qp)
 The pipeline now mixes participant transcripts AND the bot's own
 utterances into a single `_transcript_history` list so the router /
@@ -265,6 +297,85 @@ the first response runs, and the bot utterance is appended at the
 end (after the second transcript), which doesn't surface in the
 second prompt because the prompt builder slices `history[:current_pos]`.
 
+---
+
+## 2026-06-06 - Johnny-arh
+- Fixed the bot speaking over a user mid-sentence. Two-layer fix:
+  1. **Threshold bump**: `DEFAULT_END_OF_SPEECH_MS` 600 → 800 ms in
+     `johnny.voice_pipeline.pipeline`. The 600 ms default was shorter than
+     natural mid-sentence hesitation pauses (200–700 ms per speech-research
+     norms), so a user pausing to think mid-clause would trigger end-of-turn
+     and the bot would jump in. 800 ms absorbs natural pauses without
+     making true end-of-turn feel sluggish.
+  2. **Race fix on `_interrupt_event`**: moved the lone `clear()` call from
+     the start of `_answer_and_speak` to the start of
+     `_respond_to_transcript_inner` (before the router LLM call), and
+     added a post-router `if self._interrupt_event.is_set(): suppress`
+     short-circuit. Without (2), even an 800 ms threshold leaves a window
+     during the router LLM call (200–500 ms) where a fast barge-in fire
+     would be silently wiped by the legacy clear in `_answer_and_speak`,
+     letting the bot speak over the user.
+- New 6 tests in `tests/voice_pipeline/test_pipeline.py`:
+  - `test_default_end_of_speech_ms_is_800` — pins the new 800 ms default.
+  - `test_natural_mid_sentence_pause_below_default_does_not_split` —
+    700 ms silence between two tones merges into ONE utterance.
+  - `test_natural_mid_sentence_pause_above_threshold_splits` — 900 ms
+    silence DOES split (guards against an over-correction).
+  - `test_user_resume_during_router_aborts_answer` — gated router LLM
+    calls `interrupt()` mid-flight; asserts no TTS calls, no utterance
+    row, decision marked `suppressed`, answer LLM never invoked (saved
+    cost).
+  - `test_user_resume_during_router_does_not_emit_agent_spoke` — same
+    race but asserts no `AgentSpoke` published (UI subscribers don't
+    see a phantom "the bot said X").
+  - `test_interrupt_cleared_at_response_start_not_in_answer_and_speak` —
+    AST-level pin: exactly ONE `_interrupt_event.clear()` call in
+    `pipeline.py` AND it lives inside `_respond_to_transcript_inner`.
+    Future refactors that re-introduce the clear in `_answer_and_speak`
+    fail loudly with the explicit regression message.
+- Files changed:
+  - `backend/johnny/voice_pipeline/pipeline.py`
+  - `backend/tests/voice_pipeline/test_pipeline.py`
+- **Learnings:**
+  - `_interrupt_event` has a subtle lifecycle: it's the only "stop NOW"
+    signal across the entire response pipeline (router, answer LLM stream,
+    TTS frame yield). When clearing it, the location matters: clearing at
+    the start of a stage means any fire DURING earlier stages of the SAME
+    response gets wiped. The legacy code cleared inside `_answer_and_speak`,
+    which was correct for the "interrupt left over from previous response"
+    case but wrong for "interrupt fired during this response's router
+    stage". Moving the clear to the response entry point (before the
+    router) solves both: previous-response leftovers are still wiped
+    (same as before), AND this-response fires survive.
+  - Existing tests covering interrupt behaviour all PASS with the moved
+    clear without modification, because they fire interrupt either
+    inside the answer LLM's `stream_chat` (which runs AFTER the clear in
+    both old and new code) or inside the TTS stream (likewise). The race
+    the bead describes is the niche case where the fire lands DURING the
+    router stage — none of the pre-Johnny-arh tests exercised it.
+  - When writing the "interrupt during router" test, simulating the race
+    is tricky because real router LLMs return in milliseconds. The
+    pattern is a `_GatedRouterLLM` that sets an event when it's "entered"
+    the chat call, then awaits a release event before returning. The
+    test calls `pipeline.interrupt()` from the same task between entry
+    and release — guarantees the event is set BEFORE the router returns
+    without relying on cross-task scheduling timing. `enable_barge_in=False`
+    keeps the fast-barge-in classifier out of the picture so the assertion
+    pins exactly the post-router check.
+  - Raw PCM (no WAV header) works straight through `_BufferedTransport`
+    when each frame is the right size (640 bytes = 20 ms @ 16 kHz mono
+    S16LE). Skipping the WAV-encode-then-decode roundtrip dropped a
+    handful of mypy errors about `Wave_read` vs `Wave_write` typing on
+    a reused `BytesIO`. Future fixtures that need a custom audio layout
+    can use `_make_pcm_with_pause(...)` directly.
+  - The AST-walk regression test (`test_interrupt_cleared_at_response_start_not_in_answer_and_speak`)
+    is a high-leverage pattern for "this specific invariant must be
+    enforced at a specific source location". It reads the module text,
+    parses it with `ast.parse`, walks the function definitions, and
+    asserts the call appears in exactly one named function. Worth
+    reaching for whenever a fix's correctness depends on the LOCATION
+    of a single call (clear, set, persist, etc.) — code-review can
+    miss "you put this in the wrong function" but the AST test can't.
 ---
 
 ## 2026-06-06 - Johnny-7qp

@@ -68,7 +68,19 @@ from johnny.voice_pipeline.vad import DEFAULT_VAD_THRESHOLD, VADAnalyzer
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_UTTERANCE_MS = 30_000
-DEFAULT_END_OF_SPEECH_MS = 600
+DEFAULT_END_OF_SPEECH_MS = 800
+"""Silence duration that ends a participant's turn (Johnny-arh).
+
+VAD-driven endpointing: an utterance is finalised only after this many
+milliseconds of consecutive silence frames. 800 ms covers natural
+mid-sentence thinking pauses (typical speech research puts hesitation
+pauses at 200–700 ms) while still feeling responsive when the user
+genuinely stops. Anything shorter — the legacy 600 ms — caused the bot
+to jump in over a user's own multi-clause sentence whenever they paused
+to think (Johnny-arh symptom). Configurable per session via
+:attr:`PipelineConfig.end_of_speech_ms` for meetings with measurably
+different cadence.
+"""
 DEFAULT_FRAME_DURATION_MS = 20
 DEFAULT_CONFIDENCE_THRESHOLD = 0.7
 DEFAULT_BARGE_IN_MIN_SPEECH_MS = 160
@@ -896,7 +908,16 @@ class VoicePipeline:
 
         Split out so the in-flight / generation bookkeeping wraps every
         return path without obscuring the response logic itself.
+
+        Clears :attr:`_interrupt_event` at the very start (before the
+        router LLM call) so any barge-in fired DURING the router stage
+        sticks and aborts the answer (Johnny-arh). The legacy clear inside
+        :meth:`_answer_and_speak` raced with fast-barge-in fires that land
+        while the router LLM is still in flight: the event would be set
+        by the VAD speech-onset trigger, then immediately wiped at the
+        start of the answer stage, letting the bot talk over the user.
         """
+        self._interrupt_event.clear()
         input_window = await self._build_input_window(transcript)
         decision, raw_response = await self._run_router(transcript, input_window)
         decision_event = RouterDecisionMade(
@@ -917,6 +938,23 @@ class VoicePipeline:
             await self._persist_decision(decision_event, "suppressed")
             return
         if decision.confidence < self.config.confidence_threshold:
+            await self._persist_decision(decision_event, "suppressed")
+            return
+
+        # Johnny-arh: if a fast barge-in (or any other interrupt source)
+        # fired between the start of this response and here — typically
+        # because the participant resumed speaking while the router LLM
+        # was still in flight — suppress every downstream stage. We skip
+        # the suggestion event, the approval round, and the answer LLM
+        # so the bot does not talk over the user. The decision row is
+        # still persisted as "suppressed" so audits show the router
+        # decided to speak before the cancellation kicked in.
+        if self._interrupt_event.is_set():
+            logger.info(
+                "response cancelled for session=%s — user resumed "
+                "speaking before answer stage started",
+                self.config.session_id,
+            )
             await self._persist_decision(decision_event, "suppressed")
             return
 
@@ -1122,8 +1160,13 @@ class VoicePipeline:
         * the answer LLM produced empty text;
         * ``allowed_replies`` is set and no candidate matched;
         * the user interrupted before audio started playing.
+
+        :attr:`_interrupt_event` is cleared by the caller
+        (:meth:`_respond_to_transcript_inner`) at the start of each
+        response, NOT here, so any fast-barge-in fired during the router
+        stage survives long enough to abort this answer. Re-clearing here
+        would mask the race that Johnny-arh fixes.
         """
-        self._interrupt_event.clear()
         messages = self._answer_messages(transcript, decision)
         prompt_text = _serialize_prompt(messages)
 
