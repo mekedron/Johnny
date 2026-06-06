@@ -265,38 +265,34 @@ async def test_pipeline_emits_events_in_order_for_two_utterance_wav(
 
     events = bus.snapshot()
     types = [e.type for e in events]
-    # Expected order: T(1), R(1), A(1), T(2), R(2) — second utterance is suppressed
-    assert types == [
+    # Transcription and response run as concurrent tasks (Johnny-har),
+    # so the two transcripts may both publish before the response loop
+    # catches up. The contract is: two transcripts, two router
+    # decisions, one agent_spoke (second utterance is suppressed).
+    assert sorted(types) == sorted([
         "transcript_finalized",
         "router_decision_made",
         "agent_spoke",
         "transcript_finalized",
         "router_decision_made",
-    ]
+    ])
 
-    t1 = events[0]
-    assert isinstance(t1, TranscriptFinalized)
-    assert t1.text == "hello team"
-    assert t1.session_id == "test-session"
+    transcripts = [e for e in events if isinstance(e, TranscriptFinalized)]
+    assert [t.text for t in transcripts] == ["hello team", "any updates"]
+    assert all(t.session_id == "test-session" for t in transcripts)
 
-    r1 = events[1]
-    assert isinstance(r1, RouterDecisionMade)
+    decisions = [e for e in events if isinstance(e, RouterDecisionMade)]
+    assert len(decisions) == 2
+    r1, r2 = decisions
     assert r1.should_speak is True
     assert r1.confidence == pytest.approx(0.9)
     assert r1.suggested_reply == "Hi"
-
-    a1 = events[2]
-    assert isinstance(a1, AgentSpoke)
-    assert a1.text == "Hi"
-    assert a1.audio_duration_ms > 0
-
-    t2 = events[3]
-    assert isinstance(t2, TranscriptFinalized)
-    assert t2.text == "any updates"
-
-    r2 = events[4]
-    assert isinstance(r2, RouterDecisionMade)
     assert r2.should_speak is False
+
+    spoke = [e for e in events if isinstance(e, AgentSpoke)]
+    assert len(spoke) == 1
+    assert spoke[0].text == "Hi"
+    assert spoke[0].audio_duration_ms > 0
 
     assert stt.calls == 2
     assert tts.calls == ["Hi"]
@@ -751,9 +747,13 @@ async def test_router_decision_event_includes_input_window_and_raw_output(
     assert iw["confidence_threshold"] == pytest.approx(0.5)
     assert iw["last_decision"] is None  # first turn
     window: list[dict[str, Any]] = iw["transcript_window"]
-    assert len(window) == 1
-    assert window[0]["text"] == "hello"
-    assert window[0]["is_current"] is True
+    # Transcription runs concurrently with the response loop
+    # (Johnny-har), so the second transcript may already be in history
+    # by the time the router prompt is built. We only require that the
+    # current transcript is identified and is "hello".
+    current = [entry for entry in window if entry.get("is_current")]
+    assert len(current) == 1
+    assert current[0]["text"] == "hello"
 
     raw = first.raw_output
     assert "text" in raw
@@ -2827,15 +2827,17 @@ async def test_suggest_only_mode_runs_router_emits_agent_suggested_no_tts(
     await pipeline.run()
     events = bus.snapshot()
     types = [e.type for e in events]
-    # First utterance: transcript → router_decision → agent_suggested.
-    # Second utterance: transcript → router_decision (no should_speak, no suggestion).
-    assert types == [
+    # Transcription runs concurrently with response (Johnny-har), so
+    # the cross-utterance event order can interleave. The contract
+    # is: two transcripts, two router decisions, one agent_suggested
+    # (only the first router decision approves).
+    assert sorted(types) == sorted([
         "transcript_finalized",
         "router_decision_made",
         "agent_suggested",
         "transcript_finalized",
         "router_decision_made",
-    ]
+    ])
     # AgentSuggested carries the suggested reply.
     suggested = [e for e in events if e.type == "agent_suggested"]
     assert len(suggested) == 1
@@ -3005,7 +3007,7 @@ async def test_free_auto_speak_speaks_without_approval_or_allowlist(
     """free_auto_speak streams the answer LLM straight into TTS, skipping
     both the approval round and the allowed-reply matcher (Johnny-vgl).
 
-    Pins the spec so a future refactor of ``_process_utterance``'s mode
+    Pins the spec so a future refactor of ``_respond_to_transcript``'s mode
     dispatch doesn't silently change which collaborator is invoked.
     """
     from johnny.voice_pipeline import (
@@ -3804,3 +3806,130 @@ async def test_legacy_transcript_window_size_still_caps_history() -> None:
         "line 8",
         "line 9",
     ]
+
+
+# --- Johnny-har: STT must never pause while bot is busy --------------------
+
+
+async def test_transcription_keeps_running_while_bot_is_speaking(
+    four_utterance_pcm: bytes,
+) -> None:
+    """All participant utterances reach the transcript sink even when the
+    bot's TTS is stalled mid-utterance.
+
+    Reproduces the Johnny-har regression: the pre-fix pipeline serialised
+    STT and the bot's answer/TTS in a single ``async for`` loop, so a
+    long-running answer kept the VAD generator suspended and any audio
+    arriving in that window was silently dropped from the capture queue.
+
+    Setup: a ``_StallingTTS`` that yields one frame and then awaits an
+    :class:`asyncio.Event` controlled by the test. The pipeline starts
+    responding to the first utterance, gets stuck inside TTS, and the
+    test asserts that the remaining three utterances still make it
+    through STT → transcript sink before the TTS is released. After
+    release, the rate limiter naturally throttles the catch-up replies.
+    """
+    from johnny.voice_pipeline import InMemoryTranscriptSink
+
+    frame_size = 640
+    frames = [
+        four_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(four_utterance_pcm), frame_size)
+        if i + frame_size <= len(four_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+
+    release_tts = asyncio.Event()
+    tts_entered = asyncio.Event()
+
+    class _StallingTTS(TTSProvider):
+        """TTS that emits one frame then awaits a test-controlled event."""
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        @property
+        def name(self) -> str:
+            return "stalling-tts"
+
+        async def synthesize_stream(
+            self,
+            text: str,
+            voice_id: str | None = None,  # noqa: ARG002
+        ) -> AsyncIterator[bytes]:
+            self.calls.append(text)
+            yield bytes(320)  # one 10 ms frame so AgentSpoke registers audio
+            tts_entered.set()
+            await release_tts.wait()
+
+    stt = _FakeSTT(transcripts=["one", "two", "three", "four"])
+    router = _FakeRouterLLM(
+        decisions=[
+            {"should_speak": True, "confidence": 0.95, "reason": "yes"},
+        ]
+    )
+    answer = _FakeAnswerLLM(answers=["reply"])
+    tts = _StallingTTS()
+    bus = InMemoryEventBus()
+    tsink = InMemoryTranscriptSink()
+
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=stt,
+        router_llm=router,
+        answer_llm=answer,
+        tts=tts,
+        event_bus=bus,
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            session_id="johnny-har",
+        ),
+        transcript_sink=tsink,
+    )
+
+    run_task = asyncio.create_task(pipeline.run())
+
+    # Wait until the bot is wedged inside TTS — proves the response loop
+    # is committed to a long-running utterance.
+    await asyncio.wait_for(tts_entered.wait(), timeout=2.0)
+
+    # All four transcripts must have reached the sink even though the
+    # bot is still stalled. Poll briefly because the transcribe loop
+    # runs concurrently with the suspended response loop.
+    async def _all_transcripts_persisted() -> None:
+        while len(tsink.snapshot()) < 4:
+            await asyncio.sleep(0.005)
+
+    await asyncio.wait_for(_all_transcripts_persisted(), timeout=2.0)
+
+    persisted = [r.text for r in tsink.snapshot()]
+    assert persisted == ["one", "two", "three", "four"]
+
+    # And the same transcripts must have been published on the event
+    # bus — UI subscribers can't render gaps they never received.
+    bus_transcripts = [
+        e.text for e in bus.snapshot() if isinstance(e, TranscriptFinalized)
+    ]
+    assert bus_transcripts == ["one", "two", "three", "four"]
+
+    # Crucially: the bot is still stuck in TTS at this point. Verify
+    # by checking that AgentSpoke has not been published yet — if STT
+    # had been gated on the answer pipeline, the transcripts above
+    # could never have been persisted while the bot is still wedged.
+    spoke = [e for e in bus.snapshot() if isinstance(e, AgentSpoke)]
+    assert spoke == [], (
+        "AgentSpoke fired before TTS was released — the stalling-TTS "
+        "fixture should have kept the response loop wedged"
+    )
+
+    # Release the bot and let the pipeline drain.
+    release_tts.set()
+    await asyncio.wait_for(run_task, timeout=2.0)
+
+    # Bot eventually spoke at least once (for the first transcript) —
+    # confirms the response loop did run, it just didn't block STT.
+    spoke = [e for e in bus.snapshot() if isinstance(e, AgentSpoke)]
+    assert len(spoke) >= 1

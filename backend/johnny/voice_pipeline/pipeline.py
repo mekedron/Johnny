@@ -148,7 +148,7 @@ NON_SPEAKING_MODES: frozenset[str] = frozenset(
 )
 """Modes in which the bot must NOT generate audio.
 
-Enforced server-side in :meth:`VoicePipeline._process_utterance`: even
+Enforced server-side in :meth:`VoicePipeline._respond_to_transcript`: even
 when ``speak=True`` and the router approves, no answer LLM call and no
 TTS frames are produced. Listen-only also skips the router entirely;
 suggest-only runs the router so the UI can show the suggested reply,
@@ -318,17 +318,70 @@ class VoicePipeline:
         # cached one, and we feed the previous summary back in so the
         # call is incremental rather than recomputing from scratch.
         self._history_summary: tuple[int, str] | None = None
+        # Bridge between the (always-on) transcription loop and the
+        # (serialised) response loop. Constructed in :meth:`run` because
+        # :class:`asyncio.Queue` binds to the running loop. ``None`` is
+        # used as the end-of-stream sentinel so the response loop drains
+        # cleanly once capture ends.
+        self._response_queue: asyncio.Queue[TranscriptFinalized | None] | None = None
 
     # ------------------------------------------------------------------
     # Public lifecycle
 
     async def run(self) -> None:
-        """Run the pipeline until the transport's capture stream ends."""
+        """Run the pipeline until the transport's capture stream ends.
+
+        Transcription (VAD → STT → persist) and response (router →
+        answer LLM → TTS) run as separate concurrent tasks so STT is
+        NEVER gated on the bot's speak/think state — the contract
+        Johnny-har enforces. Without the split, any answer longer than
+        the transport's capture buffer (typically 2 s) would cause
+        subsequent participant audio to be silently dropped from the
+        capture queue: gaps in the transcript exactly when conversation
+        is most active. With the split, transcription keeps draining
+        the capture queue while the bot is mid-utterance; finalised
+        transcripts queue up for the response loop and are drained in
+        order once the in-flight answer completes.
+        """
         loop = asyncio.get_running_loop()
         self._session_started_at = loop.time()
         await self._rehydrate_transcript_history()
-        async for utterance in self._utterances():
-            await self._process_utterance(utterance)
+
+        self._response_queue = asyncio.Queue()
+        response_queue = self._response_queue
+
+        async def _transcribe_loop() -> None:
+            try:
+                async for utterance in self._utterances():
+                    await self._transcribe_and_emit(utterance)
+            finally:
+                # End-of-stream sentinel so the response loop drains
+                # any queued transcripts and then exits.
+                await response_queue.put(None)
+
+        async def _respond_loop() -> None:
+            while True:
+                transcript = await response_queue.get()
+                if transcript is None:
+                    return
+                try:
+                    await self._respond_to_transcript(transcript)
+                except Exception:
+                    # An LLM / TTS failure must never take down the
+                    # transcription loop — gaps in transcript_chunks
+                    # are the regression Johnny-har fixes.
+                    logger.exception(
+                        "response pipeline failed for session=%s; "
+                        "transcription continues",
+                        self.config.session_id,
+                    )
+
+        transcribe_task = asyncio.create_task(_transcribe_loop())
+        respond_task = asyncio.create_task(_respond_loop())
+        try:
+            await transcribe_task
+        finally:
+            await respond_task
 
     async def _rehydrate_transcript_history(self) -> None:
         """Seed ``_transcript_history`` from prior persisted transcripts.
@@ -430,7 +483,15 @@ class VoicePipeline:
     # ------------------------------------------------------------------
     # Per-utterance processing
 
-    async def _process_utterance(self, utterance: bytes) -> None:
+    async def _transcribe_and_emit(self, utterance: bytes) -> None:
+        """Run STT for ``utterance``, persist, publish, queue for response.
+
+        This is the always-on transcription leg of Johnny-har's split: it
+        must never await on the router / answer LLM / TTS, so participant
+        audio always reaches ``transcript_chunks`` even when the bot is
+        mid-utterance. Finalised transcripts are handed to the response
+        loop via ``self._response_queue``.
+        """
         if not utterance:
             return
         self._utterance_count += 1
@@ -442,6 +503,19 @@ class VoicePipeline:
         self._remember_transcript(transcript)
         await self._persist_transcript(transcript, utterance)
 
+        if self._response_queue is not None:
+            await self._response_queue.put(transcript)
+
+    async def _respond_to_transcript(self, transcript: TranscriptFinalized) -> None:
+        """Run router (and answer + TTS, when appropriate) for ``transcript``.
+
+        Serialised across transcripts so concurrent answers don't garble
+        audio. A backlog of queued transcripts is drained in order once
+        the in-flight response completes — the per-session rate limiter
+        in :meth:`_is_rate_limited` naturally throttles catch-up speech
+        when several participant turns arrive during a single long bot
+        answer.
+        """
         # Mode-based server-side enforcement (US-026). Listen-only never
         # runs the router so no router_decision / agent_spoke /
         # agent_suggested events can be emitted; suggest-only runs the
@@ -902,8 +976,19 @@ class VoicePipeline:
             user_parts.append(f"Earlier (summary): {summary['text']}")
             user_parts.append("")
         window: list[dict[str, Any]] = input_window.get("transcript_window", [])
-        if len(window) > 1:
-            history = window[:-1]
+        # With concurrent transcription (Johnny-har), the current
+        # transcript may not be at the end of the window — additional
+        # participant utterances can finalise while the bot is
+        # answering. Render only entries strictly BEFORE the current one
+        # as "Recent conversation" so we never echo the current
+        # transcript as prior context (and we never expose later
+        # transcripts as if the router had seen them when deciding).
+        current_pos = next(
+            (i for i, entry in enumerate(window) if entry.get("is_current")),
+            None,
+        )
+        history = window[:current_pos] if current_pos is not None else window[:-1]
+        if history:
             user_parts.append("Recent conversation:")
             for entry in history:
                 speaker = entry.get("speaker") or "speaker"
@@ -958,7 +1043,21 @@ class VoicePipeline:
                 f"{list(self.config.allowed_replies)}"
             )
 
-        history = self._transcript_history[:-1]
+        # Identify history relative to the current transcript by
+        # identity, not by position. Concurrent transcription
+        # (Johnny-har) means later transcripts may have been appended
+        # by the time this prompt is built — they belong to *future*
+        # turns from this transcript's point of view and must not be
+        # rendered as "Recent conversation".
+        current_pos = next(
+            (i for i, t in enumerate(self._transcript_history) if t is transcript),
+            None,
+        )
+        history = (
+            self._transcript_history[:current_pos]
+            if current_pos is not None
+            else self._transcript_history[:-1]
+        )
         cutoff = 0
         if self._history_summary is not None:
             cutoff_idx, summary_text = self._history_summary
