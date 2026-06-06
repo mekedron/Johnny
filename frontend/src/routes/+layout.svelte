@@ -5,7 +5,10 @@
 	import { ModeWatcher, toggleMode } from 'mode-watcher';
 	import SunIcon from '@lucide/svelte/icons/sun';
 	import MoonIcon from '@lucide/svelte/icons/moon';
+	import MenuIcon from '@lucide/svelte/icons/menu';
+	import UserIcon from '@lucide/svelte/icons/user';
 	import { Button } from '$lib/components/ui/button/index.js';
+	import { cn } from '$lib/utils.js';
 	import favicon from '$lib/assets/favicon.svg';
 	import { listAccounts, type Account } from '$lib/accounts';
 	import {
@@ -99,9 +102,7 @@
 	function syncApprovalSubscriptions() {
 		const liveStatuses = new Set(['scheduled', 'joining', 'joined']);
 		const wantedIds = new Set(
-			activeSessions
-				.filter((s) => liveStatuses.has(s.status))
-				.map((s) => s.id)
+			activeSessions.filter((s) => liveStatuses.has(s.status)).map((s) => s.id)
 		);
 		// Subscribe to any session we don't have a sub for yet.
 		for (const sessionId of wantedIds) {
@@ -125,9 +126,7 @@
 	}
 
 	function dropApprovalsForSession(sessionId: number) {
-		const stillPending = pendingApprovals.filter(
-			(p) => p.botSessionId !== sessionId
-		);
+		const stillPending = pendingApprovals.filter((p) => p.botSessionId !== sessionId);
 		for (const p of pendingApprovals) {
 			if (p.botSessionId === sessionId) {
 				clearApprovalNotification(p.decisionId);
@@ -151,13 +150,9 @@
 
 	function handleApprovalPending(sessionId: number, ev: ApprovalPendingEvent) {
 		const timeoutS =
-			typeof ev.timeout_s === 'number' && ev.timeout_s > 0
-				? ev.timeout_s
-				: 15;
+			typeof ev.timeout_s === 'number' && ev.timeout_s > 0 ? ev.timeout_s : 15;
 		const expiresAt = Date.now() + timeoutS * 1000;
-		const existingIdx = pendingApprovals.findIndex(
-			(p) => p.decisionId === ev.decision_id
-		);
+		const existingIdx = pendingApprovals.findIndex((p) => p.decisionId === ev.decision_id);
 		const pending: PendingApproval = {
 			botSessionId: sessionId,
 			decisionId: ev.decision_id,
@@ -178,10 +173,7 @@
 		if (existingTimer !== undefined) clearTimeout(existingTimer);
 		approvalTimers.set(
 			ev.decision_id,
-			setTimeout(
-				() => expireApproval(ev.decision_id),
-				timeoutS * 1000 + 500
-			)
+			setTimeout(() => expireApproval(ev.decision_id), timeoutS * 1000 + 500)
 		);
 
 		void showApprovalNotification({
@@ -209,9 +201,7 @@
 			clearTimeout(timer);
 			approvalTimers.delete(decisionId);
 		}
-		pendingApprovals = pendingApprovals.filter(
-			(p) => p.decisionId !== decisionId
-		);
+		pendingApprovals = pendingApprovals.filter((p) => p.decisionId !== decisionId);
 	}
 
 	async function approvePending(decisionId: number) {
@@ -225,9 +215,7 @@
 			void clearApprovalNotification(decisionId);
 		} catch (err) {
 			approvalErrorMessage =
-				err instanceof Error
-					? err.message
-					: 'Failed to approve decision';
+				err instanceof Error ? err.message : 'Failed to approve decision';
 		} finally {
 			const next = new Set(resolvingDecisionIds);
 			next.delete(decisionId);
@@ -318,6 +306,8 @@
 		}
 		approvalTimers.clear();
 	});
+
+	const liveStatuses = new Set(['joining', 'joined']);
 </script>
 
 <svelte:head>
@@ -326,60 +316,80 @@
 
 <ModeWatcher />
 
-<div class="app-shell">
-	<header class="header">
-		<button
-			class="menu-toggle"
-			type="button"
-			aria-label="Toggle navigation"
-			aria-expanded={sidebarOpen}
-			onclick={() => (sidebarOpen = !sidebarOpen)}
-		>
-			<span aria-hidden="true">☰</span>
-		</button>
-		<a class="brand" href="/">Johnny</a>
-		<div class="account" data-testid="account-indicator">
-			<span class="account-label">Account</span>
-			<span class="account-name">
-				{defaultAccount ? defaultAccount.email : 'Not connected'}
-			</span>
-		</div>
-		<Button
-			onclick={toggleMode}
-			variant="ghost"
-			size="icon"
-			class="text-primary-foreground hover:bg-white/10 hover:text-primary-foreground"
-			data-testid="theme-toggle"
-			aria-label="Toggle theme"
-		>
-			<SunIcon
-				class="h-[1.2rem] w-[1.2rem] scale-100 rotate-0 !transition-all dark:scale-0 dark:-rotate-90"
-			/>
-			<MoonIcon
-				class="absolute h-[1.2rem] w-[1.2rem] scale-0 rotate-90 !transition-all dark:scale-100 dark:rotate-0"
-			/>
-			<span class="sr-only">Toggle theme</span>
-		</Button>
-	</header>
+<div class="bg-background text-foreground min-h-screen">
+	<!-- Mobile menu toggle: visible only below md. -->
+	<Button
+		variant="ghost"
+		size="icon"
+		class="fixed top-3 left-3 z-[1100] size-9 md:hidden"
+		aria-label="Toggle navigation"
+		aria-expanded={sidebarOpen}
+		onclick={() => (sidebarOpen = !sidebarOpen)}
+	>
+		<MenuIcon class="size-5" />
+	</Button>
 
+	<!-- Mobile backdrop -->
 	{#if sidebarOpen}
 		<button
-			class="sidebar-backdrop"
+			class="fixed inset-0 z-[1200] bg-black/50 backdrop-blur-sm md:hidden"
 			type="button"
 			aria-label="Close navigation"
 			onclick={closeSidebar}
 		></button>
 	{/if}
 
-	<aside class="sidebar" class:open={sidebarOpen} aria-label="Primary">
-		<nav>
-			<ul>
+	<aside
+		class={cn(
+			'bg-sidebar border-border fixed top-0 bottom-0 left-0 z-[1300] flex w-60 flex-col border-r',
+			'transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)]',
+			sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'
+		)}
+		aria-label="Primary"
+	>
+		<!-- Brand row -->
+		<div class="border-separator flex h-14 items-center justify-between border-b px-4">
+			<a
+				href="/"
+				class="text-foreground hover:text-foreground text-base font-semibold tracking-tight"
+				onclick={closeSidebar}
+			>
+				Johnny
+			</a>
+			<Button
+				onclick={toggleMode}
+				variant="ghost"
+				size="icon"
+				class="text-muted-foreground hover:text-foreground size-8"
+				data-testid="theme-toggle"
+				aria-label="Toggle theme"
+			>
+				<SunIcon
+					class="size-4 scale-100 rotate-0 transition-all dark:scale-0 dark:-rotate-90"
+				/>
+				<MoonIcon
+					class="absolute size-4 scale-0 rotate-90 transition-all dark:scale-100 dark:rotate-0"
+				/>
+				<span class="sr-only">Toggle theme</span>
+			</Button>
+		</div>
+
+		<!-- Nav -->
+		<nav class="px-2 py-3" aria-label="Primary nav">
+			<ul class="flex flex-col gap-0.5">
 				{#each navItems as item (item.href)}
+					{@const active = isActive(item.href)}
 					<li>
 						<a
 							href={item.href}
-							class:active={isActive(item.href)}
-							aria-current={isActive(item.href) ? 'page' : undefined}
+							class={cn(
+								'flex items-center rounded-md py-2 pr-3 pl-3 text-sm transition-colors',
+								'border-l-[1.5px]',
+								active
+									? 'border-primary text-foreground font-medium'
+									: 'hover:bg-surface-3 text-muted-foreground hover:text-foreground border-transparent'
+							)}
+							aria-current={active ? 'page' : undefined}
 							onclick={closeSidebar}
 						>
 							{item.label}
@@ -388,483 +398,199 @@
 				{/each}
 			</ul>
 		</nav>
-		<section class="status-panel" aria-label="Bot sessions" data-testid="status-panel">
-			<header class="status-header">
-				<span class="status-title">Active sessions</span>
-				<span class="status-count" data-testid="status-count">{activeSessions.length}</span>
-			</header>
-			{#if sessionsErrorMessage}
-				<p class="status-error" role="alert">{sessionsErrorMessage}</p>
-			{:else if activeSessions.length === 0}
-				<p class="status-empty">No active sessions</p>
-			{:else}
-				<ul class="status-list">
-					{#each activeSessions as session (session.id)}
-						<li class="status-item" data-testid="status-session-{session.id}">
-							<div class="status-row">
-								<a
-									class="status-id status-link"
-									href={`/sessions/${session.id}`}
-									onclick={closeSidebar}
-								>
-									#{session.id}
-								</a>
-								<span class="status-pill status-pill-{session.status}">
-									{BOT_SESSION_STATUS_LABEL[session.status]}
-								</span>
-								{#if session.source === 'browser'}
-									<span
-										class="status-source-pill source-browser"
-										data-testid="session-source-{session.id}"
-										title="Browser session — voice/text chat without Google Meet"
-									>
-										browser
-									</span>
-								{/if}
-							</div>
-							{#if session.error_reason}
-								<p
-									class="status-reason"
-									data-testid="status-session-{session.id}-reason"
-								>
-									{session.error_reason}
-								</p>
-							{/if}
-							<button
-								class="status-stop"
-								type="button"
-								disabled={stoppingSessionIds.has(session.id)}
-								onclick={() => handleStopSession(session.id)}
-							>
-								{stoppingSessionIds.has(session.id) ? 'Stopping…' : 'Leave now'}
-							</button>
-						</li>
-					{/each}
-				</ul>
-			{/if}
-		</section>
 
-		<section
-			class="approval-panel"
-			aria-label="Pending approvals"
-			data-testid="approval-panel"
-		>
-			<header class="status-header">
-				<span class="status-title">Pending approvals</span>
-				<span class="status-count" data-testid="approval-count">
-					{pendingApprovals.length}
-				</span>
-			</header>
-			{#if approvalErrorMessage}
-				<p class="status-error" role="alert">{approvalErrorMessage}</p>
-			{/if}
-			{#if notificationPermission === 'denied'}
-				<p class="status-empty" data-testid="approval-perm-denied">
-					Notifications denied — approvals appear here only.
-				</p>
-			{/if}
-			{#if pendingApprovals.length === 0}
-				<p class="status-empty">No pending approvals</p>
-			{:else}
-				<ul class="status-list">
-					{#each pendingApprovals as approval (approval.decisionId)}
-						<li
-							class="approval-item"
-							data-testid="approval-{approval.decisionId}"
+		<!-- Scrollable live area: active sessions + pending approvals -->
+		<div class="flex min-h-0 flex-1 flex-col overflow-y-auto">
+			{#if activeSessions.length > 0 || sessionsErrorMessage}
+				<section
+					class="border-separator border-t px-4 py-3"
+					aria-label="Bot sessions"
+					data-testid="status-panel"
+				>
+					<header class="mb-2 flex items-center justify-between">
+						<span class="text-muted-foreground text-xs font-medium">Active sessions</span>
+						<span
+							class="bg-surface-3 text-muted-foreground rounded-full px-1.5 py-0.5 font-mono text-[10px]"
+							data-testid="status-count"
 						>
-							<div class="approval-meta">
-								<span class="status-id">Session #{approval.botSessionId}</span>
-								<span class="approval-id">Decision #{approval.decisionId}</span>
-							</div>
-							<p class="approval-reply">"{approval.suggestedReply}"</p>
-							{#if approval.reason}
-								<p class="approval-reason">{approval.reason}</p>
-							{/if}
-							<div class="approval-actions">
-								<button
-									class="approval-approve"
-									type="button"
-									disabled={resolvingDecisionIds.has(approval.decisionId)}
-									onclick={() => approvePending(approval.decisionId)}
+							{activeSessions.length}
+						</span>
+					</header>
+					{#if sessionsErrorMessage}
+						<p class="text-destructive text-xs" role="alert">{sessionsErrorMessage}</p>
+					{:else}
+						<ul class="flex flex-col gap-3">
+							{#each activeSessions as session (session.id)}
+								<li
+									class="flex flex-col gap-1.5"
+									data-testid="status-session-{session.id}"
 								>
-									{resolvingDecisionIds.has(approval.decisionId)
-										? '…'
-										: 'Approve'}
-								</button>
-								<button
-									class="approval-reject"
-									type="button"
-									disabled={resolvingDecisionIds.has(approval.decisionId)}
-									onclick={() => rejectPending(approval.decisionId)}
-								>
-									{resolvingDecisionIds.has(approval.decisionId)
-										? '…'
-										: 'Reject'}
-								</button>
-							</div>
-						</li>
-					{/each}
-				</ul>
+									<div class="flex items-center gap-2 text-xs">
+										{#if liveStatuses.has(session.status)}
+											<span
+												class="bg-primary live-pulse size-1.5 rounded-full"
+												aria-hidden="true"
+											></span>
+										{:else}
+											<span
+												class="bg-ink-subtle size-1.5 rounded-full opacity-50"
+												aria-hidden="true"
+											></span>
+										{/if}
+										<a
+											class="text-foreground hover:text-foreground font-mono font-semibold hover:underline"
+											href={`/sessions/${session.id}`}
+											onclick={closeSidebar}
+										>
+											#{session.id}
+										</a>
+										<span class="text-muted-foreground">
+											{BOT_SESSION_STATUS_LABEL[session.status]}
+										</span>
+										{#if session.source === 'browser'}
+											<span
+												class="text-muted-foreground bg-surface-3 ml-auto rounded-sm px-1 py-0.5 font-mono text-[10px]"
+												data-testid="session-source-{session.id}"
+												title="Browser session — voice/text chat without Google Meet"
+											>
+												browser
+											</span>
+										{/if}
+									</div>
+									{#if session.error_reason}
+										<p
+											class="text-destructive text-xs leading-tight break-words"
+											data-testid="status-session-{session.id}-reason"
+										>
+											{session.error_reason}
+										</p>
+									{/if}
+									<Button
+										variant="outline"
+										size="sm"
+										class="h-7 w-full px-2 text-xs"
+										disabled={stoppingSessionIds.has(session.id)}
+										onclick={() => handleStopSession(session.id)}
+									>
+										{stoppingSessionIds.has(session.id) ? 'Stopping…' : 'Leave now'}
+									</Button>
+								</li>
+							{/each}
+						</ul>
+					{/if}
+				</section>
 			{/if}
-		</section>
+
+			{#if pendingApprovals.length > 0 || approvalErrorMessage || notificationPermission === 'denied'}
+				<section
+					class="border-separator border-t px-4 py-3"
+					aria-label="Pending approvals"
+					data-testid="approval-panel"
+				>
+					<header class="mb-2 flex items-center justify-between">
+						<span class="text-muted-foreground text-xs font-medium">
+							Pending approvals
+						</span>
+						<span
+							class={cn(
+								'inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 font-mono text-[10px]',
+								pendingApprovals.length > 0
+									? 'border-warning/40 text-warning bg-warning/10 border'
+									: 'bg-surface-3 text-muted-foreground'
+							)}
+							data-testid="approval-count"
+						>
+							{pendingApprovals.length}
+						</span>
+					</header>
+					{#if approvalErrorMessage}
+						<p class="text-destructive mb-2 text-xs" role="alert">
+							{approvalErrorMessage}
+						</p>
+					{/if}
+					{#if notificationPermission === 'denied'}
+						<p
+							class="text-muted-foreground mb-2 text-xs italic"
+							data-testid="approval-perm-denied"
+						>
+							Notifications denied — approvals appear here only.
+						</p>
+					{/if}
+					{#if pendingApprovals.length > 0}
+						<ul class="flex flex-col gap-3">
+							{#each pendingApprovals as approval (approval.decisionId)}
+								<li
+									class="flex flex-col gap-1.5"
+									data-testid="approval-{approval.decisionId}"
+								>
+									<div
+										class="text-muted-foreground flex items-baseline gap-1 font-mono text-[10px]"
+									>
+										<span>#{approval.botSessionId}</span>
+										<span>·</span>
+										<span>decision {approval.decisionId}</span>
+									</div>
+									<p class="text-foreground text-xs leading-snug">
+										"{approval.suggestedReply}"
+									</p>
+									{#if approval.reason}
+										<p class="text-muted-foreground text-[11px] leading-snug italic">
+											{approval.reason}
+										</p>
+									{/if}
+									<div class="flex gap-1.5">
+										<Button
+											variant="outline"
+											size="sm"
+											class="h-7 flex-1 px-2 text-xs"
+											disabled={resolvingDecisionIds.has(approval.decisionId)}
+											onclick={() => approvePending(approval.decisionId)}
+										>
+											{resolvingDecisionIds.has(approval.decisionId) ? '…' : 'Approve'}
+										</Button>
+										<Button
+											variant="ghost"
+											size="sm"
+											class="text-destructive hover:bg-destructive/10 hover:text-destructive h-7 flex-1 px-2 text-xs"
+											disabled={resolvingDecisionIds.has(approval.decisionId)}
+											onclick={() => rejectPending(approval.decisionId)}
+										>
+											{resolvingDecisionIds.has(approval.decisionId) ? '…' : 'Reject'}
+										</Button>
+									</div>
+								</li>
+							{/each}
+						</ul>
+					{/if}
+				</section>
+			{/if}
+		</div>
+
+		<!-- Account footer -->
+		<div
+			class="border-separator flex items-center gap-2 border-t px-4 py-3 text-xs"
+			data-testid="account-indicator"
+		>
+			<UserIcon
+				class={cn(
+					'size-3.5 shrink-0',
+					defaultAccount ? 'text-muted-foreground' : 'text-ink-subtle'
+				)}
+				aria-hidden="true"
+			/>
+			<span
+				class={cn(
+					'truncate font-mono',
+					defaultAccount ? 'text-muted-foreground' : 'text-ink-subtle italic'
+				)}
+				title={defaultAccount ? defaultAccount.email : 'Not connected'}
+			>
+				{defaultAccount ? defaultAccount.email : 'Not connected'}
+			</span>
+		</div>
 	</aside>
 
-	<main class="content">
+	<main class="min-h-screen md:pl-60">
 		{@render children()}
 	</main>
 </div>
-
-<style>
-	:global(html, body) {
-		margin: 0;
-		padding: 0;
-	}
-	:global(body) {
-		font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
-	}
-
-	.app-shell {
-		display: grid;
-		grid-template-areas:
-			'header header'
-			'sidebar main';
-		grid-template-columns: 240px 1fr;
-		grid-template-rows: 56px 1fr;
-		min-height: 100vh;
-	}
-
-	.header {
-		grid-area: header;
-		display: flex;
-		align-items: center;
-		gap: 1rem;
-		padding: 0 1rem;
-		background: #1f2937;
-		color: #ffffff;
-		position: sticky;
-		top: 0;
-		z-index: 20;
-	}
-
-	.menu-toggle {
-		display: none;
-		background: transparent;
-		color: inherit;
-		border: 0;
-		font-size: 1.25rem;
-		cursor: pointer;
-		padding: 0.25rem 0.5rem;
-		border-radius: 4px;
-	}
-	.menu-toggle:hover {
-		background: rgba(255, 255, 255, 0.1);
-	}
-
-	.brand {
-		font-weight: 700;
-		font-size: 1.25rem;
-		color: inherit;
-		text-decoration: none;
-	}
-
-	.account {
-		margin-left: auto;
-		display: flex;
-		flex-direction: column;
-		align-items: flex-end;
-		line-height: 1.2;
-	}
-	.account-label {
-		font-size: 0.7rem;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		opacity: 0.7;
-	}
-	.account-name {
-		font-size: 0.95rem;
-		font-weight: 600;
-	}
-
-	.sidebar {
-		grid-area: sidebar;
-		background: #f3f4f6;
-		border-right: 1px solid #e5e7eb;
-		display: flex;
-		flex-direction: column;
-	}
-	.sidebar nav ul {
-		list-style: none;
-		margin: 0;
-		padding: 0.75rem 0;
-	}
-	.sidebar nav a {
-		display: block;
-		padding: 0.75rem 1.25rem;
-		color: #1f2937;
-		text-decoration: none;
-		border-left: 3px solid transparent;
-	}
-	.sidebar nav a:hover {
-		background: #e5e7eb;
-	}
-	.sidebar nav a.active {
-		background: #e0e7ff;
-		border-left-color: #4f46e5;
-		font-weight: 600;
-		color: #312e81;
-	}
-
-	.status-panel {
-		margin-top: auto;
-		padding: 1rem 1.25rem;
-		border-top: 1px solid #e5e7eb;
-		font-size: 0.85rem;
-	}
-	.status-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		margin-bottom: 0.5rem;
-	}
-	.status-title {
-		font-weight: 600;
-		color: #1f2937;
-	}
-	.status-count {
-		background: #1f2937;
-		color: #ffffff;
-		border-radius: 9999px;
-		padding: 0.1rem 0.5rem;
-		font-size: 0.75rem;
-		font-weight: 600;
-	}
-	.status-empty {
-		margin: 0;
-		color: #6b7280;
-		font-style: italic;
-	}
-	.status-error {
-		margin: 0;
-		color: #b91c1c;
-		font-size: 0.8rem;
-	}
-	.status-list {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 0.5rem;
-	}
-	.status-item {
-		display: flex;
-		flex-direction: column;
-		gap: 0.35rem;
-		background: #ffffff;
-		border: 1px solid #e5e7eb;
-		border-radius: 6px;
-		padding: 0.5rem 0.65rem;
-	}
-	.status-row {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-	}
-	.status-id {
-		font-weight: 600;
-		color: #1f2937;
-	}
-	.status-link {
-		text-decoration: none;
-	}
-	.status-link:hover {
-		color: #4f46e5;
-		text-decoration: underline;
-	}
-	.status-pill {
-		font-size: 0.7rem;
-		font-weight: 600;
-		padding: 0.1rem 0.5rem;
-		border-radius: 9999px;
-		text-transform: uppercase;
-		letter-spacing: 0.03em;
-	}
-	.status-pill-scheduled {
-		background: #fef3c7;
-		color: #92400e;
-	}
-	.status-pill-joining {
-		background: #dbeafe;
-		color: #1e40af;
-	}
-	.status-pill-joined {
-		background: #d1fae5;
-		color: #065f46;
-	}
-	.status-pill-ended,
-	.status-pill-failed {
-		background: #fee2e2;
-		color: #991b1b;
-	}
-	.status-source-pill {
-		display: inline-block;
-		padding: 0.1rem 0.4rem;
-		border-radius: 999px;
-		font-size: 0.65rem;
-		letter-spacing: 0.04em;
-		text-transform: uppercase;
-		font-weight: 600;
-	}
-	.status-source-pill.source-browser {
-		background: #ede9fe;
-		color: #6d28d9;
-	}
-	.status-reason {
-		margin: 0;
-		font-size: 0.7rem;
-		color: #991b1b;
-		line-height: 1.3;
-		word-break: break-word;
-	}
-	.status-stop {
-		appearance: none;
-		background: #f3f4f6;
-		border: 1px solid #d1d5db;
-		border-radius: 4px;
-		padding: 0.25rem 0.5rem;
-		font-size: 0.75rem;
-		font-weight: 500;
-		color: #1f2937;
-		cursor: pointer;
-	}
-	.status-stop:hover:not(:disabled) {
-		background: #e5e7eb;
-	}
-	.status-stop:disabled {
-		opacity: 0.6;
-		cursor: not-allowed;
-	}
-
-	.approval-panel {
-		padding: 1rem 1.25rem;
-		border-top: 1px solid #e5e7eb;
-		font-size: 0.85rem;
-	}
-	.approval-item {
-		display: flex;
-		flex-direction: column;
-		gap: 0.4rem;
-		background: #fff7ed;
-		border: 1px solid #fdba74;
-		border-radius: 6px;
-		padding: 0.6rem 0.7rem;
-	}
-	.approval-meta {
-		display: flex;
-		align-items: baseline;
-		justify-content: space-between;
-		font-size: 0.7rem;
-		color: #6b7280;
-	}
-	.approval-id {
-		font-weight: 600;
-		color: #9a3412;
-	}
-	.approval-reply {
-		margin: 0;
-		font-weight: 600;
-		color: #1f2937;
-	}
-	.approval-reason {
-		margin: 0;
-		font-size: 0.75rem;
-		color: #6b7280;
-		font-style: italic;
-	}
-	.approval-actions {
-		display: flex;
-		gap: 0.4rem;
-	}
-	.approval-approve,
-	.approval-reject {
-		flex: 1;
-		appearance: none;
-		border: 0;
-		border-radius: 4px;
-		padding: 0.35rem 0.5rem;
-		font-size: 0.78rem;
-		font-weight: 600;
-		cursor: pointer;
-	}
-	.approval-approve {
-		background: #16a34a;
-		color: #ffffff;
-	}
-	.approval-approve:hover:not(:disabled) {
-		background: #15803d;
-	}
-	.approval-reject {
-		background: #fee2e2;
-		color: #991b1b;
-	}
-	.approval-reject:hover:not(:disabled) {
-		background: #fecaca;
-	}
-	.approval-approve:disabled,
-	.approval-reject:disabled {
-		opacity: 0.6;
-		cursor: not-allowed;
-	}
-
-	.sidebar-backdrop {
-		display: none;
-	}
-
-	.content {
-		grid-area: main;
-		padding: 1.5rem 2rem;
-		overflow-x: hidden;
-	}
-
-	@media (max-width: 720px) {
-		.app-shell {
-			grid-template-areas:
-				'header'
-				'main';
-			grid-template-columns: 1fr;
-		}
-		.menu-toggle {
-			display: inline-flex;
-		}
-		.sidebar {
-			position: fixed;
-			top: 56px;
-			left: 0;
-			bottom: 0;
-			width: 240px;
-			transform: translateX(-100%);
-			transition: transform 0.2s ease-out;
-			z-index: 30;
-		}
-		.sidebar.open {
-			transform: translateX(0);
-			box-shadow: 4px 0 12px rgba(0, 0, 0, 0.15);
-		}
-		.sidebar-backdrop {
-			display: block;
-			position: fixed;
-			top: 56px;
-			left: 0;
-			right: 0;
-			bottom: 0;
-			background: rgba(0, 0, 0, 0.35);
-			border: 0;
-			padding: 0;
-			cursor: pointer;
-			z-index: 25;
-		}
-		.content {
-			padding: 1rem;
-		}
-	}
-</style>

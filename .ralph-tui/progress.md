@@ -153,6 +153,45 @@ the `<li>` becomes a flex container with the row content in one
 `<div>` next to it — no nesting. Pattern lives in
 `providers/+page.svelte`.
 
+### Layout shell yellow budget: brand mark is foreground, not yellow
+
+`+layout.svelte` appears on every page — its yellow expenditure caps
+what each page can spend before busting gate 4. The DESIGN.md
+discipline permits the brand mark to be yellow on dark surfaces, but
+doing so in the layout shell pushes steady-state yellow to 2 (brand +
+nav-active) before any per-page content appears. With one active
+session (live-pulse) + a focus ring, that becomes 4 — gate 4 fails.
+Decision: shell brand wordmark is `text-foreground font-semibold
+tracking-tight` only. The yellow budget is spent on signals: sidebar
+`aria-current="page"` left-edge accent, `live-pulse` on active session
+dots, focus ring on whatever the operator is interacting with. Steady
+worst case: 1 nav + 1 live-pulse = 2; with focus ring = 3 at the gate
+limit. Pattern lives in `+layout.svelte`.
+
+### Layout shell sections: no card-in-card, hairlines instead
+
+The sidebar is `bg-sidebar` (`--surface-2`) — it's chrome, not a
+Card. Sections inside (active sessions, pending approvals, account
+footer) are separated by `border-t border-separator` hairlines rather
+than nested Cards. Session rows and approval rows are flat `<li>`
+elements without per-row backgrounds — they get visual grouping from
+the section header + hairlines, not from a per-row Card surface. This
+keeps gate 5 (no card-in-card) clean across the whole app since
+EVERY page is wrapped by this shell. Pattern lives in
+`+layout.svelte`.
+
+### Status visualisation: dot + label, not coloured pill
+
+Old layout coloured status pills by category (amber `scheduled`,
+blue `joining`, green `joined`, red `ended`/`failed`) — five colours
+competing with Signal Yellow on every page. The new approach asks "is
+this LIVE right now?" as a binary signal (yellow `live-pulse` dot for
+`joining`/`joined`; muted dot for `scheduled`) and uses the text
+label for the specific status. Same information, half the visual
+chrome, plus the dot earns its yellow per the brand's "live-now
+indicator" rule. Applies to any status with a "live vs queued"
+distinction. Pattern lives in `+layout.svelte` Active sessions panel.
+
 
 ---
 
@@ -1717,4 +1756,277 @@ Screenshots in `.validation/Johnny-fe.10/`.
   validation + factory + cleanup boilerplate.
 
 ---
+
+
+---
+
+## 2026-06-07 — Johnny-fe.1 (REIMAGINE +layout.svelte shell)
+
+Replaced the 870-line custom-CSS app shell (top header + light-mode-
+only sidebar) with a 388-line shadcn-svelte + design-token rewrite.
+From-scratch IA redesign — not a 1:1 port.
+
+### Files changed
+
+- `frontend/src/routes/+layout.svelte` — full rewrite.
+  Deleted the entire `<style>` block (~353 lines of hardcoded hex
+  colors: `#1f2937` slate header for BOTH modes, `#f3f4f6`/`#e5e7eb`
+  light-mode-only sidebar, `#4f46e5`/`#e0e7ff`/`#312e81` indigo active
+  nav, `#fef3c7`/`#92400e` amber `scheduled` pill, `#dbeafe`/`#1e40af`
+  blue `joining` pill, `#d1fae5`/`#065f46` green `joined` pill,
+  `#fee2e2`/`#991b1b` red `ended`/`failed` pill, `#ede9fe`/`#6d28d9`
+  purple `browser` source pill, `#fff7ed`/`#fdba74`/`#9a3412` orange-
+  cream approval card, `#16a34a` green Approve button, `#fee2e2`/
+  `#991b1b` red Reject button). Replaced with shadcn `Button` and
+  Tailwind utility classes mapped to DESIGN.md tokens (`bg-sidebar`,
+  `bg-surface-1/2/3`, `text-foreground`, `text-muted-foreground`,
+  `text-ink-subtle`, `border-border`, `border-separator`, `bg-primary
+  live-pulse`, `text-destructive`, `text-warning`, `border-warning/40`,
+  `bg-warning/10`). Preserved every `data-testid` (`account-indicator`,
+  `theme-toggle`, `status-panel`, `status-count`, `status-session-{id}`,
+  `session-source-{id}`, `status-session-{id}-reason`, `approval-panel`,
+  `approval-count`, `approval-perm-denied`, `approval-{decisionId}`).
+
+### IA changes (the actual REIMAGINE)
+
+1. **Killed the top bar entirely.** The old design had a 56px sticky
+   `header` with `bg-#1f2937` (slate-800 hex, ignored both dark/light
+   mode) containing the menu toggle, "Johnny" brand, account indicator,
+   and theme toggle. Per DESIGN.md §App shell: "No top bar by default;
+   the page title lives in the content area, not the chrome." New
+   design moves brand mark + theme toggle into the SIDEBAR header row,
+   and the account indicator into the sidebar footer. Every page now
+   starts at the top of the viewport — gains ~56px of vertical real
+   estate AND removes the hardcoded slate-800 bug at the same time.
+2. **Killed the light-mode-only sidebar (`#f3f4f6`).** Old design had
+   a light-grey sidebar that DID NOT respect dark mode — a foundation-
+   level gate failure the Johnny-fe.9 audit explicitly flagged. New
+   design uses `bg-sidebar` token (`--sidebar = --surface-2`) so the
+   sidebar swaps light/dark with the rest of the app. The hairline
+   `border-r border-border` replaces the hardcoded `#e5e7eb`.
+3. **Killed the indigo active-nav.** Old design used `#e0e7ff`
+   background + `#4f46e5` left border + `#312e81` text — three-shade
+   indigo costume per active item. New design uses the DESIGN.md
+   prescription verbatim: 1.5px Signal Yellow LEFT-EDGE accent +
+   `text-foreground` ink elevation + `font-medium`. No fill, no
+   indigo. Non-active links are `text-muted-foreground` and gain
+   `bg-surface-3` only on hover. Yellow now appears on exactly the
+   one nav item per surface state that the discipline allows.
+4. **Killed the rainbow status pills.** Old design had 4 distinct
+   color palettes for `scheduled` (amber), `joining` (blue),
+   `joined` (green), `ended`/`failed` (red) — each a tinted-bg pill
+   with mid-tone text in UPPERCASE TRACKED EYEBROW (gate 6
+   violation). New design uses a tiny dot + sentence-case label:
+   `joining`/`joined` → yellow `live-pulse` dot (the brand-prescribed
+   "live now" signal) + neutral text; `scheduled` → muted neutral dot
+   (not live yet). `ended`/`failed` naturally drop off the active
+   list. The text label carries the status; the dot signals "live"
+   only when actually live. Colour is no longer doing the work of the
+   word.
+5. **Killed the purple `browser` source pill.** Old design used
+   `#ede9fe`/`#6d28d9` (lavender on light, near-black-purple text). New
+   design uses a small neutral mono chip on `bg-surface-3` with
+   `text-muted-foreground` — same information, zero colour cost.
+   Title attribute preserves the discoverability ("Browser session —
+   voice/text chat without Google Meet").
+6. **Killed the orange-cream approval cards + green/red action
+   buttons.** Old design rendered each approval as a `#fff7ed` cream
+   card with `#fdba74` orange border, mono-bold suggested reply, then
+   `#16a34a` green `Approve` (filled) + `#fee2e2`/`#991b1b` red
+   `Reject` (filled). Three competing colours (orange / green / red),
+   AND the orange was dangerously close to Signal Yellow — visual
+   noise that competed with the brand-defined "live" signal. New
+   design: hairline-separated section (no card), mono session/decision
+   meta in muted, suggested reply in foreground, optional reason in
+   italics muted, then an action row with both Approve and Reject as
+   `outline`/`ghost` (Reject gets `text-destructive` only). ZERO
+   yellow in the approvals area body — Approve is outline because
+   firing yellow on every pending row would explode gate 4 the moment
+   N > 1 (matches the `picker/list sheets` codebase pattern). The
+   approval-count chip uses `border-warning/40 bg-warning/10
+   text-warning` to signal "needs attention" — distinct from primary
+   hue (warning amber sits at hue 55, primary yellow at hue 103, the
+   palette is engineered for non-competition).
+7. **Killed the uppercase tracked "ACCOUNT" eyebrow.** Old design had
+   a tiny "ACCOUNT" label above the email — gate 6 violation. New
+   design uses a single `UserIcon` (size-3.5, `text-muted-foreground`)
+   + the email in `font-mono text-muted-foreground` — sentence-case-
+   compatible (no transform) and matches the "operator over visitor"
+   principle (the operator already knows what their email is for; no
+   eyebrow needed). When no account is connected, the row shows
+   "Not connected" in `text-ink-subtle italic` — empty state without
+   ceremony.
+8. **Killed the raw `☰` glyph.** Mobile menu toggle used a `&#9776;`
+   character — wrong font, wrong stroke weight, no alignment with the
+   Lucide icon family used everywhere else. New design uses
+   `MenuIcon` from `@lucide/svelte` at size-5 inside a `Button
+   variant="ghost" size="icon"` so it inherits the icon stroke
+   discipline and adopts the design-tokened hover/focus states.
+9. **Mobile drawer with backdrop blur.** Old design slid the sidebar
+   in via `transform: translateX(...)` and laid a `rgba(0,0,0,0.35)`
+   backdrop behind it — flat dark overlay. New design uses the same
+   transform but the backdrop becomes `bg-black/50 backdrop-blur-sm`
+   so the page content reads as "out of focus while you're in the
+   sidebar" rather than just dim. Matches the calendar/playground
+   sheet pattern from Johnny-fe.4/.3 for cross-page consistency.
+10. **`flex-1` overflow-y on the live area.** Old design had `margin-
+    top: auto` on the status panel + a fixed-position approval panel
+    below it — the layout broke when many approvals stacked or the
+    sidebar was short. New design uses a `flex flex-col` sidebar with
+    `flex-1 overflow-y-auto` on the middle live area (sessions +
+    approvals) and `border-t border-separator` between every section.
+    The brand row and account footer are fixed-height anchors at top
+    and bottom; the live area scrolls independently if it overflows.
+11. **Brand mark is foreground, not yellow.** PRODUCT.md allows the
+    brand mark to use yellow on dark surfaces, but doing so would
+    push the steady-state yellow count to 2 (brand + nav active)
+    before any live session or focus ring — making gate 4 fail the
+    instant the operator clicks anything with an active session
+    present. Decision: brand wordmark is `text-foreground
+    font-semibold tracking-tight` — clean, readable, but holds zero
+    yellow. The yellow budget goes to nav-active + live-pulse + focus
+    ring, which are the *signals* the operator needs at-a-glance.
+12. **No "Account" combobox in the sidebar.** The sidebar lists ONE
+    account (the default user) — there is no account picker here.
+    The calendar page has its own per-source account picker; the
+    sidebar just shows "which user am I logged in as". This avoids
+    the "two account pickers on the same screen" confusion the old
+    design produced when the calendar page opened.
+
+### Verification (chrome-devtools MCP, dark + light + mobile)
+
+Drove the layout through the real Chrome instance pointing at
+`http://localhost:5173`:
+- ✓ Dark mode `/calendar`: sidebar = `bg-sidebar` dark surface-2,
+  brand "Johnny" in foreground, theme toggle ghost button right-aligned,
+  Calendar nav active with yellow left-edge accent, all other nav items
+  muted-foreground. Active sessions section visible with `#8 Joined`
+  + yellow `live-pulse` dot + neutral `browser` mono chip + Leave now
+  outline button. Account footer shows email in muted mono with
+  UserIcon. Yellow count: 1 (Calendar nav) + 1 (live-pulse) = 2 ✓.
+- ✓ Light mode `/calendar`: same sidebar structure, `bg-sidebar` light
+  surface-2 (warm-neutral grey), all hierarchy intact. Yellow count
+  identical.
+- ✓ Mobile (560×800) `/calendar`: sidebar hidden by
+  `-translate-x-full`, MenuIcon ghost button visible top-left fixed.
+  Click → sidebar slides in from left over `bg-black/50 backdrop-
+  blur-sm` backdrop; transition `duration-300 ease-[cubic-
+  bezier(0.16,1,0.3,1)]`. All sidebar content accessible. Backdrop
+  click closes the drawer.
+- ✓ Navigation between pages: clicked Playground → URL changed to
+  `/playground`, Playground nav active accent moved (Calendar lost
+  it). Clicked History → same. The `isActive(href)` check
+  (`path === href || path.startsWith(href + '/')`) works for nested
+  routes (e.g. `/sessions/8` → no nav highlight since `/sessions` is
+  not in `navItems`, which is the intended behavior).
+- ✓ Focus ring on `/playground` after Tab key on the `#8` session
+  link: yellow 2px outline at 2px offset — exactly the DESIGN.md
+  §Focus prescription. Yellow count at this moment: 1 (Playground
+  nav) + 1 (live-pulse) + 1 (focus ring) = 3 ✓ at limit.
+- ✓ Active sessions section ONLY renders when `activeSessions.length
+  > 0` or `sessionsErrorMessage` — no empty placeholder block on
+  pages with no live work.
+- ✓ Pending approvals section ONLY renders when
+  `pendingApprovals.length > 0` or `approvalErrorMessage` or
+  `notificationPermission === 'denied'` — same.
+
+### Verification gates (DESIGN.md)
+
+| Gate | Status |
+| --- | --- |
+| 1. Body text on background ≥4.5:1 | ✓ (foundation, ~18:1 dark, ~16:1 light) |
+| 2. Placeholder on surface-3 ≥4.5:1 | ✓ (foundation; no placeholders in this surface) |
+| 3. Primary button label on primary ≥4.5:1 | ✓ (foundation, ~14:1) |
+| 4. Yellow ≤ 3 elements per viewport | ✓ (steady: 1 nav active + 1 live-pulse = 2; with focus ring: 3 at limit; pending-approval scenario stays at 2 in the body since Approve is outline, +1 focus ring = 3 at limit) |
+| 5. No card-in-card | ✓ (sidebar is `bg-sidebar` chrome, not a Card; sections inside are hairline-separated, not nested Cards; session rows + approval rows are flat `<li>`s without per-row backgrounds) |
+| 6. No uppercase tracked eyebrow | ✓ ("Active sessions", "Pending approvals", "Johnny", "Calendar"/"Playground"/..., "#8", "Joined", "browser", "Leave now", "Approve"/"Reject" all sentence-case; no `text-transform: uppercase` or `letter-spacing` eyebrow rules) |
+| 7. Reduced motion honored | ✓ (foundation `prefers-reduced-motion: reduce` gate; `live-pulse` degrades to static fully-opaque dot via app.css override; mobile drawer transition uses `transition-transform` which the foundation gate sets to ~0ms under reduced motion) |
+| 8. Screenshot unambiguously NOT stock shadcn | ✓ (dark surface-2 sidebar + yellow nav-active accent + yellow live-pulse dot on `#8` + mono email/IDs + neutral browser chip — no indigo/purple/cyan/amber/green/orange anywhere) |
+
+### Quality gates
+
+- `pnpm check` (svelte-check) → 0 errors, 0 warnings ✓
+- `pnpm lint` (eslint) → 0 errors ✓
+
+### Screenshots in `.validation/Johnny-fe.1/`
+
+- `01-before-layout-dark.png` / `02-before-layout-dark.png` —
+  pre-REIMAGINE reference: slate-800 hardcoded header with white text
+  on dark, LIGHT-GREY sidebar even when the rest of the app is in
+  dark mode (the foundation-gate failure this ticket fixes), indigo
+  `Calendar` active nav with `#e0e7ff` background fill, "ACCOUNT"
+  uppercase tracked eyebrow above email.
+- `03-after-layout-dark.png` — new layout in dark mode: full
+  `bg-sidebar` dark surface-2, yellow left-edge accent on Calendar,
+  yellow live-pulse on `#8`, account footer with UserIcon + muted
+  email.
+- `04-after-sidebar-dark-zoom.png` — sidebar-only crop for the
+  details: brand row + theme toggle, nav stack, Active sessions
+  section, Leave now outline, account footer.
+- `05-after-layout-light.png` — new layout in light mode: same
+  hierarchy, light surface-2 sidebar.
+- `06-after-mobile-light-closed.png` — mobile (560×800) with sidebar
+  hidden by `-translate-x-full`, MenuIcon ghost button top-left.
+- `07-after-mobile-light-drawer-open.png` — mobile drawer open over
+  `bg-black/50 backdrop-blur-sm` backdrop; page content behind is
+  blurred + dimmed so the operator's focus is unambiguously on the
+  drawer.
+- `08-after-history-dark.png` — `/history` page in dark with new
+  layout — confirms nav-active accent moves to History when the
+  route changes. (Note: the `/history` page body still uses the old
+  custom-CSS design with an indigo Search button — that's the
+  Johnny-fe.7 ticket, not in scope here.)
+- `09-after-calendar-dark.png` — back-to-calendar in dark for the
+  final canonical layout shot.
+- `10-after-focus-ring-dark.png` — Tab-focused state on the `#8`
+  link showing the yellow 2px focus-visible outline. The gate-4
+  stress test: 3 yellows (Playground nav + live-pulse + focus ring)
+  exactly at the ≤3 limit.
+
+### Learnings
+
+- **DESIGN.md §App shell prescribes "No top bar by default" — and
+  it's a substantial UX improvement, not just a discipline rule.**
+  The 56px top bar in the old layout cost vertical real estate AND
+  ate the page's `position:sticky` budget AND created two competing
+  "chrome surfaces" (header + sidebar) when the operator only needs
+  one. Removing it and folding brand/theme/account into the sidebar
+  is structurally cleaner.
+- **The active session "JOINED" pill is the wrong abstraction.** It
+  treated status as a category to color-code (5 different colors for
+  5 different statuses) when what the operator actually needs is
+  "is this LIVE right now?" — a binary signal. The new `live-pulse`
+  dot answers that question; the text label answers "what specific
+  status is it in?" without color competition. Same information,
+  half the visual chrome.
+- **Yellow-budget math for the layout shell is the constraining
+  factor.** Every other yellow in the app appears INSIDE a page's
+  content, so the page can manage its own budget. The layout shell
+  appears on EVERY page, so its yellow expenditure caps what each
+  page can spend. The decision to make the brand mark foreground
+  (not yellow) is a direct consequence: it preserves a yellow slot
+  for the per-page primary CTA. Pattern documented in the new
+  "Layout shell yellow budget" codebase note.
+- **`flex flex-col` + `flex-1 overflow-y-auto` on the live area is
+  cleaner than `margin-top: auto`.** The old layout used `margin-
+  top: auto` to push the status panel to the bottom of the sidebar
+  — which broke when the panel itself became tall (multiple
+  sessions + multiple approvals). The flex column + `flex-1` middle
+  + fixed-height anchors at top and bottom handles arbitrary content
+  heights gracefully.
+- **Sidebar drawer needs `z-[1300]` not just `z-30`.** The old
+  layout used `z-index: 30` on the sidebar and `z-index: 25` on the
+  backdrop — both arbitrary numbers off the DESIGN.md z-scale. New
+  design uses `--z-modal` (1300) for the drawer, `--z-modal-
+  backdrop` (1200) for the backdrop, `--z-sticky` (1100) for the
+  mobile menu button. Stays on the scale; future modals/sheets can
+  layer over the drawer without arbitrary fights.
+- **`bg-sidebar` token from app.css just works.** The shadcn-svelte
+  baseline ships sidebar tokens (`--sidebar`, `--sidebar-
+  foreground`, `--sidebar-border`, `--sidebar-primary`) and the
+  foundation pass mapped `--sidebar = --surface-2` in both modes.
+  The layout-shell rewrite uses `bg-sidebar` everywhere without
+  needing to swap classes between light and dark — the modes
+  swap via the underlying CSS variables. The foundation work
+  paying off.
 
