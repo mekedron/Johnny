@@ -33,6 +33,16 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     runner / local dev experience). When set, the Docker SDK launcher
     is used so manual ``/sessions/start`` calls actually spawn a worker.
     """
+    # Run migrations + abort on model/DB drift BEFORE anything queries
+    # an ORM-mapped table. Johnny-ckz.9: shipping a model change without
+    # the matching migration used to surface as a 500 on the first
+    # `/sessions/active` request; the drift check turns it into a loud
+    # boot-time crash. Exceptions intentionally propagate (no try/except)
+    # so the container restarts and the operator sees the real error.
+    from app.db.bootstrap import bootstrap as db_bootstrap
+
+    db_bootstrap()
+
     try:
         from app.db.session import session_scope
         from app.services.templates import seed_initial_templates

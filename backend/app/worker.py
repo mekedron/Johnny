@@ -200,6 +200,15 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    # Run migrations + abort on model/DB drift BEFORE the periodic loop
+    # touches an ORM-mapped table. Johnny-ckz.9: the worker was crashing
+    # in monitor_session_containers because the live schema lacked the
+    # columns the model expected; the drift check makes that a loud
+    # boot-time exit instead of a silent SELECT crash every 30 seconds.
+    from app.db.bootstrap import bootstrap as db_bootstrap
+
+    db_bootstrap()
+
     settings = get_settings()
     embedding_interval = get_embedding_interval_seconds()
     poll_interval = get_poll_interval_seconds()

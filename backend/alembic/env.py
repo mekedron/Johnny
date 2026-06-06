@@ -20,7 +20,14 @@ from app.db import (
 
 config = context.config
 
-if config.config_file_name is not None:
+# When called programmatically (``command.upgrade`` from inside the API /
+# worker process via ``app.db.bootstrap``) the caller has already
+# configured its own logging — and a fileConfig() pass here would
+# silently downgrade the root logger to WARNING (Johnny-ckz.9). The
+# bootstrap sets ``preserve_caller_logging`` on the config to opt out.
+if config.config_file_name is not None and not config.attributes.get(
+    "preserve_caller_logging"
+):
     fileConfig(config.config_file_name)
 
 config.set_main_option("sqlalchemy.url", get_settings().database_url)

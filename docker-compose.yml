@@ -75,6 +75,21 @@ services:
       retries: 5
       start_period: 5s
 
+  # One-shot Alembic upgrade. Runs once, exits 0 on success, and
+  # ``api`` / ``worker`` gate their start on ``service_completed_successfully``
+  # so the API never boots against an un-migrated schema. Re-running
+  # ``docker compose up`` is safe — Alembic is a no-op when the DB is
+  # already at head.
+  migrate:
+    build:
+      context: ./backend
+    command: ["alembic", "upgrade", "head"]
+    environment: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   api:
     build:
       context: ./backend
@@ -84,6 +99,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "8000:8000"
     # Mount the host docker socket so the API can spawn meet-worker
@@ -135,6 +152,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - worker_state:/var/lib/johnny/worker
       # Same docker socket mount as the API — the worker drives the
