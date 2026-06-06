@@ -35,16 +35,40 @@ Produce:
    - **Expected behavior** — what should happen instead.
    - **Repro steps** (bugs) — numbered, minimal, deterministic.
    - **Scope** (features/tasks) — what's in, what's explicitly out.
-   - **Acceptance criteria** — checkbox list. Each item must be **verifiable** by an outside observer. No "works correctly", no "good UX". Examples:
+   - **Acceptance criteria** — checkbox list. Each item must be **verifiable** by an outside observer **and must describe a SHIPPED OUTCOME, not an intermediate artifact**. No "works correctly", no "good UX", no "plan was produced", no "research completed". Examples:
      - `[ ] /sessions/active returns 200 with the active session for a logged-in user`
      - `[ ] Voice dropdown lists all 6 Piper voices from the catalog response`
      - `[ ] Clicking "Leave now" causes the bot container to exit within 10s and the row transitions to ENDED`
    - **Validation / Testing** — concrete how-to-verify. This is mandatory.
      - Unit / integration tests to add or extend (where they live).
-     - **Browser validation via `chrome-devtools` MCP** — REQUIRED for any UI-visible change. Spell out: navigate → snapshot → interact → assert DOM/network → screenshot. Never `claude-in-chrome`.
+     - **Browser validation via `chrome-devtools` MCP** — REQUIRED for any UI-visible change. Spell out: navigate → snapshot → interact → assert DOM/network → screenshot. Screenshots get attached to the PR as evidence. Never `claude-in-chrome`.
      - For backend-only/CRON-only/migration work with no UI surface: state that explicitly so the next agent knows browser validation is intentionally skipped.
    - **Out of scope / Non-goals** — optional, but use it whenever the dictation hints at scope creep.
    - **Open questions** — anything you flagged but couldn't resolve.
+
+## Definition of done — ship the fix, do NOT just plan it
+
+Every ticket exists to be **implemented**. The deliverable is the shipped fix, not a plan, not a research note, not a Slack-friendly summary of findings. This rule overrides every other temptation.
+
+Concrete consequences for ticket writing:
+
+1. **Default: no plan mode language.** Do not include `REQUIRES PLAN MODE`, `Phase 1 — exploration`, `Phase 2 — plan mode`, or similar scaffolding in tickets by default. They give the closer an out: they can claim the plan is the deliverable and close the ticket while nothing has shipped. We have already lost work to this exact failure mode.
+2. **Plan mode is OPT-IN, only when the user explicitly asks for it in this dictation.** Phrases like *"use plan mode"*, *"plan it first"*, *"do not start coding without a plan"*, *"explore the codebase first"* in the user's dictation are the only triggers. Absent those words, do not insert plan-mode requirements.
+3. **When plan mode IS requested**, structure the ticket so the plan is a **prerequisite step**, not the closure condition. State explicitly: *"The plan is reviewed and approved. Then implementation begins. Closing the ticket on the plan alone is invalid and will be reopened."*
+4. **Acceptance criteria describe shipped outcomes only.** Never `[ ] Plan written and approved`, never `[ ] Architecture decision documented`, never `[ ] Codebase explored`. Always concrete user-observable or system-observable outcomes (endpoint returns X, UI shows Y, log line Z disappears).
+5. **Include an "Anti-patterns" block in any ticket where the failure mode is plausible** (UI refactors, library migrations, big architectural changes). Example to paste in such tickets:
+
+   > ### Anti-patterns — do not close prematurely
+   >
+   > - ❌ *"I read the code and llms.txt — closing as research complete."* → Reject. Reopen.
+   > - ❌ *"I produced an approved plan — closing."* → Reject. Plan is a prerequisite, not the deliverable.
+   > - ❌ *"I installed the package and configured it — closing."* → Reject. No production code shipped.
+   > - ❌ *"Unit tests pass — closing."* → Reject. Unit tests do not prove the user-visible behaviour works.
+   > - ✅ *"All acceptance criteria checked; chrome-devtools MCP screenshots attached; user-facing flow verified end-to-end in browser; closing."* → Accept.
+
+6. **Close-reasons must enumerate evidence.** When YOU close a ticket on the user's behalf, the `--reason` flag must list what shipped (files changed / PR number / screenshots attached / observable behaviour change) — never just *"completed"* or *"done"*. If you can't list evidence, the ticket isn't closeable.
+
+This section is the most important part of this command. If a ticket you write could be closed by an agent that did only research, you have written it wrong. Rewrite it so the only way to close is to ship.
 
 ## Every issue MUST belong to an epic
 
