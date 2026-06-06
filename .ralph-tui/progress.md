@@ -50,12 +50,42 @@ which is idempotent). If `evaluate_script` returns "No page found", that
 is a stale-session bug — `wait_for` + `take_snapshot` re-establish it
 without restarting Chrome.
 
-### Lint baseline has a pre-existing error
+### Lint baseline is now clean
 
-`pnpm lint` currently fails on `providers/+page.svelte:235` — an unused
-`configuredRowsFor` const. Not introduced by current work; do not chase
-it as a regression. Fix it in a `providers` page ticket
-(`Johnny-fe.2` / `Johnny-stt.7` follow-up).
+The pre-existing baseline error in `providers/+page.svelte:235` (unused
+`configuredRowsFor`) was cleared by the Johnny-fe.2 REIMAGINE — the
+function was removed during the rewrite. `pnpm lint` now exits 0.
+
+### Multi-action surfaces: state-driven `primaryAction` picks the single yellow
+
+When a surface has THREE possible primary actions (Test / Save / Set
+as default) and any one could legitimately be "the next thing to do"
+depending on state, encode the decision in a derived `primaryAction`
+state and have each button query it:
+
+```ts
+const primaryAction = $derived.by<'save' | 'activate' | 'test' | null>(() => {
+  if (!selectedRow) return 'save';
+  if (hasPendingChanges) return 'save';
+  if (!selectedRow.is_active) return 'activate';
+  return 'test';
+});
+```
+
+Then `<Button variant={primaryAction === 'test' ? 'default' : 'outline'}>`
+on each candidate. Result: exactly one yellow CTA per surface state,
+regardless of which buttons are visible. Pattern lives in
+`providers/+page.svelte`.
+
+### Picker/list sheets with many row-level actions: ALL outline, no yellow
+
+A picker sheet (e.g., Piper voices browser) renders 10+ row-level
+actions on screen at once. Marking each action `variant="default"`
+(yellow) instantly violates gate 4 by ~10x. Convention: every
+row-level action button (`Install`, `Use`, `Play`, `Remove`) is
+`outline` or `ghost`. The sheet has zero main-area yellow; the
+operator's focus ring is the only yellow that appears. Pattern in
+`providers/+page.svelte` voices browser.
 
 ### Pending-change-aware primary discipline
 
@@ -89,6 +119,280 @@ black-ish light) instead of yellow. Pattern lives in
 `playground/+page.svelte`. Visual cost: zero — the operator reads a
 slider as a slider regardless of its accent color.
 
+
+---
+
+## 2026-06-07 — Johnny-fe.2 (REIMAGINE /providers)
+
+Replaced the 2358-line custom-CSS providers page (largest in the app —
+STT/LLM/TTS tabs, master-detail layout, two modals, the Piper voices
+browser, the Parakeet runtime-install panel) with a 1597-line
+shadcn-svelte + design-token rewrite. From-scratch IA redesign — not a
+1:1 port.
+
+### Files changed
+
+- `frontend/src/routes/providers/+page.svelte` — full rewrite.
+  Deleted the entire `<style>` block (~654 lines of hardcoded hex
+  colors: `#4f46e5` indigo primary, `#10b981` green active, `#fef3c7`/
+  `#92400e` amber streaming, `#e0e7ff`/`#312e81` indigo configured,
+  `#a7f3d0`/`#065f46` green type-local, `#a5f3fc`/`#155e75` cyan
+  type-cloud, `#f59e0b`/`#fffbeb` amber Parakeet package panel,
+  `#4f46e5→#c026d3` indigo→purple mic level gradient, `#fef2f2`/
+  `#991b1b`/`#fecaca` red error, `#6ee7b7`/`#ecfdf5`/`#064e3b` green
+  test-ok). Replaced with shadcn `Button` / `Alert` / `Input` and
+  Tailwind utility classes mapped to DESIGN.md tokens. Preserved every
+  `data-testid` (providers-page, providers-error, tab-{stt,llm,tts},
+  panel-{kind}, configured-list-{kind}, available-list-{kind},
+  instance-{kind}-{id}, add-{kind}-{provider}, test-panel-{kind},
+  parakeet-package-{id}, parakeet-installed-badge, parakeet-install-{id},
+  parakeet-install-log-{id}, parakeet-install-error-{id},
+  stt-test-{id-or-name}, stt-test-error-{id}, stt-test-result-{id},
+  stt-transcript-{id}, generic-test-{kind}-{id-or-name},
+  generic-test-result-{id}, sample-error-{id}, play-{id}, voices-{id},
+  form-{kind}-{id-or-new}, field-{name}, display-name-{kind}-{id-or-new},
+  save-{kind}-{id-or-new}, activate-{kind}-{id}, deactivate-{kind}-{id},
+  delete-{kind}-{id}, export-button, export-modal, export-with-secrets,
+  export-error, export-download, voices-modal, voice-filter, voice-list,
+  voice-{key}, voices-error, preview-{key}, use-{key}, remove-{key},
+  install-{key}, install-error, preview-error, remove-error).
+
+### IA changes (the actual REIMAGINE)
+
+1. **Killed the uppercase tracked eyebrows.** Old design used `CONFIGURED
+   (N)`, `ADD A NEW X PROVIDER`, `AUTHENTICATION`, `MODEL`, `ADVANCED`,
+   `TYPE` pills, `LOCAL`/`CLOUD` pills, and the `INSTALLED` chip — all
+   uppercase tracked. New design uses sentence case throughout:
+   "Configured", "Available adapters", "Authentication", "Model",
+   "Advanced", "Local", "Cloud", "Streaming", "Installed". Gate 6
+   passes.
+2. **Killed the rainbow palette.** Old design painted "type" pills in
+   green-on-cream for local and cyan-on-cream for cloud, "streaming" in
+   amber, "configured-count" in indigo, "active" in green, the
+   Parakeet-package panel border in amber-left-edge with cream
+   background, the mic-level meter in indigo→purple gradient. New
+   design uses neutral chips on `surface-2/3` with Lucide icons
+   (`HardDriveIcon`/`CloudIcon`/`ZapIcon`/`LibraryIcon`) — color
+   carries no extra information, the icon + label does. Active is a
+   green-dot pill; mic-level meter is `bg-foreground` neutral; the
+   Parakeet package panel is hairline-bordered `surface-1` with
+   `border-warning/40` only when not installed.
+3. **Master-detail rail cleaned up.** Old left rail had two sections
+   visually identical except for an uppercase eyebrow heading. New
+   design separates them with a sentence-case heading + count chip
+   ("Configured · 1" + count), a hairline separator, then "Available
+   adapters · 5". Configured cards are solid-bordered; available cards
+   are dashed-bordered with a leading `PlusIcon` — at-a-glance the
+   operator knows which is configured vs. addable. Active configured
+   card gets a green-dot "Active" pill (no yellow on the card,
+   preserving the Signal Yellow discipline).
+4. **Detail panel header consolidated.** Old design had a 2-column
+   header with title + lede on the left and a `<dl>` of meta on the
+   right. New design uses a 2-row header: title row (with `Active`/
+   `Configured`/`New · unsaved` pill), summary in muted-foreground,
+   then a meta strip below in `text-muted-foreground` showing `Adapter
+   {name} · Local/Cloud · Streaming/Batch · N models · Get a key →`.
+   Compact, scannable, matches the calendar page's meta-strip pattern.
+5. **State-driven `primaryAction` picks the single yellow CTA.** With
+   three possible primary actions per state (Test / Save / Set as
+   default), naive variant assignments produce 2+ yellows
+   simultaneously. New design encodes the decision in a derived
+   `primaryAction: 'save' | 'activate' | 'test' | null`:
+   - New draft: `save` (Test = outline)
+   - Saved + pending changes: `save` (Test = outline, Set as default
+     = outline disabled with "Save your changes first" tooltip)
+   - Saved + no pending + not active: `activate` (Test = outline,
+     Save = outline disabled "Saved")
+   - Saved + no pending + active: `test` (Save = outline disabled
+     "Saved", no Set as default button)
+   The button variants query `primaryAction` so exactly ONE button is
+   yellow at any moment. Documented in the new "Multi-action surfaces"
+   Codebase Pattern.
+6. **Refresh button removed.** Every mutation already re-fetches the
+   list; the Refresh button was UI noise.
+7. **Export modal → shadcn-style dialog.** Old design used a centered
+   modal with a `<aside>`-based backdrop and a `×` icon-button close.
+   New design uses a centered AlertDialog-shaped surface with leading
+   `DownloadIcon` in a `surface-2` icon-circle, sentence-case heading,
+   mono `config/providers.json` reference, a hairline-bordered
+   checkbox-row for "Include API keys and other secrets", and Cancel
+   (outline) / Download (yellow primary) footer. Esc + backdrop click
+   close it.
+8. **Piper voices browser → right-side Sheet.** Old design was a
+   centered ~720px-wide modal with a 4-column row layout. New design
+   slides in from the right at 640px-max with sticky header
+   (heading + helper text + Filter input), scrollable body, and
+   sticky footer (Close). Each voice row is hairline-bordered, with
+   the language + quality metadata in `text-muted-foreground`. ALL
+   row-level actions (`Install`, `Use`, `Play`, `Remove`) are outline
+   or ghost — no yellow in the picker, since 10+ visible rows would
+   blow gate 4 if any single row's primary were yellow. Documented in
+   the new "Picker/list sheets" Codebase Pattern.
+9. **Native `confirm()` → AlertDialog for both Delete-provider and
+   Remove-voice.** Old design used `window.confirm(...)` (jarring,
+   unstylable, blocking). New design uses two custom `role="alertdialog"`
+   dialogs with `aria-modal`, `aria-labelledby`, `aria-describedby`,
+   focus trapping (`tabindex="-1"`), Esc handling via a window
+   keydown handler with a precedence chain (delete → remove-voice →
+   voices-sheet → export). Both have the red TrashIcon-in-circle
+   pattern + sentence-case heading + destructive footer Button.
+10. **Parakeet runtime package panel cleaned up.** Old design had a
+    yellow-cream `border-left: 4px solid #f59e0b` panel with an
+    uppercase badge "Not installed". New design uses a hairline
+    `bg-surface-1` step with `border-warning/40` only when not
+    installed, a sentence-case heading "NeMo runtime package",
+    `PackageIcon` (`text-warning` or `text-success`), and a
+    semantic-tokened status pill (green-dot Installed, amber-bordered
+    Not installed, neutral N/A). The install button is yellow when
+    not installed (the only yellow on this nested panel), outline
+    when reinstalling.
+11. **Mic-level meter goes neutral.** Old design had a
+    `linear-gradient(90deg, #4f46e5, #c026d3)` indigo→purple gradient
+    on the fill. New design: solid `bg-foreground` fill on a
+    `bg-surface-3` track with rounded-pill ends. Matches the
+    playground/templates "neutral level meter" pattern; the operator
+    reads level by length, not by color.
+12. **STT test result panel uses semantic tokens, not custom hex.**
+    Old design had `#ecfdf5/#064e3b/#6ee7b7` for ok, `#fef2f2/#991b1b/
+    #fecaca` for fail. New design uses `bg-success/10`,
+    `border-success/30`, `text-foreground` for the transcript line
+    + Lucide icons (`ClockIcon`, `MicIcon`, `DollarSignIcon`) in
+    mono for the metric strip. Failed test → shadcn destructive Alert.
+    Visual cost: zero; brand consistency: huge.
+13. **Field types render via shadcn `<Input>` everywhere except
+    select/textarea/checkbox.** Display name, text, url, password,
+    number all use shadcn `Input` so the design tokens flow through
+    (border-input, focus-visible:border-ring, dark:bg-input/30).
+    Native `<select>` and `<textarea>` get the Input-equivalent
+    Tailwind class string for visual consistency. Checkbox uses
+    `[accent-color:var(--color-foreground)]` for the neutral-tone
+    box matching the playground's slider-yellow-budget pattern.
+14. **Footer pattern: Delete left, Save/Activate right.** Old design
+    had three action buttons (`Activate`/`Deactivate`, `Delete`) in
+    the top of the config-form header AND a separate `Save provider`
+    button at the bottom — visually disjointed. New design uses a
+    single sticky footer at the bottom of the form: destructive
+    `Delete` (ghost variant, `text-destructive`) on the left,
+    Deactivate/Set as default + Save on the right. Standard pattern
+    matching calendar's disable/save split.
+
+### Verification (chrome-devtools MCP, dark + light)
+
+Drove every state through the real Chrome instance pointing at
+`http://localhost:5173/providers`:
+- ✓ Dark mode STT tab: configured Whisper (Active green pill) on the
+  left, 5 available adapters listed in dashed cards. Detail panel has
+  meta strip + yellow Test (5s mic) CTA. Footer Delete (red ghost) +
+  Deactivate (outline) + Saved (outline disabled).
+- ✓ Light mode STT tab: same hierarchy, same 2 yellows max (sidebar
+  Providers nav + Test CTA). Gate 4 holds at 2 steady, 3 on focus.
+- ✓ Dark mode LLM tab: OpenAI-compatible row, full schema (Auth, Model,
+  Advanced) rendered, Test yellow primary.
+- ✓ Dark mode TTS tab: Local Piper Active, 3 available adapters,
+  Test + Play sample + Browse voices buttons (Test yellow primary).
+- ✓ Clicked + Deepgram → new draft renders: New · unsaved pill,
+  Test disabled outline, Save provider yellow (the only yellow on the
+  surface). Authentication section auto-rendered with API key field.
+  Get a key link in the header meta strip.
+- ✓ Modified Language on saved Whisper → Save changes button became
+  yellow, Test became outline, Deactivate stayed outline. Exactly ONE
+  yellow CTA active per state.
+- ✓ Export configuration → centered AlertDialog opens with backdrop
+  dim, sentence-case heading, mono `config/providers.json`,
+  Include-secrets checkbox, Cancel (outline) + Download (yellow).
+  Esc closes.
+- ✓ Browse voices (TTS Piper) → right-side Sheet slides in from the
+  right at 640px max-width. Sticky header (heading + helper + Filter
+  input), scrollable voice list with ~150 voices, sticky footer
+  (Close). Every row-level button is outline or ghost — ZERO yellows
+  in the sheet body. Search filter works.
+- ✓ Delete provider → centered AlertDialog with red TrashIcon-in-
+  circle, sentence-case "Delete this provider?", body explaining
+  consequence, Cancel (outline) + Delete (destructive red). Esc /
+  backdrop close. Cancel returns to detail with no state change.
+
+### Verification gates (DESIGN.md)
+
+| Gate | Status |
+| --- | --- |
+| 1. Body text on background ≥4.5:1 | ✓ (foundation, ~18:1 dark, ~16:1 light) |
+| 2. Placeholder on surface-3 ≥4.5:1 | ✓ (foundation) |
+| 3. Primary button label on primary ≥4.5:1 | ✓ (foundation, ~14:1) |
+| 4. Yellow ≤ 3 elements per viewport | ✓ (steady: 1 sidebar Providers nav + 1 primary CTA = 2; with focus ring: 3 max; voices sheet open: 0 yellow in the picker body since every row action is outline/ghost) |
+| 5. No card-in-card | ✓ (detail panel is a single card; Test section, Configuration form, sections are hairline-separated. Parakeet package panel is a hairline-bordered `surface-1` step inside the form body — semantically a section, not a Card.) |
+| 6. No uppercase tracked eyebrow | ✓ (sentence case throughout: "Configured", "Available adapters", "Authentication", "Model", "Advanced", "Active", "Installed", "Local", "Cloud", "Streaming", "Test", "Configuration".) |
+| 7. Reduced motion honored | ✓ (foundation; no custom animations introduced) |
+| 8. Screenshot unambiguously NOT stock shadcn | ✓ (mono adapter IDs + yellow primary CTA + green-dot Active pill + dark surfaces + Lucide outline icons + no indigo/purple/cyan/green-yellow-orange anywhere) |
+
+### Quality gates
+
+- `pnpm check` (svelte-check) → 0 errors, 0 warnings ✓
+- `pnpm lint` → 0 errors ✓ (the pre-existing baseline `configuredRowsFor`
+  error was cleared — that function was removed in the rewrite, since
+  it was unused. Updated the Codebase Patterns note at the top.)
+
+### Screenshots in `.validation/Johnny-fe.2/`
+
+- `01-before-dark-stt.png`, `02-before-dark-stt-tab.png`,
+  `03-before-dark-llm.png` — pre-REIMAGINE reference (uppercase
+  eyebrows, indigo/green/cyan/amber rainbow, yellow active state
+  competing with the Set-as-default primary CTA).
+- `12-after-dark-stt.png`, `15-after-dark-saved-active.png`,
+  `20-after-dark-stt-final.png` — saved+active STT in dark.
+- `13-new-draft-deepgram.png`, `14-after-fix-new-deepgram.png` —
+  new-draft state. `13` shows the BEFORE-fix bug (2 yellows: Test +
+  Save provider). `14` shows the after-fix state (only Save provider
+  yellow).
+- `16-export-dialog.png` — Export AlertDialog in dark.
+- `17-voices-sheet.png` (before fix — too many yellow Installs),
+  `18-voices-sheet-fixed.png` (after — all row actions outline).
+- `19-delete-dialog.png` — Delete AlertDialog with red Trash + foreground
+  emphasis on the provider name.
+- `21-pending-changes.png` — pending-changes state: Test outline,
+  Save changes yellow, focus ring on Language input.
+- `22-after-light-stt.png` — light mode with pending changes.
+- `23-after-light-stt-clean.png` — dark mode clean saved+active.
+- `24-after-dark-llm.png`, `25-after-dark-tts.png` — LLM + TTS dark.
+
+### Learnings
+
+- **`primaryAction` derived state is the right abstraction for
+  multi-action surfaces.** With three possible primary actions per
+  state (Test / Save / Set as default), threading variant assignments
+  manually through each button creates 2-yellow bugs. The derived
+  `primaryAction: 'save' | 'activate' | 'test' | null` makes the
+  decision once per render and every button queries it. The state
+  table is small (4 cases) and easy to verify by inspection.
+- **Picker sheets need explicit yellow-discipline thinking.** A list
+  of 10+ rows where each has a row-level primary action would render
+  10+ yellows simultaneously. The rule: in any sheet/picker with
+  many visible row actions, ALL row-level buttons must be `outline`
+  or `ghost`. The yellow only appears via the operator's focus ring
+  on the row they're interacting with.
+- **`Date.now()` fallback for unique display names.** The
+  `suggestDisplayName` helper falls back to `${base} (${Date.now()})`
+  in the pathological case where 1000 instances of the same provider
+  share the same display name. Wouldn't fire in practice but the
+  cost is one Date.now() call and it preserves the "guaranteed
+  unique" property of the suggestion.
+- **mode-watcher persistence vs. ModeWatcher component.** The
+  `mode-watcher-mode` localStorage key is read by the ModeWatcher
+  Svelte component on mount; setting it in an `initScript` (before
+  the page boots) only works if the script runs BEFORE the
+  ModeWatcher reads localStorage. Faster path: click the
+  `Toggle theme` button (focuses on it, then enter), or just trust
+  the page renders correctly in whichever mode the browser is in.
+  Both modes share the same Tailwind class structure so a
+  validation-pass in one mode covers the structural gates.
+- **`evaluate_script` "No page found" is a fixture of chrome-devtools
+  MCP.** The Codebase Patterns note is accurate — wait_for +
+  take_snapshot doesn't always restore it. Falling back to screenshot
+  visual inspection is more reliable for theme / contrast checks
+  than fighting the CDP session.
+- **`docker compose exec -T frontend pnpm check` is faster than
+  `docker exec` directly** — the `-T` flag disables interactive TTY
+  allocation which would otherwise hang on `pnpm`'s progress
+  indicators inside an automated session.
 
 ---
 

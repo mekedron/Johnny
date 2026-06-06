@@ -1,5 +1,27 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
+	import CheckIcon from '@lucide/svelte/icons/check';
+	import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
+	import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
+	import ClockIcon from '@lucide/svelte/icons/clock';
+	import CloudIcon from '@lucide/svelte/icons/cloud';
+	import DollarSignIcon from '@lucide/svelte/icons/dollar-sign';
+	import DownloadIcon from '@lucide/svelte/icons/download';
+	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
+	import HardDriveIcon from '@lucide/svelte/icons/hard-drive';
+	import LibraryIcon from '@lucide/svelte/icons/library';
+	import MicIcon from '@lucide/svelte/icons/mic';
+	import PackageIcon from '@lucide/svelte/icons/package';
+	import PlayIcon from '@lucide/svelte/icons/play';
+	import PlusIcon from '@lucide/svelte/icons/plus';
+	import RadioTowerIcon from '@lucide/svelte/icons/radio-tower';
+	import SquareIcon from '@lucide/svelte/icons/square';
+	import Trash2Icon from '@lucide/svelte/icons/trash-2';
+	import XIcon from '@lucide/svelte/icons/x';
+	import ZapIcon from '@lucide/svelte/icons/zap';
+	import * as Alert from '$lib/components/ui/alert/index.js';
+	import { Button } from '$lib/components/ui/button/index.js';
+	import { Input } from '$lib/components/ui/input/index.js';
 	import {
 		activateProvider,
 		createProvider,
@@ -41,24 +63,12 @@
 	} from '$lib/providers';
 	import { MicPermissionDeniedError, recordMicPcm } from '$lib/sttMicRecorder';
 
-	// Unified Provider Settings page (Johnny-stt.5 / Johnny-stt.7). Each kind
-	// (STT, LLM, TTS) is a tab; within a tab the left panel lists every
-	// CONFIGURED provider instance (one card per row) and below that an
-	// "Add new" section with one card per registered provider kind. State
-	// is keyed by an opaque draft key — "instance-<id>" for existing rows
-	// and "new-<provider_name>" for unsaved drafts — so the user can have
-	// N instances of the same provider_name (multiple Ollama models,
-	// multiple OpenAI keys, etc.) without the form state colliding.
-
 	interface CatalogEntry {
 		provider_name: string;
 		display_name: string;
 		summary: string;
 		signup_url: string | null;
 		field_schema: ProviderSchema;
-		// Optional metadata: present for STT (from the dedicated catalog
-		// endpoint), absent for LLM/TTS. The card just hides the badges
-		// when these are undefined.
 		provider_type?: 'local' | 'cloud';
 		streaming?: boolean;
 		model_count?: number;
@@ -67,11 +77,19 @@
 	type TabKey = ProviderKind;
 	type PerKind<T> = Record<TabKey, T>;
 	type TestPhase = 'idle' | 'recording' | 'uploading' | 'done' | 'error';
-
-	// Opaque selection / form draft identifier.
-	// - "instance-<id>": refers to an existing ProviderCredential row.
-	// - "new-<provider_name>": refers to an unsaved draft of a new instance.
 	type DraftKey = string;
+
+	const KIND_SHORT_LABEL: Record<ProviderKind, string> = {
+		stt: 'STT',
+		llm: 'LLM',
+		tts: 'TTS'
+	};
+
+	const SECTION_LABEL: Record<string, string> = {
+		auth: 'Authentication',
+		model: 'Model',
+		advanced: 'Advanced'
+	};
 
 	const MIC_RECORDING_MS = 5000;
 	const ACTIVE_TAB_KEY = 'johnny.providers.active-tab';
@@ -110,41 +128,33 @@
 	let loading = $state(false);
 	let error = $state<string | null>(null);
 
-	// Per-draft form state. Keyed by DraftKey, so a user can have an
-	// in-progress "new Ollama" draft AND simultaneously edit an existing
-	// Ollama instance without either's values bleeding into the other.
 	let formValues = $state<Record<DraftKey, Record<string, unknown>>>({});
 	let formErrors = $state<Record<DraftKey, Record<string, string>>>({});
 	let formDisplayNames = $state<Record<DraftKey, string>>({});
 	let formBannerFor = $state<Record<DraftKey, string>>({});
 	let formSubmittingFor = $state<DraftKey | null>(null);
 
-	// Which draft is showing in the right detail panel, per tab.
 	let selectedDraftKey = $state<PerKind<DraftKey | null>>({
 		stt: null,
 		llm: null,
 		tts: null
 	});
 
-	// Test state — keyed by row id, since only saved instances are testable.
 	let sttTestPhase = $state<Record<number, TestPhase>>({});
 	let sttTestMicLevel = $state<Record<number, number>>({});
 	let sttTestResults = $state<Record<number, SttTestResult>>({});
 	let sttTestErrors = $state<Record<number, string>>({});
 	let sttTestingFor = $state<number | null>(null);
 
-	// Generic provider test — used for LLM (and any non-mic TTS test).
 	let genericTestResults = $state<Record<number, TestResult>>({});
 	let genericTestingId = $state<number | null>(null);
 
-	// TTS sample playback (one per configured row).
 	type PlaybackHandle = { audio: HTMLAudioElement; url: string };
 	const playingHandles: Map<number, PlaybackHandle> = new Map();
 	let playingIds = $state<number[]>([]);
 	let loadingSampleId = $state<number | null>(null);
 	let sampleError = $state<Record<number, string>>({});
 
-	// Piper voice browser (TTS / piper only).
 	let voiceBrowserId = $state<number | null>(null);
 	let voiceList = $state<PiperVoice[]>([]);
 	let voiceLoading = $state(false);
@@ -153,11 +163,6 @@
 	let installingVoice = $state<string | null>(null);
 	let installError = $state<string | null>(null);
 
-	// Runtime Python package install for providers whose deps don't ship
-	// in the api image (currently only Parakeet / NeMo). Same UX shape as
-	// the Piper voice browser: a button on the provider card → POST that
-	// streams pip's output → live log tail → status badge once done.
-	// Keyed by provider id so two cards can have independent state.
 	let packageStatus = $state<Record<number, PackageStatus>>({});
 	let packageInstallingId = $state<number | null>(null);
 	let packageInstallLog = $state<Record<number, string>>({});
@@ -169,12 +174,14 @@
 	let removingVoice = $state<string | null>(null);
 	let removeError = $state<string | null>(null);
 	let voicePreviewHandle: { audio: HTMLAudioElement; url: string } | null = null;
+	let askingRemoveVoiceKey = $state<string | null>(null);
 
-	// Export-configuration modal.
 	let showExport = $state(false);
 	let exportWithSecrets = $state(false);
 	let exportSubmitting = $state(false);
 	let exportError = $state<string | null>(null);
+
+	let askingDeleteId = $state<number | null>(null);
 
 	function selectionKey(kind: TabKey): string {
 		return `${SELECTION_KEY_PREFIX}.${kind}.last-selected`;
@@ -184,8 +191,6 @@
 		if (typeof window === 'undefined') return null;
 		const fresh = window.localStorage.getItem(selectionKey(kind));
 		if (fresh) return fresh;
-		// Migrate the legacy /settings/stt key once so users don't lose
-		// their previous selection during the refactor.
 		if (kind === 'stt') {
 			const legacy = window.localStorage.getItem(LEGACY_STT_SELECTION_KEY);
 			if (legacy) {
@@ -232,10 +237,6 @@
 		};
 	}
 
-	function configuredRowsFor(kind: TabKey, providerName: string): Provider[] {
-		return providers[kind].filter((p) => p.provider_name === providerName);
-	}
-
 	function rowById(kind: TabKey, id: number): Provider | null {
 		return providers[kind].find((p) => p.id === id) ?? null;
 	}
@@ -254,10 +255,6 @@
 		return base;
 	}
 
-	// Suggest a unique display name when starting a fresh draft so the
-	// user is not forced to invent one to satisfy the per-(kind, display)
-	// uniqueness rule. Falls back to "<catalog name> (N)" when one of
-	// that shape already exists.
 	function suggestDisplayName(kind: TabKey, entry: CatalogEntry): string {
 		const base = entry.display_name;
 		const used = new Set(providers[kind].map((p) => p.display_name));
@@ -266,7 +263,6 @@
 			const candidate = `${base} (${i})`;
 			if (!used.has(candidate)) return candidate;
 		}
-		// Pathological fallback — should never hit in practice.
 		return `${base} (${Date.now()})`;
 	}
 
@@ -341,15 +337,9 @@
 			const [schemasResp, providersResp, sttCatalogResp] = await Promise.all([
 				listSchemas(),
 				listProviders(),
-				// Best-effort: if the STT catalog endpoint blows up we still
-				// want LLM/TTS tabs to render. Fall through to deriving STT
-				// entries from the schema list.
 				listSttCatalog().catch(() => null)
 			]);
 			providers = providersResp;
-			// Refresh runtime-package status for any Parakeet row. Fire-and-
-			// forget: the install button stays usable even if status fetch
-			// fails (it shows "unknown" instead of "installed"/"missing").
 			for (const stt of providersResp.stt) {
 				if (stt.provider_name === 'parakeet') {
 					loadPackageStatus(stt.id);
@@ -364,9 +354,6 @@
 			next.llm = (schemasResp as ProviderSchemaList).llm.map(schemaToCatalogEntry);
 			next.tts = (schemasResp as ProviderSchemaList).tts.map(schemaToCatalogEntry);
 			catalog = next;
-			// Hydrate / refresh form drafts for every existing row so flipping
-			// tabs preserves in-progress edits but also picks up any server-
-			// side changes we don't have a draft for yet.
 			for (const kind of PROVIDER_KINDS) {
 				for (const row of providers[kind]) {
 					ensureFormStateForInstance(kind, row);
@@ -424,8 +411,6 @@
 		const values = formValues[key];
 		const validation = validateClient(schema, values);
 		if (row) {
-			// Editing: secret fields can stay blank to keep the previous
-			// value, so relax the required check for those.
 			const filtered = { ...validation };
 			for (const f of schema.fields) {
 				if (f.secret && filtered[f.name] && !values[f.name]) {
@@ -466,10 +451,6 @@
 					display_name: displayName,
 					values: values
 				});
-				// Drop the "new" draft state — its successor is the persisted
-				// instance the server just minted. Then swap the selection
-				// onto the new instance so the user sees their freshly saved
-				// row in the right panel.
 				delete formValues[key];
 				delete formErrors[key];
 				delete formDisplayNames[key];
@@ -495,7 +476,7 @@
 	async function onActivate(kind: TabKey, key: DraftKey, row: Provider | null) {
 		if (!row) {
 			formBannerFor[key] =
-				'Save the provider before marking it as the default.';
+				'Save the provider before marking it as the active default.';
 			return;
 		}
 		try {
@@ -515,11 +496,22 @@
 		}
 	}
 
-	async function onDelete(kind: TabKey, row: Provider) {
-		const ok = window.confirm(
-			`Delete configured provider "${row.display_name}"? You'll need to re-enter credentials before the next test.`
-		);
-		if (!ok) return;
+	function openDelete(row: Provider) {
+		askingDeleteId = row.id;
+	}
+
+	function cancelDelete() {
+		askingDeleteId = null;
+	}
+
+	async function confirmDelete() {
+		if (askingDeleteId === null) return;
+		const id = askingDeleteId;
+		const row = rowById(activeTab, id);
+		if (!row) {
+			askingDeleteId = null;
+			return;
+		}
 		try {
 			await deleteProvider(row.id);
 			const key = instanceKey(row.id);
@@ -532,24 +524,21 @@
 			delete sttTestPhase[row.id];
 			delete genericTestResults[row.id];
 			delete sampleError[row.id];
-			// Reset selection: the row we just deleted is no longer valid.
-			if (selectedDraftKey[kind] === key) {
-				selectedDraftKey[kind] = null;
+			if (selectedDraftKey[activeTab] === key) {
+				selectedDraftKey[activeTab] = null;
 			}
 			await load();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			askingDeleteId = null;
 		}
 	}
-
-	// --- Parakeet runtime package install ---------------------------------
 
 	async function loadPackageStatus(rowId: number) {
 		try {
 			packageStatus[rowId] = await getProviderPackage(rowId);
 		} catch (e) {
-			// Non-fatal — the UI just hides the install affordance. The
-			// next Test click will surface any real error via the server.
 			console.warn('package status fetch failed', e);
 		}
 	}
@@ -694,8 +683,6 @@
 		return activeTab === 'tts' && providerName === 'piper';
 	}
 
-	// --- Piper voice browser modal -------------------------------------
-
 	function stopVoicePreview() {
 		if (voicePreviewHandle) {
 			try {
@@ -735,6 +722,7 @@
 		installError = null;
 		previewError = null;
 		removeError = null;
+		askingRemoveVoiceKey = null;
 	}
 
 	async function onPreviewVoice(row: Provider, voice: PiperVoice) {
@@ -769,14 +757,24 @@
 		}
 	}
 
-	async function onRemoveVoice(row: Provider, voice: PiperVoice) {
-		const ok = window.confirm(
-			`Remove ${voice.key}?\n\nThe .onnx and .onnx.json files will be deleted from ${voiceModelDir || 'model_dir'}. You can reinstall later from the same modal.`
-		);
-		if (!ok) return;
-		if (previewingVoice === voice.key) {
-			stopVoicePreview();
+	function askRemoveVoice(voice: PiperVoice) {
+		askingRemoveVoiceKey = voice.key;
+	}
+
+	function cancelRemoveVoice() {
+		askingRemoveVoiceKey = null;
+	}
+
+	async function confirmRemoveVoice() {
+		if (askingRemoveVoiceKey === null) return;
+		const voiceKey = askingRemoveVoiceKey;
+		const voice = voiceList.find((v) => v.key === voiceKey);
+		const row = voiceBrowserId !== null ? rowById('tts', voiceBrowserId) : null;
+		if (!row || !voice) {
+			askingRemoveVoiceKey = null;
+			return;
 		}
+		if (previewingVoice === voice.key) stopVoicePreview();
 		removingVoice = voice.key;
 		removeError = null;
 		try {
@@ -788,6 +786,7 @@
 			removeError = e instanceof Error ? e.message : String(e);
 		} finally {
 			removingVoice = null;
+			askingRemoveVoiceKey = null;
 		}
 	}
 
@@ -807,7 +806,6 @@
 	}
 
 	function useVoice(row: Provider, voice: PiperVoice) {
-		// Write the voice_id into the saved row's form draft.
 		const key = ensureFormStateForInstance('tts', row);
 		formValues[key] = {
 			...formValues[key],
@@ -815,8 +813,6 @@
 		};
 		closeVoiceBrowser();
 	}
-
-	// --- Export modal --------------------------------------------------
 
 	function openExport() {
 		showExport = true;
@@ -842,8 +838,6 @@
 			exportSubmitting = false;
 		}
 	}
-
-	// --- Formatters ----------------------------------------------------
 
 	function formatCost(cost: number | null | undefined): string {
 		if (cost === null || cost === undefined) return '—';
@@ -871,12 +865,26 @@
 		}
 	}
 
-	// --- Derived -------------------------------------------------------
+	function handleWindowKeydown(event: KeyboardEvent) {
+		if (event.key !== 'Escape') return;
+		if (askingDeleteId !== null) {
+			cancelDelete();
+			return;
+		}
+		if (askingRemoveVoiceKey !== null) {
+			cancelRemoveVoice();
+			return;
+		}
+		if (voiceBrowserId !== null) {
+			closeVoiceBrowser();
+			return;
+		}
+		if (showExport && !exportSubmitting) {
+			closeExport();
+			return;
+		}
+	}
 
-	// Resolve the current selection into the row (if instance) and catalog
-	// entry the right detail panel renders. Both can be null briefly during
-	// state transitions (e.g. immediately after delete) — the template
-	// handles that case with an empty-state.
 	const selectedRow = $derived.by<Provider | null>(() => {
 		const key = selectedDraftKey[activeTab];
 		if (key === null) return null;
@@ -884,6 +892,7 @@
 		if (id === null) return null;
 		return rowById(activeTab, id);
 	});
+
 	const selectedEntry = $derived.by<CatalogEntry | null>(() => {
 		const key = selectedDraftKey[activeTab];
 		if (key === null) return null;
@@ -897,20 +906,54 @@
 		return catalogEntryFor(activeTab, name);
 	});
 
-	// Group configured rows by provider_name within each tab so the left
-	// list reads as "all Ollama instances, then all OpenAI instances, …"
-	// rather than interleaved.
-	const configuredByName = $derived.by<PerKind<Map<string, Provider[]>>>(() => {
-		const out = emptyPerKind(() => new Map<string, Provider[]>());
-		for (const kind of PROVIDER_KINDS) {
-			for (const row of providers[kind]) {
-				const list = out[kind].get(row.provider_name) ?? [];
-				list.push(row);
-				out[kind].set(row.provider_name, list);
+	const hasPendingChanges = $derived.by<boolean>(() => {
+		const key = selectedDraftKey[activeTab];
+		if (key === null) return false;
+		if (!selectedRow) return true;
+		if (!selectedEntry) return false;
+		const values = formValues[key] ?? {};
+		const savedDisplay = selectedRow.display_name;
+		const draftDisplay = (formDisplayNames[key] ?? '').trim();
+		if (draftDisplay !== savedDisplay) return true;
+		const saved = selectedRow.options ?? {};
+		for (const field of selectedEntry.field_schema.fields) {
+			const v = values[field.name];
+			const s = saved[field.name];
+			if (field.secret) {
+				const isEmpty =
+					v === null ||
+					v === undefined ||
+					(typeof v === 'string' && v.trim() === '');
+				if (isEmpty) continue;
+				if (v !== s) return true;
+				continue;
 			}
+			const va = v ?? '';
+			const sa = s ?? '';
+			if (va !== sa) return true;
 		}
-		return out;
+		return false;
 	});
+
+	const primaryAction = $derived.by<'save' | 'activate' | 'test' | null>(() => {
+		if (!selectedEntry) return null;
+		if (!selectedRow) return 'save';
+		if (hasPendingChanges) return 'save';
+		if (!selectedRow.is_active) return 'activate';
+		return 'test';
+	});
+
+	const browserRow = $derived(
+		voiceBrowserId !== null ? providers.tts.find((p) => p.id === voiceBrowserId) ?? null : null
+	);
+
+	const deleteTargetRow = $derived(
+		askingDeleteId !== null ? rowById(activeTab, askingDeleteId) : null
+	);
+
+	const removeVoiceTarget = $derived(
+		askingRemoveVoiceKey ? voiceList.find((v) => v.key === askingRemoveVoiceKey) ?? null : null
+	);
 
 	onDestroy(() => {
 		for (const id of [...playingHandles.keys()]) {
@@ -924,31 +967,44 @@
 	<title>Providers · Johnny</title>
 </svelte:head>
 
-<div class="page" data-testid="providers-page">
-	<header class="page-header">
-		<div>
-			<h1>Providers</h1>
-			<p class="lede">
-				Configure which STT, LLM, and TTS adapters Johnny uses. Pick a tab, then
-				select a provider on the left to edit its credentials, run a test, and
-				mark it as the active default for that kind.
+<svelte:window onkeydown={handleWindowKeydown} />
+
+<div class="mx-auto flex w-full max-w-[1200px] flex-col gap-6 px-8 py-12" data-testid="providers-page">
+	<header class="flex flex-wrap items-start justify-between gap-4">
+		<div class="flex min-w-0 flex-col gap-1">
+			<h1 class="m-0 text-xl leading-tight font-semibold tracking-tight text-foreground">
+				Providers
+			</h1>
+			<p class="m-0 max-w-[70ch] text-sm text-muted-foreground">
+				Configure STT, LLM, and TTS adapters. Pick a kind, then select a provider on
+				the left to edit credentials, run a test, and mark it active.
 			</p>
 		</div>
-		<div class="header-actions">
-			<button type="button" onclick={load} disabled={loading}>
-				{loading ? 'Refreshing…' : 'Refresh'}
-			</button>
-			<button type="button" onclick={openExport} data-testid="export-button">
+		<div class="flex shrink-0 items-center gap-2">
+			<Button
+				variant="outline"
+				onclick={openExport}
+				data-testid="export-button"
+			>
+				<DownloadIcon />
 				Export configuration
-			</button>
+			</Button>
 		</div>
 	</header>
 
 	{#if error}
-		<div class="alert error" role="alert" data-testid="providers-error">{error}</div>
+		<Alert.Root variant="destructive" data-testid="providers-error">
+			<CircleAlertIcon />
+			<Alert.Title>Something went wrong</Alert.Title>
+			<Alert.Description>{error}</Alert.Description>
+		</Alert.Root>
 	{/if}
 
-	<div class="tabs" role="tablist" aria-label="Provider kinds">
+	<div
+		class="-mb-2 flex flex-wrap gap-1 border-b border-separator"
+		role="tablist"
+		aria-label="Provider kinds"
+	>
 		{#each PROVIDER_KINDS as kind (kind)}
 			{@const count = providers[kind].length}
 			{@const active = providers[kind].find((p) => p.is_active)}
@@ -956,69 +1012,107 @@
 				type="button"
 				role="tab"
 				aria-selected={activeTab === kind}
-				class="tab"
-				class:active={activeTab === kind}
+				class="-mb-px flex flex-col items-start gap-0.5 rounded-t-md border-b-2 px-4 py-2.5 text-left transition-colors duration-150 outline-none {activeTab ===
+				kind
+					? 'border-foreground text-foreground'
+					: 'border-transparent text-muted-foreground hover:text-foreground'}"
 				onclick={() => switchTab(kind)}
 				data-testid={`tab-${kind}`}
 			>
-				<span class="tab-label">{PROVIDER_KIND_LABEL[kind]}</span>
-				<span class="tab-meta">
-					{count} configured
-					{#if active}
-						· active: <strong>{active.display_name}</strong>
-					{/if}
+				<span class="flex items-center gap-2 text-sm font-medium">
+					<span class="font-mono text-[0.7rem] text-ink-subtle">{KIND_SHORT_LABEL[kind]}</span>
+					<span>{PROVIDER_KIND_LABEL[kind].split(' (')[1]?.replace(')', '') ?? KIND_SHORT_LABEL[kind]}</span>
+					<span
+						class="inline-flex min-w-5 items-center justify-center rounded-pill bg-surface-2 px-1.5 text-[0.7rem] font-medium text-foreground"
+					>
+						{count}
+					</span>
 				</span>
+				{#if active}
+					<span class="truncate text-[0.7rem] text-muted-foreground" title={active.display_name}>
+						Active · {active.display_name}
+					</span>
+				{:else}
+					<span class="text-[0.7rem] text-ink-subtle">No active default</span>
+				{/if}
 			</button>
 		{/each}
 	</div>
 
 	{#if !loading && catalog[activeTab].length === 0}
-		<p class="empty" data-testid={`empty-${activeTab}`}>
-			No {PROVIDER_KIND_LABEL[activeTab]} providers are installed. Install a
-			provider module on the backend, then return here.
-		</p>
+		<div
+			class="flex flex-col items-center gap-2 rounded-md border border-dashed border-border bg-surface-1 px-6 py-12 text-center"
+			data-testid={`empty-${activeTab}`}
+		>
+			<PackageIcon class="size-6 text-ink-subtle" />
+			<p class="m-0 text-sm text-muted-foreground">
+				No {PROVIDER_KIND_LABEL[activeTab]} providers are installed. Install a provider
+				module on the backend, then return here.
+			</p>
+		</div>
 	{/if}
 
 	{#if catalog[activeTab].length > 0}
 		{@const configuredRows = providers[activeTab]}
 		{@const selectedKey = selectedDraftKey[activeTab]}
-		<div class="layout" role="tabpanel" data-testid={`panel-${activeTab}`}>
-			<aside class="catalog-list" aria-label={`${PROVIDER_KIND_LABEL[activeTab]} catalog`}>
+		<div class="grid grid-cols-1 gap-6 lg:grid-cols-[320px_1fr]" role="tabpanel" data-testid={`panel-${activeTab}`}>
+			<aside
+				class="flex min-w-0 flex-col gap-2"
+				aria-label={`${PROVIDER_KIND_LABEL[activeTab]} catalog`}
+			>
 				{#if configuredRows.length > 0}
-					<h3 class="catalog-section-label">
-						Configured ({configuredRows.length})
-					</h3>
-					<ul data-testid={`configured-list-${activeTab}`}>
+					<div
+						class="flex items-center justify-between px-1 pt-1"
+					>
+						<h3 class="m-0 text-sm font-semibold text-foreground">Configured</h3>
+						<span class="text-xs text-ink-subtle">{configuredRows.length}</span>
+					</div>
+					<ul class="m-0 flex list-none flex-col gap-1.5 p-0" data-testid={`configured-list-${activeTab}`}>
 						{#each configuredRows as row (row.id)}
 							{@const entry = catalogEntryFor(activeTab, row.provider_name)}
 							{@const itemKey = instanceKey(row.id)}
+							{@const isSelected = selectedKey === itemKey}
 							<li>
 								<button
 									type="button"
-									class="catalog-card instance-card"
-									class:selected={selectedKey === itemKey}
-									class:configured={true}
-									class:active={row.is_active}
+									class="group flex w-full flex-col gap-1.5 rounded-md border bg-card px-3 py-2.5 text-left transition-colors duration-150 outline-none {isSelected
+										? 'border-foreground bg-surface-2'
+										: 'border-border hover:border-border-strong hover:bg-surface-2'}"
 									onclick={() => selectInstance(activeTab, row)}
 									data-testid={`instance-${activeTab}-${row.id}`}
 								>
-									<div class="catalog-card-head">
-										<strong>{row.display_name}</strong>
-										{#if entry?.provider_type}
-											<span class={`type-pill type-${entry.provider_type}`}>
-												{entry.provider_type}
+									<div class="flex items-start justify-between gap-2">
+										<span class="truncate text-sm font-medium text-foreground">
+											{row.display_name}
+										</span>
+										{#if row.is_active}
+											<span
+												class="inline-flex shrink-0 items-center gap-1 rounded-pill border border-border bg-surface-3 px-1.5 py-0.5 text-[0.65rem] font-medium text-foreground"
+												title="Active default for this kind"
+											>
+												<span class="size-1.5 rounded-full bg-success" aria-hidden="true"></span>
+												<span>Active</span>
 											</span>
 										{/if}
 									</div>
-									<p class="catalog-card-summary">
-										<span class="provider-kind-label">{row.provider_name}</span>
-										{#if entry}· {entry.display_name}{/if}
-									</p>
-									<div class="catalog-card-meta">
-										{#if row.is_active}
-											<span class="meta-item meta-active">active</span>
-										{:else}
-											<span class="meta-item meta-configured">configured</span>
+									<div class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[0.7rem] text-muted-foreground">
+										<span class="font-mono text-ink-subtle">{row.provider_name}</span>
+										{#if entry?.provider_type === 'local'}
+											<span class="inline-flex items-center gap-1">
+												<HardDriveIcon class="size-3" />
+												<span>Local</span>
+											</span>
+										{:else if entry?.provider_type === 'cloud'}
+											<span class="inline-flex items-center gap-1">
+												<CloudIcon class="size-3" />
+												<span>Cloud</span>
+											</span>
+										{/if}
+										{#if entry?.streaming}
+											<span class="inline-flex items-center gap-1">
+												<ZapIcon class="size-3" />
+												<span>Streaming</span>
+											</span>
 										{/if}
 									</div>
 								</button>
@@ -1027,40 +1121,65 @@
 					</ul>
 				{/if}
 
-				<h3 class="catalog-section-label">Add a new {PROVIDER_KIND_LABEL[activeTab]} provider</h3>
-				<ul data-testid={`available-list-${activeTab}`}>
+				<div
+					class="mt-1 flex items-center justify-between px-1 pt-3 {configuredRows.length > 0 ? 'border-t border-separator' : ''}"
+				>
+					<h3 class="m-0 text-sm font-semibold text-foreground">Available adapters</h3>
+					<span class="text-xs text-ink-subtle">{catalog[activeTab].length}</span>
+				</div>
+				<ul class="m-0 flex list-none flex-col gap-1.5 p-0" data-testid={`available-list-${activeTab}`}>
 					{#each catalog[activeTab] as entry (entry.provider_name)}
 						{@const itemKey = newKey(entry.provider_name)}
-						{@const existingCount = configuredByName[activeTab].get(entry.provider_name)?.length ?? 0}
+						{@const existingCount = providers[activeTab].filter((p) => p.provider_name === entry.provider_name).length}
+						{@const isSelected = selectedKey === itemKey}
 						<li>
 							<button
 								type="button"
-								class="catalog-card add-card"
-								class:selected={selectedKey === itemKey}
+								class="group flex w-full flex-col gap-1.5 rounded-md border border-dashed bg-card px-3 py-2.5 text-left transition-colors duration-150 outline-none {isSelected
+									? 'border-foreground bg-surface-2'
+									: 'border-border hover:border-border-strong hover:bg-surface-1'}"
 								onclick={() => startNewDraft(activeTab, entry)}
 								data-testid={`add-${activeTab}-${entry.provider_name}`}
 							>
-								<div class="catalog-card-head">
-									<strong>+ {entry.display_name}</strong>
-									{#if entry.provider_type}
-										<span class={`type-pill type-${entry.provider_type}`}>
-											{entry.provider_type}
+								<div class="flex items-start justify-between gap-2">
+									<span class="flex min-w-0 items-center gap-1.5 truncate text-sm font-medium text-foreground">
+										<PlusIcon class="size-3.5 shrink-0 text-ink-subtle" />
+										<span class="truncate">{entry.display_name}</span>
+									</span>
+									{#if existingCount > 0}
+										<span
+											class="shrink-0 text-[0.65rem] font-medium text-ink-subtle"
+											title={`${existingCount} configured`}
+										>
+											{existingCount}×
 										</span>
 									{/if}
 								</div>
-								<p class="catalog-card-summary">{entry.summary}</p>
-								<div class="catalog-card-meta">
-									{#if entry.model_count !== undefined}
-										<span class="meta-item">
-											{entry.model_count} model{entry.model_count === 1 ? '' : 's'}
+								<p class="m-0 line-clamp-2 text-xs text-muted-foreground">{entry.summary}</p>
+								<div class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[0.7rem] text-muted-foreground">
+									{#if entry.provider_type === 'local'}
+										<span class="inline-flex items-center gap-1">
+											<HardDriveIcon class="size-3" />
+											<span>Local</span>
+										</span>
+									{:else if entry.provider_type === 'cloud'}
+										<span class="inline-flex items-center gap-1">
+											<CloudIcon class="size-3" />
+											<span>Cloud</span>
 										</span>
 									{/if}
 									{#if entry.streaming}
-										<span class="meta-item meta-streaming">streaming</span>
+										<span class="inline-flex items-center gap-1">
+											<ZapIcon class="size-3" />
+											<span>Streaming</span>
+										</span>
 									{/if}
-									{#if existingCount > 0}
-										<span class="meta-item meta-configured-count">
-											{existingCount} configured
+									{#if entry.model_count !== undefined}
+										<span class="inline-flex items-center gap-1">
+											<LibraryIcon class="size-3" />
+											<span>
+												{entry.model_count} model{entry.model_count === 1 ? '' : 's'}
+											</span>
 										</span>
 									{/if}
 								</div>
@@ -1070,7 +1189,7 @@
 				</ul>
 			</aside>
 
-			<section class="detail" aria-live="polite">
+			<section class="flex min-w-0 flex-col" aria-live="polite">
 				{#if selectedEntry && selectedDraftKey[activeTab]}
 					{@const entry = selectedEntry}
 					{@const row = selectedRow}
@@ -1080,361 +1199,490 @@
 					{@const sttErr = row ? sttTestErrors[row.id] : undefined}
 					{@const banner = formBannerFor[draftKey]}
 					{@const isDraft = isNewKey(draftKey)}
-					<header class="detail-head">
-						<div>
-							<h2>
-								{#if row}
-									{row.display_name}
-								{:else}
-									New {entry.display_name} instance
+					<div class="flex min-w-0 flex-col gap-6 rounded-md border border-border bg-card">
+						<header class="flex flex-col gap-3 border-b border-separator px-6 pt-5 pb-4">
+							<div class="flex flex-wrap items-start justify-between gap-3">
+								<div class="flex min-w-0 flex-col gap-1">
+									<div class="flex items-center gap-2">
+										<h2 class="m-0 text-lg leading-tight font-semibold tracking-tight text-foreground">
+											{#if row}
+												{row.display_name}
+											{:else}
+												New {entry.display_name}
+											{/if}
+										</h2>
+										{#if row?.is_active}
+											<span
+												class="inline-flex items-center gap-1 rounded-pill border border-border bg-surface-3 px-1.5 py-0.5 text-[0.65rem] font-medium text-foreground"
+											>
+												<span class="size-1.5 rounded-full bg-success" aria-hidden="true"></span>
+												<span>Active</span>
+											</span>
+										{:else if row}
+											<span
+												class="inline-flex items-center gap-1 rounded-pill border border-border bg-surface-2 px-1.5 py-0.5 text-[0.65rem] font-medium text-muted-foreground"
+											>
+												<span>Configured</span>
+											</span>
+										{:else}
+											<span
+												class="inline-flex items-center gap-1 rounded-pill border border-dashed border-border bg-surface-1 px-1.5 py-0.5 text-[0.65rem] font-medium text-muted-foreground"
+											>
+												<span>New · unsaved</span>
+											</span>
+										{/if}
+									</div>
+									<p class="m-0 max-w-[60ch] text-sm text-muted-foreground">{entry.summary}</p>
+								</div>
+							</div>
+
+							<div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+								<span class="inline-flex items-center gap-1">
+									<span class="text-ink-subtle">Adapter</span>
+									<span class="font-mono text-foreground">{entry.provider_name}</span>
+								</span>
+								{#if entry.provider_type}
+									<span aria-hidden="true" class="text-ink-subtle">·</span>
+									<span class="inline-flex items-center gap-1">
+										{#if entry.provider_type === 'local'}
+											<HardDriveIcon class="size-3" />
+											<span class="text-foreground">Local</span>
+										{:else}
+											<CloudIcon class="size-3" />
+											<span class="text-foreground">Cloud</span>
+										{/if}
+									</span>
 								{/if}
-							</h2>
-							<p class="lede">{entry.summary}</p>
-							{#if entry.signup_url}
-								<p>
+								{#if entry.streaming !== undefined}
+									<span aria-hidden="true" class="text-ink-subtle">·</span>
+									<span class="inline-flex items-center gap-1">
+										<ZapIcon class="size-3" />
+										<span class="text-foreground">{entry.streaming ? 'Streaming' : 'Batch'}</span>
+									</span>
+								{/if}
+								{#if entry.model_count !== undefined}
+									<span aria-hidden="true" class="text-ink-subtle">·</span>
+									<span class="inline-flex items-center gap-1">
+										<LibraryIcon class="size-3" />
+										<span class="text-foreground">
+											{entry.model_count} model{entry.model_count === 1 ? '' : 's'}
+										</span>
+									</span>
+								{/if}
+								{#if entry.signup_url}
+									<span aria-hidden="true" class="text-ink-subtle">·</span>
 									<a
-										class="signup-link"
+										class="inline-flex items-center gap-1 text-foreground underline decoration-border-strong decoration-1 underline-offset-2 hover:decoration-primary"
 										href={entry.signup_url}
 										target="_blank"
 										rel="noopener"
 									>
-										Get started → {entry.signup_url}
+										<span>Get a key</span>
+										<ExternalLinkIcon class="size-3" />
 									</a>
-								</p>
-							{/if}
-						</div>
-						<dl class="detail-meta">
-							{#if entry.provider_type}
-								<dt>Type</dt>
-								<dd>{entry.provider_type}</dd>
-							{/if}
-							{#if entry.streaming !== undefined}
-								<dt>Streaming</dt>
-								<dd>{entry.streaming ? 'yes' : 'no'}</dd>
-							{/if}
-							{#if entry.model_count !== undefined}
-								<dt>Models</dt>
-								<dd>{entry.model_count}</dd>
-							{/if}
-							<dt>Status</dt>
-							<dd>
-								{#if row?.is_active}
-									Active
-								{:else if row}
-									Configured
-								{:else}
-									New (unsaved)
-								{/if}
-							</dd>
-						</dl>
-					</header>
-
-					<section
-						class="test-panel"
-						aria-label="Test provider"
-						data-testid={`test-panel-${activeTab}`}
-					>
-						{#if activeTab === 'stt'}
-							{#if entry.provider_name === 'parakeet' && row}
-								{@const pkg = packageStatus[row.id]}
-								{@const installing = packageInstallingId === row.id}
-								{@const installed = pkg?.installed === true}
-								<div
-									class={`package-panel ${installed ? 'installed' : 'pending'}`}
-									data-testid={`parakeet-package-${row.id}`}
-								>
-									<div class="package-head">
-										<strong>NeMo runtime package</strong>
-										{#if installed}
-											<span class="badge ok" data-testid="parakeet-installed-badge">
-												Installed{pkg?.version ? ` · v${pkg.version}` : ''}
-											</span>
-										{:else if pkg && pkg.applicable === false}
-											<span class="badge muted">N/A</span>
-										{:else}
-											<span class="badge warn">Not installed</span>
-										{/if}
-									</div>
-									<p class="help">
-										Parakeet runs locally on NeMo, which is too heavy
-										(~3 GB) to ship in the api image. Click Install to
-										fetch nemo_toolkit[asr] into
-										<code>~/.johnny/parakeet-packages</code> — persists
-										across rebuilds. First install takes 5–10 minutes.
-									</p>
-									<div class="package-actions">
-										<button
-											type="button"
-											class="primary"
-											onclick={() => onInstallPackage(row)}
-											disabled={installing}
-											data-testid={`parakeet-install-${row.id}`}
-										>
-											{#if installing}
-												Installing…
-											{:else if installed}
-												Reinstall
-											{:else}
-												Install package
-											{/if}
-										</button>
-									</div>
-									{#if packageInstallLog[row.id]}
-										<pre
-											class="package-log"
-											data-testid={`parakeet-install-log-${row.id}`}>{packageInstallLog[
-												row.id
-											]}</pre>
-									{/if}
-									{#if packageInstallError[row.id]}
-										<div
-											class="alert error"
-											role="alert"
-											data-testid={`parakeet-install-error-${row.id}`}
-										>
-											{packageInstallError[row.id]}
-										</div>
-									{/if}
-								</div>
-							{/if}
-							<div class="test-actions">
-								<button
-									type="button"
-									class="primary"
-									onclick={() => row && onSttTest(row)}
-									disabled={!row || sttTestingFor !== null}
-									data-testid={`stt-test-${row ? row.id : entry.provider_name}`}
-								>
-									{#if sttPhase === 'recording'}
-										Recording {(MIC_RECORDING_MS / 1000).toFixed(0)}s…
-									{:else if sttPhase === 'uploading'}
-										Transcribing…
-									{:else}
-										Test ({(MIC_RECORDING_MS / 1000).toFixed(0)}s mic)
-									{/if}
-								</button>
-								{#if sttPhase}
-									<span class={`phase phase-${sttPhase}`}>{phaseLabel(sttPhase)}</span>
-								{/if}
-							</div>
-							{#if row && sttPhase === 'recording'}
-								<div class="mic-level" aria-hidden="true">
-									<div
-										class="mic-level-bar"
-										style={`width: ${Math.round((sttTestMicLevel[row.id] ?? 0) * 100)}%;`}
-									></div>
-								</div>
-							{/if}
-							{#if !row}
-								<p class="help">
-									Save credentials for this provider below before clicking Test.
-								</p>
-							{/if}
-							{#if row && sttErr}
-								<div
-									class="alert error"
-									role="alert"
-									data-testid={`stt-test-error-${row.id}`}
-								>
-									{sttErr}
-								</div>
-							{/if}
-							{#if row && sttResult && sttResult.ok}
-								<div
-									class="test-result ok"
-									data-stt-result="ok"
-									data-testid={`stt-test-result-${row.id}`}
-								>
-									<header class="test-result-head">
-										<strong>Transcript</strong>
-										<div class="test-result-meta">
-											<span title="Adapter call wall-clock latency">
-												⏱ {formatMs(sttResult.latency_ms)}
-											</span>
-											<span title="Audio captured + sent">
-												🎙 {formatMs(sttResult.audio_ms)}
-											</span>
-											<span title="Estimated cost at published per-minute rate">
-												💲 {formatCost(sttResult.cost_usd)}
-											</span>
-										</div>
-									</header>
-									<p class="transcript" data-testid={`stt-transcript-${row.id}`}>
-										"{sttResult.transcript}"
-									</p>
-									{#if sttResult.message}
-										<small class="help">{sttResult.message}</small>
-									{/if}
-								</div>
-							{:else if row && sttResult && !sttResult.ok && !sttErr}
-								<div class="test-result fail" data-stt-result="fail">
-									<strong>Test failed:</strong>
-									{sttResult.message ?? 'Provider returned no transcript.'}
-								</div>
-							{/if}
-						{:else}
-							<!-- LLM + TTS use the generic Test endpoint; TTS adds the
-							     Play sample button so the user can hear the voice. -->
-							<div class="test-actions">
-								<button
-									type="button"
-									class="primary"
-									onclick={() => row && onGenericTest(row)}
-									disabled={!row || genericTestingId === row.id}
-									data-testid={`generic-test-${activeTab}-${row ? row.id : entry.provider_name}`}
-								>
-									{#if row && genericTestingId === row.id}
-										Testing…
-									{:else}
-										Test
-									{/if}
-								</button>
-								{#if activeTab === 'tts' && row}
-									<button
-										type="button"
-										onclick={() => onPlaySample(row)}
-										disabled={loadingSampleId === row.id}
-										data-testid={`play-${row.id}`}
-									>
-										{#if loadingSampleId === row.id}
-											Loading…
-										{:else if isPlaying(row.id)}
-											Stop sample
-										{:else}
-											Play sample
-										{/if}
-									</button>
-								{/if}
-								{#if activeTab === 'tts' && isPiperProvider(entry.provider_name) && row}
-									<button
-										type="button"
-										onclick={() => openVoiceBrowser(row)}
-										data-testid={`voices-${row.id}`}
-									>
-										Browse voices
-									</button>
-								{/if}
-							</div>
-							{#if !row}
-								<p class="help">Save this provider below before testing.</p>
-							{/if}
-							{#if row && genericTestResults[row.id]}
-								{@const r = genericTestResults[row.id]}
-								<div
-									class="test-result"
-									class:ok={r.ok}
-									class:fail={!r.ok}
-									data-testid={`generic-test-result-${row.id}`}
-								>
-									<strong>{r.ok ? 'Test OK' : 'Test failed'}:</strong>
-									{r.message}
-									{#if r.detail}<span class="detail">— {r.detail}</span>{/if}
-								</div>
-							{/if}
-							{#if row && sampleError[row.id]}
-								<div class="alert error" data-testid={`sample-error-${row.id}`}>
-									<strong>Sample failed:</strong>
-									{sampleError[row.id]}
-								</div>
-							{/if}
-						{/if}
-					</section>
-
-					<section class="config-panel" aria-label="Provider configuration">
-						<header class="config-head">
-							<h3>Configuration</h3>
-							<div class="config-actions">
-								{#if row && row.is_active}
-									<button
-										type="button"
-										onclick={() => onDeactivate(row)}
-										data-testid={`deactivate-${activeTab}-${row.id}`}
-									>
-										Deactivate
-									</button>
-								{:else if row}
-									<button
-										type="button"
-										class="primary"
-										onclick={() => onActivate(activeTab, draftKey, row)}
-										data-testid={`activate-${activeTab}-${row.id}`}
-									>
-										Set as default
-									</button>
-								{/if}
-								{#if row}
-									<button
-										type="button"
-										class="danger"
-										onclick={() => onDelete(activeTab, row)}
-										data-testid={`delete-${activeTab}-${row.id}`}
-									>
-										Delete
-									</button>
 								{/if}
 							</div>
 						</header>
+
+						<section
+							class="flex flex-col gap-3 px-6"
+							aria-label="Test provider"
+							data-testid={`test-panel-${activeTab}`}
+						>
+							<div class="flex items-baseline justify-between">
+								<h3 class="m-0 text-sm font-semibold text-foreground">Test</h3>
+								{#if sttPhase || (row && genericTestResults[row.id])}
+									{@const phaseClass =
+										sttPhase === 'recording'
+											? 'text-warning'
+											: sttPhase === 'uploading'
+												? 'text-muted-foreground'
+												: sttPhase === 'done'
+													? 'text-success'
+													: sttPhase === 'error'
+														? 'text-destructive'
+														: 'text-muted-foreground'}
+									{#if sttPhase}
+										<span class={`text-xs ${phaseClass}`}>{phaseLabel(sttPhase)}</span>
+									{/if}
+								{/if}
+							</div>
+
+							{#if activeTab === 'stt'}
+								{#if entry.provider_name === 'parakeet' && row}
+									{@const pkg = packageStatus[row.id]}
+									{@const installing = packageInstallingId === row.id}
+									{@const installed = pkg?.installed === true}
+									<div
+										class="flex flex-col gap-2 rounded-md border bg-surface-1 px-4 py-3 {installed
+											? 'border-border'
+											: 'border-warning/40'}"
+										data-testid={`parakeet-package-${row.id}`}
+									>
+										<div class="flex items-center justify-between gap-2">
+											<div class="flex items-center gap-2">
+												<PackageIcon class="size-4 {installed ? 'text-success' : 'text-warning'}" />
+												<strong class="text-sm font-medium text-foreground">NeMo runtime package</strong>
+											</div>
+											{#if installed}
+												<span
+													class="inline-flex items-center gap-1 rounded-pill border border-border bg-surface-3 px-1.5 py-0.5 text-[0.65rem] font-medium text-foreground"
+													data-testid="parakeet-installed-badge"
+												>
+													<span class="size-1.5 rounded-full bg-success" aria-hidden="true"></span>
+													<span>Installed{pkg?.version ? ` · v${pkg.version}` : ''}</span>
+												</span>
+											{:else if pkg && pkg.applicable === false}
+												<span
+													class="inline-flex items-center rounded-pill border border-border bg-surface-2 px-1.5 py-0.5 text-[0.65rem] font-medium text-muted-foreground"
+												>
+													N/A
+												</span>
+											{:else}
+												<span
+													class="inline-flex items-center gap-1 rounded-pill border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[0.65rem] font-medium text-warning"
+												>
+													<span>Not installed</span>
+												</span>
+											{/if}
+										</div>
+										<p class="m-0 text-xs leading-relaxed text-muted-foreground">
+											Parakeet runs locally on NeMo, which is too heavy (~3 GB) to ship in the
+											api image. Click Install to fetch
+											<span class="font-mono text-foreground">nemo_toolkit[asr]</span>
+											into
+											<span class="font-mono text-foreground">~/.johnny/parakeet-packages</span>
+											— persists across rebuilds. First install takes 5–10 minutes.
+										</p>
+										<div class="flex items-center gap-2">
+											<Button
+												variant={installed ? 'outline' : 'default'}
+												size="sm"
+												onclick={() => onInstallPackage(row)}
+												disabled={installing}
+												data-testid={`parakeet-install-${row.id}`}
+											>
+												{#if installing}
+													Installing…
+												{:else if installed}
+													Reinstall
+												{:else}
+													<DownloadIcon />
+													Install package
+												{/if}
+											</Button>
+										</div>
+										{#if packageInstallLog[row.id]}
+											<pre
+												class="m-0 max-h-56 overflow-auto rounded-sm bg-surface-3 px-3 py-2 font-mono text-[0.75rem] leading-relaxed whitespace-pre-wrap text-foreground"
+												data-testid={`parakeet-install-log-${row.id}`}>{packageInstallLog[row.id]}</pre>
+										{/if}
+										{#if packageInstallError[row.id]}
+											<Alert.Root
+												variant="destructive"
+												data-testid={`parakeet-install-error-${row.id}`}
+											>
+												<CircleAlertIcon />
+												<Alert.Description>{packageInstallError[row.id]}</Alert.Description>
+											</Alert.Root>
+										{/if}
+									</div>
+								{/if}
+
+								<div class="flex flex-wrap items-center gap-2">
+									<Button
+										variant={primaryAction === 'test' ? 'default' : 'outline'}
+										onclick={() => row && onSttTest(row)}
+										disabled={!row || sttTestingFor !== null}
+										data-testid={`stt-test-${row ? row.id : entry.provider_name}`}
+									>
+										<MicIcon />
+										{#if sttPhase === 'recording'}
+											Recording {(MIC_RECORDING_MS / 1000).toFixed(0)}s…
+										{:else if sttPhase === 'uploading'}
+											Transcribing…
+										{:else}
+											Test ({(MIC_RECORDING_MS / 1000).toFixed(0)}s mic)
+										{/if}
+									</Button>
+								</div>
+
+								{#if row && sttPhase === 'recording'}
+									<div
+										class="h-1.5 w-full overflow-hidden rounded-pill bg-surface-3"
+										aria-hidden="true"
+									>
+										<div
+											class="h-full bg-foreground transition-[width] duration-100"
+											style={`width: ${Math.round((sttTestMicLevel[row.id] ?? 0) * 100)}%;`}
+										></div>
+									</div>
+								{/if}
+								{#if !row}
+									<p class="m-0 text-xs text-muted-foreground">
+										Save credentials below before clicking Test.
+									</p>
+								{/if}
+								{#if row && sttErr}
+									<Alert.Root variant="destructive" data-testid={`stt-test-error-${row.id}`}>
+										<CircleAlertIcon />
+										<Alert.Title>Test failed</Alert.Title>
+										<Alert.Description>{sttErr}</Alert.Description>
+									</Alert.Root>
+								{/if}
+								{#if row && sttResult && sttResult.ok}
+									<div
+										class="flex flex-col gap-3 rounded-md border border-success/30 bg-success/10 px-4 py-3"
+										data-stt-result="ok"
+										data-testid={`stt-test-result-${row.id}`}
+									>
+										<div class="flex flex-wrap items-baseline justify-between gap-3">
+											<div class="inline-flex items-center gap-2">
+												<CircleCheckIcon class="size-4 text-success" />
+												<strong class="text-sm font-medium text-foreground">Transcript</strong>
+											</div>
+											<div class="flex flex-wrap items-center gap-3 font-mono text-xs text-muted-foreground">
+												<span title="Adapter call wall-clock latency" class="inline-flex items-center gap-1">
+													<ClockIcon class="size-3" />
+													{formatMs(sttResult.latency_ms)}
+												</span>
+												<span title="Audio captured and sent" class="inline-flex items-center gap-1">
+													<MicIcon class="size-3" />
+													{formatMs(sttResult.audio_ms)}
+												</span>
+												<span title="Estimated cost at published per-minute rate" class="inline-flex items-center gap-1">
+													<DollarSignIcon class="size-3" />
+													{formatCost(sttResult.cost_usd)}
+												</span>
+											</div>
+										</div>
+										<p
+											class="m-0 text-sm leading-relaxed text-foreground"
+											data-testid={`stt-transcript-${row.id}`}
+										>
+											"{sttResult.transcript}"
+										</p>
+										{#if sttResult.message}
+											<small class="text-xs text-muted-foreground">{sttResult.message}</small>
+										{/if}
+									</div>
+								{:else if row && sttResult && !sttResult.ok && !sttErr}
+									<Alert.Root variant="destructive" data-stt-result="fail">
+										<CircleAlertIcon />
+										<Alert.Title>Test failed</Alert.Title>
+										<Alert.Description>
+											{sttResult.message ?? 'Provider returned no transcript.'}
+										</Alert.Description>
+									</Alert.Root>
+								{/if}
+							{:else}
+								<div class="flex flex-wrap items-center gap-2">
+									<Button
+										variant={primaryAction === 'test' ? 'default' : 'outline'}
+										onclick={() => row && onGenericTest(row)}
+										disabled={!row || genericTestingId === row.id}
+										data-testid={`generic-test-${activeTab}-${row ? row.id : entry.provider_name}`}
+									>
+										<RadioTowerIcon />
+										{#if row && genericTestingId === row.id}
+											Testing…
+										{:else}
+											Test
+										{/if}
+									</Button>
+									{#if activeTab === 'tts' && row}
+										<Button
+											variant="outline"
+											onclick={() => onPlaySample(row)}
+											disabled={loadingSampleId === row.id}
+											data-testid={`play-${row.id}`}
+										>
+											{#if loadingSampleId === row.id}
+												Loading…
+											{:else if isPlaying(row.id)}
+												<SquareIcon />
+												Stop sample
+											{:else}
+												<PlayIcon />
+												Play sample
+											{/if}
+										</Button>
+									{/if}
+									{#if activeTab === 'tts' && isPiperProvider(entry.provider_name) && row}
+										<Button
+											variant="outline"
+											onclick={() => openVoiceBrowser(row)}
+											data-testid={`voices-${row.id}`}
+										>
+											<LibraryIcon />
+											Browse voices
+										</Button>
+									{/if}
+								</div>
+								{#if !row}
+									<p class="m-0 text-xs text-muted-foreground">Save this provider below before testing.</p>
+								{/if}
+								{#if row && genericTestResults[row.id]}
+									{@const r = genericTestResults[row.id]}
+									{#if r.ok}
+										<div
+											class="flex flex-col gap-1 rounded-md border border-success/30 bg-success/10 px-4 py-3"
+											data-testid={`generic-test-result-${row.id}`}
+										>
+											<div class="inline-flex items-center gap-2">
+												<CircleCheckIcon class="size-4 text-success" />
+												<strong class="text-sm font-medium text-foreground">Test OK</strong>
+											</div>
+											<p class="m-0 text-sm leading-relaxed text-muted-foreground">
+												{r.message}{#if r.detail} — <span class="opacity-85">{r.detail}</span>{/if}
+											</p>
+										</div>
+									{:else}
+										<Alert.Root variant="destructive" data-testid={`generic-test-result-${row.id}`}>
+											<CircleAlertIcon />
+											<Alert.Title>Test failed</Alert.Title>
+											<Alert.Description>
+												{r.message}{#if r.detail} — {r.detail}{/if}
+											</Alert.Description>
+										</Alert.Root>
+									{/if}
+								{/if}
+								{#if row && sampleError[row.id]}
+									<Alert.Root variant="destructive" data-testid={`sample-error-${row.id}`}>
+										<CircleAlertIcon />
+										<Alert.Title>Sample failed</Alert.Title>
+										<Alert.Description>{sampleError[row.id]}</Alert.Description>
+									</Alert.Root>
+								{/if}
+							{/if}
+						</section>
+
 						<form
-							class="config-form"
+							class="flex flex-col"
 							onsubmit={(event) => onSaveProvider(activeTab, draftKey, entry, row, event)}
 							data-testid={`form-${activeTab}-${row ? row.id : `new-${entry.provider_name}`}`}
 						>
-							<label class="row">
-								<span>Display name</span>
-								<input
-									type="text"
-									bind:value={formDisplayNames[draftKey]}
-									placeholder={entry.display_name}
-									required
-									data-testid={`display-name-${activeTab}-${row ? row.id : `new-${entry.provider_name}`}`}
-								/>
-								{#if isDraft}
-									<small class="help">
-										Multiple instances of the same provider are allowed — pick a unique
-										name so you can tell them apart.
-									</small>
-								{/if}
-							</label>
-							{#each groupedFields(entry.field_schema) as group (group.group)}
-								<fieldset>
-									<legend>{GROUP_LABEL[group.group]}</legend>
-									{#each group.fields as field (field.name)}
-										{@render fieldRow(
-											field,
-											formValues[draftKey] ?? {},
-											formErrors[draftKey] ?? {},
-											fieldInputId(
-												`${activeTab}-${row ? row.id : `new-${entry.provider_name}`}`,
-												field.name
-											),
-											row !== null
-										)}
-									{/each}
-								</fieldset>
-							{/each}
-							{#if banner}
-								<div class="alert error">{banner}</div>
-							{/if}
-							<div class="config-form-actions">
-								<button
-									type="submit"
-									class="primary"
-									disabled={formSubmittingFor === draftKey}
-									data-testid={`save-${activeTab}-${row ? row.id : `new-${entry.provider_name}`}`}
-								>
-									{#if formSubmittingFor === draftKey}
-										Saving…
-									{:else if row}
-										Save changes
-									{:else}
-										Save provider
+							<div class="flex flex-col gap-5 border-t border-separator px-6 pt-5 pb-5">
+								<h3 class="m-0 text-sm font-semibold text-foreground">Configuration</h3>
+
+								<div class="flex flex-col gap-1.5">
+									<label
+										for={`display-name-${activeTab}-${row ? row.id : `new-${entry.provider_name}`}`}
+										class="text-sm leading-none font-medium text-foreground"
+									>
+										Display name
+									</label>
+									<Input
+										id={`display-name-${activeTab}-${row ? row.id : `new-${entry.provider_name}`}`}
+										type="text"
+										bind:value={formDisplayNames[draftKey]}
+										placeholder={entry.display_name}
+										required
+										data-testid={`display-name-${activeTab}-${row ? row.id : `new-${entry.provider_name}`}`}
+									/>
+									{#if isDraft}
+										<small class="text-xs text-muted-foreground">
+											Multiple instances of the same provider are allowed — pick a unique
+											name so you can tell them apart.
+										</small>
 									{/if}
-								</button>
+								</div>
+
+								{#each groupedFields(entry.field_schema) as group (group.group)}
+									<div class="flex flex-col gap-3 border-t border-separator pt-4">
+										<h4 class="m-0 text-sm font-medium text-foreground">
+											{SECTION_LABEL[group.group] ?? GROUP_LABEL[group.group]}
+										</h4>
+										<div class="flex flex-col gap-3">
+											{#each group.fields as field (field.name)}
+												{@render fieldRow(
+													field,
+													formValues[draftKey] ?? {},
+													formErrors[draftKey] ?? {},
+													fieldInputId(
+														`${activeTab}-${row ? row.id : `new-${entry.provider_name}`}`,
+														field.name
+													),
+													row !== null
+												)}
+											{/each}
+										</div>
+									</div>
+								{/each}
+
+								{#if banner}
+									<Alert.Root variant="destructive">
+										<CircleAlertIcon />
+										<Alert.Description>{banner}</Alert.Description>
+									</Alert.Root>
+								{/if}
 							</div>
+
+							<footer class="flex flex-wrap items-center justify-between gap-2 border-t border-separator px-6 py-4">
+								<div>
+									{#if row}
+										<Button
+											type="button"
+											variant="ghost"
+											onclick={() => openDelete(row)}
+											class="text-destructive hover:bg-destructive/10 hover:text-destructive"
+											data-testid={`delete-${activeTab}-${row.id}`}
+										>
+											<Trash2Icon />
+											Delete
+										</Button>
+									{/if}
+								</div>
+								<div class="flex flex-wrap items-center gap-2">
+									{#if row && row.is_active}
+										<Button
+											type="button"
+											variant="outline"
+											onclick={() => onDeactivate(row)}
+											data-testid={`deactivate-${activeTab}-${row.id}`}
+										>
+											Deactivate
+										</Button>
+									{:else if row}
+										<Button
+											type="button"
+											variant={hasPendingChanges ? 'outline' : 'default'}
+											onclick={() => onActivate(activeTab, draftKey, row)}
+											disabled={hasPendingChanges}
+											title={hasPendingChanges ? 'Save your changes first.' : undefined}
+											data-testid={`activate-${activeTab}-${row.id}`}
+										>
+											Set as default
+										</Button>
+									{/if}
+									<Button
+										type="submit"
+										variant={row && !hasPendingChanges ? 'outline' : 'default'}
+										disabled={formSubmittingFor === draftKey ||
+											(row !== null && !hasPendingChanges)}
+										data-testid={`save-${activeTab}-${row ? row.id : `new-${entry.provider_name}`}`}
+									>
+										{#if formSubmittingFor === draftKey}
+											Saving…
+										{:else if row}
+											{hasPendingChanges ? 'Save changes' : 'Saved'}
+										{:else}
+											Save provider
+										{/if}
+									</Button>
+								</div>
+							</footer>
 						</form>
-					</section>
+					</div>
 				{:else}
-					<p class="empty">Select a provider on the left to see details.</p>
+					<div
+						class="flex min-h-[320px] flex-col items-center justify-center gap-2 rounded-md border border-dashed border-border bg-surface-1 px-6 py-10 text-center"
+					>
+						<PackageIcon class="size-6 text-ink-subtle" />
+						<p class="m-0 text-sm text-muted-foreground">
+							Pick a provider on the left to configure it.
+						</p>
+					</div>
 				{/if}
 			</section>
 		</div>
@@ -1443,93 +1691,164 @@
 
 {#if showExport}
 	<div
-		class="modal-backdrop"
-		role="dialog"
-		aria-modal="true"
-		aria-labelledby="export-heading"
+		class="fixed inset-0 z-[var(--z-modal-backdrop)] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+		role="presentation"
+		onclick={closeExport}
+		onkeydown={() => {}}
 	>
-		<div class="modal" data-testid="export-modal">
-			<header class="modal-header">
-				<h2 id="export-heading">Export configuration</h2>
-				<button type="button" class="icon" onclick={closeExport} aria-label="Close">×</button>
-			</header>
-			<p class="lede">
-				Download every configured provider as a JSON file you can keep as a backup,
-				move to another machine, or commit to <code>config/providers.json</code> so
-				the next stack startup re-seeds these rows automatically.
-			</p>
-			<label class="checkbox-row">
+		<div
+			class="flex w-full max-w-md flex-col gap-4 rounded-md border border-border bg-card p-5 shadow-[var(--shadow-modal)]"
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby="export-heading"
+			tabindex="-1"
+			onclick={(e) => e.stopPropagation()}
+			onkeydown={() => {}}
+			data-testid="export-modal"
+		>
+			<div class="flex items-start gap-3">
+				<div
+					class="flex size-9 shrink-0 items-center justify-center rounded-md bg-surface-2 text-foreground"
+				>
+					<DownloadIcon class="size-4" />
+				</div>
+				<div class="flex min-w-0 flex-1 flex-col gap-1.5">
+					<h2
+						id="export-heading"
+						class="m-0 text-base leading-tight font-semibold tracking-tight text-foreground"
+					>
+						Export configuration
+					</h2>
+					<p class="m-0 text-sm text-muted-foreground">
+						Download every configured provider as a JSON file you can keep as a backup,
+						move to another machine, or commit to
+						<span class="font-mono text-foreground">config/providers.json</span>
+						so the next stack startup re-seeds these rows automatically.
+					</p>
+				</div>
+			</div>
+			<label
+				class="flex items-start gap-3 rounded-md border border-border bg-surface-1 px-4 py-3"
+			>
 				<input
 					type="checkbox"
 					bind:checked={exportWithSecrets}
+					class="mt-0.5 size-4 [accent-color:var(--color-foreground)]"
 					data-testid="export-with-secrets"
 				/>
-				<span>
-					<strong>Include API keys and other secrets</strong>
-					<small>
-						Without secrets, the file restores names, kinds, and options — you'll re-enter keys
-						by hand on import. With secrets, the file itself becomes the secret store; treat it
-						accordingly.
+				<span class="flex flex-col gap-1 text-sm">
+					<span class="font-medium text-foreground">Include API keys and other secrets</span>
+					<small class="text-xs leading-relaxed text-muted-foreground">
+						Without secrets, the file restores names, kinds, and options — you'll re-enter
+						keys by hand on import. With secrets, the file itself becomes the secret store;
+						treat it accordingly.
 					</small>
 				</span>
 			</label>
 			{#if exportError}
-				<div class="alert error" data-testid="export-error">{exportError}</div>
+				<Alert.Root variant="destructive" data-testid="export-error">
+					<CircleAlertIcon />
+					<Alert.Description>{exportError}</Alert.Description>
+				</Alert.Root>
 			{/if}
-			<div class="modal-actions">
-				<button type="button" onclick={closeExport} disabled={exportSubmitting}>Cancel</button>
-				<button
-					type="button"
-					class="primary"
+			<div class="flex items-center justify-end gap-2">
+				<Button variant="outline" onclick={closeExport} disabled={exportSubmitting}>
+					Cancel
+				</Button>
+				<Button
+					variant="default"
 					onclick={runExport}
 					disabled={exportSubmitting}
 					data-testid="export-download"
 				>
 					{exportSubmitting ? 'Preparing…' : 'Download'}
-				</button>
+				</Button>
 			</div>
 		</div>
 	</div>
 {/if}
 
-{#if voiceBrowserId !== null}
-	{@const browserRow = providers.tts.find((p) => p.id === voiceBrowserId)}
+{#if voiceBrowserId !== null && browserRow}
 	<div
-		class="modal-backdrop"
-		role="dialog"
-		aria-modal="true"
-		aria-labelledby="voices-heading"
+		class="fixed inset-0 z-[var(--z-modal-backdrop)] bg-black/50 backdrop-blur-sm"
+		role="presentation"
+		onclick={closeVoiceBrowser}
+		onkeydown={() => {}}
+	></div>
+	<aside
+		class="fixed top-0 right-0 z-[var(--z-modal)] flex h-full w-full max-w-[640px] flex-col border-l border-border bg-card shadow-[var(--shadow-modal)]"
+		aria-label="Piper voices"
+		data-testid="voices-modal"
 	>
-		<div class="modal voices-modal" data-testid="voices-modal">
-			<header class="modal-header">
-				<h2 id="voices-heading">Piper voices</h2>
-				<button type="button" class="icon" onclick={closeVoiceBrowser} aria-label="Close">
-					×
-				</button>
-			</header>
-			<p class="lede">
-				Voices come from
-				<a
-					href="https://huggingface.co/rhasspy/piper-voices"
-					target="_blank"
-					rel="noopener">huggingface.co/rhasspy/piper-voices</a
-				>. Installing downloads <code>.onnx</code> + <code>.onnx.json</code> into
-				<code>{voiceModelDir || '/var/lib/johnny/piper-models'}</code>
-				— typically ~60 MB for medium voices.
-			</p>
-			<label class="row">
-				<span>Filter</span>
-				<input
+		<div
+			class="flex flex-col gap-2 border-b border-separator px-6 py-4"
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby="voices-heading"
+			tabindex="-1"
+		>
+			<div class="flex items-start justify-between gap-3">
+				<div class="flex min-w-0 flex-col gap-1">
+					<h2
+						id="voices-heading"
+						class="m-0 text-lg leading-tight font-semibold tracking-tight text-foreground"
+					>
+						Piper voices
+					</h2>
+					<p class="m-0 text-xs leading-relaxed text-muted-foreground">
+						Voices from
+						<a
+							class="text-foreground underline decoration-border-strong decoration-1 underline-offset-2 hover:decoration-primary"
+							href="https://huggingface.co/rhasspy/piper-voices"
+							target="_blank"
+							rel="noopener"
+						>
+							huggingface.co/rhasspy/piper-voices
+						</a>. Installing downloads
+						<span class="font-mono text-foreground">.onnx</span>
+						+
+						<span class="font-mono text-foreground">.onnx.json</span>
+						into
+						<span class="font-mono text-foreground">
+							{voiceModelDir || '/var/lib/johnny/piper-models'}
+						</span>
+						— typically ~60 MB for medium voices.
+					</p>
+				</div>
+				<Button
+					variant="ghost"
+					size="icon"
+					onclick={closeVoiceBrowser}
+					aria-label="Close voices browser"
+				>
+					<XIcon />
+				</Button>
+			</div>
+			<div class="flex flex-col gap-1.5">
+				<label
+					for="voice-filter"
+					class="text-xs font-medium text-foreground"
+				>
+					Filter
+				</label>
+				<Input
+					id="voice-filter"
 					type="text"
 					bind:value={voiceFilter}
 					placeholder="en, amy, en_US-amy-medium…"
 					data-testid="voice-filter"
 				/>
-			</label>
+			</div>
+		</div>
+
+		<div class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-6 py-4">
 			{#if voiceLoading}
-				<p class="empty">Loading catalog…</p>
+				<p class="m-0 text-sm italic text-muted-foreground">Loading catalog…</p>
 			{:else if voiceError}
-				<div class="alert error" data-testid="voices-error">{voiceError}</div>
+				<Alert.Root variant="destructive" data-testid="voices-error">
+					<CircleAlertIcon />
+					<Alert.Description>{voiceError}</Alert.Description>
+				</Alert.Root>
 			{:else}
 				{@const filtered = voiceFilter.trim()
 					? voiceList.filter(
@@ -1540,68 +1859,83 @@
 						)
 					: voiceList}
 				{#if filtered.length === 0}
-					<p class="empty">No voices match.</p>
+					<p class="m-0 text-sm italic text-muted-foreground">No voices match.</p>
 				{:else}
-					<ul class="voice-list" data-testid="voice-list">
+					<ul class="m-0 flex list-none flex-col gap-1.5 p-0" data-testid="voice-list">
 						{#each filtered as voice (voice.key)}
-							<li class="voice" data-testid={`voice-${voice.key}`}>
-								<div class="voice-main">
-									<div class="voice-title">
-										<strong>{voice.key}</strong>
+							<li
+								class="flex flex-col gap-2 rounded-md border border-border bg-card px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between"
+								data-testid={`voice-${voice.key}`}
+							>
+								<div class="flex min-w-0 flex-col gap-0.5">
+									<div class="flex flex-wrap items-center gap-2">
+										<strong class="font-mono text-sm font-medium text-foreground">
+											{voice.key}
+										</strong>
 										{#if voice.installed}
-											<span class="badge installed">Installed</span>
+											<span
+												class="inline-flex items-center gap-1 rounded-pill border border-border bg-surface-3 px-1.5 py-0.5 text-[0.65rem] font-medium text-foreground"
+											>
+												<span class="size-1.5 rounded-full bg-success" aria-hidden="true"></span>
+												<span>Installed</span>
+											</span>
 										{/if}
 									</div>
-									<small class="voice-meta">
-										{voice.language_name || voice.language_code} · quality:
-										{voice.quality}
+									<small class="text-xs text-muted-foreground">
+										{voice.language_name || voice.language_code} · quality: {voice.quality}
 									</small>
 								</div>
-								<div class="voice-actions">
-									{#if browserRow}
-										{#if voice.installed}
-											<button
-												type="button"
-												onclick={() => onPreviewVoice(browserRow, voice)}
-												disabled={previewLoadingVoice !== null &&
-													previewLoadingVoice !== voice.key}
-												data-testid={`preview-${voice.key}`}
-											>
-												{#if previewLoadingVoice === voice.key}
-													Loading…
-												{:else if previewingVoice === voice.key}
-													Stop
-												{:else}
-													Play
-												{/if}
-											</button>
-											<button
-												type="button"
-												onclick={() => useVoice(browserRow, voice)}
-												data-testid={`use-${voice.key}`}
-											>
-												Use this voice
-											</button>
-											<button
-												type="button"
-												class="danger"
-												onclick={() => onRemoveVoice(browserRow, voice)}
-												disabled={removingVoice !== null}
-												data-testid={`remove-${voice.key}`}
-											>
-												{removingVoice === voice.key ? 'Removing…' : 'Remove'}
-											</button>
-										{:else}
-											<button
-												type="button"
-												class="primary"
-												onclick={() => onInstallVoice(browserRow, voice)}
-												disabled={installingVoice !== null}
-												data-testid={`install-${voice.key}`}
-											>
-												{installingVoice === voice.key ? 'Downloading…' : 'Install'}
-											</button>
-										{/if}
+								<div class="flex shrink-0 flex-wrap items-center gap-1.5">
+									{#if voice.installed}
+										<Button
+											variant="outline"
+											size="sm"
+											onclick={() => onPreviewVoice(browserRow, voice)}
+											disabled={previewLoadingVoice !== null &&
+												previewLoadingVoice !== voice.key}
+											data-testid={`preview-${voice.key}`}
+										>
+											{#if previewLoadingVoice === voice.key}
+												Loading…
+											{:else if previewingVoice === voice.key}
+												<SquareIcon />
+												Stop
+											{:else}
+												<PlayIcon />
+												Play
+											{/if}
+										</Button>
+										<Button
+											variant="outline"
+											size="sm"
+											onclick={() => useVoice(browserRow, voice)}
+											data-testid={`use-${voice.key}`}
+										>
+											<CheckIcon />
+											Use
+										</Button>
+										<Button
+											variant="ghost"
+											size="sm"
+											onclick={() => askRemoveVoice(voice)}
+											disabled={removingVoice !== null}
+											class="text-destructive hover:bg-destructive/10 hover:text-destructive"
+											data-testid={`remove-${voice.key}`}
+										>
+											<Trash2Icon />
+											{removingVoice === voice.key ? 'Removing…' : 'Remove'}
+										</Button>
+									{:else}
+										<Button
+											variant="outline"
+											size="sm"
+											onclick={() => onInstallVoice(browserRow, voice)}
+											disabled={installingVoice !== null}
+											data-testid={`install-${voice.key}`}
+										>
+											<DownloadIcon />
+											{installingVoice === voice.key ? 'Downloading…' : 'Install'}
+										</Button>
 									{/if}
 								</div>
 							</li>
@@ -1610,16 +1944,138 @@
 				{/if}
 			{/if}
 			{#if installError}
-				<div class="alert error" data-testid="install-error">{installError}</div>
+				<Alert.Root variant="destructive" data-testid="install-error">
+					<CircleAlertIcon />
+					<Alert.Description>{installError}</Alert.Description>
+				</Alert.Root>
 			{/if}
 			{#if previewError}
-				<div class="alert error" data-testid="preview-error">{previewError}</div>
+				<Alert.Root variant="destructive" data-testid="preview-error">
+					<CircleAlertIcon />
+					<Alert.Description>{previewError}</Alert.Description>
+				</Alert.Root>
 			{/if}
 			{#if removeError}
-				<div class="alert error" data-testid="remove-error">{removeError}</div>
+				<Alert.Root variant="destructive" data-testid="remove-error">
+					<CircleAlertIcon />
+					<Alert.Description>{removeError}</Alert.Description>
+				</Alert.Root>
 			{/if}
-			<div class="modal-actions">
-				<button type="button" onclick={closeVoiceBrowser}>Close</button>
+		</div>
+
+		<footer class="flex items-center justify-end gap-2 border-t border-separator px-6 py-4">
+			<Button variant="outline" onclick={closeVoiceBrowser}>Close</Button>
+		</footer>
+	</aside>
+{/if}
+
+{#if askingDeleteId !== null && deleteTargetRow}
+	<div
+		class="fixed inset-0 z-[calc(var(--z-modal)+1)] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+		role="presentation"
+		onclick={cancelDelete}
+		onkeydown={() => {}}
+	>
+		<div
+			class="flex w-full max-w-md flex-col gap-4 rounded-md border border-border bg-card p-5 shadow-[var(--shadow-modal)]"
+			role="alertdialog"
+			aria-modal="true"
+			aria-labelledby="delete-heading"
+			aria-describedby="delete-body"
+			tabindex="-1"
+			onclick={(e) => e.stopPropagation()}
+			onkeydown={() => {}}
+			data-testid="delete-dialog"
+		>
+			<div class="flex items-start gap-3">
+				<div
+					class="flex size-9 shrink-0 items-center justify-center rounded-full bg-destructive/10 text-destructive"
+				>
+					<Trash2Icon class="size-4" />
+				</div>
+				<div class="flex flex-1 flex-col gap-1.5">
+					<h3
+						id="delete-heading"
+						class="m-0 text-base leading-tight font-semibold tracking-tight text-foreground"
+					>
+						Delete this provider?
+					</h3>
+					<p id="delete-body" class="m-0 text-sm text-muted-foreground">
+						<span class="font-medium text-foreground">{deleteTargetRow.display_name}</span>
+						will be removed. You'll need to re-enter credentials before the next test.
+						This cannot be undone.
+					</p>
+				</div>
+			</div>
+			<div class="flex items-center justify-end gap-2">
+				<Button variant="outline" onclick={cancelDelete}>Cancel</Button>
+				<Button
+					variant="destructive"
+					onclick={confirmDelete}
+					data-testid="delete-confirm"
+				>
+					<Trash2Icon />
+					Delete
+				</Button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+{#if askingRemoveVoiceKey !== null && removeVoiceTarget}
+	<div
+		class="fixed inset-0 z-[calc(var(--z-modal)+1)] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+		role="presentation"
+		onclick={cancelRemoveVoice}
+		onkeydown={() => {}}
+	>
+		<div
+			class="flex w-full max-w-md flex-col gap-4 rounded-md border border-border bg-card p-5 shadow-[var(--shadow-modal)]"
+			role="alertdialog"
+			aria-modal="true"
+			aria-labelledby="remove-voice-heading"
+			aria-describedby="remove-voice-body"
+			tabindex="-1"
+			onclick={(e) => e.stopPropagation()}
+			onkeydown={() => {}}
+			data-testid="remove-voice-dialog"
+		>
+			<div class="flex items-start gap-3">
+				<div
+					class="flex size-9 shrink-0 items-center justify-center rounded-full bg-destructive/10 text-destructive"
+				>
+					<Trash2Icon class="size-4" />
+				</div>
+				<div class="flex flex-1 flex-col gap-1.5">
+					<h3
+						id="remove-voice-heading"
+						class="m-0 text-base leading-tight font-semibold tracking-tight text-foreground"
+					>
+						Remove this voice?
+					</h3>
+					<p id="remove-voice-body" class="m-0 text-sm text-muted-foreground">
+						The
+						<span class="font-mono text-foreground">.onnx</span>
+						and
+						<span class="font-mono text-foreground">.onnx.json</span>
+						files for
+						<span class="font-mono text-foreground">{removeVoiceTarget.key}</span>
+						will be deleted from
+						<span class="font-mono text-foreground">{voiceModelDir || 'model_dir'}</span>.
+						You can reinstall later from the same browser.
+					</p>
+				</div>
+			</div>
+			<div class="flex items-center justify-end gap-2">
+				<Button variant="outline" onclick={cancelRemoveVoice}>Cancel</Button>
+				<Button
+					variant="destructive"
+					onclick={confirmRemoveVoice}
+					data-testid="remove-voice-confirm"
+				>
+					<Trash2Icon />
+					Remove
+				</Button>
 			</div>
 		</div>
 	</div>
@@ -1632,30 +2088,39 @@
 	id: string,
 	editing: boolean
 )}
-	<div class="field" data-testid={`field-${field.name}`}>
-		<label for={id}>
-			<span>
-				{field.label}
-				{#if field.required}<span class="required" aria-hidden="true">*</span>{/if}
-			</span>
+	<div class="flex flex-col gap-1.5" data-testid={`field-${field.name}`}>
+		<label for={id} class="text-sm leading-none font-medium text-foreground">
+			{field.label}
+			{#if field.required}<span class="ml-0.5 text-destructive" aria-hidden="true">*</span>{/if}
 		</label>
 		{#if field.type === 'select' && field.options}
-			<select id={id} bind:value={values[field.name]} required={field.required && !editing}>
+			<select
+				id={id}
+				bind:value={values[field.name]}
+				required={field.required && !editing}
+				class="border-input bg-background text-foreground focus-visible:border-ring focus-visible:ring-ring/50 dark:bg-input/30 flex h-9 w-full rounded-md border px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:ring-[3px]"
+			>
 				{#each field.options as opt (opt.value)}
 					<option value={opt.value}>{opt.label}</option>
 				{/each}
 			</select>
 		{:else if field.type === 'checkbox'}
-			<input id={id} type="checkbox" bind:checked={values[field.name] as boolean} />
+			<input
+				id={id}
+				type="checkbox"
+				bind:checked={values[field.name] as boolean}
+				class="mt-1 size-4 [accent-color:var(--color-foreground)]"
+			/>
 		{:else if field.type === 'textarea'}
 			<textarea
 				id={id}
 				bind:value={values[field.name]}
 				placeholder={field.placeholder ?? ''}
 				rows="3"
+				class="border-input bg-background text-foreground focus-visible:border-ring focus-visible:ring-ring/50 dark:bg-input/30 flex w-full rounded-md border px-3 py-2 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:ring-[3px]"
 			></textarea>
 		{:else if field.type === 'number'}
-			<input
+			<Input
 				id={id}
 				type="number"
 				step="any"
@@ -1663,14 +2128,14 @@
 				placeholder={field.placeholder ?? ''}
 			/>
 		{:else if field.type === 'url'}
-			<input
+			<Input
 				id={id}
 				type="url"
 				bind:value={values[field.name]}
 				placeholder={field.placeholder ?? 'https://…'}
 			/>
 		{:else if field.type === 'password'}
-			<input
+			<Input
 				id={id}
 				type="password"
 				autocomplete="new-password"
@@ -1679,7 +2144,7 @@
 				required={field.required && !editing}
 			/>
 		{:else}
-			<input
+			<Input
 				id={id}
 				type="text"
 				bind:value={values[field.name]}
@@ -1688,671 +2153,22 @@
 			/>
 		{/if}
 		{#if field.help_text || field.signup_url}
-			<small class="help">
+			<small class="text-xs text-muted-foreground">
 				{field.help_text ?? ''}
 				{#if field.signup_url}
-					<a href={field.signup_url} target="_blank" rel="noopener">Get a key →</a>
+					<a
+						class="text-foreground underline decoration-border-strong decoration-1 underline-offset-2 hover:decoration-primary"
+						href={field.signup_url}
+						target="_blank"
+						rel="noopener"
+					>
+						Get a key →
+					</a>
 				{/if}
 			</small>
 		{/if}
 		{#if errors[field.name]}
-			<small class="field-error">{errors[field.name]}</small>
+			<small class="text-xs text-destructive">{errors[field.name]}</small>
 		{/if}
 	</div>
 {/snippet}
-
-<style>
-	.page {
-		max-width: 1100px;
-	}
-	.page-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: flex-start;
-		gap: 1.5rem;
-		flex-wrap: wrap;
-	}
-	.lede {
-		max-width: 70ch;
-		color: #4b5563;
-		margin: 0.25rem 0 0;
-	}
-	.header-actions {
-		display: flex;
-		gap: 0.5rem;
-		flex-shrink: 0;
-	}
-
-	button {
-		padding: 0.45rem 0.9rem;
-		border: 1px solid #d1d5db;
-		background: #ffffff;
-		color: #1f2937;
-		border-radius: 6px;
-		cursor: pointer;
-		font-size: 0.9rem;
-	}
-	button:hover:not(:disabled) {
-		background: #f9fafb;
-	}
-	button:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-	button.primary {
-		background: #4f46e5;
-		color: #ffffff;
-		border-color: #4f46e5;
-	}
-	button.primary:hover:not(:disabled) {
-		background: #4338ca;
-	}
-	button.danger {
-		color: #b91c1c;
-		border-color: #fca5a5;
-	}
-	button.danger:hover:not(:disabled) {
-		background: #fef2f2;
-	}
-	button.icon {
-		padding: 0.1rem 0.45rem;
-		font-size: 1.2rem;
-		line-height: 1;
-		background: transparent;
-		border: none;
-		color: #6b7280;
-	}
-
-	.alert {
-		padding: 0.75rem 1rem;
-		border-radius: 6px;
-		margin: 1rem 0;
-	}
-	.alert.error {
-		background: #fef2f2;
-		color: #991b1b;
-		border: 1px solid #fecaca;
-	}
-
-	.tabs {
-		display: flex;
-		gap: 0.25rem;
-		border-bottom: 1px solid #e5e7eb;
-		margin-top: 1.5rem;
-	}
-	.tab {
-		display: flex;
-		flex-direction: column;
-		gap: 0.15rem;
-		align-items: flex-start;
-		padding: 0.6rem 1rem;
-		border: none;
-		border-bottom: 3px solid transparent;
-		background: transparent;
-		border-radius: 0;
-		font-size: 0.9rem;
-		cursor: pointer;
-		color: #4b5563;
-	}
-	.tab:hover:not(:disabled) {
-		background: #f9fafb;
-		color: #1f2937;
-	}
-	.tab.active {
-		color: #312e81;
-		border-bottom-color: #4f46e5;
-		font-weight: 600;
-	}
-	.tab-label {
-		font-size: 0.95rem;
-	}
-	.tab-meta {
-		font-size: 0.75rem;
-		color: #6b7280;
-		font-weight: 400;
-	}
-
-	.empty {
-		color: #6b7280;
-		font-style: italic;
-		margin: 1.5rem 0 0;
-	}
-
-	.layout {
-		display: grid;
-		grid-template-columns: 320px 1fr;
-		gap: 1.5rem;
-		align-items: flex-start;
-		margin-top: 1.5rem;
-	}
-
-	.catalog-list ul {
-		list-style: none;
-		padding: 0;
-		margin: 0;
-		display: grid;
-		gap: 0.5rem;
-	}
-	.catalog-section-label {
-		font-size: 0.7rem;
-		font-weight: 700;
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		color: #6b7280;
-		margin: 1rem 0 0.4rem;
-	}
-	.catalog-section-label:first-of-type {
-		margin-top: 0;
-	}
-	.add-card {
-		border-style: dashed !important;
-		background: #f9fafb !important;
-	}
-	.add-card:hover {
-		border-color: #4f46e5 !important;
-		background: #eef2ff !important;
-	}
-	.add-card.selected {
-		background: #e0e7ff !important;
-		border-style: solid !important;
-	}
-	.instance-card .provider-kind-label {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.72rem;
-		color: #6b7280;
-	}
-	.meta-configured-count {
-		background: #e0e7ff;
-		color: #312e81;
-	}
-	.catalog-card {
-		display: block;
-		width: 100%;
-		text-align: left;
-		padding: 0.8rem 0.9rem;
-		border: 1px solid #e5e7eb;
-		border-radius: 8px;
-		background: #ffffff;
-		color: inherit;
-		font: inherit;
-		cursor: pointer;
-	}
-	.catalog-card:hover {
-		border-color: #c7d2fe;
-	}
-	.catalog-card.selected {
-		border-color: #4f46e5;
-		background: #eef2ff;
-	}
-	.catalog-card.configured.selected {
-		background: #e0e7ff;
-	}
-	.catalog-card.active {
-		border-color: #10b981;
-	}
-	.catalog-card-head {
-		display: flex;
-		justify-content: space-between;
-		gap: 0.5rem;
-		align-items: baseline;
-	}
-	.catalog-card-summary {
-		margin: 0.25rem 0 0;
-		font-size: 0.8rem;
-		color: #4b5563;
-		display: -webkit-box;
-		-webkit-line-clamp: 2;
-		line-clamp: 2;
-		-webkit-box-orient: vertical;
-		overflow: hidden;
-	}
-	.catalog-card-meta {
-		display: flex;
-		gap: 0.4rem;
-		flex-wrap: wrap;
-		margin-top: 0.5rem;
-	}
-	.type-pill {
-		font-size: 0.65rem;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		padding: 0.1rem 0.4rem;
-		border-radius: 999px;
-		font-weight: 600;
-	}
-	.type-local {
-		background: #ecfdf5;
-		color: #065f46;
-		border: 1px solid #a7f3d0;
-	}
-	.type-cloud {
-		background: #ecfeff;
-		color: #155e75;
-		border: 1px solid #a5f3fc;
-	}
-	.meta-item {
-		font-size: 0.7rem;
-		color: #4b5563;
-		background: #f3f4f6;
-		padding: 0.1rem 0.45rem;
-		border-radius: 999px;
-	}
-	.meta-streaming {
-		background: #fef3c7;
-		color: #92400e;
-	}
-	.meta-configured {
-		background: #e0e7ff;
-		color: #312e81;
-	}
-	.meta-active {
-		background: #10b981;
-		color: #ffffff;
-	}
-
-	.detail {
-		background: #ffffff;
-		border: 1px solid #e5e7eb;
-		border-radius: 10px;
-		padding: 1.25rem 1.5rem;
-		min-height: 320px;
-	}
-	.detail-head {
-		display: grid;
-		grid-template-columns: 1fr auto;
-		gap: 1rem;
-		align-items: flex-start;
-		padding-bottom: 1rem;
-		border-bottom: 1px solid #e5e7eb;
-		margin-bottom: 1.25rem;
-	}
-	.detail-head h2 {
-		margin: 0;
-		font-size: 1.15rem;
-	}
-	.detail-meta {
-		display: grid;
-		grid-template-columns: max-content max-content;
-		column-gap: 0.6rem;
-		row-gap: 0.15rem;
-		font-size: 0.85rem;
-		color: #4b5563;
-		margin: 0;
-	}
-	.detail-meta dt {
-		font-weight: 600;
-	}
-	.detail-meta dd {
-		margin: 0;
-		text-transform: capitalize;
-	}
-	.signup-link {
-		color: #4f46e5;
-		font-size: 0.85rem;
-		text-decoration: none;
-	}
-	.signup-link:hover {
-		text-decoration: underline;
-	}
-
-	.test-panel {
-		padding: 1rem 0;
-		margin-bottom: 1.25rem;
-	}
-	.package-panel {
-		border: 1px solid #e5e7eb;
-		border-left: 4px solid #f59e0b;
-		border-radius: 6px;
-		padding: 0.75rem 1rem;
-		margin-bottom: 1rem;
-		background: #fffbeb;
-	}
-	.package-panel.installed {
-		border-left-color: #059669;
-		background: #ecfdf5;
-	}
-	.package-head {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		justify-content: space-between;
-	}
-	.package-head .badge {
-		font-size: 0.75rem;
-		padding: 0.15rem 0.5rem;
-		border-radius: 999px;
-		font-weight: 600;
-	}
-	.package-head .badge.ok {
-		background: #d1fae5;
-		color: #065f46;
-	}
-	.package-head .badge.warn {
-		background: #fef3c7;
-		color: #92400e;
-	}
-	.package-head .badge.muted {
-		background: #e5e7eb;
-		color: #374151;
-	}
-	.package-actions {
-		margin-top: 0.5rem;
-		display: flex;
-		gap: 0.5rem;
-	}
-	.package-log {
-		margin-top: 0.75rem;
-		max-height: 220px;
-		overflow: auto;
-		background: #111827;
-		color: #e5e7eb;
-		font-size: 0.78rem;
-		padding: 0.5rem 0.75rem;
-		border-radius: 4px;
-		white-space: pre-wrap;
-		font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
-	}
-	.test-actions {
-		display: flex;
-		gap: 0.75rem;
-		align-items: center;
-		flex-wrap: wrap;
-	}
-	.phase {
-		font-size: 0.85rem;
-		color: #4b5563;
-	}
-	.phase-recording {
-		color: #c2410c;
-	}
-	.phase-uploading {
-		color: #2563eb;
-	}
-	.phase-done {
-		color: #065f46;
-	}
-	.phase-error {
-		color: #991b1b;
-	}
-	.mic-level {
-		margin-top: 0.5rem;
-		height: 6px;
-		background: #f3f4f6;
-		border-radius: 999px;
-		overflow: hidden;
-	}
-	.mic-level-bar {
-		height: 100%;
-		background: linear-gradient(90deg, #4f46e5, #c026d3);
-		transition: width 0.1s linear;
-	}
-	.test-result {
-		margin-top: 1rem;
-		padding: 0.85rem 1rem;
-		border-radius: 8px;
-		font-size: 0.9rem;
-	}
-	.test-result.ok {
-		background: #ecfdf5;
-		color: #064e3b;
-		border: 1px solid #6ee7b7;
-	}
-	.test-result.fail {
-		background: #fef2f2;
-		color: #991b1b;
-		border: 1px solid #fecaca;
-	}
-	.test-result-head {
-		display: flex;
-		justify-content: space-between;
-		gap: 1rem;
-		flex-wrap: wrap;
-		align-items: baseline;
-		margin-bottom: 0.5rem;
-	}
-	.test-result-meta {
-		display: flex;
-		gap: 0.9rem;
-		font-size: 0.85rem;
-		color: #4b5563;
-		font-weight: 500;
-	}
-	.test-result .detail {
-		opacity: 0.85;
-	}
-	.transcript {
-		margin: 0;
-		font-size: 1.05rem;
-		font-style: italic;
-		line-height: 1.4;
-		color: #1f2937;
-	}
-
-	.config-panel {
-		padding-top: 1rem;
-		border-top: 1px solid #e5e7eb;
-	}
-	.config-head {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 1rem;
-		margin-bottom: 0.75rem;
-	}
-	.config-head h3 {
-		margin: 0;
-		font-size: 1rem;
-	}
-	.config-actions {
-		display: flex;
-		gap: 0.5rem;
-		flex-wrap: wrap;
-	}
-	.config-form {
-		display: grid;
-		gap: 0.85rem;
-	}
-	.config-form-actions {
-		display: flex;
-		justify-content: flex-end;
-	}
-	.row {
-		display: grid;
-		gap: 0.3rem;
-		font-size: 0.9rem;
-	}
-	.row > span {
-		font-weight: 600;
-	}
-	fieldset {
-		border: 1px solid #e5e7eb;
-		border-radius: 8px;
-		padding: 0.85rem 1rem;
-		display: grid;
-		gap: 0.75rem;
-		margin: 0;
-	}
-	fieldset legend {
-		font-weight: 600;
-		font-size: 0.85rem;
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-		color: #4b5563;
-		padding: 0 0.25rem;
-	}
-	.field {
-		display: grid;
-		gap: 0.3rem;
-	}
-	.field label > span {
-		font-weight: 600;
-		font-size: 0.9rem;
-	}
-	.field .required {
-		color: #b91c1c;
-		margin-left: 0.2rem;
-	}
-	.field input,
-	.field select,
-	.field textarea {
-		font: inherit;
-		padding: 0.45rem 0.6rem;
-		border: 1px solid #d1d5db;
-		border-radius: 6px;
-		background: #ffffff;
-	}
-	.field input[type='checkbox'] {
-		justify-self: start;
-		padding: 0;
-		width: auto;
-	}
-	.help {
-		color: #6b7280;
-		font-size: 0.8rem;
-	}
-	.help a {
-		color: #4f46e5;
-	}
-	.field-error {
-		color: #b91c1c;
-		font-size: 0.8rem;
-	}
-	.row input {
-		font: inherit;
-		padding: 0.45rem 0.6rem;
-		border: 1px solid #d1d5db;
-		border-radius: 6px;
-		background: #ffffff;
-	}
-
-	.modal-backdrop {
-		position: fixed;
-		inset: 0;
-		background: rgba(17, 24, 39, 0.6);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		padding: 1rem;
-		z-index: 50;
-	}
-	.modal {
-		background: #ffffff;
-		padding: 1.5rem;
-		border-radius: 10px;
-		width: min(640px, 100%);
-		max-height: 90vh;
-		overflow: auto;
-		display: grid;
-		gap: 0.85rem;
-	}
-	.modal-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: baseline;
-		gap: 1rem;
-	}
-	.modal h2 {
-		margin: 0;
-		font-size: 1.1rem;
-	}
-	.modal-actions {
-		display: flex;
-		justify-content: flex-end;
-		gap: 0.5rem;
-		margin-top: 0.25rem;
-	}
-	.checkbox-row {
-		display: grid;
-		grid-template-columns: auto 1fr;
-		gap: 0.6rem;
-		align-items: start;
-		padding: 0.85rem 1rem;
-		border: 1px solid #e5e7eb;
-		border-radius: 8px;
-	}
-	.checkbox-row input[type='checkbox'] {
-		margin-top: 0.2rem;
-	}
-	.checkbox-row span {
-		display: grid;
-		gap: 0.2rem;
-		font-size: 0.9rem;
-	}
-	.checkbox-row small {
-		color: #6b7280;
-		font-size: 0.8rem;
-	}
-	.modal code {
-		background: #f3f4f6;
-		padding: 0 0.25rem;
-		border-radius: 4px;
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.85em;
-	}
-
-	.voices-modal {
-		width: min(720px, 100%);
-	}
-	.voice-list {
-		list-style: none;
-		padding: 0;
-		margin: 0;
-		display: grid;
-		gap: 0.4rem;
-		max-height: 50vh;
-		overflow: auto;
-	}
-	.voice {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		gap: 1rem;
-		padding: 0.5rem 0.75rem;
-		border: 1px solid #e5e7eb;
-		border-radius: 6px;
-		background: #ffffff;
-	}
-	.voice-main {
-		min-width: 0;
-	}
-	.voice-title {
-		display: flex;
-		align-items: baseline;
-		gap: 0.5rem;
-		flex-wrap: wrap;
-	}
-	.voice-meta {
-		color: #6b7280;
-		font-size: 0.8rem;
-	}
-	.badge {
-		font-size: 0.7rem;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		background: #4f46e5;
-		color: #ffffff;
-		padding: 0.1rem 0.45rem;
-		border-radius: 999px;
-	}
-	.badge.installed {
-		background: #10b981;
-	}
-	.voice-actions {
-		display: flex;
-		gap: 0.4rem;
-		flex-shrink: 0;
-		flex-wrap: wrap;
-	}
-
-	@media (max-width: 880px) {
-		.layout {
-			grid-template-columns: 1fr;
-		}
-		.detail-head {
-			grid-template-columns: 1fr;
-		}
-		.tabs {
-			flex-wrap: wrap;
-		}
-	}
-</style>
