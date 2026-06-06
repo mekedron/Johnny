@@ -11,6 +11,8 @@
 		groupedFields,
 		GROUP_LABEL,
 		initialValues,
+		installPiperVoice,
+		listPiperVoices,
 		listProviders,
 		listSchemas,
 		playSample,
@@ -21,6 +23,7 @@
 		validateClient,
 		ValidationFailure,
 		type FieldDef,
+		type PiperVoice,
 		type Provider,
 		type ProviderKind,
 		type ProviderList,
@@ -381,6 +384,88 @@
 	function fieldInputId(prefix: string, fieldName: string): string {
 		return `${prefix}-${fieldName}`;
 	}
+
+	// --- Piper voice browser ----------------------------------------------
+	//
+	// When the user opens "Browse voices" on a Local Piper card we fetch
+	// the rhasspy/piper-voices catalog and let them click Install on a
+	// row. Installation downloads ~60 MB so we track per-row busy state.
+	// The selected key is written back into editValues.voice_id so saving
+	// the form uses the just-installed voice without manual typing.
+
+	let voiceBrowserId = $state<number | null>(null);
+	let voiceList = $state<PiperVoice[]>([]);
+	let voiceLoading = $state(false);
+	let voiceError = $state<string | null>(null);
+	let voiceFilter = $state('');
+	let installingVoice = $state<string | null>(null);
+	let installError = $state<string | null>(null);
+	let voiceModelDir = $state<string>('');
+
+	function isPiperProvider(p: Provider): boolean {
+		return p.kind === 'tts' && p.provider_name === 'piper';
+	}
+
+	const filteredVoices = $derived.by(() => {
+		const q = voiceFilter.trim().toLowerCase();
+		if (!q) return voiceList;
+		return voiceList.filter(
+			(v) =>
+				v.key.toLowerCase().includes(q) ||
+				v.language_name.toLowerCase().includes(q) ||
+				v.name.toLowerCase().includes(q)
+		);
+	});
+
+	async function openVoiceBrowser(p: Provider) {
+		voiceBrowserId = p.id;
+		voiceError = null;
+		installError = null;
+		voiceLoading = true;
+		voiceList = [];
+		try {
+			const data = await listPiperVoices(p.id);
+			voiceList = data.voices;
+			voiceModelDir = data.model_dir;
+		} catch (e) {
+			voiceError = e instanceof Error ? e.message : String(e);
+		} finally {
+			voiceLoading = false;
+		}
+	}
+
+	function closeVoiceBrowser() {
+		voiceBrowserId = null;
+		voiceFilter = '';
+		voiceError = null;
+		installError = null;
+	}
+
+	async function onInstallVoice(p: Provider, voice: PiperVoice) {
+		installingVoice = voice.key;
+		installError = null;
+		try {
+			const result = await installPiperVoice(p.id, voice.key);
+			// Refresh the entry in-place so the UI flips to "Installed".
+			voiceList = voiceList.map((v) =>
+				v.key === voice.key ? { ...v, installed: result.installed } : v
+			);
+		} catch (e) {
+			installError = e instanceof Error ? e.message : String(e);
+		} finally {
+			installingVoice = null;
+		}
+	}
+
+	function useVoice(p: Provider, voice: PiperVoice) {
+		// Write the voice_id into the edit form if it's open, otherwise
+		// open the editor first so the user lands on the right field.
+		if (editingId !== p.id) {
+			openEdit(p);
+		}
+		editValues = { ...editValues, voice_id: voice.key };
+		closeVoiceBrowser();
+	}
 </script>
 
 <svelte:head>
@@ -537,6 +622,15 @@
 										{:else}
 											Play
 										{/if}
+									</button>
+								{/if}
+								{#if isPiperProvider(provider)}
+									<button
+										type="button"
+										onclick={() => openVoiceBrowser(provider)}
+										data-testid={`voices-${provider.id}`}
+									>
+										Browse voices
 									</button>
 								{/if}
 								{#if editingId !== provider.id}
@@ -712,6 +806,99 @@
 				>
 					{exportSubmitting ? 'Preparing…' : 'Download'}
 				</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+{#if voiceBrowserId !== null}
+	{@const browserProvider = providers.tts.find((p) => p.id === voiceBrowserId)}
+	<div
+		class="modal-backdrop"
+		role="dialog"
+		aria-modal="true"
+		aria-labelledby="voices-heading"
+	>
+		<div class="modal voices-modal" data-testid="voices-modal">
+			<header class="modal-header">
+				<h2 id="voices-heading">Piper voices</h2>
+				<button type="button" class="icon" onclick={closeVoiceBrowser} aria-label="Close">
+					×
+				</button>
+			</header>
+			<p class="lede">
+				Voices come from
+				<a
+					href="https://huggingface.co/rhasspy/piper-voices"
+					target="_blank"
+					rel="noopener">huggingface.co/rhasspy/piper-voices</a
+				>. Installing downloads <code>.onnx</code> + <code>.onnx.json</code> into
+				<code>{voiceModelDir || '/var/lib/johnny/piper-models'}</code>
+				— typically ~60 MB for medium voices.
+			</p>
+			<label class="row">
+				<span>Filter</span>
+				<input
+					type="text"
+					bind:value={voiceFilter}
+					placeholder="en, amy, en_US-amy-medium…"
+					data-testid="voice-filter"
+				/>
+			</label>
+			{#if voiceLoading}
+				<p class="empty">Loading catalog…</p>
+			{:else if voiceError}
+				<div class="alert error" data-testid="voices-error">{voiceError}</div>
+			{:else if filteredVoices.length === 0}
+				<p class="empty">No voices match.</p>
+			{:else}
+				<ul class="voice-list" data-testid="voice-list">
+					{#each filteredVoices as voice (voice.key)}
+						<li class="voice" data-testid={`voice-${voice.key}`}>
+							<div class="voice-main">
+								<div class="voice-title">
+									<strong>{voice.key}</strong>
+									{#if voice.installed}
+										<span class="badge installed">Installed</span>
+									{/if}
+								</div>
+								<small class="voice-meta">
+									{voice.language_name || voice.language_code} · quality:
+									{voice.quality}
+								</small>
+							</div>
+							<div class="voice-actions">
+								{#if browserProvider}
+									{#if voice.installed}
+										<button
+											type="button"
+											onclick={() => useVoice(browserProvider, voice)}
+											data-testid={`use-${voice.key}`}
+										>
+											Use this voice
+										</button>
+									{:else}
+										<button
+											type="button"
+											class="primary"
+											onclick={() => onInstallVoice(browserProvider, voice)}
+											disabled={installingVoice !== null}
+											data-testid={`install-${voice.key}`}
+										>
+											{installingVoice === voice.key ? 'Downloading…' : 'Install'}
+										</button>
+									{/if}
+								{/if}
+							</div>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+			{#if installError}
+				<div class="alert error" data-testid="install-error">{installError}</div>
+			{/if}
+			<div class="modal-actions">
+				<button type="button" onclick={closeVoiceBrowser}>Close</button>
 			</div>
 		</div>
 	</div>
@@ -1129,6 +1316,48 @@
 		border-radius: 4px;
 		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 		font-size: 0.85em;
+	}
+
+	.voices-modal {
+		width: min(720px, 100%);
+	}
+	.voice-list {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+		display: grid;
+		gap: 0.4rem;
+		max-height: 50vh;
+		overflow: auto;
+	}
+	.voice {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 1rem;
+		padding: 0.5rem 0.75rem;
+		border: 1px solid #e5e7eb;
+		border-radius: 6px;
+		background: #ffffff;
+	}
+	.voice-main {
+		min-width: 0;
+	}
+	.voice-title {
+		display: flex;
+		align-items: baseline;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+	.voice-meta {
+		color: #6b7280;
+		font-size: 0.8rem;
+	}
+	.badge.installed {
+		background: #10b981;
+	}
+	.voice-actions {
+		flex-shrink: 0;
 	}
 
 	@media (max-width: 640px) {

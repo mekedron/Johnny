@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "sessionId": "79f70c67-bb19-4cbc-940f-b02dbec38449",
+  "sessionId": "df240159-fc21-4121-a38c-68d1ee51e96c",
   "status": "running",
-  "startedAt": "2026-06-06T07:53:57.289Z",
-  "updatedAt": "2026-06-06T10:37:47.832Z",
-  "currentIteration": 10,
+  "startedAt": "2026-06-06T10:45:39.877Z",
+  "updatedAt": "2026-06-06T11:00:57.826Z",
+  "currentIteration": 0,
   "maxIterations": 0,
-  "tasksCompleted": 10,
+  "tasksCompleted": 0,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -27,11 +27,83 @@
         }
       }
     ],
-    "totalTasks": 15,
+    "totalTasks": 34,
     "tasks": [
+      {
+        "id": "Johnny-4c0",
+        "title": "Local Piper TTS: smoke test fails with opaque 'exit code 1' — need easy voice install + real error surfacing",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ze3",
+        "title": "Voice interrupt doesn't actually work end-to-end: bot ignores user speech mid-utterance (reopens Johnny-har / Johnny-di9)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-d2g",
+        "title": "Bot joined but voice pipeline never runs: no transcription, no decisions, no speech, no audio bridge",
+        "status": "completed",
+        "completedInSession": false
+      },
       {
         "id": "Johnny-ckz.1",
         "title": "Bot join hangs at 'Johnny is joining — session #N': bot never appears in Meet, Active sessions stays 0, no logs",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.2",
+        "title": "Add 'Autonomous' mode: bot speaks freely per profile instructions, no whitelist, no approval gate",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ajc",
+        "title": "Active session 'Leave now' button: UI marks session ended but bot stays in the Google Meet",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-3ha",
+        "title": "Active LLM provider sometimes gets unselected (TTS and STT are not affected)",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-1zg",
+        "title": "Add ElevenLabs as an STT provider (missing from Add Provider dropdown when kind=stt)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-arh",
+        "title": "Bot speaks over user mid-sentence: partial transcripts trigger responses before user finishes",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-2bw",
+        "title": "Build automated two-bot test harness to reproduce voice-interrupt failure (simulated speaker vs Johnny)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-7qp",
+        "title": "Bot loses conversation context mid-session: can't recall its own prior utterances",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-di9",
+        "title": "Voice-triggered barge-in: user can interrupt the bot mid-utterance by speaking",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-har",
+        "title": "STT transcription of participants must never pause while bot is speaking or thinking",
         "status": "completed",
         "completedInSession": false
       },
@@ -68,7 +140,7 @@
       {
         "id": "Johnny-pdf",
         "title": "Execute comprehensive end-to-end validation: bot joins real Google Meet and exercises every product feature across all modes",
-        "status": "open",
+        "status": "completed",
         "completedInSession": false
       },
       {
@@ -80,19 +152,31 @@
       {
         "id": "Johnny-f7k",
         "title": "Smoke-test populated .env: bring stack up and verify end-to-end",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-9eq",
+        "title": "LLM providers: fetch model list dynamically from each provider's API instead of hardcoding",
         "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-ckz.2",
-        "title": "Add 'Autonomous' mode: bot speaks freely per profile instructions, no whitelist, no approval gate",
-        "status": "completed",
+        "id": "Johnny-uga",
+        "title": "ElevenLabs e2e plan uses library voice incompatible with free tier",
+        "status": "open",
         "completedInSession": false
       },
       {
         "id": "Johnny-ckz.3",
         "title": "Bot carries the whole meeting's context (not a 6-turn rolling window) when routing and answering",
         "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.4",
+        "title": "Run the two-bot voice-interrupt harness end-to-end against real models, fix any bugs it surfaces",
+        "status": "open",
         "completedInSession": false
       },
       {
@@ -108,121 +192,50 @@
         "completedInSession": false
       },
       {
+        "id": "Johnny-qow",
+        "title": "Add no-CLI bot sign-in: in-browser Chromium via noVNC helper container",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-4da",
+        "title": "Read Google Docs/Sheets URLs linked in calendar event description and include as pre-meeting context",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-dsy",
+        "title": "Cross-session continuity: rehydrate prior session summary for recurring events",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
         "id": "Johnny-4ph",
-        "title": "Trigger bot Google sign-in from the UI (no CLI helper)",
+        "title": "Add UI button to trigger bot Google sign-in (CLI helper stays as alternative)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-6ij",
-        "title": "TTS providers: play a demo phrase after Test so the user actually hears the voice",
+        "title": "TTS providers: separate Play button to hear a demo phrase, with Stop while playing",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-d3e",
+        "title": "Seed providers from JSON/config file on startup",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-k3z",
+        "title": "Export all provider configurations as JSON from the UI",
+        "status": "completed",
+        "completedInSession": false
       }
     ]
   },
-  "iterations": [
-    {
-      "iteration": 1,
-      "status": "completed",
-      "taskId": "Johnny-har",
-      "taskTitle": "STT transcription of participants must never pause while bot is speaking or thinking",
-      "taskCompleted": true,
-      "durationMs": 739772,
-      "startedAt": "2026-06-06T07:56:57.428Z",
-      "endedAt": "2026-06-06T08:09:17.200Z"
-    },
-    {
-      "iteration": 2,
-      "status": "completed",
-      "taskId": "Johnny-di9",
-      "taskTitle": "Voice-triggered barge-in: user can interrupt the bot mid-utterance by speaking",
-      "taskCompleted": true,
-      "durationMs": 1538194,
-      "startedAt": "2026-06-06T08:09:54.974Z",
-      "endedAt": "2026-06-06T08:35:33.168Z"
-    },
-    {
-      "iteration": 3,
-      "status": "completed",
-      "taskId": "Johnny-4ph",
-      "taskTitle": "Add UI button to trigger bot Google sign-in (CLI helper stays as alternative)",
-      "taskCompleted": true,
-      "durationMs": 906498,
-      "startedAt": "2026-06-06T08:35:40.622Z",
-      "endedAt": "2026-06-06T08:50:47.120Z"
-    },
-    {
-      "iteration": 4,
-      "status": "completed",
-      "taskId": "Johnny-6ij",
-      "taskTitle": "TTS providers: separate Play button to hear a demo phrase, with Stop while playing",
-      "taskCompleted": true,
-      "durationMs": 468531,
-      "startedAt": "2026-06-06T08:50:54.163Z",
-      "endedAt": "2026-06-06T08:58:42.694Z"
-    },
-    {
-      "iteration": 5,
-      "status": "completed",
-      "taskId": "Johnny-ze3",
-      "taskTitle": "Voice interrupt doesn't actually work end-to-end: bot ignores user speech mid-utterance (reopens Johnny-har / Johnny-di9)",
-      "taskCompleted": true,
-      "durationMs": 1102199,
-      "startedAt": "2026-06-06T08:58:50.427Z",
-      "endedAt": "2026-06-06T09:17:12.626Z"
-    },
-    {
-      "iteration": 6,
-      "status": "completed",
-      "taskId": "Johnny-7qp",
-      "taskTitle": "Bot loses conversation context mid-session: can't recall its own prior utterances",
-      "taskCompleted": true,
-      "durationMs": 939433,
-      "startedAt": "2026-06-06T09:17:19.503Z",
-      "endedAt": "2026-06-06T09:32:58.936Z"
-    },
-    {
-      "iteration": 7,
-      "status": "completed",
-      "taskId": "Johnny-d3e",
-      "taskTitle": "Seed providers from JSON/config file on startup",
-      "taskCompleted": true,
-      "durationMs": 564191,
-      "startedAt": "2026-06-06T09:33:06.104Z",
-      "endedAt": "2026-06-06T09:42:30.295Z"
-    },
-    {
-      "iteration": 8,
-      "status": "completed",
-      "taskId": "Johnny-k3z",
-      "taskTitle": "Export all provider configurations as JSON from the UI",
-      "taskCompleted": true,
-      "durationMs": 478934,
-      "startedAt": "2026-06-06T09:42:37.383Z",
-      "endedAt": "2026-06-06T09:50:36.317Z"
-    },
-    {
-      "iteration": 9,
-      "status": "completed",
-      "taskId": "Johnny-1zg",
-      "taskTitle": "Add ElevenLabs as an STT provider (missing from Add Provider dropdown when kind=stt)",
-      "taskCompleted": true,
-      "durationMs": 616574,
-      "startedAt": "2026-06-06T09:50:43.558Z",
-      "endedAt": "2026-06-06T10:01:00.132Z"
-    },
-    {
-      "iteration": 10,
-      "status": "completed",
-      "taskId": "Johnny-arh",
-      "taskTitle": "Bot speaks over user mid-sentence: partial transcripts trigger responses before user finishes",
-      "taskCompleted": true,
-      "durationMs": 788802,
-      "startedAt": "2026-06-06T10:01:08.305Z",
-      "endedAt": "2026-06-06T10:14:17.107Z"
-    }
-  ],
+  "iterations": [],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

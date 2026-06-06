@@ -250,6 +250,54 @@ export async function playSample(id: number): Promise<Blob> {
 	return res.blob();
 }
 
+export interface PiperVoice {
+	key: string;
+	name: string;
+	language_code: string;
+	language_name: string;
+	quality: string;
+	installed: boolean;
+}
+
+export interface PiperVoiceList {
+	model_dir: string;
+	voices: PiperVoice[];
+}
+
+export interface PiperVoiceInstallResult {
+	key: string;
+	installed: boolean;
+	onnx_bytes: number;
+	onnx_json_bytes: number;
+	already_present: boolean;
+}
+
+/**
+ * List every Piper voice from huggingface.co/rhasspy/piper-voices and
+ * annotate which are already installed in the provider's `model_dir`.
+ * Only valid for `tts:piper` providers — STT/LLM rows return 400.
+ */
+export function listPiperVoices(id: number): Promise<PiperVoiceList> {
+	return request<PiperVoiceList>(`/providers/${id}/voices`);
+}
+
+/**
+ * Download a Piper voice (both `.onnx` and `.onnx.json`) into the
+ * provider's `model_dir`. Idempotent: re-installing an already-present
+ * voice short-circuits without re-downloading. The browser request
+ * holds the connection until the ~60 MB download completes, so the
+ * caller should keep the user informed with a spinner.
+ */
+export function installPiperVoice(
+	id: number,
+	voiceKey: string
+): Promise<PiperVoiceInstallResult> {
+	return request<PiperVoiceInstallResult>(
+		`/providers/${id}/voices/${encodeURIComponent(voiceKey)}/install`,
+		{ method: 'POST' }
+	);
+}
+
 export interface ExportResult {
 	blob: Blob;
 	filename: string;

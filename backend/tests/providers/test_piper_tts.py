@@ -82,9 +82,11 @@ class _FakeProcess:
         *,
         exit_code: int = 0,
         terminate_hangs: bool = False,
+        stderr_data: bytes = b"",
     ) -> None:
         self.stdout: IO[bytes] | None = io.BytesIO(stdout_data)
         self.stdin: IO[bytes] | None = _FakeStdin()
+        self.stderr: IO[bytes] | None = io.BytesIO(stderr_data)
         self._returncode: int | None = None
         self._exit_code = exit_code
         self._terminate_hangs = terminate_hangs
@@ -114,7 +116,13 @@ class _FakeProcess:
 
 
 class _FakePiperTTS(PiperTTS):
-    """PiperTTS variant that returns a controlled :class:`_FakeProcess`."""
+    """PiperTTS variant that returns a controlled :class:`_FakeProcess`.
+
+    Skips the on-disk preflight checks (model file existence, binary on
+    PATH) so tests can use synthetic paths like ``/m/foo.onnx`` without
+    materialising fixture files for every case. The real adapter's
+    behaviour for those checks is covered by dedicated tests below.
+    """
 
     def __init__(
         self,
@@ -123,13 +131,20 @@ class _FakePiperTTS(PiperTTS):
         stdout_data: bytes = b"",
         exit_code: int = 0,
         terminate_hangs: bool = False,
+        stderr_data: bytes = b"",
     ) -> None:
         super().__init__(config)
         self._stdout_data = stdout_data
         self._exit_code = exit_code
         self._terminate_hangs = terminate_hangs
+        self._stderr_data = stderr_data
         self.spawned_with: list[Path] = []
         self.process: _FakeProcess | None = None
+
+    def _preflight_checks(self, model_path: Path) -> None:
+        # Tests rely on synthetic /m/foo.onnx paths; bypass the on-disk
+        # checks that the real adapter runs before spawning piper.
+        return None
 
     def _spawn_process(self, model_path: Path) -> Any:
         self.spawned_with.append(model_path)
@@ -137,6 +152,7 @@ class _FakePiperTTS(PiperTTS):
             stdout_data=self._stdout_data,
             exit_code=self._exit_code,
             terminate_hangs=self._terminate_hangs,
+            stderr_data=self._stderr_data,
         )
         return self.process
 
@@ -403,6 +419,37 @@ async def test_synthesize_raises_when_piper_exits_nonzero() -> None:
             pass
 
 
+async def test_synthesize_includes_stderr_in_error_message() -> None:
+    """Non-zero exit must surface the captured stderr tail so users see
+    the real reason (missing libonnxruntime, malformed model, etc.)."""
+    stderr_payload = b"piper: error while loading shared libraries: libonnxruntime.so.1\n"
+    adapter = _FakePiperTTS(
+        _config(voice_id="vx", model_dir="/m"),
+        stdout_data=b"",
+        exit_code=1,
+        stderr_data=stderr_payload,
+    )
+    with pytest.raises(TTSError) as exc_info:
+        async for _ in adapter.synthesize_stream("hi"):
+            pass
+    assert "libonnxruntime" in str(exc_info.value)
+    assert "non-zero code 1" in str(exc_info.value)
+
+
+async def test_synthesize_error_says_no_stderr_when_drained_empty() -> None:
+    """When piper exits non-zero but produced no diagnostic output the
+    error should explicitly say so instead of dangling an empty colon."""
+    adapter = _FakePiperTTS(
+        _config(voice_id="vx", model_dir="/m"),
+        stdout_data=b"",
+        exit_code=2,
+        stderr_data=b"",
+    )
+    with pytest.raises(TTSError, match="no stderr captured"):
+        async for _ in adapter.synthesize_stream("hi"):
+            pass
+
+
 async def test_synthesize_propagates_broken_pipe_on_stdin() -> None:
     adapter = _FakePiperTTS(
         _config(voice_id="vx", model_dir="/m"),
@@ -526,3 +573,298 @@ def test_resolve_binary_raises_when_not_on_path(
     adapter = PiperTTS(_config(binary="piper-missing"))
     with pytest.raises(TTSError, match="not found on PATH"):
         adapter._resolve_binary()
+
+
+# --- preflight checks ------------------------------------------------------
+
+
+def test_preflight_raises_when_model_file_missing(tmp_path: Path) -> None:
+    """The adapter must fail fast with a clear voice-not-installed message
+    before spawning piper — otherwise the user only sees 'exit code 1'."""
+    adapter = PiperTTS(_config(voice_id="en_US-amy-medium", model_dir=str(tmp_path)))
+    with pytest.raises(TTSError, match="voice model not found"):
+        adapter._preflight_checks(tmp_path / "en_US-amy-medium.onnx")
+
+
+def test_preflight_raises_when_sidecar_missing(tmp_path: Path) -> None:
+    """Only the .onnx half being present is still a broken install."""
+    onnx = tmp_path / "vx.onnx"
+    onnx.write_bytes(b"")  # touch the .onnx so the first check passes
+    adapter = PiperTTS(_config(voice_id="vx", model_dir=str(tmp_path)))
+    with pytest.raises(TTSError, match="sidecar not found"):
+        adapter._preflight_checks(onnx)
+
+
+def test_preflight_passes_when_files_and_binary_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    onnx = tmp_path / "vx.onnx"
+    onnx.write_bytes(b"")
+    sidecar = tmp_path / "vx.onnx.json"
+    sidecar.write_text("{}")
+    monkeypatch.setattr(
+        "app.providers.piper_tts.shutil.which", lambda name: f"/usr/bin/{name}"
+    )
+    adapter = PiperTTS(_config(voice_id="vx", model_dir=str(tmp_path)))
+    # No exception means preflight is happy.
+    adapter._preflight_checks(onnx)
+
+
+async def test_synthesize_runs_preflight_before_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing voice must short-circuit before any subprocess work."""
+    monkeypatch.setattr(
+        "app.providers.piper_tts.shutil.which", lambda name: f"/usr/bin/{name}"
+    )
+    adapter = PiperTTS(_config(voice_id="en_US-amy-medium", model_dir="/nonexistent"))
+    with pytest.raises(TTSError, match="voice model not found"):
+        async for _ in adapter.synthesize_stream("hi"):
+            pass
+
+
+# --- Voice catalog helpers -------------------------------------------------
+
+
+def test_voice_is_installed_true_only_when_both_files_present(
+    tmp_path: Path,
+) -> None:
+    from app.providers.piper_tts import voice_is_installed
+
+    assert voice_is_installed(str(tmp_path), "vx") is False
+    (tmp_path / "vx.onnx").write_bytes(b"")
+    assert voice_is_installed(str(tmp_path), "vx") is False
+    (tmp_path / "vx.onnx.json").write_text("{}")
+    assert voice_is_installed(str(tmp_path), "vx") is True
+
+
+def test_coerce_catalog_marks_installed_voices(tmp_path: Path) -> None:
+    from app.providers.piper_tts import _coerce_catalog
+
+    (tmp_path / "en_US-amy-medium.onnx").write_bytes(b"")
+    (tmp_path / "en_US-amy-medium.onnx.json").write_text("{}")
+    payload = {
+        "en_US-amy-medium": {
+            "name": "amy",
+            "language": {"code": "en_US", "name_english": "English"},
+            "quality": "medium",
+        },
+        "en_US-ryan-low": {
+            "name": "ryan",
+            "language": {"code": "en_US", "name_english": "English"},
+            "quality": "low",
+        },
+    }
+    voices = _coerce_catalog(payload, str(tmp_path))
+    by_key = {v.key: v for v in voices}
+    assert by_key["en_US-amy-medium"].installed is True
+    assert by_key["en_US-ryan-low"].installed is False
+    # Sorted by language_code then key — both share en_US, alpha order on key.
+    assert [v.key for v in voices] == ["en_US-amy-medium", "en_US-ryan-low"]
+
+
+def test_coerce_catalog_handles_missing_language_block(tmp_path: Path) -> None:
+    from app.providers.piper_tts import _coerce_catalog
+
+    voices = _coerce_catalog(
+        {"odd-voice": {"name": "odd", "quality": "medium"}}, str(tmp_path)
+    )
+    assert len(voices) == 1
+    assert voices[0].language_code == ""
+    assert voices[0].language_name == ""
+
+
+def test_coerce_catalog_skips_non_dict_entries(tmp_path: Path) -> None:
+    from app.providers.piper_tts import _coerce_catalog
+
+    voices = _coerce_catalog(
+        {"good": {"name": "good", "quality": "medium"}, "bad": "not-an-object"},
+        str(tmp_path),
+    )
+    assert [v.key for v in voices] == ["good"]
+
+
+def test_find_voice_files_locates_onnx_and_json() -> None:
+    from app.providers.piper_tts import _find_voice_files
+
+    entry: dict[str, Any] = {
+        "files": {
+            "en/en_US/amy/medium/en_US-amy-medium.onnx": {},
+            "en/en_US/amy/medium/en_US-amy-medium.onnx.json": {},
+            "en/en_US/amy/medium/MODEL_CARD": {},
+        }
+    }
+    onnx, sidecar = _find_voice_files(entry, "en_US-amy-medium")
+    assert onnx.endswith("en_US-amy-medium.onnx")
+    assert sidecar.endswith("en_US-amy-medium.onnx.json")
+
+
+def test_find_voice_files_raises_when_files_map_missing() -> None:
+    from app.providers.piper_tts import _find_voice_files
+
+    with pytest.raises(TTSError, match="'files' map"):
+        _find_voice_files({"files": "not-a-dict"}, "vx")
+
+
+def test_find_voice_files_raises_when_partial() -> None:
+    from app.providers.piper_tts import _find_voice_files
+
+    entry: dict[str, Any] = {"files": {"path/to/vx.onnx": {}}}
+    with pytest.raises(TTSError, match="missing"):
+        _find_voice_files(entry, "vx")
+
+
+async def test_fetch_voice_catalog_calls_huggingface(tmp_path: Path) -> None:
+    """The catalog fetcher must hit the rhasspy/piper-voices voices.json URL."""
+    import httpx
+
+    from app.providers.piper_tts import (
+        PIPER_VOICES_CATALOG_URL,
+        fetch_voice_catalog,
+    )
+
+    seen_urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_urls.append(str(request.url))
+        return httpx.Response(
+            200,
+            json={
+                "en_US-amy-medium": {
+                    "name": "amy",
+                    "language": {"code": "en_US", "name_english": "English"},
+                    "quality": "medium",
+                }
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    voices = await fetch_voice_catalog(str(tmp_path), client=client)
+    await client.aclose()
+    assert seen_urls == [PIPER_VOICES_CATALOG_URL]
+    assert [v.key for v in voices] == ["en_US-amy-medium"]
+
+
+async def test_fetch_voice_catalog_wraps_http_errors(tmp_path: Path) -> None:
+    import httpx
+
+    from app.providers.piper_tts import fetch_voice_catalog
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="upstream down")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(TTSError, match="failed to fetch piper voice catalog"):
+        await fetch_voice_catalog(str(tmp_path), client=client)
+    await client.aclose()
+
+
+async def test_download_voice_writes_both_files(tmp_path: Path) -> None:
+    import httpx
+
+    from app.providers.piper_tts import download_voice
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.endswith("voices.json"):
+            return httpx.Response(
+                200,
+                json={
+                    "vx": {
+                        "name": "voice",
+                        "language": {"code": "en_US"},
+                        "quality": "low",
+                        "files": {
+                            "en/vx.onnx": {},
+                            "en/vx.onnx.json": {},
+                        },
+                    }
+                },
+            )
+        if url.endswith("vx.onnx"):
+            return httpx.Response(200, content=b"FAKE_ONNX_BYTES")
+        if url.endswith("vx.onnx.json"):
+            return httpx.Response(200, content=b'{"k":"v"}')
+        return httpx.Response(404)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    result = await download_voice("vx", str(tmp_path), client=client)
+    await client.aclose()
+    assert (tmp_path / "vx.onnx").read_bytes() == b"FAKE_ONNX_BYTES"
+    assert (tmp_path / "vx.onnx.json").read_bytes() == b'{"k":"v"}'
+    assert result["installed"] is True
+    assert result["already_present"] is False
+    assert result["onnx_bytes"] == len(b"FAKE_ONNX_BYTES")
+
+
+async def test_download_voice_is_idempotent_when_already_installed(
+    tmp_path: Path,
+) -> None:
+    import httpx
+
+    from app.providers.piper_tts import download_voice
+
+    (tmp_path / "vx.onnx").write_bytes(b"existing")
+    (tmp_path / "vx.onnx.json").write_text("existing")
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(500)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    result = await download_voice("vx", str(tmp_path), client=client)
+    await client.aclose()
+    # No HTTP traffic when both files are already present.
+    assert seen == []
+    assert result["already_present"] is True
+    assert (tmp_path / "vx.onnx").read_bytes() == b"existing"
+
+
+async def test_download_voice_raises_when_voice_not_in_catalog(
+    tmp_path: Path,
+) -> None:
+    import httpx
+
+    from app.providers.piper_tts import download_voice
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={})  # empty catalog
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(TTSError, match="not found in piper-voices catalog"):
+        await download_voice("vx", str(tmp_path), client=client)
+    await client.aclose()
+
+
+async def test_download_voice_cleans_up_partial_files_on_failure(
+    tmp_path: Path,
+) -> None:
+    """If the second file fails to download, the half-written tempfile and
+    the first file should not be left behind for a partial-install illusion."""
+    import httpx
+
+    from app.providers.piper_tts import download_voice
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.endswith("voices.json"):
+            return httpx.Response(
+                200,
+                json={
+                    "vx": {
+                        "files": {"en/vx.onnx": {}, "en/vx.onnx.json": {}}
+                    }
+                },
+            )
+        if url.endswith("vx.onnx"):
+            return httpx.Response(200, content=b"OK")
+        return httpx.Response(503)  # sidecar fails
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(TTSError, match="failed to download"):
+        await download_voice("vx", str(tmp_path), client=client)
+    await client.aclose()
+    # Tempfile for sidecar was cleaned up; only the .onnx remains.
+    assert not (tmp_path / "vx.onnx.json.part").exists()
+    assert not (tmp_path / "vx.onnx.json").exists()

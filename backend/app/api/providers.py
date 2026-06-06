@@ -39,6 +39,18 @@ from app.providers.base import (
     UnknownProviderError,
     get_registry,
 )
+from app.providers.piper_tts import (
+    DEFAULT_MODEL_DIR as PIPER_DEFAULT_MODEL_DIR,
+)
+from app.providers.piper_tts import (
+    PROVIDER_NAME as PIPER_PROVIDER_NAME,
+)
+from app.providers.piper_tts import (
+    download_voice as piper_download_voice,
+)
+from app.providers.piper_tts import (
+    fetch_voice_catalog as piper_fetch_voice_catalog,
+)
 from app.providers.schema import ProviderSchema
 from app.providers.schema_validation import (
     FieldValidationError,
@@ -124,6 +136,39 @@ class SchemaListResponse(BaseModel):
     stt: list[dict[str, Any]]
     llm: list[dict[str, Any]]
     tts: list[dict[str, Any]]
+
+
+class VoiceRead(BaseModel):
+    """One Piper voice entry from huggingface.co/rhasspy/piper-voices.
+
+    ``installed`` indicates whether both the ``.onnx`` and ``.onnx.json``
+    files for this voice are present in the provider's configured
+    ``model_dir`` — the UI uses this to grey out the Install button.
+    """
+
+    key: str
+    name: str
+    language_code: str
+    language_name: str
+    quality: str
+    installed: bool
+
+
+class VoiceListResponse(BaseModel):
+    """Response payload for ``GET /providers/{id}/voices``."""
+
+    model_dir: str
+    voices: list[VoiceRead]
+
+
+class VoiceInstallResponse(BaseModel):
+    """Response payload for ``POST /providers/{id}/voices/{key}/install``."""
+
+    key: str
+    installed: bool
+    onnx_bytes: int
+    onnx_json_bytes: int
+    already_present: bool
 
 
 # --- Helpers ---------------------------------------------------------------
@@ -618,6 +663,95 @@ async def play_sample(
             "Content-Disposition": 'inline; filename="sample.wav"',
         },
     )
+
+
+# --- piper voice catalog endpoints -----------------------------------------
+
+
+def _piper_model_dir(row: ProviderCredential) -> str:
+    """Return the model_dir for a Piper provider row, falling back to default."""
+    config = row.config or {}
+    raw = config.get("model_dir")
+    if isinstance(raw, str) and raw.strip():
+        return raw
+    return PIPER_DEFAULT_MODEL_DIR
+
+
+def _require_piper_row(session: Session, provider_id: int) -> ProviderCredential:
+    """Look up a provider row and assert it is the Local Piper adapter.
+
+    The voices endpoints are Piper-specific (the rhasspy/piper-voices
+    catalog only describes Piper models), so we reject any other kind
+    of row with a 400. 404 still applies when the id is unknown.
+    """
+    row = _get_row_or_404(session, provider_id)
+    if row.kind is not ProviderKind.TTS or row.provider_name != PIPER_PROVIDER_NAME:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "voice catalog is only available for tts:piper providers "
+                f"(got {row.kind.value}:{row.provider_name})"
+            ),
+        )
+    return row
+
+
+@router.get("/{provider_id}/voices", response_model=VoiceListResponse)
+async def list_voices(
+    provider_id: int, session: SessionDep
+) -> VoiceListResponse:
+    """List every Piper voice from the public rhasspy catalog.
+
+    Each voice is annotated with ``installed=True`` when both the
+    ``.onnx`` and ``.onnx.json`` files are already in the provider's
+    configured ``model_dir`` so the UI can render Install vs.
+    Reinstall affordances without an extra round-trip.
+
+    Returns HTTP 400 when the provider row is not a Piper TTS adapter,
+    or HTTP 502 when the huggingface catalog cannot be fetched (network
+    failure, malformed payload, etc.) — the upstream error message is
+    included in ``detail`` so the operator can debug without checking
+    server logs.
+    """
+    row = _require_piper_row(session, provider_id)
+    model_dir = _piper_model_dir(row)
+    try:
+        voices = await piper_fetch_voice_catalog(model_dir)
+    except Exception as exc:  # noqa: BLE001 — surface fetch errors as 502
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return VoiceListResponse(
+        model_dir=model_dir,
+        voices=[VoiceRead(**v.to_dict()) for v in voices],
+    )
+
+
+@router.post(
+    "/{provider_id}/voices/{voice_key}/install",
+    response_model=VoiceInstallResponse,
+)
+async def install_voice(
+    provider_id: int,
+    voice_key: str,
+    session: SessionDep,
+) -> VoiceInstallResponse:
+    """Download a Piper voice into this provider's ``model_dir``.
+
+    The call is idempotent: a voice already present on disk returns
+    ``installed=True, already_present=True`` without re-downloading.
+    Partial files from a previous interrupted install are overwritten,
+    so re-clicking Install is the right recovery action.
+
+    Returns HTTP 400 when the row isn't a Piper TTS adapter or the voice
+    key isn't in the catalog. Returns HTTP 502 when the download
+    transport fails — the error message includes the upstream cause.
+    """
+    row = _require_piper_row(session, provider_id)
+    model_dir = _piper_model_dir(row)
+    try:
+        result = await piper_download_voice(voice_key, model_dir)
+    except Exception as exc:  # noqa: BLE001 — surface download errors
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return VoiceInstallResponse(**result)
 
 
 # --- export endpoint -------------------------------------------------------

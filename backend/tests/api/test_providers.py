@@ -1243,3 +1243,220 @@ def test_export_orders_by_kind_and_display_name(client: TestClient) -> None:
     names = [p["display_name"] for p in resp.json()["providers"]]
     # ordered by (kind, display_name): llm/Antelope, llm/Zebra, stt/Alpha
     assert names == ["Antelope", "Zebra", "Alpha"]
+
+
+# --- Piper voice endpoints (Johnny-4c0) ------------------------------------
+
+
+def _register_piper(model_dir: str) -> None:
+    """Register the real PiperTTS factory so the voices endpoints can resolve it.
+
+    We don't actually run synthesis in these tests, so we just need the
+    registry to know about ``tts:piper`` and the row in the DB to look
+    like a Piper provider. The model_dir comes from the row's options.
+    """
+    from app.providers.piper_tts import PiperTTS
+
+    get_registry().register(ProviderKind.TTS, "piper", PiperTTS)
+
+
+def _make_piper_row(client: TestClient, model_dir: str) -> dict[str, Any]:
+    data: dict[str, Any] = client.post(
+        "/providers",
+        json={
+            "kind": "tts",
+            "provider_name": "piper",
+            "display_name": "Local Piper",
+            "credentials": {},
+            "options": {"voice_id": "en_US-amy-medium", "model_dir": model_dir},
+        },
+    ).json()
+    return data
+
+
+def test_list_voices_returns_catalog_and_installed_flag(
+    client: TestClient, tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Voices endpoint reflects the upstream catalog and marks
+    already-on-disk voices as installed=True."""
+    _register_piper(str(tmp_path))
+    (tmp_path / "en_US-amy-medium.onnx").write_bytes(b"")
+    (tmp_path / "en_US-amy-medium.onnx.json").write_text("{}")
+    created = _make_piper_row(client, str(tmp_path))
+
+    async def fake_fetch(model_dir: str, *args: Any, **kwargs: Any) -> list[Any]:
+        from app.providers.piper_tts import VoiceInfo, voice_is_installed
+
+        return [
+            VoiceInfo(
+                key="en_US-amy-medium",
+                name="amy",
+                language_code="en_US",
+                language_name="English",
+                quality="medium",
+                installed=voice_is_installed(model_dir, "en_US-amy-medium"),
+            ),
+            VoiceInfo(
+                key="en_US-ryan-low",
+                name="ryan",
+                language_code="en_US",
+                language_name="English",
+                quality="low",
+                installed=voice_is_installed(model_dir, "en_US-ryan-low"),
+            ),
+        ]
+
+    monkeypatch.setattr(
+        "app.api.providers.piper_fetch_voice_catalog", fake_fetch
+    )
+    resp = client.get(f"/providers/{created['id']}/voices")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["model_dir"] == str(tmp_path)
+    by_key = {v["key"]: v for v in body["voices"]}
+    assert by_key["en_US-amy-medium"]["installed"] is True
+    assert by_key["en_US-ryan-low"]["installed"] is False
+    assert by_key["en_US-amy-medium"]["language_name"] == "English"
+
+
+def test_list_voices_rejects_non_piper_provider(client: TestClient) -> None:
+    """STT/LLM rows or non-Piper TTS rows must return 400 — the rhasspy
+    catalog is meaningless for them."""
+    get_registry().register(ProviderKind.STT, "ok-stt", _OKSTT)
+    created = client.post("/providers", json=_create_payload()).json()
+    resp = client.get(f"/providers/{created['id']}/voices")
+    assert resp.status_code == 400
+    assert "piper" in resp.json()["detail"].lower()
+
+
+def test_list_voices_propagates_fetch_error_as_502(
+    client: TestClient, tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Catalog fetch failures should surface to the UI, not 500."""
+    _register_piper(str(tmp_path))
+    created = _make_piper_row(client, str(tmp_path))
+
+    async def boom(*args: Any, **kwargs: Any) -> list[Any]:
+        from app.providers.base import TTSError
+
+        raise TTSError("network down")
+
+    monkeypatch.setattr(
+        "app.api.providers.piper_fetch_voice_catalog", boom
+    )
+    resp = client.get(f"/providers/{created['id']}/voices")
+    assert resp.status_code == 502
+    assert "network down" in resp.json()["detail"]
+
+
+def test_list_voices_missing_provider_returns_404(client: TestClient) -> None:
+    resp = client.get("/providers/9999/voices")
+    assert resp.status_code == 404
+
+
+def test_list_voices_defaults_model_dir_when_unset(
+    client: TestClient, tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A piper row without a model_dir option should fall back to the
+    DEFAULT_MODEL_DIR constant so the endpoint never sees None."""
+    _register_piper(str(tmp_path))
+    created = client.post(
+        "/providers",
+        json={
+            "kind": "tts",
+            "provider_name": "piper",
+            "display_name": "Local Piper bare",
+            "credentials": {},
+            "options": {"voice_id": "en_US-amy-medium"},
+        },
+    ).json()
+    seen_model_dir: list[str] = []
+
+    async def capture(model_dir: str, *args: Any, **kwargs: Any) -> list[Any]:
+        seen_model_dir.append(model_dir)
+        return []
+
+    monkeypatch.setattr(
+        "app.api.providers.piper_fetch_voice_catalog", capture
+    )
+    resp = client.get(f"/providers/{created['id']}/voices")
+    assert resp.status_code == 200
+    from app.providers.piper_tts import DEFAULT_MODEL_DIR
+
+    assert seen_model_dir == [DEFAULT_MODEL_DIR]
+
+
+def test_install_voice_downloads_and_returns_metadata(
+    client: TestClient, tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The install endpoint should hand off to the downloader and surface
+    its summary back to the caller for the UI to render."""
+    _register_piper(str(tmp_path))
+    created = _make_piper_row(client, str(tmp_path))
+    seen: dict[str, Any] = {}
+
+    async def fake_download(
+        voice_key: str, model_dir: str, *args: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        seen["voice_key"] = voice_key
+        seen["model_dir"] = model_dir
+        return {
+            "key": voice_key,
+            "installed": True,
+            "onnx_bytes": 60_000_000,
+            "onnx_json_bytes": 4_096,
+            "already_present": False,
+        }
+
+    monkeypatch.setattr(
+        "app.api.providers.piper_download_voice", fake_download
+    )
+    resp = client.post(
+        f"/providers/{created['id']}/voices/en_US-amy-medium/install"
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["key"] == "en_US-amy-medium"
+    assert body["installed"] is True
+    assert body["already_present"] is False
+    assert body["onnx_bytes"] == 60_000_000
+    assert seen["voice_key"] == "en_US-amy-medium"
+    assert seen["model_dir"] == str(tmp_path)
+
+
+def test_install_voice_rejects_non_piper_provider(client: TestClient) -> None:
+    get_registry().register(ProviderKind.LLM, "ok-llm", _OKLLM)
+    created = client.post(
+        "/providers",
+        json=_create_payload(kind="llm", provider_name="ok-llm", display_name="L"),
+    ).json()
+    resp = client.post(
+        f"/providers/{created['id']}/voices/en_US-amy-medium/install"
+    )
+    assert resp.status_code == 400
+
+
+def test_install_voice_propagates_download_error_as_502(
+    client: TestClient, tmp_path: Any, monkeypatch: Any
+) -> None:
+    _register_piper(str(tmp_path))
+    created = _make_piper_row(client, str(tmp_path))
+
+    async def boom(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        from app.providers.base import TTSError
+
+        raise TTSError("connection refused")
+
+    monkeypatch.setattr(
+        "app.api.providers.piper_download_voice", boom
+    )
+    resp = client.post(
+        f"/providers/{created['id']}/voices/en_US-amy-medium/install"
+    )
+    assert resp.status_code == 502
+    assert "connection refused" in resp.json()["detail"]
+
+
+def test_install_voice_missing_provider_returns_404(client: TestClient) -> None:
+    resp = client.post("/providers/9999/voices/en_US-amy-medium/install")
+    assert resp.status_code == 404
