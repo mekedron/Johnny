@@ -1,8 +1,8 @@
 {
-  "id": "fb7755d9-c368-4618-bf5b-b19379bcccf7",
+  "id": "10afcece-cc40-43a0-8f7d-e7372e7ab552",
   "status": "running",
-  "startedAt": "2026-06-05T23:19:17.977Z",
-  "updatedAt": "2026-06-06T00:05:41.322Z",
+  "startedAt": "2026-06-06T05:38:48.000Z",
+  "updatedAt": "2026-06-06T05:38:48.000Z",
   "agentPlugin": "claude",
   "trackerPlugin": "beads-bv",
   "epicId": "Johnny-ckz",
@@ -12,18 +12,18 @@
   "executionScopes": [
     {
       "id": "Johnny-ckz",
-      "title": "Fix join-meeting stuck-on-joining bug and build end-to-end Test-event validation harness",
+      "title": "Johnny meeting bot — ongoing work, fixes, and end-to-end validation",
       "type": "epic",
-      "description": "## Why this exists\n\nTwo interlocked problems:\n\n1. **Bug**: Clicking \"Join\" on any meeting transitions session state to \"joining\" and stays there forever. No information surfaces in any log. The full join -> transcribe -> decide -> speak pipeline cannot be validated until this is fixed.\n\n2. **No end-to-end validation**: We have no harness that exercises the real stack against a real Google Meet. Unit tests pass while the user-visible journey is broken. We need a reproducible test program that drives the full stack end-to-end.\n\nThese must be solved together: the harness is how we prove the bug is fixed and stays fixed.\n\n## Setup (testing environment)\n\n- Johnny (bot identity): nikita.rabykin@aikamatkat.fi\n- User (running tests, listening): nikita.rabykin@gmail.com\n- Test calendar event: exactly one Google Calendar event titled \"Test\", owned by the user account. The harness owns this event — it may rearrange, retitle, reschedule, or otherwise mutate it freely between runs.\n\n## What this delivers\n\n### Part A: Diagnose and fix the join-stuck bug\n\n- Add structured logging at every stage of the join path: scheduler dispatch, worker container spawn, Playwright navigation, Google sign-in, \"Join now\" click, bot_sessions.status transitions, audio bridge attach\n- Logs must include session_id and surface both in 'docker compose logs' and 'bot_sessions.logs'\n- UI session view must surface the most recent failure stage when join fails — no silent perpetual \"joining\"\n- Identify and fix the actual root cause (candidates: missing Chromium flags, Xvfb not started, account cookies missing, Meet \"Ask to join\" gate, container spawn failure, race between scheduler and worker)\n\n### Part B: End-to-end validation harness\n\nSingle command ('uv run python -m johnny.e2e --mode=<mode>' or 'make e2e MODE=<mode>') that:\n  1. Ensures the \"Test\" event exists, owned by user account, with both bot and user invited, Meet link attached\n  2. Reschedules the Test event to start within ~1 minute (so each run kicks off quickly without waiting for the original schedule)\n  3. Creates a meeting_config for the Test event with the chosen mode\n  4. Waits for scheduler to spawn the meet-worker container (or invokes the same code path directly)\n  5. Verifies the bot joins (Meet participant list includes Johnny, bot_sessions.status flips to \"joined\")\n  6. Injects a known audio sample into the meeting (second Playwright participant playing fixture audio, or synthetic injector piping audio into the room)\n  7. Verifies transcripts persisted to transcript_chunks with expected content\n  8. Verifies router decisions persisted to agent_decisions\n  9. In Limited auto-speak mode, verifies an utterance is persisted to agent_utterances\n  10. Tears down: bot leaves meeting, worker container stops, Test event reset for next run\n\n- Selectable mode: listen / suggest / approval / auto_speak_limited — every mode must pass independently\n- PASS/FAIL output per phase with diagnostic logs (same format as Johnny-f7k smoke test)\n- Exit code 0 only when every phase passes\n\n### Part C: Documentation\n\n- \"Running end-to-end\" section in docs/SETUP_LOCAL.md linking to the harness\n- Document the Test-event convention (one event named \"Test\", both identities invited, freely mutable)\n- Document how to swap modes and what each verifies\n\n## Parent relationship\n\nThis issue sits ABOVE Johnny-kgc — Johnny-kgc becomes its child. Rationale: this is the meta-validation gate proving the entire epic actually works end-to-end against real infrastructure. Johnny-kgc delivers features; this issue validates them.\n\n## Out of scope\n\n- Multi-tenant fixtures (single user, single Test event only)\n- Load / concurrent meeting tests\n- Replacing unit tests (this is additive)\n- CI integration (follow-up)",
+      "description": "## Why this exists\n\nUmbrella epic for the Johnny Google Meet AI Meeting Bot post-MVP work.\n\nThe original join-stuck bug (Johnny-ckz.1) is fixed and the bot now reliably joins meetings (commit 979447e). The remaining scope spans:\n- End-to-end validation against real Google Meet (across all modes)\n- Adding/refining bot behavior modes (Autonomous, free-mode speech logic)\n- Provider integration polish (TTS demo playback, ElevenLabs verification, openai-realtime fix)\n- UX improvements (UI-driven Google sign-in, full-meeting context vs rolling window)\n- Smoke tests and provider management UI tests\n\nAll child issues here are tracked under this single epic.\n\n## Acceptance\n\n- All child issues closed\n- Bot has been validated end-to-end across every mode against a real Google Meet\n- Provider management surface is polished and tested via UI",
       "metadata": {
         "dependencyCount": 0,
         "dependentCount": 0
       }
     }
   ],
-  "currentIteration": 3,
+  "currentIteration": 0,
   "maxIterations": 0,
   "totalTasks": 0,
-  "tasksCompleted": 3,
+  "tasksCompleted": 0,
   "cwd": "/Users/nikita/Projects/Johnny"
 }

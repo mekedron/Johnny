@@ -17,6 +17,10 @@ already sets:
   ``provider_name``, ``credentials``, ``options``, ``display_name``.
 * ``JOHNNY_SESSION_ID`` — propagated onto every pipeline event so the
   API's Redis subscribers and WebSocket fan-out can correlate.
+* ``JOHNNY_REDIS_URL`` — used to construct the :class:`RedisApprovalGate`
+  in ``approval_required`` mode so user approve/reject clicks reach the
+  pipeline. Absent in non-approval modes; absent + ``approval_required``
+  logs a warning and the bot stays silent (auto-reject on timeout).
 
 Configuration absent or invalid is a soft failure: the pipeline logs the
 gap and falls back. A meeting with no STT configured still joins; we
@@ -50,6 +54,7 @@ from johnny.meet_worker.log_stages import (
     log_stage_error,
 )
 from johnny.voice_pipeline import (
+    APPROVAL_REQUIRED_MODE,
     DEFAULT_VAD_THRESHOLD,
     EnergyVAD,
     EventBus,
@@ -59,6 +64,7 @@ from johnny.voice_pipeline import (
     VADAnalyzer,
     VoicePipeline,
 )
+from johnny.voice_pipeline.approval import ApprovalGate
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +74,7 @@ MODE_ENV = "JOHNNY_MODE"
 INSTRUCTIONS_ENV = "JOHNNY_INSTRUCTIONS"
 CONTEXT_ENV = "JOHNNY_CONTEXT"
 SESSION_ID_ENV = "JOHNNY_SESSION_ID"
+REDIS_URL_ENV = "JOHNNY_REDIS_URL"
 
 # Fallback to EnergyVAD when SileroVAD's heavy onnx model isn't loadable
 # (e.g. file missing, torch absent in environment). EnergyVAD is crude
@@ -230,6 +237,12 @@ async def build_and_run_pipeline(
                 pass
         if not stop_task.done():
             stop_task.cancel()
+        try:
+            await pipeline.approval_gate.close()
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            logger.exception(
+                "approval gate close failed for session=%s", session_id
+            )
 
 
 async def _assemble_pipeline(
@@ -307,6 +320,16 @@ async def _assemble_pipeline(
             context=context,
         )
 
+    # Wire the approval gate when mode requires it. Without this, the
+    # pipeline defaults to NoopApprovalGate which always returns
+    # "timeout" — so user clicks in the UI never reach the meet-worker
+    # and the bot stays silent (Johnny-cdw).
+    approval_gate = _build_approval_gate(
+        mode=config.mode,
+        session_id=session_id,
+        redis_url=env.get(REDIS_URL_ENV, "").strip() or None,
+    )
+
     # Pipeline requires both router_llm and answer_llm. For now use the
     # same provider for both — a future change can split them.
     pipeline = VoicePipeline(
@@ -318,8 +341,52 @@ async def _assemble_pipeline(
         tts=_as_tts_or_none(tts),
         event_bus=event_bus,
         config=config,
+        approval_gate=approval_gate,
     )
     return pipeline
+
+
+def _build_approval_gate(
+    *,
+    mode: str,
+    session_id: str,
+    redis_url: str | None,
+) -> ApprovalGate | None:
+    """Construct the production approval gate for ``approval_required`` mode.
+
+    Returns ``None`` for non-approval modes so the pipeline keeps its
+    safe default :class:`NoopApprovalGate`. For approval-required mode
+    we return :class:`RedisApprovalGate` so user approve/reject clicks
+    published by the API actually unblock the answer LLM + TTS — without
+    this the default gate always returns ``timeout`` and the bot stays
+    silent (Johnny-cdw).
+    """
+    if mode != APPROVAL_REQUIRED_MODE:
+        return None
+    if not redis_url:
+        log_stage(
+            STAGE_AUDIO_BRIDGE,
+            session_id=session_id,
+            level=logging.WARNING,
+            msg=(
+                "mode=approval_required but JOHNNY_REDIS_URL is not set — "
+                "approval clicks will not reach the bot; every utterance "
+                "will auto-reject on timeout"
+            ),
+        )
+        return None
+    # Lazy import: app.services.approval pulls in redis.asyncio on demand.
+    from app.services.approval import RedisApprovalGate
+
+    log_stage(
+        STAGE_AUDIO_BRIDGE,
+        session_id=session_id,
+        msg=(
+            f"approval gate wired to redis channel "
+            f"johnny.approval.{session_id}"
+        ),
+    )
+    return RedisApprovalGate(redis_url=redis_url, session_id=session_id)
 
 
 def _as_stt(provider: Any) -> STTProvider:
@@ -374,6 +441,7 @@ __all__ = [
     "INSTRUCTIONS_ENV",
     "MODE_ENV",
     "PROVIDER_CONFIG_ENV",
+    "REDIS_URL_ENV",
     "PipelineSetupError",
     "build_and_run_pipeline",
 ]

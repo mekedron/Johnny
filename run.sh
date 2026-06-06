@@ -7,4 +7,4 @@ if [[ ! -f .env ]]; then
   cp .env.example .env
 fi
 
-exec docker compose up "$@"
+exec docker compose up --build "$@"
