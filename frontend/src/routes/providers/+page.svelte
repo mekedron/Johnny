@@ -7,10 +7,12 @@
 		deleteProvider,
 		downloadBlob,
 		exportProviders,
+		getProviderPackage,
 		groupedFields,
 		GROUP_LABEL,
 		initialValues,
 		installPiperVoice,
+		installProviderPackage,
 		listPiperVoices,
 		listProviders,
 		listSchemas,
@@ -26,6 +28,7 @@
 		validateClient,
 		ValidationFailure,
 		type FieldDef,
+		type PackageStatus,
 		type PiperVoice,
 		type Provider,
 		type ProviderKind,
@@ -38,13 +41,14 @@
 	} from '$lib/providers';
 	import { MicPermissionDeniedError, recordMicPcm } from '$lib/sttMicRecorder';
 
-	// One unified Provider Settings page (Johnny-stt.5). Each kind (STT,
-	// LLM, TTS) is a tab inside this surface; the standalone /settings/stt
-	// page that Johnny-stt.2 shipped is deleted as part of this refactor.
-	// The catalog two-column UX (left = registered providers, right =
-	// detail with Test + Config) is now the layout for every kind. Where
-	// the STT catalog has dedicated server metadata (`listSttCatalog`),
-	// LLM and TTS derive their catalog entries from the schema list.
+	// Unified Provider Settings page (Johnny-stt.5 / Johnny-stt.7). Each kind
+	// (STT, LLM, TTS) is a tab; within a tab the left panel lists every
+	// CONFIGURED provider instance (one card per row) and below that an
+	// "Add new" section with one card per registered provider kind. State
+	// is keyed by an opaque draft key — "instance-<id>" for existing rows
+	// and "new-<provider_name>" for unsaved drafts — so the user can have
+	// N instances of the same provider_name (multiple Ollama models,
+	// multiple OpenAI keys, etc.) without the form state colliding.
 
 	interface CatalogEntry {
 		provider_name: string;
@@ -64,6 +68,11 @@
 	type PerKind<T> = Record<TabKey, T>;
 	type TestPhase = 'idle' | 'recording' | 'uploading' | 'done' | 'error';
 
+	// Opaque selection / form draft identifier.
+	// - "instance-<id>": refers to an existing ProviderCredential row.
+	// - "new-<provider_name>": refers to an unsaved draft of a new instance.
+	type DraftKey = string;
+
 	const MIC_RECORDING_MS = 5000;
 	const ACTIVE_TAB_KEY = 'johnny.providers.active-tab';
 	const SELECTION_KEY_PREFIX = 'johnny.providers';
@@ -73,6 +82,27 @@
 		return { stt: make(), llm: make(), tts: make() };
 	}
 
+	function instanceKey(id: number): DraftKey {
+		return `instance-${id}`;
+	}
+	function newKey(providerName: string): DraftKey {
+		return `new-${providerName}`;
+	}
+	function isInstanceKey(key: DraftKey): boolean {
+		return key.startsWith('instance-');
+	}
+	function isNewKey(key: DraftKey): boolean {
+		return key.startsWith('new-');
+	}
+	function instanceIdOf(key: DraftKey): number | null {
+		if (!isInstanceKey(key)) return null;
+		const id = Number(key.slice('instance-'.length));
+		return Number.isFinite(id) ? id : null;
+	}
+	function providerNameOfNewKey(key: DraftKey): string | null {
+		return isNewKey(key) ? key.slice('new-'.length) : null;
+	}
+
 	let activeTab = $state<TabKey>('stt');
 
 	let catalog = $state<PerKind<CatalogEntry[]>>(emptyPerKind(() => []));
@@ -80,34 +110,28 @@
 	let loading = $state(false);
 	let error = $state<string | null>(null);
 
-	// One slot per kind per provider_name so flipping cards/tabs mid-edit
-	// doesn't discard in-progress secrets or display-name edits.
-	let formValues = $state<PerKind<Record<string, Record<string, unknown>>>>(
-		emptyPerKind(() => ({}))
-	);
-	let formErrors = $state<PerKind<Record<string, Record<string, string>>>>(
-		emptyPerKind(() => ({}))
-	);
-	let formDisplayNames = $state<PerKind<Record<string, string>>>(
-		emptyPerKind(() => ({}))
-	);
-	let formBannerFor = $state<PerKind<Record<string, string>>>(emptyPerKind(() => ({})));
-	let formSubmittingFor = $state<string | null>(null);
+	// Per-draft form state. Keyed by DraftKey, so a user can have an
+	// in-progress "new Ollama" draft AND simultaneously edit an existing
+	// Ollama instance without either's values bleeding into the other.
+	let formValues = $state<Record<DraftKey, Record<string, unknown>>>({});
+	let formErrors = $state<Record<DraftKey, Record<string, string>>>({});
+	let formDisplayNames = $state<Record<DraftKey, string>>({});
+	let formBannerFor = $state<Record<DraftKey, string>>({});
+	let formSubmittingFor = $state<DraftKey | null>(null);
 
-	let selectedProviderName = $state<PerKind<string | null>>({
+	// Which draft is showing in the right detail panel, per tab.
+	let selectedDraftKey = $state<PerKind<DraftKey | null>>({
 		stt: null,
 		llm: null,
 		tts: null
 	});
 
-	// Test state. STT and LLM/TTS use different endpoints but the panel
-	// renders both — phase/error/result are keyed by provider_name within
-	// a kind so the user can flip cards and see prior test output.
-	let sttTestPhase = $state<Record<string, TestPhase>>({});
-	let sttTestMicLevel = $state<Record<string, number>>({});
-	let sttTestResults = $state<Record<string, SttTestResult>>({});
-	let sttTestErrors = $state<Record<string, string>>({});
-	let sttTestingFor = $state<string | null>(null);
+	// Test state — keyed by row id, since only saved instances are testable.
+	let sttTestPhase = $state<Record<number, TestPhase>>({});
+	let sttTestMicLevel = $state<Record<number, number>>({});
+	let sttTestResults = $state<Record<number, SttTestResult>>({});
+	let sttTestErrors = $state<Record<number, string>>({});
+	let sttTestingFor = $state<number | null>(null);
 
 	// Generic provider test — used for LLM (and any non-mic TTS test).
 	let genericTestResults = $state<Record<number, TestResult>>({});
@@ -128,6 +152,16 @@
 	let voiceFilter = $state('');
 	let installingVoice = $state<string | null>(null);
 	let installError = $state<string | null>(null);
+
+	// Runtime Python package install for providers whose deps don't ship
+	// in the api image (currently only Parakeet / NeMo). Same UX shape as
+	// the Piper voice browser: a button on the provider card → POST that
+	// streams pip's output → live log tail → status badge once done.
+	// Keyed by provider id so two cards can have independent state.
+	let packageStatus = $state<Record<number, PackageStatus>>({});
+	let packageInstallingId = $state<number | null>(null);
+	let packageInstallLog = $state<Record<number, string>>({});
+	let packageInstallError = $state<Record<number, string>>({});
 	let voiceModelDir = $state<string>('');
 	let previewingVoice = $state<string | null>(null);
 	let previewLoadingVoice = $state<string | null>(null);
@@ -198,8 +232,16 @@
 		};
 	}
 
-	function configuredRowFor(kind: TabKey, providerName: string): Provider | null {
-		return providers[kind].find((p) => p.provider_name === providerName) ?? null;
+	function configuredRowsFor(kind: TabKey, providerName: string): Provider[] {
+		return providers[kind].filter((p) => p.provider_name === providerName);
+	}
+
+	function rowById(kind: TabKey, id: number): Provider | null {
+		return providers[kind].find((p) => p.id === id) ?? null;
+	}
+
+	function catalogEntryFor(kind: TabKey, providerName: string): CatalogEntry | null {
+		return catalog[kind].find((e) => e.provider_name === providerName) ?? null;
 	}
 
 	function initialValuesFor(entry: CatalogEntry, row: Provider | null): Record<string, unknown> {
@@ -212,31 +254,84 @@
 		return base;
 	}
 
-	function ensureFormStateFor(kind: TabKey, entry: CatalogEntry) {
-		if (formDisplayNames[kind][entry.provider_name] === undefined) {
-			formDisplayNames[kind][entry.provider_name] = entry.display_name;
+	// Suggest a unique display name when starting a fresh draft so the
+	// user is not forced to invent one to satisfy the per-(kind, display)
+	// uniqueness rule. Falls back to "<catalog name> (N)" when one of
+	// that shape already exists.
+	function suggestDisplayName(kind: TabKey, entry: CatalogEntry): string {
+		const base = entry.display_name;
+		const used = new Set(providers[kind].map((p) => p.display_name));
+		if (!used.has(base)) return base;
+		for (let i = 2; i < 1000; i++) {
+			const candidate = `${base} (${i})`;
+			if (!used.has(candidate)) return candidate;
 		}
-		if (formValues[kind][entry.provider_name] === undefined) {
-			const row = configuredRowFor(kind, entry.provider_name);
-			formValues[kind][entry.provider_name] = initialValuesFor(entry, row);
+		// Pathological fallback — should never hit in practice.
+		return `${base} (${Date.now()})`;
+	}
+
+	function ensureFormStateForInstance(kind: TabKey, row: Provider): DraftKey {
+		const key = instanceKey(row.id);
+		const entry = catalogEntryFor(kind, row.provider_name);
+		if (formDisplayNames[key] === undefined) {
+			formDisplayNames[key] = row.display_name;
 		}
+		if (formValues[key] === undefined) {
+			formValues[key] = entry
+				? initialValuesFor(entry, row)
+				: { ...(row.options as Record<string, unknown>) };
+		}
+		return key;
+	}
+
+	function ensureFormStateForNewDraft(kind: TabKey, entry: CatalogEntry): DraftKey {
+		const key = newKey(entry.provider_name);
+		if (formDisplayNames[key] === undefined) {
+			formDisplayNames[key] = suggestDisplayName(kind, entry);
+		}
+		if (formValues[key] === undefined) {
+			formValues[key] = initialValuesFor(entry, null);
+		}
+		return key;
+	}
+
+	function selectionMatchesAnyDraft(kind: TabKey, key: DraftKey | null): boolean {
+		if (key === null) return false;
+		if (isInstanceKey(key)) {
+			const id = instanceIdOf(key);
+			return id !== null && providers[kind].some((p) => p.id === id);
+		}
+		if (isNewKey(key)) {
+			const name = providerNameOfNewKey(key);
+			return name !== null && catalog[kind].some((e) => e.provider_name === name);
+		}
+		return false;
 	}
 
 	function pickInitialSelection(kind: TabKey) {
-		if (selectedProviderName[kind] !== null) return;
+		if (selectionMatchesAnyDraft(kind, selectedDraftKey[kind])) return;
+		const rows = providers[kind];
 		const entries = catalog[kind];
-		if (entries.length === 0) return;
+
 		const saved = readLastSelected(kind);
-		if (saved && entries.some((e) => e.provider_name === saved)) {
-			selectedProviderName[kind] = saved;
+		if (saved && selectionMatchesAnyDraft(kind, saved)) {
+			selectedDraftKey[kind] = saved;
 			return;
 		}
-		const active = providers[kind].find((p) => p.is_active);
-		if (active && entries.some((e) => e.provider_name === active.provider_name)) {
-			selectedProviderName[kind] = active.provider_name;
+		const active = rows.find((p) => p.is_active);
+		if (active) {
+			selectedDraftKey[kind] = instanceKey(active.id);
 			return;
 		}
-		selectedProviderName[kind] = entries[0].provider_name;
+		if (rows.length > 0) {
+			selectedDraftKey[kind] = instanceKey(rows[0].id);
+			return;
+		}
+		if (entries.length > 0) {
+			selectedDraftKey[kind] = newKey(entries[0].provider_name);
+			return;
+		}
+		selectedDraftKey[kind] = null;
 	}
 
 	async function load() {
@@ -252,6 +347,14 @@
 				listSttCatalog().catch(() => null)
 			]);
 			providers = providersResp;
+			// Refresh runtime-package status for any Parakeet row. Fire-and-
+			// forget: the install button stays usable even if status fetch
+			// fails (it shows "unknown" instead of "installed"/"missing").
+			for (const stt of providersResp.stt) {
+				if (stt.provider_name === 'parakeet') {
+					loadPackageStatus(stt.id);
+				}
+			}
 			const next: PerKind<CatalogEntry[]> = emptyPerKind(() => []);
 			if (sttCatalogResp) {
 				next.stt = sttCatalogResp.providers.map(sttToCatalogEntry);
@@ -261,9 +364,12 @@
 			next.llm = (schemasResp as ProviderSchemaList).llm.map(schemaToCatalogEntry);
 			next.tts = (schemasResp as ProviderSchemaList).tts.map(schemaToCatalogEntry);
 			catalog = next;
+			// Hydrate / refresh form drafts for every existing row so flipping
+			// tabs preserves in-progress edits but also picks up any server-
+			// side changes we don't have a draft for yet.
 			for (const kind of PROVIDER_KINDS) {
-				for (const entry of catalog[kind]) {
-					ensureFormStateFor(kind, entry);
+				for (const row of providers[kind]) {
+					ensureFormStateForInstance(kind, row);
 				}
 				pickInitialSelection(kind);
 			}
@@ -284,45 +390,60 @@
 		writeActiveTab(next);
 	}
 
-	function selectProvider(kind: TabKey, providerName: string) {
-		selectedProviderName[kind] = providerName;
+	function selectDraft(kind: TabKey, key: DraftKey) {
+		selectedDraftKey[kind] = key;
 		if (typeof window !== 'undefined') {
-			window.localStorage.setItem(selectionKey(kind), providerName);
+			window.localStorage.setItem(selectionKey(kind), key);
 		}
-		delete formBannerFor[kind][providerName];
+		delete formBannerFor[key];
+	}
+
+	function selectInstance(kind: TabKey, row: Provider) {
+		ensureFormStateForInstance(kind, row);
+		selectDraft(kind, instanceKey(row.id));
+	}
+
+	function startNewDraft(kind: TabKey, entry: CatalogEntry) {
+		ensureFormStateForNewDraft(kind, entry);
+		selectDraft(kind, newKey(entry.provider_name));
 	}
 
 	function fieldInputId(prefix: string, fieldName: string): string {
 		return `${prefix}-${fieldName}`;
 	}
 
-	async function onSaveProvider(kind: TabKey, entry: CatalogEntry, event: Event) {
+	async function onSaveProvider(
+		kind: TabKey,
+		key: DraftKey,
+		entry: CatalogEntry,
+		row: Provider | null,
+		event: Event
+	) {
 		event.preventDefault();
 		const schema = entry.field_schema;
-		const values = formValues[kind][entry.provider_name];
-		const errors = validateClient(schema, values);
-		const row = configuredRowFor(kind, entry.provider_name);
+		const values = formValues[key];
+		const validation = validateClient(schema, values);
 		if (row) {
 			// Editing: secret fields can stay blank to keep the previous
 			// value, so relax the required check for those.
-			const filtered = { ...errors };
+			const filtered = { ...validation };
 			for (const f of schema.fields) {
 				if (f.secret && filtered[f.name] && !values[f.name]) {
 					delete filtered[f.name];
 				}
 			}
-			formErrors[kind][entry.provider_name] = filtered;
+			formErrors[key] = filtered;
 		} else {
-			formErrors[kind][entry.provider_name] = errors;
+			formErrors[key] = validation;
 		}
-		if (Object.keys(formErrors[kind][entry.provider_name]).length > 0) {
+		if (Object.keys(formErrors[key]).length > 0) {
 			return;
 		}
-		formSubmittingFor = entry.provider_name;
-		delete formBannerFor[kind][entry.provider_name];
+		formSubmittingFor = key;
+		delete formBannerFor[key];
 		try {
 			const displayName =
-				formDisplayNames[kind][entry.provider_name]?.trim() || entry.display_name;
+				formDisplayNames[key]?.trim() || entry.display_name;
 			if (row) {
 				const filtered: Record<string, unknown> = {};
 				for (const [k, v] of Object.entries(values)) {
@@ -337,35 +458,43 @@
 					filtered[k] = v;
 				}
 				await updateProvider(row.id, { display_name: displayName, values: filtered });
+				await load();
 			} else {
-				await createProvider({
+				const created = await createProvider({
 					kind,
 					provider_name: entry.provider_name,
 					display_name: displayName,
 					values: values
 				});
+				// Drop the "new" draft state — its successor is the persisted
+				// instance the server just minted. Then swap the selection
+				// onto the new instance so the user sees their freshly saved
+				// row in the right panel.
+				delete formValues[key];
+				delete formErrors[key];
+				delete formDisplayNames[key];
+				delete formBannerFor[key];
+				await load();
+				selectDraft(kind, instanceKey(created.id));
 			}
-			await load();
 		} catch (e) {
 			if (e instanceof ValidationFailure) {
-				formErrors[kind][entry.provider_name] = {
-					...formErrors[kind][entry.provider_name],
+				formErrors[key] = {
+					...(formErrors[key] ?? {}),
 					...e.fields
 				};
-				formBannerFor[kind][entry.provider_name] = 'Some fields need attention.';
+				formBannerFor[key] = 'Some fields need attention.';
 			} else {
-				formBannerFor[kind][entry.provider_name] =
-					e instanceof Error ? e.message : String(e);
+				formBannerFor[key] = e instanceof Error ? e.message : String(e);
 			}
 		} finally {
 			formSubmittingFor = null;
 		}
 	}
 
-	async function onActivate(kind: TabKey, entry: CatalogEntry) {
-		const row = configuredRowFor(kind, entry.provider_name);
+	async function onActivate(kind: TabKey, key: DraftKey, row: Provider | null) {
 		if (!row) {
-			formBannerFor[kind][entry.provider_name] =
+			formBannerFor[key] =
 				'Save the provider before marking it as the default.';
 			return;
 		}
@@ -377,9 +506,7 @@
 		}
 	}
 
-	async function onDeactivate(kind: TabKey, entry: CatalogEntry) {
-		const row = configuredRowFor(kind, entry.provider_name);
-		if (!row) return;
+	async function onDeactivate(row: Provider) {
 		try {
 			await deactivateProvider(row.id);
 			await load();
@@ -388,75 +515,114 @@
 		}
 	}
 
-	async function onDelete(kind: TabKey, entry: CatalogEntry) {
-		const row = configuredRowFor(kind, entry.provider_name);
-		if (!row) return;
+	async function onDelete(kind: TabKey, row: Provider) {
 		const ok = window.confirm(
 			`Delete configured provider "${row.display_name}"? You'll need to re-enter credentials before the next test.`
 		);
 		if (!ok) return;
 		try {
 			await deleteProvider(row.id);
-			delete sttTestResults[entry.provider_name];
-			delete sttTestErrors[entry.provider_name];
-			delete sttTestPhase[entry.provider_name];
+			const key = instanceKey(row.id);
+			delete formValues[key];
+			delete formErrors[key];
+			delete formDisplayNames[key];
+			delete formBannerFor[key];
+			delete sttTestResults[row.id];
+			delete sttTestErrors[row.id];
+			delete sttTestPhase[row.id];
 			delete genericTestResults[row.id];
 			delete sampleError[row.id];
-			formValues[kind][entry.provider_name] = initialValuesFor(entry, null);
+			// Reset selection: the row we just deleted is no longer valid.
+			if (selectedDraftKey[kind] === key) {
+				selectedDraftKey[kind] = null;
+			}
 			await load();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		}
 	}
 
-	async function onSttTest(entry: CatalogEntry) {
-		const row = configuredRowFor('stt', entry.provider_name);
-		if (!row) {
-			sttTestErrors[entry.provider_name] =
-				'Save the provider with valid credentials before testing.';
-			sttTestPhase[entry.provider_name] = 'error';
-			return;
+	// --- Parakeet runtime package install ---------------------------------
+
+	async function loadPackageStatus(rowId: number) {
+		try {
+			packageStatus[rowId] = await getProviderPackage(rowId);
+		} catch (e) {
+			// Non-fatal — the UI just hides the install affordance. The
+			// next Test click will surface any real error via the server.
+			console.warn('package status fetch failed', e);
 		}
-		sttTestingFor = entry.provider_name;
-		delete sttTestErrors[entry.provider_name];
-		delete sttTestResults[entry.provider_name];
-		sttTestMicLevel[entry.provider_name] = 0;
-		sttTestPhase[entry.provider_name] = 'recording';
+	}
+
+	async function onInstallPackage(row: Provider) {
+		packageInstallingId = row.id;
+		packageInstallLog[row.id] = '';
+		delete packageInstallError[row.id];
+		try {
+			const stream = await installProviderPackage(row.id);
+			const reader = stream.getReader();
+			const decoder = new TextDecoder();
+			let lastMarkerOk = false;
+			while (true) {
+				const { value, done } = await reader.read();
+				if (done) break;
+				const chunk = decoder.decode(value, { stream: true });
+				packageInstallLog[row.id] = (packageInstallLog[row.id] ?? '') + chunk;
+				if (chunk.includes('[install ok')) lastMarkerOk = true;
+				if (chunk.includes('[install failed')) lastMarkerOk = false;
+			}
+			if (!lastMarkerOk) {
+				packageInstallError[row.id] =
+					'pip install did not emit a success marker — see log above for details.';
+			}
+		} catch (e) {
+			packageInstallError[row.id] = e instanceof Error ? e.message : String(e);
+		} finally {
+			packageInstallingId = null;
+			await loadPackageStatus(row.id);
+		}
+	}
+
+	async function onSttTest(row: Provider) {
+		sttTestingFor = row.id;
+		delete sttTestErrors[row.id];
+		delete sttTestResults[row.id];
+		sttTestMicLevel[row.id] = 0;
+		sttTestPhase[row.id] = 'recording';
 		let pcm: ArrayBuffer | null = null;
 		try {
 			const recording = await recordMicPcm({
 				durationMs: MIC_RECORDING_MS,
 				onLevel: (level) => {
-					sttTestMicLevel[entry.provider_name] = level;
+					sttTestMicLevel[row.id] = level;
 				}
 			});
 			pcm = recording.pcm;
 		} catch (e) {
 			if (e instanceof MicPermissionDeniedError) {
-				sttTestErrors[entry.provider_name] =
+				sttTestErrors[row.id] =
 					'Microphone permission denied — grant access in browser settings and try again.';
 			} else {
-				sttTestErrors[entry.provider_name] = e instanceof Error ? e.message : String(e);
+				sttTestErrors[row.id] = e instanceof Error ? e.message : String(e);
 			}
-			sttTestPhase[entry.provider_name] = 'error';
+			sttTestPhase[row.id] = 'error';
 			sttTestingFor = null;
 			return;
 		}
-		sttTestPhase[entry.provider_name] = 'uploading';
+		sttTestPhase[row.id] = 'uploading';
 		try {
 			const result = await sttTestRecording(row.id, pcm);
-			sttTestResults[entry.provider_name] = result;
-			sttTestPhase[entry.provider_name] = result.ok ? 'done' : 'error';
+			sttTestResults[row.id] = result;
+			sttTestPhase[row.id] = result.ok ? 'done' : 'error';
 			if (!result.ok) {
-				sttTestErrors[entry.provider_name] =
-					result.detail ?? result.message ?? 'Test failed';
+				sttTestErrors[row.id] = result.detail ?? result.message ?? 'Test failed';
 			}
 		} catch (e) {
-			sttTestErrors[entry.provider_name] = e instanceof Error ? e.message : String(e);
-			sttTestPhase[entry.provider_name] = 'error';
+			sttTestErrors[row.id] = e instanceof Error ? e.message : String(e);
+			sttTestPhase[row.id] = 'error';
 		} finally {
 			sttTestingFor = null;
-			sttTestMicLevel[entry.provider_name] = 0;
+			sttTestMicLevel[row.id] = 0;
 		}
 	}
 
@@ -524,8 +690,8 @@
 		return playingIds.includes(id);
 	}
 
-	function isPiperProvider(entry: CatalogEntry): boolean {
-		return activeTab === 'tts' && entry.provider_name === 'piper';
+	function isPiperProvider(providerName: string): boolean {
+		return activeTab === 'tts' && providerName === 'piper';
 	}
 
 	// --- Piper voice browser modal -------------------------------------
@@ -642,14 +808,11 @@
 
 	function useVoice(row: Provider, voice: PiperVoice) {
 		// Write the voice_id into the saved row's form draft.
-		const entry = catalog.tts.find((e) => e.provider_name === row.provider_name);
-		if (entry) {
-			ensureFormStateFor('tts', entry);
-			formValues.tts[entry.provider_name] = {
-				...formValues.tts[entry.provider_name],
-				voice_id: voice.key
-			};
-		}
+		const key = ensureFormStateForInstance('tts', row);
+		formValues[key] = {
+			...formValues[key],
+			voice_id: voice.key
+		};
 		closeVoiceBrowser();
 	}
 
@@ -710,12 +873,44 @@
 
 	// --- Derived -------------------------------------------------------
 
-	const selectedEntry = $derived(
-		catalog[activeTab].find((e) => e.provider_name === selectedProviderName[activeTab]) ?? null
-	);
-	const selectedRow = $derived(
-		selectedEntry ? configuredRowFor(activeTab, selectedEntry.provider_name) : null
-	);
+	// Resolve the current selection into the row (if instance) and catalog
+	// entry the right detail panel renders. Both can be null briefly during
+	// state transitions (e.g. immediately after delete) — the template
+	// handles that case with an empty-state.
+	const selectedRow = $derived.by<Provider | null>(() => {
+		const key = selectedDraftKey[activeTab];
+		if (key === null) return null;
+		const id = instanceIdOf(key);
+		if (id === null) return null;
+		return rowById(activeTab, id);
+	});
+	const selectedEntry = $derived.by<CatalogEntry | null>(() => {
+		const key = selectedDraftKey[activeTab];
+		if (key === null) return null;
+		if (isInstanceKey(key)) {
+			const row = selectedRow;
+			if (!row) return null;
+			return catalogEntryFor(activeTab, row.provider_name);
+		}
+		const name = providerNameOfNewKey(key);
+		if (name === null) return null;
+		return catalogEntryFor(activeTab, name);
+	});
+
+	// Group configured rows by provider_name within each tab so the left
+	// list reads as "all Ollama instances, then all OpenAI instances, …"
+	// rather than interleaved.
+	const configuredByName = $derived.by<PerKind<Map<string, Provider[]>>>(() => {
+		const out = emptyPerKind(() => new Map<string, Provider[]>());
+		for (const kind of PROVIDER_KINDS) {
+			for (const row of providers[kind]) {
+				const list = out[kind].get(row.provider_name) ?? [];
+				list.push(row);
+				out[kind].set(row.provider_name, list);
+			}
+		}
+		return out;
+	});
 
 	onDestroy(() => {
 		for (const id of [...playingHandles.keys()]) {
@@ -785,23 +980,68 @@
 	{/if}
 
 	{#if catalog[activeTab].length > 0}
+		{@const configuredRows = providers[activeTab]}
+		{@const selectedKey = selectedDraftKey[activeTab]}
 		<div class="layout" role="tabpanel" data-testid={`panel-${activeTab}`}>
 			<aside class="catalog-list" aria-label={`${PROVIDER_KIND_LABEL[activeTab]} catalog`}>
-				<ul>
+				{#if configuredRows.length > 0}
+					<h3 class="catalog-section-label">
+						Configured ({configuredRows.length})
+					</h3>
+					<ul data-testid={`configured-list-${activeTab}`}>
+						{#each configuredRows as row (row.id)}
+							{@const entry = catalogEntryFor(activeTab, row.provider_name)}
+							{@const itemKey = instanceKey(row.id)}
+							<li>
+								<button
+									type="button"
+									class="catalog-card instance-card"
+									class:selected={selectedKey === itemKey}
+									class:configured={true}
+									class:active={row.is_active}
+									onclick={() => selectInstance(activeTab, row)}
+									data-testid={`instance-${activeTab}-${row.id}`}
+								>
+									<div class="catalog-card-head">
+										<strong>{row.display_name}</strong>
+										{#if entry?.provider_type}
+											<span class={`type-pill type-${entry.provider_type}`}>
+												{entry.provider_type}
+											</span>
+										{/if}
+									</div>
+									<p class="catalog-card-summary">
+										<span class="provider-kind-label">{row.provider_name}</span>
+										{#if entry}· {entry.display_name}{/if}
+									</p>
+									<div class="catalog-card-meta">
+										{#if row.is_active}
+											<span class="meta-item meta-active">active</span>
+										{:else}
+											<span class="meta-item meta-configured">configured</span>
+										{/if}
+									</div>
+								</button>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+
+				<h3 class="catalog-section-label">Add a new {PROVIDER_KIND_LABEL[activeTab]} provider</h3>
+				<ul data-testid={`available-list-${activeTab}`}>
 					{#each catalog[activeTab] as entry (entry.provider_name)}
-						{@const row = configuredRowFor(activeTab, entry.provider_name)}
+						{@const itemKey = newKey(entry.provider_name)}
+						{@const existingCount = configuredByName[activeTab].get(entry.provider_name)?.length ?? 0}
 						<li>
 							<button
 								type="button"
-								class="catalog-card"
-								class:selected={selectedProviderName[activeTab] === entry.provider_name}
-								class:configured={row !== null}
-								class:active={row?.is_active}
-								onclick={() => selectProvider(activeTab, entry.provider_name)}
-								data-testid={`card-${activeTab}-${entry.provider_name}`}
+								class="catalog-card add-card"
+								class:selected={selectedKey === itemKey}
+								onclick={() => startNewDraft(activeTab, entry)}
+								data-testid={`add-${activeTab}-${entry.provider_name}`}
 							>
 								<div class="catalog-card-head">
-									<strong>{entry.display_name}</strong>
+									<strong>+ {entry.display_name}</strong>
 									{#if entry.provider_type}
 										<span class={`type-pill type-${entry.provider_type}`}>
 											{entry.provider_type}
@@ -818,10 +1058,10 @@
 									{#if entry.streaming}
 										<span class="meta-item meta-streaming">streaming</span>
 									{/if}
-									{#if row?.is_active}
-										<span class="meta-item meta-active">active</span>
-									{:else if row}
-										<span class="meta-item meta-configured">configured</span>
+									{#if existingCount > 0}
+										<span class="meta-item meta-configured-count">
+											{existingCount} configured
+										</span>
 									{/if}
 								</div>
 							</button>
@@ -831,16 +1071,24 @@
 			</aside>
 
 			<section class="detail" aria-live="polite">
-				{#if selectedEntry}
+				{#if selectedEntry && selectedDraftKey[activeTab]}
 					{@const entry = selectedEntry}
 					{@const row = selectedRow}
-					{@const sttPhase = sttTestPhase[entry.provider_name]}
-					{@const sttResult = sttTestResults[entry.provider_name]}
-					{@const sttErr = sttTestErrors[entry.provider_name]}
-					{@const banner = formBannerFor[activeTab][entry.provider_name]}
+					{@const draftKey = selectedDraftKey[activeTab]!}
+					{@const sttPhase = row ? sttTestPhase[row.id] : undefined}
+					{@const sttResult = row ? sttTestResults[row.id] : undefined}
+					{@const sttErr = row ? sttTestErrors[row.id] : undefined}
+					{@const banner = formBannerFor[draftKey]}
+					{@const isDraft = isNewKey(draftKey)}
 					<header class="detail-head">
 						<div>
-							<h2>{entry.display_name}</h2>
+							<h2>
+								{#if row}
+									{row.display_name}
+								{:else}
+									New {entry.display_name} instance
+								{/if}
+							</h2>
 							<p class="lede">{entry.summary}</p>
 							{#if entry.signup_url}
 								<p>
@@ -875,7 +1123,7 @@
 								{:else if row}
 									Configured
 								{:else}
-									Not configured
+									New (unsaved)
 								{/if}
 							</dd>
 						</dl>
@@ -887,13 +1135,75 @@
 						data-testid={`test-panel-${activeTab}`}
 					>
 						{#if activeTab === 'stt'}
+							{#if entry.provider_name === 'parakeet' && row}
+								{@const pkg = packageStatus[row.id]}
+								{@const installing = packageInstallingId === row.id}
+								{@const installed = pkg?.installed === true}
+								<div
+									class={`package-panel ${installed ? 'installed' : 'pending'}`}
+									data-testid={`parakeet-package-${row.id}`}
+								>
+									<div class="package-head">
+										<strong>NeMo runtime package</strong>
+										{#if installed}
+											<span class="badge ok" data-testid="parakeet-installed-badge">
+												Installed{pkg?.version ? ` · v${pkg.version}` : ''}
+											</span>
+										{:else if pkg && pkg.applicable === false}
+											<span class="badge muted">N/A</span>
+										{:else}
+											<span class="badge warn">Not installed</span>
+										{/if}
+									</div>
+									<p class="help">
+										Parakeet runs locally on NeMo, which is too heavy
+										(~3 GB) to ship in the api image. Click Install to
+										fetch nemo_toolkit[asr] into
+										<code>~/.johnny/parakeet-packages</code> — persists
+										across rebuilds. First install takes 5–10 minutes.
+									</p>
+									<div class="package-actions">
+										<button
+											type="button"
+											class="primary"
+											onclick={() => onInstallPackage(row)}
+											disabled={installing}
+											data-testid={`parakeet-install-${row.id}`}
+										>
+											{#if installing}
+												Installing…
+											{:else if installed}
+												Reinstall
+											{:else}
+												Install package
+											{/if}
+										</button>
+									</div>
+									{#if packageInstallLog[row.id]}
+										<pre
+											class="package-log"
+											data-testid={`parakeet-install-log-${row.id}`}>{packageInstallLog[
+												row.id
+											]}</pre>
+									{/if}
+									{#if packageInstallError[row.id]}
+										<div
+											class="alert error"
+											role="alert"
+											data-testid={`parakeet-install-error-${row.id}`}
+										>
+											{packageInstallError[row.id]}
+										</div>
+									{/if}
+								</div>
+							{/if}
 							<div class="test-actions">
 								<button
 									type="button"
 									class="primary"
-									onclick={() => onSttTest(entry)}
+									onclick={() => row && onSttTest(row)}
 									disabled={!row || sttTestingFor !== null}
-									data-testid={`stt-test-${entry.provider_name}`}
+									data-testid={`stt-test-${row ? row.id : entry.provider_name}`}
 								>
 									{#if sttPhase === 'recording'}
 										Recording {(MIC_RECORDING_MS / 1000).toFixed(0)}s…
@@ -907,11 +1217,11 @@
 									<span class={`phase phase-${sttPhase}`}>{phaseLabel(sttPhase)}</span>
 								{/if}
 							</div>
-							{#if sttPhase === 'recording'}
+							{#if row && sttPhase === 'recording'}
 								<div class="mic-level" aria-hidden="true">
 									<div
 										class="mic-level-bar"
-										style={`width: ${Math.round((sttTestMicLevel[entry.provider_name] ?? 0) * 100)}%;`}
+										style={`width: ${Math.round((sttTestMicLevel[row.id] ?? 0) * 100)}%;`}
 									></div>
 								</div>
 							{/if}
@@ -920,20 +1230,20 @@
 									Save credentials for this provider below before clicking Test.
 								</p>
 							{/if}
-							{#if sttErr}
+							{#if row && sttErr}
 								<div
 									class="alert error"
 									role="alert"
-									data-testid={`stt-test-error-${entry.provider_name}`}
+									data-testid={`stt-test-error-${row.id}`}
 								>
 									{sttErr}
 								</div>
 							{/if}
-							{#if sttResult && sttResult.ok}
+							{#if row && sttResult && sttResult.ok}
 								<div
 									class="test-result ok"
 									data-stt-result="ok"
-									data-testid={`stt-test-result-${entry.provider_name}`}
+									data-testid={`stt-test-result-${row.id}`}
 								>
 									<header class="test-result-head">
 										<strong>Transcript</strong>
@@ -949,14 +1259,14 @@
 											</span>
 										</div>
 									</header>
-									<p class="transcript" data-testid={`stt-transcript-${entry.provider_name}`}>
+									<p class="transcript" data-testid={`stt-transcript-${row.id}`}>
 										"{sttResult.transcript}"
 									</p>
 									{#if sttResult.message}
 										<small class="help">{sttResult.message}</small>
 									{/if}
 								</div>
-							{:else if sttResult && !sttResult.ok && !sttErr}
+							{:else if row && sttResult && !sttResult.ok && !sttErr}
 								<div class="test-result fail" data-stt-result="fail">
 									<strong>Test failed:</strong>
 									{sttResult.message ?? 'Provider returned no transcript.'}
@@ -971,7 +1281,7 @@
 									class="primary"
 									onclick={() => row && onGenericTest(row)}
 									disabled={!row || genericTestingId === row.id}
-									data-testid={`generic-test-${activeTab}-${entry.provider_name}`}
+									data-testid={`generic-test-${activeTab}-${row ? row.id : entry.provider_name}`}
 								>
 									{#if row && genericTestingId === row.id}
 										Testing…
@@ -995,7 +1305,7 @@
 										{/if}
 									</button>
 								{/if}
-								{#if activeTab === 'tts' && isPiperProvider(entry) && row}
+								{#if activeTab === 'tts' && isPiperProvider(entry.provider_name) && row}
 									<button
 										type="button"
 										onclick={() => openVoiceBrowser(row)}
@@ -1037,8 +1347,8 @@
 								{#if row && row.is_active}
 									<button
 										type="button"
-										onclick={() => onDeactivate(activeTab, entry)}
-										data-testid={`deactivate-${activeTab}-${entry.provider_name}`}
+										onclick={() => onDeactivate(row)}
+										data-testid={`deactivate-${activeTab}-${row.id}`}
 									>
 										Deactivate
 									</button>
@@ -1046,8 +1356,8 @@
 									<button
 										type="button"
 										class="primary"
-										onclick={() => onActivate(activeTab, entry)}
-										data-testid={`activate-${activeTab}-${entry.provider_name}`}
+										onclick={() => onActivate(activeTab, draftKey, row)}
+										data-testid={`activate-${activeTab}-${row.id}`}
 									>
 										Set as default
 									</button>
@@ -1056,8 +1366,8 @@
 									<button
 										type="button"
 										class="danger"
-										onclick={() => onDelete(activeTab, entry)}
-										data-testid={`delete-${activeTab}-${entry.provider_name}`}
+										onclick={() => onDelete(activeTab, row)}
+										data-testid={`delete-${activeTab}-${row.id}`}
 									>
 										Delete
 									</button>
@@ -1066,17 +1376,24 @@
 						</header>
 						<form
 							class="config-form"
-							onsubmit={(event) => onSaveProvider(activeTab, entry, event)}
-							data-testid={`form-${activeTab}-${entry.provider_name}`}
+							onsubmit={(event) => onSaveProvider(activeTab, draftKey, entry, row, event)}
+							data-testid={`form-${activeTab}-${row ? row.id : `new-${entry.provider_name}`}`}
 						>
 							<label class="row">
 								<span>Display name</span>
 								<input
 									type="text"
-									bind:value={formDisplayNames[activeTab][entry.provider_name]}
+									bind:value={formDisplayNames[draftKey]}
 									placeholder={entry.display_name}
 									required
+									data-testid={`display-name-${activeTab}-${row ? row.id : `new-${entry.provider_name}`}`}
 								/>
+								{#if isDraft}
+									<small class="help">
+										Multiple instances of the same provider are allowed — pick a unique
+										name so you can tell them apart.
+									</small>
+								{/if}
 							</label>
 							{#each groupedFields(entry.field_schema) as group (group.group)}
 								<fieldset>
@@ -1084,9 +1401,12 @@
 									{#each group.fields as field (field.name)}
 										{@render fieldRow(
 											field,
-											formValues[activeTab][entry.provider_name],
-											formErrors[activeTab][entry.provider_name] ?? {},
-											fieldInputId(`${activeTab}-${entry.provider_name}`, field.name),
+											formValues[draftKey] ?? {},
+											formErrors[draftKey] ?? {},
+											fieldInputId(
+												`${activeTab}-${row ? row.id : `new-${entry.provider_name}`}`,
+												field.name
+											),
 											row !== null
 										)}
 									{/each}
@@ -1099,10 +1419,10 @@
 								<button
 									type="submit"
 									class="primary"
-									disabled={formSubmittingFor === entry.provider_name}
-									data-testid={`save-${activeTab}-${entry.provider_name}`}
+									disabled={formSubmittingFor === draftKey}
+									data-testid={`save-${activeTab}-${row ? row.id : `new-${entry.provider_name}`}`}
 								>
-									{#if formSubmittingFor === entry.provider_name}
+									{#if formSubmittingFor === draftKey}
 										Saving…
 									{:else if row}
 										Save changes
@@ -1513,6 +1833,38 @@
 		display: grid;
 		gap: 0.5rem;
 	}
+	.catalog-section-label {
+		font-size: 0.7rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: #6b7280;
+		margin: 1rem 0 0.4rem;
+	}
+	.catalog-section-label:first-of-type {
+		margin-top: 0;
+	}
+	.add-card {
+		border-style: dashed !important;
+		background: #f9fafb !important;
+	}
+	.add-card:hover {
+		border-color: #4f46e5 !important;
+		background: #eef2ff !important;
+	}
+	.add-card.selected {
+		background: #e0e7ff !important;
+		border-style: solid !important;
+	}
+	.instance-card .provider-kind-label {
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		font-size: 0.72rem;
+		color: #6b7280;
+	}
+	.meta-configured-count {
+		background: #e0e7ff;
+		color: #312e81;
+	}
 	.catalog-card {
 		display: block;
 		width: 100%;
@@ -1646,6 +1998,59 @@
 	.test-panel {
 		padding: 1rem 0;
 		margin-bottom: 1.25rem;
+	}
+	.package-panel {
+		border: 1px solid #e5e7eb;
+		border-left: 4px solid #f59e0b;
+		border-radius: 6px;
+		padding: 0.75rem 1rem;
+		margin-bottom: 1rem;
+		background: #fffbeb;
+	}
+	.package-panel.installed {
+		border-left-color: #059669;
+		background: #ecfdf5;
+	}
+	.package-head {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		justify-content: space-between;
+	}
+	.package-head .badge {
+		font-size: 0.75rem;
+		padding: 0.15rem 0.5rem;
+		border-radius: 999px;
+		font-weight: 600;
+	}
+	.package-head .badge.ok {
+		background: #d1fae5;
+		color: #065f46;
+	}
+	.package-head .badge.warn {
+		background: #fef3c7;
+		color: #92400e;
+	}
+	.package-head .badge.muted {
+		background: #e5e7eb;
+		color: #374151;
+	}
+	.package-actions {
+		margin-top: 0.5rem;
+		display: flex;
+		gap: 0.5rem;
+	}
+	.package-log {
+		margin-top: 0.75rem;
+		max-height: 220px;
+		overflow: auto;
+		background: #111827;
+		color: #e5e7eb;
+		font-size: 0.78rem;
+		padding: 0.5rem 0.75rem;
+		border-radius: 4px;
+		white-space: pre-wrap;
+		font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
 	}
 	.test-actions {
 		display: flex;

@@ -15,7 +15,8 @@ fi
 mkdir -p \
   "${HOME}/.johnny/piper-models" \
   "${HOME}/.johnny/whisper-models" \
-  "${HOME}/.johnny/parakeet-models"
+  "${HOME}/.johnny/parakeet-models" \
+  "${HOME}/.johnny/parakeet-packages"
 
 # Legacy migration hint: older installs kept the models in named Docker
 # volumes (johnny_piper_models / johnny_whisper_models). Detect them and
@@ -39,15 +40,6 @@ EOF
     fi
   done
 fi
-
-# Heavy on-device STT (NVIDIA NeMo / Parakeet, Johnny-stt.1) is gated
-# behind a build arg consumed by both backend Dockerfiles. Default ON
-# so the catalog Test button and real sessions can use Parakeet out of
-# the box; export INSTALL_PARAKEET=0 before invoking this script to
-# skip the ~2.5 GB CPU torch + NeMo install. CUDA builds are tracked
-# as a follow-up under the Johnny-stt epic; until then INSTALL_PARAKEET=1
-# always means CPU-only torch (works on any Mac / Linux without a GPU).
-export INSTALL_PARAKEET="${INSTALL_PARAKEET:-1}"
 
 # meet-worker is gated behind a compose profile, so `up --build` skips it.
 # Build it explicitly so per-session containers (spawned by the api via the

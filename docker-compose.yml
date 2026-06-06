@@ -35,6 +35,15 @@ x-backend-env: &backend-env
   JOHNNY_MEET_WORKER_WHISPER_VOLUME: ${JOHNNY_MEET_WORKER_WHISPER_VOLUME:-${HOME}/.johnny/whisper-models}
   JOHNNY_MEET_WORKER_PIPER_VOLUME: ${JOHNNY_MEET_WORKER_PIPER_VOLUME:-${HOME}/.johnny/piper-models}
   JOHNNY_MEET_WORKER_PARAKEET_VOLUME: ${JOHNNY_MEET_WORKER_PARAKEET_VOLUME:-${HOME}/.johnny/parakeet-models}
+  # Host bind-mount for the runtime-installed Parakeet Python packages
+  # (Johnny-stt.1). The api / meet-worker code prepends this dir to
+  # sys.path on startup so `import nemo.collections.asr` works whenever
+  # the user has clicked Install on the Parakeet provider card; the
+  # image itself ships NO NeMo / torch — installs live entirely under
+  # ~/.johnny/parakeet-packages. The launcher passes this through to
+  # each spawned meet-worker too so live sessions can use Parakeet.
+  JOHNNY_MEET_WORKER_PARAKEET_PACKAGES_VOLUME: ${JOHNNY_MEET_WORKER_PARAKEET_PACKAGES_VOLUME:-${HOME}/.johnny/parakeet-packages}
+  JOHNNY_PARAKEET_PACKAGES_DIR: ${JOHNNY_PARAKEET_PACKAGES_DIR:-/var/lib/johnny/parakeet-packages}
   JOHNNY_CONTAINER_MONITOR_INTERVAL_SECONDS: ${JOHNNY_CONTAINER_MONITOR_INTERVAL_SECONDS:-30}
   JOHNNY_CONTAINER_PRUNE_INTERVAL_SECONDS: ${JOHNNY_CONTAINER_PRUNE_INTERVAL_SECONDS:-3600}
   JOHNNY_CONTAINER_PRUNE_AGE_SECONDS: ${JOHNNY_CONTAINER_PRUNE_AGE_SECONDS:-86400}
@@ -84,10 +93,6 @@ services:
   migrate:
     build:
       context: ./backend
-      args:
-        # Mirror api/worker so all three services share the same backend
-        # image and don't trigger a rebuild over a single ARG diff.
-        INSTALL_PARAKEET: "${INSTALL_PARAKEET:-1}"
     command: ["alembic", "upgrade", "head"]
     environment: *backend-env
     depends_on:
@@ -98,12 +103,6 @@ services:
   api:
     build:
       context: ./backend
-      args:
-        # Toggle NeMo / Parakeet install (Johnny-stt.1). Default ON so
-        # the catalog Test button works on a fresh clone; export
-        # INSTALL_PARAKEET=0 before `./run.sh` to skip the ~2.5 GB
-        # install and keep the api image lean.
-        INSTALL_PARAKEET: "${INSTALL_PARAKEET:-1}"
     environment: *backend-env
     depends_on:
       postgres:
@@ -130,6 +129,11 @@ services:
       - ${HOME}/.johnny/whisper-models:/var/lib/johnny/whisper-models
       - ${HOME}/.johnny/piper-models:/var/lib/johnny/piper-models
       - ${HOME}/.johnny/parakeet-models:/var/lib/johnny/parakeet-models
+      # Runtime-installed Parakeet Python packages (Johnny-stt.1). Empty
+      # on first boot; populated by clicking Install on the Parakeet
+      # provider card. The api server prepends this dir to sys.path so
+      # `import nemo` works without rebuilding the image.
+      - ${HOME}/.johnny/parakeet-packages:/var/lib/johnny/parakeet-packages
       # google_auth_state holds the Playwright storage_state.json files
       # per bot account so the meet-worker can sign into Google without
       # an interactive OAuth round-trip per session (Johnny-ckz.1).
@@ -157,9 +161,6 @@ services:
   worker:
     build:
       context: ./backend
-      args:
-        # Match api so worker shares the same image layer cache.
-        INSTALL_PARAKEET: "${INSTALL_PARAKEET:-1}"
     command: ["python", "-m", "app.worker"]
     environment: *backend-env
     depends_on:
@@ -181,6 +182,7 @@ services:
       - ${HOME}/.johnny/whisper-models:/var/lib/johnny/whisper-models
       - ${HOME}/.johnny/piper-models:/var/lib/johnny/piper-models
       - ${HOME}/.johnny/parakeet-models:/var/lib/johnny/parakeet-models
+      - ${HOME}/.johnny/parakeet-packages:/var/lib/johnny/parakeet-packages
       # Same shared google-auth volume as the API (read-write here so
       # an admin endpoint or one-time helper can refresh stored cookies
       # from inside the worker process if needed).
@@ -220,13 +222,6 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.meet-worker
-      args:
-        # Toggle NeMo / Parakeet install (Johnny-stt.1). Sessions that
-        # select Parakeet need this ON inside the meet-worker image
-        # (the per-session container is spawned from it). Export
-        # INSTALL_PARAKEET=0 before `./run.sh` to skip if Parakeet
-        # isn't part of your provider mix.
-        INSTALL_PARAKEET: "${INSTALL_PARAKEET:-1}"
     image: johnny-meet-worker:latest
     profiles: ["meet-worker"]
     # Per-session containers attach these dirs so downloaded model
@@ -236,6 +231,7 @@ services:
       - ${HOME}/.johnny/piper-models:/var/lib/johnny/piper-models
       - ${HOME}/.johnny/whisper-models:/var/lib/johnny/whisper-models
       - ${HOME}/.johnny/parakeet-models:/var/lib/johnny/parakeet-models
+      - ${HOME}/.johnny/parakeet-packages:/var/lib/johnny/parakeet-packages
 
 volumes:
   postgres_data:

@@ -410,6 +410,53 @@ export function removePiperVoice(
 	);
 }
 
+// --- runtime package install (Parakeet / NeMo) ----------------------------
+
+export interface PackageStatus {
+	applicable: boolean;
+	install_path?: string;
+	exists?: boolean;
+	installed?: boolean;
+	version?: string | null;
+	on_sys_path?: boolean;
+}
+
+/**
+ * Status of the runtime-installed Python package stack for providers
+ * whose deps don't ship in the api image (currently only Parakeet).
+ * Responds with `{applicable: false}` for any other provider so the UI
+ * can skip rendering the Install affordance.
+ */
+export function getProviderPackage(id: number): Promise<PackageStatus> {
+	return request<PackageStatus>(`/providers/${id}/package`);
+}
+
+/**
+ * Start a Parakeet runtime install (`uv pip install nemo_toolkit[asr]`
+ * into `~/.johnny/parakeet-packages`). Returns the raw `text/plain`
+ * response stream from pip so the caller can render a live tail of the
+ * install (~5–10 min on first run). The stream ends with one of two
+ * markers: `[install ok — packages at <path>]` or `[install failed —
+ * exit code <n>]` — pattern-match either to detect completion.
+ */
+export async function installProviderPackage(
+	id: number
+): Promise<ReadableStream<Uint8Array>> {
+	const res = await fetch(`${API_BASE}/providers/${id}/package/install`, {
+		method: 'POST'
+	});
+	if (!res.ok || !res.body) {
+		let detail: string | null = null;
+		try {
+			detail = extractDetail(await res.json());
+		} catch {
+			// Non-JSON — keep generic error.
+		}
+		throw new Error(detail ?? `HTTP ${res.status}`);
+	}
+	return res.body;
+}
+
 /**
  * Synthesise the canonical demo phrase via this provider, but with
  * `voice_id` overridden for this single call only — the saved row is

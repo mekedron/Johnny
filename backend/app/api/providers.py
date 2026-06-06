@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -530,7 +531,13 @@ def create_provider(
         session.rollback()
         raise HTTPException(
             status_code=409,
-            detail="a provider with this kind/name/display already exists",
+            detail=(
+                f"a {payload.kind.value} provider with display name "
+                f"{payload.display_name!r} already exists. "
+                "Pick a different display name — multiple instances of the "
+                "same provider are allowed as long as their display names "
+                "are unique."
+            ),
         ) from exc
     session.refresh(row)
     return _row_to_read(crypto, row)
@@ -591,7 +598,12 @@ def update_provider(
         session.rollback()
         raise HTTPException(
             status_code=409,
-            detail="conflicts with another provider with the same kind/name/display",
+            detail=(
+                f"another {row.kind.value} provider already has display "
+                f"name {row.display_name!r}. Pick a different display name "
+                "— multiple instances of the same provider are allowed as "
+                "long as their display names are unique."
+            ),
         ) from exc
     session.refresh(row)
     return _row_to_read(crypto, row)
@@ -1184,6 +1196,67 @@ def remove_voice_endpoint(
             detail=f"failed to remove voice {voice_key!r}: {exc}",
         ) from exc
     return VoiceRemoveResponse(**result)
+
+
+# --- parakeet runtime package install -------------------------------------
+
+
+@router.get("/{provider_id}/package")
+def get_provider_package(
+    provider_id: int,
+    session: SessionDep,
+) -> dict[str, object]:
+    """Return runtime-package status for providers that ship a heavy
+    dependency stack outside the image (currently only Parakeet).
+
+    For everything else the response is ``{"applicable": false}`` so the
+    UI can skip rendering an Install button — the catalog Test button
+    works directly against deps that are already baked into the api
+    image.
+    """
+    from app.services.parakeet_packages import package_status
+
+    row = _get_row_or_404(session, provider_id)
+    if row.provider_name != "parakeet":
+        return {"applicable": False}
+    return {"applicable": True, **package_status()}
+
+
+@router.post("/{provider_id}/package/install")
+def install_provider_package(
+    provider_id: int,
+    session: SessionDep,
+) -> StreamingResponse:
+    """Run ``uv pip install`` for the Parakeet package stack at runtime.
+
+    The install lands in a host bind-mounted directory (set by the
+    ``JOHNNY_PARAKEET_PACKAGES_DIR`` env, defaulting to
+    ``/var/lib/johnny/parakeet-packages``) so it persists across
+    container restarts and image rebuilds — same pattern as the Piper
+    voice catalog (``POST /providers/{id}/voices/{voice}/install``).
+
+    The body is a ``text/plain`` stream of pip's combined stdout/stderr
+    so the frontend can show a live tail instead of staring at a
+    spinner for the 5–10 minute first install. Two terminal markers:
+    ``[install ok — packages at …]`` on success, ``[install failed —
+    exit code …]`` on failure. After success the api process's
+    ``sys.path`` is updated in place — no container restart needed.
+    """
+    from app.services.parakeet_packages import install_packages_stream
+
+    row = _get_row_or_404(session, provider_id)
+    if row.provider_name != "parakeet":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"runtime package install only supported for "
+                f"provider 'parakeet', not {row.provider_name!r}"
+            ),
+        )
+    return StreamingResponse(
+        install_packages_stream(),
+        media_type="text/plain; charset=utf-8",
+    )
 
 
 # --- export endpoint -------------------------------------------------------

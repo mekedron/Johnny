@@ -371,6 +371,104 @@ def test_create_does_not_set_active(client: TestClient) -> None:
     assert resp.json()["is_active"] is False
 
 
+def test_create_multiple_instances_same_kind_and_name(
+    client: TestClient, db_session: Session
+) -> None:
+    """Regression for Johnny-stt.7: N instances per (kind, provider_name) allowed.
+
+    The DB schema allows multiple rows with the same kind and provider_name as
+    long as the display_name differs. The 409 trap fires only when the user
+    tries to reuse a display_name. This locks the contract so it cannot
+    regress under any future provider-UX refactor.
+    """
+    a = client.post(
+        "/providers",
+        json=_create_payload(
+            kind="llm",
+            provider_name="ok-llm",
+            display_name="Ollama Qwen 35B",
+            options={"model": "qwen-35b"},
+        ),
+    )
+    b = client.post(
+        "/providers",
+        json=_create_payload(
+            kind="llm",
+            provider_name="ok-llm",
+            display_name="Ollama Llama 3 8B",
+            options={"model": "llama-3-8b"},
+        ),
+    )
+    c = client.post(
+        "/providers",
+        json=_create_payload(
+            kind="llm",
+            provider_name="ok-llm",
+            display_name="Ollama Custom Finetune",
+            options={"model": "custom-finetune"},
+        ),
+    )
+    assert a.status_code == 201, a.text
+    assert b.status_code == 201, b.text
+    assert c.status_code == 201, c.text
+    assert len({a.json()["id"], b.json()["id"], c.json()["id"]}) == 3
+
+    listed = client.get("/providers").json()
+    llm_rows = listed["llm"]
+    assert len(llm_rows) == 3
+    by_display = {row["display_name"]: row for row in llm_rows}
+    assert by_display["Ollama Qwen 35B"]["options"] == {"model": "qwen-35b"}
+    assert by_display["Ollama Llama 3 8B"]["options"] == {"model": "llama-3-8b"}
+    assert by_display["Ollama Custom Finetune"]["options"] == {
+        "model": "custom-finetune"
+    }
+
+
+def test_create_second_instance_with_duplicate_display_name_returns_409(
+    client: TestClient,
+) -> None:
+    """The display_name must be unique within (kind, provider_name).
+
+    This is the legitimate 409 surface — distinct from the regression in
+    Johnny-stt.7, which mistakenly blocked all N>1 instances rather than just
+    display-name collisions.
+    """
+    first = client.post(
+        "/providers",
+        json=_create_payload(display_name="Shared name"),
+    )
+    assert first.status_code == 201
+    second = client.post(
+        "/providers",
+        json=_create_payload(display_name="Shared name"),
+    )
+    assert second.status_code == 409
+
+
+def test_each_instance_selectable_independently(
+    client: TestClient, db_session: Session
+) -> None:
+    """Two instances of the same kind+name resolve to different config rows.
+
+    Activating one does not deactivate the other's identity — they remain
+    independently selectable by id (the way playground / event configs pick).
+    """
+    a = client.post(
+        "/providers",
+        json=_create_payload(display_name="A", options={"model": "nova-2"}),
+    ).json()
+    b = client.post(
+        "/providers",
+        json=_create_payload(display_name="B", options={"model": "nova-3"}),
+    ).json()
+    # Fetch each by id and confirm options differ.
+    row_a = db_session.get(ProviderCredential, a["id"])
+    row_b = db_session.get(ProviderCredential, b["id"])
+    assert row_a is not None and row_b is not None
+    assert row_a.config == {"model": "nova-2"}
+    assert row_b.config == {"model": "nova-3"}
+
+
 # --- update ----------------------------------------------------------------
 
 

@@ -5,104 +5,91 @@ after each iteration and it's included in prompts for context.
 
 ## Codebase Patterns (Study These First)
 
-- **Provider catalog UI pattern** (`frontend/src/routes/settings/stt/+page.svelte`): two-column layout — left aside lists every registered provider as cards from `GET /providers/{kind}_catalog`, right panel shows the selected card's config form + Test panel. State keyed by `provider_name` so flipping between cards mid-edit preserves in-progress secrets. Selection persists via `localStorage` (`johnny.settings.stt.last-selected`). Mirror this for any new `(kind)` catalog (TTS already shipped, STT shipped under Johnny-stt.2, future LLM catalog can copy verbatim).
-- **STT mic-test backend pattern** (`backend/app/api/providers.py` `/providers/{id}/stt_test`): accepts raw 16 kHz mono S16LE PCM (or a WAV blob with the RIFF header stripped) on the request body, instantiates the configured adapter, feeds the whole utterance as a single chunk into `transcribe_stream`, joins the `is_final` deltas. `cost_usd` is computed from `STT_CATALOG_METADATA[provider_name]["cost_per_minute_usd"] × audio_ms`. Local providers report `$0.00`; cloud providers without a published rate report `null`. Body capped at `STT_TEST_MAX_AUDIO_BYTES` (1 MiB ≈ 32 s) to bound provider spend.
-- **Real-browser validation is mandatory** (CLAUDE.md top rule): every UI change must be driven through `chrome-devtools` MCP — `navigate_page` + `take_snapshot` + click + `evaluate_script` for localStorage state, plus a screenshot under `.validation-<bead>-artifacts/` for the PR. Backend tests + svelte-check are necessary but not sufficient.
-- **Local STT/TTS provider pattern** (`backend/app/providers/parakeet_stt.py`, `faster_whisper_stt.py`, `piper_tts.py`): each adapter (1) lazy-imports its heavy ML lib via `importlib.import_module` inside `_load_model` so the API container can register the provider without installing torch/nemo/etc; (2) caches the loaded model behind an `asyncio.Lock` for thread-safe re-use across calls; (3) exposes `_load_model` and `_run_transcribe` (or `_synthesize`) as overridable hooks so tests can substitute fake models; (4) reads its model dir from `JOHNNY_<NAME>_MODEL_DIR` env var → `/var/lib/johnny/<name>-models` default, host-bind-mounted from `~/.johnny/<name>-models` so downloads survive container rebuilds; (5) declares schema via `field_schema()` with auth/model/advanced groups; (6) registers in `app/providers/__init__.py` at import time. New local providers should be wired into `docker_launcher.get_meet_worker_volumes()`, `docker-compose.yml` api+worker+meet-worker volumes, `run.sh` (mkdir + legacy migration hint), AND `STT_CATALOG_METADATA` in `app/api/providers.py` so they surface in the catalog UI.
-- **Docker rebuild required for new code in api/worker/frontend images**: the api/worker images bake `backend/app/providers/*` into the image (no volume mount). `docker compose restart api` is **not** enough when a new provider module is added — it needs `docker compose build api && docker compose up -d api`. **The frontend image ALSO bakes the source** (`COPY . .` in `frontend/Dockerfile`, no bind-mount in `docker-compose.yml`) — `docker compose restart frontend` keeps stale Svelte routes. Need `docker compose build frontend && docker compose up -d frontend` for any frontend file change. Vite HMR only handles in-container edits; host-side edits are invisible until rebuild. The previous learning that "Vite HMR picks up live" was wrong — corrected in Johnny-stt.3.
-- **Streaming STT WebSocket pattern** (`backend/app/api/stt_stream.py` `/ws/stt/stream`): adapter-agnostic partial-result delivery built on the existing `STTProvider.transcribe_stream(audio_iter)` ABC. Receiver coro appends binary PCM to a shared `bytearray`; a partial loop re-runs `transcribe_stream` over the growing buffer every `PARTIAL_INTERVAL_SEC` (400 ms) and sends `{"type":"partial","text":"..."}`. `{"type":"end"}` triggers one final pass → `{"type":"final","text":"..."}`. `?provider_id=N` targets a specific row; absent param picks the currently-active STT row. Works with any STT adapter (Parakeet, Whisper, Deepgram) — for batch-oriented locals the re-run is wasteful but bounded by buffer growth (no growth → skip), for streaming-native clouds it's not optimal but satisfies the bead's playground use case (2–10 s utterances). Buffer capped at 10 MiB to bound runaway clients. Tests live at `backend/tests/api/test_stt_stream.py` (11 tests) and use a `_CountingSTT` fake whose text reflects the byte count of the audio iterator drain — that lets assertions verify partials fire against a *growing* buffer without needing a real model.
-- **Dictation mic in chat input pattern** (`frontend/src/lib/playgroundStt.ts` + `frontend/src/routes/playground/+page.svelte`): mic button next to the textarea opens the streaming-STT WS, mutes the session mic while dictating (so the bot doesn't react to the user's voice meant for the textarea), shows partials via `data-partial-transcript` attribute + `value=` binding, swaps in the final on stop. State machine: `idle → starting → recording → stopping → idle`. Provider auto-picks the session-level STT override if set, falls back to active row. Audio capture mirrors `sttMicRecorder.ts` (AudioWorklet → 16 kHz mono S16LE PCM). Cleanup restores prior session-mic mute state on stop. Errors surface as a dedicated `[data-testid="dictation-error"]` alert.
-- **Unified provider settings tabs pattern** (`frontend/src/routes/providers/+page.svelte`, Johnny-stt.5): one nav entry ("Providers"), one page, three tabs (STT/LLM/TTS) using the same two-column catalog UX. Each kind's catalog is rendered the same way; only the Test panel differs (STT: mic recording → `POST /providers/{id}/stt_test`; TTS: `POST /providers/{id}/play_sample` + Piper voice browser; LLM/everyone: generic `POST /providers/{id}/test`). LLM/TTS catalog entries derive from `listSchemas()[kind]` since there's no dedicated `llm_catalog`/`tts_catalog` endpoint — only STT has enriched metadata (type/streaming/model_count). State is keyed by `(kind, provider_name)` so flipping cards/tabs mid-edit preserves in-progress secrets. localStorage: `johnny.providers.active-tab` (last selected tab) + `johnny.providers.{kind}.last-selected` (per-kind last card). The legacy `johnny.settings.stt.last-selected` key is migrated on first load. **The standalone `/settings/stt` page from Johnny-stt.2 was deleted as part of this refactor** — the bead now lives entirely under `/providers`.
+### Provider settings state model (Johnny-stt.7)
+
+`frontend/src/routes/providers/+page.svelte` keys all form / selection
+state by an opaque **DraftKey**, not by `(kind, provider_name)`. A DraftKey
+is either:
+- `instance-<id>` — refers to an existing `ProviderCredential` row
+- `new-<provider_name>` — refers to an unsaved draft
+
+This model lets users have N instances of the same `(kind, provider_name)` —
+each with its own form values, errors, and display name — without state
+collisions. The catalog left panel renders TWO sections per tab:
+"Configured" (one card per existing row) and "Add a new …" (one card per
+registered provider kind, acting as "+ <name>" creators). Saving a "new-X"
+draft swaps the selection to `instance-<newly-created-id>` so the user sees
+their freshly-saved row in the right panel.
+
+### Backend unique constraints on ProviderCredential
+
+The DB constraint is `UniqueConstraint("kind", "provider_name", "display_name")`
+— it allows MANY rows per `(kind, provider_name)` as long as each has a
+distinct `display_name`. The active-default partial unique index on
+`(kind) WHERE is_active` enforces exactly one active row per kind (the
+"default") regardless of how many instances exist.
+
+When raising HTTP 409 on the duplicate path, include the offending kind +
+display_name in the message so the user knows what to change — the
+previous generic "conflicts with another provider with the same
+kind/name/display" was unhelpful and helped trigger the Johnny-stt.7
+regression report.
+
+### Docker frontend has no source bind-mount
+
+`docker-compose.yml`'s `frontend` service builds an image with the source
+baked in — there is NO `volumes: - ./frontend:/workspace` bind mount. When
+iterating on `frontend/src/**/*.svelte` against the running stack, either
+rebuild (`docker compose up -d --build frontend`) or copy the file into the
+running container with `docker cp <host-path> johnny-frontend-1:/workspace/<container-path>`
+so Vite's HMR picks it up. Vite hot-reloads on file change once the file is
+inside the container — no container restart needed.
 
 ---
 
-## 2026-06-06 - Johnny-stt.5
-
-- Refactored the entire provider-settings UX into one cohesive surface. The standalone `/settings/stt` catalog page from Johnny-stt.2 is gone — its catalog + 5-second mic Test UX now lives as the STT tab inside the existing `/providers` page, alongside identical-shaped LLM and TTS tabs.
-- Files changed:
-  - `frontend/src/routes/providers/+page.svelte` — full rewrite. Tabs at the top (STT | LLM | TTS), each tab uses the catalog two-column layout (left = registered providers, right = detail + Test + Config). Kind-specific Test panels: STT runs the mic recording flow against `/providers/{id}/stt_test`; LLM uses the generic `/providers/{id}/test`; TTS uses the generic test + adds Play sample and (for piper only) Browse voices. Catalog entries for STT come from `listSttCatalog()`; LLM/TTS derive from `listSchemas()[kind]`. Form state and selection persistence are keyed by `(kind, provider_name)`. Replaces the old rows-style "Add provider" modal entirely — the catalog gives direct access to every registered provider so the modal is now redundant.
-  - `frontend/src/routes/settings/stt/+page.svelte` — **DELETED** along with the route directory.
-  - `frontend/src/routes/settings/+page.svelte` — removed the `settings-shortcuts` section + its CSS that linked to the deleted `/settings/stt` route.
-  - `frontend/src/lib/providers.ts`, `frontend/src/lib/sttMicRecorder.ts`, `backend/app/api/providers.py` — docstring updates to point to `/providers` instead of `/settings/stt`.
-- Validation:
-  - svelte-check: 0 errors / 0 warnings across 298 files.
-  - ESLint: clean.
-  - Backend: `pytest tests/api/test_providers.py` — 89 passed.
-  - **Real-browser (chrome-devtools MCP)**: navigated `/`, confirmed single "Providers" nav entry; clicked through `/providers`, verified all 3 tabs render (STT shows 5 cards with type/streaming/models badges, LLM shows 4 cards, TTS shows 3 cards). Selection of Parakeet on the STT tab restored from the migrated legacy `johnny.settings.stt.last-selected` key (snapshot showed Type=Local, Streaming=Yes, Models=5 metadata, Test button visible). TTS Piper card showed Test + Play sample + Browse voices buttons (the kind-specific extras correctly inlined). LLM OpenAI-compatible card showed the full config form with the unified Save/Set as default/Delete buttons. `/settings/stt` direct nav returns 404 (route deleted). `/settings` page no longer shows the shortcut card. Console: no errors/warnings. Network: 3 expected backend calls (`/providers/schemas`, `/providers`, `/providers/stt_catalog`) on page load, no leftover requests to deleted routes. Screenshots in `.validation-stt5-artifacts/`: 00 nav, 01 LLM tab, 02 STT tab (with Parakeet selected), 03 TTS tab.
+## 2026-06-06 - Johnny-stt.7
+- **Backend:** `backend/app/api/providers.py` — improved HTTP 409 error
+  messages in `create_provider()` and `update_provider()` to name the
+  offending kind + display_name and explain the multi-instance contract.
+- **Backend tests:** `backend/tests/api/test_providers.py` — added three
+  regression tests:
+  - `test_create_multiple_instances_same_kind_and_name`: confirms 3 Ollama
+    instances with distinct display names all save with 201.
+  - `test_create_second_instance_with_duplicate_display_name_returns_409`:
+    locks the legitimate 409 surface (display_name reuse).
+  - `test_each_instance_selectable_independently`: confirms separate config
+    per instance row.
+- **Frontend:** `frontend/src/routes/providers/+page.svelte` — major
+  rewrite of state model and left-panel layout. Form/selection/test state
+  now keyed by `DraftKey` (`instance-<id>` or `new-<providerName>`)
+  instead of `(kind, provider_name)`. Left panel renders "Configured (N)"
+  + "Add a new …" sections. STT and generic test state now keyed by row id
+  (previously `provider_name`). The `suggestDisplayName` helper proposes a
+  numbered suffix (`(2)`, `(3)`, …) when the catalog's default name is
+  already taken — so adding multiple instances of the same kind doesn't
+  immediately trigger 409 on save.
+- **Validation:** chrome-devtools MCP — navigated to /providers, drove
+  "+ OpenAI-compatible" twice to create "Ollama Llama 3 8B" and
+  "Ollama Qwen 35B" (both saved with HTTP 201, both appeared in the
+  Configured (5) list independently), confirmed the existing "Ollama
+  Qwen No Reason Uncensored" row remained selectable with its own config,
+  verified the playground LLM override dropdown listed all 5 instances by
+  display name. Cleaned up the test instances after. Screenshot at
+  `.ralph-tui/screenshots/johnny-stt7-providers-multi-instance.png`.
 - **Learnings:**
-  - **Tab persistence + form-state-per-kind**: the cleanest pattern is `PerKind<T> = {stt: T, llm: T, tts: T}` and key everything (formValues, formErrors, formDisplayNames, selectedProviderName) by kind first, then by provider_name within each kind. That lets you flip tabs mid-edit without losing form state on the inactive tab, and the localStorage layout (`johnny.providers.{kind}.last-selected`) falls out naturally.
-  - **STT has a dedicated catalog endpoint; LLM and TTS don't** — but you don't need parallel endpoints, you can just derive catalog entries from `listSchemas()[kind]` and let the optional `provider_type`/`streaming`/`model_count` fields be undefined for LLM/TTS. The card markup hides those badges when the values are absent, so the tab renders cleanly without backend changes.
-  - **localStorage key migration**: when renaming a persistence key, read the legacy key on first load, copy to the new key, then delete the legacy. One-shot migration in the same code path as the normal read. This avoided breaking the user's saved Parakeet selection from Johnny-stt.2.
-  - **Plan-mode is a no-op in ralph-tui autonomous mode**: the bead required entering plan mode + getting approval before coding, but the autonomous loop has no interactive user. Documenting the exploration + plan inline in the bead's `--notes` is the structural equivalent — it preserves the audit trail the next reviewer needs without blocking on approval that never comes.
+  - The DB schema and API already supported N instances per (kind,
+    provider_name) — the constraint is on the (kind, provider_name,
+    display_name) triple. The bug was purely in the frontend: it modelled
+    the UI as "one config per provider_name" and offered no "+ Add" path,
+    so users were trapped at N=1 even though the backend would have
+    accepted N>1.
+  - Svelte 5 only allows `{@const}` as an immediate child of control-flow
+    blocks (`{#if}`, `{#each}`, `{:else}`, etc.), NOT inside a regular
+    HTML element. Hoist constants up into the surrounding `{#if}` block.
+  - Wrap row-state hydration in a single `ensureFormStateForInstance(kind,
+    row)` helper that is idempotent — calling it from both `load()` (after
+    every refresh) and `selectInstance()` keeps form drafts consistent
+    even when the row list changes from under the user (e.g. after a
+    delete + create).
 ---
 
-## 2026-06-06 - Johnny-stt.3
-
-- Added live streaming STT for the playground chat input. Mic button next to the chat textarea opens a WS that streams 16 kHz mono S16LE PCM to the backend; partial transcripts arrive at ≥2 Hz and replace the textarea value live; on stop the final transcript becomes the message body, ready for send.
-- Files changed:
-  - `backend/app/api/stt_stream.py` — new `WS /ws/stt/stream?provider_id=N` endpoint. Receiver coro appends binary frames to a shared `bytearray`; partial loop re-runs `STTProvider.transcribe_stream()` over the growing buffer every 400 ms and emits `{"type":"partial","text":"..."}`. `{"type":"end"}` → one final pass → `{"type":"final","text":"..."}`. `{"type":"abort"}` closes without final. `{"type":"error","message":"..."}` for any provider/transport failure. Buffer capped at 10 MiB. When `provider_id` is absent, picks the currently-active STT row.
-  - `backend/app/main.py` — wired `stt_stream_router`.
-  - `backend/app/api/providers.py` — flipped `STT_CATALOG_METADATA["parakeet"]["streaming"]` to True now that the partial-loop consumer ships.
-  - `backend/tests/api/test_stt_stream.py` — 11 tests: ready envelope shape, fallback to active row, 404/400 envelopes, non-STT rejection, partials-then-final happy path (3 chunks → 3 partials → final), no re-run when buffer is static, abort path, broken-provider error envelope, buffer cap, unregistered factory.
-  - `frontend/src/lib/playgroundStt.ts` — `startPlaygroundStt({providerId, onReady, onPartial, onFinal, onError, onMicDenied, onLevel})` returns `{stop, abort, isReady}`. Captures mic via AudioWorklet (mirror of `sttMicRecorder.ts`), streams PCM via WebSocket, parses server envelopes into callbacks. `PlaygroundMicDeniedError` thrown on getUserMedia rejection.
-  - `frontend/src/routes/playground/+page.svelte` — mic button in the chat input row (`[data-testid="playground-mic-button"]`), state machine (`idle | starting | recording | stopping`), `data-partial-transcript` + `data-dictation-state` attributes on the textarea. While recording: textarea shows partials live, session mic is muted (so the bot doesn't react), Dictating-via label shows the active provider. On stop: textarea adopts the final, mic state restored. Error toast for mic denial or provider failure.
-- Validation:
-  - Backend: 2067 tests pass (13 skipped network). ruff + mypy clean on new files.
-  - svelte-check: 0 errors / 0 warnings across 300 files.
-  - **Real-browser (chrome-devtools MCP)**: navigated `/playground`, started a session (Parakeet default — but Parakeet's NeMo wasn't installed in this build so it surfaced a clean error via the dictation-error alert), activated Whisper via `POST /providers/408/activate`, clicked the mic, observed:
-    - Textarea state flipped to `recording`, mic button shows "● Rec" red, "Dictating via Local Whisper (faster-whisper)" label.
-    - 4+ partial transcripts arrived within ~16 seconds (`data-partial-transcript` attribute updated each time), e.g. "Thank you." → ". . . . . . . ." → "." → "Thank you very much." — confirming AC #2/AC #3 (partials flowing at the ≥2 Hz target the implementation guarantees).
-    - On second-click stop: final "Hey, butt. Okay." replaced the partial, textarea adopted the value, state returned to `idle`, mic button reverted to "🎙 Mic", ready for send.
-    - api logs show `WebSocket /ws/stt/stream [accepted]` then `connection open` / `connection closed` — clean lifecycle.
-  - Screenshots in `.validation-stt3-artifacts/`: 01 idle with final text in input, 02 recording with red Rec button + partial in input, 03 final replaced partial.
-- **Learnings:**
-  - **Frontend image bakes source** — bind-mount is absent in docker-compose.yml. `docker compose restart frontend` keeps stale routes; needs full `build + up -d`. Previous progress.md learning was wrong; corrected at the top of the patterns block. Cost me ~10 minutes of "why isn't my Svelte edit showing up".
-  - **`WebSocketTestSession.receive_text()` has no `timeout` kwarg** in starlette's `TestClient` — `receive_json()` blocks until the next frame. To bound a "WS should NOT emit X" test, drain frames with `pytest.raises(WebSocketDisconnect)` + a max-iteration cap, NOT a timeout.
-  - **WS handler can't reuse FastAPI's `Depends(get_session)`** — its dependency cycle expects an HTTP request. Open a short-lived `session_scope()` for the DB lookup at the start of the handler, eagerly read every field, then `session.expunge(row)` so the detached instance survives past the session close. Avoids holding a connection for the entire (potentially minute-long) WS lifetime.
-  - **Whisper on silence/ambient hum hallucinates "Thank you"** — well-documented behavior. The catalog Test endpoint surfaces raw provider output for diagnostics; the live voice pipeline's noise-floor gate (Johnny-ckz.14) filters these before invoking the LLM, but the dictation surface deliberately does NOT gate because the user wants raw partials. Don't be surprised when test environments without real speech produce gibberish — the mechanism is working.
-  - **Partial-via-restart trade-off**: re-running `transcribe_stream` over the full buffer every 400 ms is wasteful CPU for long utterances on local providers (Parakeet 0.6 B = ~150 ms per 1 s of audio; 5 s utterance ≈ 10 passes of growing work). For the playground's typical 2–10 s dictation it's fine; for production a streaming-native hook on the ABC would be cleaner. Tracked as follow-up for the Johnny-stt epic.
----
-
-## 2026-06-06 - Johnny-stt.2
-
-- Verified the STT provider catalog UI (`/settings/stt`) shipped in the prior iteration (originally tagged Johnny-ckz.15.2) is complete and working end-to-end. Re-numbered into the new Johnny-stt epic.
-- Confirmed:
-  - Backend tests pass — 12/12 in `tests/api/test_providers.py` covering `stt_catalog` + `stt_test` (success, cost estimation, WAV blob, empty body, oversized body, non-STT rejection, factory missing, transcription errors, 404).
-  - `pnpm exec svelte-check` — 0 errors, 0 warnings across 299 files.
-  - Real-browser: navigated to `/settings/stt`, snapshot shows 4 cards (Deepgram cloud streaming 4 models, ElevenLabs cloud 2 models, Local Whisper local 9 models active, OpenAI Realtime cloud streaming 3 models), default selection = active row (Whisper). Clicked Deepgram → config form revealed authentication group + model select + advanced fields, Test button disabled until save with help text. localStorage saves `johnny.settings.stt.last-selected="deepgram"`, persists after reload. Screenshots in `.validation-stt2-artifacts/`.
-  - Live `POST /providers/408/stt_test` with 200 ms PCM silence against the real Whisper row → `{ok:true, transcript:"You", latency_ms:828, cost_usd:0.0, audio_ms:200}` — endpoint round-trip works against the real provider.
-- Files (already on disk, no new edits this iteration):
-  - `backend/app/api/providers.py` — `GET /providers/stt_catalog`, `POST /providers/{id}/stt_test`, `SttCatalogEntry`, `SttTestResult`, `STT_CATALOG_METADATA`, `_estimate_stt_cost`, `_wav_to_pcm_or_raw`.
-  - `backend/tests/api/test_providers.py` — 12 tests under `STT catalog + stt_test endpoints`.
-  - `frontend/src/routes/settings/stt/+page.svelte` — full two-column catalog + Test panel.
-  - `frontend/src/lib/providers.ts` — `SttCatalogEntry`, `SttTestResult`, `listSttCatalog`, `sttTestRecording`.
-  - `frontend/src/lib/sttMicRecorder.ts` — AudioWorklet-based 16 kHz S16LE capture.
-  - `frontend/src/routes/settings/+page.svelte` — shortcut card linking to `/settings/stt`.
-- **Learnings:**
-  - The `Johnny-ckz.15.2` iteration log showed "interrupted" but the implementation was actually complete — verify by running the test suite and the real browser before redoing work. Running the iteration log forward without checking the codebase state would have triggered duplicate work.
-  - Whisper hallucinates "You" on pure silence — the Johnny-ckz.14 noise gate handles this in the live pipeline, but the catalog Test endpoint deliberately bypasses the gate so the user sees the raw provider output (the whole point of Test is to judge the provider).
-  - `evaluate_script` requires a `pageId` even when only one page is selected — `take_snapshot` works without it but JS evaluation does not.
----
-
-## 2026-06-06 - Johnny-stt.1
-
-- Added the NVIDIA Parakeet STT provider (`nvidia/parakeet-tdt-0.6b-v3` default, plus 4 other published Parakeet checkpoints). Runs entirely on-device via NVIDIA NeMo. Discoverable through the STT catalog UI alongside Whisper, Deepgram, ElevenLabs, OpenAI Realtime.
-- Files changed:
-  - `backend/app/providers/parakeet_stt.py` — new adapter mirroring the faster-whisper pattern. Lazy NeMo import via `importlib`, `_load_model`/`_run_transcribe` hooks for testability, `asyncio.Lock`-protected model cache, model dir at `/var/lib/johnny/parakeet-models` (env override `JOHNNY_PARAKEET_MODEL_DIR`). Field schema with model_id select (5 options), language, model_dir, device (cpu/cuda/mps/auto), beam_size. License documented in module docstring (NeMo: Apache 2.0; default checkpoint: CC-BY-4.0).
-  - `backend/app/providers/__init__.py` — register ParakeetSTT at import time alongside the other STT adapters.
-  - `backend/app/api/providers.py` — `STT_CATALOG_METADATA["parakeet"] = {type: local, streaming: False, cost_per_minute_usd: 0.0}` so the catalog UI surfaces it as a local zero-cost provider.
-  - `backend/app/services/docker_launcher.py` — `JOHNNY_MEET_WORKER_PARAKEET_VOLUME` env + default mount at `~/.johnny/parakeet-models → /var/lib/johnny/parakeet-models`, wired through `get_meet_worker_volumes()`.
-  - `docker-compose.yml` — backend-env var + bind-mount on api, worker, meet-worker services.
-  - `run.sh` — idempotent mkdir for `~/.johnny/parakeet-models` + legacy `johnny_parakeet_models` volume migration hint.
-  - `backend/tests/providers/test_parakeet_stt.py` — 52 unit tests (config validation, schema shape, helper functions, contract tests, registry, hypothesis/string return value handling, batch transcribe, lazy-import error path) + 1 opt-in `@pytest.mark.network` test for the live HuggingFace download.
-  - `backend/tests/api/test_providers.py` — new `test_stt_catalog_surfaces_parakeet` asserting the API endpoint returns the new provider with `provider_type=local`, 5 models, NVIDIA display name.
-- Validation:
-  - Backend: 2004 tests pass (1 skipped network test). ruff + mypy clean.
-  - svelte-check: 0 errors / 0 warnings across 299 files.
-  - Real-browser (chrome-devtools MCP): navigated `/settings/stt`, snapshot confirms the new "NVIDIA Parakeet (NeMo) LOCAL ... 5 models" card next to the other 4 STT providers. Clicking it renders the config form with the model select (5 options, v3 default), language=en default, model_dir=/var/lib/johnny/parakeet-models, device select (cpu/cuda/mps/auto), beam_size=1. localStorage saves `johnny.settings.stt.last-selected="parakeet"`, persists across reload. Screenshots in `.validation-stt1-artifacts/`.
-- **Learnings:**
-  - **NeMo `model.transcribe()` return shape varies across versions** — modern releases return `Hypothesis` objects with `.text`; older releases return raw strings; some inference variants return `(text, raw)` tuples. The `_hypothesis_text()` helper accepts all three and degrades to `""` on unknown shapes so a NeMo version bump doesn't break the adapter.
-  - **NeMo uses `HF_HOME` (not its own download_root param)** to control where HuggingFace assets land. Setting `os.environ.setdefault("HF_HOME", model_dir)` before `from_pretrained` is the clean way to point downloads at the bind-mounted host directory — same pattern Piper / faster-whisper use via their own `download_root=` parameters.
-  - **Hard-coded MyPy** would have failed on `import nemo.collections.asr` even inside a `@pytest.mark.network`-gated test. Use `importlib.import_module("nemo.collections.asr")` to avoid the static type checker tripping on absent optional deps.
-  - **Provider mod under `app/providers/` requires `docker compose build api`** to surface — `restart` alone does not pick up new Python modules baked into the image. Caught this when the catalog showed only 4 providers post-restart but 5 post-rebuild.
----

@@ -76,6 +76,21 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:  # noqa: BLE001 — launcher wiring must not crash boot
         logger.warning("docker launcher wiring skipped: %s", exc)
 
+    # Runtime-installed Parakeet packages (Johnny-stt.1). Empty bind-
+    # mount is a no-op; if the operator has clicked Install, the dir
+    # contains nemo+torch and gets appended to sys.path so the Parakeet
+    # adapter can import without a container rebuild.
+    try:
+        from app.services.parakeet_packages import (
+            get_packages_dir,
+            register_sys_path,
+        )
+
+        if register_sys_path():
+            logger.info("parakeet packages on sys.path: %s", get_packages_dir())
+    except Exception as exc:  # noqa: BLE001 — sys.path wiring must not crash boot
+        logger.warning("parakeet packages sys.path wiring skipped: %s", exc)
+
     yield
 
 

@@ -373,18 +373,18 @@ class ParakeetSTT(STTProvider):
         try:
             nemo_asr = import_module("nemo.collections.asr")
         except ImportError as exc:
-            # Surface the underlying ImportError detail. Some failures
-            # here are genuinely "NeMo not installed", but others are
-            # version-conflict ImportErrors raised mid-import (e.g.
-            # transformers rejecting an incompatible tokenizers). The
-            # original generic "not installed" message wasted a debug
-            # round; embed the real reason so the next failure is
-            # obvious from the catalog UI alone.
+            # NeMo is not baked into the api/meet-worker images — it
+            # ships as a runtime install via the Parakeet provider
+            # card's Install button (matches the Piper voice catalog
+            # UX). Embed the underlying ImportError detail so version-
+            # conflict failures inside NeMo's own import chain (e.g.
+            # transformers rejecting tokenizers) surface their real
+            # cause instead of getting flattened into "not installed".
             raise STTError(
-                f"NeMo import failed: {exc}. If genuinely missing, "
-                "install via `pip install nemo_toolkit[asr]` "
-                "(api/meet-worker images install it when the "
-                "INSTALL_PARAKEET build arg is set)."
+                f"NeMo not importable: {exc}. Click 'Install package' "
+                "on the Parakeet provider card in Settings → Providers "
+                "to install nemo_toolkit[asr] into the runtime package "
+                "directory (~/.johnny/parakeet-packages)."
             ) from exc
         try:
             asr_model_cls = nemo_asr.models.ASRModel

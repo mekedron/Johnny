@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "sessionId": "51aec77c-06d2-41a0-ab44-ea76c3bf8c41",
+  "sessionId": "6e77043f-11f4-42dc-99f5-bb7c12f762e8",
   "status": "running",
-  "startedAt": "2026-06-06T16:31:22.596Z",
-  "updatedAt": "2026-06-06T17:27:23.082Z",
-  "currentIteration": 3,
+  "startedAt": "2026-06-06T18:08:07.345Z",
+  "updatedAt": "2026-06-06T18:27:31.325Z",
+  "currentIteration": 0,
   "maxIterations": 0,
-  "tasksCompleted": 3,
+  "tasksCompleted": 0,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -27,66 +27,47 @@
         }
       }
     ],
-    "totalTasks": 4,
+    "totalTasks": 6,
     "tasks": [
       {
         "id": "Johnny-stt.1",
         "title": "Add NVIDIA Parakeet STT provider (local, streaming-capable) — nvidia/parakeet-tdt-0.6b-v3",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-stt.2",
         "title": "STT provider catalog UI with per-provider Test button (mic record + transcribe + latency/cost)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-stt.3",
         "title": "Live streaming STT in playground chat input (mic icon + partial transcripts as user speaks)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-stt.4",
         "title": "VoiceInk parity: add Gemini, AssemblyAI, Groq, FluidAudio STT providers (bundle)",
         "status": "open",
         "completedInSession": false
+      },
+      {
+        "id": "Johnny-stt.5",
+        "title": "Refactor and unify ALL provider settings UX (LLM + TTS + STT) into one cohesive provider page — explore existing code FIRST, integrate everything, REQUIRES PLAN MODE",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-stt.6",
+        "title": "Parakeet CUDA build variant — opt-in INSTALL_PARAKEET=cuda for NVIDIA GPU hosts",
+        "status": "open",
+        "completedInSession": false
       }
     ]
   },
-  "iterations": [
-    {
-      "iteration": 1,
-      "status": "completed",
-      "taskId": "Johnny-stt.2",
-      "taskTitle": "STT provider catalog UI with per-provider Test button (mic record + transcribe + latency/cost)",
-      "taskCompleted": true,
-      "durationMs": 241301,
-      "startedAt": "2026-06-06T16:31:35.306Z",
-      "endedAt": "2026-06-06T16:35:36.607Z"
-    },
-    {
-      "iteration": 2,
-      "status": "completed",
-      "taskId": "Johnny-stt.1",
-      "taskTitle": "Add NVIDIA Parakeet STT provider (local, streaming-capable) — nvidia/parakeet-tdt-0.6b-v3",
-      "taskCompleted": true,
-      "durationMs": 773533,
-      "startedAt": "2026-06-06T16:35:44.577Z",
-      "endedAt": "2026-06-06T16:48:38.110Z"
-    },
-    {
-      "iteration": 3,
-      "status": "completed",
-      "taskId": "Johnny-stt.3",
-      "taskTitle": "Live streaming STT in playground chat input (mic icon + partial transcripts as user speaks)",
-      "taskCompleted": true,
-      "durationMs": 1350601,
-      "startedAt": "2026-06-06T16:48:45.478Z",
-      "endedAt": "2026-06-06T17:11:16.079Z"
-    }
-  ],
+  "iterations": [],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],
