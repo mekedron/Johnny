@@ -654,6 +654,276 @@ def deactivate_provider(
     return _row_to_read(crypto, row)
 
 
+# --- preview-without-save endpoints (Johnny-fe.10) -------------------------
+#
+# Defined BEFORE the parametric /{provider_id}/... routes so FastAPI's
+# in-order matcher routes /preview/* paths here rather than treating
+# "preview" as a provider_id. Same applies to /catalog/piper/voices below.
+
+
+class ProviderPreviewPayload(BaseModel):
+    """Request body for the /providers/preview/* endpoints.
+
+    ``kind`` + ``provider_name`` jointly identify the registry factory the
+    handler instantiates. ``values`` is the same flat dict the structured
+    create / update payloads carry — the handler splits it into encrypted
+    credentials and plain options based on the provider's field schema.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: ProviderKind
+    provider_name: str = Field(min_length=1, max_length=64)
+    display_name: str = Field(default="Preview", min_length=1, max_length=128)
+    values: dict[str, Any] = Field(default_factory=dict)
+
+
+def _instantiate_preview(
+    payload: ProviderPreviewPayload,
+) -> STTProvider | LLMProvider | TTSProvider:
+    """Build a transient provider instance from a preview payload."""
+    schema = _schema_for(payload.kind, payload.provider_name)
+    if schema is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"no registered provider for {payload.kind.value}:{payload.provider_name}"
+            ),
+        )
+    errors = validate_payload(schema, payload.values)
+    if errors:
+        _raise_validation_errors(errors)
+    credentials, options = split_values(schema, payload.values)
+    config = ProviderConfig(
+        kind=payload.kind,
+        provider_name=payload.provider_name,
+        display_name=payload.display_name,
+        credentials=credentials,
+        options=options,
+    )
+    registry = get_registry()
+    try:
+        return registry.instantiate(config)
+    except UnknownProviderError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"provider factory missing: {exc}",
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=400,
+            detail=f"provider construction failed: {exc}",
+        ) from exc
+
+
+@router.post("/preview/test", response_model=TestResult)
+async def preview_test(payload: ProviderPreviewPayload) -> TestResult:
+    """Run a smoke test against the supplied values without saving anything."""
+    instance = _instantiate_preview(payload)
+    try:
+        return await _smoke_test(instance, payload.kind)
+    except Exception as exc:  # noqa: BLE001
+        return TestResult(ok=False, message="smoke call failed", detail=str(exc))
+    finally:
+        try:
+            await instance.close()
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+
+@router.post(
+    "/preview/play_sample",
+    responses={
+        200: {"content": {"audio/wav": {}}},
+        400: {"description": "Invalid configuration"},
+        404: {"description": "Provider factory missing"},
+        502: {"description": "Synthesis failed"},
+    },
+)
+async def preview_play_sample(payload: ProviderPreviewPayload) -> Response:
+    """TTS preview-without-save: synthesise the demo phrase, return WAV."""
+    if payload.kind is not ProviderKind.TTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"preview/play_sample only supports TTS, not {payload.kind.value}",
+        )
+    instance = _instantiate_preview(payload)
+    assert isinstance(instance, TTSProvider)
+    try:
+        chunks: list[bytes] = []
+        async for frame in instance.synthesize_stream(TTS_SAMPLE_PHRASE):
+            chunks.append(frame)
+        pcm = b"".join(chunks)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=f"synthesis failed: {exc}",
+        ) from exc
+    finally:
+        try:
+            await instance.close()
+        except Exception:  # noqa: BLE001, S110
+            pass
+    if not pcm:
+        raise HTTPException(status_code=502, detail="synthesis produced no audio")
+    wav_bytes = _pcm_to_wav_bytes(pcm)
+    return Response(
+        content=wav_bytes,
+        media_type="audio/wav",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": 'inline; filename="preview.wav"',
+        },
+    )
+
+
+@router.post("/preview/stt_test", response_model=SttTestResult)
+async def preview_stt_test(
+    request: Request,
+    kind: ProviderKind,
+    provider_name: str,
+    display_name: str = "Preview",
+    values_json: str = "{}",
+) -> SttTestResult:
+    """STT preview-without-save: send mic PCM body + config query, get transcript."""
+    if kind is not ProviderKind.STT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"preview/stt_test only supports STT, not {kind.value}",
+        )
+    try:
+        values = json.loads(values_json) if values_json else {}
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"values_json is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(values, dict):
+        raise HTTPException(
+            status_code=400, detail="values_json must encode a JSON object"
+        )
+    payload = ProviderPreviewPayload(
+        kind=kind,
+        provider_name=provider_name,
+        display_name=display_name,
+        values=values,
+    )
+    audio = await request.body()
+    if len(audio) > STT_TEST_MAX_AUDIO_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"audio body {len(audio)} bytes exceeds limit "
+                f"{STT_TEST_MAX_AUDIO_BYTES}"
+            ),
+        )
+    pcm = _wav_to_pcm_or_raw(audio)
+    if not pcm:
+        raise HTTPException(status_code=400, detail="audio body is empty")
+    sample_bytes = PCM_SAMPLE_RATE_HZ * PCM_SAMPLE_WIDTH_BYTES
+    audio_ms = int(len(pcm) * 1000 / sample_bytes) if sample_bytes else 0
+
+    instance = _instantiate_preview(payload)
+    assert isinstance(instance, STTProvider)
+
+    async def _one_chunk() -> AsyncIterator[bytes]:
+        yield pcm
+
+    transcript_pieces: list[str] = []
+    started = time.monotonic()
+    try:
+        async for event in instance.transcribe_stream(_one_chunk()):
+            if not event.is_final:
+                continue
+            text = (event.text or "").strip()
+            if text:
+                transcript_pieces.append(text)
+    except Exception as exc:  # noqa: BLE001
+        latency_ms = int((time.monotonic() - started) * 1000)
+        return SttTestResult(
+            ok=False,
+            transcript="",
+            latency_ms=latency_ms,
+            cost_usd=_estimate_stt_cost(provider_name, audio_ms),
+            audio_ms=audio_ms,
+            message="transcription failed",
+            detail=str(exc),
+        )
+    finally:
+        try:
+            await instance.close()
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+    latency_ms = int((time.monotonic() - started) * 1000)
+    transcript = " ".join(transcript_pieces).strip()
+    cost_usd = _estimate_stt_cost(provider_name, audio_ms)
+    if not transcript:
+        return SttTestResult(
+            ok=False,
+            transcript="",
+            latency_ms=latency_ms,
+            cost_usd=cost_usd,
+            audio_ms=audio_ms,
+            message="provider returned no transcript",
+            detail="The microphone audio may be silent or below the provider's noise floor.",
+        )
+    return SttTestResult(
+        ok=True,
+        transcript=transcript,
+        latency_ms=latency_ms,
+        cost_usd=cost_usd,
+        audio_ms=audio_ms,
+        message=f"Transcribed {audio_ms} ms in {latency_ms} ms",
+    )
+
+
+# --- catalog-level Piper voices (Johnny-fe.10) -----------------------------
+
+
+@router.get("/catalog/piper/voices", response_model=VoiceListResponse)
+async def list_catalog_piper_voices() -> VoiceListResponse:
+    """List Piper voices using the default model_dir, no saved row required."""
+    try:
+        voices = await piper_fetch_voice_catalog(PIPER_DEFAULT_MODEL_DIR)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return VoiceListResponse(
+        model_dir=PIPER_DEFAULT_MODEL_DIR,
+        voices=[VoiceRead(**v.to_dict()) for v in voices],
+    )
+
+
+@router.post(
+    "/catalog/piper/voices/{voice_key}/install",
+    response_model=VoiceInstallResponse,
+)
+async def install_catalog_piper_voice(voice_key: str) -> VoiceInstallResponse:
+    """Download a Piper voice to the default model_dir, no saved row required."""
+    try:
+        result = await piper_download_voice(voice_key, PIPER_DEFAULT_MODEL_DIR)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return VoiceInstallResponse(**result)
+
+
+@router.delete(
+    "/catalog/piper/voices/{voice_key}",
+    response_model=VoiceRemoveResponse,
+)
+def remove_catalog_piper_voice(voice_key: str) -> VoiceRemoveResponse:
+    """Delete a Piper voice from the default model_dir, no saved row required."""
+    try:
+        result = piper_remove_voice(voice_key, PIPER_DEFAULT_MODEL_DIR)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"failed to remove voice {voice_key!r}: {exc}",
+        ) from exc
+    return VoiceRemoveResponse(**result)
+
+
 @router.post("/{provider_id}/test", response_model=TestResult)
 async def test_provider(
     provider_id: int,
@@ -1257,7 +1527,6 @@ def install_provider_package(
         install_packages_stream(),
         media_type="text/plain; charset=utf-8",
     )
-
 
 # --- export endpoint -------------------------------------------------------
 

@@ -273,6 +273,94 @@ export function testProvider(id: number): Promise<TestResult> {
 }
 
 /**
+ * Preview-without-save payload. Mirrors :class:`ProviderPreviewPayload` on
+ * the backend (Johnny-fe.10). The modal sends this shape whenever the
+ * operator clicks Test / Play sample before committing the row.
+ */
+export interface ProviderPreviewPayload {
+	kind: ProviderKind;
+	provider_name: string;
+	display_name?: string;
+	values: Record<string, unknown>;
+}
+
+/**
+ * Run a smoke test using the supplied values without saving a row.
+ * Same dispatcher as :func:`testProvider` but takes the payload directly.
+ */
+export function previewTestProvider(
+	payload: ProviderPreviewPayload
+): Promise<TestResult> {
+	return request<TestResult>('/providers/preview/test', {
+		method: 'POST',
+		body: JSON.stringify(payload)
+	});
+}
+
+/**
+ * Synthesise the demo phrase using transient values; return WAV audio.
+ * TTS only; the modal calls this for preview-before-save iteration.
+ */
+export async function previewPlaySample(
+	payload: ProviderPreviewPayload
+): Promise<Blob> {
+	const res = await fetch(`${API_BASE}/providers/preview/play_sample`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(payload)
+	});
+	if (!res.ok) {
+		let detail: string | null = null;
+		try {
+			const body = await res.json();
+			detail = extractDetail(body);
+		} catch {
+			// Non-JSON error body — fall through.
+		}
+		throw new Error(detail ?? `HTTP ${res.status}`);
+	}
+	return res.blob();
+}
+
+/**
+ * STT preview-without-save: send mic PCM + config, get back transcript.
+ * The config travels as query params; the audio is the request body.
+ */
+export async function previewSttTestRecording(
+	payload: ProviderPreviewPayload,
+	pcm: ArrayBuffer
+): Promise<SttTestResult> {
+	const params = new URLSearchParams({
+		kind: payload.kind,
+		provider_name: payload.provider_name,
+		display_name: payload.display_name ?? 'Preview',
+		values_json: JSON.stringify(payload.values)
+	});
+	const res = await fetch(
+		`${API_BASE}/providers/preview/stt_test?${params.toString()}`,
+		{
+			method: 'POST',
+			headers: { 'Content-Type': 'application/octet-stream' },
+			body: pcm
+		}
+	);
+	let body: unknown = null;
+	const text = await res.text();
+	if (text.length > 0) {
+		try {
+			body = JSON.parse(text);
+		} catch {
+			body = text;
+		}
+	}
+	if (!res.ok) {
+		const detail = extractDetail(body) ?? `HTTP ${res.status}`;
+		throw new Error(detail);
+	}
+	return body as SttTestResult;
+}
+
+/**
  * Fetch the STT catalog — every registered STT provider enriched with
  * the metadata the `/providers` STT tab renders (type, streaming flag,
  * model count, full schema). Returned in display order; the UI doesn't
@@ -370,6 +458,15 @@ export function listPiperVoices(id: number): Promise<PiperVoiceList> {
 }
 
 /**
+ * List Piper voices using the default model_dir, no saved row required.
+ * The /providers modal calls this when the operator picks Piper from
+ * a clean state — before any Piper provider has been persisted.
+ */
+export function listCatalogPiperVoices(): Promise<PiperVoiceList> {
+	return request<PiperVoiceList>('/providers/catalog/piper/voices');
+}
+
+/**
  * Download a Piper voice (both `.onnx` and `.onnx.json`) into the
  * provider's `model_dir`. Idempotent: re-installing an already-present
  * voice short-circuits without re-downloading. The browser request
@@ -382,6 +479,20 @@ export function installPiperVoice(
 ): Promise<PiperVoiceInstallResult> {
 	return request<PiperVoiceInstallResult>(
 		`/providers/${id}/voices/${encodeURIComponent(voiceKey)}/install`,
+		{ method: 'POST' }
+	);
+}
+
+/**
+ * Catalog-level voice install: downloads to the default model_dir without
+ * needing a saved provider row. The modal uses this in clean-state Piper
+ * flow.
+ */
+export function installCatalogPiperVoice(
+	voiceKey: string
+): Promise<PiperVoiceInstallResult> {
+	return request<PiperVoiceInstallResult>(
+		`/providers/catalog/piper/voices/${encodeURIComponent(voiceKey)}/install`,
 		{ method: 'POST' }
 	);
 }
@@ -406,6 +517,19 @@ export function removePiperVoice(
 ): Promise<PiperVoiceRemoveResult> {
 	return request<PiperVoiceRemoveResult>(
 		`/providers/${id}/voices/${encodeURIComponent(voiceKey)}`,
+		{ method: 'DELETE' }
+	);
+}
+
+/**
+ * Catalog-level voice remove: deletes from the default model_dir without
+ * needing a saved provider row.
+ */
+export function removeCatalogPiperVoice(
+	voiceKey: string
+): Promise<PiperVoiceRemoveResult> {
+	return request<PiperVoiceRemoveResult>(
+		`/providers/catalog/piper/voices/${encodeURIComponent(voiceKey)}`,
 		{ method: 'DELETE' }
 	);
 }

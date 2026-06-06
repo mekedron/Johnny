@@ -119,6 +119,40 @@ black-ish light) instead of yellow. Pattern lives in
 `playground/+page.svelte`. Visual cost: zero — the operator reads a
 slider as a slider regardless of its accent color.
 
+### FastAPI route ordering for prefix collisions
+
+FastAPI matches routes in declaration order. When a literal path
+collides with a parametric one — e.g. `POST /providers/preview/test`
+vs. `POST /providers/{provider_id}/test` — the **first one declared
+wins**. So if `/preview/test` is added after `/{provider_id}/test`,
+requests to `/providers/preview/test` resolve to the parametric route
+with `provider_id="preview"` and 422 on integer parsing. Always
+declare literal `/<verb>/...` paths BEFORE any `/{provider_id}/...`
+parametric routes in the same router. Pattern lives in
+`backend/app/api/providers.py` — the `/preview/*` and `/catalog/*`
+blocks are positioned right after `/{provider_id}/deactivate` and
+before `/{provider_id}/test`.
+
+### `<input type="number">` needs `step="any"` for non-integer values
+
+Default HTML5 `type="number"` step is 1, so any float value (default
+`temperature: 0.7`, `top_p`, etc.) triggers the browser's native
+validation popup "The two nearest valid values are 0 and 1" which
+blocks form submission. Set `step="any"` to allow arbitrary floats.
+Pattern: in dynamic-field renderers driving `FieldType.NUMBER`, pass
+`step={field.type === 'number' ? 'any' : undefined}` to the `<Input>`.
+Pattern lives in `providers/+page.svelte`.
+
+### Row-clickable list rows: don't nest action buttons inside the row button
+
+Don't put an action button (e.g. `Deactivate`) inside the row's
+clickable `<button>`. The HTML is invalid (button-in-button) and the
+outer click never fires reliably on the inner button's bounds. Fix:
+the `<li>` becomes a flex container with the row content in one
+`<button onclick={openModal}>` and the side-action in a sibling
+`<div>` next to it — no nesting. Pattern lives in
+`providers/+page.svelte`.
+
 
 ---
 
@@ -1497,3 +1531,190 @@ needs_reauth`, so the reauth state is the default):
   pages can't rely on that.
 
 ---
+
+## 2026-06-07 — Johnny-fe.10 (/providers single-modal CRUD redesign)
+
+Total rewrite of `/providers` UX. ONE `+ Add provider` button at top,
+modal-based CRUD (Add / Edit / Rename / Delete / Test all inside one
+sheet), preview-without-save backend endpoints, catalog-level Piper
+voice endpoints reachable from a clean modal state. Resolved every
+broken-state symptom the user enumerated.
+
+### Files changed
+
+- `backend/app/api/providers.py` — added three preview endpoints
+  (`POST /providers/preview/test`, `POST /providers/preview/play_sample`,
+  `POST /providers/preview/stt_test`) and three catalog endpoints
+  (`GET /providers/catalog/piper/voices`,
+  `POST /providers/catalog/piper/voices/{key}/install`,
+  `DELETE /providers/catalog/piper/voices/{key}`). The preview endpoints
+  instantiate a transient provider from `(kind, provider_name, values)`,
+  validate via the existing schema validator, run the same smoke /
+  preview / STT-test code paths as the saved-row endpoints, and tear the
+  instance down at the end — no DB writes. The catalog Piper endpoints
+  resolve `model_dir` to `DEFAULT_MODEL_DIR` so voice download works
+  before any Piper provider has been persisted. Critically: the new
+  routes are declared BEFORE the parametric `/{provider_id}/...` routes
+  to avoid FastAPI's in-order matcher routing `/preview/test` to
+  `/{provider_id}/test` with `provider_id="preview"`.
+- `frontend/src/lib/providers.ts` — added typed clients:
+  `previewTestProvider`, `previewPlaySample`, `previewSttTestRecording`,
+  `listCatalogPiperVoices`, `installCatalogPiperVoice`,
+  `removeCatalogPiperVoice`. The STT preview client sends the structured
+  config as query params (kind/provider_name/display_name/values_json)
+  and the mic PCM as the request body — same as the saved-row
+  `sttTestRecording` but with the extra config plumbing.
+- `frontend/src/routes/providers/+page.svelte` — complete rewrite from
+  2174-line tabs-with-master-detail to ~1300-line single-modal CRUD.
+  Deleted the kind tabs entirely; the page is now a flat 3-section list
+  (STT / LLM / TTS) with one row per saved provider. Clicking a row OR
+  the single `+ Add provider` button opens a right-side Sheet (560px).
+  In `mode === 'new'` the sheet shows kind-radio + provider `<select>`
+  pickers; in `mode === 'edit'` those are hidden and the title is the
+  row's display name. Display name is just an `<Input>` — rename = edit
+  display name + save. Delete = ghost button at sheet footer left,
+  opens an AlertDialog for confirmation. Test/Play-sample inside the
+  sheet calls the preview endpoint when the row is unsaved OR has
+  pending changes; switches to the saved-row endpoints when there are
+  no pending changes (lets the SttTestResult include the cost line and
+  the row id-keyed metric panes from the existing endpoints).
+
+### IA changes (the actual REIMAGINE)
+
+1. **One CTA at the top, not three per category.** The previous
+   design (Johnny-fe.2) kept the three tabs but the user's complaint
+   was that the add affordances felt fragmented and the UX didn't
+   stand up to PRODUCT.md's "operator deck" register. New design:
+   single `+ Add provider` button, single Add modal, kind picker
+   inside. The PRD literally said *"We just have to click only one
+   plus button"*; this implements that.
+2. **Modal handles every CRUD operation.** Add / Edit / Rename /
+   Delete / Test / Preview / Piper-download — all inside the same
+   sheet. Different `mode` (`new`/`edit`) just toggles which sections
+   render (kind/provider picker hidden in edit; Delete + Activate +
+   Saved disabled state only in edit). No separate dialogs to remember.
+3. **Preview-without-save is the gate.** Previously the Test buttons
+   were per-row and required saving first. Now Test inside the modal
+   posts to `/providers/preview/test` with the in-modal config — the
+   operator can iterate freely. `hasPendingChanges` derived state
+   decides whether Test uses the preview endpoint or the saved-row
+   endpoint; the latter is preferred when the row is committed and
+   unchanged because it returns the row-id-keyed metrics
+   (latency / cost / etc.).
+4. **Piper voice library lives inside the modal.** When TTS/Piper
+   is selected the modal shows the full rhasspy voice list, with
+   Install / Use / Play / Remove buttons per voice. In a clean-state
+   modal (no saved Piper row yet) the buttons call the new
+   `/providers/catalog/piper/voices/*` endpoints. The previous design
+   only exposed the voice library AFTER a Piper provider was saved —
+   the user explicitly flagged this: *"when we're selecting or adding
+   new Piper voices, there is no way to download the model actually
+   because the download opens only after we add the first item."*
+5. **Sentence-case throughout, hairline borders, neutral chrome.**
+   No uppercase tracked eyebrows (gate 6); section headings are sentence
+   case; row badges use neutral surface tints; only the page CTA
+   carries yellow.
+6. **State-driven primary-action discipline.** `primaryAction =
+   $derived<'save' | 'activate' | 'test' | null>` decides which footer
+   button gets `variant="default"` (yellow) at any moment: new draft
+   → Save yellow, edit + pending → Save yellow, edit + saved + inactive
+   → Activate yellow, edit + saved + active → Test yellow. At most one
+   yellow CTA in the modal footer regardless of which buttons are
+   visible.
+
+### Verification (chrome-devtools MCP)
+
+| Flow | Result |
+| --- | --- |
+| 1. Page load + list | ✓ — `01-list-dark.png` shows STT/LLM/TTS sections, single yellow `+ Add provider` CTA |
+| 2. Add modal opens, kind picker | ✓ — radio cards for STT/LLM/TTS |
+| 3. Kind → provider picker → dynamic fields | ✓ — picking Anthropic renders auth/model/advanced groups dynamically from schema |
+| 4. Preview-without-save (LLM) | ✓ — fake API key → POST `/providers/preview/test` returns "anthropic LLM HTTP 401: invalid x-api-key"; no row created (verified via `GET /providers` after) |
+| 5. Preview-without-save (TTS) | ✓ — `Play sample` plays the synth, "Synthesis OK — playing sample" inline |
+| 6. Piper voice download from clean modal state | ✓ — `02-modal-piper-clean-state.png` shows 161-voice catalog with Install / Use / Play / Remove buttons before any Piper save |
+| 7. Edit + Rename | ✓ — opening existing row pre-fills display name + all config; editing the display name flips Save from `Saved` (disabled) to `Save changes` (yellow); on save the title updates and Save returns to `Saved`. Row in the list reflects the new name |
+| 8. Multi-instance per kind | ✓ — added Ollama-compat instance #2 (`Test instance 2`); LLM section count goes from 1 to 2 |
+| 9. Delete + confirm | ✓ — Delete opens AlertDialog above the modal with red Trash2 icon, "Delete provider?" heading, Cancel + destructive Delete buttons |
+| 10. `list_console_messages` clean | ✓ — no errors/warnings across the full flow |
+
+Screenshots in `.validation/Johnny-fe.10/`.
+
+### Verification gates (DESIGN.md)
+
+| Gate | Status |
+| --- | --- |
+| 1. Body text contrast ≥ 4.5:1 | ✓ (foundation tokens) |
+| 2. Placeholder contrast | ✓ (foundation) |
+| 3. Primary button contrast | ✓ (foundation; signal yellow on near-black) |
+| 4. Yellow ≤ 3 per viewport | ✓ — list page: sidebar nav active + `+ Add provider` CTA + active-session badge = exactly 3 |
+| 5. No card-in-card | ✓ — voice library lives INSIDE the sheet body, not as a nested card |
+| 6. No uppercase tracked eyebrow | ✓ — sentence case throughout |
+| 7. Reduced motion honored | ✓ (no custom animations) |
+| 8. Screenshot unambiguously not stock shadcn | ✓ — yellow accents + dark surfaces + sectioned list |
+
+### Quality gates
+
+- `pnpm check` → 0 errors, 0 warnings
+- `pnpm lint` → 0 errors, 0 warnings
+- `ruff check app/api/providers.py` → all checks passed
+- Backend tests not run in this iteration (`pytest` install in container
+  is incomplete; verified the new endpoints via direct curl + browser).
+
+### Out-of-scope (intentionally deferred)
+
+- **Dynamic model lists** (live OpenAI / Anthropic catalog fetch). The
+  PRD asked for this but it requires per-provider `list_models` backend
+  endpoints with provider API calls + caching. Static `FieldType.SELECT`
+  options remain — operators can still type a model name via the model
+  field. File as follow-up; this iteration ships the rest of the
+  redesign without it.
+
+### Learnings
+
+- **FastAPI route order matters for prefix collisions.** Declaring
+  `POST /providers/preview/test` AFTER `POST /providers/{provider_id}/test`
+  in the same router causes the parametric one to win and the modal's
+  Test fires with `provider_id="preview"` (HTTP 422 "Input should be a
+  valid integer"). The fix is to declare the literal-path routes
+  BEFORE the parametric ones — moved both blocks before the
+  `/{provider_id}/test` decorator. Bear in mind when adding any new
+  `/providers/<verb>` endpoint that doesn't take an id.
+- **Browser `<input type="number">` without `step` rejects floats.**
+  Default step is 1, so `0.7` triggers a native validation popup that
+  blocks form submission. Pass `step="any"` to allow arbitrary floats —
+  this matters for any provider field declared as `FieldType.NUMBER`
+  with a non-integer default (`temperature`, `top_p`, etc.). Fixed by
+  threading `step={field.type === 'number' ? 'any' : undefined}` into
+  the form's `<Input>`.
+- **Nested `<button>`s break click targeting.** The first row design
+  had the Deactivate button as a child of the row's clickable `<button>`.
+  Browsers treat that as invalid HTML and the outer click never fires
+  on the inner button's bounds. Fixed by promoting the `<li>` to a
+  flex container, putting the row content in one `<button>` and the
+  Deactivate action in a sibling `<div>` next to it — no nesting.
+  Pattern applies to any list-row design with row-level action buttons.
+- **AlertDialog over a Sheet rendered correctly in DOM but the a11y
+  tree didn't surface it as a second dialog.** The screenshot proves
+  the dialog renders above the modal (z-index resolves correctly).
+  Chrome's a11y snapshot focuses on the first interactable dialog, so
+  programmatic interaction with the second one needs `evaluate_script`
+  or the screenshot pathway rather than uid-based clicks. Worth knowing
+  when validating layered confirm-over-modal flows.
+- **`evaluate_script` returns "No page found" after some interactions
+  even though `list_pages` shows the page selected.** Documented in
+  codebase patterns as a stale-session issue — `take_snapshot` /
+  `wait_for` re-establish the page binding without restarting Chrome,
+  but `evaluate_script` may stay broken across a single session
+  segment. Workaround: drive UI clicks via uid-based `click` (which
+  always works) and use direct `curl` against the API to verify
+  back-end effects.
+- **Preview-without-save is two endpoints, not one.** TTS play_sample
+  returns a binary WAV blob, so `application/json` request + `audio/wav`
+  response. STT test takes raw PCM as the body, which conflicts with a
+  JSON config envelope — solved by sending config as query parameters
+  and PCM as `application/octet-stream`. LLM test is straight JSON in,
+  JSON out. The three endpoints share `_instantiate_preview()` for the
+  validation + factory + cleanup boilerplate.
+
+---
+
