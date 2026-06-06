@@ -38,3 +38,11 @@ frontend/.netlify/
 .env.*.local
 
 client_secret*.json
+
+# Browser-validation artifacts — chrome-devtools MCP screenshots, snapshots,
+# console dumps. Local-only; never committed. See AGENTS.md → "Where to save
+# browser-validation artifacts" for the convention. The canonical path is
+# .validation/, but the legacy .validation-* prefix is also caught for older
+# scratch dirs.
+.validation/
+.validation-*/

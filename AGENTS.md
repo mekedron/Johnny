@@ -19,6 +19,22 @@ The `chrome-devtools` MCP is configured to attach to a long-lived Chrome on `htt
 
 This rule sits at the top of this file because skipping it has repeatedly shipped "fixes" that don't actually work for the user.
 
+### Where to save browser-validation artifacts
+
+All chrome-devtools MCP outputs (screenshots, snapshots, console dumps, network captures) MUST be written under a single gitignored root:
+
+```
+.validation/<task-id>/NN-short-description.<ext>
+```
+
+- `<task-id>` is the bd issue or PR slug you're working on (e.g. `Johnny-uzz`, `pages-deploy`, `voice-catalog-307-fix`). One sub-folder per task — do NOT create a new top-level `.validation-*` directory per session.
+- `NN-short-description.png` keeps captures ordered by step (`01-hero.png`, `02-modes.png`, `03-mobile-menu.png`). Use jpg/webp only when png would be wastefully large.
+- The whole `.validation/` tree is gitignored (`.gitignore` rules: `.validation/` and the legacy `.validation-*/`). **Never `git add` anything in there.** If a screenshot is genuinely needed in the repo (e.g. README hero image), copy it into the proper docs path with an intentional filename — don't promote a validation scratch file.
+- Reference these paths in your PR description if useful, but link to them as local-path notes for the reviewer; do not check them in.
+- When `mcp__chrome-devtools__take_screenshot` complains that the path is outside the workspace roots, use the `.validation/<task-id>/...` path inside the repo (it's in the workspace root and works).
+
+The legacy `.validation-*-artifacts/` convention from earlier sessions is deprecated. Existing dirs were untracked from git and the pattern is gitignored — keep all new captures under `.validation/<task-id>/` only.
+
 ---
 
 ## Top rule: Docker is the only runtime — never run services on the host
