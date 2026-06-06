@@ -44,6 +44,12 @@ from app.providers.base import (
     TTSProvider,
     get_registry,
 )
+from app.providers.schema import (
+    FieldDef,
+    FieldGroup,
+    FieldType,
+    ProviderSchema,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +154,58 @@ class PiperTTS(TTSProvider):
     @property
     def name(self) -> str:
         return PROVIDER_NAME
+
+    @classmethod
+    def field_schema(cls) -> ProviderSchema:
+        return ProviderSchema(
+            kind=ProviderKind.TTS,
+            provider_name=PROVIDER_NAME,
+            display_name="Local Piper",
+            summary="Local Piper TTS. ~60 MB voices, CPU-only, no audio leaves host.",
+            signup_url=None,
+            fields=(
+                FieldDef(
+                    name="voice_id",
+                    label="Voice ID",
+                    required=True,
+                    placeholder="en_US-amy-medium",
+                    help_text=(
+                        "Piper voice identifier — see "
+                        "huggingface.co/rhasspy/piper-voices."
+                    ),
+                    group=FieldGroup.MODEL,
+                ),
+                FieldDef(
+                    name="model_dir",
+                    label="Voice directory",
+                    default=DEFAULT_MODEL_DIR,
+                    help_text="Where the .onnx + .onnx.json files live.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="binary",
+                    label="Piper binary",
+                    default=DEFAULT_BINARY,
+                    help_text="Path to the piper executable.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="native_sample_rate",
+                    label="Native sample rate (Hz)",
+                    type=FieldType.NUMBER,
+                    default=DEFAULT_NATIVE_SAMPLE_RATE_HZ,
+                    help_text="Sample rate of the voice file; the adapter resamples to 16 kHz.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="chunk_bytes",
+                    label="Read chunk bytes",
+                    type=FieldType.NUMBER,
+                    default=DEFAULT_CHUNK_BYTES,
+                    group=FieldGroup.ADVANCED,
+                ),
+            ),
+        )
 
     @property
     def default_voice_id(self) -> str | None:

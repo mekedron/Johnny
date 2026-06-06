@@ -42,6 +42,13 @@ from app.providers.base import (
     ToolDefinition,
     get_registry,
 )
+from app.providers.schema import (
+    FieldDef,
+    FieldGroup,
+    FieldOption,
+    FieldType,
+    ProviderSchema,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +114,71 @@ class GeminiLLM(LLMProvider):
     @property
     def name(self) -> str:
         return PROVIDER_NAME
+
+    @classmethod
+    def field_schema(cls) -> ProviderSchema:
+        return ProviderSchema(
+            kind=ProviderKind.LLM,
+            provider_name=PROVIDER_NAME,
+            display_name="Google Gemini",
+            summary="1M-token context, JSON-mode, very fast Flash tier.",
+            signup_url="https://aistudio.google.com/app/apikey",
+            fields=(
+                FieldDef(
+                    name="api_key",
+                    label="API key",
+                    type=FieldType.PASSWORD,
+                    required=True,
+                    secret=True,
+                    placeholder="AIza...",
+                    help_text="Get a key from aistudio.google.com.",
+                    signup_url="https://aistudio.google.com/app/apikey",
+                    env_key="GOOGLE_API_KEY",
+                    group=FieldGroup.AUTH,
+                ),
+                FieldDef(
+                    name="model",
+                    label="Model",
+                    type=FieldType.SELECT,
+                    default="gemini-2.5-flash",
+                    options=(
+                        FieldOption(value="gemini-2.5-flash", label="gemini-2.5-flash (fast)"),
+                        FieldOption(value="gemini-2.5-pro", label="gemini-2.5-pro"),
+                        FieldOption(value="gemini-1.5-flash", label="gemini-1.5-flash (legacy)"),
+                        FieldOption(value="gemini-1.5-pro", label="gemini-1.5-pro (legacy)"),
+                    ),
+                    group=FieldGroup.MODEL,
+                ),
+                FieldDef(
+                    name="max_output_tokens",
+                    label="Max output tokens",
+                    type=FieldType.NUMBER,
+                    default=DEFAULT_MAX_OUTPUT_TOKENS,
+                    group=FieldGroup.MODEL,
+                ),
+                FieldDef(
+                    name="temperature",
+                    label="Temperature",
+                    type=FieldType.NUMBER,
+                    default=DEFAULT_TEMPERATURE,
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="base_url",
+                    label="API base URL",
+                    type=FieldType.URL,
+                    default=DEFAULT_BASE_URL,
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="timeout_s",
+                    label="Request timeout (s)",
+                    type=FieldType.NUMBER,
+                    default=DEFAULT_TIMEOUT_S,
+                    group=FieldGroup.ADVANCED,
+                ),
+            ),
+        )
 
     @property
     def model(self) -> str:

@@ -23,7 +23,10 @@ import enum
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from app.providers.schema import ProviderSchema
 
 PCM_SAMPLE_RATE_HZ = 16_000
 PCM_SAMPLE_WIDTH_BYTES = 2
@@ -158,6 +161,18 @@ class _ProviderBase(ABC):
     @abstractmethod
     def name(self) -> str:
         """Canonical provider name (e.g. ``"deepgram"``, ``"openai"``)."""
+
+    @classmethod
+    def field_schema(cls) -> ProviderSchema:
+        """Describe the form fields the configuration UI should render.
+
+        Adapters override this to declare their per-provider field set.
+        The default raises ``NotImplementedError`` so any registered
+        adapter that surfaces in ``/providers/schemas`` must opt in.
+        """
+        raise NotImplementedError(
+            f"{cls.__name__} has not declared a field_schema()"
+        )
 
     async def close(self) -> None:  # noqa: B027 — intentional non-abstract hook
         """Release any held resources (HTTP sessions, model handles).

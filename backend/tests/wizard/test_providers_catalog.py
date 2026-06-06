@@ -102,3 +102,30 @@ def test_recommended_local_for_llm_uses_openai_compatible() -> None:
     assert choice is not None
     assert choice.provider_name == "openai-compatible"
     assert "host.docker.internal" in choice.default_options["base_url"]
+
+
+def test_catalog_credential_keys_match_adapter_schema() -> None:
+    """The wizard catalog and the runtime field_schema must agree on credentials.
+
+    The schema is the source of truth — adding a credential field to an
+    adapter should automatically be the set the wizard prompts for.
+    Until the catalog migrates to derive credential_keys from
+    ``schema_for(choice)`` automatically, this check guarantees they do
+    not silently diverge.
+    """
+    import app.providers  # noqa: F401, PLC0415 — populate registry
+    from johnny.wizard.providers import schema_for
+
+    for choice in CATALOG:
+        schema = schema_for(choice)
+        if schema is None:
+            continue
+        schema_secrets = {f.name for f in schema.fields if f.secret}
+        catalog_keys = set(choice.credential_keys)
+        assert schema_secrets == catalog_keys or catalog_keys.issubset(
+            schema_secrets
+        ), (
+            f"{choice.kind.value}/{choice.provider_name}: "
+            f"wizard credential_keys={catalog_keys}, "
+            f"schema secrets={schema_secrets}"
+        )

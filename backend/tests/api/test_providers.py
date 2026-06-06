@@ -580,3 +580,237 @@ def test_smoke_construction_failure_returns_ok_false(client: TestClient) -> None
 def test_smoke_missing_returns_404(client: TestClient) -> None:
     resp = client.post("/providers/9999/test")
     assert resp.status_code == 404
+
+
+# --- schemas endpoint and structured payloads ------------------------------
+
+
+class _SchemaAwareLLM(LLMProvider):
+    """A stub LLM adapter that declares a real field_schema."""
+
+    def __init__(self, config: ProviderConfig) -> None:
+        self._config = config
+        if not config.credentials.get("api_key"):
+            raise ValueError("missing api_key")
+
+    @property
+    def name(self) -> str:
+        return "schema-llm"
+
+    @classmethod
+    def field_schema(cls):  # type: ignore[no-untyped-def]
+        from app.providers.schema import (
+            FieldDef,
+            FieldGroup,
+            FieldOption,
+            FieldType,
+            ProviderSchema,
+        )
+
+        return ProviderSchema(
+            kind=ProviderKind.LLM,
+            provider_name="schema-llm",
+            display_name="Test schema LLM",
+            summary="A test adapter that declares a structured schema.",
+            signup_url="https://example.com",
+            fields=(
+                FieldDef(
+                    name="api_key",
+                    label="API key",
+                    type=FieldType.PASSWORD,
+                    required=True,
+                    secret=True,
+                    group=FieldGroup.AUTH,
+                ),
+                FieldDef(
+                    name="model",
+                    label="Model",
+                    type=FieldType.SELECT,
+                    default="gpt-4o-mini",
+                    options=(
+                        FieldOption(value="gpt-4o-mini", label="gpt-4o-mini"),
+                        FieldOption(value="gpt-4o", label="gpt-4o"),
+                    ),
+                    group=FieldGroup.MODEL,
+                ),
+                FieldDef(
+                    name="temperature",
+                    label="Temperature",
+                    type=FieldType.NUMBER,
+                    default=0.7,
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="base_url",
+                    label="Base URL",
+                    type=FieldType.URL,
+                    group=FieldGroup.ADVANCED,
+                ),
+            ),
+        )
+
+    async def chat(self, messages, tools=None, response_format=None):  # type: ignore[no-untyped-def]
+        return LLMResponse(text="hi", finish_reason="stop")
+
+
+def test_schemas_endpoint_returns_registered_provider_schemas(client: TestClient) -> None:
+    get_registry().register(ProviderKind.LLM, "schema-llm", _SchemaAwareLLM)
+    resp = client.get("/providers/schemas")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "stt" in body and "llm" in body and "tts" in body
+    llm_schemas = body["llm"]
+    by_name = {s["provider_name"]: s for s in llm_schemas}
+    assert "schema-llm" in by_name
+    schema = by_name["schema-llm"]
+    assert schema["display_name"] == "Test schema LLM"
+    assert schema["signup_url"] == "https://example.com"
+    field_names = [f["name"] for f in schema["fields"]]
+    assert "api_key" in field_names
+    api_key_field = next(f for f in schema["fields"] if f["name"] == "api_key")
+    assert api_key_field["secret"] is True
+    assert api_key_field["required"] is True
+    assert api_key_field["type"] == "password"
+
+
+def test_schemas_endpoint_omits_adapters_without_schema(client: TestClient) -> None:
+    # _OKLLM is registered without field_schema
+    get_registry().register(ProviderKind.LLM, "ok-llm", _OKLLM)
+    resp = client.get("/providers/schemas")
+    assert resp.status_code == 200
+    names = {s["provider_name"] for s in resp.json()["llm"]}
+    assert "ok-llm" not in names
+
+
+def test_create_with_values_splits_into_credentials_and_options(
+    client: TestClient, db_session: Session, crypto: CredentialCrypto
+) -> None:
+    get_registry().register(ProviderKind.LLM, "schema-llm", _SchemaAwareLLM)
+    resp = client.post(
+        "/providers",
+        json={
+            "kind": "llm",
+            "provider_name": "schema-llm",
+            "display_name": "Struct",
+            "values": {
+                "api_key": "sk-secret",
+                "model": "gpt-4o-mini",
+                "temperature": "0.9",
+                "base_url": "https://api.example.com/v1",
+            },
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    data = resp.json()
+    assert data["credential_keys"] == ["api_key"]
+    assert data["options"]["model"] == "gpt-4o-mini"
+    assert data["options"]["temperature"] == 0.9
+    assert data["options"]["base_url"] == "https://api.example.com/v1"
+    # Secret never appears in the response.
+    assert "sk-secret" not in resp.text
+
+    # Check it's actually encrypted at rest under the api_key key.
+    from app.security.crypto import decrypt_json
+
+    row = db_session.get(ProviderCredential, data["id"])
+    assert row is not None
+    creds = decrypt_json(crypto, row.credentials_encrypted)
+    assert creds == {"api_key": "sk-secret"}
+
+
+def test_create_with_values_missing_required_returns_422(client: TestClient) -> None:
+    get_registry().register(ProviderKind.LLM, "schema-llm", _SchemaAwareLLM)
+    resp = client.post(
+        "/providers",
+        json={
+            "kind": "llm",
+            "provider_name": "schema-llm",
+            "display_name": "Struct",
+            "values": {"model": "gpt-4o-mini"},
+        },
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    fields = {item["loc"][-1] for item in body["detail"]}
+    assert "api_key" in fields
+
+
+def test_create_with_values_unknown_select_option_returns_422(client: TestClient) -> None:
+    get_registry().register(ProviderKind.LLM, "schema-llm", _SchemaAwareLLM)
+    resp = client.post(
+        "/providers",
+        json={
+            "kind": "llm",
+            "provider_name": "schema-llm",
+            "display_name": "Struct",
+            "values": {"api_key": "sk-x", "model": "not-a-real-model"},
+        },
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    fields = {item["loc"][-1] for item in body["detail"]}
+    assert "model" in fields
+
+
+def test_create_legacy_buckets_still_validated_against_schema(client: TestClient) -> None:
+    """Legacy credentials/options shape still pays for schema validation."""
+    get_registry().register(ProviderKind.LLM, "schema-llm", _SchemaAwareLLM)
+    resp = client.post(
+        "/providers",
+        json={
+            "kind": "llm",
+            "provider_name": "schema-llm",
+            "display_name": "Legacy",
+            "credentials": {},  # missing required api_key
+            "options": {"model": "gpt-4o-mini"},
+        },
+    )
+    assert resp.status_code == 422
+
+
+def test_update_with_values_revalidates_and_resplits(
+    client: TestClient, db_session: Session, crypto: CredentialCrypto
+) -> None:
+    get_registry().register(ProviderKind.LLM, "schema-llm", _SchemaAwareLLM)
+    created = client.post(
+        "/providers",
+        json={
+            "kind": "llm",
+            "provider_name": "schema-llm",
+            "display_name": "Struct",
+            "values": {"api_key": "sk-old"},
+        },
+    ).json()
+    resp = client.patch(
+        f"/providers/{created['id']}",
+        json={"values": {"api_key": "sk-new", "model": "gpt-4o", "temperature": 0.2}},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["options"]["model"] == "gpt-4o"
+    assert data["options"]["temperature"] == 0.2
+
+    from app.security.crypto import decrypt_json
+
+    row = db_session.get(ProviderCredential, created["id"])
+    assert row is not None
+    creds = decrypt_json(crypto, row.credentials_encrypted)
+    assert creds == {"api_key": "sk-new"}
+
+
+def test_create_without_schema_provider_still_works_with_legacy_payload(
+    client: TestClient,
+) -> None:
+    """Adapters without a schema fall back to legacy behavior (no validation)."""
+    get_registry().register(ProviderKind.LLM, "ok-llm", _OKLLM)
+    resp = client.post(
+        "/providers",
+        json={
+            "kind": "llm",
+            "provider_name": "ok-llm",
+            "display_name": "Legacy free-text",
+            "credentials": {"whatever": "fine"},
+            "options": {"anything": "goes"},
+        },
+    )
+    assert resp.status_code == 201

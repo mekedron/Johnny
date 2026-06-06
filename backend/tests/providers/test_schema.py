@@ -1,0 +1,203 @@
+"""Tests for :mod:`app.providers.schema` and schema-based validation."""
+
+from __future__ import annotations
+
+import pytest
+
+from app.providers import (
+    AnthropicLLM,
+    DeepgramSTT,
+    ElevenLabsTTS,
+    FasterWhisperSTT,
+    GeminiLLM,
+    OpenAICompatibleLLM,
+    OpenAILLM,
+    OpenAIRealtimeSTT,
+    OpenAITTS,
+    PiperTTS,
+)
+from app.providers.schema import FieldGroup, FieldType, ProviderSchema
+from app.providers.schema_validation import (
+    FieldValidationError,
+    split_values,
+    validate_payload,
+)
+
+ADAPTERS = [
+    AnthropicLLM,
+    DeepgramSTT,
+    ElevenLabsTTS,
+    FasterWhisperSTT,
+    GeminiLLM,
+    OpenAICompatibleLLM,
+    OpenAILLM,
+    OpenAIRealtimeSTT,
+    OpenAITTS,
+    PiperTTS,
+]
+
+
+@pytest.mark.parametrize("adapter", ADAPTERS)
+def test_each_adapter_declares_a_schema(adapter: type) -> None:
+    schema = adapter.field_schema()
+    assert isinstance(schema, ProviderSchema)
+    assert schema.fields, f"{adapter.__name__} has no fields"
+    assert schema.kind.value in {"stt", "llm", "tts"}
+    assert schema.provider_name
+    assert schema.display_name
+    assert schema.summary
+
+
+@pytest.mark.parametrize("adapter", ADAPTERS)
+def test_field_names_are_unique_within_a_schema(adapter: type) -> None:
+    schema = adapter.field_schema()
+    names = [f.name for f in schema.fields]
+    assert len(names) == len(set(names)), f"duplicate field names in {adapter.__name__}: {names}"
+
+
+@pytest.mark.parametrize("adapter", ADAPTERS)
+def test_required_fields_have_meaningful_labels(adapter: type) -> None:
+    schema = adapter.field_schema()
+    for field in schema.fields:
+        assert field.label, f"{adapter.__name__}.{field.name} has no label"
+        if field.type is FieldType.SELECT:
+            assert field.options, (
+                f"{adapter.__name__}.{field.name} is select but declares no options"
+            )
+
+
+@pytest.mark.parametrize("adapter", ADAPTERS)
+def test_to_dict_roundtrip_is_json_friendly(adapter: type) -> None:
+    import json
+
+    schema = adapter.field_schema()
+    payload = schema.to_dict()
+    json.dumps(payload)  # must not raise — the endpoint returns JSON
+
+
+def test_validate_payload_flags_missing_required_field() -> None:
+    schema = OpenAILLM.field_schema()
+    errors = validate_payload(schema, {"model": "gpt-4o-mini"})
+    names = [e.field for e in errors]
+    assert "api_key" in names
+    api_key_error = next(e for e in errors if e.field == "api_key")
+    assert api_key_error.error_type == "missing"
+
+
+def test_validate_payload_passes_with_required_fields() -> None:
+    schema = OpenAILLM.field_schema()
+    errors = validate_payload(schema, {"api_key": "sk-test"})
+    assert errors == []
+
+
+def test_validate_payload_rejects_unknown_select_option() -> None:
+    schema = OpenAILLM.field_schema()
+    errors = validate_payload(
+        schema, {"api_key": "sk-test", "model": "claude-totally-fake-model"}
+    )
+    assert any(e.field == "model" for e in errors)
+
+
+def test_validate_payload_rejects_non_numeric_for_number_field() -> None:
+    schema = OpenAILLM.field_schema()
+    errors = validate_payload(
+        schema, {"api_key": "sk-test", "temperature": "warmish"}
+    )
+    assert any(e.field == "temperature" for e in errors)
+
+
+def test_validate_payload_accepts_numeric_string() -> None:
+    schema = OpenAILLM.field_schema()
+    errors = validate_payload(
+        schema, {"api_key": "sk-test", "temperature": "0.5"}
+    )
+    assert errors == []
+
+
+def test_validate_payload_rejects_non_url_for_url_field() -> None:
+    schema = OpenAILLM.field_schema()
+    errors = validate_payload(
+        schema, {"api_key": "sk-test", "base_url": "not a url"}
+    )
+    assert any(e.field == "base_url" for e in errors)
+
+
+def test_validate_payload_accepts_ws_url_for_stt_endpoint() -> None:
+    schema = DeepgramSTT.field_schema()
+    errors = validate_payload(
+        schema,
+        {"api_key": "dg-test", "base_url": "wss://api.deepgram.com/v1/listen"},
+    )
+    assert errors == []
+
+
+def test_split_values_routes_secrets_to_credentials() -> None:
+    schema = OpenAILLM.field_schema()
+    credentials, options = split_values(
+        schema,
+        {
+            "api_key": "sk-test",
+            "model": "gpt-4o-mini",
+            "temperature": "0.5",
+            "base_url": "https://example.com/v1",
+        },
+    )
+    assert credentials == {"api_key": "sk-test"}
+    assert options["model"] == "gpt-4o-mini"
+    assert options["temperature"] == 0.5
+    assert options["base_url"] == "https://example.com/v1"
+
+
+def test_split_values_drops_unknown_and_empty_fields() -> None:
+    schema = OpenAILLM.field_schema()
+    credentials, options = split_values(
+        schema,
+        {
+            "api_key": "sk-test",
+            "model": "",
+            "made_up_key": "ignored",
+            "temperature": None,
+        },
+    )
+    assert credentials == {"api_key": "sk-test"}
+    assert "model" not in options
+    assert "made_up_key" not in options
+    assert "temperature" not in options
+
+
+def test_split_values_coerces_checkbox_values() -> None:
+    schema = DeepgramSTT.field_schema()
+    _, options = split_values(
+        schema,
+        {
+            "api_key": "dg-test",
+            "interim_results": "true",
+            "punctuate": False,
+            "smart_format": "yes",
+        },
+    )
+    assert options["interim_results"] is True
+    assert options["punctuate"] is False
+    assert options["smart_format"] is True
+
+
+def test_field_validation_error_serializes_for_fastapi() -> None:
+    err = FieldValidationError(field="api_key", message="API key is required", error_type="missing")
+    payload = err.to_dict()
+    assert payload == {
+        "loc": ["body", "api_key"],
+        "msg": "API key is required",
+        "type": "missing",
+    }
+
+
+def test_required_fields_are_grouped_with_auth_first() -> None:
+    """Adapters should put required fields in the AUTH group so users see them first."""
+    for adapter in ADAPTERS:
+        schema = adapter.field_schema()
+        for field in schema.fields:
+            if field.required and field.secret:
+                assert field.group is FieldGroup.AUTH, (
+                    f"{adapter.__name__}.{field.name} is a required secret "
+                    f"but lives in group {field.group}"
+                )

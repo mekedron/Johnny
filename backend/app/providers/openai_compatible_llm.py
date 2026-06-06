@@ -41,6 +41,13 @@ from app.providers.base import (
     ToolDefinition,
     get_registry,
 )
+from app.providers.schema import (
+    FieldDef,
+    FieldGroup,
+    FieldOption,
+    FieldType,
+    ProviderSchema,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +136,85 @@ class OpenAICompatibleLLM(LLMProvider):
     @property
     def name(self) -> str:
         return PROVIDER_NAME
+
+    @classmethod
+    def field_schema(cls) -> ProviderSchema:
+        return ProviderSchema(
+            kind=ProviderKind.LLM,
+            provider_name=PROVIDER_NAME,
+            display_name="OpenAI-compatible (Ollama / vLLM / OpenRouter / …)",
+            summary=(
+                "Any endpoint that speaks the OpenAI /v1/chat/completions "
+                "wire format. Use this for Ollama, vLLM, LM Studio, OpenRouter."
+            ),
+            signup_url=None,
+            fields=(
+                FieldDef(
+                    name="base_url",
+                    label="Base URL",
+                    type=FieldType.URL,
+                    required=True,
+                    placeholder="http://host.docker.internal:11434/v1",
+                    help_text=(
+                        "Root URL up to /v1. For Ollama from inside Docker use "
+                        "host.docker.internal."
+                    ),
+                    group=FieldGroup.AUTH,
+                ),
+                FieldDef(
+                    name="api_key",
+                    label="API key",
+                    type=FieldType.PASSWORD,
+                    secret=True,
+                    placeholder="(optional)",
+                    help_text="Required by hosted gateways like OpenRouter; Ollama ignores it.",
+                    group=FieldGroup.AUTH,
+                ),
+                FieldDef(
+                    name="model",
+                    label="Model",
+                    required=True,
+                    placeholder="llama3.1:8b-instruct-q4_K_M",
+                    help_text="Whatever model identifier the upstream server expects.",
+                    group=FieldGroup.MODEL,
+                ),
+                FieldDef(
+                    name="tool_format",
+                    label="Tool-call format",
+                    type=FieldType.SELECT,
+                    default="openai",
+                    options=(
+                        FieldOption(value="openai", label="openai (default)"),
+                        FieldOption(
+                            value="hermes",
+                            label="hermes (Nous Hermes / some Qwen builds)",
+                        ),
+                    ),
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="temperature",
+                    label="Temperature",
+                    type=FieldType.NUMBER,
+                    default=DEFAULT_TEMPERATURE,
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="max_tokens",
+                    label="Max tokens",
+                    type=FieldType.NUMBER,
+                    help_text="Leave blank for the server default.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="timeout_s",
+                    label="Request timeout (s)",
+                    type=FieldType.NUMBER,
+                    default=DEFAULT_TIMEOUT_S,
+                    group=FieldGroup.ADVANCED,
+                ),
+            ),
+        )
 
     @property
     def model(self) -> str:

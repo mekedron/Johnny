@@ -37,6 +37,13 @@ from app.providers.base import (
     TranscriptEvent,
     get_registry,
 )
+from app.providers.schema import (
+    FieldDef,
+    FieldGroup,
+    FieldOption,
+    FieldType,
+    ProviderSchema,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +131,69 @@ class OpenAIRealtimeSTT(STTProvider):
     @property
     def name(self) -> str:
         return PROVIDER_NAME
+
+    @classmethod
+    def field_schema(cls) -> ProviderSchema:
+        return ProviderSchema(
+            kind=ProviderKind.STT,
+            provider_name=PROVIDER_NAME,
+            display_name="OpenAI Realtime",
+            summary="Streaming Whisper via the Realtime WebSocket API.",
+            signup_url="https://platform.openai.com/signup",
+            fields=(
+                FieldDef(
+                    name="api_key",
+                    label="API key",
+                    type=FieldType.PASSWORD,
+                    required=True,
+                    secret=True,
+                    placeholder="sk-...",
+                    help_text="Get a key from platform.openai.com.",
+                    signup_url="https://platform.openai.com/signup",
+                    env_key="OPENAI_API_KEY",
+                    group=FieldGroup.AUTH,
+                ),
+                FieldDef(
+                    name="model",
+                    label="Model",
+                    type=FieldType.SELECT,
+                    default=DEFAULT_MODEL,
+                    options=(
+                        FieldOption(value="whisper-1", label="whisper-1"),
+                        FieldOption(
+                            value="gpt-4o-transcribe", label="gpt-4o-transcribe"
+                        ),
+                        FieldOption(
+                            value="gpt-4o-mini-transcribe",
+                            label="gpt-4o-mini-transcribe",
+                        ),
+                    ),
+                    group=FieldGroup.MODEL,
+                ),
+                FieldDef(
+                    name="language",
+                    label="Language",
+                    placeholder="en",
+                    help_text="Leave blank to auto-detect.",
+                    group=FieldGroup.MODEL,
+                ),
+                FieldDef(
+                    name="prompt",
+                    label="Bias prompt",
+                    type=FieldType.TEXTAREA,
+                    help_text="Optional context that biases transcription.",
+                    group=FieldGroup.MODEL,
+                ),
+                FieldDef(
+                    name="base_url",
+                    label="WebSocket endpoint",
+                    type=FieldType.URL,
+                    default=DEFAULT_BASE_URL,
+                    help_text="Override only for proxied deployments.",
+                    group=FieldGroup.ADVANCED,
+                ),
+            ),
+        )
 
     @property
     def model(self) -> str:

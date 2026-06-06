@@ -49,6 +49,13 @@ from app.providers.base import (
     TranscriptEvent,
     get_registry,
 )
+from app.providers.schema import (
+    FieldDef,
+    FieldGroup,
+    FieldOption,
+    FieldType,
+    ProviderSchema,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +161,84 @@ class FasterWhisperSTT(STTProvider):
     @property
     def name(self) -> str:
         return PROVIDER_NAME
+
+    @classmethod
+    def field_schema(cls) -> ProviderSchema:
+        return ProviderSchema(
+            kind=ProviderKind.STT,
+            provider_name=PROVIDER_NAME,
+            display_name="Local Whisper (faster-whisper)",
+            summary="Runs entirely on-device via CTranslate2. No audio leaves your host.",
+            signup_url=None,
+            fields=(
+                FieldDef(
+                    name="model_size",
+                    label="Model size",
+                    type=FieldType.SELECT,
+                    default=DEFAULT_MODEL_SIZE,
+                    help_text="Larger models are more accurate but slower.",
+                    options=tuple(
+                        FieldOption(value=m, label=m) for m in sorted(ALLOWED_MODEL_SIZES)
+                    ),
+                    group=FieldGroup.MODEL,
+                ),
+                FieldDef(
+                    name="language",
+                    label="Language",
+                    placeholder="en",
+                    help_text="Leave blank to auto-detect.",
+                    group=FieldGroup.MODEL,
+                ),
+                FieldDef(
+                    name="model_dir",
+                    label="Model directory",
+                    default=DEFAULT_MODEL_DIR,
+                    help_text="Where the CTranslate2 model files live on disk.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="device",
+                    label="Device",
+                    type=FieldType.SELECT,
+                    default=DEFAULT_DEVICE,
+                    options=(
+                        FieldOption(value="cpu", label="cpu"),
+                        FieldOption(value="cuda", label="cuda (NVIDIA GPU)"),
+                        FieldOption(value="auto", label="auto"),
+                    ),
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="compute_type",
+                    label="Compute type",
+                    type=FieldType.SELECT,
+                    default=DEFAULT_COMPUTE_TYPE,
+                    options=(
+                        FieldOption(value="int8", label="int8 (fastest CPU)"),
+                        FieldOption(value="int8_float16", label="int8_float16"),
+                        FieldOption(value="float16", label="float16"),
+                        FieldOption(value="float32", label="float32"),
+                    ),
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="beam_size",
+                    label="Beam size",
+                    type=FieldType.NUMBER,
+                    default=DEFAULT_BEAM_SIZE,
+                    help_text="Higher = more accurate, slower.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="vad_filter",
+                    label="VAD filter",
+                    type=FieldType.CHECKBOX,
+                    default=DEFAULT_VAD_FILTER,
+                    help_text="Drop non-speech segments before transcription.",
+                    group=FieldGroup.ADVANCED,
+                ),
+            ),
+        )
 
     @property
     def model_size(self) -> str:

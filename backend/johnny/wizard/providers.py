@@ -335,6 +335,34 @@ def get_choice(kind: Kind, provider_name: str) -> ProviderChoice | None:
     return None
 
 
+def schema_for(choice: ProviderChoice) -> Any:
+    """Look up the runtime ``field_schema()`` for a catalog entry.
+
+    Returns the adapter's :class:`app.providers.schema.ProviderSchema`
+    when the registered factory declares one, otherwise ``None``. The
+    wizard uses this to drive prompts off the same source of truth the
+    HTTP API and the /providers UI consume — adding a new credential
+    key in the adapter automatically flows through to the CLI without
+    touching this catalog.
+    """
+    # Imported lazily to avoid the wizard pulling in the SQLAlchemy
+    # transitively at import time.
+    from app.providers.base import ProviderKind, get_registry  # noqa: PLC0415
+
+    registry = get_registry()
+    kind = ProviderKind(choice.kind.value)
+    if not registry.has(kind, choice.provider_name):
+        return None
+    factory = registry.get(kind, choice.provider_name)
+    field_schema = getattr(factory, "field_schema", None)
+    if not callable(field_schema):
+        return None
+    try:
+        return field_schema()
+    except NotImplementedError:
+        return None
+
+
 __all__ = [
     "CATALOG",
     "Hosting",
@@ -347,4 +375,5 @@ __all__ = [
     "get_choice",
     "recommended_cloud",
     "recommended_local",
+    "schema_for",
 ]

@@ -56,6 +56,18 @@ from app.providers.openai_tts import OpenAITTS
 from app.providers.openai_tts import register as _register_openai_tts
 from app.providers.piper_tts import PiperTTS
 from app.providers.piper_tts import register as _register_piper_tts
+from app.providers.schema import (
+    FieldDef,
+    FieldGroup,
+    FieldOption,
+    FieldType,
+    ProviderSchema,
+)
+from app.providers.schema_validation import (
+    FieldValidationError,
+    split_values,
+    validate_payload,
+)
 
 # Auto-register adapters whose imports only pull in stdlib + httpx (a
 # lightweight runtime dep already required by FastAPI / tests). Adapters
@@ -82,6 +94,11 @@ __all__ = [
     "DeepgramSTT",
     "ElevenLabsTTS",
     "FasterWhisperSTT",
+    "FieldDef",
+    "FieldGroup",
+    "FieldOption",
+    "FieldType",
+    "FieldValidationError",
     "GeminiLLM",
     "LLMError",
     "LLMProvider",
@@ -97,6 +114,7 @@ __all__ = [
     "ProviderInstance",
     "ProviderKind",
     "ProviderRegistry",
+    "ProviderSchema",
     "STTError",
     "STTProvider",
     "TTSError",
@@ -106,4 +124,6 @@ __all__ = [
     "TranscriptEvent",
     "UnknownProviderError",
     "get_registry",
+    "split_values",
+    "validate_payload",
 ]

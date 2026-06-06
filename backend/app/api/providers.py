@@ -36,6 +36,12 @@ from app.providers.base import (
     UnknownProviderError,
     get_registry,
 )
+from app.providers.schema import ProviderSchema
+from app.providers.schema_validation import (
+    FieldValidationError,
+    split_values,
+    validate_payload,
+)
 from app.security.crypto import CredentialCrypto, CryptoError, decrypt_json, encrypt_json
 
 router = APIRouter(prefix="/providers", tags=["providers"])
@@ -45,13 +51,26 @@ router = APIRouter(prefix="/providers", tags=["providers"])
 
 
 class ProviderCreate(BaseModel):
-    """Payload for creating a provider credential row."""
+    """Payload for creating a provider credential row.
+
+    Two equivalent shapes are accepted:
+
+    * **Structured form (preferred)**: send a flat ``values`` dict —
+      the backend splits it into encrypted credentials and plain
+      options based on the provider's field schema.
+    * **Legacy buckets**: send ``credentials`` and ``options`` directly.
+      Used by tests and older clients.
+
+    If both are supplied, ``credentials`` / ``options`` win for the keys
+    they declare and ``values`` fills in the rest.
+    """
 
     kind: ProviderKind
     provider_name: str = Field(min_length=1, max_length=64)
     display_name: str = Field(min_length=1, max_length=128)
     credentials: dict[str, str] = Field(default_factory=dict)
     options: dict[str, Any] = Field(default_factory=dict)
+    values: dict[str, Any] | None = None
 
 
 class ProviderUpdate(BaseModel):
@@ -60,6 +79,7 @@ class ProviderUpdate(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=128)
     credentials: dict[str, str] | None = None
     options: dict[str, Any] | None = None
+    values: dict[str, Any] | None = None
 
 
 class ProviderRead(BaseModel):
@@ -92,6 +112,14 @@ class TestResult(BaseModel):
     ok: bool
     message: str
     detail: str | None = None
+
+
+class SchemaListResponse(BaseModel):
+    """All registered provider schemas grouped by kind."""
+
+    stt: list[dict[str, Any]]
+    llm: list[dict[str, Any]]
+    tts: list[dict[str, Any]]
 
 
 # --- Helpers ---------------------------------------------------------------
@@ -127,11 +155,96 @@ def _get_row_or_404(session: Session, provider_id: int) -> ProviderCredential:
     return row
 
 
+def _schema_for(kind: ProviderKind, provider_name: str) -> ProviderSchema | None:
+    """Look up a provider's field schema via the registry.
+
+    Returns ``None`` when no factory is registered for ``(kind, name)``
+    or when the factory's class did not declare a ``field_schema()``.
+    Callers fall back to legacy free-text validation in that case.
+    """
+    registry = get_registry()
+    if not registry.has(kind, provider_name):
+        return None
+    factory = registry.get(kind, provider_name)
+    field_schema = getattr(factory, "field_schema", None)
+    if not callable(field_schema):
+        return None
+    try:
+        schema = field_schema()
+    except NotImplementedError:
+        return None
+    if isinstance(schema, ProviderSchema):
+        return schema
+    return None
+
+
+def _all_schemas() -> dict[ProviderKind, list[ProviderSchema]]:
+    """Collect schemas for every registered provider, grouped by kind."""
+    registry = get_registry()
+    out: dict[ProviderKind, list[ProviderSchema]] = {
+        ProviderKind.STT: [],
+        ProviderKind.LLM: [],
+        ProviderKind.TTS: [],
+    }
+    for kind in (ProviderKind.STT, ProviderKind.LLM, ProviderKind.TTS):
+        for provider_name in registry.names(kind):
+            schema = _schema_for(kind, provider_name)
+            if schema is not None:
+                out[kind].append(schema)
+    return out
+
+
+def _merge_values_and_buckets(
+    schema: ProviderSchema,
+    values: dict[str, Any] | None,
+    credentials: dict[str, str] | None,
+    options: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Combine the structured ``values`` dict with legacy bucket payloads.
+
+    ``credentials`` and ``options`` win for the keys they explicitly
+    declare, since they are the historically authoritative shape. The
+    ``values`` dict fills in any field the buckets omitted.
+    """
+    merged: dict[str, Any] = dict(values or {})
+    if credentials:
+        merged.update(credentials)
+    if options:
+        merged.update(options)
+    # Drop any key not in the schema so unknown fields can't slip through.
+    return {k: v for k, v in merged.items() if schema.field(k) is not None}
+
+
+def _raise_validation_errors(errors: list[FieldValidationError]) -> None:
+    """Surface field-level errors as FastAPI's standard 422 envelope."""
+    raise HTTPException(
+        status_code=422,
+        detail=[err.to_dict() for err in errors],
+    )
+
+
 # --- Endpoints -------------------------------------------------------------
 
 
 SessionDep = Annotated[Session, Depends(get_session)]
 CryptoDep = Annotated[CredentialCrypto, Depends(get_crypto)]
+
+
+@router.get("/schemas", response_model=SchemaListResponse)
+def list_schemas() -> SchemaListResponse:
+    """Return field schemas for every registered provider, grouped by kind.
+
+    The SvelteKit /providers UI fetches this once on mount and uses it
+    to render a structured form per provider — replacing the previous
+    free-text Credentials/Options textareas. The wizard and the
+    server-side validator share the same source of truth.
+    """
+    schemas = _all_schemas()
+    return SchemaListResponse(
+        stt=[s.to_dict() for s in schemas[ProviderKind.STT]],
+        llm=[s.to_dict() for s in schemas[ProviderKind.LLM]],
+        tts=[s.to_dict() for s in schemas[ProviderKind.TTS]],
+    )
 
 
 @router.get("", response_model=ProviderListResponse)
@@ -164,13 +277,35 @@ def create_provider(
     session: SessionDep,
     crypto: CryptoDep,
 ) -> ProviderRead:
-    """Create a new provider credential row. Always created inactive."""
+    """Create a new provider credential row. Always created inactive.
+
+    Validates ``values`` / ``credentials`` / ``options`` against the
+    provider's declared field schema (when one exists) and surfaces
+    field-level errors as HTTP 422. Falls back to legacy unvalidated
+    behavior when the registered factory does not declare a schema.
+    """
+    schema = _schema_for(payload.kind, payload.provider_name)
+    if schema is not None:
+        merged = _merge_values_and_buckets(
+            schema,
+            payload.values,
+            dict(payload.credentials),
+            dict(payload.options),
+        )
+        errors = validate_payload(schema, merged)
+        if errors:
+            _raise_validation_errors(errors)
+        credentials, options = split_values(schema, merged)
+    else:
+        credentials = dict(payload.credentials)
+        options = dict(payload.options)
+
     row = ProviderCredential(
         kind=payload.kind,
         provider_name=payload.provider_name,
         display_name=payload.display_name,
-        credentials_encrypted=encrypt_json(crypto, dict(payload.credentials)),
-        config=dict(payload.options),
+        credentials_encrypted=encrypt_json(crypto, credentials),
+        config=options,
         is_active=False,
     )
     session.add(row)
@@ -193,14 +328,48 @@ def update_provider(
     session: SessionDep,
     crypto: CryptoDep,
 ) -> ProviderRead:
-    """Patch a provider credential row. Omitted fields are unchanged."""
+    """Patch a provider credential row. Omitted fields are unchanged.
+
+    When ``values`` is supplied alongside a schema-aware adapter, the
+    payload is validated and split into credentials / options buckets
+    the same way ``POST`` does. Legacy callers may still send the
+    bucket fields directly.
+    """
     row = _get_row_or_404(session, provider_id)
+
     if payload.display_name is not None:
         row.display_name = payload.display_name
-    if payload.credentials is not None:
-        row.credentials_encrypted = encrypt_json(crypto, dict(payload.credentials))
-    if payload.options is not None:
-        row.config = dict(payload.options)
+
+    schema = _schema_for(row.kind, row.provider_name)
+    if schema is not None and payload.values is not None:
+        existing_creds: dict[str, str] = {}
+        try:
+            existing_creds = decrypt_json(crypto, row.credentials_encrypted) or {}
+        except (CryptoError, ValueError, json.JSONDecodeError):
+            existing_creds = {}
+        baseline: dict[str, Any] = {}
+        baseline.update(existing_creds)
+        baseline.update(row.config or {})
+        baseline.update(payload.values)
+        if payload.credentials is not None:
+            baseline.update(payload.credentials)
+        if payload.options is not None:
+            baseline.update(payload.options)
+        merged = {
+            k: v for k, v in baseline.items() if schema.field(k) is not None
+        }
+        errors = validate_payload(schema, merged)
+        if errors:
+            _raise_validation_errors(errors)
+        credentials, options = split_values(schema, merged)
+        row.credentials_encrypted = encrypt_json(crypto, credentials)
+        row.config = options
+    else:
+        if payload.credentials is not None:
+            row.credentials_encrypted = encrypt_json(crypto, dict(payload.credentials))
+        if payload.options is not None:
+            row.config = dict(payload.options)
+
     try:
         session.flush()
     except IntegrityError as exc:
@@ -359,6 +528,7 @@ __all__ = [
     "ProviderListResponse",
     "ProviderRead",
     "ProviderUpdate",
+    "SchemaListResponse",
     "TestResult",
     "router",
 ]

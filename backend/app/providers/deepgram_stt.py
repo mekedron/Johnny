@@ -36,6 +36,13 @@ from app.providers.base import (
     TranscriptEvent,
     get_registry,
 )
+from app.providers.schema import (
+    FieldDef,
+    FieldGroup,
+    FieldOption,
+    FieldType,
+    ProviderSchema,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +127,91 @@ class DeepgramSTT(STTProvider):
     @property
     def name(self) -> str:
         return PROVIDER_NAME
+
+    @classmethod
+    def field_schema(cls) -> ProviderSchema:
+        return ProviderSchema(
+            kind=ProviderKind.STT,
+            provider_name=PROVIDER_NAME,
+            display_name="Deepgram",
+            summary="Lowest streaming latency. Excellent diarization. Pay-as-you-go.",
+            signup_url="https://console.deepgram.com/signup",
+            fields=(
+                FieldDef(
+                    name="api_key",
+                    label="API key",
+                    type=FieldType.PASSWORD,
+                    required=True,
+                    secret=True,
+                    placeholder="dg-...",
+                    help_text="Get a key from console.deepgram.com.",
+                    signup_url="https://console.deepgram.com/signup",
+                    env_key="DEEPGRAM_API_KEY",
+                    group=FieldGroup.AUTH,
+                ),
+                FieldDef(
+                    name="model",
+                    label="Model",
+                    type=FieldType.SELECT,
+                    default=DEFAULT_MODEL,
+                    help_text="Deepgram speech model.",
+                    options=(
+                        FieldOption(value="nova-3", label="nova-3 (latest)"),
+                        FieldOption(value="nova-2", label="nova-2 (recommended)"),
+                        FieldOption(value="enhanced", label="enhanced"),
+                        FieldOption(value="base", label="base"),
+                    ),
+                    group=FieldGroup.MODEL,
+                ),
+                FieldDef(
+                    name="language",
+                    label="Language",
+                    default=DEFAULT_LANGUAGE,
+                    placeholder="en-US",
+                    help_text="BCP-47 language tag.",
+                    group=FieldGroup.MODEL,
+                ),
+                FieldDef(
+                    name="base_url",
+                    label="WebSocket endpoint",
+                    type=FieldType.URL,
+                    default=DEFAULT_BASE_URL,
+                    help_text="Override only for self-hosted gateways.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="endpointing_ms",
+                    label="Endpointing (ms)",
+                    type=FieldType.NUMBER,
+                    default=DEFAULT_ENDPOINTING_MS,
+                    help_text="Silence duration that finalises an utterance.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="interim_results",
+                    label="Interim results",
+                    type=FieldType.CHECKBOX,
+                    default=DEFAULT_INTERIM_RESULTS,
+                    help_text="Emit partial transcripts as they arrive.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="punctuate",
+                    label="Punctuate",
+                    type=FieldType.CHECKBOX,
+                    default=DEFAULT_PUNCTUATE,
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="smart_format",
+                    label="Smart format",
+                    type=FieldType.CHECKBOX,
+                    default=DEFAULT_SMART_FORMAT,
+                    help_text="Apply number / date / currency formatting.",
+                    group=FieldGroup.ADVANCED,
+                ),
+            ),
+        )
 
     @property
     def model(self) -> str:

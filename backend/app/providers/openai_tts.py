@@ -31,6 +31,13 @@ from app.providers.base import (
     TTSProvider,
     get_registry,
 )
+from app.providers.schema import (
+    FieldDef,
+    FieldGroup,
+    FieldOption,
+    FieldType,
+    ProviderSchema,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +113,74 @@ class OpenAITTS(TTSProvider):
     @property
     def name(self) -> str:
         return PROVIDER_NAME
+
+    @classmethod
+    def field_schema(cls) -> ProviderSchema:
+        return ProviderSchema(
+            kind=ProviderKind.TTS,
+            provider_name=PROVIDER_NAME,
+            display_name="OpenAI TTS",
+            summary="Consistent neutral voices, integrates with your OpenAI key.",
+            signup_url="https://platform.openai.com/signup",
+            fields=(
+                FieldDef(
+                    name="api_key",
+                    label="API key",
+                    type=FieldType.PASSWORD,
+                    required=True,
+                    secret=True,
+                    placeholder="sk-...",
+                    help_text="Get a key from platform.openai.com.",
+                    signup_url="https://platform.openai.com/signup",
+                    env_key="OPENAI_API_KEY",
+                    group=FieldGroup.AUTH,
+                ),
+                FieldDef(
+                    name="voice_id",
+                    label="Voice",
+                    type=FieldType.SELECT,
+                    default=DEFAULT_VOICE_ID,
+                    options=tuple(
+                        FieldOption(value=v, label=v) for v in sorted(ALLOWED_VOICES)
+                    ),
+                    group=FieldGroup.MODEL,
+                ),
+                FieldDef(
+                    name="model",
+                    label="Model",
+                    type=FieldType.SELECT,
+                    default=DEFAULT_MODEL,
+                    options=(
+                        FieldOption(value="tts-1", label="tts-1 (fast)"),
+                        FieldOption(value="tts-1-hd", label="tts-1-hd (high quality)"),
+                        FieldOption(value="gpt-4o-mini-tts", label="gpt-4o-mini-tts"),
+                    ),
+                    group=FieldGroup.MODEL,
+                ),
+                FieldDef(
+                    name="speed",
+                    label="Speed",
+                    type=FieldType.NUMBER,
+                    default=1.0,
+                    help_text="0.25 to 4.0.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="base_url",
+                    label="API base URL",
+                    type=FieldType.URL,
+                    default=DEFAULT_BASE_URL,
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="timeout_s",
+                    label="Request timeout (s)",
+                    type=FieldType.NUMBER,
+                    default=DEFAULT_TIMEOUT_S,
+                    group=FieldGroup.ADVANCED,
+                ),
+            ),
+        )
 
     @property
     def default_voice_id(self) -> str:

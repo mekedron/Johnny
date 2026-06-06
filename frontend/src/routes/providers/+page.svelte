@@ -5,39 +5,62 @@
 		createProvider,
 		deactivateProvider,
 		deleteProvider,
+		findSchema,
+		groupedFields,
+		GROUP_LABEL,
+		initialValues,
 		listProviders,
-		parseKeyValueText,
+		listSchemas,
 		PROVIDER_KIND_LABEL,
 		PROVIDER_KINDS,
 		testProvider,
+		updateProvider,
+		validateClient,
+		ValidationFailure,
+		type FieldDef,
 		type Provider,
 		type ProviderKind,
 		type ProviderList,
+		type ProviderSchema,
+		type ProviderSchemaList,
 		type TestResult
 	} from '$lib/providers';
 
 	let providers = $state<ProviderList>({ stt: [], llm: [], tts: [] });
+	let schemas = $state<ProviderSchemaList>({ stt: [], llm: [], tts: [] });
 	let loading = $state(false);
 	let error = $state<string | null>(null);
-
-	let showForm = $state(false);
-	let formKind = $state<ProviderKind>('llm');
-	let formProviderName = $state('');
-	let formDisplayName = $state('');
-	let formCredentialsText = $state('');
-	let formOptionsText = $state('');
-	let formSubmitting = $state(false);
-	let formError = $state<string | null>(null);
 
 	let testResults = $state<Record<number, TestResult>>({});
 	let testingId = $state<number | null>(null);
 	let busyId = $state<number | null>(null);
 
-	async function loadProviders() {
+	let editingId = $state<number | null>(null);
+	let editValues = $state<Record<string, unknown>>({});
+	let editErrors = $state<Record<string, string>>({});
+	let editSubmitting = $state(false);
+
+	let showAdd = $state(false);
+	let addKind = $state<ProviderKind>('llm');
+	let addProviderName = $state<string>('');
+	let addDisplayName = $state<string>('');
+	let addValues = $state<Record<string, unknown>>({});
+	let addErrors = $state<Record<string, string>>({});
+	let addSubmitting = $state(false);
+	let addBanner = $state<string | null>(null);
+
+	const addSchema = $derived(findSchema(schemas, addKind, addProviderName));
+
+	async function load() {
 		loading = true;
 		error = null;
 		try {
-			providers = await listProviders();
+			const [schemasResp, providersResp] = await Promise.all([
+				listSchemas(),
+				listProviders()
+			]);
+			schemas = schemasResp;
+			providers = providersResp;
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -45,47 +68,156 @@
 		}
 	}
 
-	onMount(loadProviders);
+	onMount(load);
 
-	function resetForm() {
-		formKind = 'llm';
-		formProviderName = '';
-		formDisplayName = '';
-		formCredentialsText = '';
-		formOptionsText = '';
-		formError = null;
+	function rowsFor(kind: ProviderKind): Provider[] {
+		return providers[kind];
 	}
 
-	function openForm() {
-		resetForm();
-		showForm = true;
+	function activeFor(kind: ProviderKind): Provider | null {
+		return rowsFor(kind).find((p) => p.is_active) ?? null;
 	}
 
-	function closeForm() {
-		showForm = false;
+	function defaultProviderFor(kind: ProviderKind): string {
+		const list = schemas[kind];
+		return list.length > 0 ? list[0].provider_name : '';
 	}
 
-	async function submitForm(event: Event) {
+	function schemaFor(p: Provider): ProviderSchema | null {
+		return findSchema(schemas, p.kind, p.provider_name);
+	}
+
+	function openAdd() {
+		showAdd = true;
+		addBanner = null;
+		addKind = 'llm';
+		addProviderName = defaultProviderFor(addKind);
+		const schema = findSchema(schemas, addKind, addProviderName);
+		addDisplayName = schema ? schema.display_name : '';
+		addValues = schema ? initialValues(schema) : {};
+		addErrors = {};
+	}
+
+	function closeAdd() {
+		showAdd = false;
+	}
+
+	function onAddKindChange() {
+		addProviderName = defaultProviderFor(addKind);
+		const schema = findSchema(schemas, addKind, addProviderName);
+		addDisplayName = schema ? schema.display_name : '';
+		addValues = schema ? initialValues(schema) : {};
+		addErrors = {};
+	}
+
+	function onAddProviderChange() {
+		const schema = findSchema(schemas, addKind, addProviderName);
+		addDisplayName = schema ? schema.display_name : '';
+		addValues = schema ? initialValues(schema) : {};
+		addErrors = {};
+	}
+
+	async function submitAdd(event: Event) {
 		event.preventDefault();
-		formSubmitting = true;
-		formError = null;
+		const schema = findSchema(schemas, addKind, addProviderName);
+		if (!schema) {
+			addBanner = `Unknown provider ${addProviderName}.`;
+			return;
+		}
+		addErrors = validateClient(schema, addValues);
+		if (!addDisplayName.trim()) {
+			addErrors._display_name = 'Display name is required';
+		}
+		if (Object.keys(addErrors).length > 0) {
+			return;
+		}
+		addSubmitting = true;
+		addBanner = null;
 		try {
-			const credentials = parseKeyValueText(formCredentialsText);
-			const options = parseKeyValueText(formOptionsText);
 			await createProvider({
-				kind: formKind,
-				provider_name: formProviderName.trim(),
-				display_name: formDisplayName.trim(),
-				credentials,
-				options
+				kind: addKind,
+				provider_name: addProviderName,
+				display_name: addDisplayName.trim(),
+				values: addValues
 			});
-			showForm = false;
-			resetForm();
-			await loadProviders();
+			showAdd = false;
+			await load();
 		} catch (e) {
-			formError = e instanceof Error ? e.message : String(e);
+			if (e instanceof ValidationFailure) {
+				addErrors = { ...addErrors, ...e.fields };
+				addBanner = 'Some fields need attention.';
+			} else {
+				addBanner = e instanceof Error ? e.message : String(e);
+			}
 		} finally {
-			formSubmitting = false;
+			addSubmitting = false;
+		}
+	}
+
+	function openEdit(p: Provider) {
+		const schema = schemaFor(p);
+		if (!schema) {
+			error = `No schema for ${p.kind}/${p.provider_name}.`;
+			return;
+		}
+		editingId = p.id;
+		editValues = initialValues(schema);
+		// Pre-fill non-secret options from the row; secrets stay blank
+		// (the API never returns them — the user must re-enter to rotate).
+		for (const [k, v] of Object.entries(p.options)) {
+			editValues[k] = v as unknown;
+		}
+		editErrors = {};
+	}
+
+	function cancelEdit() {
+		editingId = null;
+		editErrors = {};
+	}
+
+	async function submitEdit(p: Provider, event: Event) {
+		event.preventDefault();
+		const schema = schemaFor(p);
+		if (!schema) return;
+		const filtered: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(editValues)) {
+			const field = schema.fields.find((f) => f.name === k);
+			if (!field) continue;
+			// Skip empty secret fields so the previous key stays in place.
+			if (
+				field.secret &&
+				(v === null || v === undefined || (typeof v === 'string' && v.trim() === ''))
+			) {
+				continue;
+			}
+			filtered[k] = v;
+		}
+		// Build a synthetic values set for client validation: missing-but-
+		// kept-secret fields shouldn't fail the required check on edit.
+		const forValidation = { ...filtered };
+		for (const f of schema.fields) {
+			if (f.secret && !(f.name in forValidation)) {
+				forValidation[f.name] = 'kept';
+			}
+		}
+		editErrors = validateClient(schema, forValidation);
+		// Drop the synthetic sentinel from the actual submit payload.
+		if (Object.keys(editErrors).length > 0) {
+			return;
+		}
+		editSubmitting = true;
+		try {
+			await updateProvider(p.id, { values: filtered });
+			editingId = null;
+			await load();
+		} catch (e) {
+			if (e instanceof ValidationFailure) {
+				editErrors = { ...editErrors, ...e.fields };
+			} else {
+				error = e instanceof Error ? e.message : String(e);
+			}
+		} finally {
+			editSubmitting = false;
 		}
 	}
 
@@ -93,7 +225,7 @@
 		busyId = p.id;
 		try {
 			await activateProvider(p.id);
-			await loadProviders();
+			await load();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -105,7 +237,7 @@
 		busyId = p.id;
 		try {
 			await deactivateProvider(p.id);
-			await loadProviders();
+			await load();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -120,7 +252,7 @@
 		try {
 			await deleteProvider(p.id);
 			delete testResults[p.id];
-			await loadProviders();
+			await load();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -143,18 +275,8 @@
 		}
 	}
 
-	function rowsFor(kind: ProviderKind): Provider[] {
-		return providers[kind];
-	}
-
-	function activeFor(kind: ProviderKind): Provider | null {
-		return rowsFor(kind).find((p) => p.is_active) ?? null;
-	}
-
-	function formatOptions(options: Record<string, unknown>): string {
-		const entries = Object.entries(options);
-		if (entries.length === 0) return '—';
-		return entries.map(([k, v]) => `${k}=${String(v)}`).join(', ');
+	function fieldInputId(prefix: string, fieldName: string): string {
+		return `${prefix}-${fieldName}`;
 	}
 </script>
 
@@ -167,15 +289,17 @@
 		<div>
 			<h1>Providers</h1>
 			<p class="lede">
-				Pick which STT, LLM, and TTS adapters Johnny uses. Credentials are encrypted at rest;
+				Pick which STT, LLM, and TTS adapters Johnny uses. Each provider has its own
+				form — labels, required markers, and help text are surfaced inline so you
+				don't have to guess the right key names. Credentials are encrypted at rest;
 				only one provider per kind can be active at a time.
 			</p>
 		</div>
 		<div class="header-actions">
-			<button type="button" onclick={loadProviders} disabled={loading}>
+			<button type="button" onclick={load} disabled={loading}>
 				{loading ? 'Refreshing…' : 'Refresh'}
 			</button>
-			<button type="button" class="primary" onclick={openForm}>Add provider</button>
+			<button type="button" class="primary" onclick={openAdd}>Add provider</button>
 		</div>
 	</header>
 
@@ -198,20 +322,42 @@
 			{:else}
 				<ul class="provider-list">
 					{#each rows as provider (provider.id)}
-						<li class="provider" class:active={provider.is_active} data-testid={`row-${provider.id}`}>
+						{@const schema = schemaFor(provider)}
+						<li
+							class="provider"
+							class:active={provider.is_active}
+							data-testid={`row-${provider.id}`}
+						>
 							<div class="provider-main">
 								<div class="provider-title">
 									<strong>{provider.display_name}</strong>
-									<span class="provider-meta">{provider.provider_name}</span>
+									<span class="provider-meta">
+										{schema ? schema.display_name : provider.provider_name}
+									</span>
 									{#if provider.is_active}
 										<span class="badge">Active</span>
 									{/if}
 								</div>
+								{#if schema}
+									<p class="provider-summary">{schema.summary}</p>
+								{/if}
 								<dl class="provider-details">
 									<dt>Credentials:</dt>
-									<dd>{provider.credential_keys.length > 0 ? provider.credential_keys.join(', ') : '—'}</dd>
+									<dd>
+										{provider.credential_keys.length > 0
+											? provider.credential_keys.join(', ')
+											: '—'}
+									</dd>
 									<dt>Options:</dt>
-									<dd>{formatOptions(provider.options)}</dd>
+									<dd>
+										{#if Object.keys(provider.options).length === 0}
+											—
+										{:else}
+											{Object.entries(provider.options)
+												.map(([k, v]) => `${k}=${String(v)}`)
+												.join(', ')}
+										{/if}
+									</dd>
 								</dl>
 								{#if testResults[provider.id]}
 									{@const r = testResults[provider.id]}
@@ -220,6 +366,37 @@
 										{r.message}
 										{#if r.detail}<span class="detail">— {r.detail}</span>{/if}
 									</div>
+								{/if}
+
+								{#if editingId === provider.id && schema}
+									<form
+										class="inline-form"
+										onsubmit={(event) => submitEdit(provider, event)}
+										data-testid={`edit-form-${provider.id}`}
+									>
+										{#each groupedFields(schema) as group (group.group)}
+											<fieldset>
+												<legend>{GROUP_LABEL[group.group]}</legend>
+												{#each group.fields as field (field.name)}
+													{@render fieldRow(
+														field,
+														editValues,
+														editErrors,
+														fieldInputId(`edit-${provider.id}`, field.name),
+														true
+													)}
+												{/each}
+											</fieldset>
+										{/each}
+										<div class="inline-form-actions">
+											<button type="button" onclick={cancelEdit} disabled={editSubmitting}>
+												Cancel
+											</button>
+											<button type="submit" class="primary" disabled={editSubmitting}>
+												{editSubmitting ? 'Saving…' : 'Save changes'}
+											</button>
+										</div>
+									</form>
 								{/if}
 							</div>
 							<div class="provider-actions">
@@ -230,6 +407,11 @@
 								>
 									{testingId === provider.id ? 'Testing…' : 'Test'}
 								</button>
+								{#if editingId !== provider.id}
+									<button type="button" onclick={() => openEdit(provider)} disabled={!schema}>
+										Edit
+									</button>
+								{/if}
 								{#if provider.is_active}
 									<button
 										type="button"
@@ -265,72 +447,168 @@
 	{/each}
 </div>
 
-{#if showForm}
+{#if showAdd}
 	<div
 		class="modal-backdrop"
 		role="dialog"
 		aria-modal="true"
 		aria-labelledby="add-provider-heading"
 	>
-		<form class="modal" onsubmit={submitForm}>
-			<h2 id="add-provider-heading">Add provider</h2>
-			<label>
+		<form class="modal" onsubmit={submitAdd}>
+			<header class="modal-header">
+				<h2 id="add-provider-heading">Add provider</h2>
+				<button type="button" class="icon" onclick={closeAdd} aria-label="Close">×</button>
+			</header>
+			<label class="row">
 				<span>Kind</span>
-				<select bind:value={formKind} required>
+				<select bind:value={addKind} onchange={onAddKindChange}>
 					{#each PROVIDER_KINDS as k (k)}
 						<option value={k}>{PROVIDER_KIND_LABEL[k]}</option>
 					{/each}
 				</select>
 			</label>
-			<label>
-				<span>Provider name</span>
-				<input
-					type="text"
-					bind:value={formProviderName}
-					required
-					placeholder="e.g. openai, deepgram, piper"
-				/>
-				<small>Must match a registered adapter factory.</small>
+			<label class="row">
+				<span>Provider</span>
+				<select bind:value={addProviderName} onchange={onAddProviderChange}>
+					{#each schemas[addKind] as schema (schema.provider_name)}
+						<option value={schema.provider_name}>{schema.display_name}</option>
+					{/each}
+				</select>
 			</label>
-			<label>
-				<span>Display name</span>
-				<input
-					type="text"
-					bind:value={formDisplayName}
-					required
-					placeholder="e.g. OpenAI primary"
-				/>
-			</label>
-			<label>
-				<span>Credentials (key=value per line)</span>
-				<textarea
-					bind:value={formCredentialsText}
-					rows="4"
-					placeholder={'api_key=sk-...\nbase_url=https://api.example.com'}
-				></textarea>
-				<small>Encrypted at rest. Common keys: api_key, base_url, token.</small>
-			</label>
-			<label>
-				<span>Options (key=value per line)</span>
-				<textarea
-					bind:value={formOptionsText}
-					rows="4"
-					placeholder={'model=gpt-4o\nvoice_id=alloy'}
-				></textarea>
-				<small>Non-secret runtime settings: model, voice_id, base_url, sample_rate.</small>
-			</label>
-			{#if formError}
-				<div class="alert error">{formError}</div>
+
+			{#if addSchema}
+				<p class="provider-summary">{addSchema.summary}</p>
+				{#if addSchema.signup_url}
+					<p>
+						<a class="signup-link" href={addSchema.signup_url} target="_blank" rel="noopener">
+							Get started → {addSchema.signup_url}
+						</a>
+					</p>
+				{/if}
+
+				<label class="row">
+					<span>Display name</span>
+					<input
+						type="text"
+						bind:value={addDisplayName}
+						placeholder={addSchema.display_name}
+						required
+					/>
+					{#if addErrors._display_name}
+						<small class="field-error">{addErrors._display_name}</small>
+					{/if}
+				</label>
+
+				{#each groupedFields(addSchema) as group (group.group)}
+					<fieldset>
+						<legend>{GROUP_LABEL[group.group]}</legend>
+						{#each group.fields as field (field.name)}
+							{@render fieldRow(
+								field,
+								addValues,
+								addErrors,
+								fieldInputId('add', field.name),
+								false
+							)}
+						{/each}
+					</fieldset>
+				{/each}
+			{:else}
+				<p class="empty">No providers registered for this kind.</p>
+			{/if}
+
+			{#if addBanner}
+				<div class="alert error">{addBanner}</div>
 			{/if}
 			<div class="modal-actions">
-				<button type="button" onclick={closeForm} disabled={formSubmitting}>Cancel</button>
-				<button type="submit" class="primary" disabled={formSubmitting}>
-					{formSubmitting ? 'Saving…' : 'Create'}
+				<button type="button" onclick={closeAdd} disabled={addSubmitting}>Cancel</button>
+				<button
+					type="submit"
+					class="primary"
+					disabled={addSubmitting || !addSchema}
+				>
+					{addSubmitting ? 'Saving…' : 'Create'}
 				</button>
 			</div>
 		</form>
 	</div>
 {/if}
+
+{#snippet fieldRow(
+	field: FieldDef,
+	values: Record<string, unknown>,
+	errors: Record<string, string>,
+	id: string,
+	editing: boolean
+)}
+	<div class="field" data-testid={`field-${field.name}`}>
+		<label for={id}>
+			<span>
+				{field.label}
+				{#if field.required}<span class="required" aria-hidden="true">*</span>{/if}
+			</span>
+		</label>
+		{#if field.type === 'select' && field.options}
+			<select id={id} bind:value={values[field.name]} required={field.required && !editing}>
+				{#each field.options as opt (opt.value)}
+					<option value={opt.value}>{opt.label}</option>
+				{/each}
+			</select>
+		{:else if field.type === 'checkbox'}
+			<input id={id} type="checkbox" bind:checked={values[field.name] as boolean} />
+		{:else if field.type === 'textarea'}
+			<textarea
+				id={id}
+				bind:value={values[field.name]}
+				placeholder={field.placeholder ?? ''}
+				rows="3"
+			></textarea>
+		{:else if field.type === 'number'}
+			<input
+				id={id}
+				type="number"
+				step="any"
+				bind:value={values[field.name]}
+				placeholder={field.placeholder ?? ''}
+			/>
+		{:else if field.type === 'url'}
+			<input
+				id={id}
+				type="url"
+				bind:value={values[field.name]}
+				placeholder={field.placeholder ?? 'https://…'}
+			/>
+		{:else if field.type === 'password'}
+			<input
+				id={id}
+				type="password"
+				autocomplete="new-password"
+				bind:value={values[field.name]}
+				placeholder={editing ? '(unchanged — fill to rotate)' : (field.placeholder ?? '')}
+				required={field.required && !editing}
+			/>
+		{:else}
+			<input
+				id={id}
+				type="text"
+				bind:value={values[field.name]}
+				placeholder={field.placeholder ?? ''}
+				required={field.required && !editing}
+			/>
+		{/if}
+		{#if field.help_text || field.signup_url}
+			<small class="help">
+				{field.help_text ?? ''}
+				{#if field.signup_url}
+					<a href={field.signup_url} target="_blank" rel="noopener">Get a key →</a>
+				{/if}
+			</small>
+		{/if}
+		{#if errors[field.name]}
+			<small class="field-error">{errors[field.name]}</small>
+		{/if}
+	</div>
+{/snippet}
 
 <style>
 	.page {
@@ -384,6 +662,14 @@
 	}
 	button.danger:hover:not(:disabled) {
 		background: #fef2f2;
+	}
+	button.icon {
+		padding: 0.1rem 0.45rem;
+		font-size: 1.2rem;
+		line-height: 1;
+		background: transparent;
+		border: none;
+		color: #6b7280;
 	}
 
 	.alert {
@@ -451,9 +737,13 @@
 		flex-wrap: wrap;
 	}
 	.provider-meta {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 		font-size: 0.85rem;
 		color: #6b7280;
+	}
+	.provider-summary {
+		margin: 0.4rem 0 0;
+		color: #4b5563;
+		font-size: 0.85rem;
 	}
 	.badge {
 		font-size: 0.7rem;
@@ -508,6 +798,21 @@
 		flex-shrink: 0;
 	}
 
+	.inline-form {
+		margin-top: 1rem;
+		padding: 1rem;
+		background: #f9fafb;
+		border: 1px solid #e5e7eb;
+		border-radius: 6px;
+		display: grid;
+		gap: 0.75rem;
+	}
+	.inline-form-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 0.5rem;
+	}
+
 	.modal-backdrop {
 		position: fixed;
 		inset: 0;
@@ -522,42 +827,91 @@
 		background: #ffffff;
 		padding: 1.5rem;
 		border-radius: 10px;
-		width: min(560px, 100%);
+		width: min(640px, 100%);
 		max-height: 90vh;
 		overflow: auto;
 		display: grid;
 		gap: 0.85rem;
 	}
+	.modal-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		gap: 1rem;
+	}
 	.modal h2 {
-		margin: 0 0 0.25rem;
+		margin: 0;
 		font-size: 1.1rem;
 	}
-	.modal label {
+
+	.row {
 		display: grid;
 		gap: 0.3rem;
 		font-size: 0.9rem;
 	}
-	.modal label > span {
+	.row > span {
 		font-weight: 600;
 	}
-	.modal input,
-	.modal select,
-	.modal textarea {
+
+	fieldset {
+		border: 1px solid #e5e7eb;
+		border-radius: 8px;
+		padding: 0.85rem 1rem;
+		display: grid;
+		gap: 0.75rem;
+		margin: 0;
+	}
+	fieldset legend {
+		font-weight: 600;
+		font-size: 0.85rem;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		color: #4b5563;
+		padding: 0 0.25rem;
+	}
+
+	.field {
+		display: grid;
+		gap: 0.3rem;
+	}
+	.field label > span {
+		font-weight: 600;
+		font-size: 0.9rem;
+	}
+	.field .required {
+		color: #b91c1c;
+		margin-left: 0.2rem;
+	}
+	.field input,
+	.field select,
+	.field textarea {
 		font: inherit;
 		padding: 0.45rem 0.6rem;
 		border: 1px solid #d1d5db;
 		border-radius: 6px;
 		background: #ffffff;
 	}
-	.modal textarea {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.85rem;
-		resize: vertical;
+	.field input[type='checkbox'] {
+		justify-self: start;
+		padding: 0;
+		width: auto;
 	}
-	.modal small {
+	.help {
 		color: #6b7280;
 		font-size: 0.8rem;
 	}
+	.help a {
+		color: #4f46e5;
+	}
+	.signup-link {
+		color: #4f46e5;
+		font-size: 0.85rem;
+	}
+	.field-error {
+		color: #b91c1c;
+		font-size: 0.8rem;
+	}
+
 	.modal-actions {
 		display: flex;
 		justify-content: flex-end;

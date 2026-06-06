@@ -41,6 +41,13 @@ from app.providers.base import (
     ToolDefinition,
     get_registry,
 )
+from app.providers.schema import (
+    FieldDef,
+    FieldGroup,
+    FieldOption,
+    FieldType,
+    ProviderSchema,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +114,89 @@ class AnthropicLLM(LLMProvider):
     @property
     def name(self) -> str:
         return PROVIDER_NAME
+
+    @classmethod
+    def field_schema(cls) -> ProviderSchema:
+        return ProviderSchema(
+            kind=ProviderKind.LLM,
+            provider_name=PROVIDER_NAME,
+            display_name="Anthropic (Claude)",
+            summary="Strong reasoning, careful tone, low hallucination.",
+            signup_url="https://console.anthropic.com/",
+            fields=(
+                FieldDef(
+                    name="api_key",
+                    label="API key",
+                    type=FieldType.PASSWORD,
+                    required=True,
+                    secret=True,
+                    placeholder="sk-ant-...",
+                    help_text="Get a key from console.anthropic.com.",
+                    signup_url="https://console.anthropic.com/",
+                    env_key="ANTHROPIC_API_KEY",
+                    group=FieldGroup.AUTH,
+                ),
+                FieldDef(
+                    name="model",
+                    label="Model",
+                    type=FieldType.SELECT,
+                    default="claude-haiku-4-5",
+                    options=(
+                        FieldOption(
+                            value="claude-haiku-4-5", label="claude-haiku-4-5 (fast)"
+                        ),
+                        FieldOption(
+                            value="claude-sonnet-4-6", label="claude-sonnet-4-6"
+                        ),
+                        FieldOption(
+                            value="claude-opus-4-7",
+                            label="claude-opus-4-7 (most capable)",
+                        ),
+                        FieldOption(
+                            value="claude-3-5-sonnet-20241022",
+                            label="claude-3-5-sonnet-20241022",
+                        ),
+                    ),
+                    group=FieldGroup.MODEL,
+                ),
+                FieldDef(
+                    name="max_tokens",
+                    label="Max tokens",
+                    type=FieldType.NUMBER,
+                    default=DEFAULT_MAX_TOKENS,
+                    help_text="Anthropic requires this; default is 1024.",
+                    group=FieldGroup.MODEL,
+                ),
+                FieldDef(
+                    name="temperature",
+                    label="Temperature",
+                    type=FieldType.NUMBER,
+                    default=DEFAULT_TEMPERATURE,
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="base_url",
+                    label="API base URL",
+                    type=FieldType.URL,
+                    default=DEFAULT_BASE_URL,
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="anthropic_version",
+                    label="Anthropic-Version header",
+                    default=DEFAULT_ANTHROPIC_VERSION,
+                    help_text="Default works for the stable Messages API.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="timeout_s",
+                    label="Request timeout (s)",
+                    type=FieldType.NUMBER,
+                    default=DEFAULT_TIMEOUT_S,
+                    group=FieldGroup.ADVANCED,
+                ),
+            ),
+        )
 
     @property
     def model(self) -> str:

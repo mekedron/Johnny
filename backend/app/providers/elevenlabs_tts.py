@@ -27,6 +27,13 @@ from app.providers.base import (
     TTSProvider,
     get_registry,
 )
+from app.providers.schema import (
+    FieldDef,
+    FieldGroup,
+    FieldOption,
+    FieldType,
+    ProviderSchema,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +105,83 @@ class ElevenLabsTTS(TTSProvider):
     @property
     def name(self) -> str:
         return PROVIDER_NAME
+
+    @classmethod
+    def field_schema(cls) -> ProviderSchema:
+        return ProviderSchema(
+            kind=ProviderKind.TTS,
+            provider_name=PROVIDER_NAME,
+            display_name="ElevenLabs",
+            summary="Highest-quality cloud voices with fast streaming.",
+            signup_url="https://elevenlabs.io/sign-up",
+            fields=(
+                FieldDef(
+                    name="api_key",
+                    label="API key",
+                    type=FieldType.PASSWORD,
+                    required=True,
+                    secret=True,
+                    placeholder="sk_...",
+                    help_text="Get a key from elevenlabs.io.",
+                    signup_url="https://elevenlabs.io/sign-up",
+                    env_key="ELEVENLABS_API_KEY",
+                    group=FieldGroup.AUTH,
+                ),
+                FieldDef(
+                    name="voice_id",
+                    label="Voice ID",
+                    required=True,
+                    placeholder="EXAVITQu4vr4xnSDxMaL",
+                    help_text="Find IDs at elevenlabs.io/app/voice-library.",
+                    group=FieldGroup.MODEL,
+                ),
+                FieldDef(
+                    name="model_id",
+                    label="Model",
+                    type=FieldType.SELECT,
+                    default=DEFAULT_MODEL_ID,
+                    options=(
+                        FieldOption(
+                            value="eleven_multilingual_v2", label="eleven_multilingual_v2"
+                        ),
+                        FieldOption(
+                            value="eleven_flash_v2_5",
+                            label="eleven_flash_v2_5 (low latency EN)",
+                        ),
+                        FieldOption(value="eleven_turbo_v2_5", label="eleven_turbo_v2_5"),
+                    ),
+                    group=FieldGroup.MODEL,
+                ),
+                FieldDef(
+                    name="output_format",
+                    label="Output format",
+                    default=DEFAULT_OUTPUT_FORMAT,
+                    help_text="Must be a pcm_16000 variant for the audio bridge.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="base_url",
+                    label="API base URL",
+                    type=FieldType.URL,
+                    default=DEFAULT_BASE_URL,
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="chunk_bytes",
+                    label="Read chunk bytes",
+                    type=FieldType.NUMBER,
+                    default=DEFAULT_CHUNK_BYTES,
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="timeout_s",
+                    label="Request timeout (s)",
+                    type=FieldType.NUMBER,
+                    default=DEFAULT_TIMEOUT_S,
+                    group=FieldGroup.ADVANCED,
+                ),
+            ),
+        )
 
     @property
     def default_voice_id(self) -> str | None:

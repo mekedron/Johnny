@@ -2,8 +2,11 @@
  * Typed client for the /providers HTTP endpoints (US-018).
  *
  * All requests target `VITE_API_BASE` (default `http://localhost:8000`).
- * Responses surface server validation errors as Error messages so the UI
- * can render them inline.
+ * The list / create / update / delete endpoints carry the structured
+ * field schemas the adapters declare via `field_schema()` — the
+ * frontend renders one form per provider from those schemas instead of
+ * dumping a free-text key=value textarea on the user. Validation errors
+ * (HTTP 422) surface as field-level messages keyed by field name.
  */
 
 export type ProviderKind = 'stt' | 'llm' | 'tts';
@@ -15,6 +18,52 @@ export const PROVIDER_KIND_LABEL: Record<ProviderKind, string> = {
 	llm: 'LLM (Language Model)',
 	tts: 'TTS (Text-to-Speech)'
 };
+
+export type FieldType =
+	| 'text'
+	| 'password'
+	| 'url'
+	| 'number'
+	| 'select'
+	| 'checkbox'
+	| 'textarea';
+
+export type FieldGroup = 'auth' | 'model' | 'advanced';
+
+export interface FieldOption {
+	value: string;
+	label: string;
+}
+
+export interface FieldDef {
+	name: string;
+	label: string;
+	type: FieldType;
+	required: boolean;
+	secret: boolean;
+	group: FieldGroup;
+	placeholder?: string;
+	help_text?: string;
+	default?: string | number | boolean;
+	options?: FieldOption[];
+	signup_url?: string;
+	env_key?: string;
+}
+
+export interface ProviderSchema {
+	kind: ProviderKind;
+	provider_name: string;
+	display_name: string;
+	summary: string;
+	signup_url: string | null;
+	fields: FieldDef[];
+}
+
+export interface ProviderSchemaList {
+	stt: ProviderSchema[];
+	llm: ProviderSchema[];
+	tts: ProviderSchema[];
+}
 
 export interface Provider {
 	id: number;
@@ -38,20 +87,33 @@ export interface ProviderCreatePayload {
 	kind: ProviderKind;
 	provider_name: string;
 	display_name: string;
-	credentials: Record<string, string>;
-	options: Record<string, unknown>;
+	values: Record<string, unknown>;
 }
 
 export interface ProviderUpdatePayload {
 	display_name?: string;
-	credentials?: Record<string, string>;
-	options?: Record<string, unknown>;
+	values?: Record<string, unknown>;
 }
 
 export interface TestResult {
 	ok: boolean;
 	message: string;
 	detail: string | null;
+}
+
+/**
+ * Structured server-side validation error. Surfaces 422 detail entries
+ * back to the caller with a flat `{field: message}` lookup the form
+ * uses to render inline messages next to the relevant input.
+ */
+export class ValidationFailure extends Error {
+	fields: Record<string, string>;
+
+	constructor(fields: Record<string, string>, summary?: string) {
+		super(summary ?? Object.values(fields).join('; '));
+		this.name = 'ValidationFailure';
+		this.fields = fields;
+	}
 }
 
 const API_BASE: string = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
@@ -74,10 +136,34 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 		}
 	}
 	if (!res.ok) {
+		if (res.status === 422) {
+			const fields = extractFieldErrors(body);
+			if (Object.keys(fields).length > 0) {
+				throw new ValidationFailure(fields);
+			}
+		}
 		const detail = extractDetail(body) ?? `HTTP ${res.status}`;
 		throw new Error(detail);
 	}
 	return body as T;
+}
+
+function extractFieldErrors(body: unknown): Record<string, string> {
+	const out: Record<string, string> = {};
+	if (body && typeof body === 'object' && 'detail' in body) {
+		const detail = (body as { detail: unknown }).detail;
+		if (Array.isArray(detail)) {
+			for (const entry of detail) {
+				if (entry && typeof entry === 'object' && 'loc' in entry && 'msg' in entry) {
+					const e = entry as { loc: unknown; msg: unknown };
+					const loc = Array.isArray(e.loc) ? e.loc : [];
+					const field = loc.length > 0 ? String(loc[loc.length - 1]) : '_';
+					out[field] = String(e.msg);
+				}
+			}
+		}
+	}
+	return out;
 }
 
 function extractDetail(body: unknown): string | null {
@@ -97,6 +183,10 @@ function extractDetail(body: unknown): string | null {
 		return JSON.stringify(detail);
 	}
 	return null;
+}
+
+export function listSchemas(): Promise<ProviderSchemaList> {
+	return request<ProviderSchemaList>('/providers/schemas');
 }
 
 export function listProviders(): Promise<ProviderList> {
@@ -137,22 +227,98 @@ export function testProvider(id: number): Promise<TestResult> {
 }
 
 /**
- * Parse a "key=value" text block into a flat string map. Used to convert the
- * credentials / options textareas into the API's `Record<string, string>` /
- * `Record<string, unknown>` shape. Blank lines and lines without `=` are
- * skipped silently so users can leave comments or empty separators.
+ * Build the form's initial `values` dict from a schema. Number/checkbox
+ * defaults are coerced to the right primitive type so Svelte's bindings
+ * stay consistent — the previous textarea-based form just used strings
+ * everywhere.
  */
-export function parseKeyValueText(text: string): Record<string, string> {
-	const out: Record<string, string> = {};
-	for (const raw of text.split('\n')) {
-		const line = raw.trim();
-		if (!line || line.startsWith('#')) continue;
-		const eq = line.indexOf('=');
-		if (eq === -1) continue;
-		const key = line.slice(0, eq).trim();
-		const value = line.slice(eq + 1).trim();
-		if (key.length === 0) continue;
-		out[key] = value;
+export function initialValues(schema: ProviderSchema): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const field of schema.fields) {
+		if (field.default === undefined || field.default === null) {
+			if (field.type === 'checkbox') {
+				out[field.name] = false;
+			} else {
+				out[field.name] = '';
+			}
+			continue;
+		}
+		out[field.name] = field.default;
 	}
 	return out;
 }
+
+/**
+ * Validate `values` against `schema` on the client. Mirrors the
+ * server-side validator — same required / type rules — so the form can
+ * surface errors before the round-trip. The server still re-runs every
+ * check; the client is just an optimisation.
+ */
+export function validateClient(
+	schema: ProviderSchema,
+	values: Record<string, unknown>
+): Record<string, string> {
+	const errors: Record<string, string> = {};
+	for (const field of schema.fields) {
+		const raw = values[field.name];
+		const empty = raw === null || raw === undefined || (typeof raw === 'string' && raw.trim() === '');
+		if (empty) {
+			if (field.required) {
+				errors[field.name] = `${field.label} is required`;
+			}
+			continue;
+		}
+		if (field.type === 'number') {
+			const n = Number(raw);
+			if (Number.isNaN(n)) {
+				errors[field.name] = `${field.label} must be a number`;
+			}
+			continue;
+		}
+		if (field.type === 'url' && typeof raw === 'string') {
+			if (!/^(https?|wss?):\/\//i.test(raw)) {
+				errors[field.name] = `${field.label} must start with http://, https://, ws:// or wss://`;
+			}
+			continue;
+		}
+		if (field.type === 'select' && field.options) {
+			const allowed = new Set(field.options.map((o) => o.value));
+			if (!allowed.has(String(raw))) {
+				errors[field.name] = `${field.label} must be one of: ${field.options.map((o) => o.value).join(', ')}`;
+			}
+		}
+	}
+	return errors;
+}
+
+/**
+ * Return the schema for `(kind, provider_name)` from a schema list.
+ * Used by the configured-provider card to render the same form used
+ * when creating a new entry.
+ */
+export function findSchema(
+	schemas: ProviderSchemaList,
+	kind: ProviderKind,
+	providerName: string
+): ProviderSchema | null {
+	return schemas[kind].find((s) => s.provider_name === providerName) ?? null;
+}
+
+/**
+ * Group a schema's fields by their declared `group`. Renders the AUTH
+ * fields first, then MODEL, then ADVANCED.
+ */
+export function groupedFields(
+	schema: ProviderSchema
+): { group: FieldGroup; fields: FieldDef[] }[] {
+	const groups: FieldGroup[] = ['auth', 'model', 'advanced'];
+	return groups
+		.map((g) => ({ group: g, fields: schema.fields.filter((f) => f.group === g) }))
+		.filter((entry) => entry.fields.length > 0);
+}
+
+export const GROUP_LABEL: Record<FieldGroup, string> = {
+	auth: 'Authentication',
+	model: 'Model',
+	advanced: 'Advanced'
+};

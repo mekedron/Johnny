@@ -9,6 +9,7 @@ after each iteration and it's included in prompts for context.
 - **`e2e_ui` pytest marker convention.** Opt-in end-to-end tests gate behind `pytest -m e2e_ui` (registered in `backend/pyproject.toml`). A session-scoped autouse fixture in `conftest.py` skips the whole selection with one actionable message when the API is unreachable instead of letting every test emit the same connection error.
 - **Encrypted-credentials test rows.** When seeding `provider_credentials` rows for tests, use the public `POST /providers` endpoint — never write to the DB directly. The endpoint runs the Fernet encryption that production uses, so a test row exercises the same path as a UI-created row.
 - **Readiness-first phase layout for journey tests.** Multi-phase E2E runs (Johnny-pdf, Johnny-f7k) precreate `tests/e2e/artifacts/<timestamp>/phase-N/` directories up-front and produce a single `report.json` whose top-level `summary` maps every phase to PASS / PARTIAL / FAIL / BLOCKED. When a phase is blocked, the JSON also lists the specific blockers (id, title, impact, remedy, related_beads) so the next runner can act without re-deriving the gap. Mirror the same data in `REPORT.md` for humans. The layout keeps every run comparable across iterations even when most phases are blocked, and matches the `report.json` schema produced by Johnny-upg so post-run dashboards can union the two.
+- **Adapter `field_schema()` is the single source of truth for provider configuration.** Each concrete provider adapter under `backend/app/providers/` declares a `field_schema()` classmethod returning `ProviderSchema(kind, provider_name, display_name, summary, signup_url, fields=(FieldDef…))`. The same schema feeds (a) the `GET /providers/schemas` endpoint that drives the SvelteKit `/providers` UI, (b) the wizard prompts via `johnny.wizard.providers.schema_for(choice)`, and (c) the server-side validator (`app.providers.schema_validation.validate_payload` / `split_values`) that turns missing required keys / wrong select options into HTTP 422 with `{loc, msg, type}` envelopes. `FieldDef.secret=True` routes a field into the encrypted credentials blob; the rest go into the plain options JSONB. Adding a new field anywhere in the system means editing exactly one adapter — UI and CLI follow automatically.
 
 ---
 
@@ -69,3 +70,32 @@ End-to-end UI test harness for provider management (Johnny-upg).
 
 ---
 
+
+## 2026-06-06 — Johnny-mma
+
+Refactored provider settings UI from generic Credentials/Options textareas into per-provider structured forms (Johnny-mma).
+
+**What was implemented**
+- `backend/app/providers/schema.py` — `FieldDef`, `FieldGroup`, `FieldOption`, `FieldType`, `ProviderSchema` dataclasses. Each FieldDef declares name, label, type (text/password/url/number/select/checkbox/textarea), secret flag (drives credentials vs options split), required, default, options, help_text, signup_url, env_key, and group (auth/model/advanced).
+- `backend/app/providers/schema_validation.py` — schema-driven `validate_payload()` (required, type, select-option checks) and `split_values()` (routes secrets to credentials, non-secrets to options, coerces numbers/checkboxes).
+- Added `field_schema()` classmethod to `_ProviderBase` and concrete implementations on all 10 adapters (DeepgramSTT, OpenAIRealtimeSTT, FasterWhisperSTT, OpenAILLM, AnthropicLLM, GeminiLLM, OpenAICompatibleLLM, ElevenLabsTTS, OpenAITTS, PiperTTS).
+- New endpoint `GET /providers/schemas` returns all registered provider schemas grouped by kind.
+- POST/PATCH `/providers` now accept either the new flat `values` dict or the legacy `credentials`+`options` buckets. When the adapter declares a schema the payload is validated; missing required / wrong select option / non-numeric for number / non-URL for URL surface as field-level 422 errors with `{loc, msg, type}`.
+- Frontend `lib/providers.ts` — new types (`FieldDef`, `ProviderSchema`, …), `listSchemas()`, client-side `validateClient()`, `initialValues()`, `groupedFields()`, and `ValidationFailure` exception that carries `{field: message}` for inline rendering.
+- Frontend `/providers` page fully rewritten: schemas drive both the Add modal AND the inline Edit form. Each provider has its own structured form (labels + required markers + help text + signup links + grouped by Auth/Model/Advanced). Password fields masked, select fields use dropdowns, URL fields show protocol hints. No textareas remain.
+- Wizard catalog gets a new `schema_for(choice)` helper that walks back to the runtime adapter's schema; new consistency test ensures wizard `credential_keys` stay in sync with the adapter's declared secret fields.
+- Tests: `tests/providers/test_schema.py` (52 assertions over all 10 adapters covering required/type/select/URL/checkbox validation and the credentials/options split); 7 new API tests on `tests/api/test_providers.py` covering the `/schemas` endpoint, structured-payload create, missing-required 422, unknown-select 422, legacy-bucket still validated, update revalidation, and schemaless-provider fallback.
+- Visual verification artifacts at `tests/e2e/artifacts/Johnny-mma-2026-06-06/`: empty providers page, Add modal for Anthropic LLM (cloud), Add modal for Local Piper TTS (local), inline Edit form, populated providers list with both cloud and local rows.
+
+**Files changed**
+- Backend new: `app/providers/schema.py`, `app/providers/schema_validation.py`, `tests/providers/test_schema.py`.
+- Backend modified: `app/providers/base.py`, `app/providers/__init__.py`, all 10 adapter modules, `app/api/providers.py`, `johnny/wizard/providers.py`, `tests/api/test_providers.py`, `tests/wizard/test_providers_catalog.py`.
+- Frontend modified: `src/lib/providers.ts`, `src/routes/providers/+page.svelte`.
+
+**Learnings**
+- The credentials-vs-options split is more usefully encoded as a per-field `secret` boolean than as separate dict shapes. The same flat `values` dict the frontend sends becomes the right shape for the schema-aware validator AND for the credentials/options split — the legacy two-dict API still works via a merge step so test fixtures and the e2e harness keep passing untouched.
+- `{@const}` in Svelte 5 must be the immediate child of `{#if}` / `{#each}` / `{:else}` / `{#snippet}` / `{:then}` / `{:catch}` / a fragment. Nesting it inside a `<form>` that lives inside `{#if}` is rejected. The clean fix is to use `$derived(...)` in the script block instead — that gives you the same lazy computation with no template-placement constraints.
+- HTML `required` attribute kicks in BEFORE Svelte `onsubmit` runs. To exercise client-side schema validation (the `validateClient()` path), use `required={field.required && !editing}` so empty-on-create still triggers browser validation but empty-on-edit (where blanks mean "keep existing secret") doesn't block submission.
+- Anthropic adapter's old default model `claude-3-5-haiku-20241022` 404s on newer accounts; the schema's select option list now leads with `claude-haiku-4-5` to match the Johnny-upg learning. Same pattern for Gemini (`gemini-2.5-flash` first).
+
+---

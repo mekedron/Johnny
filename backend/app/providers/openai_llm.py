@@ -13,6 +13,13 @@ from dataclasses import replace as dc_replace
 
 from app.providers.base import ProviderConfig, ProviderKind, get_registry
 from app.providers.openai_compatible_llm import OpenAICompatibleLLM
+from app.providers.schema import (
+    FieldDef,
+    FieldGroup,
+    FieldOption,
+    FieldType,
+    ProviderSchema,
+)
 
 PROVIDER_NAME = "openai"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
@@ -53,6 +60,75 @@ class OpenAILLM(OpenAICompatibleLLM):
     @property
     def name(self) -> str:
         return PROVIDER_NAME
+
+    @classmethod
+    def field_schema(cls) -> ProviderSchema:
+        return ProviderSchema(
+            kind=ProviderKind.LLM,
+            provider_name=PROVIDER_NAME,
+            display_name="OpenAI",
+            summary="GPT-4o family. Solid all-rounder with native tool calling.",
+            signup_url="https://platform.openai.com/signup",
+            fields=(
+                FieldDef(
+                    name="api_key",
+                    label="API key",
+                    type=FieldType.PASSWORD,
+                    required=True,
+                    secret=True,
+                    placeholder="sk-...",
+                    help_text="Get a key from platform.openai.com.",
+                    signup_url="https://platform.openai.com/signup",
+                    env_key="OPENAI_API_KEY",
+                    group=FieldGroup.AUTH,
+                ),
+                FieldDef(
+                    name="model",
+                    label="Model",
+                    type=FieldType.SELECT,
+                    default=DEFAULT_MODEL,
+                    options=(
+                        FieldOption(value="gpt-4o-mini", label="gpt-4o-mini (fast, cheap)"),
+                        FieldOption(value="gpt-4o", label="gpt-4o"),
+                        FieldOption(value="gpt-4.1-mini", label="gpt-4.1-mini"),
+                        FieldOption(value="gpt-4.1", label="gpt-4.1"),
+                        FieldOption(value="o1-mini", label="o1-mini"),
+                        FieldOption(value="o3-mini", label="o3-mini"),
+                    ),
+                    group=FieldGroup.MODEL,
+                ),
+                FieldDef(
+                    name="base_url",
+                    label="API base URL",
+                    type=FieldType.URL,
+                    default=DEFAULT_BASE_URL,
+                    help_text="Override for Azure OpenAI or a compatible proxy.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="temperature",
+                    label="Temperature",
+                    type=FieldType.NUMBER,
+                    default=0.7,
+                    help_text="Sampling temperature (0.0 - 2.0).",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="max_tokens",
+                    label="Max tokens",
+                    type=FieldType.NUMBER,
+                    help_text="Response length cap. Leave blank for the model default.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="timeout_s",
+                    label="Request timeout (s)",
+                    type=FieldType.NUMBER,
+                    default=60,
+                    group=FieldGroup.ADVANCED,
+                ),
+            ),
+        )
 
 
 def register(*, replace: bool = False) -> None:
