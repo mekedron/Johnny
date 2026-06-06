@@ -184,3 +184,118 @@ async def test_concurrent_push_and_iterate_serializes_correctly() -> None:
     await transport.stop()
     await consumer
     assert received == [bytes([i, i, i, i]) for i in range(10)]
+
+
+# --- Johnny-ckz.13: cancel_playback drains queue + signals browser --------
+
+
+@pytest.mark.asyncio
+async def test_cancel_playback_drains_queued_frames() -> None:
+    """After cancel_playback, drain_playback_frames yields no leftover audio.
+
+    The playground bug was that interrupt only stopped the TTS generator;
+    frames already enqueued in _playback_q kept being streamed to the
+    browser. cancel_playback must drop them synchronously so the user
+    actually hears the cut.
+    """
+    transport = BrowserAudioTransport()
+    await transport.start()
+    # Pre-queue a bunch of frames simulating mid-utterance TTS output.
+    await transport.play_frames([b"a" * 40, b"b" * 40, b"c" * 40])
+    assert transport._playback_q.qsize() == 3
+
+    transport.cancel_playback()
+
+    # Queue is empty immediately — no frame survives the cut.
+    assert transport._playback_q.qsize() == 0
+    # Sequence counter advances so callers can verify the cut fired.
+    assert transport.interrupt_seq == 1
+
+    # An interrupt control message is queued for the WS layer to relay
+    # to the browser.
+    assert transport._control_q.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_playback_emits_interrupt_control_message() -> None:
+    """drain_control_messages yields the interrupt event so the WS sender
+    can forward it to the browser."""
+    transport = BrowserAudioTransport()
+    await transport.start()
+    transport.cancel_playback()
+
+    seen: list[dict[str, object]] = []
+
+    async def consume() -> None:
+        async for msg in transport.drain_control_messages():
+            seen.append(msg)
+            return  # one message is enough for this test
+
+    await asyncio.wait_for(consume(), timeout=0.5)
+
+    assert seen == [{"type": "interrupt", "seq": 1}]
+
+
+@pytest.mark.asyncio
+async def test_cancel_playback_idempotent() -> None:
+    """Two cancel_playback calls in a row produce two interrupt sequences
+    but never raise — the browser tolerates duplicate interrupts."""
+    transport = BrowserAudioTransport()
+    await transport.start()
+    transport.cancel_playback()
+    transport.cancel_playback()
+    transport.cancel_playback()
+    assert transport.interrupt_seq == 3
+    # Three control messages queued — the WS sender will replay them all
+    # to the browser, each a no-op when nothing is scheduled.
+    assert transport._control_q.qsize() == 3
+
+
+@pytest.mark.asyncio
+async def test_cancel_playback_when_queue_empty_still_signals() -> None:
+    """Stop-pressed-when-bot-isn't-speaking case: no frames to drain
+    but the interrupt event still propagates so the pipeline's TTS
+    generator (which might be midway through producing the first frame)
+    bails out."""
+    transport = BrowserAudioTransport()
+    await transport.start()
+    transport.cancel_playback()
+    assert transport.interrupt_seq == 1
+    assert transport._control_q.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_close_playback_terminates_control_drain() -> None:
+    """drain_control_messages exits cleanly when the transport closes —
+    the WS sender's secondary task should not block forever after
+    teardown."""
+    transport = BrowserAudioTransport()
+    await transport.start()
+    transport.cancel_playback()
+    transport.close_playback()
+
+    seen: list[dict[str, object]] = []
+    async for msg in transport.drain_control_messages():
+        seen.append(msg)
+    # The pre-close interrupt is delivered; then the None sentinel ends
+    # the iterator.
+    assert seen == [{"type": "interrupt", "seq": 1}]
+
+
+@pytest.mark.asyncio
+async def test_cancel_playback_preserves_future_playback() -> None:
+    """After cancel_playback, the transport remains usable — new TTS
+    frames queued afterwards still flow. cancel_playback is a *flush*,
+    not a *close*."""
+    transport = BrowserAudioTransport()
+    await transport.start()
+    await transport.play_frames([b"stale"])
+    transport.cancel_playback()
+    await transport.play_frames([b"fresh"])
+    transport.close_playback()
+
+    drained: list[bytes] = []
+    async for frame in transport.drain_playback_frames():
+        drained.append(frame)
+    assert drained == [b"fresh"]
+    assert transport.interrupt_seq == 1

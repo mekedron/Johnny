@@ -1,8 +1,8 @@
 {
   "id": "e226e3c5-adc1-481f-bc49-85d000e1bf13",
-  "status": "running",
+  "status": "interrupted",
   "startedAt": "2026-06-06T14:49:05.906Z",
-  "updatedAt": "2026-06-06T14:49:05.906Z",
+  "updatedAt": "2026-06-06T15:59:58.774Z",
   "agentPlugin": "claude",
   "trackerPlugin": "beads-bv",
   "epicId": "Johnny-ckz",
@@ -21,9 +21,10 @@
       }
     }
   ],
-  "currentIteration": 0,
+  "currentIteration": 1,
   "maxIterations": 0,
   "totalTasks": 0,
-  "tasksCompleted": 0,
-  "cwd": "/Users/nikita/Projects/Johnny"
+  "tasksCompleted": 1,
+  "cwd": "/Users/nikita/Projects/Johnny",
+  "endedAt": "2026-06-06T15:59:58.773Z"
 }

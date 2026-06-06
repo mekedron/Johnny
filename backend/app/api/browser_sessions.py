@@ -761,13 +761,22 @@ async def browser_audio_socket(
     Wire format:
     * ``binary``  — one PCM frame (16 kHz mono S16LE).
     * ``text``    — control messages, JSON-encoded ``{"type": ...}``.
-                    Currently supported: ``{"type": "end"}`` cleanly
-                    closes the stream from the client side.
+                    Supported:
+
+                    - ``{"type": "end"}`` cleanly closes the stream from
+                      the client side.
+                    - ``{"type": "stop"}`` (Johnny-ckz.13) interrupts the
+                      bot mid-utterance: triggers
+                      :meth:`VoicePipeline.interrupt`, drains the playback
+                      queue, and pushes an ``{"type": "interrupt"}`` ack
+                      back to the client so the browser stops its
+                      already-scheduled audio buffers.
 
     Server -> client:
     * ``binary``  — one TTS-rendered PCM frame.
     * ``text``    — JSON status messages (e.g. ``{"type": "ready"}``,
-                    ``{"type": "ended", "reason": "..."}``).
+                    ``{"type": "ended", "reason": "..."}``,
+                    ``{"type": "interrupt", "seq": N}`` — Johnny-ckz.13).
     """
     runner = get_session_runner(bot_session_id)
     if runner is None or runner.transport.is_closed:
@@ -825,8 +834,12 @@ async def browser_audio_socket(
                     continue
                 if "text" in msg and msg["text"] is not None:
                     text = msg["text"]
-                    if text and text.strip().lower().startswith('{"type":"end"'):
-                        disconnect.set()
+                    if not text:
+                        continue
+                    handled = _handle_client_control(
+                        text, runner=runner, disconnect=disconnect
+                    )
+                    if handled == "disconnect":
                         return
         except WebSocketDisconnect:
             disconnect.set()
@@ -844,15 +857,32 @@ async def browser_audio_socket(
         except asyncio.CancelledError:
             raise
 
+    async def control_sender() -> None:
+        # Forwards server-originated JSON control messages (Johnny-ckz.13
+        # interrupts, future status pings) so they arrive in band with
+        # the PCM stream.
+        try:
+            async for control in transport.drain_control_messages():
+                if disconnect.is_set():
+                    return
+                try:
+                    await websocket.send_json(control)
+                except (WebSocketDisconnect, RuntimeError):
+                    disconnect.set()
+                    return
+        except asyncio.CancelledError:
+            raise
+
     recv_task = asyncio.create_task(receiver())
     send_task = asyncio.create_task(sender())
+    control_task = asyncio.create_task(control_sender())
     try:
         await asyncio.wait(
-            (recv_task, send_task),
+            (recv_task, send_task, control_task),
             return_when=asyncio.FIRST_COMPLETED,
         )
     finally:
-        for t in (recv_task, send_task):
+        for t in (recv_task, send_task, control_task):
             if not t.done():
                 t.cancel()
                 try:
@@ -922,21 +952,111 @@ def _schedule_disconnect_watchdog(runner: BrowserSessionRunner) -> None:
         # attached so it doesn't grow without bound while the pipeline
         # keeps producing TTS. We watch ws_connected to bail as soon as
         # a tab reattaches; reattach also explicitly cancels this task.
-        try:
-            async for _frame in runner.transport.drain_playback_frames():
-                if runner.ws_connected:
-                    return
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 — defensive
-            logger.exception(
-                "silent playback drain crashed for session %s",
-                runner.bot_session_id,
-            )
+        # Control messages are also drained concurrently so server-side
+        # interrupts (Johnny-ckz.13) don't queue up for a disconnected
+        # browser.
+        async def _drain_audio() -> None:
+            try:
+                async for _frame in runner.transport.drain_playback_frames():
+                    if runner.ws_connected:
+                        return
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — defensive
+                logger.exception(
+                    "silent playback drain crashed for session %s",
+                    runner.bot_session_id,
+                )
+
+        async def _drain_control() -> None:
+            try:
+                async for _msg in runner.transport.drain_control_messages():
+                    if runner.ws_connected:
+                        return
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — defensive
+                logger.exception(
+                    "silent control drain crashed for session %s",
+                    runner.bot_session_id,
+                )
+
+        await asyncio.gather(
+            _drain_audio(), _drain_control(), return_exceptions=True
+        )
 
     runner.silent_drain_task = asyncio.create_task(
         _silent_drain(), name=f"browser-silent-drain-{runner.bot_session_id}"
     )
+
+
+def _handle_client_control(
+    raw: str,
+    *,
+    runner: BrowserSessionRunner,
+    disconnect: asyncio.Event,
+) -> str | None:
+    """Process one JSON control message from the browser.
+
+    Returns ``"disconnect"`` when the caller should stop the receiver
+    loop (currently only the ``end`` message), or ``None`` to keep
+    looping. Unknown / malformed payloads are silently ignored so a
+    misbehaving client can't crash the audio socket.
+    """
+    import json
+
+    body = raw.strip()
+    if not body:
+        return None
+    try:
+        msg = json.loads(body)
+    except (ValueError, TypeError):
+        # Fall back to the legacy textual match so older clients that
+        # send ``{"type":"end"}`` without surrounding whitespace still
+        # work — defensive only; production clients send strict JSON.
+        if body.lower().startswith('{"type":"end"'):
+            disconnect.set()
+            return "disconnect"
+        return None
+    if not isinstance(msg, dict):
+        return None
+    kind = msg.get("type")
+    if kind == "end":
+        disconnect.set()
+        return "disconnect"
+    if kind == "stop":
+        # Johnny-ckz.13: user clicked the Stop button (or the bot is being
+        # told to yield by an explicit control path). Fire the pipeline
+        # interrupt the same way the fast barge-in path does — this
+        # drains the playback queue + sends an interrupt control message
+        # back to the browser so already-scheduled audio buffers are
+        # cancelled. cancel_playback() is also called directly so a stop
+        # signal still cuts audio even if the pipeline isn't assembled
+        # yet (e.g. the user stops before any TTS started).
+        pipeline = getattr(runner, "pipeline", None)
+        logger.info(
+            "client stop control received for session=%s "
+            "(pipeline_assembled=%s)",
+            runner.bot_session_id,
+            pipeline is not None,
+        )
+        if pipeline is not None:
+            try:
+                pipeline.interrupt()
+            except Exception:  # noqa: BLE001 — defensive
+                logger.exception(
+                    "pipeline.interrupt() raised for session=%s",
+                    runner.bot_session_id,
+                )
+        try:
+            runner.transport.cancel_playback()
+        except Exception:  # noqa: BLE001 — defensive
+            logger.exception(
+                "transport.cancel_playback() raised for session=%s",
+                runner.bot_session_id,
+            )
+        return None
+    return None
 
 
 def _cancel_disconnect_watchdog(runner: BrowserSessionRunner) -> None:

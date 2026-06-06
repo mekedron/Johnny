@@ -67,6 +67,23 @@ class JohnnyTransport(ABC):
     ) -> None:
         """Push PCM frames to the meeting (virtual mic / room speaker)."""
 
+    def cancel_playback(self) -> None:
+        """Discard any audio queued for playback but not yet rendered (Johnny-ckz.13).
+
+        Called by :meth:`VoicePipeline.interrupt` so a barge-in (or an
+        operator Stop button) cuts bot audio across every buffer in
+        flight — server playback queue, network, and any client-side
+        scheduler. Default is a no-op for transports where TTS is rendered
+        synchronously into a hardware mixer (the LocalAudioTransport →
+        PulseAudio path holds ≤ 20 ms of buffered audio, so the
+        ``aclose()`` of the TTS generator inside :meth:`_tts_frame_iter`
+        is already a tight enough cut). The browser-WebRTC transport
+        overrides this because it can have hundreds of milliseconds of
+        audio queued across the playback queue + WS send buffer + browser
+        audio scheduler.
+        """
+        return None
+
     async def __aenter__(self) -> JohnnyTransport:
         await self.start()
         return self

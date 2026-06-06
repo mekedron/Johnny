@@ -2249,6 +2249,72 @@ async def test_pipeline_interrupt_during_tts_truncates_audio(
     assert elapsed < 0.5
 
 
+async def test_pipeline_interrupt_calls_transport_cancel_playback() -> None:
+    """Johnny-ckz.13: interrupt() must signal the transport to flush
+    queued audio. Without this hook, transports with deep buffers (e.g.
+    the BrowserAudioTransport's playback queue) keep streaming TTS to the
+    client even after the pipeline gives up on the response, so the user
+    keeps hearing the bot for hundreds of milliseconds. The base
+    JohnnyTransport.cancel_playback is a no-op; only transports that
+    actually buffer audio override it."""
+
+    class _CancellableTransport(_BufferedTransport):
+        def __init__(self) -> None:
+            super().__init__(frames=[])
+            self.cancel_calls = 0
+
+        def cancel_playback(self) -> None:
+            self.cancel_calls += 1
+
+    transport = _CancellableTransport()
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hi"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": True, "confidence": 0.95, "reason": "ok"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["whatever"]),
+        tts=_FakeTTS(frame_count=2),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(),
+    )
+    pipeline.interrupt()
+    assert transport.cancel_calls == 1
+    # The pipeline interrupt event is the contract that already-running
+    # generators check; cancel_playback is the contract for queue draining.
+    # Both fire together.
+    assert pipeline._interrupt_event.is_set()
+
+
+async def test_pipeline_interrupt_survives_transport_cancel_playback_raise() -> None:
+    """If a transport's cancel_playback raises, the pipeline still sets
+    its interrupt event — the answer loop must still bail out."""
+
+    class _RaisingTransport(_BufferedTransport):
+        def __init__(self) -> None:
+            super().__init__(frames=[])
+
+        def cancel_playback(self) -> None:
+            raise RuntimeError("buggy transport")
+
+    transport = _RaisingTransport()
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hi"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": True, "confidence": 0.95, "reason": "ok"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["whatever"]),
+        tts=_FakeTTS(frame_count=2),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(),
+    )
+    pipeline.interrupt()  # must not raise
+    assert pipeline._interrupt_event.is_set()
+
+
 async def test_pipeline_interrupt_state_clears_between_utterances(
     two_utterance_pcm: bytes,
 ) -> None:

@@ -69,6 +69,20 @@ export interface BrowserAudioSession {
 	getMicMuted: () => boolean;
 	/** True while bot TTS audio is actively scheduled in the output. */
 	isSpeaking: () => boolean;
+	/**
+	 * Interrupt the bot (Johnny-ckz.13).
+	 *
+	 * Stops any audio currently scheduled in the browser's AudioContext
+	 * (cuts within ~one frame, ~20 ms) and sends a `{"type":"stop"}`
+	 * control message to the server so the pipeline yields the floor
+	 * and drains its playback queue. Combined with the server-side
+	 * playback drain + the WebSocket `{"type":"interrupt"}` ack, this
+	 * is the path the on-screen Stop button drives. Safe to call when
+	 * nothing is playing.
+	 */
+	requestInterrupt: () => void;
+	/** How many interrupts have been processed (local or server-driven). */
+	getInterruptCount: () => number;
 }
 
 const PCM_WORKLET_SOURCE = `
@@ -165,6 +179,7 @@ export async function startBrowserAudioSession(
 	let speaking = false;
 	let micLevelInterval: ReturnType<typeof setInterval> | null = null;
 	let micAnalyser: AnalyserNode | null = null;
+	let interruptCount = 0;
 	const activeOutputs = new Set<AudioBufferSourceNode>();
 
 	const setSpeakingState = (next: boolean) => {
@@ -175,6 +190,43 @@ export async function startBrowserAudioSession(
 		} catch {
 			// swallow listener errors
 		}
+	};
+
+	/**
+	 * Cut all bot audio that is currently scheduled in the AudioContext
+	 * (Johnny-ckz.13). Each TTS frame is scheduled `nextPlaybackTime`
+	 * seconds into the future via `AudioBufferSourceNode.start(startAt)`,
+	 * so even after we stop receiving frames over the WebSocket the
+	 * already-scheduled nodes will keep playing for the remaining
+	 * `nextPlaybackTime - currentTime` seconds. Calling `.stop()` on each
+	 * source and clearing the schedule cursor cuts that tail.
+	 *
+	 * Idempotent — calling when nothing is scheduled is a no-op.
+	 */
+	const cancelScheduledPlayback = () => {
+		interruptCount += 1;
+		for (const node of activeOutputs) {
+			try {
+				node.onended = null;
+				node.stop();
+			} catch {
+				// stop() throws if the source already ended naturally;
+				// either way the schedule is now empty.
+			}
+			try {
+				node.disconnect();
+			} catch {
+				// best-effort
+			}
+		}
+		activeOutputs.clear();
+		scheduledOutputs = 0;
+		if (audioCtx) {
+			nextPlaybackTime = audioCtx.currentTime;
+		} else {
+			nextPlaybackTime = 0;
+		}
+		setSpeakingState(false);
 	};
 
 	const cleanup = async () => {
@@ -257,7 +309,9 @@ export async function startBrowserAudioSession(
 			getSpeakerMuted: () => speakerMuted,
 			setMicMuted: () => undefined,
 			getMicMuted: () => micMuted,
-			isSpeaking: () => false
+			isSpeaking: () => false,
+			requestInterrupt: () => undefined,
+			getInterruptCount: () => 0
 		};
 	}
 
@@ -392,6 +446,14 @@ export async function startBrowserAudioSession(
 				} else if (msg.type === 'ended') {
 					options.onEnded?.(msg.reason ?? 'remote');
 					void cleanup();
+				} else if (msg.type === 'interrupt') {
+					// Johnny-ckz.13: server interrupted the bot
+					// (barge-in or operator stop). Drop any audio still
+					// scheduled in our AudioContext so the user hears the
+					// cut immediately — without this the user keeps
+					// hearing whatever was already scheduled, sometimes
+					// for hundreds of milliseconds.
+					cancelScheduledPlayback();
 				}
 			} catch {
 				// ignore malformed control messages
@@ -443,6 +505,25 @@ export async function startBrowserAudioSession(
 		}
 	};
 
+	const requestInterrupt = () => {
+		// Local cut first — this is the path with the lowest latency
+		// (no round-trip to the server). The user hears the cut within
+		// one frame (~20 ms) instead of waiting for the WS round-trip
+		// plus the server's playback drain.
+		cancelScheduledPlayback();
+		// Then ask the server to stop synthesising and drain its queue
+		// so we don't keep receiving frames for the now-cancelled
+		// utterance. Sent best-effort — if the WS is gone the local cut
+		// is still enough to silence the bot.
+		if (socket && socket.readyState === WebSocket.OPEN) {
+			try {
+				socket.send(JSON.stringify({ type: 'stop' }));
+			} catch {
+				// best-effort
+			}
+		}
+	};
+
 	return {
 		stop: cleanup,
 		isLive: () => live,
@@ -453,6 +534,8 @@ export async function startBrowserAudioSession(
 		getSpeakerMuted: () => speakerMuted,
 		setMicMuted,
 		getMicMuted: () => micMuted,
-		isSpeaking: () => speaking
+		isSpeaking: () => speaking,
+		requestInterrupt,
+		getInterruptCount: () => interruptCount
 	};
 }

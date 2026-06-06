@@ -499,6 +499,20 @@
 		audioSession?.setMicMuted(micMuted);
 	}
 
+	function interruptBot() {
+		// Johnny-ckz.13: explicit Stop button so the user always has a
+		// UI escape hatch — voice barge-in is the primary path, but this
+		// button is the guaranteed cut. requestInterrupt() drops any
+		// scheduled audio locally (cuts within one frame) and tells the
+		// server to drain its TTS queue, so the bot truly yields the
+		// floor.
+		audioSession?.requestInterrupt();
+		// Reset the "speaking" state immediately so the UI indicator
+		// flips to idle without waiting for the next onSpeakingChange
+		// — the cut already happened in the AudioContext.
+		isSpeaking = false;
+	}
+
 	onDestroy(() => {
 		// Stop audio (and its WS) on navigation away — but do NOT call
 		// stopBrowserSession. Per Johnny-ckz.11, closing the tab leaves
@@ -749,6 +763,16 @@
 					</div>
 
 					<div class="actions">
+						<button
+							type="button"
+							class="interrupt"
+							onclick={interruptBot}
+							data-testid="playground-interrupt-button"
+							aria-label="Stop the bot from speaking"
+							title="Stop the bot immediately (voice barge-in also works while it's speaking)"
+						>
+							Stop bot
+						</button>
 						<a
 							class="secondary"
 							href={`/sessions/${liveSession.id}`}
@@ -917,6 +941,17 @@
 	button.danger {
 		background: #dc2626;
 		color: #fff;
+	}
+
+	button.interrupt {
+		background: #f59e0b;
+		color: #1f2937;
+		border-color: #d97706;
+		font-weight: 600;
+	}
+
+	button.interrupt:hover {
+		background: #fbbf24;
 	}
 
 	button.toggle {

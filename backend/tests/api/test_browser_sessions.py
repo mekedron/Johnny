@@ -524,6 +524,208 @@ def test_session_detail_endpoint_surfaces_audio_ws_path_for_browser_row(
     assert s["audio_ws_path"] == f"/ws/sessions/{browser.id}/audio"
 
 
+# --- Johnny-ckz.13: stop control message wires up interrupt + cancel ------
+
+
+def test_stop_control_message_fires_pipeline_interrupt() -> None:
+    """A `{"type":"stop"}` text frame from the browser must:
+
+    * call ``pipeline.interrupt()`` on the assembled runner,
+    * call ``transport.cancel_playback()`` so the playback queue drains
+      and an interrupt control message is queued for the browser,
+    * NOT signal disconnect (we keep the WebSocket open for the next
+      utterance — interrupt aborts ONE answer, not the whole session).
+    """
+    import asyncio
+
+    async def _run() -> None:
+        transport = browser_sessions_module.BrowserAudioTransport(
+            sample_rate=16_000
+        )
+        await transport.start()
+        # Simulate a TTS burst already queued for playback.
+        await transport.play_frames([b"\x00" * 40, b"\x01" * 40])
+        assert transport._playback_q.qsize() == 2
+
+        class _StubPipeline:
+            def __init__(self) -> None:
+                self.interrupt_calls = 0
+
+            def interrupt(self) -> None:
+                self.interrupt_calls += 1
+
+        runner = browser_sessions_module.BrowserSessionRunner(
+            bot_session_id=99,
+            transport=transport,
+            stop_event=asyncio.Event(),
+            task=asyncio.create_task(asyncio.sleep(60)),
+        )
+        runner.pipeline = _StubPipeline()
+        disconnect = asyncio.Event()
+
+        try:
+            result = browser_sessions_module._handle_client_control(
+                '{"type":"stop"}', runner=runner, disconnect=disconnect
+            )
+            assert result is None  # stop does NOT disconnect
+            assert not disconnect.is_set()
+            assert runner.pipeline.interrupt_calls == 1
+            # Queue drained — the user actually hears the cut.
+            assert transport._playback_q.qsize() == 0
+            # And the browser is notified via a control message.
+            assert transport.interrupt_seq == 1
+            assert transport._control_q.qsize() == 1
+        finally:
+            runner.task.cancel()
+            try:
+                await runner.task
+            except (asyncio.CancelledError, Exception):
+                pass
+            await transport.stop()
+            transport.close_playback()
+
+    asyncio.run(_run())
+
+
+def test_stop_control_message_when_pipeline_not_yet_assembled() -> None:
+    """If the user clicks Stop before the pipeline finishes assembling,
+    we still want the playback queue drained (defensive) — runner.pipeline
+    is None in that window but the transport-side cut still works."""
+    import asyncio
+
+    async def _run() -> None:
+        transport = browser_sessions_module.BrowserAudioTransport(
+            sample_rate=16_000
+        )
+        await transport.start()
+        runner = browser_sessions_module.BrowserSessionRunner(
+            bot_session_id=100,
+            transport=transport,
+            stop_event=asyncio.Event(),
+            task=asyncio.create_task(asyncio.sleep(60)),
+        )
+        # pipeline is None — runner was just spawned
+        assert runner.pipeline is None
+        disconnect = asyncio.Event()
+        try:
+            result = browser_sessions_module._handle_client_control(
+                '{"type":"stop"}', runner=runner, disconnect=disconnect
+            )
+            assert result is None
+            assert not disconnect.is_set()
+            assert transport.interrupt_seq == 1
+        finally:
+            runner.task.cancel()
+            try:
+                await runner.task
+            except (asyncio.CancelledError, Exception):
+                pass
+            await transport.stop()
+            transport.close_playback()
+
+    asyncio.run(_run())
+
+
+def test_end_control_message_still_disconnects() -> None:
+    """The legacy `{"type":"end"}` shape must still cleanly close the
+    socket — Johnny-ckz.13 only adds a new control type, it does not
+    change the existing one."""
+    import asyncio
+
+    async def _run() -> None:
+        transport = browser_sessions_module.BrowserAudioTransport(
+            sample_rate=16_000
+        )
+        await transport.start()
+        runner = browser_sessions_module.BrowserSessionRunner(
+            bot_session_id=101,
+            transport=transport,
+            stop_event=asyncio.Event(),
+            task=asyncio.create_task(asyncio.sleep(60)),
+        )
+        disconnect = asyncio.Event()
+        try:
+            result = browser_sessions_module._handle_client_control(
+                '{"type":"end"}', runner=runner, disconnect=disconnect
+            )
+            assert result == "disconnect"
+            assert disconnect.is_set()
+        finally:
+            runner.task.cancel()
+            try:
+                await runner.task
+            except (asyncio.CancelledError, Exception):
+                pass
+            await transport.stop()
+            transport.close_playback()
+
+    asyncio.run(_run())
+
+
+def test_unknown_control_message_is_ignored() -> None:
+    """Garbage / unknown JSON must NOT crash the WS — defensive shape so
+    a misbehaving client can't take down the audio socket."""
+    import asyncio
+
+    async def _run() -> None:
+        transport = browser_sessions_module.BrowserAudioTransport(
+            sample_rate=16_000
+        )
+        await transport.start()
+        runner = browser_sessions_module.BrowserSessionRunner(
+            bot_session_id=102,
+            transport=transport,
+            stop_event=asyncio.Event(),
+            task=asyncio.create_task(asyncio.sleep(60)),
+        )
+        disconnect = asyncio.Event()
+        try:
+            # Unknown type
+            assert (
+                browser_sessions_module._handle_client_control(
+                    '{"type":"hovercraft"}',
+                    runner=runner,
+                    disconnect=disconnect,
+                )
+                is None
+            )
+            # Malformed JSON
+            assert (
+                browser_sessions_module._handle_client_control(
+                    "not even close to json",
+                    runner=runner,
+                    disconnect=disconnect,
+                )
+                is None
+            )
+            # Empty
+            assert (
+                browser_sessions_module._handle_client_control(
+                    "", runner=runner, disconnect=disconnect
+                )
+                is None
+            )
+            # Non-object JSON
+            assert (
+                browser_sessions_module._handle_client_control(
+                    "[1, 2, 3]", runner=runner, disconnect=disconnect
+                )
+                is None
+            )
+            assert not disconnect.is_set()
+            assert transport.interrupt_seq == 0
+        finally:
+            runner.task.cancel()
+            try:
+                await runner.task
+            except (asyncio.CancelledError, Exception):
+                pass
+            await transport.stop()
+            transport.close_playback()
+
+    asyncio.run(_run())
+
+
 def test_disconnect_watchdog_schedules_and_cancels_cleanly() -> None:
     """The disconnect grace watchdog must:
 

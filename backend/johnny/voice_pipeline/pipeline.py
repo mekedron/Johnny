@@ -748,10 +748,26 @@ class VoicePipeline:
         generators. Well under the 500 ms budget mandated by US-024's
         acceptance criteria.
 
+        Also signals the transport to drop any audio queued for playback
+        but not yet rendered — for transports where that's a no-op (e.g.
+        the meet-worker's PulseAudio bridge) this is harmless. For
+        transports with deeper buffering — browser-WebRTC has audio in
+        the server playback queue + WS send buffer + browser scheduler —
+        the override drains the queue and signals the client to stop
+        already-scheduled buffers so the user actually hears the cut
+        (Johnny-ckz.13).
+
         After interrupt fires, the pipeline keeps processing the next
         utterance — interrupt aborts *one* answer, not the whole session.
         """
         self._interrupt_event.set()
+        try:
+            self.transport.cancel_playback()
+        except Exception:  # noqa: BLE001 — best-effort, never block the event
+            logger.exception(
+                "transport.cancel_playback raised — pipeline interrupt "
+                "still set but playback queue may not be drained"
+            )
 
     # ------------------------------------------------------------------
     # Utterance collection (VAD-driven segmentation)

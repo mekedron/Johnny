@@ -81,9 +81,16 @@ class BrowserAudioTransport(JohnnyTransport):
             maxsize=self._capture_queue_max
         )
         self._playback_q: asyncio.Queue[bytes] = asyncio.Queue()
+        # Control messages drained by the WebSocket sender alongside
+        # playback frames. ``None`` is the EOF sentinel so the sender
+        # can exit cleanly on close (Johnny-ckz.13).
+        self._control_q: asyncio.Queue[dict[str, object] | None] = (
+            asyncio.Queue()
+        )
         self._started = False
         self._closed = False
         self._capture_drop_count = 0
+        self._interrupt_seq = 0
 
     # ------------------------------------------------------------------
     # JohnnyTransport interface
@@ -231,6 +238,70 @@ class BrowserAudioTransport(JohnnyTransport):
             self._playback_q.put_nowait(b"")
         except asyncio.QueueFull:  # pragma: no cover — unbounded queue
             pass
+        # Also close the control-message channel so the WebSocket
+        # sender's secondary drain task exits cleanly.
+        try:
+            self._control_q.put_nowait(None)
+        except asyncio.QueueFull:  # pragma: no cover — unbounded queue
+            pass
+
+    def cancel_playback(self) -> None:
+        """Synchronously drop queued playback frames + signal browser interrupt.
+
+        Called by :meth:`VoicePipeline.interrupt` on barge-in and by the
+        WebSocket endpoint when the browser sends a stop control message
+        (Johnny-ckz.13). Both effects combined produce the < 500 ms p95
+        cut budget:
+
+        * Server playback queue is drained — frames that haven't been
+          handed to the WS yet never reach the browser.
+        * An ``{"type": "interrupt"}`` control message is enqueued so the
+          WebSocket sender can forward it; the browser side stops its
+          already-scheduled :class:`AudioBufferSourceNode` instances on
+          receipt (the queue that holds the most audio in flight).
+
+        Idempotent: calling twice in a row just bumps the sequence number;
+        the browser sees two interrupt control messages, which is fine —
+        each is a no-op if there's nothing playing.
+        """
+        drained = 0
+        while True:
+            try:
+                self._playback_q.get_nowait()
+                drained += 1
+            except asyncio.QueueEmpty:
+                break
+        self._interrupt_seq += 1
+        try:
+            self._control_q.put_nowait(
+                {"type": "interrupt", "seq": self._interrupt_seq}
+            )
+        except asyncio.QueueFull:  # pragma: no cover — unbounded queue
+            pass
+        if drained:
+            logger.debug(
+                "browser transport: cancel_playback drained %d queued frames "
+                "(interrupt_seq=%d)",
+                drained,
+                self._interrupt_seq,
+            )
+
+    async def drain_control_messages(
+        self,
+    ) -> AsyncIterator[dict[str, object]]:
+        """Yield JSON-serialisable control messages until the transport closes.
+
+        The WebSocket endpoint runs this alongside
+        :meth:`drain_playback_frames` so server-originated control frames
+        (interrupt, future status updates) can be forwarded to the
+        browser without contaminating the PCM stream. Iterator exits when
+        :meth:`close_playback` enqueues the ``None`` sentinel.
+        """
+        while True:
+            msg = await self._control_q.get()
+            if msg is None:
+                return
+            yield msg
 
     @property
     def is_closed(self) -> bool:
@@ -239,6 +310,15 @@ class BrowserAudioTransport(JohnnyTransport):
     @property
     def capture_drop_count(self) -> int:
         return self._capture_drop_count
+
+    @property
+    def interrupt_seq(self) -> int:
+        """How many times :meth:`cancel_playback` has been called.
+
+        Exposed for tests + future per-session metrics so we can prove
+        the playground interrupt path is actually being exercised.
+        """
+        return self._interrupt_seq
 
 
 __all__ = [
