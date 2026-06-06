@@ -1,8 +1,8 @@
 {
-  "id": "6e77043f-11f4-42dc-99f5-bb7c12f762e8",
+  "id": "753ca925-ded9-4c59-874c-a2ab93c33808",
   "status": "running",
-  "startedAt": "2026-06-06T18:08:04.850Z",
-  "updatedAt": "2026-06-06T18:08:04.850Z",
+  "startedAt": "2026-06-06T18:32:52.617Z",
+  "updatedAt": "2026-06-06T18:32:52.617Z",
   "agentPlugin": "claude",
   "trackerPlugin": "beads-bv",
   "epicId": "Johnny-stt",
