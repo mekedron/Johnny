@@ -21,7 +21,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -35,6 +36,7 @@ from app.db.models import (
     TranscriptChunk,
 )
 from app.db.session import session_scope
+from app.services.approval import publish_approval_pending_event
 from app.services.bot_sessions import (
     BotSessionNotFoundError,
     mark_session_ended,
@@ -54,6 +56,31 @@ AGENT_SPOKE_EVENT_TYPE = "agent_spoke"
 
 # Sleep this long between reconnect attempts when Redis is unreachable.
 RECONNECT_BACKOFF_S = 2.0
+
+# Fallback timeout published on the WS approval_pending event when the
+# router_decision_made payload does not carry one. Matches
+# :data:`johnny.voice_pipeline.pipeline.DEFAULT_APPROVAL_TIMEOUT_SECONDS`
+# — kept in sync manually since the meet-worker module is not imported
+# here (no SQLAlchemy in the meet-worker side).
+DEFAULT_APPROVAL_TIMEOUT_S = 15.0
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingApprovalEvent:
+    """Info needed to publish an ``approval_pending`` WS event.
+
+    Returned by :func:`apply_router_decision_event` when it persists a
+    PENDING row; the caller (the async subscriber loop) uses it to push
+    the event onto the session channel so the UI receives a real-time
+    update without polling (Johnny-hn6).
+    """
+
+    session_id: int
+    decision_id: int
+    suggested_reply: str
+    reason: str
+    reply_type: str | None
+    timeout_s: float
 
 
 # --- Pure handler ---------------------------------------------------------
@@ -144,7 +171,9 @@ def apply_transcript_event(db: Session, payload: dict[str, Any]) -> bool:
     return True
 
 
-def apply_router_decision_event(db: Session, payload: dict[str, Any]) -> bool:
+def apply_router_decision_event(
+    db: Session, payload: dict[str, Any]
+) -> tuple[bool, _PendingApprovalEvent | None]:
     """Insert one agent_decisions row from a ``router_decision_made`` event.
 
     Choose the row's ``outcome`` based on the pipeline mode so the UI
@@ -159,12 +188,17 @@ def apply_router_decision_event(db: Session, payload: dict[str, Any]) -> bool:
     * suggest_only + should_speak: ``suggested`` — UI surfaces the
       suggested reply but no audio is produced.
     * any mode + not should_speak: ``suppressed``.
+
+    Returns ``(applied, pending_event_or_None)``. ``pending_event`` is
+    set when the inserted row's outcome is PENDING — the caller uses
+    it to publish a follow-up ``approval_pending`` event on the WS
+    session channel so the UI receives a real-time update (Johnny-hn6).
     """
     if payload.get("type") != ROUTER_DECISION_EVENT_TYPE:
-        return False
+        return False, None
     session_id = _coerce_int_id(payload.get("session_id"))
     if session_id is None:
-        return False
+        return False, None
     should_speak = bool(payload.get("should_speak", False))
     confidence = float(payload.get("confidence") or 0.0)
     reason = str(payload.get("reason") or "")
@@ -204,7 +238,30 @@ def apply_router_decision_event(db: Session, payload: dict[str, Any]) -> bool:
     )
     db.add(row)
     db.flush()
-    return True
+    if outcome != DecisionOutcome.PENDING or row.id is None:
+        return True, None
+    timeout_raw = (
+        input_window.get("approval_timeout_seconds")
+        if isinstance(input_window, dict)
+        else None
+    )
+    try:
+        timeout_s = (
+            float(timeout_raw)
+            if timeout_raw is not None
+            else DEFAULT_APPROVAL_TIMEOUT_S
+        )
+    except (TypeError, ValueError):
+        timeout_s = DEFAULT_APPROVAL_TIMEOUT_S
+    pending_event = _PendingApprovalEvent(
+        session_id=session_id,
+        decision_id=int(row.id),
+        suggested_reply=str(suggested_reply) if isinstance(suggested_reply, str) else "",
+        reason=reason,
+        reply_type=str(reply_type) if isinstance(reply_type, str) else None,
+        timeout_s=max(0.1, timeout_s),
+    )
+    return True, pending_event
 
 
 def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
@@ -254,26 +311,50 @@ def _coerce_int_id(value: Any) -> int | None:
         return None
 
 
-def _apply_in_transaction(payload: dict[str, Any]) -> bool:
+PendingEventPublisher = Callable[[_PendingApprovalEvent], Awaitable[None]]
+"""Callback invoked after a PENDING decision row is committed.
+
+The subscriber uses it to publish the WS ``approval_pending`` event so
+open browser tabs learn about the new approval card in real time. The
+callback is awaited *after* the row is committed so a publish failure
+cannot poison the persistence transaction.
+"""
+
+
+async def _apply_in_transaction(
+    payload: dict[str, Any],
+    *,
+    pending_publisher: PendingEventPublisher | None = None,
+) -> bool:
     """Open a fresh session, apply the event, commit on success.
 
     Dispatches on ``payload["type"]`` so one subscriber persists every
     pipeline event flavour: status changes, transcripts, decisions,
     utterances. Other types pass through unchanged (the WebSocket fan-out
     still receives them; we just don't write a DB row).
+
+    When ``apply_router_decision_event`` inserts a PENDING row, the
+    accompanying :class:`_PendingApprovalEvent` is handed to
+    ``pending_publisher`` (when supplied) *after* the surrounding
+    transaction commits — the publish lives outside the DB transaction
+    so a Redis hiccup never rolls back a successful insert.
     """
     event_type = payload.get("type")
+    pending_event: _PendingApprovalEvent | None = None
+    applied = False
     try:
         with session_scope() as db:
             try:
                 if event_type == SESSION_STATUS_EVENT_TYPE:
-                    return apply_status_event(db, payload)
-                if event_type == TRANSCRIPT_EVENT_TYPE:
-                    return apply_transcript_event(db, payload)
-                if event_type == ROUTER_DECISION_EVENT_TYPE:
-                    return apply_router_decision_event(db, payload)
-                if event_type == AGENT_SPOKE_EVENT_TYPE:
-                    return apply_agent_spoke_event(db, payload)
+                    applied = apply_status_event(db, payload)
+                elif event_type == TRANSCRIPT_EVENT_TYPE:
+                    applied = apply_transcript_event(db, payload)
+                elif event_type == ROUTER_DECISION_EVENT_TYPE:
+                    applied, pending_event = apply_router_decision_event(
+                        db, payload
+                    )
+                elif event_type == AGENT_SPOKE_EVENT_TYPE:
+                    applied = apply_agent_spoke_event(db, payload)
             except BotSessionNotFoundError as exc:
                 logger.warning("status-sub: %s", exc)
                 return False
@@ -284,7 +365,17 @@ def _apply_in_transaction(payload: dict[str, Any]) -> bool:
             payload,
         )
         return False
-    return False
+    if applied and pending_event is not None and pending_publisher is not None:
+        try:
+            await pending_publisher(pending_event)
+        except Exception:
+            logger.exception(
+                "status-sub: failed to publish approval_pending event "
+                "for decision_id=%d session_id=%d",
+                pending_event.decision_id,
+                pending_event.session_id,
+            )
+    return applied
 
 
 # --- Redis pub/sub plumbing ----------------------------------------------
@@ -371,10 +462,52 @@ async def _redis_message_stream(redis_url: str) -> MessageStream:
                 logger.exception("status-sub: error closing redis client")
 
 
+async def _default_pending_publisher_factory(
+    redis_url: str,
+) -> PendingEventPublisher | None:
+    """Build the production publisher that pushes WS approval events.
+
+    The voice pipeline's own ``ApprovalPending`` publish path is gated
+    on a decision sink that returns an id, which the meet-worker's
+    SQLAlchemy-free NoopDecisionSink never does. The subscriber owns
+    the row creation and therefore owns the live-event publish too
+    (Johnny-hn6).
+    """
+    try:
+        from redis.asyncio import Redis as RedisClient
+    except ImportError:  # pragma: no cover — redis ships with the image
+        logger.warning(
+            "status-sub: redis package missing, approval_pending events "
+            "will NOT be published"
+        )
+        return None
+
+    client = RedisClient.from_url(redis_url, decode_responses=False)
+
+    async def _publish(event: _PendingApprovalEvent) -> None:
+        await publish_approval_pending_event(
+            client,
+            session_id=str(event.session_id),
+            decision_id=event.decision_id,
+            suggested_reply=event.suggested_reply,
+            reason=event.reason,
+            reply_type=event.reply_type,
+            timeout_s=event.timeout_s,
+        )
+
+    return _publish
+
+
+PendingPublisherFactory = Callable[
+    [str], Awaitable[PendingEventPublisher | None]
+]
+
+
 async def run_subscriber(
     redis_url: str,
     *,
     message_stream_factory: StreamFactory | None = None,
+    pending_publisher_factory: PendingPublisherFactory | None = None,
 ) -> None:
     """Subscribe and persist forever (until cancelled).
 
@@ -382,14 +515,29 @@ async def run_subscriber(
     Redis URL and yielding decoded payload dicts. The production
     default :func:`_redis_message_stream` connects to Redis directly;
     tests inject a fake factory that yields canned payloads.
+
+    ``pending_publisher_factory`` builds a callback the subscriber
+    invokes after persisting a PENDING decision row — used to fan a
+    live ``approval_pending`` event onto the session WS channel
+    (Johnny-hn6). The default factory wraps a fresh Redis publisher;
+    tests inject one that captures the events.
     """
     factory = message_stream_factory or _redis_message_stream
+    publisher_factory = (
+        pending_publisher_factory or _default_pending_publisher_factory
+    )
+    pending_publisher = await publisher_factory(redis_url)
     async for payload in factory(redis_url):
-        _apply_in_transaction(payload)
+        await _apply_in_transaction(
+            payload, pending_publisher=pending_publisher
+        )
 
 
 __all__ = [
     "AGENT_SPOKE_EVENT_TYPE",
+    "DEFAULT_APPROVAL_TIMEOUT_S",
+    "PendingEventPublisher",
+    "PendingPublisherFactory",
     "RECONNECT_BACKOFF_S",
     "ROUTER_DECISION_EVENT_TYPE",
     "SESSION_CHANNEL_PATTERN",

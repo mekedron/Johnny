@@ -10,15 +10,23 @@ import pytest
 
 from app.services.approval import (
     APPROVAL_CHANNEL_PREFIX,
+    SESSION_CHANNEL_PREFIX,
     RedisApprovalGate,
     approval_channel,
     publish_approval,
+    publish_approval_pending_event,
+    publish_approval_resolved_event,
+    session_channel,
 )
 from johnny.voice_pipeline.approval import ApprovalRequest
 
 
 def test_approval_channel_includes_session_id() -> None:
     assert approval_channel("sess-42") == f"{APPROVAL_CHANNEL_PREFIX}sess-42"
+
+
+def test_session_channel_includes_session_id() -> None:
+    assert session_channel("sess-42") == f"{SESSION_CHANNEL_PREFIX}sess-42"
 
 
 # --- _FakeRedisClient / _FakePubSub ---------------------------------------
@@ -279,3 +287,55 @@ async def test_publish_approval_rejects_unsupported_action() -> None:
     fake = _FakeRedis()
     with pytest.raises(ValueError):
         await publish_approval(fake, "x", 1, "timeout")  # type: ignore[arg-type]
+
+
+# --- WS fan-out event helpers (Johnny-hn6) --------------------------------
+
+
+async def test_publish_approval_pending_event_lands_on_session_channel() -> None:
+    fake = _FakeRedis()
+    fake.publish_result = 2
+    subs = await publish_approval_pending_event(
+        fake,  # type: ignore[arg-type]
+        session_id="7",
+        decision_id=42,
+        suggested_reply="how are you?",
+        reason="user-asked",
+        reply_type="answer",
+        timeout_s=12.5,
+    )
+    assert subs == 2
+    assert len(fake.published) == 1
+    channel, payload = fake.published[0]
+    assert channel == session_channel("7")
+    body = json.loads(payload)
+    assert body["type"] == "approval_pending"
+    assert body["decision_id"] == 42
+    assert body["suggested_reply"] == "how are you?"
+    assert body["reason"] == "user-asked"
+    assert body["reply_type"] == "answer"
+    assert body["timeout_s"] == 12.5
+    assert body["session_id"] == "7"
+    assert isinstance(body["timestamp_ms"], int)
+
+
+async def test_publish_approval_resolved_event_lands_on_session_channel() -> None:
+    fake = _FakeRedis()
+    subs = await publish_approval_resolved_event(
+        fake,  # type: ignore[arg-type]
+        session_id="9",
+        decision_id=11,
+        resolution="approved",
+    )
+    assert subs == 1
+    channel, payload = fake.published[0]
+    assert channel == session_channel("9")
+    body = json.loads(payload)
+    assert body == {
+        "type": "approval_resolved",
+        "decision_id": 11,
+        "resolution": "approved",
+        "timestamp_ms": body["timestamp_ms"],
+        "session_id": "9",
+    }
+    assert isinstance(body["timestamp_ms"], int)

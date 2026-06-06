@@ -13,10 +13,16 @@ The endpoint:
 2. Publishes ``{"decision_id": <id>, "action": "approve" | "reject"}``
    to the Redis channel ``johnny.approval.{session_id}``. The
    meet-worker's :class:`RedisApprovalGate` is subscribed; it returns
-   the corresponding outcome, and the pipeline flips the decision row's
-   outcome itself (so the API does NOT need to update ``agent_decisions``
-   here — it would race with the pipeline's own write).
-3. Returns the decision id + a status flag indicating whether the
+   the corresponding outcome.
+3. Publishes an ``approval_resolved`` event to the session WS channel
+   so every open browser tab learns about the resolution in real time
+   without polling (Johnny-hn6).
+4. On reject, flips the row's ``outcome`` to ``REJECTED`` itself —
+   the meet-worker pipeline can't durably update the row (it has no
+   SQLAlchemy access), so leaving the row PENDING after a click would
+   make new page-loads show stale state. Approve is left as PENDING
+   because the row should ideally end up SPOKEN after TTS runs.
+5. Returns the decision id + a status flag indicating whether the
    meet-worker actually had a listener for the message (a count of
    ``0`` subscribers signals "approval round already closed").
 
@@ -37,7 +43,10 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_session
 from app.config import get_settings
 from app.db.models import AgentDecision, BotSession, DecisionOutcome
-from app.services.approval import publish_approval
+from app.services.approval import (
+    publish_approval,
+    publish_approval_resolved_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,12 +136,35 @@ async def _dispatch(
     decision_id: int,
     action: str,
 ) -> int:
+    """Publish both the control message and the WS fan-out event.
+
+    The control message on ``johnny.approval.{session_id}`` is what
+    unblocks the meet-worker's :class:`RedisApprovalGate`; the
+    ``approval_resolved`` event on ``johnny.session.{session_id}``
+    is what makes every open browser tab clear its pending card in
+    real time (Johnny-hn6). Returns the subscriber count of the
+    control publish so the API response can surface "no listener".
+    """
     client = await redis_factory()
     try:
         outcome = "approved" if action == "approve" else "rejected"
         subscribers = await publish_approval(
             client, str(bot_session_id), decision_id, outcome  # type: ignore[arg-type]
         )
+        try:
+            await publish_approval_resolved_event(
+                client,
+                session_id=str(bot_session_id),
+                decision_id=decision_id,
+                resolution=outcome,  # type: ignore[arg-type]
+            )
+        except Exception:
+            logger.exception(
+                "approval dispatch: failed to publish approval_resolved "
+                "for decision_id=%d session_id=%d",
+                decision_id,
+                bot_session_id,
+            )
     finally:
         try:
             await client.aclose()
@@ -183,8 +215,16 @@ async def reject_decision(
     session: SessionDep,
     redis_factory: RedisFactoryDep,
 ) -> DecisionActionResponse:
-    """Reject a pending decision — the meet-worker stays silent."""
-    _load_pending(session, bot_session_id, decision_id)
+    """Reject a pending decision — the meet-worker stays silent.
+
+    Flips the row's outcome to ``REJECTED`` synchronously so a refresh
+    after the click does not bring the card back: the meet-worker has
+    no SQLAlchemy access and therefore cannot durably write this
+    transition itself (Johnny-hn6 / NoopDecisionSink trap).
+    """
+    row = _load_pending(session, bot_session_id, decision_id)
+    row.outcome = DecisionOutcome.REJECTED
+    session.commit()
     subscribers = await _dispatch(
         redis_factory, bot_session_id, decision_id, "reject"
     )

@@ -3,10 +3,10 @@
   "sessionId": "10afcece-cc40-43a0-8f7d-e7372e7ab552",
   "status": "running",
   "startedAt": "2026-06-06T05:38:50.502Z",
-  "updatedAt": "2026-06-06T05:49:16.278Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-06T06:09:00.531Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -38,8 +38,8 @@
       {
         "id": "Johnny-cdw",
         "title": "Approving a pending suggestion doesn't make the bot actually speak it",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-hn6",
@@ -121,7 +121,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-cdw",
+      "taskTitle": "Approving a pending suggestion doesn't make the bot actually speak it",
+      "taskCompleted": true,
+      "durationMs": 616009,
+      "startedAt": "2026-06-06T05:38:59.430Z",
+      "endedAt": "2026-06-06T05:49:15.439Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

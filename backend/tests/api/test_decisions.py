@@ -190,8 +190,9 @@ def test_approve_pending_decision_publishes_to_redis(
     assert body["bot_session_id"] == bot_session.id
     assert body["action"] == "approve"
     assert body["subscribers"] == 1
-    # Redis publish was issued on the right channel with the right payload.
-    assert len(fake_redis.published) == 1
+    # Two publishes: the meet-worker control message AND the WS fan-out
+    # event so every open browser tab clears the pending card live.
+    assert len(fake_redis.published) == 2
     channel, payload = fake_redis.published[0]
     assert channel == approval_channel(str(bot_session.id))
     import json as _json
@@ -202,6 +203,31 @@ def test_approve_pending_decision_publishes_to_redis(
     }
     # Redis client was closed by the endpoint.
     assert fake_redis.aclosed is True
+
+
+def test_approve_publishes_approval_resolved_on_session_channel(
+    client: TestClient, db_session: Session, fake_redis: _FakeRedis
+) -> None:
+    """Open browser tabs receive ``approval_resolved`` over the WS (Johnny-hn6)."""
+    bot_session, decision = _seed_session_with_pending_decision(db_session)
+    res = client.post(
+        f"/sessions/{bot_session.id}/decisions/{decision.id}/approve"
+    )
+    assert res.status_code == 200
+    import json as _json
+
+    session_channel_name = f"johnny.session.{bot_session.id}"
+    resolved_pubs = [
+        _json.loads(p)
+        for ch, p in fake_redis.published
+        if ch == session_channel_name
+    ]
+    assert len(resolved_pubs) == 1
+    event = resolved_pubs[0]
+    assert event["type"] == "approval_resolved"
+    assert event["decision_id"] == decision.id
+    assert event["resolution"] == "approved"
+    assert event["session_id"] == str(bot_session.id)
 
 
 def test_reject_pending_decision_publishes_to_redis(
@@ -218,6 +244,44 @@ def test_reject_pending_decision_publishes_to_redis(
 
     payload = _json.loads(fake_redis.published[0][1])
     assert payload["action"] == "reject"
+
+
+def test_reject_flips_row_outcome_to_rejected(
+    client: TestClient, db_session: Session, fake_redis: _FakeRedis
+) -> None:
+    """Reject persists synchronously so refreshes show no stale PENDING."""
+    bot_session, decision = _seed_session_with_pending_decision(db_session)
+    res = client.post(
+        f"/sessions/{bot_session.id}/decisions/{decision.id}/reject"
+    )
+    assert res.status_code == 200
+    db_session.expire(decision)
+    refreshed = db_session.get(AgentDecision, decision.id)
+    assert refreshed is not None
+    assert refreshed.outcome == DecisionOutcome.REJECTED
+
+
+def test_reject_publishes_approval_resolved_on_session_channel(
+    client: TestClient, db_session: Session, fake_redis: _FakeRedis
+) -> None:
+    """Reject also broadcasts to open tabs over the WS (Johnny-hn6)."""
+    bot_session, decision = _seed_session_with_pending_decision(db_session)
+    res = client.post(
+        f"/sessions/{bot_session.id}/decisions/{decision.id}/reject"
+    )
+    assert res.status_code == 200
+    import json as _json
+
+    session_channel_name = f"johnny.session.{bot_session.id}"
+    resolved_pubs = [
+        _json.loads(p)
+        for ch, p in fake_redis.published
+        if ch == session_channel_name
+    ]
+    assert len(resolved_pubs) == 1
+    event = resolved_pubs[0]
+    assert event["type"] == "approval_resolved"
+    assert event["resolution"] == "rejected"
 
 
 def test_approve_returns_subscriber_count_zero_when_no_listener(

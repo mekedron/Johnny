@@ -870,6 +870,7 @@ class VoicePipeline:
             "allowed_replies": list(self.config.allowed_replies),
             "mode": self.config.mode,
             "confidence_threshold": self.config.confidence_threshold,
+            "approval_timeout_seconds": self.config.approval_timeout_seconds,
             "last_decision": self._last_decision_summary(),
         }
 

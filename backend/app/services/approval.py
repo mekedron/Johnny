@@ -21,6 +21,10 @@ This module:
 * :func:`approval_channel` / :func:`publish_approval` — small helpers
   the API endpoints call to push approve/reject messages onto the
   right channel.
+* :func:`publish_approval_pending_event` /
+  :func:`publish_approval_resolved_event` — push WS-routable events
+  onto the session channel (``johnny.session.{session_id}``) so the
+  UI receives live updates without polling (Johnny-hn6).
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 from johnny.voice_pipeline.approval import (
@@ -44,10 +49,18 @@ logger = logging.getLogger(__name__)
 APPROVAL_CHANNEL_PREFIX = "johnny.approval."
 """Redis pub/sub channel prefix for approve/reject control messages."""
 
+SESSION_CHANNEL_PREFIX = "johnny.session."
+"""Redis pub/sub channel prefix for per-session WS fan-out events."""
+
 
 def approval_channel(session_id: str) -> str:
     """Build the Redis pub/sub channel name for one session."""
     return f"{APPROVAL_CHANNEL_PREFIX}{session_id}"
+
+
+def session_channel(session_id: str) -> str:
+    """Build the WS fan-out channel name for one session."""
+    return f"{SESSION_CHANNEL_PREFIX}{session_id}"
 
 
 class RedisApprovalGate(ApprovalGate):
@@ -211,9 +224,75 @@ async def publish_approval(
     return int(result)
 
 
+async def publish_approval_pending_event(
+    redis_client: Redis,
+    *,
+    session_id: str,
+    decision_id: int,
+    suggested_reply: str,
+    reason: str = "",
+    reply_type: str | None = None,
+    timeout_s: float = 15.0,
+) -> int:
+    """Publish an ``approval_pending`` event on the session WS channel.
+
+    The voice pipeline's ``_handle_approval_required`` would normally
+    publish this, but in production its decision sink defaults to
+    :class:`NoopDecisionSink` (the meet-worker is SQLAlchemy-free) — so
+    the pipeline returns early without publishing and the UI has to
+    refresh to discover the pending approval row. Calling this from the
+    session-status subscriber after persisting a PENDING row closes that
+    gap so the UI updates in real time (Johnny-hn6).
+    """
+    payload = {
+        "type": "approval_pending",
+        "decision_id": decision_id,
+        "suggested_reply": suggested_reply,
+        "reason": reason,
+        "reply_type": reply_type,
+        "timeout_s": timeout_s,
+        "timestamp_ms": int(time.time() * 1000),
+        "session_id": session_id,
+    }
+    channel = session_channel(session_id)
+    result = await redis_client.publish(channel, json.dumps(payload))
+    return int(result)
+
+
+async def publish_approval_resolved_event(
+    redis_client: Redis,
+    *,
+    session_id: str,
+    decision_id: int,
+    resolution: ApprovalOutcome,
+) -> int:
+    """Publish an ``approval_resolved`` event on the session WS channel.
+
+    Companion to :func:`publish_approval_pending_event` — fired by the
+    API approve/reject endpoint so every open browser tab learns the
+    decision was resolved within ~1s, without having to listen on the
+    private :data:`APPROVAL_CHANNEL_PREFIX` channel. ``resolution`` is
+    one of ``"approved"`` / ``"rejected"`` / ``"timeout"``.
+    """
+    payload = {
+        "type": "approval_resolved",
+        "decision_id": decision_id,
+        "resolution": resolution,
+        "timestamp_ms": int(time.time() * 1000),
+        "session_id": session_id,
+    }
+    channel = session_channel(session_id)
+    result = await redis_client.publish(channel, json.dumps(payload))
+    return int(result)
+
+
 __all__ = [
     "APPROVAL_CHANNEL_PREFIX",
+    "SESSION_CHANNEL_PREFIX",
     "RedisApprovalGate",
     "approval_channel",
     "publish_approval",
+    "publish_approval_pending_event",
+    "publish_approval_resolved_event",
+    "session_channel",
 ]
