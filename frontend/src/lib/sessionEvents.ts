@@ -96,6 +96,7 @@ export interface AgentSpokeEvent extends BaseEnvelope {
 	audio_duration_ms: number;
 	timestamp_ms: number;
 	matched_allowed_reply?: string | null;
+	prompt?: string;
 }
 
 export interface AgentSuggestedEvent extends BaseEnvelope {

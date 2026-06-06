@@ -568,6 +568,7 @@ class VoicePipeline:
             timestamp_ms=self._now_ms(),
             matched_allowed_reply=matched_allowed_reply,
             session_id=self.config.session_id,
+            prompt=prompt_text,
         )
         await self.event_bus.publish(spoke_event)
         await self._persist_utterance(

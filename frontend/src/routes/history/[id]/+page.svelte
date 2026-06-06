@@ -7,8 +7,7 @@
 		DECISION_OUTCOME_LABEL,
 		type AgentDecisionRecord,
 		type AgentUtteranceRecord,
-		type DecisionOutcome,
-		type TranscriptChunk
+		type DecisionOutcome
 	} from '$lib/sessionDetail';
 	import {
 		deleteHistorySession,
@@ -127,8 +126,36 @@
 		return utterances.filter((u) => u.agent_decision_id === decision.id);
 	}
 
-	function transcriptsForRender(d: HistoryDetail): TranscriptChunk[] {
-		return d.transcripts;
+	interface TranscriptTimelineEntry {
+		key: string;
+		text: string;
+		speaker: string | null;
+		createdAt: string | null;
+		isBot: boolean;
+	}
+
+	function transcriptsForRender(d: HistoryDetail): TranscriptTimelineEntry[] {
+		const lines: TranscriptTimelineEntry[] = d.transcripts.map((t) => ({
+			key: `t-${t.id}`,
+			text: t.text,
+			speaker: t.speaker,
+			createdAt: t.created_at,
+			isBot: false
+		}));
+		const utterances: TranscriptTimelineEntry[] = d.utterances.map((u) => ({
+			key: `u-${u.id}`,
+			text: u.output_text,
+			speaker: 'Johnny',
+			createdAt: u.created_at,
+			isBot: true
+		}));
+		// Interleave participant transcripts with bot utterances by
+		// created_at so the timeline is complete (Johnny-awh).
+		return [...lines, ...utterances].sort(
+			(a, b) =>
+				(a.createdAt ? Date.parse(a.createdAt) : 0) -
+				(b.createdAt ? Date.parse(b.createdAt) : 0)
+		);
 	}
 
 	function decisionsForRender(d: HistoryDetail): AgentDecisionRecord[] {
@@ -305,15 +332,21 @@
 						<p class="empty">No transcripts recorded.</p>
 					{:else}
 						<ul class="transcript-list">
-							{#each transcriptsForRender(detail) as line (line.id)}
-								<li class="transcript-line">
+							{#each transcriptsForRender(detail) as line (line.key)}
+								<li
+									class="transcript-line"
+									class:bot={line.isBot}
+									data-testid={line.isBot ? 'bot-transcript-line' : 'transcript-line'}
+								>
 									<div class="transcript-meta">
-										{#if line.speaker}
+										{#if line.isBot}
+											<span class="speaker bot">{line.speaker}</span>
+										{:else if line.speaker}
 											<span class="speaker">{line.speaker}</span>
 										{:else}
 											<span class="speaker unknown">Speaker</span>
 										{/if}
-										<time class="ts">{formatTimestamp(line.created_at)}</time>
+										<time class="ts">{formatTimestamp(line.createdAt)}</time>
 									</div>
 									<p class="transcript-text">{line.text}</p>
 								</li>
@@ -703,6 +736,10 @@
 		border-radius: 6px;
 		padding: 0.45rem 0.6rem;
 	}
+	.transcript-line.bot {
+		background: #eef2ff;
+		border-color: #c7d2fe;
+	}
 	.transcript-meta,
 	.decision-header,
 	.utterance-header {
@@ -717,6 +754,9 @@
 	.speaker {
 		font-weight: 600;
 		color: #1f2937;
+	}
+	.speaker.bot {
+		color: #4338ca;
 	}
 	.speaker.unknown {
 		color: #6b7280;

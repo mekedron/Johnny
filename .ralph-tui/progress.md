@@ -37,6 +37,14 @@ after each iteration and it's included in prompts for context.
   API approve/reject endpoint publishes `approval_resolved` on the
   same channel. The pipeline's own publishes are short-circuited
   by the Noop sink and never reach the UI in production.
+- **Utterance ↔ decision linkage is resolved subscriber-side.** The
+  meet-worker can't link `agent_utterances.agent_decision_id` itself
+  because it doesn't know decision row ids. When `apply_agent_spoke_event`
+  inserts an utterance row it queries for the most recent
+  `should_speak=True` `agent_decisions` row for the bot session and
+  uses that id; if that row is still PENDING (approval_required mode
+  after approve), the same transaction flips it to SPOKEN. Production's
+  PENDING → SPOKEN audit flip lives here, NOT in the pipeline.
 
 ---
 
@@ -70,6 +78,77 @@ after each iteration and it's included in prompts for context.
     was already failing before this change because `free_auto_speak`
     was added to `BotMode` in commit 82aa844 without updating the test.
     Not touched in this bead.
+---
+
+## 2026-06-06 - Johnny-awh
+- Persisted every bot utterance to `agent_utterances`, linked to its
+  originating router decision, and surfaced bot utterances inline in
+  the transcript timeline on both the live session and history detail
+  pages so a viewer sees a complete chronological record of who said
+  what.
+- Files changed:
+  - `backend/johnny/voice_pipeline/events.py` — `AgentSpoke` gained an
+    optional `prompt` field (default `""`) so the LLM prompt rides on
+    the event into the subscriber's audit-row insert.
+  - `backend/johnny/voice_pipeline/pipeline.py` — `_answer_and_speak`
+    now passes `prompt=prompt_text` (the already-serialised answer-LLM
+    messages) when publishing `AgentSpoke`. No new pipeline-side
+    storage; the subscriber owns the row.
+  - `backend/app/services/session_status_subscriber.py` —
+    `apply_agent_spoke_event` now:
+    - reads `prompt` from the payload and stores it on the row
+      (previously hard-coded to `""`),
+    - locates the most recent `AgentDecision` with `should_speak=True`
+      for the bot session and sets `agent_decision_id` on the new
+      utterance row,
+    - flips a still-PENDING decision row to SPOKEN in the same
+      transaction so the approval-required audit trail is consistent
+      (the pipeline's own `update_outcome` call goes through the
+      production NoopDecisionSink and never lands).
+  - `backend/tests/services/test_session_status_subscriber.py` — 8 new
+    tests for `apply_agent_spoke_event` covering: persists, prompt
+    pass-through, drops wrong type / missing session_id, links to the
+    most recent should_speak=True decision, flips PENDING → SPOKEN,
+    null link when no prior decision, mode defaults to listen-only.
+    Engine fixture now also creates the `meeting_configs` chain
+    (GoogleAccount/CalendarEvent/ProfileTemplate/MeetingConfig +
+    AgentUtterance) so the `BotSession.meeting_config` lazy load that
+    fires inside `apply_agent_spoke_event` doesn't blow up on missing
+    table.
+  - `frontend/src/lib/sessionDetail.ts` — `BotMode` union learned the
+    `free_auto_speak` value so future utterance rows render without
+    type errors.
+  - `frontend/src/lib/sessionEvents.ts` — `AgentSpokeEvent` interface
+    gained the optional `prompt` field to match the backend.
+  - `frontend/src/routes/sessions/[id]/+page.svelte` — interleaves bot
+    utterances into the transcript pane. The initial load merges
+    `detail.utterances` into the transcript list sorted by
+    `created_at`; live `agent_spoke` events append a bot line and
+    auto-scroll. Bot lines render with a "Johnny" speaker tag and a
+    distinct indigo treatment (`.transcript-line.bot` /
+    `.speaker.bot`).
+  - `frontend/src/routes/history/[id]/+page.svelte` — `transcriptsForRender`
+    now returns an interleaved timeline of participant chunks and
+    `Johnny` utterance lines sorted by `created_at`. Removed the
+    now-unused `TranscriptChunk` import; reused the existing
+    `.transcript-line` / `.speaker` styling with a new bot variant.
+- **Learnings:**
+  - The "two writers, one row" pattern from Johnny-hn6 generalises to
+    utterances: the meet-worker can't link to a decision_id (no
+    SQLAlchemy), so the subscriber resolves the link by querying for
+    the most recent `should_speak=True` row for the bot session. Same
+    pattern, same constraint.
+  - `apply_agent_spoke_event` accessing `BotSession.meeting_config`
+    triggers lazy load → SQL on `meeting_configs` even though the code
+    guards with `getattr(..., None)`. SQLAlchemy raises
+    `OperationalError` *before* `getattr` can fall back, so any
+    in-memory test fixture that exercises this path needs the full
+    meeting_config chain in `Base.metadata.create_all`.
+  - The frontend `BotMode` union was missing `free_auto_speak` from
+    when Johnny-d2g added it server-side, which would manifest as a
+    type error on any utterance row in that mode (the API returns it
+    as a string). Easy thing to forget on a backend-only feature add.
+
 ---
 
 ## 2026-06-06 - Johnny-hn6

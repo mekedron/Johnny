@@ -37,6 +37,7 @@
 		speaker: string | null;
 		isFinal: boolean;
 		timestampMs: number;
+		isBot?: boolean;
 	}
 
 	interface DecisionEntry {
@@ -131,7 +132,13 @@
 
 	function applySessionDetail(detail: SessionDetail) {
 		session = detail.session;
-		transcripts = detail.transcripts.map(transcriptToLine);
+		const transcriptLines = detail.transcripts.map(transcriptToLine);
+		const utteranceLines = detail.utterances.map(utteranceToLine);
+		// Interleave bot utterances with participant transcripts so the
+		// transcript pane shows a complete chronological timeline.
+		transcripts = [...transcriptLines, ...utteranceLines].sort(
+			(a, b) => a.timestampMs - b.timestampMs
+		);
 		const utteranceMap = new Map<number, AgentUtteranceRecord>();
 		for (const u of detail.utterances) {
 			if (u.agent_decision_id !== null) {
@@ -161,6 +168,17 @@
 			speaker: t.speaker,
 			isFinal: true,
 			timestampMs: Date.parse(t.created_at) || 0
+		};
+	}
+
+	function utteranceToLine(u: AgentUtteranceRecord): TranscriptLine {
+		return {
+			key: `db-u-${u.id}`,
+			text: u.output_text,
+			speaker: 'Johnny',
+			isFinal: true,
+			timestampMs: Date.parse(u.created_at) || 0,
+			isBot: true
 		};
 	}
 
@@ -322,6 +340,20 @@
 			next[idx] = { ...next[idx], outcome: 'spoken', matchedReply: matched };
 			decisions = next;
 		}
+		// Surface the bot's utterance inline in the transcript timeline
+		// (Johnny-awh). The history pane is the audit trail of every
+		// utterance, so the transcript pane mirrors what participants in
+		// the meeting heard — including the bot.
+		const botLine: TranscriptLine = {
+			key: `live-spoke-${ev.seq}`,
+			text: ev.text,
+			speaker: 'Johnny',
+			isFinal: true,
+			timestampMs: Date.now(),
+			isBot: true
+		};
+		transcripts = [...transcripts, botLine];
+		void autoScrollTranscript();
 	}
 
 	function handleAgentSuggested(ev: AgentSuggestedEvent) {
@@ -535,10 +567,13 @@
 								<li
 									class="transcript-line"
 									class:partial={!line.isFinal}
-									data-testid="transcript-line"
+									class:bot={line.isBot}
+									data-testid={line.isBot ? 'bot-transcript-line' : 'transcript-line'}
 								>
 									<div class="transcript-meta">
-										{#if line.speaker}
+										{#if line.isBot}
+											<span class="speaker bot">{line.speaker}</span>
+										{:else if line.speaker}
 											<span class="speaker">{line.speaker}</span>
 										{:else}
 											<span class="speaker unknown">Speaker</span>
@@ -866,6 +901,10 @@
 		border-color: #fde68a;
 		border-style: dashed;
 	}
+	.transcript-line.bot {
+		background: #eef2ff;
+		border-color: #c7d2fe;
+	}
 	.transcript-meta {
 		display: flex;
 		justify-content: space-between;
@@ -878,6 +917,9 @@
 	.speaker {
 		font-weight: 600;
 		color: #1f2937;
+	}
+	.speaker.bot {
+		color: #4338ca;
 	}
 	.speaker.unknown {
 		color: #6b7280;

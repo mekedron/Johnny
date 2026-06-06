@@ -67,13 +67,20 @@ class RouterDecisionMade:
 
 @dataclass(frozen=True, slots=True)
 class AgentSpoke:
-    """An utterance the agent actually spoke into the meeting."""
+    """An utterance the agent actually spoke into the meeting.
+
+    ``prompt`` carries the serialised answer-LLM prompt that produced the
+    utterance so the audit row in ``agent_utterances`` can render the
+    exact input that drove the bot to say what it said. Optional + default
+    empty string keeps prior callers (tests, old subscribers) working.
+    """
 
     text: str
     audio_duration_ms: int
     timestamp_ms: int
     matched_allowed_reply: str | None = None
     session_id: str | None = None
+    prompt: str = ""
     type: AgentEventType = "agent_spoke"
 
 

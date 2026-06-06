@@ -25,6 +25,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -265,7 +266,18 @@ def apply_router_decision_event(
 
 
 def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
-    """Insert one agent_utterances row from an ``agent_spoke`` event."""
+    """Insert one agent_utterances row from an ``agent_spoke`` event.
+
+    Two writers, one row applies here (Johnny-awh): the meet-worker
+    pipeline can't link to the decision id (no SQLAlchemy), so the
+    subscriber resolves the link by finding the most recent
+    ``should_speak=True`` decision for the bot session and binding the
+    utterance to it. The same path flips a PENDING decision to SPOKEN —
+    in production the pipeline's ``decision_sink.update_outcome`` call
+    is short-circuited by :class:`NoopDecisionSink`, so without this the
+    audit row would stay PENDING forever even though the bot actually
+    spoke.
+    """
     if payload.get("type") != AGENT_SPOKE_EVENT_TYPE:
         return False
     session_id = _coerce_int_id(payload.get("session_id"))
@@ -274,6 +286,7 @@ def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
     text = str(payload.get("text") or "")
     duration = payload.get("audio_duration_ms")
     matched = payload.get("matched_allowed_reply")
+    prompt = str(payload.get("prompt") or "")
     # Mode is taken from the bot session row at insert time so the
     # utterance audit row mirrors the meeting's bot mode.
     session_row = db.get(BotSession, session_id)
@@ -282,15 +295,25 @@ def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
         meeting = getattr(session_row, "meeting_config", None)
         if meeting is not None and getattr(meeting, "mode", None) is not None:
             mode = meeting.mode
-    # ``prompt`` is NOT NULL on the table. The pipeline's agent_spoke
-    # event doesn't carry the original prompt (the router decision row
-    # has the full input window already), so we record a placeholder so
-    # the audit trail still inserts.
+    linked_decision = db.scalar(
+        select(AgentDecision)
+        .where(
+            AgentDecision.bot_session_id == session_id,
+            AgentDecision.should_speak.is_(True),
+        )
+        .order_by(AgentDecision.id.desc())
+        .limit(1)
+    )
+    decision_id: int | None = None
+    if linked_decision is not None:
+        decision_id = linked_decision.id
+        if linked_decision.outcome == DecisionOutcome.PENDING:
+            linked_decision.outcome = DecisionOutcome.SPOKEN
     row = AgentUtterance(
         bot_session_id=session_id,
-        agent_decision_id=None,
+        agent_decision_id=decision_id,
         mode=mode,
-        prompt="",
+        prompt=prompt,
         output_text=text,
         audio_duration_ms=int(duration) if isinstance(duration, (int, float)) else None,
         matched_allowed_reply=(

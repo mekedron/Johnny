@@ -16,15 +16,23 @@ from sqlalchemy.orm import Session
 from app.db import Base
 from app.db.models import (
     AgentDecision,
+    AgentUtterance,
+    BotMode,
     BotSession,
     BotSessionStatus,
+    CalendarEvent,
     DecisionOutcome,
+    GoogleAccount,
+    MeetingConfig,
+    ProfileTemplate,
 )
 from app.services import session_status_subscriber
 from app.services.session_status_subscriber import (
+    AGENT_SPOKE_EVENT_TYPE,
     ROUTER_DECISION_EVENT_TYPE,
     SESSION_STATUS_EVENT_TYPE,
     _PendingApprovalEvent,
+    apply_agent_spoke_event,
     apply_router_decision_event,
     apply_status_event,
     run_subscriber,
@@ -41,8 +49,13 @@ def engine() -> sa.Engine:
     Base.metadata.create_all(
         bind=eng,
         tables=[
+            GoogleAccount.__table__,  # type: ignore[list-item]
+            CalendarEvent.__table__,  # type: ignore[list-item]
+            ProfileTemplate.__table__,  # type: ignore[list-item]
+            MeetingConfig.__table__,  # type: ignore[list-item]
             BotSession.__table__,  # type: ignore[list-item]
             AgentDecision.__table__,  # type: ignore[list-item]
+            AgentUtterance.__table__,  # type: ignore[list-item]
         ],
     )
     return eng
@@ -320,6 +333,196 @@ def test_apply_router_decision_event_returns_no_pending_event_when_not_speak(
     )
     assert applied is True
     assert pending is None
+
+
+# --- apply_agent_spoke_event utterance persistence (Johnny-awh) ----------
+
+
+def _agent_spoke_payload(
+    *,
+    session_id: int,
+    text: str = "Hello team.",
+    audio_duration_ms: int = 1200,
+    matched_allowed_reply: str | None = None,
+    prompt: str = "[]",
+) -> dict[str, Any]:
+    return {
+        "type": AGENT_SPOKE_EVENT_TYPE,
+        "session_id": session_id,
+        "text": text,
+        "audio_duration_ms": audio_duration_ms,
+        "matched_allowed_reply": matched_allowed_reply,
+        "prompt": prompt,
+        "timestamp_ms": 0,
+    }
+
+
+def test_apply_agent_spoke_event_persists_row(db_session: Session) -> None:
+    """A bare ``agent_spoke`` event becomes an ``agent_utterances`` row."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    applied = apply_agent_spoke_event(
+        db_session,
+        _agent_spoke_payload(session_id=bot_session.id, text="Sure thing."),
+    )
+    assert applied is True
+    rows = db_session.scalars(sa.select(AgentUtterance)).all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.bot_session_id == bot_session.id
+    assert row.output_text == "Sure thing."
+    assert row.audio_duration_ms == 1200
+
+
+def test_apply_agent_spoke_event_carries_prompt(db_session: Session) -> None:
+    """``prompt`` from the event lands on the utterance row (Johnny-awh)."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    prompt_blob = (
+        '[{"role":"system","content":"You are Johnny."},'
+        '{"role":"user","content":"Latest transcript: hello"}]'
+    )
+    applied = apply_agent_spoke_event(
+        db_session,
+        _agent_spoke_payload(
+            session_id=bot_session.id, prompt=prompt_blob
+        ),
+    )
+    assert applied is True
+    row = db_session.scalars(sa.select(AgentUtterance)).one()
+    assert row.prompt == prompt_blob
+
+
+def test_apply_agent_spoke_event_drops_wrong_event_type(
+    db_session: Session,
+) -> None:
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    payload = _agent_spoke_payload(session_id=bot_session.id)
+    payload["type"] = "router_decision_made"
+    assert apply_agent_spoke_event(db_session, payload) is False
+    assert db_session.scalars(sa.select(AgentUtterance)).all() == []
+
+
+def test_apply_agent_spoke_event_drops_missing_session_id(
+    db_session: Session,
+) -> None:
+    payload = _agent_spoke_payload(session_id=0)
+    payload["session_id"] = None
+    assert apply_agent_spoke_event(db_session, payload) is False
+
+
+def test_apply_agent_spoke_event_links_recent_decision(
+    db_session: Session,
+) -> None:
+    """The utterance's ``agent_decision_id`` points at the latest should_speak row.
+
+    Two writers, one row: the meet-worker pipeline has no decision id
+    (NoopDecisionSink) so the subscriber resolves the linkage from the
+    most recent ``router_decision_made`` row for the session.
+    """
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    # First insert a suppressed decision (should_speak=False) — must NOT
+    # be the link target.
+    apply_router_decision_event(
+        db_session,
+        _router_decision_payload(
+            session_id=bot_session.id,
+            mode="limited_auto_speak",
+            should_speak=False,
+        ),
+    )
+    # Then a speaking decision — this is what the utterance must link to.
+    apply_router_decision_event(
+        db_session,
+        _router_decision_payload(
+            session_id=bot_session.id,
+            mode="limited_auto_speak",
+            should_speak=True,
+            suggested_reply="affirmative",
+        ),
+    )
+    db_session.flush()
+    speaking = db_session.scalars(
+        sa.select(AgentDecision)
+        .where(AgentDecision.should_speak.is_(True))
+        .order_by(AgentDecision.id.desc())
+    ).first()
+    assert speaking is not None
+
+    apply_agent_spoke_event(
+        db_session,
+        _agent_spoke_payload(
+            session_id=bot_session.id, text="affirmative"
+        ),
+    )
+    utterance = db_session.scalars(sa.select(AgentUtterance)).one()
+    assert utterance.agent_decision_id == speaking.id
+
+
+def test_apply_agent_spoke_event_flips_pending_decision_to_spoken(
+    db_session: Session,
+) -> None:
+    """Approval-required path: utterance arrival flips PENDING → SPOKEN.
+
+    Without this the audit row stays PENDING forever because the
+    pipeline's ``update_outcome`` call is short-circuited by
+    :class:`NoopDecisionSink` in production. Linking + flipping in one
+    subscriber transaction keeps the audit trail consistent.
+    """
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    applied, pending = apply_router_decision_event(
+        db_session,
+        _router_decision_payload(
+            session_id=bot_session.id,
+            mode="approval_required",
+            suggested_reply="yes",
+        ),
+    )
+    assert applied is True
+    assert pending is not None
+    decision_id = pending.decision_id
+
+    apply_agent_spoke_event(
+        db_session,
+        _agent_spoke_payload(session_id=bot_session.id, text="yes"),
+    )
+    db_session.flush()
+    decision = db_session.get(AgentDecision, decision_id)
+    assert decision is not None
+    assert decision.outcome == DecisionOutcome.SPOKEN
+    utterance = db_session.scalars(sa.select(AgentUtterance)).one()
+    assert utterance.agent_decision_id == decision_id
+
+
+def test_apply_agent_spoke_event_with_no_prior_decision_leaves_link_null(
+    db_session: Session,
+) -> None:
+    """No matching decision row → utterance still inserts with NULL link."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    apply_agent_spoke_event(
+        db_session,
+        _agent_spoke_payload(session_id=bot_session.id),
+    )
+    utterance = db_session.scalars(sa.select(AgentUtterance)).one()
+    assert utterance.agent_decision_id is None
+
+
+def test_apply_agent_spoke_event_defaults_mode_to_listen_only(
+    db_session: Session,
+) -> None:
+    """Without a meeting_config row, mode falls back to LISTEN_ONLY."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    apply_agent_spoke_event(
+        db_session,
+        _agent_spoke_payload(session_id=bot_session.id),
+    )
+    row = db_session.scalars(sa.select(AgentUtterance)).one()
+    assert row.mode == BotMode.LISTEN_ONLY
 
 
 # --- run_subscriber loop end-to-end --------------------------------------
