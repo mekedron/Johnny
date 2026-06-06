@@ -3,10 +3,10 @@
   "sessionId": "79f70c67-bb19-4cbc-940f-b02dbec38449",
   "status": "running",
   "startedAt": "2026-06-06T07:53:57.289Z",
-  "updatedAt": "2026-06-06T08:09:18.072Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-06T08:35:34.080Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -121,7 +121,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-har",
+      "taskTitle": "STT transcription of participants must never pause while bot is speaking or thinking",
+      "taskCompleted": true,
+      "durationMs": 739772,
+      "startedAt": "2026-06-06T07:56:57.428Z",
+      "endedAt": "2026-06-06T08:09:17.200Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

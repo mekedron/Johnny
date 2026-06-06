@@ -23,6 +23,96 @@ the `is_current` flag in `transcript_window`; `_answer_messages` walks
 The `_response_queue` uses `None` as the end-of-stream sentinel so the
 respond loop drains queued transcripts before exiting once capture ends.
 
+### Voice barge-in: fire-and-forget classifier + generation guard (Johnny-di9)
+While the bot is in `_respond_to_transcript` (responding to a previous
+transcript), each newly-finalised participant transcript spawns a
+fire-and-forget barge-in classifier task in `_transcribe_and_emit`.
+The classifier is the SAME `router_llm` provider invoked with a
+distinct prompt + `_BARGE_IN_SCHEMA`. When the verdict is
+`should_interrupt=True` AND the response generation hasn't moved on,
+the task calls `pipeline.interrupt()`.
+
+Why fire-and-forget: awaiting the classifier inline in
+`_transcribe_and_emit` would reintroduce the Johnny-har regression —
+the transcribe loop would be gated on a slow LLM call, dropping
+capture frames. Pending classifier tasks live in
+`self._barge_in_tasks` and are gathered (with cancel) at the end of
+`run()` to avoid "Task was destroyed but it is pending" warnings.
+
+Why the generation guard: `self._response_generation` increments at
+the start of each `_respond_to_transcript`. Each classifier task
+captures the generation at spawn time. The verdict only fires
+`interrupt()` if the captured generation still equals
+`_response_generation` AND `_response_in_flight` is True. Without
+this guard, a delayed verdict (e.g. the LLM call takes longer than
+the response it was meant to interrupt) would abort a LATER
+response that the user didn't mean to cancel.
+
+The classifier is gated on `mode in SPEAKING_MODES` AND `speak=True`:
+listen_only / suggest_only don't produce audio, so `interrupt()`
+would be a no-op and the LLM call would just waste budget.
+`enable_barge_in=False` in `PipelineConfig` is the kill switch.
+
+### Slow STT in barge-in tests gives the response loop room to schedule
+The synchronous `_FakeSTT` is so fast that the transcribe loop
+processes ALL utterances before the response loop has a chance to
+pull the first one off the queue — so by the time
+`_should_classify_barge_in()` is checked for any later transcript,
+`_response_in_flight` is still False and no classifier fires. The
+fix is a `_SlowFakeSTT` with a small (~20 ms) per-utterance sleep,
+which mimics production timing and lets asyncio interleave the
+respond loop in. Without this, the only timing where barge-in fires
+is when the response loop is genuinely wedged in a long stage —
+which doesn't naturally happen with fake providers.
+
+---
+
+## 2026-06-06 - Johnny-di9
+- Added voice-triggered barge-in. While the bot is in flight
+  (`_response_in_flight=True` and mode allows audio), each
+  newly-finalised participant transcript spawns a fire-and-forget
+  barge-in classifier task in `_transcribe_and_emit`. The classifier
+  reuses `router_llm` with a distinct prompt + `_BARGE_IN_SCHEMA`
+  and returns one of `stop` / `correct` / `new_question` /
+  `side_chat` / `noise` — the first three call `pipeline.interrupt()`.
+- Added a generation guard: each response increments
+  `_response_generation` at start of `_respond_to_transcript`. The
+  classifier task captures the generation at spawn time and only
+  fires interrupt if it still matches when the verdict returns. This
+  stops a delayed verdict from aborting a *later* response the user
+  didn't mean to cancel.
+- Added `PipelineConfig.enable_barge_in` (default True) as a kill
+  switch so tests can pin pre-barge-in behaviour.
+- Renamed the original `_respond_to_transcript` body to
+  `_respond_to_transcript_inner` so the in-flight / generation
+  bookkeeping wraps every return path of the response logic
+  uniformly. `listen_only` and `speak=False` early-return BEFORE the
+  bookkeeping kicks in so non-speaking modes never spawn classifiers.
+- New `_SlowFakeSTT` fixture (20 ms per-utterance sleep) for
+  barge-in tests, because the synchronous `_FakeSTT` is too fast for
+  the response loop to interleave (see codebase pattern above).
+- Added 22 new tests covering: stop/correct/new_question fire
+  interrupt; side_chat/noise don't; bot idle → no classifier;
+  `enable_barge_in=False` → no classifier; listen_only / suggest_only
+  / speak=False → no classifier; classifier prompt contains bot
+  context; classifier LLM failure leaves bot running; stale verdict
+  (gen guard) drops interrupt; parse safety defaults.
+- Files changed:
+  - `backend/johnny/voice_pipeline/pipeline.py`
+  - `backend/johnny/voice_pipeline/__init__.py`
+  - `backend/tests/voice_pipeline/test_pipeline.py`
+- **Learnings:**
+  - The TTS interrupt loop only checks `_interrupt_event` between
+    yielded frames. A TTS provider that awaits forever inside a
+    single `synthesize_stream` call (no further yields) is effectively
+    uninterruptible — production TTS streams 20 ms frames so it's a
+    non-issue in real deployments, but test fixtures need to either
+    yield continuously or be released externally for the audio-cut
+    assertion to land.
+  - `_parse_barge_in_response` cross-checks the `should_interrupt`
+    bool against the `category` and downgrades to no-interrupt for
+    `noise` / `side_chat` — a misbehaving classifier can't smuggle
+    an interrupt past the safety default.
 ---
 
 ## 2026-06-06 - Johnny-har

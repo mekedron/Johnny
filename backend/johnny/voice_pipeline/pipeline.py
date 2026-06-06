@@ -192,6 +192,32 @@ soon as they arrive so time-to-first-audio is bounded by the first
 sentence rather than the full response.
 """
 
+BARGE_IN_CATEGORIES: tuple[str, ...] = (
+    "stop",
+    "correct",
+    "new_question",
+    "side_chat",
+    "noise",
+)
+"""Intent buckets for the voice barge-in classifier (Johnny-di9).
+
+``stop`` / ``correct`` / ``new_question`` are the three categories that
+yank the floor away from the bot — the classifier returns
+``should_interrupt=true`` for these. ``side_chat`` and ``noise`` leave
+the bot's current answer running and the transcript still goes into the
+meeting history through the normal response path.
+"""
+
+INTERRUPTING_BARGE_IN_CATEGORIES: frozenset[str] = frozenset(
+    {"stop", "correct", "new_question"}
+)
+"""Categories that map to ``should_interrupt=true``.
+
+Kept as a separate set so the parser can validate the bool against the
+category (a buggy classifier saying ``noise`` + ``should_interrupt=true``
+is downgraded to no-interrupt rather than firing a false barge-in).
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class PipelineConfig:
@@ -237,6 +263,17 @@ class PipelineConfig:
     rate_limit_max_utterances: int = DEFAULT_RATE_LIMIT_MAX_UTTERANCES
     rate_limit_window_ms: int = DEFAULT_RATE_LIMIT_WINDOW_MS
     approval_timeout_seconds: float = DEFAULT_APPROVAL_TIMEOUT_SECONDS
+    enable_barge_in: bool = True
+    """Run the voice barge-in classifier while the bot is mid-utterance (Johnny-di9).
+
+    When ``True`` (the default), each participant transcript that
+    finalises while the bot is speaking or thinking is fed to a fast
+    intent classifier; a ``stop`` / ``correct`` / ``new_question``
+    verdict calls :meth:`VoicePipeline.interrupt` so the floor yields
+    to the participant. Set to ``False`` to opt out — useful for tests
+    that pin pre-barge-in behaviour and for sessions where the extra
+    LLM call per transcript isn't worth the latency budget.
+    """
     session_id: str | None = None
     bot_session_id: int | None = None
 
@@ -268,6 +305,33 @@ _ROUTER_SCHEMA: dict[str, Any] = {
         "suggested_reply": {"type": ["string", "null"]},
     },
     "required": ["should_speak", "confidence", "reason"],
+}
+
+
+@dataclass(frozen=True, slots=True)
+class BargeInDecision:
+    """Parsed output of the barge-in intent classifier (Johnny-di9).
+
+    ``should_interrupt`` is the only field the pipeline acts on —
+    ``category`` and ``reason`` are kept for logging / observability so
+    we can audit *why* a barge-in fired (or didn't) without re-running
+    the classifier.
+    """
+
+    should_interrupt: bool
+    category: str
+    reason: str
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+_BARGE_IN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "should_interrupt": {"type": "boolean"},
+        "category": {"type": "string", "enum": list(BARGE_IN_CATEGORIES)},
+        "reason": {"type": "string"},
+    },
+    "required": ["should_interrupt", "category", "reason"],
 }
 
 
@@ -324,6 +388,17 @@ class VoicePipeline:
         # used as the end-of-stream sentinel so the response loop drains
         # cleanly once capture ends.
         self._response_queue: asyncio.Queue[TranscriptFinalized | None] | None = None
+        # Barge-in bookkeeping (Johnny-di9). ``_response_in_flight`` flips
+        # to True while ``_respond_to_transcript`` is processing a
+        # transcript; ``_response_generation`` increments at the start of
+        # each response so an in-flight classifier task can prove the
+        # response it wanted to interrupt is still the one running.
+        # Without the generation guard, a delayed classifier verdict
+        # could fire ``interrupt()`` against a *later* response that the
+        # user did not mean to abort.
+        self._response_in_flight: bool = False
+        self._response_generation: int = 0
+        self._barge_in_tasks: list[asyncio.Task[None]] = []
 
     # ------------------------------------------------------------------
     # Public lifecycle
@@ -382,6 +457,17 @@ class VoicePipeline:
             await transcribe_task
         finally:
             await respond_task
+            # Drain any in-flight barge-in classifier tasks. They are
+            # fire-and-forget by design (so the transcribe loop is never
+            # gated on the classifier LLM), so we have to gather them
+            # here or the asyncio event loop logs "Task was destroyed
+            # but it is pending" warnings on shutdown.
+            pending = [t for t in self._barge_in_tasks if not t.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            self._barge_in_tasks.clear()
 
     async def _rehydrate_transcript_history(self) -> None:
         """Seed ``_transcript_history`` from prior persisted transcripts.
@@ -491,6 +577,13 @@ class VoicePipeline:
         audio always reaches ``transcript_chunks`` even when the bot is
         mid-utterance. Finalised transcripts are handed to the response
         loop via ``self._response_queue``.
+
+        When the bot is currently responding to a *previous* transcript
+        (Johnny-di9 barge-in), this also spawns a fire-and-forget intent
+        classifier so a ``stop`` / ``correct`` / ``new_question`` verdict
+        can yield the floor. The classifier MUST be fire-and-forget — if
+        we awaited it inline we'd reintroduce the Johnny-har regression
+        of gating STT on the bot's speak/think state.
         """
         if not utterance:
             return
@@ -503,8 +596,147 @@ class VoicePipeline:
         self._remember_transcript(transcript)
         await self._persist_transcript(transcript, utterance)
 
+        # Spawn the barge-in classifier BEFORE queueing for the response
+        # loop so the generation captured here matches the response the
+        # user is trying to interrupt. If we queued first, the response
+        # loop could pull this very transcript and start a new response
+        # before the classifier even runs — then the classifier would
+        # capture the wrong generation.
+        if self._should_classify_barge_in():
+            gen = self._response_generation
+            task = asyncio.create_task(self._maybe_barge_in(transcript, gen))
+            self._barge_in_tasks.append(task)
+            # Garbage-collect finished tasks so the list doesn't grow
+            # without bound across long meetings.
+            self._barge_in_tasks = [t for t in self._barge_in_tasks if not t.done()]
+
         if self._response_queue is not None:
             await self._response_queue.put(transcript)
+
+    def _should_classify_barge_in(self) -> bool:
+        """Whether to spawn the barge-in classifier for the latest transcript.
+
+        Gated on:
+
+        * The feature flag (``enable_barge_in``).
+        * The bot is currently responding (``_response_in_flight``) —
+          there's nothing to interrupt when the bot is idle.
+        * The mode actually produces audio (``SPEAKING_MODES`` ∩
+          ``speak=True``). Listen-only / suggest-only don't speak, so
+          ``interrupt()`` would be a no-op in those modes and the LLM
+          call would just burn budget.
+        """
+        return (
+            self.config.enable_barge_in
+            and self._response_in_flight
+            and self.config.speak
+            and self.config.mode in SPEAKING_MODES
+        )
+
+    async def _maybe_barge_in(
+        self, transcript: TranscriptFinalized, gen: int
+    ) -> None:
+        """Classify the transcript's intent and interrupt if barge-in is warranted.
+
+        ``gen`` is the response generation captured when the classifier
+        was spawned. We only call :meth:`interrupt` if the bot is still
+        on the same response — if it has moved on (naturally finished
+        or already been interrupted), the verdict is stale and firing
+        ``interrupt()`` now would abort an *unrelated* response.
+        """
+        try:
+            decision = await self._classify_barge_in_intent(transcript)
+        except Exception:
+            logger.exception(
+                "barge-in classifier failed for session=%s — "
+                "leaving current response running",
+                self.config.session_id,
+            )
+            return
+        if not decision.should_interrupt:
+            return
+        if not self._response_in_flight or self._response_generation != gen:
+            # Either the original response completed naturally before
+            # the classifier returned, or another barge-in already
+            # interrupted it. Either way our verdict no longer applies.
+            return
+        logger.info(
+            "barge-in fired for session=%s category=%s reason=%s",
+            self.config.session_id,
+            decision.category,
+            decision.reason,
+        )
+        self.interrupt()
+
+    async def _classify_barge_in_intent(
+        self, transcript: TranscriptFinalized
+    ) -> BargeInDecision:
+        """Ask the router LLM whether ``transcript`` should interrupt the bot.
+
+        Reuses ``router_llm`` rather than introducing a new provider so
+        the deployment story stays single-knob. The prompt is distinct
+        from the router's "should bot speak" decision — it asks one
+        binary question (interrupt or not) plus a category for
+        observability.
+        """
+        messages = self._barge_in_messages(transcript)
+        response = await self.router_llm.chat(
+            messages, response_format=_BARGE_IN_SCHEMA
+        )
+        return _parse_barge_in_response(response)
+
+    def _barge_in_messages(
+        self, transcript: TranscriptFinalized
+    ) -> list[ChatMessage]:
+        """Build the prompt for the barge-in intent classifier."""
+        system = (
+            "You are the barge-in intent classifier for an AI meeting bot. "
+            "The bot is currently mid-utterance (speaking or thinking about "
+            "a reply). Classify the latest participant speech into ONE of "
+            "these categories and decide whether to interrupt the bot:\n"
+            "- 'stop': Direct interruption — the user wants the bot to "
+            "stop ('hey Johnny stop', 'wait', 'hold on', 'shut up'). "
+            "should_interrupt=true.\n"
+            "- 'correct': Correction or redirection of the bot ('no, focus "
+            "on X', \"that's wrong, it's actually Y\"). "
+            "should_interrupt=true.\n"
+            "- 'new_question': A new question or topic addressed to the "
+            "bot ('actually, what about Y?', 'by the way, how does Z "
+            "work?'). should_interrupt=true.\n"
+            "- 'side_chat': Side conversation between human participants, "
+            "NOT addressed to the bot. should_interrupt=false.\n"
+            "- 'noise': Background noise, cough, mumbling, filler word, "
+            "or unintelligible speech. should_interrupt=false.\n\n"
+            "Reply as JSON matching the supplied schema. When uncertain, "
+            "default to side_chat or noise — false positives (interrupting "
+            "the bot for nothing) are worse than false negatives (not "
+            "interrupting when the user wanted to)."
+        )
+        if self.config.instructions:
+            system += f"\n\nMeeting instructions: {self.config.instructions}"
+
+        user_parts: list[str] = []
+        last_decision = self._last_decision
+        if (
+            last_decision is not None
+            and last_decision.suggested_reply
+        ):
+            user_parts.append(
+                "The bot is currently saying / about to say: "
+                f"{last_decision.suggested_reply}"
+            )
+            user_parts.append("")
+        speaker_label = (
+            f"Participant '{transcript.speaker}'"
+            if transcript.speaker
+            else "Participant"
+        )
+        user_parts.append(f"{speaker_label} said: {transcript.text}")
+
+        return [
+            ChatMessage(role="system", content=system),
+            ChatMessage(role="user", content="\n".join(user_parts)),
+        ]
 
     async def _respond_to_transcript(self, transcript: TranscriptFinalized) -> None:
         """Run router (and answer + TTS, when appropriate) for ``transcript``.
@@ -526,6 +758,27 @@ class VoicePipeline:
         if not self.config.speak:
             return
 
+        # Mark the response in-flight so any transcripts finalising
+        # while we work can spawn a barge-in classifier (Johnny-di9).
+        # The generation counter lets the classifier prove its verdict
+        # still applies to *this* response — if we finish naturally and
+        # the loop has moved on to a newer response, a late classifier
+        # call will no longer interrupt the wrong utterance.
+        self._response_generation += 1
+        self._response_in_flight = True
+        try:
+            await self._respond_to_transcript_inner(transcript)
+        finally:
+            self._response_in_flight = False
+
+    async def _respond_to_transcript_inner(
+        self, transcript: TranscriptFinalized
+    ) -> None:
+        """Router → answer + TTS body of :meth:`_respond_to_transcript`.
+
+        Split out so the in-flight / generation bookkeeping wraps every
+        return path without obscuring the response logic itself.
+        """
         input_window = await self._build_input_window(transcript)
         decision, raw_response = await self._run_router(transcript, input_window)
         decision_event = RouterDecisionMade(
@@ -1411,6 +1664,51 @@ async def _single_chunk(chunk: bytes) -> AsyncIterator[bytes]:
     yield chunk
 
 
+def _parse_barge_in_response(response: LLMResponse) -> BargeInDecision:
+    """Parse the classifier LLM response into a :class:`BargeInDecision`.
+
+    Mirrors :func:`_parse_router_response`: prefers ``structured_output``,
+    falls back to JSON-decoding ``text``, and degrades to a safe
+    no-interrupt verdict when the model gives us nothing usable. False
+    negatives (failing to interrupt) are strictly preferred over false
+    positives (interrupting the bot for nothing), so unknown / malformed
+    output always lands on ``should_interrupt=False``.
+    """
+    structured = response.structured_output
+    if structured is None and response.text:
+        try:
+            structured = json.loads(response.text)
+        except (ValueError, TypeError):
+            structured = None
+    if not isinstance(structured, dict):
+        return BargeInDecision(
+            should_interrupt=False,
+            category="noise",
+            reason="barge-in classifier returned no structured output",
+            raw={"text": response.text},
+        )
+    raw_category = str(structured.get("category", "noise"))
+    if raw_category not in BARGE_IN_CATEGORIES:
+        raw_category = "noise"
+    raw_should_interrupt = bool(structured.get("should_interrupt", False))
+    # Cross-check the bool against the category — a buggy classifier
+    # claiming ``should_interrupt=true`` for ``noise`` or ``side_chat``
+    # is downgraded to no-interrupt. Same the other way: if the
+    # category says ``stop`` but the bool is False, we trust the bool.
+    if (
+        raw_should_interrupt
+        and raw_category not in INTERRUPTING_BARGE_IN_CATEGORIES
+    ):
+        raw_should_interrupt = False
+    reason = str(structured.get("reason", ""))
+    return BargeInDecision(
+        should_interrupt=raw_should_interrupt,
+        category=raw_category,
+        reason=reason,
+        raw=structured,
+    )
+
+
 def _parse_router_response(response: LLMResponse) -> RouterDecision:
     structured = response.structured_output
     if structured is None and response.text:
@@ -1528,6 +1826,8 @@ def _serialize_prompt(messages: Sequence[ChatMessage]) -> str:
 __all__ = [
     "APPROVAL_REQUIRED_MODE",
     "AUTONOMOUS_MODE",
+    "BARGE_IN_CATEGORIES",
+    "BargeInDecision",
     "FREE_AUTO_SPEAK_MODE",
     "FREE_FORM_MODES",
     "DEFAULT_APPROVAL_TIMEOUT_SECONDS",
@@ -1543,6 +1843,7 @@ __all__ = [
     "DEFAULT_SUMMARY_MAX_SENTENCES",
     "DEFAULT_SUMMARY_RECENT_KEEP",
     "DEFAULT_TRANSCRIPT_WINDOW_SIZE",
+    "INTERRUPTING_BARGE_IN_CATEGORIES",
     "LIMITED_AUTO_SPEAK_MODE",
     "LISTEN_ONLY_MODE",
     "NON_SPEAKING_MODES",

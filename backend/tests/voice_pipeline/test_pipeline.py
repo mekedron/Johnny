@@ -3933,3 +3933,887 @@ async def test_transcription_keeps_running_while_bot_is_speaking(
     # confirms the response loop did run, it just didn't block STT.
     spoke = [e for e in bus.snapshot() if isinstance(e, AgentSpoke)]
     assert len(spoke) >= 1
+
+
+# --- Johnny-di9: voice-triggered barge-in ----------------------------------
+
+
+class _SlowFakeSTT(STTProvider):
+    """``_FakeSTT`` with a configurable per-utterance sleep.
+
+    Production STT calls take hundreds of milliseconds; the synchronous
+    ``_FakeSTT`` is fast enough that the transcribe loop processes
+    every utterance before the response loop has had a chance to pull
+    the first one off the queue. For barge-in tests we want the
+    response loop to be wedged in TTS *before* later transcripts
+    finalise — a small per-utterance sleep gives the scheduler a
+    natural interleave point so the timing matches production.
+    """
+
+    def __init__(self, transcripts: list[str], sleep_s: float = 0.02) -> None:
+        self._transcripts = list(transcripts)
+        self._idx = 0
+        self.calls = 0
+        self._sleep_s = sleep_s
+
+    @property
+    def name(self) -> str:
+        return "slow-fake-stt"
+
+    async def transcribe_stream(
+        self,
+        audio_iter: AsyncIterator[bytes],
+    ) -> AsyncIterator[TranscriptEvent]:
+        async for _ in audio_iter:
+            pass
+        await asyncio.sleep(self._sleep_s)
+        if self._idx >= len(self._transcripts):
+            text = "<exhausted>"
+        else:
+            text = self._transcripts[self._idx]
+        self._idx += 1
+        self.calls += 1
+        yield TranscriptEvent(
+            text=text,
+            is_final=True,
+            timestamp_ms=self.calls * 1000,
+            confidence=0.9,
+        )
+
+
+class _SwitchingRouterLLM(LLMProvider):
+    """Fake LLM that serves both router decisions and barge-in verdicts.
+
+    The production pipeline reuses ``router_llm`` for the barge-in
+    classifier so deployments stay single-knob; the test fake dispatches
+    by the requested ``response_format`` so we can assert each path
+    independently.
+    """
+
+    def __init__(
+        self,
+        router_decisions: list[dict[str, Any]],
+        barge_in_decisions: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self._router_decisions = list(router_decisions)
+        self._barge_in_decisions = list(barge_in_decisions or [])
+        self._router_idx = 0
+        self._barge_in_idx = 0
+        self.router_calls: list[Sequence[ChatMessage]] = []
+        self.barge_in_calls: list[Sequence[ChatMessage]] = []
+        self.last_messages: Sequence[ChatMessage] | None = None
+        self.last_response_format: dict[str, Any] | None = None
+
+    @property
+    def name(self) -> str:
+        return "switching-router"
+
+    def _is_barge_in_format(
+        self, response_format: dict[str, Any] | None
+    ) -> bool:
+        if not response_format:
+            return False
+        props = response_format.get("properties")
+        if not isinstance(props, dict):
+            return False
+        return "should_interrupt" in props
+
+    async def chat(
+        self,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
+        response_format: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        self.last_messages = messages
+        self.last_response_format = response_format
+
+        if self._is_barge_in_format(response_format):
+            self.barge_in_calls.append(list(messages))
+            if not self._barge_in_decisions:
+                payload = {
+                    "should_interrupt": False,
+                    "category": "noise",
+                    "reason": "test default",
+                }
+            elif self._barge_in_idx >= len(self._barge_in_decisions):
+                payload = self._barge_in_decisions[-1]
+            else:
+                payload = self._barge_in_decisions[self._barge_in_idx]
+                self._barge_in_idx += 1
+            return LLMResponse(
+                text=json.dumps(payload),
+                finish_reason="stop",
+                structured_output=payload,
+            )
+
+        self.router_calls.append(list(messages))
+        if self._router_idx >= len(self._router_decisions):
+            decision = self._router_decisions[-1]
+        else:
+            decision = self._router_decisions[self._router_idx]
+            self._router_idx += 1
+        return LLMResponse(
+            text=json.dumps(decision),
+            finish_reason="stop",
+            structured_output=decision,
+        )
+
+
+async def _wait_until(
+    predicate: Any, timeout: float = 2.0, poll: float = 0.005
+) -> None:
+    """Poll ``predicate`` until it returns truthy or ``timeout`` elapses."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(poll)
+    raise TimeoutError(f"predicate did not become truthy within {timeout}s")
+
+
+def _frames_from_pcm(pcm: bytes, frame_size: int = 640) -> list[bytes]:
+    return [
+        pcm[i : i + frame_size]
+        for i in range(0, len(pcm), frame_size)
+        if i + frame_size <= len(pcm)
+    ]
+
+
+async def test_barge_in_stop_fires_interrupt_event(four_utterance_pcm: bytes) -> None:
+    """Participant saying 'stop' while the bot is talking calls interrupt().
+
+    Verifies the classifier-→-interrupt() wiring end-to-end: the test
+    stalls the bot inside TTS so the response loop stays in-flight while
+    a second transcript ('hey Johnny stop') finalises through the
+    transcribe loop. The classifier must then run and flip the pipeline's
+    ``_interrupt_event``. Actual audio-cut-on-interrupt behaviour is
+    already proven by ``test_pipeline_interrupt_during_tts_truncates_audio``.
+    """
+    from johnny.voice_pipeline import InMemoryTranscriptSink
+
+    transport = _BufferedTransport(frames=_frames_from_pcm(four_utterance_pcm))
+
+    release_tts = asyncio.Event()
+    tts_entered = asyncio.Event()
+
+    class _StallingTTS(TTSProvider):
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        @property
+        def name(self) -> str:
+            return "stalling-tts"
+
+        async def synthesize_stream(
+            self,
+            text: str,
+            voice_id: str | None = None,  # noqa: ARG002
+        ) -> AsyncIterator[bytes]:
+            self.calls.append(text)
+            yield bytes(320)
+            tts_entered.set()
+            await release_tts.wait()
+
+    stt = _SlowFakeSTT(transcripts=["hello team", "hey Johnny stop"])
+    router = _SwitchingRouterLLM(
+        router_decisions=[
+            {
+                "should_speak": True,
+                "confidence": 0.95,
+                "reason": "greeting",
+                "suggested_reply": "Hi everyone",
+            },
+            {
+                "should_speak": False,
+                "confidence": 0.1,
+                "reason": "stop command — nothing to say",
+            },
+        ],
+        barge_in_decisions=[
+            {
+                "should_interrupt": True,
+                "category": "stop",
+                "reason": "user wants the bot to stop",
+            },
+        ],
+    )
+    bus = InMemoryEventBus()
+    tsink = InMemoryTranscriptSink()
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=stt,
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["A long winded greeting reply."]),
+        tts=_StallingTTS(),
+        event_bus=bus,
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            session_id="barge-in-stop",
+        ),
+        transcript_sink=tsink,
+    )
+
+    run_task = asyncio.create_task(pipeline.run())
+
+    # Wait until the bot is wedged inside TTS for the first utterance.
+    await asyncio.wait_for(tts_entered.wait(), timeout=2.0)
+
+    # The second transcript ("hey Johnny stop") must reach the
+    # classifier and call interrupt() — verify by waiting until the
+    # interrupt event flips. The classifier runs as a fire-and-forget
+    # task so we poll for the side effect.
+    await _wait_until(
+        lambda: pipeline._interrupt_event.is_set(), timeout=2.0
+    )
+
+    # Release the stalling TTS so the run task can complete. Once
+    # released, the next frame yield doesn't happen (the TTS generator
+    # exits), so the response loop drains the rest of the queue.
+    release_tts.set()
+    await asyncio.wait_for(run_task, timeout=2.0)
+
+    # Both transcripts should be persisted regardless — barge-in
+    # categories (stop/correct/new_question) AND non-barge-in
+    # categories (side_chat/noise) all land in the meeting history.
+    persisted = [r.text for r in tsink.snapshot()]
+    # The four_utterance_pcm fixture has 4 speech bursts; the
+    # _FakeSTT seeds only 2 transcripts before falling back to
+    # "<exhausted>". We assert the first two — the documented
+    # transcripts — made it through.
+    assert persisted[:2] == ["hello team", "hey Johnny stop"]
+
+    # The barge-in classifier must have been called at least once
+    # (for the second transcript while the bot was wedged in TTS).
+    assert len(router.barge_in_calls) >= 1
+    classifier_user_msg = router.barge_in_calls[0][1].content or ""
+    assert "hey Johnny stop" in classifier_user_msg
+
+
+@pytest.mark.parametrize(
+    "category,should_interrupt",
+    [
+        ("stop", True),
+        ("correct", True),
+        ("new_question", True),
+        ("side_chat", False),
+        ("noise", False),
+    ],
+)
+async def test_barge_in_category_drives_interrupt_decision(
+    two_utterance_pcm: bytes,
+    category: str,
+    should_interrupt: bool,
+) -> None:
+    """Each classifier category maps to the documented interrupt behaviour."""
+    transport = _BufferedTransport(frames=_frames_from_pcm(two_utterance_pcm))
+
+    release_tts = asyncio.Event()
+    tts_entered = asyncio.Event()
+
+    class _StallingTTS(TTSProvider):
+        @property
+        def name(self) -> str:
+            return "stalling-tts"
+
+        async def synthesize_stream(
+            self,
+            text: str,  # noqa: ARG002
+            voice_id: str | None = None,  # noqa: ARG002
+        ) -> AsyncIterator[bytes]:
+            yield bytes(320)
+            tts_entered.set()
+            await release_tts.wait()
+
+    router = _SwitchingRouterLLM(
+        router_decisions=[
+            {"should_speak": True, "confidence": 0.95, "reason": "greet"},
+            {"should_speak": False, "confidence": 0.1, "reason": "skip"},
+        ],
+        barge_in_decisions=[
+            {
+                "should_interrupt": should_interrupt,
+                "category": category,
+                "reason": f"test verdict: {category}",
+            },
+        ],
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_SlowFakeSTT(transcripts=["hi", "follow-up"]),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["a reply"]),
+        tts=_StallingTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+
+    run_task = asyncio.create_task(pipeline.run())
+    await asyncio.wait_for(tts_entered.wait(), timeout=2.0)
+
+    # Wait for the classifier task to fire at least once.
+    await _wait_until(
+        lambda: len(router.barge_in_calls) >= 1, timeout=2.0
+    )
+    # Give the verdict a beat to propagate through the gen guard +
+    # interrupt() call.
+    await asyncio.sleep(0.05)
+    if should_interrupt:
+        await _wait_until(
+            lambda: pipeline._interrupt_event.is_set(), timeout=1.0
+        )
+    assert pipeline._interrupt_event.is_set() is should_interrupt
+
+    release_tts.set()
+    await asyncio.wait_for(run_task, timeout=2.0)
+
+
+async def test_barge_in_classifier_skipped_when_bot_idle(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Transcripts arriving while the bot is idle don't trigger classifier calls."""
+    transport = _BufferedTransport(frames=_frames_from_pcm(two_utterance_pcm))
+    router = _SwitchingRouterLLM(
+        router_decisions=[
+            {"should_speak": False, "confidence": 0.1, "reason": "skip"},
+        ],
+        # Don't seed any barge-in verdicts — if the classifier IS
+        # called, the default falls back to no-interrupt but we still
+        # want to assert no calls were made.
+        barge_in_decisions=[],
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two"]),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+    await pipeline.run()
+
+    # Bot decided not to speak (should_speak=False) — no answer ever
+    # started, so each subsequent transcript saw _response_in_flight
+    # cycle (briefly true → false) between transcripts. The router
+    # call for transcript 2 happens after transcript 1's response loop
+    # completes naturally, so the classifier never sees in_flight=True.
+    # The exact race depends on scheduling, but barge_in_calls should
+    # remain zero because the response loop never blocks long enough
+    # for transcript 2 to arrive while in-flight.
+    assert router.barge_in_calls == []
+
+
+async def test_barge_in_disabled_by_config(
+    four_utterance_pcm: bytes,
+) -> None:
+    """enable_barge_in=False suppresses the classifier even when bot is busy."""
+    transport = _BufferedTransport(frames=_frames_from_pcm(four_utterance_pcm))
+
+    release_tts = asyncio.Event()
+    tts_entered = asyncio.Event()
+
+    class _StallingTTS(TTSProvider):
+        @property
+        def name(self) -> str:
+            return "stalling-tts"
+
+        async def synthesize_stream(
+            self,
+            text: str,  # noqa: ARG002
+            voice_id: str | None = None,  # noqa: ARG002
+        ) -> AsyncIterator[bytes]:
+            yield bytes(320)
+            tts_entered.set()
+            await release_tts.wait()
+
+    router = _SwitchingRouterLLM(
+        router_decisions=[
+            {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+            {"should_speak": False, "confidence": 0.1, "reason": "skip"},
+        ],
+        barge_in_decisions=[
+            {"should_interrupt": True, "category": "stop", "reason": "would interrupt"},
+        ],
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_SlowFakeSTT(
+            transcripts=["hi", "stop please", "and another", "fourth"]
+        ),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["reply"]),
+        tts=_StallingTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            enable_barge_in=False,
+        ),
+    )
+
+    run_task = asyncio.create_task(pipeline.run())
+    await asyncio.wait_for(tts_entered.wait(), timeout=2.0)
+    # Let transcripts 2-4 arrive while bot is wedged.
+    await asyncio.sleep(0.2)
+
+    # Classifier must not be called at all.
+    assert router.barge_in_calls == []
+    # And interrupt must not have fired.
+    assert pipeline._interrupt_event.is_set() is False
+
+    release_tts.set()
+    await asyncio.wait_for(run_task, timeout=2.0)
+
+
+@pytest.mark.parametrize(
+    "mode,speak",
+    [
+        ("listen_only", True),
+        ("suggest_only", True),
+        ("limited_auto_speak", False),
+    ],
+)
+async def test_barge_in_skipped_in_non_speaking_modes(
+    four_utterance_pcm: bytes,
+    mode: str,
+    speak: bool,
+) -> None:
+    """Non-speaking modes don't run the classifier — interrupt would no-op."""
+    transport = _BufferedTransport(frames=_frames_from_pcm(four_utterance_pcm))
+    router = _SwitchingRouterLLM(
+        router_decisions=[
+            {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+        ],
+        barge_in_decisions=[
+            {"should_interrupt": True, "category": "stop", "reason": "x"},
+        ],
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two", "three", "four"]),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["reply"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            mode=mode,
+            speak=speak,
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+    await pipeline.run()
+
+    assert router.barge_in_calls == []
+    assert pipeline._interrupt_event.is_set() is False
+
+
+async def test_barge_in_classifier_prompt_includes_bot_context(
+    four_utterance_pcm: bytes,
+) -> None:
+    """The classifier prompt names the bot's role and offers the last suggested reply."""
+    transport = _BufferedTransport(frames=_frames_from_pcm(four_utterance_pcm))
+
+    release_tts = asyncio.Event()
+    tts_entered = asyncio.Event()
+
+    class _StallingTTS(TTSProvider):
+        @property
+        def name(self) -> str:
+            return "stalling-tts"
+
+        async def synthesize_stream(
+            self,
+            text: str,  # noqa: ARG002
+            voice_id: str | None = None,  # noqa: ARG002
+        ) -> AsyncIterator[bytes]:
+            yield bytes(320)
+            tts_entered.set()
+            await release_tts.wait()
+
+    router = _SwitchingRouterLLM(
+        router_decisions=[
+            {
+                "should_speak": True,
+                "confidence": 0.95,
+                "reason": "ok",
+                "suggested_reply": "Talking about the Q3 roadmap",
+            },
+        ],
+        barge_in_decisions=[
+            {"should_interrupt": False, "category": "noise", "reason": "cough"},
+        ],
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_SlowFakeSTT(
+            transcripts=["topic please", "cough cough", "x", "y"]
+        ),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["the long reply"]),
+        tts=_StallingTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            instructions="Speak only about engineering",
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+
+    run_task = asyncio.create_task(pipeline.run())
+    await asyncio.wait_for(tts_entered.wait(), timeout=2.0)
+    await _wait_until(lambda: len(router.barge_in_calls) >= 1, timeout=2.0)
+
+    classifier_msgs = router.barge_in_calls[0]
+    system_msg = classifier_msgs[0]
+    user_msg = classifier_msgs[1]
+    assert system_msg.role == "system"
+    assert system_msg.content is not None
+    # The system prompt anchors the bot's role.
+    assert "barge-in" in system_msg.content.lower()
+    # Categories must be listed so the classifier knows what to return.
+    assert "stop" in system_msg.content
+    assert "correct" in system_msg.content
+    assert "new_question" in system_msg.content
+    assert "side_chat" in system_msg.content
+    assert "noise" in system_msg.content
+    # Meeting instructions flow through so the classifier can tell
+    # on-topic from off-topic correction attempts.
+    assert "Speak only about engineering" in system_msg.content
+
+    assert user_msg.role == "user"
+    assert user_msg.content is not None
+    # User message includes the bot's last suggested reply for context.
+    assert "Q3 roadmap" in user_msg.content
+    # And the actual participant transcript being classified.
+    assert "cough cough" in user_msg.content
+
+    release_tts.set()
+    await asyncio.wait_for(run_task, timeout=2.0)
+
+
+async def test_barge_in_classifier_failure_does_not_interrupt(
+    four_utterance_pcm: bytes,
+) -> None:
+    """An exception in the classifier leaves the bot running (safe default)."""
+    transport = _BufferedTransport(frames=_frames_from_pcm(four_utterance_pcm))
+
+    release_tts = asyncio.Event()
+    tts_entered = asyncio.Event()
+
+    class _StallingTTS(TTSProvider):
+        @property
+        def name(self) -> str:
+            return "stalling-tts"
+
+        async def synthesize_stream(
+            self,
+            text: str,  # noqa: ARG002
+            voice_id: str | None = None,  # noqa: ARG002
+        ) -> AsyncIterator[bytes]:
+            yield bytes(320)
+            tts_entered.set()
+            await release_tts.wait()
+
+    class _BrokenClassifierRouter(_SwitchingRouterLLM):
+        async def chat(
+            self,
+            messages: Sequence[ChatMessage],
+            tools: Sequence[ToolDefinition] | None = None,
+            response_format: dict[str, Any] | None = None,
+        ) -> LLMResponse:
+            if self._is_barge_in_format(response_format):
+                self.barge_in_calls.append(list(messages))
+                raise RuntimeError("classifier upstream failure")
+            return await super().chat(messages, tools, response_format)
+
+    router = _BrokenClassifierRouter(
+        router_decisions=[
+            {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+        ],
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_SlowFakeSTT(
+            transcripts=["hi", "another", "three", "four"]
+        ),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["reply"]),
+        tts=_StallingTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+
+    run_task = asyncio.create_task(pipeline.run())
+    await asyncio.wait_for(tts_entered.wait(), timeout=2.0)
+    # Wait for at least one classifier failure to log.
+    await _wait_until(lambda: len(router.barge_in_calls) >= 1, timeout=2.0)
+    await asyncio.sleep(0.05)
+
+    # Despite the classifier crashing, the bot keeps going.
+    assert pipeline._interrupt_event.is_set() is False
+
+    release_tts.set()
+    await asyncio.wait_for(run_task, timeout=2.0)
+
+
+async def test_barge_in_stale_verdict_does_not_interrupt_next_response(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Classifier verdict arriving after the response generation moved on is dropped.
+
+    A delayed classifier captures gen=N, but by the time its verdict
+    returns the response loop is on gen=N+1 (the original response
+    completed naturally). The generation guard MUST drop the late
+    interrupt — without it, the user's NEW response would be aborted
+    by a verdict that was meant for the PREVIOUS one.
+    """
+    transport = _BufferedTransport(frames=_frames_from_pcm(two_utterance_pcm))
+
+    classifier_gate = asyncio.Event()
+    classifier_entered = asyncio.Event()
+    captured_gen: list[int] = []
+
+    class _DelayedClassifierRouter(_SwitchingRouterLLM):
+        async def chat(
+            self,
+            messages: Sequence[ChatMessage],
+            tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
+            response_format: dict[str, Any] | None = None,
+        ) -> LLMResponse:
+            if self._is_barge_in_format(response_format):
+                self.barge_in_calls.append(list(messages))
+                captured_gen.append(pipeline._response_generation)
+                classifier_entered.set()
+                # Hold the verdict until the test opens the gate.
+                await classifier_gate.wait()
+                payload = {
+                    "should_interrupt": True,
+                    "category": "stop",
+                    "reason": "stale verdict — must not fire",
+                }
+                return LLMResponse(
+                    text=json.dumps(payload),
+                    finish_reason="stop",
+                    structured_output=payload,
+                )
+            return await super().chat(messages, tools, response_format)
+
+    release_first_tts = asyncio.Event()
+    first_tts_entered = asyncio.Event()
+    second_tts_entered = asyncio.Event()
+    release_second_tts = asyncio.Event()
+    tts_call_count = 0
+
+    class _GatedTTS(TTSProvider):
+        @property
+        def name(self) -> str:
+            return "gated-tts"
+
+        async def synthesize_stream(
+            self,
+            text: str,  # noqa: ARG002
+            voice_id: str | None = None,  # noqa: ARG002
+        ) -> AsyncIterator[bytes]:
+            nonlocal tts_call_count
+            tts_call_count += 1
+            if tts_call_count == 1:
+                yield bytes(320)
+                first_tts_entered.set()
+                await release_first_tts.wait()
+            else:
+                yield bytes(320)
+                second_tts_entered.set()
+                await release_second_tts.wait()
+
+    router = _DelayedClassifierRouter(
+        router_decisions=[
+            {"should_speak": True, "confidence": 0.95, "reason": "ok-1"},
+            {"should_speak": True, "confidence": 0.95, "reason": "ok-2"},
+        ],
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_SlowFakeSTT(transcripts=["first turn", "second turn"]),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["reply"]),
+        tts=_GatedTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+
+    run_task = asyncio.create_task(pipeline.run())
+
+    # Wait for the bot to start its first response.
+    await asyncio.wait_for(first_tts_entered.wait(), timeout=2.0)
+    # Wait for the classifier (for transcript 2) to ENTER the gate so
+    # we know it captured the first response's generation.
+    await asyncio.wait_for(classifier_entered.wait(), timeout=2.0)
+    assert len(captured_gen) == 1, (
+        f"expected exactly one classifier call (for utterance 2), "
+        f"got {len(captured_gen)} (gens: {captured_gen})"
+    )
+    gen_when_classifier_started = captured_gen[0]
+
+    # Release the first TTS so the response loop completes utterance 1.
+    # The classifier is still held by the gate.
+    release_first_tts.set()
+    # Wait for the SECOND response to start.
+    await asyncio.wait_for(second_tts_entered.wait(), timeout=2.0)
+    assert pipeline._response_generation > gen_when_classifier_started, (
+        f"expected generation to advance past {gen_when_classifier_started}, "
+        f"but current is {pipeline._response_generation}"
+    )
+
+    # Release the classifier. Its captured gen is now stale —
+    # gen_when_classifier_started < pipeline._response_generation —
+    # so the gen guard MUST drop the interrupt.
+    classifier_gate.set()
+
+    # Give the verdict a chance to (incorrectly) fire.
+    await asyncio.sleep(0.1)
+
+    assert pipeline._interrupt_event.is_set() is False, (
+        "stale classifier verdict aborted a response it was not meant to"
+    )
+
+    # Let the second TTS finish so the pipeline can drain.
+    release_second_tts.set()
+    await asyncio.wait_for(run_task, timeout=3.0)
+
+
+# --- _parse_barge_in_response unit tests ---------------------------------
+
+
+def test_parse_barge_in_response_with_structured_output() -> None:
+    from johnny.voice_pipeline.pipeline import _parse_barge_in_response
+
+    resp = LLMResponse(
+        text="",
+        finish_reason="stop",
+        structured_output={
+            "should_interrupt": True,
+            "category": "stop",
+            "reason": "user said stop",
+        },
+    )
+    d = _parse_barge_in_response(resp)
+    assert d.should_interrupt is True
+    assert d.category == "stop"
+    assert d.reason == "user said stop"
+
+
+def test_parse_barge_in_response_falls_back_to_text_json() -> None:
+    from johnny.voice_pipeline.pipeline import _parse_barge_in_response
+
+    resp = LLMResponse(
+        text=(
+            '{"should_interrupt": false, "category": "noise", '
+            '"reason": "cough"}'
+        ),
+        finish_reason="stop",
+    )
+    d = _parse_barge_in_response(resp)
+    assert d.should_interrupt is False
+    assert d.category == "noise"
+
+
+def test_parse_barge_in_response_no_structured_output_returns_safe_default() -> None:
+    from johnny.voice_pipeline.pipeline import _parse_barge_in_response
+
+    resp = LLMResponse(text="garbage not json", finish_reason="stop")
+    d = _parse_barge_in_response(resp)
+    assert d.should_interrupt is False
+    assert d.category == "noise"
+
+
+def test_parse_barge_in_response_unknown_category_defaults_to_noise() -> None:
+    from johnny.voice_pipeline.pipeline import _parse_barge_in_response
+
+    resp = LLMResponse(
+        text="",
+        finish_reason="stop",
+        structured_output={
+            "should_interrupt": True,
+            "category": "interrupt_immediately",  # not in BARGE_IN_CATEGORIES
+            "reason": "x",
+        },
+    )
+    d = _parse_barge_in_response(resp)
+    assert d.category == "noise"
+    # Unknown category cannot fire an interrupt.
+    assert d.should_interrupt is False
+
+
+def test_parse_barge_in_response_should_interrupt_downgraded_for_noise() -> None:
+    """A buggy classifier saying noise+interrupt is downgraded to no-interrupt."""
+    from johnny.voice_pipeline.pipeline import _parse_barge_in_response
+
+    resp = LLMResponse(
+        text="",
+        finish_reason="stop",
+        structured_output={
+            "should_interrupt": True,
+            "category": "noise",
+            "reason": "bug",
+        },
+    )
+    d = _parse_barge_in_response(resp)
+    assert d.category == "noise"
+    assert d.should_interrupt is False
+
+
+def test_parse_barge_in_response_should_interrupt_downgraded_for_side_chat() -> None:
+    from johnny.voice_pipeline.pipeline import _parse_barge_in_response
+
+    resp = LLMResponse(
+        text="",
+        finish_reason="stop",
+        structured_output={
+            "should_interrupt": True,
+            "category": "side_chat",
+            "reason": "bug",
+        },
+    )
+    d = _parse_barge_in_response(resp)
+    assert d.should_interrupt is False
+
+
+def test_barge_in_config_default_enabled() -> None:
+    cfg = PipelineConfig()
+    assert cfg.enable_barge_in is True
+
+
+def test_barge_in_config_can_disable() -> None:
+    cfg = PipelineConfig(enable_barge_in=False)
+    assert cfg.enable_barge_in is False
