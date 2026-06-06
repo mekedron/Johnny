@@ -177,6 +177,32 @@ in-flight precondition was satisfied — otherwise the test could pass
 because there was nothing to interrupt, which would be a regression
 in disguise.
 
+### Provider seed file shape is the interchange format (Johnny-d3e / Johnny-k3z)
+`/config/providers.json` (and the future export endpoint Johnny-k3z)
+share a single schema defined in
+`app/services/providers_seed.py::parse_providers_file`. Shape:
+```json
+{
+  "version": 1,
+  "providers": [
+    {"kind": "stt|llm|tts", "provider_name": "...",
+     "display_name": "...", "credentials": {...},
+     "options": {...}, "is_active": true}
+  ]
+}
+```
+Any change to the schema MUST bump `SUPPORTED_FILE_VERSION` and update
+both sides (seeder + export). The seeder is wired into
+`app/main.py`'s lifespan after `seed_initial_templates`; modes are
+controlled by `JOHNNY_PROVIDERS_FILE` (path) and
+`JOHNNY_PROVIDERS_SEED_MODE` (`insert-only` default, `overwrite`, or
+`disabled`). The mount is `./config:/config:ro` so the API never
+writes back. Activation of `is_active=true` rows uses a bulk
+`UPDATE ... WHERE kind=X AND id != target` per kind at the END of
+the loop (not row-by-row) so the partial unique index
+`(kind) WHERE is_active` is never transiently violated. Same write
+the `POST /providers/{id}/activate` endpoint performs.
+
 ### Bot's own utterances live in `_transcript_history` as `Bot (you)` (Johnny-7qp)
 The pipeline now mixes participant transcripts AND the bot's own
 utterances into a single `_transcript_history` list so the router /
@@ -558,4 +584,77 @@ second prompt because the prompt builder slices `history[:current_pos]`.
     behind one call site — five lines instead of forty per test.
     Worth the small abstraction because the fast-path test surface is
     going to grow as we tune the threshold per meeting.
+---
+
+## 2026-06-06 - Johnny-d3e
+- Added a JSON-file seeder so the user can commit a `providers.json`
+  alongside the stack and have provider rows auto-reconciled on every
+  API boot. The file shape is the canonical interchange format for
+  this seeder AND the export endpoint (Johnny-k3z, still open) — both
+  sides must move together if the schema changes.
+- New module `app/services/providers_seed.py`:
+  - `SeedMode` enum: `INSERT_ONLY` (default), `OVERWRITE`, `DISABLED`.
+    Default is the safest: missing rows get inserted, existing rows
+    are left alone (UI edits survive). `OVERWRITE` re-encrypts
+    credentials, replaces options, and syncs `is_active`. `DISABLED`
+    is a kill switch.
+  - `parse_providers_file(path)` validates shape strictly: version
+    must be `1`, every entry needs a valid `kind` enum + non-empty
+    `provider_name` + `display_name`; `credentials` must be a string
+    map (no nulls); `options` must be a JSON object; `is_active`
+    must be a real bool. Rejects the file as a whole on any error
+    so a partial parse never leaves the DB half-seeded.
+  - `seed_providers_from_file(session, crypto, ...)` returns a
+    `SeedResult` dataclass tracking created / updated / skipped /
+    activated entries. Logs a one-line summary per run.
+  - Activation handling: collects all `is_active=true` entries, picks
+    the last per kind (matching how the activate endpoint behaves),
+    deactivates siblings via a bulk UPDATE so the partial unique
+    index `(kind) WHERE is_active` is never violated. Warns when the
+    file declares multiple actives for the same kind.
+- Wired into `app/main.py` lifespan after `seed_initial_templates`.
+  Wrapped in the same try/except pattern: a malformed file logs a
+  warning, the API still boots.
+- docker-compose.yml: bind-mounted `./config:/config:ro` into the api
+  and worker services (read-only so the API can't write back to the
+  source-of-truth file), exported `JOHNNY_PROVIDERS_FILE` and
+  `JOHNNY_PROVIDERS_SEED_MODE` to both. Created an empty `config/`
+  directory with a `.gitkeep` so the bind mount works on a fresh
+  clone, plus `config/providers.example.json` showing the shape.
+- `.env.example` documents both env vars with the same defaults the
+  compose file ships.
+- Files changed:
+  - `backend/app/services/providers_seed.py` (new)
+  - `backend/app/main.py` (lifespan hook)
+  - `backend/tests/services/test_providers_seed.py` (new, 46 tests)
+  - `docker-compose.yml` (bind mount + env vars)
+  - `config/.gitkeep` (new)
+  - `config/providers.example.json` (new)
+  - `.env.example` (documentation)
+- **Learnings:**
+  - Defining `SUPPORTED_FILE_VERSION = 1` as a constant + a parse-time
+    version check is cheap insurance: any future change to the file
+    shape forces an intentional bump that ripples through both the
+    seeder and the export endpoint (Johnny-k3z). A test pinning the
+    constant catches accidental drift.
+  - The active-per-kind partial unique index means we can't naively
+    flip `is_active=true` row-by-row inside a single transaction —
+    the second row of the same kind would violate the index even if
+    the first one was about to be deactivated. The fix is to collect
+    all activation requests during the row loop, then do a bulk
+    `UPDATE ... WHERE kind=X AND id != target` for each kind at the
+    end (one round-trip per kind). Mirrors what the
+    `POST /providers/{id}/activate` endpoint does, so the two paths
+    stay in sync.
+  - Coercing credential values to strings (`str(val)` for any int /
+    float that sneaks into the JSON) is correct because the encrypted
+    blob shape is `dict[str, str]` — `decrypt_json` would otherwise
+    reject the value on read. A test pins this so a future user who
+    exports a port number as an int doesn't get a runtime decrypt
+    failure mid-meeting.
+  - In `OVERWRITE` mode, an explicit `is_active=false` MUST clear the
+    flag (not leave it as-is) — otherwise an export → edit → re-import
+    roundtrip can't deactivate a provider, which would be surprising.
+    Insert-only mode never touches the flag because the whole point
+    of that mode is "don't clobber UI state".
 ---

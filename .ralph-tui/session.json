@@ -3,10 +3,10 @@
   "sessionId": "79f70c67-bb19-4cbc-940f-b02dbec38449",
   "status": "running",
   "startedAt": "2026-06-06T07:53:57.289Z",
-  "updatedAt": "2026-06-06T09:32:59.780Z",
-  "currentIteration": 5,
+  "updatedAt": "2026-06-06T09:42:31.192Z",
+  "currentIteration": 6,
   "maxIterations": 0,
-  "tasksCompleted": 5,
+  "tasksCompleted": 6,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -171,6 +171,16 @@
       "durationMs": 1102199,
       "startedAt": "2026-06-06T08:58:50.427Z",
       "endedAt": "2026-06-06T09:17:12.626Z"
+    },
+    {
+      "iteration": 6,
+      "status": "completed",
+      "taskId": "Johnny-7qp",
+      "taskTitle": "Bot loses conversation context mid-session: can't recall its own prior utterances",
+      "taskCompleted": true,
+      "durationMs": 939433,
+      "startedAt": "2026-06-06T09:17:19.503Z",
+      "endedAt": "2026-06-06T09:32:58.936Z"
     }
   ],
   "skippedTaskIds": [],

@@ -41,6 +41,16 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         logger.warning("template seeding skipped: %s", exc)
 
     try:
+        from app.db.session import session_scope
+        from app.security.crypto import get_crypto
+        from app.services.providers_seed import seed_providers_from_file
+
+        with session_scope() as session:
+            seed_providers_from_file(session, get_crypto())
+    except Exception as exc:  # noqa: BLE001 — seeding must never crash boot
+        logger.warning("providers seeding skipped: %s", exc)
+
+    try:
         from app.api.sessions import set_launcher
         from app.services.docker_launcher import (
             DockerContainerLauncher,

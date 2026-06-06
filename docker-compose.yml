@@ -14,6 +14,8 @@ x-backend-env: &backend-env
   DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
   ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
   JOHNNY_CALENDAR_POLL_INTERVAL_SECONDS: ${JOHNNY_CALENDAR_POLL_INTERVAL_SECONDS:-300}
+  JOHNNY_PROVIDERS_FILE: ${JOHNNY_PROVIDERS_FILE:-/config/providers.json}
+  JOHNNY_PROVIDERS_SEED_MODE: ${JOHNNY_PROVIDERS_SEED_MODE:-insert-only}
   JOHNNY_USE_DOCKER_LAUNCHER: ${JOHNNY_USE_DOCKER_LAUNCHER:-true}
   JOHNNY_MEET_WORKER_IMAGE: ${JOHNNY_MEET_WORKER_IMAGE:-johnny-meet-worker:latest}
   # docker compose prefixes volume names with the project name (default
@@ -94,6 +96,13 @@ services:
       # The API mounts it read-write so a setup helper can seed cookies;
       # the meet-worker mounts the same volume read-only.
       - google_auth_state:/var/lib/johnny/google-auth
+      # Provider config seed (Johnny-d3e). The api auto-imports
+      # ``/config/providers.json`` on startup so a committed export
+      # (Johnny-k3z) is re-applied after a clean stack reset.
+      # Read-only: the seeder never writes back here. Mount is
+      # optional — the seeder silently skips when the directory is
+      # absent so a fresh checkout without a ./config dir still boots.
+      - ./config:/config:ro
     healthcheck:
       test:
         - "CMD"

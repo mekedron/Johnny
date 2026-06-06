@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "kind": "stt",
+      "provider_name": "deepgram",
+      "display_name": "Deepgram primary",
+      "credentials": {
+        "api_key": "REPLACE_WITH_DEEPGRAM_KEY"
+      },
+      "options": {
+        "model": "nova-2"
+      },
+      "is_active": true
+    },
+    {
+      "kind": "llm",
+      "provider_name": "openai",
+      "display_name": "OpenAI primary",
+      "credentials": {
+        "api_key": "REPLACE_WITH_OPENAI_KEY"
+      },
+      "options": {
+        "model": "gpt-4o-mini"
+      },
+      "is_active": true
+    },
+    {
+      "kind": "tts",
+      "provider_name": "elevenlabs",
+      "display_name": "ElevenLabs primary",
+      "credentials": {
+        "api_key": "REPLACE_WITH_ELEVENLABS_KEY"
+      },
+      "options": {
+        "voice_id": "21m00Tcm4TlvDq8ikWAM"
+      },
+      "is_active": true
+    }
+  ]
+}
