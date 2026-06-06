@@ -99,3 +99,22 @@ Refactored provider settings UI from generic Credentials/Options textareas into 
 - Anthropic adapter's old default model `claude-3-5-haiku-20241022` 404s on newer accounts; the schema's select option list now leads with `claude-haiku-4-5` to match the Johnny-upg learning. Same pattern for Gemini (`gemini-2.5-flash` first).
 
 ---
+
+## 2026-06-06 — Johnny-kgc
+
+Closed the Johnny — Google Meet AI Meeting Bot epic. All 39 child user stories (US-001 through US-034 plus follow-up beads Johnny-61y, Johnny-f7k, Johnny-mma, Johnny-mxx, Johnny-q1x) were already closed in prior iterations. This iteration is the epic close-out itself — no new code, just verification that every child is `✓` and a progress-log entry.
+
+**What was verified**
+- `bd show Johnny-kgc` reports `39/39 complete (100%) — eligible for close`. Every US-NNN child carries the `✓` glyph.
+- The parent epic Johnny-ckz (join-stuck bug + Test-event harness) is the only remaining work in the Johnny-kgc tree and stays open: it is not a child of Johnny-kgc, so closing the bot epic does not affect it.
+- `bd list --status=open` shows only three items left in the entire project: Johnny-ckz (parent epic), Johnny-466 (openai-realtime adapter deprecated), Johnny-jrd (mislabeled ELEVENLABS_API_KEY). Both Johnny-466 and Johnny-jrd were filed by the Johnny-upg harness and have remedies recorded in their bead notes — they are downstream of Johnny-kgc, not part of it.
+
+**Files changed**
+- `.ralph-tui/progress.md` — this entry.
+
+**Learnings**
+- A 100%-complete epic still shows up under `bd list --status=in_progress` until somebody explicitly runs `bd close`; the "eligible for close" line at the bottom of `bd show` is the only hint. Periodically scan in-progress epics whose children are all `✓` to keep the dashboard honest — a forgotten parent epic distorts both `bd ready` and `bd stats`.
+- Closing a parent epic does NOT cascade to its children — closing Johnny-kgc leaves Johnny-ckz (its own parent), Johnny-466, and Johnny-jrd untouched. That is the right semantic (those issues are independent in scope) but means epic-close is purely a bookkeeping action: the value is in the closed signal, not in any side-effect on related work.
+- The Codebase Patterns block at the top of `progress.md` is the right place for *durable* discoveries (provider plan = SoT, e2e_ui marker, `field_schema()` SoT); per-iteration learnings (specific provider model rot, Svelte 5 `{@const}` placement) stay in the dated entries so the top stays scannable.
+
+---
