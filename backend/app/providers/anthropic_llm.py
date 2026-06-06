@@ -85,6 +85,11 @@ class AnthropicLLM(LLMProvider):
     * ``max_tokens`` — required by Anthropic; the adapter defaults to
       ``1024``.
     * ``temperature`` — sampling temperature; default ``0.7`` (0.0 honored).
+    * ``top_p`` — nucleus sampling; default unset (model default).
+    * ``top_k`` — top-k sampling; default unset (model default).
+    * ``disable_thinking`` — suppress Anthropic extended thinking. Default
+      ``True`` (the adapter never enables extended thinking today; the
+      flag is forward-compatible).
     * ``timeout_s`` — HTTP timeout in seconds; default ``60``.
     """
 
@@ -108,6 +113,11 @@ class AnthropicLLM(LLMProvider):
             raise ValueError(f"max_tokens must be positive; got {max_tokens}")
         self._max_tokens = max_tokens
         self._temperature = float(opts.get("temperature", DEFAULT_TEMPERATURE))
+        top_p = opts.get("top_p")
+        self._top_p: float | None = float(top_p) if top_p is not None else None
+        top_k = opts.get("top_k")
+        self._top_k: int | None = int(top_k) if top_k is not None else None
+        self._disable_thinking = bool(opts.get("disable_thinking", True))
         self._timeout_s = float(opts.get("timeout_s") or DEFAULT_TIMEOUT_S)
         self._client = self._create_client()
 
@@ -175,6 +185,35 @@ class AnthropicLLM(LLMProvider):
                     group=FieldGroup.ADVANCED,
                 ),
                 FieldDef(
+                    name="top_p",
+                    label="Top-p (nucleus sampling)",
+                    type=FieldType.NUMBER,
+                    placeholder="(leave blank for model default)",
+                    help_text="Restrict sampling to tokens whose cumulative probability exceeds this value (0-1).",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="top_k",
+                    label="Top-k",
+                    type=FieldType.NUMBER,
+                    placeholder="(leave blank for model default)",
+                    help_text="Restrict sampling to the top K most-likely tokens.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="disable_thinking",
+                    label="Disable thinking / reasoning",
+                    type=FieldType.CHECKBOX,
+                    default=True,
+                    help_text=(
+                        "Suppress Anthropic extended thinking. This adapter "
+                        "does not enable extended thinking by default, so "
+                        "leaving this checked keeps requests deterministic; "
+                        "the flag is reserved for future opt-in support."
+                    ),
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
                     name="base_url",
                     label="API base URL",
                     type=FieldType.URL,
@@ -218,6 +257,18 @@ class AnthropicLLM(LLMProvider):
     def temperature(self) -> float:
         return self._temperature
 
+    @property
+    def top_p(self) -> float | None:
+        return self._top_p
+
+    @property
+    def top_k(self) -> int | None:
+        return self._top_k
+
+    @property
+    def disable_thinking(self) -> bool:
+        return self._disable_thinking
+
     def _create_client(self) -> httpx.AsyncClient:
         """Build the underlying HTTP client. Overridable in tests."""
         return httpx.AsyncClient(timeout=self._timeout_s)
@@ -235,6 +286,10 @@ class AnthropicLLM(LLMProvider):
             "messages": request_messages,
             "temperature": self._temperature,
         }
+        if self._top_p is not None:
+            body["top_p"] = self._top_p
+        if self._top_k is not None:
+            body["top_k"] = self._top_k
         if system_text:
             body["system"] = system_text
         if tools:

@@ -10,6 +10,7 @@ other OpenAI-compatible endpoint, prefer the generic
 from __future__ import annotations
 
 from dataclasses import replace as dc_replace
+from typing import Any
 
 from app.providers.base import ProviderConfig, ProviderKind, get_registry
 from app.providers.openai_compatible_llm import OpenAICompatibleLLM
@@ -24,6 +25,7 @@ from app.providers.schema import (
 PROVIDER_NAME = "openai"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-4o-mini"
+_REASONING_MODEL_PREFIXES = ("o1", "o3", "o4", "gpt-5")
 
 
 class OpenAILLM(OpenAICompatibleLLM):
@@ -114,6 +116,51 @@ class OpenAILLM(OpenAICompatibleLLM):
                     group=FieldGroup.ADVANCED,
                 ),
                 FieldDef(
+                    name="top_p",
+                    label="Top-p (nucleus sampling)",
+                    type=FieldType.NUMBER,
+                    placeholder="(leave blank for model default)",
+                    help_text="Restrict sampling to tokens whose cumulative probability exceeds this value (0-1).",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="frequency_penalty",
+                    label="Frequency penalty",
+                    type=FieldType.NUMBER,
+                    placeholder="(leave blank for model default)",
+                    help_text="Penalize tokens proportional to how often they have appeared so far (-2 to 2).",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="presence_penalty",
+                    label="Presence penalty",
+                    type=FieldType.NUMBER,
+                    placeholder="(leave blank for model default)",
+                    help_text="Penalize tokens that have already appeared at all (-2 to 2). Encourages topic novelty.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="seed",
+                    label="Seed",
+                    type=FieldType.NUMBER,
+                    placeholder="(leave blank for random)",
+                    help_text="Integer seed for deterministic sampling. Best-effort on OpenAI.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="disable_thinking",
+                    label="Disable thinking / reasoning",
+                    type=FieldType.CHECKBOX,
+                    default=False,
+                    help_text=(
+                        "For reasoning models (o1 / o3 / o4 / gpt-5), set "
+                        "'reasoning_effort: minimal' so the model spends as "
+                        "little time as possible on internal reasoning. "
+                        "No effect on gpt-4o / gpt-4.1."
+                    ),
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
                     name="max_tokens",
                     label="Max tokens",
                     type=FieldType.NUMBER,
@@ -129,6 +176,24 @@ class OpenAILLM(OpenAICompatibleLLM):
                 ),
             ),
         )
+
+    def _apply_disable_thinking_to_body(self, body: dict[str, Any]) -> None:
+        """Use OpenAI's native ``reasoning_effort`` knob on reasoning models.
+
+        For o-series and gpt-5 family models the API accepts
+        ``reasoning_effort: "minimal"`` which steers the model to the
+        shortest possible reasoning trace. Non-reasoning models would
+        reject the field, so it is only added when the configured model
+        looks like a reasoning model. The Ollama-specific ``think`` knob
+        from the parent class is deliberately *not* sent here — OpenAI's
+        endpoint can reject unknown body keys depending on flags.
+        """
+        if self._model.startswith(_REASONING_MODEL_PREFIXES):
+            body["reasoning_effort"] = "minimal"
+
+    def _disable_thinking_system_prefix(self) -> str | None:
+        """OpenAI models do not recognise ``/no_think``; skip the prefix."""
+        return None
 
 
 def register(*, replace: bool = False) -> None:

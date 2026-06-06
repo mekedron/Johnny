@@ -5,160 +5,57 @@ after each iteration and it's included in prompts for context.
 
 ## Codebase Patterns (Study These First)
 
-### Web Audio playback on a click-handler-await chain
-When the AudioContext is constructed AFTER `await getUserMedia(...)`, Chrome's
-autoplay policy can leave it in `suspended` state — every scheduled
-`createBufferSource().start()` plays silently. ALWAYS call `await
-audioCtx.resume()` immediately after `new AudioContext(...)` in any
-flow that starts from a click handler but awaits other work first.
-See `frontend/src/lib/browserAudio.ts` (Johnny-ckz.11). Also resume
-on every playback frame as belt-and-suspenders for tab-focus loss.
+### chrome-devtools MCP validation pattern (Johnny project top rule)
 
-### Per-session browser pipeline runner registry
-Browser-source sessions hold an in-process `BrowserSessionRunner`
-keyed by `bot_session_id`. The WebSocket endpoint looks the runner up,
-shares its transport, and on disconnect schedules a grace timer
-(`DISCONNECT_GRACE_SECONDS = 60`) + silent-drain task so the pipeline
-keeps running for tab-close + reopen. See
-`backend/app/api/browser_sessions.py::_schedule_disconnect_watchdog`.
+The project's CLAUDE.md mandates real-browser validation via the
+**chrome-devtools MCP** for every UI-visible change. Pattern for any
+validation task:
 
-### Pipeline.feed_text() — text→TTS injection
-`VoicePipeline.feed_text(text)` publishes a `TranscriptFinalized` and
-queues it on `_response_queue` so the router → answer → TTS path runs
-exactly as it would for a transcribed voice utterance. Used by the
-playground's text-input fallback (mic-denied / mic-muted). See
-`backend/johnny/voice_pipeline/pipeline.py`.
+1. `./scripts/start-chrome.sh` (idempotent — runs only if Chrome isn't already attached at `127.0.0.1:9222`).
+2. `ToolSearch select:mcp__chrome-devtools__{list_pages,new_page,navigate_page,take_snapshot,take_screenshot,click,fill,evaluate_script,list_console_messages,list_network_requests,wait_for}` (and others as needed) — schemas are deferred and must be loaded before calling.
+3. Screenshots / artifacts must go to a path within the workspace root (e.g. `.validation-ckz10-artifacts/`) — `/tmp` is rejected with "Access denied: path is not within any of the workspace roots".
+4. NEVER use `claude-in-chrome` MCP. Project rule + global rule in `/Users/nikita/.claude/rules/common/browser-automation.md`.
+5. After each chrome-devtools tool call the `selected` page can be reset to the default — use `pageId` consistently on every subsequent call, OR call `select_page` once and trust it. Most failures of `evaluate_script` returning "No page found" come from a stale page selection.
+
+### Beads issue tracking (NO TaskCreate / TodoWrite in this project)
+
+`CLAUDE.md` is explicit: use `bd` for all task tracking. Even when the
+harness gently reminds you to use TaskCreate, ignore it for this project.
+
+- New issue: `bd create --title="…" --description="…" --type=bug|task|feature --priority=0..4 --db /Users/nikita/Projects/Johnny/.beads/beads.db`
+- Link to epic: `bd update <id> --parent <epic-id> --db …`
+- Add notes (long-form, supports markdown + `[[wiki-links]]` to other issues): `bd update <id> --notes "$(cat …)" --db …`
+- Close: `bd close <id> --reason "…" --db …`
+- The wiki-link target is the issue's `description` slug; `bd` resolves them lazily so a `[[link]]` to a not-yet-existing issue is fine.
+
+### Playground architecture (for future validation runs)
+
+- `/playground` page is configuration + start. After Start the live UI re-uses the same panel; the per-session detail page is at `/sessions/{id}` and offers a "Reopen playground" link back to `/playground?session={id}`.
+- Audio plumbing lives in `frontend/src/lib/browserAudio.ts` — it opens a WebSocket to `/ws/sessions/{id}/audio`, captures mic via `getUserMedia` → `AudioWorkletNode` → 16 kHz PCM frames as binary WS messages, and plays incoming binary frames through an `AudioContext` + `GainNode`. **At time of Johnny-ckz.10 validation, the page never actually called `startBrowserAudioSession` — see Johnny-c8t.**
+- BROWSER badge on active-sessions sidebar is the visual marker that distinguishes playground sessions from `source: meet` sessions.
 
 ---
 
-## 2026-06-06 - Johnny-ckz.11
+## 2026-06-06 - Johnny-ckz.10
 
-### What was implemented
-Critical audio playback bug fix + comprehensive playground UI overhaul.
+### What was done
 
-**Audio fix (the critical bug):**
-- Root cause: `AudioContext` constructed after `await getUserMedia` could
-  land in `suspended` state on Chrome (autoplay policy). Every
-  `createBufferSource().start()` ran silently.
-- `browserAudio.ts` now calls `await audioCtx.resume()` after creation
-  and again on each playback frame as a guard against tab-focus loss.
-- Verified end-to-end via chrome-devtools MCP: `AudioContext.state ===
-  'running'`, 41 `BufferSource.start()` calls scheduled at advancing
-  timestamps after the bot replied.
-
-**Playground configuration UI:**
-- Decision mode picker exposes all 6 `BotMode` values; switching mode
-  drives the same router / approval / TTS code paths as a real meeting.
-- Template picker pulls from `/templates`; selected template's
-  `base_instructions` + `base_context` are stitched into the effective
-  system prompt.
-- STT / LLM / TTS provider override pickers (in an Advanced section)
-  pull from `/providers`; each row defaults to "Use active default".
-- Context-injection textarea is appended to the system prompt as
-  `Additional context` so the playground can simulate per-event
-  surfaces without a calendar event.
-- Persona + custom system prompt kept from before.
-
-**Live UI improvements:**
-- Idle / Listening / Thinking / Speaking state indicator driven by
-  speaking flag + mic level + recent router-decision timestamps.
-- Active-config chips (mode / template / STT / LLM / TTS / persona)
-  so the user can verify settings without leaving the live view.
-- Speaker volume slider routes through a new `GainNode` between
-  `BufferSource` and `audioCtx.destination`.
-- Mic level meter (10 Hz RMS sampling via `AnalyserNode`).
-- Independent mic + speaker mute toggles.
-- Live transcript pane (left) + controls pane (right), responsive
-  to single-column on tablet/mobile.
-
-**Tab-close survival + reopen:**
-- WS disconnect now schedules a 60 s grace timer instead of tearing
-  down the transport. A concurrent silent-drain task absorbs TTS
-  frames produced while no tab is attached.
-- Re-attach within the grace window cancels both timer + drain. After
-  the grace expires the watchdog calls `transport.stop()` and the
-  pipeline exits cleanly, marking the session ENDED.
-- A second tab attaching while one is already connected is refused
-  with `{"type":"ended","reason":"session already attached"}`.
-- Session-detail page shows a "Reopen playground" button for
-  browser-source rows in non-terminal states; it links to
-  `/playground?session=ID`.
-- Playground page detects `?session=ID`, fetches `/sessions/{id}`,
-  hydrates persona / system_prompt / mode from `playground_overrides`,
-  seeds the transcript pane from history, and starts a fresh audio
-  WS against the live runner.
-
-**Text input now drives the full pipeline:**
-- `VoicePipeline.feed_text(text)` injects typed input as a
-  `TranscriptFinalized` and queues it for the response loop. Router /
-  answer / TTS run identically to a voice utterance.
-- `/sessions/browser/{id}/text` endpoint calls `pipeline.feed_text`
-  when the runner is alive; falls back to persisting a chunk if not.
-
-**Backend schema:**
-- `BotSessionRead` (regular `/sessions/active`, `/sessions/{id}`)
-  surfaces `audio_ws_path` for browser-source rows so the
-  session-detail page can offer Reopen.
-- `playground_overrides` is also exposed on the read model.
+Pure verification (no code changed). Drove `/playground`, `/sessions/{id}`, `/calendar` (Try with bot button), and the sidebar through chrome-devtools MCP to validate the 8 acceptance bullets from Johnny-ckz.6. Captured screenshots to `.validation-ckz10-artifacts/`. Filed 4 follow-up bugs under epic Johnny-ckz for the gaps. Wrote a per-check verdict trace into Johnny-ckz.10's notes.
 
 ### Files changed
-**Frontend**
-- `frontend/src/lib/browserAudio.ts` — AudioContext resume, GainNode,
-  mute toggles, mic level meter, speaking-state callback.
-- `frontend/src/lib/sessions.ts` — BotSession adds `audio_ws_path` +
-  `playground_overrides`.
-- `frontend/src/routes/playground/+page.svelte` — total rewrite
-  covering all config knobs, state indicators, live controls,
-  reattach via `?session=ID`, hydrated transcript.
-- `frontend/src/routes/sessions/[id]/+page.svelte` — Reopen
-  playground button for browser-source live sessions.
 
-**Backend**
-- `backend/app/api/browser_sessions.py` — disconnect grace timer,
-  silent drain, second-tab refusal, text endpoint drives pipeline,
-  runner captures pipeline reference via on_assembled callback.
-- `backend/app/api/sessions.py` — `BotSessionRead` exposes
-  `audio_ws_path` + `playground_overrides`.
-- `backend/app/services/browser_pipeline_runner.py` —
-  `run_browser_pipeline` accepts `on_assembled` callback so the API
-  layer can capture the assembled pipeline.
-- `backend/johnny/voice_pipeline/pipeline.py` — `feed_text(text)`
-  injects typed input as a finalised transcript.
-
-**Tests**
-- `backend/tests/voice_pipeline/test_pipeline.py` — 2 new tests for
-  `feed_text` (drives router→answer→TTS; rejects empty).
-- `backend/tests/api/test_browser_sessions.py` — 3 new tests
-  (active endpoint surfaces audio_ws_path, session detail surfaces
-  audio_ws_path, disconnect watchdog round-trip).
-
-**Verification**
-- Frontend `pnpm check`: 0 errors, 0 warnings.
-- Backend pytest (voice_pipeline + browser_sessions + sessions):
-  338 passed, 2 skipped.
-- chrome-devtools MCP screenshots in
-  `.ralph-tui/iterations/playground-*.png`.
+- No application code changed.
+- `.ralph-tui/progress.md` (this file) updated with the reusable patterns above.
+- `.validation-ckz10-artifacts/*.png` — 6 screenshots from the chrome-devtools MCP trace.
+- 4 new beads filed: Johnny-c8t (P0), Johnny-31g (P1), Johnny-klh (P1), Johnny-wyd (P1).
 
 ### Learnings
-- **AudioContext autoplay-policy gotcha** — see the pattern at the
-  top of this file. This was the single root cause of the
-  "transcription appears but no sound" bug.
-- **Per-tab session ownership** — pipeline needs a TTL after WS
-  disconnect, not immediate teardown, otherwise accidental tab close
-  loses the session. A silent-drain coroutine is necessary so the
-  unbounded playback queue doesn't accumulate frames during the
-  grace window.
-- **HMR doesn't help across docker-compose** — the frontend
-  container bakes source at build time, so iterating UI changes
-  requires `docker compose up -d --build frontend`. (Confirmed by
-  observing the page render the prior page version after a code
-  edit + reload without a rebuild.)
-- **chrome-devtools MCP probe pattern for closure-private state** —
-  the audio module's `AudioContext` and `GainNode` live in a closure.
-  Inject an `initScript` that wraps `AudioContext`, captures every
-  instance on `window.__lastAudioCtx`, and patches
-  `AudioParam.value` setter to snapshot writes globally. That gave
-  hard evidence for the audio-fix proof (state running, 41 frames
-  scheduled, gain.value written by slider drag).
+
+- The configuration UI half of Johnny-ckz.6 / Johnny-ckz.11 is well-built (mode picker, template picker, persona, advanced disclosure with per-session STT/LLM/TTS overrides, volume slider, mute mic/speaker buttons, BROWSER badge, Reopen playground link). The plumbing half (WebSocket audio path, conversation reply loop) is **completely missing or silently failing** despite the "audio ready" badge in the UI.
+- `browserAudio.ts` exists and looks correct in isolation, but the playground page never wires it up — none of the 113 network requests over a 3-minute session is a WebSocket.
+- faster-whisper hallucinates aggressively on silence (`Does Olam A.P.I.`, Welsh-shaped strings, `. . . .`). These are getting saved into `bot_sessions.transcripts` with `speaker = NULL` and pollute the conversation feed.
+- The barge-in classifier shares the user's "active" LLM choice — which in this stack is a 35B Qwen model that times out 5×/session under `httpx`'s default read timeout. Worker logs are noisy and every timeout is a silently-missed interrupt.
+- "Try with bot" on a calendar event whose times are nonsensical (`end < start`) can silently trigger an auto-spawn of a real `meet-worker-session-{id}` container that fails on Meet's "Join now" selector. Out of scope for Johnny-ckz.6 but worth tracking if it recurs.
+- Per-check timing: chrome-devtools MCP `click` + `wait_for` round-trip adds noticeable wall-clock overhead (3-10 s in practice). Cannot use wall-clock alone to assert sub-3s budgets — instrument the page directly or use the network response timing.
 
 ---

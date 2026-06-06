@@ -92,6 +92,15 @@ class OpenAICompatibleLLM(LLMProvider):
       injects tool definitions into the system prompt and parses
       ``<tool_call>{...}</tool_call>`` markers from the assistant message.
     * ``temperature`` — sampling temperature; default ``0.7``.
+    * ``top_p`` — nucleus sampling; default unset (server default).
+    * ``top_k`` — top-k sampling; default unset (server default).
+    * ``frequency_penalty`` — repeat penalty; default unset.
+    * ``presence_penalty`` — novelty penalty; default unset.
+    * ``seed`` — deterministic sampling seed; default unset.
+    * ``disable_thinking`` — for Qwen3 / DeepSeek-R1-style models served by
+      Ollama, sends top-level ``think: false`` and prepends ``/no_think``
+      to the first system message. Harmless on servers that don't honor
+      it. Default ``False``.
     * ``max_tokens`` — response length cap; default unset.
     * ``timeout_s`` — HTTP timeout in seconds; default ``60``.
 
@@ -130,6 +139,21 @@ class OpenAICompatibleLLM(LLMProvider):
         self._max_tokens: int | None = (
             int(max_tokens) if max_tokens is not None else None
         )
+        top_p = opts.get("top_p")
+        self._top_p: float | None = float(top_p) if top_p is not None else None
+        top_k = opts.get("top_k")
+        self._top_k: int | None = int(top_k) if top_k is not None else None
+        freq_pen = opts.get("frequency_penalty")
+        self._frequency_penalty: float | None = (
+            float(freq_pen) if freq_pen is not None else None
+        )
+        pres_pen = opts.get("presence_penalty")
+        self._presence_penalty: float | None = (
+            float(pres_pen) if pres_pen is not None else None
+        )
+        seed = opts.get("seed")
+        self._seed: int | None = int(seed) if seed is not None else None
+        self._disable_thinking = bool(opts.get("disable_thinking", False))
         self._timeout_s = float(opts.get("timeout_s") or DEFAULT_TIMEOUT_S)
         self._client = self._create_client()
 
@@ -200,6 +224,59 @@ class OpenAICompatibleLLM(LLMProvider):
                     group=FieldGroup.ADVANCED,
                 ),
                 FieldDef(
+                    name="top_p",
+                    label="Top-p (nucleus sampling)",
+                    type=FieldType.NUMBER,
+                    placeholder="(leave blank for server default)",
+                    help_text="Restrict sampling to tokens whose cumulative probability exceeds this value (0-1).",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="top_k",
+                    label="Top-k",
+                    type=FieldType.NUMBER,
+                    placeholder="(Ollama / llama.cpp only)",
+                    help_text="Restrict sampling to the top K most-likely tokens. Honored by Ollama / llama.cpp; ignored by OpenAI.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="frequency_penalty",
+                    label="Frequency penalty",
+                    type=FieldType.NUMBER,
+                    placeholder="(leave blank for server default)",
+                    help_text="Penalize tokens proportional to how often they have appeared so far (-2 to 2).",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="presence_penalty",
+                    label="Presence penalty",
+                    type=FieldType.NUMBER,
+                    placeholder="(leave blank for server default)",
+                    help_text="Penalize tokens that have already appeared at all (-2 to 2). Encourages topic novelty.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="seed",
+                    label="Seed",
+                    type=FieldType.NUMBER,
+                    placeholder="(leave blank for random)",
+                    help_text="Integer seed for deterministic sampling. Best-effort on most servers.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="disable_thinking",
+                    label="Disable thinking / reasoning",
+                    type=FieldType.CHECKBOX,
+                    default=False,
+                    help_text=(
+                        "For Qwen3 / DeepSeek-R1 via Ollama: send top-level "
+                        "'think: false' and prepend '/no_think' to the first "
+                        "system message. Harmless on servers that don't "
+                        "honor it."
+                    ),
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
                     name="max_tokens",
                     label="Max tokens",
                     type=FieldType.NUMBER,
@@ -236,6 +313,30 @@ class OpenAICompatibleLLM(LLMProvider):
     def max_tokens(self) -> int | None:
         return self._max_tokens
 
+    @property
+    def top_p(self) -> float | None:
+        return self._top_p
+
+    @property
+    def top_k(self) -> int | None:
+        return self._top_k
+
+    @property
+    def frequency_penalty(self) -> float | None:
+        return self._frequency_penalty
+
+    @property
+    def presence_penalty(self) -> float | None:
+        return self._presence_penalty
+
+    @property
+    def seed(self) -> int | None:
+        return self._seed
+
+    @property
+    def disable_thinking(self) -> bool:
+        return self._disable_thinking
+
     def _create_client(self) -> httpx.AsyncClient:
         """Build the underlying HTTP client. Overridable in tests."""
         return httpx.AsyncClient(timeout=self._timeout_s)
@@ -249,6 +350,10 @@ class OpenAICompatibleLLM(LLMProvider):
         request_messages = [_message_to_dict(m) for m in messages]
         if tools and self._tool_format == "hermes":
             request_messages = _inject_hermes_tools(request_messages, tools)
+        if self._disable_thinking:
+            prefix = self._disable_thinking_system_prefix()
+            if prefix:
+                request_messages = _prepend_system_text(request_messages, prefix)
 
         body: dict[str, Any] = {
             "model": self._model,
@@ -257,6 +362,18 @@ class OpenAICompatibleLLM(LLMProvider):
         }
         if self._max_tokens is not None:
             body["max_tokens"] = self._max_tokens
+        if self._top_p is not None:
+            body["top_p"] = self._top_p
+        if self._top_k is not None:
+            body["top_k"] = self._top_k
+        if self._frequency_penalty is not None:
+            body["frequency_penalty"] = self._frequency_penalty
+        if self._presence_penalty is not None:
+            body["presence_penalty"] = self._presence_penalty
+        if self._seed is not None:
+            body["seed"] = self._seed
+        if self._disable_thinking:
+            self._apply_disable_thinking_to_body(body)
         if tools and self._tool_format == "openai":
             body["tools"] = [_tool_to_dict(t) for t in tools]
         if response_format is not None:
@@ -294,6 +411,27 @@ class OpenAICompatibleLLM(LLMProvider):
     async def close(self) -> None:
         with contextlib.suppress(Exception):
             await self._client.aclose()
+
+    def _apply_disable_thinking_to_body(self, body: dict[str, Any]) -> None:
+        """Mutate ``body`` so the upstream model skips its reasoning trace.
+
+        Default behavior targets Ollama's ``think`` parameter: setting it
+        to ``false`` (top-level, not nested under ``options``) suppresses
+        the ``<think>...</think>`` chain on Qwen3 / DeepSeek-R1-style
+        models. Servers that don't honor it (OpenAI, vLLM, OpenRouter)
+        ignore unknown body keys. Subclasses override this when they
+        prefer a different mechanism (e.g. OpenAI's ``reasoning_effort``).
+        """
+        body["think"] = False
+
+    def _disable_thinking_system_prefix(self) -> str | None:
+        """Return text to prepend to the first system message, or ``None``.
+
+        Default is ``/no_think``, which Qwen3 honors as a per-turn opt-out
+        token. Models that don't recognize the token treat it as ordinary
+        system text. Subclasses return ``None`` to skip the injection.
+        """
+        return "/no_think"
 
     def _parse_response(
         self,
@@ -431,6 +569,25 @@ def _tool_to_dict(tool: ToolDefinition) -> dict[str, Any]:
             "parameters": tool.parameters,
         },
     }
+
+
+def _prepend_system_text(
+    messages: list[dict[str, Any]],
+    prefix: str,
+) -> list[dict[str, Any]]:
+    """Prepend ``prefix`` to the first system message, inserting one if absent.
+
+    Used by the disable-thinking flag to add ``/no_think`` (Qwen3) or any
+    other control token to the system context without overwriting the
+    user's own system prompt.
+    """
+    out = [dict(m) for m in messages]
+    if out and out[0].get("role") == "system":
+        existing = out[0].get("content") or ""
+        out[0]["content"] = f"{prefix}\n{existing}".rstrip()
+    else:
+        out.insert(0, {"role": "system", "content": prefix})
+    return out
 
 
 def _inject_hermes_tools(

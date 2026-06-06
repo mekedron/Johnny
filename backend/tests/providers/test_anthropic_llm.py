@@ -182,6 +182,28 @@ def test_init_default_timeout() -> None:
     assert adapter._timeout_s == pytest.approx(DEFAULT_TIMEOUT_S)
 
 
+def test_init_top_p_defaults_to_none() -> None:
+    adapter = AnthropicLLM(_config())
+    assert adapter.top_p is None
+    assert adapter.top_k is None
+
+
+def test_init_respects_top_p_and_top_k() -> None:
+    adapter = AnthropicLLM(_config(top_p=0.92, top_k=40))
+    assert adapter.top_p == pytest.approx(0.92)
+    assert adapter.top_k == 40
+
+
+def test_init_disable_thinking_defaults_true() -> None:
+    adapter = AnthropicLLM(_config())
+    assert adapter.disable_thinking is True
+
+
+def test_init_disable_thinking_explicit_false() -> None:
+    adapter = AnthropicLLM(_config(disable_thinking=False))
+    assert adapter.disable_thinking is False
+
+
 # --- Request shape ---------------------------------------------------------
 
 
@@ -224,6 +246,39 @@ async def test_chat_body_includes_model_and_max_tokens() -> None:
     body = json.loads(adapter.requests[0].content)
     assert body["model"] == "claude-3-5-sonnet-20241022"
     assert body["max_tokens"] == 512
+
+
+async def test_chat_body_includes_top_p_and_top_k_when_set() -> None:
+    adapter = _FakeAnthropicLLM(
+        _config(top_p=0.9, top_k=20),
+        handler=_ok_handler(_messages_response()),
+    )
+    await adapter.chat([ChatMessage(role="user", content="hi")])
+    body = json.loads(adapter.requests[0].content)
+    assert body["top_p"] == pytest.approx(0.9)
+    assert body["top_k"] == 20
+
+
+async def test_chat_body_omits_top_p_and_top_k_when_unset() -> None:
+    adapter = _FakeAnthropicLLM(_config(), handler=_ok_handler(_messages_response()))
+    await adapter.chat([ChatMessage(role="user", content="hi")])
+    body = json.loads(adapter.requests[0].content)
+    assert "top_p" not in body
+    assert "top_k" not in body
+
+
+async def test_chat_body_never_sets_thinking_field() -> None:
+    # The Anthropic adapter does not enable extended thinking today; the
+    # disable_thinking flag is forward-compat. Either value of the flag
+    # should leave 'thinking' absent from the request body.
+    for value in (True, False):
+        adapter = _FakeAnthropicLLM(
+            _config(disable_thinking=value),
+            handler=_ok_handler(_messages_response()),
+        )
+        await adapter.chat([ChatMessage(role="user", content="hi")])
+        body = json.loads(adapter.requests[0].content)
+        assert "thinking" not in body
 
 
 async def test_chat_promotes_system_message_to_top_level() -> None:

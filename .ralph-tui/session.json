@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "sessionId": "3749d6fd-2087-45da-97b9-e587604101a9",
+  "sessionId": "47618889-b8db-42d2-988e-f3dbe0c65c3c",
   "status": "running",
-  "startedAt": "2026-06-06T13:00:57.169Z",
-  "updatedAt": "2026-06-06T13:41:38.351Z",
+  "startedAt": "2026-06-06T13:41:52.273Z",
+  "updatedAt": "2026-06-06T13:55:56.725Z",
   "currentIteration": 0,
   "maxIterations": 0,
   "tasksCompleted": 0,
@@ -236,7 +236,7 @@
       {
         "id": "Johnny-ckz.11",
         "title": "Playground / live mode: no audio playback (critical) + needs template-driven mode picker, volume control, and resume-from-session-page UX",
-        "status": "open",
+        "status": "completed",
         "completedInSession": false
       },
       {

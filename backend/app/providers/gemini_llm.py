@@ -84,6 +84,11 @@ class GeminiLLM(LLMProvider):
     * ``base_url`` — API base URL; defaults to Google's public endpoint.
     * ``max_output_tokens`` — response length cap; default ``1024``.
     * ``temperature`` — sampling temperature; default ``0.7`` (0.0 honored).
+    * ``top_p`` — nucleus sampling; default unset (model default).
+    * ``top_k`` — top-k sampling; default unset (model default).
+    * ``disable_thinking`` — for Gemini 2.5+ models, set the thinking
+      budget to 0 so the model returns answers immediately without an
+      internal chain-of-thought trace. Default ``False``.
     * ``timeout_s`` — HTTP timeout in seconds; default ``60``.
     """
 
@@ -108,6 +113,11 @@ class GeminiLLM(LLMProvider):
             )
         self._max_output_tokens = max_output_tokens
         self._temperature = float(opts.get("temperature", DEFAULT_TEMPERATURE))
+        top_p = opts.get("top_p")
+        self._top_p: float | None = float(top_p) if top_p is not None else None
+        top_k = opts.get("top_k")
+        self._top_k: int | None = int(top_k) if top_k is not None else None
+        self._disable_thinking = bool(opts.get("disable_thinking", False))
         self._timeout_s = float(opts.get("timeout_s") or DEFAULT_TIMEOUT_S)
         self._client = self._create_client()
 
@@ -164,6 +174,34 @@ class GeminiLLM(LLMProvider):
                     group=FieldGroup.ADVANCED,
                 ),
                 FieldDef(
+                    name="top_p",
+                    label="Top-p (nucleus sampling)",
+                    type=FieldType.NUMBER,
+                    placeholder="(leave blank for model default)",
+                    help_text="Restrict sampling to tokens whose cumulative probability exceeds this value (0-1).",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="top_k",
+                    label="Top-k",
+                    type=FieldType.NUMBER,
+                    placeholder="(leave blank for model default)",
+                    help_text="Restrict sampling to the top K most-likely tokens.",
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="disable_thinking",
+                    label="Disable thinking / reasoning",
+                    type=FieldType.CHECKBOX,
+                    default=False,
+                    help_text=(
+                        "For Gemini 2.5 models, set the thinking budget to 0 "
+                        "so responses skip the internal reasoning trace and "
+                        "return faster. No effect on Gemini 1.5 models."
+                    ),
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
                     name="base_url",
                     label="API base URL",
                     type=FieldType.URL,
@@ -196,6 +234,18 @@ class GeminiLLM(LLMProvider):
     def temperature(self) -> float:
         return self._temperature
 
+    @property
+    def top_p(self) -> float | None:
+        return self._top_p
+
+    @property
+    def top_k(self) -> int | None:
+        return self._top_k
+
+    @property
+    def disable_thinking(self) -> bool:
+        return self._disable_thinking
+
     def _create_client(self) -> httpx.AsyncClient:
         """Build the underlying HTTP client. Overridable in tests."""
         return httpx.AsyncClient(timeout=self._timeout_s)
@@ -211,6 +261,14 @@ class GeminiLLM(LLMProvider):
             "temperature": self._temperature,
             "maxOutputTokens": self._max_output_tokens,
         }
+        if self._top_p is not None:
+            generation_config["topP"] = self._top_p
+        if self._top_k is not None:
+            generation_config["topK"] = self._top_k
+        if self._disable_thinking:
+            # Gemini 2.5+ supports a zero thinking budget; 1.5 models
+            # silently ignore the field, so this is safe to always send.
+            generation_config["thinkingConfig"] = {"thinkingBudget": 0}
         if response_format is not None:
             generation_config["responseMimeType"] = "application/json"
             schema = _extract_response_schema(response_format)
