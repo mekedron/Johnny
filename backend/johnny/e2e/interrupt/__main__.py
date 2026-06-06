@@ -22,7 +22,14 @@ import logging
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+from johnny.e2e.interrupt.real_providers import (
+    RealProviderError,
+    load_real_providers,
+)
+from johnny.e2e.interrupt.real_runner import run_suite_real
+from johnny.e2e.interrupt.real_speaker import warm_cache
 from johnny.e2e.interrupt.report import SuiteReport, render_summary, write_report
 from johnny.e2e.interrupt.runner import run_suite
 from johnny.e2e.interrupt.scenarios import SCENARIOS, scenarios_by_name
@@ -33,6 +40,20 @@ def _default_artifact_root() -> Path:
     # ``__file__`` is .../Johnny/backend/johnny/e2e/interrupt/__main__.py.
     # parents[4] is the repo root.
     return Path(__file__).resolve().parents[4] / "tests" / "e2e" / "artifacts"
+
+
+def _default_speech_cache_root() -> Path:
+    """``<repo>/backend/tests/e2e/interrupt/fixtures/speech``."""
+    # ``__file__`` is .../Johnny/backend/johnny/e2e/interrupt/__main__.py.
+    # parents[3] is the ``backend`` package root.
+    return (
+        Path(__file__).resolve().parents[3]
+        / "tests"
+        / "e2e"
+        / "interrupt"
+        / "fixtures"
+        / "speech"
+    )
 
 
 def _artifact_dir(root: Path) -> Path:
@@ -68,6 +89,42 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Enable DEBUG logging.",
     )
+    parser.add_argument(
+        "--real",
+        action="store_true",
+        help=(
+            "Use real STT/LLM/TTS adapters from a providers.json file "
+            "instead of the scripted shims. Requires --providers-file."
+        ),
+    )
+    parser.add_argument(
+        "--providers-file",
+        type=Path,
+        help=(
+            "Path to a providers.json (the format the API seeder consumes; "
+            "see Johnny-d3e). Required when --real is set."
+        ),
+    )
+    parser.add_argument(
+        "--speech-cache-root",
+        type=Path,
+        default=_default_speech_cache_root(),
+        help=(
+            "Where pre-rendered speaker PCM is cached (default: %(default)s). "
+            "Re-used across runs so only the first run pays TTS cost."
+        ),
+    )
+    parser.add_argument(
+        "--fallback-tts-openai",
+        action="store_true",
+        help=(
+            "When --real is set, ignore the JSON's TTS rows and synthesise "
+            "an OpenAI TTS adapter from the OpenAI LLM api_key. Use this "
+            "when the configured TTS provider is unusable (e.g. ElevenLabs "
+            "credits exhausted) — explicitly opt-in so the operator knows "
+            "they're testing a different TTS than configured."
+        ),
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -84,7 +141,46 @@ def main(argv: list[str] | None = None) -> int:
     else:
         scenarios = SCENARIOS
 
-    results = asyncio.run(run_suite(scenarios))
+    if args.real:
+        if args.providers_file is None:
+            print(
+                "ERROR: --real requires --providers-file <path>",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            bundle = load_real_providers(
+                args.providers_file,
+                fallback_tts_to_openai=args.fallback_tts_openai,
+            )
+        except RealProviderError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        voice_id = getattr(bundle.tts, "_default_voice_id", None)
+        voice_label = voice_id or bundle.tts.name
+
+        async def _run() -> list[Any]:
+            try:
+                await warm_cache(
+                    bundle.tts,
+                    list(scenarios),
+                    cache_root=args.speech_cache_root,
+                    voice_label=voice_label,
+                    voice_id=voice_id,
+                )
+                return await run_suite_real(
+                    list(scenarios),
+                    bundle,
+                    cache_root=args.speech_cache_root,
+                    voice_label=voice_label,
+                    voice_id=voice_id,
+                )
+            finally:
+                await bundle.aclose()
+
+        results = asyncio.run(_run())
+    else:
+        results = asyncio.run(run_suite(list(scenarios)))
     report = SuiteReport(scenarios=results)
 
     if not args.no_artifacts:

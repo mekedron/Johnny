@@ -1,0 +1,61 @@
+{
+  "all_passed": true,
+  "exit_code": 0,
+  "artifact_dir": "/Users/nikita/Projects/Johnny/tests/e2e/artifacts/2026-06-06T11-35-41Z-interrupt",
+  "scenarios": [
+    {
+      "name": "stop_interrupts_long_answer",
+      "description": "Speaker prompts the bot ('tell me about yourself'), bot starts a long monologue, speaker says 'stop'. Bot MUST cut TTS within 500 ms of speech onset, MUST NOT emit any follow-up utterance.",
+      "duration_s": 14.921280707989354,
+      "assertions": [
+        {
+          "name": "all_expected_transcripts_persisted",
+          "passed": true,
+          "detail": "persisted=['Tell me about yourself.', 'Stop, please.']; expected_keywords=['tell', 'stop']; missing_keywords=[]"
+        },
+        {
+          "name": "first_agent_spoke_truncated",
+          "passed": true,
+          "detail": "audio_duration_ms=437 vs floor=4500 (must be strictly less)"
+        },
+        {
+          "name": "interrupt_to_cut_latency_budget",
+          "passed": true,
+          "detail": "delta_ms=1157 vs budget=1500ms"
+        },
+        {
+          "name": "bot_did_not_emit_followup_utterance",
+          "passed": true,
+          "detail": "agent_spoke_count=1 (must be \u2264 1)"
+        },
+        {
+          "name": "all_expected_transcripts_on_event_bus",
+          "passed": true,
+          "detail": "bus_texts=['Tell me about yourself.', 'Stop, please.']; missing_keywords=[]"
+        }
+      ],
+      "transcripts_persisted": [
+        "Tell me about yourself.",
+        "Stop, please."
+      ],
+      "utterances_persisted": [
+        {
+          "mode": "limited_auto_speak",
+          "output_text": "Hello! I'm Johnny, your AI meeting assistant designed to help you manage and navigate your meetings more efficiently. I have expertise in summarizing discussions, answering questions about meeting content, and providing detailed explanations when needed. Currently, I'm working on assisting you by keeping track of meeting transcripts and offering insights or summaries on demand. Feel free to ask me anything about the meeting or my capabilities, and I'll do my best to assist you.",
+          "audio_duration_ms": 437
+        }
+      ],
+      "agent_spoke_durations_ms": [
+        437
+      ],
+      "interrupt_event_set": false,
+      "fast_barge_in_count": 1,
+      "classifier_calls": 0,
+      "played_frame_count": 6,
+      "interrupt_to_cut_ms": null,
+      "transcript_landing_ms_by_tag": {},
+      "error": null,
+      "passed": true
+    }
+  ]
+}

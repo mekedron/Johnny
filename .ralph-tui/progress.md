@@ -43,6 +43,24 @@ a network-touching fix works. Don't rely on `MockTransport` alone for
 network-shape bugs — that's how the original Johnny-4c0 fix missed the
 307 redirect (the mock pretended HF returns 200 directly).
 
+### Interrupt harness has a `--real` mode that hits real STT/LLM/TTS
+
+The default `python -m johnny.e2e.interrupt` uses scripted providers
+(deterministic, fast, 4/4 PASS in <30 s). The `--real --providers-file
+<path>` mode swaps in real Deepgram + OpenAI adapters from a
+`providers.json` and pre-renders the synthetic speaker's audio through
+the configured TTS so real STT can transcribe it. Cached PCM lives in
+`backend/tests/e2e/interrupt/fixtures/speech/`. Use
+`--fallback-tts-openai` when the configured TTS is unusable (e.g.
+ElevenLabs out of credits): it builds an OpenAI TTS adapter from the
+OpenAI LLM api_key.
+
+Real-mode assertions are FUZZY on transcript text (Deepgram returns
+proper capitalisation + punctuation) and wider on latency (2 s
+interrupt-to-cut vs scripted 500 ms; 45 s scenario timeout). Real
+silences need to be 8 s after each speech event so the bot's real STT
+→ LLM → TTS chain (~4–6 s) finishes before the next speaker event.
+
 ---
 
 ## 2026-06-06 - Johnny-ckz.5
@@ -131,3 +149,69 @@ dirs from Docker named volumes to host bind mounts under `~/.johnny/`.
 
 ---
 
+## 2026-06-06 - Johnny-ckz.4
+
+Added a **real-provider mode** to the existing in-process interrupt
+harness so it can be driven against actual Deepgram STT + OpenAI LLM +
+OpenAI TTS (the configured ElevenLabs key turned out to have exhausted
+credits — a real-world finding) using credentials from
+``/Users/nikita/Downloads/johnny-providers-2026-06-06.json``.
+
+**Files changed:**
+
+- ``backend/johnny/e2e/interrupt/real_providers.py`` (new) —
+  ``load_real_providers`` parses the JSON the seeder consumes,
+  instantiates real adapters via the production registry. Default STT
+  excludes ``faster-whisper`` (host typically lacks the model);
+  ``fallback_tts_to_openai`` synthesises OpenAI TTS from the OpenAI
+  LLM api_key when the configured TTS row is unusable.
+- ``backend/johnny/e2e/interrupt/real_speaker.py`` (new) — pre-renders
+  speaker phrases via TTS; caches PCM + JSON sidecar on disk.
+- ``backend/johnny/e2e/interrupt/real_runner.py`` (new) — runs the
+  scripted scenarios against a real ``VoicePipeline`` wired to real
+  adapters. Uses fuzzy keyword-containment assertions, widens latency
+  budgets (2 s interrupt-to-cut, 45 s scenario timeout), pads 8 s
+  after each speech event.
+- ``backend/johnny/e2e/interrupt/__main__.py`` — adds ``--real``,
+  ``--providers-file``, ``--speech-cache-root``, and
+  ``--fallback-tts-openai`` flags.
+- ``backend/tests/e2e/interrupt/test_real_providers.py`` (new) — 8
+  unit tests.
+
+**Verification:**
+
+- ``uv run python -m johnny.e2e.interrupt --no-artifacts`` (scripted)
+  — 4/4 scenarios pass across 3 consecutive runs (stable).
+- ``uv run python -m johnny.e2e.interrupt --real
+  --providers-file /Users/nikita/Downloads/johnny-providers-2026-06-06.json
+  --fallback-tts-openai --only stt_keeps_running_during_bot_speech
+  cough_does_not_interrupt`` — 2/2 PASS reproducibly with real
+  Deepgram + OpenAI.
+- ``stop_interrupts_long_answer`` (real mode) passes when the LLM
+  round-trip lands under ~3 s, flakes (no AgentSpoke) on slower turns.
+  Filed Johnny-ckz.4.1.
+- ``clarification_redirects_long_answer`` (real mode) — fast barge-in
+  fires, follow-up answer emits AgentSpoke. The assertion shape
+  expecting two AgentSpokes (cut + follow-up) doesn't match real-mode
+  behavior where the cut answer publishes no AgentSpoke. Filed
+  Johnny-ckz.4.2.
+- All 41 existing interrupt tests pass; ``ruff``/``mypy`` clean.
+
+**Learnings:**
+
+- ElevenLabs' "exceeds your quota" 401 surfaces as ``TTSError`` mid-
+  pipeline; the bot's response loop catches it and the session
+  continues, but no audio plays.
+- Real Deepgram nova-3 transcribes synthesized OpenAI TTS speaker
+  audio reliably (``"Stop, please."``, ``"Tell me about yourself."``,
+  ``"Wait. What about the launch date?"``).
+- Fast barge-in (Johnny-ze3) reliably fires ~1.1 s after real speech
+  onset against the real pipeline.
+- The follow-up path (Johnny-di9) works end-to-end with real
+  providers: bot answers the new question after a ``new_question``
+  barge-in.
+- Scripted scenarios' 1.2 s inter-event silence is far too tight for
+  real-provider mode; 8 s padding after each speech event lets the
+  bot start TTS before the next speaker event arrives.
+
+---

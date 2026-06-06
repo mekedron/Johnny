@@ -3,10 +3,10 @@
   "sessionId": "8f0c3abd-f08d-40a2-8208-2be1c6e3a4bb",
   "status": "running",
   "startedAt": "2026-06-06T11:07:44.490Z",
-  "updatedAt": "2026-06-06T11:18:52.767Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-06T11:51:39.005Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -182,8 +182,8 @@
       {
         "id": "Johnny-ckz.5",
         "title": "Local Piper follow-up: voice catalog fetcher fails on HF 307 redirect, plus model dirs must move to host bind mounts (~/.johnny/...)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-466",
@@ -241,7 +241,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-ckz.5",
+      "taskTitle": "Local Piper follow-up: voice catalog fetcher fails on HF 307 redirect, plus model dirs must move to host bind mounts (~/.johnny/...)",
+      "taskCompleted": true,
+      "durationMs": 656276,
+      "startedAt": "2026-06-06T11:07:55.571Z",
+      "endedAt": "2026-06-06T11:18:51.847Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

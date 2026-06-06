@@ -1,0 +1,95 @@
+{
+  "all_passed": true,
+  "exit_code": 0,
+  "artifact_dir": "/Users/nikita/Projects/Johnny/tests/e2e/artifacts/2026-06-06T11-45-14Z-interrupt",
+  "scenarios": [
+    {
+      "name": "stt_keeps_running_during_bot_speech",
+      "description": "Reproduces the Johnny-har contract: participant speech mid-bot-utterance MUST land in the transcript sink. This is the regression that today's session-160 evidence proves is back \u2014 the 'stop' utterances never reached transcript_chunks at all.",
+      "duration_s": 33.16128425000352,
+      "assertions": [
+        {
+          "name": "all_expected_transcripts_persisted",
+          "passed": true,
+          "detail": "persisted=['Please describe the meeting bot architecture.', 'Just a side comment here.', 'And one more thing to add.']; expected_keywords=['please', 'just', 'more']; missing_keywords=[]"
+        },
+        {
+          "name": "all_expected_transcripts_on_event_bus",
+          "passed": true,
+          "detail": "bus_texts=['Please describe the meeting bot architecture.', 'Just a side comment here.', 'And one more thing to add.']; missing_keywords=[]"
+        }
+      ],
+      "transcripts_persisted": [
+        "Please describe the meeting bot architecture.",
+        "Just a side comment here.",
+        "And one more thing to add."
+      ],
+      "utterances_persisted": [
+        {
+          "mode": "limited_auto_speak",
+          "output_text": "The meeting bot architecture is designed to enable smooth and effective interaction during meetings using advanced natural language processing and real-time data analysis. It typically consists of several key components: speech recognition, which converts spoken language into text; natural language understanding, which interprets the meaning and intent behind the words; dialogue management, which keeps track of the conversation context and manages the flow; and response generation, which creates relevant replies or summaries. Additionally, the architecture integrates with calendar systems and meeting platforms to access details like meeting agendas and participant information. Together, these components allow the bot to assist users by summarizing discussions, answering questions, and providing actionable insights throughout the meeting.",
+          "audio_duration_ms": 31069
+        }
+      ],
+      "agent_spoke_durations_ms": [
+        31069
+      ],
+      "interrupt_event_set": false,
+      "fast_barge_in_count": 1,
+      "classifier_calls": 0,
+      "played_frame_count": 365,
+      "interrupt_to_cut_ms": null,
+      "transcript_landing_ms_by_tag": {},
+      "error": null,
+      "passed": true
+    },
+    {
+      "name": "cough_does_not_interrupt",
+      "description": "A short cough mid-bot-utterance MUST NOT trigger fast barge-in. VAD still finalises the cough as an utterance after the configured end_of_speech_ms silence; the classifier verdict is no-interrupt (category=noise) and the router declines to speak so the bot's answer completes in full.",
+      "duration_s": 13.960432666004635,
+      "assertions": [
+        {
+          "name": "all_expected_transcripts_persisted",
+          "passed": true,
+          "detail": "persisted=['Explain the system to me.']; expected_keywords=['explain']; missing_keywords=[]"
+        },
+        {
+          "name": "bot_completed_full_tts",
+          "passed": true,
+          "detail": "audio_duration_ms=26206 vs floor=800ms (must be \u2265)"
+        },
+        {
+          "name": "no_interrupt_event_fired",
+          "passed": true,
+          "detail": "interrupt_event_set=False fast_barge_in_count=0"
+        },
+        {
+          "name": "all_expected_transcripts_on_event_bus",
+          "passed": true,
+          "detail": "bus_texts=['Explain the system to me.']; missing_keywords=[]"
+        }
+      ],
+      "transcripts_persisted": [
+        "Explain the system to me."
+      ],
+      "utterances_persisted": [
+        {
+          "mode": "limited_auto_speak",
+          "output_text": "Certainly! This system is an AI meeting assistant named Johnny. I am designed to help facilitate meetings by providing summaries, answering questions about the discussion, and assisting with follow-ups. My expertise includes understanding meeting context, tracking action items, and offering relevant information. By interacting with me, you can get quick insights and support to make your meetings more efficient and productive.",
+          "audio_duration_ms": 26206
+        }
+      ],
+      "agent_spoke_durations_ms": [
+        26206
+      ],
+      "interrupt_event_set": false,
+      "fast_barge_in_count": 0,
+      "classifier_calls": 0,
+      "played_frame_count": 310,
+      "interrupt_to_cut_ms": null,
+      "transcript_landing_ms_by_tag": {},
+      "error": null,
+      "passed": true
+    }
+  ]
+}
