@@ -4566,6 +4566,14 @@ async def test_barge_in_classifier_failure_does_not_interrupt(
             vad_threshold=0.05,
             end_of_speech_ms=300,
             confidence_threshold=0.5,
+            # Pin classifier-only behaviour: this test exists to prove
+            # that a broken CLASSIFIER doesn't take down the bot. The
+            # Johnny-ze3 fast (VAD-driven) path is a *separate* interrupt
+            # source that bypasses the classifier entirely, so we disable
+            # it here to keep the assertion focused on classifier-fail
+            # semantics. (Fast-path coverage lives in
+            # test_fast_barge_in_*.)
+            barge_in_min_speech_ms=0,
         ),
     )
 
@@ -4710,6 +4718,564 @@ async def test_barge_in_stale_verdict_does_not_interrupt_next_response(
     # Let the second TTS finish so the pipeline can drain.
     release_second_tts.set()
     await asyncio.wait_for(run_task, timeout=3.0)
+
+
+# --- Johnny-ze3: fast (VAD-driven) barge-in -------------------------------
+
+
+def _make_test_pipeline(
+    *,
+    pcm: bytes,
+    enable_barge_in: bool = True,
+    barge_in_min_speech_ms: int = 160,
+    mode: str = "limited_auto_speak",
+    speak: bool = True,
+    stalling_tts: TTSProvider | None = None,
+) -> tuple[VoicePipeline, _BufferedTransport, _SwitchingRouterLLM]:
+    """Wire a pipeline for fast-barge-in tests.
+
+    The stalling TTS keeps the bot wedged in flight so that any speech
+    onset on a *later* utterance lands while ``_response_in_flight`` is
+    True — without that the fast path is never reachable. Tests that need
+    custom TTS pass their own; others get a default that yields one frame
+    and then waits forever (the caller releases via cancellation).
+    """
+    transport = _BufferedTransport(frames=_frames_from_pcm(pcm))
+
+    class _DefaultStallingTTS(TTSProvider):
+        @property
+        def name(self) -> str:
+            return "default-stalling"
+
+        async def synthesize_stream(
+            self,
+            text: str,  # noqa: ARG002
+            voice_id: str | None = None,  # noqa: ARG002
+        ) -> AsyncIterator[bytes]:
+            yield bytes(320)
+            await asyncio.Event().wait()
+
+    tts: TTSProvider = stalling_tts if stalling_tts is not None else _DefaultStallingTTS()
+    router = _SwitchingRouterLLM(
+        router_decisions=[
+            {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+            {"should_speak": False, "confidence": 0.1, "reason": "skip"},
+        ],
+        # Default classifier verdict is no-interrupt so any rise in
+        # _interrupt_event MUST come from the fast path.
+        barge_in_decisions=[
+            {"should_interrupt": False, "category": "noise", "reason": "test default"},
+        ],
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_SlowFakeSTT(transcripts=["one", "two", "three", "four"]),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["reply"]),
+        tts=tts,
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            enable_barge_in=enable_barge_in,
+            barge_in_min_speech_ms=barge_in_min_speech_ms,
+            mode=mode,
+            speak=speak,
+        ),
+    )
+    return pipeline, transport, router
+
+
+async def test_fast_barge_in_default_threshold_is_160ms() -> None:
+    """The config default lines up with the documented ~200 ms latency target."""
+    from johnny.voice_pipeline.pipeline import DEFAULT_BARGE_IN_MIN_SPEECH_MS
+
+    assert PipelineConfig().barge_in_min_speech_ms == 160
+    assert DEFAULT_BARGE_IN_MIN_SPEECH_MS == 160
+
+
+async def test_fast_barge_in_threshold_frames_handles_zero_and_division() -> None:
+    """Threshold computation: 0 → disabled, otherwise ceil-style frame count."""
+    from app.providers import (
+        LLMProvider,
+        STTProvider,
+        TTSProvider,
+    )
+
+    class _Stub(LLMProvider, STTProvider, TTSProvider):
+        @property
+        def name(self) -> str:
+            return "stub"
+
+        async def chat(
+            self,
+            messages: Sequence[ChatMessage],
+            tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
+            response_format: dict[str, Any] | None = None,  # noqa: ARG002
+        ) -> LLMResponse:
+            return LLMResponse(text="", finish_reason="stop")
+
+        async def transcribe_stream(
+            self, audio_iter: AsyncIterator[bytes]
+        ) -> AsyncIterator[TranscriptEvent]:
+            async for _ in audio_iter:
+                pass
+            if False:
+                yield  # pragma: no cover
+
+        async def synthesize_stream(
+            self,
+            text: str,  # noqa: ARG002
+            voice_id: str | None = None,  # noqa: ARG002
+        ) -> AsyncIterator[bytes]:
+            if False:
+                yield  # pragma: no cover
+
+    stub = _Stub()
+    transport = _BufferedTransport(frames=[])
+
+    for ms, frame_ms, expected_frames in [
+        (160, 20, 8),
+        (200, 20, 10),
+        (60, 20, 3),
+        (0, 20, 0),
+        (-5, 20, 0),
+        # Very small ms relative to frame size: at least 1 frame.
+        (10, 20, 1),
+    ]:
+        pipeline = VoicePipeline(
+            transport=transport,
+            vad=EnergyVAD(threshold=0.5),
+            stt=stub,
+            router_llm=stub,
+            answer_llm=stub,
+            tts=stub,
+            event_bus=InMemoryEventBus(),
+            config=PipelineConfig(
+                barge_in_min_speech_ms=ms,
+                frame_duration_ms=frame_ms,
+            ),
+        )
+        assert pipeline._fast_barge_in_threshold_frames() == expected_frames, (
+            f"ms={ms} frame_ms={frame_ms}"
+        )
+
+
+async def test_fast_barge_in_should_fire_predicate_matches_classifier_gates(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Fast and slow paths share the same gating conditions.
+
+    Both must be governed by ``enable_barge_in`` + ``_response_in_flight``
+    + ``speak`` + ``mode in SPEAKING_MODES``; operators must never wind
+    up with one path firing while the other is muted.
+    """
+    pipeline, _, _ = _make_test_pipeline(pcm=two_utterance_pcm)
+
+    # Default state: barge-in enabled, but bot is not in flight yet.
+    assert pipeline._should_fast_barge_in() is False
+    assert pipeline._should_classify_barge_in() is False
+
+    # Flip in-flight on; both predicates flip together.
+    pipeline._response_in_flight = True
+    assert pipeline._should_fast_barge_in() is True
+    assert pipeline._should_classify_barge_in() is True
+
+
+async def test_fast_barge_in_fires_during_bot_response(
+    four_utterance_pcm: bytes,
+) -> None:
+    """Speech onset while the bot is responding sets _interrupt_event.
+
+    Drives the full pipeline with the bot stalled in TTS during the
+    first response; the second / third utterance's speech frames must
+    trigger the fast path well before the classifier returns. Asserts
+    the observability counter ticks and the interrupt fires WITHOUT
+    waiting for any classifier verdict.
+    """
+    tts_entered = asyncio.Event()
+    release_tts = asyncio.Event()
+
+    class _StallingTTS(TTSProvider):
+        @property
+        def name(self) -> str:
+            return "stalling"
+
+        async def synthesize_stream(
+            self,
+            text: str,  # noqa: ARG002
+            voice_id: str | None = None,  # noqa: ARG002
+        ) -> AsyncIterator[bytes]:
+            yield bytes(320)
+            tts_entered.set()
+            await release_tts.wait()
+
+    pipeline, _, router = _make_test_pipeline(
+        pcm=four_utterance_pcm,
+        # Classifier verdict is no-interrupt (set by default in
+        # _make_test_pipeline). Any rise in _interrupt_event is therefore
+        # attributable to the fast path alone.
+        stalling_tts=_StallingTTS(),
+    )
+
+    run_task = asyncio.create_task(pipeline.run())
+    try:
+        await asyncio.wait_for(tts_entered.wait(), timeout=2.0)
+        await _wait_until(
+            lambda: pipeline._fast_barge_in_count >= 1, timeout=2.0
+        )
+        # Interrupt event MUST be set by the fast path, not by the
+        # (no-interrupt) classifier. The classifier may also have run
+        # by now but its verdict is no-interrupt.
+        assert pipeline._interrupt_event.is_set() is True
+        if router.barge_in_calls:
+            verdict = router._barge_in_decisions[0]
+            assert verdict["should_interrupt"] is False
+    finally:
+        release_tts.set()
+        await asyncio.wait_for(run_task, timeout=3.0)
+
+
+async def test_fast_barge_in_does_not_fire_when_bot_idle(
+    two_utterance_pcm: bytes,
+) -> None:
+    """No bot response → no interrupt, even when participants are speaking."""
+    transport = _BufferedTransport(frames=_frames_from_pcm(two_utterance_pcm))
+    router = _SwitchingRouterLLM(
+        # Bot decides NOT to speak so _response_in_flight stays brief
+        # (just for the router stage) and never reaches TTS.
+        router_decisions=[
+            {"should_speak": False, "confidence": 0.1, "reason": "skip"},
+            {"should_speak": False, "confidence": 0.1, "reason": "skip"},
+        ],
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two"]),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+    await pipeline.run()
+    assert pipeline._fast_barge_in_count == 0
+    assert pipeline._interrupt_event.is_set() is False
+
+
+async def test_fast_barge_in_disabled_via_min_speech_ms_zero(
+    four_utterance_pcm: bytes,
+) -> None:
+    """barge_in_min_speech_ms=0 disables the fast path entirely.
+
+    The bot stays wedged in TTS for the duration of the test — any
+    interrupt rises must come from the classifier (which we leave
+    on no-interrupt to keep the assertion clean).
+    """
+    tts_entered = asyncio.Event()
+    release_tts = asyncio.Event()
+
+    class _StallingTTS(TTSProvider):
+        @property
+        def name(self) -> str:
+            return "stalling"
+
+        async def synthesize_stream(
+            self,
+            text: str,  # noqa: ARG002
+            voice_id: str | None = None,  # noqa: ARG002
+        ) -> AsyncIterator[bytes]:
+            yield bytes(320)
+            tts_entered.set()
+            await release_tts.wait()
+
+    pipeline, _, router = _make_test_pipeline(
+        pcm=four_utterance_pcm,
+        barge_in_min_speech_ms=0,
+        stalling_tts=_StallingTTS(),
+    )
+
+    run_task = asyncio.create_task(pipeline.run())
+    try:
+        await asyncio.wait_for(tts_entered.wait(), timeout=2.0)
+        # Wait long enough that any fast-path firing would have happened.
+        await _wait_until(
+            lambda: len(router.barge_in_calls) >= 1, timeout=2.0
+        )
+        await asyncio.sleep(0.1)
+        assert pipeline._fast_barge_in_count == 0
+        assert pipeline._interrupt_event.is_set() is False
+    finally:
+        release_tts.set()
+        await asyncio.wait_for(run_task, timeout=3.0)
+
+
+async def test_fast_barge_in_respects_enable_barge_in_flag(
+    four_utterance_pcm: bytes,
+) -> None:
+    """enable_barge_in=False suppresses BOTH the classifier and the fast path."""
+    tts_entered = asyncio.Event()
+    release_tts = asyncio.Event()
+
+    class _StallingTTS(TTSProvider):
+        @property
+        def name(self) -> str:
+            return "stalling"
+
+        async def synthesize_stream(
+            self,
+            text: str,  # noqa: ARG002
+            voice_id: str | None = None,  # noqa: ARG002
+        ) -> AsyncIterator[bytes]:
+            yield bytes(320)
+            tts_entered.set()
+            await release_tts.wait()
+
+    pipeline, _, router = _make_test_pipeline(
+        pcm=four_utterance_pcm,
+        enable_barge_in=False,
+        stalling_tts=_StallingTTS(),
+    )
+
+    run_task = asyncio.create_task(pipeline.run())
+    try:
+        await asyncio.wait_for(tts_entered.wait(), timeout=2.0)
+        # Give the pipeline a chance to (in)correctly fire the fast path.
+        await asyncio.sleep(0.3)
+        assert pipeline._fast_barge_in_count == 0
+        assert pipeline._interrupt_event.is_set() is False
+        # Classifier must also be off.
+        assert router.barge_in_calls == []
+    finally:
+        release_tts.set()
+        await asyncio.wait_for(run_task, timeout=3.0)
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["listen_only", "suggest_only"],
+)
+async def test_fast_barge_in_skipped_in_non_speaking_modes(
+    four_utterance_pcm: bytes,
+    mode: str,
+) -> None:
+    """Non-speaking modes never call interrupt() because there's nothing to cut."""
+    pipeline, _, _ = _make_test_pipeline(
+        pcm=four_utterance_pcm,
+        mode=mode,
+    )
+    # No TTS to stall — non-speaking modes don't run TTS. Pipeline runs
+    # to completion on its own once the transport's frames are drained.
+    await asyncio.wait_for(pipeline.run(), timeout=3.0)
+    assert pipeline._fast_barge_in_count == 0
+    assert pipeline._interrupt_event.is_set() is False
+
+
+async def test_fast_barge_in_skipped_when_speak_false(
+    four_utterance_pcm: bytes,
+) -> None:
+    """speak=False is the legacy listen-only equivalent — no interrupt path."""
+    pipeline, _, _ = _make_test_pipeline(
+        pcm=four_utterance_pcm,
+        speak=False,
+    )
+    await asyncio.wait_for(pipeline.run(), timeout=3.0)
+    assert pipeline._fast_barge_in_count == 0
+    assert pipeline._interrupt_event.is_set() is False
+
+
+async def test_fast_barge_in_fires_at_most_once_per_utterance(
+    four_utterance_pcm: bytes,
+) -> None:
+    """A long sustained speech burst only fires the interrupt once.
+
+    Without the per-utterance one-shot flag, every speech frame past the
+    threshold would re-fire interrupt(), spamming the observability
+    counter and the log.
+    """
+    tts_entered = asyncio.Event()
+    release_tts = asyncio.Event()
+
+    class _StallingTTS(TTSProvider):
+        @property
+        def name(self) -> str:
+            return "stalling"
+
+        async def synthesize_stream(
+            self,
+            text: str,  # noqa: ARG002
+            voice_id: str | None = None,  # noqa: ARG002
+        ) -> AsyncIterator[bytes]:
+            yield bytes(320)
+            tts_entered.set()
+            await release_tts.wait()
+
+    pipeline, _, _ = _make_test_pipeline(
+        pcm=four_utterance_pcm,
+        stalling_tts=_StallingTTS(),
+    )
+
+    run_task = asyncio.create_task(pipeline.run())
+    try:
+        await asyncio.wait_for(tts_entered.wait(), timeout=2.0)
+        await _wait_until(
+            lambda: pipeline._fast_barge_in_count >= 1, timeout=2.0
+        )
+        # Even after the fast path has fired and time has passed, the
+        # counter should advance no more than once per utterance burst:
+        # four bursts in the fixture, so at most four total fires.
+        await asyncio.sleep(0.2)
+        assert 1 <= pipeline._fast_barge_in_count <= 4
+    finally:
+        release_tts.set()
+        await asyncio.wait_for(run_task, timeout=3.0)
+
+
+async def test_fast_barge_in_does_not_fire_for_brief_speech_below_threshold(
+    tmp_path: Path,
+) -> None:
+    """A burst shorter than barge_in_min_speech_ms must NOT cut the bot.
+
+    Synthesises a short tone (~80 ms) — half the default threshold — so
+    a cough-equivalent is filtered out even when the bot is in flight.
+    """
+    from tests.voice_pipeline.conftest import (
+        _read_wav_pcm,
+        _silence_samples,
+        _tone_samples,
+        _write_wav,
+    )
+
+    samples: list[int] = []
+    samples.extend(_silence_samples(200))
+    samples.extend(_tone_samples(600))  # utterance 1 (long → bot starts responding)
+    samples.extend(_silence_samples(800))
+    samples.extend(_tone_samples(80))  # brief tone (below 160 ms threshold)
+    samples.extend(_silence_samples(800))
+    wav_path = tmp_path / "brief_burst.wav"
+    _write_wav(wav_path, samples)
+    pcm = _read_wav_pcm(wav_path)
+
+    tts_entered = asyncio.Event()
+    release_tts = asyncio.Event()
+
+    class _StallingTTS(TTSProvider):
+        @property
+        def name(self) -> str:
+            return "stalling"
+
+        async def synthesize_stream(
+            self,
+            text: str,  # noqa: ARG002
+            voice_id: str | None = None,  # noqa: ARG002
+        ) -> AsyncIterator[bytes]:
+            yield bytes(320)
+            tts_entered.set()
+            await release_tts.wait()
+
+    pipeline, _, _ = _make_test_pipeline(
+        pcm=pcm,
+        stalling_tts=_StallingTTS(),
+    )
+
+    run_task = asyncio.create_task(pipeline.run())
+    try:
+        await asyncio.wait_for(tts_entered.wait(), timeout=2.0)
+        # Let all the audio drain through VAD.
+        await asyncio.sleep(0.3)
+        # The 80 ms burst is below the default 160 ms threshold so the
+        # fast path stays at zero.
+        assert pipeline._fast_barge_in_count == 0
+        assert pipeline._interrupt_event.is_set() is False
+    finally:
+        release_tts.set()
+        await asyncio.wait_for(run_task, timeout=3.0)
+
+
+async def test_fast_barge_in_log_line_includes_session_id(
+    four_utterance_pcm: bytes,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Production diagnoses need a single grep-friendly log per fire.
+
+    The log must include the session id and the configured threshold so
+    operators can correlate a fast-barge-in with the rest of the session
+    timeline without spelunking through multiple lines.
+    """
+    import logging
+
+    caplog.set_level(logging.INFO, logger="johnny.voice_pipeline.pipeline")
+
+    tts_entered = asyncio.Event()
+    release_tts = asyncio.Event()
+
+    class _StallingTTS(TTSProvider):
+        @property
+        def name(self) -> str:
+            return "stalling"
+
+        async def synthesize_stream(
+            self,
+            text: str,  # noqa: ARG002
+            voice_id: str | None = None,  # noqa: ARG002
+        ) -> AsyncIterator[bytes]:
+            yield bytes(320)
+            tts_entered.set()
+            await release_tts.wait()
+
+    transport = _BufferedTransport(frames=_frames_from_pcm(four_utterance_pcm))
+    router = _SwitchingRouterLLM(
+        router_decisions=[
+            {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+            {"should_speak": False, "confidence": 0.1, "reason": "skip"},
+        ],
+        barge_in_decisions=[
+            {"should_interrupt": False, "category": "noise", "reason": "test"},
+        ],
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_SlowFakeSTT(transcripts=["a", "b", "c", "d"]),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["reply"]),
+        tts=_StallingTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            session_id="session-test-fast-barge",
+        ),
+    )
+
+    run_task = asyncio.create_task(pipeline.run())
+    try:
+        await asyncio.wait_for(tts_entered.wait(), timeout=2.0)
+        await _wait_until(
+            lambda: pipeline._fast_barge_in_count >= 1, timeout=2.0
+        )
+    finally:
+        release_tts.set()
+        await asyncio.wait_for(run_task, timeout=3.0)
+
+    fast_logs = [
+        rec.getMessage()
+        for rec in caplog.records
+        if "fast barge-in fired" in rec.getMessage()
+    ]
+    assert fast_logs, "expected at least one fast-barge-in log line"
+    # Single log per fire: session id and threshold both present so a
+    # production grep can lift session timing without joining lines.
+    assert "session-test-fast-barge" in fast_logs[0]
+    assert "min_speech_ms=160" in fast_logs[0]
 
 
 # --- _parse_barge_in_response unit tests ---------------------------------

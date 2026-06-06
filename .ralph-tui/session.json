@@ -3,10 +3,10 @@
   "sessionId": "79f70c67-bb19-4cbc-940f-b02dbec38449",
   "status": "running",
   "startedAt": "2026-06-06T07:53:57.289Z",
-  "updatedAt": "2026-06-06T08:58:43.547Z",
-  "currentIteration": 3,
+  "updatedAt": "2026-06-06T09:17:13.463Z",
+  "currentIteration": 4,
   "maxIterations": 0,
-  "tasksCompleted": 3,
+  "tasksCompleted": 4,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -116,8 +116,8 @@
       {
         "id": "Johnny-6ij",
         "title": "TTS providers: play a demo phrase after Test so the user actually hears the voice",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       }
     ]
   },
@@ -151,6 +151,16 @@
       "durationMs": 906498,
       "startedAt": "2026-06-06T08:35:40.622Z",
       "endedAt": "2026-06-06T08:50:47.120Z"
+    },
+    {
+      "iteration": 4,
+      "status": "completed",
+      "taskId": "Johnny-6ij",
+      "taskTitle": "TTS providers: separate Play button to hear a demo phrase, with Stop while playing",
+      "taskCompleted": true,
+      "durationMs": 468531,
+      "startedAt": "2026-06-06T08:50:54.163Z",
+      "endedAt": "2026-06-06T08:58:42.694Z"
     }
   ],
   "skippedTaskIds": [],

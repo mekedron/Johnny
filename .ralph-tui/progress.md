@@ -121,6 +121,62 @@ array of playing ids for reactivity, and calls
 listener, `audio.error` listener, and `onDestroy`. Forget any one
 and you leak a few KB of WAV every preview.
 
+### Fast (VAD-driven) barge-in beats the LLM classifier on latency (Johnny-ze3)
+The Johnny-di9 classifier-only barge-in is structurally too slow for
+mid-utterance interrupts. End-to-end latency is the sum of:
+* VAD end-of-speech detection (`end_of_speech_ms`, ~600 ms in prod)
+* STT processing of the complete utterance (~200-500 ms)
+* Classifier LLM call (~300-1000 ms)
+
+That floors interrupt latency at ~1.5-3 s — long enough that the user
+gives up and talks over the bot for the whole utterance. The fix is to
+fire `interrupt()` from inside `_utterances()` once N consecutive
+VAD-classified speech frames are seen AND the bot is responding (same
+gating predicate as the classifier path). Default N = 8 frames at
+20 ms/frame = 160 ms, which beats the 200 ms target and filters single-
+frame coughs / lip-smacks without filtering real words.
+
+The classifier still runs on the finalised transcript — but only as a
+post-hoc observability signal, not a latency-critical decision. It can
+log that the interrupt was "noise" or "side_chat" so operators can
+audit false-positive rates without slowing the hot path. The fast path
+runs *synchronously* inside the VAD frame loop (no `await` between the
+threshold check and `interrupt()`) so the only latency is N frames of
+speech plus the 1-frame TTS-event-check interval.
+
+Per-utterance one-shot: a sustained 5-second speech burst must fire
+`interrupt()` exactly ONCE, not 250 times. The `_utterances()` loop
+keeps a `fast_barge_in_fired_this_utterance` flag that resets every
+time VAD detects end-of-speech (or `max_utterance_ms` chunks the
+buffer). Forgetting this resets makes the `_fast_barge_in_count`
+observability counter useless and spams the log.
+
+### BufferedTransport tests don't pace frames — fast path may not fire
+The test `_BufferedTransport.capture_frames()` yields all frames as
+fast as the consumer pulls them, with no per-frame `await`. That means
+the `_utterances()` loop can burn through ALL queued frames in a
+single event-loop scheduler tick, without ever yielding control to the
+respond loop in between. Consequence: tests that depend on the
+respond loop having flipped `_response_in_flight=True` while
+later utterances' speech frames are being processed are *timing
+fragile*. The four-utterance fixture happens to interleave because
+the STT (with `_SlowFakeSTT`'s 20 ms sleep) is the only async-yield
+point between consecutive utterances — so the respond loop runs
+during that sleep. The two-utterance fixture often DOESN'T, because
+all four "speech bursts then silence" segments fit into one
+synchronous burn through the buffered transport.
+
+**Practice for new tests of the fast path:** stall the bot inside TTS
+via an `asyncio.Event` (the existing `_StallingTTS` pattern), wait for
+`tts_entered` to confirm the response loop is wedged with
+`_response_in_flight=True`, THEN assert on `_fast_barge_in_count`.
+This pattern is timing-stable regardless of how many utterances the
+fixture carries. Tests that assert the fast path does NOT fire (e.g.
+`barge_in_min_speech_ms=0`) should ALSO stall the bot, to prove the
+in-flight precondition was satisfied — otherwise the test could pass
+because there was nothing to interrupt, which would be a regression
+in disguise.
+
 ---
 
 ## 2026-06-06 - Johnny-4ph
@@ -320,3 +376,76 @@ and you leak a few KB of WAV every preview.
     a *voice-quality* preview, not a config check.
 ---
 
+
+## 2026-06-06 - Johnny-ze3
+- Built voice barge-in that actually fires inside the latency budget.
+  Johnny-har (concurrent transcribe/respond) + Johnny-di9 (post-utterance
+  classifier) provided the scaffolding, but in a real Meet session the
+  interrupt was effectively unreachable: VAD end-of-speech (600 ms) +
+  STT (200-500 ms) + classifier LLM (300-1000 ms) floored interrupt
+  latency at ~1.5-3 s, so the user could speak over the bot for 18+
+  seconds and the bot wouldn't yield the floor (session 154 evidence).
+- Added a VAD-driven fast path inside `_utterances()`. Each VAD-
+  classified speech frame increments a per-utterance counter; once it
+  crosses `barge_in_min_speech_ms / frame_duration_ms` (default 8 frames
+  / 160 ms) AND the bot is responding AND the mode produces audio,
+  `interrupt()` fires synchronously. No LLM in the hot path. The TTS
+  loop already checks `_interrupt_event` between yielded frames (~20 ms
+  per check), so end-to-end "user starts speaking → TTS cuts" is
+  ~180 ms by construction.
+- The classifier still runs on the finalised transcript — but now
+  purely as a post-hoc observability signal. Operators get
+  `category=noise/side_chat` verdicts in the log to audit false-positive
+  rates, but the interrupt has already happened. Acceptable tradeoff:
+  the bead explicitly ranked "real interrupts work" above "cough never
+  false-positives".
+- Added `barge_in_min_speech_ms: int = 160` to `PipelineConfig` as the
+  knob. `0` disables the fast path (used by the legacy classifier-
+  failure test to pin pre-fast-path semantics). The gating predicate
+  `_should_fast_barge_in()` is intentionally identical to
+  `_should_classify_barge_in()` so `enable_barge_in=False` /
+  non-speaking modes turn BOTH paths off together — operators never end
+  up with one path firing while the other is muted.
+- Added `_fast_barge_in_count` counter + single-line `logger.info` per
+  fire (includes session id and threshold) for production diagnosis.
+  The pattern is the same as
+  `barge-in classifier failed for session=...` — grep-friendly,
+  one record per event.
+- Added 13 new tests: default threshold, threshold-to-frame math,
+  predicate parity with the classifier path, fast-path fires during
+  bot response, doesn't fire when idle, disabled via
+  `barge_in_min_speech_ms=0`, disabled via `enable_barge_in=False`,
+  skipped in listen_only/suggest_only, skipped when `speak=False`,
+  fires at most once per utterance, doesn't fire for sub-threshold
+  bursts (80 ms), log line includes session id.
+- Updated `test_barge_in_classifier_failure_does_not_interrupt` to
+  pass `barge_in_min_speech_ms=0` so it stays focused on the
+  classifier-fail semantics (the fast path is a separate interrupt
+  source covered by its own tests).
+- Files changed:
+  - `backend/johnny/voice_pipeline/pipeline.py`
+  - `backend/tests/voice_pipeline/test_pipeline.py`
+- **Learnings:**
+  - VAD speech-onset is a perfectly good barge-in signal on its own —
+    no LLM needed in the hot path. The classifier only earns its place
+    as a post-hoc auditor, not a latency-critical decision.
+  - The `interrupt_event.clear()` call at the start of
+    `_answer_and_speak` naturally absorbs a stale interrupt set during
+    the *previous* response — so the fast path firing on utterance N's
+    leading-edge tail doesn't leak into the response for utterance N+1.
+    That's why the stale-verdict test still passes without modification:
+    the fast path may fire, but the clear() between responses wipes it.
+  - When writing tests of `_fast_barge_in_count`, you MUST stall the
+    bot in TTS via an `asyncio.Event` before asserting. The
+    `_BufferedTransport.capture_frames()` fixture doesn't pace frames
+    — without the stall, the transcribe loop may consume all frames
+    before `_response_in_flight=True` flips, and the fast path never
+    fires. Tests that assert the fast path *doesn't* fire need the
+    same stall, otherwise they're false-passing on the absence of the
+    precondition rather than on the gating logic.
+  - The default-disabled `_make_test_pipeline` helper packs the common
+    "VAD-sensitive, slow STT, switching router, stalling TTS" setup
+    behind one call site — five lines instead of forty per test.
+    Worth the small abstraction because the fast-path test surface is
+    going to grow as we tune the threshold per meeting.
+---

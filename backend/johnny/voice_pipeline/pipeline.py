@@ -70,6 +70,15 @@ DEFAULT_MAX_UTTERANCE_MS = 30_000
 DEFAULT_END_OF_SPEECH_MS = 600
 DEFAULT_FRAME_DURATION_MS = 20
 DEFAULT_CONFIDENCE_THRESHOLD = 0.7
+DEFAULT_BARGE_IN_MIN_SPEECH_MS = 160
+"""Confirmed speech duration that triggers a fast (VAD-driven) barge-in (Johnny-ze3).
+
+Counted as consecutive speech-classified frames. At the default
+20 ms/frame this is 8 frames — long enough to filter out single coughs
+and lip-smacks, short enough that 'hey Johnny stop' cuts the bot within
+~200 ms of speech onset. Set to ``0`` to disable the fast path and rely
+solely on the post-utterance classifier (the pre-Johnny-ze3 behaviour).
+"""
 DEFAULT_TRANSCRIPT_WINDOW_SIZE = 0
 """Rolling window cap on in-memory transcript history.
 
@@ -273,6 +282,27 @@ class PipelineConfig:
     to the participant. Set to ``False`` to opt out — useful for tests
     that pin pre-barge-in behaviour and for sessions where the extra
     LLM call per transcript isn't worth the latency budget.
+
+    Also gates the fast (VAD-driven) barge-in path: turning the feature
+    off disables both the LLM classifier and the speech-onset interrupt.
+    """
+    barge_in_min_speech_ms: int = DEFAULT_BARGE_IN_MIN_SPEECH_MS
+    """Confirmed speech duration that triggers fast barge-in (Johnny-ze3).
+
+    The fast path lives inside :meth:`VoicePipeline._utterances`: each
+    VAD-classified speech frame increments a per-utterance counter; once
+    the counter crosses ``barge_in_min_speech_ms / frame_duration_ms``
+    AND the bot is currently responding AND the mode produces audio,
+    :meth:`VoicePipeline.interrupt` fires synchronously — no LLM call in
+    the hot path. This is what gets TTS cut within ~200 ms of the user
+    starting to speak, which the post-utterance classifier alone cannot
+    achieve (VAD end-of-speech adds 600 ms + STT + classifier LLM latency).
+
+    Set to ``0`` to disable the fast path (then only the post-utterance
+    classifier from :data:`enable_barge_in` runs). The classifier still
+    runs as a post-hoc observability log even when the fast path fires
+    — see :meth:`VoicePipeline._maybe_barge_in` for the generation guard
+    that prevents stale verdicts from aborting unrelated responses.
     """
     session_id: str | None = None
     bot_session_id: int | None = None
@@ -399,6 +429,12 @@ class VoicePipeline:
         self._response_in_flight: bool = False
         self._response_generation: int = 0
         self._barge_in_tasks: list[asyncio.Task[None]] = []
+        # Fast (VAD-driven) barge-in counter (Johnny-ze3). Each time
+        # ``_utterances`` detects enough consecutive speech frames
+        # mid-bot-utterance to fire :meth:`interrupt`, this increments.
+        # Surfaced for tests + (future) per-session metrics; a non-zero
+        # count is the proof that the fast path is wired and reachable.
+        self._fast_barge_in_count: int = 0
 
     # ------------------------------------------------------------------
     # Public lifecycle
@@ -532,13 +568,24 @@ class VoicePipeline:
         frames, the buffered speech is yielded as a single utterance. The
         VAD's :meth:`reset` is called between utterances so stateful
         analysers don't carry context across boundaries.
+
+        Also runs the fast (VAD-driven) barge-in trigger (Johnny-ze3):
+        once enough consecutive speech frames have been seen mid-bot-
+        utterance, :meth:`interrupt` fires synchronously without waiting
+        for the utterance to finalise. This is the only way to cut TTS
+        within ~200 ms of speech onset — the post-utterance classifier
+        adds VAD end-of-speech (600 ms) + STT + classifier-LLM latency,
+        which adds up to 1.5–3 s in production.
         """
-        frame_ms = self.config.frame_duration_ms
+        frame_ms = max(1, self.config.frame_duration_ms)
         silence_frames_needed = max(1, self.config.end_of_speech_ms // frame_ms)
         max_frames = max(1, self.config.max_utterance_ms // frame_ms)
+        fast_barge_in_frames = self._fast_barge_in_threshold_frames()
         buffer: list[bytes] = []
         silence_count = 0
         in_speech = False
+        consecutive_speech_frames = 0
+        fast_barge_in_fired_this_utterance = False
 
         async for frame in self.transport.capture_frames():
             result = self.vad.analyze(frame)
@@ -546,25 +593,95 @@ class VoicePipeline:
                 buffer.append(frame)
                 silence_count = 0
                 in_speech = True
+                consecutive_speech_frames += 1
+                # Fast barge-in: VAD-confirmed speech mid-bot-utterance
+                # fires interrupt() immediately, without waiting for end-
+                # of-speech + STT + classifier (Johnny-ze3). One-shot per
+                # utterance so a long interruption doesn't spam the event;
+                # the flag resets when the utterance finalises below.
+                if (
+                    not fast_barge_in_fired_this_utterance
+                    and fast_barge_in_frames > 0
+                    and consecutive_speech_frames >= fast_barge_in_frames
+                    and self._should_fast_barge_in()
+                ):
+                    self._fire_fast_barge_in()
+                    fast_barge_in_fired_this_utterance = True
                 if len(buffer) >= max_frames:
                     yield b"".join(buffer)
                     buffer.clear()
                     silence_count = 0
                     in_speech = False
+                    consecutive_speech_frames = 0
+                    fast_barge_in_fired_this_utterance = False
                     self.vad.reset()
             elif in_speech:
                 buffer.append(frame)
                 silence_count += 1
+                consecutive_speech_frames = 0
                 if silence_count >= silence_frames_needed:
                     yield b"".join(buffer[: len(buffer) - silence_count])
                     buffer.clear()
                     silence_count = 0
                     in_speech = False
+                    fast_barge_in_fired_this_utterance = False
                     self.vad.reset()
-            # else: pre-speech silence; drop frame
+            else:
+                # Pre-speech silence; drop frame. Counter must reset so
+                # only a *contiguous* run of speech frames triggers the
+                # fast path — a single isolated speech frame surrounded
+                # by silence (lip-smack, brief click) never accumulates.
+                consecutive_speech_frames = 0
 
         if buffer and in_speech:
             yield b"".join(buffer[: len(buffer) - silence_count])
+
+    def _fast_barge_in_threshold_frames(self) -> int:
+        """Number of consecutive speech frames that triggers fast barge-in.
+
+        Computed from :attr:`PipelineConfig.barge_in_min_speech_ms`. A
+        value ``<= 0`` disables the fast path (callers check this).
+        """
+        if self.config.barge_in_min_speech_ms <= 0:
+            return 0
+        frame_ms = max(1, self.config.frame_duration_ms)
+        return max(1, self.config.barge_in_min_speech_ms // frame_ms)
+
+    def _should_fast_barge_in(self) -> bool:
+        """Whether VAD-detected speech should immediately interrupt the bot.
+
+        Same gating as :meth:`_should_classify_barge_in` (the post-
+        utterance classifier path): both routes only make sense while
+        the bot is actively producing audio. Keeping the two predicates
+        in sync means turning ``enable_barge_in`` off or switching to a
+        non-speaking mode disables BOTH paths together — operators
+        never end up with the fast path firing while the slow path is
+        muted (or vice versa).
+        """
+        return (
+            self.config.enable_barge_in
+            and self._response_in_flight
+            and self.config.speak
+            and self.config.mode in SPEAKING_MODES
+        )
+
+    def _fire_fast_barge_in(self) -> None:
+        """Trigger an immediate interrupt from the VAD fast path.
+
+        Split out so tests can patch / count invocations without having
+        to drive the full ``_utterances`` loop, and so the log line
+        appears in production logs without being lost in the per-frame
+        VAD hot path.
+        """
+        self._fast_barge_in_count += 1
+        logger.info(
+            "fast barge-in fired for session=%s (VAD speech onset, "
+            "min_speech_ms=%d, count=%d)",
+            self.config.session_id,
+            self.config.barge_in_min_speech_ms,
+            self._fast_barge_in_count,
+        )
+        self.interrupt()
 
     # ------------------------------------------------------------------
     # Per-utterance processing
