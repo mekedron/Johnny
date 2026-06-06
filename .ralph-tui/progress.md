@@ -5,6 +5,49 @@ after each iteration and it's included in prompts for context.
 
 ## Codebase Patterns (Study These First)
 
+### Meet-worker stop: kill by name AND label, then verify (no silent ENDED)
+
+`DockerContainerLauncher.stop()` (Johnny-ajc) finds containers two ways
+and unions the matches:
+
+* by `container_name` when the row stored one, AND
+* by `johnny.session-id=<bot_session_id>` label.
+
+After stop+remove on all matches, it lists by label one more time. If
+anything still exists, it raises `LauncherError` so
+`stop_session_by_id` marks the row `failed` instead of silently
+`ended`. Without this, a row whose `container_name` was `None` (start
+raced with stop) or stale (re-launched container with a different
+name) would silently no-op — the API marks the row ENDED, the UI
+shows "ended", but the real meet-worker keeps running the call.
+
+Two failure modes the verification catches: (a) Docker daemon
+swallowed the kill, (b) a second labelled container somehow exists
+(crashed launcher mid-restart) and is still listening to the same
+meeting. Either way the operator sees a real error instead of a bot
+that thinks it left.
+
+Tests in `tests/services/test_docker_launcher.py` exercise:
+label-fallback when `container_name` is None, multiple-container
+sweep, and the post-stop verification raising on leftovers.
+
+### Spawned meet-worker containers must run with `init=True`
+
+`run_kwargs["init"] = True` puts tini as PID 1 inside each
+meet-worker (Johnny-ajc). Without it, the bash entrypoint `exec`s
+into python, python becomes PID 1, and Linux's PID 1 rule drops
+signals that don't have explicit handlers. A SIGTERM arriving during
+the synchronous bootstrap phase (before
+`_idle_until_signal_or_disconnect` calls
+`asyncio.add_signal_handler`) gets ignored — Docker's 10 s grace
+expires, SIGKILL hits, the container dies but the bot didn't
+gracefully leave the meeting (and any pre-handler asyncio shutdown
+was skipped). Tini forwards signals regardless of phase.
+
+Test guard:
+`test_start_runs_with_init_for_signal_forwarding` asserts
+`run_kwargs["init"] is True`. Don't drop it.
+
 ### In-browser voice surface uses `BrowserAudioTransport` (no Meet)
 
 For browser-sourced sessions (Johnny-ckz.6) the voice pipeline runs
@@ -94,6 +137,78 @@ proper capitalisation + punctuation) and wider on latency (2 s
 interrupt-to-cut vs scripted 500 ms; 45 s scenario timeout). Real
 silences need to be 8 s after each speech event so the bot's real STT
 → LLM → TTS chain (~4–6 s) finishes before the next speaker event.
+
+---
+
+## 2026-06-06 - Johnny-ajc
+
+Fix the "Leave now" silent-no-op bug — UI marked the session ended but
+the meet-worker container kept running the meeting because
+`DockerContainerLauncher.stop()` had two silent early-return paths
+(`container_name is None` and `NotFound` on get-by-name) plus no
+post-stop verification.
+
+**Files changed:**
+
+- `backend/app/services/docker_launcher.py` —
+  `DockerContainerLauncher.stop()` rewritten to (a) discover targets
+  by both `container_name` and the `johnny.session-id=<id>` label
+  (union), (b) stop+remove all matches best-effort, (c) verify by
+  listing the label one more time and raise `LauncherError` if
+  anything remains. New helpers `_discover_stop_targets` and
+  `_verify_no_session_containers` split the flow for readability.
+  `start()` now passes `init=True` so tini is PID 1 inside the
+  meet-worker — SIGTERM from `docker stop` is forwarded uniformly
+  regardless of which phase the python bootstrap is in.
+- `backend/tests/services/test_docker_launcher.py` — `_FakeContainer`
+  grew a `removed` flag; `_FakeContainers.list` filters removed
+  containers so the post-stop verification sees the same view a real
+  daemon would. New tests:
+  - `test_start_runs_with_init_for_signal_forwarding` — guards
+    the `init=True` flag.
+  - `test_stop_falls_back_to_label_when_name_missing` — label sweep
+    kills a container even when the row's `container_name` is None.
+  - `test_stop_is_noop_when_no_containers_anywhere` — replaces the
+    old name-only no-op test.
+  - `test_stop_swallows_not_found_on_get` — stale row name still OK
+    when label sweep returns nothing.
+  - `test_stop_kills_multiple_containers_for_one_session` — a
+    primary container + an extra labelled one both get stopped.
+  - `test_stop_raises_when_container_still_present_after_stop` — a
+    failed kill surfaces as `LauncherError` (so the row is marked
+    failed, not silently ended).
+  - `test_stop_raises_when_verification_list_fails` — daemon dying
+    mid-stop also surfaces as `LauncherError`.
+
+**Verification:**
+
+- 54 docker_launcher tests pass (was 49).
+- 389 service + sessions API tests pass.
+- 1883 backend tests pass (`pytest -m "not network and not
+  livekit_smoke and not e2e_ui"`).
+- `ruff` + `mypy` clean on every file touched.
+
+**Learnings:**
+
+- See "Codebase Patterns" at top — two new patterns extracted from
+  this fix: the dual name+label stop sweep with post-verification,
+  and the `init=True` requirement for reliable SIGTERM forwarding.
+- The original Johnny-ckz.1 fix focused on getting the bot INTO the
+  meeting; the symmetric concern (reliably getting it OUT) was
+  unhandled. Two silent-no-op early returns
+  (`container_name is None`, `NotFound`) in `stop()` made the row
+  flip to ENDED even when the launcher did nothing. A post-stop
+  verification step turns silent bugs into visible errors.
+- Listing by label is more robust than name lookup for cleanup
+  because labels are set on `containers.run(...)` and survive name
+  changes, accidental re-launches, and start/stop races. Names are
+  fragile — a single label predicate sweeps every artefact of the
+  session.
+- Docker SDK's `containers.run(..., init=True)` maps to `docker run
+  --init` (tini as PID 1). Without it, a Python process becomes PID
+  1 and a SIGTERM arriving before asyncio installs its handler is
+  silently dropped — the 10 s `docker stop` grace expires and
+  SIGKILL hits before any graceful cleanup runs.
 
 ---
 

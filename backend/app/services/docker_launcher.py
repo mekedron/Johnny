@@ -375,6 +375,15 @@ class DockerContainerLauncher(ContainerLauncher):
             "environment": environment,
             "labels": labels,
             "restart_policy": {"Name": "no"},
+            # init=True runs tini as PID 1 inside the container so SIGTERM
+            # from ``docker stop`` is reliably forwarded to the python
+            # process (Johnny-ajc). Without it the bash entrypoint script
+            # ``exec``s into python — python then becomes PID 1, and PID 1
+            # ignores signals that don't have explicit handlers, so a
+            # SIGTERM arriving before asyncio installs its handler is
+            # dropped. Tini handles signal forwarding + zombie reaping
+            # uniformly regardless of process phase.
+            "init": True,
         }
         if self._volumes is not None:
             run_kwargs["volumes"] = self._volumes
@@ -403,39 +412,133 @@ class DockerContainerLauncher(ContainerLauncher):
     async def stop(
         self, *, bot_session_id: int, container_name: str | None
     ) -> None:
-        if not container_name:
-            return
+        """Stop and remove every meet-worker container tied to this session.
+
+        Finds targets two ways and unions the results:
+
+        * by ``container_name`` (when the row stored one), and
+        * by the ``johnny.session-id=<bot_session_id>`` label.
+
+        Going by name alone (Johnny-ajc) silently no-ops when the row's
+        ``container_name`` is unset (start raced with stop) or stale
+        (a re-launched container has a different name) — the UI then
+        marks the row ended while the real container keeps running.
+        The label sweep is the safety net.
+
+        After the stop+remove attempts we LIST again by label: if
+        anything is still present, raise :class:`LauncherError` so
+        :func:`stop_session_by_id` marks the row ``failed`` instead of
+        silently ``ended``. Users see a real error instead of a bot that
+        thinks it left but is still listening to the call.
+        """
         try:
             client = self._client_or_create()
-            container = client.containers.get(container_name)
         except LauncherError:
             raise
-        except Exception as exc:  # noqa: BLE001 — SDK exceptions are heterogeneous
-            if _is_not_found(exc):
-                logger.info(
-                    "stop: container %s already gone (session=%s)",
-                    container_name,
-                    bot_session_id,
-                )
-                return
-            raise LauncherError(
-                f"failed to look up container {container_name!r}: {exc}"
-            ) from exc
 
+        targets = self._discover_stop_targets(
+            client, bot_session_id=bot_session_id, container_name=container_name
+        )
+        if not targets:
+            logger.info(
+                "stop: no container found for session=%s (name=%r)",
+                bot_session_id,
+                container_name,
+            )
+            return
+
+        for target_name, container in targets.items():
+            try:
+                container.stop(timeout=self._stop_timeout_seconds)
+            except Exception as exc:  # noqa: BLE001 — best-effort stop
+                if not _is_not_found(exc):
+                    logger.warning(
+                        "stop: docker stop failed for %s: %s", target_name, exc
+                    )
+            try:
+                container.remove(force=True)
+            except Exception as exc:  # noqa: BLE001 — best-effort remove
+                if not _is_not_found(exc):
+                    logger.warning(
+                        "stop: docker remove failed for %s: %s", target_name, exc
+                    )
+
+        self._verify_no_session_containers(
+            client, bot_session_id=bot_session_id
+        )
+
+    def _discover_stop_targets(
+        self,
+        client: _DockerClient,
+        *,
+        bot_session_id: int,
+        container_name: str | None,
+    ) -> dict[str, _DockerContainer]:
+        """Union of containers matching ``container_name`` and the session label."""
+        targets: dict[str, _DockerContainer] = {}
+        if container_name:
+            try:
+                container = client.containers.get(container_name)
+                targets[getattr(container, "id", container_name)] = container
+            except Exception as exc:  # noqa: BLE001 — SDK exceptions are heterogeneous
+                if not _is_not_found(exc):
+                    raise LauncherError(
+                        f"failed to look up container {container_name!r}: {exc}"
+                    ) from exc
         try:
-            container.stop(timeout=self._stop_timeout_seconds)
-        except Exception as exc:  # noqa: BLE001 — best-effort stop
-            if not _is_not_found(exc):
-                logger.warning(
-                    "stop: docker stop failed for %s: %s", container_name, exc
-                )
+            labelled = client.containers.list(
+                all=True,
+                filters={
+                    "label": f"{JOHNNY_SESSION_ID_LABEL}={bot_session_id}"
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — label list is best-effort
+            logger.warning(
+                "stop: label list failed for session=%s: %s",
+                bot_session_id,
+                exc,
+            )
+            labelled = []
+        for container in labelled:
+            key = str(
+                getattr(container, "id", None)
+                or getattr(container, "name", None)
+                or "?"
+            )
+            targets[key] = container
+        return targets
+
+    def _verify_no_session_containers(
+        self, client: _DockerClient, *, bot_session_id: int
+    ) -> None:
+        """Raise :class:`LauncherError` if any container for this session remains.
+
+        Listing by label catches both:
+
+        * a container we tried to stop but Docker couldn't kill, and
+        * a container we never knew about (stale row name, second
+          accidental launch) that's still attached to the meeting.
+
+        Either case is a real failure from the operator's perspective:
+        the bot is still in the call.
+        """
         try:
-            container.remove(force=True)
-        except Exception as exc:  # noqa: BLE001 — best-effort remove
-            if not _is_not_found(exc):
-                raise LauncherError(
-                    f"failed to remove container {container_name!r}: {exc}"
-                ) from exc
+            leftovers = client.containers.list(
+                all=True,
+                filters={
+                    "label": f"{JOHNNY_SESSION_ID_LABEL}={bot_session_id}"
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — SDK exceptions are heterogeneous
+            raise LauncherError(
+                f"failed to verify cleanup for session={bot_session_id}: {exc}"
+            ) from exc
+        if leftovers:
+            names = [getattr(c, "name", "?") for c in leftovers]
+            raise LauncherError(
+                f"container(s) still present after stop "
+                f"for session={bot_session_id}: {names}"
+            )
 
     # --- Helpers for monitor + prune passes --------------------------
 

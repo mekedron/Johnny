@@ -64,6 +64,7 @@ class _FakeContainer:
     raise_on_logs: Exception | None = None
     raise_on_reload: Exception | None = None
     reload_state_factory: Any | None = None
+    removed: bool = False
 
     def reload(self) -> None:
         self.reload_calls += 1
@@ -81,6 +82,10 @@ class _FakeContainer:
         self.remove_calls.append(force)
         if self.raise_on_remove is not None:
             raise self.raise_on_remove
+        # Real Docker drops the container from subsequent list() calls;
+        # mirror that so the launcher's post-stop verification sweep
+        # sees the same view operators would (Johnny-ajc).
+        self.removed = True
 
     def logs(
         self,
@@ -129,7 +134,9 @@ class _FakeContainers:
         self.list_calls.append({"all": all, "filters": filters or {}})
         if self.raise_on_list is not None:
             raise self.raise_on_list
-        return list(self.list_payload)
+        # Skip containers that were ``remove()``-d so the post-stop
+        # verification sweep sees the same view a real daemon would.
+        return [c for c in self.list_payload if not c.removed]
 
     def get(self, container_id: str) -> _FakeContainer:
         self.get_calls.append(container_id)
@@ -353,6 +360,23 @@ async def test_start_disables_auto_restart(
 
 
 @pytest.mark.asyncio
+async def test_start_runs_with_init_for_signal_forwarding(
+    launcher: _StubLauncher, fake_client: _FakeDockerClient
+) -> None:
+    """Johnny-ajc: init=True puts tini as PID 1 so SIGTERM reaches python.
+
+    Without it ``docker stop`` can land on a python process that's PID 1
+    but hasn't yet installed an asyncio SIGTERM handler — Linux's PID 1
+    rule drops unhandled signals, the bot keeps running the call until
+    the 10 s grace expires and SIGKILL hits. Tini forwards signals
+    uniformly regardless of which phase the python process is in.
+    """
+    await launcher.start(_make_ctx())
+    _, kwargs = fake_client.containers.run_calls[0]
+    assert kwargs["init"] is True
+
+
+@pytest.mark.asyncio
 async def test_start_respects_custom_image_and_extras(
     fake_client: _FakeDockerClient,
 ) -> None:
@@ -409,19 +433,46 @@ async def test_stop_stops_then_removes_container(
 
 
 @pytest.mark.asyncio
-async def test_stop_is_noop_when_container_name_missing(
+async def test_stop_falls_back_to_label_when_name_missing(
     launcher: _StubLauncher, fake_client: _FakeDockerClient
 ) -> None:
+    """Johnny-ajc: a session with no stored container_name still gets killed.
+
+    Without the label fallback, the launcher used to silently no-op when
+    ``container_name`` was ``None`` — the API then marked the row ended
+    while the real meet-worker kept running the meeting.
+    """
+    container = _FakeContainer(
+        name="meet-worker-session-7", id="abc", status="running"
+    )
+    fake_client.containers.list_payload = [container]
+    await launcher.stop(bot_session_id=7, container_name=None)
+    assert len(container.stop_calls) == 1
+    assert container.remove_calls == [True]
+    # Verify list was called with the session-id label filter.
+    label_filters = [
+        c["filters"].get("label", "")
+        for c in fake_client.containers.list_calls
+    ]
+    assert any("johnny.session-id=7" in label for label in label_filters)
+
+
+@pytest.mark.asyncio
+async def test_stop_is_noop_when_no_containers_anywhere(
+    launcher: _StubLauncher, fake_client: _FakeDockerClient
+) -> None:
+    """No container by name, none by label — return quietly."""
     await launcher.stop(bot_session_id=7, container_name=None)
     assert fake_client.containers.get_calls == []
 
 
 @pytest.mark.asyncio
-async def test_stop_swallows_not_found(
+async def test_stop_swallows_not_found_on_get(
     launcher: _StubLauncher, fake_client: _FakeDockerClient
 ) -> None:
+    """A stale row name is fine as long as the label sweep finds nothing."""
     fake_client.containers.raise_on_get = _FakeNotFound("gone already")
-    # Should not raise.
+    # No labelled containers either.
     await launcher.stop(bot_session_id=7, container_name="meet-worker-session-7")
 
 
@@ -447,6 +498,83 @@ async def test_stop_tolerates_stop_failure_but_still_removes(
         bot_session_id=7, container_name="meet-worker-session-7"
     )
     assert container.remove_calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_stop_kills_multiple_containers_for_one_session(
+    launcher: _StubLauncher, fake_client: _FakeDockerClient
+) -> None:
+    """Both a name-matched and an extra label-matched container get stopped.
+
+    Can happen if a second launcher.start ran without a successful stop
+    in between (e.g., crashed launcher process) — both containers are
+    listening to the same Meet call until we kill them.
+    """
+    primary = _FakeContainer(
+        name="meet-worker-session-7", id="primary", status="running"
+    )
+    extra = _FakeContainer(
+        name="meet-worker-session-7-stale", id="extra", status="running"
+    )
+    fake_client.containers.containers_by_name["meet-worker-session-7"] = primary
+    fake_client.containers.list_payload = [primary, extra]
+    await launcher.stop(
+        bot_session_id=7, container_name="meet-worker-session-7"
+    )
+    assert primary.remove_calls == [True]
+    assert extra.remove_calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_stop_raises_when_container_still_present_after_stop(
+    launcher: _StubLauncher, fake_client: _FakeDockerClient
+) -> None:
+    """Johnny-ajc: a failed kill must surface as LauncherError, not silent ENDED.
+
+    The verification step lists by label after stop+remove. If anything
+    remains the launcher raises so :func:`stop_session_by_id` marks the
+    row FAILED — the operator sees a real error rather than a bot that
+    thinks it left but is still in the call.
+    """
+    container = _FakeContainer(
+        name="meet-worker-session-7", id="zombie", status="running"
+    )
+    container.raise_on_remove = RuntimeError("permission denied")
+    fake_client.containers.containers_by_name["meet-worker-session-7"] = container
+    # The fake leaves the container in list_payload to simulate "still there".
+    fake_client.containers.list_payload = [container]
+    with pytest.raises(LauncherError) as info:
+        await launcher.stop(
+            bot_session_id=7, container_name="meet-worker-session-7"
+        )
+    assert "still present" in str(info.value)
+
+
+@pytest.mark.asyncio
+async def test_stop_raises_when_verification_list_fails(
+    launcher: _StubLauncher, fake_client: _FakeDockerClient
+) -> None:
+    """If we can't even verify (daemon went away), surface as LauncherError."""
+    container = _FakeContainer(name="meet-worker-session-7", status="running")
+    fake_client.containers.containers_by_name["meet-worker-session-7"] = container
+
+    # Track call count so the first list (discovery) succeeds and the
+    # second (verification) fails — mirrors daemon dying mid-stop.
+    real_list = fake_client.containers.list
+    call_count = {"n": 0}
+
+    def flaky_list(**kwargs: Any) -> list[_FakeContainer]:
+        call_count["n"] += 1
+        if call_count["n"] >= 2:
+            raise RuntimeError("daemon gone")
+        return real_list(**kwargs)
+
+    fake_client.containers.list = flaky_list  # type: ignore[method-assign]
+    with pytest.raises(LauncherError) as info:
+        await launcher.stop(
+            bot_session_id=7, container_name="meet-worker-session-7"
+        )
+    assert "verify" in str(info.value)
 
 
 # --- monitor_session_containers --------------------------------------------
