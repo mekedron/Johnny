@@ -1,7 +1,18 @@
 # Johnny
 
+> [!IMPORTANT]
+> **Work in progress — no stable release yet.** Johnny is being built in
+> the open by one person; the code on `main` is the only version right
+> now, and the UX, APIs, and docs are still moving. When a polished cut
+> is ready, it will be published on the
+> [Releases page](https://github.com/mekedron/Johnny/releases) — watch
+> this repo to be notified. Until then, expect rough edges, breaking
+> changes, and a few half-wired pieces.
+
 Single-user AI assistant that joins Google Meet meetings, transcribes, and
 optionally speaks within configured constraints.
+
+🌐 Landing page: <https://mekedron.github.io/Johnny/>
 
 See `tasks/prd-johnny-google-meet-ai-meeting-bot.md` for the full PRD.
 
