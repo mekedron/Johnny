@@ -14,6 +14,8 @@
 	import Volume2Icon from '@lucide/svelte/icons/volume-2';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Alert from '$lib/components/ui/alert/index.js';
+	import Page from '$lib/components/page.svelte';
+	import PageHeader from '$lib/components/page-header.svelte';
 	import { BOT_SESSION_STATUS_LABEL } from '$lib/sessions';
 	import {
 		DECISION_OUTCOME_LABEL,
@@ -232,50 +234,45 @@
 	<title>Session #{sessionIdStr} · History · Johnny</title>
 </svelte:head>
 
-<div
-	class="mx-auto flex max-w-7xl flex-col gap-6"
-	data-testid="history-detail"
->
-	<header class="flex flex-wrap items-start justify-between gap-4">
-		<div class="flex min-w-0 flex-col gap-1.5">
-			<div class="flex flex-wrap items-center gap-3">
-				<h1
-					class="m-0 text-2xl leading-tight font-semibold tracking-tight text-foreground"
+<Page testId="history-detail">
+	<PageHeader>
+		{#snippet title()}
+			Session <span class="font-mono">#{sessionIdStr}</span>
+		{/snippet}
+		{#snippet meta()}
+			{#if detail !== null}
+				<span
+					class="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium {statusToneClass(
+						detail.session.status
+					)}"
+					data-testid="session-status"
 				>
-					Session <span class="font-mono">#{sessionIdStr}</span>
-				</h1>
-				{#if detail !== null}
-					<span
-						class="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium {statusToneClass(
-							detail.session.status
-						)}"
-						data-testid="session-status"
-					>
-						{BOT_SESSION_STATUS_LABEL[detail.session.status]}
-					</span>
-				{/if}
-			</div>
+					{BOT_SESSION_STATUS_LABEL[detail.session.status]}
+				</span>
+			{/if}
+		{/snippet}
+		{#snippet details()}
 			{#if detail !== null}
 				<div
-					class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"
+					class="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 text-xs"
 				>
 					<span class="inline-flex items-baseline gap-1">
 						<span>Started</span>
-						<time class="font-mono text-foreground">
+						<time class="text-foreground font-mono">
 							{formatDateTime(detail.session.started_at)}
 						</time>
 					</span>
 					<span aria-hidden="true">·</span>
 					<span class="inline-flex items-baseline gap-1">
 						<span>Ended</span>
-						<time class="font-mono text-foreground">
+						<time class="text-foreground font-mono">
 							{formatDateTime(detail.session.ended_at)}
 						</time>
 					</span>
 					<span aria-hidden="true">·</span>
 					<span class="inline-flex items-baseline gap-1">
 						<span>Duration</span>
-						<span class="font-mono text-foreground">
+						<span class="text-foreground font-mono">
 							{formatDurationFromTimestamps(
 								detail.session.started_at,
 								detail.session.ended_at
@@ -286,15 +283,15 @@
 						<span aria-hidden="true">·</span>
 						<span class="inline-flex items-baseline gap-1">
 							<span>Container</span>
-							<span class="font-mono text-foreground">
+							<span class="text-foreground font-mono">
 								{detail.session.container_name}
 							</span>
 						</span>
 					{/if}
 				</div>
 			{/if}
-		</div>
-		<div class="flex flex-wrap items-center gap-2">
+		{/snippet}
+		{#snippet actions()}
 			<Button href="/history" variant="ghost" size="sm">
 				<ArrowLeftIcon /> Back
 			</Button>
@@ -318,7 +315,7 @@
 				</Button>
 			{:else}
 				<span
-					class="text-xs font-medium text-destructive"
+					class="text-destructive text-xs font-medium"
 					data-testid="delete-confirm-prompt"
 				>
 					Delete this session?
@@ -341,8 +338,8 @@
 					Cancel
 				</Button>
 			{/if}
-		</div>
-	</header>
+		{/snippet}
+	</PageHeader>
 
 	{#if loadError}
 		<Alert.Root variant="destructive" data-testid="load-error">
@@ -749,4 +746,4 @@
 			{/if}
 		</div>
 	{/if}
-</div>
+</Page>

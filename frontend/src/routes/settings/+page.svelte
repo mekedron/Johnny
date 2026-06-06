@@ -14,6 +14,8 @@
 	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Alert from '$lib/components/ui/alert/index.js';
+	import Page from '$lib/components/page.svelte';
+	import PageHeader from '$lib/components/page-header.svelte';
 	import {
 		ACCOUNT_ROLE_LABEL,
 		ACCOUNT_ROLES,
@@ -364,21 +366,17 @@
 
 <svelte:window onkeydown={handleSheetKeydown} />
 
-<div class="mx-auto flex max-w-4xl flex-col gap-10">
-	<header class="flex flex-wrap items-end justify-between gap-4">
-		<div class="flex min-w-0 flex-col gap-1.5">
-			<h1 class="m-0 text-2xl leading-tight font-semibold tracking-tight text-foreground">
-				Settings
-			</h1>
-			<p class="m-0 max-w-[64ch] text-sm text-muted-foreground">
-				Google identities Johnny uses. The default user is the calendar source; meeting bots
-				are the accounts Johnny signs in as when joining Meet calls.
-			</p>
-		</div>
-		<Button onclick={() => openAddForm('user')} data-testid="add-account-button">
-			<PlusIcon /> Add account
-		</Button>
-	</header>
+<Page width="narrow">
+	<PageHeader
+		title="Settings"
+		description="Google identities Johnny uses. The default user is the calendar source; meeting bots are the accounts Johnny signs in as when joining Meet calls."
+	>
+		{#snippet actions()}
+			<Button onclick={() => openAddForm('user')} data-testid="add-account-button">
+				<PlusIcon /> Add account
+			</Button>
+		{/snippet}
+	</PageHeader>
 
 	{#if error}
 		<Alert.Root variant="destructive" data-testid="settings-error">
@@ -722,7 +720,7 @@
 			</ul>
 		{/if}
 	</section>
-</div>
+</Page>
 
 {#if showForm}
 	<div

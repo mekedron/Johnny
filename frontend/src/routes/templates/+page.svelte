@@ -11,6 +11,8 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Alert from '$lib/components/ui/alert/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
+	import Page from '$lib/components/page.svelte';
+	import PageHeader from '$lib/components/page-header.svelte';
 	import {
 		BOT_MODE_LABEL,
 		BOT_MODES,
@@ -199,23 +201,17 @@
 	}}
 />
 
-<div class="mx-auto flex max-w-5xl flex-col gap-8">
-	<header class="flex flex-wrap items-end justify-between gap-4">
-		<div class="flex min-w-0 flex-col gap-1.5">
-			<h1
-				class="m-0 text-2xl leading-tight font-semibold tracking-tight text-foreground"
-			>
-				Templates
-			</h1>
-			<p class="m-0 max-w-[64ch] text-sm text-muted-foreground">
-				Reusable behavior profiles. Apply one to a meeting config, override per
-				meeting if needed.
-			</p>
-		</div>
-		<Button onclick={openNewForm} data-testid="new-template-button">
-			<PlusIcon /> New template
-		</Button>
-	</header>
+<Page>
+	<PageHeader
+		title="Templates"
+		description="Reusable behavior profiles. Apply one to a meeting config, override per meeting if needed."
+	>
+		{#snippet actions()}
+			<Button onclick={openNewForm} data-testid="new-template-button">
+				<PlusIcon /> New template
+			</Button>
+		{/snippet}
+	</PageHeader>
 
 	{#if error}
 		<Alert.Root variant="destructive" data-testid="templates-error">
@@ -355,7 +351,7 @@
 			{/each}
 		</ul>
 	{/if}
-</div>
+</Page>
 
 {#if showForm}
 	<div

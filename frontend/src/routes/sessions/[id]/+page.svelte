@@ -10,6 +10,8 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Card from '$lib/components/ui/card/index.js';
 	import * as Alert from '$lib/components/ui/alert/index.js';
+	import Page from '$lib/components/page.svelte';
+	import PageHeader from '$lib/components/page-header.svelte';
 	import {
 		BOT_SESSION_STATUS_LABEL,
 		stopSession,
@@ -568,40 +570,38 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="mx-auto flex max-w-7xl flex-col gap-6" data-testid="session-page">
-	<header class="flex flex-wrap items-start justify-between gap-4">
-		<div class="flex min-w-0 flex-col gap-1.5">
-			<div class="flex flex-wrap items-center gap-3">
-				<h1
-					class="m-0 text-2xl leading-tight font-semibold tracking-tight text-foreground"
+<Page testId="session-page">
+	<PageHeader>
+		{#snippet title()}
+			Session <span class="font-mono">#{sessionIdStr}</span>
+		{/snippet}
+		{#snippet meta()}
+			{#if session !== null}
+				<span
+					class="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium {statusToneClass(
+						session.status
+					)}"
+					data-testid="session-status"
 				>
-					Session <span class="font-mono">#{sessionIdStr}</span>
-				</h1>
-				{#if session !== null}
+					{BOT_SESSION_STATUS_LABEL[session.status]}
+				</span>
+				{#if !isTerminal && connected}
 					<span
-						class="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium {statusToneClass(
-							session.status
-						)}"
-						data-testid="session-status"
+						class="text-muted-foreground inline-flex items-center gap-1.5 text-xs"
+						aria-live="polite"
 					>
-						{BOT_SESSION_STATUS_LABEL[session.status]}
-					</span>
-					{#if !isTerminal && connected}
 						<span
-							class="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
-							aria-live="polite"
-						>
-							<span
-								aria-hidden="true"
-								class="live-pulse h-2 w-2 rounded-full bg-primary"
-							></span>
-							<span class="font-medium tracking-wide uppercase">Live</span>
-						</span>
-					{/if}
+							aria-hidden="true"
+							class="live-pulse bg-primary h-2 w-2 rounded-full"
+						></span>
+						<span class="font-medium tracking-wide uppercase">Live</span>
+					</span>
 				{/if}
-			</div>
+			{/if}
+		{/snippet}
+		{#snippet details()}
 			<div
-				class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground"
+				class="text-muted-foreground flex flex-wrap items-center gap-x-2 gap-y-1 text-xs"
 			>
 				{#if session !== null}
 					<span class="font-mono">{session.source}</span>
@@ -614,7 +614,7 @@
 					{#if !isTerminal && !connected}
 						<span aria-hidden="true">·</span>
 						<span
-							class="inline-flex items-center gap-1 text-warning"
+							class="text-warning inline-flex items-center gap-1"
 							data-testid="connection-state"
 						>
 							<WifiOffIcon class="size-3" /> Connecting…
@@ -622,8 +622,8 @@
 					{/if}
 				{/if}
 			</div>
-		</div>
-		<div class="flex flex-wrap items-center gap-2">
+		{/snippet}
+		{#snippet actions()}
 			<Button href="/calendar" variant="ghost" size="sm">
 				<ArrowLeftIcon /> Back
 			</Button>
@@ -648,8 +648,8 @@
 					<SquareIcon /> {stopping ? 'Ending…' : 'End session'}
 				</Button>
 			{/if}
-		</div>
-	</header>
+		{/snippet}
+	</PageHeader>
 
 	{#if loadError}
 		<Alert.Root variant="destructive" data-testid="load-error">
@@ -982,4 +982,4 @@
 			</Card.Root>
 		</div>
 	{/if}
-</div>
+</Page>

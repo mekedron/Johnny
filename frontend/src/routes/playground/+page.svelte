@@ -18,6 +18,8 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Alert from '$lib/components/ui/alert/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
+	import Page from '$lib/components/page.svelte';
+	import PageHeader from '$lib/components/page-header.svelte';
 	import {
 		audioWebSocketUrl,
 		postBrowserText,
@@ -682,17 +684,11 @@
 	<title>Playground · Johnny</title>
 </svelte:head>
 
-<div class="mx-auto flex w-full max-w-[960px] flex-col gap-6">
-	<header class="flex flex-col gap-1">
-		<h1
-			class="m-0 text-2xl leading-tight font-semibold tracking-tight text-foreground"
-		>
-			Playground
-		</h1>
-		<p class="m-0 max-w-[64ch] text-sm text-muted-foreground">
-			Talk to Johnny in the browser. Same router, approval, and TTS code paths as a real meeting — without a calendar event.
-		</p>
-	</header>
+<Page>
+	<PageHeader
+		title="Playground"
+		description="Talk to Johnny in the browser. Same router, approval, and TTS code paths as a real meeting — without a calendar event."
+	/>
 
 	{#if errorMessage}
 		<Alert.Root variant="destructive" data-testid="playground-error">
@@ -1254,4 +1250,4 @@
 			</form>
 		</section>
 	{/if}
-</div>
+</Page>

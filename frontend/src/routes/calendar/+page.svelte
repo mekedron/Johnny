@@ -16,6 +16,8 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Alert from '$lib/components/ui/alert/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
+	import Page from '$lib/components/page.svelte';
+	import PageHeader from '$lib/components/page-header.svelte';
 	import { listAccounts, type Account } from '$lib/accounts';
 	import {
 		formatDayHeading,
@@ -431,20 +433,12 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="mx-auto flex max-w-5xl flex-col gap-6">
-	<header class="flex flex-wrap items-end justify-between gap-4">
-		<div class="flex min-w-0 flex-col gap-1.5">
-			<h1
-				class="m-0 text-2xl leading-tight font-semibold tracking-tight text-foreground"
-			>
-				Calendar
-			</h1>
-			<p class="m-0 max-w-[64ch] text-sm text-muted-foreground">
-				Upcoming meetings · pick one with a Meet link to configure Johnny for
-				it.
-			</p>
-		</div>
-		<div class="flex items-center gap-2">
+<Page>
+	<PageHeader
+		title="Calendar"
+		description="Upcoming meetings · pick one with a Meet link to configure Johnny for it."
+	>
+		{#snippet actions()}
 			{#if accounts.length > 0}
 				<label class="flex items-center gap-2 text-sm">
 					<span class="sr-only">Account</span>
@@ -452,7 +446,7 @@
 						value={selectedAccountId ?? ''}
 						onchange={onAccountChange}
 						disabled={loadingEvents || accounts.length < 2}
-						class="border-input flex h-9 min-w-[200px] rounded-md border bg-background px-3 py-1 font-mono text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-70"
+						class="border-input bg-background focus-visible:border-ring focus-visible:ring-ring/50 flex h-9 min-w-[200px] rounded-md border px-3 py-1 font-mono text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-70"
 						data-testid="account-picker"
 					>
 						{#each accounts as account (account.id)}
@@ -474,8 +468,8 @@
 			>
 				<RefreshCwIcon class={loadingEvents ? 'animate-spin' : ''} />
 			</Button>
-		</div>
-	</header>
+		{/snippet}
+	</PageHeader>
 
 	{#if error}
 		<Alert.Root variant="destructive" data-testid="calendar-error">
@@ -702,7 +696,7 @@
 	{:else if loadingEvents}
 		<p class="text-sm text-muted-foreground italic">Syncing calendar…</p>
 	{/if}
-</div>
+</Page>
 
 {#if selectedEvent}
 	<div

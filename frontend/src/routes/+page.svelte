@@ -7,6 +7,8 @@
 	import HistoryIcon from '@lucide/svelte/icons/history';
 	import SettingsIcon from '@lucide/svelte/icons/settings';
 	import { cn } from '$lib/utils.js';
+	import Page from '$lib/components/page.svelte';
+	import PageHeader from '$lib/components/page-header.svelte';
 
 	const apiBase = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
 
@@ -95,15 +97,11 @@
 	<title>Johnny</title>
 </svelte:head>
 
-<div class="mx-auto flex w-full max-w-5xl flex-col gap-10">
-	<header class="flex flex-col gap-1.5">
-		<h1 class="m-0 text-2xl leading-tight font-semibold tracking-tight text-foreground">
-			Johnny
-		</h1>
-		<p class="m-0 max-w-[64ch] text-sm text-muted-foreground">
-			Operator console for the Google Meet AI meeting bot.
-		</p>
-	</header>
+<Page>
+	<PageHeader
+		title="Johnny"
+		description="Operator console for the Google Meet AI meeting bot."
+	/>
 
 	<section aria-label="Quick navigation">
 		<ul
@@ -170,4 +168,4 @@
 			{/if}
 		</p>
 	</section>
-</div>
+</Page>

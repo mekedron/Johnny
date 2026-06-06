@@ -8,6 +8,8 @@
 	import ArchiveIcon from '@lucide/svelte/icons/archive';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Alert from '$lib/components/ui/alert/index.js';
+	import Page from '$lib/components/page.svelte';
+	import PageHeader from '$lib/components/page-header.svelte';
 	import { BOT_MODE_LABEL } from '$lib/templates';
 	import { BOT_SESSION_STATUS_LABEL } from '$lib/sessions';
 	import {
@@ -111,17 +113,11 @@
 	<title>History · Johnny</title>
 </svelte:head>
 
-<div class="mx-auto flex max-w-7xl flex-col gap-6" data-testid="history-page">
-	<header class="flex flex-col gap-1.5">
-		<h1
-			class="m-0 text-2xl leading-tight font-semibold tracking-tight text-foreground"
-		>
-			History
-		</h1>
-		<p class="m-0 text-sm text-muted-foreground">
-			Past meeting sessions and audit logs.
-		</p>
-	</header>
+<Page testId="history-page">
+	<PageHeader
+		title="History"
+		description="Past meeting sessions and audit logs."
+	/>
 
 	<section
 		class="flex flex-col gap-3"
@@ -416,4 +412,4 @@
 			{/if}
 		{/if}
 	</section>
-</div>
+</Page>

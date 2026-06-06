@@ -19,6 +19,8 @@
 	import * as Alert from '$lib/components/ui/alert/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
+	import Page from '$lib/components/page.svelte';
+	import PageHeader from '$lib/components/page-header.svelte';
 	import {
 		activateProvider,
 		createProvider,
@@ -933,21 +935,12 @@
 
 <svelte:window onkeydown={handleWindowKeydown} />
 
-<div
-	class="mx-auto flex w-full max-w-[1200px] flex-col gap-6"
-	data-testid="providers-page"
->
-	<header class="flex flex-wrap items-start justify-between gap-4">
-		<div class="flex min-w-0 flex-col gap-1">
-			<h1 class="m-0 text-2xl leading-tight font-semibold tracking-tight text-foreground">
-				Providers
-			</h1>
-			<p class="m-0 max-w-[70ch] text-sm text-muted-foreground">
-				STT, LLM, and TTS adapters that Johnny uses during meetings. Add a provider to
-				get started — one modal handles configuration, testing, renaming, and deletion.
-			</p>
-		</div>
-		<div class="flex shrink-0 items-center gap-2">
+<Page testId="providers-page">
+	<PageHeader
+		title="Providers"
+		description="STT, LLM, and TTS adapters that Johnny uses during meetings. Add a provider to get started — one modal handles configuration, testing, renaming, and deletion."
+	>
+		{#snippet actions()}
 			<Button variant="outline" onclick={openExport} data-testid="export-button">
 				<DownloadIcon />
 				Export
@@ -956,8 +949,8 @@
 				<PlusIcon />
 				Add provider
 			</Button>
-		</div>
-	</header>
+		{/snippet}
+	</PageHeader>
 
 	{#if error}
 		<Alert.Root variant="destructive" data-testid="providers-error">
@@ -1080,7 +1073,7 @@
 			{/each}
 		</div>
 	{/if}
-</div>
+</Page>
 
 {#if mode !== 'closed'}
 	<div
