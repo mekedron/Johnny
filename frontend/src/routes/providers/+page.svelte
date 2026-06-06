@@ -934,12 +934,12 @@
 <svelte:window onkeydown={handleWindowKeydown} />
 
 <div
-	class="mx-auto flex w-full max-w-[1200px] flex-col gap-6 px-8 py-12"
+	class="mx-auto flex w-full max-w-[1200px] flex-col gap-6"
 	data-testid="providers-page"
 >
 	<header class="flex flex-wrap items-start justify-between gap-4">
 		<div class="flex min-w-0 flex-col gap-1">
-			<h1 class="m-0 text-xl leading-tight font-semibold tracking-tight text-foreground">
+			<h1 class="m-0 text-2xl leading-tight font-semibold tracking-tight text-foreground">
 				Providers
 			</h1>
 			<p class="m-0 max-w-[70ch] text-sm text-muted-foreground">

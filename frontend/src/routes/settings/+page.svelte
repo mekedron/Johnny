@@ -448,11 +448,11 @@
 									>
 									{#if account.is_default_user}
 										<span
-											class="inline-flex items-center gap-1 rounded-full bg-primary px-2 py-0.5 font-mono text-[0.7rem] font-medium text-primary-foreground"
+											class="inline-flex items-center gap-1 rounded-full border border-success/40 bg-success/10 px-2 py-0.5 font-mono text-[0.7rem] font-medium text-foreground"
 											data-testid={`default-badge-${account.id}`}
 											title="Default user — calendar source"
 										>
-											<ShieldCheckIcon class="size-3" aria-hidden="true" />
+											<ShieldCheckIcon class="size-3 text-success" aria-hidden="true" />
 											Default
 										</span>
 									{/if}

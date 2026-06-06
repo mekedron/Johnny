@@ -3,10 +3,10 @@
   "sessionId": "8456e0e0-4938-425a-82b4-bbdced2826f5",
   "status": "running",
   "startedAt": "2026-06-06T22:53:37.192Z",
-  "updatedAt": "2026-06-06T23:11:10.052Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-06T23:24:48.829Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -68,8 +68,8 @@
       {
         "id": "Johnny-fe.7",
         "title": "REIMAGINE + migrate: Migrate /history list + /history/[id] detail (442 + 847 lines) to shadcn-svelte",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-fe.8",
@@ -97,7 +97,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-fe.7",
+      "taskTitle": "REIMAGINE + migrate: Migrate /history list + /history/[id] detail (442 + 847 lines) to shadcn-svelte",
+      "taskCompleted": true,
+      "durationMs": 1042077,
+      "startedAt": "2026-06-06T22:53:47.210Z",
+      "endedAt": "2026-06-06T23:11:09.287Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

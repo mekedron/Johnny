@@ -591,6 +591,8 @@
 	</aside>
 
 	<main class="min-h-screen md:pl-60">
-		{@render children()}
+		<div class="px-4 py-8 md:px-8 md:py-12">
+			{@render children()}
+		</div>
 	</main>
 </div>
