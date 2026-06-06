@@ -26,6 +26,17 @@ export interface BotSession {
 	error_reason: string | null;
 	created_at: string;
 	updated_at: string;
+	/**
+	 * WebSocket path for the in-browser audio stream (browser-source
+	 * sessions only). The live UI uses this when reattaching to a
+	 * session after the playground tab was closed (Johnny-ckz.11).
+	 */
+	audio_ws_path?: string | null;
+	/**
+	 * Per-session playground overrides (persona, system prompt,
+	 * provider overrides). Populated for browser-source sessions only.
+	 */
+	playground_overrides?: Record<string, unknown> | null;
 }
 
 export interface ActiveSessionsResponse {

@@ -26,7 +26,7 @@ test.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict
@@ -86,6 +86,14 @@ class BotSessionRead(BaseModel):
     (Johnny-ckz.6). Lets the UI badge them differently in the list.
     ``meeting_config_id`` is nullable because playground sessions have
     no calendar event.
+
+    For browser-source rows ``audio_ws_path`` carries the WebSocket the
+    UI must connect to in order to reattach the live audio stream
+    (Johnny-ckz.11 — used by the session-detail "Reopen" button when
+    the playground tab was closed). ``playground_overrides`` exposes
+    the per-session knobs (persona, system prompt, provider overrides)
+    so the reopen UI can reflect the session's actual configuration
+    without re-asking the user.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -100,6 +108,8 @@ class BotSessionRead(BaseModel):
     error_reason: str | None
     created_at: datetime
     updated_at: datetime
+    audio_ws_path: str | None = None
+    playground_overrides: dict[str, Any] | None = None
 
 
 class StartSessionPayload(BaseModel):
@@ -178,7 +188,13 @@ class SessionDetailResponse(BaseModel):
 
 
 def _to_read(row: BotSession) -> BotSessionRead:
-    return BotSessionRead.model_validate(row)
+    data = BotSessionRead.model_validate(row)
+    if row.source == BotSessionSource.BROWSER:
+        # Mirror /sessions/browser/start's audio_ws_path so the live UI
+        # can reattach to the same WebSocket from the session-detail
+        # page (Johnny-ckz.11).
+        data = data.model_copy(update={"audio_ws_path": f"/ws/sessions/{row.id}/audio"})
+    return data
 
 
 def _meeting_for_event_or_404(

@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "sessionId": "13f4830b-7751-409e-9a7f-6d7c3f498ba5",
+  "sessionId": "3749d6fd-2087-45da-97b9-e587604101a9",
   "status": "running",
-  "startedAt": "2026-06-06T12:32:46.111Z",
-  "updatedAt": "2026-06-06T12:52:34.573Z",
+  "startedAt": "2026-06-06T13:00:57.169Z",
+  "updatedAt": "2026-06-06T13:41:38.351Z",
   "currentIteration": 0,
   "maxIterations": 0,
   "tasksCompleted": 0,
@@ -27,7 +27,7 @@
         }
       }
     ],
-    "totalTasks": 39,
+    "totalTasks": 45,
     "tasks": [
       {
         "id": "Johnny-ckz.1",
@@ -38,6 +38,12 @@
       {
         "id": "Johnny-ckz.2",
         "title": "Add 'Autonomous' mode: bot speaks freely per profile instructions, no whitelist, no approval gate",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.3",
+        "title": "Bot carries the whole meeting's context (not a 6-turn rolling window) when routing and answering",
         "status": "completed",
         "completedInSession": false
       },
@@ -60,12 +66,6 @@
         "completedInSession": false
       },
       {
-        "id": "Johnny-ckz.3",
-        "title": "Bot carries the whole meeting's context (not a 6-turn rolling window) when routing and answering",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
         "id": "Johnny-ckz.4",
         "title": "Run the two-bot voice-interrupt harness end-to-end against real models, fix any bugs it surfaces",
         "status": "completed",
@@ -75,6 +75,18 @@
         "id": "Johnny-ckz.5",
         "title": "Local Piper follow-up: voice catalog fetcher fails on HF 307 redirect, plus model dirs must move to host bind mounts (~/.johnny/...)",
         "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.6",
+        "title": "In-browser voice/text chat with the bot — per-event 'Try with bot' button + standalone playground (no Meet required)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.7",
+        "title": "Per-session activity / timing log surfaced in chat history (per-turn pipeline events with durations)",
+        "status": "open",
         "completedInSession": false
       },
       {
@@ -174,14 +186,32 @@
         "completedInSession": false
       },
       {
-        "id": "Johnny-ckz.6",
-        "title": "In-browser voice/text chat with the bot — per-event 'Try with bot' button + standalone playground (no Meet required)",
+        "id": "Johnny-ckz.8",
+        "title": "Profile + tune end-to-end voice latency on real local STT/TTS/LLM, and add in-UI optimization tips on each provider settings page",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.9",
+        "title": "bot_sessions schema drift: ORM expects 'source' and 'playground_overrides' columns that don't exist — worker monitor + /sessions/active both 500",
         "status": "completed",
         "completedInSession": false
       },
       {
-        "id": "Johnny-ckz.7",
-        "title": "Per-session activity / timing log surfaced in chat history (per-turn pipeline events with durations)",
+        "id": "Johnny-g2n",
+        "title": "ElevenLabs TTS: handle 'exceeds quota' 401 gracefully in the response loop",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-tjd",
+        "title": "Interrupt harness real-mode: clarification assertion shape doesn't match real behavior",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-gft",
+        "title": "Interrupt harness real-mode: stop scenario flakes when LLM round-trip is slow",
         "status": "open",
         "completedInSession": false
       },
@@ -198,14 +228,14 @@
         "completedInSession": false
       },
       {
-        "id": "Johnny-ckz.8",
-        "title": "Profile + tune end-to-end voice latency on real local STT/TTS/LLM, and add in-UI optimization tips on each provider settings page",
+        "id": "Johnny-ckz.10",
+        "title": "Validate in-browser live chat / live talking (Johnny-ckz.6) end-to-end via chrome-devtools MCP — pure verification, file follow-up bugs for any gap",
         "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-ckz.9",
-        "title": "bot_sessions schema drift: ORM expects 'source' and 'playground_overrides' columns that don't exist — worker monitor + /sessions/active both 500",
+        "id": "Johnny-ckz.11",
+        "title": "Playground / live mode: no audio playback (critical) + needs template-driven mode picker, volume control, and resume-from-session-page UX",
         "status": "open",
         "completedInSession": false
       },
@@ -219,6 +249,12 @@
         "id": "Johnny-kgc",
         "title": "Johnny — Google Meet AI Meeting Bot",
         "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.12",
+        "title": "STT provider settings: 'Record sample' button to verify transcription end-to-end (symmetric to existing TTS demo)",
+        "status": "open",
         "completedInSession": false
       },
       {

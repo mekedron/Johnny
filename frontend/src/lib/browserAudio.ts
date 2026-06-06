@@ -1,5 +1,5 @@
 /**
- * Web Audio + WebSocket plumbing for the in-browser voice surface (Johnny-ckz.6).
+ * Web Audio + WebSocket plumbing for the in-browser voice surface (Johnny-ckz.6, .11).
  *
  * The browser captures audio from the user's mic with
  * `getUserMedia`, downsamples it to 16 kHz mono signed-16-bit PCM via
@@ -10,6 +10,20 @@
  *
  * The contract matches `BrowserAudioTransport` on the server: raw PCM,
  * no JSON wrapping; control messages travel as JSON text frames.
+ *
+ * Audio routing for Johnny-ckz.11: TTS playback now goes through a
+ * `GainNode` so the UI can adjust volume and toggle mute without
+ * tearing down the WS or the pipeline. The mic stream is captured
+ * through a track whose `enabled` flag the UI can flip so the user
+ * can mute themselves without losing the WebRTC pipe.
+ *
+ * AudioContext resume (Johnny-ckz.11 audio fix): the playground's
+ * "Start session" click is the user gesture that unlocks audio playback,
+ * but the `AudioContext` is constructed *after* `await getUserMedia`,
+ * so on some browsers it lands in the `suspended` state. The TTS frames
+ * then arrive and silently schedule playback that never starts. We
+ * `resume()` explicitly the first time we touch the context, and again
+ * before the first playback frame, so the user always hears the bot.
  *
  * SECURITY: this module requests microphone access via the browser's
  * standard permission prompt. A denied permission triggers
@@ -26,6 +40,12 @@ export interface BrowserAudioSessionOptions {
 	onEnded?: (reason: string) => void;
 	onError?: (err: Error) => void;
 	onMicDenied?: () => void;
+	/** Fires when bot-output audio starts/stops playing in the speakers. */
+	onSpeakingChange?: (speaking: boolean) => void;
+	/** Periodic mic level (0..1 RMS); throttled to ~10 Hz inside the session. */
+	onMicLevel?: (level: number) => void;
+	/** Initial output volume (0..1). Default 1 (full). */
+	initialVolume?: number;
 }
 
 export interface BrowserAudioSession {
@@ -35,6 +55,20 @@ export interface BrowserAudioSession {
 	isLive: () => boolean;
 	/** Microphone media stream — exposed so the UI can show level meters. */
 	stream: MediaStream | null;
+	/** Adjust bot-output volume in 0..1. Persists across frames. */
+	setVolume: (volume: number) => void;
+	/** Current bot-output volume (0..1). */
+	getVolume: () => number;
+	/** Mute/unmute the speaker output. Independent of `setVolume`. */
+	setSpeakerMuted: (muted: boolean) => void;
+	/** Current speaker mute state. */
+	getSpeakerMuted: () => boolean;
+	/** Mute/unmute the microphone capture. Disables outbound audio frames. */
+	setMicMuted: (muted: boolean) => void;
+	/** Current microphone mute state. */
+	getMicMuted: () => boolean;
+	/** True while bot TTS audio is actively scheduled in the output. */
+	isSpeaking: () => boolean;
 }
 
 const PCM_WORKLET_SOURCE = `
@@ -97,6 +131,13 @@ function pcm16ToFloat32(buf: ArrayBuffer): Float32Array {
 	return out;
 }
 
+function clamp01(value: number): number {
+	if (!Number.isFinite(value)) return 1;
+	if (value < 0) return 0;
+	if (value > 1) return 1;
+	return value;
+}
+
 /**
  * Start a full duplex audio session against the given WebSocket.
  *
@@ -116,11 +157,35 @@ export async function startBrowserAudioSession(
 	let live = false;
 	let workletUrl: string | null = null;
 	let nextPlaybackTime = 0;
+	let outputGain: GainNode | null = null;
+	let speakerMuted = false;
+	let micMuted = false;
+	let volume = clamp01(options.initialVolume ?? 1);
+	let scheduledOutputs = 0;
+	let speaking = false;
+	let micLevelInterval: ReturnType<typeof setInterval> | null = null;
+	let micAnalyser: AnalyserNode | null = null;
+	const activeOutputs = new Set<AudioBufferSourceNode>();
+
+	const setSpeakingState = (next: boolean) => {
+		if (speaking === next) return;
+		speaking = next;
+		try {
+			options.onSpeakingChange?.(next);
+		} catch {
+			// swallow listener errors
+		}
+	};
 
 	const cleanup = async () => {
 		if (stopped) return;
 		stopped = true;
 		live = false;
+		setSpeakingState(false);
+		if (micLevelInterval) {
+			clearInterval(micLevelInterval);
+			micLevelInterval = null;
+		}
 		try {
 			if (socket && socket.readyState === WebSocket.OPEN) {
 				socket.send(JSON.stringify({ type: 'end' }));
@@ -133,8 +198,26 @@ export async function startBrowserAudioSession(
 		} catch {
 			// best-effort
 		}
+		for (const node of activeOutputs) {
+			try {
+				node.stop();
+			} catch {
+				// best-effort
+			}
+		}
+		activeOutputs.clear();
 		try {
 			workletNode?.disconnect();
+		} catch {
+			// best-effort
+		}
+		try {
+			micAnalyser?.disconnect();
+		} catch {
+			// best-effort
+		}
+		try {
+			outputGain?.disconnect();
 		} catch {
 			// best-effort
 		}
@@ -167,7 +250,14 @@ export async function startBrowserAudioSession(
 		return {
 			stop: cleanup,
 			isLive: () => false,
-			stream: null
+			stream: null,
+			setVolume: () => undefined,
+			getVolume: () => volume,
+			setSpeakerMuted: () => undefined,
+			getSpeakerMuted: () => speakerMuted,
+			setMicMuted: () => undefined,
+			getMicMuted: () => micMuted,
+			isSpeaking: () => false
 		};
 	}
 
@@ -178,6 +268,22 @@ export async function startBrowserAudioSession(
 		// device default and let the worklet downsample.
 		audioCtx = new AudioContext();
 	}
+
+	// Chrome's autoplay policy can leave the AudioContext in `suspended`
+	// state even after the user-gesture click that started this flow,
+	// because we already awaited getUserMedia. Without an explicit
+	// resume, every scheduled buffer source plays silently.
+	if (audioCtx.state === 'suspended') {
+		try {
+			await audioCtx.resume();
+		} catch (err) {
+			options.onError?.(err as Error);
+		}
+	}
+
+	outputGain = audioCtx.createGain();
+	outputGain.gain.value = speakerMuted ? 0 : volume;
+	outputGain.connect(audioCtx.destination);
 
 	workletUrl = pcmWorkletUrl();
 	await audioCtx.audioWorklet.addModule(workletUrl);
@@ -194,7 +300,7 @@ export async function startBrowserAudioSession(
 	socket.binaryType = 'arraybuffer';
 
 	workletNode.port.onmessage = (event: MessageEvent<ArrayBuffer>) => {
-		if (!live || stopped) return;
+		if (!live || stopped || micMuted) return;
 		const buf = event.data;
 		try {
 			socket?.send(buf);
@@ -206,19 +312,73 @@ export async function startBrowserAudioSession(
 	const source = audioCtx.createMediaStreamSource(stream);
 	source.connect(workletNode);
 
+	// Mic-level meter — feeds the UI's input level indicator. Cheap:
+	// an AnalyserNode + 10 Hz polling so we don't churn the frame loop.
+	if (options.onMicLevel) {
+		try {
+			micAnalyser = audioCtx.createAnalyser();
+			micAnalyser.fftSize = 256;
+			source.connect(micAnalyser);
+			const sampleBuf = new Float32Array(micAnalyser.fftSize);
+			micLevelInterval = setInterval(() => {
+				if (!micAnalyser || stopped) return;
+				micAnalyser.getFloatTimeDomainData(sampleBuf);
+				let sumSquares = 0;
+				for (const sample of sampleBuf) {
+					sumSquares += sample * sample;
+				}
+				const rms = Math.sqrt(sumSquares / sampleBuf.length);
+				const level = micMuted ? 0 : Math.min(1, rms * 4);
+				try {
+					options.onMicLevel?.(level);
+				} catch {
+					// swallow listener errors
+				}
+			}, 100);
+		} catch (err) {
+			// Mic metering is best-effort — fall back silently.
+			micAnalyser = null;
+			options.onError?.(err as Error);
+		}
+	}
+
 	const playFrame = (buf: ArrayBuffer) => {
-		if (!audioCtx) return;
+		if (!audioCtx || !outputGain) return;
 		const float = pcm16ToFloat32(buf);
 		if (float.length === 0) return;
+		// Belt-and-suspenders: if the context drifted back into suspended
+		// (some browsers do this when the tab loses focus briefly), try
+		// to resume before scheduling — silent failure here is fine.
+		if (audioCtx.state === 'suspended') {
+			void audioCtx.resume().catch(() => undefined);
+		}
 		const audioBuffer = audioCtx.createBuffer(1, float.length, SAMPLE_RATE);
 		audioBuffer.getChannelData(0).set(float);
 		const node = audioCtx.createBufferSource();
 		node.buffer = audioBuffer;
-		node.connect(audioCtx.destination);
+		node.connect(outputGain);
 		const now = audioCtx.currentTime;
-		nextPlaybackTime = Math.max(now, nextPlaybackTime);
-		node.start(nextPlaybackTime);
+		// Drift guard: if we fall too far behind realtime (network
+		// hiccup), snap back to "now" so the user doesn't hear an
+		// ever-growing audio delay.
+		if (nextPlaybackTime < now - 0.05) {
+			nextPlaybackTime = now;
+		} else {
+			nextPlaybackTime = Math.max(now, nextPlaybackTime);
+		}
+		const startAt = nextPlaybackTime;
+		node.start(startAt);
 		nextPlaybackTime += audioBuffer.duration;
+		scheduledOutputs += 1;
+		setSpeakingState(true);
+		activeOutputs.add(node);
+		node.onended = () => {
+			activeOutputs.delete(node);
+			scheduledOutputs = Math.max(0, scheduledOutputs - 1);
+			if (scheduledOutputs === 0) {
+				setSpeakingState(false);
+			}
+		};
 	};
 
 	socket.onmessage = (event: MessageEvent<unknown>) => {
@@ -253,9 +413,46 @@ export async function startBrowserAudioSession(
 		void cleanup();
 	};
 
+	const setVolume = (next: number) => {
+		volume = clamp01(next);
+		if (outputGain && !speakerMuted) {
+			outputGain.gain.value = volume;
+		}
+	};
+
+	const setSpeakerMuted = (next: boolean) => {
+		speakerMuted = next;
+		if (outputGain) {
+			outputGain.gain.value = next ? 0 : volume;
+		}
+	};
+
+	const setMicMuted = (next: boolean) => {
+		micMuted = next;
+		if (stream) {
+			for (const track of stream.getAudioTracks()) {
+				track.enabled = !next;
+			}
+		}
+		if (next) {
+			try {
+				options.onMicLevel?.(0);
+			} catch {
+				// swallow
+			}
+		}
+	};
+
 	return {
 		stop: cleanup,
 		isLive: () => live,
-		stream
+		stream,
+		setVolume,
+		getVolume: () => volume,
+		setSpeakerMuted,
+		getSpeakerMuted: () => speakerMuted,
+		setMicMuted,
+		getMicMuted: () => micMuted,
+		isSpeaking: () => speaking
 	};
 }

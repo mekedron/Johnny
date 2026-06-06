@@ -470,3 +470,105 @@ def test_runner_registry_round_trip() -> None:
     finally:
         browser_sessions_module.deregister_runner(7777)
     assert browser_sessions_module.get_session_runner(7777) is None
+
+
+# --- Disconnect grace + reattach (Johnny-ckz.11) ----------------------------
+
+
+def test_active_sessions_endpoint_surfaces_audio_ws_path_for_browser_rows(
+    client: TestClient, db_session: Session
+) -> None:
+    """The /sessions/active endpoint (the global one) must surface the
+    ``audio_ws_path`` for browser-source rows so the session-detail page
+    can offer a Reopen button (Johnny-ckz.11)."""
+    _, cfg = _seed_meeting(db_session)
+    meet = BotSession(
+        meeting_config_id=cfg.id,
+        source=BotSessionSource.MEET,
+        status=BotSessionStatus.JOINED,
+    )
+    browser = BotSession(
+        meeting_config_id=None,
+        source=BotSessionSource.BROWSER,
+        status=BotSessionStatus.JOINED,
+    )
+    db_session.add_all([meet, browser])
+    db_session.commit()
+    res = client.get("/sessions/active")
+    assert res.status_code == 200
+    sessions_by_id = {s["id"]: s for s in res.json()["sessions"]}
+    assert sessions_by_id[browser.id]["audio_ws_path"] == (
+        f"/ws/sessions/{browser.id}/audio"
+    )
+    # Meet-source rows do NOT advertise an audio path — Reopen is
+    # browser-only.
+    assert sessions_by_id[meet.id].get("audio_ws_path") in (None, "")
+
+
+def test_session_detail_endpoint_surfaces_audio_ws_path_for_browser_row(
+    client: TestClient, db_session: Session
+) -> None:
+    """A single-session GET must include audio_ws_path so the Reopen
+    flow on the session-detail page can mount the live UI without an
+    additional roundtrip."""
+    browser = BotSession(
+        meeting_config_id=None,
+        source=BotSessionSource.BROWSER,
+        status=BotSessionStatus.JOINED,
+    )
+    db_session.add(browser)
+    db_session.commit()
+    res = client.get(f"/sessions/{browser.id}")
+    assert res.status_code == 200
+    s = res.json()["session"]
+    assert s["audio_ws_path"] == f"/ws/sessions/{browser.id}/audio"
+
+
+def test_disconnect_watchdog_schedules_and_cancels_cleanly() -> None:
+    """The disconnect grace watchdog must:
+
+    * schedule a TimerHandle + silent-drain task on first call,
+    * cancel both when reattach happens, and
+    * leave the runner in a re-startable state.
+    """
+    import asyncio
+
+    async def _run() -> None:
+        transport = browser_sessions_module.BrowserAudioTransport(
+            sample_rate=16_000
+        )
+        await transport.start()
+        runner = browser_sessions_module.BrowserSessionRunner(
+            bot_session_id=42,
+            transport=transport,
+            stop_event=asyncio.Event(),
+            task=asyncio.create_task(asyncio.sleep(60)),
+        )
+        try:
+            browser_sessions_module._schedule_disconnect_watchdog(runner)
+            assert runner.disconnect_timer is not None
+            assert runner.silent_drain_task is not None
+            # Push a frame so the silent-drain task has something to
+            # absorb — the drain task should consume it and stay alive.
+            transport._enqueue_playback(b"\x00" * 4, source_rate=16_000)
+            await asyncio.sleep(0)  # let the drain task tick once
+            assert runner.silent_drain_task is not None
+            assert not runner.silent_drain_task.done()
+            # Now simulate a reattach: ws_connected goes True and the
+            # watchdog is cancelled.
+            runner.ws_connected = True
+            browser_sessions_module._cancel_disconnect_watchdog(runner)
+            assert runner.disconnect_timer is None
+            assert runner.silent_drain_task is None
+            # Pipeline transport is still open — reattach is safe.
+            assert not transport.is_closed
+        finally:
+            runner.task.cancel()
+            try:
+                await runner.task
+            except (asyncio.CancelledError, Exception):
+                pass
+            await transport.stop()
+            transport.close_playback()
+
+    asyncio.run(_run())

@@ -189,6 +189,17 @@ class BrowserTextInput(BaseModel):
 # --- Runner registry ------------------------------------------------------
 
 
+DISCONNECT_GRACE_SECONDS = 60.0
+"""How long the pipeline stays alive after the browser tab disconnects.
+
+Johnny-ckz.11 requires that closing the playground tab does NOT
+terminate the session — the user can reopen the session-detail page
+and click "Reopen" to re-attach within this window. After the grace
+period elapses without a re-attach, the runner is torn down so we
+don't leak transports + pipelines forever.
+"""
+
+
 @dataclass
 class BrowserSessionRunner:
     """One live in-browser pipeline run.
@@ -197,6 +208,12 @@ class BrowserSessionRunner:
     WebSocket endpoint attaches by looking up the runner in the
     registry; if the runner has no active websocket yet we stash the
     socket here so the next attach can boot it.
+
+    ``ws_connected`` is True only while a browser tab is actively
+    streaming. When the tab disconnects we schedule a grace-period
+    timer (``disconnect_timer``) and a silent playback drain
+    (``silent_drain_task``) so the pipeline keeps running for reattach
+    without filling the playback queue with frames nobody can hear.
     """
 
     bot_session_id: int
@@ -205,6 +222,14 @@ class BrowserSessionRunner:
     task: asyncio.Task[None]
     started_at: float = field(default_factory=time.monotonic)
     ws_connected: bool = False
+    disconnect_timer: asyncio.TimerHandle | None = None
+    silent_drain_task: asyncio.Task[None] | None = None
+    pipeline: Any = None
+    """The assembled :class:`VoicePipeline` for this run.
+
+    Captured via ``on_assembled`` callback so the text-input endpoint
+    can call :meth:`VoicePipeline.feed_text` and drive the full
+    router → answer → TTS path from typed input (Johnny-ckz.11)."""
 
 
 def get_session_runner(bot_session_id: int) -> BrowserSessionRunner | None:
@@ -475,11 +500,22 @@ def _spawn_runner(
     """Start the pipeline task and register it in the per-process registry."""
     transport = BrowserAudioTransport(sample_rate=DEFAULT_SAMPLE_RATE)
     stop_event = asyncio.Event()
+    runner_holder: dict[str, Any] = {}
+
+    def _capture_pipeline(pipeline: Any) -> None:
+        # Captured via run_browser_pipeline's on_assembled hook so the
+        # text-input endpoint can call pipeline.feed_text (Johnny-ckz.11).
+        holder_runner = runner_holder.get("runner")
+        if holder_runner is not None:
+            holder_runner.pipeline = pipeline
 
     async def _runner() -> None:
         try:
             await run_browser_pipeline(
-                transport, spec, stop_event=stop_event
+                transport,
+                spec,
+                stop_event=stop_event,
+                on_assembled=_capture_pipeline,
             )
         finally:
             # Persist the session end on cleanup so the UI sees the
@@ -503,6 +539,7 @@ def _spawn_runner(
         stop_event=stop_event,
         task=task,
     )
+    runner_holder["runner"] = runner
     register_runner(runner)
     return runner
 
@@ -619,10 +656,17 @@ async def post_text_input(
 ) -> dict[str, Any]:
     """Inject text into the pipeline as a finalised transcript.
 
-    Used by the UI when the mic is denied/muted — the user types,
-    the pipeline runs router → answer → TTS like a normal speech turn.
-    Implementation is deferred to a future iteration; for now we record
-    the text as a transcript_chunk so it shows up in the live view.
+    Used by the UI when the mic is denied/muted — the user types and
+    the pipeline runs router → answer → TTS like a normal speech turn
+    (Johnny-ckz.6 + Johnny-ckz.11). The transcript is also persisted
+    so it shows up in the live transcript pane and the history page.
+
+    If the live runner has assembled its pipeline, we call
+    ``pipeline.feed_text`` so the bot actually responds (audio + UI
+    events follow). When the runner exists but the pipeline isn't
+    ready yet — or there is no runner at all (session ended, or the
+    server restarted) — we fall back to persisting the chunk so the
+    user's input is at least preserved.
     """
     row = session.get(BotSession, bot_session_id)
     if row is None:
@@ -635,18 +679,45 @@ async def post_text_input(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="text input is only available for browser sessions",
         )
-    from app.db.models import TranscriptChunk
 
-    chunk = TranscriptChunk(
-        bot_session_id=row.id,
-        start_offset_ms=0,
-        end_offset_ms=0,
-        speaker="user",
-        text=payload.text.strip(),
-    )
-    session.add(chunk)
-    session.flush()
-    return {"accepted": True, "chunk_id": chunk.id}
+    text = payload.text.strip()
+    accepted_by_pipeline = False
+    runner = get_session_runner(bot_session_id)
+    pipeline = getattr(runner, "pipeline", None) if runner else None
+    if pipeline is not None:
+        try:
+            accepted_by_pipeline = await pipeline.feed_text(text)
+        except Exception:  # noqa: BLE001 — never let pipeline state
+            # block the user; we still persist below so the input is
+            # not lost.
+            logger.exception(
+                "feed_text failed for session=%s; persisting chunk only",
+                bot_session_id,
+            )
+            accepted_by_pipeline = False
+
+    chunk_id: int | None = None
+    if not accepted_by_pipeline:
+        # Fallback path — runner gone or pipeline not ready. Persist
+        # the chunk directly so the input is not lost.
+        from app.db.models import TranscriptChunk
+
+        chunk = TranscriptChunk(
+            bot_session_id=row.id,
+            start_offset_ms=0,
+            end_offset_ms=0,
+            speaker="user",
+            text=text,
+        )
+        session.add(chunk)
+        session.flush()
+        chunk_id = chunk.id
+
+    return {
+        "accepted": True,
+        "drove_pipeline": accepted_by_pipeline,
+        "chunk_id": chunk_id,
+    }
 
 
 @router.get("/active", response_model=list[BrowserSessionRead])
@@ -709,6 +780,25 @@ async def browser_audio_socket(
         await websocket.close(code=1011)
         return
 
+    if runner.ws_connected:
+        # Refuse a second tab attaching to the same session — the user
+        # is meant to close the previous tab (or click Reopen which
+        # naturally disconnects the prior WS). Without this guard the
+        # two tabs would race over the playback queue.
+        await websocket.accept()
+        await websocket.send_json(
+            {
+                "type": "ended",
+                "reason": "session already attached in another tab",
+            }
+        )
+        await websocket.close(code=1008)
+        return
+
+    # Cancel any pending disconnect-grace timer + silent drain that the
+    # previous tab left behind so reattach picks up cleanly.
+    _cancel_disconnect_watchdog(runner)
+
     await websocket.accept()
     runner.ws_connected = True
     await websocket.send_json(
@@ -770,15 +860,97 @@ async def browser_audio_socket(
                 except (asyncio.CancelledError, Exception):
                     pass
         runner.ws_connected = False
-        # Closing the transport here also signals the pipeline that
-        # the audio stream ended — it will drain remaining frames and
-        # exit cleanly.
-        await transport.stop()
+        # Johnny-ckz.11: do NOT close the transport here. Closing it
+        # would tear down the pipeline and mark the session ENDED, so
+        # an accidental tab close would lose the live session. Instead
+        # we start a grace-period timer; if no tab reattaches within
+        # ``DISCONNECT_GRACE_SECONDS`` the watchdog calls
+        # ``transport.stop()`` and the pipeline exits cleanly. A
+        # concurrent silent-drain task absorbs TTS frames produced while
+        # nobody is listening so the playback queue can't grow without
+        # bound.
+        if not runner.transport.is_closed:
+            _schedule_disconnect_watchdog(runner)
         if websocket.client_state is not WebSocketState.DISCONNECTED:
             try:
                 await websocket.close()
             except Exception:  # noqa: BLE001 — best-effort
                 pass
+
+
+def _schedule_disconnect_watchdog(runner: BrowserSessionRunner) -> None:
+    """Start the grace-period timer + silent playback drain after WS disconnect.
+
+    The grace timer fires ``DISCONNECT_GRACE_SECONDS`` from now and tells
+    the pipeline to shut down by closing the transport. The silent drain
+    coroutine consumes outbound playback frames in the meantime so the
+    transport's unbounded queue can't grow while no browser is attached.
+    Either coroutine is cancelled if a new WebSocket reattaches.
+    """
+    loop = asyncio.get_event_loop()
+
+    def _on_grace_expired() -> None:
+        # Best-effort: if the runner closed naturally before the grace
+        # expired we just no-op. asyncio.Task creation is fire-and-forget
+        # since the runner's own cleanup path will mark the session ended.
+        if runner.ws_connected or runner.transport.is_closed:
+            return
+        logger.info(
+            "browser session %s: disconnect grace expired; stopping pipeline",
+            runner.bot_session_id,
+        )
+
+        async def _stop() -> None:
+            try:
+                await runner.transport.stop()
+            except Exception:  # noqa: BLE001 — best-effort
+                logger.exception(
+                    "failed to stop transport after disconnect grace"
+                )
+            runner.stop_event.set()
+
+        asyncio.create_task(
+            _stop(), name=f"browser-disconnect-stop-{runner.bot_session_id}"
+        )
+
+    runner.disconnect_timer = loop.call_later(
+        DISCONNECT_GRACE_SECONDS, _on_grace_expired
+    )
+
+    async def _silent_drain() -> None:
+        # Drop frames from the playback queue while no WebSocket is
+        # attached so it doesn't grow without bound while the pipeline
+        # keeps producing TTS. We watch ws_connected to bail as soon as
+        # a tab reattaches; reattach also explicitly cancels this task.
+        try:
+            async for _frame in runner.transport.drain_playback_frames():
+                if runner.ws_connected:
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — defensive
+            logger.exception(
+                "silent playback drain crashed for session %s",
+                runner.bot_session_id,
+            )
+
+    runner.silent_drain_task = asyncio.create_task(
+        _silent_drain(), name=f"browser-silent-drain-{runner.bot_session_id}"
+    )
+
+
+def _cancel_disconnect_watchdog(runner: BrowserSessionRunner) -> None:
+    """Cancel pending disconnect timer + silent drain when a tab reattaches."""
+    if runner.disconnect_timer is not None:
+        try:
+            runner.disconnect_timer.cancel()
+        except Exception:  # noqa: BLE001 — defensive
+            pass
+        runner.disconnect_timer = None
+    if runner.silent_drain_task is not None:
+        if not runner.silent_drain_task.done():
+            runner.silent_drain_task.cancel()
+        runner.silent_drain_task = None
 
 
 __all__ = [

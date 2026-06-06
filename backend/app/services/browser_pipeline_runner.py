@@ -198,8 +198,14 @@ async def run_browser_pipeline(
     *,
     stop_event: asyncio.Event,
     vad: VADAnalyzer | None = None,
+    on_assembled: Any = None,
 ) -> None:
     """Assemble and run the pipeline until ``stop_event`` fires.
+
+    ``on_assembled`` is an optional callback that receives the assembled
+    :class:`VoicePipeline` BEFORE :meth:`run` is awaited. Callers use
+    this to capture a reference for out-of-band injection (e.g. the
+    text-input endpoint that calls ``pipeline.feed_text`` — Johnny-ckz.11).
 
     All exceptions are caught and logged; the run never bubbles up so
     a transient provider error doesn't kill the API process. The
@@ -223,6 +229,14 @@ async def run_browser_pipeline(
         await transport.stop()
         transport.close_playback()
         return
+
+    if on_assembled is not None:
+        try:
+            on_assembled(pipeline)
+        except Exception:  # noqa: BLE001 — best-effort hook
+            logger.exception(
+                "on_assembled hook raised for session=%s", spec.session_id
+            )
 
     logger.info(
         "browser pipeline assembled for session=%s mode=%s",

@@ -512,6 +512,15 @@
 		</div>
 		<div class="header-actions">
 			<a href="/calendar" class="ghost">Back to calendar</a>
+			{#if session !== null && session.source === 'browser' && !isTerminal}
+				<a
+					href={`/playground?session=${session.id}`}
+					class="primary reopen"
+					data-testid="reopen-playground-button"
+				>
+					Reopen playground
+				</a>
+			{/if}
 			<button
 				type="button"
 				class="end-session danger"
@@ -808,6 +817,19 @@
 	.danger {
 		background: #b91c1c;
 		color: #ffffff;
+	}
+	a.reopen {
+		display: inline-block;
+		padding: 0.5rem 0.9rem;
+		border-radius: 6px;
+		font-weight: 600;
+		font-size: 0.85rem;
+		background: #2563eb;
+		color: #ffffff;
+		text-decoration: none;
+	}
+	a.reopen:hover {
+		background: #1d4ed8;
 	}
 	.danger:hover:not(:disabled) {
 		background: #991b1b;

@@ -5,97 +5,160 @@ after each iteration and it's included in prompts for context.
 
 ## Codebase Patterns (Study These First)
 
-### Boot-time DB bootstrap + model/DB drift guard
-Both the FastAPI lifespan (`backend/app/main.py`) and the worker loop
-(`backend/app/worker.py`) call `app.db.bootstrap.bootstrap()` BEFORE
-any ORM query. The helper runs `alembic upgrade head` programmatically
-and then diffs `Base.metadata.tables` against the live schema; missing
-columns raise `SchemaDriftError` so the process exits non-zero instead
-of silently 500-ing on the first request. Opt out with
-`JOHNNY_DB_BOOTSTRAP=off` (set in `backend/tests/conftest.py` for the
-test suite). When invoking Alembic programmatically also set
-`cfg.attributes["preserve_caller_logging"] = True` — Alembic's env.py
-checks that flag and skips `fileConfig()`, which would otherwise reset
-the caller's root logger to WARNING and mute every subsequent INFO log.
+### Web Audio playback on a click-handler-await chain
+When the AudioContext is constructed AFTER `await getUserMedia(...)`, Chrome's
+autoplay policy can leave it in `suspended` state — every scheduled
+`createBufferSource().start()` plays silently. ALWAYS call `await
+audioCtx.resume()` immediately after `new AudioContext(...)` in any
+flow that starts from a click handler but awaits other work first.
+See `frontend/src/lib/browserAudio.ts` (Johnny-ckz.11). Also resume
+on every playback frame as belt-and-suspenders for tab-focus loss.
 
-### Idempotent Alembic migrations against half-applied state
-`0007_bot_session_browser_source.py` is the pattern: build an
-`sa.Inspector` from `op.get_bind()`, then guard every `add_column` /
-`create_check_constraint` / `alter_column` with an existence check.
-All ALTERs run inside a single `op.batch_alter_table` block so the
-same migration works on Postgres (native ALTER) AND SQLite (test
-runner) without a separate dialect branch.
+### Per-session browser pipeline runner registry
+Browser-source sessions hold an in-process `BrowserSessionRunner`
+keyed by `bot_session_id`. The WebSocket endpoint looks the runner up,
+shares its transport, and on disconnect schedules a grace timer
+(`DISCONNECT_GRACE_SECONDS = 60`) + silent-drain task so the pipeline
+keeps running for tab-close + reopen. See
+`backend/app/api/browser_sessions.py::_schedule_disconnect_watchdog`.
+
+### Pipeline.feed_text() — text→TTS injection
+`VoicePipeline.feed_text(text)` publishes a `TranscriptFinalized` and
+queues it on `_response_queue` so the router → answer → TTS path runs
+exactly as it would for a transcribed voice utterance. Used by the
+playground's text-input fallback (mic-denied / mic-muted). See
+`backend/johnny/voice_pipeline/pipeline.py`.
 
 ---
 
-## 2026-06-06 - Johnny-ckz.9
+## 2026-06-06 - Johnny-ckz.11
 
-- Diagnosed the P0 outage: live Postgres was at Alembic revision 0006
-  while the ORM in `backend/app/db/models.py` expected the 0007
-  columns `source` and `playground_overrides`. Every SELECT against
-  `bot_sessions` (worker `monitor_session_containers`, API
-  `/sessions/active`) raised `UndefinedColumn`.
-- Reworked the existing `0007_bot_session_browser_source.py`
-  migration to be idempotent and SQLite-compatible: each step is
-  guarded by an `sa.Inspector` check on the running bind, and
-  everything happens inside `op.batch_alter_table`.
-- Added `backend/app/db/bootstrap.py` (`bootstrap()`,
-  `run_migrations()`, `check_model_db_drift()`, `SchemaDriftError`).
-- Wired `bootstrap()` into the FastAPI lifespan
-  (`backend/app/main.py`) and the worker `main()`
-  (`backend/app/worker.py`) BEFORE any DB query.
-- Patched `backend/alembic/env.py` to skip `fileConfig()` when the
-  caller has set `preserve_caller_logging` on the alembic Config —
-  otherwise programmatic `command.upgrade` silently downgraded the
-  root logger to WARNING and hid every subsequent worker INFO log.
-- Added `backend/tests/conftest.py` setting `JOHNNY_DB_BOOTSTRAP=off`
-  so the in-process pytest suite (which uses SQLite via
-  `Base.metadata.create_all`) doesn't try to connect to the
-  Compose-only `postgres` hostname.
-- Verified end-to-end:
-  - `GET /sessions/active` returned HTTP 200 with a synthetic
-    `source='browser'` row carrying `meeting_config_id=NULL`.
-  - Inserted a synthetic `joining` session with a non-existent
-    container name; the worker's monitor pass transitioned it to
-    `failed` / `error_reason='container disappeared'` and logged
-    `container monitor complete: 1 sessions transitioned` — proving
-    the previously-crashing SELECT path now runs cleanly.
-  - Worker log over 5+ minutes shows zero `UndefinedColumn` /
-    exception entries.
+### What was implemented
+Critical audio playback bug fix + comprehensive playground UI overhaul.
+
+**Audio fix (the critical bug):**
+- Root cause: `AudioContext` constructed after `await getUserMedia` could
+  land in `suspended` state on Chrome (autoplay policy). Every
+  `createBufferSource().start()` ran silently.
+- `browserAudio.ts` now calls `await audioCtx.resume()` after creation
+  and again on each playback frame as a guard against tab-focus loss.
+- Verified end-to-end via chrome-devtools MCP: `AudioContext.state ===
+  'running'`, 41 `BufferSource.start()` calls scheduled at advancing
+  timestamps after the bot replied.
+
+**Playground configuration UI:**
+- Decision mode picker exposes all 6 `BotMode` values; switching mode
+  drives the same router / approval / TTS code paths as a real meeting.
+- Template picker pulls from `/templates`; selected template's
+  `base_instructions` + `base_context` are stitched into the effective
+  system prompt.
+- STT / LLM / TTS provider override pickers (in an Advanced section)
+  pull from `/providers`; each row defaults to "Use active default".
+- Context-injection textarea is appended to the system prompt as
+  `Additional context` so the playground can simulate per-event
+  surfaces without a calendar event.
+- Persona + custom system prompt kept from before.
+
+**Live UI improvements:**
+- Idle / Listening / Thinking / Speaking state indicator driven by
+  speaking flag + mic level + recent router-decision timestamps.
+- Active-config chips (mode / template / STT / LLM / TTS / persona)
+  so the user can verify settings without leaving the live view.
+- Speaker volume slider routes through a new `GainNode` between
+  `BufferSource` and `audioCtx.destination`.
+- Mic level meter (10 Hz RMS sampling via `AnalyserNode`).
+- Independent mic + speaker mute toggles.
+- Live transcript pane (left) + controls pane (right), responsive
+  to single-column on tablet/mobile.
+
+**Tab-close survival + reopen:**
+- WS disconnect now schedules a 60 s grace timer instead of tearing
+  down the transport. A concurrent silent-drain task absorbs TTS
+  frames produced while no tab is attached.
+- Re-attach within the grace window cancels both timer + drain. After
+  the grace expires the watchdog calls `transport.stop()` and the
+  pipeline exits cleanly, marking the session ENDED.
+- A second tab attaching while one is already connected is refused
+  with `{"type":"ended","reason":"session already attached"}`.
+- Session-detail page shows a "Reopen playground" button for
+  browser-source rows in non-terminal states; it links to
+  `/playground?session=ID`.
+- Playground page detects `?session=ID`, fetches `/sessions/{id}`,
+  hydrates persona / system_prompt / mode from `playground_overrides`,
+  seeds the transcript pane from history, and starts a fresh audio
+  WS against the live runner.
+
+**Text input now drives the full pipeline:**
+- `VoicePipeline.feed_text(text)` injects typed input as a
+  `TranscriptFinalized` and queues it for the response loop. Router /
+  answer / TTS run identically to a voice utterance.
+- `/sessions/browser/{id}/text` endpoint calls `pipeline.feed_text`
+  when the runner is alive; falls back to persisting a chunk if not.
+
+**Backend schema:**
+- `BotSessionRead` (regular `/sessions/active`, `/sessions/{id}`)
+  surfaces `audio_ws_path` for browser-source rows so the
+  session-detail page can offer Reopen.
+- `playground_overrides` is also exposed on the read model.
 
 ### Files changed
-- `backend/alembic/versions/0007_bot_session_browser_source.py`
-- `backend/alembic/env.py`
-- `backend/app/db/bootstrap.py` (new)
-- `backend/app/main.py`
-- `backend/app/worker.py`
-- `backend/tests/conftest.py` (new)
-- `backend/tests/test_db_bootstrap.py` (new — 9 tests)
-- `backend/tests/test_migration_0007.py` (new — 5 tests)
+**Frontend**
+- `frontend/src/lib/browserAudio.ts` — AudioContext resume, GainNode,
+  mute toggles, mic level meter, speaking-state callback.
+- `frontend/src/lib/sessions.ts` — BotSession adds `audio_ws_path` +
+  `playground_overrides`.
+- `frontend/src/routes/playground/+page.svelte` — total rewrite
+  covering all config knobs, state indicators, live controls,
+  reattach via `?session=ID`, hydrated transcript.
+- `frontend/src/routes/sessions/[id]/+page.svelte` — Reopen
+  playground button for browser-source live sessions.
+
+**Backend**
+- `backend/app/api/browser_sessions.py` — disconnect grace timer,
+  silent drain, second-tab refusal, text endpoint drives pipeline,
+  runner captures pipeline reference via on_assembled callback.
+- `backend/app/api/sessions.py` — `BotSessionRead` exposes
+  `audio_ws_path` + `playground_overrides`.
+- `backend/app/services/browser_pipeline_runner.py` —
+  `run_browser_pipeline` accepts `on_assembled` callback so the API
+  layer can capture the assembled pipeline.
+- `backend/johnny/voice_pipeline/pipeline.py` — `feed_text(text)`
+  injects typed input as a finalised transcript.
+
+**Tests**
+- `backend/tests/voice_pipeline/test_pipeline.py` — 2 new tests for
+  `feed_text` (drives router→answer→TTS; rejects empty).
+- `backend/tests/api/test_browser_sessions.py` — 3 new tests
+  (active endpoint surfaces audio_ws_path, session detail surfaces
+  audio_ws_path, disconnect watchdog round-trip).
+
+**Verification**
+- Frontend `pnpm check`: 0 errors, 0 warnings.
+- Backend pytest (voice_pipeline + browser_sessions + sessions):
+  338 passed, 2 skipped.
+- chrome-devtools MCP screenshots in
+  `.ralph-tui/iterations/playground-*.png`.
 
 ### Learnings
+- **AudioContext autoplay-policy gotcha** — see the pattern at the
+  top of this file. This was the single root cause of the
+  "transcription appears but no sound" bug.
+- **Per-tab session ownership** — pipeline needs a TTL after WS
+  disconnect, not immediate teardown, otherwise accidental tab close
+  loses the session. A silent-drain coroutine is necessary so the
+  unbounded playback queue doesn't accumulate frames during the
+  grace window.
+- **HMR doesn't help across docker-compose** — the frontend
+  container bakes source at build time, so iterating UI changes
+  requires `docker compose up -d --build frontend`. (Confirmed by
+  observing the page render the prior page version after a code
+  edit + reload without a rebuild.)
+- **chrome-devtools MCP probe pattern for closure-private state** —
+  the audio module's `AudioContext` and `GainNode` live in a closure.
+  Inject an `initScript` that wraps `AudioContext`, captures every
+  instance on `window.__lastAudioCtx`, and patches
+  `AudioParam.value` setter to snapshot writes globally. That gave
+  hard evidence for the audio-fix proof (state running, 41 frames
+  scheduled, gain.value written by slider drag).
 
-- **Patterns discovered:** see the "Codebase Patterns" section above
-  for the boot-time bootstrap and idempotent-migration recipes.
-- **Gotchas:**
-  - The Compose stack has a one-shot `migrate` service that runs
-    `alembic upgrade head` on `docker compose up`. It only fires
-    once per `up`, not when migration files change — so if a
-    migration is added while the stack is running, the API/worker
-    containers stay against the old schema until restart. The new
-    in-process `bootstrap()` is the second line of defence.
-  - `alembic.command.upgrade` calls `env.py`, which by default runs
-    `fileConfig(alembic.ini)`. With `[logger_root] level=WARNING`
-    in `alembic.ini`, that pass silently swallows every later INFO
-    log from the calling process unless you suppress it via the
-    `preserve_caller_logging` attribute pattern.
-  - SQLite does NOT support `ALTER TABLE ADD CONSTRAINT`, so any
-    Alembic migration that adds a CHECK constraint must run inside
-    `op.batch_alter_table` to be testable on SQLite. Postgres still
-    uses native ALTER inside batch mode — no table recreation.
-  - `inspect(engine).get_check_constraints(table)` returns dicts
-    with `name`/`sqltext`; existing-constraint checks need to filter
-    out unnamed entries (some dialects emit `name=None` for inline
-    constraints).
 ---
-

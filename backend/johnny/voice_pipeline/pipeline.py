@@ -556,6 +556,47 @@ class VoicePipeline:
             self.config.session_id,
         )
 
+    async def feed_text(self, text: str, *, speaker: str = "user") -> bool:
+        """Inject typed text as if it were a finalised STT transcript.
+
+        Used by the playground's text-input fallback (Johnny-ckz.6 +
+        Johnny-ckz.11): the user types, the pipeline runs router →
+        answer → TTS exactly the way it would on a voice utterance. The
+        injected transcript is published on the event bus (so the live
+        UI sees it) and persisted as a ``TranscriptChunk`` (so it
+        appears in history), then handed to the response loop.
+
+        Returns ``True`` if the text was accepted, ``False`` if the
+        pipeline is not currently running (i.e. before :meth:`run` or
+        after the transport closed).
+        """
+        cleaned = text.strip()
+        if not cleaned:
+            return False
+        if self._response_queue is None:
+            # Pipeline hasn't started its run loop yet. Reject so the
+            # API can return a clear 4xx.
+            return False
+        transcript = TranscriptFinalized(
+            text=cleaned,
+            timestamp_ms=self._now_ms(),
+            speaker=speaker,
+            session_id=self.config.session_id,
+        )
+        await self.event_bus.publish(transcript)
+        self._remember_transcript(transcript)
+        try:
+            await self._persist_transcript(transcript, utterance=b"")
+        except Exception:  # noqa: BLE001 — persistence failure shouldn't
+            # block the live response; it'll show up in the live UI even
+            # if the audit row failed.
+            logger.exception(
+                "failed to persist text-injected transcript for session=%s",
+                self.config.session_id,
+            )
+        await self._response_queue.put(transcript)
+        return True
+
     def interrupt(self) -> None:
         """Stop the current answer stage's LLM stream and TTS playback.
 

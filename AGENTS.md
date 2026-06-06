@@ -13,6 +13,10 @@ Rules:
 - "I read the code and it looks right" is not validation. "The unit test passes" is not validation. Only a recorded chrome-devtools MCP run is.
 - If the change literally cannot be browser-tested (pure backend migration with no UI surface, a cron-only worker), state that explicitly in the PR description — otherwise assume browser validation is required.
 
+You can run and test anything in Chrome browser using `chrome-devtools` MCP server. NEVER use `claude-in-chrome` MCP — always use `chrome-devtools` MCP exclusively for all browser automation.
+
+The `chrome-devtools` MCP is configured to attach to a long-lived Chrome on `http://127.0.0.1:9222` (see `.mcp.json`), so the same profile is shared across every Claude Code session and sub-agent. Before the first `chrome-devtools` tool call in a session, run `./scripts/start-chrome.sh` from the project root. It is idempotent — if the proper Chrome is already up it exits 0 with no side effects, so it is safe to run every time. If it reports that the profile is locked by an old Chrome instance, follow the `pkill` instruction it prints and re-run it.
+
 This rule sits at the top of this file because skipping it has repeatedly shipped "fixes" that don't actually work for the user.
 
 ---

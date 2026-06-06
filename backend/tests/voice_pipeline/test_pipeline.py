@@ -5988,3 +5988,151 @@ async def test_user_resume_during_router_does_not_emit_agent_spoke(
     assert spoke == [], (
         f"AgentSpoke fired for a cancelled response: {[e.text for e in spoke]}"
     )
+
+
+# --- feed_text (Johnny-ckz.6 / Johnny-ckz.11 text-input fallback) ---------
+
+
+class _LiveBlockingTransport(JohnnyTransport):
+    """Transport whose ``capture_frames`` blocks until ``stop()`` is called.
+
+    Mirrors the production ``BrowserAudioTransport``'s semantics — the
+    capture iterator must not return EOF the moment the buffer is
+    empty; otherwise the response loop exits before
+    :meth:`VoicePipeline.feed_text` can push anything onto it
+    (Johnny-ckz.11)."""
+
+    def __init__(self, sample_rate: int = 16_000) -> None:
+        self._sample_rate = sample_rate
+        self._stop = asyncio.Event()
+        self.played: list[bytes] = []
+        self.played_source_rate: int | None = None
+
+    @property
+    def sample_rate(self) -> int:
+        return self._sample_rate
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        self._stop.set()
+
+    async def capture_frames(self) -> AsyncIterator[bytes]:
+        # Block until stop(): the transcribe loop sees nothing and
+        # eventually exits when we set the stop event.
+        await self._stop.wait()
+        if False:  # pragma: no cover — yield to satisfy AsyncIterator
+            yield b""
+
+    async def play_frames(
+        self,
+        frames: Iterable[bytes] | AsyncIterable[bytes],
+        source_rate: int | None = None,
+    ) -> None:
+        self.played_source_rate = source_rate
+        if isinstance(frames, AsyncIterable):
+            async for f in frames:
+                self.played.append(f)
+        else:
+            for f in frames:
+                self.played.append(f)
+
+
+@pytest.mark.asyncio
+async def test_feed_text_drives_router_and_tts() -> None:
+    """Typed text injected via feed_text() drives router + answer + TTS just
+    like a transcribed utterance — the playground's mic-denied / mic-muted
+    fallback (Johnny-ckz.11)."""
+    transport = _LiveBlockingTransport()
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=[]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {
+                    "should_speak": True,
+                    "confidence": 0.95,
+                    "reason": "user typed a greeting",
+                    "reply_type": "acknowledgement",
+                    "suggested_reply": "Hello there",
+                }
+            ]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["Hello there"]),
+        tts=_FakeTTS(frame_count=2),
+        event_bus=bus,
+        config=PipelineConfig(
+            session_id="text-input-test",
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            enable_barge_in=False,
+        ),
+    )
+
+    run_task = asyncio.create_task(pipeline.run())
+    try:
+        # Wait until the run loop has constructed _response_queue.
+        for _ in range(50):
+            if pipeline._response_queue is not None:  # noqa: SLF001
+                break
+            await asyncio.sleep(0.01)
+        assert pipeline._response_queue is not None, (  # noqa: SLF001
+            "pipeline didn't initialise _response_queue"
+        )
+
+        accepted = await pipeline.feed_text("hello bot")
+        assert accepted is True
+
+        # Give the response loop time to pick up the queued transcript +
+        # run through router/answer/tts.
+        for _ in range(100):
+            spoke_events = [e for e in bus.snapshot() if isinstance(e, AgentSpoke)]
+            if spoke_events:
+                break
+            await asyncio.sleep(0.02)
+    finally:
+        await transport.stop()
+        try:
+            await asyncio.wait_for(run_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            if not run_task.done():
+                run_task.cancel()
+                try:
+                    await run_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+    events = bus.snapshot()
+    transcripts = [e for e in events if isinstance(e, TranscriptFinalized)]
+    assert any(
+        t.text == "hello bot" and t.speaker == "user" for t in transcripts
+    ), f"feed_text didn't publish the transcript event: {[t.text for t in transcripts]}"
+    spoke = [e for e in events if isinstance(e, AgentSpoke)]
+    assert spoke, "feed_text didn't drive the response loop to produce AgentSpoke"
+    assert spoke[0].text == "Hello there"
+    # And the TTS frames flowed through the transport (proves the
+    # end-to-end audio path the playground depends on).
+    assert transport.played, "no PCM frames were played through the transport"
+
+
+@pytest.mark.asyncio
+async def test_feed_text_rejects_empty_input() -> None:
+    """Whitespace-only / empty input is rejected so the API can return 4xx."""
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=[]),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=[]),
+        router_llm=_FakeRouterLLM(decisions=[]),
+        answer_llm=_FakeAnswerLLM(answers=[]),
+        tts=_FakeTTS(),
+        event_bus=bus,
+        config=PipelineConfig(),
+    )
+    # Pipeline not yet run — feed_text must report not-accepted.
+    assert await pipeline.feed_text("") is False
+    assert await pipeline.feed_text("   ") is False
