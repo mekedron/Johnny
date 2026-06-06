@@ -28,6 +28,7 @@ from collections.abc import AsyncIterator, Mapping
 from importlib import import_module
 from typing import Any, Protocol, runtime_checkable
 
+from app.providers._pcm import resample_pcm16
 from app.providers.base import (
     PCM_SAMPLE_WIDTH_BYTES,
     ProviderConfig,
@@ -52,7 +53,17 @@ DEFAULT_BASE_URL = "wss://api.openai.com/v1/realtime"
 DEFAULT_INTENT = "transcription"
 DEFAULT_MODEL = "whisper-1"
 DEFAULT_LANGUAGE: str | None = None
-DEFAULT_BETA_HEADER = "realtime=v1"
+# OpenAI's Realtime API went GA in 2025; sending ``OpenAI-Beta: realtime=v1``
+# now routes to the deprecated beta endpoint, which the server rejects with
+# "The Realtime Beta API is no longer supported." Default to empty so no
+# header is sent; ``beta_header`` option remains for proxied/legacy deploys.
+DEFAULT_BETA_HEADER = ""
+# The rest of the voice pipeline runs at 16 kHz, but the GA Realtime API
+# rejects rates below 24 kHz with "Invalid 'session.audio.input.format.rate':
+# integer below minimum value." The adapter advertises the wire-side rate it
+# actually sends after upsampling.
+PIPELINE_SAMPLE_RATE_HZ = 16_000
+WIRE_SAMPLE_RATE_HZ = 24_000
 # Each audio chunk forwarded to OpenAI is bounded to avoid building
 # unbounded base64 payloads; 0.5 s of 16 kHz S16LE PCM is 16 000 bytes.
 DEFAULT_MAX_APPEND_BYTES = 16_000
@@ -90,8 +101,9 @@ class OpenAIRealtimeSTT(STTProvider):
       ``wss://api.openai.com/v1/realtime``.
     * ``intent`` — query param (default ``"transcription"``). Overrideable
       for proxied deployments that use a non-standard intent path.
-    * ``beta_header`` — value sent as ``OpenAI-Beta``. Default
-      ``"realtime=v1"``.
+    * ``beta_header`` — value sent as ``OpenAI-Beta``. Default empty
+      (GA API); only set this for proxies that still require the legacy
+      ``"realtime=v1"`` value.
     * ``max_append_bytes`` — chunk size used to slice large audio buffers
       into multiple ``input_audio_buffer.append`` events. Must be a
       multiple of 2. Default 16 000 (~0.5 s @ 16 kHz).
@@ -118,7 +130,10 @@ class OpenAIRealtimeSTT(STTProvider):
         )
         self._base_url = str(opts.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
         self._intent = str(opts.get("intent") or DEFAULT_INTENT)
-        self._beta_header = str(opts.get("beta_header") or DEFAULT_BETA_HEADER)
+        beta_opt = opts.get("beta_header")
+        self._beta_header = (
+            str(beta_opt) if beta_opt is not None else DEFAULT_BETA_HEADER
+        )
         max_append = int(opts.get("max_append_bytes") or DEFAULT_MAX_APPEND_BYTES)
         if max_append <= 0:
             raise ValueError(f"max_append_bytes must be positive; got {max_append}")
@@ -225,22 +240,44 @@ class OpenAIRealtimeSTT(STTProvider):
         return self._base_url
 
     def _build_headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self._api_key}",
-            "OpenAI-Beta": self._beta_header,
-        }
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+        if self._beta_header:
+            headers["OpenAI-Beta"] = self._beta_header
+        return headers
 
     def _build_session_update(self) -> dict[str, Any]:
+        # GA Realtime API (Aug 2025) reshaped the session config:
+        # ``transcription_session.update`` collapsed into ``session.update``
+        # carrying ``session.type: "transcription"``, and the top-level
+        # ``input_audio_format`` / ``input_audio_transcription`` fields moved
+        # under ``session.audio.input.{format,transcription}``. Sending the
+        # legacy flat keys now returns "Unknown parameter:
+        # 'session.input_audio_format'".
         transcription: dict[str, Any] = {"model": self._model}
         if self._language is not None:
             transcription["language"] = self._language
         if self._prompt is not None:
             transcription["prompt"] = self._prompt
         return {
-            "type": "transcription_session.update",
+            "type": "session.update",
             "session": {
-                "input_audio_format": "pcm16",
-                "input_audio_transcription": transcription,
+                "type": "transcription",
+                "audio": {
+                    "input": {
+                        "format": {
+                            "type": "audio/pcm",
+                            "rate": WIRE_SAMPLE_RATE_HZ,
+                        },
+                        "transcription": transcription,
+                        # The voice pipeline already VAD-bounds each utterance
+                        # before handing it to STT, so we manually commit the
+                        # buffer per call. Without ``turn_detection: null``
+                        # the GA API defaults to server-VAD, which silently
+                        # discards silence-only buffers and rejects the
+                        # commit as "0.00ms of audio".
+                        "turn_detection": None,
+                    },
+                },
             },
         }
 
@@ -284,7 +321,10 @@ class OpenAIRealtimeSTT(STTProvider):
         async def sender() -> None:
             try:
                 await ws.send(json.dumps(self._build_session_update()))
-                for slice_ in _split_pcm(first_chunk, self._max_append_bytes):
+                first_wire = resample_pcm16(
+                    first_chunk, PIPELINE_SAMPLE_RATE_HZ, WIRE_SAMPLE_RATE_HZ
+                )
+                for slice_ in _split_pcm(first_wire, self._max_append_bytes):
                     await ws.send(_audio_append_message(slice_))
                 async for chunk in audio_iter:
                     if not chunk:
@@ -294,7 +334,10 @@ class OpenAIRealtimeSTT(STTProvider):
                             f"audio chunk {len(chunk)} bytes is not aligned to "
                             f"{PCM_SAMPLE_WIDTH_BYTES}-byte S16 samples"
                         )
-                    for slice_ in _split_pcm(chunk, self._max_append_bytes):
+                    wire = resample_pcm16(
+                        chunk, PIPELINE_SAMPLE_RATE_HZ, WIRE_SAMPLE_RATE_HZ
+                    )
+                    for slice_ in _split_pcm(wire, self._max_append_bytes):
                         await ws.send(_audio_append_message(slice_))
                 await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
             except BaseException as exc:
@@ -404,11 +447,12 @@ def _parse_message(message: bytes | str) -> TranscriptEvent | None:
         transcript = payload.get("transcript", "")
         if not isinstance(transcript, str):
             return None
-        text = transcript.strip()
-        if not text:
-            return None
+        # Yield the completed event even when ``transcript`` is empty —
+        # the GA Realtime API emits a final ``...completed`` event for
+        # silence-only utterances (transcript=""), and the caller needs
+        # the ``is_final=True`` signal to stop reading from the socket.
         return TranscriptEvent(
-            text=text,
+            text=transcript.strip(),
             is_final=True,
             timestamp_ms=0,
             confidence=None,

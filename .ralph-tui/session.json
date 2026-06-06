@@ -3,10 +3,10 @@
   "sessionId": "10afcece-cc40-43a0-8f7d-e7372e7ab552",
   "status": "running",
   "startedAt": "2026-06-06T05:38:50.502Z",
-  "updatedAt": "2026-06-06T07:18:17.395Z",
-  "currentIteration": 6,
+  "updatedAt": "2026-06-06T07:45:27.116Z",
+  "currentIteration": 7,
   "maxIterations": 0,
-  "tasksCompleted": 6,
+  "tasksCompleted": 7,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -86,8 +86,8 @@
       {
         "id": "Johnny-ckz.2",
         "title": "Add 'Autonomous' mode: bot speaks freely per profile instructions, no whitelist, no approval gate",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-ckz.3",
@@ -181,6 +181,16 @@
       "durationMs": 1500853,
       "startedAt": "2026-06-06T06:37:21.290Z",
       "endedAt": "2026-06-06T07:02:22.143Z"
+    },
+    {
+      "iteration": 7,
+      "status": "completed",
+      "taskId": "Johnny-ckz.2",
+      "taskTitle": "Add 'Autonomous' mode: bot speaks freely per profile instructions, no whitelist, no approval gate",
+      "taskCompleted": true,
+      "durationMs": 948167,
+      "startedAt": "2026-06-06T07:02:28.381Z",
+      "endedAt": "2026-06-06T07:18:16.548Z"
     }
   ],
   "skippedTaskIds": [],

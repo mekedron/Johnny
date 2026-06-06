@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from app.providers._pcm import resample_pcm16
 from app.providers.base import (
     ProviderConfig,
     ProviderKind,
@@ -28,7 +29,9 @@ from app.providers.openai_realtime_stt import (
     DEFAULT_INTENT,
     DEFAULT_MAX_APPEND_BYTES,
     DEFAULT_MODEL,
+    PIPELINE_SAMPLE_RATE_HZ,
     PROVIDER_NAME,
+    WIRE_SAMPLE_RATE_HZ,
     OpenAIRealtimeSTT,
     _parse_message,
     register,
@@ -258,19 +261,37 @@ def test_url_honors_custom_intent() -> None:
     assert url == f"{DEFAULT_BASE_URL}?intent=custom"
 
 
-def test_headers_include_bearer_and_beta() -> None:
+def test_headers_include_bearer_and_omit_beta_for_ga() -> None:
     adapter = OpenAIRealtimeSTT(_config())
     headers = adapter._build_headers()  # pyright: ignore[reportPrivateUsage]
     assert headers["Authorization"] == "Bearer sk-test"
-    assert headers["OpenAI-Beta"] == DEFAULT_BETA_HEADER
+    # GA API rejects the legacy ``OpenAI-Beta: realtime=v1`` route; the
+    # default config must not send the header at all.
+    assert "OpenAI-Beta" not in headers
+    assert DEFAULT_BETA_HEADER == ""
+
+
+def test_headers_include_beta_when_explicitly_overridden() -> None:
+    adapter = OpenAIRealtimeSTT(_config(beta_header="realtime=v1"))
+    headers = adapter._build_headers()  # pyright: ignore[reportPrivateUsage]
+    assert headers["OpenAI-Beta"] == "realtime=v1"
 
 
 def test_session_update_includes_model_and_optional_fields() -> None:
     adapter = OpenAIRealtimeSTT(_config(language="en", prompt="hint"))
     payload = adapter._build_session_update()  # pyright: ignore[reportPrivateUsage]
-    transcription = payload["session"]["input_audio_transcription"]
-    assert payload["type"] == "transcription_session.update"
-    assert payload["session"]["input_audio_format"] == "pcm16"
+    # GA Realtime API: ``session.update`` + ``session.type: "transcription"``;
+    # input audio config moved under ``session.audio.input``.
+    assert payload["type"] == "session.update"
+    assert payload["session"]["type"] == "transcription"
+    audio_input = payload["session"]["audio"]["input"]
+    # GA API requires the format spec as an object and rejects rates
+    # below 24 kHz; the adapter advertises (and upsamples to) 24 kHz.
+    assert audio_input["format"] == {"type": "audio/pcm", "rate": 24_000}
+    # VAD must be disabled — pipeline does its own VAD bounding and the
+    # adapter commits the buffer per utterance.
+    assert audio_input["turn_detection"] is None
+    transcription = audio_input["transcription"]
     assert transcription["model"] == DEFAULT_MODEL
     assert transcription["language"] == "en"
     assert transcription["prompt"] == "hint"
@@ -290,6 +311,16 @@ def test_parse_message_extracts_completed_final() -> None:
     event = _parse_message(json.dumps(_completed("hello world")))
     assert event is not None
     assert event.text == "hello world"
+    assert event.is_final is True
+
+
+def test_parse_message_emits_final_event_for_silence_completed() -> None:
+    # Silence-only utterances on the GA API produce a ``...completed``
+    # event with ``transcript=""``; the parser must still emit a final
+    # TranscriptEvent so the read loop terminates instead of hanging.
+    event = _parse_message(json.dumps(_completed("")))
+    assert event is not None
+    assert event.text == ""
     assert event.is_final is True
 
 
@@ -351,7 +382,12 @@ async def test_transcribe_sends_session_update_first() -> None:
     fake = _FakeConnection(responses=[_completed("hi")])
     adapter = _FakeOpenAIRealtimeSTT(_config(), connection=fake)
     [_ async for _ in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))]
-    assert _sent_types(fake)[0] == "transcription_session.update"
+    assert _sent_types(fake)[0] == "session.update"
+
+
+def _upsampled(pcm: bytes) -> bytes:
+    """Expected wire bytes after the adapter's 16 kHz → 24 kHz resample."""
+    return resample_pcm16(pcm, PIPELINE_SAMPLE_RATE_HZ, WIRE_SAMPLE_RATE_HZ)
 
 
 async def test_transcribe_sends_audio_as_base64_and_commits() -> None:
@@ -359,7 +395,9 @@ async def test_transcribe_sends_audio_as_base64_and_commits() -> None:
     adapter = _FakeOpenAIRealtimeSTT(_config(), connection=fake)
     audio = _pcm([0] * 1600)
     [_ async for _ in adapter.transcribe_stream(_iter([audio]))]
-    assert _appended_pcm(fake) == audio
+    # GA API requires >= 24 kHz; the adapter upsamples 16 kHz pipeline audio
+    # on the wire. Silence at any rate is still silence.
+    assert _appended_pcm(fake) == _upsampled(audio)
     assert "input_audio_buffer.commit" in _sent_types(fake)
 
 
@@ -368,25 +406,27 @@ async def test_transcribe_concatenates_multiple_chunks_into_one_stream() -> None
     adapter = _FakeOpenAIRealtimeSTT(_config(), connection=fake)
     chunks = [_pcm([100, 200]), _pcm([300, 400]), _pcm([500, 600])]
     [_ async for _ in adapter.transcribe_stream(_iter(chunks))]
-    assert _appended_pcm(fake) == b"".join(chunks)
+    # Each chunk is resampled independently; their concatenation reaches the wire.
+    assert _appended_pcm(fake) == b"".join(_upsampled(c) for c in chunks)
 
 
 async def test_transcribe_splits_audio_at_max_append_bytes() -> None:
     fake = _FakeConnection(responses=[_completed("ok")])
     adapter = _FakeOpenAIRealtimeSTT(_config(max_append_bytes=8), connection=fake)
-    audio = _pcm([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])  # 20 bytes
+    audio = _pcm([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])  # 20 bytes (10 samples)
     [_ async for _ in adapter.transcribe_stream(_iter([audio]))]
     append_events = [
         _decode_text(t)
         for t in fake.sent_text
         if _decode_text(t).get("type") == "input_audio_buffer.append"
     ]
-    # 20 / 8 → 3 slices (8, 8, 4)
-    assert len(append_events) == 3
+    wire = _upsampled(audio)  # ~30 bytes (15 samples after 3:2 upsample)
+    expected_slices = (len(wire) + 7) // 8  # ceil(len/8)
+    assert len(append_events) == expected_slices
     rejoined = b"".join(
         base64.b64decode(ev["audio"]) for ev in append_events
     )
-    assert rejoined == audio
+    assert rejoined == wire
 
 
 async def test_transcribe_emits_delta_then_completed() -> None:
@@ -456,7 +496,8 @@ async def test_transcribe_builds_correct_url_and_headers() -> None:
     assert "intent=transcription" in adapter.last_url
     assert adapter.last_headers is not None
     assert adapter.last_headers["Authorization"] == "Bearer sk-test"
-    assert adapter.last_headers["OpenAI-Beta"] == DEFAULT_BETA_HEADER
+    # GA API: no OpenAI-Beta header by default.
+    assert "OpenAI-Beta" not in adapter.last_headers
 
 
 # --- Contract test ---------------------------------------------------------
@@ -478,7 +519,8 @@ async def test_openai_realtime_respects_vad_boundaries() -> None:
     audio = _pcm([0] * 1600)
     events = await assert_transcribe_respects_vad_boundaries(adapter, audio)
     assert events
-    assert _appended_pcm(fake) == audio
+    # Silence audio upsamples to silence; compare against the wire-rate form.
+    assert _appended_pcm(fake) == _upsampled(audio)
     assert "input_audio_buffer.commit" in _sent_types(fake)
 
 

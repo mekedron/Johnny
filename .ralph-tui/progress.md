@@ -675,3 +675,64 @@ after each iteration and it's included in prompts for context.
     we can't block on a flaky API just to recover context, but
     operators need the log line to spot the silent gap.
 ---
+
+## 2026-06-06 - Johnny-466
+- Migrated `openai-realtime` STT adapter from the deprecated OpenAI
+  Realtime Beta API to the GA `/v1/realtime` API.
+- Files changed:
+  - `backend/app/providers/openai_realtime_stt.py` — dropped the
+    `OpenAI-Beta: realtime=v1` header by default, switched the
+    session event from `transcription_session.update` to
+    `session.update` with `session.type="transcription"`, moved
+    `input_audio_format` / `input_audio_transcription` under
+    `session.audio.input`, advertise 24 kHz wire rate and resample
+    16 kHz pipeline audio to 24 kHz via the existing
+    `app.providers._pcm.resample_pcm16` helper, disabled
+    `turn_detection` (pipeline does its own VAD), and emit a final
+    `TranscriptEvent` even for empty-transcript completions so the
+    read loop terminates.
+  - `backend/app/api/providers.py` — bumped the STT smoke-test
+    silence frame from 50 ms to 200 ms so it clears the GA API's
+    100 ms minimum buffer-commit threshold.
+  - `backend/tests/e2e/providers_ui/plans.py` — switched the
+    `stt-openai-realtime` plan to `gpt-4o-mini-transcribe`; the
+    legacy `whisper-1` is no longer offered through this socket.
+  - `backend/tests/providers/test_openai_realtime_stt.py` — updated
+    assertions for the new event names / nested audio config /
+    upsample-on-the-wire behavior, plus a regression test for
+    silence-completed.
+- E2E: `uv run python -m tests.e2e.providers_ui` now reports
+  `[PASS] stt-openai-realtime`. Only remaining `[FAIL]` is the
+  pre-existing `tts-elevenlabs` paywall (Johnny-uga).
+- **Learnings:**
+  - **GA OpenAI Realtime API shape (Aug 2025).** The session config
+    moved from a per-mode `transcription_session.update` to a unified
+    `session.update` whose session block carries `type: "transcription"`
+    and a nested `audio.input.{format, transcription, turn_detection}`
+    structure. The `format` field is now an object
+    `{type: "audio/pcm", rate: 24000}` — rate < 24 kHz is rejected;
+    the legacy `pcm16` string yields "expected an object, but got a
+    string". The `OpenAI-Beta: realtime=v1` header now routes to the
+    deprecated beta and is rejected; the GA endpoint takes only
+    `Authorization: Bearer …`.
+  - **Server VAD silently drops silence buffers.** With the default
+    `turn_detection: server_vad`, manually-committed silence is
+    reported as "0.00ms of audio" regardless of how many bytes were
+    appended — the server only counts detected-speech samples. For
+    adapters that VAD-bound utterances upstream and commit manually,
+    set `turn_detection: null` in the session config.
+  - **The completed event fires with empty transcript for silence.**
+    The GA API still emits
+    `conversation.item.input_audio_transcription.completed` after a
+    silence-only commit, but with `transcript: ""`. Adapters that
+    treat empty completions as "no event" will block forever on the
+    `recv` loop; the event must propagate as `is_final=True` so the
+    caller terminates.
+  - **24 kHz wire rate vs 16 kHz pipeline rate.** The voice pipeline
+    runs at 16 kHz end to end but the GA Realtime API requires
+    >= 24 kHz on the wire. The pre-existing `app.providers._pcm.
+    resample_pcm16` helper does sub-second linear interpolation
+    without numpy / scipy, which is enough for transcription
+    chunks (the smoke test commits a single 200 ms silence frame
+    well under the resampler's per-call budget).
+---

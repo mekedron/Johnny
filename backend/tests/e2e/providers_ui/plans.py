@@ -113,7 +113,10 @@ PROVIDER_PLANS: tuple[ProviderPlan, ...] = (
         provider_name="openai-realtime",
         display_name="e2e-stt-openai-realtime",
         credential_env={"api_key": "OPENAI_API_KEY"},
-        static_options={"model": "whisper-1"},
+        # The GA Realtime API exposes ``gpt-4o-mini-transcribe`` /
+        # ``gpt-4o-transcribe`` as the supported transcription models;
+        # the legacy ``whisper-1`` no longer flows through this socket.
+        static_options={"model": "gpt-4o-mini-transcribe"},
         skip_hint="OPENAI_API_KEY blank in .env",
     ),
     ProviderPlan(

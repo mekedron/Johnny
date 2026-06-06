@@ -1,0 +1,186 @@
+{
+  "started_at": "2026-06-06T07-24-19Z",
+  "finished_at": "2026-06-06T07-24-20Z",
+  "artifact_dir": "/Users/nikita/Projects/Johnny/tests/e2e/artifacts/2026-06-06T07-24-19Z",
+  "providers": [
+    {
+      "plan_id": "stt-deepgram",
+      "kind": "stt",
+      "provider_name": "deepgram",
+      "display_name": "e2e-stt-deepgram",
+      "outcome": "SKIP",
+      "reason": "DEEPGRAM_API_KEY blank in .env",
+      "steps": [],
+      "screenshots": [],
+      "provider_id": null
+    },
+    {
+      "plan_id": "stt-openai-realtime",
+      "kind": "stt",
+      "provider_name": "openai-realtime",
+      "display_name": "e2e-stt-openai-realtime",
+      "outcome": "SKIP",
+      "reason": "OPENAI_API_KEY blank in .env",
+      "steps": [],
+      "screenshots": [],
+      "provider_id": null
+    },
+    {
+      "plan_id": "stt-faster-whisper",
+      "kind": "stt",
+      "provider_name": "faster-whisper",
+      "display_name": "e2e-stt-faster-whisper",
+      "outcome": "SKIP",
+      "reason": "whisper_models volume empty \u2014 no local model available",
+      "steps": [],
+      "screenshots": [],
+      "provider_id": null
+    },
+    {
+      "plan_id": "llm-openai",
+      "kind": "llm",
+      "provider_name": "openai",
+      "display_name": "e2e-llm-openai",
+      "outcome": "SKIP",
+      "reason": "OPENAI_API_KEY blank in .env",
+      "steps": [],
+      "screenshots": [],
+      "provider_id": null
+    },
+    {
+      "plan_id": "llm-anthropic",
+      "kind": "llm",
+      "provider_name": "anthropic",
+      "display_name": "e2e-llm-anthropic",
+      "outcome": "SKIP",
+      "reason": "ANTHROPIC_API_KEY blank in .env",
+      "steps": [],
+      "screenshots": [],
+      "provider_id": null
+    },
+    {
+      "plan_id": "llm-gemini",
+      "kind": "llm",
+      "provider_name": "gemini",
+      "display_name": "e2e-llm-gemini",
+      "outcome": "SKIP",
+      "reason": "GOOGLE_API_KEY (or GEMINI_API_KEY) blank in .env",
+      "steps": [],
+      "screenshots": [],
+      "provider_id": null
+    },
+    {
+      "plan_id": "llm-openai-compatible-ollama",
+      "kind": "llm",
+      "provider_name": "openai-compatible",
+      "display_name": "e2e-llm-ollama",
+      "outcome": "PASS",
+      "reason": "",
+      "steps": [
+        {
+          "name": "POST /providers",
+          "ok": true,
+          "detail": "id=234"
+        },
+        {
+          "name": "GET /providers (row visible)",
+          "ok": true,
+          "detail": "display_name=e2e-llm-ollama found"
+        },
+        {
+          "name": "POST /providers/{id}/test",
+          "ok": true,
+          "detail": "LLM smoke OK \u2014 finish_reason=stop \u2014 Hi there! How can I assist you today?"
+        },
+        {
+          "name": "POST /providers/{id}/activate",
+          "ok": true,
+          "detail": "active.id=234"
+        },
+        {
+          "name": "exactly one active per kind",
+          "ok": true,
+          "detail": "active_count=1"
+        },
+        {
+          "name": "DELETE /providers/{id}",
+          "ok": true,
+          "detail": "row removed"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": 234
+    },
+    {
+      "plan_id": "tts-elevenlabs",
+      "kind": "tts",
+      "provider_name": "elevenlabs",
+      "display_name": "e2e-tts-elevenlabs",
+      "outcome": "SKIP",
+      "reason": "ELEVENLABS_API_KEY blank in .env",
+      "steps": [],
+      "screenshots": [],
+      "provider_id": null
+    },
+    {
+      "plan_id": "tts-openai",
+      "kind": "tts",
+      "provider_name": "openai",
+      "display_name": "e2e-tts-openai",
+      "outcome": "SKIP",
+      "reason": "OPENAI_API_KEY blank in .env",
+      "steps": [],
+      "screenshots": [],
+      "provider_id": null
+    },
+    {
+      "plan_id": "tts-piper",
+      "kind": "tts",
+      "provider_name": "piper",
+      "display_name": "e2e-tts-piper",
+      "outcome": "SKIP",
+      "reason": "piper_models volume empty \u2014 no local voice available",
+      "steps": [],
+      "screenshots": [],
+      "provider_id": null
+    },
+    {
+      "plan_id": "edge-invalid-key",
+      "kind": "llm",
+      "provider_name": "anthropic",
+      "display_name": "e2e-edge-invalid-key",
+      "outcome": "PASS",
+      "reason": "",
+      "steps": [
+        {
+          "name": "POST /providers (bad key)",
+          "ok": true,
+          "detail": "id=235"
+        },
+        {
+          "name": "test rejects invalid key",
+          "ok": true,
+          "detail": "anthropic LLM HTTP 401: invalid x-api-key"
+        },
+        {
+          "name": "cleanup invalid-key row",
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "name": "duplicate display_name rejected",
+          "ok": true,
+          "detail": "HTTPStatusError"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": 235
+    }
+  ],
+  "totals": {
+    "PASS": 2,
+    "SKIP": 9,
+    "FAIL": 0
+  },
+  "exit_code": 0
+}

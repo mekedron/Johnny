@@ -495,7 +495,9 @@ async def _smoke_test(
     """Dispatch to the kind-appropriate smoke call."""
     if kind is ProviderKind.STT:
         assert isinstance(instance, STTProvider)
-        silence_frame = b"\x00" * (PCM_SAMPLE_RATE_HZ * PCM_SAMPLE_WIDTH_BYTES // 20)
+        # 200 ms of silence — long enough to clear OpenAI Realtime's 100 ms
+        # minimum buffer-commit threshold while still cheap for the others.
+        silence_frame = b"\x00" * (PCM_SAMPLE_RATE_HZ * PCM_SAMPLE_WIDTH_BYTES // 5)
 
         async def _one_silence() -> AsyncIterator[bytes]:
             yield silence_frame

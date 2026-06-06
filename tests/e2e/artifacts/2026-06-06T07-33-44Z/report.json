@@ -1,0 +1,469 @@
+{
+  "started_at": "2026-06-06T07-33-44Z",
+  "finished_at": "2026-06-06T07-33-53Z",
+  "artifact_dir": "/Users/nikita/Projects/Johnny/tests/e2e/artifacts/2026-06-06T07-33-44Z",
+  "providers": [
+    {
+      "plan_id": "stt-deepgram",
+      "kind": "stt",
+      "provider_name": "deepgram",
+      "display_name": "e2e-stt-deepgram",
+      "outcome": "PASS",
+      "reason": "",
+      "steps": [
+        {
+          "name": "POST /providers",
+          "ok": true,
+          "detail": "id=306"
+        },
+        {
+          "name": "GET /providers (row visible)",
+          "ok": true,
+          "detail": "display_name=e2e-stt-deepgram found"
+        },
+        {
+          "name": "POST /providers/{id}/test",
+          "ok": true,
+          "detail": "STT smoke OK \u2014 0 transcript event(s)"
+        },
+        {
+          "name": "POST /providers/{id}/activate",
+          "ok": true,
+          "detail": "active.id=306"
+        },
+        {
+          "name": "exactly one active per kind",
+          "ok": true,
+          "detail": "active_count=1"
+        },
+        {
+          "name": "DELETE /providers/{id}",
+          "ok": true,
+          "detail": "row removed"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": 306
+    },
+    {
+      "plan_id": "stt-openai-realtime",
+      "kind": "stt",
+      "provider_name": "openai-realtime",
+      "display_name": "e2e-stt-openai-realtime",
+      "outcome": "FAIL",
+      "reason": "POST /providers/{id}/test: smoke call failed \u2014 openai-realtime error: Error committing input audio buffer: buffer too small. Expected at least 100ms of audio, but buffer only has 0.00ms of audio.",
+      "steps": [
+        {
+          "name": "POST /providers",
+          "ok": true,
+          "detail": "id=307"
+        },
+        {
+          "name": "GET /providers (row visible)",
+          "ok": true,
+          "detail": "display_name=e2e-stt-openai-realtime found"
+        },
+        {
+          "name": "POST /providers/{id}/test",
+          "ok": false,
+          "detail": "smoke call failed \u2014 openai-realtime error: Error committing input audio buffer: buffer too small. Expected at least 100ms of audio, but buffer only has 0.00ms of audio."
+        },
+        {
+          "name": "POST /providers/{id}/activate",
+          "ok": true,
+          "detail": "active.id=307"
+        },
+        {
+          "name": "exactly one active per kind",
+          "ok": true,
+          "detail": "active_count=1"
+        },
+        {
+          "name": "DELETE /providers/{id}",
+          "ok": true,
+          "detail": "row removed"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": 307
+    },
+    {
+      "plan_id": "stt-faster-whisper",
+      "kind": "stt",
+      "provider_name": "faster-whisper",
+      "display_name": "e2e-stt-faster-whisper",
+      "outcome": "SKIP",
+      "reason": "whisper_models volume empty \u2014 no local model available",
+      "steps": [],
+      "screenshots": [],
+      "provider_id": null
+    },
+    {
+      "plan_id": "llm-openai",
+      "kind": "llm",
+      "provider_name": "openai",
+      "display_name": "e2e-llm-openai",
+      "outcome": "PASS",
+      "reason": "",
+      "steps": [
+        {
+          "name": "POST /providers",
+          "ok": true,
+          "detail": "id=308"
+        },
+        {
+          "name": "GET /providers (row visible)",
+          "ok": true,
+          "detail": "display_name=e2e-llm-openai found"
+        },
+        {
+          "name": "POST /providers/{id}/test",
+          "ok": true,
+          "detail": "LLM smoke OK \u2014 finish_reason=stop \u2014 Hi there! How can I assist you today?"
+        },
+        {
+          "name": "POST /providers/{id}/activate",
+          "ok": true,
+          "detail": "active.id=308"
+        },
+        {
+          "name": "exactly one active per kind",
+          "ok": true,
+          "detail": "active_count=1"
+        },
+        {
+          "name": "DELETE /providers/{id}",
+          "ok": true,
+          "detail": "row removed"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": 308
+    },
+    {
+      "plan_id": "llm-anthropic",
+      "kind": "llm",
+      "provider_name": "anthropic",
+      "display_name": "e2e-llm-anthropic",
+      "outcome": "PASS",
+      "reason": "",
+      "steps": [
+        {
+          "name": "POST /providers",
+          "ok": true,
+          "detail": "id=309"
+        },
+        {
+          "name": "GET /providers (row visible)",
+          "ok": true,
+          "detail": "display_name=e2e-llm-anthropic found"
+        },
+        {
+          "name": "POST /providers/{id}/test",
+          "ok": true,
+          "detail": "LLM smoke OK \u2014 finish_reason=stop \u2014 Hi! \ud83d\udc4b How can I help you today?"
+        },
+        {
+          "name": "POST /providers/{id}/activate",
+          "ok": true,
+          "detail": "active.id=309"
+        },
+        {
+          "name": "exactly one active per kind",
+          "ok": true,
+          "detail": "active_count=1"
+        },
+        {
+          "name": "DELETE /providers/{id}",
+          "ok": true,
+          "detail": "row removed"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": 309
+    },
+    {
+      "plan_id": "llm-gemini",
+      "kind": "llm",
+      "provider_name": "gemini",
+      "display_name": "e2e-llm-gemini",
+      "outcome": "PASS",
+      "reason": "",
+      "steps": [
+        {
+          "name": "POST /providers",
+          "ok": true,
+          "detail": "id=310"
+        },
+        {
+          "name": "GET /providers (row visible)",
+          "ok": true,
+          "detail": "display_name=e2e-llm-gemini found"
+        },
+        {
+          "name": "POST /providers/{id}/test",
+          "ok": true,
+          "detail": "LLM smoke OK \u2014 finish_reason=stop \u2014 Hi!"
+        },
+        {
+          "name": "POST /providers/{id}/activate",
+          "ok": true,
+          "detail": "active.id=310"
+        },
+        {
+          "name": "exactly one active per kind",
+          "ok": true,
+          "detail": "active_count=1"
+        },
+        {
+          "name": "DELETE /providers/{id}",
+          "ok": true,
+          "detail": "row removed"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": 310
+    },
+    {
+      "plan_id": "llm-openai-compatible-ollama",
+      "kind": "llm",
+      "provider_name": "openai-compatible",
+      "display_name": "e2e-llm-ollama",
+      "outcome": "PASS",
+      "reason": "",
+      "steps": [
+        {
+          "name": "POST /providers",
+          "ok": true,
+          "detail": "id=311"
+        },
+        {
+          "name": "GET /providers (row visible)",
+          "ok": true,
+          "detail": "display_name=e2e-llm-ollama found"
+        },
+        {
+          "name": "POST /providers/{id}/test",
+          "ok": true,
+          "detail": "LLM smoke OK \u2014 finish_reason=stop \u2014 Hi there! How can I assist you today?"
+        },
+        {
+          "name": "POST /providers/{id}/activate",
+          "ok": true,
+          "detail": "active.id=311"
+        },
+        {
+          "name": "exactly one active per kind",
+          "ok": true,
+          "detail": "active_count=1"
+        },
+        {
+          "name": "DELETE /providers/{id}",
+          "ok": true,
+          "detail": "row removed"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": 311
+    },
+    {
+      "plan_id": "tts-elevenlabs",
+      "kind": "tts",
+      "provider_name": "elevenlabs",
+      "display_name": "e2e-tts-elevenlabs",
+      "outcome": "FAIL",
+      "reason": "POST /providers/{id}/test: smoke call failed \u2014 elevenlabs TTS HTTP 402: Free users cannot use library voices via the API. Please upgrade your subscription to use this voice.",
+      "steps": [
+        {
+          "name": "POST /providers",
+          "ok": true,
+          "detail": "id=312"
+        },
+        {
+          "name": "GET /providers (row visible)",
+          "ok": true,
+          "detail": "display_name=e2e-tts-elevenlabs found"
+        },
+        {
+          "name": "POST /providers/{id}/test",
+          "ok": false,
+          "detail": "smoke call failed \u2014 elevenlabs TTS HTTP 402: Free users cannot use library voices via the API. Please upgrade your subscription to use this voice."
+        },
+        {
+          "name": "POST /providers/{id}/activate",
+          "ok": true,
+          "detail": "active.id=312"
+        },
+        {
+          "name": "exactly one active per kind",
+          "ok": true,
+          "detail": "active_count=1"
+        },
+        {
+          "name": "DELETE /providers/{id}",
+          "ok": true,
+          "detail": "row removed"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": 312
+    },
+    {
+      "plan_id": "tts-openai",
+      "kind": "tts",
+      "provider_name": "openai",
+      "display_name": "e2e-tts-openai",
+      "outcome": "PASS",
+      "reason": "",
+      "steps": [
+        {
+          "name": "POST /providers",
+          "ok": true,
+          "detail": "id=313"
+        },
+        {
+          "name": "GET /providers (row visible)",
+          "ok": true,
+          "detail": "display_name=e2e-tts-openai found"
+        },
+        {
+          "name": "POST /providers/{id}/test",
+          "ok": true,
+          "detail": "TTS smoke OK \u2014 13996 byte(s)"
+        },
+        {
+          "name": "POST /providers/{id}/activate",
+          "ok": true,
+          "detail": "active.id=313"
+        },
+        {
+          "name": "exactly one active per kind",
+          "ok": true,
+          "detail": "active_count=1"
+        },
+        {
+          "name": "DELETE /providers/{id}",
+          "ok": true,
+          "detail": "row removed"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": 313
+    },
+    {
+      "plan_id": "tts-piper",
+      "kind": "tts",
+      "provider_name": "piper",
+      "display_name": "e2e-tts-piper",
+      "outcome": "SKIP",
+      "reason": "piper_models volume empty \u2014 no local voice available",
+      "steps": [],
+      "screenshots": [],
+      "provider_id": null
+    },
+    {
+      "plan_id": "stt-switch",
+      "kind": "stt",
+      "provider_name": "deepgram<->openai-realtime",
+      "display_name": "e2e-stt-switch",
+      "outcome": "PASS",
+      "reason": "",
+      "steps": [
+        {
+          "name": "activate A",
+          "ok": true,
+          "detail": "active=314"
+        },
+        {
+          "name": "activate B (switch)",
+          "ok": true,
+          "detail": "active=315"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": null
+    },
+    {
+      "plan_id": "llm-switch",
+      "kind": "llm",
+      "provider_name": "openai<->anthropic",
+      "display_name": "e2e-llm-switch",
+      "outcome": "PASS",
+      "reason": "",
+      "steps": [
+        {
+          "name": "activate A",
+          "ok": true,
+          "detail": "active=316"
+        },
+        {
+          "name": "activate B (switch)",
+          "ok": true,
+          "detail": "active=317"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": null
+    },
+    {
+      "plan_id": "tts-switch",
+      "kind": "tts",
+      "provider_name": "elevenlabs<->openai",
+      "display_name": "e2e-tts-switch",
+      "outcome": "PASS",
+      "reason": "",
+      "steps": [
+        {
+          "name": "activate A",
+          "ok": true,
+          "detail": "active=318"
+        },
+        {
+          "name": "activate B (switch)",
+          "ok": true,
+          "detail": "active=319"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": null
+    },
+    {
+      "plan_id": "edge-invalid-key",
+      "kind": "llm",
+      "provider_name": "anthropic",
+      "display_name": "e2e-edge-invalid-key",
+      "outcome": "PASS",
+      "reason": "",
+      "steps": [
+        {
+          "name": "POST /providers (bad key)",
+          "ok": true,
+          "detail": "id=320"
+        },
+        {
+          "name": "test rejects invalid key",
+          "ok": true,
+          "detail": "anthropic LLM HTTP 401: invalid x-api-key"
+        },
+        {
+          "name": "cleanup invalid-key row",
+          "ok": true,
+          "detail": ""
+        },
+        {
+          "name": "duplicate display_name rejected",
+          "ok": true,
+          "detail": "HTTPStatusError"
+        }
+      ],
+      "screenshots": [],
+      "provider_id": 320
+    }
+  ],
+  "totals": {
+    "PASS": 10,
+    "SKIP": 2,
+    "FAIL": 2
+  },
+  "exit_code": 1
+}
