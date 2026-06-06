@@ -84,6 +84,10 @@ services:
   migrate:
     build:
       context: ./backend
+      args:
+        # Mirror api/worker so all three services share the same backend
+        # image and don't trigger a rebuild over a single ARG diff.
+        INSTALL_PARAKEET: "${INSTALL_PARAKEET:-1}"
     command: ["alembic", "upgrade", "head"]
     environment: *backend-env
     depends_on:
@@ -94,6 +98,12 @@ services:
   api:
     build:
       context: ./backend
+      args:
+        # Toggle NeMo / Parakeet install (Johnny-stt.1). Default ON so
+        # the catalog Test button works on a fresh clone; export
+        # INSTALL_PARAKEET=0 before `./run.sh` to skip the ~2.5 GB
+        # install and keep the api image lean.
+        INSTALL_PARAKEET: "${INSTALL_PARAKEET:-1}"
     environment: *backend-env
     depends_on:
       postgres:
@@ -147,6 +157,9 @@ services:
   worker:
     build:
       context: ./backend
+      args:
+        # Match api so worker shares the same image layer cache.
+        INSTALL_PARAKEET: "${INSTALL_PARAKEET:-1}"
     command: ["python", "-m", "app.worker"]
     environment: *backend-env
     depends_on:
@@ -207,6 +220,13 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.meet-worker
+      args:
+        # Toggle NeMo / Parakeet install (Johnny-stt.1). Sessions that
+        # select Parakeet need this ON inside the meet-worker image
+        # (the per-session container is spawned from it). Export
+        # INSTALL_PARAKEET=0 before `./run.sh` to skip if Parakeet
+        # isn't part of your provider mix.
+        INSTALL_PARAKEET: "${INSTALL_PARAKEET:-1}"
     image: johnny-meet-worker:latest
     profiles: ["meet-worker"]
     # Per-session containers attach these dirs so downloaded model

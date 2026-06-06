@@ -364,12 +364,14 @@ STT_CATALOG_METADATA: dict[str, dict[str, Any]] = {
     },
     "parakeet": {
         # NVIDIA NeMo Parakeet. Runs entirely on-device — no audio leaves
-        # the host. The TDT 0.6 B v3 default checkpoint is streaming-
-        # capable architecturally (Cache-Aware Streaming inference);
-        # the live-chat consumer that exercises partials ships in
-        # Johnny-stt.3 — flip ``streaming`` to True there.
+        # the host. Johnny-stt.3 wired the streaming-into-chat consumer
+        # via ``/ws/stt/stream`` — the endpoint re-runs ``transcribe``
+        # over the growing buffer to deliver partials at >=2 Hz, so
+        # every STT adapter (Parakeet included) is streaming-from-the-
+        # user-perspective regardless of whether the underlying model
+        # is batch- or streaming-native.
         "type": "local",
-        "streaming": False,
+        "streaming": True,
         "cost_per_minute_usd": 0.0,
     },
     "deepgram": {

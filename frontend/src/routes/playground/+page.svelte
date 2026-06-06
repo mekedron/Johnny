@@ -22,6 +22,11 @@
 		type Template
 	} from '$lib/templates';
 	import { listProviders, type Provider, type ProviderKind } from '$lib/providers';
+	import {
+		PlaygroundMicDeniedError,
+		startPlaygroundStt,
+		type PlaygroundSttSession
+	} from '$lib/playgroundStt';
 	import { getSessionDetail, type SessionDetail } from '$lib/sessionDetail';
 	import {
 		subscribeToSession,
@@ -78,6 +83,21 @@
 	let audioReady = $state(false);
 	let textInput = $state('');
 	let textPending = $state(false);
+
+	// --- Dictation mic (Johnny-stt.3) -------------------------------------
+	// State machine: idle → starting → recording → stopping → idle.
+	// While `dictating` is true the chat input shows live partials and
+	// the session mic is muted so the bot doesn't react to the user
+	// talking to the textarea instead of the bot.
+	type DictationState = 'idle' | 'starting' | 'recording' | 'stopping';
+	let dictationState = $state<DictationState>('idle');
+	let dictationPartial = $state('');
+	let dictationError = $state<string | null>(null);
+	let dictationProviderLabel = $state<string | null>(null);
+	let dictationSession: PlaygroundSttSession | null = null;
+	// Track whether we muted the session mic ourselves so we can
+	// restore the previous state when dictation ends.
+	let dictationPrevMicMuted = false;
 
 	// Live-UI controls
 	let volume = $state(1);
@@ -499,6 +519,92 @@
 		audioSession?.setMicMuted(micMuted);
 	}
 
+	async function startDictation() {
+		if (dictationState !== 'idle') return;
+		dictationState = 'starting';
+		dictationError = null;
+		dictationPartial = '';
+		dictationProviderLabel = null;
+
+		// Mute the session mic while dictating so the bot doesn't
+		// re-react to whatever the user is saying into the chat input.
+		dictationPrevMicMuted = micMuted;
+		if (!micMuted) {
+			toggleMicMute();
+		}
+
+		// Pick the STT override the user selected in Advanced, if any.
+		// When null the backend falls back to the currently-active STT row.
+		const providerId = providerOverrides.stt ?? null;
+
+		try {
+			const session = await startPlaygroundStt({
+				providerId,
+				onReady: ({ display_name }) => {
+					dictationProviderLabel = display_name;
+					dictationState = 'recording';
+				},
+				onPartial: (text) => {
+					dictationPartial = text;
+					textInput = text;
+				},
+				onFinal: (text) => {
+					if (text) {
+						textInput = text;
+					}
+					dictationPartial = '';
+				},
+				onError: (message) => {
+					dictationError = message;
+				},
+				onMicDenied: () => {
+					dictationError = 'Microphone permission denied. Grant access in browser settings.';
+				}
+			});
+			dictationSession = session;
+		} catch (err) {
+			if (err instanceof PlaygroundMicDeniedError) {
+				dictationError = 'Microphone permission denied. Grant access in browser settings.';
+			} else {
+				dictationError = err instanceof Error ? err.message : String(err);
+			}
+			dictationState = 'idle';
+			// Restore mic mute state if we changed it.
+			if (!dictationPrevMicMuted && micMuted) {
+				toggleMicMute();
+			}
+		}
+	}
+
+	async function stopDictation() {
+		if (dictationState !== 'recording' && dictationState !== 'starting') return;
+		const session = dictationSession;
+		dictationSession = null;
+		dictationState = 'stopping';
+		try {
+			await session?.stop();
+		} catch (err) {
+			dictationError = err instanceof Error ? err.message : String(err);
+		} finally {
+			dictationState = 'idle';
+			dictationPartial = '';
+			dictationProviderLabel = null;
+			// Restore session mic mute state to whatever the user had
+			// before we started dictating.
+			if (!dictationPrevMicMuted && micMuted) {
+				toggleMicMute();
+			}
+		}
+	}
+
+	function toggleDictation() {
+		if (dictationState === 'idle') {
+			void startDictation();
+		} else if (dictationState === 'recording') {
+			void stopDictation();
+		}
+	}
+
 	function interruptBot() {
 		// Johnny-ckz.13: explicit Stop button so the user always has a
 		// UI escape hatch — voice barge-in is the primary path, but this
@@ -519,6 +625,8 @@
 		// the session live so the user can reopen it from the session
 		// detail page.
 		void audioSession?.stop();
+		void dictationSession?.abort();
+		dictationSession = null;
 		subscription?.close();
 		subscription = null;
 	});
@@ -802,14 +910,72 @@
 				}}
 			>
 				<label class="field">
-					<span>Text input (always available — works when mic is muted/denied)</span>
-					<textarea
-						bind:value={textInput}
-						rows="2"
-						placeholder="Type to chat without a microphone"
-						disabled={textPending}
-					></textarea>
+					<span>
+						Text input (always available — works when mic is muted/denied)
+						{#if dictationState === 'recording' && dictationProviderLabel}
+							<span class="hint dictation-hint" data-testid="dictation-provider-label">
+								· Dictating via {dictationProviderLabel}
+							</span>
+						{/if}
+					</span>
+					<div class="text-input-row">
+						<textarea
+							bind:value={textInput}
+							rows="2"
+							placeholder={
+								dictationState === 'recording'
+									? 'Listening… speak now to dictate'
+									: 'Type or press the mic to dictate'
+							}
+							disabled={textPending}
+							data-testid="playground-text-input"
+							data-partial-transcript={dictationState === 'recording'
+								? dictationPartial
+								: undefined}
+							data-dictation-state={dictationState}
+						></textarea>
+						<button
+							type="button"
+							class="mic-btn"
+							class:recording={dictationState === 'recording'}
+							class:starting={dictationState === 'starting' ||
+								dictationState === 'stopping'}
+							onclick={toggleDictation}
+							disabled={dictationState === 'starting' || dictationState === 'stopping'}
+							aria-pressed={dictationState === 'recording'}
+							aria-label={
+								dictationState === 'recording'
+									? 'Stop dictation'
+									: dictationState === 'idle'
+										? 'Start dictation (mic)'
+										: 'Dictation transitioning'
+							}
+							title={
+								dictationState === 'recording'
+									? 'Stop dictation'
+									: 'Start dictation — speak to fill the chat input'
+							}
+							data-testid="playground-mic-button"
+						>
+							{#if dictationState === 'recording'}
+								<span class="mic-dot" aria-hidden="true"></span>
+								Rec
+							{:else if dictationState === 'starting'}
+								…
+							{:else if dictationState === 'stopping'}
+								Stopping…
+							{:else}
+								<span aria-hidden="true">🎙</span>
+								Mic
+							{/if}
+						</button>
+					</div>
 				</label>
+				{#if dictationError}
+					<div class="dictation-error" role="alert" data-testid="dictation-error">
+						{dictationError}
+					</div>
+				{/if}
 				<button type="submit" class="secondary" disabled={textPending}>
 					{textPending ? 'Sending…' : 'Send text'}
 				</button>
@@ -1238,5 +1404,101 @@
 		background: #fef2f2;
 		color: #991b1b;
 		border: 1px solid #fecaca;
+	}
+
+	.text-input-row {
+		display: flex;
+		gap: 8px;
+		align-items: flex-start;
+	}
+
+	.text-input-row textarea {
+		flex: 1 1 auto;
+		min-width: 0;
+		padding: 8px;
+		border: 1px solid var(--border, #ccc);
+		border-radius: 4px;
+		font: inherit;
+		background: #fff;
+	}
+
+	.text-input-row textarea[data-dictation-state='recording'] {
+		border-color: #dc2626;
+		background: #fff8f8;
+	}
+
+	.mic-btn {
+		flex: 0 0 auto;
+		padding: 8px 14px;
+		border: 1px solid var(--border, #ccc);
+		border-radius: 4px;
+		background: #fff;
+		font: inherit;
+		cursor: pointer;
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		min-width: 72px;
+		justify-content: center;
+	}
+
+	.mic-btn:hover:not(:disabled) {
+		background: #f3f4f6;
+	}
+
+	.mic-btn:disabled {
+		opacity: 0.6;
+		cursor: progress;
+	}
+
+	.mic-btn.recording {
+		background: #dc2626;
+		color: #fff;
+		border-color: #b91c1c;
+		font-weight: 600;
+	}
+
+	.mic-btn.recording:hover {
+		background: #b91c1c;
+	}
+
+	.mic-btn.starting {
+		font-style: italic;
+		color: #6b7280;
+	}
+
+	.mic-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: #fff;
+		animation: mic-pulse 0.9s ease-in-out infinite;
+	}
+
+	@keyframes mic-pulse {
+		0%,
+		100% {
+			transform: scale(1);
+			opacity: 1;
+		}
+		50% {
+			transform: scale(1.6);
+			opacity: 0.45;
+		}
+	}
+
+	.dictation-hint {
+		margin-left: 8px;
+		color: #6b7280;
+		font-weight: 400;
+	}
+
+	.dictation-error {
+		padding: 8px 12px;
+		border-radius: 4px;
+		background: #fef2f2;
+		color: #991b1b;
+		border: 1px solid #fecaca;
+		font-size: 0.875rem;
 	}
 </style>

@@ -23,6 +23,28 @@ WORKDIR /workspace
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project --no-dev --extra local-stt --extra local-tts
 
+# Optional: NVIDIA NeMo for the Parakeet STT adapter (Johnny-stt.1).
+# Heavy (~2.5 GB CPU torch + NeMo deps) so it's gated behind a build
+# arg — defaults to on so the catalog `/stt_test` Test button works
+# out of the box; set INSTALL_PARAKEET=0 to skip. CPU-only torch is
+# baked in via the PyTorch CPU index; a CUDA variant is tracked as a
+# follow-up under the Johnny-stt epic. The conditional install sits
+# BEFORE the code COPY so editing app/johnny doesn't bust the ~2.5 GB
+# cache layer. `--inexact` on the final `uv sync` below keeps these
+# packages around (without it, uv would remove anything outside the
+# resolved lock).
+ARG INSTALL_PARAKEET=1
+RUN if [ "$INSTALL_PARAKEET" = "1" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            libsndfile1 \
+        && rm -rf /var/lib/apt/lists/* \
+        && /opt/venv/bin/python -m pip install --no-cache-dir \
+            --index-url https://download.pytorch.org/whl/cpu \
+            torch torchaudio \
+        && /opt/venv/bin/python -m pip install --no-cache-dir \
+            "nemo_toolkit[asr]>=2.5.0"; \
+    fi
+
 # Copy source and install the project itself. The `johnny/` package
 # carries SQLAlchemy-free voice-pipeline modules (e.g. `ApprovalGate`,
 # event dataclasses) that `app.services.*` imports — required from
@@ -31,7 +53,7 @@ COPY alembic.ini ./
 COPY alembic ./alembic
 COPY app ./app
 COPY johnny ./johnny
-RUN uv sync --frozen --no-dev --extra local-stt --extra local-tts
+RUN uv sync --frozen --no-dev --inexact --extra local-stt --extra local-tts
 
 EXPOSE 8000
 

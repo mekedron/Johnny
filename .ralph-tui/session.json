@@ -3,10 +3,10 @@
   "sessionId": "51aec77c-06d2-41a0-ab44-ea76c3bf8c41",
   "status": "running",
   "startedAt": "2026-06-06T16:31:22.596Z",
-  "updatedAt": "2026-06-06T16:48:38.947Z",
-  "currentIteration": 1,
+  "updatedAt": "2026-06-06T17:11:16.929Z",
+  "currentIteration": 2,
   "maxIterations": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 2,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -32,8 +32,8 @@
       {
         "id": "Johnny-stt.1",
         "title": "Add NVIDIA Parakeet STT provider (local, streaming-capable) — nvidia/parakeet-tdt-0.6b-v3",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-stt.2",
@@ -65,6 +65,16 @@
       "durationMs": 241301,
       "startedAt": "2026-06-06T16:31:35.306Z",
       "endedAt": "2026-06-06T16:35:36.607Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "Johnny-stt.1",
+      "taskTitle": "Add NVIDIA Parakeet STT provider (local, streaming-capable) — nvidia/parakeet-tdt-0.6b-v3",
+      "taskCompleted": true,
+      "durationMs": 773533,
+      "startedAt": "2026-06-06T16:35:44.577Z",
+      "endedAt": "2026-06-06T16:48:38.110Z"
     }
   ],
   "skippedTaskIds": [],

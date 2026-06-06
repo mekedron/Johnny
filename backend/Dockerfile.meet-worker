@@ -50,6 +50,26 @@ RUN pip install --no-cache-dir \
         faster-whisper==1.0.3 \
         piper-tts==1.4.2
 
+# Optional: NVIDIA NeMo for the Parakeet STT adapter (Johnny-stt.1).
+# Heavy (~2.5 GB CPU torch + NeMo deps) so it's gated behind a build
+# arg — defaults to on so real sessions that pick Parakeet actually
+# transcribe; set INSTALL_PARAKEET=0 to skip and keep the meet-worker
+# image lean if you only use faster-whisper / cloud STT. CPU-only
+# torch is baked in via the PyTorch CPU index; a CUDA variant is
+# tracked as a follow-up under the Johnny-stt epic. Conditional sits
+# before the `johnny` COPY so source edits don't bust the cache.
+ARG INSTALL_PARAKEET=1
+RUN if [ "$INSTALL_PARAKEET" = "1" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            libsndfile1 \
+        && rm -rf /var/lib/apt/lists/* \
+        && pip install --no-cache-dir \
+            --index-url https://download.pytorch.org/whl/cpu \
+            torch torchaudio \
+        && pip install --no-cache-dir \
+            "nemo_toolkit[asr]>=2.5.0"; \
+    fi
+
 # The `johnny` package owns the meet-worker runtime (selfcheck, audio
 # bridge, voice pipeline). The pipeline imports the provider ABCs from
 # `app.providers.base` (no SQLAlchemy involved); we ship just the
