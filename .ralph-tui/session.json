@@ -3,10 +3,10 @@
   "sessionId": "79f70c67-bb19-4cbc-940f-b02dbec38449",
   "status": "running",
   "startedAt": "2026-06-06T07:53:57.289Z",
-  "updatedAt": "2026-06-06T09:50:37.212Z",
-  "currentIteration": 7,
+  "updatedAt": "2026-06-06T10:01:01.025Z",
+  "currentIteration": 8,
   "maxIterations": 0,
-  "tasksCompleted": 7,
+  "tasksCompleted": 8,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -191,6 +191,16 @@
       "durationMs": 564191,
       "startedAt": "2026-06-06T09:33:06.104Z",
       "endedAt": "2026-06-06T09:42:30.295Z"
+    },
+    {
+      "iteration": 8,
+      "status": "completed",
+      "taskId": "Johnny-k3z",
+      "taskTitle": "Export all provider configurations as JSON from the UI",
+      "taskCompleted": true,
+      "durationMs": 478934,
+      "startedAt": "2026-06-06T09:42:37.383Z",
+      "endedAt": "2026-06-06T09:50:36.317Z"
     }
   ],
   "skippedTaskIds": [],

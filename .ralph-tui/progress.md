@@ -754,3 +754,86 @@ second prompt because the prompt builder slices `history[:current_pos]`.
     6266 encoding handling would be premature complexity for a
     server we control.
 ---
+
+### ElevenLabs Scribe STT is batch-only (Johnny-1zg)
+The ElevenLabs Scribe API is fundamentally different from Deepgram /
+OpenAI Realtime: it has NO streaming surface. There is no WebSocket,
+no partials, no interim deltas — just a single
+`POST /v1/speech-to-text` multipart request returning the final text
+in one JSON response. So `ElevenLabsSTT.transcribe_stream` buffers the
+entire VAD-bounded utterance into a `bytearray`, fires one
+multipart POST, and yields exactly ONE event with `is_final=True`. The
+pipeline's VAD boundary is the only finality signal.
+
+The wire-side trick: instead of WAV-wrapping the PCM, pass
+`file_format=pcm_s16le_16` as a form field and post the raw 16 kHz
+mono S16LE bytes directly — Scribe keys off the form field, not the
+MIME type (which is `application/octet-stream`). That matches the
+meet-worker bridge format exactly, so no header munging or transcoding
+is needed. This is the same pattern any future "send PCM to a batch
+endpoint" adapter should follow.
+
+Implications for latency: end-to-end response time is dominated by the
+batch round-trip (~300-800 ms for a short utterance), so this is a
+good fallback when streaming partials aren't the constraint but
+accuracy or specific language coverage matters. The existing
+`_smoke_test` (200 ms of silence) works unchanged — silence returns
+empty text → `_parse_response` filters it → 0 events yielded → smoke
+test still reports OK.
+
+Confidence comes from `language_probability` (the language-detect
+confidence), clamped to [0, 1]. The Scribe response also carries
+per-word timestamps in `words`, but the pipeline doesn't consume
+them yet so the adapter just propagates the top-level `text`.
+
+## 2026-06-06 - Johnny-1zg
+- Added ElevenLabs Scribe as a first-class STT provider so kind=stt
+  in the /providers UI now lists "ElevenLabs" alongside Deepgram and
+  OpenAI Realtime.
+- New `app/providers/elevenlabs_stt.py` — `ElevenLabsSTT` adapter
+  registered under `(ProviderKind.STT, "elevenlabs")`. Same `api_key`
+  credential as the existing `ElevenLabsTTS` adapter (shared
+  `xi-api-key` auth header pattern). The single "elevenlabs" name now
+  maps to TWO factories (STT and TTS) under different kinds — that's
+  fine: `ProviderRegistry` keys on `(kind, name)` tuples.
+- `field_schema()` declares:
+  - **auth**: `api_key` (required, secret)
+  - **model**: `model_id` (`scribe_v2` default / `scribe_v1`),
+    `language_code` (blank = auto-detect), `diarize`,
+    `tag_audio_events`
+  - **advanced**: `base_url`, `file_format` (`pcm_s16le_16`),
+    `timeout_s`
+- `transcribe_stream` is batch: buffers the iterator, POSTs raw PCM
+  via multipart with `file_format=pcm_s16le_16`, yields one
+  `is_final=True` `TranscriptEvent`. Empty buffer / empty `text`
+  short-circuits without yielding (matches Deepgram's empty-handling).
+- Errors translated to `STTError` with detail extraction matching
+  the TTS adapter's pattern: `detail.message`, `detail` (string),
+  top-level `message`, raw body.
+- Test file `tests/providers/test_elevenlabs_stt.py` — 36 tests
+  covering config defaults, schema, response parsing, transcribe
+  flow, both contract tests, error paths, and registry behavior.
+  Mirrors the structure of `test_elevenlabs_tts.py`.
+- Files changed:
+  - `backend/app/providers/elevenlabs_stt.py` (new)
+  - `backend/app/providers/__init__.py` — import, register, export
+  - `backend/tests/providers/test_elevenlabs_stt.py` (new, 36 tests)
+- **Learnings:**
+  - The `_smoke_test` STT path (200 ms of silence) flows fine through
+    a batch adapter: silence yields empty `text`, `_parse_response`
+    returns None, the test reports "0 transcript event(s)" — `ok=True`.
+    No need to special-case batch adapters in the smoke harness.
+  - Multipart form posting with httpx is straightforward: pass
+    `data=` for form fields and `files=` for the binary, set
+    `Accept: application/json` explicitly so the server can't
+    surprise us with a 415. No need for manual boundary handling.
+  - Two adapters can share `PROVIDER_NAME = "elevenlabs"` because
+    the registry's keyspace is `(kind, name)`. The test
+    `test_elevenlabs_stt_and_tts_share_name_under_different_kinds`
+    asserts this pattern works and the factories are distinct.
+  - The frontend `/providers` page reads schemas dynamically via
+    `GET /providers/schemas` (`app/api/providers.py:_all_schemas`),
+    so registering the adapter at import time is enough — no UI
+    code changes were needed to make ElevenLabs appear in the STT
+    dropdown. Same goes for the structured settings form.
+---

@@ -40,6 +40,8 @@ from app.providers.base import (
 )
 from app.providers.deepgram_stt import DeepgramSTT
 from app.providers.deepgram_stt import register as _register_deepgram_stt
+from app.providers.elevenlabs_stt import ElevenLabsSTT
+from app.providers.elevenlabs_stt import register as _register_elevenlabs_stt
 from app.providers.elevenlabs_tts import ElevenLabsTTS
 from app.providers.elevenlabs_tts import register as _register_elevenlabs_tts
 from app.providers.faster_whisper_stt import FasterWhisperSTT
@@ -86,12 +88,14 @@ _register_gemini_llm(replace=True)
 _register_faster_whisper_stt(replace=True)
 _register_deepgram_stt(replace=True)
 _register_openai_realtime_stt(replace=True)
+_register_elevenlabs_stt(replace=True)
 
 __all__ = [
     "AnthropicLLM",
     "ChatMessage",
     "ChatRole",
     "DeepgramSTT",
+    "ElevenLabsSTT",
     "ElevenLabsTTS",
     "FasterWhisperSTT",
     "FieldDef",
