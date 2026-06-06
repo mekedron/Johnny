@@ -474,15 +474,33 @@ def check_elevenlabs_credentials(api_key: str) -> SmokeResult:
     )
 
 
-# --- Local model dirs (Docker named volumes) ------------------------------
+# --- Local model dirs (host bind mounts under ~/.johnny) ------------------
+
+
+# Default host paths the compose stack bind-mounts into the api/worker/
+# meet-worker containers. Switched from Docker named volumes in Johnny-ckz.5
+# so the user can ``ls ~/.johnny/piper-models`` directly without docker cp.
+DEFAULT_WHISPER_HOST_DIR = str(Path.home() / ".johnny" / "whisper-models")
+DEFAULT_PIPER_HOST_DIR = str(Path.home() / ".johnny" / "piper-models")
 
 
 def _list_files_in_volume(volume: str, mount: str) -> tuple[bool, list[str], str]:
-    """Mount ``volume`` into a one-shot alpine and list files.
+    """List files in a host directory (or docker volume).
 
-    Returns ``(ok, files, error_detail)``. ``ok=False`` means the
-    docker call itself failed (missing CLI, missing volume).
+    When ``volume`` is an absolute path (the new default under
+    ``~/.johnny``) we just read the directory directly. When ``volume``
+    is a bare name (legacy ``johnny_*_models``), we fall back to mounting
+    it into a one-shot alpine container. Returns ``(ok, files, err)``.
     """
+    if volume.startswith("/") or volume.startswith("~"):
+        host_dir = Path(volume).expanduser()
+        if not host_dir.exists():
+            return False, [], f"host directory {host_dir} does not exist"
+        try:
+            files = sorted(p.name for p in host_dir.iterdir())
+        except OSError as exc:
+            return False, [], str(exc)
+        return True, files, ""
     if shutil.which("docker") is None:
         return False, [], "docker CLI not on PATH"
     rc, output = _run_subprocess(
@@ -506,49 +524,51 @@ def _list_files_in_volume(volume: str, mount: str) -> tuple[bool, list[str], str
 
 
 def check_whisper_models_dir(
-    volume: str = "johnny_whisper_models",
+    volume: str | None = None,
     mount: str = "/var/lib/johnny/whisper-models",
 ) -> SmokeResult:
-    """Report whether the faster-whisper volume contains at least one model."""
+    """Report whether the faster-whisper host dir holds at least one model."""
     name = "Whisper models dir"
-    ok, files, err = _list_files_in_volume(volume, mount)
+    location = volume if volume is not None else DEFAULT_WHISPER_HOST_DIR
+    ok, files, err = _list_files_in_volume(location, mount)
     if not ok:
         return SmokeResult.failed(
             name,
-            f"could not list {volume}: {err}",
-            volume=volume,
+            f"could not list {location}: {err}",
+            volume=location,
             mount=mount,
         )
     model_dirs = [f for f in files if f.startswith("models--Systran--faster-whisper-")]
     if not model_dirs:
         return SmokeResult.failed(
             name,
-            f"{volume} is empty; pre-warm with the docker run command in "
+            f"{location} is empty; pre-warm with the docker run command in "
             "docs/SETUP_LOCAL.md §8",
-            volume=volume,
+            volume=location,
             files=files,
         )
     sizes = sorted(d.removeprefix("models--Systran--faster-whisper-") for d in model_dirs)
     return SmokeResult.passed(
         name,
-        f"{', '.join(sizes)} present in {volume}",
-        volume=volume,
+        f"{', '.join(sizes)} present in {location}",
+        volume=location,
         models=sizes,
     )
 
 
 def check_piper_voices_dir(
-    volume: str = "johnny_piper_models",
+    volume: str | None = None,
     mount: str = "/var/lib/johnny/piper-models",
 ) -> SmokeResult:
-    """Report whether the Piper volume contains at least one voice pair."""
+    """Report whether the Piper host dir holds at least one voice pair."""
     name = "Piper voices dir"
-    ok, files, err = _list_files_in_volume(volume, mount)
+    location = volume if volume is not None else DEFAULT_PIPER_HOST_DIR
+    ok, files, err = _list_files_in_volume(location, mount)
     if not ok:
         return SmokeResult.failed(
             name,
-            f"could not list {volume}: {err}",
-            volume=volume,
+            f"could not list {location}: {err}",
+            volume=location,
             mount=mount,
         )
     onnx = {f for f in files if f.endswith(".onnx")}
@@ -557,16 +577,16 @@ def check_piper_voices_dir(
     if not pairs:
         return SmokeResult.failed(
             name,
-            f"{volume} empty or incomplete; download from "
-            "https://huggingface.co/rhasspy/piper-voices",
-            volume=volume,
+            f"{location} empty or incomplete; use the voice browser in the "
+            "Providers UI, or grab one from https://huggingface.co/rhasspy/piper-voices",
+            volume=location,
             files=files,
         )
     voice_ids = sorted(p.removesuffix(".onnx") for p in pairs)
     return SmokeResult.passed(
         name,
-        f"{', '.join(voice_ids)} present in {volume}",
-        volume=volume,
+        f"{', '.join(voice_ids)} present in {location}",
+        volume=location,
         voices=voice_ids,
     )
 

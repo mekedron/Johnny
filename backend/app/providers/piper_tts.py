@@ -271,7 +271,10 @@ async def fetch_voice_catalog(
     """
     owns_client = client is None
     if client is None:
-        client = httpx.AsyncClient(timeout=timeout_s)
+        # follow_redirects: HuggingFace's resolve endpoint 307s to a
+        # CDN-cached blob URL. Without this the catalog fetch raises and
+        # the voice browser is dead-on-arrival.
+        client = httpx.AsyncClient(timeout=timeout_s, follow_redirects=True)
     try:
         try:
             response = await client.get(PIPER_VOICES_CATALOG_URL)

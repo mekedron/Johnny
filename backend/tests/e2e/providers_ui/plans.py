@@ -125,8 +125,10 @@ PROVIDER_PLANS: tuple[ProviderPlan, ...] = (
         provider_name="faster-whisper",
         display_name="e2e-stt-faster-whisper",
         static_options={"model_size": "tiny"},
-        local_asset=Path("/var/lib/johnny/whisper-models"),
-        skip_hint="whisper_models volume empty — no local model available",
+        # Host bind mount the compose stack maps to /var/lib/johnny/...
+        # in-container. Tests run on the host so we look at ~/.johnny/.
+        local_asset=Path.home() / ".johnny" / "whisper-models",
+        skip_hint="~/.johnny/whisper-models empty — no local model available",
     ),
     # LLM
     ProviderPlan(
@@ -209,10 +211,10 @@ PROVIDER_PLANS: tuple[ProviderPlan, ...] = (
         provider_name="piper",
         display_name="e2e-tts-piper",
         static_options={"voice_id": "en_US-amy-low"},
-        # The compose volume is ``piper_models`` (the PRD nicknames it
-        # ``piper_voices``; both point at the same on-disk dir).
-        local_asset=Path("/var/lib/johnny/piper-models"),
-        skip_hint="piper_models volume empty — no local voice available",
+        # Host bind mount that compose maps to /var/lib/johnny/piper-models
+        # in-container. Tests run on the host so we point at ~/.johnny/.
+        local_asset=Path.home() / ".johnny" / "piper-models",
+        skip_hint="~/.johnny/piper-models empty — no local voice available",
     ),
 )
 

@@ -82,6 +82,7 @@ pythonpath = ["."]
 markers = [
     "livekit_smoke: opt-in smoke tests that exercise LiveKitTransport against a running dev server (US-025)",
     "e2e_ui: opt-in end-to-end provider UI tests against a live Compose stack (Johnny-upg)",
+    "network: opt-in tests that hit live external services — run locally before claiming a fix, CI may skip when offline (Johnny-ckz.5)",
 ]
 
 [tool.ruff]

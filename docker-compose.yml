@@ -25,8 +25,15 @@ x-backend-env: &backend-env
   # COMPOSE_PROJECT_NAME if you renamed the project.
   JOHNNY_MEET_WORKER_NETWORK: ${JOHNNY_MEET_WORKER_NETWORK:-johnny_default}
   JOHNNY_MEET_WORKER_AUTH_VOLUME: ${JOHNNY_MEET_WORKER_AUTH_VOLUME:-johnny_google_auth_state}
-  JOHNNY_MEET_WORKER_WHISPER_VOLUME: ${JOHNNY_MEET_WORKER_WHISPER_VOLUME:-johnny_whisper_models}
-  JOHNNY_MEET_WORKER_PIPER_VOLUME: ${JOHNNY_MEET_WORKER_PIPER_VOLUME:-johnny_piper_models}
+  # Host bind-mount paths the meet-worker launcher passes to each
+  # spawned container so a voice / whisper model downloaded once stays
+  # readable from the host (``ls ~/.johnny/piper-models``). Setting these
+  # to a Docker named volume name (no leading slash) is still allowed —
+  # the launcher mounts it as a named volume in that case for backwards
+  # compatibility with non-Compose deployments that haven't moved off
+  # the legacy ``johnny_*_models`` volumes yet.
+  JOHNNY_MEET_WORKER_WHISPER_VOLUME: ${JOHNNY_MEET_WORKER_WHISPER_VOLUME:-${HOME}/.johnny/whisper-models}
+  JOHNNY_MEET_WORKER_PIPER_VOLUME: ${JOHNNY_MEET_WORKER_PIPER_VOLUME:-${HOME}/.johnny/piper-models}
   JOHNNY_CONTAINER_MONITOR_INTERVAL_SECONDS: ${JOHNNY_CONTAINER_MONITOR_INTERVAL_SECONDS:-30}
   JOHNNY_CONTAINER_PRUNE_INTERVAL_SECONDS: ${JOHNNY_CONTAINER_PRUNE_INTERVAL_SECONDS:-3600}
   JOHNNY_CONTAINER_PRUNE_AGE_SECONDS: ${JOHNNY_CONTAINER_PRUNE_AGE_SECONDS:-86400}
@@ -88,8 +95,12 @@ services:
     # future meet-workers will read from).
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - whisper_models:/var/lib/johnny/whisper-models
-      - piper_models:/var/lib/johnny/piper-models
+      # Model caches as HOST BIND MOUNTS so the user can drop files in
+      # by hand (``ls ~/.johnny/piper-models``) without docker cp, and
+      # so downloads survive ``docker compose down -v`` resets. ``run.sh``
+      # creates these dirs idempotently on first boot.
+      - ${HOME}/.johnny/whisper-models:/var/lib/johnny/whisper-models
+      - ${HOME}/.johnny/piper-models:/var/lib/johnny/piper-models
       # google_auth_state holds the Playwright storage_state.json files
       # per bot account so the meet-worker can sign into Google without
       # an interactive OAuth round-trip per session (Johnny-ckz.1).
@@ -132,9 +143,9 @@ services:
       # Share the on-device model caches with api/meet-worker so any
       # CTranslate2 weights / Piper voices downloaded by one service
       # are visible to the others (the worker image is identical to
-      # the api image).
-      - whisper_models:/var/lib/johnny/whisper-models
-      - piper_models:/var/lib/johnny/piper-models
+      # the api image). Host bind mounts — see api notes above.
+      - ${HOME}/.johnny/whisper-models:/var/lib/johnny/whisper-models
+      - ${HOME}/.johnny/piper-models:/var/lib/johnny/piper-models
       # Same shared google-auth volume as the API (read-write here so
       # an admin endpoint or one-time helper can refresh stored cookies
       # from inside the worker process if needed).
@@ -176,17 +187,15 @@ services:
       dockerfile: Dockerfile.meet-worker
     image: johnny-meet-worker:latest
     profiles: ["meet-worker"]
-    # Per-session containers attach these volumes so downloaded model
+    # Per-session containers attach these dirs so downloaded model
     # files survive restarts. The scheduler (US-029/US-030) will mount
-    # the same named volumes into each spawned container.
+    # the same host paths into each spawned container.
     volumes:
-      - piper_models:/var/lib/johnny/piper-models
-      - whisper_models:/var/lib/johnny/whisper-models
+      - ${HOME}/.johnny/piper-models:/var/lib/johnny/piper-models
+      - ${HOME}/.johnny/whisper-models:/var/lib/johnny/whisper-models
 
 volumes:
   postgres_data:
   redis_data:
   worker_state:
-  piper_models:
-  whisper_models:
   google_auth_state:

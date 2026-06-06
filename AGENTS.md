@@ -1,5 +1,22 @@
 # Agent Instructions
 
+## Top rule: real-browser validation is mandatory
+
+Anything that *can* be verified through a real browser **must** be verified through a real browser, via the **chrome-devtools MCP server** (`mcp__chrome-devtools__*`). No exceptions, no matter how small the change.
+
+This applies to every UI surface in this project — provider settings, voice catalog browser, Test / Sample buttons, session list, leave-now button, calendar import, sign-in flow, error toasts, every form, every dropdown. A passing unit/integration test is necessary but **not sufficient**; the change is not done until it has been driven in the real browser and seen working.
+
+Rules:
+- Use **chrome-devtools MCP only**. Do **not** use `claude-in-chrome` (see `/Users/nikita/.claude/rules/common/browser-automation.md`).
+- Load the tools you need via ToolSearch before calling them (e.g. `select:mcp__chrome-devtools__navigate_page,mcp__chrome-devtools__take_snapshot,mcp__chrome-devtools__click,mcp__chrome-devtools__list_network_requests`).
+- For each user-visible change, the verification trace must include at minimum: navigate to the page, take a snapshot, drive the relevant interaction, assert the resulting DOM/network state, and capture a screenshot for the PR description.
+- "I read the code and it looks right" is not validation. "The unit test passes" is not validation. Only a recorded chrome-devtools MCP run is.
+- If the change literally cannot be browser-tested (pure backend migration with no UI surface, a cron-only worker), state that explicitly in the PR description — otherwise assume browser validation is required.
+
+This rule sits at the top of this file because skipping it has repeatedly shipped "fixes" that don't actually work for the user.
+
+---
+
 This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
 
 > **Architecture in one line:** Issues live in a local Dolt database

@@ -32,10 +32,10 @@ class PreflightResult:
 def _local_asset_has_content(path: Path) -> bool:
     """Return True if the path exists and contains at least one regular file.
 
-    The host bind-mounts for ``whisper_models`` / ``piper_models`` are
-    Docker named volumes — they always exist on disk once Compose has
-    started but may be empty. Treat "empty directory" as "no model
-    available" so the harness emits a clear SKIP.
+    The model dirs live under ``~/.johnny`` as host bind mounts (created
+    by ``run.sh`` on first boot). They always exist on disk after the
+    stack has started but may be empty. Treat "empty directory" as "no
+    model available" so the harness emits a clear SKIP.
     """
     if not path.exists():
         return False

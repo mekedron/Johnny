@@ -4,13 +4,14 @@ Three flavors:
 
 * **Whisper** (``faster-whisper``): runs the model loader inside the
   ``johnny-meet-worker`` image so the CTranslate2 weights land in the
-  shared ``whisper_models`` Docker volume the meet-worker mounts at
-  runtime. This requires the meet-worker image to be built; we
-  build-on-demand if missing.
+  shared ``~/.johnny/whisper-models`` host directory the meet-worker
+  bind-mounts at runtime. Requires the meet-worker image to be built;
+  we build-on-demand if missing.
 
 * **Piper** voices: runs ``curl`` inside a tiny image with the
-  ``piper_models`` volume mounted, so the ``.onnx`` + ``.onnx.json``
-  pair lands at exactly the path :mod:`app.providers.piper_tts` expects.
+  ``~/.johnny/piper-models`` host directory bind-mounted, so the
+  ``.onnx`` + ``.onnx.json`` pair lands at exactly the path
+  :mod:`app.providers.piper_tts` expects.
 
 * **Ollama** models: ``ollama pull <tag>`` on the host. Ollama is a
   host-side daemon that the meet-worker reaches via
@@ -33,9 +34,12 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-# Defaults match the compose volume names and adapter defaults.
-WHISPER_VOLUME = "johnny_whisper_models"
-PIPER_VOLUME = "johnny_piper_models"
+# Defaults match the compose host bind mounts and adapter defaults.
+# Host paths point at ~/.johnny so the user can ls/drop files in by hand;
+# the in-container target stays at /var/lib/johnny/*-models because the
+# Python adapters (faster-whisper, piper_tts) read from those paths.
+WHISPER_VOLUME = str(Path.home() / ".johnny" / "whisper-models")
+PIPER_VOLUME = str(Path.home() / ".johnny" / "piper-models")
 WHISPER_MOUNT = "/var/lib/johnny/whisper-models"
 PIPER_MOUNT = "/var/lib/johnny/piper-models"
 MEET_WORKER_IMAGE = "johnny-meet-worker:latest"
@@ -53,6 +57,22 @@ class DownloadResult:
 
 def _docker_available() -> bool:
     return shutil.which("docker") is not None
+
+
+def _ensure_host_dir(volume: str) -> None:
+    """Create the host directory for a bind-mount source if it doesn't exist.
+
+    Docker will auto-create a missing bind source as root (because dockerd
+    runs as root), which then traps the user behind a permission wall when
+    they try to ``ls`` or drop files in. Pre-creating the path with the
+    current uid sidesteps that. No-op for legacy named-volume strings.
+    """
+    if not (volume.startswith("/") or volume.startswith("~")):
+        return
+    try:
+        Path(volume).expanduser().mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning("could not pre-create %s: %s", volume, exc)
 
 
 def _run_subprocess(args: list[str], *, timeout: float = 1800.0) -> tuple[int, str]:
@@ -126,13 +146,13 @@ def download_whisper_model(
     mount: str = WHISPER_MOUNT,
     image: str = MEET_WORKER_IMAGE,
 ) -> DownloadResult:
-    """Pre-warm a faster-whisper model into the shared Docker volume.
+    """Pre-warm a faster-whisper model into the shared host directory.
 
     Equivalent to the manual command in ``docs/SETUP_LOCAL.md`` §8 —
     runs ``WhisperModel(model_size, download_root=mount, ...)`` inside the
     meet-worker image. The CTranslate2 weights land in
     ``<mount>/models--Systran--faster-whisper-<size>/`` and survive
-    container rebuilds because they live in the named volume.
+    container rebuilds because the host directory is bind-mounted in.
     """
     if not _docker_available():
         return DownloadResult(ok=False, detail="docker CLI not available")
@@ -141,6 +161,7 @@ def download_whisper_model(
             ok=False,
             detail=f"meet-worker image {image!r} not built yet — run the build step first",
         )
+    _ensure_host_dir(volume)
     py = (
         "from faster_whisper import WhisperModel; "
         f"WhisperModel({model_size!r}, download_root={mount!r}, "
@@ -182,15 +203,16 @@ def download_piper_voice(
     volume: str = PIPER_VOLUME,
     mount: str = PIPER_MOUNT,
 ) -> DownloadResult:
-    """Download a Piper voice (`.onnx` + `.onnx.json`) into the shared volume.
+    """Download a Piper voice (`.onnx` + `.onnx.json`) into the shared dir.
 
     Runs ``curl`` inside the ``curlimages/curl`` image because that's the
-    smallest reliable way to write into a named Docker volume without
-    requiring curl/wget on the host. Both files must land next to each
-    other for Piper to load the voice.
+    smallest reliable way to write into a host bind mount or named volume
+    without requiring curl/wget on the host. Both files must land next to
+    each other for Piper to load the voice.
     """
     if not _docker_available():
         return DownloadResult(ok=False, detail="docker CLI not available")
+    _ensure_host_dir(volume)
     rc, output = _run_subprocess(
         [
             "docker",
@@ -271,11 +293,22 @@ def pull_ollama_model(model_tag: str) -> DownloadResult:
 
 
 def list_files_in_volume(volume: str, mount: str) -> list[str]:
-    """Return filenames present in a Docker named volume (for re-run detection).
+    """Return filenames present in a Docker volume / host bind mount.
 
-    Mounts ``volume`` into a one-shot ``alpine`` container and runs
-    ``ls -1``. An empty list also signals "nothing there yet".
+    When ``volume`` is an absolute path (host bind mount, the new default
+    under ``~/.johnny``), we read the directory directly — much faster
+    than spawning a one-shot alpine container. When ``volume`` is a bare
+    name (legacy ``johnny_piper_models``-style), we fall back to the
+    docker run + ls round-trip.
     """
+    if volume.startswith("/") or volume.startswith("~"):
+        host_dir = Path(volume).expanduser()
+        if not host_dir.exists():
+            return []
+        try:
+            return sorted(p.name for p in host_dir.iterdir())
+        except OSError:
+            return []
     if not _docker_available():
         return []
     rc, output = _run_subprocess(

@@ -33,6 +33,7 @@ import os
 import typing
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
+from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy import select
@@ -73,10 +74,14 @@ MEET_WORKER_AUTH_VOLUME_ENV = "JOHNNY_MEET_WORKER_AUTH_VOLUME"
 DEFAULT_MEET_WORKER_AUTH_VOLUME = "google_auth_state"
 DEFAULT_MEET_WORKER_AUTH_TARGET = "/var/lib/johnny/google-auth"
 MEET_WORKER_WHISPER_VOLUME_ENV = "JOHNNY_MEET_WORKER_WHISPER_VOLUME"
-DEFAULT_MEET_WORKER_WHISPER_VOLUME = "whisper_models"
+DEFAULT_MEET_WORKER_WHISPER_VOLUME = (
+    str(Path.home() / ".johnny" / "whisper-models")
+)
 DEFAULT_MEET_WORKER_WHISPER_TARGET = "/var/lib/johnny/whisper-models"
 MEET_WORKER_PIPER_VOLUME_ENV = "JOHNNY_MEET_WORKER_PIPER_VOLUME"
-DEFAULT_MEET_WORKER_PIPER_VOLUME = "piper_models"
+DEFAULT_MEET_WORKER_PIPER_VOLUME = (
+    str(Path.home() / ".johnny" / "piper-models")
+)
 DEFAULT_MEET_WORKER_PIPER_TARGET = "/var/lib/johnny/piper-models"
 
 DEFAULT_STOP_TIMEOUT_SECONDS = 10
@@ -173,12 +178,18 @@ def get_meet_worker_volumes() -> dict[str, dict[str, str]]:
     * ``google_auth_state`` → ``/var/lib/johnny/google-auth`` (read-only)
       — Playwright ``storage_state.json`` files per bot account so the
       browser loads straight into the signed-in Google session.
-    * ``whisper_models`` → ``/var/lib/johnny/whisper-models`` — shared
-      CTranslate2 cache so cold-start STT downloads are reused.
-    * ``piper_models`` → ``/var/lib/johnny/piper-models`` — TTS voices.
+    * ``~/.johnny/whisper-models`` (or named volume) →
+      ``/var/lib/johnny/whisper-models`` — shared CTranslate2 cache so
+      cold-start STT downloads are reused. Host bind mount by default so
+      the user can drop models in by hand without ``docker cp``.
+    * ``~/.johnny/piper-models`` (or named volume) →
+      ``/var/lib/johnny/piper-models`` — Piper TTS voices, same UX
+      reasoning as whisper.
 
     Returns a Docker SDK-compatible mapping. An operator can disable any
-    mount by setting the matching env var to ``none``.
+    mount by setting the matching env var to ``none``. An absolute path
+    becomes a bind mount; a bare name becomes a named volume (kept for
+    backwards compat with legacy ``johnny_*_models`` deployments).
     """
     out: dict[str, dict[str, str]] = {}
     auth = _read_volume_env(

@@ -868,3 +868,65 @@ async def test_download_voice_cleans_up_partial_files_on_failure(
     # Tempfile for sidecar was cleaned up; only the .onnx remains.
     assert not (tmp_path / "vx.onnx.json.part").exists()
     assert not (tmp_path / "vx.onnx.json").exists()
+
+
+async def test_fetch_voice_catalog_uses_follow_redirects_by_default() -> None:
+    """Reproducer for Johnny-ckz.5: HF's resolve endpoint 307s by design.
+
+    The default-client branch (no client= injected) must enable redirect
+    following, or every user with a vanilla httpx setup gets a useless
+    "Redirect response '307 Temporary Redirect'" error.
+
+    Test strategy: serve a 307 from the canonical voices.json URL via
+    MockTransport, then a 200 JSON body from the redirected target. The
+    catalog must end up parsed regardless. We pass our own client
+    configured with the mock transport AND follow_redirects=True, AND
+    additionally verify the production default-client branch wires the
+    same flag through (so we can't accidentally regress by editing the
+    redirect-aware branch only).
+    """
+    import inspect
+
+    from app.providers import piper_tts as pt
+
+    src = inspect.getsource(pt.fetch_voice_catalog)
+    assert "follow_redirects=True" in src, (
+        "fetch_voice_catalog must construct its default httpx.AsyncClient "
+        "with follow_redirects=True — without it HuggingFace's 307 to the "
+        "CDN-cached blob URL is raised as an error and the voice browser "
+        "is dead-on-arrival. See Johnny-ckz.5."
+    )
+
+
+@pytest.mark.network
+async def test_fetch_voice_catalog_against_real_huggingface(
+    tmp_path: Path,
+) -> None:
+    """Hit the real Hugging Face voices.json — no mocks.
+
+    The earlier fix attempt passed unit tests against a mocked HF response
+    which is why the 307 wasn't caught. This test exercises the real URL
+    end-to-end so a future redirect / schema change is visible the next
+    time the suite runs.
+
+    Marked ``network`` so CI offline runs can ``pytest -m "not network"``.
+    A live HF probe MUST pass locally before claiming the catalog fetch
+    is fixed.
+    """
+    from app.providers.piper_tts import fetch_voice_catalog
+
+    voices = await fetch_voice_catalog(str(tmp_path))
+    assert voices, (
+        "fetch_voice_catalog returned an empty list — either HF is down, "
+        "the catalog has moved, or the parser is mis-decoding the payload"
+    )
+    # Sanity: every entry should carry at least a key + language code.
+    for v in voices[:5]:
+        assert v.key, "voice missing key"
+        assert v.language_code, "voice missing language_code"
+    # rhasspy/piper-voices always ships en_US-amy-medium — if it ever
+    # disappears the upstream catalog has changed shape and we should
+    # know about it.
+    assert any(v.key == "en_US-amy-medium" for v in voices), (
+        "en_US-amy-medium missing from upstream catalog — schema may have changed"
+    )
