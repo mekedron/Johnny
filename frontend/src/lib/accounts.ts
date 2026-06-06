@@ -119,3 +119,50 @@ export function disconnectAccount(id: number, force = false): Promise<void> {
 	const qs = force ? '?force=true' : '';
 	return request<void>(`/auth/google/accounts/${id}${qs}`, { method: 'DELETE' });
 }
+
+/**
+ * Bot-session storage_state (Johnny-4ph).
+ *
+ * The meet-worker needs a Playwright `storage_state.json` to open
+ * Chromium straight into the bot's signed-in Google session. The user
+ * produces that file via the `seed_auth_state` CLI helper, then
+ * uploads it here so the API can drop it into the shared docker
+ * volume the meet-worker reads from.
+ */
+export interface BotSessionStatus {
+	connected: boolean;
+	saved_at: string | null;
+	size_bytes: number | null;
+	path: string;
+}
+
+export function getBotSessionStatus(accountId: number): Promise<BotSessionStatus> {
+	return request<BotSessionStatus>(`/auth/google/accounts/${accountId}/bot-session`);
+}
+
+/**
+ * Upload a Playwright `storage_state.json` for the bot account.
+ *
+ * The payload must be the raw JSON bytes the CLI helper writes (cookies
+ * array + optional origins). The backend validates the shape before
+ * writing to the shared volume; a 400 means the file is malformed and
+ * the user should re-run the helper.
+ */
+export function uploadBotSession(
+	accountId: number,
+	storageStateJson: string
+): Promise<BotSessionStatus> {
+	return request<BotSessionStatus>(
+		`/auth/google/accounts/${accountId}/bot-session`,
+		{
+			method: 'PUT',
+			body: storageStateJson
+		}
+	);
+}
+
+export function deleteBotSession(accountId: number): Promise<BotSessionStatus> {
+	return request<BotSessionStatus>(`/auth/google/accounts/${accountId}/bot-session`, {
+		method: 'DELETE'
+	});
+}

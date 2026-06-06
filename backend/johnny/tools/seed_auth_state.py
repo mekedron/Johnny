@@ -24,6 +24,17 @@ no perpetual "joining".
 
 Re-run any time the cookies expire (or after a manual sign-out). The
 existing file in the volume is overwritten atomically.
+
+**Two ways to use this**:
+
+* **Operator / automation**: run the script directly — it copies the
+  resulting ``storage_state.json`` into the shared volume via
+  ``docker cp`` and the meet-worker picks it up automatically.
+* **UI path (Johnny-4ph)**: a user can also click *Connect bot session*
+  in the Settings page and upload the JSON file produced by this script
+  (``--keep-local <path>`` writes a copy outside the docker volume).
+  Both paths land at the same on-disk location so they are fully
+  interchangeable.
 """
 
 from __future__ import annotations

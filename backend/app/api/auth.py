@@ -44,7 +44,7 @@ import secrets
 from datetime import datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, func, select
@@ -55,6 +55,13 @@ from app.api.deps import get_crypto, get_session
 from app.config import Settings, get_settings
 from app.db.models import AccountRole, GoogleAccount, MeetingConfig
 from app.security.crypto import CredentialCrypto
+from app.services.bot_auth_seed import (
+    MAX_STORAGE_STATE_BYTES,
+    BotSessionError,
+    bot_session_status,
+    delete_bot_session,
+    save_bot_session,
+)
 from app.services.google_client import (
     GoogleApiClientError,
     can_decrypt_refresh_token,
@@ -155,6 +162,24 @@ class AccountUpdate(BaseModel):
 
     role: AccountRole | None = None
     is_default_user: bool | None = None
+
+
+class BotSessionStatusResponse(BaseModel):
+    """Whether a bot account's Playwright ``storage_state.json`` exists.
+
+    Returned by the bot-session GET / PUT / DELETE endpoints so the UI
+    can render a single status surface (``Connected (saved …)`` vs
+    ``Not connected``) regardless of the operation that produced it.
+
+    ``connected`` is purely file-presence based — cookies may have
+    expired, but the meet-worker is the authoritative source for that
+    determination at join time.
+    """
+
+    connected: bool
+    saved_at: datetime | None = None
+    size_bytes: int | None = None
+    path: str
 
 
 # --- In-memory state map ---------------------------------------------------
@@ -510,9 +535,121 @@ async def disconnect_account(
         session.delete(row)
 
 
+# --- Bot-session storage_state endpoints (Johnny-4ph) ---------------------
+
+
+def _require_bot_account(session: Session, account_id: int) -> GoogleAccount:
+    """Return the account row or 400/404 if it can't host a bot session.
+
+    Only accounts tagged ``role=bot`` carry a Playwright storage_state —
+    user accounts authenticate via OAuth tokens, not a saved browser
+    session. We surface a 400 instead of silently accepting so a wrong
+    account selection is caught at upload time.
+    """
+    row = _get_account_or_404(session, account_id)
+    if row.role is not AccountRole.BOT:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "bot-session storage_state is only valid for accounts with "
+                "role=bot; this account is tagged "
+                f"role={row.role.value}"
+            ),
+        )
+    return row
+
+
+@router.get(
+    "/accounts/{account_id}/bot-session",
+    response_model=BotSessionStatusResponse,
+)
+def get_bot_session(account_id: int, session: SessionDep) -> BotSessionStatusResponse:
+    """Return whether a Playwright storage_state.json is on disk for this bot.
+
+    The status reflects file presence and mtime — it does NOT round-trip
+    to Google or validate the cookies. The meet-worker is the authority
+    on whether the session is actually usable; this endpoint just tells
+    the UI whether the user has run the helper yet.
+    """
+    _require_bot_account(session, account_id)
+    return BotSessionStatusResponse(**bot_session_status(account_id))
+
+
+@router.put(
+    "/accounts/{account_id}/bot-session",
+    response_model=BotSessionStatusResponse,
+)
+async def upload_bot_session(
+    account_id: int,
+    request: Request,
+    session: SessionDep,
+) -> BotSessionStatusResponse:
+    """Persist an uploaded ``storage_state.json`` for this bot account.
+
+    Accepts the raw JSON body as ``application/json`` and writes it
+    atomically to the shared ``google_auth_state`` volume so the
+    meet-worker finds it on its next join attempt. The file format is
+    Playwright's standard storage_state — same shape as the file
+    :mod:`johnny.tools.seed_auth_state` produces.
+
+    A successful round-trip means the file is on disk and well-formed;
+    it does not guarantee the cookies will still be valid when the
+    meet-worker actually tries to sign in. Cookies expire; this is the
+    same caveat the CLI helper carries.
+    """
+    _require_bot_account(session, account_id)
+
+    raw = await request.body()
+    if not raw:
+        raise HTTPException(
+            status_code=400,
+            detail="empty body — POST the storage_state.json content as the request body",
+        )
+    if len(raw) > MAX_STORAGE_STATE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"storage_state file is too large: {len(raw)} bytes "
+                f"(limit {MAX_STORAGE_STATE_BYTES})"
+            ),
+        )
+    try:
+        result = save_bot_session(account_id, raw)
+    except BotSessionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        # Disk full, permission denied, etc. — surface as 500 so the UI
+        # tells the operator to check the host volume.
+        raise HTTPException(
+            status_code=500,
+            detail=f"failed to write storage_state to volume: {exc}",
+        ) from exc
+    return BotSessionStatusResponse(**result)
+
+
+@router.delete(
+    "/accounts/{account_id}/bot-session",
+    response_model=BotSessionStatusResponse,
+)
+def delete_bot_session_endpoint(
+    account_id: int, session: SessionDep
+) -> BotSessionStatusResponse:
+    """Remove the saved Playwright storage_state for this bot account.
+
+    Useful when the cookies have expired (the user signs in fresh) or
+    when the user is switching the bot identity to a different email.
+    Returns the post-delete status — ``connected=False`` either way.
+    A no-op (file did not exist) is not an error.
+    """
+    _require_bot_account(session, account_id)
+    delete_bot_session(account_id)
+    return BotSessionStatusResponse(**bot_session_status(account_id))
+
+
 __all__ = [
     "AccountRead",
     "AccountUpdate",
+    "BotSessionStatusResponse",
     "CallbackRequest",
     "StartRequest",
     "StartResponse",

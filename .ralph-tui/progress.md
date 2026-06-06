@@ -5,6 +5,31 @@ after each iteration and it's included in prompts for context.
 
 ## Codebase Patterns (Study These First)
 
+### Bot-session storage_state lives on a shared Docker volume (Johnny-4ph)
+The meet-worker needs a Playwright `storage_state.json` to sign into
+Google as the bot. The file lives at
+`{root}/account-<id>/storage_state.json` inside the API container,
+where `root` is `/var/lib/johnny/google-auth` (bind-mount of the
+`google_auth_state` docker volume) — or whatever
+`JOHNNY_BOT_AUTH_STATE_ROOT` points at for tests. **Two interchangeable
+producers** write to the same path:
+
+* `johnny.tools.seed_auth_state` (CLI on the host, used by operators).
+* `PUT /auth/google/accounts/<id>/bot-session` (UI upload).
+
+Validation lives in `app.services.bot_auth_seed.validate_storage_state`:
+must be a JSON object with a non-empty `cookies` list and (optionally)
+`origins` as a list — anything else raises `BotSessionError` and is
+surfaced as HTTP 400. Writes are atomic via `tempfile` + `os.replace`
+in the target directory so the meet-worker never opens a half-written
+file.
+
+`bot_session_status(account_id)` is pure file-stat: `connected=True`
+iff the path exists. It does NOT validate the cookies are still
+session-valid — that determination only happens when the meet-worker
+actually tries to sign in. So UI showing "Connected" only means the
+file is present, not that the bot can join right now.
+
 ### VoicePipeline: split transcribe vs respond loops (Johnny-har)
 `VoicePipeline.run()` runs two concurrent tasks: a transcribe loop (VAD →
 STT → persist) and a respond loop (router → answer LLM → TTS). They
@@ -65,6 +90,67 @@ respond loop in. Without this, the only timing where barge-in fires
 is when the response loop is genuinely wedged in a long stage —
 which doesn't naturally happen with fake providers.
 
+---
+
+## 2026-06-06 - Johnny-4ph
+- Added a UI surface for connecting the bot's Google sign-in session.
+  The CLI helper (`johnny.tools.seed_auth_state`) stays in place for
+  operators/automation; the new UI path lets a user upload the JSON
+  file the helper produced (via `--keep-local`) instead of running
+  `docker cp` themselves.
+- New backend module `app/services/bot_auth_seed.py`: validates the
+  uploaded JSON is a Playwright storage_state (object with a non-empty
+  `cookies` array, optional `origins` array), writes atomically to
+  `{root}/account-<id>/storage_state.json` using `tempfile` +
+  `os.replace`, and exposes status / delete helpers. The root is
+  env-overridable (`JOHNNY_BOT_AUTH_STATE_ROOT`) so tests use a tmp
+  directory instead of the real `/var/lib/johnny/google-auth` mount.
+  4 MiB upload cap so a stray file can't fill the volume.
+- New endpoints in `/auth/google/accounts/{account_id}/bot-session/`:
+  GET (status), PUT (upload + validate + write), DELETE (remove). All
+  three reject `role=user` accounts with 400 — storage_state only
+  makes sense for bot identities. PUT enforces the size cap with 413
+  and surfaces validation failures as 400 without writing anything.
+- Frontend: extended `accounts.ts` with `getBotSessionStatus` /
+  `uploadBotSession` / `deleteBotSession`; the Settings page now
+  shows "Bot session: Connected (saved ...)" or "Not connected" on
+  every bot account row, with `Connect bot session` /
+  `Replace bot session` / `Disconnect session` actions. The connect
+  modal includes inline help on producing the JSON via the CLI
+  helper (collapsed `<details>` block by default).
+- Caveat / follow-up: this satisfies the "UI surface for bot sign-in"
+  spirit of the bead but still requires the user to run the CLI to
+  generate the JSON. Truly "no terminal needed" sign-in needs a
+  helper container running Playwright + noVNC so the user can drive
+  Chromium from their browser — that's a separate, larger bead.
+  The current implementation IS what unblocks the path: the meet-worker
+  reads the same on-disk file regardless of which producer wrote it.
+- Files changed:
+  - `backend/app/services/bot_auth_seed.py` (new)
+  - `backend/app/api/auth.py`
+  - `backend/johnny/tools/seed_auth_state.py` (docstring updated)
+  - `backend/tests/services/test_bot_auth_seed.py` (new, 20 tests)
+  - `backend/tests/api/test_auth_bot_session.py` (new, 14 tests)
+  - `frontend/src/lib/accounts.ts`
+  - `frontend/src/routes/settings/+page.svelte`
+- **Learnings:**
+  - The `google_auth_state` docker volume is mounted RW into the API
+    container (`/var/lib/johnny/google-auth`) and RO into spawned
+    meet-worker containers. Already perfectly set up for an
+    API-writes-/-worker-reads pattern; no compose changes needed.
+  - Playwright `storage_state.json` shape is a plain JSON object with
+    `cookies: [...]` (required, list of cookie dicts) and `origins:
+    [...]` (optional, localStorage by origin). A file with `cookies: []`
+    means sign-in failed silently — caught as 400 here so the UI
+    surfaces it instead of writing a useless file.
+  - `os.replace` in the SAME directory as the target is atomic across
+    a single filesystem (which the docker volume is), so the
+    meet-worker never opens a half-written file even mid-upload.
+  - The PUT endpoint reads the raw body via `request.body()` rather
+    than `UploadFile` because Playwright's storage_state.json is
+    naturally a JSON object — accepting it as the raw request body
+    keeps the wire format trivial and avoids multipart boundary
+    handling on the frontend.
 ---
 
 ## 2026-06-06 - Johnny-di9

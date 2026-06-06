@@ -3,12 +3,16 @@
 	import {
 		ACCOUNT_ROLE_LABEL,
 		ACCOUNT_ROLES,
+		deleteBotSession,
 		disconnectAccount,
+		getBotSessionStatus,
 		listAccounts,
 		startOAuth,
 		updateAccount,
+		uploadBotSession,
 		type Account,
-		type AccountRole
+		type AccountRole,
+		type BotSessionStatus
 	} from '$lib/accounts';
 
 	let accounts = $state<Account[]>([]);
@@ -25,16 +29,109 @@
 	let lastAuthorizeUrl = $state<string | null>(null);
 	let reconnectingId = $state<number | null>(null);
 
+	// Bot-session storage_state (Johnny-4ph). Map account id → status so
+	// the "Bot session connected" badge on each bot row reflects whether
+	// a Playwright storage_state.json sits in the shared docker volume.
+	let botSessions = $state<Record<number, BotSessionStatus>>({});
+	let botBusyId = $state<number | null>(null);
+	let showBotSessionForm = $state<{ account: Account } | null>(null);
+	let botFormError = $state<string | null>(null);
+	let botFormSubmitting = $state(false);
+	let botSessionFile = $state<File | null>(null);
+
 	async function loadAccounts() {
 		loading = true;
 		error = null;
 		try {
 			accounts = await listAccounts();
+			await loadBotSessions();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
 			loading = false;
 		}
+	}
+
+	async function loadBotSessions() {
+		// Bot-session status is a per-bot-account file check; only fetch
+		// for rows with role=bot so we don't 400 the server on every user
+		// row. Failures are non-fatal — the UI just falls back to "not
+		// connected" rather than blocking the whole accounts list.
+		const next: Record<number, BotSessionStatus> = {};
+		const bots = accounts.filter((a) => a.role === 'bot');
+		await Promise.all(
+			bots.map(async (a) => {
+				try {
+					next[a.id] = await getBotSessionStatus(a.id);
+				} catch {
+					next[a.id] = {
+						connected: false,
+						saved_at: null,
+						size_bytes: null,
+						path: ''
+					};
+				}
+			})
+		);
+		botSessions = next;
+	}
+
+	function openBotSessionForm(account: Account) {
+		botSessionFile = null;
+		botFormError = null;
+		showBotSessionForm = { account };
+	}
+
+	function closeBotSessionForm() {
+		showBotSessionForm = null;
+		botFormError = null;
+		botSessionFile = null;
+	}
+
+	async function submitBotSessionForm(event: Event) {
+		event.preventDefault();
+		const ctx = showBotSessionForm;
+		if (!ctx || !botSessionFile) return;
+		botFormSubmitting = true;
+		botFormError = null;
+		try {
+			const text = await botSessionFile.text();
+			botSessions[ctx.account.id] = await uploadBotSession(ctx.account.id, text);
+			closeBotSessionForm();
+		} catch (e) {
+			botFormError = e instanceof Error ? e.message : String(e);
+		} finally {
+			botFormSubmitting = false;
+		}
+	}
+
+	async function onDisconnectBotSession(account: Account) {
+		const confirmed = confirm(
+			`Disconnect the saved bot session for ${account.email}? ` +
+				'The meet-worker will need a new storage_state.json before it can join meetings.'
+		);
+		if (!confirmed) return;
+		botBusyId = account.id;
+		try {
+			botSessions[account.id] = await deleteBotSession(account.id);
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			botBusyId = null;
+		}
+	}
+
+	function onBotSessionFileChange(event: Event) {
+		const input = event.currentTarget as HTMLInputElement;
+		botSessionFile = input.files?.[0] ?? null;
+		botFormError = null;
+	}
+
+	function formatBotSessionSize(bytes: number | null): string {
+		if (bytes === null) return '';
+		if (bytes < 1024) return `${bytes} B`;
+		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+		return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 	}
 
 	onMount(() => {
@@ -269,6 +366,36 @@
 									runs the Google sign-in flow again and replaces the row in place.
 								</p>
 							{/if}
+							{#if account.role === 'bot'}
+								{@const session = botSessions[account.id]}
+								<div
+									class="bot-session"
+									class:bot-session-connected={session?.connected}
+									data-testid={`bot-session-${account.id}`}
+								>
+									<div class="bot-session-summary">
+										<strong>Bot session:</strong>
+										{#if session?.connected}
+											<span class="bot-session-status connected">
+												Connected
+												{#if session.saved_at}
+													<small>(saved {formatExpiry(session.saved_at)})</small>
+												{/if}
+												{#if session.size_bytes}
+													<small>· {formatBotSessionSize(session.size_bytes)}</small>
+												{/if}
+											</span>
+										{:else}
+											<span class="bot-session-status missing">Not connected</span>
+										{/if}
+									</div>
+									<p class="bot-session-help">
+										Meet-worker needs a Playwright <code>storage_state.json</code> to
+										sign into Google as this bot. Connect the session below; the file
+										lands in the shared <code>google_auth_state</code> volume.
+									</p>
+								</div>
+							{/if}
 						</div>
 						<div class="account-actions">
 							{#if account.token_health === 'needs_reauth'}
@@ -303,6 +430,29 @@
 								>
 									Set as default
 								</button>
+							{/if}
+							{#if account.role === 'bot'}
+								{@const session = botSessions[account.id]}
+								<button
+									type="button"
+									class={session?.connected ? '' : 'primary'}
+									onclick={() => openBotSessionForm(account)}
+									disabled={botBusyId === account.id}
+									data-testid={`connect-bot-session-${account.id}`}
+								>
+									{session?.connected ? 'Replace bot session' : 'Connect bot session'}
+								</button>
+								{#if session?.connected}
+									<button
+										type="button"
+										class="danger"
+										onclick={() => onDisconnectBotSession(account)}
+										disabled={botBusyId === account.id}
+										data-testid={`disconnect-bot-session-${account.id}`}
+									>
+										Disconnect session
+									</button>
+								{/if}
 							{/if}
 							<button
 								type="button"
@@ -374,6 +524,82 @@
 				<button type="button" onclick={closeForm} disabled={formSubmitting}>Cancel</button>
 				<button type="submit" class="primary" disabled={formSubmitting}>
 					{formSubmitting ? 'Opening…' : 'Continue to Google'}
+				</button>
+			</div>
+		</form>
+	</div>
+{/if}
+
+{#if showBotSessionForm}
+	{@const ctx = showBotSessionForm}
+	<div
+		class="modal-backdrop"
+		role="dialog"
+		aria-modal="true"
+		aria-labelledby="connect-bot-session-heading"
+	>
+		<form class="modal" onsubmit={submitBotSessionForm} data-testid="bot-session-modal">
+			<h2 id="connect-bot-session-heading">Connect bot session</h2>
+			<p class="modal-lede">
+				Connect a Playwright sign-in session for <strong>{ctx.account.email}</strong> so
+				the meet-worker can open Chromium straight into Google as this bot.
+			</p>
+			<details class="bot-session-howto">
+				<summary>How to generate the sign-in file</summary>
+				<p>
+					Run the seed helper on this machine. It opens a Chromium window where you
+					sign in to Google as the bot. The helper writes
+					<code>storage_state.json</code> to the path you pass.
+				</p>
+				<pre><code
+						>cd backend
+uv sync --extra auth-seed
+uv run playwright install chromium
+uv run python -m johnny.tools.seed_auth_state \
+  --account-id {ctx.account.id} \
+  --email {ctx.account.email} \
+  --keep-local /tmp/storage_state.json</code
+					></pre>
+				<p class="howto-note">
+					The CLI helper also copies the file into the docker volume automatically
+					(handy for operators). Uploading via this form is the alternative for
+					anyone who can't run <code>docker cp</code> directly.
+				</p>
+			</details>
+			<label>
+				<span>storage_state.json</span>
+				<input
+					type="file"
+					accept="application/json,.json"
+					onchange={onBotSessionFileChange}
+					required
+					data-testid="bot-session-file-input"
+				/>
+				<small>
+					Pick the JSON file the helper produced. Maximum 4 MiB; must contain a
+					non-empty <code>cookies</code> array.
+				</small>
+			</label>
+			{#if botSessionFile}
+				<p class="file-summary">
+					Selected: <strong>{botSessionFile.name}</strong>
+					<small>({formatBotSessionSize(botSessionFile.size)})</small>
+				</p>
+			{/if}
+			{#if botFormError}
+				<div class="alert error" data-testid="bot-session-error">{botFormError}</div>
+			{/if}
+			<div class="modal-actions">
+				<button type="button" onclick={closeBotSessionForm} disabled={botFormSubmitting}>
+					Cancel
+				</button>
+				<button
+					type="submit"
+					class="primary"
+					disabled={botFormSubmitting || !botSessionFile}
+					data-testid="bot-session-submit"
+				>
+					{botFormSubmitting ? 'Uploading…' : 'Save bot session'}
 				</button>
 			</div>
 		</form>
@@ -658,6 +884,96 @@
 		justify-content: flex-end;
 		gap: 0.5rem;
 		margin-top: 0.25rem;
+	}
+
+	.bot-session {
+		margin: 0.75rem 0 0;
+		padding: 0.6rem 0.8rem;
+		border: 1px solid #fed7aa;
+		background: #fff7ed;
+		border-radius: 6px;
+		font-size: 0.85rem;
+	}
+	.bot-session.bot-session-connected {
+		border-color: #86efac;
+		background: #f0fdf4;
+	}
+	.bot-session-summary {
+		display: flex;
+		gap: 0.4rem;
+		align-items: baseline;
+		flex-wrap: wrap;
+	}
+	.bot-session-status {
+		font-weight: 500;
+	}
+	.bot-session-status.connected {
+		color: #166534;
+	}
+	.bot-session-status.missing {
+		color: #9a3412;
+	}
+	.bot-session-status small {
+		color: #6b7280;
+		font-weight: 400;
+		margin-left: 0.25rem;
+	}
+	.bot-session-help {
+		margin: 0.3rem 0 0;
+		color: #4b5563;
+		font-size: 0.8rem;
+	}
+	.bot-session-help code {
+		background: rgba(255, 255, 255, 0.6);
+		padding: 0.05rem 0.3rem;
+		border-radius: 4px;
+		font-size: 0.75rem;
+	}
+	.bot-session-howto {
+		background: #f9fafb;
+		border: 1px solid #e5e7eb;
+		border-radius: 6px;
+		padding: 0.5rem 0.75rem;
+		font-size: 0.85rem;
+	}
+	.bot-session-howto summary {
+		cursor: pointer;
+		font-weight: 600;
+		color: #374151;
+	}
+	.bot-session-howto p {
+		margin: 0.5rem 0;
+		color: #4b5563;
+	}
+	.bot-session-howto pre {
+		margin: 0.5rem 0;
+		padding: 0.5rem;
+		background: #1f2937;
+		color: #f9fafb;
+		border-radius: 4px;
+		font-size: 0.75rem;
+		overflow-x: auto;
+		white-space: pre;
+	}
+	.bot-session-howto code {
+		font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	}
+	.bot-session-howto p code {
+		background: #e5e7eb;
+		padding: 0.05rem 0.3rem;
+		border-radius: 4px;
+	}
+	.howto-note {
+		font-size: 0.8rem;
+		color: #6b7280;
+	}
+	.file-summary {
+		margin: 0;
+		font-size: 0.85rem;
+		color: #374151;
+	}
+	.file-summary small {
+		color: #6b7280;
 	}
 
 	@media (max-width: 640px) {
