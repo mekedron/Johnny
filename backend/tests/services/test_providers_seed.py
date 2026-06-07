@@ -695,3 +695,268 @@ def test_seed_result_dataclass_defaults() -> None:
     assert res.created == [] and res.updated == [] and res.skipped == []
     assert res.activated == []
     assert res.mode is DEFAULT_SEED_MODE
+
+
+# --- Johnny-3ha: active flag survives restart for every kind --------------
+#
+# The bug report observed that the active LLM selection silently went empty
+# after "some operation (possibly a stack restart)" while TTS/STT stayed
+# put. The acceptance criteria specifically asks for a "set active X →
+# restart → assert active X unchanged" guard for LLM, plus parity with
+# STT/TTS. The seeder is the only startup hook that touches
+# ``provider_credentials``, so these tests use it as the canonical
+# "restart" stand-in: a no-op (missing file), an empty file, and the
+# realistic insert-only re-import all need to preserve every active row
+# for every kind.
+
+
+def _activate_directly(
+    session: Session,
+    crypto: CredentialCrypto,
+    *,
+    kind: ProviderKind,
+    provider_name: str,
+    display_name: str,
+    credentials: dict[str, str] | None = None,
+    options: dict[str, Any] | None = None,
+) -> ProviderCredential:
+    """Insert a provider row and flip it active. Bypasses the seeder."""
+    row = ProviderCredential(
+        kind=kind,
+        provider_name=provider_name,
+        display_name=display_name,
+        credentials_encrypted=crypto.encrypt(
+            json.dumps(credentials or {})
+        ),
+        config=dict(options or {}),
+        is_active=True,
+    )
+    session.add(row)
+    session.commit()
+    return row
+
+
+@pytest.mark.parametrize(
+    ("kind", "provider_name"),
+    [
+        (ProviderKind.LLM, "openai"),
+        (ProviderKind.STT, "deepgram"),
+        (ProviderKind.TTS, "elevenlabs"),
+    ],
+    ids=["llm", "stt", "tts"],
+)
+def test_seed_with_missing_file_preserves_active_per_kind(
+    db_session: Session,
+    crypto: CredentialCrypto,
+    tmp_path: Path,
+    kind: ProviderKind,
+    provider_name: str,
+) -> None:
+    """Restart with no providers.json must not deactivate ANY kind's active.
+
+    Johnny-3ha acceptance: ``set active <kind> → restart → assert active
+    <kind> unchanged``. Parametrised so a future asymmetry between LLM
+    and STT/TTS shows up as a single-kind failure instead of slipping
+    through under "the LLM test alone".
+    """
+    row = _activate_directly(
+        db_session,
+        crypto,
+        kind=kind,
+        provider_name=provider_name,
+        display_name=f"{provider_name}-primary",
+    )
+    missing = tmp_path / "does-not-exist.json"
+    assert not missing.exists()
+
+    seed_providers_from_file(db_session, crypto, path=missing)
+
+    db_session.refresh(row)
+    assert row.is_active is True, f"{kind.value} lost its active flag"
+
+
+@pytest.mark.parametrize(
+    ("kind", "provider_name"),
+    [
+        (ProviderKind.LLM, "openai"),
+        (ProviderKind.STT, "deepgram"),
+        (ProviderKind.TTS, "elevenlabs"),
+    ],
+    ids=["llm", "stt", "tts"],
+)
+def test_seed_with_empty_providers_array_preserves_active(
+    db_session: Session,
+    crypto: CredentialCrypto,
+    tmp_path: Path,
+    kind: ProviderKind,
+    provider_name: str,
+) -> None:
+    """A providers.json present but listing zero entries must be a no-op."""
+    row = _activate_directly(
+        db_session,
+        crypto,
+        kind=kind,
+        provider_name=provider_name,
+        display_name=f"{provider_name}-primary",
+    )
+    path = _write_seed_file(tmp_path / "empty.json")  # zero entries
+
+    seed_providers_from_file(db_session, crypto, path=path)
+
+    db_session.refresh(row)
+    assert row.is_active is True
+
+
+@pytest.mark.parametrize(
+    ("kind", "provider_name"),
+    [
+        (ProviderKind.LLM, "openai"),
+        (ProviderKind.STT, "deepgram"),
+        (ProviderKind.TTS, "elevenlabs"),
+    ],
+    ids=["llm", "stt", "tts"],
+)
+def test_seed_insert_only_with_same_identity_preserves_active(
+    db_session: Session,
+    crypto: CredentialCrypto,
+    tmp_path: Path,
+    kind: ProviderKind,
+    provider_name: str,
+) -> None:
+    """INSERT_ONLY with the file listing the already-active row skips it
+    AND leaves ``is_active`` intact — regardless of what the file says
+    about ``is_active``. The DB is the source of truth in INSERT_ONLY
+    mode; an exported-then-re-imported file should never silently flip
+    a flag the operator did not edit."""
+    row = _activate_directly(
+        db_session,
+        crypto,
+        kind=kind,
+        provider_name=provider_name,
+        display_name=f"{provider_name}-primary",
+    )
+    # Same identity as the DB row, but is_active=false in the file.
+    path = _write_seed_file(
+        tmp_path / "p.json",
+        _provider_entry(
+            kind=kind.value,
+            provider_name=provider_name,
+            display_name=f"{provider_name}-primary",
+            is_active=False,
+        ),
+    )
+
+    seed_providers_from_file(
+        db_session, crypto, path=path, mode=SeedMode.INSERT_ONLY
+    )
+
+    db_session.refresh(row)
+    assert row.is_active is True
+
+
+def test_seed_with_no_file_preserves_active_across_all_kinds(
+    db_session: Session, crypto: CredentialCrypto, tmp_path: Path
+) -> None:
+    """The realistic restart shape: every kind has an active provider,
+    no providers.json mounted, seeder runs as a no-op. None should be
+    silently deactivated."""
+    llm_row = _activate_directly(
+        db_session,
+        crypto,
+        kind=ProviderKind.LLM,
+        provider_name="openai",
+        display_name="OpenAI primary",
+        credentials={"api_key": "sk-test"},
+        options={"model": "gpt-4o-mini"},
+    )
+    stt_row = _activate_directly(
+        db_session,
+        crypto,
+        kind=ProviderKind.STT,
+        provider_name="deepgram",
+        display_name="Deepgram primary",
+    )
+    tts_row = _activate_directly(
+        db_session,
+        crypto,
+        kind=ProviderKind.TTS,
+        provider_name="elevenlabs",
+        display_name="ElevenLabs primary",
+    )
+
+    seed_providers_from_file(
+        db_session, crypto, path=tmp_path / "does-not-exist.json"
+    )
+
+    for label, row in (("llm", llm_row), ("stt", stt_row), ("tts", tts_row)):
+        db_session.refresh(row)
+        assert row.is_active is True, f"{label} lost its active flag on restart"
+
+
+def test_seed_insert_only_with_unrelated_new_row_preserves_active_llm(
+    db_session: Session, crypto: CredentialCrypto, tmp_path: Path
+) -> None:
+    """Realistic ``restart with a slightly-stale providers.json``: the file
+    introduces a new STT row but does not mention the active LLM. The LLM
+    must not be deactivated as a side effect of the STT row landing."""
+    llm_row = _activate_directly(
+        db_session,
+        crypto,
+        kind=ProviderKind.LLM,
+        provider_name="openai",
+        display_name="OpenAI primary",
+        credentials={"api_key": "sk-test"},
+        options={"model": "gpt-4o-mini"},
+    )
+    path = _write_seed_file(
+        tmp_path / "p.json",
+        _provider_entry(
+            kind="stt",
+            provider_name="deepgram",
+            display_name="Deepgram primary",
+            is_active=False,
+        ),
+    )
+
+    seed_providers_from_file(
+        db_session, crypto, path=path, mode=SeedMode.INSERT_ONLY
+    )
+
+    db_session.refresh(llm_row)
+    assert llm_row.is_active is True
+
+
+def test_seed_overwrite_keeps_active_when_file_says_active_true(
+    db_session: Session, crypto: CredentialCrypto, tmp_path: Path
+) -> None:
+    """OVERWRITE with the same identity AND ``is_active=True`` must round-trip
+    cleanly: the row stays active across the restart. Pairs with the
+    existing ``test_seed_overwrite_clears_active_when_file_says_false``
+    test that documents the converse intentional path."""
+    llm_row = _activate_directly(
+        db_session,
+        crypto,
+        kind=ProviderKind.LLM,
+        provider_name="openai",
+        display_name="OpenAI primary",
+        credentials={"api_key": "sk-test"},
+        options={"model": "gpt-4o-mini"},
+    )
+    path = _write_seed_file(
+        tmp_path / "p.json",
+        _provider_entry(
+            kind="llm",
+            provider_name="openai",
+            display_name="OpenAI primary",
+            credentials={"api_key": "sk-test"},
+            options={"model": "gpt-4o-mini"},
+            is_active=True,
+        ),
+    )
+
+    seed_providers_from_file(
+        db_session, crypto, path=path, mode=SeedMode.OVERWRITE
+    )
+
+    db_session.refresh(llm_row)
+    assert llm_row.is_active is True

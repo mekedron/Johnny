@@ -601,6 +601,134 @@ def test_deactivate_returns_inactive(client: TestClient) -> None:
     assert resp.json()["is_active"] is False
 
 
+# --- Johnny-3ha: active flag is never silently cleared by sibling CRUD -----
+#
+# The acceptance is "Add/edit/delete other providers / Active LLM remains
+# as set, never silently NULLed". The bug reporter saw the LLM go inactive
+# while TTS/STT stayed put, which would only happen if some API path were
+# asymmetric for LLM. These tests pin every CRUD verb across the other two
+# kinds and assert the LLM is_active flag survives — and the symmetric
+# tests prove the same guard for STT/TTS so an LLM-specific regression
+# would surface as a single-test failure.
+
+
+def _seed_kind_pair(client: TestClient) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Create one LLM + one STT provider; activate the LLM. Return both ids."""
+    registry = get_registry()
+    registry.register(ProviderKind.STT, "ok-stt", _OKSTT, replace=True)
+    registry.register(ProviderKind.LLM, "ok-llm", _OKLLM, replace=True)
+    llm = client.post(
+        "/providers",
+        json=_create_payload(
+            kind="llm", provider_name="ok-llm", display_name="L-active"
+        ),
+    ).json()
+    stt = client.post(
+        "/providers",
+        json=_create_payload(
+            kind="stt", provider_name="ok-stt", display_name="S-other"
+        ),
+    ).json()
+    assert client.post(f"/providers/{llm['id']}/activate").status_code == 200
+    return llm, stt
+
+
+def test_creating_other_kind_does_not_deactivate_active_llm(
+    client: TestClient, db_session: Session
+) -> None:
+    """Acceptance: 'Add ... other providers / Active LLM remains as set'."""
+    llm, _ = _seed_kind_pair(client)
+    registry = get_registry()
+    registry.register(ProviderKind.TTS, "ok-tts", _OKTTS, replace=True)
+
+    client.post(
+        "/providers",
+        json=_create_payload(
+            kind="tts", provider_name="ok-tts", display_name="T-new"
+        ),
+    )
+
+    db_session.expire_all()
+    row_llm = db_session.get(ProviderCredential, llm["id"])
+    assert row_llm is not None and row_llm.is_active is True
+
+
+def test_updating_other_kind_does_not_deactivate_active_llm(
+    client: TestClient, db_session: Session
+) -> None:
+    """Acceptance: 'edit ... other providers / Active LLM remains as set'."""
+    llm, stt = _seed_kind_pair(client)
+
+    resp = client.patch(
+        f"/providers/{stt['id']}",
+        json={"display_name": "S-other-renamed"},
+    )
+    assert resp.status_code == 200
+
+    db_session.expire_all()
+    row_llm = db_session.get(ProviderCredential, llm["id"])
+    assert row_llm is not None and row_llm.is_active is True
+
+
+def test_deleting_other_kind_does_not_deactivate_active_llm(
+    client: TestClient, db_session: Session
+) -> None:
+    """Acceptance: 'delete other providers / Active LLM remains as set'."""
+    llm, stt = _seed_kind_pair(client)
+
+    resp = client.delete(f"/providers/{stt['id']}")
+    assert resp.status_code == 204
+
+    db_session.expire_all()
+    row_llm = db_session.get(ProviderCredential, llm["id"])
+    assert row_llm is not None and row_llm.is_active is True
+
+
+def test_creating_same_kind_inactive_sibling_does_not_deactivate_active_llm(
+    client: TestClient, db_session: Session
+) -> None:
+    """A brand-new LLM is created with is_active=False (POST never auto-flips
+    the flag), so the existing active LLM must survive a second LLM row
+    landing. This pins down the asymmetry the bug report called out — adds
+    of additional LLMs should not silently NULL the active one."""
+    llm, _ = _seed_kind_pair(client)
+
+    client.post(
+        "/providers",
+        json=_create_payload(
+            kind="llm", provider_name="ok-llm", display_name="L-other"
+        ),
+    )
+
+    db_session.expire_all()
+    row_llm = db_session.get(ProviderCredential, llm["id"])
+    assert row_llm is not None and row_llm.is_active is True
+
+
+def test_updating_active_llm_itself_preserves_active_flag(
+    client: TestClient, db_session: Session
+) -> None:
+    """Editing the active LLM row (display name, options, credentials) must
+    not touch is_active. The PATCH endpoint has no knob for the flag —
+    pin that contract so a future schema-driven refactor cannot reintroduce
+    a hidden auto-deactivate."""
+    llm, _ = _seed_kind_pair(client)
+
+    resp = client.patch(
+        f"/providers/{llm['id']}",
+        json={
+            "display_name": "L-active-renamed",
+            "credentials": {"api_key": "sk-rotated"},
+            "options": {"model": "gpt-4o"},
+        },
+    )
+    assert resp.status_code == 200
+
+    db_session.expire_all()
+    row_llm = db_session.get(ProviderCredential, llm["id"])
+    assert row_llm is not None and row_llm.is_active is True
+
+
 def test_partial_unique_index_enforced_at_db_level(
     engine: sa.Engine, db_session: Session
 ) -> None:

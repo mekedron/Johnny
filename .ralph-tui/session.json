@@ -3,10 +3,10 @@
   "sessionId": "92aa43ca-591e-4b12-ab32-62131855e44d",
   "status": "running",
   "startedAt": "2026-06-07T00:08:27.194Z",
-  "updatedAt": "2026-06-07T00:37:53.014Z",
-  "currentIteration": 2,
+  "updatedAt": "2026-06-07T00:55:10.740Z",
+  "currentIteration": 3,
   "maxIterations": 0,
-  "tasksCompleted": 2,
+  "tasksCompleted": 3,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -116,8 +116,8 @@
       {
         "id": "Johnny-31g",
         "title": "STT hallucinations from silence: faster-whisper produces 'Does Olam A.P.I.', '. . . .', etc. on quiet mic and persists them as transcripts",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-ckz.9",
@@ -369,6 +369,16 @@
       "durationMs": 356562,
       "startedAt": "2026-06-07T00:19:04.237Z",
       "endedAt": "2026-06-07T00:25:00.799Z"
+    },
+    {
+      "iteration": 3,
+      "status": "completed",
+      "taskId": "Johnny-31g",
+      "taskTitle": "STT hallucinations from silence: faster-whisper produces 'Does Olam A.P.I.', '. . . .', etc. on quiet mic and persists them as transcripts",
+      "taskCompleted": true,
+      "durationMs": 759586,
+      "startedAt": "2026-06-07T00:25:12.466Z",
+      "endedAt": "2026-06-07T00:37:52.052Z"
     }
   ],
   "skippedTaskIds": [],
