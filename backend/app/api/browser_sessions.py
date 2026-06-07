@@ -74,6 +74,11 @@ from app.services.browser_pipeline_runner import (
     BrowserRunOutcome,
     run_browser_pipeline,
 )
+from app.services.personality_resolver import (
+    PersonalityResolution,
+    apply_personality,
+    select_personality,
+)
 from app.services.provider_payload import build_provider_payload, resolve_pipeline_mode
 from johnny.voice_pipeline import (
     BrowserAudioTransport,
@@ -144,6 +149,13 @@ class StartBrowserSessionPayload(BaseModel):
     system_prompt: str | None = None
     """Custom system prompt that REPLACES the meeting's instructions.
     Use for testing prompt changes without editing the meeting config."""
+
+    personality_id: int | None = None
+    """Personality preset (Johnny-oly) to apply for this session. Overrides
+    the globally-active LLM/TTS providers and, for the playground, seeds the
+    default mode. ``None`` falls back to the meeting's personality (rehearsal)
+    then the ``is_default`` personality. An id that no longer exists degrades
+    to that fallback chain rather than failing the start."""
 
     provider_overrides: dict[str, BrowserProviderOverride] | None = None
     """Per-kind provider overrides — keyed by 'stt' / 'llm' / 'tts'.
@@ -486,6 +498,59 @@ def _resolve_provider_overrides(
     return merged
 
 
+def _resolve_personality(
+    session: Session,
+    *,
+    bot_session_id: int,
+    requested_id: int | None,
+    meeting: MeetingConfig | None,
+    base_payload: dict[str, Any],
+) -> PersonalityResolution:
+    """Select + apply the session personality over ``base_payload``.
+
+    Personality resolution must never hard-fail a session (PRD §4a step 4): a
+    missing ``personalities`` table (a stripped test schema), a crypto
+    misconfiguration, or any lookup error all degrade to "no personality
+    applied" so the session starts exactly like today, on the global-active
+    providers. Layer this BEFORE :func:`_resolve_provider_overrides` so an
+    explicit per-start provider override still wins (PRD §4b priority 1).
+    """
+    try:
+        from app.security.crypto import get_crypto
+
+        personality = select_personality(
+            session, requested_id=requested_id, meeting=meeting
+        )
+        return apply_personality(
+            session, base_payload, personality, crypto=get_crypto()
+        )
+    except Exception:
+        logger.exception(
+            "browser session %s: personality resolution failed; "
+            "continuing with global-active providers",
+            bot_session_id,
+        )
+        return PersonalityResolution(payload=base_payload)
+
+
+def _personality_snapshot(resolution: PersonalityResolution) -> dict[str, Any]:
+    """Overrides-snapshot fragment naming the applied personality (Johnny-oly.5).
+
+    Empty when no personality applied, so today's snapshots are unchanged.
+    """
+    if resolution.personality_id is None:
+        return {}
+    snapshot: dict[str, Any] = {
+        "personality_id": resolution.personality_id,
+        "personality_name": resolution.personality_name,
+    }
+    if resolution.fallbacks:
+        snapshot["personality_fallbacks"] = [
+            {"kind": fb.kind, "reason": fb.reason} for fb in resolution.fallbacks
+        ]
+    return snapshot
+
+
 def _build_spec_from_event(
     session: Session,
     *,
@@ -522,8 +587,19 @@ def _build_spec_from_event(
             bot_session_id,
         )
         base_payload = {}
+    # Layer the session personality (explicit → meeting's → default) over the
+    # global-active payload, then the explicit per-start override on top.
+    # Mode is NOT seeded from the personality here: ``meeting.mode`` is NOT
+    # NULL and is the more specific per-meeting choice, so it wins (PRD §4c).
+    resolution = _resolve_personality(
+        session,
+        bot_session_id=bot_session_id,
+        requested_id=payload.personality_id,
+        meeting=meeting,
+        base_payload=base_payload,
+    )
     effective_providers = _resolve_provider_overrides(
-        session, payload.provider_overrides, base_payload
+        session, payload.provider_overrides, resolution.payload
     )
 
     mode = (
@@ -572,6 +648,7 @@ def _build_spec_from_event(
         "playground": False,
         "pipeline_mode": pipeline_mode.value,
     }
+    overrides_snapshot.update(_personality_snapshot(resolution))
     if payload.system_prompt:
         overrides_snapshot["system_prompt"] = payload.system_prompt
     if payload.persona:
@@ -595,7 +672,6 @@ def _build_spec_playground(
         payload.system_prompt
         or f"You are a helpful assistant in playground mode. Persona: {persona}"
     )
-    mode = payload.mode or BotMode.FREE_AUTO_SPEAK.value
 
     try:
         from app.security.crypto import get_crypto
@@ -607,8 +683,19 @@ def _build_spec_playground(
             bot_session_id,
         )
         base_payload = {}
+    # Playground has no per-meeting mode, so the personality's ``default_mode``
+    # seeds it here (PRD §4c priority 3): explicit request mode > personality
+    # default > hardcoded free_auto_speak.
+    resolution = _resolve_personality(
+        session,
+        bot_session_id=bot_session_id,
+        requested_id=payload.personality_id,
+        meeting=None,
+        base_payload=base_payload,
+    )
+    mode = payload.mode or resolution.default_mode or BotMode.FREE_AUTO_SPEAK.value
     effective_providers = _resolve_provider_overrides(
-        session, payload.provider_overrides, base_payload
+        session, payload.provider_overrides, resolution.payload
     )
 
     pipeline_mode = resolve_pipeline_mode(session)
@@ -629,6 +716,7 @@ def _build_spec_playground(
         "persona": persona,
         "pipeline_mode": pipeline_mode.value,
     }
+    overrides_snapshot.update(_personality_snapshot(resolution))
     if payload.system_prompt:
         overrides_snapshot["system_prompt"] = payload.system_prompt
     if payload.provider_overrides:

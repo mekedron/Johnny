@@ -396,6 +396,33 @@ async def start_session_for_meeting(
     except Exception:  # noqa: BLE001 — never block a launch on payload errors
         logger.exception("provider payload build failed; sending empty payload")
 
+    # Johnny-oly.3: layer the meeting's personality (or the global default) over
+    # the global-active payload before it is serialised into
+    # ``JOHNNY_PROVIDER_CONFIG`` for the DB-free meet-worker. A scheduled launch
+    # has no per-start request, so selection is meeting.personality_id → the
+    # ``is_default`` personality. Wrapped in its own guard AFTER the block above
+    # so a personality glitch degrades to the global-active payload (not empty),
+    # and mode stays the meeting's non-null ``mode`` (personalities never
+    # override an existing meeting's mode at launch — PRD §4c).
+    try:
+        from app.security.crypto import get_crypto
+        from app.services.personality_resolver import (
+            apply_personality,
+            select_personality,
+        )
+
+        personality = select_personality(session, requested_id=None, meeting=meeting)
+        resolution = apply_personality(
+            session, provider_payload, personality, crypto=get_crypto()
+        )
+        provider_payload = resolution.payload
+    except Exception:  # noqa: BLE001 — never block a launch on personality errors
+        logger.exception(
+            "personality resolution failed for meeting_config=%s; "
+            "launching with global-active providers",
+            meeting.id,
+        )
+
     calendar_description = ""
     calendar_attachments = ""
     recurring_event_id: str | None = None

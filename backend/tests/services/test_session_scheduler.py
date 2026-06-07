@@ -841,3 +841,74 @@ async def test_scheduler_pass_counts_launcher_errors(db_session: Session) -> Non
     )
     assert result.started_count == 0
     assert result.error_count == 1
+
+
+# --- Johnny-oly.3: personality applied at scheduled meet-worker launch ------
+
+
+@pytest.mark.asyncio
+async def test_start_session_applies_meeting_personality_with_fallback(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The meeting's personality is selected + applied to the provider payload
+    before it is serialised for the DB-free meet-worker. A pin at a deactivated
+    provider falls back to the global-active row and logs a fallback line —
+    proving the scheduler honours meeting_configs.personality_id."""
+    import logging
+
+    from cryptography.fernet import Fernet
+
+    from app.db.models import Personality, ProviderCredential
+    from app.providers.base import ProviderKind
+    from app.security.crypto import CredentialCrypto, encrypt_json
+
+    crypto = CredentialCrypto(Fernet.generate_key())
+    monkeypatch.setattr("app.security.crypto.get_crypto", lambda: crypto)
+
+    engine = db_session.get_bind()
+    Personality.__table__.create(bind=engine, checkfirst=True)
+    ProviderCredential.__table__.create(bind=engine, checkfirst=True)
+
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    ga = ProviderCredential(
+        kind=ProviderKind.LLM,
+        provider_name="ga",
+        display_name="GA",
+        credentials_encrypted=encrypt_json(crypto, {"api_key": "k"}),
+        config={},
+        is_active=True,
+    )
+    dormant = ProviderCredential(
+        kind=ProviderKind.LLM,
+        provider_name="dormant",
+        display_name="Dormant",
+        credentials_encrypted=encrypt_json(crypto, {"api_key": "k"}),
+        config={},
+        is_active=False,
+    )
+    db_session.add_all([ga, dormant])
+    db_session.flush()
+    personality = Personality(
+        display_name="PinsDormant",
+        is_default=True,
+        llm_provider_id=dormant.id,
+    )
+    db_session.add(personality)
+    db_session.flush()
+    cfg.personality_id = personality.id
+    db_session.flush()
+
+    launcher = NoopContainerLauncher()
+    with caplog.at_level(logging.WARNING):
+        await start_session_for_meeting(db_session, meeting=cfg, launcher=launcher)
+
+    ctx = launcher.started[0]
+    assert ctx.provider_config["llm"]["provider_name"] == "ga"  # global-active fallback
+    assert "personality.fallback:" in caplog.text
+    assert "reason=deactivated" in caplog.text

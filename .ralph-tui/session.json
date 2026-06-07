@@ -3,10 +3,10 @@
   "sessionId": "426dba43-17e8-4f93-a179-086859618e18",
   "status": "running",
   "startedAt": "2026-06-07T20:27:08.873Z",
-  "updatedAt": "2026-06-07T21:26:06.194Z",
-  "currentIteration": 2,
+  "updatedAt": "2026-06-07T21:53:57.395Z",
+  "currentIteration": 3,
   "maxIterations": 0,
-  "tasksCompleted": 2,
+  "tasksCompleted": 3,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -51,8 +51,8 @@
       {
         "id": "Johnny-oly.4",
         "title": "Frontend: /personalities management page — list / create / clone / edit / delete / set-default",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-oly.6",
@@ -88,6 +88,16 @@
       "durationMs": 1422140,
       "startedAt": "2026-06-07T20:39:56.085Z",
       "endedAt": "2026-06-07T21:03:38.225Z"
+    },
+    {
+      "iteration": 3,
+      "status": "completed",
+      "taskId": "Johnny-oly.4",
+      "taskTitle": "Frontend: /personalities management page — list / create / clone / edit / delete / set-default",
+      "taskCompleted": true,
+      "durationMs": 1337903,
+      "startedAt": "2026-06-07T21:03:47.544Z",
+      "endedAt": "2026-06-07T21:26:05.447Z"
     }
   ],
   "skippedTaskIds": [],

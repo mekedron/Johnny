@@ -285,6 +285,14 @@ class MeetingConfig(TimestampMixin, Base):
         ForeignKey("google_accounts.id", ondelete="RESTRICT"),
         nullable=False,
     )
+    # Johnny-oly.3: optional per-meeting personality (LLM/TTS/mode preset).
+    # NULL = use the global default personality. ``ON DELETE SET NULL`` (not
+    # RESTRICT like the template FK) so deleting a personality never blocks —
+    # the session resolver falls back to the default / global active instead.
+    personality_id: Mapped[int | None] = mapped_column(
+        ForeignKey("personalities.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     mode: Mapped[BotMode] = mapped_column(_bot_mode_column(), nullable=False)
     instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
     context: Mapped[str | None] = mapped_column(Text, nullable=True)

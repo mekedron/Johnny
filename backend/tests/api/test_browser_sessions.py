@@ -24,6 +24,7 @@ from unittest import mock
 
 import pytest
 import sqlalchemy as sa
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -40,11 +41,15 @@ from app.db.models import (
     CalendarEvent,
     GoogleAccount,
     MeetingConfig,
+    Personality,
     PipelineSettings,
     ProfileTemplate,
+    ProviderCredential,
     TranscriptChunk,
 )
 from app.main import app
+from app.providers.base import ProviderKind
+from app.security.crypto import CredentialCrypto, encrypt_json
 
 
 @pytest.fixture(autouse=True)
@@ -75,6 +80,8 @@ def engine() -> sa.Engine:
             GoogleAccount.__table__,  # type: ignore[list-item]
             CalendarEvent.__table__,  # type: ignore[list-item]
             ProfileTemplate.__table__,  # type: ignore[list-item]
+            ProviderCredential.__table__,  # type: ignore[list-item]
+            Personality.__table__,  # type: ignore[list-item]
             MeetingConfig.__table__,  # type: ignore[list-item]
             BotSession.__table__,  # type: ignore[list-item]
             TranscriptChunk.__table__,  # type: ignore[list-item]
@@ -904,3 +911,159 @@ def test_disconnect_watchdog_schedules_and_cancels_cleanly() -> None:
             transport.close_playback()
 
     asyncio.run(_run())
+
+
+# --- Johnny-oly.3: personality-driven provider + mode resolution -----------
+
+_PERSONALITY_CRYPTO = CredentialCrypto(Fernet.generate_key())
+
+
+@pytest.fixture
+def _patch_crypto(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make get_crypto() return a known key so seeded provider rows decrypt.
+
+    Both build_provider_payload and the personality resolver import
+    ``app.security.crypto.get_crypto`` lazily inside the spec builders, so
+    patching the source attribute reaches both.
+    """
+    monkeypatch.setattr("app.security.crypto.get_crypto", lambda: _PERSONALITY_CRYPTO)
+
+
+def _seed_provider(
+    db_session: Session,
+    *,
+    kind: ProviderKind,
+    name: str,
+    display: str,
+    is_active: bool = True,
+    options: dict | None = None,
+    credentials: dict | None = None,
+) -> ProviderCredential:
+    row = ProviderCredential(
+        kind=kind,
+        provider_name=name,
+        display_name=display,
+        credentials_encrypted=encrypt_json(
+            _PERSONALITY_CRYPTO, credentials or {"api_key": "k"}
+        ),
+        config=options or {},
+        is_active=is_active,
+    )
+    db_session.add(row)
+    db_session.commit()
+    db_session.refresh(row)
+    return row
+
+
+def _seed_personality(
+    db_session: Session,
+    *,
+    name: str,
+    is_default: bool = False,
+    llm: int | None = None,
+    tts: int | None = None,
+    mode: BotMode | None = None,
+) -> Personality:
+    row = Personality(
+        display_name=name,
+        is_default=is_default,
+        llm_provider_id=llm,
+        tts_provider_id=tts,
+        default_mode=mode,
+    )
+    db_session.add(row)
+    db_session.commit()
+    db_session.refresh(row)
+    return row
+
+
+def test_start_playground_default_personality_decorates_snapshot(
+    client: TestClient, db_session: Session, _patch_crypto: None
+) -> None:
+    """No personality_id given → the is_default personality is selected and its
+    identity is recorded in the overrides snapshot (for the Johnny-oly.5 chip)."""
+    _seed_provider(db_session, kind=ProviderKind.LLM, name="anthropic", display="Claude")
+    johnny = _seed_personality(db_session, name="Johnny", is_default=True)
+
+    res = client.post("/sessions/browser/start", json={})
+    assert res.status_code == 201, res.text
+    ov = res.json()["playground_overrides"]
+    assert ov["personality_id"] == johnny.id
+    assert ov["personality_name"] == "Johnny"
+    assert "personality_fallbacks" not in ov  # NULL FKs inherit silently
+
+
+def test_start_playground_personality_seeds_mode(
+    client: TestClient, db_session: Session, _patch_crypto: None
+) -> None:
+    p = _seed_personality(
+        db_session, name="Listener", is_default=True, mode=BotMode.LISTEN_ONLY
+    )
+    with mock.patch.object(browser_sessions_module, "_spawn_runner") as spawn:
+        res = client.post(
+            "/sessions/browser/start", json={"personality_id": p.id}
+        )
+    assert res.status_code == 201, res.text
+    spec = spawn.call_args.kwargs["spec"]
+    assert spec.mode == "listen_only"  # personality.default_mode seeded it
+
+
+def test_start_playground_explicit_mode_beats_personality(
+    client: TestClient, db_session: Session, _patch_crypto: None
+) -> None:
+    p = _seed_personality(
+        db_session, name="Listener", is_default=True, mode=BotMode.LISTEN_ONLY
+    )
+    with mock.patch.object(browser_sessions_module, "_spawn_runner") as spawn:
+        res = client.post(
+            "/sessions/browser/start",
+            json={"personality_id": p.id, "mode": "autonomous"},
+        )
+    assert res.status_code == 201, res.text
+    assert spawn.call_args.kwargs["spec"].mode == "autonomous"
+
+
+def test_start_rehearsal_personality_fallback_warns_but_starts(
+    client: TestClient, db_session: Session, _patch_crypto: None
+) -> None:
+    """A personality pinned at a deactivated provider still starts the session,
+    falls back to the global-active provider, records the fallback in the
+    snapshot, and leaves the meeting's mode untouched (§4c)."""
+    event, _cfg = _seed_meeting(db_session, mode=BotMode.LISTEN_ONLY)
+    _seed_provider(db_session, kind=ProviderKind.LLM, name="ga", display="GA")
+    dormant = _seed_provider(
+        db_session, kind=ProviderKind.LLM, name="dormant", display="Dormant", is_active=False
+    )
+    p = _seed_personality(
+        db_session, name="PinsDormant", llm=dormant.id, mode=BotMode.AUTONOMOUS
+    )
+
+    with mock.patch.object(browser_sessions_module, "_spawn_runner") as spawn:
+        res = client.post(
+            "/sessions/browser/start",
+            json={"event_id": event.id, "personality_id": p.id},
+        )
+    assert res.status_code == 201, res.text
+    ov = res.json()["playground_overrides"]
+    assert ov["personality_id"] == p.id
+    assert ov["personality_fallbacks"] == [{"kind": "llm", "reason": "deactivated"}]
+    spec = spawn.call_args.kwargs["spec"]
+    assert spec.provider_payload["llm"]["provider_name"] == "ga"  # global active
+    assert spec.mode == "listen_only"  # meeting.mode wins over personality
+
+
+def test_start_rehearsal_uses_meeting_personality_without_request(
+    client: TestClient, db_session: Session, _patch_crypto: None
+) -> None:
+    """meeting_configs.personality_id (Johnny-oly.3 schema) is honored when no
+    explicit personality_id is sent — precedence level 2 (PRD §4a)."""
+    event, cfg = _seed_meeting(db_session)
+    _seed_personality(db_session, name="Johnny", is_default=True)
+    meeting_p = _seed_personality(db_session, name="MeetingPreset")
+    cfg.personality_id = meeting_p.id
+    db_session.commit()
+
+    res = client.post("/sessions/browser/start", json={"event_id": event.id})
+    assert res.status_code == 201, res.text
+    ov = res.json()["playground_overrides"]
+    assert ov["personality_id"] == meeting_p.id  # meeting's, not the default
