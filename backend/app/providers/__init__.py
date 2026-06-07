@@ -56,6 +56,8 @@ from app.providers.openai_compatible_llm import OpenAICompatibleLLM
 from app.providers.openai_compatible_llm import register as _register_openai_compatible_llm
 from app.providers.openai_llm import OpenAILLM
 from app.providers.openai_llm import register as _register_openai_llm
+from app.providers.openai_realtime_s2s import OpenAIRealtimeS2S
+from app.providers.openai_realtime_s2s import register as _register_openai_realtime_s2s
 from app.providers.openai_realtime_stt import OpenAIRealtimeSTT
 from app.providers.openai_realtime_stt import register as _register_openai_realtime_stt
 from app.providers.openai_tts import OpenAITTS
@@ -113,6 +115,7 @@ _register_openai_realtime_stt(replace=True)
 _register_elevenlabs_stt(replace=True)
 _register_stub_s2s(replace=True)
 _register_gemini_live_s2s(replace=True)
+_register_openai_realtime_s2s(replace=True)
 
 __all__ = [
     "AnthropicLLM",
@@ -135,6 +138,7 @@ __all__ = [
     "LLMResponse",
     "OpenAICompatibleLLM",
     "OpenAILLM",
+    "OpenAIRealtimeS2S",
     "OpenAIRealtimeSTT",
     "OpenAITTS",
     "ParakeetSTT",
