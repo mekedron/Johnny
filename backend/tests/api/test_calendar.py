@@ -18,7 +18,6 @@ from app.api.deps import get_crypto, get_session
 from app.config import Settings, get_settings
 from app.db import Base
 from app.db.models import (
-    AccountRole,
     BotMode,
     CalendarEvent,
     GoogleAccount,
@@ -109,11 +108,9 @@ def _make_account(
 ) -> GoogleAccount:
     row = GoogleAccount(
         email=email,
-        role=AccountRole.USER,
         access_token_encrypted=crypto.encrypt("fresh-access"),
         refresh_token_encrypted=crypto.encrypt("refresh-1"),
         token_expires_at=datetime.now(UTC) + timedelta(hours=1),
-        is_default_user=False,
     )
     session.add(row)
     session.flush()

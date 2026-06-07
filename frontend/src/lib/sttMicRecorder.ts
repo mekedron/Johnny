@@ -1,5 +1,5 @@
 /**
- * Capture a short mic recording as raw 16 kHz mono S16LE PCM (Johnny-ckz.15.2).
+ * Capture a short mic recording as raw 16 kHz mono S16LE PCM (Johnny-ckz.15.2, Johnny-ckz.12).
  *
  * Used by the `/providers` STT tab to feed the per-provider Test
  * button — the same wire format the live voice pipeline produces, so a
@@ -7,8 +7,9 @@
  *
  * Implementation mirrors `browserAudio.ts`'s capture path: getUserMedia
  * → AudioContext → AudioWorklet that downsamples to 16 kHz and emits
- * 20 ms S16 frames. The recorder collects every emitted frame until the
- * configured duration elapses, then concatenates and returns the buffer.
+ * 20 ms S16 frames. The recorder collects every emitted frame until either
+ * the configured safety cap elapses or the caller invokes `stop()`, then
+ * concatenates and returns the buffer.
  *
  * SECURITY: this module requests microphone access via the browser's
  * standard permission prompt. A denied permission rejects the returned
@@ -68,11 +69,22 @@ function pcmWorkletUrl(): string {
 	return URL.createObjectURL(blob);
 }
 
-export interface MicRecordingOptions {
-	/** Recording length in milliseconds. Default 5000 (5 s). */
-	durationMs?: number;
+export interface StartMicRecordingOptions {
+	/**
+	 * Hard safety cap. If the caller never invokes ``stop()``, recording
+	 * auto-finishes after this many milliseconds. Default 10 s — long
+	 * enough to read a short sentence, short enough to keep round-trip
+	 * fast.
+	 */
+	maxDurationMs?: number;
 	/** Fires periodically with the input level (0..1 RMS). Optional. */
 	onLevel?: (level: number) => void;
+	/**
+	 * Fires periodically (~100 ms) with the elapsed recording duration in
+	 * milliseconds. The UI uses this to render a live mm:ss counter so
+	 * the operator sees how much time is left before the safety cap.
+	 */
+	onTick?: (elapsedMs: number) => void;
 }
 
 export interface MicRecordingResult {
@@ -83,6 +95,26 @@ export interface MicRecordingResult {
 	/** Actual recording duration in milliseconds. */
 	durationMs: number;
 }
+
+/**
+ * Handle returned by ``startMicRecording``. The caller can either wait
+ * for ``done`` (auto-stop after the safety cap) or invoke ``stop()`` to
+ * finish recording early. The same ``done`` promise resolves in both
+ * cases with the captured PCM.
+ */
+export interface MicRecordingHandle {
+	/** Resolves once recording finishes (manual stop OR cap fires). */
+	done: Promise<MicRecordingResult>;
+	/** Request immediate stop. Idempotent — extra calls are no-ops. */
+	stop: () => void;
+}
+
+/**
+ * Sample rate of the PCM the recorder emits. Public so callers (e.g. the
+ * provider settings page) can build a WAV blob for in-browser playback
+ * without hardcoding the rate.
+ */
+export const RECORDING_SAMPLE_RATE = TARGET_SAMPLE_RATE;
 
 /**
  * Permission was denied or the browser does not expose `getUserMedia`.
@@ -116,29 +148,80 @@ function concatFrames(frames: ArrayBuffer[]): ArrayBuffer {
 }
 
 /**
- * Record ``durationMs`` of mic audio and return the captured PCM.
+ * Wrap raw 16-bit mono PCM in a WAV header so an ``HTMLAudioElement`` can
+ * play it back. Caller passes the sample rate the PCM was captured at
+ * (``RECORDING_SAMPLE_RATE`` for everything this module produces).
+ */
+export function pcmToWavBlob(pcm: ArrayBuffer, sampleRate: number): Blob {
+	const dataLen = pcm.byteLength;
+	const header = new ArrayBuffer(44);
+	const view = new DataView(header);
+	// "RIFF" + chunk size + "WAVE"
+	view.setUint8(0, 0x52);
+	view.setUint8(1, 0x49);
+	view.setUint8(2, 0x46);
+	view.setUint8(3, 0x46);
+	view.setUint32(4, 36 + dataLen, true);
+	view.setUint8(8, 0x57);
+	view.setUint8(9, 0x41);
+	view.setUint8(10, 0x56);
+	view.setUint8(11, 0x45);
+	// "fmt " sub-chunk (PCM, mono, 16-bit)
+	view.setUint8(12, 0x66);
+	view.setUint8(13, 0x6d);
+	view.setUint8(14, 0x74);
+	view.setUint8(15, 0x20);
+	view.setUint32(16, 16, true);
+	view.setUint16(20, 1, true);
+	view.setUint16(22, 1, true);
+	view.setUint32(24, sampleRate, true);
+	view.setUint32(28, sampleRate * 2, true);
+	view.setUint16(32, 2, true);
+	view.setUint16(34, 16, true);
+	// "data" sub-chunk
+	view.setUint8(36, 0x64);
+	view.setUint8(37, 0x61);
+	view.setUint8(38, 0x74);
+	view.setUint8(39, 0x61);
+	view.setUint32(40, dataLen, true);
+	return new Blob([header, pcm], { type: 'audio/wav' });
+}
+
+/**
+ * Start mic capture and return a controller. The capture runs until
+ * either ``stop()`` is called or ``maxDurationMs`` elapses; in both
+ * cases ``done`` resolves with the captured PCM.
  *
- * The promise resolves once the timer fires (recording stopped + audio
- * pipeline torn down). On permission denial the promise rejects with
+ * On permission denial the returned promise rejects with
  * :class:`MicPermissionDeniedError` so the UI can render a distinct
  * call-to-action; every other error (worklet load failure, etc.) is
  * surfaced as a plain ``Error``.
  */
-export async function recordMicPcm(
-	options: MicRecordingOptions = {}
-): Promise<MicRecordingResult> {
-	const durationMs = options.durationMs ?? 5000;
+export async function startMicRecording(
+	options: StartMicRecordingOptions = {}
+): Promise<MicRecordingHandle> {
+	const maxDurationMs = options.maxDurationMs ?? 10_000;
 	let stream: MediaStream | null = null;
 	let audioCtx: AudioContext | null = null;
 	let workletNode: AudioWorkletNode | null = null;
 	let workletUrl: string | null = null;
 	let micAnalyser: AnalyserNode | null = null;
 	let micLevelInterval: ReturnType<typeof setInterval> | null = null;
+	let tickInterval: ReturnType<typeof setInterval> | null = null;
+	let safetyTimer: ReturnType<typeof setTimeout> | null = null;
 
 	const cleanup = async () => {
 		if (micLevelInterval !== null) {
 			clearInterval(micLevelInterval);
 			micLevelInterval = null;
+		}
+		if (tickInterval !== null) {
+			clearInterval(tickInterval);
+			tickInterval = null;
+		}
+		if (safetyTimer !== null) {
+			clearTimeout(safetyTimer);
+			safetyTimer = null;
 		}
 		try {
 			workletNode?.disconnect();
@@ -241,21 +324,53 @@ export async function recordMicPcm(
 		}
 
 		const started = performance.now();
-		await new Promise<void>((resolve) => setTimeout(resolve, durationMs));
-		const elapsed = performance.now() - started;
 
-		// Stop accepting new frames before we tear everything down so the
-		// concat below sees the final set without races.
-		if (workletNode) {
-			workletNode.port.onmessage = null;
+		if (options.onTick) {
+			tickInterval = setInterval(() => {
+				try {
+					options.onTick?.(Math.round(performance.now() - started));
+				} catch {
+					// swallow listener errors
+				}
+			}, 100);
 		}
-		const pcm = concatFrames(frames);
-		return {
-			pcm,
-			bytes: pcm.byteLength,
-			durationMs: Math.round(elapsed)
+
+		let resolveDone!: (value: MicRecordingResult) => void;
+		const done = new Promise<MicRecordingResult>((res) => {
+			resolveDone = res;
+		});
+
+		let stopped = false;
+		const finish = async () => {
+			if (stopped) return;
+			stopped = true;
+			const elapsed = performance.now() - started;
+			// Stop accepting new frames before tearing everything down so the
+			// concat below sees the final set without races.
+			if (workletNode) {
+				workletNode.port.onmessage = null;
+			}
+			const pcm = concatFrames(frames);
+			await cleanup();
+			resolveDone({
+				pcm,
+				bytes: pcm.byteLength,
+				durationMs: Math.round(elapsed)
+			});
 		};
-	} finally {
+
+		safetyTimer = setTimeout(() => {
+			void finish();
+		}, maxDurationMs);
+
+		return {
+			done,
+			stop: () => {
+				void finish();
+			}
+		};
+	} catch (err) {
 		await cleanup();
+		throw err;
 	}
 }

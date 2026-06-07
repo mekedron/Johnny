@@ -14,7 +14,6 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_session
 from app.db import Base
 from app.db.models import (
-    AccountRole,
     BotMode,
     BotSession,
     CalendarEvent,
@@ -78,9 +77,7 @@ def client(db_session: Session) -> Iterator[TestClient]:
 def seed_account(db_session: Session) -> GoogleAccount:
     row = GoogleAccount(
         email="user@example.com",
-        role=AccountRole.USER,
         refresh_token_encrypted="x",
-        is_default_user=True,
     )
     db_session.add(row)
     db_session.commit()
@@ -92,8 +89,7 @@ def seed_account(db_session: Session) -> GoogleAccount:
 def seed_bot_account(db_session: Session) -> GoogleAccount:
     row = GoogleAccount(
         email="johnny-bot@example.com",
-        role=AccountRole.BOT,
-        refresh_token_encrypted="x",
+        refresh_token_encrypted=None,
     )
     db_session.add(row)
     db_session.commit()

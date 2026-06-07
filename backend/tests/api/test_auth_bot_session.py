@@ -1,4 +1,15 @@
-"""Tests for the bot-session storage_state HTTP endpoints (Johnny-4ph)."""
+"""Tests for the bot-session storage_state helpers and disconnect endpoint.
+
+After the accounts redesign (Johnny-pia) the file-upload PUT endpoint is
+gone — bot identities are signed in via noVNC and the supervisor writes
+``storage_state.json`` directly. What remains:
+
+* ``DELETE /auth/google/accounts/{id}/bot-session`` — drops the bot
+  capability, leaves the row (and any calendar capability) intact.
+* ``app.services.bot_auth_seed`` — file-level helpers used by the
+  supervisor and the API. Validated directly here since they no
+  longer have an upload endpoint to gate them.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +28,6 @@ from app.api.deps import get_crypto, get_session
 from app.config import Settings, get_settings
 from app.db import Base
 from app.db.models import (
-    AccountRole,
     CalendarEvent,
     GoogleAccount,
     MeetingConfig,
@@ -29,7 +39,12 @@ from app.services import bot_auth_seed
 from app.services.bot_auth_seed import (
     BOT_AUTH_STATE_ROOT_ENV,
     MAX_STORAGE_STATE_BYTES,
+    BotSessionError,
     bot_session_path,
+    bot_session_status,
+    delete_bot_session,
+    save_bot_session,
+    validate_storage_state,
 )
 
 
@@ -107,20 +122,21 @@ def client(
         app.dependency_overrides.clear()
 
 
-def _add_account(
-    session: Session,
-    crypto: CredentialCrypto,
-    *,
-    email: str,
-    role: AccountRole = AccountRole.BOT,
+def _add_bot_account(session: Session, *, email: str) -> GoogleAccount:
+    row = GoogleAccount(email=email, refresh_token_encrypted=None)
+    session.add(row)
+    session.flush()
+    return row
+
+
+def _add_calendar_account(
+    session: Session, crypto: CredentialCrypto, *, email: str
 ) -> GoogleAccount:
     row = GoogleAccount(
         email=email,
-        role=role,
         access_token_encrypted=crypto.encrypt("a"),
         refresh_token_encrypted=crypto.encrypt("r"),
         token_expires_at=datetime.now(UTC) + timedelta(hours=1),
-        is_default_user=False,
     )
     session.add(row)
     session.flush()
@@ -146,185 +162,60 @@ def _valid_state_bytes() -> bytes:
     return json.dumps(body).encode("utf-8")
 
 
-# --- GET /accounts/{id}/bot-session ---------------------------------------
+# --- validate_storage_state ------------------------------------------------
 
 
-def test_get_bot_session_reports_not_connected(
-    client: TestClient,
-    db_session: Session,
-    crypto: CredentialCrypto,
-    auth_state_root: Path,
-) -> None:
-    bot = _add_account(db_session, crypto, email="bot@example.com")
-    db_session.commit()
-
-    resp = client.get(f"/auth/google/accounts/{bot.id}/bot-session")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["connected"] is False
-    assert body["saved_at"] is None
-    assert body["size_bytes"] is None
-    assert body["path"].endswith(f"/account-{bot.id}/storage_state.json")
+def test_validate_storage_state_accepts_well_formed() -> None:
+    data = validate_storage_state(_valid_state_bytes())
+    assert isinstance(data, dict)
+    assert isinstance(data["cookies"], list)
+    assert len(data["cookies"]) == 1
 
 
-def test_get_bot_session_reports_connected_after_seed(
-    client: TestClient,
-    db_session: Session,
-    crypto: CredentialCrypto,
-    auth_state_root: Path,
-) -> None:
-    bot = _add_account(db_session, crypto, email="bot@example.com")
-    db_session.commit()
+def test_validate_storage_state_rejects_too_large() -> None:
+    oversize = b"x" * (MAX_STORAGE_STATE_BYTES + 1)
+    with pytest.raises(BotSessionError, match="too large"):
+        validate_storage_state(oversize)
 
+
+def test_validate_storage_state_rejects_bad_json() -> None:
+    with pytest.raises(BotSessionError, match="JSON"):
+        validate_storage_state(b"not valid json")
+
+
+def test_validate_storage_state_rejects_empty_cookies() -> None:
+    with pytest.raises(BotSessionError, match="cookies"):
+        validate_storage_state(b'{"cookies": []}')
+
+
+def test_validate_storage_state_requires_cookies_array() -> None:
+    with pytest.raises(BotSessionError, match="cookies"):
+        validate_storage_state(b'{"origins": []}')
+
+
+# --- save_bot_session / bot_session_status / delete_bot_session -----------
+
+
+def test_save_bot_session_writes_atomically(auth_state_root: Path) -> None:
     payload = _valid_state_bytes()
-    bot_auth_seed.save_bot_session(bot.id, payload)
-
-    resp = client.get(f"/auth/google/accounts/{bot.id}/bot-session")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["connected"] is True
-    assert body["size_bytes"] == len(payload)
-    assert body["saved_at"] is not None
+    result = save_bot_session(account_id=7, raw=payload)
+    target = bot_session_path(7)
+    assert target.exists()
+    assert target.read_bytes() == payload
+    assert result["connected"] is True
+    assert result["size_bytes"] == len(payload)
 
 
-def test_get_bot_session_rejects_user_account(
-    client: TestClient,
-    db_session: Session,
-    crypto: CredentialCrypto,
+def test_bot_session_status_reports_disconnected_when_missing(
     auth_state_root: Path,
 ) -> None:
-    user = _add_account(
-        db_session, crypto, email="alice@example.com", role=AccountRole.USER
-    )
-    db_session.commit()
-
-    resp = client.get(f"/auth/google/accounts/{user.id}/bot-session")
-    assert resp.status_code == 400
-    assert "role=bot" in resp.json()["detail"]
+    status = bot_session_status(99)
+    assert status["connected"] is False
+    assert status["saved_at"] is None
+    assert status["size_bytes"] is None
 
 
-def test_get_bot_session_404_for_unknown_account(
-    client: TestClient, auth_state_root: Path
-) -> None:
-    resp = client.get("/auth/google/accounts/9999/bot-session")
-    assert resp.status_code == 404
-
-
-# --- PUT /accounts/{id}/bot-session ---------------------------------------
-
-
-def test_put_bot_session_persists_storage_state_to_volume(
-    client: TestClient,
-    db_session: Session,
-    crypto: CredentialCrypto,
-    auth_state_root: Path,
-) -> None:
-    bot = _add_account(db_session, crypto, email="bot@example.com")
-    db_session.commit()
-
-    payload = _valid_state_bytes()
-    resp = client.put(
-        f"/auth/google/accounts/{bot.id}/bot-session",
-        content=payload,
-        headers={"Content-Type": "application/json"},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["connected"] is True
-    assert body["size_bytes"] == len(payload)
-
-    # File landed at the exact path the meet-worker will read.
-    saved = bot_session_path(bot.id)
-    assert saved.exists()
-    assert saved.read_bytes() == payload
-
-
-def test_put_bot_session_rejects_invalid_json(
-    client: TestClient,
-    db_session: Session,
-    crypto: CredentialCrypto,
-    auth_state_root: Path,
-) -> None:
-    bot = _add_account(db_session, crypto, email="bot@example.com")
-    db_session.commit()
-
-    resp = client.put(
-        f"/auth/google/accounts/{bot.id}/bot-session",
-        content=b"not valid json at all",
-        headers={"Content-Type": "application/json"},
-    )
-    assert resp.status_code == 400
-    assert "JSON" in resp.json()["detail"]
-    # No file written on failure.
-    assert not bot_session_path(bot.id).exists()
-
-
-def test_put_bot_session_rejects_empty_cookies(
-    client: TestClient,
-    db_session: Session,
-    crypto: CredentialCrypto,
-    auth_state_root: Path,
-) -> None:
-    bot = _add_account(db_session, crypto, email="bot@example.com")
-    db_session.commit()
-
-    resp = client.put(
-        f"/auth/google/accounts/{bot.id}/bot-session",
-        content=b'{"cookies": []}',
-        headers={"Content-Type": "application/json"},
-    )
-    assert resp.status_code == 400
-    assert "cookies" in resp.json()["detail"]
-
-
-def test_put_bot_session_rejects_empty_body(
-    client: TestClient,
-    db_session: Session,
-    crypto: CredentialCrypto,
-    auth_state_root: Path,
-) -> None:
-    bot = _add_account(db_session, crypto, email="bot@example.com")
-    db_session.commit()
-
-    resp = client.put(
-        f"/auth/google/accounts/{bot.id}/bot-session",
-        content=b"",
-        headers={"Content-Type": "application/json"},
-    )
-    assert resp.status_code == 400
-    assert "empty" in resp.json()["detail"]
-
-
-def test_put_bot_session_rejects_user_account(
-    client: TestClient,
-    db_session: Session,
-    crypto: CredentialCrypto,
-    auth_state_root: Path,
-) -> None:
-    user = _add_account(
-        db_session, crypto, email="alice@example.com", role=AccountRole.USER
-    )
-    db_session.commit()
-
-    resp = client.put(
-        f"/auth/google/accounts/{user.id}/bot-session",
-        content=_valid_state_bytes(),
-        headers={"Content-Type": "application/json"},
-    )
-    assert resp.status_code == 400
-    # No file should be created at the bot path.
-    assert not bot_session_path(user.id).exists()
-
-
-def test_put_bot_session_overwrites_existing_file(
-    client: TestClient,
-    db_session: Session,
-    crypto: CredentialCrypto,
-    auth_state_root: Path,
-) -> None:
-    bot = _add_account(db_session, crypto, email="bot@example.com")
-    db_session.commit()
-
+def test_save_bot_session_overwrites_existing(auth_state_root: Path) -> None:
     first = _valid_state_bytes()
     second = json.dumps(
         {
@@ -343,84 +234,166 @@ def test_put_bot_session_overwrites_existing_file(
             "origins": [],
         }
     ).encode("utf-8")
-
-    client.put(
-        f"/auth/google/accounts/{bot.id}/bot-session",
-        content=first,
-        headers={"Content-Type": "application/json"},
-    )
-    client.put(
-        f"/auth/google/accounts/{bot.id}/bot-session",
-        content=second,
-        headers={"Content-Type": "application/json"},
-    )
-    assert bot_session_path(bot.id).read_bytes() == second
+    save_bot_session(account_id=3, raw=first)
+    save_bot_session(account_id=3, raw=second)
+    assert bot_session_path(3).read_bytes() == second
 
 
-def test_put_bot_session_rejects_oversize(
-    client: TestClient,
-    db_session: Session,
-    crypto: CredentialCrypto,
-    auth_state_root: Path,
-) -> None:
-    bot = _add_account(db_session, crypto, email="bot@example.com")
-    db_session.commit()
-
-    oversize = b"x" * (MAX_STORAGE_STATE_BYTES + 1)
-    resp = client.put(
-        f"/auth/google/accounts/{bot.id}/bot-session",
-        content=oversize,
-        headers={"Content-Type": "application/json"},
-    )
-    assert resp.status_code == 413
-    assert "too large" in resp.json()["detail"]
+def test_delete_bot_session_is_idempotent(auth_state_root: Path) -> None:
+    # No file yet — delete returns False, no error.
+    assert delete_bot_session(account_id=42) is False
+    save_bot_session(account_id=42, raw=_valid_state_bytes())
+    assert delete_bot_session(account_id=42) is True
+    assert not bot_session_path(42).exists()
 
 
 # --- DELETE /accounts/{id}/bot-session ------------------------------------
 
 
-def test_delete_bot_session_removes_file(
+def test_delete_endpoint_removes_file_and_returns_account(
     client: TestClient,
     db_session: Session,
-    crypto: CredentialCrypto,
     auth_state_root: Path,
 ) -> None:
-    bot = _add_account(db_session, crypto, email="bot@example.com")
+    bot = _add_bot_account(db_session, email="bot@example.com")
     db_session.commit()
     bot_auth_seed.save_bot_session(bot.id, _valid_state_bytes())
     assert bot_session_path(bot.id).exists()
 
     resp = client.delete(f"/auth/google/accounts/{bot.id}/bot-session")
     assert resp.status_code == 200
-    assert resp.json()["connected"] is False
+    body = resp.json()
+    assert body["id"] == bot.id
+    assert body["bot_session"]["connected"] is False
     assert not bot_session_path(bot.id).exists()
 
 
-def test_delete_bot_session_is_idempotent(
+def test_delete_endpoint_idempotent(
     client: TestClient,
     db_session: Session,
-    crypto: CredentialCrypto,
     auth_state_root: Path,
 ) -> None:
-    bot = _add_account(db_session, crypto, email="bot@example.com")
+    bot = _add_bot_account(db_session, email="bot@example.com")
     db_session.commit()
 
-    # Never saved a file; deleting still succeeds with connected=False.
+    # Never saved a file; delete still returns 200 with connected=False.
     resp = client.delete(f"/auth/google/accounts/{bot.id}/bot-session")
     assert resp.status_code == 200
-    assert resp.json()["connected"] is False
+    assert resp.json()["bot_session"]["connected"] is False
 
 
-def test_delete_bot_session_rejects_user_account(
+def test_delete_endpoint_leaves_calendar_capability(
     client: TestClient,
     db_session: Session,
     crypto: CredentialCrypto,
     auth_state_root: Path,
 ) -> None:
-    user = _add_account(
-        db_session, crypto, email="alice@example.com", role=AccountRole.USER
-    )
+    """A row that has both capabilities loses only the bot side."""
+    row = _add_calendar_account(db_session, crypto, email="dual@example.com")
+    bot_auth_seed.save_bot_session(row.id, _valid_state_bytes())
     db_session.commit()
 
-    resp = client.delete(f"/auth/google/accounts/{user.id}/bot-session")
+    resp = client.delete(f"/auth/google/accounts/{row.id}/bot-session")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bot_session"]["connected"] is False
+    assert body["has_calendar"] is True
+    # Row stays.
+    assert db_session.get(GoogleAccount, row.id) is not None
+
+
+def test_delete_endpoint_404_for_unknown_id(client: TestClient) -> None:
+    resp = client.delete("/auth/google/accounts/9999/bot-session")
+    assert resp.status_code == 404
+
+
+# --- PUT /accounts/{id}/bot-session (transitional until noVNC) ------------
+
+
+def test_put_bot_session_writes_storage_state(
+    client: TestClient,
+    db_session: Session,
+    auth_state_root: Path,
+) -> None:
+    bot = _add_bot_account(db_session, email="bot@example.com")
+    db_session.commit()
+
+    payload = _valid_state_bytes()
+    resp = client.put(
+        f"/auth/google/accounts/{bot.id}/bot-session",
+        content=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bot_session"]["connected"] is True
+    assert body["bot_session"]["size_bytes"] == len(payload)
+    saved = bot_session_path(bot.id)
+    assert saved.exists()
+    assert saved.read_bytes() == payload
+
+
+def test_put_bot_session_rejects_invalid_json(
+    client: TestClient,
+    db_session: Session,
+    auth_state_root: Path,
+) -> None:
+    bot = _add_bot_account(db_session, email="bot@example.com")
+    db_session.commit()
+    resp = client.put(
+        f"/auth/google/accounts/{bot.id}/bot-session",
+        content=b"not valid json",
+        headers={"Content-Type": "application/json"},
+    )
     assert resp.status_code == 400
+    assert "JSON" in resp.json()["detail"]
+
+
+def test_put_bot_session_rejects_empty_body(
+    client: TestClient,
+    db_session: Session,
+    auth_state_root: Path,
+) -> None:
+    bot = _add_bot_account(db_session, email="bot@example.com")
+    db_session.commit()
+    resp = client.put(
+        f"/auth/google/accounts/{bot.id}/bot-session",
+        content=b"",
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 400
+
+
+def test_put_bot_session_404_for_unknown_id(
+    client: TestClient, auth_state_root: Path
+) -> None:
+    resp = client.put(
+        "/auth/google/accounts/9999/bot-session",
+        content=_valid_state_bytes(),
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 404
+
+
+def test_put_bot_session_works_on_calendar_account(
+    client: TestClient,
+    db_session: Session,
+    crypto: CredentialCrypto,
+    auth_state_root: Path,
+) -> None:
+    """Any row can host a bot session — the new model has no role gate.
+
+    A row that already has calendar capability can also gain bot
+    capability by writing a storage_state.json against its id.
+    """
+    row = _add_calendar_account(db_session, crypto, email="dual@example.com")
+    db_session.commit()
+    resp = client.put(
+        f"/auth/google/accounts/{row.id}/bot-session",
+        content=_valid_state_bytes(),
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bot_session"]["connected"] is True
+    assert body["has_calendar"] is True

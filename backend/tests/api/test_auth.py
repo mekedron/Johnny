@@ -1,4 +1,14 @@
-"""Integration tests for the Google OAuth HTTP endpoints (US-005)."""
+"""Integration tests for the Google account HTTP endpoints (Johnny-pia).
+
+The accounts redesign dropped the ``role`` enum and ``is_default_user``
+column. A row now carries derived capabilities: a calendar refresh
+token gives it calendar capability; a Playwright ``storage_state.json``
+on disk gives it bot capability. Same email = one row.
+
+These tests cover the OAuth half (start, callback, list, fetch,
+delete, bot-session disconnect). The noVNC sign-in flow has its own
+test module in ``test_bot_signin.py``.
+"""
 
 from __future__ import annotations
 
@@ -19,7 +29,6 @@ from app.api.deps import get_crypto, get_session
 from app.config import Settings, get_settings
 from app.db import Base
 from app.db.models import (
-    AccountRole,
     CalendarEvent,
     GoogleAccount,
     MeetingConfig,
@@ -99,7 +108,6 @@ def client(
     app.dependency_overrides[get_session] = _override_session
     app.dependency_overrides[get_crypto] = _override_crypto
     app.dependency_overrides[get_settings] = _override_settings
-    # Endpoints with no DB also pull `settings` via Depends(get_settings).
     try:
         yield TestClient(app)
     finally:
@@ -108,7 +116,7 @@ def client(
 
 @pytest.fixture(autouse=True)
 def clear_pending_states() -> Iterator[None]:
-    """Ensure the in-memory state map is empty around each test."""
+    """Ensure the in-memory state set is empty around each test."""
     auth_module._pending_states.clear()
     try:
         yield
@@ -139,17 +147,11 @@ def test_start_accepts_client_state(client: TestClient) -> None:
     assert resp.json()["state"] == "client-state-123"
 
 
-def test_start_remembers_role_for_callback(client: TestClient) -> None:
-    resp = client.post(
-        "/auth/google/start",
-        json={"role": "bot", "is_default_user": False},
-    )
+def test_start_remembers_state_token(client: TestClient) -> None:
+    resp = client.post("/auth/google/start", json={})
     assert resp.status_code == 200
     state = resp.json()["state"]
-    pending = auth_module._peek_state(state)
-    assert pending is not None
-    assert pending.role.value == "bot"
-    assert pending.is_default_user is False
+    assert auth_module._peek_state(state) is True
 
 
 def test_start_returns_503_when_oauth_not_configured(crypto: CredentialCrypto) -> None:
@@ -172,11 +174,6 @@ def test_start_returns_503_when_oauth_not_configured(crypto: CredentialCrypto) -
             assert "GOOGLE_CLIENT_ID" in resp.json()["detail"]
     finally:
         app.dependency_overrides.clear()
-
-
-def test_start_rejects_bad_role(client: TestClient) -> None:
-    resp = client.post("/auth/google/start", json={"role": "admin"})
-    assert resp.status_code == 422
 
 
 # --- /callback -------------------------------------------------------------
@@ -208,22 +205,17 @@ def _fake_userinfo(
 def test_callback_persists_encrypted_tokens(
     client: TestClient, db_session: Session, crypto: CredentialCrypto
 ) -> None:
-    # Pre-stage a pending state as if /start was called.
     state = "valid-state"
-    auth_module._remember_state(
-        state, auth_module._PendingState(role=AccountRole.USER, is_default_user=True)
-    )
+    auth_module._remember_state(state)
 
-    fake_tokens = _fake_token_response()
-    fake_user = _fake_userinfo()
     with (
         patch(
             "app.api.auth.exchange_code_for_tokens",
-            new=AsyncMock(return_value=fake_tokens),
+            new=AsyncMock(return_value=_fake_token_response()),
         ),
         patch(
             "app.api.auth.fetch_userinfo",
-            new=AsyncMock(return_value=fake_user),
+            new=AsyncMock(return_value=_fake_userinfo()),
         ),
     ):
         resp = client.post(
@@ -234,22 +226,22 @@ def test_callback_persists_encrypted_tokens(
     assert resp.status_code == 201
     body = resp.json()
     assert body["email"] == "alice@example.com"
-    assert body["role"] == "user"
-    assert body["is_default_user"] is True
+    assert body["has_calendar"] is True
+    assert body["token_health"] == "ok"
+    assert body["bot_session"]["connected"] is False
 
     # State was consumed (no replay possible).
-    assert auth_module._peek_state(state) is None
+    assert auth_module._peek_state(state) is False
 
     # The row exists and tokens are encrypted at rest.
     rows = db_session.scalars(sa.select(GoogleAccount)).all()
     assert len(rows) == 1
     row = rows[0]
     assert row.email == "alice@example.com"
+    assert row.refresh_token_encrypted is not None
     assert row.refresh_token_encrypted != "1//refresh"
     assert row.access_token_encrypted is not None
     assert row.access_token_encrypted != "ya29.access"
-
-    # And round-trip via the same crypto used by the dependency.
     assert crypto.decrypt(row.refresh_token_encrypted) == "1//refresh"
     assert crypto.decrypt(row.access_token_encrypted) == "ya29.access"
 
@@ -271,9 +263,7 @@ def test_callback_rejects_unknown_state(client: TestClient) -> None:
 
 def test_callback_returns_400_on_exchange_failure(client: TestClient) -> None:
     state = "valid-state"
-    auth_module._remember_state(
-        state, auth_module._PendingState(role=AccountRole.USER, is_default_user=False)
-    )
+    auth_module._remember_state(state)
     with patch(
         "app.api.auth.exchange_code_for_tokens",
         new=AsyncMock(side_effect=GoogleOAuthError("invalid_grant")),
@@ -286,41 +276,11 @@ def test_callback_returns_400_on_exchange_failure(client: TestClient) -> None:
     assert "invalid_grant" in resp.json()["detail"]
 
 
-def test_callback_role_is_bot_when_pending_says_so(
-    client: TestClient, db_session: Session
-) -> None:
-    state = "bot-state"
-    auth_module._remember_state(
-        state, auth_module._PendingState(role=AccountRole.BOT, is_default_user=False)
-    )
-    with (
-        patch(
-            "app.api.auth.exchange_code_for_tokens",
-            new=AsyncMock(return_value=_fake_token_response()),
-        ),
-        patch(
-            "app.api.auth.fetch_userinfo",
-            new=AsyncMock(return_value=_fake_userinfo(email="johnny-bot@example.com")),
-        ),
-    ):
-        resp = client.post(
-            "/auth/google/callback",
-            json={"code": "c", "state": state},
-        )
-    assert resp.status_code == 201
-    assert resp.json()["role"] == "bot"
-    assert resp.json()["is_default_user"] is False
-    row = db_session.scalars(sa.select(GoogleAccount)).one()
-    assert row.role.value == "bot"
-
-
 def test_callback_upserts_same_email(client: TestClient, db_session: Session) -> None:
     """Re-authorising the same email should update tokens in place."""
     # First auth.
     state1 = "s1"
-    auth_module._remember_state(
-        state1, auth_module._PendingState(role=AccountRole.USER, is_default_user=True)
-    )
+    auth_module._remember_state(state1)
     with (
         patch(
             "app.api.auth.exchange_code_for_tokens",
@@ -335,9 +295,7 @@ def test_callback_upserts_same_email(client: TestClient, db_session: Session) ->
 
     # Second auth — same email, rotated refresh token.
     state2 = "s2"
-    auth_module._remember_state(
-        state2, auth_module._PendingState(role=AccountRole.USER, is_default_user=True)
-    )
+    auth_module._remember_state(state2)
     with (
         patch(
             "app.api.auth.exchange_code_for_tokens",
@@ -353,6 +311,37 @@ def test_callback_upserts_same_email(client: TestClient, db_session: Session) ->
 
     rows: list[GoogleAccount] = list(db_session.scalars(sa.select(GoogleAccount)).all())
     assert len(rows) == 1
+
+
+def test_callback_attaches_calendar_to_existing_bot_only_row(
+    client: TestClient, db_session: Session, crypto: CredentialCrypto
+) -> None:
+    """OAuth on an email that already exists as a bot-only row keeps a
+    single row and attaches the calendar capability to it."""
+    bot_only = GoogleAccount(email="alice@example.com", refresh_token_encrypted=None)
+    db_session.add(bot_only)
+    db_session.commit()
+
+    state = "attach-state"
+    auth_module._remember_state(state)
+    with (
+        patch(
+            "app.api.auth.exchange_code_for_tokens",
+            new=AsyncMock(return_value=_fake_token_response()),
+        ),
+        patch(
+            "app.api.auth.fetch_userinfo",
+            new=AsyncMock(return_value=_fake_userinfo()),
+        ),
+    ):
+        resp = client.post(
+            "/auth/google/callback", json={"code": "c", "state": state}
+        )
+    assert resp.status_code == 201
+
+    rows = db_session.scalars(sa.select(GoogleAccount)).all()
+    assert len(rows) == 1
+    assert rows[0].refresh_token_encrypted is not None
 
 
 def test_callback_returns_503_when_oauth_not_configured(
@@ -400,9 +389,7 @@ def test_callback_validates_payload(client: TestClient) -> None:
 
 def test_account_read_excludes_tokens(client: TestClient) -> None:
     state = "secret-state"
-    auth_module._remember_state(
-        state, auth_module._PendingState(role=AccountRole.USER, is_default_user=False)
-    )
+    auth_module._remember_state(state)
     with (
         patch(
             "app.api.auth.exchange_code_for_tokens",
@@ -430,9 +417,7 @@ def test_get_callback_renders_success_html(
     client: TestClient, db_session: Session
 ) -> None:
     state = "browser-state"
-    auth_module._remember_state(
-        state, auth_module._PendingState(role=AccountRole.USER, is_default_user=False)
-    )
+    auth_module._remember_state(state)
     with (
         patch(
             "app.api.auth.exchange_code_for_tokens",
@@ -452,12 +437,10 @@ def test_get_callback_renders_success_html(
     body = resp.text
     assert "alice@example.com" in body
     assert "johnny:oauth" in body
-    # And the row was persisted just like the POST flow.
     assert db_session.scalars(sa.select(GoogleAccount)).one().email == "alice@example.com"
 
 
 def test_get_callback_renders_error_html(client: TestClient) -> None:
-    # No pending state matches; consume_state returns None → 400.
     resp = client.get(
         "/auth/google/callback",
         params={"code": "x", "state": "no-such-state"},
@@ -470,52 +453,52 @@ def test_get_callback_renders_error_html(client: TestClient) -> None:
 # --- GET /accounts ---------------------------------------------------------
 
 
-def _add_account(
+def _add_calendar_account(
     session: Session,
     crypto: CredentialCrypto,
     *,
     email: str,
-    role: AccountRole = AccountRole.USER,
-    is_default_user: bool = False,
 ) -> GoogleAccount:
     row = GoogleAccount(
         email=email,
-        role=role,
         access_token_encrypted=crypto.encrypt("a"),
         refresh_token_encrypted=crypto.encrypt("r"),
         token_expires_at=datetime.now(UTC) + timedelta(hours=1),
-        is_default_user=is_default_user,
     )
     session.add(row)
     session.flush()
     return row
 
 
-def test_list_accounts_returns_default_user_first(
+def _add_bot_only_account(session: Session, *, email: str) -> GoogleAccount:
+    row = GoogleAccount(email=email, refresh_token_encrypted=None)
+    session.add(row)
+    session.flush()
+    return row
+
+
+def test_list_accounts_returns_both_capabilities(
     client: TestClient,
     db_session: Session,
     crypto: CredentialCrypto,
 ) -> None:
-    bot = _add_account(db_session, crypto, email="johnny-bot@example.com", role=AccountRole.BOT)
-    user = _add_account(
-        db_session, crypto, email="alice@example.com", is_default_user=True
-    )
+    bot = _add_bot_only_account(db_session, email="johnny-bot@example.com")
+    user = _add_calendar_account(db_session, crypto, email="alice@example.com")
     db_session.commit()
 
     resp = client.get("/auth/google/accounts")
     assert resp.status_code == 200
     rows = resp.json()
-    assert [r["id"] for r in rows] == [user.id, bot.id]
-    assert rows[0]["role"] == "user"
-    assert rows[0]["is_default_user"] is True
-    assert rows[1]["role"] == "bot"
-    assert rows[1]["is_default_user"] is False
-    # All healthy rows surface token_health == "ok".
-    assert all(r["token_health"] == "ok" for r in rows)
-    # And tokens are not leaked.
+    assert [r["id"] for r in rows] == sorted([user.id, bot.id])
+    by_email = {r["email"]: r for r in rows}
+    assert by_email["alice@example.com"]["has_calendar"] is True
+    assert by_email["alice@example.com"]["token_health"] == "ok"
+    assert by_email["johnny-bot@example.com"]["has_calendar"] is False
+    assert by_email["johnny-bot@example.com"]["token_health"] == "none"
     for row in rows:
         assert "refresh_token_encrypted" not in row
         assert "access_token_encrypted" not in row
+        assert "bot_session" in row
 
 
 def test_list_accounts_empty(client: TestClient) -> None:
@@ -538,14 +521,12 @@ def test_list_accounts_marks_undecryptable_row_as_needs_reauth(
 
     Simulates a FERNET_KEY rotation: the DB row's ciphertext was produced
     by ``legacy_crypto``; the API endpoint is wired with ``crypto`` (the
-    new key). The list response must mark that row's ``token_health`` as
+    new key). The response must mark that row's ``token_health`` as
     ``"needs_reauth"`` without any Google round-trip.
     """
     legacy_crypto = CredentialCrypto(Fernet.generate_key())
-    # One healthy row (encrypted with the current key) plus one stale
-    # row (encrypted with the legacy key).
-    healthy = _add_account(db_session, crypto, email="ok@example.com")
-    stale = _add_account(
+    healthy = _add_calendar_account(db_session, crypto, email="ok@example.com")
+    stale = _add_calendar_account(
         db_session, legacy_crypto, email="broken@example.com"
     )
     db_session.commit()
@@ -579,7 +560,7 @@ def test_get_account_reports_token_health(
 ) -> None:
     """Single-account GET surfaces the same token_health field as the list."""
     legacy_crypto = CredentialCrypto(Fernet.generate_key())
-    stale = _add_account(
+    stale = _add_calendar_account(
         db_session, legacy_crypto, email="broken@example.com"
     )
     db_session.commit()
@@ -604,94 +585,17 @@ def test_get_account_reports_token_health(
     assert resp.json()["token_health"] == "needs_reauth"
 
 
-# --- PATCH /accounts/{id} --------------------------------------------------
-
-
-def test_patch_account_changes_role(
-    client: TestClient, db_session: Session, crypto: CredentialCrypto
-) -> None:
-    row = _add_account(db_session, crypto, email="alice@example.com")
-    db_session.commit()
-    resp = client.patch(
-        f"/auth/google/accounts/{row.id}",
-        json={"role": "bot"},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["role"] == "bot"
-    db_session.refresh(row)
-    assert row.role is AccountRole.BOT
-
-
-def test_patch_account_promotion_clears_other_default(
-    client: TestClient, db_session: Session, crypto: CredentialCrypto
-) -> None:
-    a = _add_account(
-        db_session, crypto, email="a@example.com", is_default_user=True
-    )
-    b = _add_account(
-        db_session, crypto, email="b@example.com", is_default_user=False
-    )
-    db_session.commit()
-
-    resp = client.patch(
-        f"/auth/google/accounts/{b.id}",
-        json={"is_default_user": True},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["is_default_user"] is True
-
-    db_session.expire_all()
-    refreshed_a = db_session.get(GoogleAccount, a.id)
-    refreshed_b = db_session.get(GoogleAccount, b.id)
-    assert refreshed_a is not None and refreshed_b is not None
-    assert refreshed_a.is_default_user is False
-    assert refreshed_b.is_default_user is True
-
-
-def test_patch_account_demote_leaves_zero_defaults(
-    client: TestClient, db_session: Session, crypto: CredentialCrypto
-) -> None:
-    row = _add_account(
-        db_session, crypto, email="a@example.com", is_default_user=True
-    )
-    db_session.commit()
-    resp = client.patch(
-        f"/auth/google/accounts/{row.id}",
-        json={"is_default_user": False},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["is_default_user"] is False
-
-
-def test_patch_account_404(client: TestClient) -> None:
-    resp = client.patch("/auth/google/accounts/999", json={"role": "bot"})
-    assert resp.status_code == 404
-
-
-def test_patch_account_rejects_bad_role(
-    client: TestClient, db_session: Session, crypto: CredentialCrypto
-) -> None:
-    row = _add_account(db_session, crypto, email="a@example.com")
-    db_session.commit()
-    resp = client.patch(
-        f"/auth/google/accounts/{row.id}", json={"role": "admin"}
-    )
-    assert resp.status_code == 422
-
-
 # --- DELETE /accounts/{id} -------------------------------------------------
 
 
 def test_delete_account_revokes_and_removes_row(
     client: TestClient, db_session: Session, crypto: CredentialCrypto
 ) -> None:
-    row = _add_account(db_session, crypto, email="a@example.com")
+    row = _add_calendar_account(db_session, crypto, email="a@example.com")
     db_session.commit()
 
     async_revoke = AsyncMock()
     with patch("app.api.auth.revoke_account", new=async_revoke) as revoke_spy:
-        # Stub revoke_account to actually delete the row (its real
-        # behaviour) so the test reflects the integrated effect.
         async def _stub_revoke(*, session: Session, account: GoogleAccount, **_: Any) -> None:
             session.delete(account)
 
@@ -713,13 +617,10 @@ def test_delete_account_404_for_unknown_id(client: TestClient) -> None:
 def test_delete_account_409_when_meeting_configs_reference_it(
     client: TestClient,
     db_session: Session,
-    crypto: CredentialCrypto,
 ) -> None:
-    bot = _add_account(db_session, crypto, email="bot@example.com", role=AccountRole.BOT)
+    bot = _add_bot_only_account(db_session, email="bot@example.com")
     db_session.commit()
 
-    # Stub the count helper so we don't need to spin up the calendar /
-    # template fixtures just for this assertion.
     with (
         patch("app.api.auth._meeting_config_count", return_value=3),
         patch("app.api.auth.revoke_account", new=AsyncMock()) as revoke_spy,
@@ -730,16 +631,14 @@ def test_delete_account_409_when_meeting_configs_reference_it(
     assert detail["meeting_config_count"] == 3
     assert "force=true" in detail["message"]
     revoke_spy.assert_not_called()
-    # Row is still present.
     assert db_session.get(GoogleAccount, bot.id) is not None
 
 
 def test_delete_account_force_true_cascades_meeting_configs(
     client: TestClient,
     db_session: Session,
-    crypto: CredentialCrypto,
 ) -> None:
-    bot = _add_account(db_session, crypto, email="bot@example.com", role=AccountRole.BOT)
+    bot = _add_bot_only_account(db_session, email="bot@example.com")
     db_session.commit()
 
     async def _stub_revoke(*, session: Session, account: GoogleAccount, **_: Any) -> None:
@@ -747,7 +646,10 @@ def test_delete_account_force_true_cascades_meeting_configs(
 
     with (
         patch("app.api.auth._meeting_config_count", return_value=2),
-        patch("app.api.auth.revoke_account", new=AsyncMock(side_effect=_stub_revoke)) as revoke_spy,
+        patch(
+            "app.api.auth.revoke_account",
+            new=AsyncMock(side_effect=_stub_revoke),
+        ) as revoke_spy,
     ):
         resp = client.delete(
             f"/auth/google/accounts/{bot.id}", params={"force": "true"}
@@ -760,7 +662,7 @@ def test_delete_account_force_true_cascades_meeting_configs(
 def test_delete_account_swallows_revoke_decrypt_failure(
     client: TestClient, db_session: Session, crypto: CredentialCrypto
 ) -> None:
-    row = _add_account(db_session, crypto, email="a@example.com")
+    row = _add_calendar_account(db_session, crypto, email="a@example.com")
     db_session.commit()
 
     from app.services.google_client import GoogleApiClientError
@@ -771,5 +673,50 @@ def test_delete_account_swallows_revoke_decrypt_failure(
     with patch("app.api.auth.revoke_account", new=AsyncMock(side_effect=_boom)):
         resp = client.delete(f"/auth/google/accounts/{row.id}")
     assert resp.status_code == 204
-    # Row is still deleted locally despite the revoke barf.
     assert db_session.scalars(sa.select(GoogleAccount)).all() == []
+
+
+def test_delete_bot_only_account_skips_google_revoke(
+    client: TestClient, db_session: Session
+) -> None:
+    """A bot-only row (no refresh token) has nothing to revoke at Google.
+
+    The disconnect should still remove the row locally without trying
+    to call Google's revocation endpoint.
+    """
+    bot = _add_bot_only_account(db_session, email="bot-only@example.com")
+    db_session.commit()
+
+    with patch(
+        "app.api.auth.revoke_account",
+        new=AsyncMock(side_effect=lambda *, session, account, **_: session.delete(account)),
+    ) as revoke_spy:
+        resp = client.delete(f"/auth/google/accounts/{bot.id}")
+    assert resp.status_code == 204
+    revoke_spy.assert_awaited_once()
+    assert db_session.get(GoogleAccount, bot.id) is None
+
+
+# --- DELETE /accounts/{id}/bot-session -------------------------------------
+
+
+def test_disconnect_bot_session_returns_updated_account(
+    client: TestClient, db_session: Session
+) -> None:
+    """Disconnecting the bot capability returns the (still-existing) row.
+
+    A no-op (no storage_state on disk) is not an error.
+    """
+    bot = _add_bot_only_account(db_session, email="bot@example.com")
+    db_session.commit()
+
+    resp = client.delete(f"/auth/google/accounts/{bot.id}/bot-session")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == bot.id
+    assert body["bot_session"]["connected"] is False
+
+
+def test_disconnect_bot_session_404_for_unknown_id(client: TestClient) -> None:
+    resp = client.delete("/auth/google/accounts/999/bot-session")
+    assert resp.status_code == 404

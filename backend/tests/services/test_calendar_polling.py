@@ -15,7 +15,6 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.db import Base
 from app.db.models import (
-    AccountRole,
     BotMode,
     CalendarEvent,
     GoogleAccount,
@@ -108,7 +107,6 @@ def _make_account_with_config(
 ) -> tuple[GoogleAccount, CalendarEvent, MeetingConfig]:
     account = GoogleAccount(
         email=email,
-        role=AccountRole.USER,
         access_token_encrypted=crypto.encrypt("access"),
         refresh_token_encrypted=crypto.encrypt("refresh"),
         token_expires_at=datetime.now(UTC) + timedelta(hours=1),
@@ -202,7 +200,6 @@ def test_returns_only_accounts_with_configs(
     # Account with no configs at all.
     a2 = GoogleAccount(
         email="b@x",
-        role=AccountRole.USER,
         access_token_encrypted=crypto.encrypt("a"),
         refresh_token_encrypted=crypto.encrypt("r"),
     )

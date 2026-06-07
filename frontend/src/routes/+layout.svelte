@@ -80,7 +80,7 @@
 	async function refreshAccount() {
 		try {
 			const accounts = await listAccounts();
-			defaultAccount = accounts.find((a) => a.is_default_user) ?? null;
+			defaultAccount = accounts.find((a) => a.has_calendar) ?? null;
 		} catch {
 			// Surfacing the error here would push it to every page; the
 			// Settings page already renders backend connection issues.

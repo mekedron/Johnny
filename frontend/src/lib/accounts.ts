@@ -1,46 +1,40 @@
 /**
- * Typed client for the /auth/google/* HTTP endpoints (US-005, US-006).
+ * Typed client for the /auth/google/* HTTP endpoints (Johnny-pia).
+ *
+ * One row per Google identity with derived capabilities:
+ *   - has_calendar  → row carries an OAuth refresh token
+ *   - bot_session.connected → row has a Playwright storage_state.json on disk
+ *
+ * A row may have either or both. The settings page renders it under
+ * the matching section(s).
  *
  * All requests target `VITE_API_BASE` (default `http://localhost:8000`).
- * Server errors are surfaced as Error messages so the UI can render them
+ * Server errors surface as Error messages so the UI can render them
  * inline.
  */
 
-export type AccountRole = 'user' | 'bot';
+export type TokenHealth = 'ok' | 'needs_reauth' | 'none';
 
-export const ACCOUNT_ROLES: readonly AccountRole[] = ['user', 'bot'];
-
-export const ACCOUNT_ROLE_LABEL: Record<AccountRole, string> = {
-	user: 'User',
-	bot: 'Bot'
-};
-
-export type TokenHealth = 'ok' | 'needs_reauth';
+export interface BotSession {
+	connected: boolean;
+	saved_at: string | null;
+	size_bytes: number | null;
+}
 
 export interface Account {
 	id: number;
 	email: string;
-	role: AccountRole;
-	is_default_user: boolean;
+	has_calendar: boolean;
 	token_expires_at: string | null;
 	token_health: TokenHealth;
+	bot_session: BotSession;
 	created_at: string;
 	updated_at: string;
-}
-
-export interface StartOAuthPayload {
-	role: AccountRole;
-	is_default_user: boolean;
 }
 
 export interface StartOAuthResponse {
 	authorize_url: string;
 	state: string;
-}
-
-export interface AccountUpdatePayload {
-	role?: AccountRole;
-	is_default_user?: boolean;
 }
 
 const API_BASE: string = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
@@ -98,20 +92,10 @@ export function listAccounts(): Promise<Account[]> {
 	return request<Account[]>('/auth/google/accounts');
 }
 
-export function startOAuth(payload: StartOAuthPayload): Promise<StartOAuthResponse> {
+export function startOAuth(): Promise<StartOAuthResponse> {
 	return request<StartOAuthResponse>('/auth/google/start', {
 		method: 'POST',
-		body: JSON.stringify(payload)
-	});
-}
-
-export function updateAccount(
-	id: number,
-	payload: AccountUpdatePayload
-): Promise<Account> {
-	return request<Account>(`/auth/google/accounts/${id}`, {
-		method: 'PATCH',
-		body: JSON.stringify(payload)
+		body: JSON.stringify({})
 	});
 }
 
@@ -121,38 +105,18 @@ export function disconnectAccount(id: number, force = false): Promise<void> {
 }
 
 /**
- * Bot-session storage_state (Johnny-4ph).
- *
- * The meet-worker needs a Playwright `storage_state.json` to open
- * Chromium straight into the bot's signed-in Google session. The user
- * produces that file via the `seed_auth_state` CLI helper, then
- * uploads it here so the API can drop it into the shared docker
- * volume the meet-worker reads from.
- */
-export interface BotSessionStatus {
-	connected: boolean;
-	saved_at: string | null;
-	size_bytes: number | null;
-	path: string;
-}
-
-export function getBotSessionStatus(accountId: number): Promise<BotSessionStatus> {
-	return request<BotSessionStatus>(`/auth/google/accounts/${accountId}/bot-session`);
-}
-
-/**
  * Upload a Playwright `storage_state.json` for the bot account.
  *
- * The payload must be the raw JSON bytes the CLI helper writes (cookies
- * array + optional origins). The backend validates the shape before
- * writing to the shared volume; a 400 means the file is malformed and
- * the user should re-run the helper.
+ * Transitional path until the noVNC sign-in flow lands. The payload
+ * must be the raw JSON bytes the CLI helper writes (cookies array +
+ * optional origins). The backend validates the shape before writing
+ * to the shared volume.
  */
 export function uploadBotSession(
 	accountId: number,
 	storageStateJson: string
-): Promise<BotSessionStatus> {
-	return request<BotSessionStatus>(
+): Promise<Account> {
+	return request<Account>(
 		`/auth/google/accounts/${accountId}/bot-session`,
 		{
 			method: 'PUT',
@@ -161,8 +125,8 @@ export function uploadBotSession(
 	);
 }
 
-export function deleteBotSession(accountId: number): Promise<BotSessionStatus> {
-	return request<BotSessionStatus>(`/auth/google/accounts/${accountId}/bot-session`, {
+export function disconnectBotSession(accountId: number): Promise<Account> {
+	return request<Account>(`/auth/google/accounts/${accountId}/bot-session`, {
 		method: 'DELETE'
 	});
 }

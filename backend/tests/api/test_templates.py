@@ -355,7 +355,6 @@ def _make_referencing_meeting_config(
 
     account = GoogleAccount(
         email="user@example.com",
-        role="user",
         refresh_token_encrypted="x",
     )
     session.add(account)

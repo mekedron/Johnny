@@ -12,7 +12,6 @@ from sqlalchemy.orm import Session
 from app.db import Base
 from app.db.models import (
     EMBEDDING_DIM,
-    AccountRole,
     AgentDecision,
     AgentUtterance,
     BotMode,
@@ -74,7 +73,6 @@ def _seed_account_template(
 ) -> tuple[GoogleAccount, ProfileTemplate]:
     acc = GoogleAccount(
         email=f"u{seed}@example.com",
-        role=AccountRole.USER,
         refresh_token_encrypted="x",
     )
     db_session.add(acc)

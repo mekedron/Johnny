@@ -10,6 +10,7 @@
 	import HardDriveIcon from '@lucide/svelte/icons/hard-drive';
 	import MicIcon from '@lucide/svelte/icons/mic';
 	import PackageIcon from '@lucide/svelte/icons/package';
+	import PauseIcon from '@lucide/svelte/icons/pause';
 	import PlayIcon from '@lucide/svelte/icons/play';
 	import PlusIcon from '@lucide/svelte/icons/plus';
 	import SquareIcon from '@lucide/svelte/icons/square';
@@ -75,7 +76,13 @@
 		type SttTestResult,
 		type TestResult
 	} from '$lib/providers';
-	import { MicPermissionDeniedError, recordMicPcm } from '$lib/sttMicRecorder';
+	import {
+		MicPermissionDeniedError,
+		pcmToWavBlob,
+		RECORDING_SAMPLE_RATE,
+		startMicRecording,
+		type MicRecordingHandle
+	} from '$lib/sttMicRecorder';
 
 	interface CatalogEntry {
 		kind: ProviderKind;
@@ -106,7 +113,11 @@
 		s2s: 'Speech-to-speech — unified realtime provider (OpenAI Realtime, Gemini Live)'
 	};
 
-	const MIC_RECORDING_MS = 5000;
+	// Safety cap for the mic recorder (Johnny-ckz.12). The operator can
+	// click Stop at any time; this is the hard ceiling if they forget.
+	// 10 s is long enough to read a sentence, short enough that the
+	// upload + transcribe round-trip stays under a few seconds.
+	const MIC_RECORDING_MS = 10000;
 	const PIPER_PROVIDER_NAME = 'piper';
 	const CARTESIA_PROVIDER_NAME = 'cartesia';
 
@@ -136,8 +147,25 @@
 	let sttTestResult = $state<SttTestResult | null>(null);
 	let sttPhase = $state<TestPhase>('idle');
 	let sttMicLevel = $state(0);
+	let sttElapsedMs = $state(0);
 	let sttError = $state<string | null>(null);
 	let testing = $state(false);
+	// Active recording controller. Non-null only while `sttPhase === 'recording'`.
+	// The Stop button calls `.stop()`; the safety cap inside the controller
+	// also fires `.stop()` itself if the user never clicks.
+	let sttRecorder: MicRecordingHandle | null = null;
+	// Playback of the just-captured clip (Johnny-ckz.12). Lets the operator
+	// audit a "no transcript" result as "I was muted" vs. "STT misheard"
+	// without leaving the page. The WAV blob is built client-side from the
+	// raw PCM the recorder returns — no extra round-trip.
+	let sttRecordingUrl = $state<string | null>(null);
+	let sttRecordingAudio: HTMLAudioElement | null = null;
+	let sttRecordingPlaying = $state(false);
+	let sttRecordingDurationMs = $state(0);
+	// Provider name shown next to the latency/cost row. Stamped at the
+	// moment the test is fired so the metadata reflects what was actually
+	// asked, even if the operator switches providers afterwards.
+	let sttResultProviderLabel = $state<string | null>(null);
 
 	let previewBlobUrl = $state<string | null>(null);
 	let previewAudio: HTMLAudioElement | null = null;
@@ -330,6 +358,7 @@
 		if (submitting || testing || previewLoading || voiceInstalling) return;
 		stopPreview();
 		stopVoicePreview();
+		stopSttPlayback();
 		resetModal();
 		mode = 'closed';
 	}
@@ -346,6 +375,10 @@
 		sttTestResult = null;
 		sttPhase = 'idle';
 		sttMicLevel = 0;
+		sttElapsedMs = 0;
+		sttRecorder = null;
+		sttResultProviderLabel = null;
+		clearSttRecording();
 		sttError = null;
 		previewError = null;
 		voiceList = [];
@@ -374,6 +407,8 @@
 		draftErrors = {};
 		testResult = null;
 		sttTestResult = null;
+		sttResultProviderLabel = null;
+		clearSttRecording();
 		voiceList = [];
 		parakeetStatus = null;
 	}
@@ -388,6 +423,8 @@
 		draftErrors = {};
 		testResult = null;
 		sttTestResult = null;
+		sttResultProviderLabel = null;
+		clearSttRecording();
 		if (draftKind === 'tts' && name === PIPER_PROVIDER_NAME) {
 			loadVoiceListCatalog();
 		}
@@ -587,9 +624,17 @@
 
 	async function onTest() {
 		if (!selectedEntry || draftKind === null) return;
+		// Clicking "Stop" while recording reuses the same button as Record;
+		// route that to the recorder controller instead of starting a new run.
+		if (draftKind === 'stt' && sttPhase === 'recording' && sttRecorder !== null) {
+			sttRecorder.stop();
+			return;
+		}
 		testing = true;
 		testResult = null;
 		sttTestResult = null;
+		sttResultProviderLabel = null;
+		clearSttRecording();
 		sttPhase = 'idle';
 		sttError = null;
 		previewError = null;
@@ -670,17 +715,23 @@
 	async function runSttTest() {
 		const payload = previewPayload();
 		if (!payload) return;
+		const providerLabel = selectedEntry?.display_name ?? payload.provider_name;
 		sttPhase = 'recording';
 		sttMicLevel = 0;
-		let pcm: ArrayBuffer | null = null;
+		sttElapsedMs = 0;
+		let recording: { pcm: ArrayBuffer; durationMs: number };
 		try {
-			const recording = await recordMicPcm({
-				durationMs: MIC_RECORDING_MS,
+			const handle = await startMicRecording({
+				maxDurationMs: MIC_RECORDING_MS,
 				onLevel: (level) => {
 					sttMicLevel = level;
+				},
+				onTick: (elapsed) => {
+					sttElapsedMs = elapsed;
 				}
 			});
-			pcm = recording.pcm;
+			sttRecorder = handle;
+			recording = await handle.done;
 		} catch (e) {
 			if (e instanceof MicPermissionDeniedError) {
 				sttError =
@@ -690,6 +741,17 @@
 			}
 			sttPhase = 'error';
 			return;
+		} finally {
+			sttRecorder = null;
+		}
+		const pcm = recording.pcm;
+		sttRecordingDurationMs = recording.durationMs;
+		try {
+			const wav = pcmToWavBlob(pcm, RECORDING_SAMPLE_RATE);
+			sttRecordingUrl = URL.createObjectURL(wav);
+		} catch {
+			// playback is best-effort; transcription still proceeds
+			sttRecordingUrl = null;
 		}
 		sttPhase = 'uploading';
 		try {
@@ -699,6 +761,7 @@
 			} else {
 				result = await previewSttTestRecording(payload, pcm);
 			}
+			sttResultProviderLabel = providerLabel;
 			sttTestResult = result;
 			sttPhase = result.ok ? 'done' : 'error';
 			if (!result.ok) {
@@ -709,7 +772,53 @@
 			sttPhase = 'error';
 		} finally {
 			sttMicLevel = 0;
+			sttElapsedMs = 0;
 		}
+	}
+
+	async function toggleSttRecordingPlayback() {
+		if (!sttRecordingUrl) return;
+		if (sttRecordingPlaying) {
+			stopSttPlayback();
+			return;
+		}
+		try {
+			if (!sttRecordingAudio) {
+				sttRecordingAudio = new Audio(sttRecordingUrl);
+				sttRecordingAudio.addEventListener('ended', () => {
+					sttRecordingPlaying = false;
+				});
+				sttRecordingAudio.addEventListener('error', () => {
+					sttRecordingPlaying = false;
+				});
+			}
+			await sttRecordingAudio.play();
+			sttRecordingPlaying = true;
+		} catch {
+			sttRecordingPlaying = false;
+		}
+	}
+
+	function stopSttPlayback() {
+		if (sttRecordingAudio) {
+			try {
+				sttRecordingAudio.pause();
+				sttRecordingAudio.currentTime = 0;
+			} catch {
+				// pause may race with `ended`; ignore
+			}
+		}
+		sttRecordingPlaying = false;
+	}
+
+	function clearSttRecording() {
+		stopSttPlayback();
+		sttRecordingAudio = null;
+		if (sttRecordingUrl) {
+			URL.revokeObjectURL(sttRecordingUrl);
+			sttRecordingUrl = null;
+		}
+		sttRecordingDurationMs = 0;
 	}
 
 	function stopPreview() {
@@ -1011,6 +1120,13 @@
 	function formatMs(ms: number | null | undefined): string {
 		if (ms === null || ms === undefined) return '—';
 		return `${ms.toLocaleString()} ms`;
+	}
+
+	function formatElapsed(ms: number): string {
+		const total = Math.max(0, Math.floor(ms / 1000));
+		const minutes = Math.floor(total / 60);
+		const seconds = total % 60;
+		return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 	}
 
 	function phaseLabel(phase: TestPhase): string {
@@ -2213,11 +2329,44 @@
 									{/if}
 								</div>
 								{#if sttPhase === 'recording'}
-									<div class="h-1.5 w-full overflow-hidden rounded-full bg-surface-3">
+									<div class="flex flex-col gap-1.5" data-testid="stt-recording-indicator">
 										<div
-											class="h-full bg-foreground transition-[width] duration-100"
-											style:width={`${Math.min(100, Math.round(sttMicLevel * 100))}%`}
-										></div>
+											class="flex items-center justify-between text-[0.7rem] text-muted-foreground"
+										>
+											<span class="font-mono text-foreground" data-testid="stt-elapsed">
+												{formatElapsed(sttElapsedMs)} / {formatElapsed(MIC_RECORDING_MS)}
+											</span>
+											<span>Speak now — click Stop when finished</span>
+										</div>
+										<div class="h-1.5 w-full overflow-hidden rounded-full bg-surface-3">
+											<div
+												class="h-full bg-foreground transition-[width] duration-100"
+												style:width={`${Math.min(100, Math.round(sttMicLevel * 100))}%`}
+											></div>
+										</div>
+									</div>
+								{/if}
+								{#if sttRecordingUrl && (sttPhase === 'uploading' || sttPhase === 'done' || sttPhase === 'error')}
+									<div
+										class="flex flex-wrap items-center gap-2 text-[0.7rem] text-muted-foreground"
+										data-testid="stt-playback"
+									>
+										<Button
+											type="button"
+											variant="outline"
+											size="sm"
+											onclick={toggleSttRecordingPlayback}
+											data-testid="stt-playback-toggle"
+										>
+											{#if sttRecordingPlaying}
+												<PauseIcon />
+												Stop playback
+											{:else}
+												<PlayIcon />
+												Play recording
+											{/if}
+										</Button>
+										<span>Captured {formatMs(sttRecordingDurationMs)} of audio</span>
 									</div>
 								{/if}
 								{#if sttTestResult}
@@ -2232,6 +2381,11 @@
 											<div
 												class="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[0.7rem] text-muted-foreground"
 											>
+												{#if sttResultProviderLabel}
+													<span data-testid="stt-provider-label"
+														>Provider: {sttResultProviderLabel}</span
+													>
+												{/if}
 												<span>Latency: {formatMs(sttTestResult.latency_ms)}</span>
 												<span>Audio: {formatMs(sttTestResult.audio_ms)}</span>
 												<span>Cost: {formatCost(sttTestResult.cost_usd)}</span>
@@ -2330,14 +2484,19 @@
 							type="button"
 							variant={primaryAction === 'test' ? 'default' : 'outline'}
 							onclick={onTest}
-							disabled={testing || submitting || !draftProviderName}
+							disabled={(testing && !(draftKind === 'stt' && sttPhase === 'recording')) ||
+								submitting ||
+								!draftProviderName}
 							data-testid="modal-test"
 						>
-							{#if testing}
+							{#if draftKind === 'stt' && sttPhase === 'recording'}
+								<SquareIcon />
+								Stop & transcribe
+							{:else if testing}
 								Testing…
 							{:else if draftKind === 'stt'}
 								<MicIcon />
-								Record & test
+								Record sample
 							{:else if draftKind === 'tts'}
 								<PlayIcon />
 								Play sample

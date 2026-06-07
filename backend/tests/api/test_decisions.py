@@ -15,7 +15,6 @@ from app.api.decisions import set_redis_client_factory
 from app.api.deps import get_session
 from app.db import Base
 from app.db.models import (
-    AccountRole,
     AgentDecision,
     BotMode,
     BotSession,
@@ -119,9 +118,7 @@ def _seed_session_with_pending_decision(
     now = datetime.now(UTC).replace(microsecond=0)
     account = GoogleAccount(
         email="u@example.com",
-        role=AccountRole.USER,
         refresh_token_encrypted="x",
-        is_default_user=True,
     )
     db_session.add(account)
     db_session.flush()

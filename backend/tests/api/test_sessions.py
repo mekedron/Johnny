@@ -14,7 +14,6 @@ from app.api.deps import get_session
 from app.api.sessions import set_launcher
 from app.db import Base
 from app.db.models import (
-    AccountRole,
     AgentDecision,
     AgentUtterance,
     BotMode,
@@ -113,9 +112,7 @@ def _seed_meeting(
     now = datetime.now(UTC).replace(microsecond=0)
     account = GoogleAccount(
         email="u@example.com",
-        role=AccountRole.USER,
         refresh_token_encrypted="x",
-        is_default_user=True,
     )
     db_session.add(account)
     db_session.flush()
@@ -193,7 +190,6 @@ def test_start_returns_404_when_no_meeting_config(
     now = datetime.now(UTC).replace(microsecond=0)
     account = GoogleAccount(
         email="solo@example.com",
-        role=AccountRole.USER,
         refresh_token_encrypted="x",
     )
     db_session.add(account)

@@ -145,7 +145,7 @@
 				return;
 			}
 			if (selectedAccountId === null) {
-				const def = accounts.find((a) => a.is_default_user && a.role === 'user');
+				const def = accounts.find((a) => a.has_calendar);
 				selectedAccountId = def?.id ?? accounts[0].id;
 			}
 			await loadEvents();
@@ -255,7 +255,7 @@
 		}
 		formTemplateId = templates[0]?.id ?? null;
 		const defaultAccount =
-			accounts.find((a) => a.is_default_user && a.role === 'user') ?? accounts[0];
+			accounts.find((a) => a.bot_session.connected) ?? accounts[0];
 		formIdentityId = defaultAccount?.id ?? null;
 		const seedTemplate = templates[0] ?? null;
 		formMode = seedTemplate?.mode ?? 'listen_only';
@@ -451,7 +451,7 @@
 					>
 						{#each accounts as account (account.id)}
 							<option value={account.id}>
-								{account.email}{account.role === 'bot' ? ' · bot' : ''}
+								{account.email}{account.bot_session.connected ? ' · bot' : ''}
 							</option>
 						{/each}
 					</select>
@@ -947,7 +947,7 @@
 							>
 								{#each accounts as account (account.id)}
 									<option value={account.id}>
-										{account.email} · {account.role}
+										{account.email}{account.bot_session.connected ? ' · bot' : account.has_calendar ? ' · calendar' : ''}
 									</option>
 								{/each}
 							</select>

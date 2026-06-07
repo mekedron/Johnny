@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 
 from app.db import Base
 from app.db.models import (
-    AccountRole,
     BotMode,
     BotSession,
     BotSessionStatus,
@@ -86,9 +85,7 @@ def _seed_full_meeting(
     now = datetime.now(UTC).replace(microsecond=0)
     account = GoogleAccount(
         email=f"u-{external_id}@example.com",
-        role=AccountRole.USER,
         refresh_token_encrypted="x",
-        is_default_user=False,
     )
     sess.add(account)
     sess.flush()

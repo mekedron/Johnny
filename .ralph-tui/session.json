@@ -3,10 +3,10 @@
   "sessionId": "92aa43ca-591e-4b12-ab32-62131855e44d",
   "status": "running",
   "startedAt": "2026-06-07T00:08:27.194Z",
-  "updatedAt": "2026-06-07T10:11:04.638Z",
-  "currentIteration": 16,
+  "updatedAt": "2026-06-07T10:27:52.872Z",
+  "currentIteration": 17,
   "maxIterations": 0,
-  "tasksCompleted": 16,
+  "tasksCompleted": 17,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -272,8 +272,8 @@
       {
         "id": "Johnny-uga",
         "title": "ElevenLabs e2e plan uses library voice incompatible with free tier",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-ckz.14",
@@ -509,6 +509,16 @@
       "durationMs": 1479907,
       "startedAt": "2026-06-07T09:33:35.685Z",
       "endedAt": "2026-06-07T09:58:15.592Z"
+    },
+    {
+      "iteration": 17,
+      "status": "completed",
+      "taskId": "Johnny-uga",
+      "taskTitle": "ElevenLabs e2e plan uses library voice incompatible with free tier",
+      "taskCompleted": true,
+      "durationMs": 751870,
+      "startedAt": "2026-06-07T09:58:31.826Z",
+      "endedAt": "2026-06-07T10:11:03.696Z"
     }
   ],
   "skippedTaskIds": [],
