@@ -35,6 +35,17 @@ All chrome-devtools MCP outputs (screenshots, snapshots, console dumps, network 
 
 The legacy `.validation-*-artifacts/` convention from earlier sessions is deprecated. Existing dirs were untracked from git and the pattern is gitignored — keep all new captures under `.validation/<task-id>/` only.
 
+### Never upload screenshots without an explicit request
+
+Capturing screenshots locally for validation is REQUIRED. **Uploading them is NOT.** Default: keep screenshots inside the gitignored `.validation/<task-id>/` tree and nowhere else. "Upload" here means any of: `git add` into a tracked path, attaching to a PR description / comment, pasting into Slack / email / external service, copying into `docs/`, `README.md`, `frontend/static/`, or any path that is checked in.
+
+- Do NOT commit screenshots to tracked paths. No new `docs/screenshots/`, no PR-attached PNGs, no README hero images — unless the user explicitly asked for that specific upload in this conversation.
+- Do NOT attach screenshots to GitHub PRs / issues / comments. Reference the local `.validation/<task-id>/NN-*.png` path for the reviewer instead.
+- Do NOT include screenshots in artifacts you generate for the user (chat replies, summaries) when they did not ask for one.
+- The user must say it: "commit this screenshot", "add this to the docs", "attach it to the PR", "use this as the hero image" — only then is uploading allowed, and only for the exact file(s) they pointed at.
+
+If you think an upload would help, ASK first. Default to the local-path note.
+
 ---
 
 ## Top rule: Docker is the only runtime — never run services on the host
