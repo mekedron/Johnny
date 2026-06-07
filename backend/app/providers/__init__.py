@@ -48,6 +48,8 @@ from app.providers.elevenlabs_tts import ElevenLabsTTS
 from app.providers.elevenlabs_tts import register as _register_elevenlabs_tts
 from app.providers.faster_whisper_stt import FasterWhisperSTT
 from app.providers.faster_whisper_stt import register as _register_faster_whisper_stt
+from app.providers.gemini_live_s2s import GeminiLiveS2S
+from app.providers.gemini_live_s2s import register as _register_gemini_live_s2s
 from app.providers.gemini_llm import GeminiLLM
 from app.providers.gemini_llm import register as _register_gemini_llm
 from app.providers.openai_compatible_llm import OpenAICompatibleLLM
@@ -81,13 +83,13 @@ from app.providers.schema import (
     FieldType,
     ProviderSchema,
 )
-from app.providers.stub_s2s import StubS2S, StubS2SSession
-from app.providers.stub_s2s import register as _register_stub_s2s
 from app.providers.schema_validation import (
     FieldValidationError,
     split_values,
     validate_payload,
 )
+from app.providers.stub_s2s import StubS2S, StubS2SSession
+from app.providers.stub_s2s import register as _register_stub_s2s
 
 # Auto-register adapters whose imports only pull in stdlib + httpx (a
 # lightweight runtime dep already required by FastAPI / tests). Adapters
@@ -110,6 +112,7 @@ _register_deepgram_stt(replace=True)
 _register_openai_realtime_stt(replace=True)
 _register_elevenlabs_stt(replace=True)
 _register_stub_s2s(replace=True)
+_register_gemini_live_s2s(replace=True)
 
 __all__ = [
     "AnthropicLLM",
@@ -126,6 +129,7 @@ __all__ = [
     "FieldType",
     "FieldValidationError",
     "GeminiLLM",
+    "GeminiLiveS2S",
     "LLMError",
     "LLMProvider",
     "LLMResponse",
