@@ -6887,3 +6887,189 @@ async def test_feed_text_rejects_empty_input() -> None:
     # Pipeline not yet run — feed_text must report not-accepted.
     assert await pipeline.feed_text("") is False
     assert await pipeline.feed_text("   ") is False
+
+
+# --- Johnny-g2n: TTS failure surfacing + circuit breaker -------------------
+
+
+class _FailingTTS(TTSProvider):
+    """TTS that raises :class:`TTSError` for every synthesize call.
+
+    Used by the Johnny-g2n tests to drive the pipeline's response loop
+    through the new TTS-failure event-emitting + circuit-breaker path.
+    The constructor takes the failure ``category`` so a single test can
+    exercise both terminal (quota / auth) and transient (rate_limited /
+    unknown) categories.
+    """
+
+    def __init__(self, category: str = "quota_exceeded", message: str = "out of credits") -> None:
+        from app.providers import TTSError
+
+        self._category = category
+        self._message = message
+        self.calls: list[str] = []
+        # Cache the exception class so we don't reach back into app.providers
+        # for every call.
+        self._err_cls = TTSError
+
+    @property
+    def name(self) -> str:
+        return "failing-tts"
+
+    async def synthesize_stream(
+        self,
+        text: str,
+        voice_id: str | None = None,  # noqa: ARG002
+    ) -> AsyncIterator[bytes]:
+        self.calls.append(text)
+        raise self._err_cls(self._message, category=self._category)  # type: ignore[arg-type]
+        # Unreachable yield to satisfy the AsyncIterator signature.
+        yield b""  # pragma: no cover
+
+
+async def test_pipeline_emits_agent_tts_failed_on_quota_exceeded(
+    two_utterance_pcm: bytes,
+) -> None:
+    """A 401-quota error fires AgentTTSFailed and continues the session."""
+    from johnny.voice_pipeline.events import AgentTTSFailed
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    transport = _BufferedTransport(frames=frames)
+    bus = InMemoryEventBus()
+    tts = _FailingTTS(
+        category="quota_exceeded",
+        message="elevenlabs TTS HTTP 401: exceeds your quota of 10",
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hi", "again"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+                {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+            ]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["sure", "again"]),
+        tts=tts,
+        event_bus=bus,
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            session_id="sess-quota",
+        ),
+    )
+    await pipeline.run()
+
+    failures = [e for e in bus.snapshot() if isinstance(e, AgentTTSFailed)]
+    assert failures, "no AgentTTSFailed event published"
+    first = failures[0]
+    assert first.category == "quota_exceeded"
+    assert first.terminal is True
+    assert first.provider_name == "failing-tts"
+    assert "exceeds your quota" in first.message
+    assert first.session_id == "sess-quota"
+    # No audio played — failure was synchronous.
+    assert transport.played == []
+
+
+async def test_pipeline_circuit_breaker_skips_subsequent_tts(
+    two_utterance_pcm: bytes,
+) -> None:
+    """After a terminal TTS failure, the next turn skips answer LLM + TTS."""
+    from johnny.voice_pipeline.events import AgentTTSFailed
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    bus = InMemoryEventBus()
+    tts = _FailingTTS(category="auth_failed", message="HTTP 401")
+    answer = _FakeAnswerLLM(answers=["one", "two"])
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hi", "again"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+                {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+            ]
+        ),
+        answer_llm=answer,
+        tts=tts,
+        event_bus=bus,
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+    await pipeline.run()
+
+    # Only ONE TTS call (the one that tripped the breaker) — second turn
+    # is short-circuited before the answer LLM runs.
+    assert len(tts.calls) == 1
+    assert len(answer.calls) == 1
+    # One terminal failure event, marked terminal=True.
+    failures = [e for e in bus.snapshot() if isinstance(e, AgentTTSFailed)]
+    assert len(failures) == 1
+    assert failures[0].terminal is True
+    # Router decisions still fire for every turn — the activity log
+    # reflects the model's intent even when the answer was suppressed.
+    decisions = [e for e in bus.snapshot() if isinstance(e, RouterDecisionMade)]
+    assert len(decisions) == 2
+
+
+async def test_pipeline_transient_tts_failure_does_not_trip_breaker(
+    two_utterance_pcm: bytes,
+) -> None:
+    """rate_limited and unknown categories emit the event but keep retrying."""
+    from johnny.voice_pipeline.events import AgentTTSFailed
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    bus = InMemoryEventBus()
+    tts = _FailingTTS(category="rate_limited", message="429")
+    answer = _FakeAnswerLLM(answers=["one", "two"])
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hi", "again"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+                {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+            ]
+        ),
+        answer_llm=answer,
+        tts=tts,
+        event_bus=bus,
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+    )
+    await pipeline.run()
+
+    # Both turns ran answer LLM + TTS — the breaker stays open for
+    # transient categories so the next attempt is made.
+    assert len(answer.calls) == 2
+    assert len(tts.calls) == 2
+    failures = [e for e in bus.snapshot() if isinstance(e, AgentTTSFailed)]
+    assert len(failures) == 2
+    assert all(f.terminal is False for f in failures)
+    assert all(f.category == "rate_limited" for f in failures)

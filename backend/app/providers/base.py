@@ -67,8 +67,51 @@ class LLMError(ProviderError):
     """Raised when an LLM adapter fails (auth, rate limit, schema, etc.)."""
 
 
+TTSErrorCategory = Literal[
+    "quota_exceeded",
+    "auth_failed",
+    "rate_limited",
+    "unknown",
+]
+"""Why a :class:`TTSError` fired (Johnny-g2n).
+
+Lets the pipeline branch on the *kind* of failure without parsing the
+exception message:
+
+* ``quota_exceeded`` — provider rejected the call because the account
+  is out of credits / past its monthly quota. Terminal for the session:
+  retrying just burns more error responses, and the operator needs to
+  top up before any TTS will work again.
+* ``auth_failed`` — bad / revoked API key, or an expired token. Also
+  terminal for the session.
+* ``rate_limited`` — provider asked us to back off; transient, but per
+  Johnny-g2n we still want a structured event so the operator can see
+  why a turn fell silent.
+* ``unknown`` — every other failure (network blip, 5xx, decode error).
+  Not terminal; the next turn re-attempts.
+"""
+
+
 class TTSError(ProviderError):
-    """Raised when a TTS adapter fails (auth, transport, synth, etc.)."""
+    """Raised when a TTS adapter fails (auth, transport, synth, etc.).
+
+    ``category`` (Johnny-g2n) tags the failure type so the voice pipeline
+    can emit a structured ``agent_tts_failed`` event with a meaningful
+    reason for the UI and decide whether to trip a per-session circuit
+    breaker (terminal categories: ``quota_exceeded`` / ``auth_failed``).
+    Adapters that don't categorise their failures inherit
+    ``category='unknown'`` so the broad ``except TTSError`` path still
+    works.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: TTSErrorCategory = "unknown",
+    ) -> None:
+        super().__init__(message)
+        self.category: TTSErrorCategory = category
 
 
 class UnknownProviderError(ProviderError, KeyError):
@@ -375,6 +418,7 @@ __all__ = [
     "STTError",
     "STTProvider",
     "TTSError",
+    "TTSErrorCategory",
     "TTSProvider",
     "ToolCall",
     "ToolDefinition",

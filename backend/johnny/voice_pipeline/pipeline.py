@@ -30,6 +30,7 @@ from app.providers import (
     LLMResponse,
     STTProvider,
     TranscriptEvent,
+    TTSError,
     TTSProvider,
 )
 from app.providers.base import PCM_SAMPLE_RATE_HZ
@@ -47,6 +48,8 @@ from johnny.voice_pipeline.event_bus import EventBus
 from johnny.voice_pipeline.events import (
     AgentSpoke,
     AgentSuggested,
+    AgentTTSFailed,
+    AgentTTSFailedCategory,
     ApprovalPending,
     ApprovalResolved,
     PipelineTiming,
@@ -365,6 +368,20 @@ category (a buggy classifier saying ``noise`` + ``should_interrupt=true``
 is downgraded to no-interrupt rather than firing a false barge-in).
 """
 
+TERMINAL_TTS_FAILURE_CATEGORIES: frozenset[str] = frozenset(
+    {"quota_exceeded", "auth_failed"}
+)
+"""TTS failure categories that trip the per-session circuit breaker (Johnny-g2n).
+
+Quota / auth failures will not recover within a session — the operator
+has to top up credits or rotate the key. Hammering the provider on every
+subsequent turn just burns LLM tokens for an answer no one will hear.
+The circuit breaker (``_tts_tripped``) suppresses the answer + TTS
+stages and persists the decision as ``suppressed`` after the first
+terminal failure. Transient failures (``rate_limited`` / ``unknown``)
+emit the event but leave the breaker open so the next turn retries.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class PipelineConfig:
@@ -647,6 +664,15 @@ class VoicePipeline:
         # by ``_emit_timing`` so router/answer/tts rows attach to the
         # correct turn.
         self._current_response_turn_id: int = 0
+        # TTS circuit breaker (Johnny-g2n). Set to True after the first
+        # terminal TTS failure (quota / auth) for the session; once
+        # tripped, ``_respond_to_transcript_inner`` short-circuits the
+        # answer + TTS stages and persists the decision as suppressed.
+        # The router still runs (cheap, observability for the operator)
+        # but no LLM tokens are spent generating an answer the user
+        # would never hear. Resets per session, not per pipeline
+        # instance — a new session re-instantiates the pipeline.
+        self._tts_tripped: bool = False
 
     # ------------------------------------------------------------------
     # Public lifecycle
@@ -689,6 +715,36 @@ class VoicePipeline:
                     return
                 try:
                     await self._respond_to_transcript(transcript)
+                except TTSError as exc:
+                    # Johnny-g2n: surface TTS failures as a structured
+                    # event so the operator sees "ElevenLabs out of
+                    # credits" instead of silence. Terminal categories
+                    # (quota / auth) trip the per-session circuit
+                    # breaker so the next turn does not burn LLM tokens
+                    # generating an answer no one will hear. Transient
+                    # failures (rate_limit, network) still emit the
+                    # event but the breaker stays open for the next
+                    # turn. Persist what we know: the response loop is
+                    # always responsible for the audit row when a turn
+                    # crashes inside it.
+                    category = _resolve_tts_failure_category(exc)
+                    terminal = category in TERMINAL_TTS_FAILURE_CATEGORIES
+                    if terminal:
+                        self._tts_tripped = True
+                    logger.warning(
+                        "TTS stage failed for session=%s provider=%s "
+                        "category=%s terminal=%s: %s",
+                        self.config.session_id,
+                        _provider_name(self.tts),
+                        category,
+                        terminal,
+                        exc,
+                    )
+                    await self._emit_tts_failed(
+                        category=category,
+                        message=str(exc),
+                        terminal=terminal,
+                    )
                 except Exception:
                     # An LLM / TTS failure must never take down the
                     # transcription loop — gaps in transcript_chunks
@@ -1447,6 +1503,20 @@ class VoicePipeline:
         await self.event_bus.publish(decision_event)
         self._last_decision = decision_event
 
+        # TTS circuit breaker (Johnny-g2n): once a terminal failure has
+        # fired for the session (quota exhausted, key revoked), skip
+        # the answer stage and persist the decision as suppressed. The
+        # router still ran above so the activity log reflects the
+        # model's intent; we just don't burn answer-LLM tokens for an
+        # answer the user could not hear anyway.
+        if self._tts_tripped and decision.should_speak:
+            logger.info(
+                "TTS breaker tripped — suppressing answer for session=%s",
+                self.config.session_id,
+            )
+            await self._persist_decision(decision_event, "suppressed")
+            return
+
         if not decision.should_speak:
             await self._persist_decision(decision_event, "suppressed")
             return
@@ -2175,6 +2245,39 @@ class VoicePipeline:
                 exc_info=True,
             )
 
+    async def _emit_tts_failed(
+        self,
+        *,
+        category: AgentTTSFailedCategory,
+        message: str,
+        terminal: bool,
+    ) -> None:
+        """Publish an :class:`AgentTTSFailed` event (Johnny-g2n).
+
+        Mirrors :meth:`_emit_timing` in being defensive: a failing event
+        bus must not propagate back into the response loop — this method
+        is invoked from the loop's exception handler, where re-raising
+        would mask the original TTS failure with an event-bus error.
+        """
+        event = AgentTTSFailed(
+            provider_name=_provider_name(self.tts),
+            category=category,
+            message=message,
+            terminal=terminal,
+            timestamp_ms=self._now_ms(),
+            session_id=self.config.session_id,
+        )
+        try:
+            await self.event_bus.publish(event)
+        except Exception:  # noqa: BLE001 — observability; never re-raise
+            logger.exception(
+                "failed to publish agent_tts_failed for session=%s "
+                "provider=%s category=%s",
+                self.config.session_id,
+                event.provider_name,
+                category,
+            )
+
     def _is_rate_limited(self) -> bool:
         """Return True when the per-session utterance cap is exceeded.
 
@@ -2522,6 +2625,23 @@ class VoicePipeline:
 
 async def _single_chunk(chunk: bytes) -> AsyncIterator[bytes]:
     yield chunk
+
+
+def _resolve_tts_failure_category(exc: TTSError) -> AgentTTSFailedCategory:
+    """Read the failure category off a :class:`TTSError` (Johnny-g2n).
+
+    Older adapters that pre-date the categorised constructor inherit
+    ``category='unknown'`` (the default), so this helper is just a
+    typed access — the validation lives in the constructor.
+    """
+    category: Any = getattr(exc, "category", None)
+    if category == "quota_exceeded":
+        return "quota_exceeded"
+    if category == "auth_failed":
+        return "auth_failed"
+    if category == "rate_limited":
+        return "rate_limited"
+    return "unknown"
 
 
 def _provider_name(provider: Any) -> str | None:

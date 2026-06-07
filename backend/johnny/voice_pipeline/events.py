@@ -21,10 +21,27 @@ TranscriptFilteredEventType = Literal["transcript_filtered"]
 RouterEventType = Literal["router_decision_made"]
 AgentEventType = Literal["agent_spoke"]
 AgentSuggestedEventType = Literal["agent_suggested"]
+AgentTTSFailedEventType = Literal["agent_tts_failed"]
 SessionStatusEventType = Literal["session_status_changed"]
 ApprovalPendingEventType = Literal["approval_pending"]
 ApprovalResolvedEventType = Literal["approval_resolved"]
 PipelineTimingEventType = Literal["pipeline_timing"]
+
+AgentTTSFailedCategory = Literal[
+    "quota_exceeded",
+    "auth_failed",
+    "rate_limited",
+    "unknown",
+]
+"""Why the TTS stage failed for a turn (Johnny-g2n).
+
+Mirrors :data:`app.providers.base.TTSErrorCategory` but redeclared here
+so the meet-worker / voice-pipeline package does not have to import the
+``app.providers.base`` Literal at runtime (the pipeline module is
+imported from contexts where ``app`` isn't on sys.path yet during unit
+tests). Kept in lock-step manually — when adding a new category to
+:data:`TTSErrorCategory`, mirror it here too.
+"""
 
 PipelineTimingStage = Literal[
     "stt",
@@ -190,6 +207,48 @@ class AgentSuggested:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentTTSFailed:
+    """TTS synthesis failed for a turn the router approved (Johnny-g2n).
+
+    Emitted from :meth:`VoicePipeline._respond_loop` when the TTS stage
+    raises :class:`TTSError` (e.g. ElevenLabs returns 401 with "exceeds
+    your quota"). Without this event the session continues silently —
+    the user sees nothing on screen and just hears no audio, which made
+    quota / auth failures invisible to the operator.
+
+    Fields:
+
+    * ``provider_name`` — canonical provider id (``elevenlabs`` /
+      ``openai`` / ``cartesia`` / ``piper``). Lets the UI render
+      "ElevenLabs: out of credits" without joining to a separate row.
+    * ``category`` — :data:`AgentTTSFailedCategory`. Terminal categories
+      (``quota_exceeded`` / ``auth_failed``) trip the pipeline's circuit
+      breaker so subsequent turns suppress the answer + TTS stages
+      until the operator fixes the provider configuration. Transient
+      categories (``rate_limited`` / ``unknown``) emit the event but
+      do NOT trip the breaker — the next turn re-attempts.
+    * ``message`` — the raw exception message (e.g. "elevenlabs TTS
+      HTTP 401: ... exceeds your quota of 10 ..."). Kept verbatim so
+      operator-facing copy can quote the provider's own wording rather
+      than hand-translating every variant.
+    * ``terminal`` — whether the pipeline will skip TTS for the rest
+      of the session. ``True`` for quota / auth failures; ``False`` for
+      transient ones. Lets the UI render different copy ("TTS is down
+      for the rest of this session — top up credits and restart" vs
+      "ElevenLabs rate-limited, retrying next turn") without having to
+      know the category-to-terminal mapping itself.
+    """
+
+    provider_name: str | None
+    category: AgentTTSFailedCategory
+    message: str
+    timestamp_ms: int
+    terminal: bool = False
+    session_id: str | None = None
+    type: AgentTTSFailedEventType = "agent_tts_failed"
+
+
+@dataclass(frozen=True, slots=True)
 class SessionStatusChanged:
     """The bot session moved to a new lifecycle status.
 
@@ -296,6 +355,7 @@ PipelineEvent = (
     | RouterDecisionMade
     | AgentSpoke
     | AgentSuggested
+    | AgentTTSFailed
     | SessionStatusChanged
     | ApprovalPending
     | ApprovalResolved
@@ -317,6 +377,8 @@ def event_to_dict(event: PipelineEvent) -> dict[str, Any]:
 __all__ = [
     "AgentSpoke",
     "AgentSuggested",
+    "AgentTTSFailed",
+    "AgentTTSFailedCategory",
     "ApprovalPending",
     "ApprovalResolution",
     "ApprovalResolved",

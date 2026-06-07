@@ -24,6 +24,7 @@ from app.providers.base import (
     ProviderConfig,
     ProviderKind,
     TTSError,
+    TTSErrorCategory,
     TTSProvider,
     get_registry,
 )
@@ -309,14 +310,28 @@ class ElevenLabsTTS(TTSProvider):
         except httpx.HTTPError as exc:
             if isinstance(exc, TTSError):
                 raise
-            raise TTSError(f"elevenlabs TTS request failed: {exc}") from exc
+            raise TTSError(
+                f"elevenlabs TTS request failed: {exc}",
+                category="unknown",
+            ) from exc
 
     async def close(self) -> None:
         with contextlib.suppress(Exception):
             await self._client.aclose()
 
     async def _raise_for_status(self, response: httpx.Response) -> None:
-        """Translate non-2xx responses into :class:`TTSError`."""
+        """Translate non-2xx responses into :class:`TTSError`.
+
+        Categorises HTTP failures (Johnny-g2n) so the pipeline can branch
+        on the failure type rather than parsing the message:
+
+        * ``401`` + ``quota`` in the detail (ElevenLabs' "exceeds your
+          quota of N, M credits required" shape) → ``quota_exceeded``.
+        * Any other ``401`` → ``auth_failed`` (bad / revoked key).
+        * ``402`` / ``403`` → ``quota_exceeded`` (paywall / billing).
+        * ``429`` → ``rate_limited``.
+        * Everything else → ``unknown``.
+        """
         if response.is_success:
             return
         try:
@@ -338,10 +353,32 @@ class ElevenLabsTTS(TTSProvider):
             if not detail:
                 with contextlib.suppress(UnicodeDecodeError):
                     detail = body_bytes.decode("utf-8")[:200]
+        category = _categorise_http_failure(response.status_code, detail)
         raise TTSError(
             f"elevenlabs TTS HTTP {response.status_code}"
-            + (f": {detail}" if detail else "")
+            + (f": {detail}" if detail else ""),
+            category=category,
         )
+
+
+def _categorise_http_failure(status_code: int, detail: str) -> TTSErrorCategory:
+    """Map an ElevenLabs HTTP failure to a :data:`TTSErrorCategory`.
+
+    Quota / billing errors land at 401 with a "quota" substring in the
+    ``detail`` payload ("exceeds your quota of N, M credits required"),
+    or at 402/403 when the account is paywalled. Auth failures (bad
+    key, revoked key) land at 401 without a quota mention.
+    """
+    detail_lc = (detail or "").lower()
+    if status_code == 401:
+        if "quota" in detail_lc or "credits" in detail_lc:
+            return "quota_exceeded"
+        return "auth_failed"
+    if status_code in (402, 403):
+        return "quota_exceeded"
+    if status_code == 429:
+        return "rate_limited"
+    return "unknown"
 
 
 def register(*, replace: bool = False) -> None:

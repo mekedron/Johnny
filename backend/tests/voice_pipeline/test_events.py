@@ -9,6 +9,7 @@ import pytest
 from johnny.voice_pipeline.events import (
     AgentSpoke,
     AgentSuggested,
+    AgentTTSFailed,
     ApprovalPending,
     ApprovalResolved,
     RouterDecisionMade,
@@ -375,6 +376,91 @@ def test_event_to_dict_transcript_filtered() -> None:
         "session_id": "sess-1",
         "type": "transcript_filtered",
     }
+
+
+# --- AgentTTSFailed (Johnny-g2n) ------------------------------------------
+
+
+def test_agent_tts_failed_defaults() -> None:
+    ev = AgentTTSFailed(
+        provider_name="elevenlabs",
+        category="quota_exceeded",
+        message="elevenlabs TTS HTTP 401: exceeds your quota",
+        timestamp_ms=42,
+    )
+    assert ev.provider_name == "elevenlabs"
+    assert ev.category == "quota_exceeded"
+    assert ev.terminal is False
+    assert ev.session_id is None
+    assert ev.type == "agent_tts_failed"
+
+
+def test_agent_tts_failed_terminal_full() -> None:
+    ev = AgentTTSFailed(
+        provider_name="elevenlabs",
+        category="quota_exceeded",
+        message="exceeds your quota of 10, 25 credits required",
+        timestamp_ms=5_000,
+        terminal=True,
+        session_id="sess-12",
+    )
+    assert ev.terminal is True
+    assert ev.session_id == "sess-12"
+
+
+def test_agent_tts_failed_is_frozen() -> None:
+    ev = AgentTTSFailed(
+        provider_name=None,
+        category="unknown",
+        message="x",
+        timestamp_ms=0,
+    )
+    with pytest.raises(FrozenInstanceError):
+        ev.category = "auth_failed"  # type: ignore[misc]
+
+
+def test_event_to_dict_agent_tts_failed() -> None:
+    ev = AgentTTSFailed(
+        provider_name="elevenlabs",
+        category="auth_failed",
+        message="elevenlabs TTS HTTP 401: invalid_api_key",
+        timestamp_ms=1_234,
+        terminal=True,
+        session_id="sess-7",
+    )
+    d = event_to_dict(ev)
+    assert d == {
+        "provider_name": "elevenlabs",
+        "category": "auth_failed",
+        "message": "elevenlabs TTS HTTP 401: invalid_api_key",
+        "terminal": True,
+        "timestamp_ms": 1_234,
+        "session_id": "sess-7",
+        "type": "agent_tts_failed",
+    }
+
+
+def test_agent_tts_failed_category_supports_all_documented_values() -> None:
+    """Constructor accepts every documented category — pins the Literal contract."""
+    from typing import get_args
+
+    from johnny.voice_pipeline.events import AgentTTSFailedCategory
+
+    categories = get_args(AgentTTSFailedCategory)
+    assert set(categories) == {
+        "quota_exceeded",
+        "auth_failed",
+        "rate_limited",
+        "unknown",
+    }
+    for cat in categories:
+        ev = AgentTTSFailed(
+            provider_name="x",
+            category=cat,  # type: ignore[arg-type]
+            message="x",
+            timestamp_ms=0,
+        )
+        assert ev.category == cat
 
 
 def test_transcript_filtered_reason_supports_all_documented_values() -> None:

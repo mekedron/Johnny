@@ -358,6 +358,36 @@ def test_unknown_provider_error_carries_kind_and_name() -> None:
     assert "stt:missing" in str(err)
 
 
+def test_tts_error_defaults_to_unknown_category() -> None:
+    """Pre-Johnny-g2n callers that don't pass category still construct cleanly."""
+    err = TTSError("something went wrong")
+    assert err.category == "unknown"
+    assert str(err) == "something went wrong"
+
+
+def test_tts_error_carries_explicit_category() -> None:
+    err = TTSError("out of credits", category="quota_exceeded")
+    assert err.category == "quota_exceeded"
+
+
+def test_tts_error_category_literal_contract() -> None:
+    """Every documented category constructs without TypeError."""
+    from typing import get_args
+
+    from app.providers.base import TTSErrorCategory
+
+    categories = get_args(TTSErrorCategory)
+    assert set(categories) == {
+        "quota_exceeded",
+        "auth_failed",
+        "rate_limited",
+        "unknown",
+    }
+    for cat in categories:
+        err = TTSError("x", category=cat)
+        assert err.category == cat
+
+
 # --- Registry --------------------------------------------------------------
 
 

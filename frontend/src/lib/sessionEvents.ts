@@ -36,6 +36,7 @@ export type SessionEventType =
 	| 'approval_resolved'
 	| 'agent_spoke'
 	| 'agent_suggested'
+	| 'agent_tts_failed'
 	| 'session_status_change';
 
 export type GlobalEventType = 'session_status_change' | 'calendar_event_changed';
@@ -109,6 +110,27 @@ export interface AgentSuggestedEvent extends BaseEnvelope {
 	session_id?: string | null;
 }
 
+/**
+ * TTS synthesis failed for a turn the router approved (Johnny-g2n).
+ *
+ * Lets the playground / session view surface "ElevenLabs out of
+ * credits" or "OpenAI TTS auth failed" instead of just silence. The
+ * `terminal` flag is the pipeline's verdict on whether the failure
+ * will recover within this session — `false` for transient blips
+ * (rate-limit, network) where the next turn retries; `true` for
+ * permanent failures (quota, auth) where the circuit breaker
+ * suppresses every subsequent TTS attempt for the session.
+ */
+export interface AgentTTSFailedEvent extends BaseEnvelope {
+	type: 'agent_tts_failed';
+	provider_name: string | null;
+	category: 'quota_exceeded' | 'auth_failed' | 'rate_limited' | 'unknown';
+	message: string;
+	terminal: boolean;
+	timestamp_ms: number;
+	session_id?: string | null;
+}
+
 export interface SessionStatusChangeEvent extends BaseEnvelope {
 	type: 'session_status_change';
 	status: BotSessionStatus;
@@ -134,6 +156,7 @@ export type SessionEvent =
 	| ApprovalResolvedEvent
 	| AgentSpokeEvent
 	| AgentSuggestedEvent
+	| AgentTTSFailedEvent
 	| SessionStatusChangeEvent;
 
 export type GlobalEvent = SessionStatusChangeEvent | CalendarEventChangedEvent;

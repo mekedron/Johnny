@@ -58,6 +58,7 @@
 		subscribeToSession,
 		type AgentSpokeEvent,
 		type AgentSuggestedEvent,
+		type AgentTTSFailedEvent,
 		type RouterDecisionEvent,
 		type SessionEvent,
 		type Subscription,
@@ -157,6 +158,12 @@
 	let lastSpokenAt = $state<number>(0);
 	let subscription: Subscription | null = null;
 	let transcriptEl = $state<HTMLDivElement | null>(null);
+
+	// TTS failure surface (Johnny-g2n). Holds the most recent
+	// `agent_tts_failed` event so the playground can render an alert
+	// instead of going silent when ElevenLabs runs out of credits or
+	// the configured key is bad. Cleared on session start / stop.
+	let ttsFailure = $state<AgentTTSFailedEvent | null>(null);
 
 	const isLive = $derived(liveSession !== null);
 
@@ -332,6 +339,7 @@
 		errorMessage = null;
 		micDenied = false;
 		micUnsupported = false;
+		ttsFailure = null;
 
 		const supportsMic =
 			typeof navigator !== 'undefined' &&
@@ -523,6 +531,10 @@
 				lastSpokenAt = ts;
 				break;
 			}
+			case 'agent_tts_failed': {
+				ttsFailure = event as AgentTTSFailedEvent;
+				break;
+			}
 		}
 	}
 
@@ -582,6 +594,7 @@
 			subscription?.close();
 			subscription = null;
 			stopping = false;
+			ttsFailure = null;
 		}
 	}
 
@@ -744,6 +757,41 @@
 			<CircleAlertIcon />
 			<Alert.Title>Something went wrong</Alert.Title>
 			<Alert.Description>{errorMessage}</Alert.Description>
+		</Alert.Root>
+	{/if}
+
+	{#if ttsFailure}
+		<Alert.Root variant="destructive" data-testid="playground-tts-failure">
+			<CircleAlertIcon />
+			<Alert.Title>
+				{#if ttsFailure.category === 'quota_exceeded'}
+					TTS provider out of credits
+				{:else if ttsFailure.category === 'auth_failed'}
+					TTS provider authentication failed
+				{:else if ttsFailure.category === 'rate_limited'}
+					TTS provider rate limited
+				{:else}
+					TTS synthesis failed
+				{/if}
+				{#if ttsFailure.provider_name}
+					· {ttsFailure.provider_name}
+				{/if}
+			</Alert.Title>
+			<Alert.Description>
+				<div class="flex flex-col gap-1">
+					<p class="m-0 text-sm">{ttsFailure.message}</p>
+					{#if ttsFailure.terminal}
+						<p class="m-0 text-xs text-muted-foreground">
+							No more audio will play in this session. Top up credits / fix the key on
+							/providers, then start a new playground session.
+						</p>
+					{:else}
+						<p class="m-0 text-xs text-muted-foreground">
+							The next turn will retry automatically.
+						</p>
+					{/if}
+				</div>
+			</Alert.Description>
 		</Alert.Root>
 	{/if}
 

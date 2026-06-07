@@ -304,9 +304,108 @@ async def test_synthesize_raises_on_network_error() -> None:
         raise httpx.ConnectError("dns broken")
 
     adapter = _FakeElevenLabsTTS(_config(voice_id="vx"), handler=handler)
-    with pytest.raises(TTSError, match="request failed"):
+    with pytest.raises(TTSError, match="request failed") as exc_info:
         async for _ in adapter.synthesize_stream("hi"):
             pass
+    # Network failures are transient (Johnny-g2n) — category=unknown so
+    # the pipeline's circuit breaker does NOT trip on a blip.
+    assert exc_info.value.category == "unknown"
+
+
+# --- Johnny-g2n: failure-category tagging --------------------------------
+
+
+async def test_synthesize_categorises_401_quota_exceeded() -> None:
+    """A 401 with 'quota' in the detail must surface as quota_exceeded."""
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        body = json.dumps(
+            {
+                "detail": {
+                    "status": "quota_exceeded",
+                    "message": (
+                        "This request exceeds your quota of 10 credits. "
+                        "25 credits required."
+                    ),
+                }
+            }
+        ).encode()
+        return httpx.Response(401, content=body)
+
+    adapter = _FakeElevenLabsTTS(_config(voice_id="vx"), handler=handler)
+    with pytest.raises(TTSError, match="quota") as exc_info:
+        async for _ in adapter.synthesize_stream("hi"):
+            pass
+    assert exc_info.value.category == "quota_exceeded"
+
+
+async def test_synthesize_categorises_401_credits_exceeded() -> None:
+    """A 401 with 'credits' (no 'quota' word) still surfaces as quota_exceeded."""
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        body = json.dumps(
+            {"detail": "not enough credits remaining (5/25)"}
+        ).encode()
+        return httpx.Response(401, content=body)
+
+    adapter = _FakeElevenLabsTTS(_config(voice_id="vx"), handler=handler)
+    with pytest.raises(TTSError) as exc_info:
+        async for _ in adapter.synthesize_stream("hi"):
+            pass
+    assert exc_info.value.category == "quota_exceeded"
+
+
+async def test_synthesize_categorises_401_bad_key_as_auth_failed() -> None:
+    """A 401 without quota/credits text means the key is bad/revoked."""
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        body = json.dumps(
+            {"detail": {"status": "invalid_api_key", "message": "API key invalid"}}
+        ).encode()
+        return httpx.Response(401, content=body)
+
+    adapter = _FakeElevenLabsTTS(_config(voice_id="vx"), handler=handler)
+    with pytest.raises(TTSError) as exc_info:
+        async for _ in adapter.synthesize_stream("hi"):
+            pass
+    assert exc_info.value.category == "auth_failed"
+
+
+async def test_synthesize_categorises_403_as_quota_exceeded() -> None:
+    """A 403 (paywall / billing) maps to quota_exceeded."""
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        body = json.dumps({"detail": "subscription required"}).encode()
+        return httpx.Response(403, content=body)
+
+    adapter = _FakeElevenLabsTTS(_config(voice_id="vx"), handler=handler)
+    with pytest.raises(TTSError) as exc_info:
+        async for _ in adapter.synthesize_stream("hi"):
+            pass
+    assert exc_info.value.category == "quota_exceeded"
+
+
+async def test_synthesize_categorises_429_as_rate_limited() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        body = json.dumps({"detail": "rate limited"}).encode()
+        return httpx.Response(429, content=body)
+
+    adapter = _FakeElevenLabsTTS(_config(voice_id="vx"), handler=handler)
+    with pytest.raises(TTSError) as exc_info:
+        async for _ in adapter.synthesize_stream("hi"):
+            pass
+    assert exc_info.value.category == "rate_limited"
+
+
+async def test_synthesize_categorises_500_as_unknown() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, content=b"plaintext error")
+
+    adapter = _FakeElevenLabsTTS(_config(voice_id="vx"), handler=handler)
+    with pytest.raises(TTSError) as exc_info:
+        async for _ in adapter.synthesize_stream("hi"):
+            pass
+    assert exc_info.value.category == "unknown"
 
 
 async def test_synthesize_cleans_up_on_consumer_break() -> None:

@@ -37,6 +37,8 @@ from johnny.voice_pipeline.event_bus import (
 from johnny.voice_pipeline.events import (
     AgentSpoke,
     AgentSuggested,
+    AgentTTSFailed,
+    AgentTTSFailedCategory,
     ApprovalPending,
     ApprovalResolution,
     ApprovalResolved,
@@ -154,6 +156,8 @@ __all__ = [
     "BOT_SPEAKER_LABEL",
     "AgentSpoke",
     "AgentSuggested",
+    "AgentTTSFailed",
+    "AgentTTSFailedCategory",
     "ApprovalGate",
     "ApprovalOutcome",
     "ApprovalPending",
