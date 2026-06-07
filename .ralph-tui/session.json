@@ -3,10 +3,10 @@
   "sessionId": "92aa43ca-591e-4b12-ab32-62131855e44d",
   "status": "running",
   "startedAt": "2026-06-07T00:08:27.194Z",
-  "updatedAt": "2026-06-07T00:25:01.608Z",
-  "currentIteration": 1,
+  "updatedAt": "2026-06-07T00:37:53.014Z",
+  "currentIteration": 2,
   "maxIterations": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 2,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -110,8 +110,8 @@
       {
         "id": "Johnny-klh",
         "title": "Playground transcripts label every speaker=null row as 'You' — including STT hallucinations and any non-user rows",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-31g",
@@ -359,6 +359,16 @@
       "durationMs": 538355,
       "startedAt": "2026-06-07T00:09:54.427Z",
       "endedAt": "2026-06-07T00:18:52.782Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "Johnny-klh",
+      "taskTitle": "Playground transcripts label every speaker=null row as 'You' — including STT hallucinations and any non-user rows",
+      "taskCompleted": true,
+      "durationMs": 356562,
+      "startedAt": "2026-06-07T00:19:04.237Z",
+      "endedAt": "2026-06-07T00:25:00.799Z"
     }
   ],
   "skippedTaskIds": [],

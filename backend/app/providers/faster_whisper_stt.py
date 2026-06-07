@@ -66,6 +66,38 @@ DEFAULT_DEVICE = "cpu"
 DEFAULT_COMPUTE_TYPE = "int8"
 DEFAULT_BEAM_SIZE = 5
 DEFAULT_VAD_FILTER = False
+DEFAULT_NO_SPEECH_THRESHOLD = 0.6
+"""Drop segments whose ``no_speech_prob`` exceeds this (Johnny-31g).
+
+Whisper is trained to always emit *something* for each chunk it sees;
+when the input is pure silence the model fabricates a plausible-sounding
+short string ("Does Olam A.P.I.", "Thanks for watching", random Welsh
+nonsense, runs of dots, etc.) and tags it with a high ``no_speech_prob``
+indicating it doesn't actually believe the audio was speech. The
+adapter reads that signal directly and drops the segment before it
+becomes a :class:`TranscriptEvent`, so the pipeline's text-only noise
+gate (Johnny-ckz.14) is no longer the only line of defence — the gate
+catches a curated stoplist of known patterns, but ``no_speech_prob``
+catches novel hallucinations the stoplist hasn't seen yet.
+
+``0.6`` matches faster-whisper's own internal default for the same
+field; raising it loosens the gate (more hallucinations pass through);
+lowering it tightens it (some quiet but real speech may be dropped).
+Set to ``1.0`` to disable the filter and rely solely on the model's
+internal silence detection.
+"""
+DEFAULT_CONDITION_ON_PREVIOUS_TEXT = False
+"""Whether each chunk's decoding is conditioned on the previous chunk's text.
+
+Default is ``False`` (Johnny-31g): the upstream library defaults this
+to ``True`` for transcription continuity across long-form audio, but
+that's exactly what lets a single silence hallucination ("Thanks for
+watching") seed *more* hallucinations on subsequent silent chunks
+within the same utterance. The voice pipeline already feeds the
+adapter VAD-bounded single-utterance buffers, so cross-utterance
+continuity is not relevant — disabling conditioning breaks the
+hallucination drift loop with no quality cost.
+"""
 ALLOWED_MODEL_SIZES = frozenset(
     {
         "tiny",
@@ -100,6 +132,8 @@ class _WhisperModel(Protocol):
         language: str | None = ...,
         beam_size: int = ...,
         vad_filter: bool = ...,
+        no_speech_threshold: float = ...,
+        condition_on_previous_text: bool = ...,
         **kwargs: Any,
     ) -> tuple[Any, _TranscriptionInfo]: ...
 
@@ -124,6 +158,13 @@ class FasterWhisperSTT(STTProvider):
     * ``vad_filter`` — whether to use Whisper's built-in VAD filter
       (default ``False`` — the pipeline already segments by VAD before
       handing audio to STT).
+    * ``no_speech_threshold`` — drop segments whose ``no_speech_prob``
+      exceeds this (default ``0.6``). The primary defence against
+      silence hallucinations (Johnny-31g); set to ``1.0`` to disable.
+    * ``condition_on_previous_text`` — whether each chunk is decoded
+      conditioned on the previous chunk's text (default ``False``).
+      Disabling breaks the hallucination drift loop on long silent
+      segments without affecting accuracy on VAD-cut single utterances.
     """
 
     def __init__(self, config: ProviderConfig) -> None:
@@ -155,6 +196,22 @@ class FasterWhisperSTT(STTProvider):
             str(language) if language not in (None, "") else None
         )
         self._vad_filter = bool(opts.get("vad_filter", DEFAULT_VAD_FILTER))
+        no_speech_opt = opts.get("no_speech_threshold")
+        no_speech_threshold = (
+            float(no_speech_opt)
+            if no_speech_opt is not None
+            else DEFAULT_NO_SPEECH_THRESHOLD
+        )
+        if not 0.0 <= no_speech_threshold <= 1.0:
+            raise ValueError(
+                f"no_speech_threshold must be in [0, 1]; got {no_speech_threshold}"
+            )
+        self._no_speech_threshold = no_speech_threshold
+        self._condition_on_previous_text = bool(
+            opts.get(
+                "condition_on_previous_text", DEFAULT_CONDITION_ON_PREVIOUS_TEXT
+            )
+        )
         self._model: _WhisperModel | None = None
         self._model_lock = asyncio.Lock()
 
@@ -237,6 +294,30 @@ class FasterWhisperSTT(STTProvider):
                     help_text="Drop non-speech segments before transcription.",
                     group=FieldGroup.ADVANCED,
                 ),
+                FieldDef(
+                    name="no_speech_threshold",
+                    label="No-speech threshold",
+                    type=FieldType.NUMBER,
+                    default=DEFAULT_NO_SPEECH_THRESHOLD,
+                    help_text=(
+                        "Drop segments whose probability of being silence "
+                        "exceeds this. Lower = stricter (fewer "
+                        "hallucinations, slight risk of dropping quiet "
+                        "real speech)."
+                    ),
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="condition_on_previous_text",
+                    label="Condition on previous text",
+                    type=FieldType.CHECKBOX,
+                    default=DEFAULT_CONDITION_ON_PREVIOUS_TEXT,
+                    help_text=(
+                        "Carry context across chunks. Disabled by default "
+                        "to break Whisper hallucination drift on silence."
+                    ),
+                    group=FieldGroup.ADVANCED,
+                ),
             ),
         )
 
@@ -267,6 +348,14 @@ class FasterWhisperSTT(STTProvider):
     @property
     def vad_filter(self) -> bool:
         return self._vad_filter
+
+    @property
+    def no_speech_threshold(self) -> float:
+        return self._no_speech_threshold
+
+    @property
+    def condition_on_previous_text(self) -> bool:
+        return self._condition_on_previous_text
 
     async def transcribe_stream(
         self,
@@ -308,6 +397,30 @@ class FasterWhisperSTT(STTProvider):
             text = getattr(segment, "text", "") or ""
             text = text.strip()
             if not text:
+                continue
+            # Johnny-31g: drop silence-hallucinated segments before they
+            # become TranscriptEvents. Whisper sets ``no_speech_prob``
+            # high (>0.6 by default) when it thinks the audio is silence
+            # but emits a fabricated string anyway ("Does Olam A.P.I.",
+            # "Thanks for watching", runs of dots, random other-language
+            # nonsense). Filtering here keeps the downstream noise gate
+            # (Johnny-ckz.14) focused on the curated stoplist instead of
+            # chasing every novel hallucination, and stops the row from
+            # ever reaching the transcripts table.
+            no_speech_prob = _coerce_no_speech_prob(
+                getattr(segment, "no_speech_prob", None)
+            )
+            if (
+                no_speech_prob is not None
+                and no_speech_prob > self._no_speech_threshold
+            ):
+                logger.info(
+                    "faster-whisper dropped silence-hallucinated segment "
+                    "(no_speech_prob=%.3f > %.3f) text=%r",
+                    no_speech_prob,
+                    self._no_speech_threshold,
+                    text,
+                )
                 continue
             start_ms = int(getattr(segment, "start", 0.0) * 1000)
             confidence = _logprob_to_confidence(
@@ -385,6 +498,8 @@ class FasterWhisperSTT(STTProvider):
             language=self._language,
             beam_size=self._beam_size,
             vad_filter=self._vad_filter,
+            no_speech_threshold=self._no_speech_threshold,
+            condition_on_previous_text=self._condition_on_previous_text,
         )
 
 
@@ -405,6 +520,26 @@ def _pcm16_bytes_to_float32(pcm: bytes) -> Any:
         return array.array("f", [s / 32768.0 for s in samples])
     arr = np.asarray(samples, dtype=np.float32)
     return arr / 32768.0
+
+
+def _coerce_no_speech_prob(value: Any) -> float | None:
+    """Best-effort parse of a Whisper segment's ``no_speech_prob`` field.
+
+    Returns ``None`` when the upstream field is missing or unparseable,
+    so the caller defaults to keeping the segment (fail-open). When the
+    field is parseable but out of the [0, 1] range we still surface it
+    as-is — the silence filter uses ``>`` comparison so any value above
+    1.0 (shouldn't happen, but defensive) still drops the segment.
+    """
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(parsed) or math.isinf(parsed):
+        return None
+    return parsed
 
 
 def _logprob_to_confidence(logprob: float | None) -> float | None:
@@ -450,9 +585,11 @@ __all__ = [
     "ALLOWED_MODEL_SIZES",
     "DEFAULT_BEAM_SIZE",
     "DEFAULT_COMPUTE_TYPE",
+    "DEFAULT_CONDITION_ON_PREVIOUS_TEXT",
     "DEFAULT_DEVICE",
     "DEFAULT_MODEL_DIR",
     "DEFAULT_MODEL_SIZE",
+    "DEFAULT_NO_SPEECH_THRESHOLD",
     "DEFAULT_VAD_FILTER",
     "FasterWhisperSTT",
     "PROVIDER_NAME",

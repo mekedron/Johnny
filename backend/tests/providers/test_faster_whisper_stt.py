@@ -27,9 +27,11 @@ from app.providers.faster_whisper_stt import (
     ALLOWED_MODEL_SIZES,
     DEFAULT_BEAM_SIZE,
     DEFAULT_COMPUTE_TYPE,
+    DEFAULT_CONDITION_ON_PREVIOUS_TEXT,
     DEFAULT_DEVICE,
     DEFAULT_MODEL_DIR,
     DEFAULT_MODEL_SIZE,
+    DEFAULT_NO_SPEECH_THRESHOLD,
     PROVIDER_NAME,
     FasterWhisperSTT,
     _logprob_to_confidence,
@@ -72,11 +74,13 @@ class _FakeSegment:
         start: float = 0.0,
         end: float = 1.0,
         avg_logprob: float | None = -0.2,
+        no_speech_prob: float | None = 0.05,
     ) -> None:
         self.text = text
         self.start = start
         self.end = end
         self.avg_logprob = avg_logprob
+        self.no_speech_prob = no_speech_prob
 
 
 class _FakeInfo:
@@ -101,6 +105,8 @@ class _FakeModel:
         language: str | None = None,
         beam_size: int = 5,
         vad_filter: bool = False,
+        no_speech_threshold: float = 0.6,
+        condition_on_previous_text: bool = True,
         **kwargs: Any,
     ) -> tuple[Any, _FakeInfo]:
         self.calls.append(
@@ -109,6 +115,8 @@ class _FakeModel:
                 "language": language,
                 "beam_size": beam_size,
                 "vad_filter": vad_filter,
+                "no_speech_threshold": no_speech_threshold,
+                "condition_on_previous_text": condition_on_previous_text,
                 "kwargs": kwargs,
             }
         )
@@ -160,6 +168,35 @@ def test_init_defaults_when_options_empty(monkeypatch: pytest.MonkeyPatch) -> No
     assert adapter.beam_size == DEFAULT_BEAM_SIZE
     assert adapter.language is None
     assert adapter.vad_filter is False
+    assert adapter.no_speech_threshold == DEFAULT_NO_SPEECH_THRESHOLD
+    assert adapter.condition_on_previous_text is DEFAULT_CONDITION_ON_PREVIOUS_TEXT
+
+
+def test_init_default_no_speech_threshold_is_06_for_silence_filtering() -> None:
+    """The Whisper-native silence signal is on by default at ``0.6`` (Johnny-31g).
+
+    Quiet-mic STT hallucinations ("Does Olam A.P.I.", "Thanks for
+    watching", random other-language nonsense) are suppressed by reading
+    Whisper's own ``no_speech_prob`` and dropping segments above this
+    threshold. Pinning the default keeps the gate active even when an
+    operator forgets to set the option explicitly.
+    """
+    assert DEFAULT_NO_SPEECH_THRESHOLD == 0.6
+    assert FasterWhisperSTT(_config()).no_speech_threshold == 0.6
+
+
+def test_init_default_condition_on_previous_text_is_false() -> None:
+    """Hallucination drift across chunks is suppressed by default (Johnny-31g).
+
+    Whisper's upstream default is ``True`` — useful for long-form
+    transcription continuity, but it lets a single silence-hallucinated
+    segment ("Thanks for watching") seed *more* hallucinations on the
+    next silent chunk. The adapter feeds the model VAD-cut single
+    utterances, so cross-chunk continuity has no value and the default
+    is flipped to ``False``.
+    """
+    assert DEFAULT_CONDITION_ON_PREVIOUS_TEXT is False
+    assert FasterWhisperSTT(_config()).condition_on_previous_text is False
 
 
 def test_init_env_var_supplies_model_dir(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -221,6 +258,22 @@ def test_init_propagates_device_and_compute_type() -> None:
     )
     assert adapter.device == "cuda"
     assert adapter.compute_type == "float16"
+
+
+def test_init_propagates_no_speech_threshold() -> None:
+    adapter = FasterWhisperSTT(_config(no_speech_threshold=0.3))
+    assert adapter.no_speech_threshold == 0.3
+
+
+def test_init_propagates_condition_on_previous_text() -> None:
+    adapter = FasterWhisperSTT(_config(condition_on_previous_text=True))
+    assert adapter.condition_on_previous_text is True
+
+
+@pytest.mark.parametrize("bad_value", [-0.1, 1.5, 2.0])
+def test_init_rejects_out_of_range_no_speech_threshold(bad_value: float) -> None:
+    with pytest.raises(ValueError, match="no_speech_threshold"):
+        FasterWhisperSTT(_config(no_speech_threshold=bad_value))
 
 
 # --- Helper functions ------------------------------------------------------
@@ -323,7 +376,13 @@ async def test_transcribe_concatenates_chunks_into_single_call() -> None:
 
 async def test_transcribe_passes_config_to_model_call() -> None:
     adapter = _FakeFasterWhisperSTT(
-        _config(language="en", beam_size=3, vad_filter=True),
+        _config(
+            language="en",
+            beam_size=3,
+            vad_filter=True,
+            no_speech_threshold=0.4,
+            condition_on_previous_text=True,
+        ),
         segments=[_FakeSegment(text="hi")],
     )
     [_ async for _ in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))]
@@ -332,6 +391,134 @@ async def test_transcribe_passes_config_to_model_call() -> None:
     assert model.calls[0]["language"] == "en"
     assert model.calls[0]["beam_size"] == 3
     assert model.calls[0]["vad_filter"] is True
+    assert model.calls[0]["no_speech_threshold"] == 0.4
+    assert model.calls[0]["condition_on_previous_text"] is True
+
+
+async def test_transcribe_passes_default_silence_args_to_model_call() -> None:
+    """Even with default config the silence-protection args are wired through.
+
+    Regression guard: a future refactor that forgets to thread the
+    defaults into ``model.transcribe()`` would silently revert the
+    Johnny-31g fix because faster-whisper's own defaults are
+    ``condition_on_previous_text=True`` (drift-friendly) and an
+    internal-only threshold check that the adapter no longer relies on.
+    """
+    adapter = _FakeFasterWhisperSTT(
+        _config(),
+        segments=[_FakeSegment(text="hi")],
+    )
+    [_ async for _ in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))]
+    model = adapter.fake_model
+    assert model is not None
+    assert model.calls[0]["no_speech_threshold"] == DEFAULT_NO_SPEECH_THRESHOLD
+    assert model.calls[0]["condition_on_previous_text"] is False
+
+
+async def test_transcribe_drops_silence_hallucinated_segments_by_default() -> None:
+    """Silence-derived hallucinations (Johnny-31g) never become TranscriptEvents.
+
+    Quiet mic produces strings like "Does Olam A.P.I." with high
+    ``no_speech_prob``. The adapter reads that signal directly and
+    drops the segment before it reaches the pipeline's noise gate or
+    the transcripts table — that's the difference between a curated
+    stoplist (catches known patterns) and the model's own confidence
+    that the audio was silence (catches *any* novel hallucination).
+    """
+    adapter = _FakeFasterWhisperSTT(
+        _config(),
+        segments=[
+            _FakeSegment(text="Does Olam A.P.I.", no_speech_prob=0.95),
+            _FakeSegment(text="real speech here", no_speech_prob=0.05),
+            _FakeSegment(
+                text="amwch ran i'n clo canwys.", no_speech_prob=0.85
+            ),
+        ],
+    )
+    events = [
+        e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))
+    ]
+    assert [e.text for e in events] == ["real speech here"]
+
+
+async def test_transcribe_drops_all_segments_for_full_silence_utterance() -> None:
+    """60 s of pure silence → zero TranscriptEvents (Johnny-31g acceptance #1).
+
+    Even when Whisper hallucinates every segment in the utterance the
+    adapter's silence filter drops them all, so the pipeline never sees
+    a finalised transcript to persist or feed to the router.
+    """
+    adapter = _FakeFasterWhisperSTT(
+        _config(),
+        segments=[
+            _FakeSegment(text=". . . . . .", no_speech_prob=0.99),
+            _FakeSegment(text=". . . .", no_speech_prob=0.99),
+            _FakeSegment(text="Does Olam A.P.I.", no_speech_prob=0.97),
+            _FakeSegment(text="Thanks for watching!", no_speech_prob=0.93),
+        ],
+    )
+    events = [
+        e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))
+    ]
+    assert events == []
+
+
+async def test_transcribe_keeps_segments_with_borderline_no_speech_prob() -> None:
+    """``no_speech_prob`` at or below the threshold passes through.
+
+    The check is strict ``>`` — a segment whose probability is *equal*
+    to the threshold is still emitted, matching the convention used by
+    other pipeline thresholds (e.g. confidence floor) so an operator
+    setting the threshold to ``0.6`` doesn't accidentally drop segments
+    Whisper rated as a coin flip.
+    """
+    adapter = _FakeFasterWhisperSTT(
+        _config(no_speech_threshold=0.6),
+        segments=[_FakeSegment(text="borderline", no_speech_prob=0.6)],
+    )
+    events = [
+        e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))
+    ]
+    assert [e.text for e in events] == ["borderline"]
+
+
+async def test_transcribe_keeps_segments_when_no_speech_prob_absent() -> None:
+    """Fail-open: segments with no ``no_speech_prob`` field still pass.
+
+    Older fake providers / mismatched library versions may not expose
+    the field; treating absence as "drop" would silently delete every
+    transcript when the library upgrade lags. Treat absence as
+    fail-open so the adapter degrades gracefully.
+    """
+    adapter = _FakeFasterWhisperSTT(
+        _config(),
+        segments=[_FakeSegment(text="kept", no_speech_prob=None)],
+    )
+    events = [
+        e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))
+    ]
+    assert [e.text for e in events] == ["kept"]
+
+
+async def test_transcribe_disables_silence_filter_when_threshold_at_one() -> None:
+    """``no_speech_threshold=1.0`` keeps every segment, matching the docstring.
+
+    Operators who want to opt out of the new behaviour (e.g. running a
+    custom Whisper fine-tune that emits high ``no_speech_prob`` for
+    legitimate quiet speech) can disable the gate by setting the
+    threshold to ``1.0``.
+    """
+    adapter = _FakeFasterWhisperSTT(
+        _config(no_speech_threshold=1.0),
+        segments=[
+            _FakeSegment(text="kept anyway", no_speech_prob=0.95),
+            _FakeSegment(text="and this", no_speech_prob=0.99),
+        ],
+    )
+    events = [
+        e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))
+    ]
+    assert [e.text for e in events] == ["kept anyway", "and this"]
 
 
 async def test_transcribe_emits_one_event_per_segment() -> None:
