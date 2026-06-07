@@ -76,6 +76,15 @@ export interface FieldDef {
 	 * offline fallback when the catalog can't be fetched.
 	 */
 	voice_catalog?: boolean;
+	/**
+	 * When true, this SELECT's value comes from a live provider catalog (the
+	 * LLM model list, Johnny-9eq), so the build-time `options` allow-list is
+	 * not authoritative. Client-side validation SKIPS the `value ∈ options`
+	 * membership check for such fields (Johnny-ckz.29) — otherwise a freshly
+	 * released model picked from the live dropdown would be rejected before the
+	 * request ever reaches the backend. `options` stays the offline fallback.
+	 */
+	dynamic_options?: boolean;
 }
 
 export interface ProviderTip {
@@ -943,7 +952,7 @@ export function validateClient(
 			}
 			continue;
 		}
-		if (field.type === 'select' && field.options) {
+		if (field.type === 'select' && field.options && !field.dynamic_options) {
 			const allowed = new Set(field.options.map((o) => o.value));
 			if (!allowed.has(String(raw))) {
 				errors[field.name] = `${field.label} must be one of: ${field.options.map((o) => o.value).join(', ')}`;

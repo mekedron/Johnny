@@ -122,6 +122,15 @@ class FieldDef:
     # with per-voice Preview buttons. The `options` tuple stays the offline
     # fallback when the catalog can't be fetched (no creds yet, network down).
     voice_catalog: bool = False
+    # When True, this SELECT's value is sourced from a live catalog fetched
+    # from the provider's own API (e.g. the LLM model list, Johnny-9eq), so a
+    # build-time `options` allow-list cannot be authoritative. The validator
+    # SKIPS the `value ∈ options` membership check for such fields — any
+    # non-empty string within a sane length cap is accepted, and a bad id
+    # surfaces as a clean upstream error on first use rather than a hardcoded
+    # schema rejection (Johnny-ckz.29). The `options` tuple stays the offline
+    # fallback the dropdown shows when the live catalog can't be fetched.
+    dynamic_options: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for the ``GET /providers/schemas`` payload."""
@@ -149,6 +158,8 @@ class FieldDef:
             payload["env_key"] = self.env_key
         if self.voice_catalog:
             payload["voice_catalog"] = True
+        if self.dynamic_options:
+            payload["dynamic_options"] = True
         return payload
 
 

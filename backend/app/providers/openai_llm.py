@@ -125,6 +125,7 @@ class OpenAILLM(OpenAICompatibleLLM):
                     label="Model",
                     type=FieldType.SELECT,
                     default=DEFAULT_MODEL,
+                    dynamic_options=True,
                     options=(
                         FieldOption(value="gpt-4o-mini", label="gpt-4o-mini (fast, cheap)"),
                         FieldOption(value="gpt-4o", label="gpt-4o"),

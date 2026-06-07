@@ -21,8 +21,11 @@ from app.providers import (
     PiperTTS,
     StubS2S,
 )
+from app.providers.base import ProviderKind
 from app.providers.schema import (
+    FieldDef,
     FieldGroup,
+    FieldOption,
     FieldType,
     ProviderSchema,
     ProviderTip,
@@ -105,12 +108,64 @@ def test_validate_payload_passes_with_required_fields() -> None:
     assert errors == []
 
 
-def test_validate_payload_rejects_unknown_select_option() -> None:
-    schema = OpenAILLM.field_schema()
-    errors = validate_payload(
-        schema, {"api_key": "sk-test", "model": "claude-totally-fake-model"}
+def _single_select_schema(*, dynamic_options: bool) -> ProviderSchema:
+    """A throwaway one-field schema with a SELECT for option-check tests."""
+    return ProviderSchema(
+        kind=ProviderKind.LLM,
+        provider_name="probe",
+        display_name="Probe",
+        summary="probe",
+        fields=(
+            FieldDef(
+                name="model",
+                label="Model",
+                type=FieldType.SELECT,
+                dynamic_options=dynamic_options,
+                options=(
+                    FieldOption(value="a", label="a"),
+                    FieldOption(value="b", label="b"),
+                ),
+                group=FieldGroup.MODEL,
+            ),
+        ),
     )
+
+
+def test_validate_payload_enforces_membership_for_static_select() -> None:
+    # dynamic_options=False keeps the build-time allow-list authoritative
+    # (e.g. Parakeet `device`): an off-list value is rejected.
+    schema = _single_select_schema(dynamic_options=False)
+    errors = validate_payload(schema, {"model": "c"})
     assert any(e.field == "model" for e in errors)
+    msg = next(e for e in errors if e.field == "model").message
+    assert "must be one of" in msg
+
+
+def test_validate_payload_skips_membership_for_dynamic_select() -> None:
+    # dynamic_options=True sources the dropdown from a live provider catalog,
+    # so a value outside the offline fallback list must still validate.
+    schema = _single_select_schema(dynamic_options=True)
+    errors = validate_payload(schema, {"model": "c"})
+    assert errors == []
+
+
+def test_validate_payload_caps_dynamic_select_length() -> None:
+    schema = _single_select_schema(dynamic_options=True)
+    errors = validate_payload(schema, {"model": "x" * 5000})
+    assert any(e.field == "model" for e in errors)
+
+
+def test_validate_payload_accepts_live_catalog_model_on_cloud_llm() -> None:
+    # The bug (Johnny-ckz.29): a model the live API advertises but that
+    # predates the hardcoded options must save without a schema rejection.
+    for adapter in (OpenAILLM, GeminiLLM, AnthropicLLM):
+        schema = adapter.field_schema()
+        errors = validate_payload(
+            schema, {"api_key": "sk-test", "model": "future-model-9.9-ultra"}
+        )
+        assert not any(e.field == "model" for e in errors), (
+            f"{adapter.__name__} rejected a live-catalog model"
+        )
 
 
 def test_validate_payload_rejects_non_numeric_for_number_field() -> None:
@@ -299,6 +354,27 @@ def test_tips_serialize_in_to_dict(adapter: type) -> None:
     assert len(payload["tips"]) == len(schema.tips)
     for raw_tip, expected in zip(payload["tips"], schema.tips, strict=True):
         assert raw_tip == {"topic": expected.topic, "body": expected.body}
+
+
+@pytest.mark.parametrize("adapter", [OpenAILLM, GeminiLLM, AnthropicLLM])
+def test_model_field_serializes_dynamic_options(adapter: type) -> None:
+    """Cloud LLM model dropdowns advertise dynamic_options so the frontend
+    sources them from the live catalog and skips client-side membership."""
+    schema = adapter.field_schema()
+    payload = schema.to_dict()
+    model_field = next(f for f in payload["fields"] if f["name"] == "model")
+    assert model_field["dynamic_options"] is True
+    # The offline fallback list survives for the dropdown when the live
+    # catalog can't be fetched.
+    assert model_field["options"]
+
+
+def test_static_select_omits_dynamic_options_in_to_dict() -> None:
+    schema = _single_select_schema(dynamic_options=False)
+    model_field = next(
+        f for f in schema.to_dict()["fields"] if f["name"] == "model"
+    )
+    assert "dynamic_options" not in model_field
 
 
 def test_provider_schema_to_dict_omits_tips_only_when_explicitly_empty() -> None:

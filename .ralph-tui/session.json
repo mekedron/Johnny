@@ -1,125 +1,452 @@
 {
   "version": 1,
-  "sessionId": "426dba43-17e8-4f93-a179-086859618e18",
+  "sessionId": "fdf153cd-1429-4f44-9048-a1fbb60a77c5",
   "status": "running",
-  "startedAt": "2026-06-07T20:27:08.873Z",
-  "updatedAt": "2026-06-07T23:02:16.640Z",
-  "currentIteration": 5,
+  "startedAt": "2026-06-07T23:21:19.573Z",
+  "updatedAt": "2026-06-07T23:36:10.373Z",
+  "currentIteration": 0,
   "maxIterations": 0,
-  "tasksCompleted": 5,
+  "tasksCompleted": 0,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
   "trackerState": {
     "plugin": "beads-bv",
-    "epicId": "Johnny-oly",
+    "epicId": "Johnny-ckz",
     "epicIds": [
-      "Johnny-oly"
+      "Johnny-ckz"
     ],
     "executionScopes": [
       {
-        "id": "Johnny-oly",
-        "title": "Personality library: reusable character profiles (name + description + LLM + TTS voice) assignable to calendar events / playground; renders the per-session bot name in history",
+        "id": "Johnny-ckz",
+        "title": "Johnny meeting bot — ongoing work, fixes, and end-to-end validation",
         "type": "epic",
-        "description": "## Why this exists\n\nToday the bots character lives in two implicit places: a single system prompt buried in the global settings, plus whichever LLM + TTS providers happen to be active. Switching from \"Johnny — neutral assistant\" to \"a different character\" today means editing that prompt, swapping the active LLM, and swapping the active TTS — for every session, by hand, with no way to keep the old setup around.\n\nThe product idea is to lift \"the character\" into a first-class object: a **personality**. Each personality is a name + a plain-text description (traits, communication style, anything else the operator writes) plus the LLM provider/model and TTS provider/voice that personality should use. Once created, personalities are assignable on the two surfaces the bot actually runs from today — calendar events (one per meeting) and the playground page — and revertible without re-typing anything.\n\n> **Surface audit.** Existing frontend routes (verified): `calendar/`, `history/`, `playground/`, `providers/`, `sessions/`, `settings/`, `templates/`. There is NO standalone \"chat\" route — the playground is the chat-style live surface and history is the read-only transcript view. Both display the bot under the hardcoded name \"Johnny\" (`frontend/src/routes/history/[id]/+page.svelte:217,234`). Personalities replace that hardcoding by snapshotting the personality's display name onto the session at start and rendering history rows / titles from the snapshot instead of the constant.\n\nThe operator can have a library: \"Johnny\" (the default), \"Friendly Customer Support\", \"Skeptical Code Reviewer\", \"Calm Therapist\". Each carries its own voice and its own model. Switching between them is a one-click assignment, not a config rewrite.\n\n## What lives ON a personality vs OFF it\n\n| On the personality | Off the personality (stays global) | Why |\n| --- | --- | --- |\n| Display name | — | The name the operator picks the personality by. |\n| Description (free text) | — | Goes into the system prompt at session start. Where the character lives. |\n| LLM provider + model | — | Different models have noticeably different voice / pacing / tone. The operator explicitly called this out. |\n| TTS provider + voice | — | The single biggest carrier of perceived character. |\n| Default bot mode (listen / suggest / approval / autonomous) — OPTIONAL | If the personality leaves it blank, falls back to the meeting / playground default. | Some characters only make sense in certain modes (an \"autonomous skeptic\" is a different bot from a \"suggest-only skeptic\"). |\n| — | STT provider | STT does not meaningfully affect perceived character; keeping it global avoids re-configuring the STT side every time the operator wants a different voice on the same recording pipeline. |\n\n## How it composes with the existing system\n\n- Personalities are **NOT** template substitutes. A template is a conversation pattern (intro / interview / standup); a personality is *who* is running it. The two compose: a meeting picks a template AND a personality.\n- At session start, the providers loader (`backend/app/providers/loader.py:load_active_providers`) reads the chosen personality FIRST and uses its LLM + TTS overrides; falls back to the global active providers when the personality leaves a slot blank.\n- The existing global \"Johnny\" system prompt + the currently-active LLM + the currently-active TTS get migrated into a built-in personality called \"Johnny\", marked as the default. Nothing changes for an operator who never touches the personalities page; the default keeps working.\n\n## Sub-tasks (filed as children below)\n\n1. **Design + PRD** — read the current provider-loader + system-prompt flow end to end, propose the personality data model, decide override rules (what fallback when the personality references an unconfigured provider), decide UI placement. Blocks everything else.\n2. **Backend: data model + CRUD API + Johnny-default migration** — new `personalities` table, REST endpoints (list / create / clone / get / update / delete / set-default), Alembic migration that lifts the current globals into a built-in \"Johnny\" personality without data loss.\n3. **Backend: personality-driven provider resolution at session start** — `load_active_providers` reads the chosen personality, swaps LLM + TTS to the personality-specified rows, falls back loudly (logged + surfaced in the session UI) when the personality references a provider the operator deleted or deactivated.\n4. **Frontend: personality library management page** — list / create-from-scratch / clone / edit / delete / set-as-default. New route `/personalities`. Form fields: name, description (textarea), LLM picker, TTS picker (uses the unified voice component from Johnny-1ge.8), optional bot-mode override.\n5. **Frontend: personality picker integrated into calendar events + playground + history bot-name rendering** — the two surfaces that pick a personality at session start (calendar event detail, playground) gain a dropdown; the history view stops rendering the hardcoded `'Johnny'` constant and reads the per-session bot name from the snapshot taken at session start. Active-session card surfaces the personality name too.\n6. **End-to-end test matrix** — backend unit + integration tests for every CRUD endpoint, every override-resolution branch, every fallback path. Frontend browser tests via chrome-devtools MCP that drive: create a personality, assign it to a calendar event, start a session, verify the right LLM + TTS were loaded, verify the system prompt contains the personality description. Reproducible in CI without a live Meet.\n\n## Acceptance for the epic\n\n- A new operator with no personalities defined sees nothing change — the Johnny default behaves exactly like the current global setup.\n- An operator can create a second personality, assign it to a calendar event, start that meeting, and the bot uses the personality-specified LLM + TTS, with the description in the system prompt.\n- History rows for that session render the personality's name where today they render the hardcoded `'Johnny'`. Pre-personality sessions keep showing \"Johnny\" because that is what was true at the time.\n- The personality the bot is currently using is surfaced in the active-session UI (so the operator can tell at a glance which character is in the meeting).\n- Every sub-task lands with its own tests; the test matrix in `.7` runs in CI on every PR.\n- README has a new \"Personalities\" section explaining the concept in 4-5 sentences and pointing at `/personalities`.\n\n## Non-goals\n\n- Mid-session personality swap. Personality is picked at session start and held for the rest of the session.\n- Personality-conditioned templates / personality-conditioned routing. The personality is consumed by the LLM (as system prompt) and the TTS (as voice). Anything that needs the router to *behave differently* per personality belongs in the Johnny-etu pipeline epic, not here.\n- Multi-personality conversations (Johnny + a second character in the same meeting). Single-personality-per-session is the v1 scope.\n- Cloud personalities marketplace, sharing, presets. Local-only library; one operator owns their personalities the same way they own their providers.\n\n## Cross-links\n\n- **Johnny-1ge.8** (unified voice picker UX) — HARD DEPENDENCY for sub-task .4 (the TTS slot inside the personality form uses that component).\n- **Johnny-etu** epic (pipeline + decision-making revision) — the per-session reasoning timeline (Johnny-ckz.28.4) should display which personality is active so an operator reading the timeline knows whose voice they expect.\n- **Johnny-etu.1 / .etu.2** (pipeline docs) — both get a short subsection on how personalities feed into the pipeline at session start.\n- **Johnny-fe** (frontend overhaul epic) — the new `/personalities` page must be designed in the shadcn-svelte system landing under that epic.\n- **Johnny-ckz** epic — every closed sub-task that touched \"system prompt\" or \"active provider selection\" (Johnny-vgl, Johnny-7qp, Johnny-ckz.2 autonomous mode, Johnny-d3e provider seed) is context the design agent should re-read.\n\n## Reference\n\n- Current provider loader: `backend/app/providers/loader.py:load_active_providers`.\n- Where the system prompt lives today: search `backend/app/services/` for prompt assembly; specifically the place that interpolates the global Johnny prompt into the per-turn LLM call.\n- Templates table (do not confuse with personalities): `backend/app/db/models.py`.\n",
+        "description": "## Why this exists\n\nUmbrella epic for the Johnny Google Meet AI Meeting Bot post-MVP work.\n\nThe original join-stuck bug (Johnny-ckz.1) is fixed and the bot now reliably joins meetings (commit 979447e). The remaining scope spans:\n- End-to-end validation against real Google Meet (across all modes)\n- Adding/refining bot behavior modes (Autonomous, free-mode speech logic)\n- Provider integration polish (TTS demo playback, ElevenLabs verification, openai-realtime fix)\n- UX improvements (UI-driven Google sign-in, full-meeting context vs rolling window)\n- Smoke tests and provider management UI tests\n\nAll child issues here are tracked under this single epic.\n\n## Acceptance\n\n- All child issues closed\n- Bot has been validated end-to-end across every mode against a real Google Meet\n- Provider management surface is polished and tested via UI",
         "metadata": {
           "dependencyCount": 0,
           "dependentCount": 0
         }
       }
     ],
-    "totalTasks": 6,
+    "totalTasks": 69,
     "tasks": [
       {
-        "id": "Johnny-oly.1",
-        "title": "Design + PRD: read current provider-loader / system-prompt flow end-to-end, propose personality data model + override rules",
+        "id": "Johnny-ckz.1",
+        "title": "Bot join hangs at 'Johnny is joining — session #N': bot never appears in Meet, Active sessions stays 0, no logs",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
-        "id": "Johnny-oly.2",
-        "title": "Backend: personality data model + CRUD API + Johnny-default Alembic migration",
+        "id": "Johnny-ckz.2",
+        "title": "Add 'Autonomous' mode: bot speaks freely per profile instructions, no whitelist, no approval gate",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
-        "id": "Johnny-oly.3",
-        "title": "Backend: personality-driven provider resolution at session start (LLM + TTS override with loud-fallback)",
+        "id": "Johnny-ckz.3",
+        "title": "Bot carries the whole meeting's context (not a 6-turn rolling window) when routing and answering",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
-        "id": "Johnny-oly.4",
-        "title": "Frontend: /personalities management page — list / create / clone / edit / delete / set-default",
+        "id": "Johnny-c8t",
+        "title": "Playground audio path never opens WebSocket — no voice, no bot replies (Johnny-ckz.6 regression)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
-        "id": "Johnny-oly.6",
-        "title": "Frontend: personality picker on calendar events + playground + active-session badge + history bot-name rendering (replaces hardcoded 'Johnny' constant)",
+        "id": "Johnny-ckz.4",
+        "title": "Run the two-bot voice-interrupt harness end-to-end against real models, fix any bugs it surfaces",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
-        "id": "Johnny-oly.7",
-        "title": "End-to-end test matrix: backend integration + chrome-devtools MCP browser tests across personality CRUD → assign → session-start → verify",
+        "id": "Johnny-ckz.5",
+        "title": "Local Piper follow-up: voice catalog fetcher fails on HF 307 redirect, plus model dirs must move to host bind mounts (~/.johnny/...)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.6",
+        "title": "In-browser voice/text chat with the bot — per-event 'Try with bot' button + standalone playground (no Meet required)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-4c0",
+        "title": "Local Piper TTS: smoke test fails with opaque 'exit code 1' — need easy voice install + real error surfacing",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ze3",
+        "title": "Voice interrupt doesn't actually work end-to-end: bot ignores user speech mid-utterance (reopens Johnny-har / Johnny-di9)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-d2g",
+        "title": "Bot joined but voice pipeline never runs: no transcription, no decisions, no speech, no audio bridge",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.7",
+        "title": "Per-session activity / timing log surfaced in chat history (per-turn pipeline events with durations)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.8",
+        "title": "Profile + tune end-to-end voice latency on real local STT/TTS/LLM, and add in-UI optimization tips on each provider settings page",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.9",
+        "title": "bot_sessions schema drift: ORM expects 'source' and 'playground_overrides' columns that don't exist — worker monitor + /sessions/active both 500",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.10",
+        "title": "Validate in-browser live chat / live talking (Johnny-ckz.6) end-to-end via chrome-devtools MCP — pure verification, file follow-up bugs for any gap",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.11",
+        "title": "Playground / live mode: no audio playback (critical) + needs template-driven mode picker, volume control, and resume-from-session-page UX",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.12",
+        "title": "STT provider settings: 'Record sample' button to verify transcription end-to-end (symmetric to existing TTS demo)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-wyd",
+        "title": "Barge-in classifier LLM ReadTimeouts against Ollama Qwen 35B — every timeout is a missed interrupt + log noise",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-klh",
+        "title": "Playground transcripts label every speaker=null row as 'You' — including STT hallucinations and any non-user rows",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-31g",
+        "title": "STT hallucinations from silence: faster-whisper produces 'Does Olam A.P.I.', '. . . .', etc. on quiet mic and persists them as transcripts",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.13",
+        "title": "Playground: voice barge-in does nothing — bot ignores user speech mid-utterance (interrupt bug recurring on WebRTC transport)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.14",
+        "title": "Playground: STT artifacts ('you', 'uh', '...' dot sequences) trigger AI replies — no noise-floor / floor-management gate before invoking LLM",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.15",
+        "title": "STT provider catalog: VoiceInk parity + NVIDIA Parakeet + streaming-in-chat",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ajc",
+        "title": "Active session 'Leave now' button: UI marks session ended but bot stays in the Google Meet",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-3ha",
+        "title": "Active LLM provider sometimes gets unselected (TTS and STT are not affected)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-1zg",
+        "title": "Add ElevenLabs as an STT provider (missing from Add Provider dropdown when kind=stt)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-arh",
+        "title": "Bot speaks over user mid-sentence: partial transcripts trigger responses before user finishes",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-2bw",
+        "title": "Build automated two-bot test harness to reproduce voice-interrupt failure (simulated speaker vs Johnny)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-7qp",
+        "title": "Bot loses conversation context mid-session: can't recall its own prior utterances",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-di9",
+        "title": "Voice-triggered barge-in: user can interrupt the bot mid-utterance by speaking",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-har",
+        "title": "STT transcription of participants must never pause while bot is speaking or thinking",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-cdw",
+        "title": "Approving a pending suggestion doesn't make the bot actually speak it",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-hn6",
+        "title": "Pending approvals don't appear in UI until page is refreshed",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-awh",
+        "title": "Persist bot utterances to meeting history (everything the bot says)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-vgl",
+        "title": "Review and standardize bot free mode speech decision logic",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-jrd",
+        "title": "Verify ElevenLabs TTS provider works end-to-end with updated API key",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-pdf",
+        "title": "Execute comprehensive end-to-end validation: bot joins real Google Meet and exercises every product feature across all modes",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-upg",
+        "title": "End-to-end UI test of provider management via chrome-devtools-mcp",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-f7k",
+        "title": "Smoke-test populated .env: bring stack up and verify end-to-end",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.16",
+        "title": "Playground: every audio stream rejected with 'Audio stream ended: session not active' — regression from Johnny-ckz.14",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.17",
+        "title": "Backend: Realtime S2S provider abstraction + dual-mode pipeline routing (split vs unified)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.18",
+        "title": "Backend + Frontend: Cartesia Sonic 3.5 TTS provider (split-pipeline option, playground + Meet parity)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-al3",
+        "title": "Multi-account bot identities: '+ Add another meeting bot' tile becomes a real button that creates a new bot row",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-105",
+        "title": "noVNC bot sign-in: container + backend endpoints + frontend modal",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-pia",
+        "title": "Settings page redesign — multi-account Calendars + Bots with noVNC sign-in",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.19",
+        "title": "Backend: OpenAI GPT-Realtime S2S provider (audio in/out, barge-in, playground + Meet parity)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.20",
+        "title": "Backend: Google Gemini Live API S2S provider (audio in/out, barge-in, playground + Meet parity)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.21",
+        "title": "Frontend: Providers page — pipeline-mode toggle (split vs unified) + S2S provider picker (Meet + playground)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.22",
+        "title": "Adapt interruption test tool to drive S2S providers (OpenAI Realtime + Gemini Live) across Meet and playground",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.23",
+        "title": "Bot sign-in method picker: keep CLI+upload path as a first-class option alongside noVNC",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.24",
+        "title": "Bot 'Verify session' button always returns connected — file-shape-only check, never round-trips to Google",
         "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.25",
+        "title": "Consolidate free_auto_speak into autonomous — remove FREE_AUTO_SPEAK BotMode",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.26",
+        "title": "noVNC sign-in: email scrape fails for Workspace accounts → bot saved as 'unknown-<hex>@johnny.local' instead of real email",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-g2n",
+        "title": "ElevenLabs TTS: handle 'exceeds quota' 401 gracefully in the response loop",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-tjd",
+        "title": "Interrupt harness real-mode: clarification assertion shape doesn't match real behavior",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-gft",
+        "title": "Interrupt harness real-mode: stop scenario flakes when LLM round-trip is slow",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-9eq",
+        "title": "LLM providers: fetch model list dynamically from each provider's API instead of hardcoding",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-uga",
+        "title": "ElevenLabs e2e plan uses library voice incompatible with free tier",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.27",
+        "title": "Sidebar (z-1300) renders above modals — noVNC sign-in + BotSigninUpload + BotSigninMethodPicker use bare z-50 instead of --z-modal tokens",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.28",
+        "title": "Pipeline + decision-making revision: stop silent drops, enforce decision↔utterance parity, expose the bot's reasoning to the operator",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-466",
+        "title": "openai-realtime STT adapter targets deprecated Realtime Beta API",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-kgc",
+        "title": "Johnny — Google Meet AI Meeting Bot",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.29",
+        "title": "(BUG) Gemini model SELECT validator rejects models fetched live from Gemini's own API — 'gemini-3.5' returned by the catalog can't be saved",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-qow",
+        "title": "Add no-CLI bot sign-in: in-browser Chromium via noVNC helper container",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-4da",
+        "title": "Read Google Docs/Sheets URLs linked in calendar event description and include as pre-meeting context",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-dsy",
+        "title": "Cross-session continuity: rehydrate prior session summary for recurring events",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-4ph",
+        "title": "Add UI button to trigger bot Google sign-in (CLI helper stays as alternative)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-6ij",
+        "title": "TTS providers: separate Play button to hear a demo phrase, with Stop while playing",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-d3e",
+        "title": "Seed providers from JSON/config file on startup",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-k3z",
+        "title": "Export all provider configurations as JSON from the UI",
+        "status": "completed",
         "completedInSession": false
       }
     ]
   },
-  "iterations": [
-    {
-      "iteration": 1,
-      "status": "completed",
-      "taskId": "Johnny-oly.1",
-      "taskTitle": "Design + PRD: read current provider-loader / system-prompt flow end-to-end, propose personality data model + override rules",
-      "taskCompleted": true,
-      "durationMs": 746796,
-      "startedAt": "2026-06-07T20:27:20.327Z",
-      "endedAt": "2026-06-07T20:39:47.123Z"
-    },
-    {
-      "iteration": 2,
-      "status": "completed",
-      "taskId": "Johnny-oly.2",
-      "taskTitle": "Backend: personality data model + CRUD API + Johnny-default Alembic migration",
-      "taskCompleted": true,
-      "durationMs": 1422140,
-      "startedAt": "2026-06-07T20:39:56.085Z",
-      "endedAt": "2026-06-07T21:03:38.225Z"
-    },
-    {
-      "iteration": 3,
-      "status": "completed",
-      "taskId": "Johnny-oly.4",
-      "taskTitle": "Frontend: /personalities management page — list / create / clone / edit / delete / set-default",
-      "taskCompleted": true,
-      "durationMs": 1337903,
-      "startedAt": "2026-06-07T21:03:47.544Z",
-      "endedAt": "2026-06-07T21:26:05.447Z"
-    },
-    {
-      "iteration": 4,
-      "status": "completed",
-      "taskId": "Johnny-oly.3",
-      "taskTitle": "Backend: personality-driven provider resolution at session start (LLM + TTS override with loud-fallback)",
-      "taskCompleted": true,
-      "durationMs": 1662312,
-      "startedAt": "2026-06-07T21:26:14.310Z",
-      "endedAt": "2026-06-07T21:53:56.622Z"
-    },
-    {
-      "iteration": 5,
-      "status": "completed",
-      "taskId": "Johnny-oly.6",
-      "taskTitle": "Frontend: personality picker on calendar events + playground + active-session badge + history bot-name rendering (replaces hardcoded 'Johnny' constant)",
-      "taskCompleted": true,
-      "durationMs": 2650479,
-      "startedAt": "2026-06-07T21:54:05.301Z",
-      "endedAt": "2026-06-07T22:38:15.780Z"
-    }
-  ],
+  "iterations": [],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

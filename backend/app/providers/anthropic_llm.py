@@ -156,6 +156,7 @@ class AnthropicLLM(LLMProvider):
                     label="Model",
                     type=FieldType.SELECT,
                     default="claude-haiku-4-5",
+                    dynamic_options=True,
                     options=(
                         FieldOption(
                             value="claude-haiku-4-5", label="claude-haiku-4-5 (fast)"

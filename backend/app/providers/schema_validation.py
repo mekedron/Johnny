@@ -21,6 +21,11 @@ from typing import Any
 
 from app.providers.schema import FieldDef, FieldType, ProviderSchema
 
+# Upper bound on a dynamic-catalog SELECT value (e.g. an LLM model id). Real
+# model ids are short ("gemini-2.5-flash-preview-05-20" ~30 chars); this is a
+# generous guard against a pasted blob, not a precise allow-list.
+_DYNAMIC_SELECT_MAX_LEN = 200
+
 
 @dataclass(frozen=True, slots=True)
 class FieldValidationError:
@@ -145,7 +150,20 @@ def _check_type(value: Any, fdef: FieldDef) -> str | None:
 
 
 def _check_option(value: Any, fdef: FieldDef) -> str | None:
-    if fdef.type is not FieldType.SELECT or not fdef.options:
+    if fdef.type is not FieldType.SELECT:
+        return None
+    if fdef.dynamic_options:
+        # The dropdown is populated from a live provider catalog (Johnny-ckz.29),
+        # so the build-time `options` allow-list isn't authoritative. Accept any
+        # non-empty string within a sane length cap; a bad id surfaces as a clean
+        # upstream error on first use, not a hardcoded schema rejection.
+        if len(str(value)) > _DYNAMIC_SELECT_MAX_LEN:
+            return (
+                f"{fdef.label} must be at most "
+                f"{_DYNAMIC_SELECT_MAX_LEN} characters"
+            )
+        return None
+    if not fdef.options:
         return None
     allowed = {opt.value for opt in fdef.options}
     if str(value) not in allowed:

@@ -156,6 +156,7 @@ class GeminiLLM(LLMProvider):
                     label="Model",
                     type=FieldType.SELECT,
                     default="gemini-2.5-flash",
+                    dynamic_options=True,
                     options=(
                         FieldOption(value="gemini-2.5-flash", label="gemini-2.5-flash (fast)"),
                         FieldOption(value="gemini-2.5-pro", label="gemini-2.5-pro"),
