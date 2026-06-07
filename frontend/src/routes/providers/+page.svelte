@@ -676,13 +676,13 @@
 		previewLoading = true;
 		previewError = null;
 		try {
-			let blob: Blob;
+			let sample;
 			if (mode === 'edit' && editingRow && !hasPendingChanges) {
-				blob = await playSample(editingRow.id);
+				sample = await playSample(editingRow.id);
 			} else {
-				blob = await previewPlaySample(payload);
+				sample = await previewPlaySample(payload);
 			}
-			const url = URL.createObjectURL(blob);
+			const url = URL.createObjectURL(sample.blob);
 			previewBlobUrl = url;
 			previewAudio = new Audio(url);
 			previewAudio.addEventListener('ended', () => {
@@ -699,7 +699,20 @@
 				previewError = e instanceof Error ? e.message : String(e);
 				stopPreview();
 			}
-			testResult = { ok: true, message: 'Synthesis OK — playing sample', detail: null };
+			// Append the runtime + time-to-first-audio so the user can confirm
+			// the Local Piper runtime picker is actually doing something
+			// (Johnny-1ge.1). Cloud TTS providers report no runtime.
+			let badge = '';
+			if (sample.runtime) {
+				badge = ` (runtime: ${sample.runtime}`;
+				if (sample.ttfaMs !== null) badge += `, TTFA ${sample.ttfaMs} ms`;
+				badge += ')';
+			}
+			testResult = {
+				ok: true,
+				message: `Synthesis OK — playing sample${badge}`,
+				detail: null
+			};
 		} catch (e) {
 			previewError = e instanceof Error ? e.message : String(e);
 			testResult = {
@@ -918,12 +931,14 @@
 			if (mode === 'edit' && editingRow) {
 				blob = await previewPiperVoice(editingRow.id, voice.key);
 			} else {
-				blob = await previewPlaySample({
-					kind: 'tts',
-					provider_name: PIPER_PROVIDER_NAME,
-					display_name: 'Preview',
-					values: { voice_id: voice.key }
-				});
+				blob = (
+					await previewPlaySample({
+						kind: 'tts',
+						provider_name: PIPER_PROVIDER_NAME,
+						display_name: 'Preview',
+						values: { voice_id: voice.key }
+					})
+				).blob;
 			}
 			const url = URL.createObjectURL(blob);
 			const audio = new Audio(url);

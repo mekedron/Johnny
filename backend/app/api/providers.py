@@ -917,9 +917,13 @@ async def preview_play_sample(payload: ProviderPreviewPayload) -> Response:
         )
     instance = _instantiate_preview(payload)
     assert isinstance(instance, TTSProvider)
+    start = time.perf_counter()
+    ttfa_ms = -1
     try:
         chunks: list[bytes] = []
         async for frame in instance.synthesize_stream(TTS_SAMPLE_PHRASE):
+            if ttfa_ms < 0:
+                ttfa_ms = int((time.perf_counter() - start) * 1000)
             chunks.append(frame)
         pcm = b"".join(chunks)
     except Exception as exc:  # noqa: BLE001
@@ -932,16 +936,14 @@ async def preview_play_sample(payload: ProviderPreviewPayload) -> Response:
             await instance.close()
         except Exception:  # noqa: BLE001, S110
             pass
+    total_ms = int((time.perf_counter() - start) * 1000)
     if not pcm:
         raise HTTPException(status_code=502, detail="synthesis produced no audio")
     wav_bytes = _pcm_to_wav_bytes(pcm)
     return Response(
         content=wav_bytes,
         media_type="audio/wav",
-        headers={
-            "Cache-Control": "no-store",
-            "Content-Disposition": 'inline; filename="preview.wav"',
-        },
+        headers=_tts_sample_headers(instance, ttfa_ms, total_ms, "preview.wav"),
     )
 
 
@@ -1600,6 +1602,25 @@ def _pcm_to_wav_bytes(pcm: bytes) -> bytes:
     return buf.getvalue()
 
 
+def _tts_sample_headers(
+    instance: TTSProvider, ttfa_ms: int, total_ms: int, filename: str
+) -> dict[str, str]:
+    """Response headers for a TTS sample, stamping runtime + timing.
+
+    ``X-TTS-Runtime`` lets the /providers UI show which runtime served the
+    audio (the Piper runtime picker, Johnny-1ge.1). Providers without a
+    ``runtime`` attribute (cloud TTS) get an empty value. These headers are
+    listed in the CORS ``expose_headers`` so the browser can read them.
+    """
+    return {
+        "Cache-Control": "no-store",
+        "Content-Disposition": f'inline; filename="{filename}"',
+        "X-TTS-Runtime": str(getattr(instance, "runtime", "") or ""),
+        "X-TTS-TTFA-Ms": str(max(ttfa_ms, 0)),
+        "X-TTS-Total-Ms": str(total_ms),
+    }
+
+
 @router.post(
     "/{provider_id}/play_sample",
     responses={
@@ -1680,9 +1701,13 @@ async def play_sample(
         ) from exc
 
     assert isinstance(instance, TTSProvider)
+    start = time.perf_counter()
+    ttfa_ms = -1
     try:
         chunks: list[bytes] = []
         async for frame in instance.synthesize_stream(TTS_SAMPLE_PHRASE):
+            if ttfa_ms < 0:
+                ttfa_ms = int((time.perf_counter() - start) * 1000)
             chunks.append(frame)
         pcm = b"".join(chunks)
     except Exception as exc:  # noqa: BLE001 — surface any synth error
@@ -1695,6 +1720,7 @@ async def play_sample(
             await instance.close()
         except Exception:  # noqa: BLE001, S110 — cleanup best-effort
             pass
+    total_ms = int((time.perf_counter() - start) * 1000)
 
     if not pcm:
         raise HTTPException(
@@ -1706,10 +1732,7 @@ async def play_sample(
     return Response(
         content=wav_bytes,
         media_type="audio/wav",
-        headers={
-            "Cache-Control": "no-store",
-            "Content-Disposition": 'inline; filename="sample.wav"',
-        },
+        headers=_tts_sample_headers(instance, ttfa_ms, total_ms, "sample.wav"),
     )
 
 

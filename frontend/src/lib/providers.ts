@@ -372,12 +372,43 @@ export function previewTestProvider(
 }
 
 /**
- * Synthesise the demo phrase using transient values; return WAV audio.
- * TTS only; the modal calls this for preview-before-save iteration.
+ * Result of a TTS play-sample call: the audio plus the runtime that served
+ * it and its timing, read from the `X-TTS-*` response headers. `runtime` is
+ * empty for providers that don't expose one (cloud TTS); the Local Piper
+ * runtime picker stamps `subprocess` / `persistent-subprocess` / `http-sidecar`
+ * so the modal can show which path produced the audio.
+ */
+export interface TtsSampleResult {
+	blob: Blob;
+	runtime: string;
+	ttfaMs: number | null;
+	totalMs: number | null;
+}
+
+function _parseIntHeader(res: Response, name: string): number | null {
+	const raw = res.headers.get(name);
+	if (raw === null) return null;
+	const n = Number.parseInt(raw, 10);
+	return Number.isNaN(n) ? null : n;
+}
+
+async function _ttsSampleResult(res: Response): Promise<TtsSampleResult> {
+	return {
+		blob: await res.blob(),
+		runtime: res.headers.get('X-TTS-Runtime') ?? '',
+		ttfaMs: _parseIntHeader(res, 'X-TTS-TTFA-Ms'),
+		totalMs: _parseIntHeader(res, 'X-TTS-Total-Ms')
+	};
+}
+
+/**
+ * Synthesise the demo phrase using transient values; return WAV audio plus
+ * the runtime/timing metadata. TTS only; the modal calls this for
+ * preview-before-save iteration.
  */
 export async function previewPlaySample(
 	payload: ProviderPreviewPayload
-): Promise<Blob> {
+): Promise<TtsSampleResult> {
 	const res = await fetch(`${API_BASE}/providers/preview/play_sample`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
@@ -393,7 +424,7 @@ export async function previewPlaySample(
 		}
 		throw new Error(detail ?? `HTTP ${res.status}`);
 	}
-	return res.blob();
+	return _ttsSampleResult(res);
 }
 
 /**
@@ -483,7 +514,7 @@ export async function sttTestRecording(
  * an `Audio` element so the user can hear the configured voice before
  * wiring it into a live meeting.
  */
-export async function playSample(id: number): Promise<Blob> {
+export async function playSample(id: number): Promise<TtsSampleResult> {
 	const res = await fetch(`${API_BASE}/providers/${id}/play_sample`, {
 		method: 'POST'
 	});
@@ -497,7 +528,7 @@ export async function playSample(id: number): Promise<Blob> {
 		}
 		throw new Error(detail ?? `HTTP ${res.status}`);
 	}
-	return res.blob();
+	return _ttsSampleResult(res);
 }
 
 export interface PiperVoice {

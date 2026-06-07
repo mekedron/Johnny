@@ -20,11 +20,20 @@ huggingface.co/rhasspy/piper-voices — used by the
 ``POST /providers/{id}/voices/{voice}/install`` endpoint so an operator
 never has to touch a terminal to wire up a voice.
 
-Latency profile: model load happens once per ``synthesize_stream`` call
-(piper exits when stdin closes); time-to-first-audio is dominated by
-ONNX startup (~200-400 ms for medium voices on CPU). For lower latency
-in production, prefer a persistent piper HTTP server fronted by an
-adapter that re-uses a long-lived process.
+Latency profile depends on the ``runtime`` option (Settings → Providers →
+Local Piper → Runtime):
+
+* ``subprocess`` (default) — a fresh ``piper`` CLI process per call; time-to-
+  first-audio is dominated by ONNX startup (~200-400 ms for medium voices on
+  CPU) and is paid every turn. Safe single-step-debug baseline.
+* ``persistent-subprocess`` — a warm in-process ``PiperVoice`` cached at module
+  scope; the ~700 ms load is paid once and warm calls return first audio in
+  ~40-60 ms. (piper-tts 1.x dropped the old ``--json-input`` streaming CLI, so
+  the warm path is in-process rather than a long-lived child process.) This is
+  the real meeting-latency win.
+* ``http-sidecar`` — POSTs text to a piper sidecar on the macOS host
+  (``sidecars/piper-http/``, started via ``scripts/start-piper-sidecar.sh``)
+  for process isolation or future macOS-native voices.
 """
 
 from __future__ import annotations
@@ -36,8 +45,10 @@ import os
 import shutil
 import subprocess
 import threading
-from collections.abc import AsyncIterator
-from dataclasses import dataclass
+import time
+from collections.abc import AsyncGenerator, AsyncIterator
+from dataclasses import dataclass, field
+from importlib import import_module
 from pathlib import Path
 from typing import IO, Any, Protocol
 
@@ -57,12 +68,29 @@ from app.providers.base import (
 from app.providers.schema import (
     FieldDef,
     FieldGroup,
+    FieldOption,
     FieldType,
     ProviderSchema,
     ProviderTip,
 )
 
 logger = logging.getLogger(__name__)
+# Surface the structured ``piper.synth:`` / ``piper.worker:`` / ``piper.sidecar:``
+# lines in ``docker logs api`` so a regression to cold per-call loading shows up
+# immediately. Mirrors the parakeet_stt handler setup — without this the root
+# logger defaults to WARNING and our timing breadcrumbs get dropped. Attach a
+# stderr handler only if the logger chain has none of our own so we don't shadow
+# the project's logging setup when one is added later.
+logger.setLevel(logging.INFO)
+if not any(getattr(h, "_johnny_piper", False) for h in logger.handlers):
+    _h = logging.StreamHandler()
+    _h.setLevel(logging.INFO)
+    _h.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    )
+    _h._johnny_piper = True  # type: ignore[attr-defined]
+    logger.addHandler(_h)
+    logger.propagate = False
 
 PROVIDER_NAME = "piper"
 DEFAULT_BINARY = "piper"
@@ -71,6 +99,31 @@ DEFAULT_NATIVE_SAMPLE_RATE_HZ = 22_050
 DEFAULT_CHUNK_BYTES = 4_096
 DEFAULT_WAIT_TIMEOUT_S = 30.0
 DEFAULT_TERMINATE_TIMEOUT_S = 2.0
+
+# Runtime selector. ``subprocess`` is the historical behaviour (a fresh piper
+# CLI process per call) and remains the default so unconfigured installs keep
+# working bit-for-bit. ``persistent-subprocess`` keeps a warm in-process
+# ``PiperVoice`` (ONNX session) cached at module scope — piper-tts 1.x dropped
+# the old ``--json-input`` long-running-CLI protocol, so the warm path is an
+# in-process voice cache rather than a literal child process (same net effect:
+# the ~700 ms ONNX cold-start is paid once, not per turn). ``http-sidecar``
+# POSTs text to a piper sidecar on the macOS host, mirroring the Parakeet
+# sidecars.
+RUNTIME_SUBPROCESS = "subprocess"
+RUNTIME_PERSISTENT = "persistent-subprocess"
+RUNTIME_HTTP_SIDECAR = "http-sidecar"
+DEFAULT_RUNTIME = RUNTIME_SUBPROCESS
+ALLOWED_RUNTIMES = frozenset(
+    {RUNTIME_SUBPROCESS, RUNTIME_PERSISTENT, RUNTIME_HTTP_SIDECAR}
+)
+# Default sidecar URL. ``host.docker.internal`` resolves to the host's loopback
+# from inside Docker Desktop on macOS; port 8775 is chosen so the piper sidecar
+# can run alongside the Parakeet sidecars (8765 / 8766) without a collision.
+DEFAULT_SIDECAR_URL = "http://host.docker.internal:8775"
+# 60 s is generous: a warm sidecar synthesises the sample phrase in well under a
+# second; the cold first call may spend a few seconds loading the voice. Past
+# 60 s is a hung sidecar and the user should see a clear error.
+SIDECAR_HTTP_TIMEOUT_SECONDS = 60.0
 
 # Cap captured stderr so a runaway error log can't blow up memory. 4 KB is
 # more than enough to surface a single piper-phonemize / onnxruntime traceback
@@ -86,6 +139,84 @@ PIPER_VOICES_REPO_BASE = (
     "https://huggingface.co/rhasspy/piper-voices/resolve/main"
 )
 PIPER_VOICES_CATALOG_URL = f"{PIPER_VOICES_REPO_BASE}/voices.json"
+
+
+# --- Persistent in-process voice cache (runtime=persistent-subprocess) ----
+#
+# piper-tts 1.x (the Python rewrite installed via the ``local-tts`` extra) has
+# no ``--json-input`` streaming-CLI mode and no ``--http`` server, so the
+# "persistent" runtime can't be a long-lived child process fed line-by-line.
+# Instead we load the library's ``PiperVoice`` (which holds the warm ONNX
+# session) once and cache it at module scope keyed by ``(model_path,
+# native_sample_rate)`` — the same idiom as ``parakeet_stt._LAST`` but a dict
+# rather than a single slot, because piper voices are ~60 MB each (vs Parakeet's
+# 0.6 B) so switching voices needn't evict the previous one.
+VoiceKey = tuple[str, int]
+
+
+@dataclass
+class _VoiceHandle:
+    """A cached, warm ``PiperVoice`` plus the lock that serialises its use.
+
+    ``voice`` is the loaded library object (its ONNX session is not safe to
+    drive from two threads at once, hence ``lock``). ``requests_served`` and
+    ``loaded_at`` feed the ``piper.worker:`` breadcrumbs.
+    """
+
+    voice: _PiperVoice
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    loaded_at: float = field(default_factory=time.perf_counter)
+    requests_served: int = 0
+
+
+# The warm-voice cache and its guards. ``_CACHE_LOCK`` (sync) protects the dicts;
+# ``_LOAD_LOCKS`` coalesces concurrent first-loads of the same key; the global
+# gate serialises the heavy ``PiperVoice.load`` across keys so a voice switch
+# can't briefly hold two loads at once.
+_VOICES: dict[VoiceKey, _VoiceHandle] = {}
+_LOAD_LOCKS: dict[VoiceKey, asyncio.Lock] = {}
+_CACHE_LOCK = threading.Lock()
+_GLOBAL_LOAD_GATE = asyncio.Lock()
+
+
+class _AudioChunk(Protocol):
+    """The subset of piper's ``AudioChunk`` the adapter reads."""
+
+    audio_int16_bytes: bytes
+    sample_rate: int
+
+
+class _PiperVoice(Protocol):
+    """The subset of piper's ``PiperVoice`` the persistent runtime depends on."""
+
+    def synthesize(self, text: str) -> Any: ...
+
+
+def _get_or_make_lock(key: VoiceKey) -> asyncio.Lock:
+    """Return the load-lock for ``key``, creating it on first sight.
+
+    Guarded by :data:`_CACHE_LOCK` so two coroutines don't race on the
+    ``setdefault``. The map only grows with distinct voice keys (a handful of
+    provider rows in practice), so the leak is negligible.
+    """
+    with _CACHE_LOCK:
+        lock = _LOAD_LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _LOAD_LOCKS[key] = lock
+        return lock
+
+
+def _evict_process_cache() -> None:
+    """Drop every cached warm voice and per-key load lock.
+
+    Public API is :meth:`PiperTTS.evict_process_cache`; this is the
+    module-level helper it dispatches to so tests / a future admin "reload
+    voices" action can wipe state without touching the class.
+    """
+    with _CACHE_LOCK:
+        _VOICES.clear()
+        _LOAD_LOCKS.clear()
 
 
 class _Process(Protocol):
@@ -496,6 +627,22 @@ class PiperTTS(TTSProvider):
                 f"PiperTTS requires ProviderKind.TTS; got {config.kind.value}"
             )
         opts = config.options
+        runtime = str(opts.get("runtime") or DEFAULT_RUNTIME)
+        if runtime not in ALLOWED_RUNTIMES:
+            raise ValueError(
+                f"runtime {runtime!r} must be one of {sorted(ALLOWED_RUNTIMES)}"
+            )
+        self._runtime = runtime
+        sidecar_url_opt = opts.get("sidecar_url")
+        if sidecar_url_opt:
+            self._sidecar_url = str(sidecar_url_opt).rstrip("/")
+        elif runtime == RUNTIME_HTTP_SIDECAR:
+            self._sidecar_url = DEFAULT_SIDECAR_URL
+        else:
+            self._sidecar_url = ""
+        # Lazy httpx client for the sidecar runtime; reused across calls on the
+        # same instance so the TCP connection stays warm.
+        self._sidecar_client: httpx.AsyncClient | None = None
         voice_id = opts.get("voice_id")
         self._default_voice_id: str | None = (
             str(voice_id) if voice_id not in (None, "") else None
@@ -536,6 +683,52 @@ class PiperTTS(TTSProvider):
             summary="Local Piper TTS. ~60 MB voices, CPU-only, no audio leaves host.",
             signup_url=None,
             fields=(
+                FieldDef(
+                    name="runtime",
+                    label="Runtime",
+                    type=FieldType.SELECT,
+                    default=DEFAULT_RUNTIME,
+                    options=(
+                        FieldOption(
+                            value=RUNTIME_SUBPROCESS,
+                            label="Subprocess (fresh piper per call, safe default)",
+                        ),
+                        FieldOption(
+                            value=RUNTIME_PERSISTENT,
+                            label="Persistent (warm in-process voice, fastest)",
+                        ),
+                        FieldOption(
+                            value=RUNTIME_HTTP_SIDECAR,
+                            label="HTTP sidecar (piper on the macOS host)",
+                        ),
+                    ),
+                    help_text=(
+                        "How piper synthesises. Subprocess spawns a fresh "
+                        "piper process per call (~200-400 ms cold every "
+                        "turn) — the safe single-step debug default. "
+                        "Persistent keeps the voice's ONNX session warm "
+                        "in-process so repeat calls return first audio in "
+                        "~40-60 ms (this is the real meeting-latency win). "
+                        "HTTP sidecar POSTs text to a piper server on the "
+                        "macOS host — start it with "
+                        "./scripts/start-piper-sidecar.sh."
+                    ),
+                    group=FieldGroup.MODEL,
+                ),
+                FieldDef(
+                    name="sidecar_url",
+                    label="Sidecar URL",
+                    type=FieldType.URL,
+                    default=DEFAULT_SIDECAR_URL,
+                    placeholder=DEFAULT_SIDECAR_URL,
+                    help_text=(
+                        "Base URL of the running piper sidecar. Use "
+                        "http://host.docker.internal:8775 from inside the "
+                        "api container; the sidecar runs natively on the "
+                        "macOS host. Ignored unless runtime is HTTP sidecar."
+                    ),
+                    group=FieldGroup.MODEL,
+                ),
                 FieldDef(
                     name="voice_id",
                     label="Voice ID",
@@ -609,15 +802,22 @@ class PiperTTS(TTSProvider):
                     ),
                 ),
                 ProviderTip(
-                    topic="Persistent piper process is the next big win",
+                    topic="Runtime: pick Persistent for real meetings",
                     body=(
-                        "Each synthesis call today spawns a fresh "
-                        "piper subprocess; the ONNX runtime startup is "
-                        "~200-400 ms of pure overhead per turn. Holding "
-                        "a long-lived piper process (or fronting one "
-                        "with the piper HTTP server) eliminates that "
-                        "tax and is the path to <100 ms time-to-first-"
-                        "audio on CPU. Tracked separately."
+                        "The Runtime selector at the top trades latency "
+                        "for isolation. Subprocess spawns a fresh piper "
+                        "per call — ~200-400 ms of ONNX cold-start every "
+                        "turn — and is the safe single-step-debug default. "
+                        "Persistent loads the voice once and keeps the "
+                        "ONNX session warm in-process, so the second and "
+                        "later calls return first audio in ~40-60 ms on "
+                        "CPU; this is the path to sub-100 ms TTFA in live "
+                        "meetings. HTTP sidecar runs piper on the macOS "
+                        "host (start with ./scripts/start-piper-sidecar.sh) "
+                        "for process isolation or future macOS-native "
+                        "voices. piper-tts 1.x has no long-running CLI or "
+                        "HTTP mode of its own, so Persistent is in-process "
+                        "and the sidecar is a thin piper-library server."
                     ),
                 ),
                 ProviderTip(
@@ -664,6 +864,14 @@ class PiperTTS(TTSProvider):
     def chunk_bytes(self) -> int:
         return self._chunk_bytes
 
+    @property
+    def runtime(self) -> str:
+        return self._runtime
+
+    @property
+    def sidecar_url(self) -> str:
+        return self._sidecar_url
+
     async def synthesize_stream(
         self,
         text: str,
@@ -671,16 +879,21 @@ class PiperTTS(TTSProvider):
     ) -> AsyncIterator[bytes]:
         """Synthesize ``text`` to 16 kHz mono S16LE PCM frames.
 
-        Spawns a fresh ``piper`` subprocess per call; the stdin pipe
-        carries the input text and stdout streams raw PCM. Output is
-        resampled from the model's native rate to 16 kHz so the frames
-        slot directly into the meet-worker audio bridge.
+        Dispatches on the configured ``runtime``:
 
-        Pre-flight checks run before any subprocess is spawned so the
-        user sees "voice not installed" or "piper binary missing" as a
-        clean error rather than the previous opaque "exit code 1". When
-        piper itself fails (bad onnx, missing onnxruntime, etc.) the
-        captured stderr tail is included in :class:`TTSError`.
+        * ``subprocess`` (default) — a fresh ``piper`` CLI process per call.
+          Unchanged historical behaviour; pays ONNX cold-start every turn.
+        * ``persistent-subprocess`` — a warm in-process ``PiperVoice`` held in
+          the module cache and reused across calls, so only the first pays the
+          ~700 ms load (piper-tts 1.x has no streaming-CLI mode, so the warm
+          path is in-process rather than a literal long-running child).
+        * ``http-sidecar`` — POST the text to a piper sidecar on the host.
+
+        Output is resampled from the voice's native rate to 16 kHz so the
+        frames slot directly into the meet-worker audio bridge. Emits one
+        ``piper.synth:`` INFO line per call with the time-to-first-audio and
+        total wall-clock so a regression to cold loading is visible in
+        ``docker logs api``.
         """
         voice = voice_id if voice_id not in (None, "") else self._default_voice_id
         if not voice:
@@ -688,6 +901,50 @@ class PiperTTS(TTSProvider):
                 "PiperTTS requires a voice; pass voice_id explicitly or set "
                 "voice_id in the provider configuration."
             )
+        stream: AsyncGenerator[bytes, None]
+        if self._runtime == RUNTIME_PERSISTENT:
+            stream = self._synth_persistent(text, voice)
+        elif self._runtime == RUNTIME_HTTP_SIDECAR:
+            stream = self._synth_http_sidecar(text, voice)
+        else:
+            stream = self._synth_subprocess(text, voice)
+
+        start = time.perf_counter()
+        ttfa_ms = -1
+        try:
+            # aclosing() guarantees the inner runtime generator's finally
+            # (subprocess cleanup, sidecar drain) runs if the consumer breaks
+            # out early and closes this outer generator.
+            async with contextlib.aclosing(stream) as inner:
+                async for frame in inner:
+                    if ttfa_ms < 0:
+                        ttfa_ms = int((time.perf_counter() - start) * 1000)
+                    yield frame
+        finally:
+            total_ms = int((time.perf_counter() - start) * 1000)
+            logger.info(
+                "piper.synth: runtime=%s voice=%s text_chars=%d "
+                "ttfa_ms=%d total_ms=%d",
+                self._runtime,
+                voice,
+                len(text),
+                ttfa_ms,
+                total_ms,
+            )
+
+    async def _synth_subprocess(
+        self, text: str, voice: str
+    ) -> AsyncGenerator[bytes, None]:
+        """Runtime A — a fresh ``piper`` CLI subprocess per call.
+
+        The stdin pipe carries the input text and stdout streams raw PCM.
+        Pre-flight checks run before any subprocess is spawned so the user
+        sees "voice not installed" or "piper binary missing" as a clean error
+        rather than the previous opaque "exit code 1". When piper itself fails
+        (bad onnx, missing onnxruntime, etc.) the captured stderr tail is
+        included in :class:`TTSError`. Behaviour is unchanged from before the
+        runtime split.
+        """
         model_path = self._resolve_model_path(voice)
         self._preflight_checks(model_path)
         proc = await asyncio.to_thread(self._spawn_process, model_path)
@@ -706,19 +963,129 @@ class PiperTTS(TTSProvider):
         finally:
             await self._cleanup(proc)
 
+    async def _synth_persistent(
+        self, text: str, voice: str
+    ) -> AsyncGenerator[bytes, None]:
+        """Runtime B — warm in-process ``PiperVoice`` from the module cache.
+
+        Loads the voice once (paying the ~700 ms ONNX cold-start), caches it at
+        module scope keyed by ``(model_path, native_sample_rate)``, and reuses
+        it on every later call so warm time-to-first-audio drops to ~40-60 ms.
+        The cached voice's ONNX session is not safe to drive concurrently, so a
+        per-voice :class:`asyncio.Lock` serialises use.
+
+        The library's ``synthesize`` is a blocking generator; we pump it on a
+        worker thread and hand chunks to the async consumer through a queue as
+        they arrive, so the first sentence's audio leaves the box without
+        waiting for the whole utterance to finish.
+        """
+        model_path = self._resolve_model_path(voice)
+        self._preflight_model_files(model_path)
+        handle = await self._ensure_voice(model_path, voice)
+
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+        sentinel = object()
+
+        def _produce() -> None:
+            try:
+                for chunk in handle.voice.synthesize(text):
+                    pcm = bytes(chunk.audio_int16_bytes)
+                    rate = int(getattr(chunk, "sample_rate", 0)) or self._native_sample_rate
+                    loop.call_soon_threadsafe(queue.put_nowait, (pcm, rate))
+            except Exception as exc:  # noqa: BLE001 — surfaced on the async side
+                loop.call_soon_threadsafe(queue.put_nowait, exc)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, sentinel)
+
+        async with handle.lock:
+            handle.requests_served += 1
+            producer = asyncio.ensure_future(asyncio.to_thread(_produce))
+            try:
+                while True:
+                    item = await queue.get()
+                    if item is sentinel:
+                        break
+                    if isinstance(item, Exception):
+                        raise TTSError(
+                            f"piper persistent synth failed: {item}"
+                        ) from item
+                    pcm, rate = item
+                    out = resample_pcm16(pcm, rate, PCM_SAMPLE_RATE_HZ)
+                    if out:
+                        yield out
+            finally:
+                with contextlib.suppress(Exception):
+                    await producer
+
+    async def _synth_http_sidecar(
+        self, text: str, voice: str
+    ) -> AsyncGenerator[bytes, None]:
+        """Runtime C — POST the text to a piper sidecar on the macOS host.
+
+        Wire protocol: ``POST {sidecar_url}/synthesize`` with JSON
+        ``{"text": ..., "voice": ...}``; the response body is raw S16LE PCM at
+        the voice's native rate, advertised via the ``X-Sample-Rate`` header.
+        The adapter resamples to 16 kHz, same as the other runtimes. An
+        unreachable sidecar raises a :class:`TTSError` naming the start script.
+        """
+        if not self._sidecar_url:
+            raise TTSError(
+                f"piper runtime={self._runtime} requires sidecar_url"
+            )
+        client = self._sidecar_client_or_open()
+        url = f"{self._sidecar_url}/synthesize"
+        start = time.perf_counter()
+        try:
+            response = await client.post(
+                url,
+                json={"text": text, "voice": voice},
+                timeout=SIDECAR_HTTP_TIMEOUT_SECONDS,
+            )
+        except httpx.RequestError as exc:
+            raise TTSError(
+                f"piper sidecar at {self._sidecar_url} unreachable: {exc}. "
+                "Start it with ./scripts/start-piper-sidecar.sh"
+            ) from exc
+        ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            "piper.sidecar: action=request url=%s status=%d ms=%d",
+            url,
+            response.status_code,
+            ms,
+        )
+        if response.status_code != 200:
+            raise TTSError(
+                f"piper sidecar returned HTTP {response.status_code}: "
+                f"{response.text[:200]}"
+            )
+        pcm = response.content
+        try:
+            rate = int(response.headers.get("X-Sample-Rate", "") or self._native_sample_rate)
+        except ValueError:
+            rate = self._native_sample_rate
+        extra = len(pcm) % PCM_SAMPLE_WIDTH_BYTES
+        if extra:
+            pcm = pcm[:-extra]
+        out = resample_pcm16(pcm, rate, PCM_SAMPLE_RATE_HZ)
+        for i in range(0, len(out), self._chunk_bytes):
+            frame = out[i : i + self._chunk_bytes]
+            if frame:
+                yield frame
+
     # --- Hooks (overridable in tests) -------------------------------------
 
     def _resolve_model_path(self, voice: str) -> Path:
         return _resolve_voice_path(self._model_dir, voice)
 
-    def _preflight_checks(self, model_path: Path) -> None:
-        """Verify the voice file and piper binary are reachable.
+    def _preflight_model_files(self, model_path: Path) -> None:
+        """Verify the voice ``.onnx`` + ``.onnx.json`` files are on disk.
 
-        Surfacing these failures *before* spawning piper means the user
-        sees a precise diagnostic ("voice X not installed", "piper not on
-        PATH") instead of the opaque "exited with non-zero code 1" they
-        used to get when the same problems showed up as subprocess
-        crashes with stderr suppressed.
+        Surfacing a missing-voice failure *before* loading or spawning piper
+        means the user sees a precise "voice X not installed" diagnostic
+        instead of an opaque ONNX / subprocess crash. Shared by the subprocess
+        and persistent runtimes (the persistent path needs the files but not
+        the ``piper`` binary).
         """
         if not model_path.exists():
             sidecar = model_path.with_suffix(model_path.suffix + ".json")
@@ -737,10 +1104,17 @@ class PiperTTS(TTSProvider):
                 f"piper voice sidecar not found at {sidecar}. "
                 f"Both <voice>.onnx and <voice>.onnx.json are required."
             )
-        # _resolve_binary raises TTSError with its own clear message when
-        # piper is missing from PATH (or the configured absolute path is
-        # bogus). Trigger that here so the message arrives before any
-        # subprocess noise.
+
+    def _preflight_checks(self, model_path: Path) -> None:
+        """Verify the voice files and the piper binary are reachable.
+
+        Used by the ``subprocess`` runtime, which needs the ``piper``
+        executable in addition to the voice files. ``_resolve_binary`` raises
+        a clear TTSError when piper is missing from PATH (or the configured
+        absolute path is bogus); trigger it here so the message arrives before
+        any subprocess noise.
+        """
+        self._preflight_model_files(model_path)
         self._resolve_binary()
 
     def _spawn_process(self, model_path: Path) -> _Process:
@@ -770,6 +1144,96 @@ class PiperTTS(TTSProvider):
                 "option to its full path"
             )
         return path
+
+    async def _ensure_voice(self, model_path: Path, voice: str) -> _VoiceHandle:
+        """Return a warm :class:`_VoiceHandle`, using the module-level cache.
+
+        Fast-path is a lock-free cache hit. On a miss, a per-key load lock
+        coalesces concurrent first-loads of the same voice and the global gate
+        serialises the heavy ``PiperVoice.load`` across keys. Tests override
+        :meth:`_load_voice` to populate the cache with a fake; the autouse
+        eviction fixture wipes the cache between tests.
+        """
+        key: VoiceKey = (str(model_path), self._native_sample_rate)
+
+        with _CACHE_LOCK:
+            handle = _VOICES.get(key)
+        if handle is not None:
+            return handle
+
+        lock = _get_or_make_lock(key)
+        async with lock:
+            with _CACHE_LOCK:
+                handle = _VOICES.get(key)
+            if handle is not None:
+                return handle
+            load_start = time.perf_counter()
+            async with _GLOBAL_LOAD_GATE:
+                loaded = await asyncio.to_thread(self._load_voice, model_path)
+            load_ms = int((time.perf_counter() - load_start) * 1000)
+            handle = _VoiceHandle(voice=loaded)
+            with _CACHE_LOCK:
+                _VOICES[key] = handle
+            logger.info(
+                "piper.worker: voice=%s action=spawn reason=cache_miss load_ms=%d",
+                voice,
+                load_ms,
+            )
+            return handle
+
+    def _load_voice(self, model_path: Path) -> _PiperVoice:
+        """Load and return a warm ``PiperVoice``; overridable in tests.
+
+        Imports piper lazily so this module stays importable in lightweight
+        test environments without the ``local-tts`` extra installed. The same
+        ``piper-tts`` package that ships the ``piper`` CLI exposes
+        ``PiperVoice``, so the persistent runtime needs no new dependency.
+        """
+        try:
+            piper_mod = import_module("piper")
+        except ImportError as exc:
+            raise TTSError(
+                "piper-tts library not importable for the persistent runtime: "
+                f"{exc}. Install the 'local-tts' extra, or switch the runtime "
+                "to 'subprocess'."
+            ) from exc
+        try:
+            return piper_mod.PiperVoice.load(str(model_path))  # type: ignore[no-any-return]
+        except Exception as exc:  # noqa: BLE001 — surfaced as a clean TTSError
+            raise TTSError(
+                f"failed to load piper voice {model_path}: {exc}"
+            ) from exc
+
+    def _sidecar_client_or_open(self) -> httpx.AsyncClient:
+        """Return the per-instance httpx client, creating it on first use."""
+        if self._sidecar_client is None:
+            self._sidecar_client = httpx.AsyncClient(
+                timeout=SIDECAR_HTTP_TIMEOUT_SECONDS,
+            )
+        return self._sidecar_client
+
+    async def close(self) -> None:
+        """Close the per-instance sidecar HTTP client.
+
+        Does **not** evict the process-wide warm-voice cache — the next
+        ``PiperTTS(...)`` for the same voice reuses the warm ONNX session
+        instead of paying the load cost again. Use :meth:`evict_process_cache`
+        for a hard reset.
+        """
+        if self._sidecar_client is not None:
+            with contextlib.suppress(Exception):
+                await self._sidecar_client.aclose()
+            self._sidecar_client = None
+
+    @classmethod
+    def evict_process_cache(cls) -> None:
+        """Wipe the process-wide warm-voice cache.
+
+        Used by tests and by a future "reload voices" admin action. The next
+        persistent-runtime synth re-runs ``PiperVoice.load``. In-flight synths
+        that already hold a ``_VoiceHandle`` reference finish on the old voice.
+        """
+        _evict_process_cache()
 
     # --- Internals --------------------------------------------------------
 
@@ -866,14 +1330,21 @@ def register(*, replace: bool = False) -> None:
 
 
 __all__ = [
+    "ALLOWED_RUNTIMES",
     "DEFAULT_BINARY",
     "DEFAULT_CHUNK_BYTES",
     "DEFAULT_MODEL_DIR",
     "DEFAULT_NATIVE_SAMPLE_RATE_HZ",
+    "DEFAULT_RUNTIME",
+    "DEFAULT_SIDECAR_URL",
     "PCM_CHANNELS",
     "PIPER_VOICES_CATALOG_URL",
     "PIPER_VOICES_REPO_BASE",
     "PROVIDER_NAME",
+    "RUNTIME_HTTP_SIDECAR",
+    "RUNTIME_PERSISTENT",
+    "RUNTIME_SUBPROCESS",
+    "SIDECAR_HTTP_TIMEOUT_SECONDS",
     "PiperTTS",
     "VoiceInfo",
     "download_voice",

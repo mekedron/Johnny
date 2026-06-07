@@ -25,17 +25,39 @@ from app.providers.base import (
     get_registry,
 )
 from app.providers.piper_tts import (
+    ALLOWED_RUNTIMES,
     DEFAULT_BINARY,
     DEFAULT_CHUNK_BYTES,
     DEFAULT_MODEL_DIR,
     DEFAULT_NATIVE_SAMPLE_RATE_HZ,
+    DEFAULT_RUNTIME,
+    DEFAULT_SIDECAR_URL,
     PROVIDER_NAME,
+    RUNTIME_HTTP_SIDECAR,
+    RUNTIME_PERSISTENT,
+    RUNTIME_SUBPROCESS,
     PiperTTS,
     _resample_pcm16,
     _resolve_voice_path,
     register,
 )
 from tests.providers._tts_contract import assert_synthesize_yields_pcm_audio
+
+
+@pytest.fixture(autouse=True)
+def _reset_piper_process_cache() -> Any:
+    """Wipe the module-level warm-voice cache around every test.
+
+    The persistent runtime caches loaded voices at process scope (so two
+    ``PiperTTS(config)`` instances share a warm ONNX session across
+    ``/play_sample`` clicks). In tests that means two unrelated cases would
+    otherwise reuse each other's fake voice — wrong and a source of flaky
+    load-count assertions. Reset before AND after each test.
+    """
+    PiperTTS.evict_process_cache()
+    yield
+    PiperTTS.evict_process_cache()
+
 
 # --- Helpers ---------------------------------------------------------------
 
@@ -157,6 +179,86 @@ class _FakePiperTTS(PiperTTS):
         return self.process
 
 
+class _FakeAudioChunk:
+    """Stand-in for piper's ``AudioChunk`` — only the fields the adapter reads."""
+
+    def __init__(self, pcm: bytes, sample_rate: int) -> None:
+        self.audio_int16_bytes = pcm
+        self.sample_rate = sample_rate
+
+
+class _FakeVoice:
+    """Stand-in for a loaded ``PiperVoice``; yields scripted audio chunks."""
+
+    def __init__(self, chunks: list[_FakeAudioChunk]) -> None:
+        self._chunks = chunks
+        self.synthesize_calls = 0
+
+    def synthesize(self, text: str) -> Any:
+        self.synthesize_calls += 1
+        yield from self._chunks
+
+
+class _FakePersistentPiperTTS(PiperTTS):
+    """PiperTTS variant whose persistent runtime loads a controlled fake voice.
+
+    Skips the on-disk file preflight (so synthetic ``/m/foo.onnx`` paths work)
+    and returns a pre-built :class:`_FakeVoice` from ``_load_voice`` so tests
+    exercise the module-level warm-voice cache without piper installed.
+    """
+
+    def __init__(
+        self,
+        config: ProviderConfig,
+        *,
+        chunks: list[_FakeAudioChunk] | None = None,
+    ) -> None:
+        super().__init__(config)
+        self._chunks = chunks or []
+        self.load_calls = 0
+        self.loaded_voices: list[_FakeVoice] = []
+
+    def _preflight_model_files(self, model_path: Path) -> None:
+        return None
+
+    def _load_voice(self, model_path: Path) -> Any:
+        self.load_calls += 1
+        voice = _FakeVoice(list(self._chunks))
+        self.loaded_voices.append(voice)
+        return voice
+
+
+def _sidecar_mock_transport(
+    handler: Any,
+) -> tuple[Any, list[Any]]:
+    import httpx
+
+    captured: list[httpx.Request] = []
+
+    def wrapper(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return handler(request)
+
+    return httpx.MockTransport(wrapper), captured
+
+
+class _SidecarFakePiperTTS(PiperTTS):
+    """PiperTTS with a MockTransport-backed httpx client for the sidecar path."""
+
+    def __init__(self, config: ProviderConfig, *, handler: Any) -> None:
+        super().__init__(config)
+        transport, requests = _sidecar_mock_transport(handler)
+        self._mock_transport = transport
+        self.requests = requests
+
+    def _sidecar_client_or_open(self) -> Any:
+        import httpx
+
+        if self._sidecar_client is None:
+            self._sidecar_client = httpx.AsyncClient(transport=self._mock_transport)
+        return self._sidecar_client
+
+
 # --- Config validation -----------------------------------------------------
 
 
@@ -223,6 +325,40 @@ def test_init_rejects_non_positive_chunk_bytes() -> None:
 def test_init_rejects_odd_chunk_bytes() -> None:
     with pytest.raises(ValueError, match="multiple of"):
         PiperTTS(_config(chunk_bytes=4097))
+
+
+# --- Runtime selector config -----------------------------------------------
+
+
+def test_init_runtime_defaults_to_subprocess() -> None:
+    adapter = PiperTTS(_config())
+    assert adapter.runtime == DEFAULT_RUNTIME
+    assert adapter.runtime == RUNTIME_SUBPROCESS
+    # No sidecar URL is materialised for the non-sidecar default.
+    assert adapter.sidecar_url == ""
+
+
+@pytest.mark.parametrize("runtime", sorted(ALLOWED_RUNTIMES))
+def test_init_accepts_all_allowed_runtimes(runtime: str) -> None:
+    adapter = PiperTTS(_config(runtime=runtime))
+    assert adapter.runtime == runtime
+
+
+def test_init_rejects_unknown_runtime() -> None:
+    with pytest.raises(ValueError, match="runtime"):
+        PiperTTS(_config(runtime="gpu-magic"))
+
+
+def test_init_http_sidecar_runtime_picks_default_url() -> None:
+    adapter = PiperTTS(_config(runtime=RUNTIME_HTTP_SIDECAR))
+    assert adapter.sidecar_url == DEFAULT_SIDECAR_URL
+
+
+def test_init_explicit_sidecar_url_overrides_default() -> None:
+    adapter = PiperTTS(
+        _config(runtime=RUNTIME_HTTP_SIDECAR, sidecar_url="http://my-host:9000/")
+    )
+    assert adapter.sidecar_url == "http://my-host:9000"  # trailing slash stripped
 
 
 # --- Voice resolution ------------------------------------------------------
@@ -507,6 +643,233 @@ async def test_piper_contract_voice_id_override() -> None:
     )
     await assert_synthesize_yields_pcm_audio(adapter, voice_id="en_US-ryan-low")
     assert adapter.spawned_with == [Path("/m/en_US-ryan-low.onnx")]
+
+
+# --- Schema: runtime + sidecar fields --------------------------------------
+
+
+def test_field_schema_runtime_field_lists_all_options() -> None:
+    schema = PiperTTS.field_schema()
+    runtime_field = schema.field("runtime")
+    assert runtime_field is not None
+    assert runtime_field.default == DEFAULT_RUNTIME
+    option_values = {o.value for o in runtime_field.options}
+    assert option_values == set(ALLOWED_RUNTIMES)
+
+
+def test_field_schema_sidecar_url_default() -> None:
+    schema = PiperTTS.field_schema()
+    sidecar_field = schema.field("sidecar_url")
+    assert sidecar_field is not None
+    assert sidecar_field.default == DEFAULT_SIDECAR_URL
+
+
+# --- synthesize_stream: persistent (warm in-process voice) runtime ---------
+
+
+async def test_persistent_runtime_yields_resampled_pcm() -> None:
+    # 220 samples at 22050 Hz → ~160 samples at 16 kHz after resample.
+    chunk = _FakeAudioChunk(_pcm([0] * 220), sample_rate=22_050)
+    adapter = _FakePersistentPiperTTS(
+        _config(runtime=RUNTIME_PERSISTENT, voice_id="vx", model_dir="/m"),
+        chunks=[chunk],
+    )
+    frames = [f async for f in adapter.synthesize_stream("hi")]
+    total = b"".join(frames)
+    expected_samples = round(220 * PCM_SAMPLE_RATE_HZ / 22_050)
+    assert len(total) == expected_samples * PCM_SAMPLE_WIDTH_BYTES
+    assert adapter.load_calls == 1
+
+
+async def test_persistent_runtime_reuses_warm_voice_across_calls() -> None:
+    """Second synth on the same voice must NOT reload — that's the whole point."""
+    chunk = _FakeAudioChunk(_pcm([1234] * 64), sample_rate=16_000)
+    adapter = _FakePersistentPiperTTS(
+        _config(runtime=RUNTIME_PERSISTENT, voice_id="vx", model_dir="/m"),
+        chunks=[chunk],
+    )
+    [_ async for _ in adapter.synthesize_stream("first")]
+    [_ async for _ in adapter.synthesize_stream("second")]
+    # Loaded exactly once; the warm voice was reused on the second call.
+    assert adapter.load_calls == 1
+    assert len(adapter.loaded_voices) == 1
+    assert adapter.loaded_voices[0].synthesize_calls == 2
+
+
+async def test_persistent_runtime_cache_is_shared_across_instances() -> None:
+    """Two adapters for the same voice key share the module-level warm voice."""
+    chunk = _FakeAudioChunk(_pcm([7] * 32), sample_rate=16_000)
+    a = _FakePersistentPiperTTS(
+        _config(runtime=RUNTIME_PERSISTENT, voice_id="vx", model_dir="/m"),
+        chunks=[chunk],
+    )
+    b = _FakePersistentPiperTTS(
+        _config(runtime=RUNTIME_PERSISTENT, voice_id="vx", model_dir="/m"),
+        chunks=[chunk],
+    )
+    [_ async for _ in a.synthesize_stream("one")]
+    [_ async for _ in b.synthesize_stream("two")]
+    # Only the first instance paid the load; the second hit the shared cache.
+    assert a.load_calls == 1
+    assert b.load_calls == 0
+
+
+async def test_persistent_runtime_distinct_voices_load_separately() -> None:
+    chunk = _FakeAudioChunk(_pcm([0] * 16), sample_rate=16_000)
+    adapter = _FakePersistentPiperTTS(
+        _config(runtime=RUNTIME_PERSISTENT, voice_id="vx", model_dir="/m"),
+        chunks=[chunk],
+    )
+    [_ async for _ in adapter.synthesize_stream("hi", voice_id="alpha")]
+    [_ async for _ in adapter.synthesize_stream("hi", voice_id="beta")]
+    # Different model paths → two distinct cache keys → two loads.
+    assert adapter.load_calls == 2
+
+
+async def test_persistent_runtime_reloads_after_eviction() -> None:
+    chunk = _FakeAudioChunk(_pcm([0] * 16), sample_rate=16_000)
+    adapter = _FakePersistentPiperTTS(
+        _config(runtime=RUNTIME_PERSISTENT, voice_id="vx", model_dir="/m"),
+        chunks=[chunk],
+    )
+    [_ async for _ in adapter.synthesize_stream("hi")]
+    PiperTTS.evict_process_cache()
+    [_ async for _ in adapter.synthesize_stream("hi")]
+    assert adapter.load_calls == 2
+
+
+async def test_persistent_runtime_multi_chunk_concatenates() -> None:
+    """Multiple sentence chunks (16 kHz) concatenate without resampling loss."""
+    chunks = [
+        _FakeAudioChunk(_pcm([100] * 20), sample_rate=16_000),
+        _FakeAudioChunk(_pcm([200] * 20), sample_rate=16_000),
+    ]
+    adapter = _FakePersistentPiperTTS(
+        _config(runtime=RUNTIME_PERSISTENT, voice_id="vx", model_dir="/m"),
+        chunks=chunks,
+    )
+    total = b"".join([f async for f in adapter.synthesize_stream("two sentences")])
+    assert total == _pcm([100] * 20) + _pcm([200] * 20)
+
+
+async def test_persistent_runtime_surfaces_synth_error() -> None:
+    class _BoomVoice(_FakeVoice):
+        def synthesize(self, text: str) -> Any:
+            raise RuntimeError("onnx exploded")
+            yield  # pragma: no cover — make it a generator
+
+    class _BoomAdapter(_FakePersistentPiperTTS):
+        def _load_voice(self, model_path: Path) -> Any:
+            self.load_calls += 1
+            return _BoomVoice([])
+
+    adapter = _BoomAdapter(
+        _config(runtime=RUNTIME_PERSISTENT, voice_id="vx", model_dir="/m"),
+    )
+    with pytest.raises(TTSError, match="persistent synth failed"):
+        async for _ in adapter.synthesize_stream("hi"):
+            pass
+
+
+async def test_persistent_runtime_contract() -> None:
+    chunk = _FakeAudioChunk(_pcm([0] * 4_410), sample_rate=22_050)
+    adapter = _FakePersistentPiperTTS(
+        _config(runtime=RUNTIME_PERSISTENT, voice_id="en_US-amy-medium", model_dir="/m"),
+        chunks=[chunk],
+    )
+    await assert_synthesize_yields_pcm_audio(adapter)
+
+
+# --- synthesize_stream: http-sidecar runtime -------------------------------
+
+
+async def test_sidecar_runtime_posts_text_and_decodes_pcm() -> None:
+    import httpx
+
+    native = _pcm([0] * 220)  # 22050 Hz → resampled to 16 kHz on the api side
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/synthesize"
+        import json as _json
+
+        body = _json.loads(request.content)
+        assert body == {"text": "hello sidecar", "voice": "vx"}
+        return httpx.Response(
+            200, content=native, headers={"X-Sample-Rate": "22050"}
+        )
+
+    adapter = _SidecarFakePiperTTS(
+        _config(runtime=RUNTIME_HTTP_SIDECAR, voice_id="vx"),
+        handler=handler,
+    )
+    frames = [f async for f in adapter.synthesize_stream("hello sidecar")]
+    total = b"".join(frames)
+    expected_samples = round(220 * PCM_SAMPLE_RATE_HZ / 22_050)
+    assert len(total) == expected_samples * PCM_SAMPLE_WIDTH_BYTES
+    assert len(adapter.requests) == 1
+
+
+async def test_sidecar_runtime_no_resample_when_rate_is_16k() -> None:
+    import httpx
+
+    native = _pcm([1234] * 64)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=native, headers={"X-Sample-Rate": "16000"}
+        )
+
+    adapter = _SidecarFakePiperTTS(
+        _config(runtime=RUNTIME_HTTP_SIDECAR, voice_id="vx"),
+        handler=handler,
+    )
+    total = b"".join([f async for f in adapter.synthesize_stream("hi")])
+    assert total == native
+
+
+async def test_sidecar_runtime_unreachable_raises_helpful_error() -> None:
+    import httpx
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("Connection refused")
+
+    adapter = _SidecarFakePiperTTS(
+        _config(runtime=RUNTIME_HTTP_SIDECAR, voice_id="vx"),
+        handler=handler,
+    )
+    with pytest.raises(TTSError, match="unreachable") as exc_info:
+        async for _ in adapter.synthesize_stream("hi"):
+            pass
+    assert "start-piper-sidecar.sh" in str(exc_info.value)
+
+
+async def test_sidecar_runtime_non_200_raises() -> None:
+    import httpx
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="voice still loading")
+
+    adapter = _SidecarFakePiperTTS(
+        _config(runtime=RUNTIME_HTTP_SIDECAR, voice_id="vx"),
+        handler=handler,
+    )
+    with pytest.raises(TTSError, match="HTTP 503"):
+        async for _ in adapter.synthesize_stream("hi"):
+            pass
+
+
+async def test_sidecar_runtime_requires_url() -> None:
+    # http-sidecar with an explicitly blank sidecar_url has nothing to call.
+    adapter = PiperTTS(
+        _config(runtime=RUNTIME_HTTP_SIDECAR, voice_id="vx", sidecar_url="")
+    )
+    # Blank URL falls back to the default, so force it empty post-construction
+    # to exercise the guard.
+    adapter._sidecar_url = ""
+    with pytest.raises(TTSError, match="requires sidecar_url"):
+        async for _ in adapter.synthesize_stream("hi"):
+            pass
 
 
 # --- Registry --------------------------------------------------------------

@@ -4,6 +4,7 @@ agent = "claude"
 tracker = "beads-bv"
 autoCommit = true
 subagentTracingDetail = "full"
+model = "opus"
 
 [agentOptions]
 [trackerOptions]

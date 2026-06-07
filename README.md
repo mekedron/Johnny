@@ -160,6 +160,28 @@ Sidecar management:
 
 Health checks: `curl http://localhost:8765/health` (MLX) / `curl http://localhost:8766/health` (CoreML) — both return `{"ready": true, "model_id": "..."}` once loaded.
 
+## Local Piper TTS runtimes
+
+The Local Piper TTS provider supports three runtimes selectable from the Providers page (Settings → Providers → Local Piper → Runtime). TTS pays its cost on **every** conversation turn (unlike STT, which is pre-loaded), so the runtime choice directly drives how fast Johnny starts speaking.
+
+| Runtime | Where it runs | Time-to-first-audio (warm) | Setup |
+| --- | --- | --- | --- |
+| `subprocess` (default) | api container, fresh `piper` CLI per call | ~200–400 ms (cold every turn) | None. Safe single-step-debug baseline; identical to the historical behaviour. |
+| `persistent-subprocess` | api container, warm in-process `PiperVoice` (ONNX session) cached at module scope | ~40–60 ms | None. The first synth per voice pays the ~700 ms load; every later turn is warm. This is the meeting-latency win — pick it for real meetings. |
+| `http-sidecar` | macOS host, piper sidecar process | ~80–120 ms (network round-trip + warm synth) | `./scripts/start-piper-sidecar.sh start`. Runs `sidecars/piper-http/server.py` under `uv` on port 8775; the api POSTs to `http://host.docker.internal:8775`. Set the **Sidecar URL** field. |
+
+Why `persistent-subprocess` is in-process, not a child process: piper-tts 1.x (the Python rewrite installed via the `local-tts` extra) dropped the old C++ piper's `--json-input` streaming CLI **and** its `--http` server. There is no long-running piper to pipe into and no upstream HTTP server to point at, so the warm path keeps `PiperVoice` warm inside the api process, and the `http-sidecar` is a thin FastAPI wrapper around the same library (see `sidecars/piper-http/README.md`).
+
+Sidecar management:
+
+```bash
+./scripts/start-piper-sidecar.sh start    # build venv + launch on :8775
+./scripts/start-piper-sidecar.sh status   # is the sidecar up?
+./scripts/start-piper-sidecar.sh stop     # stop it
+```
+
+Health check: `curl http://localhost:8775/health` → `{"ready": true, "voice": "...", "backend": "piper"}` once the default voice is loaded.
+
 ## Voice transport (US-025)
 
 The voice pipeline runs over a swappable transport. The default —

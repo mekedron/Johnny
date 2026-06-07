@@ -1,0 +1,20 @@
+[project]
+name = "piper-http-sidecar"
+version = "0.1.0"
+description = "Thin FastAPI wrapper around the piper-tts PiperVoice library — runs natively on macOS so TTS can scale to its own process; the Johnny api container POSTs text and gets raw PCM back over HTTP."
+requires-python = ">=3.10"
+dependencies = [
+    "piper-tts>=1.4.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+]
+
+[project.scripts]
+piper-http-sidecar = "server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]

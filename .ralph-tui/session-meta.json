@@ -1,20 +1,20 @@
 {
-  "id": "e098572e-3cd4-4977-850e-0294153096d6",
+  "id": "bfd5986f-72a0-472e-b80f-eceb73c7b975",
   "status": "running",
-  "startedAt": "2026-06-07T14:01:05.901Z",
-  "updatedAt": "2026-06-07T14:01:05.901Z",
+  "startedAt": "2026-06-07T16:33:39.342Z",
+  "updatedAt": "2026-06-07T16:33:39.342Z",
   "agentPlugin": "claude",
   "trackerPlugin": "beads-bv",
-  "epicId": "Johnny-ckz",
+  "epicId": "Johnny-1ge",
   "epicIds": [
-    "Johnny-ckz"
+    "Johnny-1ge"
   ],
   "executionScopes": [
     {
-      "id": "Johnny-ckz",
-      "title": "Johnny meeting bot — ongoing work, fixes, and end-to-end validation",
+      "id": "Johnny-1ge",
+      "title": "Local TTS performance + new providers: persistent processes, sidecars, KittenTTS, Kokoro",
       "type": "epic",
-      "description": "## Why this exists\n\nUmbrella epic for the Johnny Google Meet AI Meeting Bot post-MVP work.\n\nThe original join-stuck bug (Johnny-ckz.1) is fixed and the bot now reliably joins meetings (commit 979447e). The remaining scope spans:\n- End-to-end validation against real Google Meet (across all modes)\n- Adding/refining bot behavior modes (Autonomous, free-mode speech logic)\n- Provider integration polish (TTS demo playback, ElevenLabs verification, openai-realtime fix)\n- UX improvements (UI-driven Google sign-in, full-meeting context vs rolling window)\n- Smoke tests and provider management UI tests\n\nAll child issues here are tracked under this single epic.\n\n## Acceptance\n\n- All child issues closed\n- Bot has been validated end-to-end across every mode against a real Google Meet\n- Provider management surface is polished and tested via UI",
+      "description": "## Why this exists\n\nToday every PiperTTS.synthesize_stream call spawns a fresh piper subprocess (backend/app/providers/piper_tts.py:693 -> _spawn_process at line 746). The ONNX runtime + voice-model cold-start adds ~200-400 ms of pure overhead PER conversation turn. Unlike Parakeet (where per-request load only hurt the catalog Test button — meeting providers are pre-loaded by load_active_providers), TTS pays this cost on every reply Johnny speaks in a real meeting.\n\nThis epic does for TTS what the Parakeet runtime split did for STT:\n\n1. Give the existing Piper provider a runtime picker (subprocess / persistent-subprocess / http-sidecar), defaulting to the safe current behaviour. PRD already written at tasks/prd-piper-tts-runtime-options.md.\n2. Add two new local TTS providers (KittenTTS, Kokoro) with the same 3-runtime shape so the user can pick whichever voice + speed trade-off they want.\n\nEach provider exposes the same kind of Runtime dropdown in Settings -> Providers, with structured `<provider>.synth: runtime=... ttfa_ms=...` INFO logs visible in docker logs api so the user can verify the picker is actually doing what they expect and debug runtime-specific failures independently.\n\n## Acceptance for the epic as a whole\n\n- Three providers (Piper, KittenTTS, Kokoro) each ship with three selectable runtimes covering the in-container default, an in-container optimised path, and an out-of-container sidecar option.\n- Real meeting hot-path TTS latency drops from ~300 ms cold to <= 100 ms warm on whichever provider the user picks for the in-container optimised path.\n- README has a new \"Local TTS providers\" table listing voices, sample-rate quirks, and the three runtime options per provider.\n- Browser-validated via chrome-devtools MCP for each provider: switch runtime in the modal, click Play sample, observe latency badge + structured log.\n\n## Child issues\n\n- Piper runtime split (subprocess / persistent / http-sidecar) — PRD at tasks/prd-piper-tts-runtime-options.md.\n- KittenTTS provider (https://github.com/KittenML/KittenTTS) with the same 3-runtime picker.\n- Kokoro provider (https://github.com/hexgrad/kokoro) with the same 3-runtime picker.\n\n## Reference implementation\n\nThe Parakeet runtime split is the canonical example to copy:\n- Module-level cache + per-key asyncio.Lock + global load gate: backend/app/providers/parakeet_stt.py (search for `_LAST`, `_LOAD_LOCKS`, `_GLOBAL_LOAD_GATE`, `_ensure_model`, `evict_process_cache`).\n- Runtime dispatch inside transcribe_stream: parakeet_stt.py:_transcribe_in_container vs _transcribe_via_sidecar.\n- Sidecar wire protocol + launcher script: sidecars/parakeet-mlx/ and scripts/start-parakeet-sidecar.sh.\n- Test seam (autouse fixture evicts the module cache between tests): backend/tests/providers/test_parakeet_stt.py:_reset_parakeet_process_cache.",
       "metadata": {
         "dependencyCount": 0,
         "dependentCount": 0
