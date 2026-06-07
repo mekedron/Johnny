@@ -3,10 +3,10 @@
   "sessionId": "92aa43ca-591e-4b12-ab32-62131855e44d",
   "status": "running",
   "startedAt": "2026-06-07T00:08:27.194Z",
-  "updatedAt": "2026-06-07T01:15:19.472Z",
-  "currentIteration": 4,
+  "updatedAt": "2026-06-07T01:40:56.016Z",
+  "currentIteration": 5,
   "maxIterations": 0,
-  "tasksCompleted": 4,
+  "tasksCompleted": 5,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -98,8 +98,8 @@
       {
         "id": "Johnny-ckz.8",
         "title": "Profile + tune end-to-end voice latency on real local STT/TTS/LLM, and add in-UI optimization tips on each provider settings page",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-wyd",
@@ -389,6 +389,16 @@
       "durationMs": 1025813,
       "startedAt": "2026-06-07T00:38:04.140Z",
       "endedAt": "2026-06-07T00:55:09.953Z"
+    },
+    {
+      "iteration": 5,
+      "status": "completed",
+      "taskId": "Johnny-ckz.8",
+      "taskTitle": "Profile + tune end-to-end voice latency on real local STT/TTS/LLM, and add in-UI optimization tips on each provider settings page",
+      "taskCompleted": true,
+      "durationMs": 1197067,
+      "startedAt": "2026-06-07T00:55:21.615Z",
+      "endedAt": "2026-06-07T01:15:18.682Z"
     }
   ],
   "skippedTaskIds": [],

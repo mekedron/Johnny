@@ -25,14 +25,17 @@ from app.db.models import (
     GoogleAccount,
     MeetingConfig,
     ProfileTemplate,
+    SessionTiming,
 )
 from app.services import session_status_subscriber
 from app.services.session_status_subscriber import (
     AGENT_SPOKE_EVENT_TYPE,
+    PIPELINE_TIMING_EVENT_TYPE,
     ROUTER_DECISION_EVENT_TYPE,
     SESSION_STATUS_EVENT_TYPE,
     _PendingApprovalEvent,
     apply_agent_spoke_event,
+    apply_pipeline_timing_event,
     apply_router_decision_event,
     apply_status_event,
     run_subscriber,
@@ -56,6 +59,7 @@ def engine() -> sa.Engine:
             BotSession.__table__,  # type: ignore[list-item]
             AgentDecision.__table__,  # type: ignore[list-item]
             AgentUtterance.__table__,  # type: ignore[list-item]
+            SessionTiming.__table__,  # type: ignore[list-item]
         ],
     )
     return eng
@@ -726,3 +730,153 @@ async def test_run_subscriber_does_not_emit_pending_for_non_approval_mode(
     )
 
     assert captured == []
+
+
+# --- pipeline_timing event tests (Johnny-ckz.7) ----------------------------
+
+
+def _timing_payload(
+    *,
+    session_id: Any,
+    stage: str = "stt",
+    turn_id: int = 1,
+    started_at_ms: int = 100,
+    duration_ms: int = 250,
+    provider_name: str | None = "faster_whisper",
+    details: dict[str, Any] | None = None,
+    event_type: str = PIPELINE_TIMING_EVENT_TYPE,
+) -> dict[str, Any]:
+    return {
+        "type": event_type,
+        "session_id": session_id,
+        "stage": stage,
+        "turn_id": turn_id,
+        "started_at_ms": started_at_ms,
+        "duration_ms": duration_ms,
+        "provider_name": provider_name,
+        "details": details or {},
+    }
+
+
+def test_apply_pipeline_timing_event_persists_row(db_session: Session) -> None:
+    row = _seed(db_session)
+    applied = apply_pipeline_timing_event(
+        db_session,
+        _timing_payload(
+            session_id=row.id,
+            stage="stt",
+            duration_ms=380,
+            details={"audio_duration_ms": 1200, "produced_text": True},
+        ),
+    )
+    assert applied is True
+    persisted = list(
+        db_session.scalars(sa.select(SessionTiming)).all()
+    )
+    assert len(persisted) == 1
+    saved = persisted[0]
+    assert saved.bot_session_id == row.id
+    assert saved.stage == "stt"
+    assert saved.turn_id == 1
+    assert saved.duration_ms == 380
+    assert saved.provider_name == "faster_whisper"
+    assert saved.details == {"audio_duration_ms": 1200, "produced_text": True}
+
+
+def test_apply_pipeline_timing_event_drops_wrong_type(db_session: Session) -> None:
+    row = _seed(db_session)
+    applied = apply_pipeline_timing_event(
+        db_session,
+        _timing_payload(session_id=row.id, event_type="transcript_finalized"),
+    )
+    assert applied is False
+    assert list(db_session.scalars(sa.select(SessionTiming)).all()) == []
+
+
+def test_apply_pipeline_timing_event_drops_unknown_stage(db_session: Session) -> None:
+    row = _seed(db_session)
+    applied = apply_pipeline_timing_event(
+        db_session,
+        _timing_payload(session_id=row.id, stage="unknown_stage"),
+    )
+    assert applied is False
+    assert list(db_session.scalars(sa.select(SessionTiming)).all()) == []
+
+
+def test_apply_pipeline_timing_event_drops_missing_session_id(
+    db_session: Session,
+) -> None:
+    applied = apply_pipeline_timing_event(
+        db_session,
+        _timing_payload(session_id=None),
+    )
+    assert applied is False
+
+
+def test_apply_pipeline_timing_event_drops_non_numeric_timings(
+    db_session: Session,
+) -> None:
+    row = _seed(db_session)
+    applied = apply_pipeline_timing_event(
+        db_session,
+        _timing_payload(session_id=row.id, started_at_ms="not-an-int"),
+    )
+    assert applied is False
+
+
+def test_apply_pipeline_timing_event_accepts_all_known_stages(
+    db_session: Session,
+) -> None:
+    row = _seed(db_session)
+    stages = [
+        "stt",
+        "router_llm",
+        "answer_llm",
+        "tts",
+        "end_to_end",
+        "interrupt_fast",
+        "interrupt_slow",
+        "provider_switch",
+        "error",
+    ]
+    for stage in stages:
+        applied = apply_pipeline_timing_event(
+            db_session,
+            _timing_payload(session_id=row.id, stage=stage),
+        )
+        assert applied is True, f"stage {stage} should persist"
+    persisted = list(db_session.scalars(sa.select(SessionTiming)).all())
+    assert {r.stage for r in persisted} == set(stages)
+
+
+def test_apply_pipeline_timing_event_null_provider_for_orchestration_stage(
+    db_session: Session,
+) -> None:
+    row = _seed(db_session)
+    applied = apply_pipeline_timing_event(
+        db_session,
+        _timing_payload(
+            session_id=row.id,
+            stage="end_to_end",
+            provider_name=None,
+        ),
+    )
+    assert applied is True
+    saved = db_session.scalars(sa.select(SessionTiming)).one()
+    assert saved.provider_name is None
+
+
+def test_apply_pipeline_timing_event_clamps_negative_values(
+    db_session: Session,
+) -> None:
+    row = _seed(db_session)
+    applied = apply_pipeline_timing_event(
+        db_session,
+        _timing_payload(
+            session_id=row.id, started_at_ms=-50, duration_ms=-200
+        ),
+    )
+    assert applied is True
+    saved = db_session.scalars(sa.select(SessionTiming)).one()
+    assert saved.started_at_ms == 0
+    assert saved.duration_ms == 0

@@ -61,6 +61,33 @@ export interface AgentUtteranceRecord {
 	created_at: string;
 }
 
+export type SessionTimingStage =
+	| 'stt'
+	| 'router_llm'
+	| 'answer_llm'
+	| 'tts'
+	| 'end_to_end'
+	| 'interrupt_fast'
+	| 'interrupt_slow'
+	| 'provider_switch'
+	| 'error';
+
+export interface SessionTimingRecord {
+	id: number;
+	bot_session_id: number;
+	turn_id: number;
+	stage: SessionTimingStage | string;
+	started_at_ms: number;
+	duration_ms: number;
+	provider_name: string | null;
+	details: Record<string, unknown>;
+	created_at: string;
+}
+
+export interface SessionTimingsResponse {
+	timings: SessionTimingRecord[];
+}
+
 export interface SessionDetail {
 	session: BotSession;
 	transcripts: TranscriptChunk[];
@@ -132,4 +159,24 @@ export function getSessionDetail(
 ): Promise<SessionDetail> {
 	const qs = limit !== undefined ? `?limit=${encodeURIComponent(limit)}` : '';
 	return request<SessionDetail>(`/sessions/${botSessionId}${qs}`);
+}
+
+export const SESSION_TIMING_STAGE_LABEL: Record<string, string> = {
+	stt: 'STT',
+	router_llm: 'Router LLM',
+	answer_llm: 'Answer LLM',
+	tts: 'TTS',
+	end_to_end: 'End-to-end',
+	interrupt_fast: 'Interrupt (fast)',
+	interrupt_slow: 'Interrupt (classifier)',
+	provider_switch: 'Provider switch',
+	error: 'Error'
+};
+
+export function getSessionTimings(
+	botSessionId: number,
+	limit?: number
+): Promise<SessionTimingsResponse> {
+	const qs = limit !== undefined ? `?limit=${encodeURIComponent(limit)}` : '';
+	return request<SessionTimingsResponse>(`/sessions/${botSessionId}/timings${qs}`);
 }

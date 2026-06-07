@@ -24,6 +24,40 @@ AgentSuggestedEventType = Literal["agent_suggested"]
 SessionStatusEventType = Literal["session_status_changed"]
 ApprovalPendingEventType = Literal["approval_pending"]
 ApprovalResolvedEventType = Literal["approval_resolved"]
+PipelineTimingEventType = Literal["pipeline_timing"]
+
+PipelineTimingStage = Literal[
+    "stt",
+    "router_llm",
+    "answer_llm",
+    "tts",
+    "end_to_end",
+    "interrupt_fast",
+    "interrupt_slow",
+    "provider_switch",
+    "error",
+]
+"""Stage labels for :class:`PipelineTiming` events (Johnny-ckz.7).
+
+* ``stt`` — STT round-trip for one utterance.
+* ``router_llm`` — router LLM call deciding whether to speak.
+* ``answer_llm`` — answer LLM streaming generation. Carries
+  ``time_to_first_token_ms`` in ``details`` so the UI can show TTFT
+  separately from total cost.
+* ``tts`` — TTS synth for one utterance. Carries
+  ``time_to_first_audio_ms`` in ``details`` analogous to the LLM TTFT.
+* ``end_to_end`` — user-speech-end → first-audio-out-to-user. The
+  single number users actually feel.
+* ``interrupt_fast`` — VAD-driven fast barge-in (Johnny-ze3). Logged
+  per fire with the speech-onset offset in ``started_at_ms``.
+* ``interrupt_slow`` — post-utterance classifier-driven interrupt
+  (Johnny-di9). ``duration_ms`` is the classifier LLM cost.
+* ``provider_switch`` — active provider changed mid-session. Reserved
+  for a future emit point; included in the migration so adding it later
+  doesn't need a new schema change.
+* ``error`` — a stage failed. Provider in ``provider_name``,
+  human-readable cause in ``details['reason']``.
+"""
 
 TranscriptFilteredReason = Literal[
     "audio_too_short",
@@ -217,6 +251,45 @@ class ApprovalResolved:
     type: ApprovalResolvedEventType = "approval_resolved"
 
 
+@dataclass(frozen=True, slots=True)
+class PipelineTiming:
+    """One measured stage timing for the per-turn activity log (Johnny-ckz.7).
+
+    Emitted by the pipeline as each stage (STT, router LLM, answer LLM,
+    TTS, end-to-end, interrupts) completes or fires. The subscriber
+    persists these to ``session_timings`` so the session detail page
+    can render a per-turn activity log without recomputing latencies
+    from raw transcript / decision / utterance rows.
+
+    Fields:
+
+    * ``turn_id`` — pipeline's per-session utterance counter; lets the
+      UI group all the events for a single user-turn → bot-reply
+      round-trip naturally.
+    * ``stage`` — one of :data:`PipelineTimingStage`.
+    * ``started_at_ms`` — pipeline-time offset (from session start)
+      when the stage began.
+    * ``duration_ms`` — measured stage cost in ms. For interrupt events
+      this is the cut latency (speech-onset → interrupt fired).
+    * ``provider_name`` — denormalised provider id (e.g.
+      ``faster_whisper``, ``openai``, ``piper``) so the UI can render
+      "TTS: 1.4s — Local Piper" without joining to provider rows. ``None``
+      when the stage has no underlying provider (end-to-end, interrupts).
+    * ``details`` — small JSON bag for stage-specific extras: model
+      name, finish reason, token counts, error reason, etc. Kept open
+      so future stages can extend without a schema change.
+    """
+
+    turn_id: int
+    stage: PipelineTimingStage
+    started_at_ms: int
+    duration_ms: int
+    provider_name: str | None = None
+    details: dict[str, Any] = field(default_factory=dict)
+    session_id: str | None = None
+    type: PipelineTimingEventType = "pipeline_timing"
+
+
 PipelineEvent = (
     TranscriptFinalized
     | TranscriptFiltered
@@ -226,6 +299,7 @@ PipelineEvent = (
     | SessionStatusChanged
     | ApprovalPending
     | ApprovalResolved
+    | PipelineTiming
 )
 """Union of every event the pipeline emits."""
 
@@ -247,6 +321,8 @@ __all__ = [
     "ApprovalResolution",
     "ApprovalResolved",
     "PipelineEvent",
+    "PipelineTiming",
+    "PipelineTimingStage",
     "RouterDecisionMade",
     "SessionStatus",
     "SessionStatusChanged",

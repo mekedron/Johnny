@@ -25,6 +25,7 @@ from app.db.models import (
     GoogleAccount,
     MeetingConfig,
     ProfileTemplate,
+    SessionTiming,
     TranscriptChunk,
 )
 from app.main import app
@@ -55,6 +56,7 @@ def engine() -> sa.Engine:
             TranscriptChunk.__table__,  # type: ignore[list-item]
             AgentDecision.__table__,  # type: ignore[list-item]
             AgentUtterance.__table__,  # type: ignore[list-item]
+            SessionTiming.__table__,  # type: ignore[list-item]
         ],
     )
     return eng
@@ -465,4 +467,141 @@ def test_get_session_detail_rejects_invalid_limit(client: TestClient) -> None:
     res = client.get("/sessions/1?limit=0")
     assert res.status_code == 422
     res = client.get("/sessions/1?limit=1000")
+    assert res.status_code == 422
+
+
+# --- GET /sessions/{id}/timings (Johnny-ckz.7) -----------------------------
+
+
+def test_get_session_timings_404_for_unknown(client: TestClient) -> None:
+    res = client.get("/sessions/9999/timings")
+    assert res.status_code == 404
+
+
+def test_get_session_timings_empty_for_pre_migration_session(
+    client: TestClient, db_session: Session
+) -> None:
+    """Acceptance #5: pre-migration sessions load with no crash, empty list."""
+    _, cfg = _seed_meeting(db_session)
+    row = BotSession(
+        meeting_config_id=cfg.id, status=BotSessionStatus.ENDED
+    )
+    db_session.add(row)
+    db_session.commit()
+    res = client.get(f"/sessions/{row.id}/timings")
+    assert res.status_code == 200
+    body = res.json()
+    assert body == {"timings": []}
+
+
+def test_get_session_timings_returns_persisted_rows_sorted_by_turn(
+    client: TestClient, db_session: Session
+) -> None:
+    """Rows are returned sorted by (turn_id, started_at_ms) so the UI can
+    render turn-by-turn timelines without re-sorting."""
+    _, cfg = _seed_meeting(db_session)
+    row = BotSession(
+        meeting_config_id=cfg.id, status=BotSessionStatus.JOINED
+    )
+    db_session.add(row)
+    db_session.flush()
+
+    # Add rows out of order; we expect the API to sort them.
+    db_session.add(
+        SessionTiming(
+            bot_session_id=row.id,
+            turn_id=2,
+            stage="tts",
+            started_at_ms=4500,
+            duration_ms=1200,
+            provider_name="piper",
+            details={"time_to_first_audio_ms": 80},
+        )
+    )
+    db_session.add(
+        SessionTiming(
+            bot_session_id=row.id,
+            turn_id=1,
+            stage="stt",
+            started_at_ms=120,
+            duration_ms=380,
+            provider_name="faster_whisper",
+            details={"audio_duration_ms": 1200},
+        )
+    )
+    db_session.add(
+        SessionTiming(
+            bot_session_id=row.id,
+            turn_id=1,
+            stage="router_llm",
+            started_at_ms=520,
+            duration_ms=210,
+            provider_name="openai",
+            details={"finish_reason": "stop"},
+        )
+    )
+    db_session.add(
+        SessionTiming(
+            bot_session_id=row.id,
+            turn_id=1,
+            stage="end_to_end",
+            started_at_ms=120,
+            duration_ms=920,
+            provider_name=None,
+            details={},
+        )
+    )
+    db_session.commit()
+
+    res = client.get(f"/sessions/{row.id}/timings")
+    assert res.status_code == 200
+    body = res.json()
+    rows = body["timings"]
+    # turn_id ASC, then started_at_ms ASC, then id ASC.
+    assert [(t["turn_id"], t["stage"]) for t in rows] == [
+        (1, "stt"),
+        (1, "end_to_end"),
+        (1, "router_llm"),
+        (2, "tts"),
+    ]
+    # Provider name and details survive the round-trip.
+    stt_row = rows[0]
+    assert stt_row["provider_name"] == "faster_whisper"
+    assert stt_row["duration_ms"] == 380
+    assert stt_row["details"] == {"audio_duration_ms": 1200}
+    # end_to_end with no provider returns None.
+    assert rows[1]["provider_name"] is None
+
+
+def test_get_session_timings_respects_limit(
+    client: TestClient, db_session: Session
+) -> None:
+    _, cfg = _seed_meeting(db_session)
+    row = BotSession(
+        meeting_config_id=cfg.id, status=BotSessionStatus.JOINED
+    )
+    db_session.add(row)
+    db_session.flush()
+    for i in range(10):
+        db_session.add(
+            SessionTiming(
+                bot_session_id=row.id,
+                turn_id=i,
+                stage="stt",
+                started_at_ms=i * 1000,
+                duration_ms=100,
+                provider_name="faster_whisper",
+                details={},
+            )
+        )
+    db_session.commit()
+    res = client.get(f"/sessions/{row.id}/timings?limit=4")
+    assert res.status_code == 200
+    assert len(res.json()["timings"]) == 4
+
+
+def test_get_session_timings_rejects_invalid_limit(client: TestClient) -> None:
+    res = client.get("/sessions/1/timings?limit=0")
+    assert res.status_code == 422
+    res = client.get("/sessions/1/timings?limit=10000")
     assert res.status_code == 422

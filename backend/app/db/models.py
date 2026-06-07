@@ -416,6 +416,56 @@ class AgentUtterance(Base):
     decision: Mapped[AgentDecision | None] = relationship(back_populates="utterances")
 
 
+class SessionTiming(Base):
+    """One measured stage event in one turn of the voice pipeline (Johnny-ckz.7).
+
+    Captured by the pipeline as it walks an utterance through the
+    stages (STT → router → answer LLM → TTS) and persisted so the
+    session detail page can render a per-turn activity log. ``turn_id``
+    is the pipeline's per-session utterance counter, so events that
+    share a turn group naturally in the UI. ``stage`` is one of
+    :data:`SESSION_TIMING_STAGES` and is enforced by a CHECK constraint
+    on the table (matching the alembic migration).
+
+    ``started_at_ms`` is the pipeline-time offset from session start
+    when the stage began; ``duration_ms`` is the measured cost.
+    ``provider_name`` is denormalised so the UI can render
+    "TTS: 1.4s — Local Piper" without a join. ``details`` is a small
+    JSON bag for stage-specific extras (model name, token counts,
+    finish reason, error message, etc.) — kept open so future stages
+    can extend without a schema change.
+    """
+
+    __tablename__ = "session_timings"
+    __table_args__ = (
+        Index(
+            "ix_session_timings_session_turn",
+            "bot_session_id",
+            "turn_id",
+            "started_at_ms",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_session_id: Mapped[int] = mapped_column(
+        ForeignKey("bot_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    turn_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    started_at_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    details: Mapped[dict[str, Any]] = mapped_column(
+        _json_column(), nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
 class ProviderCredential(TimestampMixin, Base):
     __tablename__ = "provider_credentials"
     __table_args__ = (

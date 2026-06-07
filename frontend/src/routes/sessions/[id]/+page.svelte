@@ -21,10 +21,13 @@
 	import {
 		DECISION_OUTCOME_LABEL,
 		getSessionDetail,
+		getSessionTimings,
+		SESSION_TIMING_STAGE_LABEL,
 		type AgentDecisionRecord,
 		type AgentUtteranceRecord,
 		type DecisionOutcome,
 		type SessionDetail,
+		type SessionTimingRecord,
 		type TranscriptChunk
 	} from '$lib/sessionDetail';
 	import {
@@ -88,6 +91,10 @@
 	let pendingApprovals = $state<PendingApproval[]>([]);
 	let resolvingDecisionIds = $state<Set<number>>(new Set());
 	let approvalErrorMessage = $state<string | null>(null);
+
+	let timings = $state<SessionTimingRecord[]>([]);
+	let timingsLoadError = $state<string | null>(null);
+	let expandedTurnIds = $state<Set<number>>(new Set());
 
 	let connected = $state(false);
 	let connectError = $state<string | null>(null);
@@ -256,6 +263,116 @@
 		};
 	}
 
+	interface TimingTurn {
+		turnId: number;
+		events: SessionTimingRecord[];
+		endToEndMs: number | null;
+		hasError: boolean;
+	}
+
+	const groupedTimings = $derived(groupTimingsByTurn(timings));
+
+	function groupTimingsByTurn(rows: SessionTimingRecord[]): TimingTurn[] {
+		const byTurn = new Map<number, SessionTimingRecord[]>();
+		for (const row of rows) {
+			const list = byTurn.get(row.turn_id);
+			if (list === undefined) {
+				byTurn.set(row.turn_id, [row]);
+			} else {
+				list.push(row);
+			}
+		}
+		const turns: TimingTurn[] = [];
+		for (const [turnId, events] of byTurn.entries()) {
+			events.sort((a, b) => {
+				if (a.started_at_ms !== b.started_at_ms) {
+					return a.started_at_ms - b.started_at_ms;
+				}
+				return a.id - b.id;
+			});
+			const endToEnd = events.find((e) => e.stage === 'end_to_end');
+			const hasError = events.some((e) => e.stage === 'error');
+			turns.push({
+				turnId,
+				events,
+				endToEndMs: endToEnd ? endToEnd.duration_ms : null,
+				hasError
+			});
+		}
+		turns.sort((a, b) => a.turnId - b.turnId);
+		return turns;
+	}
+
+	function stageLabel(stage: string): string {
+		return SESSION_TIMING_STAGE_LABEL[stage] ?? stage;
+	}
+
+	function isErrorStage(stage: string): boolean {
+		return stage === 'error';
+	}
+
+	function isInterruptStage(stage: string): boolean {
+		return stage === 'interrupt_fast' || stage === 'interrupt_slow';
+	}
+
+	function formatTimingMs(ms: number | null | undefined): string {
+		if (ms === null || ms === undefined || !Number.isFinite(ms)) return '—';
+		if (ms < 1000) return `${ms} ms`;
+		return `${(ms / 1000).toFixed(2)} s`;
+	}
+
+	function formatStartedAtMs(ms: number): string {
+		if (!Number.isFinite(ms)) return '';
+		const totalSeconds = Math.floor(ms / 1000);
+		const minutes = Math.floor(totalSeconds / 60);
+		const seconds = totalSeconds % 60;
+		const millis = ms % 1000;
+		const pad = (n: number, width: number) => String(n).padStart(width, '0');
+		return `${pad(minutes, 2)}:${pad(seconds, 2)}.${pad(millis, 3)}`;
+	}
+
+	function detailSummary(row: SessionTimingRecord): string {
+		const d = row.details ?? {};
+		const parts: string[] = [];
+		const ttft = (d as { time_to_first_token_ms?: unknown }).time_to_first_token_ms;
+		if (typeof ttft === 'number') parts.push(`TTFT ${formatTimingMs(ttft)}`);
+		const ttfa = (d as { time_to_first_audio_ms?: unknown }).time_to_first_audio_ms;
+		if (typeof ttfa === 'number') parts.push(`TTFA ${formatTimingMs(ttfa)}`);
+		const chars = (d as { char_count?: unknown }).char_count;
+		if (typeof chars === 'number') parts.push(`${chars} chars`);
+		const audioMs = (d as { audio_duration_ms?: unknown }).audio_duration_ms;
+		if (typeof audioMs === 'number') parts.push(`audio ${formatTimingMs(audioMs)}`);
+		const finishReason = (d as { finish_reason?: unknown }).finish_reason;
+		if (typeof finishReason === 'string' && finishReason) {
+			parts.push(`finish=${finishReason}`);
+		}
+		const failedStage = (d as { failed_stage?: unknown }).failed_stage;
+		if (typeof failedStage === 'string') parts.push(`failed stage=${failedStage}`);
+		const category = (d as { category?: unknown }).category;
+		if (typeof category === 'string') parts.push(`category=${category}`);
+		return parts.join(' · ');
+	}
+
+	function toggleTurn(turnId: number): void {
+		const next = new Set(expandedTurnIds);
+		if (next.has(turnId)) {
+			next.delete(turnId);
+		} else {
+			next.add(turnId);
+		}
+		expandedTurnIds = next;
+	}
+
+	async function loadTimings() {
+		timingsLoadError = null;
+		try {
+			const resp = await getSessionTimings(sessionId);
+			timings = resp.timings;
+		} catch (err) {
+			timingsLoadError = err instanceof Error ? err.message : String(err);
+		}
+	}
+
 	function startSubscription() {
 		if (!Number.isFinite(sessionId)) return;
 		subscription = subscribeToSession(String(sessionId), {
@@ -399,6 +516,7 @@
 		};
 		transcripts = [...transcripts, botLine];
 		void autoScrollTranscript();
+		void loadTimings();
 	}
 
 	function handleAgentSuggested(ev: AgentSuggestedEvent) {
@@ -542,6 +660,7 @@
 		void loadInitialDetail().then(() => {
 			void autoScrollTranscript();
 		});
+		void loadTimings();
 		startSubscription();
 		durationTimer = setInterval(() => {
 			nowMs = Date.now();
@@ -981,5 +1100,127 @@
 				</div>
 			</Card.Root>
 		</div>
+
+		<Card.Root class="flex flex-col gap-0 py-0" data-testid="activity-pane">
+			<Card.Header
+				class="flex flex-row items-baseline justify-between border-b border-border px-4 py-3"
+			>
+				<Card.Title class="text-sm font-semibold tracking-wide"
+					>Activity log</Card.Title
+				>
+				<span
+					class="font-mono text-xs text-muted-foreground"
+					data-testid="activity-turn-count"
+				>
+					{groupedTimings.length} {groupedTimings.length === 1 ? 'turn' : 'turns'}
+				</span>
+			</Card.Header>
+			<div class="px-4 py-3">
+				{#if timingsLoadError}
+					<p class="text-sm text-warning" data-testid="activity-load-error">
+						Activity log unavailable: {timingsLoadError}
+					</p>
+				{:else if groupedTimings.length === 0}
+					<p class="text-sm text-muted-foreground italic">
+						No activity events yet. The activity log captures per-turn pipeline timings (STT, router LLM, answer LLM, TTS, interrupts) as the session progresses.
+					</p>
+				{:else}
+					<ul class="m-0 flex list-none flex-col gap-2 p-0">
+						{#each groupedTimings as turn (turn.turnId)}
+							{@const expanded = expandedTurnIds.has(turn.turnId)}
+							<li
+								class="rounded-md border border-border bg-surface-2"
+								data-testid="activity-turn"
+								data-turn-id={turn.turnId}
+							>
+								<button
+									type="button"
+									class="flex w-full items-center gap-3 px-3 py-2 text-left text-sm hover:bg-muted/40 transition"
+									data-testid="activity-turn-header"
+									aria-expanded={expanded}
+									onclick={() => toggleTurn(turn.turnId)}
+								>
+									<span
+										class="font-mono text-xs text-muted-foreground"
+										style="min-width: 4ch"
+									>
+										#{turn.turnId}
+									</span>
+									<span class="font-mono text-xs">
+										{turn.events.length}
+										{turn.events.length === 1 ? 'event' : 'events'}
+									</span>
+									<span
+										class="font-mono text-xs font-medium text-foreground"
+										data-testid="activity-turn-end-to-end"
+										title="End-to-end (user speech end → first audio out)"
+									>
+										end-to-end {formatTimingMs(turn.endToEndMs)}
+									</span>
+									{#if turn.hasError}
+										<span
+											class="inline-flex items-center rounded-sm border border-destructive/40 bg-destructive/10 px-1.5 py-0.5 text-[0.65rem] font-semibold tracking-wide uppercase text-foreground"
+											data-testid="activity-turn-error-badge"
+										>
+											Error
+										</span>
+									{/if}
+									<span
+										class="ml-auto font-mono text-xs text-muted-foreground"
+										aria-hidden="true"
+									>
+										{expanded ? '▾' : '▸'}
+									</span>
+								</button>
+								{#if expanded}
+									<div class="border-t border-border px-3 py-2">
+										<ul
+											class="m-0 flex list-none flex-col gap-1 p-0 text-xs"
+											data-testid="activity-events"
+										>
+											{#each turn.events as ev (ev.id)}
+												<li
+													class="grid grid-cols-[6ch_minmax(0,9rem)_minmax(0,7rem)_minmax(0,1fr)] items-baseline gap-x-3 gap-y-0.5"
+													data-testid="activity-event"
+													data-stage={ev.stage}
+												>
+													<time
+														class="font-mono text-muted-foreground"
+														title="Offset from session start"
+													>
+														{formatStartedAtMs(ev.started_at_ms)}
+													</time>
+													<span
+														class="font-medium text-foreground"
+														class:text-destructive={isErrorStage(ev.stage)}
+														class:text-warning={isInterruptStage(ev.stage)}
+													>
+														{stageLabel(ev.stage)}
+													</span>
+													<span class="font-mono text-foreground">
+														{formatTimingMs(ev.duration_ms)}
+													</span>
+													<span class="text-muted-foreground">
+														{#if ev.provider_name}
+															<span class="font-mono">{ev.provider_name}</span>
+															{#if detailSummary(ev)}
+																<span class="mx-1" aria-hidden="true">·</span>
+															{/if}
+														{/if}
+														{#if detailSummary(ev)}
+															<span>{detailSummary(ev)}</span>
+														{/if}
+													</span>
+												</li>
+											{/each}
+										</ul>
+									</div>
+								{/if}
+							</li>
+						{/each}
+					</ul>
+				{/if}
+			</div>
+		</Card.Root>
 	{/if}
 </Page>

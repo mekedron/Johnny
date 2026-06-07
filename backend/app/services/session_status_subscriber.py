@@ -34,6 +34,7 @@ from app.db.models import (
     BotMode,
     BotSession,
     DecisionOutcome,
+    SessionTiming,
     TranscriptChunk,
 )
 from app.db.session import session_scope
@@ -54,6 +55,24 @@ SESSION_STATUS_EVENT_TYPE = "session_status_changed"
 TRANSCRIPT_EVENT_TYPE = "transcript_finalized"
 ROUTER_DECISION_EVENT_TYPE = "router_decision_made"
 AGENT_SPOKE_EVENT_TYPE = "agent_spoke"
+PIPELINE_TIMING_EVENT_TYPE = "pipeline_timing"
+
+# Whitelist of stages persisted to ``session_timings`` (Johnny-ckz.7). The
+# pipeline may emit additional stages in the future; an unknown value is
+# dropped silently rather than risk a CHECK-constraint violation.
+PIPELINE_TIMING_STAGES = frozenset(
+    {
+        "stt",
+        "router_llm",
+        "answer_llm",
+        "tts",
+        "end_to_end",
+        "interrupt_fast",
+        "interrupt_slow",
+        "provider_switch",
+        "error",
+    }
+)
 
 # Sleep this long between reconnect attempts when Redis is unreachable.
 RECONNECT_BACKOFF_S = 2.0
@@ -325,6 +344,60 @@ def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
     return True
 
 
+def apply_pipeline_timing_event(db: Session, payload: dict[str, Any]) -> bool:
+    """Insert one ``session_timings`` row from a ``pipeline_timing`` event (Johnny-ckz.7).
+
+    The voice pipeline emits one of these per stage event (STT, router
+    LLM, answer LLM, TTS, end-to-end, interrupts, errors) for the
+    per-turn activity log on the session detail page. Rows are appended;
+    we never update or merge — each event is a discrete measurement.
+
+    Returns ``False`` (without raising) for any payload the writer
+    can't trust: wrong event type, missing session id, unknown stage,
+    non-numeric ``started_at_ms`` / ``duration_ms``. Skipping silently
+    keeps a single malformed payload from breaking the subscriber loop
+    — the operator sees the gap in the activity log if it happens, and
+    legitimate events keep flowing.
+    """
+    if payload.get("type") != PIPELINE_TIMING_EVENT_TYPE:
+        return False
+    session_id = _coerce_int_id(payload.get("session_id"))
+    if session_id is None:
+        return False
+    stage = payload.get("stage")
+    if not isinstance(stage, str) or stage not in PIPELINE_TIMING_STAGES:
+        logger.warning(
+            "status-sub: dropping pipeline_timing with unknown stage=%r", stage
+        )
+        return False
+    turn_id = _coerce_int_id(payload.get("turn_id"))
+    if turn_id is None:
+        return False
+    started_at_ms = _coerce_int_id(payload.get("started_at_ms"))
+    duration_ms = _coerce_int_id(payload.get("duration_ms"))
+    if started_at_ms is None or duration_ms is None:
+        return False
+    provider_name_raw = payload.get("provider_name")
+    provider_name = (
+        provider_name_raw if isinstance(provider_name_raw, str) and provider_name_raw
+        else None
+    )
+    details_raw = payload.get("details") or {}
+    details = details_raw if isinstance(details_raw, dict) else {}
+    row = SessionTiming(
+        bot_session_id=session_id,
+        turn_id=max(0, turn_id),
+        stage=stage,
+        started_at_ms=max(0, started_at_ms),
+        duration_ms=max(0, duration_ms),
+        provider_name=provider_name,
+        details=details,
+    )
+    db.add(row)
+    db.flush()
+    return True
+
+
 def _coerce_int_id(value: Any) -> int | None:
     if value is None:
         return None
@@ -378,6 +451,8 @@ async def _apply_in_transaction(
                     )
                 elif event_type == AGENT_SPOKE_EVENT_TYPE:
                     applied = apply_agent_spoke_event(db, payload)
+                elif event_type == PIPELINE_TIMING_EVENT_TYPE:
+                    applied = apply_pipeline_timing_event(db, payload)
             except BotSessionNotFoundError as exc:
                 logger.warning("status-sub: %s", exc)
                 return False
@@ -559,6 +634,8 @@ async def run_subscriber(
 __all__ = [
     "AGENT_SPOKE_EVENT_TYPE",
     "DEFAULT_APPROVAL_TIMEOUT_S",
+    "PIPELINE_TIMING_EVENT_TYPE",
+    "PIPELINE_TIMING_STAGES",
     "PendingEventPublisher",
     "PendingPublisherFactory",
     "RECONNECT_BACKOFF_S",
@@ -567,6 +644,7 @@ __all__ = [
     "SESSION_STATUS_EVENT_TYPE",
     "TRANSCRIPT_EVENT_TYPE",
     "apply_agent_spoke_event",
+    "apply_pipeline_timing_event",
     "apply_router_decision_event",
     "apply_status_event",
     "apply_transcript_event",

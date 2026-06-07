@@ -49,6 +49,8 @@ from johnny.voice_pipeline.events import (
     AgentSuggested,
     ApprovalPending,
     ApprovalResolved,
+    PipelineTiming,
+    PipelineTimingStage,
     RouterDecisionMade,
     TranscriptFiltered,
     TranscriptFilteredReason,
@@ -619,6 +621,32 @@ class VoicePipeline:
         # Surfaced for tests + (future) per-session metrics; a non-zero
         # count is the proof that the fast path is wired and reachable.
         self._fast_barge_in_count: int = 0
+        # Per-turn end-to-end timing anchor (Johnny-ckz.7). Set when STT
+        # begins for the current turn; consumed by the TTS first-audio
+        # capture to emit one ``end_to_end`` row per turn. -1 means "no
+        # turn in flight" so spurious TTS frames (text-injected fast
+        # path, late frames after interrupt) don't fabricate a timing.
+        self._turn_started_at_ms: int = -1
+        # Whether the current turn has already emitted its end-to-end
+        # row. Prevents a multi-sentence answer from logging end_to_end
+        # for every TTS sentence; only the first sentence's first frame
+        # is the user-felt "first sound".
+        self._end_to_end_emitted_for_turn: bool = False
+        # Map ``id(transcript)`` → (turn_id, turn_started_at_ms)
+        # captured when STT began for that transcript. The transcribe
+        # loop and the response loop run concurrently (Johnny-har), so
+        # ``_utterance_count`` is unsafe as the turn id from inside the
+        # response loop — the next STT may have already incremented
+        # the counter by the time the router LLM call begins. The map
+        # gives each response loop call a stable turn id tied to the
+        # transcript it's processing, plus the original "user finished
+        # speaking" timestamp for the end-to-end measurement.
+        self._transcript_turn_ids: dict[int, tuple[int, int]] = {}
+        # Turn id of the response currently being processed. Captured
+        # by the response loop when it dequeues a transcript; consumed
+        # by ``_emit_timing`` so router/answer/tts rows attach to the
+        # correct turn.
+        self._current_response_turn_id: int = 0
 
     # ------------------------------------------------------------------
     # Public lifecycle
@@ -922,6 +950,31 @@ class VoicePipeline:
             self.config.barge_in_min_speech_ms,
             self._fast_barge_in_count,
         )
+        # Activity log (Johnny-ckz.7): the fast path is a synchronous
+        # interrupt fired from inside the VAD hot loop. We can't await
+        # here (the VAD frame iterator is a sync-iter wrapper), so
+        # schedule the timing emit on the event loop. The interrupt
+        # itself happens immediately — the timing is observability.
+        now_ms = self._now_ms()
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                self._emit_timing(
+                    stage="interrupt_fast",
+                    started_at_ms=now_ms,
+                    duration_ms=0,
+                    provider_name=None,
+                    details={
+                        "count": self._fast_barge_in_count,
+                        "min_speech_ms": self.config.barge_in_min_speech_ms,
+                    },
+                )
+            )
+        except RuntimeError:
+            # No running loop — fast barge-in fired from a sync context
+            # outside of run(). The timing row is observability only;
+            # skipping it doesn't affect the interrupt itself.
+            pass
         self.interrupt()
 
     # ------------------------------------------------------------------
@@ -962,9 +1015,49 @@ class VoicePipeline:
             )
             return
 
-        transcript = await self._run_stt(utterance)
+        # Mark the start of this user turn (Johnny-ckz.7): end-to-end
+        # latency is measured from "user finished speaking" (here) to
+        # "first audio frame reaches the user" (in _tts_frame_iter).
+        turn_id = self._utterance_count
+        turn_started_at = self._now_ms()
+
+        stt_started_at = turn_started_at
+        try:
+            transcript = await self._run_stt(utterance)
+        except Exception:
+            stt_duration = self._now_ms() - stt_started_at
+            await self._emit_timing(
+                stage="error",
+                started_at_ms=stt_started_at,
+                duration_ms=stt_duration,
+                provider_name=_provider_name(self.stt),
+                details={"failed_stage": "stt"},
+                turn_id=turn_id,
+            )
+            raise
+        stt_duration = self._now_ms() - stt_started_at
+        await self._emit_timing(
+            stage="stt",
+            started_at_ms=stt_started_at,
+            duration_ms=stt_duration,
+            provider_name=_provider_name(self.stt),
+            details={
+                "audio_duration_ms": audio_duration_ms,
+                "produced_text": transcript is not None,
+            },
+            turn_id=turn_id,
+        )
         if transcript is None:
             return
+
+        # Stamp the transcript's turn id + STT-began-at timestamp so the
+        # response loop reads the same values when emitting
+        # router/answer/tts/end_to_end rows for this same turn. The
+        # transcribe + response loops run concurrently — by the time
+        # the response loop runs, the next utterance may already have
+        # incremented _utterance_count. End-to-end is measured from
+        # this STT-start anchor to the first TTS frame.
+        self._transcript_turn_ids[id(transcript)] = (turn_id, stt_started_at)
 
         # Post-STT noise gate (Johnny-ckz.14): drop transcripts that fail
         # the layered content check (length, punctuation-only, stoplist,
@@ -1137,6 +1230,7 @@ class VoicePipeline:
         or already been interrupted), the verdict is stale and firing
         ``interrupt()`` now would abort an *unrelated* response.
         """
+        classifier_started_at = self._now_ms()
         try:
             decision = await self._classify_barge_in_intent(transcript)
         except TimeoutError:
@@ -1173,6 +1267,16 @@ class VoicePipeline:
             self.config.session_id,
             decision.category,
             decision.reason,
+        )
+        await self._emit_timing(
+            stage="interrupt_slow",
+            started_at_ms=classifier_started_at,
+            duration_ms=self._now_ms() - classifier_started_at,
+            provider_name=_provider_name(self.router_llm),
+            details={
+                "category": decision.category,
+                "reason": decision.reason,
+            },
         )
         self.interrupt()
 
@@ -1287,10 +1391,28 @@ class VoicePipeline:
         # call will no longer interrupt the wrong utterance.
         self._response_generation += 1
         self._response_in_flight = True
+        # Activity-log turn tracking (Johnny-ckz.7): bind every timing
+        # row emitted inside this response to the turn id captured when
+        # STT finalised this transcript, and read the original
+        # "user-finished-speaking" anchor for the end_to_end row. The
+        # map is populated by ``_transcribe_and_emit``; transcripts
+        # injected via ``feed_text`` are not mapped, so fall back to
+        # the latest utterance count + now (close enough for text
+        # injection, where end_to_end is dominated by router+answer
+        # cost anyway).
+        stamped = self._transcript_turn_ids.pop(id(transcript), None)
+        if stamped is not None:
+            self._current_response_turn_id, self._turn_started_at_ms = stamped
+        else:
+            self._current_response_turn_id = self._utterance_count
+            self._turn_started_at_ms = self._now_ms()
+        self._end_to_end_emitted_for_turn = False
         try:
             await self._respond_to_transcript_inner(transcript)
         finally:
             self._response_in_flight = False
+            self._current_response_turn_id = 0
+            self._turn_started_at_ms = -1
 
     async def _respond_to_transcript_inner(
         self, transcript: TranscriptFinalized
@@ -1532,9 +1654,31 @@ class VoicePipeline:
         input_window: dict[str, Any],
     ) -> tuple[RouterDecision, LLMResponse]:
         messages = self._router_messages(transcript, input_window)
-        response = await self.router_llm.chat(
-            messages,
-            response_format=_ROUTER_SCHEMA,
+        router_started_at = self._now_ms()
+        try:
+            response = await self.router_llm.chat(
+                messages,
+                response_format=_ROUTER_SCHEMA,
+            )
+        except Exception:
+            duration = self._now_ms() - router_started_at
+            await self._emit_timing(
+                stage="error",
+                started_at_ms=router_started_at,
+                duration_ms=duration,
+                provider_name=_provider_name(self.router_llm),
+                details={"failed_stage": "router_llm"},
+            )
+            raise
+        duration = self._now_ms() - router_started_at
+        await self._emit_timing(
+            stage="router_llm",
+            started_at_ms=router_started_at,
+            duration_ms=duration,
+            provider_name=_provider_name(self.router_llm),
+            details={
+                "finish_reason": response.finish_reason,
+            },
         )
         return _parse_router_response(response), response
 
@@ -1667,12 +1811,16 @@ class VoicePipeline:
             AsyncGenerator[str, None],
             self.answer_llm.stream_chat(messages),
         )
+        answer_started_at = self._now_ms()
+        time_to_first_token_ms: int | None = None
         try:
             async for delta in agen:
                 if self._interrupt_event.is_set():
                     break
                 if not delta:
                     continue
+                if time_to_first_token_ms is None:
+                    time_to_first_token_ms = self._now_ms() - answer_started_at
                 sentence_buffer += delta
                 full_text_parts.append(delta)
                 while True:
@@ -1697,7 +1845,20 @@ class VoicePipeline:
             with suppress(Exception):
                 await agen.aclose()
 
-        return "".join(full_text_parts).strip(), all_frames
+        full_text = "".join(full_text_parts).strip()
+        total_duration = self._now_ms() - answer_started_at
+        await self._emit_timing(
+            stage="answer_llm",
+            started_at_ms=answer_started_at,
+            duration_ms=total_duration,
+            provider_name=_provider_name(self.answer_llm),
+            details={
+                "time_to_first_token_ms": time_to_first_token_ms,
+                "char_count": len(full_text),
+                "interrupted": self._interrupt_event.is_set(),
+            },
+        )
+        return full_text, all_frames
 
     async def _play_text_streamed(
         self,
@@ -1730,22 +1891,64 @@ class VoicePipeline:
         typical). ``aclose`` is propagated to the upstream TTS generator
         in the ``finally`` block so the adapter can tear down its
         subprocess / HTTP connection cleanly.
+
+        Captures TTS first-audio + total-synth timings, plus the per-turn
+        end-to-end measurement (Johnny-ckz.7). The first non-empty frame
+        defines TTFA; the loop exit defines total cost. End-to-end fires
+        once per turn on the first audio frame so a multi-sentence
+        answer doesn't log multiple end-to-end rows.
         """
         tts_gen = cast(
             AsyncGenerator[bytes, None],
             self.tts.synthesize_stream(text),
         )
+        tts_started_at = self._now_ms()
+        time_to_first_audio_ms: int | None = None
+        bytes_emitted = 0
         try:
             async for frame in tts_gen:
                 if self._interrupt_event.is_set():
                     break
                 if not frame:
                     continue
+                if time_to_first_audio_ms is None:
+                    time_to_first_audio_ms = self._now_ms() - tts_started_at
+                    # First user-audible frame for this TTS call. If we
+                    # haven't emitted end-to-end for this turn yet, do
+                    # so now — this is the single number users feel.
+                    if (
+                        self._turn_started_at_ms >= 0
+                        and not self._end_to_end_emitted_for_turn
+                    ):
+                        await self._emit_timing(
+                            stage="end_to_end",
+                            started_at_ms=self._turn_started_at_ms,
+                            duration_ms=self._now_ms() - self._turn_started_at_ms,
+                            provider_name=None,
+                            details={
+                                "char_count": len(text),
+                            },
+                        )
+                        self._end_to_end_emitted_for_turn = True
                 collected.append(frame)
+                bytes_emitted += len(frame)
                 yield frame
         finally:
             with suppress(Exception):
                 await tts_gen.aclose()
+            tts_duration = self._now_ms() - tts_started_at
+            await self._emit_timing(
+                stage="tts",
+                started_at_ms=tts_started_at,
+                duration_ms=tts_duration,
+                provider_name=_provider_name(self.tts),
+                details={
+                    "time_to_first_audio_ms": time_to_first_audio_ms,
+                    "audio_bytes": bytes_emitted,
+                    "char_count": len(text),
+                    "interrupted": self._interrupt_event.is_set(),
+                },
+            )
 
     # ------------------------------------------------------------------
     # Prompt construction
@@ -1914,6 +2117,63 @@ class VoicePipeline:
     def _now_ms(self) -> int:
         loop = asyncio.get_running_loop()
         return int((loop.time() - self._session_started_at) * 1000)
+
+    async def _emit_timing(
+        self,
+        *,
+        stage: PipelineTimingStage,
+        started_at_ms: int,
+        duration_ms: int,
+        provider_name: str | None = None,
+        details: dict[str, Any] | None = None,
+        turn_id: int | None = None,
+    ) -> None:
+        """Publish a :class:`PipelineTiming` event for the activity log (Johnny-ckz.7).
+
+        Wraps :meth:`event_bus.publish` so a slow / failing bus never
+        breaks the audio loop: emit failures are logged at debug (the
+        activity log is observability, not user-facing audio) and
+        swallowed.
+
+        Turn id resolution:
+
+        * Explicit ``turn_id`` wins — used by STT timings inside
+          ``_transcribe_and_emit`` where the local counter is the
+          authoritative turn id for the utterance just transcribed.
+        * Otherwise ``_current_response_turn_id`` — set by the response
+          loop when it dequeues a transcript. Router / answer / TTS /
+          end-to-end timings all run inside the response loop so they
+          read this.
+        * Falls back to the latest utterance count if neither is set
+          (interrupts from the VAD hot path, where there's no clean
+          response-loop context to thread a turn id through).
+        """
+        if turn_id is None:
+            resolved_turn_id = (
+                self._current_response_turn_id
+                if self._current_response_turn_id > 0
+                else self._utterance_count
+            )
+        else:
+            resolved_turn_id = turn_id
+        event = PipelineTiming(
+            turn_id=max(0, resolved_turn_id),
+            stage=stage,
+            started_at_ms=max(0, started_at_ms),
+            duration_ms=max(0, duration_ms),
+            provider_name=provider_name,
+            details=dict(details or {}),
+            session_id=self.config.session_id,
+        )
+        try:
+            await self.event_bus.publish(event)
+        except Exception:  # noqa: BLE001 — observability path; never block
+            logger.debug(
+                "timing emit failed for session=%s stage=%s",
+                self.config.session_id,
+                stage,
+                exc_info=True,
+            )
 
     def _is_rate_limited(self) -> bool:
         """Return True when the per-session utterance cap is exceeded.
@@ -2262,6 +2522,22 @@ class VoicePipeline:
 
 async def _single_chunk(chunk: bytes) -> AsyncIterator[bytes]:
     yield chunk
+
+
+def _provider_name(provider: Any) -> str | None:
+    """Return the canonical name of a provider for timing rows (Johnny-ckz.7).
+
+    Reads the ``.name`` property declared on :class:`_ProviderBase`.
+    Returns ``None`` when the provider is missing (e.g. TTS in a
+    non-speaking mode) so the timing row stores ``None`` rather than
+    a stub string the UI would have to filter out.
+    """
+    if provider is None:
+        return None
+    name_attr = getattr(provider, "name", None)
+    if isinstance(name_attr, str) and name_attr:
+        return name_attr
+    return None
 
 
 def _parse_barge_in_response(response: LLMResponse) -> BargeInDecision:

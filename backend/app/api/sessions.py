@@ -44,6 +44,7 @@ from app.db.models import (
     CalendarEvent,
     DecisionOutcome,
     MeetingConfig,
+    SessionTiming,
     TranscriptChunk,
 )
 from app.services.bot_sessions import BotSessionNotFoundError
@@ -167,6 +168,35 @@ class AgentUtteranceRead(BaseModel):
     audio_duration_ms: int | None
     matched_allowed_reply: str | None
     created_at: datetime
+
+
+class SessionTimingRead(BaseModel):
+    """One persisted activity-log timing row (Johnny-ckz.7).
+
+    Mirrors ``session_timings`` rows so the session detail page can
+    render a per-turn activity panel without any server-side
+    transformation. ``provider_name`` is denormalised at write time so
+    the UI can render "TTS: 1.4s — Local Piper" without joining back
+    to ``provider_credentials``.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    bot_session_id: int
+    turn_id: int
+    stage: str
+    started_at_ms: int
+    duration_ms: int
+    provider_name: str | None
+    details: dict[str, Any]
+    created_at: datetime
+
+
+class SessionTimingsResponse(BaseModel):
+    """Response shape for ``GET /sessions/{id}/timings``."""
+
+    timings: list[SessionTimingRead]
 
 
 class SessionDetailResponse(BaseModel):
@@ -297,6 +327,58 @@ def get_session_detail(
     )
 
 
+# Cap on per-session timing rows returned in one call. The UI only ever
+# renders the latest N turns so an unbounded fetch on a long session
+# would burn payload size for no visible benefit.
+DEFAULT_TIMINGS_LIMIT = 1000
+MAX_TIMINGS_LIMIT = 5000
+
+
+@router.get("/{bot_session_id}/timings", response_model=SessionTimingsResponse)
+def get_session_timings(
+    bot_session_id: int,
+    session: SessionDep,
+    limit: Annotated[
+        int,
+        Query(ge=1, le=MAX_TIMINGS_LIMIT),
+    ] = DEFAULT_TIMINGS_LIMIT,
+) -> SessionTimingsResponse:
+    """Return the per-turn activity log for one session (Johnny-ckz.7).
+
+    Each row is a single measured stage event (STT, router LLM, answer
+    LLM, TTS, end-to-end, interrupt, error). Sorted by ``turn_id`` ASC
+    then ``started_at_ms`` ASC so the UI renders turns in chronological
+    order with stages-within-turn in their pipeline order.
+
+    Sessions that pre-date the activity log return an empty list (no
+    rows; no crash). The endpoint is read-only and intentionally
+    permissive on bot_session_id existence — a 404 here would make
+    the UI noisier without adding value to the operator.
+    """
+    row = session.get(BotSession, bot_session_id)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="bot_session not found",
+        )
+
+    timings = list(
+        session.scalars(
+            select(SessionTiming)
+            .where(SessionTiming.bot_session_id == bot_session_id)
+            .order_by(
+                SessionTiming.turn_id.asc(),
+                SessionTiming.started_at_ms.asc(),
+                SessionTiming.id.asc(),
+            )
+            .limit(limit)
+        ).all()
+    )
+    return SessionTimingsResponse(
+        timings=[SessionTimingRead.model_validate(t) for t in timings],
+    )
+
+
 @router.post(
     "/start",
     response_model=BotSessionRead,
@@ -376,6 +458,8 @@ __all__ = [
     "AgentUtteranceRead",
     "BotSessionRead",
     "SessionDetailResponse",
+    "SessionTimingRead",
+    "SessionTimingsResponse",
     "StartSessionPayload",
     "TranscriptChunkRead",
     "get_launcher",

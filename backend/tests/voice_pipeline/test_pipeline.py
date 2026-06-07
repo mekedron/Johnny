@@ -34,6 +34,7 @@ from johnny.voice_pipeline import (
     InMemoryEventBus,
     JohnnyTransport,
     PipelineConfig,
+    PipelineTiming,
     RouterDecisionMade,
     TranscriptFinalized,
     VoicePipeline,
@@ -264,7 +265,10 @@ async def test_pipeline_emits_events_in_order_for_two_utterance_wav(
     await pipeline.run()
 
     events = bus.snapshot()
-    types = [e.type for e in events]
+    # Activity-log timings (Johnny-ckz.7) share the same event bus but
+    # are observability; filter them out before asserting the
+    # transcript/decision/utterance contract.
+    types = [e.type for e in events if e.type != "pipeline_timing"]
     # Transcription and response run as concurrent tasks (Johnny-har),
     # so the two transcripts may both publish before the response loop
     # catches up. The contract is: two transcripts, two router
@@ -303,6 +307,38 @@ async def test_pipeline_emits_events_in_order_for_two_utterance_wav(
     assert sum(len(f) for f in transport.played) > 0
     assert transport.played_source_rate == 16_000
 
+    # Activity-log timings (Johnny-ckz.7): every applicable stage in
+    # the speaking turn emits a row, the suppressed turn emits stt +
+    # router_llm only.
+    timings = [e for e in events if isinstance(e, PipelineTiming)]
+    stages_by_turn: dict[int, list[str]] = {}
+    for t in timings:
+        stages_by_turn.setdefault(t.turn_id, []).append(t.stage)
+    # Two turns.
+    assert set(stages_by_turn.keys()) == {1, 2}
+    # First turn: stt, router_llm, answer_llm, tts, end_to_end.
+    assert "stt" in stages_by_turn[1]
+    assert "router_llm" in stages_by_turn[1]
+    assert "answer_llm" in stages_by_turn[1]
+    assert "tts" in stages_by_turn[1]
+    assert "end_to_end" in stages_by_turn[1]
+    # Second turn: suppressed before answer LLM ran, so only stt +
+    # router_llm appear. No end_to_end (the bot never spoke).
+    assert "stt" in stages_by_turn[2]
+    assert "router_llm" in stages_by_turn[2]
+    assert "answer_llm" not in stages_by_turn[2]
+    assert "tts" not in stages_by_turn[2]
+    assert "end_to_end" not in stages_by_turn[2]
+    # Every persisted timing carries the session id.
+    assert all(t.session_id == "test-session" for t in timings)
+    # Durations are non-negative ints.
+    assert all(t.duration_ms >= 0 for t in timings)
+    # The end-to-end row carries no provider (it's an orchestration
+    # measurement, not a single provider call).
+    end_to_end = [t for t in timings if t.stage == "end_to_end"]
+    assert len(end_to_end) == 1
+    assert end_to_end[0].provider_name is None
+
 
 # --- pipeline behaviour edge cases ----------------------------------------
 
@@ -335,7 +371,7 @@ async def test_pipeline_speak_false_skips_router_and_tts(
         config=cfg,
     )
     await pipeline.run()
-    types = [e.type for e in bus.snapshot()]
+    types = [e.type for e in bus.snapshot() if e.type != "pipeline_timing"]
     assert types == ["transcript_finalized", "transcript_finalized"]
     assert tts.calls == []
     assert transport.played == []
@@ -501,7 +537,7 @@ async def test_noise_gate_drops_stoplist_and_punctuation_and_short(
 
     # No router decision, no agent speak — the gate held the floor.
     assert router.calls == [], f"router invoked for noise text {noise_text!r}"
-    event_types = [e.type for e in bus.snapshot()]
+    event_types = [e.type for e in bus.snapshot() if e.type != "pipeline_timing"]
     assert "router_decision_made" not in event_types
     assert "agent_spoke" not in event_types
     assert "transcript_finalized" not in event_types
@@ -2897,7 +2933,7 @@ async def test_pipeline_approval_required_approves_and_speaks(
 
     await pipeline.run()
 
-    types = [e.type for e in bus.snapshot()]
+    types = [e.type for e in bus.snapshot() if e.type != "pipeline_timing"]
     # Two utterances. First triggers approval flow (approved); second
     # suppressed by router.
     assert "approval_pending" in types
@@ -2985,7 +3021,7 @@ async def test_pipeline_approval_required_rejected_stays_silent(
 
     await pipeline.run()
 
-    types = [e.type for e in bus.snapshot()]
+    types = [e.type for e in bus.snapshot() if e.type != "pipeline_timing"]
     assert "approval_pending" in types
     assert "approval_resolved" in types
     # No agent_spoke event because TTS never ran for the approved reply.
@@ -3204,7 +3240,7 @@ async def test_pipeline_approval_required_below_threshold_skips_gate(
     # Gate was never called — both utterances rejected at threshold check.
     assert gate.requests == []
     # No approval events emitted.
-    types = {e.type for e in bus.snapshot()}
+    types = {e.type for e in bus.snapshot() if e.type != "pipeline_timing"}
     assert "approval_pending" not in types
     assert "approval_resolved" not in types
     # Decisions recorded as suppressed (not rejected).
@@ -3254,7 +3290,7 @@ async def test_listen_only_mode_skips_router_and_tts_emits_only_transcripts(
         utterance_sink=usink,
     )
     await pipeline.run()
-    types = [e.type for e in bus.snapshot()]
+    types = [e.type for e in bus.snapshot() if e.type != "pipeline_timing"]
     # Only transcripts: no decisions, no utterances, no agent_spoke,
     # no agent_suggested.
     assert types == ["transcript_finalized", "transcript_finalized"]
@@ -3323,7 +3359,10 @@ async def test_suggest_only_mode_runs_router_emits_agent_suggested_no_tts(
     )
     await pipeline.run()
     events = bus.snapshot()
-    types = [e.type for e in events]
+    # Activity-log timings (Johnny-ckz.7) share the same event bus but
+    # are observability; filter them out before asserting the
+    # transcript/decision/utterance contract.
+    types = [e.type for e in events if e.type != "pipeline_timing"]
     # Transcription runs concurrently with response (Johnny-har), so
     # the cross-utterance event order can interleave. The contract
     # is: two transcripts, two router decisions, one agent_suggested
@@ -3402,7 +3441,7 @@ async def test_suggest_only_below_threshold_does_not_emit_agent_suggested(
         utterance_sink=usink,
     )
     await pipeline.run()
-    types = [e.type for e in bus.snapshot()]
+    types = [e.type for e in bus.snapshot() if e.type != "pipeline_timing"]
     # No agent_suggested emitted because confidence was below threshold.
     assert "agent_suggested" not in types
     # All persisted decisions are 'suppressed'.
@@ -3455,7 +3494,7 @@ async def test_suggest_only_should_speak_false_suppresses_no_suggestion(
         utterance_sink=usink,
     )
     await pipeline.run()
-    types = [e.type for e in bus.snapshot()]
+    types = [e.type for e in bus.snapshot() if e.type != "pipeline_timing"]
     assert "agent_suggested" not in types
     assert "agent_spoke" not in types
     assert answer.calls == []
@@ -3557,7 +3596,7 @@ async def test_free_auto_speak_speaks_without_approval_or_allowlist(
     )
     await pipeline.run()
 
-    types = [e.type for e in bus.snapshot()]
+    types = [e.type for e in bus.snapshot() if e.type != "pipeline_timing"]
     # Speaks (not "suggested") and never published an approval round.
     assert "agent_spoke" in types
     assert "agent_suggested" not in types
@@ -3733,7 +3772,7 @@ async def test_autonomous_speaks_without_approval_or_allowlist(
     )
     await pipeline.run()
 
-    types = [e.type for e in bus.snapshot()]
+    types = [e.type for e in bus.snapshot() if e.type != "pipeline_timing"]
     assert "agent_spoke" in types
     assert "agent_suggested" not in types
     assert "approval_pending" not in types
