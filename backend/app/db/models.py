@@ -561,6 +561,59 @@ class ProviderCredential(TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
+class Personality(TimestampMixin, Base):
+    """A named, reusable LLM + TTS + default-mode preset (Johnny-oly).
+
+    A personality decides *which brain and which voice* Johnny uses for a
+    session, plus a preferred decision mode — nothing more. It is an axis
+    orthogonal to :class:`ProfileTemplate` (which owns the prompt text /
+    behaviour); the two compose. ``llm_provider_id`` / ``tts_provider_id``
+    are nullable FKs into ``provider_credentials``: when set they override
+    the globally-active provider for that kind at session start, and when
+    ``NULL`` the session inherits whatever provider is active — so the
+    bootstrap "Johnny" personality (NULL FKs) reproduces today's behaviour
+    byte-for-byte.
+
+    Exactly one row carries ``is_default=true`` at any time, enforced by a
+    partial unique index (mirrors the active-per-kind index on
+    ``provider_credentials``). Provider deletes ``SET NULL`` the FK rather
+    than cascading, so deleting a provider never destroys a personality —
+    the session resolver falls back to global-active and warns instead
+    (Johnny-oly.3). ``extra_metadata`` (DB column ``metadata``) is a
+    forward-compat bag stored but not consumed in v1.
+    """
+
+    __tablename__ = "personalities"
+    __table_args__ = (
+        UniqueConstraint("display_name", name="uq_personalities_display_name"),
+        Index(
+            "uq_personalities_single_default",
+            "is_default",
+            unique=True,
+            postgresql_where=text("is_default"),
+            sqlite_where=text("is_default"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    llm_provider_id: Mapped[int | None] = mapped_column(
+        ForeignKey("provider_credentials.id", ondelete="SET NULL"), nullable=True
+    )
+    tts_provider_id: Mapped[int | None] = mapped_column(
+        ForeignKey("provider_credentials.id", ondelete="SET NULL"), nullable=True
+    )
+    default_mode: Mapped[BotMode | None] = mapped_column(_bot_mode_column(), nullable=True)
+    # Attribute is ``extra_metadata`` because ``metadata`` is reserved on
+    # SQLAlchemy's declarative ``Base``; the DB column + JSON wire name
+    # stay the clean ``metadata``.
+    extra_metadata: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", _json_column(), nullable=False, default=dict
+    )
+
+
 class PipelineSettings(TimestampMixin, Base):
     """Singleton settings row controlling pipeline shape (Johnny-ckz.17).
 

@@ -3,10 +3,10 @@
   "sessionId": "426dba43-17e8-4f93-a179-086859618e18",
   "status": "running",
   "startedAt": "2026-06-07T20:27:08.873Z",
-  "updatedAt": "2026-06-07T20:39:47.929Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-07T21:03:39.283Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -33,8 +33,8 @@
       {
         "id": "Johnny-oly.1",
         "title": "Design + PRD: read current provider-loader / system-prompt flow end-to-end, propose personality data model + override rules",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-oly.2",
@@ -68,7 +68,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-oly.1",
+      "taskTitle": "Design + PRD: read current provider-loader / system-prompt flow end-to-end, propose personality data model + override rules",
+      "taskCompleted": true,
+      "durationMs": 746796,
+      "startedAt": "2026-06-07T20:27:20.327Z",
+      "endedAt": "2026-06-07T20:39:47.123Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

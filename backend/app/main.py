@@ -18,6 +18,7 @@ from app.api.calendar import router as calendar_router
 from app.api.decisions import router as decisions_router
 from app.api.history import router as history_router
 from app.api.meeting_configs import router as meeting_configs_router
+from app.api.personalities import router as personalities_router
 from app.api.providers import router as providers_router
 from app.api.sessions import router as sessions_router
 from app.api.sidecars import router as sidecars_router
@@ -131,6 +132,7 @@ app.include_router(calendar_router)
 app.include_router(decisions_router)
 app.include_router(history_router)
 app.include_router(meeting_configs_router)
+app.include_router(personalities_router)
 app.include_router(providers_router)
 app.include_router(sessions_router)
 app.include_router(sidecars_router)
