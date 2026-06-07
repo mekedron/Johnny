@@ -33,6 +33,10 @@ johnny-setup = "johnny.wizard.cli:main"
 # `johnny-smoke` runs the post-setup smoke test (Johnny-f7k). Verifies a
 # populated .env produces a working stack and provider responses.
 johnny-smoke = "johnny.smoketest.cli:main"
+# `johnny-tts-smoke` drives every saved TTS provider × runtime × voice through
+# play_sample and asserts audible PCM (Johnny-1ge.7), catching silent-failure
+# runtimes that return a 200 with empty/all-zero audio.
+johnny-tts-smoke = "johnny.smoketest.tts_cli:main"
 
 [project.optional-dependencies]
 # Heavy ML dep for on-device STT. Only the meet-worker image needs it

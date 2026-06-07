@@ -3,10 +3,10 @@
   "sessionId": "bfd5986f-72a0-472e-b80f-eceb73c7b975",
   "status": "running",
   "startedAt": "2026-06-07T16:33:40.626Z",
-  "updatedAt": "2026-06-07T17:31:24.394Z",
-  "currentIteration": 1,
+  "updatedAt": "2026-06-07T17:58:12.679Z",
+  "currentIteration": 2,
   "maxIterations": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 2,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -45,8 +45,8 @@
       {
         "id": "Johnny-1ge.3",
         "title": "New TTS provider: Kokoro with 3-runtime picker (in-container / mlx-sidecar / http-sidecar)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       }
     ]
   },
@@ -60,6 +60,16 @@
       "durationMs": 1798812,
       "startedAt": "2026-06-07T16:34:28.396Z",
       "endedAt": "2026-06-07T17:04:27.208Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "Johnny-1ge.3",
+      "taskTitle": "New TTS provider: Kokoro with 3-runtime picker (in-container / mlx-sidecar / http-sidecar)",
+      "taskCompleted": true,
+      "durationMs": 1606883,
+      "startedAt": "2026-06-07T17:04:36.618Z",
+      "endedAt": "2026-06-07T17:31:23.501Z"
     }
   ],
   "skippedTaskIds": [],

@@ -200,6 +200,62 @@ class _FailingTTS(TTSProvider):
         raise RuntimeError("synthetic tts failure")
 
 
+def _audible_pcm(ms: int = 3000, amplitude: int = 10_000) -> bytes:
+    """``ms`` of 16 kHz mono S16LE at a constant, non-silent amplitude."""
+    import array
+
+    n = int(16_000 * ms / 1000)
+    return array.array("h", [amplitude] * n).tobytes()
+
+
+class _AudibleTTS(TTSProvider):
+    """TTS adapter that yields enough non-silent PCM to pass the audible check.
+
+    Records the runtime option so tests can assert the play_sample runtime
+    override reached the factory (Johnny-1ge.7).
+    """
+
+    last_runtime: str | None = None
+
+    def __init__(self, config: ProviderConfig) -> None:
+        self._config = config
+        self.runtime = str(config.options.get("runtime", "") or "")
+        type(self).last_runtime = self.runtime
+
+    @property
+    def name(self) -> str:
+        return "audible-tts"
+
+    async def synthesize_stream(
+        self, text: str, voice_id: str | None = None
+    ) -> AsyncIterator[bytes]:
+        pcm = _audible_pcm()
+        # Stream in chunks like a real adapter so TTFA timing is exercised.
+        for i in range(0, len(pcm), 8_000):
+            yield pcm[i : i + 8_000]
+
+
+class _SilentTTS(TTSProvider):
+    """TTS adapter that yields audio-shaped but all-zero PCM — the silent bug.
+
+    Long enough to clear the byte/duration floors, so only the peak-amplitude
+    check can catch it.
+    """
+
+    def __init__(self, config: ProviderConfig) -> None:
+        self._config = config
+        self.runtime = "mlx-sidecar"
+
+    @property
+    def name(self) -> str:
+        return "silent-tts"
+
+    async def synthesize_stream(
+        self, text: str, voice_id: str | None = None
+    ) -> AsyncIterator[bytes]:
+        yield b"\x00\x00" * 24_000  # 48000 bytes = 1.5 s of silence
+
+
 # --- Fixtures --------------------------------------------------------------
 
 
@@ -1279,6 +1335,75 @@ def test_play_sample_rejects_extra_body_fields(client: TestClient) -> None:
         json={"voice_id": "x", "unexpected": True},
     )
     assert resp.status_code == 422
+
+
+# --- play_sample audio metrics (Johnny-1ge.7) ------------------------------
+
+
+def test_play_sample_stamps_audio_metric_headers(client: TestClient) -> None:
+    """Audible audio → metric headers present and the verdict is audible."""
+    get_registry().register(ProviderKind.TTS, "audible-tts", _AudibleTTS)
+    created = _make_tts(client, provider_name="audible-tts")
+    resp = client.post(f"/providers/{created['id']}/play_sample")
+    assert resp.status_code == 200
+    assert resp.headers["X-TTS-Audible"] == "1"
+    assert resp.headers["X-TTS-Audible-Reason"] == ""
+    assert int(resp.headers["X-TTS-Audio-Bytes"]) >= 16_000
+    assert int(resp.headers["X-TTS-Audio-Ms"]) > 0
+    assert float(resp.headers["X-TTS-Peak"]) > 0.01
+
+
+def test_play_sample_silent_audio_returns_200_with_warning(client: TestClient) -> None:
+    """All-zero PCM is returned (so the UI can warn) but flagged not audible.
+
+    The kokoro mlx-sidecar bug class: HTTP 200 + finite latency + silence. The
+    endpoint must surface the verdict, not pretend success.
+    """
+    get_registry().register(ProviderKind.TTS, "silent-tts", _SilentTTS)
+    created = _make_tts(client, provider_name="silent-tts")
+    resp = client.post(f"/providers/{created['id']}/play_sample")
+    assert resp.status_code == 200  # audio still flows back for inspection
+    assert resp.headers["X-TTS-Audible"] == "0"
+    assert float(resp.headers["X-TTS-Peak"]) == 0.0
+    assert "silent" in resp.headers["X-TTS-Audible-Reason"]
+
+
+def test_play_sample_small_sample_is_flagged_not_audible(client: TestClient) -> None:
+    """The trivial 32-byte fake clears 200 but fails the byte/duration floor."""
+    get_registry().register(ProviderKind.TTS, "sample-tts", _SampleTTS)
+    created = _make_tts(client)
+    resp = client.post(f"/providers/{created['id']}/play_sample")
+    assert resp.status_code == 200
+    assert resp.headers["X-TTS-Audible"] == "0"
+    assert "bytes" in resp.headers["X-TTS-Audible-Reason"]
+
+
+def test_play_sample_runtime_override_propagates_to_factory(client: TestClient) -> None:
+    """A runtime in the request body overrides the row's saved runtime."""
+    get_registry().register(ProviderKind.TTS, "audible-tts", _AudibleTTS)
+    created = client.post(
+        "/providers",
+        json=_create_payload(
+            kind="tts",
+            provider_name="audible-tts",
+            display_name="Card",
+            options={"runtime": "subprocess"},
+        ),
+    ).json()
+    _AudibleTTS.last_runtime = None
+
+    resp = client.post(
+        f"/providers/{created['id']}/play_sample",
+        json={"runtime": "http-sidecar"},
+    )
+    assert resp.status_code == 200
+    assert _AudibleTTS.last_runtime == "http-sidecar"
+    assert resp.headers["X-TTS-Runtime"] == "http-sidecar"
+
+    # The saved row keeps its original runtime — the override was ephemeral.
+    listed = client.get("/providers").json()
+    row = next(p for p in listed["tts"] if p["id"] == created["id"])
+    assert row["options"]["runtime"] == "subprocess"
 
 
 # --- DELETE /voices/{key} (piper) ------------------------------------------

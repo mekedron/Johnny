@@ -163,7 +163,12 @@ def _audio_to_pcm16(audio: Any) -> bytes:
 def _synthesize_via_generate(
     model: Any, text: str, voice: str, speed: float, lang_code: str
 ) -> bytes:
-    """Drive ``model.generate(...)`` and concatenate the audio segments."""
+    """Drive ``model.generate(...)`` and concatenate the audio segments.
+
+    Raises if the call yields *no* audio so the caller can fall back to the
+    file path: an empty result here is the silent-failure mode we are hunting
+    (the runtime accepted the call but produced nothing audible), not success.
+    """
     pcm = bytearray()
     # mlx-audio's generate() kwargs vary by release; try richest first.
     last_exc: Exception | None = None
@@ -181,6 +186,12 @@ def _synthesize_via_generate(
         for seg in segments:
             audio = getattr(seg, "audio", seg)
             pcm.extend(_audio_to_pcm16(audio))
+        if not pcm:
+            raise RuntimeError(
+                f"model.generate returned no audio for voice={voice!r} "
+                f"lang={lang_code!r} (empty segments) — the voice may not exist "
+                "in the loaded checkpoint"
+            )
         return bytes(pcm)
     raise RuntimeError(f"model.generate signature not recognised: {last_exc}")
 
@@ -207,9 +218,21 @@ def _synthesize_via_file(
     candidates = [prefix + ".wav", prefix + "_000.wav", prefix + "_0.wav"]
     wav_path = next((p for p in candidates if os.path.exists(p)), None)
     if wav_path is None:
-        raise RuntimeError("generate_audio produced no .wav output")
+        raise RuntimeError(
+            f"generate_audio produced no .wav output for voice={voice!r} "
+            f"lang={lang_code!r} model={_state['model_id']!r} "
+            f"(checked {candidates}). The voice is likely not in the "
+            "checkpoint, or this mlx-audio build does not support "
+            "audio_format='wav'."
+        )
     with wave.open(wav_path, "rb") as wf:
-        return wf.readframes(wf.getnframes())
+        pcm = wf.readframes(wf.getnframes())
+    if not pcm:
+        raise RuntimeError(
+            f"generate_audio wrote an empty .wav at {wav_path} for "
+            f"voice={voice!r} lang={lang_code!r} — no audible samples"
+        )
+    return pcm
 
 
 def _synthesize_sync(
@@ -225,6 +248,17 @@ def _synthesize_sync(
     except Exception as exc:  # noqa: BLE001 — fall back to the file path
         logger.warning("generate() path failed (%s); trying file path", exc)
         pcm = _synthesize_via_file(text, voice, speed, lang_code)
+    # The whole point of Johnny-1ge.7: never hand the api an empty body and let
+    # the operator click Play sample to silence. Fail loudly with the cause so
+    # the 500 body is actionable, not a generic "synthesis failed".
+    if not pcm:
+        raise RuntimeError(
+            f"synthesis produced 0 bytes of PCM for voice={voice!r} "
+            f"lang={lang_code!r} model={_state['model_id']!r} — both the "
+            "generate() and file paths returned empty audio (likely an "
+            "unknown voice or an mlx-audio API change in "
+            "sidecars/kokoro-mlx/server.py)"
+        )
     logger.info(
         "synth voice=%s lang=%s text_chars=%d pcm_bytes=%d ms=%d",
         voice,

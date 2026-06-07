@@ -205,6 +205,25 @@ Sidecar management:
 
 Health checks: `curl http://localhost:8772/health` (MLX) / `curl http://localhost:8773/health` (HTTP) — both return `{"ready": true, ...}` once the model has loaded.
 
+## Verifying TTS audio output (every provider × runtime)
+
+A successful HTTP round-trip is not proof of audible speech: a runtime can return `200 OK` with empty or all-zero PCM and the user simply hears nothing (this is exactly how a broken Kokoro MLX sidecar once failed silently). `johnny-tts-smoke` guards against that — it drives **every saved TTS provider × every runtime it supports × the first available voice** through `/play_sample` and asserts the audio is actually audible (non-trivial byte count, plausible duration for the text, and a peak amplitude above the silence floor). It prints one `PASS` / `SKIP` / `FAIL` row per cell and exits non-zero on any `FAIL`; a sidecar that is offline or a voice that is not installed is a `SKIP`, never a `FAIL`.
+
+```bash
+docker compose exec api johnny-tts-smoke          # against the running stack
+# or, without rebuilding after a source edit:
+docker compose exec api python -m johnny.smoketest.tts_cli
+```
+
+```
+piper  subprocess             PASS  93 ms, 18400 bytes, peak 0.31
+piper  persistent-subprocess  PASS  47 ms, 18120 bytes, peak 0.30
+piper  http-sidecar           SKIP  piper sidecar unreachable: start ./scripts/start-piper-sidecar.sh
+kokoro mlx-sidecar            FAIL  0 ms, 0 bytes, peak 0.00 -- no audible output
+```
+
+The same audible-or-not verdict rides back on the `/play_sample` response headers (`X-TTS-Audible`, `X-TTS-Audio-Bytes`, `X-TTS-Audio-Ms`, `X-TTS-Peak`), so the Providers page warns inline when a **Play sample** click returns silence instead of leaving the user guessing.
+
 ## Voice transport (US-025)
 
 The voice pipeline runs over a swappable transport. The default —

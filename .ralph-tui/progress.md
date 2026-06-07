@@ -87,6 +87,27 @@ derive `KPipeline(lang_code=...)` from the voice prefix and cache by
 `(model_id, lang_code)` — NOT per voice; the KModel is shared across a
 language's voices.
 
+### Strict "is this audible?" verdict + header contract for TTS smoke
+A TTS runtime can fail *silently*: HTTP 200, finite latency, empty/all-zero PCM
+→ user hears nothing. `app/providers/audio_assert.py` is the ONE place that
+turns raw 16 kHz S16LE PCM into `(audio_bytes, audio_ms, peak_amplitude)` and
+decides audible (all-stdlib `array`, no numpy — must import in the test venv).
+`assert_audible(pcm, text, runtime=...)` raises `TTSError` on silence; `play_sample`
++ `preview_play_sample` instead stamp the verdict on response headers
+(`X-TTS-Audible` 1/0, `X-TTS-Audio-Bytes/-Ms`, `X-TTS-Peak`, `X-TTS-Audible-Reason`)
+and still return 200 so the UI can warn — add every new header to the CORS
+`expose_headers` in `main.py` or the cross-origin browser reads null. The
+`johnny-tts-smoke` runner (`johnny/smoketest/tts_runner.py`) is a host-side
+stdlib-`urllib` HTTP client (mirrors `checks.py`, never imports `app`): it
+discovers cells from `GET /providers` + `/providers/schemas` (runtime SELECT
+options = supported runtimes; no field → one "default" cell), drives each via
+`POST /providers/{id}/play_sample` with `{runtime, voice_id}` overrides, and
+classifies by the verdict header. SKIP vs FAIL on an error is decided by
+substring-matching the detail against environment-gap signatures (`unreachable`,
+`not importable`, `not installed`, ...) — gaps SKIP, everything else FAILs. The
+saved-row endpoint (not preview) keeps cloud creds server-side, so one code path
+covers local + cloud TTS uniformly.
+
 ---
 
 ## 2026-06-07 - Johnny-1ge.1 (Piper TTS runtime picker)
@@ -201,6 +222,65 @@ language's voices.
     `tts-elevenlabs` e2e (live ElevenLabs key is free-tier → HTTP 402 on a library
     voice) and 2 `wizard/test_models.py` (`docker CLI not available` in-container).
     2635 passed, providers suite fully green, kokoro_tts mypy + ruff clean.
+
+---
+
+## 2026-06-07 - Johnny-1ge.7 (End-to-end TTS audible-output validation)
+- A real silent-failure (kokoro mlx-sidecar HTTP 500 / empty PCM → user heard
+  nothing) motivated a uniform smoke proving **every (provider × runtime × voice)**
+  emits *audible* PCM, plus the assertion fields + frontend warning + sidecar fix.
+- Files changed:
+  - `backend/app/providers/audio_assert.py` (new) — `measure_pcm16` →
+    `AudioMetrics(audio_bytes, audio_ms, peak_amplitude, sample_rate)`,
+    `check_audible` (reasons list), `assert_audible` (raises `TTSError`).
+    Thresholds: 16_000-byte floor (0.5 s), peak ≥ 0.01, duration 50–500% of
+    `len(text)/16 cps`. All-stdlib `array` (no numpy in the test venv).
+  - `backend/app/api/providers.py` — `_tts_sample_headers` now takes
+    `metrics` + `audible_reasons` and stamps `X-TTS-Audio-Bytes/-Ms`,
+    `X-TTS-Peak`, `X-TTS-Audible`, `X-TTS-Audible-Reason`; both play_sample
+    endpoints compute metrics and return 200 with the verdict (silent ≠ error,
+    so the UI can warn); `PlaySampleRequest` gained a `runtime` override.
+  - `backend/app/main.py` — CORS `expose_headers` += the 5 new `X-TTS-*` headers.
+  - `frontend/src/lib/providers.ts` — `TtsSampleResult` gained
+    `audioBytes/audioMs/peakAmplitude/audible/audibleReason` (audible defaults
+    true if header absent → no spurious warning vs a stale API).
+  - `frontend/src/routes/providers/+page.svelte` — `runTtsPreview` renders a
+    destructive (red) Alert with the silent reason when `!sample.audible`.
+  - `backend/johnny/smoketest/tts_runner.py` + `tts_cli.py` (new) +
+    `johnny-tts-smoke` console script in `backend/pyproject.toml`.
+  - `sidecars/kokoro-mlx/server.py` — non-empty assertions in
+    `_synthesize_via_generate` / `_synthesize_via_file` / `_synthesize_sync`
+    so the sidecar 500s with an actionable cause instead of returning silence.
+  - Tests: `tests/providers/test_audio_assert.py` (20, incl. all-zero-PCM
+    regression), `tests/smoketest/test_tts_runner.py` (16, mocked urllib),
+    `tests/api/test_providers.py` (+4 play_sample metric/runtime tests).
+  - `README.md` — "Verifying TTS audio output" section pointing at the command.
+- Verified: `johnny-tts-smoke` live → piper × {subprocess, persistent-subprocess,
+  http-sidecar} all PASS (~120 KB, peak ~0.99), exit 0. Browser (chrome-devtools):
+  Play sample → green "Synthesis OK (runtime: persistent-subprocess, TTFA 39 ms)";
+  cross-origin `fetch` reads all new `X-TTS-*` headers (audible=1, peak=0.9909) +
+  runtime override (subprocess) honoured; injected `audible=0` → real Svelte path
+  renders the red silent Alert. 1076 providers+smoketest tests pass, ruff clean,
+  new modules mypy-clean. Artifacts in `.validation/Johnny-1ge.7/`.
+- **Learnings:**
+  - Scope-A tension: the bead says "any failure → TTSError" but the acceptance
+    wants the frontend to *warn* on silence — reconciled by making the ENDPOINT
+    return 200 + verdict headers (UI warns) while `assert_audible` is the
+    raising function the smoke + regression test pin to. One threshold source,
+    two surfaces.
+  - The smoke MUST be a host-side `urllib` HTTP client, not an in-process driver:
+    `johnny/smoketest` never imports `app` (heavy provider libs live only in the
+    api container), so the verdict has to ride back on headers. Drove this through
+    the saved-row endpoint (server-side creds) so one path covers local + cloud.
+  - Browser silent-warning branch can't be triggered by any shipping provider
+    (real piper always produces audio), so I forced it via a chrome-devtools
+    `initScript` fetch shim that flips only `X-TTS-Audible` to 0 — the network
+    call, audio body, parsing and Svelte rendering all stay real. `evaluate_script`
+    runs in an isolated world, so `window.fetch.toString()` reads native even
+    when the page's main-world fetch is patched — check page behaviour, not that.
+  - kokoro-mlx `_synthesize_via_generate` could return `b""` without raising
+    (empty segments) — the exact silent path. Now every layer asserts non-empty
+    before returning so the sidecar 500s with the voice/lang/model in the body.
 
 ---
 

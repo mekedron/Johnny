@@ -37,6 +37,11 @@ from app.providers.anthropic_llm import (
 from app.providers.anthropic_llm import (
     fetch_model_catalog as anthropic_fetch_model_catalog,
 )
+from app.providers.audio_assert import (
+    AudioMetrics,
+    check_audible,
+    measure_pcm16,
+)
 from app.providers.base import (
     PCM_CHANNELS,
     PCM_SAMPLE_RATE_HZ,
@@ -351,11 +356,16 @@ class PlaySampleRequest(BaseModel):
     single synth call only; the database row is *not* mutated. This is
     what the Piper voice browser modal uses to preview an installed
     voice without forcing the user to re-save the provider first.
+
+    ``runtime`` likewise overrides ``options["runtime"]`` for the single
+    call, so ``johnny-tts-smoke`` (Johnny-1ge.7) can exercise every runtime
+    a provider supports against the same saved row without re-saving it.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     voice_id: str | None = Field(default=None, max_length=256)
+    runtime: str | None = Field(default=None, max_length=64)
 
 
 # --- Helpers ---------------------------------------------------------------
@@ -939,11 +949,15 @@ async def preview_play_sample(payload: ProviderPreviewPayload) -> Response:
     total_ms = int((time.perf_counter() - start) * 1000)
     if not pcm:
         raise HTTPException(status_code=502, detail="synthesis produced no audio")
+    metrics = measure_pcm16(pcm)
+    reasons = check_audible(metrics, TTS_SAMPLE_PHRASE)
     wav_bytes = _pcm_to_wav_bytes(pcm)
     return Response(
         content=wav_bytes,
         media_type="audio/wav",
-        headers=_tts_sample_headers(instance, ttfa_ms, total_ms, "preview.wav"),
+        headers=_tts_sample_headers(
+            instance, ttfa_ms, total_ms, "preview.wav", metrics, reasons
+        ),
     )
 
 
@@ -1603,14 +1617,26 @@ def _pcm_to_wav_bytes(pcm: bytes) -> bytes:
 
 
 def _tts_sample_headers(
-    instance: TTSProvider, ttfa_ms: int, total_ms: int, filename: str
+    instance: TTSProvider,
+    ttfa_ms: int,
+    total_ms: int,
+    filename: str,
+    metrics: AudioMetrics,
+    audible_reasons: list[str],
 ) -> dict[str, str]:
-    """Response headers for a TTS sample, stamping runtime + timing.
+    """Response headers for a TTS sample, stamping runtime + timing + audio.
 
     ``X-TTS-Runtime`` lets the /providers UI show which runtime served the
     audio (the Piper runtime picker, Johnny-1ge.1). Providers without a
-    ``runtime`` attribute (cloud TTS) get an empty value. These headers are
-    listed in the CORS ``expose_headers`` so the browser can read them.
+    ``runtime`` attribute (cloud TTS) get an empty value.
+
+    ``X-TTS-Audio-Bytes`` / ``X-TTS-Audio-Ms`` / ``X-TTS-Peak`` carry the
+    "is there audible speech?" measurements (Johnny-1ge.7), and
+    ``X-TTS-Audible`` is the verdict (``1`` audible, ``0`` silent/short) with
+    ``X-TTS-Audible-Reason`` spelling out *why* when ``0``. The frontend reads
+    these to warn on a silent sample; ``johnny-tts-smoke`` reads them to render
+    PASS/FAIL per (provider × runtime). All listed in the CORS
+    ``expose_headers`` so the browser can read them.
     """
     return {
         "Cache-Control": "no-store",
@@ -1618,6 +1644,11 @@ def _tts_sample_headers(
         "X-TTS-Runtime": str(getattr(instance, "runtime", "") or ""),
         "X-TTS-TTFA-Ms": str(max(ttfa_ms, 0)),
         "X-TTS-Total-Ms": str(total_ms),
+        "X-TTS-Audio-Bytes": str(metrics.audio_bytes),
+        "X-TTS-Audio-Ms": str(metrics.audio_ms),
+        "X-TTS-Peak": f"{metrics.peak_amplitude:.4f}",
+        "X-TTS-Audible": "0" if audible_reasons else "1",
+        "X-TTS-Audible-Reason": "; ".join(audible_reasons),
     }
 
 
@@ -1678,6 +1709,8 @@ async def play_sample(
     options = dict(row.config or {})
     if overrides is not None and overrides.voice_id is not None:
         options["voice_id"] = overrides.voice_id
+    if overrides is not None and overrides.runtime is not None:
+        options["runtime"] = overrides.runtime
 
     config = ProviderConfig(
         kind=row.kind,
@@ -1728,11 +1761,15 @@ async def play_sample(
             detail="synthesis produced no audio",
         )
 
+    metrics = measure_pcm16(pcm)
+    reasons = check_audible(metrics, TTS_SAMPLE_PHRASE)
     wav_bytes = _pcm_to_wav_bytes(pcm)
     return Response(
         content=wav_bytes,
         media_type="audio/wav",
-        headers=_tts_sample_headers(instance, ttfa_ms, total_ms, "sample.wav"),
+        headers=_tts_sample_headers(
+            instance, ttfa_ms, total_ms, "sample.wav", metrics, reasons
+        ),
     )
 
 

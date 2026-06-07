@@ -708,11 +708,27 @@
 				if (sample.ttfaMs !== null) badge += `, TTFA ${sample.ttfaMs} ms`;
 				badge += ')';
 			}
-			testResult = {
-				ok: true,
-				message: `Synthesis OK — playing sample${badge}`,
-				detail: null
-			};
+			// A successful HTTP round-trip can still be silent — the runtime
+			// returned empty/all-zero PCM and the user hears nothing
+			// (Johnny-1ge.7, the kokoro mlx-sidecar failure). The backend
+			// stamps a verdict on the response; warn loudly when it is silent.
+			if (!sample.audible) {
+				const peak =
+					sample.peakAmplitude !== null
+						? ` (peak ${sample.peakAmplitude.toFixed(3)})`
+						: '';
+				testResult = {
+					ok: false,
+					message: `Silent sample${badge} — no audible speech${peak}`,
+					detail: sample.audibleReason || 'The runtime returned no audible audio.'
+				};
+			} else {
+				testResult = {
+					ok: true,
+					message: `Synthesis OK — playing sample${badge}`,
+					detail: null
+				};
+			}
 		} catch (e) {
 			previewError = e instanceof Error ? e.message : String(e);
 			testResult = {

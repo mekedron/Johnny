@@ -383,6 +383,16 @@ export interface TtsSampleResult {
 	runtime: string;
 	ttfaMs: number | null;
 	totalMs: number | null;
+	/** PCM byte count of the synthesised sample (Johnny-1ge.7). */
+	audioBytes: number | null;
+	/** Duration of the sample in ms, derived from byte count + sample rate. */
+	audioMs: number | null;
+	/** Max abs sample normalised to [0, 1]; ~0 means the runtime was silent. */
+	peakAmplitude: number | null;
+	/** Backend verdict: did the runtime produce audible speech? */
+	audible: boolean;
+	/** Why the sample was judged silent/short, when `audible` is false. */
+	audibleReason: string;
 }
 
 function _parseIntHeader(res: Response, name: string): number | null {
@@ -392,12 +402,27 @@ function _parseIntHeader(res: Response, name: string): number | null {
 	return Number.isNaN(n) ? null : n;
 }
 
+function _parseFloatHeader(res: Response, name: string): number | null {
+	const raw = res.headers.get(name);
+	if (raw === null) return null;
+	const n = Number.parseFloat(raw);
+	return Number.isNaN(n) ? null : n;
+}
+
 async function _ttsSampleResult(res: Response): Promise<TtsSampleResult> {
+	// `X-TTS-Audible` is "1"/"0". Absent (older backend) → treat as audible so
+	// the warning never fires spuriously against a stale API.
+	const audibleHeader = res.headers.get('X-TTS-Audible');
 	return {
 		blob: await res.blob(),
 		runtime: res.headers.get('X-TTS-Runtime') ?? '',
 		ttfaMs: _parseIntHeader(res, 'X-TTS-TTFA-Ms'),
-		totalMs: _parseIntHeader(res, 'X-TTS-Total-Ms')
+		totalMs: _parseIntHeader(res, 'X-TTS-Total-Ms'),
+		audioBytes: _parseIntHeader(res, 'X-TTS-Audio-Bytes'),
+		audioMs: _parseIntHeader(res, 'X-TTS-Audio-Ms'),
+		peakAmplitude: _parseFloatHeader(res, 'X-TTS-Peak'),
+		audible: audibleHeader === null ? true : audibleHeader === '1',
+		audibleReason: res.headers.get('X-TTS-Audible-Reason') ?? ''
 	};
 }
 

@@ -106,8 +106,19 @@ app.add_middleware(
     allow_headers=["*"],
     # Custom response headers the browser must be allowed to read from JS.
     # The TTS play-sample endpoints stamp the runtime + timing here so the
-    # /providers UI can show which runtime served the audio (Johnny-1ge.1).
-    expose_headers=["X-TTS-Runtime", "X-TTS-TTFA-Ms", "X-TTS-Total-Ms"],
+    # /providers UI can show which runtime served the audio (Johnny-1ge.1),
+    # plus the audio measurements + audible verdict (Johnny-1ge.7) so the UI
+    # can warn when a runtime returns a silent sample.
+    expose_headers=[
+        "X-TTS-Runtime",
+        "X-TTS-TTFA-Ms",
+        "X-TTS-Total-Ms",
+        "X-TTS-Audio-Bytes",
+        "X-TTS-Audio-Ms",
+        "X-TTS-Peak",
+        "X-TTS-Audible",
+        "X-TTS-Audible-Reason",
+    ],
 )
 
 app.include_router(auth_router)
