@@ -19,7 +19,7 @@ client surface small and easy to test.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -240,25 +240,31 @@ async def revoke_account(
 ) -> None:
     """Revoke the account's refresh token at Google and delete the row.
 
-    Used by the disconnect flow in US-006; available here so the OAuth
-    helpers and the row-mutating side live next to each other.
+    A bot-only row (no refresh token, sign-in via Playwright
+    ``storage_state.json`` only) has nothing to revoke at Google — the
+    cookies aren't OAuth-bearer credentials. Skip the Google round-trip
+    in that case and just delete the local row.
+
+    Used by the disconnect flow; available here so the OAuth helpers
+    and the row-mutating side live next to each other.
     """
     from app.services.google_oauth import revoke_token
 
-    try:
-        refresh_token = crypto.decrypt(account.refresh_token_encrypted)
-    except Exception as exc:
-        raise TokenUndecryptableError(
-            account_id=account.id, email=account.email
-        ) from exc
-    try:
-        await revoke_token(token=refresh_token, http_client=http_client)
-    except GoogleOAuthError as exc:
-        logger.warning(
-            "revocation HTTP call failed for account id=%s — deleting row anyway: %s",
-            account.id,
-            exc,
-        )
+    if account.refresh_token_encrypted:
+        try:
+            refresh_token = crypto.decrypt(account.refresh_token_encrypted)
+        except Exception as exc:
+            raise TokenUndecryptableError(
+                account_id=account.id, email=account.email
+            ) from exc
+        try:
+            await revoke_token(token=refresh_token, http_client=http_client)
+        except GoogleOAuthError as exc:
+            logger.warning(
+                "revocation HTTP call failed for account id=%s — deleting row anyway: %s",
+                account.id,
+                exc,
+            )
     session.delete(account)
 
 
@@ -267,16 +273,16 @@ def upsert_account_from_tokens(
     session: Session,
     crypto: CredentialCrypto,
     email: str,
-    role: Any,
     access_token: str,
     refresh_token: str,
     expires_at: datetime,
-    is_default_user: bool = False,
 ) -> GoogleAccount:
     """Insert or update a :class:`GoogleAccount` row from a token response.
 
-    The unique key is ``email`` — re-authorising the same address updates
-    the stored tokens in place rather than creating a duplicate row.
+    The unique key is ``email`` — re-authorising the same address (or
+    OAuthing an email that already exists as a bot-only row) attaches
+    the calendar capability to the existing row rather than creating a
+    duplicate.
     """
     from sqlalchemy import select
 
@@ -284,24 +290,16 @@ def upsert_account_from_tokens(
     if existing is None:
         row = GoogleAccount(
             email=email,
-            role=role,
             refresh_token_encrypted=crypto.encrypt(refresh_token),
             access_token_encrypted=crypto.encrypt(access_token),
             token_expires_at=expires_at,
-            is_default_user=is_default_user,
         )
         session.add(row)
-        if is_default_user:
-            _clear_other_defaults(session, row)
         session.flush()
         return row
-    existing.role = role
     existing.refresh_token_encrypted = crypto.encrypt(refresh_token)
     existing.access_token_encrypted = crypto.encrypt(access_token)
     existing.token_expires_at = expires_at
-    if is_default_user and not existing.is_default_user:
-        existing.is_default_user = True
-        _clear_other_defaults(session, existing)
     session.flush()
     return existing
 
@@ -312,26 +310,17 @@ def can_decrypt_refresh_token(
     """Return ``True`` if the stored refresh token decrypts with ``crypto``.
 
     Used to compute the ``token_health`` field surfaced by the accounts
-    API. Cheap: the call is a single Fernet decrypt of an existing column
-    and never round-trips to Google.
+    API. A row without any refresh token (bot-only identity) returns
+    ``False`` — it has no calendar capability to verify. Cheap: a single
+    Fernet decrypt of an existing column with no Google round-trip.
     """
+    if not account.refresh_token_encrypted:
+        return False
     try:
         crypto.decrypt(account.refresh_token_encrypted)
     except Exception:
         return False
     return True
-
-
-def _clear_other_defaults(session: Session, keep: GoogleAccount) -> None:
-    """Ensure at most one account row has ``is_default_user=True``."""
-    others: Iterable[GoogleAccount] = session.query(GoogleAccount).filter(
-        GoogleAccount.is_default_user.is_(True),
-        GoogleAccount.id != keep.id if keep.id is not None else True,
-    )
-    for other in others:
-        if other is keep:
-            continue
-        other.is_default_user = False
 
 
 __all__ = [

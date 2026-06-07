@@ -1,38 +1,35 @@
-"""Google OAuth 2.0 desktop-flow endpoints (US-005, US-006).
+"""Google account endpoints: connect calendars, list, disconnect.
 
-US-005 added the initial authorize / callback round-trip; US-006 extends
-this module with account-management endpoints (list, patch, disconnect)
-plus a GET ``/callback`` variant that Google can redirect a browser to.
+The accounts redesign (Johnny-pia) collapses the previous
+calendar/bot distinction to a single row per Google identity with
+derived capabilities. The schema dropped ``role`` and
+``is_default_user``; a row is a calendar source iff it carries an
+encrypted refresh token, and a bot identity iff a Playwright
+``storage_state.json`` exists for it on the shared volume.
 
-* ``POST /auth/google/start`` — build the consent URL using the configured
-  ``GOOGLE_CLIENT_ID`` and return it for the client to open in a browser.
-  The client picks a per-session ``state`` value (or lets the server pick
-  one); the role / default-user tags chosen at start time round-trip
-  through Google via the state map.
+Endpoints in this module own the **calendar** half of the surface:
 
-* ``POST /auth/google/callback`` — programmatic variant: exchange the
-  authorization code for tokens and persist the encrypted account row.
-  Used by tests and any client that proxies Google's redirect.
+* ``POST /auth/google/start`` — build the consent URL and remember the
+  ``state`` token in process memory.
+* ``POST /auth/google/callback`` / ``GET /auth/google/callback`` —
+  programmatic and browser-facing variants of the OAuth code exchange.
+  The browser variant posts ``johnny:oauth`` back to the opener so the
+  Settings tab can refresh.
+* ``GET /auth/google/accounts`` and ``GET /auth/google/accounts/{id}``
+  — list / fetch. Response shape folds the bot-session status in so
+  the UI doesn't need a second round-trip per account.
+* ``DELETE /auth/google/accounts/{id}`` — revoke the refresh token (if
+  any) at Google and delete the row. HTTP 409 if meeting configs
+  reference the account; pass ``?force=true`` to cascade-delete.
+* ``DELETE /auth/google/accounts/{id}/bot-session`` — remove just the
+  bot capability (clears the stored ``storage_state.json``). The row
+  stays if it still carries calendar capability.
 
-* ``GET /auth/google/callback`` — browser-friendly variant of the same
-  flow: Google redirects the user here, the server processes the code,
-  and a small HTML page tells the user to close the popup. The
-  ``window.opener``-aware script posts ``johnny:oauth`` so the original
-  Settings tab can refresh without polling.
+The bot **sign-in** flow (noVNC-based) lives in
+:mod:`app.api.bot_signin`.
 
-* ``GET /auth/google/accounts`` — list every connected account (no token
-  material is ever returned).
-
-* ``PATCH /auth/google/accounts/{id}`` — change role or promote to the
-  default user identity. Promoting one account demotes any other.
-
-* ``DELETE /auth/google/accounts/{id}`` — revoke the refresh token at
-  Google's revocation endpoint and remove the row. Returns HTTP 409 if
-  any meeting configs reference the account (with ``meeting_config_count``
-  in the detail); pass ``?force=true`` to cascade-delete those rows first.
-
-Tokens are encrypted with the application-wide Fernet key before going to
-the database. Decryption only happens inside the shared
+Tokens are encrypted with the application-wide Fernet key before going
+to the database. Decryption only happens inside the shared
 :class:`~app.services.google_client.GoogleApiClient` wrapper.
 """
 
@@ -44,24 +41,17 @@ import secrets
 from datetime import datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, func, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_crypto, get_session
 from app.config import Settings, get_settings
-from app.db.models import AccountRole, GoogleAccount, MeetingConfig
+from app.db.models import GoogleAccount, MeetingConfig
 from app.security.crypto import CredentialCrypto
-from app.services.bot_auth_seed import (
-    MAX_STORAGE_STATE_BYTES,
-    BotSessionError,
-    bot_session_status,
-    delete_bot_session,
-    save_bot_session,
-)
+from app.services.bot_auth_seed import bot_session_status, delete_bot_session
 from app.services.google_client import (
     GoogleApiClientError,
     can_decrypt_refresh_token,
@@ -87,13 +77,9 @@ class StartRequest(BaseModel):
     """Optional knobs for the consent URL.
 
     ``state`` is auto-generated server-side if the client doesn't supply
-    one. ``role`` and ``is_default_user`` are remembered in the in-memory
-    pending-state map keyed by the state token, so the callback knows
-    how to label the resulting account row.
+    one. No role or default flag — the redesign collapsed both away.
     """
 
-    role: AccountRole = AccountRole.USER
-    is_default_user: bool = False
     state: str | None = Field(default=None, max_length=128)
 
 
@@ -111,105 +97,95 @@ class CallbackRequest(BaseModel):
     state: str = Field(min_length=1, max_length=128)
 
 
-TokenHealth = Literal["ok", "needs_reauth"]
+TokenHealth = Literal["ok", "needs_reauth", "none"]
+
+
+class BotSessionView(BaseModel):
+    """Whether a bot account's Playwright ``storage_state.json`` exists.
+
+    Folded into :class:`AccountRead` so the UI sees a single per-account
+    payload. ``connected`` is purely file-presence based — cookies may
+    have expired, but the meet-worker is the authoritative source for
+    that determination at join time.
+    """
+
+    connected: bool
+    saved_at: datetime | None = None
+    size_bytes: int | None = None
 
 
 class AccountRead(BaseModel):
     """Public view of a :class:`GoogleAccount` row (no tokens exposed).
 
-    ``token_health`` is computed at response time by attempting a no-op
-    decrypt of the stored refresh token. ``"needs_reauth"`` means the
-    Fernet key has rotated (or the ciphertext is corrupt) and the user
-    must re-run the OAuth flow. No Google round-trip is performed.
+    Capabilities are exposed as two boolean-like fields:
+
+    * ``has_calendar`` — a calendar refresh token is present.
+      ``token_health`` reflects whether it decrypts.
+    * ``bot_session.connected`` — a Playwright ``storage_state.json``
+      exists for this account on the shared volume.
+
+    A row can carry one or both capabilities; the UI renders it under
+    the matching section(s).
     """
 
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     email: str
-    role: AccountRole
-    is_default_user: bool
+    has_calendar: bool
     token_expires_at: datetime | None
-    token_health: TokenHealth = "ok"
+    token_health: TokenHealth
+    bot_session: BotSessionView
     created_at: datetime
     updated_at: datetime
 
 
 def _account_read(row: GoogleAccount, crypto: CredentialCrypto) -> AccountRead:
-    """Build :class:`AccountRead` and fill in ``token_health``."""
-    health: TokenHealth = (
-        "ok" if can_decrypt_refresh_token(account=row, crypto=crypto) else "needs_reauth"
-    )
+    """Build :class:`AccountRead` and fill in capability fields."""
+    has_calendar = row.refresh_token_encrypted is not None
+    if not has_calendar:
+        health: TokenHealth = "none"
+    elif can_decrypt_refresh_token(account=row, crypto=crypto):
+        health = "ok"
+    else:
+        health = "needs_reauth"
+    session_status = bot_session_status(row.id)
     return AccountRead(
         id=row.id,
         email=row.email,
-        role=row.role,
-        is_default_user=row.is_default_user,
+        has_calendar=has_calendar,
         token_expires_at=row.token_expires_at,
         token_health=health,
+        bot_session=BotSessionView(
+            connected=session_status["connected"],
+            saved_at=session_status["saved_at"],
+            size_bytes=session_status["size_bytes"],
+        ),
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
 
 
-class AccountUpdate(BaseModel):
-    """Patch payload for promoting an account or changing its role.
-
-    Promoting one account to ``is_default_user=True`` automatically
-    demotes any other default-user row so the unique-by-intent invariant
-    holds even though the database column is just a plain boolean.
-    """
-
-    role: AccountRole | None = None
-    is_default_user: bool | None = None
-
-
-class BotSessionStatusResponse(BaseModel):
-    """Whether a bot account's Playwright ``storage_state.json`` exists.
-
-    Returned by the bot-session GET / PUT / DELETE endpoints so the UI
-    can render a single status surface (``Connected (saved …)`` vs
-    ``Not connected``) regardless of the operation that produced it.
-
-    ``connected`` is purely file-presence based — cookies may have
-    expired, but the meet-worker is the authoritative source for that
-    determination at join time.
-    """
-
-    connected: bool
-    saved_at: datetime | None = None
-    size_bytes: int | None = None
-    path: str
-
-
 # --- In-memory state map ---------------------------------------------------
 
 
-class _PendingState(BaseModel):
-    """The role / default-user choice the client made at /start time.
-
-    Kept in-memory because the OAuth flow is single-user, single-process,
-    and the state lifetime is the time it takes the user to click through
-    Google's consent screen (seconds to minutes).
-    """
-
-    role: AccountRole
-    is_default_user: bool
+_pending_states: set[str] = set()
 
 
-_pending_states: dict[str, _PendingState] = {}
+def _remember_state(state: str) -> None:
+    _pending_states.add(state)
 
 
-def _remember_state(state: str, payload: _PendingState) -> None:
-    _pending_states[state] = payload
+def _consume_state(state: str) -> bool:
+    """Return ``True`` if ``state`` was pending; pop it on the way out."""
+    if state in _pending_states:
+        _pending_states.discard(state)
+        return True
+    return False
 
 
-def _consume_state(state: str) -> _PendingState | None:
-    return _pending_states.pop(state, None)
-
-
-def _peek_state(state: str) -> _PendingState | None:
-    return _pending_states.get(state)
+def _peek_state(state: str) -> bool:
+    return state in _pending_states
 
 
 # --- Helpers ---------------------------------------------------------------
@@ -237,13 +213,12 @@ async def _exchange_and_persist(
 ) -> GoogleAccount:
     """Shared core of POST and GET ``/callback``.
 
-    Consumes the pending state, exchanges the code for tokens, fetches
+    Validates the pending state, exchanges the code for tokens, fetches
     the userinfo, and upserts the row. Raises ``HTTPException`` directly
     so both wrappers map errors to HTTP responses identically.
     """
     client_id, client_secret = _require_oauth_config(settings)
-    pending = _consume_state(state)
-    if pending is None:
+    if not _consume_state(state):
         raise HTTPException(status_code=400, detail="unknown or expired state")
 
     try:
@@ -266,11 +241,9 @@ async def _exchange_and_persist(
         session=session,
         crypto=crypto,
         email=userinfo.email,
-        role=pending.role,
         access_token=tokens.access_token,
         refresh_token=tokens.refresh_token,
         expires_at=tokens.expires_at,
-        is_default_user=pending.is_default_user,
     )
 
 
@@ -291,18 +264,6 @@ def _get_account_or_404(session: Session, account_id: int) -> GoogleAccount:
     return row
 
 
-def _clear_other_default_users(session: Session, keep: GoogleAccount) -> None:
-    """Ensure at most one account has ``is_default_user=True``."""
-    others = session.scalars(
-        select(GoogleAccount).where(
-            GoogleAccount.is_default_user.is_(True),
-            GoogleAccount.id != keep.id,
-        )
-    ).all()
-    for other in others:
-        other.is_default_user = False
-
-
 # --- Endpoints -------------------------------------------------------------
 
 
@@ -316,10 +277,7 @@ def start(payload: StartRequest, settings: SettingsDep) -> StartResponse:
     """Return the URL the user should open to grant consent."""
     client_id, _ = _require_oauth_config(settings)
     state = payload.state or secrets.token_urlsafe(32)
-    _remember_state(
-        state,
-        _PendingState(role=payload.role, is_default_user=payload.is_default_user),
-    )
+    _remember_state(state)
     authorize_url = build_authorize_url(
         client_id=client_id,
         redirect_uri=settings.google_oauth_redirect_uri,
@@ -433,16 +391,13 @@ def __js_string(value: str) -> str:
 
 @router.get("/accounts", response_model=list[AccountRead])
 def list_accounts(session: SessionDep, crypto: CryptoDep) -> list[AccountRead]:
-    """List every connected Google account.
+    """List every connected Google identity.
 
-    Ordered by ``is_default_user`` first (so the default user account
-    surfaces at the top of the Settings page), then by id for stability.
+    Ordered by id for stability; the UI is responsible for grouping by
+    capability (Calendars vs Meeting bots).
     """
     rows = session.scalars(
-        select(GoogleAccount).order_by(
-            GoogleAccount.is_default_user.desc(),
-            GoogleAccount.id.asc(),
-        )
+        select(GoogleAccount).order_by(GoogleAccount.id.asc())
     ).all()
     return [_account_read(row, crypto) for row in rows]
 
@@ -456,36 +411,6 @@ def get_account(
     return _account_read(row, crypto)
 
 
-@router.patch("/accounts/{account_id}", response_model=AccountRead)
-def update_account(
-    account_id: int,
-    payload: AccountUpdate,
-    session: SessionDep,
-    crypto: CryptoDep,
-) -> AccountRead:
-    """Patch role and/or default-user flag for an account.
-
-    Promoting an account to default user automatically demotes any other
-    default-user row so at most one account is marked default at a time.
-    Demoting is allowed even if it leaves zero default-user accounts; the
-    UI is responsible for prompting the user to pick a replacement.
-    """
-    row = _get_account_or_404(session, account_id)
-    if payload.role is not None:
-        row.role = payload.role
-    if payload.is_default_user is not None:
-        row.is_default_user = payload.is_default_user
-        if payload.is_default_user:
-            _clear_other_default_users(session, row)
-    try:
-        session.flush()
-    except IntegrityError as exc:
-        session.rollback()
-        raise HTTPException(status_code=409, detail="account update failed") from exc
-    session.refresh(row)
-    return _account_read(row, crypto)
-
-
 @router.delete("/accounts/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def disconnect_account(
     account_id: int,
@@ -496,7 +421,7 @@ async def disconnect_account(
         Query(description="cascade-delete referencing meeting configs"),
     ] = False,
 ) -> None:
-    """Revoke the refresh token at Google and delete the local row.
+    """Revoke the calendar refresh token (if any) and delete the local row.
 
     ``meeting_configs.identity_account_id`` is RESTRICT, so an account
     that any meeting config names as its bot identity cannot be deleted
@@ -506,8 +431,11 @@ async def disconnect_account(
 
     The Google-side revocation is best-effort: a 4xx/5xx from Google
     still proceeds to delete the local row (logged in
-    :func:`revoke_account`) — the user wants the account gone locally
-    even if Google is unreachable.
+    :func:`revoke_account`). A bot-only row (no refresh token) skips
+    the Google round-trip entirely.
+
+    Also clears the bot ``storage_state.json`` if one is on disk so the
+    next sign-in for the same email starts clean.
     """
     row = _get_account_or_404(session, account_id)
     referencing = _meeting_config_count(session, account_id)
@@ -526,130 +454,37 @@ async def disconnect_account(
         session.execute(
             delete(MeetingConfig).where(MeetingConfig.identity_account_id == account_id)
         )
+    delete_bot_session(account_id)
     try:
         await revoke_account(session=session, account=row, crypto=crypto)
     except GoogleApiClientError as exc:
-        # Decrypt failure means the row is unusable anyway — keep deleting
-        # but log so the operator notices.
+        # Decrypt failure means the row is unusable anyway — keep
+        # deleting but log so the operator notices.
         logger.warning("revoke_account failed for id=%s: %s", account_id, exc)
         session.delete(row)
 
 
-# --- Bot-session storage_state endpoints (Johnny-4ph) ---------------------
-
-
-def _require_bot_account(session: Session, account_id: int) -> GoogleAccount:
-    """Return the account row or 400/404 if it can't host a bot session.
-
-    Only accounts tagged ``role=bot`` carry a Playwright storage_state —
-    user accounts authenticate via OAuth tokens, not a saved browser
-    session. We surface a 400 instead of silently accepting so a wrong
-    account selection is caught at upload time.
-    """
-    row = _get_account_or_404(session, account_id)
-    if row.role is not AccountRole.BOT:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "bot-session storage_state is only valid for accounts with "
-                "role=bot; this account is tagged "
-                f"role={row.role.value}"
-            ),
-        )
-    return row
-
-
-@router.get(
-    "/accounts/{account_id}/bot-session",
-    response_model=BotSessionStatusResponse,
-)
-def get_bot_session(account_id: int, session: SessionDep) -> BotSessionStatusResponse:
-    """Return whether a Playwright storage_state.json is on disk for this bot.
-
-    The status reflects file presence and mtime — it does NOT round-trip
-    to Google or validate the cookies. The meet-worker is the authority
-    on whether the session is actually usable; this endpoint just tells
-    the UI whether the user has run the helper yet.
-    """
-    _require_bot_account(session, account_id)
-    return BotSessionStatusResponse(**bot_session_status(account_id))
-
-
-@router.put(
-    "/accounts/{account_id}/bot-session",
-    response_model=BotSessionStatusResponse,
-)
-async def upload_bot_session(
-    account_id: int,
-    request: Request,
-    session: SessionDep,
-) -> BotSessionStatusResponse:
-    """Persist an uploaded ``storage_state.json`` for this bot account.
-
-    Accepts the raw JSON body as ``application/json`` and writes it
-    atomically to the shared ``google_auth_state`` volume so the
-    meet-worker finds it on its next join attempt. The file format is
-    Playwright's standard storage_state — same shape as the file
-    :mod:`johnny.tools.seed_auth_state` produces.
-
-    A successful round-trip means the file is on disk and well-formed;
-    it does not guarantee the cookies will still be valid when the
-    meet-worker actually tries to sign in. Cookies expire; this is the
-    same caveat the CLI helper carries.
-    """
-    _require_bot_account(session, account_id)
-
-    raw = await request.body()
-    if not raw:
-        raise HTTPException(
-            status_code=400,
-            detail="empty body — POST the storage_state.json content as the request body",
-        )
-    if len(raw) > MAX_STORAGE_STATE_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=(
-                f"storage_state file is too large: {len(raw)} bytes "
-                f"(limit {MAX_STORAGE_STATE_BYTES})"
-            ),
-        )
-    try:
-        result = save_bot_session(account_id, raw)
-    except BotSessionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except OSError as exc:
-        # Disk full, permission denied, etc. — surface as 500 so the UI
-        # tells the operator to check the host volume.
-        raise HTTPException(
-            status_code=500,
-            detail=f"failed to write storage_state to volume: {exc}",
-        ) from exc
-    return BotSessionStatusResponse(**result)
-
-
 @router.delete(
     "/accounts/{account_id}/bot-session",
-    response_model=BotSessionStatusResponse,
+    response_model=AccountRead,
 )
-def delete_bot_session_endpoint(
-    account_id: int, session: SessionDep
-) -> BotSessionStatusResponse:
-    """Remove the saved Playwright storage_state for this bot account.
+def disconnect_bot_session(
+    account_id: int, session: SessionDep, crypto: CryptoDep
+) -> AccountRead:
+    """Remove the saved Playwright storage_state for this account.
 
-    Useful when the cookies have expired (the user signs in fresh) or
-    when the user is switching the bot identity to a different email.
-    Returns the post-delete status — ``connected=False`` either way.
-    A no-op (file did not exist) is not an error.
+    Drops just the bot capability; the row stays if it still carries a
+    calendar refresh token. Use ``DELETE /accounts/{id}`` to remove the
+    whole identity. A no-op (no storage_state on disk) is not an error.
     """
-    _require_bot_account(session, account_id)
+    row = _get_account_or_404(session, account_id)
     delete_bot_session(account_id)
-    return BotSessionStatusResponse(**bot_session_status(account_id))
+    return _account_read(row, crypto)
 
 
 __all__ = [
     "AccountRead",
-    "AccountUpdate",
-    "BotSessionStatusResponse",
+    "BotSessionView",
     "CallbackRequest",
     "StartRequest",
     "StartResponse",

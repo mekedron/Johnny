@@ -10,7 +10,6 @@ from sqlalchemy import inspect
 from app.db import Base
 from app.db.models import (
     EMBEDDING_DIM,
-    AccountRole,
     BotMode,
     BotSessionSource,
     BotSessionStatus,
@@ -77,7 +76,6 @@ def test_bot_session_has_status_default_scheduled() -> None:
 
 
 def test_enums_have_expected_members() -> None:
-    assert {e.value for e in AccountRole} == {"user", "bot"}
     assert {e.value for e in BotMode} == {
         "listen_only",
         "suggest_only",

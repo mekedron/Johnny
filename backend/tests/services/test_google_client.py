@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.db import Base
-from app.db.models import AccountRole, CalendarEvent, GoogleAccount
+from app.db.models import CalendarEvent, GoogleAccount
 from app.security.crypto import CredentialCrypto
 from app.services import google_client as gc
 from app.services.google_client import (
@@ -78,11 +78,9 @@ def _make_account(
 ) -> GoogleAccount:
     row = GoogleAccount(
         email="alice@example.com",
-        role=AccountRole.USER,
         access_token_encrypted=crypto.encrypt(access_token),
         refresh_token_encrypted=crypto.encrypt(refresh_token),
         token_expires_at=expires_at,
-        is_default_user=False,
     )
     session.add(row)
     session.flush()
@@ -101,17 +99,15 @@ def test_upsert_inserts_new_row(session: Session, crypto: CredentialCrypto) -> N
         session=session,
         crypto=crypto,
         email="bob@example.com",
-        role=AccountRole.USER,
         access_token="ya29.a",
         refresh_token="1//r",
         expires_at=datetime.now(UTC) + timedelta(hours=1),
-        is_default_user=True,
     )
     assert row.id is not None
     assert row.email == "bob@example.com"
+    assert row.refresh_token_encrypted is not None
     assert crypto.decrypt(row.refresh_token_encrypted) == "1//r"
     assert crypto.decrypt(row.access_token_encrypted or "") == "ya29.a"
-    assert row.is_default_user is True
 
 
 def test_upsert_updates_existing_row(session: Session, crypto: CredentialCrypto) -> None:
@@ -119,56 +115,47 @@ def test_upsert_updates_existing_row(session: Session, crypto: CredentialCrypto)
         session=session,
         crypto=crypto,
         email="alice@example.com",
-        role=AccountRole.USER,
         access_token="old",
         refresh_token="old-r",
         expires_at=datetime.now(UTC),
-        is_default_user=False,
     )
     new_expires = datetime.now(UTC) + timedelta(hours=2)
     row = upsert_account_from_tokens(
         session=session,
         crypto=crypto,
         email="alice@example.com",
-        role=AccountRole.BOT,
         access_token="new",
         refresh_token="new-r",
         expires_at=new_expires,
-        is_default_user=False,
     )
     rows = session.scalars(sa.select(GoogleAccount)).all()
     assert len(rows) == 1
-    assert row.role.value == "bot"
+    assert row.refresh_token_encrypted is not None
     assert crypto.decrypt(row.refresh_token_encrypted) == "new-r"
 
 
-def test_upsert_default_user_clears_other_defaults(
+def test_upsert_attaches_calendar_to_existing_bot_only_row(
     session: Session, crypto: CredentialCrypto
 ) -> None:
-    a = upsert_account_from_tokens(
+    """A bot-only row (no refresh token) gets calendar tokens attached
+    rather than triggering a duplicate insert."""
+    bot_only = GoogleAccount(email="alice@example.com", refresh_token_encrypted=None)
+    session.add(bot_only)
+    session.flush()
+    bot_id = bot_only.id
+
+    row = upsert_account_from_tokens(
         session=session,
         crypto=crypto,
-        email="a@x",
-        role=AccountRole.USER,
-        access_token="t",
-        refresh_token="r",
-        expires_at=datetime.now(UTC),
-        is_default_user=True,
+        email="alice@example.com",
+        access_token="ya29",
+        refresh_token="1//r",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
-    b = upsert_account_from_tokens(
-        session=session,
-        crypto=crypto,
-        email="b@x",
-        role=AccountRole.USER,
-        access_token="t2",
-        refresh_token="r2",
-        expires_at=datetime.now(UTC),
-        is_default_user=True,
-    )
-    session.refresh(a)
-    session.refresh(b)
-    assert b.is_default_user is True
-    assert a.is_default_user is False
+    assert row.id == bot_id
+    assert row.refresh_token_encrypted is not None
+    rows = session.scalars(sa.select(GoogleAccount)).all()
+    assert len(rows) == 1
 
 
 # --- GoogleApiClient: token freshness ------------------------------------

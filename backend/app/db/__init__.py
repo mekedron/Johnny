@@ -2,7 +2,6 @@
 
 from app.db.base import Base
 from app.db.models import (
-    AccountRole,
     AgentDecision,
     AgentUtterance,
     BotMode,
@@ -19,7 +18,6 @@ from app.db.models import (
 )
 
 __all__ = [
-    "AccountRole",
     "AgentDecision",
     "AgentUtterance",
     "Base",

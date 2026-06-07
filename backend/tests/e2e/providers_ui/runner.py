@@ -157,7 +157,21 @@ def _run_single_plan(api: JohnnyAPI, plan: ProviderPlan) -> ProviderReport:
         provider_id = _step_create(api, plan, report)
         if provider_id is None:
             return report
-        _step_test(api, provider_id, report)
+        test_ok = _step_test(api, provider_id, report)
+        if not test_ok:
+            tier_skip = _detect_tier_paywall_failure(plan, report.steps[-1].detail)
+            if tier_skip is not None:
+                # Smoke revealed the provider tier can't reach this
+                # voice / model — billing state, not a code regression.
+                # Flip the latched FAIL to SKIP, clean up the row, and
+                # skip the rest of the lifecycle.
+                report.outcome = PlanOutcome.SKIP
+                report.reason = tier_skip
+                try:
+                    api.delete_provider(provider_id)
+                except Exception:  # noqa: BLE001, S110 — best-effort cleanup
+                    pass
+                return report
         _step_activate(api, plan, provider_id, report)
         _step_delete(api, plan, provider_id, report)
     except Exception as exc:  # noqa: BLE001 — surface any harness error to report
@@ -167,6 +181,53 @@ def _run_single_plan(api: JohnnyAPI, plan: ProviderPlan) -> ProviderReport:
             detail=f"{type(exc).__name__}: {exc}",
         )
     return report
+
+
+# Provider-specific substrings that mean "this credential is valid, the
+# call wired correctly, but the configured voice / model is paywalled on
+# the account's current tier". Matched lowercased against the smoke-test
+# detail. Add new entries when a provider surfaces a new tier-paywall
+# wording — the matcher is intentionally narrow so genuine FAILs (bad
+# request, server error, malformed response) stay FAILs.
+_TIER_PAYWALL_PATTERNS: dict[str, tuple[str, ...]] = {
+    # ElevenLabs free tier (Johnny-uga): library voices like Rachel
+    # (``21m00Tcm4TlvDq8ikWAM``) return HTTP 402 with this exact phrase
+    # in the JSON detail.
+    "elevenlabs": (
+        "free users cannot use library voices",
+        "upgrade your subscription to use this voice",
+    ),
+}
+
+
+def _detect_tier_paywall_failure(plan: ProviderPlan, smoke_detail: str) -> str | None:
+    """Translate a tier-paywall smoke failure into a SKIP hint.
+
+    Returns ``None`` when the failure is anything other than a known
+    tier-paywall — those stay as FAILs. The matcher is intentionally
+    narrow (per-provider substring list) so unexpected error wording
+    doesn't get silently masked as a SKIP.
+
+    Why this lives at the runner and not at preflight: the smoke
+    endpoint is the only ElevenLabs surface that reliably returns the
+    free-tier 402 with the explicit library-voice phrasing; the voice
+    metadata routes (``/v1/voices``, ``/v2/voices``) return 200 for the
+    same paywalled voice. Reusing the smoke result keeps the probe
+    free (no extra ElevenLabs HTTP round-trip, no extra credits).
+    """
+    patterns = _TIER_PAYWALL_PATTERNS.get(plan.provider_name)
+    if not patterns:
+        return None
+    detail_lc = (smoke_detail or "").lower()
+    if not any(p in detail_lc for p in patterns):
+        return None
+    voice_id = str(plan.resolved_options().get("voice_id") or "").strip()
+    voice_clause = f" {voice_id}" if voice_id else ""
+    return (
+        f"{plan.provider_name}{voice_clause} requires paid plan — "
+        "switch the plan to an account-owned voice or upgrade the API key "
+        f"(smoke: {smoke_detail})"
+    )
 
 
 def _run_kind_switch_check(
@@ -318,4 +379,4 @@ def run_harness(
     return report
 
 
-__all__ = ["run_harness"]
+__all__ = ["run_harness", "_detect_tier_paywall_failure"]

@@ -43,11 +43,6 @@ def _json_column() -> TypeEngine[Any]:
     return JSON().with_variant(JSONB(), "postgresql")
 
 
-class AccountRole(enum.StrEnum):
-    USER = "user"
-    BOT = "bot"
-
-
 class BotMode(enum.StrEnum):
     LISTEN_ONLY = "listen_only"
     SUGGEST_ONLY = "suggest_only"
@@ -149,26 +144,33 @@ class TimestampMixin:
 
 
 class GoogleAccount(TimestampMixin, Base):
+    """One row per Google identity, with capabilities derived not declared.
+
+    A row may carry either or both capabilities at once:
+
+    * **Calendar source** — ``refresh_token_encrypted IS NOT NULL`` and
+      decryptable with the active Fernet key. The polling worker uses
+      the refresh token to fetch the user's Calendar.
+    * **Bot identity** — a Playwright ``storage_state.json`` exists on
+      the shared docker volume at ``account-<id>/storage_state.json``
+      (see ``app.services.bot_auth_seed``). The meet-worker mounts that
+      file so Chromium opens already signed-in.
+
+    Same Google email = one row. Connecting the same address a second
+    time (e.g. via the bot sign-in flow after OAuth has already
+    registered it as a calendar) attaches the second capability to the
+    existing row rather than creating a duplicate.
+    """
+
     __tablename__ = "google_accounts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True)
-    role: Mapped[AccountRole] = mapped_column(
-        SAEnum(
-            AccountRole,
-            name="account_role",
-            native_enum=False,
-            length=16,
-            values_callable=_str_enum_values,
-        ),
-        nullable=False,
-    )
-    refresh_token_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    refresh_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     access_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     token_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    is_default_user: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     calendar_events: Mapped[list[CalendarEvent]] = relationship(
         back_populates="account", cascade="all, delete-orphan"

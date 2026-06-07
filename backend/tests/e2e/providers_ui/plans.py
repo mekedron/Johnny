@@ -190,7 +190,12 @@ PROVIDER_PLANS: tuple[ProviderPlan, ...] = (
         display_name="e2e-tts-elevenlabs",
         credential_env={"api_key": "ELEVENLABS_API_KEY"},
         static_options={
-            # ElevenLabs' default ``Rachel`` voice id — every account has it.
+            # Rachel is ElevenLabs' best-known voice id — present in the
+            # voice library for every account but, on free-tier keys,
+            # callable only with a paid subscription. The harness keeps
+            # this id deliberately: paid-tier runs PASS, free-tier runs
+            # SKIP via ``_detect_tier_paywall_failure`` in the runner
+            # (Johnny-uga), so no replacement voice id is required.
             "voice_id": "21m00Tcm4TlvDq8ikWAM",
             "model_id": "eleven_multilingual_v2",
         },
