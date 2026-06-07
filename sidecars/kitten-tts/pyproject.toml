@@ -1,0 +1,29 @@
+[project]
+name = "kitten-http-sidecar"
+version = "0.1.0"
+description = "KittenTTS HTTP sidecar — runs the tiny (<25 MB) KittenTTS ONNX model in its own process; the Johnny api container POSTs text and gets raw PCM back over HTTP."
+requires-python = ">=3.10"
+dependencies = [
+    # KittenTTS ships as a GitHub release wheel (not on PyPI). It pulls in
+    # onnxruntime + a phonemizer; all CPU-only. Bump the version here when a
+    # newer release lands.
+    "kittentts @ https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "numpy>=1.26.0",
+]
+
+[project.scripts]
+kitten-http-sidecar = "server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+# The kittentts dependency is a direct GitHub-release wheel URL (it is not on
+# PyPI); hatchling rejects direct references unless this is opted in.
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]

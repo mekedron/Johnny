@@ -236,6 +236,29 @@ Sidecar management:
 
 Health checks: `curl http://localhost:8772/health` (MLX) / `curl http://localhost:8773/health` (HTTP) — both return `{"ready": true, ...}` once the model has loaded.
 
+## Local KittenTTS runtimes
+
+The KittenTTS provider supports two runtimes selectable from the Providers page (Settings → Providers → KittenTTS → Runtime). KittenTTS is a tiny (<25 MB) Apache-2.0 ONNX model with eight English voices that runs on CPU — the smallest-footprint local TTS option, complementary to Piper's larger voices and Kokoro's 82 M checkpoint.
+
+| Runtime | Where it runs | Time-to-first-audio (warm) | Setup |
+| --- | --- | --- | --- |
+| `in-container` (default) | api container, `kittentts` in the api process; loaded model (all voices) cached at module scope keyed by `model_id` | well under 200 ms warm | Requires the `kittentts` library in the api image. The first synth pays the one-off model load; later turns are warm. CPU-only — no GPU needed. |
+| `http-sidecar` | host process (CPU), KittenTTS in its own process | ~network round-trip + warm synth | `./scripts/start-kitten-sidecar.sh start`. Runs `sidecars/kitten-tts/server.py` under `uv` on port 8771; the api POSTs to `http://host.docker.internal:8771`. Keeps `onnxruntime` out of the api image, or isolates synthesis on another host. |
+
+Why only two runtimes (vs. Piper/Kokoro's three): KittenTTS ships no CLI to drive a long-running child process, so there is no separate `persistent-subprocess` runtime — the `in-container` runtime already keeps the model warm in-process. And KittenTTS has no MLX/CoreML build, so (unlike Kokoro) there is no GPU sidecar; the model is CPU-only everywhere. The sidecar speaks the same wire protocol as `sidecars/kokoro-http` / `sidecars/piper-http` (`POST /synthesize` JSON in, raw PCM + `X-Sample-Rate` out), minus the `lang_code` field.
+
+The eight voices — four female (`Bella`, `Luna`, `Rosie`, `Kiki`) and four male (`Jasper`, `Bruno`, `Hugo`, `Leo`) — ship inside the model, so switching voice is instant and needs no install.
+
+Sidecar management:
+
+```bash
+./scripts/start-kitten-sidecar.sh start    # build venv + launch on :8771
+./scripts/start-kitten-sidecar.sh status   # is the sidecar up?
+./scripts/start-kitten-sidecar.sh stop     # stop it
+```
+
+Health check: `curl http://localhost:8771/health` → `{"ready": true, "voice": "...", "backend": "kittentts"}` once the model has loaded.
+
 ## Verifying TTS audio output (every provider × runtime)
 
 A successful HTTP round-trip is not proof of audible speech: a runtime can return `200 OK` with empty or all-zero PCM and the user simply hears nothing (this is exactly how a broken Kokoro MLX sidecar once failed silently). `johnny-tts-smoke` guards against that — it drives **every saved TTS provider × every runtime it supports × the first available voice** through `/play_sample` and asserts the audio is actually audible (non-trivial byte count, plausible duration for the text, and a peak amplitude above the silence floor). It prints one `PASS` / `SKIP` / `FAIL` row per cell and exits non-zero on any `FAIL`; a sidecar that is offline or a voice that is not installed is a `SKIP`, never a `FAIL`.

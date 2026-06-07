@@ -53,6 +53,8 @@ from app.providers.gemini_live_s2s import GeminiLiveS2S
 from app.providers.gemini_live_s2s import register as _register_gemini_live_s2s
 from app.providers.gemini_llm import GeminiLLM
 from app.providers.gemini_llm import register as _register_gemini_llm
+from app.providers.kitten_tts import KittenTTS
+from app.providers.kitten_tts import register as _register_kitten_tts
 from app.providers.kokoro_tts import KokoroTTS
 from app.providers.kokoro_tts import register as _register_kokoro_tts
 from app.providers.openai_compatible_llm import OpenAICompatibleLLM
@@ -105,6 +107,7 @@ from app.providers.stub_s2s import register as _register_stub_s2s
 # where the library is not installed.
 _register_piper_tts(replace=True)
 _register_kokoro_tts(replace=True)
+_register_kitten_tts(replace=True)
 _register_openai_tts(replace=True)
 _register_elevenlabs_tts(replace=True)
 _register_cartesia_tts(replace=True)
@@ -137,6 +140,7 @@ __all__ = [
     "FieldValidationError",
     "GeminiLLM",
     "GeminiLiveS2S",
+    "KittenTTS",
     "KokoroTTS",
     "LLMError",
     "LLMProvider",

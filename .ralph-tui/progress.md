@@ -206,6 +206,30 @@ modal) or typed + Reload. Unit-test the mapping with `httpx.MockTransport` (no
 live key needed); the live rich catalog can't be browser-validated without a real
 key, so validate the keyless fallback path + that the bespoke browser is gone.
 
+### Atomic-`generate()` TTS adapter + "2 runtimes when no CLI / no GPU"
+Not every local TTS streams. KittenTTS's `model.generate(text, voice=…, speed=…)`
+returns the WHOLE utterance as one numpy float array (not a generator), so the
+in-container path is simpler than Kokoro's thread→queue bridge: `await
+asyncio.to_thread(_produce)` for the full array under the per-model lock, then
+convert → `resample_pcm16(24k→16k)` → yield in `chunk_bytes` frames. TTFA ≈ total
+synth (can't emit first-chunk-early when the library hands back one blob) — fine
+for a tiny model. **Cache key is `model_id` alone** (the model bundles every
+voice + a constant native rate), the same deviation Kokoro made from the bead's
+literal `(voice_id, sample_rate)`. **Runtime count follows the library, not the
+epic's "three":** KittenTTS ships no CLI (→ no `persistent-subprocess`; the bead
+says fold it into in-container) and no MLX/CoreML build (→ no GPU sidecar), so it
+ships exactly TWO runtimes — `in-container` + `http-sidecar` — mirroring Kokoro
+minus the MLX sidecar. Document the scoping finding; don't invent a third
+runtime to satisfy a pre-scoping acceptance bullet. Adding the whole provider
+needed ZERO api/frontend changes (schema-driven `/providers`, `list_voices()`
+picker, `getattr(instance,"runtime")` in play_sample) — only: the adapter,
+register in `__init__.py`, one line in `sidecars.py` `_known_sidecars()` (+ its
+test's expected-name set), the sidecar dir, the ~25-line launcher, README, and
+tests. **Sidecar gotcha:** a direct GitHub-release-wheel dependency
+(`name @ https://…whl`) makes `uv pip install -e .` fail under hatchling unless
+the sidecar `pyproject.toml` sets `[tool.hatch.metadata] allow-direct-references
+= true`.
+
 ---
 
 ## 2026-06-07 - Johnny-1ge.1 (Piper TTS runtime picker)
@@ -612,4 +636,76 @@ key, so validate the keyless fallback path + that the bespoke browser is gone.
   - Had to start Docker Desktop (`open -a Docker`) + re-run `./run-dev.sh` — the
     daemon was down at session start, so `docker compose exec` failed; tests run
     via `uv run pytest` (no bare `pytest` on PATH in the api image).
+---
+
+## 2026-06-07 - Johnny-1ge.2 (KittenTTS provider, 2-runtime picker)
+- New local TTS provider `kittentts` (KittenML/KittenTTS, Apache-2.0, <25 MB
+  ONNX, CPU-only, 8 English voices). Scoping found KittenTTS has **no CLI** and
+  **no MLX/CoreML** path, so — per the epic's conditional — it ships TWO
+  runtimes, not three: `in-container` (default, lazy `kittentts`, model cached
+  at module scope keyed by `model_id`) + `http-sidecar` (port 8771). 24 kHz
+  float → S16LE → resampled to 16 kHz.
+- Files changed:
+  - `backend/app/providers/kitten_tts.py` (new) — runtime constants +
+    `SIDECAR_DEFAULT_URLS` (http 8771), 8-voice catalog (4f/4m, gender in the
+    catalog tuple), module-level model cache + locks + `_evict_process_cache`,
+    `evict_process_cache()` classmethod, `_load_model`/`_ensure_model` hooks,
+    `synthesize_stream` dispatcher (TTFA/total + `kitten.synth:` log) →
+    `_synth_in_container` (atomic `generate()` on a thread, then chunk) /
+    `_synth_http_sidecar` (`kitten.sidecar:` log), `_audio_to_pcm16` (numpy or
+    pure-Python, clip-before-scale), `list_voices()`, schema
+    (runtime/sidecar_url/voice SELECT+catalog/model_id/model_dir/speed/
+    chunk_bytes) + 3 tips, INFO log handler.
+  - `backend/app/providers/__init__.py` — import + `_register_kitten_tts(replace=True)`
+    + `__all__` (auto-registers at import; kittentts is lazy-imported in the load hook).
+  - `backend/app/api/sidecars.py` (+ test) — `kitten-http` added to
+    `_known_sidecars()` so `/sidecars/health` + the modal badge probe :8771.
+  - `backend/tests/providers/test_kitten_tts.py` (new) — 46 tests: autouse
+    evict fixture, config/runtime/sidecar-URL validation (incl. asserting
+    persistent-subprocess is rejected + ALLOWED_RUNTIMES == {in-container,
+    http-sidecar}), `_audio_to_pcm16`, schema, in-container warm-reuse/
+    shared-cache/distinct-voices-load-once/distinct-models-load-separately/
+    eviction/chunking/error/contract, sidecar post+decode/no-resample/
+    unreachable/non-200/requires-url, registry, list_voices (catalog + gender).
+  - `sidecars/kitten-tts/` (server.py + pyproject.toml + README.md) — wire
+    protocol identical to kokoro-http minus `lang_code`; non-empty-PCM assertion
+    (Johnny-1ge.7). `scripts/start-kitten-sidecar.sh` (single `http` backend,
+    sourced sidecar-common.sh). README "Local KittenTTS runtimes" section.
+- Verified (chrome-devtools, real browser): KittenTTS in Add provider → TTS;
+  schema-driven form renders Runtime picker (exactly 2 opts), sidecar_url
+  (:8771), unified VoicePicker (8 voices, language/gender filters, Bella
+  default, NO free-text textbox), advanced knobs, 3 tips. in-container Play
+  sample → graceful "kittentts not importable" error naming both the install
+  path and the sidecar alternative. http-sidecar: live "sidecar running
+  (…:8771)" badge; Play sample → "Synthesis OK (runtime: http-sidecar)"; cross-
+  origin fetch read X-TTS-Audible=1, peak 0.5046, audioBytes 245866; dead-port
+  URL → clear 502 naming ./scripts/start-kitten-sidecar.sh. Saved a row + ran
+  `johnny-tts-smoke`: `kittentts http-sidecar` PASS (245866 bytes, peak 0.53),
+  `kittentts in-container` SKIP (env gap), exit 0 (4 PASS · 1 SKIP · 0 FAIL).
+  Artifacts in `.validation/Johnny-1ge.2/`.
+- Backend: kitten + sidecars suites green; providers+api+smoketest 1261 pass,
+  2 skipped; new files ruff + mypy clean. Launcher passes
+  `check-sidecar-cli.sh`; umbrella `start-sidecars.sh` discovers `kitten-http`.
+  Pre-existing/unrelated failures left as-is: 2 live `openai_realtime_s2s`
+  integration tests (invalid_api_key — s2s untouched).
+- **Measured ttfa (for Johnny-1ge.5):** http-sidecar cold first call ~1.76 s
+  (includes the api↔host round-trip + a ~7.7 s-of-audio synth of the sample
+  phrase); the sidecar itself synthesises the phrase in well under a second once
+  warm. in-container warm <=200 ms is the cache-shape target (verified by test);
+  real in-container audio needs the `kittentts` wheel baked into the api image
+  (left a deploy step, mirroring Kokoro — the lazy-import error is the shipped
+  in-container behaviour without it).
+- **Learnings:**
+  - See the new Codebase Pattern at the top (atomic-`generate()` adapter +
+    "2 runtimes when no CLI / no GPU" + the hatchling `allow-direct-references`
+    sidecar gotcha).
+  - KittenTTS friendly voice names (Bella…Leo) map onto the model's internal
+    `expr-voice-2..5-{f,m}` ids and are interchangeable; the 4-female/4-male
+    split (Bella/Luna/Rosie/Kiki vs Jasper/Bruno/Hugo/Leo) matches the expr set.
+    The voice catalog targets `kitten-tts-mini-0.8` (the current 0.8.1 wheel);
+    `model_id` is an advanced field for pointing at nano builds (expr-voice ids).
+  - The whole provider needed no api/frontend code — the schema-driven form,
+    `list_voices()` picker, and `getattr`-based runtime/header plumbing from
+    earlier epic tasks (.1/.6/.7/.8) absorbed it. The only api touch was one
+    `_known_sidecars()` entry for the health badge.
 ---

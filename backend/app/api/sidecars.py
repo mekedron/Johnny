@@ -28,7 +28,7 @@ import httpx
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.providers import kokoro_tts, parakeet_stt, piper_tts
+from app.providers import kitten_tts, kokoro_tts, parakeet_stt, piper_tts
 
 router = APIRouter(prefix="/sidecars", tags=["sidecars"])
 
@@ -73,6 +73,10 @@ def _known_sidecars() -> list[tuple[str, str]]:
         (
             "kokoro-http",
             kokoro_tts.SIDECAR_DEFAULT_URLS[kokoro_tts.RUNTIME_HTTP_SIDECAR],
+        ),
+        (
+            "kitten-http",
+            kitten_tts.SIDECAR_DEFAULT_URLS[kitten_tts.RUNTIME_HTTP_SIDECAR],
         ),
     ]
 

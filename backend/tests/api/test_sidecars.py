@@ -44,6 +44,7 @@ def test_health_lists_every_known_sidecar(
         "piper-http",
         "kokoro-mlx",
         "kokoro-http",
+        "kitten-http",
     }
     assert all(s["ok"] for s in body["sidecars"])
     assert all(s["latency_ms"] is not None for s in body["sidecars"])

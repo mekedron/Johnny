@@ -3,10 +3,10 @@
   "sessionId": "bfd5986f-72a0-472e-b80f-eceb73c7b975",
   "status": "running",
   "startedAt": "2026-06-07T16:33:40.626Z",
-  "updatedAt": "2026-06-07T19:38:46.024Z",
-  "currentIteration": 5,
+  "updatedAt": "2026-06-07T19:57:26.523Z",
+  "currentIteration": 6,
   "maxIterations": 0,
-  "tasksCompleted": 5,
+  "tasksCompleted": 6,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -100,6 +100,16 @@
       "durationMs": 1569472,
       "startedAt": "2026-06-07T18:29:55.168Z",
       "endedAt": "2026-06-07T18:56:04.640Z"
+    },
+    {
+      "iteration": 6,
+      "status": "completed",
+      "taskId": "Johnny-1ge.9",
+      "taskTitle": "Converge Piper + cloud voice selection onto the shared VoicePicker; add download-progress UI",
+      "taskCompleted": true,
+      "durationMs": 2553692,
+      "startedAt": "2026-06-07T18:56:11.571Z",
+      "endedAt": "2026-06-07T19:38:45.263Z"
     }
   ],
   "skippedTaskIds": [],
