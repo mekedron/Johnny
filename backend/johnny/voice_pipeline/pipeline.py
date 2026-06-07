@@ -85,6 +85,23 @@ different cadence.
 """
 DEFAULT_FRAME_DURATION_MS = 20
 DEFAULT_CONFIDENCE_THRESHOLD = 0.7
+DEFAULT_BARGE_IN_CLASSIFIER_TIMEOUT_S = 5.0
+"""Wall-clock cap on the post-utterance barge-in classifier call (Johnny-wyd).
+
+The classifier is a low-latency router — when the configured LLM is a
+large local model (e.g. a 35B Q4_K_M on consumer hardware) it can take
+much longer than the provider's default httpx read timeout to produce a
+verdict. That left a 30-line traceback in the worker logs per call and a
+backlog of in-flight classifier tasks. We bound the call with
+``asyncio.wait_for`` at this many seconds; on timeout the slow path
+fails open (the fast VAD path already catches speech onset) and logs a
+single WARN line.
+
+Set short enough to be a tight upper bound (the slow path's only
+purpose is observability + catching utterances the fast path missed —
+nothing in the user-facing 500 ms barge-in budget depends on it) but
+long enough that a sensibly-sized router model returns under load.
+"""
 DEFAULT_BARGE_IN_MIN_SPEECH_MS = 160
 """Confirmed speech duration that triggers a fast (VAD-driven) barge-in (Johnny-ze3).
 
@@ -404,6 +421,18 @@ class PipelineConfig:
 
     Also gates the fast (VAD-driven) barge-in path: turning the feature
     off disables both the LLM classifier and the speech-onset interrupt.
+    """
+    barge_in_classifier_timeout_s: float = DEFAULT_BARGE_IN_CLASSIFIER_TIMEOUT_S
+    """Wall-clock cap on the post-utterance classifier LLM call (Johnny-wyd).
+
+    Bounds :meth:`VoicePipeline._classify_barge_in_intent` via
+    ``asyncio.wait_for``. A value ``<= 0`` disables the bound (the call
+    inherits whatever timeout the provider's HTTP client has). A timeout
+    here logs a single WARN line and falls open — the fast VAD path
+    handles the user-facing barge-in budget independently, so the slow
+    classifier missing a verdict only loses observability + edge-case
+    intent detection (a polite barge-in below the VAD threshold), not
+    the main interrupt loop.
     """
     barge_in_min_speech_ms: int = DEFAULT_BARGE_IN_MIN_SPEECH_MS
     """Confirmed speech duration that triggers fast barge-in (Johnny-ze3).
@@ -1110,6 +1139,21 @@ class VoicePipeline:
         """
         try:
             decision = await self._classify_barge_in_intent(transcript)
+        except TimeoutError:
+            # Johnny-wyd: tight wall-clock bound on a slow upstream LLM
+            # (a 35B local model can take much longer than the provider's
+            # default httpx timeout per call). Single-line WARN — no
+            # traceback — because this is an expected mode under load,
+            # not a code bug. The fast VAD path (Johnny-ze3) already
+            # catches speech onset within ~200 ms so the user-facing
+            # barge-in budget does not depend on this slow refinement.
+            logger.warning(
+                "barge-in classifier timed out (>%.1fs) for session=%s — "
+                "leaving current response running",
+                self.config.barge_in_classifier_timeout_s,
+                self.config.session_id,
+            )
+            return
         except Exception:
             logger.exception(
                 "barge-in classifier failed for session=%s — "
@@ -1142,11 +1186,24 @@ class VoicePipeline:
         from the router's "should bot speak" decision — it asks one
         binary question (interrupt or not) plus a category for
         observability.
+
+        Bounded by ``barge_in_classifier_timeout_s`` (Johnny-wyd) so a
+        slow upstream model (e.g. a 35B local LLM under load) cannot
+        leave the classifier task wedged for the full provider httpx
+        timeout — that produced repeating ``ReadTimeout`` tracebacks in
+        the worker logs and a backlog of in-flight tasks. A non-positive
+        timeout disables the bound (the call inherits the provider's own
+        HTTP timeout).
         """
         messages = self._barge_in_messages(transcript)
-        response = await self.router_llm.chat(
+        chat_coro = self.router_llm.chat(
             messages, response_format=_BARGE_IN_SCHEMA
         )
+        timeout = self.config.barge_in_classifier_timeout_s
+        if timeout > 0:
+            response = await asyncio.wait_for(chat_coro, timeout=timeout)
+        else:
+            response = await chat_coro
         return _parse_barge_in_response(response)
 
     def _barge_in_messages(

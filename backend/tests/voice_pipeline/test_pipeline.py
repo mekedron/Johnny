@@ -5087,6 +5087,229 @@ async def test_barge_in_classifier_failure_does_not_interrupt(
     await asyncio.wait_for(run_task, timeout=2.0)
 
 
+def test_pipeline_config_barge_in_classifier_timeout_default() -> None:
+    """Johnny-wyd: classifier wall-clock timeout is bounded by default.
+
+    Acceptance #2 (single-line WARN on timeout, no traceback) only kicks
+    in once :meth:`VoicePipeline._classify_barge_in_intent` actually
+    bounds the upstream call. Pinning the default here prevents a future
+    refactor from silently zeroing the field and re-introducing the
+    original behaviour where the classifier waited the full provider
+    httpx timeout (60 s default) before failing.
+    """
+    cfg = PipelineConfig()
+    assert cfg.barge_in_classifier_timeout_s == 5.0
+
+
+async def test_barge_in_classifier_timeout_logs_warning_single_line(
+    four_utterance_pcm: bytes,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Johnny-wyd: classifier wall-clock timeout logs WARN, not exception().
+
+    The bead's acceptance #2: "Worker log noise drops to a single WARN
+    line on classifier-timeout, not a 30-line traceback." This test
+    pins both halves of the contract:
+
+    * the classifier-timeout path emits a ``WARNING`` record (not
+      ``ERROR``) for the matching message; and
+    * the record carries no ``exc_info`` payload, so the structured
+      log handler in production won't render a multi-line stack frame.
+    """
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="johnny.voice_pipeline.pipeline")
+
+    transport = _BufferedTransport(frames=_frames_from_pcm(four_utterance_pcm))
+
+    release_tts = asyncio.Event()
+    tts_entered = asyncio.Event()
+
+    class _StallingTTS(TTSProvider):
+        @property
+        def name(self) -> str:
+            return "stalling-tts"
+
+        async def synthesize_stream(
+            self,
+            text: str,  # noqa: ARG002
+            voice_id: str | None = None,  # noqa: ARG002
+        ) -> AsyncIterator[bytes]:
+            yield bytes(320)
+            tts_entered.set()
+            await release_tts.wait()
+
+    class _SlowClassifierRouter(_SwitchingRouterLLM):
+        """Classifier path blocks far longer than the wall-clock budget.
+
+        Simulates the 35B Qwen model in the bead: the upstream LLM
+        does eventually return, but only after the configured wall-
+        clock budget — so :meth:`_classify_barge_in_intent` MUST
+        raise :class:`TimeoutError` and never see the late response.
+        """
+
+        async def chat(
+            self,
+            messages: Sequence[ChatMessage],
+            tools: Sequence[ToolDefinition] | None = None,
+            response_format: dict[str, Any] | None = None,
+        ) -> LLMResponse:
+            if self._is_barge_in_format(response_format):
+                self.barge_in_calls.append(list(messages))
+                # Far longer than the test's classifier timeout below.
+                await asyncio.sleep(2.0)
+                payload = {
+                    "should_interrupt": True,
+                    "category": "stop",
+                    "reason": "late verdict — must be discarded",
+                }
+                return LLMResponse(
+                    text=json.dumps(payload),
+                    finish_reason="stop",
+                    structured_output=payload,
+                )
+            return await super().chat(messages, tools, response_format)
+
+    router = _SlowClassifierRouter(
+        router_decisions=[
+            {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+        ],
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_SlowFakeSTT(transcripts=["hi", "another", "three", "four"]),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["reply"]),
+        tts=_StallingTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            session_id="bin-timeout",
+            # Tight timeout so the test resolves quickly. The classifier
+            # sleeps 2.0 s above; 0.05 s is well below that so wait_for
+            # always fires first.
+            barge_in_classifier_timeout_s=0.05,
+            # Pin classifier-only behaviour — the fast VAD path is a
+            # separate interrupt source. Disabling it keeps the
+            # assertion focused on the slow-path timeout semantics.
+            barge_in_min_speech_ms=0,
+        ),
+    )
+
+    run_task = asyncio.create_task(pipeline.run())
+    await asyncio.wait_for(tts_entered.wait(), timeout=2.0)
+    # Wait for the classifier to enter and time out.
+    await _wait_until(lambda: len(router.barge_in_calls) >= 1, timeout=2.0)
+    # Give the wait_for + WARN log a moment to fire.
+    await asyncio.sleep(0.2)
+
+    # The classifier timed out — interrupt MUST NOT have fired (the
+    # late "stop" verdict is discarded).
+    assert pipeline._interrupt_event.is_set() is False
+
+    timeout_records = [
+        rec
+        for rec in caplog.records
+        if "classifier timed out" in rec.getMessage()
+    ]
+    assert timeout_records, (
+        "expected a WARN log for the classifier timeout; "
+        f"saw {[rec.getMessage() for rec in caplog.records]!r}"
+    )
+    rec = timeout_records[0]
+    assert rec.levelno == logging.WARNING, (
+        f"classifier timeout should log at WARNING, got {rec.levelname}"
+    )
+    # ``logger.warning(...)`` without exc_info=True keeps the record's
+    # exc_info empty — that's how we know production won't render a
+    # 30-line traceback for this case (the noise the bead names).
+    assert rec.exc_info is None, (
+        "classifier-timeout log line must not carry a traceback; "
+        "use WARN single-line, not exception()"
+    )
+    assert "bin-timeout" in rec.getMessage(), (
+        f"timeout log must name the session for grep; got {rec.getMessage()!r}"
+    )
+
+    release_tts.set()
+    await asyncio.wait_for(run_task, timeout=2.0)
+
+
+async def test_barge_in_classifier_timeout_disabled_when_zero(
+    four_utterance_pcm: bytes,
+) -> None:
+    """barge_in_classifier_timeout_s <= 0 keeps the wait_for bound off (Johnny-wyd).
+
+    Operators that want to inherit the provider's own HTTP timeout (or
+    a different upstream cap) can opt out. The classifier call then
+    runs to completion regardless of how long it takes — useful for
+    tests that exercise other paths and for deployments wiring a small
+    bespoke model.
+    """
+    transport = _BufferedTransport(frames=_frames_from_pcm(four_utterance_pcm))
+
+    release_tts = asyncio.Event()
+    tts_entered = asyncio.Event()
+
+    class _StallingTTS(TTSProvider):
+        @property
+        def name(self) -> str:
+            return "stalling-tts"
+
+        async def synthesize_stream(
+            self,
+            text: str,  # noqa: ARG002
+            voice_id: str | None = None,  # noqa: ARG002
+        ) -> AsyncIterator[bytes]:
+            yield bytes(320)
+            tts_entered.set()
+            await release_tts.wait()
+
+    router = _SwitchingRouterLLM(
+        router_decisions=[
+            {"should_speak": True, "confidence": 0.95, "reason": "ok"},
+        ],
+        barge_in_decisions=[
+            {
+                "should_interrupt": True,
+                "category": "stop",
+                "reason": "user said stop",
+            },
+        ],
+    )
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_SlowFakeSTT(transcripts=["hi", "another", "three", "four"]),
+        router_llm=router,
+        answer_llm=_FakeAnswerLLM(answers=["reply"]),
+        tts=_StallingTTS(),
+        event_bus=InMemoryEventBus(),
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+            # Disable the wall-clock bound entirely.
+            barge_in_classifier_timeout_s=0.0,
+            barge_in_min_speech_ms=0,
+        ),
+    )
+
+    run_task = asyncio.create_task(pipeline.run())
+    await asyncio.wait_for(tts_entered.wait(), timeout=2.0)
+    # With the bound disabled, the (instantaneous) classifier still
+    # fires its verdict — interrupt MUST flip.
+    await _wait_until(
+        lambda: pipeline._interrupt_event.is_set(), timeout=2.0
+    )
+
+    release_tts.set()
+    await asyncio.wait_for(run_task, timeout=2.0)
+
+
 async def test_barge_in_stale_verdict_does_not_interrupt_next_response(
     two_utterance_pcm: bytes,
 ) -> None:
