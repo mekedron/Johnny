@@ -26,6 +26,7 @@ from app.providers.base import (
     TTSError,
     TTSErrorCategory,
     TTSProvider,
+    VoiceMeta,
     get_registry,
 )
 from app.providers.schema import (
@@ -46,6 +47,86 @@ DEFAULT_MODEL_ID = "eleven_multilingual_v2"
 DEFAULT_OUTPUT_FORMAT = "pcm_16000"
 DEFAULT_CHUNK_BYTES = 4_096
 DEFAULT_TIMEOUT_S = 30.0
+
+
+def _voice_meta_from_entry(entry: Any) -> VoiceMeta | None:
+    """Map one ``GET /v1/voices`` entry to the unified :class:`VoiceMeta`.
+
+    Returns ``None`` for malformed entries so the catalog never carries a
+    half-populated row. ElevenLabs serves at the requested output rate
+    (``pcm_16000``), so ``sample_rate`` is left unset; ``language`` is the
+    best-effort accent label, ``tier`` the voice category (premade /
+    cloned / professional). Cloud voices are always ``installed=True``.
+    """
+    if not isinstance(entry, dict):
+        return None
+    voice_id = entry.get("voice_id")
+    name = entry.get("name")
+    if not isinstance(voice_id, str) or not voice_id:
+        return None
+    labels = entry.get("labels")
+    labels = labels if isinstance(labels, dict) else {}
+    accent = labels.get("language") or labels.get("accent")
+    gender = labels.get("gender")
+    category = entry.get("category")
+    preview = entry.get("preview_url")
+    return VoiceMeta(
+        id=voice_id,
+        label=str(name or voice_id),
+        language=str(accent).title() if accent else None,
+        sample_rate=None,
+        gender=str(gender).lower() if gender else None,
+        preview_url=str(preview) if isinstance(preview, str) and preview else None,
+        installed=True,
+        tier=str(category) if category else None,
+    )
+
+
+async def fetch_voice_catalog(
+    api_key: str,
+    *,
+    base_url: str = DEFAULT_BASE_URL,
+    client: httpx.AsyncClient | None = None,
+    timeout_s: float = 15.0,
+) -> list[VoiceMeta]:
+    """Return every voice on the account via ``GET /v1/voices``.
+
+    Maps each entry to the shared :class:`VoiceMeta` so the unified voice
+    picker renders ElevenLabs identically to the local providers. Raises
+    :class:`TTSError` with the API's diagnostic on transport failure so the
+    endpoint can surface it as-is (and the picker falls back to free-text).
+    """
+    if not api_key:
+        raise TTSError("elevenlabs voice catalog requires an api_key")
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=timeout_s)
+    headers = {"xi-api-key": api_key, "Accept": "application/json"}
+    url = f"{base_url.rstrip('/')}/voices"
+    try:
+        try:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.HTTPError as exc:
+            raise TTSError(
+                f"failed to fetch elevenlabs voice catalog: {exc}"
+            ) from exc
+        except ValueError as exc:
+            raise TTSError(
+                f"elevenlabs voice catalog is not valid JSON: {exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise TTSError("elevenlabs voice catalog payload is not a JSON object")
+        raw = payload.get("voices")
+        if not isinstance(raw, list):
+            raise TTSError("elevenlabs voice catalog payload missing 'voices' array")
+        voices = [m for m in (_voice_meta_from_entry(e) for e in raw) if m is not None]
+        voices.sort(key=lambda v: ((v.language or "").lower(), v.label.lower()))
+        return voices
+    finally:
+        if owns_client:
+            await client.aclose()
 
 
 class ElevenLabsTTS(TTSProvider):
@@ -133,8 +214,12 @@ class ElevenLabsTTS(TTSProvider):
                     name="voice_id",
                     label="Voice ID",
                     required=True,
+                    voice_catalog=True,
                     placeholder="EXAVITQu4vr4xnSDxMaL",
-                    help_text="Find IDs at elevenlabs.io/app/voice-library.",
+                    help_text=(
+                        "Browse your account's voices with the picker below, or "
+                        "paste any ID from elevenlabs.io/app/voice-library."
+                    ),
                     group=FieldGroup.MODEL,
                 ),
                 FieldDef(
@@ -249,6 +334,21 @@ class ElevenLabsTTS(TTSProvider):
     @property
     def chunk_bytes(self) -> int:
         return self._chunk_bytes
+
+    async def list_voices(self) -> tuple[VoiceMeta, ...]:
+        """Return the account's voice catalog (Johnny-1ge.9).
+
+        Hits ``GET /v1/voices`` with the configured key and reuses the
+        adapter's own HTTP client so the unified picker shows the same
+        language / gender / preview metadata it shows for the local
+        providers. A keyless add-modal can't reach this (``__init__``
+        requires the key) and the picker falls back to free-text entry.
+        """
+        return tuple(
+            await fetch_voice_catalog(
+                self._api_key, base_url=self._base_url, client=self._client
+            )
+        )
 
     def _create_client(self) -> httpx.AsyncClient:
         """Build the underlying HTTP client. Overridable in tests."""
@@ -401,5 +501,6 @@ __all__ = [
     "DEFAULT_TIMEOUT_S",
     "ElevenLabsTTS",
     "PROVIDER_NAME",
+    "fetch_voice_catalog",
     "register",
 ]

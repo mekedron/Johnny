@@ -30,6 +30,7 @@ from app.providers.elevenlabs_tts import (
     DEFAULT_OUTPUT_FORMAT,
     PROVIDER_NAME,
     ElevenLabsTTS,
+    fetch_voice_catalog,
     register,
 )
 from tests.providers._tts_contract import assert_synthesize_yields_pcm_audio
@@ -449,6 +450,98 @@ async def test_elevenlabs_contract_voice_id_override() -> None:
     )
     await assert_synthesize_yields_pcm_audio(adapter, voice_id="other")
     assert "/text-to-speech/other/stream" in adapter.requests[0].url.path
+
+
+# --- Voice catalog (Johnny-1ge.9) ------------------------------------------
+
+
+def _voices_payload(voices: list[dict[str, Any]]) -> httpx.Response:
+    return httpx.Response(200, content=json.dumps({"voices": voices}).encode())
+
+
+async def test_fetch_voice_catalog_maps_entries_to_voice_meta() -> None:
+    voices = [
+        {
+            "voice_id": "v-rachel",
+            "name": "Rachel",
+            "category": "premade",
+            "labels": {"accent": "american", "gender": "female"},
+            "preview_url": "https://cdn.elevenlabs.io/rachel.mp3",
+        },
+        {
+            "voice_id": "v-josh",
+            "name": "Josh",
+            "category": "cloned",
+            "labels": {"accent": "british", "gender": "male"},
+        },
+    ]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.method == "GET"
+        assert req.url.path.endswith("/voices")
+        assert req.headers["xi-api-key"] == "test-key"
+        return _voices_payload(voices)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    out = await fetch_voice_catalog("test-key", client=client)
+    await client.aclose()
+    by_id = {v.id: v for v in out}
+    assert set(by_id) == {"v-rachel", "v-josh"}
+    assert by_id["v-rachel"].label == "Rachel"
+    assert by_id["v-rachel"].language == "American"
+    assert by_id["v-rachel"].gender == "female"
+    assert by_id["v-rachel"].tier == "premade"
+    assert by_id["v-rachel"].preview_url == "https://cdn.elevenlabs.io/rachel.mp3"
+    assert by_id["v-rachel"].installed is True
+    assert by_id["v-josh"].gender == "male"
+
+
+async def test_fetch_voice_catalog_raises_without_api_key() -> None:
+    with pytest.raises(TTSError):
+        await fetch_voice_catalog("")
+
+
+async def test_fetch_voice_catalog_raises_on_http_error() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, content=b'{"detail":"bad key"}')
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(TTSError):
+        await fetch_voice_catalog("test-key", client=client)
+    await client.aclose()
+
+
+async def test_fetch_voice_catalog_raises_when_voices_missing() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"{}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(TTSError):
+        await fetch_voice_catalog("test-key", client=client)
+    await client.aclose()
+
+
+async def test_list_voices_uses_configured_key_and_client() -> None:
+    voices = [
+        {"voice_id": "v1", "name": "One", "labels": {"gender": "female"}},
+    ]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("/voices"):
+            assert req.headers["xi-api-key"] == "el-test"
+            return _voices_payload(voices)
+        return httpx.Response(200, content=b"")
+
+    adapter = _FakeElevenLabsTTS(_config(voice_id="vx"), handler=handler)
+    metas = await adapter.list_voices()
+    assert [m.id for m in metas] == ["v1"]
+    assert metas[0].gender == "female"
+
+
+def test_voice_id_field_declares_voice_catalog() -> None:
+    schema = ElevenLabsTTS.field_schema()
+    voice_field = next(f for f in schema.fields if f.name == "voice_id")
+    assert voice_field.voice_catalog is True
 
 
 # --- Registry --------------------------------------------------------------

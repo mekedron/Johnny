@@ -38,17 +38,13 @@
 		installCatalogPiperVoice,
 		installPiperVoice,
 		installProviderPackage,
-		listCartesiaVoices,
-		listCatalogPiperVoices,
 		listLlmModels,
-		listPiperVoices,
 		listProviders,
 		listSchemas,
 		listSttCatalog,
 		PIPELINE_MODE_LABEL,
 		playSample,
 		previewLlmModels,
-		previewPiperVoice,
 		previewPlaySample,
 		previewSttTestRecording,
 		previewTestProvider,
@@ -63,12 +59,10 @@
 		updateProvider,
 		validateClient,
 		ValidationFailure,
-		type CartesiaVoice,
 		type LlmModel,
 		type PackageStatus,
 		type PipelineMode,
 		type PipelineSettings,
-		type PiperVoice,
 		type Provider,
 		type ProviderKind,
 		type ProviderPreviewPayload,
@@ -122,7 +116,6 @@
 	// upload + transcribe round-trip stays under a few seconds.
 	const MIC_RECORDING_MS = 10000;
 	const PIPER_PROVIDER_NAME = 'piper';
-	const CARTESIA_PROVIDER_NAME = 'cartesia';
 
 	let catalog = $state<CatalogEntry[]>([]);
 	let providersList = $state<Provider[]>([]);
@@ -176,30 +169,10 @@
 	let previewError = $state<string | null>(null);
 	let previewLoading = $state(false);
 
-	let voiceList = $state<PiperVoice[]>([]);
-	let voiceListLoading = $state(false);
-	let voiceListError = $state<string | null>(null);
-	let voiceFilter = $state('');
-	let voiceInstalling = $state<string | null>(null);
-	let voiceInstallError = $state<string | null>(null);
-	let voicePreviewKey = $state<string | null>(null);
-	let voicePreviewLoading = $state<string | null>(null);
-	let voicePreviewError = $state<string | null>(null);
-	let voicePreviewAudio: HTMLAudioElement | null = null;
-	let voicePreviewUrl: string | null = null;
-	let askingRemoveVoiceKey = $state<string | null>(null);
-	let removingVoice = $state<string | null>(null);
-	let removeVoiceError = $state<string | null>(null);
-
 	let parakeetStatus = $state<PackageStatus | null>(null);
 	let parakeetInstalling = $state(false);
 	let parakeetInstallLog = $state('');
 	let parakeetInstallError = $state<string | null>(null);
-
-	let cartesiaVoiceList = $state<CartesiaVoice[]>([]);
-	let cartesiaVoiceLoading = $state(false);
-	let cartesiaVoiceError = $state<string | null>(null);
-	let cartesiaVoiceFilter = $state('');
 
 	// LLM model dropdown (Johnny-9eq) — fetched live from the provider's
 	// /v1/models (OpenAI, Anthropic, openai-compatible) or equivalent
@@ -346,21 +319,14 @@
 		if (row.provider_name === 'parakeet') {
 			loadParakeetStatus(row.id);
 		}
-		if (row.kind === 'tts' && row.provider_name === PIPER_PROVIDER_NAME) {
-			loadVoiceList(row);
-		}
-		if (row.kind === 'tts' && row.provider_name === CARTESIA_PROVIDER_NAME) {
-			loadCartesiaVoiceList(row);
-		}
 		if (row.kind === 'llm') {
 			loadLlmModelList();
 		}
 	}
 
 	function closeModal() {
-		if (submitting || testing || previewLoading || voiceInstalling) return;
+		if (submitting || testing || previewLoading) return;
 		stopPreview();
-		stopVoicePreview();
 		stopSttPlayback();
 		resetModal();
 		mode = 'closed';
@@ -384,18 +350,9 @@
 		clearSttRecording();
 		sttError = null;
 		previewError = null;
-		voiceList = [];
-		voiceListError = null;
-		voiceInstallError = null;
-		voiceFilter = '';
-		askingRemoveVoiceKey = null;
-		removeVoiceError = null;
 		parakeetStatus = null;
 		parakeetInstallLog = '';
 		parakeetInstallError = null;
-		cartesiaVoiceList = [];
-		cartesiaVoiceError = null;
-		cartesiaVoiceFilter = '';
 		llmModelList = [];
 		llmModelsLoading = false;
 		llmModelsError = null;
@@ -412,7 +369,6 @@
 		sttTestResult = null;
 		sttResultProviderLabel = null;
 		clearSttRecording();
-		voiceList = [];
 		parakeetStatus = null;
 	}
 
@@ -428,9 +384,6 @@
 		sttTestResult = null;
 		sttResultProviderLabel = null;
 		clearSttRecording();
-		if (draftKind === 'tts' && name === PIPER_PROVIDER_NAME) {
-			loadVoiceListCatalog();
-		}
 		if (draftKind === 'llm') {
 			// First open of a fresh "new" LLM modal: the api_key field is blank,
 			// so the preview endpoint will return a 400 "enter an api key" and
@@ -481,9 +434,6 @@
 
 	const isPiperDraft = $derived(
 		draftKind === 'tts' && draftProviderName === PIPER_PROVIDER_NAME
-	);
-	const isCartesiaDraft = $derived(
-		draftKind === 'tts' && draftProviderName === CARTESIA_PROVIDER_NAME
 	);
 	const isParakeetDraft = $derived(
 		draftKind === 'stt' && draftProviderName === 'parakeet'
@@ -659,7 +609,6 @@
 			askingDeleteRow = null;
 			if (editingRow && editingRow.id === id) {
 				stopPreview();
-				stopVoicePreview();
 				resetModal();
 				mode = 'closed';
 			}
@@ -916,167 +865,6 @@
 		previewPlaying = false;
 	}
 
-	function stopVoicePreview() {
-		if (voicePreviewAudio) {
-			try {
-				voicePreviewAudio.pause();
-				voicePreviewAudio.currentTime = 0;
-			} catch {
-				// noop
-			}
-		}
-		if (voicePreviewUrl) {
-			URL.revokeObjectURL(voicePreviewUrl);
-			voicePreviewUrl = null;
-		}
-		voicePreviewAudio = null;
-		voicePreviewKey = null;
-	}
-
-	async function loadVoiceListCatalog() {
-		voiceListLoading = true;
-		voiceListError = null;
-		voiceInstallError = null;
-		voiceList = [];
-		try {
-			const data = await listCatalogPiperVoices();
-			voiceList = data.voices;
-		} catch (e) {
-			voiceListError = e instanceof Error ? e.message : String(e);
-		} finally {
-			voiceListLoading = false;
-		}
-	}
-
-	async function loadVoiceList(row: Provider) {
-		voiceListLoading = true;
-		voiceListError = null;
-		voiceInstallError = null;
-		voiceList = [];
-		try {
-			const data = await listPiperVoices(row.id);
-			voiceList = data.voices;
-		} catch (e) {
-			voiceListError = e instanceof Error ? e.message : String(e);
-		} finally {
-			voiceListLoading = false;
-		}
-	}
-
-	async function installVoice(voice: PiperVoice) {
-		voiceInstalling = voice.key;
-		voiceInstallError = null;
-		try {
-			let result: { installed: boolean };
-			if (mode === 'edit' && editingRow) {
-				result = await installPiperVoice(editingRow.id, voice.key);
-			} else {
-				result = await installCatalogPiperVoice(voice.key);
-			}
-			voiceList = voiceList.map((v) =>
-				v.key === voice.key ? { ...v, installed: result.installed } : v
-			);
-		} catch (e) {
-			voiceInstallError = e instanceof Error ? e.message : String(e);
-		} finally {
-			voiceInstalling = null;
-		}
-	}
-
-	async function previewVoice(voice: PiperVoice) {
-		if (voicePreviewKey === voice.key) {
-			stopVoicePreview();
-			return;
-		}
-		stopVoicePreview();
-		voicePreviewError = null;
-		voicePreviewLoading = voice.key;
-		try {
-			let blob: Blob;
-			if (mode === 'edit' && editingRow) {
-				blob = await previewPiperVoice(editingRow.id, voice.key);
-			} else {
-				blob = (
-					await previewPlaySample({
-						kind: 'tts',
-						provider_name: PIPER_PROVIDER_NAME,
-						display_name: 'Preview',
-						values: { voice_id: voice.key }
-					})
-				).blob;
-			}
-			const url = URL.createObjectURL(blob);
-			const audio = new Audio(url);
-			audio.addEventListener('ended', () => {
-				stopVoicePreview();
-			});
-			audio.addEventListener('error', () => {
-				voicePreviewError = 'Audio playback failed';
-				stopVoicePreview();
-			});
-			voicePreviewAudio = audio;
-			voicePreviewUrl = url;
-			voicePreviewKey = voice.key;
-			try {
-				await audio.play();
-			} catch (e) {
-				voicePreviewError = e instanceof Error ? e.message : String(e);
-				stopVoicePreview();
-			}
-		} catch (e) {
-			voicePreviewError = e instanceof Error ? e.message : String(e);
-		} finally {
-			voicePreviewLoading = null;
-		}
-	}
-
-	function askRemoveVoice(voice: PiperVoice) {
-		askingRemoveVoiceKey = voice.key;
-	}
-
-	function cancelRemoveVoice() {
-		askingRemoveVoiceKey = null;
-	}
-
-	async function confirmRemoveVoice() {
-		if (askingRemoveVoiceKey === null) return;
-		const voiceKey = askingRemoveVoiceKey;
-		removingVoice = voiceKey;
-		removeVoiceError = null;
-		try {
-			if (mode === 'edit' && editingRow) {
-				await removePiperVoice(editingRow.id, voiceKey);
-			} else {
-				await removeCatalogPiperVoice(voiceKey);
-			}
-			voiceList = voiceList.map((v) =>
-				v.key === voiceKey ? { ...v, installed: false } : v
-			);
-		} catch (e) {
-			removeVoiceError = e instanceof Error ? e.message : String(e);
-		} finally {
-			removingVoice = null;
-			askingRemoveVoiceKey = null;
-		}
-	}
-
-	function useVoice(voice: PiperVoice) {
-		draftValues = { ...draftValues, voice_id: voice.key };
-	}
-
-	async function loadCartesiaVoiceList(row: Provider) {
-		cartesiaVoiceLoading = true;
-		cartesiaVoiceError = null;
-		cartesiaVoiceList = [];
-		try {
-			const data = await listCartesiaVoices(row.id);
-			cartesiaVoiceList = data.voices;
-		} catch (e) {
-			cartesiaVoiceError = e instanceof Error ? e.message : String(e);
-		} finally {
-			cartesiaVoiceLoading = false;
-		}
-	}
 
 	/**
 	 * Fetch the live model list for the LLM provider currently in the
@@ -1122,10 +910,6 @@
 		} finally {
 			llmModelsLoading = false;
 		}
-	}
-
-	function useCartesiaVoice(voice: CartesiaVoice) {
-		draftValues = { ...draftValues, voice_id: voice.id };
 	}
 
 	async function loadParakeetStatus(rowId: number) {
@@ -1234,10 +1018,6 @@
 			cancelDelete();
 			return;
 		}
-		if (askingRemoveVoiceKey !== null) {
-			cancelRemoveVoice();
-			return;
-		}
 		if (showExport && !exportSubmitting) {
 			closeExport();
 			return;
@@ -1247,31 +1027,6 @@
 			return;
 		}
 	}
-
-	const filteredVoices = $derived.by<PiperVoice[]>(() => {
-		const term = voiceFilter.trim().toLowerCase();
-		if (!term) return voiceList;
-		return voiceList.filter(
-			(v) =>
-				v.name.toLowerCase().includes(term) ||
-				v.language_code.toLowerCase().includes(term) ||
-				v.language_name.toLowerCase().includes(term) ||
-				v.quality.toLowerCase().includes(term)
-		);
-	});
-
-	const filteredCartesiaVoices = $derived.by<CartesiaVoice[]>(() => {
-		const term = cartesiaVoiceFilter.trim().toLowerCase();
-		if (!term) return cartesiaVoiceList;
-		return cartesiaVoiceList.filter(
-			(v) =>
-				v.name.toLowerCase().includes(term) ||
-				v.id.toLowerCase().includes(term) ||
-				v.language.toLowerCase().includes(term) ||
-				v.gender.toLowerCase().includes(term) ||
-				v.description.toLowerCase().includes(term)
-		);
-	});
 
 	const groupedRows = $derived.by(() => {
 		const groups: Record<ProviderKind, Provider[]> = { stt: [], llm: [], tts: [], s2s: [] };
@@ -1310,7 +1065,6 @@
 
 	onDestroy(() => {
 		stopPreview();
-		stopVoicePreview();
 	});
 </script>
 
@@ -1963,6 +1717,18 @@
 													onSelect={(id) => {
 														draftValues = { ...draftValues, [field.name]: id };
 													}}
+													onInstall={isPiperDraft
+														? (voiceId) =>
+																mode === 'edit' && editingRow
+																	? installPiperVoice(editingRow.id, voiceId)
+																	: installCatalogPiperVoice(voiceId)
+														: undefined}
+													onRemove={isPiperDraft
+														? (voiceId) =>
+																mode === 'edit' && editingRow
+																	? removePiperVoice(editingRow.id, voiceId)
+																	: removeCatalogPiperVoice(voiceId)
+														: undefined}
 												/>
 											{:else if field.type === 'select' && field.options}
 												<select
@@ -2116,225 +1882,6 @@
 										</li>
 									{/each}
 								</ul>
-							</section>
-						{/if}
-
-						{#if isPiperDraft}
-							<section
-								class="flex flex-col gap-3 rounded-md border border-border bg-surface-1 px-4 py-4"
-								aria-label="Piper voice library"
-								data-testid="piper-voice-library"
-							>
-								<div class="flex items-baseline justify-between">
-									<h3 class="m-0 text-sm font-semibold text-foreground">Voice library</h3>
-									{#if voiceList.length > 0}
-										<span class="text-xs text-ink-subtle">
-											{voiceList.filter((v) => v.installed).length} / {voiceList.length} installed
-										</span>
-									{/if}
-								</div>
-								<p class="m-0 text-xs text-muted-foreground">
-									Browse and download voices from rhasspy/piper-voices. Click Use to set this
-									voice as the configured <span class="font-mono">voice_id</span>.
-								</p>
-								<Input
-									type="search"
-									placeholder="Filter by name, language, or quality…"
-									bind:value={voiceFilter}
-									data-testid="voice-filter"
-								/>
-								{#if voiceListError}
-									<Alert.Root variant="destructive">
-										<CircleAlertIcon />
-										<Alert.Description>{voiceListError}</Alert.Description>
-									</Alert.Root>
-								{/if}
-								{#if voiceInstallError}
-									<Alert.Root variant="destructive">
-										<CircleAlertIcon />
-										<Alert.Description>{voiceInstallError}</Alert.Description>
-									</Alert.Root>
-								{/if}
-								{#if voicePreviewError}
-									<Alert.Root variant="destructive">
-										<CircleAlertIcon />
-										<Alert.Description>{voicePreviewError}</Alert.Description>
-									</Alert.Root>
-								{/if}
-								{#if removeVoiceError}
-									<Alert.Root variant="destructive">
-										<CircleAlertIcon />
-										<Alert.Description>{removeVoiceError}</Alert.Description>
-									</Alert.Root>
-								{/if}
-								{#if voiceListLoading}
-									<p class="text-xs text-muted-foreground">Loading voice catalog…</p>
-								{:else if filteredVoices.length === 0}
-									<p class="text-xs text-muted-foreground">
-										{voiceFilter ? 'No voices match the filter.' : 'No voices available.'}
-									</p>
-								{:else}
-									<ul
-										class="m-0 flex max-h-72 list-none flex-col gap-1.5 overflow-y-auto p-0"
-										data-testid="voice-list"
-									>
-										{#each filteredVoices as voice (voice.key)}
-											{@const isSelected = draftValues.voice_id === voice.key}
-											<li
-												class="flex items-center gap-2 rounded-sm border bg-surface-2 px-3 py-2"
-												class:border-foreground={isSelected}
-												class:border-border={!isSelected}
-												data-testid={`voice-${voice.key}`}
-											>
-												<div class="flex min-w-0 flex-1 flex-col gap-0.5">
-													<span class="truncate text-sm font-medium text-foreground">
-														{voice.name}
-													</span>
-													<span class="text-[0.7rem] text-muted-foreground">
-														<span class="font-mono">{voice.language_code}</span> ·
-														{voice.language_name} · {voice.quality}
-													</span>
-												</div>
-												{#if voice.installed}
-													<Button
-														variant="outline"
-														size="sm"
-														onclick={() => previewVoice(voice)}
-														disabled={voicePreviewLoading === voice.key}
-														data-testid={`preview-${voice.key}`}
-													>
-														{#if voicePreviewKey === voice.key}
-															<SquareIcon class="size-3" />
-															Stop
-														{:else}
-															<PlayIcon class="size-3" />
-															Play
-														{/if}
-													</Button>
-													<Button
-														variant="outline"
-														size="sm"
-														onclick={() => useVoice(voice)}
-														disabled={isSelected}
-														data-testid={`use-${voice.key}`}
-													>
-														{isSelected ? 'Selected' : 'Use'}
-													</Button>
-													<Button
-														variant="ghost"
-														size="sm"
-														onclick={() => askRemoveVoice(voice)}
-														disabled={removingVoice === voice.key}
-														data-testid={`remove-${voice.key}`}
-														aria-label="Remove voice"
-													>
-														<Trash2Icon class="size-3" />
-													</Button>
-												{:else}
-													<Button
-														variant="outline"
-														size="sm"
-														onclick={() => installVoice(voice)}
-														disabled={voiceInstalling === voice.key}
-														data-testid={`install-${voice.key}`}
-													>
-														{#if voiceInstalling === voice.key}
-															Installing…
-														{:else}
-															<DownloadIcon class="size-3" />
-															Install
-														{/if}
-													</Button>
-												{/if}
-											</li>
-										{/each}
-									</ul>
-								{/if}
-							</section>
-						{/if}
-
-						{#if isCartesiaDraft && mode === 'edit' && editingRow}
-							<section
-								class="flex flex-col gap-3 rounded-md border border-border bg-surface-1 px-4 py-4"
-								aria-label="Cartesia voice picker"
-								data-testid="cartesia-voice-library"
-							>
-								<div class="flex items-baseline justify-between">
-									<h3 class="m-0 text-sm font-semibold text-foreground">Voice library</h3>
-									{#if cartesiaVoiceList.length > 0}
-										<span class="text-xs text-ink-subtle">
-											{cartesiaVoiceList.length} voices
-										</span>
-									{/if}
-								</div>
-								<p class="m-0 text-xs text-muted-foreground">
-									Browse the live <span class="font-mono">GET /voices</span> catalog from
-									your Cartesia account. Click Use to set this voice as the configured
-									<span class="font-mono">voice_id</span>.
-								</p>
-								<Input
-									type="search"
-									placeholder="Filter by name, language, gender, or UUID…"
-									bind:value={cartesiaVoiceFilter}
-									data-testid="cartesia-voice-filter"
-								/>
-								{#if cartesiaVoiceError}
-									<Alert.Root variant="destructive">
-										<CircleAlertIcon />
-										<Alert.Description>{cartesiaVoiceError}</Alert.Description>
-									</Alert.Root>
-								{/if}
-								{#if cartesiaVoiceLoading}
-									<p class="text-xs text-muted-foreground">Loading voice catalog…</p>
-								{:else if filteredCartesiaVoices.length === 0}
-									<p class="text-xs text-muted-foreground">
-										{cartesiaVoiceFilter
-											? 'No voices match the filter.'
-											: 'No voices returned. Save the provider with an API key, then re-open.'}
-									</p>
-								{:else}
-									<ul
-										class="m-0 flex max-h-72 list-none flex-col gap-1.5 overflow-y-auto p-0"
-										data-testid="cartesia-voice-list"
-									>
-										{#each filteredCartesiaVoices as voice (voice.id)}
-											{@const isSelected = draftValues.voice_id === voice.id}
-											<li
-												class="flex items-center gap-2 rounded-sm border bg-surface-2 px-3 py-2"
-												class:border-foreground={isSelected}
-												class:border-border={!isSelected}
-												data-testid={`cartesia-voice-${voice.id}`}
-											>
-												<div class="flex min-w-0 flex-1 flex-col gap-0.5">
-													<span class="truncate text-sm font-medium text-foreground">
-														{voice.name}
-													</span>
-													<span class="text-[0.7rem] text-muted-foreground">
-														<span class="font-mono">{voice.language || '—'}</span>
-														{#if voice.gender}
-															· {voice.gender}
-														{/if}
-														{#if voice.description}
-															· {voice.description}
-														{/if}
-													</span>
-													<span class="font-mono text-[0.6rem] text-ink-subtle">
-														{voice.id}
-													</span>
-												</div>
-												<Button
-													variant="outline"
-													size="sm"
-													onclick={() => useCartesiaVoice(voice)}
-													disabled={isSelected}
-													data-testid={`cartesia-use-${voice.id}`}
-												>
-													{isSelected ? 'Selected' : 'Use'}
-												</Button>
-											</li>
-										{/each}
-									</ul>
-								{/if}
 							</section>
 						{/if}
 
@@ -2709,60 +2256,6 @@
 					data-testid="delete-confirm"
 				>
 					{deleting ? 'Deleting…' : 'Delete provider'}
-				</Button>
-			</div>
-		</div>
-	</div>
-{/if}
-
-{#if askingRemoveVoiceKey}
-	{@const voice = voiceList.find((v) => v.key === askingRemoveVoiceKey) ?? null}
-	<div
-		class="fixed inset-0 z-[var(--z-modal-backdrop)] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
-		role="presentation"
-		onclick={cancelRemoveVoice}
-		onkeydown={() => {}}
-	>
-		<div
-			class="flex w-full max-w-md flex-col gap-4 rounded-md border border-border bg-card p-5 shadow-[var(--shadow-modal)]"
-			role="alertdialog"
-			aria-modal="true"
-			aria-labelledby="remove-voice-heading"
-			tabindex="-1"
-			onclick={(e) => e.stopPropagation()}
-			onkeydown={() => {}}
-			data-testid="remove-voice-dialog"
-		>
-			<div class="flex items-start gap-3">
-				<div
-					class="flex size-9 shrink-0 items-center justify-center rounded-full bg-destructive/10 text-destructive"
-				>
-					<Trash2Icon class="size-4" />
-				</div>
-				<div class="flex flex-1 flex-col gap-1.5">
-					<h3
-						id="remove-voice-heading"
-						class="m-0 text-base leading-tight font-semibold tracking-tight text-foreground"
-					>
-						Remove voice?
-					</h3>
-					<p class="m-0 text-sm text-muted-foreground">
-						Delete <span class="font-mono text-foreground">{voice?.name ?? askingRemoveVoiceKey}</span>
-						from disk. You can re-download it anytime from the catalog.
-					</p>
-				</div>
-			</div>
-			<div class="flex items-center justify-end gap-2">
-				<Button variant="outline" onclick={cancelRemoveVoice} data-testid="remove-voice-cancel">
-					Cancel
-				</Button>
-				<Button
-					variant="destructive"
-					onclick={confirmRemoveVoice}
-					disabled={removingVoice !== null}
-					data-testid="remove-voice-confirm"
-				>
-					{removingVoice ? 'Removing…' : 'Remove voice'}
 				</Button>
 			</div>
 		</div>

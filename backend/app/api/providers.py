@@ -100,6 +100,9 @@ from app.providers.piper_tts import (
 from app.providers.piper_tts import (
     remove_voice as piper_remove_voice,
 )
+from app.providers.piper_tts import (
+    voice_info_to_meta as piper_voice_info_to_meta,
+)
 from app.providers.schema import ProviderSchema
 from app.providers.schema_validation import (
     FieldValidationError,
@@ -1890,16 +1893,16 @@ def _require_piper_row(session: Session, provider_id: int) -> ProviderCredential
 @router.get("/{provider_id}/voices")
 async def list_voices(
     provider_id: int, session: SessionDep, crypto: CryptoDep
-) -> VoiceListResponse | VoiceCatalogResponse:
-    """List a TTS provider's voice catalog (Johnny-fe.10 + Johnny-1ge.8).
+) -> VoiceCatalogResponse:
+    """List a TTS provider's voice catalog (Johnny-fe.10 + Johnny-1ge.8/.9).
 
-    The response shape depends on the provider:
+    Returns the unified ``{voices:[VoiceMeta]}`` shape for every TTS
+    provider so the shared picker renders them identically:
 
-    * **Piper** — the install-aware ``{model_dir, voices:[{key, …,
-      installed}]}`` shape the Piper voice browser drives off. Each voice
-      carries ``installed=True`` when both the ``.onnx`` and ``.onnx.json``
-      files are present in the row's ``model_dir`` so the UI can render
-      Install vs. Reinstall without an extra round-trip.
+    * **Piper** — built from the rhasspy index; each voice carries
+      ``installed=True`` when both the ``.onnx`` and ``.onnx.json`` files
+      are present in the row's ``model_dir`` so the picker can render
+      Install vs. Remove without an extra round-trip (Johnny-1ge.9).
     * **Every other TTS provider** — the unified ``{voices:[VoiceMeta]}``
       catalog (Johnny-1ge.8) built from the adapter's ``list_voices()``,
       so the shared picker renders Kokoro / OpenAI / future providers with
@@ -1922,14 +1925,20 @@ async def list_voices(
         )
 
     if row.provider_name == PIPER_PROVIDER_NAME:
+        # Piper converged onto the unified picker (Johnny-1ge.9): return the
+        # shared VoiceMeta shape (carrying per-voice ``installed`` so the
+        # picker can render Install / Remove) instead of the legacy
+        # install-aware ``{model_dir, voices:[{key …}]}`` browser shape.
         model_dir = _piper_model_dir(row)
         try:
             voices = await piper_fetch_voice_catalog(model_dir)
         except Exception as exc:  # noqa: BLE001 — surface fetch errors as 502
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-        return VoiceListResponse(
-            model_dir=model_dir,
-            voices=[VoiceRead(**v.to_dict()) for v in voices],
+        return VoiceCatalogResponse(
+            voices=[
+                VoiceCatalogVoice(**piper_voice_info_to_meta(v).to_dict())
+                for v in voices
+            ],
         )
 
     registry = get_registry()

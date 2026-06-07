@@ -1883,11 +1883,16 @@ def test_list_voices_returns_catalog_and_installed_flag(
     resp = client.get(f"/providers/{created['id']}/voices")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["model_dir"] == str(tmp_path)
-    by_key = {v["key"]: v for v in body["voices"]}
-    assert by_key["en_US-amy-medium"]["installed"] is True
-    assert by_key["en_US-ryan-low"]["installed"] is False
-    assert by_key["en_US-amy-medium"]["language_name"] == "English"
+    # Johnny-1ge.9: Piper converged onto the unified VoiceMeta shape — no
+    # more ``model_dir`` / ``key`` / ``language_name``; the picker reads
+    # ``id`` / ``language`` / ``installed`` like every other provider.
+    assert "model_dir" not in body
+    by_id = {v["id"]: v for v in body["voices"]}
+    assert by_id["en_US-amy-medium"]["installed"] is True
+    assert by_id["en_US-ryan-low"]["installed"] is False
+    assert by_id["en_US-amy-medium"]["language"] == "English"
+    assert by_id["en_US-amy-medium"]["sample_rate"] == 22_050
+    assert by_id["en_US-ryan-low"]["sample_rate"] == 16_000
 
 
 def test_list_voices_rejects_non_tts_provider(client: TestClient) -> None:

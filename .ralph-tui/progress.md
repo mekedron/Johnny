@@ -168,6 +168,44 @@ reset inside `untrack(() => { … void load(); })`. This also replaces `onMount`
 effect runs on mount too). Symptom of getting it wrong: the picker keeps the
 previous provider's voices + stale filters after switching the dropdown.
 
+### Converging a bespoke voice browser onto the shared VoicePicker (+ install/remove)
+To replace a provider's hand-rolled voice browser with the unified picker:
+(1) set `voice_catalog=True` on its `voice_id` `FieldDef`; (2) make `GET
+/providers/{id}/voices` return the unified `VoiceCatalogResponse` for that
+provider too — for Piper, map the rhasspy `VoiceInfo`→`VoiceMeta` via the (now
+public) `piper_tts.voice_info_to_meta` so each voice keeps its `installed` flag;
+(3) delete the bespoke `{#if isXDraft}` browser section in
+`routes/providers/+page.svelte` and ALL its now-dead state/functions/derived +
+the bottom confirm-dialog + the dead client fns in `lib/providers.ts`
+(`listPiperVoices`/`listCatalogPiperVoices`/`previewPiperVoice`/`listCartesiaVoices`
++ their `PiperVoice`/`CartesiaVoice` types). `svelte-check` does NOT flag unused
+locals — `pnpm lint` (eslint no-unused-vars) does, and it only reports the
+current "leaf" so removal cascades over a few passes; grep every symbol first to
+map the whole cluster, then remove in one go. **Install/Remove live in the
+picker, not the provider:** `VoicePicker` takes optional `onInstall(voiceId)` /
+`onRemove(voiceId)` props; the parent passes them ONLY for Piper
+(`isPiperDraft ? … : undefined`, choosing saved-row vs `/catalog/piper/…` by
+`mode==='edit'`). The picker shows Install when `!installed && onInstall`, an
+inline two-step Remove (`confirmingRemoveId`) when `installed && onRemove`, and
+re-runs `load()` after each so `installed` flips. Kokoro/cloud are always
+`installed=true` and pass no callbacks, so their rows are unchanged. Download
+progress is an indeterminate bar + per-second elapsed counter gated on
+`installingId` (the atomic `download_voice` has no byte-progress to poll) plus a
+post-install `Installed X (N MB)` note from the result's onnx byte counts.
+
+### Cloud voice catalogs: list_voices() over the provider's voices API
+ElevenLabs + Cartesia get the picker by adding a module `fetch_voice_catalog(api_key,
+…)` (httpx → `GET /v1/voices` / `GET /voices`) that maps to `VoiceMeta`, an
+`async list_voices()` that calls it with `self._api_key` + reuses `self._client`,
+and `voice_catalog=True` on the (still free-text — UUIDs/custom ids) `voice_id`
+field. Both `__init__`s require the key, so the keyless add-modal's
+`POST /preview/voices` 422s and the picker falls back (cloud `voice_id` has no
+static `options`, so the fallback list is empty + the "enter credentials, then
+Reload" note — not a crash). The rich catalog appears once a key is saved (edit
+modal) or typed + Reload. Unit-test the mapping with `httpx.MockTransport` (no
+live key needed); the live rich catalog can't be browser-validated without a real
+key, so validate the keyless fallback path + that the bespoke browser is gone.
+
 ---
 
 ## 2026-06-07 - Johnny-1ge.1 (Piper TTS runtime picker)
@@ -503,4 +541,75 @@ previous provider's voices + stale filters after switching the dropdown.
     default), not a per-runtime default — so switching runtime without touching
     the URL keeps probing the same host:port (matches what the adapter will
     actually call). Debounce the `$effect` (300 ms) or typing a URL spams probes.
+---
+
+## 2026-06-07 - Johnny-1ge.9 (Converge Piper + cloud voices onto VoicePicker + download progress)
+- Replaced the bespoke Piper + Cartesia voice browsers with the shared
+  `VoicePicker`, gave the picker Install/Remove + a download-progress surface,
+  and wired ElevenLabs + Cartesia `list_voices()` so every TTS provider now uses
+  one picker. KittenTTS (scope 4) is N/A — provider doesn't exist yet (Johnny-1ge.2
+  not landed).
+- Files changed:
+  - `backend/app/providers/elevenlabs_tts.py` — `_voice_meta_from_entry`,
+    `fetch_voice_catalog(api_key,…)` (GET /v1/voices → `VoiceMeta`),
+    `list_voices()`, `voice_catalog=True` on `voice_id`, `VoiceMeta` import +
+    `__all__`.
+  - `backend/app/providers/cartesia_tts.py` — `list_voices()` mapping the existing
+    `fetch_voice_catalog` (CartesiaVoiceInfo→VoiceMeta), `voice_catalog=True`,
+    `VoiceMeta` import.
+  - `backend/app/providers/piper_tts.py` — `voice_catalog=True` on `voice_id`,
+    renamed `_voice_info_to_meta`→public `voice_info_to_meta` (+ `__all__`).
+  - `backend/app/api/providers.py` — `GET /{id}/voices` Piper branch now returns
+    the unified `VoiceCatalogResponse` (via `piper_voice_info_to_meta`) instead of
+    the legacy `{model_dir, voices:[{key…}]}`; return type narrowed to
+    `VoiceCatalogResponse`. (Kept `/catalog/piper/voices` + `/{id}/cartesia/voices`
+    endpoints + tests — now UI-unused but tested API surface.)
+  - `frontend/src/lib/components/settings/VoicePicker.svelte` — optional
+    `onInstall`/`onRemove` props; Install button (+ indeterminate progress bar,
+    elapsed counter, post-install `Installed X (N MB)` note) for `!installed`
+    voices; inline two-step Remove (`confirmingRemoveId`) for installed voices;
+    reload after each; reset install state on provider change / destroy.
+  - `frontend/src/routes/providers/+page.svelte` — pass Piper-only install/remove
+    callbacks into `<VoicePicker>`; deleted the Piper + Cartesia bespoke browser
+    sections, the remove-confirm dialog, and all their dead state/functions/derived
+    + imports (`isCartesiaDraft`, `CARTESIA_PROVIDER_NAME`, etc.).
+  - `frontend/src/lib/providers.ts` — removed dead `listPiperVoices`,
+    `listCatalogPiperVoices`, `previewPiperVoice`, `listCartesiaVoices` +
+    `PiperVoice`/`PiperVoiceList`/`CartesiaVoice`/`CartesiaVoiceList` types (kept
+    install/remove client fns + their result types).
+  - Tests: `test_elevenlabs_tts.py` (+6: fetch mapping/no-key/http-error/missing-
+    voices/list_voices/voice_catalog), `test_cartesia_tts.py` (+2: list_voices
+    mapping + voice_catalog field), `test_piper_tts.py` (+1: voice_catalog field),
+    `test_providers.py` (updated `test_list_voices_returns_catalog_and_installed_flag`
+    to assert the unified Piper shape + low/medium sample rates).
+- Verified (chrome-devtools, real browser): Piper edit-modal → VoicePicker renders
+  33 installed (Preview/Use/Remove) + 128 not-installed (Install), lang+gender
+  filters, sample-rate per quality (low→16 kHz, medium→22.05 kHz), saved
+  en_GB-cori-medium = Selected, old bespoke browser gone. Install (el_GR-rapunzelina
+  low then medium) → `Installed … (63.x MB)` note + row flips to installed;
+  inline Remove? confirm → flips back to Install + files deleted from disk
+  (verified `ls` in container). Cartesia + ElevenLabs add-modal → VoicePicker
+  renders with graceful keyless fallback note (no bespoke browser). Kokoro
+  regression → rich 41-voice catalog intact; OpenAI regression → 9 static voices
+  fallback intact. Console clean except expected keyless `preview/voices` 422s.
+  Artifacts in `.validation/Johnny-1ge.9/`.
+- Backend: 1470 providers+api+smoketest tests pass (2 skipped); changed files
+  ruff + mypy clean (the 2 remaining `providers.py` mypy errors at
+  `_instantiate_preview`/`_smoke_test` are pre-existing, documented under 1ge.1).
+  Frontend `pnpm check` + `pnpm lint` clean. Pre-existing/unrelated failures left
+  as-is: 2 live `openai_realtime_s2s` integration tests (transient OpenAI 500,
+  s2s untouched).
+- **Learnings:**
+  - See the two new Codebase Patterns at the top (bespoke-browser convergence +
+    cloud `list_voices()`).
+  - The in-flight indeterminate progress bar renders while `onInstall` awaits, but
+    on a fast connection a 63 MB voice finishes downloading before a chrome-devtools
+    snapshot round-trip completes — so the captured evidence is the post-install
+    note + the installed-flag flip, which prove the same `installingId` state
+    machine ran. True byte-percentage progress would need a streaming install
+    endpoint (mirror the Parakeet `installProviderPackage` chunked-log pattern);
+    left as a future enhancement.
+  - Had to start Docker Desktop (`open -a Docker`) + re-run `./run-dev.sh` — the
+    daemon was down at session start, so `docker compose exec` failed; tests run
+    via `uv run pytest` (no bare `pytest` on PATH in the api image).
 ---

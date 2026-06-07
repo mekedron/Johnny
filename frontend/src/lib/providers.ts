@@ -603,44 +603,12 @@ export async function playSample(
 	return _ttsSampleResult(res);
 }
 
-export interface PiperVoice {
-	key: string;
-	name: string;
-	language_code: string;
-	language_name: string;
-	quality: string;
-	installed: boolean;
-}
-
-export interface PiperVoiceList {
-	model_dir: string;
-	voices: PiperVoice[];
-}
-
 export interface PiperVoiceInstallResult {
 	key: string;
 	installed: boolean;
 	onnx_bytes: number;
 	onnx_json_bytes: number;
 	already_present: boolean;
-}
-
-/**
- * List every Piper voice from huggingface.co/rhasspy/piper-voices and
- * annotate which are already installed in the provider's `model_dir`.
- * Only valid for `tts:piper` providers — STT/LLM rows return 400.
- */
-export function listPiperVoices(id: number): Promise<PiperVoiceList> {
-	return request<PiperVoiceList>(`/providers/${id}/voices`);
-}
-
-/**
- * List Piper voices using the default model_dir, no saved row required.
- * The /providers modal calls this when the operator picks Piper from
- * a clean state — before any Piper provider has been persisted.
- */
-export function listCatalogPiperVoices(): Promise<PiperVoiceList> {
-	return request<PiperVoiceList>('/providers/catalog/piper/voices');
 }
 
 /**
@@ -752,31 +720,6 @@ export function previewLlmModels(
 	});
 }
 
-// --- Cartesia voice catalog (Johnny-ckz.18) -------------------------------
-
-export interface CartesiaVoice {
-	id: string;
-	name: string;
-	description: string;
-	language: string;
-	gender: string;
-	is_public: boolean;
-}
-
-export interface CartesiaVoiceList {
-	voices: CartesiaVoice[];
-}
-
-/**
- * List every Cartesia voice using the saved row's API key. Hits
- * Cartesia's `GET /voices`, follows pagination, and returns a flat
- * list sorted by (language, name). Only valid for `tts:cartesia`
- * providers — other rows return 400.
- */
-export function listCartesiaVoices(id: number): Promise<CartesiaVoiceList> {
-	return request<CartesiaVoiceList>(`/providers/${id}/cartesia/voices`);
-}
-
 // --- unified voice catalog (Johnny-1ge.8) ---------------------------------
 
 /**
@@ -872,35 +815,6 @@ export async function installProviderPackage(
 		throw new Error(detail ?? `HTTP ${res.status}`);
 	}
 	return res.body;
-}
-
-/**
- * Synthesise the canonical demo phrase via this provider, but with
- * `voice_id` overridden for this single call only — the saved row is
- * untouched. Returns the WAV blob the caller wires into an `<Audio>`
- * element. Used by the Piper voice browser modal so the user can
- * preview a freshly-installed voice without saving the provider first.
- */
-export async function previewPiperVoice(
-	id: number,
-	voiceKey: string
-): Promise<Blob> {
-	const res = await fetch(`${API_BASE}/providers/${id}/play_sample`, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ voice_id: voiceKey })
-	});
-	if (!res.ok) {
-		let detail: string | null = null;
-		try {
-			const body = await res.json();
-			detail = extractDetail(body);
-		} catch {
-			// Non-JSON error body — fall through.
-		}
-		throw new Error(detail ?? `HTTP ${res.status}`);
-	}
-	return res.blob();
 }
 
 export interface ExportResult {

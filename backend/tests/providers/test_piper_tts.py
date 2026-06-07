@@ -1163,9 +1163,9 @@ async def test_fetch_voice_catalog_calls_huggingface(tmp_path: Path) -> None:
 
 def test_voice_info_to_meta_maps_fields() -> None:
     """Piper VoiceInfo → unified VoiceMeta mapping (Johnny-1ge.8)."""
-    from app.providers.piper_tts import VoiceInfo, _voice_info_to_meta
+    from app.providers.piper_tts import VoiceInfo, voice_info_to_meta
 
-    meta = _voice_info_to_meta(
+    meta = voice_info_to_meta(
         VoiceInfo(
             key="en_US-amy-medium",
             name="amy",
@@ -1204,6 +1204,13 @@ async def test_list_voices_maps_catalog_to_voice_meta(
     assert [v.id for v in voices] == ["en_US-amy-low", "de_DE-thorsten-high"]
     assert voices[0].sample_rate == 16_000 and voices[0].installed is True
     assert voices[1].sample_rate == 22_050 and voices[1].installed is False
+
+
+def test_voice_id_field_declares_voice_catalog() -> None:
+    """Johnny-1ge.9: Piper converged onto the shared picker."""
+    schema = PiperTTS.field_schema()
+    voice_field = next(f for f in schema.fields if f.name == "voice_id")
+    assert voice_field.voice_catalog is True
 
 
 async def test_fetch_voice_catalog_wraps_http_errors(tmp_path: Path) -> None:

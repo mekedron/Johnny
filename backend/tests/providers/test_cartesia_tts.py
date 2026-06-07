@@ -432,6 +432,50 @@ async def test_fetch_voice_catalog_single_page() -> None:
     assert [v.name for v in out] == ["Newslady", "Skylar"]
 
 
+async def test_list_voices_maps_catalog_to_voice_meta() -> None:
+    """Johnny-1ge.9: list_voices() returns the unified VoiceMeta shape so the
+    shared picker renders Cartesia like every other provider."""
+    voices = [
+        {
+            "id": "vid-1",
+            "name": "Skylar",
+            "language": "en",
+            "gender": "feminine",
+            "is_public": True,
+        },
+        {
+            "id": "vid-2",
+            "name": "Hans",
+            "language": "de",
+            "gender": "masculine",
+            "is_public": False,
+        },
+    ]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.method == "GET"
+        assert req.url.path == "/voices"
+        assert req.headers["x-api-key"] == "cart-test"
+        return _voices_response(voices)
+
+    adapter = _FakeCartesiaTTS(_config(), handler=handler)
+    metas = await adapter.list_voices()
+    by_id = {m.id: m for m in metas}
+    assert set(by_id) == {"vid-1", "vid-2"}
+    assert by_id["vid-1"].label == "Skylar"
+    assert by_id["vid-1"].language == "en"
+    assert by_id["vid-1"].gender == "feminine"
+    assert by_id["vid-1"].installed is True
+    assert by_id["vid-2"].gender == "masculine"
+
+
+def test_voice_id_field_declares_voice_catalog() -> None:
+    """Johnny-1ge.9: the voice_id field opts into the shared picker."""
+    schema = CartesiaTTS.field_schema()
+    voice_field = next(f for f in schema.fields if f.name == "voice_id")
+    assert voice_field.voice_catalog is True
+
+
 async def test_fetch_voice_catalog_follows_pagination() -> None:
     page1 = [
         {

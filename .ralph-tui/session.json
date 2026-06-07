@@ -3,10 +3,10 @@
   "sessionId": "bfd5986f-72a0-472e-b80f-eceb73c7b975",
   "status": "running",
   "startedAt": "2026-06-07T16:33:40.626Z",
-  "updatedAt": "2026-06-07T18:56:05.417Z",
-  "currentIteration": 4,
+  "updatedAt": "2026-06-07T19:38:46.024Z",
+  "currentIteration": 5,
   "maxIterations": 0,
-  "tasksCompleted": 4,
+  "tasksCompleted": 5,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -90,6 +90,16 @@
       "durationMs": 1887759,
       "startedAt": "2026-06-07T17:58:20.257Z",
       "endedAt": "2026-06-07T18:29:48.016Z"
+    },
+    {
+      "iteration": 5,
+      "status": "completed",
+      "taskId": "Johnny-1ge.6",
+      "taskTitle": "Auto-start sidecars from ./run.sh + standardised per-launcher CLI (commands, env vars, exit codes, log layout)",
+      "taskCompleted": true,
+      "durationMs": 1569472,
+      "startedAt": "2026-06-07T18:29:55.168Z",
+      "endedAt": "2026-06-07T18:56:04.640Z"
     }
   ],
   "skippedTaskIds": [],

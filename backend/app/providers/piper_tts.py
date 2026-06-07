@@ -359,7 +359,7 @@ _PIPER_QUALITY_SAMPLE_RATE: dict[str, int] = {
 }
 
 
-def _voice_info_to_meta(info: VoiceInfo) -> VoiceMeta:
+def voice_info_to_meta(info: VoiceInfo) -> VoiceMeta:
     """Map a Piper :class:`VoiceInfo` to the unified :class:`VoiceMeta`."""
     parts = [p for p in (info.language_name, info.quality) if p]
     suffix = f" — {' · '.join(parts)}" if parts else ""
@@ -760,9 +760,10 @@ class PiperTTS(TTSProvider):
                     name="voice_id",
                     label="Voice ID",
                     required=True,
+                    voice_catalog=True,
                     placeholder="en_US-amy-medium",
                     help_text=(
-                        "Piper voice identifier — use the voice browser "
+                        "Piper voice identifier — use the voice picker "
                         "below to install one without a terminal."
                     ),
                     group=FieldGroup.MODEL,
@@ -911,7 +912,7 @@ class PiperTTS(TTSProvider):
         is the provider-agnostic view the unified picker consumes.
         """
         infos = await fetch_voice_catalog(self._model_dir)
-        return tuple(_voice_info_to_meta(info) for info in infos)
+        return tuple(voice_info_to_meta(info) for info in infos)
 
     async def synthesize_stream(
         self,
@@ -1391,5 +1392,6 @@ __all__ = [
     "download_voice",
     "fetch_voice_catalog",
     "register",
+    "voice_info_to_meta",
     "voice_is_installed",
 ]

@@ -21,8 +21,10 @@
 <script lang="ts">
 	import { onDestroy, untrack } from 'svelte';
 	import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
+	import DownloadIcon from '@lucide/svelte/icons/download';
 	import PlayIcon from '@lucide/svelte/icons/play';
 	import SquareIcon from '@lucide/svelte/icons/square';
+	import Trash2Icon from '@lucide/svelte/icons/trash-2';
 	import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
 	import * as Alert from '$lib/components/ui/alert/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
@@ -44,7 +46,9 @@
 		values,
 		fallbackOptions = [],
 		value,
-		onSelect
+		onSelect,
+		onInstall,
+		onRemove
 	}: {
 		kind: ProviderKind;
 		providerName: string;
@@ -53,6 +57,16 @@
 		fallbackOptions?: FieldOption[];
 		value: string;
 		onSelect: (id: string) => void;
+		/**
+		 * Optional install hook for providers with downloadable voices (Piper).
+		 * Rendered as an Install button on any voice with `installed === false`.
+		 * Resolves with the downloaded byte counts so the picker can confirm.
+		 */
+		onInstall?: (
+			voiceId: string
+		) => Promise<{ installed: boolean; onnx_bytes?: number; onnx_json_bytes?: number }>;
+		/** Optional remove hook; rendered as a trash button on installed voices. */
+		onRemove?: (voiceId: string) => Promise<{ installed: boolean }>;
 	} = $props();
 
 	let voices = $state<VoiceCatalogVoice[]>([]);
@@ -69,6 +83,29 @@
 	let previewWarning = $state<string | null>(null);
 	let audio: HTMLAudioElement | null = null;
 	let audioUrl: string | null = null;
+
+	// Install / remove state (Johnny-1ge.9). Only Piper surfaces voices with
+	// installed === false plus install/remove hooks; for every other provider
+	// onInstall/onRemove are undefined and these stay dormant.
+	let installingId = $state<string | null>(null);
+	let installElapsed = $state(0);
+	let installNote = $state<string | null>(null);
+	let installError = $state<string | null>(null);
+	let removingId = $state<string | null>(null);
+	let confirmingRemoveId = $state<string | null>(null);
+	let removeError = $state<string | null>(null);
+	let installTimer: ReturnType<typeof setInterval> | null = null;
+
+	function clearInstallTimer() {
+		if (installTimer) {
+			clearInterval(installTimer);
+			installTimer = null;
+		}
+	}
+
+	function formatMb(bytes: number): string {
+		return `${(bytes / 1_000_000).toFixed(1)} MB`;
+	}
 
 	function optionToVoice(opt: FieldOption): VoiceCatalogVoice {
 		return {
@@ -187,6 +224,46 @@
 		onSelect(v.id);
 	}
 
+	async function install(v: VoiceCatalogVoice) {
+		if (!onInstall || installingId) return;
+		installingId = v.id;
+		installElapsed = 0;
+		installError = null;
+		installNote = null;
+		clearInstallTimer();
+		installTimer = setInterval(() => {
+			installElapsed += 1;
+		}, 1000);
+		try {
+			const result = await onInstall(v.id);
+			const bytes = (result.onnx_bytes ?? 0) + (result.onnx_json_bytes ?? 0);
+			installNote = bytes > 0 ? `Installed ${v.label} (${formatMb(bytes)})` : `Installed ${v.label}`;
+			// Re-fetch so `installed` flips to true and the row gains Preview / Use.
+			await load();
+		} catch (e) {
+			installError = e instanceof Error ? e.message : String(e);
+		} finally {
+			clearInstallTimer();
+			installingId = null;
+		}
+	}
+
+	async function remove(v: VoiceCatalogVoice) {
+		if (!onRemove || removingId) return;
+		confirmingRemoveId = null;
+		removingId = v.id;
+		removeError = null;
+		installNote = null;
+		try {
+			await onRemove(v.id);
+			await load();
+		} catch (e) {
+			removeError = e instanceof Error ? e.message : String(e);
+		} finally {
+			removingId = null;
+		}
+	}
+
 	// Re-fetch whenever the *target provider* changes — switching providers in
 	// the Add modal, or opening Edit for a saved row. Depends only on
 	// providerId / providerName / kind (read synchronously below); the actual
@@ -204,10 +281,20 @@
 			stopPreview();
 			previewError = null;
 			previewWarning = null;
+			clearInstallTimer();
+			installingId = null;
+			installError = null;
+			installNote = null;
+			removingId = null;
+			confirmingRemoveId = null;
+			removeError = null;
 			void load();
 		});
 	});
-	onDestroy(stopPreview);
+	onDestroy(() => {
+		stopPreview();
+		clearInstallTimer();
+	});
 </script>
 
 <div class="flex flex-col gap-2" data-testid="voice-picker">
@@ -275,6 +362,31 @@
 			<Alert.Description data-testid="voice-preview-warning">{previewWarning}</Alert.Description>
 		</Alert.Root>
 	{/if}
+	{#if installError}
+		<Alert.Root variant="destructive">
+			<CircleAlertIcon />
+			<Alert.Description data-testid="voice-install-error">{installError}</Alert.Description>
+		</Alert.Root>
+	{/if}
+	{#if removeError}
+		<Alert.Root variant="destructive">
+			<CircleAlertIcon />
+			<Alert.Description data-testid="voice-remove-error">{removeError}</Alert.Description>
+		</Alert.Root>
+	{/if}
+	{#if installingId}
+		<div class="flex flex-col gap-1" data-testid="voice-install-progress">
+			<div class="flex items-center justify-between text-xs text-muted-foreground">
+				<span>Downloading model files…</span>
+				<span class="font-mono">{installElapsed}s</span>
+			</div>
+			<div class="h-1.5 w-full overflow-hidden rounded-full bg-surface-3">
+				<div class="h-full w-full animate-pulse rounded-full bg-foreground"></div>
+			</div>
+		</div>
+	{:else if installNote}
+		<p class="m-0 text-xs text-success" data-testid="voice-install-note">{installNote}</p>
+	{/if}
 	{#if usedFallback}
 		<p class="m-0 text-xs text-muted-foreground" data-testid="voice-fallback-note">
 			Showing the built-in voice list{error ? ` — ${error}` : ''}. Enter any required
@@ -315,36 +427,89 @@
 							{#if v.sample_rate}
 								· {(v.sample_rate / 1000).toFixed(v.sample_rate % 1000 === 0 ? 0 : 2)} kHz
 							{/if}
-							{#if !v.installed}
+							{#if !v.installed && !onInstall}
 								· <span class="text-amber-500">download on first use</span>
 							{/if}
 						</span>
 					</div>
-					<Button
-						type="button"
-						variant="outline"
-						size="sm"
-						onclick={() => preview(v)}
-						data-testid={`voice-preview-${v.id}`}
-					>
-						{#if previewingId === v.id}
-							<SquareIcon class="size-3" />
-							Stop
-						{:else}
-							<PlayIcon class="size-3" />
-							Preview
+					{#if !v.installed && onInstall}
+						<Button
+							type="button"
+							variant="outline"
+							size="sm"
+							disabled={installingId !== null}
+							onclick={() => install(v)}
+							data-testid={`voice-install-${v.id}`}
+						>
+							{#if installingId === v.id}
+								Installing…
+							{:else}
+								<DownloadIcon class="size-3" />
+								Install
+							{/if}
+						</Button>
+					{:else}
+						<Button
+							type="button"
+							variant="outline"
+							size="sm"
+							onclick={() => preview(v)}
+							data-testid={`voice-preview-${v.id}`}
+						>
+							{#if previewingId === v.id}
+								<SquareIcon class="size-3" />
+								Stop
+							{:else}
+								<PlayIcon class="size-3" />
+								Preview
+							{/if}
+						</Button>
+						<Button
+							type="button"
+							variant="outline"
+							size="sm"
+							onclick={() => select(v)}
+							disabled={isSelected}
+							data-testid={`voice-use-${v.id}`}
+						>
+							{isSelected ? 'Selected' : 'Use'}
+						</Button>
+						{#if onRemove}
+							{#if confirmingRemoveId === v.id}
+								<Button
+									type="button"
+									variant="destructive"
+									size="sm"
+									disabled={removingId !== null}
+									onclick={() => remove(v)}
+									data-testid={`voice-remove-confirm-${v.id}`}
+								>
+									{removingId === v.id ? 'Removing…' : 'Remove?'}
+								</Button>
+								<Button
+									type="button"
+									variant="ghost"
+									size="sm"
+									onclick={() => (confirmingRemoveId = null)}
+									data-testid={`voice-remove-cancel-${v.id}`}
+								>
+									Cancel
+								</Button>
+							{:else}
+								<Button
+									type="button"
+									variant="ghost"
+									size="sm"
+									disabled={removingId !== null}
+									onclick={() => (confirmingRemoveId = v.id)}
+									data-testid={`voice-remove-${v.id}`}
+									aria-label="Remove voice"
+								>
+									<Trash2Icon class="size-3" />
+								</Button>
+							{/if}
 						{/if}
-					</Button>
-					<Button
-						type="button"
-						variant="outline"
-						size="sm"
-						onclick={() => select(v)}
-						disabled={isSelected}
-						data-testid={`voice-use-${v.id}`}
-					>
-						{isSelected ? 'Selected' : 'Use'}
-					</Button>
+					{/if}
 				</li>
 			{/each}
 		</ul>

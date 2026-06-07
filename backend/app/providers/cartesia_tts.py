@@ -45,6 +45,7 @@ from app.providers.base import (
     ProviderKind,
     TTSError,
     TTSProvider,
+    VoiceMeta,
     get_registry,
 )
 from app.providers.schema import (
@@ -314,6 +315,7 @@ class CartesiaTTS(TTSProvider):
                     name="voice_id",
                     label="Voice ID",
                     required=True,
+                    voice_catalog=True,
                     default=DEFAULT_VOICE_ID,
                     placeholder=DEFAULT_VOICE_ID,
                     help_text=(
@@ -467,6 +469,33 @@ class CartesiaTTS(TTSProvider):
     @property
     def chunk_bytes(self) -> int:
         return self._chunk_bytes
+
+    async def list_voices(self) -> tuple[VoiceMeta, ...]:
+        """Return the account's voice catalog (Johnny-1ge.9).
+
+        Reuses :func:`fetch_voice_catalog` (the same ``GET /voices`` call
+        the dedicated browser used) and maps each entry to the shared
+        :class:`VoiceMeta` so the unified picker renders Cartesia with the
+        same language / gender filters as the local providers. ``__init__``
+        requires the key, so a keyless add-modal falls back to free-text.
+        """
+        infos = await fetch_voice_catalog(
+            self._api_key,
+            base_url=self._base_url,
+            api_version=self._api_version,
+            client=self._client,
+        )
+        return tuple(
+            VoiceMeta(
+                id=info.id,
+                label=info.name,
+                language=info.language or None,
+                sample_rate=None,
+                gender=info.gender.lower() if info.gender else None,
+                installed=True,
+            )
+            for info in infos
+        )
 
     def _create_client(self) -> httpx.AsyncClient:
         """Build the underlying HTTP client. Overridable in tests."""
