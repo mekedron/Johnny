@@ -213,6 +213,62 @@ class LLMModelInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class VoiceMeta:
+    """One voice in a TTS provider's catalog (Johnny-1ge.8).
+
+    The shared shape every ``TTSProvider.list_voices`` returns so the
+    ``/providers`` voice picker renders identically for local (Piper,
+    Kokoro, KittenTTS) and cloud (OpenAI, ElevenLabs, Cartesia) providers.
+
+    * ``id`` — the canonical string the adapter accepts as ``voice_id``
+      (``af_bella``, ``en_US-amy-medium``, ``alloy``). What the picker
+      writes back into the form.
+    * ``label`` — the human-facing dropdown row (``Bella — American
+      English ♀``).
+    * ``language`` — best-effort BCP-47-ish tag or human name
+      (``en-US`` / ``American English``); ``None`` when unknown.
+    * ``sample_rate`` — the voice's native output rate in Hz, before the
+      adapter resamples to the 16 kHz bridge format; ``None`` when unknown.
+    * ``gender`` — ``"male"`` / ``"female"`` / ``None`` when the catalog
+      doesn't say. Drives the picker's gender filter.
+    * ``preview_url`` — a provider-hosted sample clip, when one exists.
+      Local providers leave this ``None`` (the picker previews via
+      ``play_sample`` instead).
+    * ``installed`` — ``True`` when the voice is ready to synthesise right
+      now. Voices that bundle with the model (Kokoro, cloud) are always
+      ``True``; Piper voices flip to ``True`` once the ``.onnx`` files are
+      on disk.
+    * ``size_bytes`` — on-disk download size for not-yet-installed voices,
+      ``None`` when irrelevant (bundled / cloud).
+    * ``tier`` — provider quality/billing tier label when one applies
+      (cloud), else ``None``.
+    """
+
+    id: str
+    label: str
+    language: str | None = None
+    sample_rate: int | None = None
+    gender: str | None = None
+    preview_url: str | None = None
+    installed: bool = True
+    size_bytes: int | None = None
+    tier: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "label": self.label,
+            "language": self.language,
+            "sample_rate": self.sample_rate,
+            "gender": self.gender,
+            "preview_url": self.preview_url,
+            "installed": self.installed,
+            "size_bytes": self.size_bytes,
+            "tier": self.tier,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderConfig:
     """Adapter-agnostic configuration passed to every provider factory.
 
@@ -326,6 +382,22 @@ class TTSProvider(_ProviderBase):
         ``voice_id`` overrides the provider-default voice. Implementations
         are async generators; the ABC declares the contract only.
         """
+
+    async def list_voices(self) -> tuple[VoiceMeta, ...]:
+        """Return the provider's canonical voice catalog (Johnny-1ge.8).
+
+        Powers the unified ``/providers`` voice picker. The default returns
+        an empty tuple so providers that expose no enumerable catalog (or
+        that already drive voice selection through their own flow) opt out
+        for free; the picker falls back to the schema's ``voice_id`` SELECT
+        options in that case. Local providers override this to surface
+        language / gender / sample-rate metadata and install state.
+
+        Async because some catalogs are fetched over the network (Piper's
+        rhasspy index, cloud voice APIs); static catalogs (Kokoro, OpenAI)
+        just return their constant list.
+        """
+        return ()
 
 
 ProviderInstance = _ProviderBase
@@ -461,5 +533,6 @@ __all__ = [
     "ToolDefinition",
     "TranscriptEvent",
     "UnknownProviderError",
+    "VoiceMeta",
     "get_registry",
 ]

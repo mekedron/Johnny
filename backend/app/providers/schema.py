@@ -115,6 +115,13 @@ class FieldDef:
     group: FieldGroup = FieldGroup.AUTH
     signup_url: str | None = None
     env_key: str | None = None  # `.env` var the wizard prefills from
+    # When True, the frontend renders the unified voice picker (Johnny-1ge.8)
+    # for this field instead of a plain SELECT: it fetches the provider's
+    # `list_voices()` catalog (`GET /providers/{id}/voices` for a saved row,
+    # `POST /providers/preview/voices` before save) and shows filterable rows
+    # with per-voice Preview buttons. The `options` tuple stays the offline
+    # fallback when the catalog can't be fetched (no creds yet, network down).
+    voice_catalog: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for the ``GET /providers/schemas`` payload."""
@@ -140,6 +147,8 @@ class FieldDef:
             payload["signup_url"] = self.signup_url
         if self.env_key is not None:
             payload["env_key"] = self.env_key
+        if self.voice_catalog:
+            payload["voice_catalog"] = True
         return payload
 
 

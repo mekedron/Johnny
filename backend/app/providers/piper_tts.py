@@ -63,6 +63,7 @@ from app.providers.base import (
     ProviderKind,
     TTSError,
     TTSProvider,
+    VoiceMeta,
     get_registry,
 )
 from app.providers.schema import (
@@ -344,6 +345,32 @@ class VoiceInfo:
             "quality": self.quality,
             "installed": self.installed,
         }
+
+
+# Native output rate per Piper quality tier (rhasspy convention): the low /
+# x-low models render at 16 kHz, medium / high at 22.05 kHz. Used only to
+# annotate the unified picker (Johnny-1ge.8) — synthesis still resamples to the
+# 16 kHz bridge format regardless.
+_PIPER_QUALITY_SAMPLE_RATE: dict[str, int] = {
+    "x-low": 16_000,
+    "low": 16_000,
+    "medium": 22_050,
+    "high": 22_050,
+}
+
+
+def _voice_info_to_meta(info: VoiceInfo) -> VoiceMeta:
+    """Map a Piper :class:`VoiceInfo` to the unified :class:`VoiceMeta`."""
+    parts = [p for p in (info.language_name, info.quality) if p]
+    suffix = f" — {' · '.join(parts)}" if parts else ""
+    return VoiceMeta(
+        id=info.key,
+        label=f"{info.name}{suffix}",
+        language=info.language_name or info.language_code or None,
+        sample_rate=_PIPER_QUALITY_SAMPLE_RATE.get(info.quality),
+        gender=None,
+        installed=info.installed,
+    )
 
 
 def voice_is_installed(model_dir: str, voice_key: str) -> bool:
@@ -871,6 +898,20 @@ class PiperTTS(TTSProvider):
     @property
     def sidecar_url(self) -> str:
         return self._sidecar_url
+
+    async def list_voices(self) -> tuple[VoiceMeta, ...]:
+        """Return the rhasspy Piper catalog as unified voices (Johnny-1ge.8).
+
+        Fetches the same huggingface index as :func:`fetch_voice_catalog`
+        and maps each :class:`VoiceInfo` to the shared :class:`VoiceMeta`
+        shape, carrying through the on-disk ``installed`` flag so the picker
+        can distinguish ready-to-use voices from ones that download on first
+        use. The rich Piper voice-browser (install / remove / preview) still
+        drives off the dedicated ``/{id}/voices`` Piper response; this method
+        is the provider-agnostic view the unified picker consumes.
+        """
+        infos = await fetch_voice_catalog(self._model_dir)
+        return tuple(_voice_info_to_meta(info) for info in infos)
 
     async def synthesize_stream(
         self,

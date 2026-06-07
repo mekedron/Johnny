@@ -29,6 +29,7 @@ from app.providers.base import (
     ProviderKind,
     TTSError,
     TTSProvider,
+    VoiceMeta,
     get_registry,
 )
 from app.providers.schema import (
@@ -53,6 +54,21 @@ DEFAULT_TIMEOUT_S = 30.0
 ALLOWED_VOICES = frozenset(
     {"alloy", "echo", "fable", "onyx", "nova", "shimmer", "ash", "coral", "sage"}
 )
+# Best-effort gender per OpenAI voice for the unified picker's gender filter
+# (Johnny-1ge.8). OpenAI does not publish canonical genders, so these reflect
+# the commonly-perceived character; ``alloy`` is marketed as neutral and is
+# left unset rather than guessed. All OpenAI voices are English and emit at
+# OpenAI's documented 24 kHz PCM rate.
+OPENAI_VOICE_GENDER: dict[str, str] = {
+    "echo": "male",
+    "fable": "male",
+    "onyx": "male",
+    "ash": "male",
+    "nova": "female",
+    "shimmer": "female",
+    "coral": "female",
+    "sage": "female",
+}
 
 
 class OpenAITTS(TTSProvider):
@@ -141,6 +157,7 @@ class OpenAITTS(TTSProvider):
                     label="Voice",
                     type=FieldType.SELECT,
                     default=DEFAULT_VOICE_ID,
+                    voice_catalog=True,
                     options=tuple(
                         FieldOption(value=v, label=v) for v in sorted(ALLOWED_VOICES)
                     ),
@@ -234,6 +251,26 @@ class OpenAITTS(TTSProvider):
     @property
     def chunk_bytes(self) -> int:
         return self._chunk_bytes
+
+    async def list_voices(self) -> tuple[VoiceMeta, ...]:
+        """Return OpenAI's fixed voice catalog (Johnny-1ge.8).
+
+        Static — OpenAI's voice set is a documented constant, so this needs
+        no API round-trip (the key only gates synthesis). Lets the unified
+        picker render the same filterable list + per-voice preview for a
+        cloud provider as it does for the local ones.
+        """
+        return tuple(
+            VoiceMeta(
+                id=v,
+                label=v,
+                language="English",
+                sample_rate=self._native_sample_rate,
+                gender=OPENAI_VOICE_GENDER.get(v),
+                installed=True,
+            )
+            for v in sorted(ALLOWED_VOICES)
+        )
 
     def _create_client(self) -> httpx.AsyncClient:
         """Build the underlying HTTP client. Overridable in tests."""
@@ -352,6 +389,7 @@ __all__ = [
     "DEFAULT_NATIVE_SAMPLE_RATE_HZ",
     "DEFAULT_TIMEOUT_S",
     "DEFAULT_VOICE_ID",
+    "OPENAI_VOICE_GENDER",
     "OpenAITTS",
     "PROVIDER_NAME",
     "register",

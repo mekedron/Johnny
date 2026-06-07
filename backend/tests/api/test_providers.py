@@ -27,6 +27,7 @@ from app.providers.base import (
     ToolDefinition,
     TranscriptEvent,
     TTSProvider,
+    VoiceMeta,
     get_registry,
 )
 from app.security.crypto import CredentialCrypto
@@ -198,6 +199,78 @@ class _FailingTTS(TTSProvider):
     ) -> AsyncIterator[bytes]:
         yield b"\x00\x00" * 4
         raise RuntimeError("synthetic tts failure")
+
+
+class _VoiceCatalogTTS(TTSProvider):
+    """TTS adapter that declares a unified voice catalog (Johnny-1ge.8).
+
+    Mirrors the Kokoro/OpenAI shape: a ``voice_id`` SELECT field flagged
+    ``voice_catalog=True`` plus a ``list_voices()`` returning structured
+    :class:`VoiceMeta`. Used to exercise the generalized voices endpoint
+    and ``preview/voices`` without depending on a real provider library.
+    """
+
+    def __init__(self, config: ProviderConfig) -> None:
+        self._config = config
+
+    @property
+    def name(self) -> str:
+        return "catalog-tts"
+
+    @classmethod
+    def field_schema(cls):  # type: ignore[no-untyped-def]
+        from app.providers.schema import (
+            FieldDef,
+            FieldGroup,
+            FieldOption,
+            FieldType,
+            ProviderSchema,
+        )
+
+        return ProviderSchema(
+            kind=ProviderKind.TTS,
+            provider_name="catalog-tts",
+            display_name="Catalog TTS",
+            summary="fake",
+            fields=(
+                FieldDef(
+                    name="voice_id",
+                    label="Voice",
+                    type=FieldType.SELECT,
+                    required=True,
+                    default="vox_a",
+                    voice_catalog=True,
+                    options=(
+                        FieldOption(value="vox_a", label="vox_a"),
+                        FieldOption(value="vox_b", label="vox_b"),
+                    ),
+                    group=FieldGroup.MODEL,
+                ),
+            ),
+        )
+
+    async def list_voices(self) -> tuple[VoiceMeta, ...]:
+        return (
+            VoiceMeta(
+                id="vox_a",
+                label="Vox A — English ♀",
+                language="English",
+                sample_rate=24_000,
+                gender="female",
+            ),
+            VoiceMeta(
+                id="vox_b",
+                label="Vox B — German ♂",
+                language="German",
+                sample_rate=22_050,
+                gender="male",
+            ),
+        )
+
+    async def synthesize_stream(
+        self, text: str, voice_id: str | None = None
+    ) -> AsyncIterator[bytes]:
+        yield b"\x10\x00" * 8
 
 
 def _audible_pcm(ms: int = 3000, amplitude: int = 10_000) -> bytes:
@@ -1817,14 +1890,105 @@ def test_list_voices_returns_catalog_and_installed_flag(
     assert by_key["en_US-amy-medium"]["language_name"] == "English"
 
 
-def test_list_voices_rejects_non_piper_provider(client: TestClient) -> None:
-    """STT/LLM rows or non-Piper TTS rows must return 400 — the rhasspy
-    catalog is meaningless for them."""
+def test_list_voices_rejects_non_tts_provider(client: TestClient) -> None:
+    """STT/LLM rows must return 400 — a voice catalog is meaningless for
+    them. Non-Piper *TTS* rows now serve the unified catalog (Johnny-1ge.8),
+    so the rejection is by kind, not by provider name."""
     get_registry().register(ProviderKind.STT, "ok-stt", _OKSTT)
     created = client.post("/providers", json=_create_payload()).json()
     resp = client.get(f"/providers/{created['id']}/voices")
     assert resp.status_code == 400
-    assert "piper" in resp.json()["detail"].lower()
+    assert "tts" in resp.json()["detail"].lower()
+
+
+# --- unified voice catalog (Johnny-1ge.8) ----------------------------------
+
+
+def test_list_voices_unified_shape_for_non_piper_tts(client: TestClient) -> None:
+    """A non-Piper TTS row returns the unified {voices:[VoiceMeta]} shape."""
+    get_registry().register(ProviderKind.TTS, "catalog-tts", _VoiceCatalogTTS)
+    created = client.post(
+        "/providers",
+        json={
+            "kind": "tts",
+            "provider_name": "catalog-tts",
+            "display_name": "Catalog",
+            "values": {"voice_id": "vox_a"},
+        },
+    ).json()
+    resp = client.get(f"/providers/{created['id']}/voices")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "model_dir" not in body
+    by_id = {v["id"]: v for v in body["voices"]}
+    assert set(by_id) == {"vox_a", "vox_b"}
+    assert by_id["vox_a"]["language"] == "English"
+    assert by_id["vox_a"]["gender"] == "female"
+    assert by_id["vox_a"]["sample_rate"] == 24_000
+    assert by_id["vox_a"]["installed"] is True
+
+
+def test_list_voices_empty_for_provider_without_catalog(client: TestClient) -> None:
+    """A TTS provider that doesn't override list_voices returns no voices
+    (the picker then falls back to the schema's static options)."""
+    get_registry().register(ProviderKind.TTS, "sample-tts", _SampleTTS)
+    created = _make_tts(client)
+    resp = client.get(f"/providers/{created['id']}/voices")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"voices": []}
+
+
+def test_preview_voices_returns_catalog_without_saving(client: TestClient) -> None:
+    """preview/voices builds a transient instance and returns its catalog."""
+    get_registry().register(ProviderKind.TTS, "catalog-tts", _VoiceCatalogTTS)
+    resp = client.post(
+        "/providers/preview/voices",
+        json={
+            "kind": "tts",
+            "provider_name": "catalog-tts",
+            "values": {"voice_id": "vox_a"},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    ids = {v["id"] for v in resp.json()["voices"]}
+    assert ids == {"vox_a", "vox_b"}
+    # Nothing persisted.
+    assert client.get("/providers").json()["tts"] == []
+
+
+def test_preview_voices_rejects_non_tts(client: TestClient) -> None:
+    get_registry().register(ProviderKind.LLM, "schema-llm", _SchemaAwareLLM)
+    resp = client.post(
+        "/providers/preview/voices",
+        json={
+            "kind": "llm",
+            "provider_name": "schema-llm",
+            "values": {"api_key": "sk-x"},
+        },
+    )
+    assert resp.status_code == 400
+    assert "tts" in resp.json()["detail"].lower()
+
+
+def test_create_rejects_unknown_voice_id_with_available_list(
+    client: TestClient,
+) -> None:
+    """An unknown voice_id is a 422 listing the allowed values (criterion E)."""
+    get_registry().register(ProviderKind.TTS, "catalog-tts", _VoiceCatalogTTS)
+    resp = client.post(
+        "/providers",
+        json={
+            "kind": "tts",
+            "provider_name": "catalog-tts",
+            "display_name": "Bad voice",
+            "values": {"voice_id": "does-not-exist"},
+        },
+    )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    # The error names the field and enumerates the valid options.
+    msg = "; ".join(e["msg"] for e in detail)
+    assert "vox_a" in msg and "vox_b" in msg
 
 
 def test_list_voices_propagates_fetch_error_as_502(

@@ -3,10 +3,10 @@
   "sessionId": "bfd5986f-72a0-472e-b80f-eceb73c7b975",
   "status": "running",
   "startedAt": "2026-06-07T16:33:40.626Z",
-  "updatedAt": "2026-06-07T17:58:12.679Z",
-  "currentIteration": 2,
+  "updatedAt": "2026-06-07T18:29:48.820Z",
+  "currentIteration": 3,
   "maxIterations": 0,
-  "tasksCompleted": 2,
+  "tasksCompleted": 3,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -70,6 +70,16 @@
       "durationMs": 1606883,
       "startedAt": "2026-06-07T17:04:36.618Z",
       "endedAt": "2026-06-07T17:31:23.501Z"
+    },
+    {
+      "iteration": 3,
+      "status": "completed",
+      "taskId": "Johnny-1ge.7",
+      "taskTitle": "End-to-end audio output validation for every TTS provider × runtime combination",
+      "taskCompleted": true,
+      "durationMs": 1598783,
+      "startedAt": "2026-06-07T17:31:32.560Z",
+      "endedAt": "2026-06-07T17:58:11.343Z"
     }
   ],
   "skippedTaskIds": [],

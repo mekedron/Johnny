@@ -70,6 +70,7 @@ from app.providers.base import (
     ProviderKind,
     TTSError,
     TTSProvider,
+    VoiceMeta,
     get_registry,
 )
 from app.providers.schema import (
@@ -129,6 +130,20 @@ KOKORO_LANG_CODES = frozenset(
     }
 )
 DEFAULT_LANG_CODE = LANG_AMERICAN_ENGLISH
+
+# Human-readable language name per Kokoro single-letter lang code, for the
+# unified voice picker (Johnny-1ge.8). Keys mirror :data:`KOKORO_LANG_CODES`.
+KOKORO_LANG_NAMES: dict[str, str] = {
+    "a": "American English",
+    "b": "British English",
+    "e": "Spanish",
+    "f": "French",
+    "h": "Hindi",
+    "i": "Italian",
+    "j": "Japanese",
+    "p": "Brazilian Portuguese",
+    "z": "Mandarin Chinese",
+}
 
 # Canonical Kokoro v1.0 voice catalog (value, human label). Drives the voice_id
 # SELECT in the provider form. The adapter does NOT hard-reject voices outside
@@ -345,6 +360,29 @@ def _audio_to_pcm16(audio: Any) -> bytes:
     return pcm
 
 
+def _voice_meta(value: str, label: str) -> VoiceMeta:
+    """Build a :class:`VoiceMeta` for one Kokoro catalog entry (Johnny-1ge.8).
+
+    Kokoro encodes language in the first id character and gender in the
+    second (``af_*`` → American English female, ``bm_*`` → British male),
+    so the metadata the picker filters on is derived from the id without a
+    separate manifest. Every Kokoro voice ships inside the single 82 M
+    checkpoint, so ``installed`` is always ``True`` and there is no
+    per-voice download size.
+    """
+    lang_code = (value[:1] or "").lower()
+    gender_code = (value[1:2] or "").lower()
+    gender = "female" if gender_code == "f" else "male" if gender_code == "m" else None
+    return VoiceMeta(
+        id=value,
+        label=label,
+        language=KOKORO_LANG_NAMES.get(lang_code),
+        sample_rate=KOKORO_NATIVE_SAMPLE_RATE_HZ,
+        gender=gender,
+        installed=True,
+    )
+
+
 class KokoroTTS(TTSProvider):
     """Streaming TTS via the local Kokoro 82 M model.
 
@@ -499,6 +537,7 @@ class KokoroTTS(TTSProvider):
                     type=FieldType.SELECT,
                     required=True,
                     default=DEFAULT_VOICE_ID,
+                    voice_catalog=True,
                     options=tuple(
                         FieldOption(value=value, label=label)
                         for value, label in KOKORO_VOICE_CATALOG
@@ -652,6 +691,18 @@ class KokoroTTS(TTSProvider):
     @property
     def sidecar_url(self) -> str:
         return self._sidecar_url
+
+    async def list_voices(self) -> tuple[VoiceMeta, ...]:
+        """Return Kokoro's canonical voice catalog (Johnny-1ge.8).
+
+        Static — derived from :data:`KOKORO_VOICE_CATALOG`; no model load,
+        network call, or runtime dependency, so it works for every runtime
+        and before any provider row is saved. Every voice lives in the
+        single 82 M checkpoint, so each is reported ``installed=True``.
+        """
+        return tuple(
+            _voice_meta(value, label) for value, label in KOKORO_VOICE_CATALOG
+        )
 
     async def synthesize_stream(
         self,
@@ -963,6 +1014,7 @@ __all__ = [
     "DEFAULT_SPEED",
     "DEFAULT_VOICE_ID",
     "KOKORO_LANG_CODES",
+    "KOKORO_LANG_NAMES",
     "KOKORO_NATIVE_SAMPLE_RATE_HZ",
     "KOKORO_VOICE_CATALOG",
     "PCM_CHANNELS",

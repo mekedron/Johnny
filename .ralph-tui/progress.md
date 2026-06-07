@@ -108,6 +108,39 @@ substring-matching the detail against environment-gap signatures (`unreachable`,
 saved-row endpoint (not preview) keeps cloud creds server-side, so one code path
 covers local + cloud TTS uniformly.
 
+### Unified voice catalog: one `list_voices()` → schema-driven picker
+A `voice_id` field becomes a rich, provider-agnostic picker by adding TWO things
+and ZERO bespoke per-provider Svelte: (1) `async TTSProvider.list_voices() ->
+tuple[VoiceMeta, ...]` on the adapter (default `()` on the base = opt-out), and
+(2) `voice_catalog=True` on the field's `FieldDef`. `VoiceMeta`
+(`app/providers/base.py`: id/label/language/sample_rate/gender/preview_url/
+installed/size_bytes/tier) is the shared wire shape. The frontend renders
+`VoicePicker.svelte` (settings/) for ANY field whose schema carries
+`voice_catalog`, fetching `GET /providers/{id}/voices` (saved row) or `POST
+/providers/preview/voices` (unsaved modal). Keep `list_voices()` **static where
+possible** (Kokoro/OpenAI derive everything from their constant catalog) so it
+works keyless in the add-modal and never needs the model lib imported — the
+catalog populates with full metadata even when synthesis itself is unavailable.
+The endpoint dispatches: Piper keeps its install-aware `{model_dir, voices:[{key
+…}]}` shape (back-compat for its bespoke browser — return type is the union
+`VoiceListResponse | VoiceCatalogResponse`, no strict `response_model`), every
+other TTS row returns the unified `{voices:[VoiceMeta]}`. Criterion "reject an
+unknown voice_id" is ALREADY satisfied for free by `schema_validation._check_option`
+(SELECT options → 422 "must be one of: …"), so a `voice_catalog` field that is also
+a SELECT (keep the static `options` as the offline fallback) gets validation +
+graceful degradation at once.
+
+### Svelte 5: reload a picker on prop change WITHOUT reloading on every keystroke
+`VoicePicker` must refetch when the *target provider* changes (switching
+providers in the modal) but NOT when `values` mutates (the user typing an API
+key into another field). A naive `$effect` that calls `load()` tracks `values`
+because `previewVoiceCatalog({…, values})` reads it synchronously before its
+first `await`. Fix: read only the real deps outside untrack
+(`void providerId; void providerName; void kind;`) then run the fetch + filter
+reset inside `untrack(() => { … void load(); })`. This also replaces `onMount` (the
+effect runs on mount too). Symptom of getting it wrong: the picker keeps the
+previous provider's voices + stale filters after switching the dropdown.
+
 ---
 
 ## 2026-06-07 - Johnny-1ge.1 (Piper TTS runtime picker)
@@ -284,3 +317,75 @@ covers local + cloud TTS uniformly.
 
 ---
 
+
+## 2026-06-07 - Johnny-1ge.8 (Unified voice picker UX)
+- Lifted voice selection into a shared, provider-agnostic interface so Kokoro,
+  OpenAI TTS (and future providers) get the picker UX Piper pioneered — SELECT
+  with per-row preview, language + gender filters, sample-rate metadata — with
+  ZERO bespoke per-provider Svelte.
+- Files changed:
+  - `backend/app/providers/base.py` — new `VoiceMeta` value object (id/label/
+    language/sample_rate/gender/preview_url/installed/size_bytes/tier + to_dict)
+    and `async TTSProvider.list_voices() -> tuple[VoiceMeta, ...]` (default `()`).
+  - `backend/app/providers/schema.py` — `FieldDef.voice_catalog: bool` hint
+    (serialised only when True) so the frontend renders the picker.
+  - `backend/app/providers/kokoro_tts.py` — `KOKORO_LANG_NAMES`, `_voice_meta`,
+    `list_voices()` (41 voices, language+gender parsed from the id prefix,
+    24 kHz, always installed), `voice_catalog=True` on the voice field.
+  - `backend/app/providers/openai_tts.py` — `OPENAI_VOICE_GENDER`,
+    `list_voices()` (static 9-voice catalog, English, 24 kHz), `voice_catalog=True`.
+  - `backend/app/providers/piper_tts.py` — `_PIPER_QUALITY_SAMPLE_RATE`,
+    `_voice_info_to_meta`, `PiperTTS.list_voices()` (maps the rhasspy catalog to
+    VoiceMeta; the bespoke browser still drives the rich endpoint).
+  - `backend/app/api/providers.py` — `VoiceCatalogVoice`/`VoiceCatalogResponse`,
+    `_voice_catalog_response()`, `POST /providers/preview/voices`, and generalized
+    `GET /providers/{id}/voices` to dispatch (Piper → rich back-compat shape;
+    other TTS → unified shape via list_voices()); union return type, no strict
+    response_model.
+  - `frontend/src/lib/providers.ts` — `voice_catalog` on FieldDef,
+    `VoiceCatalogVoice`/`VoiceCatalogList`, `listVoiceCatalog`/`previewVoiceCatalog`,
+    optional `voiceId` override on `playSample`.
+  - `frontend/src/lib/components/settings/VoicePicker.svelte` (new) — self-
+    contained: fetches saved/preview catalog, language+gender+text filters,
+    per-row Preview (own Audio element) + Use, graceful fallback to schema options
+    when the catalog can't be fetched, reactive reload on provider change.
+  - `frontend/src/routes/providers/+page.svelte` — render VoicePicker for any
+    field with `voice_catalog` (before the native SELECT branch).
+  - Tests: `tests/providers/test_kokoro_tts.py` (+3), `test_openai_tts.py` (+2),
+    `test_piper_tts.py` (+2), `tests/api/test_providers.py` (+5, +`_VoiceCatalogTTS`
+    fake; updated the non-piper rejection test to assert by-kind not by-name).
+- Verified (chrome-devtools, real browser): Kokoro add-modal → picker renders all
+  41 voices with id/language/gender/24 kHz; language filter (British English → 8),
+  +gender (male → 4) combine; Use → Selected; Preview fires play_sample and shows
+  the documented "kokoro library not importable" env gap (same as Play sample).
+  OpenAI add-modal (no key) → graceful fallback to 9 static voices + muted note,
+  no red alert; switching Kokoro→OpenAI reactively reloads (fixed a real bug).
+  OpenAI saved row (dummy key) edit-modal → RICH catalog: English language +
+  female/male gender filters, nova pre-selected. Piper unchanged (legacy browser,
+  no VoicePicker), endpoint still returns `{model_dir, voices:[{key …}]}`. Clean
+  console. Artifacts in `.validation/Johnny-1ge.8/`.
+- Backend: 1205 providers+api+smoketest tests pass (2 skipped); changed files
+  ruff-clean + mypy-clean (the 2 remaining providers.py mypy errors at the
+  `_instantiate_preview` return / `_smoke_test` call are pre-existing, just
+  line-shifted — documented under Johnny-1ge.1). Frontend `pnpm check` + `pnpm
+  lint` clean. Pre-existing unrelated failures untouched: 2 `wizard/test_models.py`
+  (docker CLI absent in-container).
+- Deferred (filed Johnny-1ge.9): converge Piper's bespoke browser + Cartesia/
+  ElevenLabs onto the shared VoicePicker, download-progress UI, KittenTTS wiring
+  (provider doesn't exist yet — Johnny-1ge.2).
+- **Learnings:**
+  - Kokoro's `voice_id` was already a SELECT (added in 1ge.3 after this bead was
+    filed), so the picker's value-add over a native dropdown is the structured
+    metadata + filters + per-row preview, not "free-text → SELECT".
+  - The "reject unknown voice_id with the available list" acceptance was already
+    met by the existing SELECT-option validator — keeping `voice_catalog` fields
+    as SELECTs (with `options` as the offline fallback) gets E + graceful
+    degradation for free.
+  - OpenAI's `__init__` requires an api_key, so keyless preview/voices in the
+    add-modal 422s → the picker falls back to the schema's static options. The
+    rich (language/gender) catalog appears once a key is saved (edit-modal), since
+    `list_voices()` is static and needs no live API call. Kokoro, being keyless,
+    shows the rich catalog immediately in the add-modal — the better showcase.
+  - See Codebase Patterns for the `$effect`+`untrack` reload-on-provider-change
+    gotcha and the one-`list_voices()`→picker recipe.
+---

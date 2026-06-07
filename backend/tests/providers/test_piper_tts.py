@@ -1161,6 +1161,51 @@ async def test_fetch_voice_catalog_calls_huggingface(tmp_path: Path) -> None:
     assert [v.key for v in voices] == ["en_US-amy-medium"]
 
 
+def test_voice_info_to_meta_maps_fields() -> None:
+    """Piper VoiceInfo → unified VoiceMeta mapping (Johnny-1ge.8)."""
+    from app.providers.piper_tts import VoiceInfo, _voice_info_to_meta
+
+    meta = _voice_info_to_meta(
+        VoiceInfo(
+            key="en_US-amy-medium",
+            name="amy",
+            language_code="en_US",
+            language_name="English",
+            quality="medium",
+            installed=True,
+        )
+    )
+    assert meta.id == "en_US-amy-medium"
+    assert "amy" in meta.label
+    assert "English" in meta.label and "medium" in meta.label
+    assert meta.language == "English"
+    assert meta.sample_rate == 22_050  # medium tier renders at 22.05 kHz
+    assert meta.installed is True
+    assert meta.gender is None  # rhasspy catalog has no gender
+
+
+async def test_list_voices_maps_catalog_to_voice_meta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PiperTTS.list_voices wires the catalog fetch through the mapper."""
+    from app.providers import piper_tts
+    from app.providers.piper_tts import VoiceInfo
+
+    async def fake_fetch(model_dir: str, **_kw: Any) -> list[VoiceInfo]:
+        assert model_dir == str(tmp_path)
+        return [
+            VoiceInfo("en_US-amy-low", "amy", "en_US", "English", "low", True),
+            VoiceInfo("de_DE-thorsten-high", "thorsten", "de_DE", "German", "high", False),
+        ]
+
+    monkeypatch.setattr(piper_tts, "fetch_voice_catalog", fake_fetch)
+    adapter = PiperTTS(_config(model_dir=str(tmp_path)))
+    voices = await adapter.list_voices()
+    assert [v.id for v in voices] == ["en_US-amy-low", "de_DE-thorsten-high"]
+    assert voices[0].sample_rate == 16_000 and voices[0].installed is True
+    assert voices[1].sample_rate == 22_050 and voices[1].installed is False
+
+
 async def test_fetch_voice_catalog_wraps_http_errors(tmp_path: Path) -> None:
     import httpx
 

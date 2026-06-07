@@ -24,6 +24,7 @@ from app.providers.base import (
     get_registry,
 )
 from app.providers.openai_tts import (
+    ALLOWED_VOICES,
     DEFAULT_BASE_URL,
     DEFAULT_CHUNK_BYTES,
     DEFAULT_MODEL,
@@ -368,3 +369,30 @@ def test_register_is_idempotent_with_replace() -> None:
 
 def test_openai_registered_on_package_import() -> None:
     assert get_registry().has(ProviderKind.TTS, PROVIDER_NAME)
+
+
+# --- list_voices / unified catalog (Johnny-1ge.8) --------------------------
+
+
+async def test_list_voices_returns_static_catalog_without_api_call() -> None:
+    # No MockTransport handler is wired here: list_voices must be static and
+    # never touch the network (the key only gates synthesis, not the catalog).
+    adapter = OpenAITTS(_config())
+    voices = await adapter.list_voices()
+    ids = {v.id for v in voices}
+    assert ids == ALLOWED_VOICES
+    assert all(v.installed for v in voices)
+    assert all(v.language == "English" for v in voices)
+    assert all(v.sample_rate == DEFAULT_NATIVE_SAMPLE_RATE_HZ for v in voices)
+    by_id = {v.id: v for v in voices}
+    assert by_id["nova"].gender == "female"
+    assert by_id["onyx"].gender == "male"
+    # alloy is marketed neutral — gender intentionally unset, not guessed.
+    assert by_id["alloy"].gender is None
+
+
+def test_field_schema_voice_field_declares_voice_catalog() -> None:
+    voice = OpenAITTS.field_schema().field("voice_id")
+    assert voice is not None
+    assert voice.voice_catalog is True
+    assert voice.options  # offline fallback retained

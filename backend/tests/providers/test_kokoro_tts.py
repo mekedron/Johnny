@@ -627,3 +627,39 @@ def test_kokoro_registered_on_package_import() -> None:
     # The import-time hook in app.providers.__init__ must have run.
     reg = get_registry()
     assert reg.has(ProviderKind.TTS, PROVIDER_NAME)
+
+
+# --- list_voices / unified catalog (Johnny-1ge.8) --------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_voices_covers_full_catalog() -> None:
+    adapter = KokoroTTS(_config())
+    voices = await adapter.list_voices()
+    assert len(voices) == len(KOKORO_VOICE_CATALOG)
+    assert {v.id for v in voices} == {value for value, _ in KOKORO_VOICE_CATALOG}
+    # Every Kokoro voice ships with the model — always installed, native 24 kHz.
+    assert all(v.installed for v in voices)
+    assert all(v.sample_rate == KOKORO_NATIVE_SAMPLE_RATE_HZ for v in voices)
+
+
+@pytest.mark.asyncio
+async def test_list_voices_derives_language_and_gender_from_id() -> None:
+    adapter = KokoroTTS(_config())
+    by_id = {v.id: v for v in await adapter.list_voices()}
+    assert by_id["af_heart"].language == "American English"
+    assert by_id["af_heart"].gender == "female"
+    assert by_id["am_adam"].gender == "male"
+    assert by_id["bf_emma"].language == "British English"
+    assert by_id["bm_george"].gender == "male"
+    assert by_id["jf_alpha"].language == "Japanese"
+
+
+def test_field_schema_voice_field_declares_voice_catalog() -> None:
+    schema = KokoroTTS.field_schema()
+    voice = schema.field("voice_id")
+    assert voice is not None
+    assert voice.voice_catalog is True
+    # The static SELECT options remain as the picker's offline fallback.
+    assert voice.options
+    assert voice.to_dict()["voice_catalog"] is True

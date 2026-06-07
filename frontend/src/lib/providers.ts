@@ -69,6 +69,13 @@ export interface FieldDef {
 	options?: FieldOption[];
 	signup_url?: string;
 	env_key?: string;
+	/**
+	 * When true, render the unified voice picker (Johnny-1ge.8) instead of a
+	 * plain SELECT: fetch the provider's `list_voices()` catalog and show
+	 * filterable rows with per-voice Preview buttons. `options` stays the
+	 * offline fallback when the catalog can't be fetched.
+	 */
+	voice_catalog?: boolean;
 }
 
 export interface ProviderTip {
@@ -539,9 +546,21 @@ export async function sttTestRecording(
  * an `Audio` element so the user can hear the configured voice before
  * wiring it into a live meeting.
  */
-export async function playSample(id: number): Promise<TtsSampleResult> {
+export async function playSample(
+	id: number,
+	voiceId?: string
+): Promise<TtsSampleResult> {
+	// A voice_id override (Johnny-1ge.8 voice picker) previews one catalog
+	// voice without mutating the saved row; omitting it uses the saved voice.
+	const hasOverride = typeof voiceId === 'string' && voiceId.length > 0;
 	const res = await fetch(`${API_BASE}/providers/${id}/play_sample`, {
-		method: 'POST'
+		method: 'POST',
+		...(hasOverride
+			? {
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ voice_id: voiceId })
+				}
+			: {})
 	});
 	if (!res.ok) {
 		let detail: string | null = null;
@@ -728,6 +747,56 @@ export interface CartesiaVoiceList {
  */
 export function listCartesiaVoices(id: number): Promise<CartesiaVoiceList> {
 	return request<CartesiaVoiceList>(`/providers/${id}/cartesia/voices`);
+}
+
+// --- unified voice catalog (Johnny-1ge.8) ---------------------------------
+
+/**
+ * One voice in the cross-provider catalog. Mirrors the backend `VoiceMeta`
+ * (`app.providers.base`). The shared voice picker renders these identically
+ * for local (Kokoro, Piper) and cloud (OpenAI, …) providers: `language` /
+ * `gender` / `sample_rate` drive the filters and per-row metadata, and
+ * `installed` distinguishes ready-to-use voices from download-on-first-use.
+ */
+export interface VoiceCatalogVoice {
+	id: string;
+	label: string;
+	language: string | null;
+	sample_rate: number | null;
+	gender: string | null;
+	preview_url: string | null;
+	installed: boolean;
+	size_bytes: number | null;
+	tier: string | null;
+}
+
+export interface VoiceCatalogList {
+	voices: VoiceCatalogVoice[];
+}
+
+/**
+ * Fetch a saved TTS row's unified voice catalog (`GET /providers/{id}/voices`).
+ * Only call this for non-Piper providers whose `voice_id` field declares
+ * `voice_catalog` — Piper's endpoint returns its own install-aware shape and
+ * is consumed by the dedicated voice browser instead.
+ */
+export function listVoiceCatalog(id: number): Promise<VoiceCatalogList> {
+	return request<VoiceCatalogList>(`/providers/${id}/voices`);
+}
+
+/**
+ * Fetch the unified voice catalog for an unsaved row from the modal's draft
+ * values (`POST /providers/preview/voices`). Lets the picker populate before
+ * the provider is persisted; cloud providers that need their API key first
+ * return 422, which the picker treats as "fall back to static options".
+ */
+export function previewVoiceCatalog(
+	payload: ProviderPreviewPayload
+): Promise<VoiceCatalogList> {
+	return request<VoiceCatalogList>('/providers/preview/voices', {
+		method: 'POST',
+		body: JSON.stringify(payload)
+	});
 }
 
 // --- runtime package install (Parakeet / NeMo) ----------------------------

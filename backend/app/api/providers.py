@@ -298,6 +298,38 @@ class CartesiaVoiceListResponse(BaseModel):
     voices: list[CartesiaVoiceRead]
 
 
+class VoiceCatalogVoice(BaseModel):
+    """One voice in the unified cross-provider catalog (Johnny-1ge.8).
+
+    Mirrors :class:`app.providers.base.VoiceMeta`. Powers the shared
+    ``/providers`` voice picker so Piper, Kokoro, OpenAI (and any future
+    TTS adapter) present an identical filterable list with per-voice
+    preview, regardless of whether the voice is local or cloud.
+    """
+
+    id: str
+    label: str
+    language: str | None = None
+    sample_rate: int | None = None
+    gender: str | None = None
+    preview_url: str | None = None
+    installed: bool = True
+    size_bytes: int | None = None
+    tier: str | None = None
+
+
+class VoiceCatalogResponse(BaseModel):
+    """Response payload for the unified voice-catalog endpoints (Johnny-1ge.8).
+
+    Returned by ``POST /providers/preview/voices`` and by
+    ``GET /providers/{id}/voices`` for every TTS provider *except* Piper,
+    whose dedicated install-aware response shape is preserved for the
+    existing voice browser.
+    """
+
+    voices: list[VoiceCatalogVoice]
+
+
 class LlmModelRead(BaseModel):
     """One model entry returned by ``GET /providers/{id}/llm_models`` (Johnny-9eq).
 
@@ -894,6 +926,20 @@ def _instantiate_preview(
         ) from exc
 
 
+async def _voice_catalog_response(instance: TTSProvider) -> VoiceCatalogResponse:
+    """Build the unified voice-catalog payload from a TTS instance.
+
+    Calls the provider's ``list_voices()`` (Johnny-1ge.8) and maps each
+    :class:`app.providers.base.VoiceMeta` into the wire model. Providers
+    that don't enumerate a catalog return an empty list, which the picker
+    treats as "fall back to the schema's voice_id options".
+    """
+    voices = await instance.list_voices()
+    return VoiceCatalogResponse(
+        voices=[VoiceCatalogVoice(**v.to_dict()) for v in voices]
+    )
+
+
 @router.post("/preview/test", response_model=TestResult)
 async def preview_test(payload: ProviderPreviewPayload) -> TestResult:
     """Run a smoke test against the supplied values without saving anything."""
@@ -959,6 +1005,43 @@ async def preview_play_sample(payload: ProviderPreviewPayload) -> Response:
             instance, ttfa_ms, total_ms, "preview.wav", metrics, reasons
         ),
     )
+
+
+@router.post("/preview/voices", response_model=VoiceCatalogResponse)
+async def preview_voices(
+    payload: ProviderPreviewPayload,
+) -> VoiceCatalogResponse:
+    """Unified voice catalog for an unsaved TTS row (Johnny-1ge.8).
+
+    Lets the voice picker populate before the provider is persisted, the
+    same way ``preview/llm_models`` refreshes the model dropdown. Builds a
+    transient instance from ``values`` and returns its ``list_voices()``.
+
+    Defined BEFORE ``/{provider_id}/voices`` so the FastAPI matcher routes
+    ``/providers/preview/voices`` here instead of parsing ``preview`` as a
+    provider id. Validation failures (e.g. a cloud provider needs its API
+    key before its catalog can be built) surface as the usual 422 so the
+    picker can fall back to the schema's static options.
+    """
+    if payload.kind is not ProviderKind.TTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"preview/voices only supports TTS, not {payload.kind.value}",
+        )
+    instance = _instantiate_preview(payload)
+    assert isinstance(instance, TTSProvider)
+    try:
+        return await _voice_catalog_response(instance)
+    except Exception as exc:  # noqa: BLE001 — surface catalog errors as 502
+        raise HTTPException(
+            status_code=502,
+            detail=f"failed to list voices: {exc}",
+        ) from exc
+    finally:
+        try:
+            await instance.close()
+        except Exception:  # noqa: BLE001, S110
+            pass
 
 
 @router.post("/preview/stt_test", response_model=SttTestResult)
@@ -1804,33 +1887,91 @@ def _require_piper_row(session: Session, provider_id: int) -> ProviderCredential
     return row
 
 
-@router.get("/{provider_id}/voices", response_model=VoiceListResponse)
+@router.get("/{provider_id}/voices")
 async def list_voices(
-    provider_id: int, session: SessionDep
-) -> VoiceListResponse:
-    """List every Piper voice from the public rhasspy catalog.
+    provider_id: int, session: SessionDep, crypto: CryptoDep
+) -> VoiceListResponse | VoiceCatalogResponse:
+    """List a TTS provider's voice catalog (Johnny-fe.10 + Johnny-1ge.8).
 
-    Each voice is annotated with ``installed=True`` when both the
-    ``.onnx`` and ``.onnx.json`` files are already in the provider's
-    configured ``model_dir`` so the UI can render Install vs.
-    Reinstall affordances without an extra round-trip.
+    The response shape depends on the provider:
 
-    Returns HTTP 400 when the provider row is not a Piper TTS adapter,
-    or HTTP 502 when the huggingface catalog cannot be fetched (network
-    failure, malformed payload, etc.) — the upstream error message is
-    included in ``detail`` so the operator can debug without checking
-    server logs.
+    * **Piper** — the install-aware ``{model_dir, voices:[{key, …,
+      installed}]}`` shape the Piper voice browser drives off. Each voice
+      carries ``installed=True`` when both the ``.onnx`` and ``.onnx.json``
+      files are present in the row's ``model_dir`` so the UI can render
+      Install vs. Reinstall without an extra round-trip.
+    * **Every other TTS provider** — the unified ``{voices:[VoiceMeta]}``
+      catalog (Johnny-1ge.8) built from the adapter's ``list_voices()``,
+      so the shared picker renders Kokoro / OpenAI / future providers with
+      the same language / gender / sample-rate metadata and per-voice
+      preview.
+
+    Returns HTTP 400 when the row is not a TTS provider, or HTTP 502 when
+    the catalog can't be built (network failure for Piper / cloud, decrypt
+    error, missing factory). The upstream message rides in ``detail`` so
+    the operator can debug from the browser.
     """
-    row = _require_piper_row(session, provider_id)
-    model_dir = _piper_model_dir(row)
+    row = _get_row_or_404(session, provider_id)
+    if row.kind is not ProviderKind.TTS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "voice catalog is only available for TTS providers "
+                f"(got {row.kind.value}:{row.provider_name})"
+            ),
+        )
+
+    if row.provider_name == PIPER_PROVIDER_NAME:
+        model_dir = _piper_model_dir(row)
+        try:
+            voices = await piper_fetch_voice_catalog(model_dir)
+        except Exception as exc:  # noqa: BLE001 — surface fetch errors as 502
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return VoiceListResponse(
+            model_dir=model_dir,
+            voices=[VoiceRead(**v.to_dict()) for v in voices],
+        )
+
+    registry = get_registry()
+    if not registry.has(row.kind, row.provider_name):
+        raise HTTPException(
+            status_code=502,
+            detail=f"no factory registered for tts:{row.provider_name}",
+        )
     try:
-        voices = await piper_fetch_voice_catalog(model_dir)
-    except Exception as exc:  # noqa: BLE001 — surface fetch errors as 502
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return VoiceListResponse(
-        model_dir=model_dir,
-        voices=[VoiceRead(**v.to_dict()) for v in voices],
+        creds = decrypt_json(crypto, row.credentials_encrypted)
+    except (CryptoError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"failed to decrypt credentials: {exc}",
+        ) from exc
+    config = ProviderConfig(
+        kind=row.kind,
+        provider_name=row.provider_name,
+        display_name=row.display_name,
+        credentials=creds,
+        options=dict(row.config or {}),
     )
+    try:
+        instance = registry.instantiate(config)
+    except Exception as exc:  # noqa: BLE001 — factory error → 502
+        raise HTTPException(
+            status_code=502,
+            detail=f"provider construction failed: {exc}",
+        ) from exc
+    assert isinstance(instance, TTSProvider)
+    try:
+        return await _voice_catalog_response(instance)
+    except Exception as exc:  # noqa: BLE001 — surface catalog errors as 502
+        raise HTTPException(
+            status_code=502,
+            detail=f"failed to list voices: {exc}",
+        ) from exc
+    finally:
+        try:
+            await instance.close()
+        except Exception:  # noqa: BLE001, S110
+            pass
 
 
 @router.post(

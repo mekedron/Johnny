@@ -22,6 +22,7 @@
 	import { Input } from '$lib/components/ui/input/index.js';
 	import Page from '$lib/components/page.svelte';
 	import PageHeader from '$lib/components/page-header.svelte';
+	import VoicePicker from '$lib/components/settings/VoicePicker.svelte';
 	import {
 		activateProvider,
 		createProvider,
@@ -1903,6 +1904,18 @@
 														</p>
 													{/if}
 												</div>
+											{:else if field.voice_catalog}
+												<VoicePicker
+													kind={selectedEntry.kind}
+													providerName={selectedEntry.provider_name}
+													providerId={mode === 'edit' && editingRow ? editingRow.id : null}
+													values={draftValues}
+													fallbackOptions={field.options ?? []}
+													value={String(draftValues[field.name] ?? '')}
+													onSelect={(id) => {
+														draftValues = { ...draftValues, [field.name]: id };
+													}}
+												/>
 											{:else if field.type === 'select' && field.options}
 												<select
 													id={inputId}
