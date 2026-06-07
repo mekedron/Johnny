@@ -413,7 +413,17 @@ class ProviderRegistry:
         self._factories.clear()
 
     def instantiate(self, config: ProviderConfig) -> ProviderInstance:
-        """Look up the factory for ``config`` and invoke it."""
+        """Look up the factory for ``config`` and invoke it.
+
+        Note: ``factory(config)`` builds a fresh provider instance every
+        call. Adapters whose underlying state is expensive to load
+        (Parakeet's NeMo model, Piper voices, faster-whisper weights)
+        currently work around this with module-level caches inside the
+        adapter — see ``parakeet_stt._LAST`` for the canonical pattern.
+        When a third adapter pays for this individually, lift the cache
+        up to the registry keyed by ``(kind, name, frozenset(options))``
+        and add a row-edit invalidation hook.
+        """
         factory = self.get(config.kind, config.provider_name)
         return factory(config)
 

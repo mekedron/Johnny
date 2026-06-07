@@ -137,6 +137,29 @@ Set `tool_format=hermes` for Hermes-style fine-tunes that emit
 `<tool_call>{...}</tool_call>` markers instead of OpenAI-native
 `tool_calls`.
 
+## NVIDIA Parakeet STT runtimes
+
+The Parakeet STT provider supports three runtimes selectable from the Providers page (Settings → Providers → NVIDIA Parakeet → Runtime). Pick whichever fits your speed / ops trade-off.
+
+| Runtime | Where it runs | Latency for 5 s audio (warm) | Setup |
+| --- | --- | --- | --- |
+| `in-container` (default) | api container, PyTorch / NeMo on CPU | ~1 s | Click **Install package** on the provider card. NeMo + deps go to `~/.johnny/parakeet-packages` (~3 GB). The model is now cached at process scope, so only the first `/stt_test` after an api restart pays the multi-second `from_pretrained` cost. |
+| `mlx-sidecar` | macOS host, Apple MLX (Metal GPU) | ~100 ms | `./scripts/start-parakeet-sidecar.sh mlx`. Runs `sidecars/parakeet-mlx/server.py` under `uv` on port 8765. First launch downloads `mlx-community/parakeet-tdt-0.6b-v3` from HuggingFace. |
+| `coreml-sidecar` | macOS host, Swift + FluidAudio (CoreML on the Apple Neural Engine) | ~150 ms target (matches VoiceInk) | `./scripts/start-parakeet-sidecar.sh coreml`. Runs `sidecars/parakeet-coreml/.build/release/parakeet-coreml-sidecar` on port 8766. Requires Xcode command-line tools (`xcode-select --install`); first build fetches FluidAudio + Hummingbird and compiles the binary. |
+
+Why sidecars exist: inside the arm64 Linux api container, PyTorch has no MPS / CoreML / ANE access — the model runs on CPU regardless of the `device` knob. Sidecars run natively on the macOS host and the api container POSTs raw PCM to them over `host.docker.internal`. Wire protocol is documented in each sidecar's README.
+
+Sidecar management:
+
+```bash
+./scripts/start-parakeet-sidecar.sh mlx       # start MLX sidecar
+./scripts/start-parakeet-sidecar.sh coreml    # start CoreML sidecar
+./scripts/start-parakeet-sidecar.sh status    # which sidecars are up
+./scripts/start-parakeet-sidecar.sh stop      # stop any running sidecar
+```
+
+Health checks: `curl http://localhost:8765/health` (MLX) / `curl http://localhost:8766/health` (CoreML) — both return `{"ready": true, "model_id": "..."}` once loaded.
+
 ## Voice transport (US-025)
 
 The voice pipeline runs over a swappable transport. The default —

@@ -16,10 +16,12 @@ adding the marker).
 from __future__ import annotations
 
 import array
+import asyncio
 import math
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
+import httpx
 import pytest
 
 from app.providers.base import (
@@ -32,12 +34,19 @@ from app.providers.base import (
 from app.providers.parakeet_stt import (
     ALLOWED_DEVICES,
     ALLOWED_MODEL_IDS,
+    ALLOWED_RUNTIMES,
     DEFAULT_BEAM_SIZE,
     DEFAULT_DEVICE,
     DEFAULT_LANGUAGE,
     DEFAULT_MODEL_DIR,
     DEFAULT_MODEL_ID,
+    DEFAULT_RUNTIME,
+    DEFAULT_SIDECAR_URL,
     PROVIDER_NAME,
+    RUNTIME_COREML_SIDECAR,
+    RUNTIME_IN_CONTAINER,
+    RUNTIME_MLX_SIDECAR,
+    SIDECAR_DEFAULT_URLS,
     ParakeetSTT,
     _hypothesis_confidence,
     _hypothesis_text,
@@ -48,6 +57,21 @@ from tests.providers._stt_contract import (
     assert_transcribe_respects_vad_boundaries,
     assert_transcribe_yields_events,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_parakeet_process_cache() -> Any:
+    """Wipe the module-level model cache around every test.
+
+    The cache is process-wide by design (so two ``ParakeetSTT(config)``
+    instances share a loaded model across ``/stt_test`` clicks). In
+    tests that means two unrelated cases would otherwise reuse each
+    other's ``_FakeASRModel`` — wrong, confusing, and the source of
+    flaky assertion-counts. Reset the slot before AND after each test.
+    """
+    ParakeetSTT.evict_process_cache()
+    yield
+    ParakeetSTT.evict_process_cache()
 
 # --- Helpers ---------------------------------------------------------------
 
@@ -148,6 +172,40 @@ def test_init_defaults_when_options_empty(monkeypatch: pytest.MonkeyPatch) -> No
     # The default language config is "en" but the property exposes None when
     # the user explicitly leaves it blank. The dataclass default keeps "en".
     assert adapter.language is None
+    # New defaults for the runtime selector — keep the historical
+    # in-container behaviour for unconfigured installs.
+    assert adapter.runtime == DEFAULT_RUNTIME
+    assert adapter.runtime == RUNTIME_IN_CONTAINER
+    assert adapter.sidecar_url == ""
+
+
+def test_init_picks_per_runtime_default_sidecar_url() -> None:
+    """Selecting a sidecar runtime without an explicit URL picks the per-runtime default."""
+    mlx = ParakeetSTT(_config(runtime=RUNTIME_MLX_SIDECAR))
+    assert mlx.sidecar_url == SIDECAR_DEFAULT_URLS[RUNTIME_MLX_SIDECAR]
+    coreml = ParakeetSTT(_config(runtime=RUNTIME_COREML_SIDECAR))
+    assert coreml.sidecar_url == SIDECAR_DEFAULT_URLS[RUNTIME_COREML_SIDECAR]
+
+
+def test_init_explicit_sidecar_url_overrides_default() -> None:
+    adapter = ParakeetSTT(
+        _config(
+            runtime=RUNTIME_MLX_SIDECAR,
+            sidecar_url="http://my-host:9999/",
+        )
+    )
+    assert adapter.sidecar_url == "http://my-host:9999"  # trailing slash stripped
+
+
+def test_init_rejects_unknown_runtime() -> None:
+    with pytest.raises(ValueError, match="runtime"):
+        ParakeetSTT(_config(runtime="local-cuda-magic"))
+
+
+@pytest.mark.parametrize("runtime", sorted(ALLOWED_RUNTIMES))
+def test_init_accepts_all_allowed_runtimes(runtime: str) -> None:
+    adapter = ParakeetSTT(_config(runtime=runtime))
+    assert adapter.runtime == runtime
 
 
 def test_init_env_var_supplies_model_dir(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -252,6 +310,22 @@ def test_field_schema_default_language_is_english() -> None:
     language_field = schema.field("language")
     assert language_field is not None
     assert language_field.default == DEFAULT_LANGUAGE
+
+
+def test_field_schema_runtime_field_lists_all_options() -> None:
+    schema = ParakeetSTT.field_schema()
+    runtime_field = schema.field("runtime")
+    assert runtime_field is not None
+    assert runtime_field.default == DEFAULT_RUNTIME
+    option_values = {o.value for o in runtime_field.options}
+    assert option_values == set(ALLOWED_RUNTIMES)
+
+
+def test_field_schema_sidecar_url_default_matches_mlx() -> None:
+    schema = ParakeetSTT.field_schema()
+    sidecar_field = schema.field("sidecar_url")
+    assert sidecar_field is not None
+    assert sidecar_field.default == DEFAULT_SIDECAR_URL
 
 
 # --- Helper functions ------------------------------------------------------
@@ -453,7 +527,14 @@ async def test_transcribe_caches_model_across_calls() -> None:
     assert adapter.load_calls == 1
 
 
-async def test_close_drops_cached_model() -> None:
+async def test_close_does_not_evict_process_cache() -> None:
+    """``close()`` releases the per-instance reference but keeps the cache.
+
+    Contract change: the previous behaviour was to drop the model on close,
+    so every ``/stt_test`` click paid the full ``from_pretrained`` cost.
+    Under the process-wide cache, closing one instance does not affect the
+    next instance's lookup — the loaded weights survive.
+    """
     adapter = _FakeParakeetSTT(
         _config(),
         hypotheses=[_FakeHypothesis("hi")],
@@ -462,7 +543,147 @@ async def test_close_drops_cached_model() -> None:
     assert adapter.load_calls == 1
     await adapter.close()
     [_ async for _ in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))]
+    # Crucially: load_calls stays at 1. The cache holds the model across
+    # close/reopen — that's the speedup the user actually sees.
+    assert adapter.load_calls == 1
+
+
+async def test_evict_process_cache_forces_reload() -> None:
+    """``ParakeetSTT.evict_process_cache()`` is the hard-reset escape hatch."""
+    adapter = _FakeParakeetSTT(
+        _config(),
+        hypotheses=[_FakeHypothesis("hi")],
+    )
+    [_ async for _ in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))]
+    assert adapter.load_calls == 1
+    ParakeetSTT.evict_process_cache()
+    [_ async for _ in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))]
     assert adapter.load_calls == 2
+
+
+async def test_two_instances_share_cached_model() -> None:
+    """A second adapter with the same config-key reuses the cached weights.
+
+    This is THE speedup that fixes the ~5 s /stt_test latency: the
+    handler builds a fresh ``ParakeetSTT(config)`` per request, and the
+    second request must NOT pay the ``from_pretrained`` cost again.
+    """
+    first = _FakeParakeetSTT(_config(), hypotheses=[_FakeHypothesis("a")])
+    [_ async for _ in first.transcribe_stream(_iter([_pcm([0] * 16)]))]
+    assert first.load_calls == 1
+
+    # Fresh instance with identical config. Its own ``_load_model`` must
+    # never be invoked because the module cache already has a match.
+    second = _FakeParakeetSTT(_config(), hypotheses=[_FakeHypothesis("b")])
+    [_ async for _ in second.transcribe_stream(_iter([_pcm([0] * 16)]))]
+    assert second.load_calls == 0
+
+
+async def test_cache_key_change_evicts_previous() -> None:
+    """A different config-key triggers a fresh load."""
+    first = _FakeParakeetSTT(_config(beam_size=1), hypotheses=[_FakeHypothesis("a")])
+    [_ async for _ in first.transcribe_stream(_iter([_pcm([0] * 16)]))]
+    assert first.load_calls == 1
+
+    # beam_size is part of the cache key — different key, fresh load.
+    second = _FakeParakeetSTT(
+        _config(beam_size=4), hypotheses=[_FakeHypothesis("b")]
+    )
+    [_ async for _ in second.transcribe_stream(_iter([_pcm([0] * 16)]))]
+    assert second.load_calls == 1
+
+
+async def test_language_is_part_of_cache_key() -> None:
+    """``language`` is included in the cache key for forward-compat.
+
+    NeMo's current ``transcribe`` call doesn't receive the language code,
+    but Johnny-stt.3 will plumb it through. If language isn't in the key
+    today, that future PR can silently serve the wrong-language model.
+    """
+    first = _FakeParakeetSTT(
+        _config(language="en"), hypotheses=[_FakeHypothesis("a")]
+    )
+    [_ async for _ in first.transcribe_stream(_iter([_pcm([0] * 16)]))]
+    assert first.load_calls == 1
+
+    second = _FakeParakeetSTT(
+        _config(language="fi"), hypotheses=[_FakeHypothesis("b")]
+    )
+    [_ async for _ in second.transcribe_stream(_iter([_pcm([0] * 16)]))]
+    assert second.load_calls == 1
+
+
+async def test_load_failure_does_not_poison_cache() -> None:
+    """If ``_load_model`` raises, the cache stays empty for the next try."""
+    failing = _FakeParakeetSTT(
+        _config(),
+        load_error=RuntimeError("boom"),
+    )
+    with pytest.raises(STTError):
+        async for _ in failing.transcribe_stream(_iter([_pcm([0] * 16)])):
+            pass
+    assert failing.load_calls == 1
+
+    # Same key, a new instance that loads successfully — must retry the load.
+    recovering = _FakeParakeetSTT(
+        _config(),
+        hypotheses=[_FakeHypothesis("now ok")],
+    )
+    events = [
+        e async for e in recovering.transcribe_stream(_iter([_pcm([0] * 16)]))
+    ]
+    assert recovering.load_calls == 1
+    assert [e.text for e in events] == ["now ok"]
+
+
+async def test_concurrent_first_load_coalesces() -> None:
+    """Two concurrent first-load coroutines share one ``_load_model`` call.
+
+    The per-key ``asyncio.Lock`` plus the post-lock cache re-check is the
+    mechanism. If two ``/stt_test`` requests for the same fresh config-key
+    race, only one pays the load cost; the other waits, then reads the
+    cache result on the second pass.
+    """
+    load_started = asyncio.Event()
+    release_load = asyncio.Event()
+
+    class _SlowLoadParakeetSTT(_FakeParakeetSTT):
+        def _load_model(self) -> Any:
+            # Runs in a worker thread via asyncio.to_thread, so blocking
+            # here doesn't stall the event loop. Signal the test, wait
+            # for the release event (set from the main coroutine), then
+            # return the fake.
+            load_started.set()
+            import time as _time
+
+            while not release_load.is_set():
+                _time.sleep(0.005)
+            self.load_calls += 1
+            self.fake_model = _FakeASRModel(self._fake_hypotheses)
+            return self.fake_model
+
+    first = _SlowLoadParakeetSTT(_config(), hypotheses=[_FakeHypothesis("a")])
+    second = _SlowLoadParakeetSTT(_config(), hypotheses=[_FakeHypothesis("b")])
+
+    async def _run(adapter: _SlowLoadParakeetSTT) -> list[Any]:
+        return [
+            e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))
+        ]
+
+    t1 = asyncio.create_task(_run(first))
+    # Wait until the first load is actually running before kicking off
+    # the second one, so the per-key lock is the thing that serialises.
+    await load_started.wait()
+    t2 = asyncio.create_task(_run(second))
+    # Give the second task a moment to reach the lock.
+    await asyncio.sleep(0.05)
+    release_load.set()
+    await asyncio.gather(t1, t2)
+
+    # Exactly one _load_model call across the two instances thanks to
+    # the per-key lock + post-lock cache re-check.
+    total_loads = first.load_calls + second.load_calls
+    assert total_loads == 1
 
 
 async def test_transcribe_wraps_model_load_failure_in_stt_error() -> None:
@@ -496,6 +717,200 @@ async def test_transcribe_passes_through_stt_error_from_load() -> None:
             pass
 
 
+# --- transcribe_stream: sidecar HTTP path ----------------------------------
+
+
+def _mock_transport(handler: Callable[[httpx.Request], httpx.Response]) -> Any:
+    captured: list[httpx.Request] = []
+
+    def wrapper(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return handler(request)
+
+    return httpx.MockTransport(wrapper), captured
+
+
+class _SidecarFakeParakeetSTT(ParakeetSTT):
+    """ParakeetSTT with an injected MockTransport-backed httpx client.
+
+    The sidecar runtimes never load NeMo locally — they POST PCM to a
+    running sidecar process. We replace the live ``httpx.AsyncClient``
+    with a MockTransport-backed one so the test doesn't need a real
+    sidecar listening.
+    """
+
+    def __init__(
+        self,
+        config: ProviderConfig,
+        *,
+        handler: Callable[[httpx.Request], httpx.Response],
+    ) -> None:
+        super().__init__(config)
+        transport, requests = _mock_transport(handler)
+        self._mock_transport = transport
+        self.requests: list[httpx.Request] = requests
+
+    def _sidecar_client_or_open(self) -> httpx.AsyncClient:  # type: ignore[override]
+        if self._sidecar_client is None:
+            self._sidecar_client = httpx.AsyncClient(transport=self._mock_transport)
+        return self._sidecar_client
+
+
+async def test_sidecar_runtime_posts_pcm_and_yields_event() -> None:
+    """The MLX runtime POSTs the raw PCM bytes and emits one final event."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/transcribe"
+        assert request.headers["Content-Type"] == "application/octet-stream"
+        assert request.headers["X-Audio-Sample-Rate"] == "16000"
+        assert request.headers["X-Audio-Channels"] == "1"
+        assert request.headers["X-Audio-Format"] == "pcm-s16le"
+        # PCM bytes round-trip 1:1.
+        assert request.content == _pcm([0, 100, 200, 300])
+        return httpx.Response(200, json={"text": "hello via mlx", "confidence": 0.87})
+
+    adapter = _SidecarFakeParakeetSTT(
+        _config(runtime=RUNTIME_MLX_SIDECAR),
+        handler=handler,
+    )
+    events = [
+        e async for e in adapter.transcribe_stream(_iter([_pcm([0, 100, 200, 300])]))
+    ]
+    assert len(events) == 1
+    assert events[0].text == "hello via mlx"
+    assert events[0].is_final is True
+    assert events[0].confidence == pytest.approx(0.87)
+    assert len(adapter.requests) == 1
+
+
+async def test_sidecar_runtime_sends_language_header_when_set() -> None:
+    """When the user configured a language, it goes out as ``X-Language``."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get("X-Language") == "fi"
+        return httpx.Response(200, json={"text": "moi"})
+
+    adapter = _SidecarFakeParakeetSTT(
+        _config(runtime=RUNTIME_COREML_SIDECAR, language="fi"),
+        handler=handler,
+    )
+    events = [
+        e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))
+    ]
+    assert [e.text for e in events] == ["moi"]
+
+
+async def test_sidecar_runtime_omits_language_header_when_blank() -> None:
+    """Blank language doesn't send the header at all."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "X-Language" not in request.headers
+        return httpx.Response(200, json={"text": "ok"})
+
+    adapter = _SidecarFakeParakeetSTT(
+        _config(runtime=RUNTIME_MLX_SIDECAR, language=""),
+        handler=handler,
+    )
+    [_ async for _ in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))]
+
+
+async def test_sidecar_runtime_unreachable_raises_helpful_stt_error() -> None:
+    """A ConnectionError surfaces as a clear STTError pointing at the script."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("Connection refused")
+
+    adapter = _SidecarFakeParakeetSTT(
+        _config(runtime=RUNTIME_MLX_SIDECAR),
+        handler=handler,
+    )
+    with pytest.raises(STTError, match="unreachable") as exc_info:
+        async for _ in adapter.transcribe_stream(_iter([_pcm([0] * 16)])):
+            pass
+    # Surfaces the runtime, URL, and the start script so the user knows
+    # what to do.
+    msg = str(exc_info.value)
+    assert RUNTIME_MLX_SIDECAR in msg
+    assert "start-parakeet-sidecar.sh" in msg
+
+
+async def test_sidecar_runtime_non_200_raises_stt_error() -> None:
+    """Any non-200 from the sidecar surfaces as STTError with the body."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="model is still loading")
+
+    adapter = _SidecarFakeParakeetSTT(
+        _config(runtime=RUNTIME_MLX_SIDECAR),
+        handler=handler,
+    )
+    with pytest.raises(STTError, match="HTTP 503"):
+        async for _ in adapter.transcribe_stream(_iter([_pcm([0] * 16)])):
+            pass
+
+
+async def test_sidecar_runtime_empty_transcript_yields_no_events() -> None:
+    """An empty ``text`` from the sidecar is a valid no-speech response."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"text": "", "confidence": 1.0})
+
+    adapter = _SidecarFakeParakeetSTT(
+        _config(runtime=RUNTIME_MLX_SIDECAR),
+        handler=handler,
+    )
+    events = [
+        e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))
+    ]
+    assert events == []
+
+
+async def test_sidecar_runtime_clamps_confidence() -> None:
+    """Out-of-range confidence values get clamped into [0, 1]."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"text": "x", "confidence": 1.5})
+
+    adapter = _SidecarFakeParakeetSTT(
+        _config(runtime=RUNTIME_MLX_SIDECAR),
+        handler=handler,
+    )
+    events = [
+        e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))
+    ]
+    assert len(events) == 1
+    assert events[0].confidence == 1.0
+
+
+async def test_sidecar_runtime_does_not_load_nemo() -> None:
+    """The sidecar path must never invoke the in-container ``_load_model``.
+
+    If a future refactor accidentally routes both paths through
+    ``_ensure_model``, this test catches it: a sidecar runtime with
+    a configured ``load_error`` would still need to call _load_model
+    to trip the error. We confirm the error never fires.
+    """
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"text": "ok"})
+
+    # Force a sidecar runtime but configure a load_error on the fake;
+    # the load_error path must never run.
+    class _NoLoadParakeetSTT(_SidecarFakeParakeetSTT):
+        def _load_model(self) -> Any:
+            raise AssertionError("sidecar runtime must not load a local model")
+
+    adapter = _NoLoadParakeetSTT(
+        _config(runtime=RUNTIME_MLX_SIDECAR),
+        handler=handler,
+    )
+    events = [
+        e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))
+    ]
+    assert [e.text for e in events] == ["ok"]
+
+
 # --- Lazy load behavior on the real adapter --------------------------------
 
 
@@ -511,7 +926,7 @@ async def test_real_adapter_raises_stt_error_without_nemo(
         "app.providers.parakeet_stt.import_module", _fail_import
     )
     adapter = ParakeetSTT(_config())
-    with pytest.raises(STTError, match="NVIDIA NeMo is not installed"):
+    with pytest.raises(STTError, match="NeMo not importable"):
         async for _ in adapter.transcribe_stream(_iter([_pcm([0] * 16)])):
             pass
 

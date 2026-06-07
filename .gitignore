@@ -69,3 +69,11 @@ client_secret*.json
 # defensively. Delete the directory manually once the rewrite is confirmed.
 .git-backup-pre-rewrite/
 .git-backup-*/
+
+# Swift Package Manager build artifacts. The CoreML Parakeet sidecar at
+# sidecars/parakeet-coreml/ produces a .build/ tree on `swift build` that
+# can grow to thousands of derived files; only Package.swift /
+# Package.resolved / Sources/ get committed. .swiftpm/ holds editor-local
+# IDE state and per-machine dependency snapshots.
+.build/
+.swiftpm/
