@@ -353,11 +353,16 @@ async def start_session_for_meeting(
     # bot still joins — it just runs in listen-only mode for that
     # session.
     provider_payload: dict[str, Any] = {}
+    pipeline_mode_value = "split"
     try:
         from app.security.crypto import CryptoError, get_crypto
-        from app.services.provider_payload import build_provider_payload
+        from app.services.provider_payload import (
+            build_provider_payload,
+            resolve_pipeline_mode,
+        )
 
         provider_payload = build_provider_payload(session, get_crypto())
+        pipeline_mode_value = resolve_pipeline_mode(session).value
     except CryptoError as exc:
         logger.warning(
             "provider payload skipped — FERNET_KEY not configured (%s); "
@@ -384,6 +389,7 @@ async def start_session_for_meeting(
         context=effective_context,
         calendar_context=calendar_description,
         provider_config=provider_payload,
+        pipeline_mode=pipeline_mode_value,
     )
     try:
         result = await launcher.start(ctx)

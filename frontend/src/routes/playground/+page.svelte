@@ -40,7 +40,14 @@
 		type BotMode,
 		type Template
 	} from '$lib/templates';
-	import { listProviders, type Provider, type ProviderKind } from '$lib/providers';
+	import {
+		getPipelineSettings,
+		listProviders,
+		PIPELINE_MODE_LABEL,
+		type PipelineSettings,
+		type Provider,
+		type ProviderKind
+	} from '$lib/providers';
 	import {
 		PlaygroundMicDeniedError,
 		startPlaygroundStt,
@@ -110,6 +117,7 @@
 		tts: [],
 		s2s: []
 	});
+	let pipelineSettings = $state<PipelineSettings | null>(null);
 	let loadingMetadata = $state(true);
 
 	// --- Live session state ------------------------------------------------
@@ -164,6 +172,20 @@
 			label: 'Mode',
 			value: BOT_MODE_LABEL[liveMode as BotMode] ?? liveMode
 		});
+		// The pipeline shape (split vs unified) is snapshotted into
+		// playground_overrides at session start (Johnny-ckz.21). Falling
+		// back to the page-level settings keeps the chip visible before
+		// the session starts.
+		const livePipelineMode =
+			typeof overrides.pipeline_mode === 'string'
+				? overrides.pipeline_mode
+				: pipelineSettings?.pipeline_mode ?? null;
+		if (livePipelineMode === 'split' || livePipelineMode === 'unified') {
+			chips.push({
+				label: 'Pipeline',
+				value: PIPELINE_MODE_LABEL[livePipelineMode]
+			});
+		}
 		const templateId =
 			typeof overrides.template_id === 'number'
 				? overrides.template_id
@@ -176,11 +198,18 @@
 			overrides.providers && typeof overrides.providers === 'object'
 				? (overrides.providers as Record<string, { credentials_id?: number }>)
 				: undefined;
-		const providerEntries: Array<[ProviderKind, Provider[]]> = [
-			['stt', providers.stt],
-			['llm', providers.llm],
-			['tts', providers.tts]
-		];
+		// Surface only the provider kinds the current pipeline actually
+		// uses. In split mode that's STT/LLM/TTS; in unified mode it's
+		// just S2S. Avoids confusing chips like "STT: Whisper" when STT
+		// is bypassed because the session is talking to OpenAI Realtime.
+		const providerEntries: Array<[ProviderKind, Provider[]]> =
+			livePipelineMode === 'unified'
+				? [['s2s', providers.s2s]]
+				: [
+					['stt', providers.stt],
+					['llm', providers.llm],
+					['tts', providers.tts]
+				];
 		for (const [kind, list] of providerEntries) {
 			const id = liveProviders?.[kind]?.credentials_id ?? providerOverrides[kind];
 			if (id !== null && id !== undefined) {
@@ -237,9 +266,14 @@
 	async function loadMetadata() {
 		loadingMetadata = true;
 		try {
-			const [tpls, provs] = await Promise.all([listTemplates(), listProviders()]);
+			const [tpls, provs, settings] = await Promise.all([
+				listTemplates(),
+				listProviders(),
+				getPipelineSettings().catch(() => null)
+			]);
 			templates = tpls;
 			providers = provs;
+			pipelineSettings = settings;
 		} catch (err) {
 			errorMessage = `Failed to load templates / providers: ${
 				err instanceof Error ? err.message : String(err)
@@ -251,7 +285,16 @@
 
 	function buildPayload(): StartBrowserSessionPayload {
 		const overrides: Record<string, BrowserProviderOverride> = {};
-		for (const kind of ['stt', 'llm', 'tts'] as const) {
+		// In unified mode the only override that matters is the S2S
+		// provider — split-mode overrides for STT/LLM/TTS get ignored by
+		// the backend assembler since UnifiedVoicePipeline doesn't read
+		// them. Send only the kind that's actually wired into the
+		// current pipeline shape.
+		const overrideKinds: readonly ProviderKind[] =
+			pipelineSettings?.pipeline_mode === 'unified'
+				? (['s2s'] as const)
+				: (['stt', 'llm', 'tts'] as const);
+		for (const kind of overrideKinds) {
 			const id = providerOverrides[kind];
 			if (id !== null && id !== undefined) {
 				overrides[kind] = { credentials_id: id };
@@ -863,39 +906,74 @@
 								</p>
 							</div>
 
-							<div class="grid gap-3 sm:grid-cols-3">
-								{#each ['stt', 'llm', 'tts'] as const as kind (kind)}
-									{@const list = providers[kind]}
+							{#if pipelineSettings?.pipeline_mode === 'unified'}
+								<div class="grid gap-3 sm:grid-cols-1">
 									<div class="flex flex-col gap-1.5">
 										<label
-											for={`pg-${kind}`}
+											for="pg-s2s"
 											class="text-sm leading-none font-medium text-foreground"
 										>
-											{kind.toUpperCase()} provider
+											S2S provider
 										</label>
 										<select
-											id={`pg-${kind}`}
-											data-testid={`playground-${kind}-override`}
-											value={providerOverrides[kind] ?? ''}
+											id="pg-s2s"
+											data-testid="playground-s2s-override"
+											value={providerOverrides.s2s ?? ''}
 											class="{FIELD_CLASS} h-9"
 											onchange={(e) => {
 												const v = (e.target as HTMLSelectElement).value;
-												providerOverrides[kind] = v === '' ? null : Number(v);
+												providerOverrides.s2s = v === '' ? null : Number(v);
 											}}
 										>
 											<option value="">Use active default</option>
-											{#each list as p (p.id)}
+											{#each providers.s2s as p (p.id)}
 												<option value={p.id}>
 													{p.display_name}{p.is_active ? ' · active' : ''}
 												</option>
 											{/each}
 										</select>
 									</div>
-								{/each}
-							</div>
-							<p class="m-0 text-xs text-muted-foreground">
-								Provider overrides apply for this session only — global active rows are not touched.
-							</p>
+								</div>
+								<p class="m-0 text-xs text-muted-foreground">
+									Pipeline is in <span class="font-medium text-foreground">Unified (S2S)</span>
+									mode — STT/LLM/TTS overrides are not used. Change the pipeline
+									shape on the <a href="/providers" class="underline">Providers page</a>.
+								</p>
+							{:else}
+								<div class="grid gap-3 sm:grid-cols-3">
+									{#each ['stt', 'llm', 'tts'] as const as kind (kind)}
+										{@const list = providers[kind]}
+										<div class="flex flex-col gap-1.5">
+											<label
+												for={`pg-${kind}`}
+												class="text-sm leading-none font-medium text-foreground"
+											>
+												{kind.toUpperCase()} provider
+											</label>
+											<select
+												id={`pg-${kind}`}
+												data-testid={`playground-${kind}-override`}
+												value={providerOverrides[kind] ?? ''}
+												class="{FIELD_CLASS} h-9"
+												onchange={(e) => {
+													const v = (e.target as HTMLSelectElement).value;
+													providerOverrides[kind] = v === '' ? null : Number(v);
+												}}
+											>
+												<option value="">Use active default</option>
+												{#each list as p (p.id)}
+													<option value={p.id}>
+														{p.display_name}{p.is_active ? ' · active' : ''}
+													</option>
+												{/each}
+											</select>
+										</div>
+									{/each}
+								</div>
+								<p class="m-0 text-xs text-muted-foreground">
+									Provider overrides apply for this session only — global active rows are not touched.
+								</p>
+							{/if}
 						</div>
 					{/if}
 				</div>

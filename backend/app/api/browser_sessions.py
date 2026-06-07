@@ -72,7 +72,7 @@ from app.services.browser_pipeline_runner import (
     BrowserPipelineSpec,
     run_browser_pipeline,
 )
-from app.services.provider_payload import build_provider_payload
+from app.services.provider_payload import build_provider_payload, resolve_pipeline_mode
 from johnny.voice_pipeline import (
     BrowserAudioTransport,
     EventBus,
@@ -416,6 +416,7 @@ def _build_spec_from_event(
         or "free_auto_speak"
     )
 
+    pipeline_mode = resolve_pipeline_mode(session)
     spec = BrowserPipelineSpec(
         session_id=str(bot_session_id),
         bot_session_id=bot_session_id,
@@ -425,10 +426,12 @@ def _build_spec_from_event(
         calendar_context=event.description or "",
         provider_payload=effective_providers,
         event_bus=_build_event_bus(),
+        pipeline_mode=pipeline_mode.value,
     )
     overrides_snapshot: dict[str, Any] = {
         "calendar_event_id": event_id,
         "playground": False,
+        "pipeline_mode": pipeline_mode.value,
     }
     if payload.system_prompt:
         overrides_snapshot["system_prompt"] = payload.system_prompt
@@ -469,6 +472,7 @@ def _build_spec_playground(
         session, payload.provider_overrides, base_payload
     )
 
+    pipeline_mode = resolve_pipeline_mode(session)
     spec = BrowserPipelineSpec(
         session_id=str(bot_session_id),
         bot_session_id=bot_session_id,
@@ -478,11 +482,13 @@ def _build_spec_playground(
         calendar_context="",
         provider_payload=effective_providers,
         event_bus=_build_event_bus(),
+        pipeline_mode=pipeline_mode.value,
     )
     overrides_snapshot: dict[str, Any] = {
         "calendar_event_id": None,
         "playground": True,
         "persona": persona,
+        "pipeline_mode": pipeline_mode.value,
     }
     if payload.system_prompt:
         overrides_snapshot["system_prompt"] = payload.system_prompt

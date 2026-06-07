@@ -41,6 +41,7 @@ from app.db.models import (
     CalendarEvent,
     GoogleAccount,
     MeetingConfig,
+    PipelineSettings,
     ProfileTemplate,
     TranscriptChunk,
 )
@@ -80,6 +81,7 @@ def engine() -> sa.Engine:
             TranscriptChunk.__table__,  # type: ignore[list-item]
             AgentDecision.__table__,  # type: ignore[list-item]
             AgentUtterance.__table__,  # type: ignore[list-item]
+            PipelineSettings.__table__,  # type: ignore[list-item]
         ],
     )
     return eng
@@ -266,6 +268,60 @@ def test_start_rejects_unknown_fields(client: TestClient) -> None:
         json={"who_dat": "extra"},
     )
     assert res.status_code == 422
+
+
+# --- Johnny-ckz.21: pipeline_mode wiring through session start -------------
+
+
+def test_start_playground_records_pipeline_mode_split_by_default(
+    client: TestClient,
+) -> None:
+    """Without any pipeline_settings row, playground sessions default to split.
+
+    The overrides snapshot is what the playground page reads to render the
+    "Pipeline" chip, so the contract is end-to-end visible.
+    """
+    res = client.post("/sessions/browser/start", json={})
+    assert res.status_code == 201, res.text
+    body = res.json()
+    assert body["playground_overrides"]["pipeline_mode"] == "split"
+
+
+def test_start_playground_records_unified_when_pipeline_mode_set(
+    client: TestClient, db_session: Session
+) -> None:
+    """A persisted unified setting must be picked up at session start.
+
+    Verifies the new ``resolve_pipeline_mode`` call in
+    ``_build_spec_playground`` and that the value is snapshotted into
+    ``playground_overrides`` so the UI can chip it.
+    """
+    from app.db.models import PipelineMode
+
+    db_session.add(PipelineSettings(id=1, pipeline_mode=PipelineMode.UNIFIED))
+    db_session.commit()
+    res = client.post("/sessions/browser/start", json={"persona": "tutor"})
+    assert res.status_code == 201, res.text
+    overrides = res.json()["playground_overrides"]
+    assert overrides["pipeline_mode"] == "unified"
+
+
+def test_start_rehearsal_records_pipeline_mode(
+    client: TestClient, db_session: Session
+) -> None:
+    """The Meet/event rehearsal path must also pick up pipeline_mode."""
+    from app.db.models import PipelineMode
+
+    event, _ = _seed_meeting(db_session)
+    db_session.add(PipelineSettings(id=1, pipeline_mode=PipelineMode.UNIFIED))
+    db_session.commit()
+    res = client.post(
+        "/sessions/browser/start",
+        json={"event_id": event.id},
+    )
+    assert res.status_code == 201, res.text
+    overrides = res.json()["playground_overrides"]
+    assert overrides["pipeline_mode"] == "unified"
 
 
 # --- POST /sessions/browser/{id}/stop --------------------------------------
