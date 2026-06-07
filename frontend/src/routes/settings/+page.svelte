@@ -1,25 +1,23 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
 	import PlusIcon from '@lucide/svelte/icons/plus';
-	import XIcon from '@lucide/svelte/icons/x';
 	import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
 	import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
 	import CalendarIcon from '@lucide/svelte/icons/calendar';
 	import BotIcon from '@lucide/svelte/icons/bot';
 	import UnlinkIcon from '@lucide/svelte/icons/unlink';
-	import UploadIcon from '@lucide/svelte/icons/upload';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Alert from '$lib/components/ui/alert/index.js';
 	import Page from '$lib/components/page.svelte';
 	import PageHeader from '$lib/components/page-header.svelte';
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 	import CheckCircle2Icon from '@lucide/svelte/icons/check-circle-2';
+	import BotSigninModal from '$lib/components/settings/BotSigninModal.svelte';
 	import {
 		disconnectAccount,
 		disconnectBotSession,
 		listAccounts,
 		startOAuth,
-		uploadBotSession,
 		verifyAccount,
 		type Account,
 		type CapabilityCheck,
@@ -38,10 +36,10 @@
 	let verifyingId = $state<number | null>(null);
 	let verifyResults = $state<Record<number, VerifyResponse>>({});
 
-	let botUploadTarget = $state<Account | null>(null);
-	let botUploadFile = $state<File | null>(null);
-	let botUploadBusy = $state(false);
-	let botUploadError = $state<string | null>(null);
+	type BotSigninContext =
+		| { kind: 'new' }
+		| { kind: 'attach'; account: Account };
+	let botSigninContext = $state<BotSigninContext | null>(null);
 
 	let disconnectTarget = $state<{
 		account: Account;
@@ -167,46 +165,17 @@
 		return verifyResults[account.id]?.bot_session ?? null;
 	}
 
-	function openBotUploadFor(account: Account | null) {
-		botUploadFile = null;
-		botUploadError = null;
-		// account === null means "create a new bot identity row first"
-		// which we don't currently support without an existing row.
-		// Until noVNC ships, the user must connect a calendar (which
-		// creates the row), then upload a storage_state for it.
-		botUploadTarget = account;
+	function openBotSigninForNew() {
+		botSigninContext = { kind: 'new' };
 	}
 
-	function closeBotUpload() {
-		if (botUploadBusy) return;
-		botUploadTarget = null;
-		botUploadFile = null;
-		botUploadError = null;
+	function openBotSigninForAccount(account: Account) {
+		botSigninContext = { kind: 'attach', account };
 	}
 
-	function onBotUploadFileChange(event: Event) {
-		const input = event.currentTarget as HTMLInputElement;
-		botUploadFile = input.files?.[0] ?? null;
-		botUploadError = null;
-	}
-
-	async function submitBotUpload(event: Event) {
-		event.preventDefault();
-		const target = botUploadTarget;
-		if (!target || !botUploadFile) return;
-		botUploadBusy = true;
-		botUploadError = null;
-		try {
-			const text = await botUploadFile.text();
-			await uploadBotSession(target.id, text);
-			await loadAccounts();
-			botUploadTarget = null;
-			botUploadFile = null;
-		} catch (e) {
-			botUploadError = e instanceof Error ? e.message : String(e);
-		} finally {
-			botUploadBusy = false;
-		}
+	async function closeBotSignin() {
+		botSigninContext = null;
+		await loadAccounts();
 	}
 
 	function askDisconnectBot(account: Account) {
@@ -306,11 +275,10 @@
 
 	function handleSheetKeydown(event: KeyboardEvent) {
 		if (event.key !== 'Escape') return;
-		if (botUploadTarget) {
-			event.preventDefault();
-			closeBotUpload();
-			return;
-		}
+		// The BotSigninModal owns its own Escape handler (it needs to
+		// call /cancel before closing); skip the global handler so we
+		// don't double-fire.
+		if (botSigninContext) return;
 		if (disconnectTarget) {
 			event.preventDefault();
 			cancelDisconnect();
@@ -321,9 +289,6 @@
 			cancelDisconnectBot();
 		}
 	}
-
-	const inputClass =
-		'border-input flex h-9 w-full rounded-md border bg-background px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50';
 </script>
 
 <svelte:head>
@@ -594,11 +559,11 @@
 								</Button>
 								<Button
 									variant="outline"
-									onclick={() => openBotUploadFor(account)}
+									onclick={() => openBotSigninForAccount(account)}
 									disabled={busyAccountId === account.id}
 									data-testid={`replace-bot-session-${account.id}`}
 								>
-									<UploadIcon /> Replace session
+									<RefreshCwIcon /> Replace session
 								</Button>
 								<Button
 									variant="ghost"
@@ -634,52 +599,46 @@
 					</li>
 				{/each}
 
-				<!-- Inline + Add tile for bots -->
+				<!-- Inline + Add tile for bots — noVNC sign-in flow. -->
 				<li>
-					{#if calendars.length === 0 && bots.length === 0}
+					<button
+						type="button"
+						class="flex w-full flex-col items-center justify-center gap-3 rounded-md border-2 border-dashed border-border bg-transparent px-6 py-{bots.length === 0
+							? 12
+							: 6} text-center transition-colors hover:border-foreground hover:bg-surface-1 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+						onclick={openBotSigninForNew}
+						data-testid="add-bot-tile"
+					>
+						<BotIcon class="size-5 text-muted-foreground" aria-hidden="true" />
+						<span class="font-medium text-foreground">
+							{bots.length === 0
+								? 'Add your first meeting bot'
+								: 'Add another meeting bot'}
+						</span>
+						<span class="max-w-[44ch] text-xs text-muted-foreground">
+							Opens an embedded Chromium window. Sign in to Google as the
+							bot account and Johnny captures the session for future Meet
+							joins.
+						</span>
+					</button>
+					{#if accounts.some((a) => !a.bot_session.connected)}
 						<div
-							class="flex flex-col items-center justify-center gap-3 rounded-md border-2 border-dashed border-border bg-transparent px-6 py-12 text-center"
-							data-testid="add-bot-tile-disabled"
+							class="flex flex-wrap items-center justify-center gap-2 pt-3"
+							data-testid="attach-bot-row"
 						>
-							<BotIcon class="size-5 text-muted-foreground" aria-hidden="true" />
-							<span class="font-medium text-foreground">Connect a calendar first</span>
-							<span class="max-w-[40ch] text-xs text-muted-foreground">
-								A Google identity row is required before you can attach a bot session
-								to it. Connect a calendar above, then come back here.
+							<span class="text-xs text-muted-foreground">
+								Or attach a session to one of these existing rows:
 							</span>
-						</div>
-					{:else}
-						<div
-							class="flex flex-col items-center justify-center gap-3 rounded-md border-2 border-dashed border-border bg-transparent px-6 py-{bots.length === 0
-								? 12
-								: 6} text-center"
-							data-testid="add-bot-tile"
-						>
-							<BotIcon class="size-5 text-muted-foreground" aria-hidden="true" />
-							<span class="font-medium text-foreground">
-								{bots.length === 0
-									? 'Add your first meeting bot'
-									: 'Add another meeting bot'}
-							</span>
-							<span class="max-w-[44ch] text-xs text-muted-foreground">
-								Browser sign-in via noVNC is coming with the rest of this redesign.
-								Until then, generate a Playwright <code class="font-mono">storage_state.json</code>
-								with
-								<code class="font-mono">johnny.tools.seed_auth_state</code> and upload
-								it to one of the identities below.
-							</span>
-							<div class="flex flex-wrap items-center justify-center gap-2 pt-2">
-								{#each accounts.filter((a) => !a.bot_session.connected) as candidate (candidate.id)}
-									<Button
-										variant="outline"
-										size="sm"
-										onclick={() => openBotUploadFor(candidate)}
-										data-testid={`attach-bot-to-${candidate.id}`}
-									>
-										Attach to {candidate.email}
-									</Button>
-								{/each}
-							</div>
+							{#each accounts.filter((a) => !a.bot_session.connected) as candidate (candidate.id)}
+								<Button
+									variant="outline"
+									size="sm"
+									onclick={() => openBotSigninForAccount(candidate)}
+									data-testid={`attach-bot-to-${candidate.id}`}
+								>
+									{candidate.email}
+								</Button>
+							{/each}
 						</div>
 					{/if}
 				</li>
@@ -688,109 +647,18 @@
 	</section>
 </Page>
 
-<!-- Bot upload modal -->
-{#if botUploadTarget}
-	<div
-		class="fixed inset-0 z-50 flex items-end justify-end bg-background/40 backdrop-blur-sm sm:items-center sm:justify-center"
-		data-testid="bot-upload-overlay"
-	>
-		<div
-			class="m-0 flex w-full max-w-[34rem] flex-col gap-4 rounded-t-md border-t border-border bg-card p-6 shadow-lg sm:rounded-md sm:border"
-			role="dialog"
-			aria-modal="true"
-			data-testid="bot-upload-sheet"
-		>
-			<div class="flex items-start justify-between gap-3">
-				<div class="flex flex-col gap-1">
-					<h3 class="m-0 text-base font-semibold tracking-tight">
-						Upload bot session for {botUploadTarget.email}
-					</h3>
-					<p class="m-0 text-xs text-muted-foreground">
-						Paste a Playwright storage_state.json produced by the
-						<code class="font-mono">seed_auth_state</code> helper. The file is
-						written atomically to the shared volume.
-					</p>
-				</div>
-				<button
-					type="button"
-					class="rounded-md p-1 text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-					onclick={closeBotUpload}
-					aria-label="Close"
-				>
-					<XIcon class="size-4" />
-				</button>
-			</div>
-			<details
-				open
-				class="rounded-md border border-border bg-surface-1 p-3"
-				data-testid="bot-upload-cli-instructions"
-			>
-				<summary class="cursor-pointer text-xs font-medium text-foreground">
-					How to generate this file
-				</summary>
-				<div class="mt-2 flex flex-col gap-2 text-xs text-muted-foreground">
-					<p class="m-0">
-						Run the helper on your host — it opens a Chromium window, you sign in to
-						Google as the bot, and it writes the storage_state.json to a path you
-						pick.
-					</p>
-					<pre
-						class="m-0 overflow-x-auto whitespace-pre rounded-md bg-background p-3 font-mono text-[0.7rem] leading-relaxed text-foreground"><code
-							>cd backend
-uv sync --extra auth-seed
-uv run playwright install chromium
-uv run python -m johnny.tools.seed_auth_state \
-    --account-id {botUploadTarget.id} \
-    --email {botUploadTarget.email} \
-    --keep-local /tmp/storage_state.json</code
-						></pre>
-					<p class="m-0">
-						Then pick <code class="font-mono">/tmp/storage_state.json</code> in the
-						file input below. Re-run any time the cookies expire.
-					</p>
-				</div>
-			</details>
-			<form class="flex flex-col gap-3" onsubmit={submitBotUpload}>
-				<input
-					type="file"
-					accept="application/json,.json"
-					onchange={onBotUploadFileChange}
-					required
-					class={inputClass}
-					data-testid="bot-upload-file-input"
-				/>
-				{#if botUploadFile}
-					<div
-						class="flex items-center justify-between gap-3 rounded-md border border-border bg-surface-1 px-3 py-2"
-					>
-						<span
-							class="truncate font-mono text-xs text-foreground"
-							title={botUploadFile.name}>{botUploadFile.name}</span
-						>
-						<span class="font-mono text-xs text-muted-foreground">
-							{formatBytes(botUploadFile.size)}
-						</span>
-					</div>
-				{/if}
-				{#if botUploadError}
-					<Alert.Root variant="destructive">
-						<CircleAlertIcon />
-						<Alert.Description>{botUploadError}</Alert.Description>
-					</Alert.Root>
-				{/if}
-				<div class="flex items-center justify-end gap-2">
-					<Button variant="ghost" type="button" onclick={closeBotUpload}>Cancel</Button>
-					<Button
-						type="submit"
-						disabled={!botUploadFile || botUploadBusy}
-						data-testid="bot-upload-submit"
-					>
-						{botUploadBusy ? 'Uploading…' : 'Save bot session'}
-					</Button>
-				</div>
-			</form>
-		</div>
-	</div>
+<!-- Bot noVNC sign-in modal (Johnny-105). -->
+{#if botSigninContext}
+	<BotSigninModal
+		account={botSigninContext.kind === 'attach'
+			? botSigninContext.account
+			: null}
+		emailHint={null}
+		title={botSigninContext.kind === 'attach'
+			? `Replace bot session for ${botSigninContext.account.email}`
+			: null}
+		onClose={() => closeBotSignin()}
+	/>
 {/if}
 
 <!-- Disconnect account confirm -->

@@ -1,7 +1,21 @@
-"""Seed a Playwright ``storage_state.json`` for the bot account.
+"""DEPRECATED — operator-only fallback for seeding a bot storage_state.
 
-This is the one-time helper an operator runs on the host before the
-meet-worker can sign into Google as the bot. Workflow::
+.. deprecated:: Johnny-105
+
+    The supported path is now the noVNC sign-in flow in the Settings
+    page (``Add a meeting bot`` tile). That flow spawns a transient
+    ``johnny-bot-signin`` container, embeds Chromium under noVNC in the
+    user's browser, and writes the ``storage_state.json`` straight into
+    the meet-worker volume — no host-side Playwright install required.
+
+This module survives as a manual fallback for environments where the
+noVNC flow can't run (no Docker daemon reachable from the API, headless
+ops, debugging the post-signin pipeline without a real browser). It is
+no longer exercised by the UI; the transitional
+``PUT /auth/google/accounts/{id}/bot-session`` upload endpoint has
+been removed.
+
+Workflow if you do need to use it::
 
     cd backend
     uv sync --extra auth-seed                # installs Playwright on the host
@@ -24,17 +38,6 @@ no perpetual "joining".
 
 Re-run any time the cookies expire (or after a manual sign-out). The
 existing file in the volume is overwritten atomically.
-
-**Two ways to use this**:
-
-* **Operator / automation**: run the script directly — it copies the
-  resulting ``storage_state.json`` into the shared volume via
-  ``docker cp`` and the meet-worker picks it up automatically.
-* **UI path (Johnny-4ph)**: a user can also click *Connect bot session*
-  in the Settings page and upload the JSON file produced by this script
-  (``--keep-local <path>`` writes a copy outside the docker volume).
-  Both paths land at the same on-disk location so they are fully
-  interchangeable.
 """
 
 from __future__ import annotations

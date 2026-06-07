@@ -33,6 +33,7 @@
 	},
 	"dependencies": {
 		"@lucide/svelte": "^1.17.0",
+		"@novnc/novnc": "^1.5.0",
 		"bits-ui": "^2.18.1",
 		"clsx": "^2.1.1",
 		"mode-watcher": "^1.1.0",

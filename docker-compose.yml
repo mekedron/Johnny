@@ -25,6 +25,13 @@ x-backend-env: &backend-env
   # COMPOSE_PROJECT_NAME if you renamed the project.
   JOHNNY_MEET_WORKER_NETWORK: ${JOHNNY_MEET_WORKER_NETWORK:-johnny_default}
   JOHNNY_MEET_WORKER_AUTH_VOLUME: ${JOHNNY_MEET_WORKER_AUTH_VOLUME:-johnny_google_auth_state}
+  # Bot-signin container settings (Johnny-105). Same compose-project
+  # prefix rules apply: override JOHNNY_BOT_SIGNIN_PENDING_VOLUME if
+  # you renamed COMPOSE_PROJECT_NAME.
+  JOHNNY_BOT_SIGNIN_IMAGE: ${JOHNNY_BOT_SIGNIN_IMAGE:-johnny-bot-signin:latest}
+  JOHNNY_BOT_SIGNIN_NETWORK: ${JOHNNY_BOT_SIGNIN_NETWORK:-johnny_default}
+  JOHNNY_BOT_SIGNIN_PENDING_VOLUME: ${JOHNNY_BOT_SIGNIN_PENDING_VOLUME:-johnny_bot_signin_pending}
+  JOHNNY_BOT_SIGNIN_PENDING_ROOT: ${JOHNNY_BOT_SIGNIN_PENDING_ROOT:-/var/lib/johnny/bot-signin-pending}
   # Host bind-mount paths the meet-worker launcher passes to each
   # spawned container so a voice / whisper model downloaded once stays
   # readable from the host (``ls ~/.johnny/piper-models``). Setting these
@@ -140,6 +147,12 @@ services:
       # The API mounts it read-write so a setup helper can seed cookies;
       # the meet-worker mounts the same volume read-only.
       - google_auth_state:/var/lib/johnny/google-auth
+      # bot_signin_pending holds the supervisor handoff during noVNC
+      # bot sign-ins (Johnny-105). The bot-signin container writes
+      # ``{signin_id}/storage_state.json`` + ``marker.json`` here; the
+      # API reads + atomically moves the storage_state into
+      # ``google_auth_state`` once the supervisor reports success.
+      - bot_signin_pending:/var/lib/johnny/bot-signin-pending
       # Provider config seed (Johnny-d3e). The api auto-imports
       # ``/config/providers.json`` on startup so a committed export
       # (Johnny-k3z) is re-applied after a clean stack reset.
@@ -187,6 +200,10 @@ services:
       # an admin endpoint or one-time helper can refresh stored cookies
       # from inside the worker process if needed).
       - google_auth_state:/var/lib/johnny/google-auth
+      # Bot-signin handoff volume (Johnny-105). The worker's orphan
+      # sweep cleans up per-session directories left behind when a
+      # supervisor crashes mid-flow.
+      - bot_signin_pending:/var/lib/johnny/bot-signin-pending
     healthcheck:
       test:
         - "CMD"
@@ -233,8 +250,28 @@ services:
       - ${HOME}/.johnny/parakeet-models:/var/lib/johnny/parakeet-models
       - ${HOME}/.johnny/parakeet-packages:/var/lib/johnny/parakeet-packages
 
+  # Base image for the noVNC bot sign-in flow (Johnny-105). Playwright
+  # Chromium under Xvfb, with x11vnc serving the display over a
+  # websockify TCP bridge so the user's browser can attach via a noVNC
+  # canvas. The "bot-signin" profile keeps the service out of
+  # `docker compose up` — the API spawns one per sign-in via the
+  # Docker SDK using ``app.services.bot_signin_launcher``.
+  # Build with: `docker compose --profile bot-signin build bot-signin`.
+  bot-signin:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.bot-signin
+    image: johnny-bot-signin:latest
+    profiles: ["bot-signin"]
+    # Per-session containers attach the shared handoff volume so the
+    # supervisor's storage_state + marker land where the API can pick
+    # them up.
+    volumes:
+      - bot_signin_pending:/mnt/pending
+
 volumes:
   postgres_data:
   redis_data:
   worker_state:
   google_auth_state:
+  bot_signin_pending:

@@ -1,0 +1,52 @@
+# Bot sign-in container image (Johnny-105). One container per sign-in
+# session is spawned by the API process (see
+# ``app.services.bot_signin_launcher``); inside, the entrypoint brings
+# up Xvfb + x11vnc + websockify and the supervisor at
+# ``johnny.bot_signin.supervisor`` drives Playwright Chromium toward a
+# signed-in Google session.
+#
+# Build with: ``docker compose --profile bot-signin build bot-signin``.
+# The main Compose stack only *builds* the image; the launcher spawns
+# instances on demand via the Docker SDK.
+
+FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/workspace \
+    DISPLAY=:99
+
+# System A/V environment:
+#   * xvfb           — virtual X server so Chromium can render headed
+#   * x11vnc         — VNC over TCP for a headed display
+#   * x11-utils      — xdpyinfo, used by the entrypoint readiness check
+#   * websockify     — TCP-over-WebSocket bridge for noVNC
+#   * dbus-x11       — Chromium needs a session DBus to start cleanly
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        xvfb \
+        x11vnc \
+        x11-utils \
+        websockify \
+        dbus-x11 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# Pinned Playwright matches the api/meet-worker images so a storage_state
+# written here is interoperable. The base image already ships Chromium.
+RUN pip install --no-cache-dir playwright==1.49.0
+
+# Just enough of the codebase for the supervisor: the bot_signin module
+# itself, plus ``johnny.tools.seed_auth_state`` which the supervisor
+# reuses for the signed-in URL template and the wait_for_signin loop.
+COPY johnny/__init__.py ./johnny/__init__.py
+COPY johnny/tools ./johnny/tools
+COPY johnny/bot_signin ./johnny/bot_signin
+
+COPY bot-signin-entrypoint.sh /usr/local/bin/bot-signin-entrypoint.sh
+RUN chmod +x /usr/local/bin/bot-signin-entrypoint.sh
+
+EXPOSE 6080
+
+ENTRYPOINT ["/usr/local/bin/bot-signin-entrypoint.sh"]
+CMD ["python", "-m", "johnny.bot_signin.supervisor"]

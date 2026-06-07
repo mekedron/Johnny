@@ -40,6 +40,16 @@ from pathlib import Path
 
 from app.config import get_settings
 from app.db.session import session_scope
+from app.services.bot_signin import (
+    cleanup_pending,
+    delete_session,
+    list_active_session_ids,
+    load_session,
+)
+from app.services.bot_signin_launcher import (
+    BotSigninLauncher,
+    BotSigninLauncherError,
+)
 from app.services.calendar_polling import (
     DEFAULT_POLL_INTERVAL_SECONDS,
     get_poll_interval_seconds,
@@ -73,6 +83,7 @@ from app.services.transcripts import (
 HEARTBEAT_PATH = Path("/var/lib/johnny/worker/heartbeat")
 INTERVAL_SECONDS = 5
 DEFAULT_EMBEDDING_INTERVAL_SECONDS = 24 * 60 * 60  # nightly
+DEFAULT_BOT_SIGNIN_SWEEP_INTERVAL_SECONDS = 60
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +149,114 @@ def run_container_prune_pass(
     if not isinstance(launcher, DockerContainerLauncher):
         return 0
     return prune_stopped_containers(launcher, max_age_seconds=max_age_seconds)
+
+
+def run_bot_signin_sweep_pass(
+    bot_signin_launcher: BotSigninLauncher | None,
+) -> int:
+    """Stop bot-signin containers whose Redis session is gone.
+
+    Three classes of orphan get cleaned up:
+
+    * Container running, no Redis session — Redis TTL has expired (the
+      session lasted longer than its 10-minute deadline) but the
+      supervisor never reached a terminal state. We stop the container
+      so a Chromium isn't sitting in a noVNC session nobody is watching.
+    * Container exited, Redis session still present in terminal state
+      — the API's status endpoint did its job; we just need to drop the
+      container itself so it doesn't accumulate.
+    * Pending dirs orphaned from a Redis session that completed or
+      expired — drop the per-session handoff directory.
+
+    Returns the number of containers + dirs cleaned up.
+    """
+    if bot_signin_launcher is None:
+        return 0
+    cleaned = 0
+    try:
+        active = bot_signin_launcher.list_active()
+    except Exception:  # noqa: BLE001 — launcher list is best-effort
+        logger.exception("bot-signin sweep: list_active failed")
+        return 0
+
+    seen_session_ids: set[str] = set()
+    for signin_id, _name, status in active:
+        seen_session_ids.add(signin_id)
+        session = load_session(signin_id)
+        terminal_docker = status in {"exited", "dead", "removing", "created"}
+        if session is None:
+            # Redis TTL gone — kill the container regardless of state.
+            try:
+                bot_signin_launcher.stop(signin_id=signin_id)
+                cleanup_pending(signin_id)
+                cleaned += 1
+            except BotSigninLauncherError as exc:
+                logger.warning(
+                    "bot-signin sweep: stop orphan %s failed: %s",
+                    signin_id,
+                    exc,
+                )
+            continue
+        if session.status in {"signed_in", "failed", "cancelled", "expired"}:
+            # Terminal Redis state — drop the container if still around.
+            try:
+                bot_signin_launcher.stop(signin_id=signin_id)
+                cleanup_pending(signin_id)
+                cleaned += 1
+            except BotSigninLauncherError as exc:
+                logger.warning(
+                    "bot-signin sweep: stop completed %s failed: %s",
+                    signin_id,
+                    exc,
+                )
+            # Drop the Redis blob too so list_active_session_ids stays
+            # tight.
+            delete_session(signin_id)
+            continue
+        if terminal_docker:
+            # Container died unexpectedly with a pending Redis session.
+            # The /status endpoint will pick this up the next time the
+            # UI polls — leave Redis alone so the user sees the error
+            # state instead of a 404.
+            try:
+                bot_signin_launcher.stop(signin_id=signin_id)
+                cleaned += 1
+            except BotSigninLauncherError as exc:
+                logger.warning(
+                    "bot-signin sweep: stop exited %s failed: %s",
+                    signin_id,
+                    exc,
+                )
+            continue
+
+    # Drop pending dirs for Redis sessions whose container is already gone.
+    for signin_id in list_active_session_ids():
+        if signin_id in seen_session_ids:
+            continue
+        session = load_session(signin_id)
+        if session is None:
+            cleanup_pending(signin_id)
+            continue
+        if session.status in {"signed_in", "failed", "cancelled", "expired"}:
+            cleanup_pending(signin_id)
+            delete_session(signin_id)
+            cleaned += 1
+    return cleaned
+
+
+def _build_bot_signin_launcher() -> BotSigninLauncher | None:
+    """Build the bot-signin launcher; ``None`` when Docker isn't wired.
+
+    Mirrors the meet-worker launcher gating: the no-docker dev path
+    shouldn't try to spawn Chromium-laden containers.
+    """
+    if not should_use_docker_launcher():
+        return None
+    try:
+        return BotSigninLauncher()
+    except BotSigninLauncherError as exc:
+        logger.warning("bot-signin launcher unavailable: %s", exc)
+        return None
 
 
 def _build_launcher() -> ContainerLauncher:
@@ -217,6 +336,7 @@ def main() -> None:
     prune_interval = get_prune_interval_seconds()
     prune_age_seconds = get_prune_age_seconds()
     launcher = _build_launcher()
+    bot_signin_launcher = _build_bot_signin_launcher()
     _start_status_subscriber_thread(settings.redis_url)
     logger.info(
         "worker starting; database_url=%s redis_url=%s embedding_interval=%ds "
@@ -241,6 +361,7 @@ def main() -> None:
     last_scheduler_at = 0.0
     last_monitor_at = 0.0
     last_prune_at = 0.0
+    last_bot_signin_sweep_at = 0.0
     while True:
         write_heartbeat()
         now = time.time()
@@ -299,6 +420,20 @@ def main() -> None:
             except Exception:
                 logger.exception("embedding pass failed")
             last_embedding_at = now
+        if _should_run(
+            now,
+            last_bot_signin_sweep_at,
+            DEFAULT_BOT_SIGNIN_SWEEP_INTERVAL_SECONDS,
+        ):
+            try:
+                cleaned = run_bot_signin_sweep_pass(bot_signin_launcher)
+                if cleaned > 0:
+                    logger.info(
+                        "bot-signin sweep complete: %d items cleaned", cleaned
+                    )
+            except Exception:
+                logger.exception("bot-signin sweep failed")
+            last_bot_signin_sweep_at = now
         time.sleep(INTERVAL_SECONDS)
 
 

@@ -3,10 +3,10 @@
   "sessionId": "d140062f-580d-4e80-b815-4dd296a98109",
   "status": "running",
   "startedAt": "2026-06-07T12:00:21.402Z",
-  "updatedAt": "2026-06-07T12:07:48.562Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-07T12:38:18.775Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -248,8 +248,8 @@
       {
         "id": "Johnny-pia",
         "title": "Settings page redesign — multi-account Calendars + Bots with noVNC sign-in",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-ckz.12",
@@ -403,7 +403,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-pia",
+      "taskTitle": "Settings page redesign — multi-account Calendars + Bots with noVNC sign-in",
+      "taskCompleted": true,
+      "durationMs": 425050,
+      "startedAt": "2026-06-07T12:00:42.547Z",
+      "endedAt": "2026-06-07T12:07:47.597Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

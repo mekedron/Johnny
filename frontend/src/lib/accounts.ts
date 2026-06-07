@@ -8,6 +8,9 @@
  * A row may have either or both. The settings page renders it under
  * the matching section(s).
  *
+ * The bot sign-in path (noVNC) lives in `$lib/bot-signin` — the upload
+ * shim previously exposed here was removed when Johnny-105 landed.
+ *
  * All requests target `VITE_API_BASE` (default `http://localhost:8000`).
  * Server errors surface as Error messages so the UI can render them
  * inline.
@@ -102,27 +105,6 @@ export function startOAuth(): Promise<StartOAuthResponse> {
 export function disconnectAccount(id: number, force = false): Promise<void> {
 	const qs = force ? '?force=true' : '';
 	return request<void>(`/auth/google/accounts/${id}${qs}`, { method: 'DELETE' });
-}
-
-/**
- * Upload a Playwright `storage_state.json` for the bot account.
- *
- * Transitional path until the noVNC sign-in flow lands. The payload
- * must be the raw JSON bytes the CLI helper writes (cookies array +
- * optional origins). The backend validates the shape before writing
- * to the shared volume.
- */
-export function uploadBotSession(
-	accountId: number,
-	storageStateJson: string
-): Promise<Account> {
-	return request<Account>(
-		`/auth/google/accounts/${accountId}/bot-session`,
-		{
-			method: 'PUT',
-			body: storageStateJson
-		}
-	);
 }
 
 export function disconnectBotSession(accountId: number): Promise<Account> {
