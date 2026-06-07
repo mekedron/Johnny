@@ -47,6 +47,7 @@
 		{ href: '/calendar', label: 'Calendar' },
 		{ href: '/playground', label: 'Playground' },
 		{ href: '/templates', label: 'Templates' },
+		{ href: '/personalities', label: 'Personalities' },
 		{ href: '/providers', label: 'Providers' },
 		{ href: '/history', label: 'History' },
 		{ href: '/settings', label: 'Settings' }

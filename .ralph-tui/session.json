@@ -3,10 +3,10 @@
   "sessionId": "426dba43-17e8-4f93-a179-086859618e18",
   "status": "running",
   "startedAt": "2026-06-07T20:27:08.873Z",
-  "updatedAt": "2026-06-07T21:03:39.283Z",
-  "currentIteration": 1,
+  "updatedAt": "2026-06-07T21:26:06.194Z",
+  "currentIteration": 2,
   "maxIterations": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 2,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -39,8 +39,8 @@
       {
         "id": "Johnny-oly.2",
         "title": "Backend: personality data model + CRUD API + Johnny-default Alembic migration",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-oly.3",
@@ -78,6 +78,16 @@
       "durationMs": 746796,
       "startedAt": "2026-06-07T20:27:20.327Z",
       "endedAt": "2026-06-07T20:39:47.123Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "Johnny-oly.2",
+      "taskTitle": "Backend: personality data model + CRUD API + Johnny-default Alembic migration",
+      "taskCompleted": true,
+      "durationMs": 1422140,
+      "startedAt": "2026-06-07T20:39:56.085Z",
+      "endedAt": "2026-06-07T21:03:38.225Z"
     }
   ],
   "skippedTaskIds": [],
