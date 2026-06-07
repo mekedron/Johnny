@@ -36,11 +36,20 @@ ChatRole = Literal["system", "user", "assistant", "tool"]
 
 
 class ProviderKind(enum.StrEnum):
-    """Categorical role of a provider in the pipeline."""
+    """Categorical role of a provider in the pipeline.
+
+    ``STT``/``LLM``/``TTS`` are the three stages of the split pipeline.
+    ``S2S`` is a unified speech-to-speech provider (OpenAI GPT-Realtime,
+    Gemini Live) that collapses all three into one bidirectional session.
+    A session runs in EITHER split mode (uses STT+LLM+TTS) OR unified
+    mode (uses S2S) — never both at once. Which mode runs is governed by
+    the per-deployment ``pipeline_settings.pipeline_mode`` setting.
+    """
 
     STT = "stt"
     LLM = "llm"
     TTS = "tts"
+    S2S = "s2s"
 
 
 # --- Errors ---------------------------------------------------------------
@@ -250,8 +259,17 @@ class TTSProvider(_ProviderBase):
         """
 
 
-ProviderInstance = STTProvider | LLMProvider | TTSProvider
-"""Runtime union of every provider ABC."""
+ProviderInstance = _ProviderBase
+"""Runtime alias for "any provider ABC".
+
+Originally :class:`STTProvider` / :class:`LLMProvider` / :class:`TTSProvider`
+was an explicit union; Johnny-ckz.17 added :class:`S2SProvider`
+(in :mod:`app.providers.s2s_base`) and the natural ``A | B | C | D``
+declaration here would force an import cycle. The shared base class
+is the common supertype of all four, so aliasing to ``_ProviderBase``
+keeps runtime ``isinstance`` checks correct and lets the loader still
+return ``ProviderInstance`` for any concrete factory output.
+"""
 
 ProviderFactory = Callable[[ProviderConfig], ProviderInstance]
 """A callable that produces a configured provider instance.

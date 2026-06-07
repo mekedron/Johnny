@@ -99,14 +99,16 @@
 	let providerOverrides = $state<Record<ProviderKind, number | null>>({
 		stt: null,
 		llm: null,
-		tts: null
+		tts: null,
+		s2s: null
 	});
 
 	let templates = $state<Template[]>([]);
-	let providers = $state<{ stt: Provider[]; llm: Provider[]; tts: Provider[] }>({
+	let providers = $state<{ stt: Provider[]; llm: Provider[]; tts: Provider[]; s2s: Provider[] }>({
 		stt: [],
 		llm: [],
-		tts: []
+		tts: [],
+		s2s: []
 	});
 	let loadingMetadata = $state(true);
 

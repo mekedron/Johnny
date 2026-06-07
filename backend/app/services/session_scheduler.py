@@ -131,6 +131,13 @@ class LaunchContext:
     can edit one without disturbing the other.
     """
     provider_config: dict[str, Any] = field(default_factory=dict)
+    pipeline_mode: str = "split"
+    """Pipeline shape — ``split`` (STT→LLM→TTS) or ``unified`` (S2S) (Johnny-ckz.17).
+
+    Defaults to ``split`` so the existing scheduler path is unchanged.
+    The Docker launcher forwards this to the meet-worker via the
+    ``JOHNNY_PIPELINE_MODE`` env var.
+    """
 
 
 @dataclass(frozen=True)

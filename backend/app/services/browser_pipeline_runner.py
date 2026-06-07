@@ -18,6 +18,17 @@ This module is the in-process counterpart of
 closes (browser disconnect) or the caller flags shutdown via the
 ``stop_event``.
 
+Per Johnny-ckz.17, the runner consults the persisted ``pipeline_mode``
+(``split`` vs ``unified``) and dispatches to the appropriate orchestrator:
+
+* ``split`` → :class:`VoicePipeline` over the STT/LLM/TTS trio.
+* ``unified`` → :class:`UnifiedVoicePipeline` over an :class:`S2SProvider`.
+
+There is no codepath that runs the split pipeline directly without
+consulting the router. The router lives inside
+:func:`assemble_browser_pipeline` so every browser session call site is
+covered by the same dispatch.
+
 Persistence (transcripts, decisions, utterances) goes through the same
 SQLAlchemy sinks as a real meeting; the Redis event bus + WebSocket
 fan-out is shared too, so the live session view (US-032) works for
@@ -41,6 +52,7 @@ from app.providers.base import (
     TTSProvider,
     get_registry,
 )
+from app.providers.s2s_base import S2SProvider
 from johnny.voice_pipeline import (
     SPEAKING_MODES,
     SUGGEST_ONLY_MODE,
@@ -49,6 +61,8 @@ from johnny.voice_pipeline import (
     EventBus,
     PipelineConfig,
     SileroVAD,
+    UnifiedPipelineConfig,
+    UnifiedVoicePipeline,
     VADAnalyzer,
     VoicePipeline,
 )
@@ -57,6 +71,16 @@ logger = logging.getLogger(__name__)
 
 VAD_ENERGY_THRESHOLD = 0.02
 """Energy VAD threshold — copied from :mod:`johnny.meet_worker.pipeline_runner`."""
+
+SPLIT_MODE = "split"
+UNIFIED_MODE = "unified"
+SUPPORTED_PIPELINE_MODES: frozenset[str] = frozenset({SPLIT_MODE, UNIFIED_MODE})
+"""Legal values for :attr:`BrowserPipelineSpec.pipeline_mode`.
+
+Kept as plain strings so the spec stays JSON-serialisable across the
+API layer without leaking the :class:`PipelineMode` enum (which is
+SQLAlchemy-tied via the ORM model) into the pipeline package.
+"""
 
 
 class BrowserPipelineSetupError(RuntimeError):
@@ -74,6 +98,11 @@ class BrowserPipelineSpec:
     Kept as a small frozen dataclass so the test surface is one
     constructor call rather than a half-dozen kwargs sprawled across
     the codebase.
+
+    ``pipeline_mode`` defaults to ``"split"`` so every existing call
+    site (and every existing test) keeps the legacy behaviour without
+    touching them. Passing ``"unified"`` opts the session into the
+    :class:`UnifiedVoicePipeline` over an :class:`S2SProvider`.
     """
 
     session_id: str
@@ -84,6 +113,7 @@ class BrowserPipelineSpec:
     calendar_context: str
     provider_payload: Mapping[str, Mapping[str, Any]]
     event_bus: EventBus
+    pipeline_mode: str = SPLIT_MODE
 
 
 def _build_provider(
@@ -127,13 +157,37 @@ def assemble_browser_pipeline(
     spec: BrowserPipelineSpec,
     *,
     vad: VADAnalyzer | None = None,
-) -> VoicePipeline:
-    """Build a :class:`VoicePipeline` wired to ``transport``.
+) -> VoicePipeline | UnifiedVoicePipeline:
+    """Build a pipeline (split or unified) wired to ``transport``.
 
-    Returns the assembled pipeline or raises
+    Returns the assembled pipeline. Raises
     :class:`BrowserPipelineSetupError` on missing/invalid providers.
-    Tests can inject a fake VAD via the ``vad`` kwarg.
+    The return type is the union of the two pipeline classes; callers
+    that only care about a common interface (``run`` / shutdown) should
+    treat the return value polymorphically — both classes expose a
+    ``run`` coroutine.
+
+    Tests can inject a fake VAD via the ``vad`` kwarg (split mode only —
+    unified mode delegates VAD to the S2S provider).
     """
+    pipeline_mode = (spec.pipeline_mode or SPLIT_MODE).strip().lower()
+    if pipeline_mode not in SUPPORTED_PIPELINE_MODES:
+        raise BrowserPipelineSetupError(
+            f"unknown pipeline_mode={pipeline_mode!r} — expected one of "
+            f"{sorted(SUPPORTED_PIPELINE_MODES)}"
+        )
+    if pipeline_mode == UNIFIED_MODE:
+        return _assemble_unified(transport, spec)
+    return _assemble_split(transport, spec, vad=vad)
+
+
+def _assemble_split(
+    transport: BrowserAudioTransport,
+    spec: BrowserPipelineSpec,
+    *,
+    vad: VADAnalyzer | None = None,
+) -> VoicePipeline:
+    """Build the legacy split pipeline (STT → LLM → TTS)."""
     stt_entry = spec.provider_payload.get(ProviderKind.STT.value)
     llm_entry = spec.provider_payload.get(ProviderKind.LLM.value)
     tts_entry = spec.provider_payload.get(ProviderKind.TTS.value)
@@ -192,6 +246,54 @@ def assemble_browser_pipeline(
     )
 
 
+def _assemble_unified(
+    transport: BrowserAudioTransport,
+    spec: BrowserPipelineSpec,
+) -> UnifiedVoicePipeline:
+    """Build the unified S2S pipeline (Johnny-ckz.17).
+
+    Requires a single ``s2s`` entry in the provider payload. STT/LLM/TTS
+    entries are ignored in this mode (they may still be present in the
+    payload — the active rows in the DB don't know what mode they're
+    routed into).
+    """
+    s2s_entry = spec.provider_payload.get(ProviderKind.S2S.value)
+    s2s = _build_provider(ProviderKind.S2S, s2s_entry)
+    if s2s is None:
+        raise BrowserPipelineSetupError(
+            "no active S2S provider — unified mode needs an s2s row "
+            "(set pipeline_mode=split to fall back to the STT+LLM+TTS pipeline)"
+        )
+
+    config = UnifiedPipelineConfig(
+        session_id=spec.session_id,
+        bot_session_id=spec.bot_session_id,
+        instructions=spec.instructions,
+        context=spec.context,
+        calendar_context=spec.calendar_context,
+        voice_id=_resolve_voice_id(s2s_entry),
+    )
+    return UnifiedVoicePipeline(
+        transport=transport,
+        s2s=_as_s2s(s2s),
+        event_bus=spec.event_bus,
+        config=config,
+    )
+
+
+def _resolve_voice_id(entry: Mapping[str, Any] | None) -> str | None:
+    """Pull ``voice_id`` from an S2S provider's options dict if present."""
+    if not isinstance(entry, Mapping):
+        return None
+    options = entry.get("options") or {}
+    if not isinstance(options, Mapping):
+        return None
+    raw = options.get("voice_id")
+    if raw is None or raw == "":
+        return None
+    return str(raw)
+
+
 async def run_browser_pipeline(
     transport: BrowserAudioTransport,
     spec: BrowserPipelineSpec,
@@ -203,9 +305,12 @@ async def run_browser_pipeline(
     """Assemble and run the pipeline until ``stop_event`` fires.
 
     ``on_assembled`` is an optional callback that receives the assembled
-    :class:`VoicePipeline` BEFORE :meth:`run` is awaited. Callers use
-    this to capture a reference for out-of-band injection (e.g. the
-    text-input endpoint that calls ``pipeline.feed_text`` — Johnny-ckz.11).
+    pipeline BEFORE :meth:`run` is awaited. Callers use this to capture a
+    reference for out-of-band injection (e.g. the text-input endpoint
+    that calls ``pipeline.feed_text`` — Johnny-ckz.11). The callback is
+    invoked for BOTH pipeline shapes; callers that only handle the split
+    pipeline should ``isinstance`` check before reading split-only
+    attributes.
 
     All exceptions are caught and logged; the run never bubbles up so
     a transient provider error doesn't kill the API process. The
@@ -239,9 +344,10 @@ async def run_browser_pipeline(
             )
 
     logger.info(
-        "browser pipeline assembled for session=%s mode=%s",
+        "browser pipeline assembled for session=%s mode=%s pipeline_mode=%s",
         spec.session_id,
         spec.mode,
+        spec.pipeline_mode,
     )
     await transport.start()
     run_task = asyncio.create_task(pipeline.run())
@@ -255,6 +361,8 @@ async def run_browser_pipeline(
             # Caller asked us to stop — close the transport so the
             # pipeline's transcribe loop exits via the EOF sentinel.
             await transport.stop()
+            if isinstance(pipeline, UnifiedVoicePipeline):
+                await pipeline.shutdown()
         if run_task in done:
             try:
                 run_task.result()
@@ -273,12 +381,16 @@ async def run_browser_pipeline(
             stop_task.cancel()
         await transport.stop()
         transport.close_playback()
-        try:
-            await pipeline.approval_gate.close()
-        except Exception:  # noqa: BLE001 — best-effort cleanup
-            logger.exception(
-                "approval gate close failed for session=%s", spec.session_id
-            )
+        # Approval-gate cleanup only applies to the split pipeline —
+        # the unified pipeline doesn't run an approval round (the S2S
+        # provider answers immediately).
+        if isinstance(pipeline, VoicePipeline):
+            try:
+                await pipeline.approval_gate.close()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                logger.exception(
+                    "approval gate close failed for session=%s", spec.session_id
+                )
 
 
 # --- Type hints (mirror of pipeline_runner) -------------------------------
@@ -296,9 +408,16 @@ def _as_tts_or_none(provider: Any) -> TTSProvider | None:
     return cast("TTSProvider | None", provider)
 
 
+def _as_s2s(provider: Any) -> S2SProvider:
+    return cast(S2SProvider, provider)
+
+
 __all__ = [
     "BrowserPipelineSetupError",
     "BrowserPipelineSpec",
+    "SPLIT_MODE",
+    "SUPPORTED_PIPELINE_MODES",
+    "UNIFIED_MODE",
     "assemble_browser_pipeline",
     "run_browser_pipeline",
 ]

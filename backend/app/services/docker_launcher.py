@@ -639,6 +639,10 @@ class DockerContainerLauncher(ContainerLauncher):
             "JOHNNY_CONTEXT": ctx.context or "",
             "JOHNNY_CALENDAR_CONTEXT": ctx.calendar_context or "",
             "JOHNNY_PROVIDER_CONFIG": json.dumps(ctx.provider_config or {}),
+            # Johnny-ckz.17: split (STT+LLM+TTS) vs unified (S2S) toggle.
+            # Defaults to "split" via LaunchContext so existing deploys
+            # keep the legacy pipeline shape with zero behaviour change.
+            "JOHNNY_PIPELINE_MODE": ctx.pipeline_mode or "split",
         }
         # JOHNNY_REDIS_URL lets the meet-worker connect its event bus to
         # the same Redis the API/worker process uses. Without it the

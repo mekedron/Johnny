@@ -62,6 +62,18 @@ from app.providers.parakeet_stt import ParakeetSTT
 from app.providers.parakeet_stt import register as _register_parakeet_stt
 from app.providers.piper_tts import PiperTTS
 from app.providers.piper_tts import register as _register_piper_tts
+from app.providers.s2s_base import (
+    S2SAudioFrame,
+    S2SError,
+    S2SEvent,
+    S2SProvider,
+    S2SResponseCompleted,
+    S2SResponseStarted,
+    S2SRole,
+    S2SSession,
+    S2SToolCall,
+    S2STranscript,
+)
 from app.providers.schema import (
     FieldDef,
     FieldGroup,
@@ -69,6 +81,8 @@ from app.providers.schema import (
     FieldType,
     ProviderSchema,
 )
+from app.providers.stub_s2s import StubS2S, StubS2SSession
+from app.providers.stub_s2s import register as _register_stub_s2s
 from app.providers.schema_validation import (
     FieldValidationError,
     split_values,
@@ -95,6 +109,7 @@ _register_parakeet_stt(replace=True)
 _register_deepgram_stt(replace=True)
 _register_openai_realtime_stt(replace=True)
 _register_elevenlabs_stt(replace=True)
+_register_stub_s2s(replace=True)
 
 __all__ = [
     "AnthropicLLM",
@@ -127,8 +142,20 @@ __all__ = [
     "ProviderKind",
     "ProviderRegistry",
     "ProviderSchema",
+    "S2SAudioFrame",
+    "S2SError",
+    "S2SEvent",
+    "S2SProvider",
+    "S2SResponseCompleted",
+    "S2SResponseStarted",
+    "S2SRole",
+    "S2SSession",
+    "S2SToolCall",
+    "S2STranscript",
     "STTError",
     "STTProvider",
+    "StubS2S",
+    "StubS2SSession",
     "TTSError",
     "TTSProvider",
     "ToolCall",

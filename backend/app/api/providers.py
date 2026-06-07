@@ -27,7 +27,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_crypto, get_session
-from app.db.models import ProviderCredential
+from app.db.models import PipelineMode, ProviderCredential
+from app.services.provider_payload import resolve_pipeline_mode, upsert_pipeline_mode
 from app.providers.base import (
     PCM_CHANNELS,
     PCM_SAMPLE_RATE_HZ,
@@ -131,6 +132,7 @@ class ProviderListResponse(BaseModel):
     stt: list[ProviderRead]
     llm: list[ProviderRead]
     tts: list[ProviderRead]
+    s2s: list[ProviderRead] = Field(default_factory=list)
 
 
 class TestResult(BaseModel):
@@ -191,6 +193,7 @@ class SchemaListResponse(BaseModel):
     stt: list[dict[str, Any]]
     llm: list[dict[str, Any]]
     tts: list[dict[str, Any]]
+    s2s: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class VoiceRead(BaseModel):
@@ -255,6 +258,31 @@ class CartesiaVoiceListResponse(BaseModel):
     """Response payload for ``GET /providers/{id}/cartesia/voices``."""
 
     voices: list[CartesiaVoiceRead]
+
+
+class PipelineSettingsRead(BaseModel):
+    """Current per-deployment pipeline settings (Johnny-ckz.17).
+
+    ``pipeline_mode`` toggles between the legacy three-stage split
+    pipeline and the unified S2S pipeline (OpenAI GPT-Realtime, Gemini
+    Live, etc.). ``s2s_provider`` is the canonical provider name of the
+    active ``kind='s2s'`` row, surfaced here so the frontend can show
+    which adapter the unified pipeline would dispatch to without
+    re-fetching the providers list. ``None`` when no active S2S row
+    exists (unified mode would fail to assemble in that state — the
+    UI uses this to badge the toggle as "configure an S2S provider").
+    """
+
+    pipeline_mode: PipelineMode
+    s2s_provider: str | None = None
+
+
+class PipelineSettingsUpdate(BaseModel):
+    """Patch payload for the pipeline settings — currently the mode only."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pipeline_mode: PipelineMode
 
 
 class PlaySampleRequest(BaseModel):
@@ -336,8 +364,14 @@ def _all_schemas() -> dict[ProviderKind, list[ProviderSchema]]:
         ProviderKind.STT: [],
         ProviderKind.LLM: [],
         ProviderKind.TTS: [],
+        ProviderKind.S2S: [],
     }
-    for kind in (ProviderKind.STT, ProviderKind.LLM, ProviderKind.TTS):
+    for kind in (
+        ProviderKind.STT,
+        ProviderKind.LLM,
+        ProviderKind.TTS,
+        ProviderKind.S2S,
+    ):
         for provider_name in registry.names(kind):
             schema = _schema_for(kind, provider_name)
             if schema is not None:
@@ -474,6 +508,52 @@ def list_stt_catalog() -> SttCatalogResponse:
     )
 
 
+@router.get("/pipeline", response_model=PipelineSettingsRead)
+def get_pipeline_settings(session: SessionDep) -> PipelineSettingsRead:
+    """Return the current per-deployment pipeline settings (Johnny-ckz.17).
+
+    The frontend uses this on the /providers page to render the
+    Split vs Unified toggle. Falls back to ``split`` when no settings
+    row exists so a pre-migration deployment doesn't 500.
+    """
+    mode = resolve_pipeline_mode(session)
+    s2s_row = session.scalars(
+        select(ProviderCredential).where(
+            ProviderCredential.kind == ProviderKind.S2S,
+            ProviderCredential.is_active.is_(True),
+        )
+    ).first()
+    return PipelineSettingsRead(
+        pipeline_mode=mode,
+        s2s_provider=s2s_row.provider_name if s2s_row is not None else None,
+    )
+
+
+@router.put("/pipeline", response_model=PipelineSettingsRead)
+def update_pipeline_settings(
+    payload: PipelineSettingsUpdate,
+    session: SessionDep,
+) -> PipelineSettingsRead:
+    """Update the pipeline mode (Johnny-ckz.17).
+
+    Persists to the singleton ``pipeline_settings`` row. The next
+    session start picks the new mode up; in-flight sessions keep
+    running whatever shape they were assembled with.
+    """
+    upsert_pipeline_mode(session, payload.pipeline_mode)
+    session.commit()
+    s2s_row = session.scalars(
+        select(ProviderCredential).where(
+            ProviderCredential.kind == ProviderKind.S2S,
+            ProviderCredential.is_active.is_(True),
+        )
+    ).first()
+    return PipelineSettingsRead(
+        pipeline_mode=payload.pipeline_mode,
+        s2s_provider=s2s_row.provider_name if s2s_row is not None else None,
+    )
+
+
 @router.get("/schemas", response_model=SchemaListResponse)
 def list_schemas() -> SchemaListResponse:
     """Return field schemas for every registered provider, grouped by kind.
@@ -488,6 +568,7 @@ def list_schemas() -> SchemaListResponse:
         stt=[s.to_dict() for s in schemas[ProviderKind.STT]],
         llm=[s.to_dict() for s in schemas[ProviderKind.LLM]],
         tts=[s.to_dict() for s in schemas[ProviderKind.TTS]],
+        s2s=[s.to_dict() for s in schemas[ProviderKind.S2S]],
     )
 
 
@@ -505,6 +586,7 @@ def list_providers(session: SessionDep, crypto: CryptoDep) -> ProviderListRespon
         ProviderKind.STT: [],
         ProviderKind.LLM: [],
         ProviderKind.TTS: [],
+        ProviderKind.S2S: [],
     }
     for row in rows:
         grouped[row.kind].append(_row_to_read(crypto, row))
@@ -512,6 +594,7 @@ def list_providers(session: SessionDep, crypto: CryptoDep) -> ProviderListRespon
         stt=grouped[ProviderKind.STT],
         llm=grouped[ProviderKind.LLM],
         tts=grouped[ProviderKind.TTS],
+        s2s=grouped[ProviderKind.S2S],
     )
 
 

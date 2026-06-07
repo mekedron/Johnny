@@ -87,13 +87,15 @@
 	const KIND_SHORT_LABEL: Record<ProviderKind, string> = {
 		stt: 'STT',
 		llm: 'LLM',
-		tts: 'TTS'
+		tts: 'TTS',
+		s2s: 'S2S'
 	};
 
 	const KIND_DESCRIPTION: Record<ProviderKind, string> = {
 		stt: 'Speech-to-text — transcribes meeting audio',
 		llm: 'Language model — drafts decisions and replies',
-		tts: 'Text-to-speech — voices Johnny in the meeting'
+		tts: 'Text-to-speech — voices Johnny in the meeting',
+		s2s: 'Speech-to-speech — unified realtime provider (OpenAI Realtime, Gemini Live)'
 	};
 
 	const MIC_RECORDING_MS = 5000;
@@ -966,7 +968,7 @@
 	});
 
 	const groupedRows = $derived.by(() => {
-		const groups: Record<ProviderKind, Provider[]> = { stt: [], llm: [], tts: [] };
+		const groups: Record<ProviderKind, Provider[]> = { stt: [], llm: [], tts: [], s2s: [] };
 		for (const row of providersList) groups[row.kind].push(row);
 		return groups;
 	});

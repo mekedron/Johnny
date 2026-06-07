@@ -101,4 +101,5 @@ def test_enums_have_expected_members() -> None:
         "rejected",
         "suggested",
     }
-    assert {e.value for e in ProviderKind} == {"stt", "llm", "tts"}
+    # Johnny-ckz.17 added the ``s2s`` kind for unified speech-to-speech providers.
+    assert {e.value for e in ProviderKind} == {"stt", "llm", "tts", "s2s"}

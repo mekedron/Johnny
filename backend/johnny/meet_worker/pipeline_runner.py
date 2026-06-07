@@ -47,6 +47,7 @@ from app.providers.base import (
     TTSProvider,
     get_registry,
 )
+from app.providers.s2s_base import S2SProvider
 from johnny.meet_worker.audio_bridge import MeetAudioBridge
 from johnny.meet_worker.log_stages import (
     STAGE_AUDIO_BRIDGE,
@@ -63,6 +64,8 @@ from johnny.voice_pipeline import (
     LocalAudioTransport,
     PipelineConfig,
     SileroVAD,
+    UnifiedPipelineConfig,
+    UnifiedVoicePipeline,
     VADAnalyzer,
     VoicePipeline,
 )
@@ -80,6 +83,19 @@ SESSION_ID_ENV = "JOHNNY_SESSION_ID"
 REDIS_URL_ENV = "JOHNNY_REDIS_URL"
 API_BASE_URL_ENV = "JOHNNY_API_BASE_URL"
 CONTEXT_TOKEN_BUDGET_ENV = "JOHNNY_CONTEXT_TOKEN_BUDGET"
+PIPELINE_MODE_ENV = "JOHNNY_PIPELINE_MODE"
+"""Per-deployment pipeline shape (Johnny-ckz.17).
+
+Read at meeting start; ``split`` (default) runs the existing
+STT → LLM → TTS pipeline; ``unified`` runs the new
+:class:`UnifiedVoicePipeline` driven by an :class:`S2SProvider`. Set by
+the launcher (:mod:`app.services.docker_launcher`) from the singleton
+``pipeline_settings`` table so the meet-worker stays SQLAlchemy-free.
+"""
+
+SPLIT_MODE = "split"
+UNIFIED_MODE = "unified"
+SUPPORTED_PIPELINE_MODES: frozenset[str] = frozenset({SPLIT_MODE, UNIFIED_MODE})
 
 # Fallback to EnergyVAD when SileroVAD's heavy onnx model isn't loadable
 # (e.g. file missing, torch absent in environment). EnergyVAD is crude
@@ -173,21 +189,34 @@ async def build_and_run_pipeline(
     stop_event: asyncio.Event,
     env: dict[str, str] | None = None,
 ) -> None:
-    """Assemble the VoicePipeline against ``bridge`` and run it.
+    """Assemble the VoicePipeline (split or unified) against ``bridge`` and run it.
 
     Returns when ``stop_event`` fires or the pipeline exits on its own
     (capture stream EOF). All errors are caught and logged with
     ``stage=audio_bridge`` so a provider misconfig never kicks the bot
     out of the meeting.
+
+    Per Johnny-ckz.17, the function consults ``JOHNNY_PIPELINE_MODE``
+    and dispatches to either the legacy :class:`VoicePipeline` (split)
+    or the new :class:`UnifiedVoicePipeline` (unified S2S).
     """
     src = dict(env if env is not None else os.environ)
+    pipeline_mode = _resolve_pipeline_mode(src, session_id=session_id)
     try:
-        pipeline = await _assemble_pipeline(
-            bridge,
-            event_bus=event_bus,
-            session_id=session_id,
-            env=src,
-        )
+        if pipeline_mode == UNIFIED_MODE:
+            pipeline = await _assemble_unified_pipeline(
+                bridge,
+                event_bus=event_bus,
+                session_id=session_id,
+                env=src,
+            )
+        else:
+            pipeline = await _assemble_pipeline(
+                bridge,
+                event_bus=event_bus,
+                session_id=session_id,
+                env=src,
+            )
     except PipelineSetupError as exc:
         log_stage_error(
             STAGE_AUDIO_BRIDGE, session_id=session_id, error=exc
@@ -202,6 +231,7 @@ async def build_and_run_pipeline(
     log_stage(
         STAGE_AUDIO_BRIDGE,
         session_id=session_id,
+        pipeline_mode=pipeline_mode,
         msg="voice pipeline assembled; starting run loop",
     )
 
@@ -218,6 +248,8 @@ async def build_and_run_pipeline(
                 session_id=session_id,
                 msg="pipeline shutdown requested",
             )
+            if isinstance(pipeline, UnifiedVoicePipeline):
+                await pipeline.shutdown()
         if run_task in done:
             try:
                 run_task.result()
@@ -242,12 +274,112 @@ async def build_and_run_pipeline(
                 pass
         if not stop_task.done():
             stop_task.cancel()
-        try:
-            await pipeline.approval_gate.close()
-        except Exception:  # noqa: BLE001 — best-effort cleanup
-            logger.exception(
-                "approval gate close failed for session=%s", session_id
-            )
+        # Approval-gate cleanup applies to the split pipeline only —
+        # the unified S2S provider answers immediately so there is no
+        # approval round.
+        if isinstance(pipeline, VoicePipeline):
+            try:
+                await pipeline.approval_gate.close()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                logger.exception(
+                    "approval gate close failed for session=%s", session_id
+                )
+
+
+def _resolve_pipeline_mode(
+    env: dict[str, str], *, session_id: str
+) -> str:
+    """Read ``JOHNNY_PIPELINE_MODE`` defaulting to ``split``.
+
+    Unknown values log a warning and fall back to ``split`` so a typo
+    in the launcher's env doesn't take the bot out of the meeting.
+    """
+    raw = (env.get(PIPELINE_MODE_ENV, "") or SPLIT_MODE).strip().lower()
+    if raw not in SUPPORTED_PIPELINE_MODES:
+        log_stage(
+            STAGE_AUDIO_BRIDGE,
+            session_id=session_id,
+            level=logging.WARNING,
+            msg=(
+                f"unknown {PIPELINE_MODE_ENV}={raw!r}; "
+                f"falling back to {SPLIT_MODE}"
+            ),
+        )
+        return SPLIT_MODE
+    return raw
+
+
+async def _assemble_unified_pipeline(
+    bridge: MeetAudioBridge,
+    *,
+    event_bus: EventBus,
+    session_id: str,
+    env: dict[str, str],
+) -> UnifiedVoicePipeline:
+    """Build the unified S2S pipeline or raise :class:`PipelineSetupError`."""
+    payload = _parse_provider_payload(env)
+    if not payload:
+        raise PipelineSetupError(
+            "JOHNNY_PROVIDER_CONFIG is empty — no providers configured "
+            "(check the API has provider_credentials rows + FERNET_KEY)"
+        )
+
+    s2s_entry = payload.get(ProviderKind.S2S.value)
+    log_stage(
+        STAGE_AUDIO_BRIDGE,
+        session_id=session_id,
+        s2s=(s2s_entry or {}).get("provider_name") if s2s_entry else "missing",
+        msg="resolving S2S provider for unified pipeline",
+    )
+
+    s2s = _build_provider(ProviderKind.S2S, s2s_entry or {})
+    if s2s is None:
+        raise PipelineSetupError(
+            "no active S2S provider — unified mode needs an active "
+            "kind='s2s' row (or set pipeline_mode=split)"
+        )
+
+    instructions = env.get(INSTRUCTIONS_ENV, "")
+    context = env.get(CONTEXT_ENV, "")
+    calendar_context = env.get(CALENDAR_CONTEXT_ENV, "")
+    bot_session_id = _resolve_bot_session_id(env, session_id=session_id)
+    voice_id = _resolve_unified_voice_id(s2s_entry or {})
+
+    config = UnifiedPipelineConfig(
+        session_id=session_id,
+        bot_session_id=bot_session_id,
+        instructions=instructions,
+        context=context,
+        calendar_context=calendar_context,
+        voice_id=voice_id,
+    )
+
+    transport = LocalAudioTransport(bridge)
+    return UnifiedVoicePipeline(
+        transport=transport,
+        s2s=_as_s2s(s2s),
+        event_bus=event_bus,
+        config=config,
+    )
+
+
+def _resolve_unified_voice_id(entry: dict[str, Any]) -> str | None:
+    """Pull ``voice_id`` from the S2S row's options dict (if set)."""
+    options = entry.get("options") or {}
+    if not isinstance(options, dict):
+        return None
+    raw = options.get("voice_id")
+    if raw is None or raw == "":
+        return None
+    return str(raw)
+
+
+def _as_s2s(provider: Any) -> S2SProvider:
+    if not isinstance(provider, S2SProvider):
+        raise PipelineSetupError(
+            f"resolved S2S provider is not an S2SProvider: {type(provider).__name__}"
+        )
+    return provider
 
 
 async def _assemble_pipeline(
@@ -563,9 +695,13 @@ __all__ = [
     "CONTEXT_TOKEN_BUDGET_ENV",
     "INSTRUCTIONS_ENV",
     "MODE_ENV",
+    "PIPELINE_MODE_ENV",
     "PROVIDER_CONFIG_ENV",
     "REDIS_URL_ENV",
     "SESSION_ID_ENV",
+    "SPLIT_MODE",
+    "SUPPORTED_PIPELINE_MODES",
+    "UNIFIED_MODE",
     "PipelineSetupError",
     "build_and_run_pipeline",
 ]

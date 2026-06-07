@@ -290,7 +290,9 @@ def test_list_empty_returns_three_buckets(client: TestClient) -> None:
     resp = client.get("/providers")
     assert resp.status_code == 200
     data = resp.json()
-    assert data == {"stt": [], "llm": [], "tts": []}
+    # Johnny-ckz.17 added the ``s2s`` kind alongside stt/llm/tts; the
+    # legacy buckets must still be present + empty.
+    assert data == {"stt": [], "llm": [], "tts": [], "s2s": []}
 
 
 def test_list_groups_by_kind(client: TestClient) -> None:
