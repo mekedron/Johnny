@@ -191,6 +191,20 @@ Sidecar management:
 
 Health checks: `curl http://localhost:8765/health` (MLX) / `curl http://localhost:8766/health` (CoreML) — both return `{"ready": true, "model_id": "..."}` once loaded.
 
+## Local TTS providers
+
+Johnny ships three local text-to-speech providers — **Piper**, **KittenTTS**, and **Kokoro** — and each exposes a **Runtime** picker (Settings → Providers → *{provider}* → Runtime) that decides *where* synthesis runs without changing the voice. TTS pays its cost on **every** conversation turn (unlike STT, which is pre-loaded), so the runtime is the single biggest lever on how fast Johnny starts speaking. Every provider has an in-container default that needs no host setup, plus optional host **sidecars** for GPU / isolation.
+
+| Provider | Runtimes | Warm time-to-first-audio | Voices / languages | Pick it for |
+| --- | --- | --- | --- | --- |
+| **Piper** | `subprocess`, `persistent-subprocess` (default win), `http-sidecar` | **~40 ms** persistent · ~90 ms sidecar · ~930 ms subprocess (cold each turn) | Hundreds, many languages; per-voice install | The all-local default — fastest warm TTFA, zero setup |
+| **KittenTTS** | `in-container`, `http-sidecar` | ~1.8 s sidecar (atomic synth)¹ | 8 English voices, bundled; 24 kHz | Smallest footprint (<25 MB) |
+| **Kokoro** | `in-container`, `mlx-sidecar`, `http-sidecar` | ~425 ms http-sidecar warm¹ | 41 voices / 9 languages, bundled; 24 kHz | Multilingual + cleaner prosody |
+
+¹ Measured on an M-series Mac, 67-char sample, median of 3. In-container KittenTTS/Kokoro need their library baked into the api image (the stock image omits both — they surface a clear "library not importable" error otherwise); their sidecars produce real audio out of the box once started. Full cold/warm numbers, install complexity, memory footprint, and a one-liner per cell are in the comparison table in **[docs/TTS_RUNTIMES.md](docs/TTS_RUNTIMES.md)**.
+
+**For the long form — the runtime-picker pattern, the full comparison table with measured cold/warm latency, sidecar lifecycle, and troubleshooting — see [docs/TTS_RUNTIMES.md](docs/TTS_RUNTIMES.md).** The per-provider deep-dives below cover each provider's sidecar wire protocol and management commands.
+
 ## Local Piper TTS runtimes
 
 The Local Piper TTS provider supports three runtimes selectable from the Providers page (Settings → Providers → Local Piper → Runtime). TTS pays its cost on **every** conversation turn (unlike STT, which is pre-loaded), so the runtime choice directly drives how fast Johnny starts speaking.

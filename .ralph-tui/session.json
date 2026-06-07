@@ -3,10 +3,10 @@
   "sessionId": "bfd5986f-72a0-472e-b80f-eceb73c7b975",
   "status": "running",
   "startedAt": "2026-06-07T16:33:40.626Z",
-  "updatedAt": "2026-06-07T19:57:26.523Z",
-  "currentIteration": 6,
+  "updatedAt": "2026-06-07T20:11:33.462Z",
+  "currentIteration": 7,
   "maxIterations": 0,
-  "tasksCompleted": 6,
+  "tasksCompleted": 7,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -39,8 +39,8 @@
       {
         "id": "Johnny-1ge.2",
         "title": "New TTS provider: KittenTTS with 3-runtime picker (in-container / persistent / sidecar)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-1ge.3",
@@ -110,6 +110,16 @@
       "durationMs": 2553692,
       "startedAt": "2026-06-07T18:56:11.571Z",
       "endedAt": "2026-06-07T19:38:45.263Z"
+    },
+    {
+      "iteration": 7,
+      "status": "completed",
+      "taskId": "Johnny-1ge.2",
+      "taskTitle": "New TTS provider: KittenTTS with 3-runtime picker (in-container / persistent / sidecar)",
+      "taskCompleted": true,
+      "durationMs": 1113446,
+      "startedAt": "2026-06-07T19:38:52.279Z",
+      "endedAt": "2026-06-07T19:57:25.725Z"
     }
   ],
   "skippedTaskIds": [],

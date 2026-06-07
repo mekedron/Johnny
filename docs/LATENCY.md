@@ -27,6 +27,17 @@ roughly 200 ms, with a long tail past 500 ms reading as "they're
 thinking". Aim under 500 ms and the bot feels alive; over 1 s and it
 feels broken.
 
+**Measured TTS contribution (updated after the Johnny-1ge runtime epic).**
+The TTS first-byte component of the local budget is now ~40 ms warm with
+the **Piper `persistent-subprocess`** runtime (was ~200–400 ms cold spawn
+*every* turn before the runtime split). So on the all-local stack, TTS is
+no longer a dominant cost — STT and LLM first-token now own the budget.
+Per-runtime measured warm numbers: Piper persistent ~40 ms · Piper
+http-sidecar ~90 ms · Kokoro http-sidecar ~425 ms · KittenTTS http-sidecar
+~1.8 s (atomic synth). Full methodology + cold numbers + the other
+providers/runtimes live in
+[TTS_RUNTIMES.md](TTS_RUNTIMES.md#3-comparison-table).
+
 ## Latency map — the stages we measure
 
 Each turn passes through these stages. The total is the only number
@@ -42,8 +53,10 @@ STT first-partial  ──┤
 STT final          ──┤  Whisper batch: 100-400 ms CPU, 30-100 ms GPU
 LLM first-token    ──┤  Router LLM. Hot path.
 LLM total          ──┤  Answer LLM. Hot for spoken answer.
-TTS first-byte     ──┤  Piper: ~200-400 ms cold spawn + ~93 ms chunk
-                     │  buffer at 4096 bytes / 22050 Hz.
+TTS first-byte     ──┤  Local default (Piper persistent): ~40 ms warm
+                     │  (was ~200-400 ms cold spawn EVERY turn before the
+                     │  runtime split shipped). + ~93 ms chunk buffer at
+                     │  4096 bytes / 22050 Hz. See docs/TTS_RUNTIMES.md.
 First audio frame  ──┘  to transport
 ```
 
@@ -92,9 +105,28 @@ floor.
 On the **all-local** stack on a Mac M-series with 16 GB RAM, measured
 informally during this work:
 
-- **Piper spawn-per-utterance** is consistently the largest single
-  cost — 200–400 ms of ONNX startup before any synthesis happens.
-  This dominates and is the next thing to fix (Johnny-ckz.8.piper).
+- **Piper spawn-per-utterance** *used to be* the largest single cost —
+  200–400 ms of ONNX startup before any synthesis, paid every turn.
+  The **TTS runtime split** (the Johnny-1ge epic) fixed this: the
+  `persistent-subprocess` runtime keeps the voice's ONNX session warm
+  in-process, so the second and later turns return first audio in
+  ~40 ms. The old per-turn cold spawn now only happens on the
+  `subprocess` runtime (kept as a debug baseline). Measured local-TTS
+  first-byte by runtime, on an M-series Mac (16 GB), 67-char sample
+  phrase, median of 3, read from the `X-TTS-TTFA-Ms` header / the
+  Play sample badge / the `*.synth: ... ttfa_ms=` log line:
+
+  | Provider · runtime | TTFA cold | TTFA warm |
+  | --- | --- | --- |
+  | Piper · `subprocess` | ~930 ms | ~930 ms (no warm state) |
+  | Piper · `persistent-subprocess` | ~930 ms (incl. ~700 ms load) | **~40 ms** |
+  | Piper · `http-sidecar` | ~90 ms + first-load | ~90 ms |
+  | Kokoro · `http-sidecar` | ~1.7 s | ~425 ms |
+  | KittenTTS · `http-sidecar` | ~1.8 s | ~1.8 s (atomic synth) |
+
+  Full table (footprint, install complexity, when-to-pick, the
+  in-container cells) is in
+  [TTS_RUNTIMES.md](TTS_RUNTIMES.md#3-comparison-table).
 - **Ollama first-token** on Qwen 8B Q4 is ~200–400 ms warm; on a 35B
   Q4_K_M model it climbs to 1.5–3 s, and that's the entire user-felt
   budget gone before TTS has a chance.
@@ -119,11 +151,14 @@ patterns in `.ralph-tui/progress.md`).
 
 ## Optimization candidates — in priority order
 
-1. **Persistent piper process** — biggest single win for the local
-   stack. The piper subprocess spawn + ONNX load is ~200–400 ms
-   today; a long-lived process eliminates it entirely. Tracked
-   separately because correctly managing a long-lived subprocess
-   (crashes, voice swaps, graceful shutdown) is its own task.
+1. **Persistent piper process** — ✅ **SHIPPED** (Johnny-1ge epic). This
+   was the biggest single win for the local stack and it landed: the
+   `persistent-subprocess` runtime keeps the voice warm and drops
+   per-turn TTFA from ~200–400 ms cold spawn to ~40 ms warm. Because
+   piper-tts 1.x has no streaming CLI, the warm path is an in-process
+   `PiperVoice` cache rather than a literal long-lived child process —
+   same net effect. Pick it in Settings → Providers → Local Piper →
+   Runtime. See [TTS_RUNTIMES.md](TTS_RUNTIMES.md).
 2. **Smaller piper chunk_bytes** — already documented in the in-UI
    tip. At 22050 Hz the default 4096 bytes is ~93 ms of head-of-line
    delay; 1024 cuts it to ~23 ms at the cost of more syscalls.

@@ -230,6 +230,26 @@ tests. **Sidecar gotcha:** a direct GitHub-release-wheel dependency
 the sidecar `pyproject.toml` sets `[tool.hatch.metadata] allow-direct-references
 = true`.
 
+### Measuring every TTS (provider × runtime) latency without mutating the DB
+To produce real measured numbers for the docs (Johnny-1ge.5): the `/play_sample`
+endpoints stamp `X-TTS-TTFA-Ms` / `-Total-Ms` / `-Audible` / `-Peak` /
+`-Audio-Bytes` headers — the SAME values the UI Play sample badge shows (verified
+in-browser), so a curl reading headers == the badge. Two endpoints cover every
+cell: `POST /providers/{id}/play_sample {"runtime":"<rt>"}` exercises a *saved*
+row's other runtimes via the override (no re-save), and
+`POST /providers/preview/play_sample {kind,provider_name,values:{runtime,voice_id,
+sidecar_url}}` measures an *unsaved* provider (e.g. Kokoro had no saved row).
+`GET /sidecars/health` first to see which sidecars are live. Take the median of
+≥3 reps; run a streaming runtime twice to separate cold (incl. model load) from
+warm. **TTFA semantics differ:** only Piper `persistent-subprocess` streams the
+first chunk early (TTFA ⟂ phrase length); `subprocess`, every sidecar, and atomic
+`generate()` models return the whole PCM first, so TTFA≈total≈full synth of the
+sample. The structured `app.providers.<p>.synth: runtime=... ttfa_ms=... total_ms=`
+INFO line in `docker compose logs api` is the source of truth (a failed
+in-container synth logs `ttfa_ms=-1 total_ms=0` = no audio). In-container
+KittenTTS/Kokoro 502 with "library not importable" unless the wheel/torch is baked
+into the api image — their sidecars produce real audio once started.
+
 ---
 
 ## 2026-06-07 - Johnny-1ge.1 (Piper TTS runtime picker)
@@ -708,4 +728,68 @@ the sidecar `pyproject.toml` sets `[tool.hatch.metadata] allow-direct-references
     `list_voices()` picker, and `getattr`-based runtime/header plumbing from
     earlier epic tasks (.1/.6/.7/.8) absorbed it. The only api touch was one
     `_known_sidecars()` entry for the health badge.
+---
+
+## 2026-06-07 - Johnny-1ge.5 (Docs pass for the TTS runtime epic)
+- The closing doc pass for the epic: one long-form page covering all local TTS
+  runtimes with REAL measured latency, a README overview that points to it, and
+  a LATENCY.md refresh now that persistent-piper shipped.
+- Files changed:
+  - `docs/TTS_RUNTIMES.md` (new) — the single page: (1) the runtime-picker
+    pattern explained once (in-container / in-container-baseline / sidecar) with
+    `parakeet_stt.py` named as the canonical impl; (2) per-provider guide for
+    Piper / KittenTTS / Kokoro (runtimes, voices, what changes on switch); (3)
+    the measured comparison table (provider×runtime, cold+warm TTFA, audible+peak,
+    quality/lang/rate, install complexity, loaded footprint, when-to-pick); (4)
+    sidecar lifecycle (start scripts, `/health` + `/sidecars/health` curls, the
+    structured-log source-of-truth section with verbatim `*.synth:` lines); (5)
+    troubleshooting. Plus the chrome-devtools-MCP browser-validation note up top.
+  - `README.md` — new "## Local TTS providers" overview section (concise
+    cross-provider table + a pointer to docs/TTS_RUNTIMES.md) inserted right
+    before the existing per-provider deep-dives, mirroring the Parakeet STT
+    section's shape.
+  - `docs/LATENCY.md` — latency-map TTS line, Bottlenecks Piper bullet (now a
+    measured runtime table + "used to be"), Optimization-candidate #1 marked
+    ✅ SHIPPED, and a "Measured TTS contribution" note under the targets table.
+- Task D (rewrite the `piper_tts.py:612` "Persistent piper process is the next
+  big win" tip) was ALREADY done by Johnny-1ge.1 — the tip is now
+  "Runtime: pick Persistent for real meetings" (piper_tts.py:832). Verified the
+  only surviving "next big win" strings are in the bead/PRD, not the source tip.
+- Verified (chrome-devtools, real browser): /providers → Local Piper modal shows
+  the rewritten runtime tip live; Play sample badge = "Synthesis OK — playing
+  sample (runtime: persistent-subprocess, TTFA 41 ms)", matching the ~40 ms
+  endpoint measurement. Screenshot in `.validation/Johnny-1ge.5/`.
+- **Measured matrix (M-series Mac, 16 GB, 67-char sample, median of 3, via
+  `/play_sample` + `/preview/play_sample` X-TTS-* headers):** Piper subprocess
+  ~930 ms (cold every call) · Piper persistent warm ~40 ms (cold ~930 incl
+  ~700 ms load) · Piper http-sidecar ~90 ms · Kokoro http-sidecar ~425 ms warm
+  (~1.7 s cold) · KittenTTS http-sidecar ~1.8 s (atomic synth, ~7.7 s of audio).
+  Env-gap cells (honest in the doc): in-container KittenTTS + Kokoro 502
+  "library not importable" (wheel/torch not baked into the stock api image);
+  Kokoro mlx-sidecar reachable but mlx-audio "produced no .wav output" (the
+  1ge.7 non-empty assertion firing, not silent).
+- No code changed → backend/frontend quality gates N/A; docs-only. All internal
+  anchor links checked (numbered `## 3. Comparison table` → `#3-comparison-table`,
+  README `#local-tts-providers` / `#sidecar-management` / the verifying-audio
+  slug all confirmed present).
+- **Learnings:**
+  - **All six sidecars happened to be live** (piper-http :8775, kitten-http :8771,
+    kokoro-mlx :8772, kokoro-http :8773, parakeet ×2), so real audio was
+    measurable for far more cells than the prior beads logged — worth a
+    `GET /sidecars/health` check before assuming a runtime can't be measured.
+  - **TTFA semantics differ by path** and this confused the table until noted:
+    only Piper `persistent-subprocess` streams the first chunk early (TTFA
+    decoupled from phrase length, ~40 ms). `subprocess` (CLI writes a whole WAV),
+    all sidecars (POST back the full buffer), and atomic models (`generate()`)
+    return the entire PCM before the first byte, so TTFA ≈ total ≈ full synth of
+    the sample — that's why subprocess reads ~930 ms even though the in-UI tip's
+    ~200–400 ms "ONNX cold-start" is only one component.
+  - The `/providers/preview/play_sample` endpoint measures an UNSAVED provider
+    (Kokoro had no saved row) by POSTing `{kind,provider_name,values:{runtime,
+    voice_id,sidecar_url}}`; `/providers/{id}/play_sample` measures a saved row's
+    other runtimes via the `{runtime}` override — together they cover every cell
+    without mutating the DB. Both stamp the same X-TTS-* headers the Play sample
+    badge reads, so endpoint numbers == badge numbers (confirmed in the browser).
+  - A failed in-container synth still logs `ttfa_ms=-1 total_ms=0` — a clean
+    "no audio produced" signal for the troubleshooting section.
 ---
