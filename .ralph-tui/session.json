@@ -3,10 +3,10 @@
   "sessionId": "d140062f-580d-4e80-b815-4dd296a98109",
   "status": "running",
   "startedAt": "2026-06-07T12:00:21.402Z",
-  "updatedAt": "2026-06-07T12:38:18.775Z",
-  "currentIteration": 1,
+  "updatedAt": "2026-06-07T12:48:41.679Z",
+  "currentIteration": 2,
   "maxIterations": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 2,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -242,8 +242,8 @@
       {
         "id": "Johnny-105",
         "title": "noVNC bot sign-in: container + backend endpoints + frontend modal",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-pia",
@@ -413,6 +413,16 @@
       "durationMs": 425050,
       "startedAt": "2026-06-07T12:00:42.547Z",
       "endedAt": "2026-06-07T12:07:47.597Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "Johnny-105",
+      "taskTitle": "noVNC bot sign-in: container + backend endpoints + frontend modal",
+      "taskCompleted": true,
+      "durationMs": 1813404,
+      "startedAt": "2026-06-07T12:08:04.436Z",
+      "endedAt": "2026-06-07T12:38:17.840Z"
     }
   ],
   "skippedTaskIds": [],

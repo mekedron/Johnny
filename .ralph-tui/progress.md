@@ -115,6 +115,76 @@ container) ↔ x11vnc (5900) ↔ Xvfb (:99) ↔ Playwright Chromium.
 
 ---
 
+## 2026-06-07 - Johnny-al3
+- Verified the multi-account bot story landed end-to-end. The
+  *Add another meeting bot* tile is a real, always-clickable `<button>`
+  (`frontend/src/routes/settings/+page.svelte:603-624`); clicking it
+  opens the noVNC `BotSigninModal` regardless of whether any calendar
+  or bot row already exists.
+- Browser-validated four states via chrome-devtools MCP:
+  - Empty accounts (stubbed): renders both
+    "Connect your first Google calendar" and "Add your first meeting
+    bot" — AC #1.
+  - Three accounts (stubbed; two bots + one calendar-only): the bot
+    list renders TWO independent cards plus the calendar-only row
+    shows up under "Or attach a session to one of these existing
+    rows" — AC #2 + the calendar-only attach affordance.
+  - Calendar page picker: lists all accounts, marking bots with
+    " · bot" so two bots are independently selectable — AC #3 at the
+    UI level. The meeting-config form's identity-select
+    (`calendar/+page.svelte:942-953`) uses the same accounts list,
+    adding " · calendar" suffix for calendar-only rows.
+  - Real accounts (live API): clicking *Add another meeting bot*
+    spawns `johnny-bot-signin-<uuid>`, the noVNC canvas renders, and
+    Cancel removes the container.
+- Added a focused unit test
+  (`backend/tests/api/test_bot_signin_resolve.py`) that locks down
+  `app.api.bot_signin._resolve_account_for_finalize` — AC #4. Seven
+  cases cover: pre-bound id wins, scraped-email dedup attaches to the
+  existing row (no duplicate), case-insensitive email match,
+  new-email → bot-only row, two distinct emails → two distinct rows,
+  scrape-fails → `unknown-<short>@johnny.local` placeholder,
+  vanished pre-bound id falls back to email match. All pass.
+- No source files modified — the implementation already shipped with
+  Johnny-105. Files added: `backend/tests/api/test_bot_signin_resolve.py`.
+- Validation artifacts:
+  `.validation/Johnny-al3/01-empty-state-add-bot-tile.png`,
+  `.validation/Johnny-al3/02-two-bots-and-cal-only.png`,
+  `.validation/Johnny-al3/03-calendar-picker-two-bots.png`,
+  `.validation/Johnny-al3/04-modal-opens-from-add-bot.png`,
+  `.validation/Johnny-al3/05-settings-after-cancel.png`.
+- Quality gates: `pytest tests/api/test_bot_signin_resolve.py` 7/7
+  pass, `ruff check` clean on the new test, frontend
+  `svelte-check` 0/0 (no frontend code touched).
+- **Learnings:**
+  - The prod-mode `johnny-api` image does NOT carry pytest or the
+    `tests/` tree. To run a single test against the existing image
+    without flipping the whole stack to `./run-dev.sh`, spin up a
+    one-shot with `docker compose run --rm --no-deps -v
+    /Users/nikita/Projects/Johnny/backend/tests:/workspace/tests api
+    sh -c "uv pip install -q pytest pytest-asyncio && python -m
+    pytest tests/api/<file>.py"`. Same for ruff.
+  - `CredentialCrypto(key=...)` requires a 32-byte url-safe
+    base64-encoded Fernet key, NOT raw 32 random bytes. The right
+    constructor input is `base64.urlsafe_b64encode(b"a" * 32)`. The
+    error surface — `app.security.crypto.CryptoError: invalid fernet
+    key: Fernet key must be 32 url-safe base64-encoded bytes.` — is
+    descriptive but the failure mode (`b"a" * 32` looks 32 bytes
+    long) is easy to trip on if you're skimming.
+  - Bot-signin orphan containers from prior sessions can hang around
+    if the API's `launcher.stop()` was never called for them — the
+    worker's periodic sweep (every 60 s) catches them eventually, or
+    they self-expire at the 10-minute TTL, but for local iteration
+    `docker rm -f johnny-bot-signin-<...>` is the fast manual sweep.
+  - Capability-folding payload from `AccountRead` makes the
+    multi-bot UI essentially "free" — both the bot list and the
+    calendar picker iterate the SAME `Account[]` and derive the
+    suffix (" · bot" / " · calendar") from `bot_session.connected`
+    and `has_calendar`. No second round-trip, no separate "bots
+    only" endpoint needed.
+
+---
+
 ## 2026-06-07 - Johnny-105
 - Shipped the noVNC bot sign-in flow end-to-end. The user clicks
   *Add a meeting bot* in Settings, the API spawns a one-shot
