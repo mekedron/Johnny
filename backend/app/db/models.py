@@ -205,6 +205,27 @@ class CalendarEvent(TimestampMixin, Base):
     last_synced_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    attachments_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """Cached concatenated text body of every Google Doc / Sheet linked
+    in :attr:`description` (Johnny-4da).
+
+    Populated by the polling worker after a successful upsert when the
+    event has Drive URLs in its description. ``None`` either means the
+    description has no Drive links, or the polling worker hasn't yet
+    run since the columns were added — the bot still joins; it just
+    has no document body to draw on for that meeting.
+    """
+    attachments_etags: Mapped[dict[str, Any] | None] = mapped_column(
+        _json_column(), nullable=True
+    )
+    """``{file_id: modifiedTime}`` snapshot from the last attachment sync.
+
+    Compared against fresh Drive metadata each polling cycle: when every
+    file's ``modifiedTime`` matches, the existing :attr:`attachments_text`
+    is reused; when any file changed (or the URL list changed), the
+    bodies are re-fetched. Lets us satisfy the bead's etag-invalidation
+    contract without a per-doc body cache.
+    """
 
     account: Mapped[GoogleAccount] = relationship(back_populates="calendar_events")
     meeting_config: Mapped[MeetingConfig | None] = relationship(

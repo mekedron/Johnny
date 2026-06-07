@@ -130,3 +130,30 @@ export function disconnectBotSession(accountId: number): Promise<Account> {
 		method: 'DELETE'
 	});
 }
+
+/**
+ * Result of a live verify call: real round-trip to Google for calendar
+ * capability, on-disk read + cookie-expiry analysis for bot capability.
+ *
+ * Per-capability fields are `null` when the row doesn't carry that
+ * capability (so the UI doesn't fabricate a status for a missing
+ * thing).
+ */
+export interface CapabilityCheck {
+	ok: boolean;
+	message: string;
+	latency_ms: number | null;
+	detail: Record<string, unknown> | null;
+}
+
+export interface VerifyResponse {
+	checked_at: string;
+	calendar: CapabilityCheck | null;
+	bot_session: CapabilityCheck | null;
+}
+
+export function verifyAccount(accountId: number): Promise<VerifyResponse> {
+	return request<VerifyResponse>(`/auth/google/accounts/${accountId}/verify`, {
+		method: 'POST'
+	});
+}

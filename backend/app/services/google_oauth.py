@@ -35,6 +35,13 @@ DEFAULT_SCOPES: tuple[str, ...] = (
     "email",
     "https://www.googleapis.com/auth/calendar.readonly",
     "https://www.googleapis.com/auth/calendar.events.readonly",
+    # Johnny-4da: read Google Docs / Sheets / Drive files linked from
+    # calendar event descriptions so the bot sees the doc body, not just
+    # the URL. Existing accounts that authorised before this landed
+    # surface HTTP 403 from the Drive metadata endpoint; the resolver
+    # handles that as "skip + log", so the feature degrades gracefully
+    # until those users re-sign-in (which adds the new scope).
+    "https://www.googleapis.com/auth/drive.readonly",
 )
 
 DEFAULT_TIMEOUT_S = 30.0

@@ -38,7 +38,8 @@ from __future__ import annotations
 import html
 import logging
 import secrets
-from datetime import datetime
+import time
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -54,12 +55,16 @@ from app.security.crypto import CredentialCrypto
 from app.services.bot_auth_seed import (
     MAX_STORAGE_STATE_BYTES,
     BotSessionError,
+    bot_session_path,
     bot_session_status,
     delete_bot_session,
     save_bot_session,
+    validate_storage_state,
 )
 from app.services.google_client import (
+    GoogleApiClient,
     GoogleApiClientError,
+    TokenUndecryptableError,
     can_decrypt_refresh_token,
     revoke_account,
     upsert_account_from_tokens,
@@ -488,6 +493,217 @@ def disconnect_bot_session(
     return _account_read(row, crypto)
 
 
+class CapabilityCheck(BaseModel):
+    """Result of an explicit, live check against one capability.
+
+    Surfaced by ``POST /accounts/{id}/verify`` so the UI can offer a
+    real "Check connection" button distinct from the cheap ciphertext-
+    decryption health hint in :class:`AccountRead`.
+    """
+
+    ok: bool
+    message: str
+    latency_ms: int | None = None
+    detail: dict[str, object] | None = None
+
+
+class VerifyResponse(BaseModel):
+    """Combined verify result; per-capability fields are ``None`` when
+    the row doesn't carry that capability."""
+
+    checked_at: datetime
+    calendar: CapabilityCheck | None = None
+    bot_session: CapabilityCheck | None = None
+
+
+async def _verify_calendar(
+    *,
+    session: Session,
+    account: GoogleAccount,
+    crypto: CredentialCrypto,
+    settings: Settings,
+) -> CapabilityCheck:
+    """Round-trip to Google's userinfo endpoint with a fresh access token.
+
+    Forces a refresh via the wrapper if the cached token is stale, then
+    calls ``/oauth2/v2/userinfo`` and reports the outcome with latency.
+    Catches token-decrypt errors and Google-side failures separately
+    so the UI can offer a helpful message.
+    """
+    start = time.monotonic()
+    try:
+        async with GoogleApiClient(
+            session=session, account=account, crypto=crypto, settings=settings
+        ) as client:
+            response = await client.request(
+                "GET", "https://www.googleapis.com/oauth2/v2/userinfo"
+            )
+    except TokenUndecryptableError as exc:
+        latency = int((time.monotonic() - start) * 1000)
+        return CapabilityCheck(
+            ok=False,
+            latency_ms=latency,
+            message="Stored token cannot be decrypted — reconnect to refresh it.",
+            detail={"error_type": type(exc).__name__},
+        )
+    except GoogleApiClientError as exc:
+        latency = int((time.monotonic() - start) * 1000)
+        return CapabilityCheck(
+            ok=False,
+            latency_ms=latency,
+            message=f"Google refresh failed: {exc}",
+            detail={"error_type": type(exc).__name__},
+        )
+    except Exception as exc:  # noqa: BLE001 — surface as a failure, not a 500
+        latency = int((time.monotonic() - start) * 1000)
+        return CapabilityCheck(
+            ok=False,
+            latency_ms=latency,
+            message=f"Verification call failed: {exc}",
+            detail={"error_type": type(exc).__name__},
+        )
+
+    latency = int((time.monotonic() - start) * 1000)
+    if response.status_code == 200:
+        try:
+            data = response.json()
+            email = str(data.get("email") or account.email)
+        except Exception:  # noqa: BLE001 — parse failure is non-fatal
+            email = account.email
+        return CapabilityCheck(
+            ok=True,
+            latency_ms=latency,
+            message=f"Authenticated to Google as {email}.",
+            detail={"email": email},
+        )
+    return CapabilityCheck(
+        ok=False,
+        latency_ms=latency,
+        message=f"Google returned HTTP {response.status_code} from /userinfo.",
+        detail={"status_code": response.status_code},
+    )
+
+
+def _verify_bot_session(account_id: int) -> CapabilityCheck:
+    """Re-read ``storage_state.json`` and report the cookie state.
+
+    File-level only — we never round-trip to Google with the cookies
+    (that would require Playwright in this process). What we verify:
+
+    * The file is present, well-formed JSON, has a non-empty cookies
+      array (the same checks ``validate_storage_state`` enforces on
+      upload).
+    * The soonest persistent-cookie expiry, so the UI can warn before
+      Google logs the bot out.
+
+    Session cookies (``expires <= 0``) are ignored — Google's session
+    cookies don't carry an expiry, so reporting them as "expired" would
+    be misleading.
+    """
+    path = bot_session_path(account_id)
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return CapabilityCheck(
+            ok=False,
+            message="No storage_state.json on disk for this account.",
+        )
+    except OSError as exc:
+        return CapabilityCheck(
+            ok=False,
+            message=f"Could not read storage_state.json: {exc}",
+        )
+
+    try:
+        data = validate_storage_state(raw)
+    except BotSessionError as exc:
+        return CapabilityCheck(
+            ok=False,
+            message=f"storage_state.json is invalid: {exc}",
+        )
+
+    cookies = data.get("cookies", []) or []
+    persistent_expiries: list[float] = []
+    for cookie in cookies:
+        expires = cookie.get("expires") if isinstance(cookie, dict) else None
+        if isinstance(expires, int | float) and expires > 0:
+            persistent_expiries.append(float(expires))
+
+    now_ts = time.time()
+    if persistent_expiries:
+        soonest = min(persistent_expiries)
+        soonest_iso = datetime.fromtimestamp(soonest, tz=UTC).isoformat()
+        already_expired = soonest <= now_ts
+        if already_expired:
+            return CapabilityCheck(
+                ok=False,
+                message=(
+                    f"{len(cookies)} cookies present, but the soonest expiry "
+                    f"({soonest_iso}) is already in the past."
+                ),
+                detail={
+                    "cookie_count": len(cookies),
+                    "soonest_expiry": soonest_iso,
+                    "expired": True,
+                },
+            )
+        days_left = round((soonest - now_ts) / 86_400, 1)
+        return CapabilityCheck(
+            ok=True,
+            message=(
+                f"{len(cookies)} cookies present; soonest persistent cookie "
+                f"expires in {days_left} day(s)."
+            ),
+            detail={
+                "cookie_count": len(cookies),
+                "soonest_expiry": soonest_iso,
+                "days_until_expiry": days_left,
+            },
+        )
+
+    return CapabilityCheck(
+        ok=True,
+        message=(
+            f"{len(cookies)} cookies present (all session-only — Google's "
+            "live session decides validity)."
+        ),
+        detail={"cookie_count": len(cookies), "soonest_expiry": None},
+    )
+
+
+@router.post(
+    "/accounts/{account_id}/verify",
+    response_model=VerifyResponse,
+)
+async def verify_account(
+    account_id: int,
+    session: SessionDep,
+    crypto: CryptoDep,
+    settings: SettingsDep,
+) -> VerifyResponse:
+    """Run live checks against whichever capabilities the row carries.
+
+    Calendar capability → real HTTP round-trip to Google /userinfo,
+    forcing a refresh if needed. Bot capability → file integrity +
+    cookie-expiry check. Either field is ``None`` in the response if
+    the row doesn't carry that capability.
+    """
+    row = _get_account_or_404(session, account_id)
+    calendar_check: CapabilityCheck | None = None
+    if row.refresh_token_encrypted is not None:
+        calendar_check = await _verify_calendar(
+            session=session, account=row, crypto=crypto, settings=settings
+        )
+    bot_check: CapabilityCheck | None = None
+    if bot_session_status(account_id)["connected"]:
+        bot_check = _verify_bot_session(account_id)
+    return VerifyResponse(
+        checked_at=datetime.now(UTC),
+        calendar=calendar_check,
+        bot_session=bot_check,
+    )
+
+
 @router.put(
     "/accounts/{account_id}/bot-session",
     response_model=AccountRead,
@@ -537,9 +753,11 @@ __all__ = [
     "AccountRead",
     "BotSessionView",
     "CallbackRequest",
+    "CapabilityCheck",
     "StartRequest",
     "StartResponse",
     "TokenHealth",
+    "VerifyResponse",
     "_account_read",
     "_consume_state",
     "_exchange_and_persist",

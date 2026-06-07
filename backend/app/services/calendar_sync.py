@@ -27,6 +27,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import CalendarEvent, GoogleAccount
+from app.services.calendar_link_resolver import (
+    has_drive_links,
+    normalise_skip_log,
+    resolve_event_attachments,
+)
 from app.services.google_client import GoogleApiClient
 
 logger = logging.getLogger(__name__)
@@ -465,6 +470,13 @@ async def sync_account_events(
     UI or worker can't request a year-long fetch by accident. ``now`` is
     accepted for deterministic testing; production passes ``None`` and
     we use :func:`datetime.now`.
+
+    After upserting, every event with Google Docs / Sheets / Drive URLs
+    in its description is passed through
+    :func:`~app.services.calendar_link_resolver.resolve_event_attachments`
+    so the bot sees the document bodies as pre-meeting context, not just
+    the link text (Johnny-4da). Resolution failures per event are
+    logged + isolated — the rest of the sync still completes.
     """
     window = _validate_window(window_days)
     base = now or datetime.now(UTC)
@@ -477,6 +489,7 @@ async def sync_account_events(
     )
     synced_at = base
     changes: list[CalendarEventChange] = []
+    touched_event_ids: list[int] = []
     for raw in raw_events:
         parsed = _parse_event_payload(raw)
         if parsed is None:
@@ -488,14 +501,26 @@ async def sync_account_events(
             if deletion is not None:
                 changes.append(deletion)
             continue
-        changes.append(
-            _apply_parsed_event(
-                session=session,
-                account=account,
-                parsed=parsed,
-                synced_at=synced_at,
-            )
+        change = _apply_parsed_event(
+            session=session,
+            account=account,
+            parsed=parsed,
+            synced_at=synced_at,
         )
+        changes.append(change)
+        # ``unchanged`` rows are tracked too: their description didn't
+        # change but a linked doc's body might have, and the resolver's
+        # cheap metadata-vs-cache check is what catches that. Skip
+        # ``deleted`` rows since the row is gone.
+        if change.kind in {"created", "updated", "unchanged"}:
+            touched_event_ids.append(change.event_id)
+
+    await _resolve_attachments_for_events(
+        session=session,
+        client=client,
+        event_ids=touched_event_ids,
+    )
+
     logger.info(
         "calendar sync account_id=%s window_days=%d created=%d updated=%d deleted=%d",
         account.id,
@@ -505,6 +530,72 @@ async def sync_account_events(
         sum(1 for c in changes if c.kind == "deleted"),
     )
     return CalendarSyncResult(account_id=account.id, changes=changes)
+
+
+async def _resolve_attachments_for_events(
+    *,
+    session: Session,
+    client: GoogleApiClient,
+    event_ids: Sequence[int],
+) -> None:
+    """Run the Drive resolver against every event with linked docs.
+
+    Iterates over freshly-upserted rows whose description contains at
+    least one Google Docs / Sheets / Drive URL and calls the resolver
+    with the row's existing ``attachments_etags`` for cache-aware
+    skipping. The resolver does the cheap metadata pass and only
+    re-fetches bodies when at least one doc's ``modifiedTime`` changed.
+
+    Per-event failures are isolated: the next event still attempts.
+    """
+    for event_id in event_ids:
+        row = session.get(CalendarEvent, event_id)
+        if row is None:
+            continue
+        description = row.description
+        if not has_drive_links(description):
+            # Description no longer has links → clear stale cache so the
+            # bot doesn't see attachment text the host removed.
+            if row.attachments_text is not None or row.attachments_etags is not None:
+                row.attachments_text = None
+                row.attachments_etags = None
+            continue
+        try:
+            cached_etags_raw = row.attachments_etags
+            cached_etags = (
+                {str(k): str(v) for k, v in cached_etags_raw.items()}
+                if isinstance(cached_etags_raw, dict)
+                else None
+            )
+            outcome = await resolve_event_attachments(
+                client=client,
+                description=description,
+                cached_etags=cached_etags,
+            )
+        except Exception:  # noqa: BLE001 — never fail the calendar sync on attachments
+            logger.exception(
+                "calendar attachment resolve crashed event_id=%s", event_id
+            )
+            continue
+        if outcome.links_found == 0:
+            # has_drive_links returned True but the resolver's stricter
+            # regex matched nothing — clear cache to stay consistent.
+            row.attachments_text = None
+            row.attachments_etags = None
+            continue
+        # Always persist the freshly observed etag map so the next
+        # cycle's cache-skip check has the right baseline. Only update
+        # the body when the resolver chose to re-fetch.
+        row.attachments_etags = outcome.etags
+        if outcome.text is not None:
+            row.attachments_text = outcome.text or None
+        if outcome.links_skipped:
+            logger.info(
+                "calendar attachments event_id=%s links=%d skipped=%s",
+                event_id,
+                outcome.links_found,
+                normalise_skip_log(outcome.links_skipped),
+            )
 
 
 def list_account_events(

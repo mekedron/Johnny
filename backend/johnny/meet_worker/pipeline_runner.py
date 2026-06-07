@@ -79,6 +79,7 @@ MODE_ENV = "JOHNNY_MODE"
 INSTRUCTIONS_ENV = "JOHNNY_INSTRUCTIONS"
 CONTEXT_ENV = "JOHNNY_CONTEXT"
 CALENDAR_CONTEXT_ENV = "JOHNNY_CALENDAR_CONTEXT"
+CALENDAR_ATTACHMENTS_ENV = "JOHNNY_CALENDAR_ATTACHMENTS"
 SESSION_ID_ENV = "JOHNNY_SESSION_ID"
 REDIS_URL_ENV = "JOHNNY_REDIS_URL"
 API_BASE_URL_ENV = "JOHNNY_API_BASE_URL"
@@ -342,6 +343,7 @@ async def _assemble_unified_pipeline(
     instructions = env.get(INSTRUCTIONS_ENV, "")
     context = env.get(CONTEXT_ENV, "")
     calendar_context = env.get(CALENDAR_CONTEXT_ENV, "")
+    calendar_attachments_text = env.get(CALENDAR_ATTACHMENTS_ENV, "")
     bot_session_id = _resolve_bot_session_id(env, session_id=session_id)
     voice_id = _resolve_unified_voice_id(s2s_entry or {})
 
@@ -351,6 +353,7 @@ async def _assemble_unified_pipeline(
         instructions=instructions,
         context=context,
         calendar_context=calendar_context,
+        calendar_attachments_text=calendar_attachments_text,
         voice_id=voice_id,
     )
 
@@ -431,6 +434,7 @@ async def _assemble_pipeline(
     instructions = env.get(INSTRUCTIONS_ENV, "")
     context = env.get(CONTEXT_ENV, "")
     calendar_context = env.get(CALENDAR_CONTEXT_ENV, "")
+    calendar_attachments_text = env.get(CALENDAR_ATTACHMENTS_ENV, "")
     token_budget = _resolve_token_budget(env, session_id=session_id)
     bot_session_id = _resolve_bot_session_id(env, session_id=session_id)
 
@@ -442,6 +446,7 @@ async def _assemble_pipeline(
         instructions=instructions,
         context=context,
         calendar_context=calendar_context,
+        calendar_attachments_text=calendar_attachments_text,
         context_token_budget=token_budget,
     )
 
@@ -467,6 +472,7 @@ async def _assemble_pipeline(
             instructions=instructions,
             context=context,
             calendar_context=calendar_context,
+            calendar_attachments_text=calendar_attachments_text,
             context_token_budget=token_budget,
         )
 

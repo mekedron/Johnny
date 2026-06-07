@@ -638,6 +638,7 @@ class DockerContainerLauncher(ContainerLauncher):
             "JOHNNY_INSTRUCTIONS": ctx.instructions or "",
             "JOHNNY_CONTEXT": ctx.context or "",
             "JOHNNY_CALENDAR_CONTEXT": ctx.calendar_context or "",
+            "JOHNNY_CALENDAR_ATTACHMENTS": ctx.calendar_attachments_text or "",
             "JOHNNY_PROVIDER_CONFIG": json.dumps(ctx.provider_config or {}),
             # Johnny-ckz.17: split (STT+LLM+TTS) vs unified (S2S) toggle.
             # Defaults to "split" via LaunchContext so existing deploys

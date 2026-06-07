@@ -91,6 +91,17 @@ class UnifiedPipelineConfig:
     instructions: str = ""
     context: str = ""
     calendar_context: str = ""
+    calendar_attachments_text: str = ""
+    """Text body of Google Docs / Sheets / Drive files linked in the
+    calendar event description (Johnny-4da).
+
+    Kept for parity with :class:`PipelineConfig` so the launcher / API
+    can pass the same env var through to both pipeline shapes. The
+    unified pipeline does not currently merge the field into the S2S
+    ``open_session`` prompt — context/calendar_context have the same
+    not-yet-merged status — but the field round-trips so future S2S
+    prompt-assembly can pick it up without a config change.
+    """
     voice_id: str | None = None
     frame_duration_ms: int = DEFAULT_FRAME_DURATION_MS
     session_id: str | None = None

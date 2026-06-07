@@ -3,10 +3,10 @@
   "sessionId": "92aa43ca-591e-4b12-ab32-62131855e44d",
   "status": "running",
   "startedAt": "2026-06-07T00:08:27.194Z",
-  "updatedAt": "2026-06-07T10:27:52.872Z",
-  "currentIteration": 17,
+  "updatedAt": "2026-06-07T10:57:24.587Z",
+  "currentIteration": 18,
   "maxIterations": 0,
-  "tasksCompleted": 17,
+  "tasksCompleted": 18,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -236,8 +236,8 @@
       {
         "id": "Johnny-ckz.12",
         "title": "STT provider settings: 'Record sample' button to verify transcription end-to-end (symmetric to existing TTS demo)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-ckz.13",
@@ -519,6 +519,16 @@
       "durationMs": 751870,
       "startedAt": "2026-06-07T09:58:31.826Z",
       "endedAt": "2026-06-07T10:11:03.696Z"
+    },
+    {
+      "iteration": 18,
+      "status": "completed",
+      "taskId": "Johnny-ckz.12",
+      "taskTitle": "STT provider settings: 'Record sample' button to verify transcription end-to-end (symmetric to existing TTS demo)",
+      "taskCompleted": true,
+      "durationMs": 991611,
+      "startedAt": "2026-06-07T10:11:20.303Z",
+      "endedAt": "2026-06-07T10:27:51.914Z"
     }
   ],
   "skippedTaskIds": [],

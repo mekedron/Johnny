@@ -4412,6 +4412,60 @@ async def test_answer_prompt_includes_calendar_context_and_summary() -> None:
     assert "Earlier (summary): Earlier: ten minutes of agenda review." in user_content
 
 
+async def test_router_prompt_includes_calendar_attachments_text() -> None:
+    """Johnny-4da: resolved Drive bodies reach the router system prompt."""
+    router = _build_summary_router("Earlier: planning.")
+    cfg = PipelineConfig(
+        instructions="be brief",
+        calendar_attachments_text=(
+            "--- Quarterly Plan ---\nObjective: ship Johnny-4da."
+        ),
+        context_token_budget=20,
+        summary_recent_keep=2,
+    )
+    pipeline = _bare_pipeline(router=router, config=cfg)
+    transcripts = _budget_breaking_transcripts()
+    for t in transcripts:
+        pipeline._remember_transcript(t)
+
+    snapshot = await pipeline._build_input_window(transcripts[-1])
+    messages = pipeline._router_messages(transcripts[-1], snapshot)
+    system_content = messages[0].content or ""
+
+    assert "Calendar attachments" in system_content
+    assert "Objective: ship Johnny-4da." in system_content
+    # Snapshot also records the field so audits can reproduce the prompt.
+    assert (
+        snapshot["calendar_attachments_text"]
+        == "--- Quarterly Plan ---\nObjective: ship Johnny-4da."
+    )
+
+
+async def test_answer_prompt_includes_calendar_attachments_text() -> None:
+    """Johnny-4da: resolved Drive bodies reach the answer LLM system prompt."""
+    cfg = PipelineConfig(
+        calendar_context="Weekly product standup.",
+        calendar_attachments_text=(
+            "--- Targets ---\n### Q3\nRegion\tTarget\nEMEA\t$1.2M"
+        ),
+    )
+    pipeline = _bare_pipeline(
+        router=_build_summary_router("Earlier: review."),
+        config=cfg,
+    )
+    transcripts = _budget_breaking_transcripts()
+    for t in transcripts:
+        pipeline._remember_transcript(t)
+
+    decision = RouterDecision(
+        should_speak=True, confidence=0.9, reason="ack", suggested_reply=None
+    )
+    messages = pipeline._answer_messages(transcripts[-1], decision)
+    system_content = messages[0].content or ""
+    assert "Calendar attachments" in system_content
+    assert "EMEA" in system_content
+
+
 def test_estimate_tokens_uses_chars_per_token_heuristic() -> None:
     """The internal token estimator returns ``len // 4`` (floored at 1)."""
     from johnny.voice_pipeline.pipeline import _estimate_tokens

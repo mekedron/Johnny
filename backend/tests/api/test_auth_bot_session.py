@@ -397,3 +397,125 @@ def test_put_bot_session_works_on_calendar_account(
     body = resp.json()
     assert body["bot_session"]["connected"] is True
     assert body["has_calendar"] is True
+
+
+# --- POST /accounts/{id}/verify · bot-session leg -------------------------
+
+
+def test_verify_bot_session_reports_cookie_count_and_expiry(
+    client: TestClient,
+    db_session: Session,
+    auth_state_root: Path,
+) -> None:
+    """A real on-disk storage_state with a future-dated cookie reports OK
+    with the cookie count and a soonest-expiry timestamp."""
+    bot = _add_bot_account(db_session, email="bot@example.com")
+    db_session.commit()
+    # Cookie expiring 30 days from now.
+    expires = datetime.now(UTC) + timedelta(days=30)
+    payload = json.dumps(
+        {
+            "cookies": [
+                {
+                    "name": "SID",
+                    "value": "abc",
+                    "domain": ".google.com",
+                    "path": "/",
+                    "expires": expires.timestamp(),
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "None",
+                },
+                {
+                    "name": "session-only",
+                    "value": "z",
+                    "domain": ".google.com",
+                    "path": "/",
+                    "expires": -1,
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "Lax",
+                },
+            ],
+            "origins": [],
+        }
+    ).encode("utf-8")
+    bot_auth_seed.save_bot_session(bot.id, payload)
+
+    resp = client.post(f"/auth/google/accounts/{bot.id}/verify")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bot_session"]["ok"] is True
+    assert body["bot_session"]["detail"]["cookie_count"] == 2
+    assert body["bot_session"]["detail"]["soonest_expiry"] is not None
+    assert body["bot_session"]["detail"]["days_until_expiry"] > 25
+
+
+def test_verify_bot_session_reports_expired_cookie(
+    client: TestClient,
+    db_session: Session,
+    auth_state_root: Path,
+) -> None:
+    """A storage_state where the soonest persistent cookie is past-due
+    must surface as ok=False so the UI can prompt re-sign-in."""
+    bot = _add_bot_account(db_session, email="bot@example.com")
+    db_session.commit()
+    expires = datetime.now(UTC) - timedelta(days=1)
+    payload = json.dumps(
+        {
+            "cookies": [
+                {
+                    "name": "SID",
+                    "value": "abc",
+                    "domain": ".google.com",
+                    "path": "/",
+                    "expires": expires.timestamp(),
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "None",
+                }
+            ],
+            "origins": [],
+        }
+    ).encode("utf-8")
+    bot_auth_seed.save_bot_session(bot.id, payload)
+
+    resp = client.post(f"/auth/google/accounts/{bot.id}/verify")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bot_session"]["ok"] is False
+    assert "past" in body["bot_session"]["message"].lower()
+
+
+def test_verify_bot_session_session_only_cookies_ok(
+    client: TestClient,
+    db_session: Session,
+    auth_state_root: Path,
+) -> None:
+    """Session-only cookies (expires<=0) are treated as live — file-level
+    verification has no way to invalidate them."""
+    bot = _add_bot_account(db_session, email="bot@example.com")
+    db_session.commit()
+    payload = json.dumps(
+        {
+            "cookies": [
+                {
+                    "name": "SID",
+                    "value": "abc",
+                    "domain": ".google.com",
+                    "path": "/",
+                    "expires": -1,
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "None",
+                }
+            ],
+            "origins": [],
+        }
+    ).encode("utf-8")
+    bot_auth_seed.save_bot_session(bot.id, payload)
+    resp = client.post(f"/auth/google/accounts/{bot.id}/verify")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bot_session"]["ok"] is True
+    assert "session-only" in body["bot_session"]["message"]

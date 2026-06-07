@@ -114,6 +114,15 @@ class BrowserPipelineSpec:
     provider_payload: Mapping[str, Mapping[str, Any]]
     event_bus: EventBus
     pipeline_mode: str = SPLIT_MODE
+    calendar_attachments_text: str = ""
+    """Resolved Google Docs / Sheets / Drive bodies (Johnny-4da).
+
+    Filled by the API session-start path from
+    :attr:`~app.db.models.CalendarEvent.attachments_text`; empty for
+    playground sessions and for events whose polling cycle hasn't
+    resolved yet. Defaulted so every existing call site keeps working
+    without modification.
+    """
 
 
 def _build_provider(
@@ -225,6 +234,7 @@ def _assemble_split(
         instructions=spec.instructions,
         context=spec.context,
         calendar_context=spec.calendar_context,
+        calendar_attachments_text=spec.calendar_attachments_text,
     )
 
     if vad is None:
@@ -271,6 +281,7 @@ def _assemble_unified(
         instructions=spec.instructions,
         context=spec.context,
         calendar_context=spec.calendar_context,
+        calendar_attachments_text=spec.calendar_attachments_text,
         voice_id=_resolve_voice_id(s2s_entry),
     )
     return UnifiedVoicePipeline(

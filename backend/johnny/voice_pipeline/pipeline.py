@@ -412,6 +412,22 @@ class PipelineConfig:
     static context without losing the calendar-derived background that
     every attendee already sees on the event page.
     """
+    calendar_attachments_text: str = ""
+    """Text body of Google Docs / Sheets / Drive files linked in the
+    calendar event description, resolved by the polling worker (Johnny-4da).
+
+    Merged alongside :attr:`calendar_context` so the bot sees both the
+    plain description (where the host pasted "agenda: see doc") AND the
+    document body it pointed at. Kept distinct so a future audit log
+    can attribute which text the model relied on, and so a worker
+    running an older container image (no resolver) still works with the
+    description-only field intact.
+
+    Capped at
+    :data:`~app.services.calendar_link_resolver.MAX_ATTACHMENT_CHARS_TOTAL`
+    characters before reaching the pipeline so a multi-tab Sheet or
+    long Doc can't single-handedly blow ``context_token_budget``.
+    """
     allowed_replies: tuple[str, ...] = ()
     speak: bool = True
     mode: str = DEFAULT_MODE
@@ -2057,6 +2073,11 @@ class VoicePipeline:
             system += f"\n\nContext: {self.config.context}"
         if self.config.calendar_context:
             system += f"\n\nCalendar event description: {self.config.calendar_context}"
+        if self.config.calendar_attachments_text:
+            system += (
+                "\n\nCalendar attachments (linked documents from the event "
+                f"description):\n{self.config.calendar_attachments_text}"
+            )
         if self.config.allowed_replies:
             system += (
                 "\n\nAllowed replies (the answer stage will pick verbatim from "
@@ -2136,6 +2157,11 @@ class VoicePipeline:
             system += f"\n\nContext: {self.config.context}"
         if self.config.calendar_context:
             system += f"\n\nCalendar event description: {self.config.calendar_context}"
+        if self.config.calendar_attachments_text:
+            system += (
+                "\n\nCalendar attachments (linked documents from the event "
+                f"description):\n{self.config.calendar_attachments_text}"
+            )
         if decision.suggested_reply:
             system += f"\n\nRouter suggested: {decision.suggested_reply}"
         if self.config.allowed_replies:
@@ -2404,6 +2430,7 @@ class VoicePipeline:
             "instructions": self.config.instructions,
             "context": self.config.context,
             "calendar_context": self.config.calendar_context,
+            "calendar_attachments_text": self.config.calendar_attachments_text,
             "allowed_replies": list(self.config.allowed_replies),
             "mode": self.config.mode,
             "confidence_threshold": self.config.confidence_threshold,
@@ -2437,9 +2464,12 @@ class VoicePipeline:
             return list(self._transcript_history), None
 
         history = self._transcript_history
-        static_tokens = _estimate_tokens(self.config.instructions) + _estimate_tokens(
-            self.config.context
-        ) + _estimate_tokens(self.config.calendar_context)
+        static_tokens = (
+            _estimate_tokens(self.config.instructions)
+            + _estimate_tokens(self.config.context)
+            + _estimate_tokens(self.config.calendar_context)
+            + _estimate_tokens(self.config.calendar_attachments_text)
+        )
         full_tokens = static_tokens + sum(
             _estimate_tokens(t.text) for t in history
         )

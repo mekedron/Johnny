@@ -720,3 +720,91 @@ def test_disconnect_bot_session_returns_updated_account(
 def test_disconnect_bot_session_404_for_unknown_id(client: TestClient) -> None:
     resp = client.delete("/auth/google/accounts/999/bot-session")
     assert resp.status_code == 404
+
+
+# --- POST /accounts/{id}/verify -------------------------------------------
+
+
+def test_verify_calendar_round_trips_to_google(
+    client: TestClient, db_session: Session, crypto: CredentialCrypto
+) -> None:
+    row = _add_calendar_account(db_session, crypto, email="alice@example.com")
+    db_session.commit()
+
+    # Patch GoogleApiClient inside the auth module so the verify path
+    # doesn't hit the real Google API. The async context-manager
+    # protocol needs to round-trip through __aenter__/__aexit__.
+    class _StubResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, str]:
+            return {"email": "alice@example.com"}
+
+    class _StubClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self) -> "_StubClient":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def request(self, *_: object, **__: object) -> _StubResponse:
+            return _StubResponse()
+
+    with patch("app.api.auth.GoogleApiClient", _StubClient):
+        resp = client.post(f"/auth/google/accounts/{row.id}/verify")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["calendar"]["ok"] is True
+    assert "alice@example.com" in body["calendar"]["message"]
+    assert body["calendar"]["latency_ms"] is not None
+    assert body["bot_session"] is None  # no storage_state on disk
+
+
+def test_verify_calendar_reports_token_undecryptable(
+    client: TestClient, db_session: Session, crypto: CredentialCrypto
+) -> None:
+    row = _add_calendar_account(db_session, crypto, email="alice@example.com")
+    db_session.commit()
+
+    from app.services.google_client import TokenUndecryptableError
+
+    class _BoomClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self) -> "_BoomClient":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def request(self, *_: object, **__: object) -> None:
+            raise TokenUndecryptableError(account_id=row.id, email=row.email)
+
+    with patch("app.api.auth.GoogleApiClient", _BoomClient):
+        resp = client.post(f"/auth/google/accounts/{row.id}/verify")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["calendar"]["ok"] is False
+    assert "reconnect" in body["calendar"]["message"].lower()
+
+
+def test_verify_returns_404_for_unknown_account(client: TestClient) -> None:
+    resp = client.post("/auth/google/accounts/9999/verify")
+    assert resp.status_code == 404
+
+
+def test_verify_bot_only_row_skips_calendar(
+    client: TestClient, db_session: Session
+) -> None:
+    bot = _add_bot_only_account(db_session, email="bot@example.com")
+    db_session.commit()
+    resp = client.post(f"/auth/google/accounts/{bot.id}/verify")
+    assert resp.status_code == 200
+    body = resp.json()
+    # No calendar capability → null. No bot session on disk either → null.
+    assert body["calendar"] is None
+    assert body["bot_session"] is None

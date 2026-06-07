@@ -12,13 +12,18 @@
 	import * as Alert from '$lib/components/ui/alert/index.js';
 	import Page from '$lib/components/page.svelte';
 	import PageHeader from '$lib/components/page-header.svelte';
+	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
+	import CheckCircle2Icon from '@lucide/svelte/icons/check-circle-2';
 	import {
 		disconnectAccount,
 		disconnectBotSession,
 		listAccounts,
 		startOAuth,
 		uploadBotSession,
-		type Account
+		verifyAccount,
+		type Account,
+		type CapabilityCheck,
+		type VerifyResponse
 	} from '$lib/accounts';
 
 	let accounts = $state<Account[]>([]);
@@ -27,7 +32,11 @@
 	let busyAddCalendar = $state(false);
 	let busyAccountId = $state<number | null>(null);
 	let popupRef: Window | null = null;
+	let popupWatchInterval: ReturnType<typeof setInterval> | null = null;
 	let lastAuthorizeUrl = $state<string | null>(null);
+
+	let verifyingId = $state<number | null>(null);
+	let verifyResults = $state<Record<number, VerifyResponse>>({});
 
 	let botUploadTarget = $state<Account | null>(null);
 	let botUploadFile = $state<File | null>(null);
@@ -64,6 +73,7 @@
 	});
 
 	onDestroy(() => {
+		stopPopupWatch();
 		if (typeof window !== 'undefined') {
 			window.removeEventListener('message', handleOAuthMessage);
 		}
@@ -73,6 +83,7 @@
 		const data = event.data;
 		if (!data || typeof data !== 'object') return;
 		if ((data as { type?: unknown }).type !== 'johnny:oauth') return;
+		stopPopupWatch();
 		loadAccounts();
 		lastAuthorizeUrl = null;
 		busyAddCalendar = false;
@@ -84,6 +95,33 @@
 			}
 		}
 		popupRef = null;
+	}
+
+	/**
+	 * Poll for popup closure. If the user closes the OAuth window
+	 * without completing consent, the postMessage from the callback
+	 * never fires, so without this guard `busyAddCalendar` stayed true
+	 * forever and the Connect tile locked up.
+	 */
+	function startPopupWatch() {
+		stopPopupWatch();
+		popupWatchInterval = setInterval(() => {
+			if (popupRef?.closed) {
+				stopPopupWatch();
+				if (busyAddCalendar) {
+					busyAddCalendar = false;
+					lastAuthorizeUrl = null;
+				}
+				popupRef = null;
+			}
+		}, 500);
+	}
+
+	function stopPopupWatch() {
+		if (popupWatchInterval !== null) {
+			clearInterval(popupWatchInterval);
+			popupWatchInterval = null;
+		}
 	}
 
 	async function addCalendar() {
@@ -100,11 +138,33 @@
 			if (!popupRef) {
 				error = 'Popup blocked. Use the link below to continue in a new tab.';
 				busyAddCalendar = false;
+				return;
 			}
+			startPopupWatch();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 			busyAddCalendar = false;
 		}
+	}
+
+	async function verify(account: Account) {
+		verifyingId = account.id;
+		try {
+			const result = await verifyAccount(account.id);
+			verifyResults = { ...verifyResults, [account.id]: result };
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			verifyingId = null;
+		}
+	}
+
+	function verifyCalendarCheck(account: Account): CapabilityCheck | null {
+		return verifyResults[account.id]?.calendar ?? null;
+	}
+
+	function verifyBotCheck(account: Account): CapabilityCheck | null {
+		return verifyResults[account.id]?.bot_session ?? null;
 	}
 
 	function openBotUploadFor(account: Account | null) {
@@ -305,9 +365,11 @@
 				{#each calendars as account (account.id)}
 					{@const needsReauth = account.token_health === 'needs_reauth'}
 					{@const alsoBot = account.bot_session.connected}
+					{@const verifyResult = verifyCalendarCheck(account)}
 					<li
 						class="flex flex-col gap-4 rounded-md border border-border bg-card p-5 transition-colors duration-150 hover:border-border-strong"
-						class:border-warning={needsReauth}
+						class:border-warning={needsReauth ||
+							(verifyResult !== null && !verifyResult.ok)}
 						data-testid={`calendar-card-${account.id}`}
 					>
 						<div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -333,9 +395,9 @@
 											<TriangleAlertIcon class="size-3" /> Token unreadable — reconnect required
 										</span>
 									{:else}
-										<span class="inline-flex items-center gap-1">
+										<span class="inline-flex items-center gap-1" title="Local check: stored token decrypts. Use the Verify button below for a real Google round-trip.">
 											<span class="size-2 rounded-full bg-success" aria-hidden="true"></span>
-											Token OK
+											Token decrypts locally
 										</span>
 									{/if}
 									<span aria-hidden="true">·</span>
@@ -343,6 +405,18 @@
 								</div>
 							</div>
 							<div class="flex shrink-0 flex-wrap items-center gap-2">
+								<Button
+									variant="outline"
+									onclick={() => verify(account)}
+									disabled={verifyingId === account.id}
+									data-testid={`verify-calendar-${account.id}`}
+								>
+									{#if verifyingId === account.id}
+										<RefreshCwIcon class="animate-spin" /> Checking…
+									{:else}
+										<RefreshCwIcon /> Verify connection
+									{/if}
+								</Button>
 								{#if needsReauth}
 									<Button
 										variant="default"
@@ -363,6 +437,30 @@
 								</Button>
 							</div>
 						</div>
+						{#if verifyResult}
+							<div
+								class="flex items-start gap-2 rounded-md border px-3 py-2 text-xs"
+								class:border-success={verifyResult.ok}
+								class:bg-success={verifyResult.ok}
+								class:border-warning={!verifyResult.ok}
+								class:text-foreground={true}
+								data-testid={`verify-calendar-result-${account.id}`}
+							>
+								{#if verifyResult.ok}
+									<CheckCircle2Icon class="size-3.5 shrink-0 text-success" />
+								{:else}
+									<TriangleAlertIcon class="size-3.5 shrink-0 text-warning" />
+								{/if}
+								<div class="flex min-w-0 flex-col gap-0.5">
+									<span class="font-medium">{verifyResult.message}</span>
+									{#if verifyResult.latency_ms !== null}
+										<span class="font-mono text-[0.7rem] text-muted-foreground">
+											Google round-trip · {verifyResult.latency_ms} ms
+										</span>
+									{/if}
+								</div>
+							</div>
+						{/if}
 					</li>
 				{/each}
 
@@ -429,9 +527,11 @@
 				{#each bots as account (account.id)}
 					{@const health = botSessionHealth(account)}
 					{@const alsoCalendar = account.has_calendar}
+					{@const verifyResult = verifyBotCheck(account)}
 					<li
 						class="flex flex-col gap-4 rounded-md border border-border bg-card p-5 transition-colors duration-150 hover:border-border-strong"
-						class:border-warning={health === 'expiring'}
+						class:border-warning={health === 'expiring' ||
+							(verifyResult !== null && !verifyResult.ok)}
 						data-testid={`bot-card-${account.id}`}
 					>
 						<div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -482,6 +582,18 @@
 							<div class="flex shrink-0 flex-wrap items-center gap-2">
 								<Button
 									variant="outline"
+									onclick={() => verify(account)}
+									disabled={verifyingId === account.id}
+									data-testid={`verify-bot-${account.id}`}
+								>
+									{#if verifyingId === account.id}
+										<RefreshCwIcon class="animate-spin" /> Checking…
+									{:else}
+										<RefreshCwIcon /> Verify session
+									{/if}
+								</Button>
+								<Button
+									variant="outline"
 									onclick={() => openBotUploadFor(account)}
 									disabled={busyAccountId === account.id}
 									data-testid={`replace-bot-session-${account.id}`}
@@ -498,6 +610,27 @@
 								</Button>
 							</div>
 						</div>
+						{#if verifyResult}
+							<div
+								class="flex items-start gap-2 rounded-md border px-3 py-2 text-xs"
+								class:border-success={verifyResult.ok}
+								class:border-warning={!verifyResult.ok}
+								data-testid={`verify-bot-result-${account.id}`}
+							>
+								{#if verifyResult.ok}
+									<CheckCircle2Icon class="size-3.5 shrink-0 text-success" />
+								{:else}
+									<TriangleAlertIcon class="size-3.5 shrink-0 text-warning" />
+								{/if}
+								<div class="flex min-w-0 flex-col gap-0.5">
+									<span class="font-medium">{verifyResult.message}</span>
+									<span class="text-[0.7rem] text-muted-foreground">
+										File-level check only — Google's session is the final word at
+										join time.
+									</span>
+								</div>
+							</div>
+						{/if}
 					</li>
 				{/each}
 
@@ -562,7 +695,7 @@
 		data-testid="bot-upload-overlay"
 	>
 		<div
-			class="m-0 flex w-full max-w-[28rem] flex-col gap-4 rounded-t-md border-t border-border bg-card p-6 shadow-lg sm:rounded-md sm:border"
+			class="m-0 flex w-full max-w-[34rem] flex-col gap-4 rounded-t-md border-t border-border bg-card p-6 shadow-lg sm:rounded-md sm:border"
 			role="dialog"
 			aria-modal="true"
 			data-testid="bot-upload-sheet"
@@ -587,6 +720,36 @@
 					<XIcon class="size-4" />
 				</button>
 			</div>
+			<details
+				open
+				class="rounded-md border border-border bg-surface-1 p-3"
+				data-testid="bot-upload-cli-instructions"
+			>
+				<summary class="cursor-pointer text-xs font-medium text-foreground">
+					How to generate this file
+				</summary>
+				<div class="mt-2 flex flex-col gap-2 text-xs text-muted-foreground">
+					<p class="m-0">
+						Run the helper on your host — it opens a Chromium window, you sign in to
+						Google as the bot, and it writes the storage_state.json to a path you
+						pick.
+					</p>
+					<pre
+						class="m-0 overflow-x-auto whitespace-pre rounded-md bg-background p-3 font-mono text-[0.7rem] leading-relaxed text-foreground"><code
+							>cd backend
+uv sync --extra auth-seed
+uv run playwright install chromium
+uv run python -m johnny.tools.seed_auth_state \
+    --account-id {botUploadTarget.id} \
+    --email {botUploadTarget.email} \
+    --keep-local /tmp/storage_state.json</code
+						></pre>
+					<p class="m-0">
+						Then pick <code class="font-mono">/tmp/storage_state.json</code> in the
+						file input below. Re-run any time the cookies expire.
+					</p>
+				</div>
+			</details>
 			<form class="flex flex-col gap-3" onsubmit={submitBotUpload}>
 				<input
 					type="file"

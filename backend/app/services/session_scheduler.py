@@ -130,6 +130,17 @@ class LaunchContext:
     both. Kept distinct so an audit can tell them apart and so the user
     can edit one without disturbing the other.
     """
+    calendar_attachments_text: str = ""
+    """Resolved text body of Google Docs / Sheets / Drive files linked
+    from the calendar event description (Johnny-4da).
+
+    Populated by the polling worker's resolver pass and cached on
+    :attr:`~app.db.models.CalendarEvent.attachments_text`. The scheduler
+    reads it once per launch and forwards via the meet-worker env var
+    ``JOHNNY_CALENDAR_ATTACHMENTS``. Empty string when the event has no
+    Drive URLs or the polling cycle hasn't yet resolved them — the bot
+    still joins, it just doesn't see document bodies for that meeting.
+    """
     provider_config: dict[str, Any] = field(default_factory=dict)
     pipeline_mode: str = "split"
     """Pipeline shape — ``split`` (STT→LLM→TTS) or ``unified`` (S2S) (Johnny-ckz.17).
@@ -373,9 +384,13 @@ async def start_session_for_meeting(
         logger.exception("provider payload build failed; sending empty payload")
 
     calendar_description = ""
+    calendar_attachments = ""
     event = meeting.calendar_event
-    if event is not None and event.description:
-        calendar_description = event.description
+    if event is not None:
+        if event.description:
+            calendar_description = event.description
+        if event.attachments_text:
+            calendar_attachments = event.attachments_text
 
     ctx = LaunchContext(
         bot_session_id=row.id,
@@ -388,6 +403,7 @@ async def start_session_for_meeting(
         instructions=effective_instructions,
         context=effective_context,
         calendar_context=calendar_description,
+        calendar_attachments_text=calendar_attachments,
         provider_config=provider_payload,
         pipeline_mode=pipeline_mode_value,
     )

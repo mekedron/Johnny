@@ -428,6 +428,52 @@ async def test_start_session_passes_calendar_description_as_context(
 
 
 @pytest.mark.asyncio
+async def test_start_session_passes_resolved_attachments_text(
+    db_session: Session,
+) -> None:
+    """Johnny-4da: ``CalendarEvent.attachments_text`` → LaunchContext."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    cfg.calendar_event.description = (
+        "See: https://docs.google.com/document/d/docABC/edit"
+    )
+    cfg.calendar_event.attachments_text = (
+        "--- Quarterly Plan ---\nObjective: ship Johnny-4da."
+    )
+    db_session.flush()
+
+    launcher = NoopContainerLauncher()
+    await start_session_for_meeting(
+        db_session, meeting=cfg, launcher=launcher
+    )
+    ctx = launcher.started[0]
+    assert ctx.calendar_attachments_text == (
+        "--- Quarterly Plan ---\nObjective: ship Johnny-4da."
+    )
+
+
+@pytest.mark.asyncio
+async def test_start_session_attachments_default_empty(
+    db_session: Session,
+) -> None:
+    """No resolved attachments → empty string env var, not None."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    db_session.flush()
+    launcher = NoopContainerLauncher()
+    await start_session_for_meeting(
+        db_session, meeting=cfg, launcher=launcher
+    )
+    assert launcher.started[0].calendar_attachments_text == ""
+
+
+@pytest.mark.asyncio
 async def test_start_session_handles_empty_override_text(
     db_session: Session,
 ) -> None:

@@ -424,6 +424,7 @@ def _build_spec_from_event(
         instructions=effective_instructions,
         context=effective_context,
         calendar_context=event.description or "",
+        calendar_attachments_text=event.attachments_text or "",
         provider_payload=effective_providers,
         event_bus=_build_event_bus(),
         pipeline_mode=pipeline_mode.value,

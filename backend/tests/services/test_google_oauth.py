@@ -41,6 +41,9 @@ def test_build_authorize_url_contains_required_query_params() -> None:
     assert "profile" in scopes
     assert "https://www.googleapis.com/auth/calendar.readonly" in scopes
     assert "https://www.googleapis.com/auth/calendar.events.readonly" in scopes
+    # Johnny-4da: drive.readonly so the bot can read Docs/Sheets linked
+    # from the calendar event description.
+    assert "https://www.googleapis.com/auth/drive.readonly" in scopes
 
 
 def test_build_authorize_url_passes_extra_params() -> None:

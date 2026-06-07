@@ -634,6 +634,165 @@ async def test_sync_skips_event_missing_id(
     assert result.updated_count == 0
 
 
+# --- sync_account_events: attachment resolution (Johnny-4da) --------------
+
+
+async def test_sync_resolves_drive_links_in_description(
+    session: Session, crypto: CredentialCrypto, settings: Settings
+) -> None:
+    """Description with a Docs URL → attachments_text + etags populated on the row."""
+    account = _make_account(session, crypto)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Calendar list response.
+        if request.url.host == "www.googleapis.com" and request.url.path.startswith(
+            "/calendar/"
+        ):
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        _event_payload(
+                            external_id="evt-1",
+                            summary="Quarterly review",
+                            description=(
+                                "Read the plan: "
+                                "https://docs.google.com/document/d/docABCDEF12/edit"
+                            ),
+                        )
+                    ]
+                },
+            )
+        # Drive metadata + export.
+        if request.url.path == "/drive/v3/files/docABCDEF12":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "docABCDEF12",
+                    "name": "Quarterly Plan",
+                    "mimeType": "application/vnd.google-apps.document",
+                    "modifiedTime": "2026-06-01T10:00:00.000Z",
+                },
+            )
+        if request.url.path == "/drive/v3/files/docABCDEF12/export":
+            return httpx.Response(200, text="Plan: ship Johnny-4da.")
+        return httpx.Response(404, text=f"unexpected: {request.url}")
+
+    client = _make_client(
+        session=session, account=account, crypto=crypto,
+        settings=settings, handler=handler,
+    )
+    result = await sync_account_events(session=session, client=client)
+    await client.aclose()
+    assert result.created_count == 1
+    row = session.scalars(sa.select(CalendarEvent)).one()
+    assert row.attachments_text is not None
+    assert "Plan: ship Johnny-4da." in row.attachments_text
+    assert row.attachments_etags == {"docABCDEF12": "2026-06-01T10:00:00.000Z"}
+
+
+async def test_sync_skips_body_fetch_on_second_pass_with_matching_etags(
+    session: Session, crypto: CredentialCrypto, settings: Settings
+) -> None:
+    """Second sync pass with unchanged doc → no body fetch.
+
+    Acceptance: "Fetched content cached + invalidated on Drive etag change."
+    """
+    account = _make_account(session, crypto)
+    body_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal body_calls
+        if request.url.host == "www.googleapis.com" and request.url.path.startswith(
+            "/calendar/"
+        ):
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        _event_payload(
+                            external_id="evt-1",
+                            summary="Quarterly review",
+                            description=(
+                                "Read the plan: "
+                                "https://docs.google.com/document/d/docABCDEF12/edit"
+                            ),
+                        )
+                    ]
+                },
+            )
+        if request.url.path == "/drive/v3/files/docABCDEF12":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "docABCDEF12",
+                    "name": "Quarterly Plan",
+                    "mimeType": "application/vnd.google-apps.document",
+                    "modifiedTime": "2026-06-01T10:00:00.000Z",
+                },
+            )
+        if request.url.path == "/drive/v3/files/docABCDEF12/export":
+            body_calls += 1
+            return httpx.Response(200, text="Plan: ship Johnny-4da.")
+        return httpx.Response(404, text=f"unexpected: {request.url}")
+
+    client = _make_client(
+        session=session, account=account, crypto=crypto,
+        settings=settings, handler=handler,
+    )
+    # First pass: body fetched, cached.
+    await sync_account_events(session=session, client=client)
+    assert body_calls == 1
+    # Second pass: unchanged modifiedTime → no body fetch (cache reuse).
+    await sync_account_events(session=session, client=client)
+    assert body_calls == 1
+    await client.aclose()
+
+
+async def test_sync_clears_attachments_when_description_drops_urls(
+    session: Session, crypto: CredentialCrypto, settings: Settings
+) -> None:
+    """Host removes the URL from the description → cached body cleared."""
+    account = _make_account(session, crypto)
+    initial = CalendarEvent(
+        account_id=account.id,
+        external_id="evt-1",
+        summary="Quarterly review",
+        description="(initial description with link — overwritten by sync)",
+        start_time=datetime(2026, 7, 1, 10, 0, tzinfo=UTC),
+        end_time=datetime(2026, 7, 1, 10, 30, tzinfo=UTC),
+        attachments_text="stale cached body",
+        attachments_etags={"docABCDEF12": "2026-06-01T10:00:00.000Z"},
+    )
+    session.add(initial)
+    session.flush()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # New event payload — description no longer has any Drive URL.
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    _event_payload(
+                        external_id="evt-1",
+                        summary="Quarterly review",
+                        description="Just talk through the goals.",
+                    )
+                ]
+            },
+        )
+
+    client = _make_client(
+        session=session, account=account, crypto=crypto,
+        settings=settings, handler=handler,
+    )
+    await sync_account_events(session=session, client=client)
+    await client.aclose()
+    session.flush()
+    assert initial.attachments_text is None
+    assert initial.attachments_etags is None
+
+
 # --- list_account_events --------------------------------------------------
 
 
