@@ -55,6 +55,7 @@ from app.providers.schema import (
     FieldOption,
     FieldType,
     ProviderSchema,
+    ProviderTip,
 )
 
 logger = logging.getLogger(__name__)
@@ -317,6 +318,76 @@ class FasterWhisperSTT(STTProvider):
                         "to break Whisper hallucination drift on silence."
                     ),
                     group=FieldGroup.ADVANCED,
+                ),
+            ),
+            tips=(
+                ProviderTip(
+                    topic="Model size is the dominant knob",
+                    body=(
+                        "tiny / base / small / medium roughly trade "
+                        "accuracy for latency: on a modern CPU expect "
+                        "~80 ms (tiny), ~150 ms (base), ~350 ms "
+                        "(small), ~900 ms (medium) per ~3 s utterance. "
+                        "Default base is the sweet spot for English "
+                        "meetings; bump to small only if you keep "
+                        "seeing wrong words. medium is rarely worth it "
+                        "without a GPU."
+                    ),
+                ),
+                ProviderTip(
+                    topic="CPU vs GPU — set device=auto if unsure",
+                    body=(
+                        "On NVIDIA hardware CUDA shrinks transcription "
+                        "by 4-8x on small / medium models; on CPU-only "
+                        "boxes it harmlessly falls back. Pair with "
+                        "compute_type=float16 on GPU, int8 on CPU. "
+                        "int8 on a recent x86 CPU is comparable to "
+                        "float32 in accuracy and roughly 2x faster."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Beam size — leave at 5 for speech",
+                    body=(
+                        "Beam size 1 (greedy) is ~30% faster but the "
+                        "Whisper paper measures a real accuracy hit on "
+                        "noisy speech. 5 (default) is the documented "
+                        "sweet spot; values above 10 produce diminishing "
+                        "returns and burn latency."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Specify the language if you know it",
+                    body=(
+                        "Leaving language blank costs ~100 ms on every "
+                        "utterance for auto-detection — set it to 'en' "
+                        "(or your meeting language) for a free win. The "
+                        "auto-detector also has a small chance of "
+                        "guessing wrong on short utterances and "
+                        "switching mid-meeting."
+                    ),
+                ),
+                ProviderTip(
+                    topic="no_speech_threshold filters silence hallucinations",
+                    body=(
+                        "Whisper sometimes fabricates a plausible string "
+                        "on silent input ('Thanks for watching', 'Does "
+                        "Olam A.P.I.'). The adapter drops segments whose "
+                        "no_speech_prob exceeds this threshold. 0.6 is "
+                        "the safe default — lower (0.4) if you still see "
+                        "hallucinations, higher (0.8) if you suspect "
+                        "the gate is dropping quiet real speech."
+                    ),
+                ),
+                ProviderTip(
+                    topic="VAD filter — leave on",
+                    body=(
+                        "The faster-whisper internal VAD trims non-"
+                        "speech ranges before transcription, which "
+                        "shrinks the work per utterance and rarely "
+                        "drops anything useful. Disable only when "
+                        "debugging a missing-word complaint and you "
+                        "want raw model output."
+                    ),
                 ),
             ),
         )

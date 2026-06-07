@@ -48,6 +48,7 @@ from app.providers.schema import (
     FieldOption,
     FieldType,
     ProviderSchema,
+    ProviderTip,
 )
 
 logger = logging.getLogger(__name__)
@@ -214,6 +215,40 @@ class GeminiLLM(LLMProvider):
                     type=FieldType.NUMBER,
                     default=DEFAULT_TIMEOUT_S,
                     group=FieldGroup.ADVANCED,
+                ),
+            ),
+            tips=(
+                ProviderTip(
+                    topic="Flash tier is dramatically faster than Pro",
+                    body=(
+                        "First-token latency: 2.5 Flash ~200-300 ms, "
+                        "2.5 Pro 600-1500 ms (Pro burns reasoning "
+                        "tokens before output). For the live router, "
+                        "Flash is the right pick; Pro becomes "
+                        "tempting only when you need its larger "
+                        "context or stronger reasoning for the answer "
+                        "stage."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Disable thinking on 2.5 models for speech",
+                    body=(
+                        "Gemini 2.5's 'thinking' budget produces "
+                        "hidden tokens before any visible output. "
+                        "Checking 'Disable thinking' sets the budget "
+                        "to 0 — visible tokens stream immediately. No "
+                        "effect on 1.5 models, harmless either way."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Largest context window in the cloud LLM tier",
+                    body=(
+                        "Gemini's 1M-token context window means even "
+                        "very long meetings rarely need transcript "
+                        "summarisation — the pipeline's token-budget "
+                        "guard tends not to fire. Pair with Flash for "
+                        "very cheap long-meeting handling."
+                    ),
                 ),
             ),
         )

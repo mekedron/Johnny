@@ -33,6 +33,7 @@ from app.providers.schema import (
     FieldOption,
     FieldType,
     ProviderSchema,
+    ProviderTip,
 )
 
 logger = logging.getLogger(__name__)
@@ -179,6 +180,51 @@ class ElevenLabsTTS(TTSProvider):
                     type=FieldType.NUMBER,
                     default=DEFAULT_TIMEOUT_S,
                     group=FieldGroup.ADVANCED,
+                ),
+            ),
+            tips=(
+                ProviderTip(
+                    topic="Flash v2.5 is the latency winner for English",
+                    body=(
+                        "eleven_flash_v2_5 starts streaming in ~150-"
+                        "300 ms from EU/US — the fastest cloud TTS "
+                        "available. English-only and slightly less "
+                        "expressive than Multilingual v2, but for "
+                        "live meetings the latency win is decisive. "
+                        "Pick Multilingual v2 only when you need a "
+                        "non-English voice."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Output format must be pcm_16000",
+                    body=(
+                        "The audio bridge expects 16 kHz raw PCM. "
+                        "Defaults already do this; if you set "
+                        "something else (mp3 / opus / pcm_22050) "
+                        "the bot's voice will sound chipmunk-fast "
+                        "or fail entirely. Keep pcm_16000."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Voice library — pick voices with low 'stability' for warmth",
+                    body=(
+                        "ElevenLabs voice stability settings are "
+                        "baked into the voice in the library. Voices "
+                        "tagged 'natural' or 'conversational' work "
+                        "better for meetings than 'narration' "
+                        "voices which can sound stilted in short "
+                        "back-and-forth."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Costs scale with characters synthesized",
+                    body=(
+                        "ElevenLabs bills per character. A typical "
+                        "bot turn (~80 chars) costs roughly $0.001 "
+                        "on Flash, $0.003 on Multilingual v2. A "
+                        "long meeting can run to dollars; watch your "
+                        "monthly cap."
+                    ),
                 ),
             ),
         )

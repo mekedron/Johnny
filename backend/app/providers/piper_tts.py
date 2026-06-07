@@ -59,6 +59,7 @@ from app.providers.schema import (
     FieldGroup,
     FieldType,
     ProviderSchema,
+    ProviderTip,
 )
 
 logger = logging.getLogger(__name__)
@@ -573,7 +574,72 @@ class PiperTTS(TTSProvider):
                     label="Read chunk bytes",
                     type=FieldType.NUMBER,
                     default=DEFAULT_CHUNK_BYTES,
+                    help_text=(
+                        "How many bytes the adapter waits to accumulate "
+                        "before yielding a frame downstream. Smaller = "
+                        "first audio leaves the box sooner, at the cost "
+                        "of more syscalls."
+                    ),
                     group=FieldGroup.ADVANCED,
+                ),
+            ),
+            tips=(
+                ProviderTip(
+                    topic="Voice tier — low vs medium vs high",
+                    body=(
+                        "Low voices output 16 kHz and synthesise fastest "
+                        "(~150 ms time-to-first-audio on a modern CPU). "
+                        "Medium voices (22.05 kHz) are noticeably more "
+                        "natural and add roughly 50-100 ms. High voices "
+                        "are a further +200 ms with marginal quality "
+                        "gain for meeting use. Default to medium unless "
+                        "you are demoing on a slow box — then low."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Native sample rate must match the voice file",
+                    body=(
+                        "Set this to 22050 for medium / high voices and "
+                        "16000 for low voices. The adapter resamples "
+                        "everything to 16 kHz internally, but if the "
+                        "rate is wrong the audio will sound chipmunk-fast "
+                        "or sluggish before resampling adds artefacts. "
+                        "Use the voice browser below — it sets the rate "
+                        "for you when you install a voice."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Persistent piper process is the next big win",
+                    body=(
+                        "Each synthesis call today spawns a fresh "
+                        "piper subprocess; the ONNX runtime startup is "
+                        "~200-400 ms of pure overhead per turn. Holding "
+                        "a long-lived piper process (or fronting one "
+                        "with the piper HTTP server) eliminates that "
+                        "tax and is the path to <100 ms time-to-first-"
+                        "audio on CPU. Tracked separately."
+                    ),
+                ),
+                ProviderTip(
+                    topic="chunk_bytes shapes head-of-line delay",
+                    body=(
+                        "At 22050 Hz / 16-bit the default 4096 bytes is "
+                        "~93 ms of audio — the first frame can't leave "
+                        "until that much has buffered. Drop to 1024 if "
+                        "you want first audio out the door inside 25 ms "
+                        "at the cost of more reads. Must be a multiple "
+                        "of 2."
+                    ),
+                ),
+                ProviderTip(
+                    topic="No audio leaves the host",
+                    body=(
+                        "Piper runs entirely on-device — no API key, no "
+                        "egress, fine on a flight. The trade-off is CPU "
+                        "load: on a busy host you may see synthesis "
+                        "stall behind whatever else is competing for "
+                        "cores."
+                    ),
                 ),
             ),
         )

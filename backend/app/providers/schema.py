@@ -69,6 +69,31 @@ class FieldOption:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderTip:
+    """One actionable tip rendered in the provider settings modal (Johnny-ckz.8).
+
+    A tip is the in-UI capture of know-how that the next operator tuning
+    this provider would otherwise have to rediscover from scratch — voice
+    tier vs latency, model size vs accuracy, CPU vs GPU rules of thumb.
+    The frontend renders the full ``tips`` tuple as a dedicated "Latency
+    & tuning tips" section in the modal so the knowledge lives next to
+    the knobs an operator is about to twist.
+
+    ``topic`` is the short headline (5-8 words). ``body`` is one or two
+    sentences in plain language, ideally naming a concrete number
+    measured on the local stack ("medium voices add ~50 ms vs low on
+    CPU"). Keep marketing fluff out — these are read at 11pm before a
+    demo, not on a landing page.
+    """
+
+    topic: str
+    body: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"topic": self.topic, "body": self.body}
+
+
+@dataclass(frozen=True, slots=True)
 class FieldDef:
     """A single configurable field on a provider form.
 
@@ -136,6 +161,7 @@ class ProviderSchema:
     summary: str
     signup_url: str | None = None
     fields: tuple[FieldDef, ...] = field(default_factory=tuple)
+    tips: tuple[ProviderTip, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for the ``GET /providers/schemas`` payload."""
@@ -146,6 +172,7 @@ class ProviderSchema:
             "summary": self.summary,
             "signup_url": self.signup_url,
             "fields": [f.to_dict() for f in self.fields],
+            "tips": [t.to_dict() for t in self.tips],
         }
 
     def field(self, name: str) -> FieldDef | None:
@@ -170,4 +197,5 @@ __all__ = [
     "FieldOption",
     "FieldType",
     "ProviderSchema",
+    "ProviderTip",
 ]

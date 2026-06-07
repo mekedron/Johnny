@@ -14,9 +14,15 @@ from app.providers import (
     OpenAILLM,
     OpenAIRealtimeSTT,
     OpenAITTS,
+    ParakeetSTT,
     PiperTTS,
 )
-from app.providers.schema import FieldGroup, FieldType, ProviderSchema
+from app.providers.schema import (
+    FieldGroup,
+    FieldType,
+    ProviderSchema,
+    ProviderTip,
+)
 from app.providers.schema_validation import (
     FieldValidationError,
     split_values,
@@ -33,6 +39,7 @@ ADAPTERS = [
     OpenAILLM,
     OpenAIRealtimeSTT,
     OpenAITTS,
+    ParakeetSTT,
     PiperTTS,
 ]
 
@@ -257,3 +264,44 @@ def test_disable_thinking_accepts_string_truthy_values() -> None:
         },
     )
     assert options["disable_thinking"] is True
+
+
+@pytest.mark.parametrize("adapter", ADAPTERS)
+def test_each_adapter_ships_tips(adapter: type) -> None:
+    """Johnny-ckz.8 — operators must see latency/tuning know-how in-UI."""
+    schema = adapter.field_schema()
+    assert schema.tips, f"{adapter.__name__} ships no ProviderTip — operators have nothing to read"
+    for tip in schema.tips:
+        assert isinstance(tip, ProviderTip)
+        assert tip.topic.strip(), f"{adapter.__name__} tip has an empty topic"
+        assert tip.body.strip(), f"{adapter.__name__} tip '{tip.topic}' has an empty body"
+        # Force the operator to actually write a sentence, not a fragment.
+        assert len(tip.body) >= 30, (
+            f"{adapter.__name__} tip '{tip.topic}' body is too terse to be useful"
+        )
+
+
+@pytest.mark.parametrize("adapter", ADAPTERS)
+def test_tips_serialize_in_to_dict(adapter: type) -> None:
+    """The /providers/schemas endpoint must include tips so the frontend can render them."""
+    schema = adapter.field_schema()
+    payload = schema.to_dict()
+    assert "tips" in payload
+    assert isinstance(payload["tips"], list)
+    assert len(payload["tips"]) == len(schema.tips)
+    for raw_tip, expected in zip(payload["tips"], schema.tips, strict=True):
+        assert raw_tip == {"topic": expected.topic, "body": expected.body}
+
+
+def test_provider_schema_to_dict_omits_tips_only_when_explicitly_empty() -> None:
+    """A schema with no tips still emits an empty list — never a missing key."""
+    schema = ProviderSchema(
+        kind=AnthropicLLM.field_schema().kind,
+        provider_name="dummy",
+        display_name="Dummy",
+        summary="Test",
+        fields=AnthropicLLM.field_schema().fields,
+    )
+    assert schema.tips == ()
+    payload = schema.to_dict()
+    assert payload["tips"] == []

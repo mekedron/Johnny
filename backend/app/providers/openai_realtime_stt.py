@@ -44,6 +44,7 @@ from app.providers.schema import (
     FieldOption,
     FieldType,
     ProviderSchema,
+    ProviderTip,
 )
 
 logger = logging.getLogger(__name__)
@@ -206,6 +207,39 @@ class OpenAIRealtimeSTT(STTProvider):
                     default=DEFAULT_BASE_URL,
                     help_text="Override only for proxied deployments.",
                     group=FieldGroup.ADVANCED,
+                ),
+            ),
+            tips=(
+                ProviderTip(
+                    topic="WebSocket-based streaming Whisper",
+                    body=(
+                        "OpenAI Realtime keeps a single WebSocket "
+                        "open per session and streams partials as "
+                        "audio arrives — first partial in ~200-400 ms, "
+                        "final in ~500-800 ms from a warm region. "
+                        "Slightly slower than Deepgram but uses your "
+                        "existing OpenAI key."
+                    ),
+                ),
+                ProviderTip(
+                    topic="gpt-4o-mini-transcribe is the speed pick",
+                    body=(
+                        "gpt-4o-mini-transcribe trades ~5% accuracy "
+                        "for noticeably faster partials than "
+                        "gpt-4o-transcribe. whisper-1 is the "
+                        "incumbent and the slowest of the three; "
+                        "rarely the right pick today."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Bias prompt — feed jargon, names, acronyms",
+                    body=(
+                        "A short bias prompt with meeting-specific "
+                        "vocabulary (company names, product codes, "
+                        "speaker names) measurably reduces wrong-word "
+                        "errors in the transcript. Keep under 50 "
+                        "words — long prompts dilute the bias."
+                    ),
                 ),
             ),
         )

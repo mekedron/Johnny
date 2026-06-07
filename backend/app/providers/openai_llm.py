@@ -20,6 +20,7 @@ from app.providers.schema import (
     FieldOption,
     FieldType,
     ProviderSchema,
+    ProviderTip,
 )
 
 PROVIDER_NAME = "openai"
@@ -173,6 +174,43 @@ class OpenAILLM(OpenAICompatibleLLM):
                     type=FieldType.NUMBER,
                     default=60,
                     group=FieldGroup.ADVANCED,
+                ),
+            ),
+            tips=(
+                ProviderTip(
+                    topic="gpt-4o-mini is the router default",
+                    body=(
+                        "First-token latency on a warm region: 4o-mini "
+                        "~200 ms, 4o ~350 ms, 4.1 ~400 ms, o1/o3 "
+                        "(reasoning) 1-10 s before any visible token. "
+                        "Use 4o-mini for the router that fires on every "
+                        "transcript and reserve the bigger models for "
+                        "the answer stage if the meeting demands it."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Reasoning models hide latency behind the first token",
+                    body=(
+                        "o1 / o3 / gpt-5 models burn 'reasoning tokens' "
+                        "before they answer — there's no visible "
+                        "streaming during that period. For a spoken "
+                        "router this looks like the bot just froze. "
+                        "Either flip 'Disable thinking' on (sets "
+                        "reasoning_effort=minimal) or stay on 4o-mini "
+                        "for any stage where the user is waiting to "
+                        "hear sound."
+                    ),
+                ),
+                ProviderTip(
+                    topic="seed + low temperature = repeatable runs",
+                    body=(
+                        "OpenAI honours seed best-effort; combined "
+                        "with temperature=0 it makes test runs "
+                        "reproducible turn-to-turn, which is how this "
+                        "project's snapshot tests stay green. "
+                        "Production conversational use wants 0.4-0.8 "
+                        "for variety."
+                    ),
                 ),
             ),
         )

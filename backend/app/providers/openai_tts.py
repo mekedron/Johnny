@@ -37,6 +37,7 @@ from app.providers.schema import (
     FieldOption,
     FieldType,
     ProviderSchema,
+    ProviderTip,
 )
 
 logger = logging.getLogger(__name__)
@@ -178,6 +179,38 @@ class OpenAITTS(TTSProvider):
                     type=FieldType.NUMBER,
                     default=DEFAULT_TIMEOUT_S,
                     group=FieldGroup.ADVANCED,
+                ),
+            ),
+            tips=(
+                ProviderTip(
+                    topic="tts-1 streams first audio in ~300-400 ms",
+                    body=(
+                        "tts-1 is the streaming-friendly model — first "
+                        "bytes arrive in ~300-400 ms from a warm "
+                        "region. tts-1-hd adds another ~200-300 ms for "
+                        "audibly cleaner output that almost nobody "
+                        "notices in a meeting. For live use stay on "
+                        "tts-1; reserve hd for offline narration."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Pick a voice and stick with it",
+                    body=(
+                        "Voices have distinct character (alloy is "
+                        "neutral, nova is bright, onyx is deep). "
+                        "Switching mid-meeting confuses participants; "
+                        "pick one and codify it in the bot's persona."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Speed knob — leave at 1.0 for naturalness",
+                    body=(
+                        "Speed 1.0 is the trained default. 1.1-1.2 is "
+                        "usable for a snappier feel; above 1.3 the "
+                        "prosody breaks down. Below 0.9 sounds "
+                        "patronising. Affects synthesis duration, not "
+                        "first-byte latency."
+                    ),
                 ),
             ),
         )

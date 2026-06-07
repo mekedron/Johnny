@@ -72,6 +72,7 @@ from app.providers.schema import (
     FieldOption,
     FieldType,
     ProviderSchema,
+    ProviderTip,
 )
 
 logger = logging.getLogger(__name__)
@@ -264,6 +265,48 @@ class ParakeetSTT(STTProvider):
                         "(fastest). Higher values trade latency for accuracy."
                     ),
                     group=FieldGroup.ADVANCED,
+                ),
+            ),
+            tips=(
+                ProviderTip(
+                    topic="Parakeet shines on GPU; CPU is workable but slow",
+                    body=(
+                        "On an NVIDIA GPU, Parakeet 0.6B TDT v3 "
+                        "transcribes a 3-second utterance in ~80-150 "
+                        "ms — comparable to Deepgram cloud. On CPU "
+                        "the same utterance can take 1-2 s. If you "
+                        "don't have a GPU, faster-whisper int8 is "
+                        "usually faster on CPU."
+                    ),
+                ),
+                ProviderTip(
+                    topic="0.6B TDT v3 is the default for a reason",
+                    body=(
+                        "Newer Transducer-Decoder Transducer (TDT) "
+                        "architecture is markedly faster than the "
+                        "older RNN-T checkpoints at comparable "
+                        "accuracy. Stay on the 0.6B unless you're "
+                        "specifically benchmarking a larger build."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Beam size 1 is fine for greedy speech",
+                    body=(
+                        "TDT beam decode adds latency without much "
+                        "accuracy gain on clear conversational "
+                        "speech. Bump to 4-8 only if you're seeing "
+                        "wrong words on noisy / accented input and "
+                        "have GPU headroom."
+                    ),
+                ),
+                ProviderTip(
+                    topic="English-only by default",
+                    body=(
+                        "Most public Parakeet checkpoints are "
+                        "English-only. For other languages, prefer "
+                        "faster-whisper (multilingual) or ElevenLabs "
+                        "Scribe."
+                    ),
                 ),
             ),
         )

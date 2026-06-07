@@ -42,6 +42,7 @@ from app.providers.schema import (
     FieldOption,
     FieldType,
     ProviderSchema,
+    ProviderTip,
 )
 
 logger = logging.getLogger(__name__)
@@ -209,6 +210,40 @@ class DeepgramSTT(STTProvider):
                     default=DEFAULT_SMART_FORMAT,
                     help_text="Apply number / date / currency formatting.",
                     group=FieldGroup.ADVANCED,
+                ),
+            ),
+            tips=(
+                ProviderTip(
+                    topic="Deepgram is the latency king for STT",
+                    body=(
+                        "Streaming-mode partials arrive in ~80-150 ms "
+                        "from EU/US — about 3-5x faster than running "
+                        "Whisper locally on CPU. If your latency "
+                        "budget is tight and you accept cloud egress, "
+                        "this is the pick."
+                    ),
+                ),
+                ProviderTip(
+                    topic="nova-3 / nova-2 — pick nova-2 unless you've tested nova-3",
+                    body=(
+                        "nova-2 is the recommended stable model; "
+                        "nova-3 is newer with slightly better "
+                        "accuracy on noisy audio but may behave "
+                        "differently for your accent/domain. "
+                        "Default to nova-2 in production."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Endpointing — keep at ~300 ms",
+                    body=(
+                        "Deepgram's endpointing fires its own "
+                        "is_final marker after this many ms of "
+                        "silence. The Johnny pipeline overlays its "
+                        "own 800 ms VAD endpointing on top, so the "
+                        "Deepgram value mostly governs how many "
+                        "partials you get. 300 ms is the documented "
+                        "sweet spot."
+                    ),
                 ),
             ),
         )

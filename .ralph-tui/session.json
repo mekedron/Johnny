@@ -3,10 +3,10 @@
   "sessionId": "92aa43ca-591e-4b12-ab32-62131855e44d",
   "status": "running",
   "startedAt": "2026-06-07T00:08:27.194Z",
-  "updatedAt": "2026-06-07T00:55:10.740Z",
-  "currentIteration": 3,
+  "updatedAt": "2026-06-07T01:15:19.472Z",
+  "currentIteration": 4,
   "maxIterations": 0,
-  "tasksCompleted": 3,
+  "tasksCompleted": 4,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -146,8 +146,8 @@
       {
         "id": "Johnny-3ha",
         "title": "Active LLM provider sometimes gets unselected (TTS and STT are not affected)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-1zg",
@@ -379,6 +379,16 @@
       "durationMs": 759586,
       "startedAt": "2026-06-07T00:25:12.466Z",
       "endedAt": "2026-06-07T00:37:52.052Z"
+    },
+    {
+      "iteration": 4,
+      "status": "completed",
+      "taskId": "Johnny-3ha",
+      "taskTitle": "Active LLM provider sometimes gets unselected (TTS and STT are not affected)",
+      "taskCompleted": true,
+      "durationMs": 1025813,
+      "startedAt": "2026-06-07T00:38:04.140Z",
+      "endedAt": "2026-06-07T00:55:09.953Z"
     }
   ],
   "skippedTaskIds": [],

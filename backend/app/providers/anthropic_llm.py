@@ -47,6 +47,7 @@ from app.providers.schema import (
     FieldOption,
     FieldType,
     ProviderSchema,
+    ProviderTip,
 )
 
 logger = logging.getLogger(__name__)
@@ -233,6 +234,41 @@ class AnthropicLLM(LLMProvider):
                     type=FieldType.NUMBER,
                     default=DEFAULT_TIMEOUT_S,
                     group=FieldGroup.ADVANCED,
+                ),
+            ),
+            tips=(
+                ProviderTip(
+                    topic="Use Haiku for the router; Sonnet/Opus only when warranted",
+                    body=(
+                        "Anthropic's first-token latency is roughly: "
+                        "Haiku ~250 ms, Sonnet ~500 ms, Opus ~800 ms "
+                        "from a warm region. The router fires on every "
+                        "transcript, so Haiku is the sane default — "
+                        "swap to Sonnet/Opus only for the answer model "
+                        "when the meeting demands reasoning quality."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Tight max_tokens, low temperature for speech",
+                    body=(
+                        "Spoken responses are ~10-30 words. Cap "
+                        "max_tokens at 256-512 and the model finishes "
+                        "fast; cap at 1024 and you may wait for "
+                        "padding it never speaks. Temperature 0.2-0.5 "
+                        "keeps tone consistent across turns."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Cost — Haiku is the value pick",
+                    body=(
+                        "At the time of writing Haiku is ~$0.80 / "
+                        "$4.00 per million in/out tokens, Sonnet ~"
+                        "$3 / $15, Opus ~$15 / $75. A typical meeting "
+                        "with the router-on-every-turn pattern runs "
+                        "well into thousands of input tokens — pick "
+                        "Haiku unless you've measured a real quality "
+                        "gap."
+                    ),
                 ),
             ),
         )

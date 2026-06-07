@@ -47,6 +47,7 @@ from app.providers.schema import (
     FieldOption,
     FieldType,
     ProviderSchema,
+    ProviderTip,
 )
 
 logger = logging.getLogger(__name__)
@@ -296,6 +297,78 @@ class OpenAICompatibleLLM(LLMProvider):
                     type=FieldType.NUMBER,
                     default=DEFAULT_TIMEOUT_S,
                     group=FieldGroup.ADVANCED,
+                ),
+            ),
+            tips=(
+                ProviderTip(
+                    topic="Model size dominates first-token latency",
+                    body=(
+                        "On Ollama / vLLM, first-token latency scales with "
+                        "model size and quantisation: a 7B Q4_K_M model "
+                        "delivers tokens in ~200-400 ms; a 13B is ~500-800 "
+                        "ms; a 35B Q4_K_M is 1.5-3 s on consumer hardware. "
+                        "For the live router that gates whether Johnny "
+                        "speaks at all, pick the smallest model that "
+                        "answers reliably — anything above 13B steals "
+                        "from the time-to-first-audio budget."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Disable thinking for the router model",
+                    body=(
+                        "Reasoning / chain-of-thought models (Qwen3, "
+                        "Qwen3.5, DeepSeek R1) emit hidden reasoning "
+                        "tokens before the visible answer — which means "
+                        "the router won't decide until those finish. "
+                        "Toggle 'Disable thinking' on so the model "
+                        "answers directly. Saves seconds per turn on "
+                        "reasoning-capable builds."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Lower temperature for routing decisions",
+                    body=(
+                        "The router decides between 'speak', 'stay "
+                        "silent', and 'ask for approval'. Temperature "
+                        "0-0.3 makes that decision repeatable; "
+                        "0.7+ lets the model occasionally talk itself "
+                        "into speaking when it shouldn't. Pair with a "
+                        "fixed seed if you want fully deterministic "
+                        "behaviour for testing."
+                    ),
+                ),
+                ProviderTip(
+                    topic="base_url — host.docker.internal for Ollama",
+                    body=(
+                        "From inside the Johnny api / worker container, "
+                        "localhost points at the container, not your "
+                        "Ollama daemon. Use http://host.docker.internal:"
+                        "11434/v1 on macOS / Docker Desktop, or the "
+                        "host's bridge IP (172.17.0.1 by default) on "
+                        "Linux."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Keep your Ollama model warm",
+                    body=(
+                        "Ollama unloads models after OLLAMA_KEEP_ALIVE "
+                        "minutes idle (default 5). The first call after "
+                        "unload re-loads the GGUF — adds 1-5 s of pure "
+                        "wait. Set OLLAMA_KEEP_ALIVE=24h on the Ollama "
+                        "host, or warm the model on session start by "
+                        "letting the bot make any LLM call."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Tool-call format — pick 'hermes' for Nous / some Qwen builds",
+                    body=(
+                        "Most servers and most Qwen builds accept the "
+                        "standard 'openai' tool-call schema. Nous "
+                        "Hermes and some uncensored Qwen remixes ship "
+                        "with a Hermes-style template; if tool calls "
+                        "are getting silently dropped, switch this to "
+                        "'hermes'."
+                    ),
                 ),
             ),
         )

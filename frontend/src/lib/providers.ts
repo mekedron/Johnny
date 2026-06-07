@@ -50,6 +50,11 @@ export interface FieldDef {
 	env_key?: string;
 }
 
+export interface ProviderTip {
+	topic: string;
+	body: string;
+}
+
 export interface ProviderSchema {
 	kind: ProviderKind;
 	provider_name: string;
@@ -57,6 +62,7 @@ export interface ProviderSchema {
 	summary: string;
 	signup_url: string | null;
 	fields: FieldDef[];
+	tips: ProviderTip[];
 }
 
 export interface ProviderSchemaList {

@@ -1338,6 +1338,49 @@
 							</section>
 						{/each}
 
+						{#if selectedEntry.field_schema.tips && selectedEntry.field_schema.tips.length > 0}
+							<section
+								class="flex flex-col gap-3 rounded-md border border-border bg-surface-1 px-4 py-4"
+								aria-label="Latency and tuning tips"
+								data-testid="provider-tips"
+							>
+								<div class="flex items-baseline justify-between">
+									<h3 class="m-0 text-sm font-semibold text-foreground">
+										Latency &amp; tuning tips
+									</h3>
+									<span class="text-xs text-ink-subtle">
+										{selectedEntry.field_schema.tips.length}
+										tip{selectedEntry.field_schema.tips.length === 1 ? '' : 's'}
+									</span>
+								</div>
+								<p class="m-0 text-xs text-muted-foreground">
+									Notes from profiling this provider on real models. Read these
+									before turning knobs above.
+								</p>
+								<ul class="m-0 flex flex-col gap-3 p-0">
+									{#each selectedEntry.field_schema.tips as tip (tip.topic)}
+										<li
+											class="flex flex-col gap-1 rounded-sm border border-border bg-surface-2 px-3 py-2"
+											data-testid="provider-tip"
+										>
+											<strong
+												class="text-xs leading-tight font-semibold text-foreground"
+												data-testid="provider-tip-topic"
+											>
+												{tip.topic}
+											</strong>
+											<p
+												class="m-0 text-xs leading-relaxed text-muted-foreground"
+												data-testid="provider-tip-body"
+											>
+												{tip.body}
+											</p>
+										</li>
+									{/each}
+								</ul>
+							</section>
+						{/if}
+
 						{#if isPiperDraft}
 							<section
 								class="flex flex-col gap-3 rounded-md border border-border bg-surface-1 px-4 py-4"

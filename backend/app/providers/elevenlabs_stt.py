@@ -40,6 +40,7 @@ from app.providers.schema import (
     FieldOption,
     FieldType,
     ProviderSchema,
+    ProviderTip,
 )
 
 logger = logging.getLogger(__name__)
@@ -183,6 +184,39 @@ class ElevenLabsSTT(STTProvider):
                     type=FieldType.NUMBER,
                     default=DEFAULT_TIMEOUT_S,
                     group=FieldGroup.ADVANCED,
+                ),
+            ),
+            tips=(
+                ProviderTip(
+                    topic="Batch only — high accuracy, no streaming partials",
+                    body=(
+                        "ElevenLabs Scribe is a batch endpoint: it "
+                        "transcribes a whole utterance in one shot. "
+                        "There are no partials, so the pipeline waits "
+                        "for VAD end-of-speech before STT runs. "
+                        "Round-trip is typically 400-800 ms for a "
+                        "3-second utterance. Pick Deepgram if "
+                        "you need streaming."
+                    ),
+                ),
+                ProviderTip(
+                    topic="Accuracy is excellent on noisy / accented speech",
+                    body=(
+                        "Scribe v2 is one of the most accurate cloud "
+                        "STT engines for non-US accents and "
+                        "background noise. Worth the higher latency "
+                        "for meetings with international participants "
+                        "where Whisper / Deepgram trip up."
+                    ),
+                ),
+                ProviderTip(
+                    topic="file_format must stay pcm_s16le_16",
+                    body=(
+                        "The bridge ships raw 16 kHz PCM; the API "
+                        "must be told that format or it tries to "
+                        "auto-detect and fails. Don't change unless "
+                        "you've changed the upstream audio bridge."
+                    ),
                 ),
             ),
         )
