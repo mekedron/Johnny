@@ -52,14 +52,11 @@
 		{ href: '/settings', label: 'Settings' }
 	];
 
-	const SESSIONS_POLL_INTERVAL_MS = 30_000;
-
 	let sidebarOpen = $state(false);
 	let defaultAccount = $state<Account | null>(null);
 	let activeSessions = $state<BotSession[]>([]);
 	let sessionsErrorMessage = $state<string | null>(null);
 	let stoppingSessionIds = $state<Set<number>>(new Set());
-	let sessionsTimer: ReturnType<typeof setInterval> | null = null;
 	let globalEventsSubscription: Subscription | null = null;
 	let pendingApprovals = $state<PendingApproval[]>([]);
 	let approvalSubscriptions: Map<number, Subscription> = new Map();
@@ -275,10 +272,15 @@
 	onMount(() => {
 		refreshAccount();
 		refreshActiveSessions();
-		sessionsTimer = setInterval(refreshActiveSessions, SESSIONS_POLL_INTERVAL_MS);
 		window.addEventListener('message', handleOAuthMessage);
+		// No polling — the global WS drives live updates (Johnny-8zv.4).
+		// Reconcile on (re)connect so a dropped connection can't leave the
+		// sidebar's active-session list stale.
 		globalEventsSubscription = subscribeToGlobal({
-			onEvent: handleGlobalEvent
+			onEvent: handleGlobalEvent,
+			onOpen: () => {
+				void refreshActiveSessions();
+			}
 		});
 		void bootstrapNotifications().then((permission) => {
 			notificationPermission = permission;
@@ -286,10 +288,6 @@
 	});
 
 	onDestroy(() => {
-		if (sessionsTimer !== null) {
-			clearInterval(sessionsTimer);
-			sessionsTimer = null;
-		}
 		if (typeof window !== 'undefined') {
 			window.removeEventListener('message', handleOAuthMessage);
 		}

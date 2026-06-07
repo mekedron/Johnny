@@ -66,10 +66,12 @@ from app.db.session import session_scope
 from app.services.bot_sessions import (
     BotSessionNotFoundError,
     mark_session_ended,
+    mark_session_failed,
     mark_session_joined,
 )
 from app.services.browser_pipeline_runner import (
     BrowserPipelineSpec,
+    BrowserRunOutcome,
     run_browser_pipeline,
 )
 from app.services.provider_payload import build_provider_payload, resolve_pipeline_mode
@@ -78,6 +80,7 @@ from johnny.voice_pipeline import (
     EventBus,
     InMemoryEventBus,
     RedisEventBus,
+    SessionStatusChanged,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,6 +90,18 @@ ws_router = APIRouter(tags=["browser-sessions-ws"])
 
 DEFAULT_SAMPLE_RATE = 16_000
 DEFAULT_PERSONA = "Friendly conversation partner. Be concise."
+
+SINGLE_SESSION_POLICY = "reject"
+"""How to handle a start request when a browser session is already live.
+
+* ``"reject"`` (default) — refuse with HTTP 409 plus the active session id
+  so the UI can offer "Resume" / "End it & start new" (Johnny-8zv.2). A
+  second concurrent in-process pipeline fights over the mic + provider
+  quota, which is the "unpredictable behaviour" users hit.
+* ``"auto_replace"`` — best-effort stop the existing session, then start
+  the new one. Wired but not the chosen UX; kept so the policy is a
+  one-line swap.
+"""
 
 # In-memory registry of live browser sessions. Each runner owns one
 # transport + one pipeline task; the WebSocket endpoint looks up the
@@ -230,6 +245,14 @@ class BrowserSessionRunner:
     Captured via ``on_assembled`` callback so the text-input endpoint
     can call :meth:`VoicePipeline.feed_text` and drive the full
     router → answer → TTS path from typed input (Johnny-ckz.11)."""
+    event_bus: EventBus | None = None
+    """The session's event bus (shared with the assembled pipeline).
+
+    Held so the runner's cleanup can publish a ``SessionStatusChanged``
+    event when the session ends/fails. Browser pipelines run in-process
+    and persist their terminal status directly, so this publish exists
+    purely for WebSocket fan-out: it lets the playground tear down its
+    own UI and the sidebar drop the session without polling (Johnny-8zv)."""
 
 
 def get_session_runner(bot_session_id: int) -> BrowserSessionRunner | None:
@@ -246,6 +269,74 @@ def deregister_runner(bot_session_id: int) -> None:
 
 def list_runner_ids() -> list[int]:
     return sorted(_session_runners)
+
+
+def request_browser_session_stop(bot_session_id: int) -> bool:
+    """Signal the in-process runner for a browser session to stop.
+
+    Returns ``True`` when a live runner was found and signalled. The
+    runner's own cleanup marks the row ended/failed and publishes the
+    ``SessionStatusChanged`` event, so every stop path — the playground
+    "End" button, the sidebar "Leave now" (which routes here via
+    :func:`app.services.session_scheduler.stop_session_by_id`), and the
+    disconnect-grace watchdog — funnels through the same teardown.
+    Returns ``False`` when there is no runner (e.g. the API restarted and
+    lost the in-memory registry); callers handle that stale case.
+    """
+    runner = get_session_runner(bot_session_id)
+    if runner is None:
+        return False
+    runner.stop_event.set()
+    return True
+
+
+async def _publish_session_status(
+    event_bus: EventBus,
+    session_id: str,
+    status: str,
+    error_reason: str | None = None,
+) -> None:
+    """Publish a ``SessionStatusChanged`` event for WS fan-out — never raises.
+
+    Browser sessions persist their own terminal status (the DB-applying
+    status subscriber only runs in the worker process), so this publish
+    exists purely so the per-session and global WebSockets learn the
+    session ended/failed and the UI reacts live instead of polling.
+    """
+    try:
+        await event_bus.publish(
+            SessionStatusChanged(
+                status=status,  # type: ignore[arg-type]
+                timestamp_ms=int(time.time() * 1000),
+                session_id=session_id,
+                error_reason=error_reason,
+            )
+        )
+    except Exception:
+        logger.exception(
+            "failed to publish session_status_changed (session=%s status=%s)",
+            session_id,
+            status,
+        )
+
+
+async def publish_session_status_oneoff(
+    session_id: str, status: str, error_reason: str | None = None
+) -> None:
+    """Publish a status change on a throwaway bus (stale / no-runner paths).
+
+    Used when no live runner holds an event bus — the single-session
+    reaper (Johnny-8zv.2) and a sidebar stop of a session whose runner is
+    already gone. Builds a one-off bus, publishes, and closes it.
+    """
+    bus = _build_event_bus()
+    try:
+        await _publish_session_status(bus, session_id, status, error_reason)
+    finally:
+        try:
+            await bus.close()
+        except Exception:
+            logger.exception("event bus close failed after one-off publish")
 
 
 # --- Helpers --------------------------------------------------------------
@@ -292,6 +383,31 @@ def _row_to_read(row: BotSession) -> BrowserSessionRead:
         audio_ws_path=f"/ws/sessions/{row.id}/audio",
         error_reason=row.error_reason,
         playground_overrides=row.playground_overrides,
+    )
+
+
+def _find_active_browser_sessions(session: Session) -> list[BotSession]:
+    """Return all non-terminal browser sessions, oldest first.
+
+    Backs the one-active-browser-session rule (Johnny-8zv.2). "Active"
+    means status in SCHEDULED/JOINING/JOINED — the same set the active
+    listing endpoint uses.
+    """
+    return list(
+        session.scalars(
+            select(BotSession)
+            .where(BotSession.source == BotSessionSource.BROWSER)
+            .where(
+                BotSession.status.in_(
+                    (
+                        BotSessionStatus.SCHEDULED,
+                        BotSessionStatus.JOINING,
+                        BotSessionStatus.JOINED,
+                    )
+                )
+            )
+            .order_by(BotSession.id)
+        ).all()
     )
 
 
@@ -539,26 +655,51 @@ def _spawn_runner(
             holder_runner.pipeline = pipeline
 
     async def _runner() -> None:
+        outcome = BrowserRunOutcome("ended", None)
         try:
-            await run_browser_pipeline(
+            outcome = await run_browser_pipeline(
                 transport,
                 spec,
                 stop_event=stop_event,
                 on_assembled=_capture_pipeline,
             )
+        except Exception as exc:  # noqa: BLE001 — runner must always clean up
+            logger.exception(
+                "browser runner crashed for session=%s", bot_session_id
+            )
+            outcome = BrowserRunOutcome("failed", f"runner crashed: {exc}")
         finally:
-            # Persist the session end on cleanup so the UI sees the
-            # status change without waiting for an external probe.
+            # Persist the terminal status on cleanup so the UI sees the
+            # change without waiting for an external probe. Browser
+            # sessions self-persist because the DB-applying status
+            # subscriber only runs in the worker process.
             try:
                 with session_scope() as session:
                     try:
-                        mark_session_ended(session, bot_session_id)
+                        if outcome.status == "failed":
+                            mark_session_failed(
+                                session,
+                                bot_session_id,
+                                outcome.error_reason or "pipeline failed",
+                            )
+                        else:
+                            mark_session_ended(session, bot_session_id)
                     except BotSessionNotFoundError:
                         pass
             except Exception:
                 logger.exception(
-                    "failed to mark browser session %s ended", bot_session_id
+                    "failed to mark browser session %s %s",
+                    bot_session_id,
+                    outcome.status,
                 )
+            # Publish for WS fan-out so the playground tears down and the
+            # sidebar drops the session live (no polling).
+            await _publish_session_status(
+                spec.event_bus,
+                str(bot_session_id),
+                outcome.status,
+                outcome.error_reason,
+            )
             deregister_runner(bot_session_id)
 
     task = asyncio.create_task(_runner(), name=f"browser-runner-{bot_session_id}")
@@ -567,6 +708,7 @@ def _spawn_runner(
         transport=transport,
         stop_event=stop_event,
         task=task,
+        event_bus=spec.event_bus,
     )
     runner_holder["runner"] = runner
     register_runner(runner)
@@ -594,6 +736,39 @@ async def start_browser_session(
     for the audio stream. Distinct from ``POST /sessions/start`` which
     is the meet-worker path.
     """
+    # One-active-browser-session rule (Johnny-8zv.2). A second concurrent
+    # in-process pipeline fights over the mic + provider quota, which is
+    # the "unpredictable behaviour" users reported. First reap any stale
+    # rows whose runner is gone — e.g. the API restarted and lost the
+    # in-memory registry — so crashes can't accumulate or lock the user
+    # out; then reject (or auto-replace) only if a genuinely live session
+    # remains, returning its id so the UI can offer Resume.
+    live: list[BotSession] = []
+    for active in _find_active_browser_sessions(session):
+        if get_session_runner(active.id) is not None:
+            live.append(active)
+            continue
+        try:
+            mark_session_ended(session, active.id)
+        except BotSessionNotFoundError:
+            pass
+        await publish_session_status_oneoff(str(active.id), "ended", None)
+    if live:
+        if SINGLE_SESSION_POLICY == "auto_replace":
+            for active in live:
+                request_browser_session_stop(active.id)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": (
+                        f"A browser session (#{live[0].id}) is already live. "
+                        "Resume it, or end it before starting a new one."
+                    ),
+                    "active_session_id": live[0].id,
+                },
+            )
+
     meeting_config_id: int | None = None
     if payload.event_id is not None:
         _, meeting = _load_event_meeting(session, payload.event_id)
@@ -637,6 +812,12 @@ async def start_browser_session(
         mark_session_joined(session, row.id)
     except BotSessionNotFoundError:  # pragma: no cover — just flushed
         pass
+
+    # Broadcast the new live session so the sidebar shows it instantly
+    # over the global WS — this is what lets us drop the 30s poll
+    # (Johnny-8zv.4). The end/failed broadcast happens in the runner's
+    # cleanup; this is the joined half of the lifecycle.
+    await _publish_session_status(spec.event_bus, str(row.id), "joined")
 
     return _row_to_read(row)
 

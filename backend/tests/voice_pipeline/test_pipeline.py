@@ -340,6 +340,140 @@ async def test_pipeline_emits_events_in_order_for_two_utterance_wav(
     assert end_to_end[0].provider_name is None
 
 
+# --- Johnny-8zv.3: structured stage-failure diagnostics -------------------
+
+
+class _FailingThenOkSTT(STTProvider):
+    """Raises on the first utterance, succeeds on the second.
+
+    Proves a transient STT failure emits a structured PipelineStageFailed
+    event and does NOT tear the session down.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    @property
+    def name(self) -> str:
+        return "flaky-stt"
+
+    async def transcribe_stream(
+        self, audio_iter: AsyncIterator[bytes]
+    ) -> AsyncIterator[TranscriptEvent]:
+        async for _ in audio_iter:
+            pass
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("connection refused: STT sidecar down")
+        yield TranscriptEvent(
+            text="second", is_final=True, timestamp_ms=2000, confidence=0.9
+        )
+
+
+class _FailingRouterLLM(LLMProvider):
+    @property
+    def name(self) -> str:
+        return "down-router"
+
+    async def chat(
+        self,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
+        response_format: dict[str, Any] | None = None,  # noqa: ARG002
+    ) -> LLMResponse:
+        raise RuntimeError("HTTP 503: model not responding")
+
+
+async def test_pipeline_stt_failure_emits_stage_failed_and_continues(
+    two_utterance_pcm: bytes,
+) -> None:
+    """A transient STT error emits PipelineStageFailed(stage=stt) and the
+    session keeps going — the second utterance still transcribes."""
+    from johnny.voice_pipeline.events import PipelineStageFailed
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    stt = _FailingThenOkSTT()
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=stt,
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": False, "confidence": 0.1, "reason": "n/a"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["unused"]),
+        tts=_FakeTTS(),
+        event_bus=bus,
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            frame_duration_ms=20,
+            session_id="stt-fail",
+        ),
+    )
+
+    await pipeline.run()
+
+    events = bus.snapshot()
+    failures = [e for e in events if isinstance(e, PipelineStageFailed)]
+    assert len(failures) == 1
+    assert failures[0].stage == "stt"
+    assert failures[0].category == "unavailable"  # "connection refused"
+    assert failures[0].session_id == "stt-fail"
+    # Stayed alive: both utterances reached STT, and the second produced a
+    # transcript despite the first failing.
+    assert stt.calls == 2
+    transcripts = [e for e in events if isinstance(e, TranscriptFinalized)]
+    assert [t.text for t in transcripts] == ["second"]
+
+
+async def test_pipeline_router_failure_emits_stage_failed_and_continues(
+    two_utterance_pcm: bytes,
+) -> None:
+    """A router-LLM error emits PipelineStageFailed(stage=router_llm) and the
+    transcription loop keeps running."""
+    from johnny.voice_pipeline.events import PipelineStageFailed
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=frames),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["one", "two"]),
+        router_llm=_FailingRouterLLM(),
+        answer_llm=_FakeAnswerLLM(answers=["unused"]),
+        tts=_FakeTTS(),
+        event_bus=bus,
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            frame_duration_ms=20,
+            session_id="router-fail",
+        ),
+    )
+
+    await pipeline.run()
+
+    events = bus.snapshot()
+    failures = [e for e in events if isinstance(e, PipelineStageFailed)]
+    assert len(failures) >= 1
+    assert all(f.stage == "router_llm" for f in failures)
+    # Transcription continued — both transcripts published despite the
+    # router failing on each turn.
+    transcripts = [e for e in events if isinstance(e, TranscriptFinalized)]
+    assert [t.text for t in transcripts] == ["one", "two"]
+
+
 # --- pipeline behaviour edge cases ----------------------------------------
 
 

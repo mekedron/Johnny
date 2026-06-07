@@ -52,6 +52,9 @@ from johnny.voice_pipeline.events import (
     AgentTTSFailedCategory,
     ApprovalPending,
     ApprovalResolved,
+    PipelineStageFailed,
+    PipelineStageFailedCategory,
+    PipelineStageFailedStage,
     PipelineTiming,
     PipelineTimingStage,
     RouterDecisionMade,
@@ -1108,7 +1111,7 @@ class VoicePipeline:
         stt_started_at = turn_started_at
         try:
             transcript = await self._run_stt(utterance)
-        except Exception:
+        except Exception as exc:
             stt_duration = self._now_ms() - stt_started_at
             await self._emit_timing(
                 stage="error",
@@ -1118,7 +1121,13 @@ class VoicePipeline:
                 details={"failed_stage": "stt"},
                 turn_id=turn_id,
             )
-            raise
+            # Johnny-8zv.3: surface a structured failure the playground can
+            # render ("speech-to-text failed") AND keep the session alive —
+            # previously this re-raised and tore down the whole transcribe
+            # loop, so one bad STT round-trip killed the session. Skip this
+            # utterance; the next turn retries.
+            await self._emit_stage_failed(stage="stt", exc=exc)
+            return
         stt_duration = self._now_ms() - stt_started_at
         await self._emit_timing(
             stage="stt",
@@ -1758,7 +1767,7 @@ class VoicePipeline:
                 messages,
                 response_format=_ROUTER_SCHEMA,
             )
-        except Exception:
+        except Exception as exc:
             duration = self._now_ms() - router_started_at
             await self._emit_timing(
                 stage="error",
@@ -1767,6 +1776,11 @@ class VoicePipeline:
                 provider_name=_provider_name(self.router_llm),
                 details={"failed_stage": "router_llm"},
             )
+            # Johnny-8zv.3: surface "the LLM isn't responding" to the
+            # playground. Keep raising — the response loop catches it and
+            # skips just this turn, so the session stays alive and the next
+            # turn retries.
+            await self._emit_stage_failed(stage="router_llm", exc=exc)
             raise
         duration = self._now_ms() - router_started_at
         await self._emit_timing(
@@ -2331,6 +2345,38 @@ class VoicePipeline:
                 category,
             )
 
+    async def _emit_stage_failed(
+        self,
+        *,
+        stage: PipelineStageFailedStage,
+        exc: BaseException,
+    ) -> None:
+        """Publish a :class:`PipelineStageFailed` event (Johnny-8zv.3).
+
+        Companion to :meth:`_emit_tts_failed` for the STT / router-LLM
+        stages so the playground can show "speech-to-text failed" / "the
+        LLM isn't responding" instead of going silently dark. Defensive:
+        a failing event bus must never mask the original stage error.
+        """
+        provider = self.stt if stage == "stt" else self.router_llm
+        event = PipelineStageFailed(
+            stage=stage,
+            category=_classify_stage_failure(exc),
+            message=str(exc) or type(exc).__name__,
+            provider_name=_provider_name(provider),
+            timestamp_ms=self._now_ms(),
+            session_id=self.config.session_id,
+        )
+        try:
+            await self.event_bus.publish(event)
+        except Exception:  # noqa: BLE001 — observability; never re-raise
+            logger.exception(
+                "failed to publish pipeline_stage_failed for session=%s "
+                "stage=%s",
+                self.config.session_id,
+                stage,
+            )
+
     def _is_rate_limited(self) -> bool:
         """Return True when the per-session utterance cap is exceeded.
 
@@ -2700,6 +2746,44 @@ def _resolve_tts_failure_category(exc: TTSError) -> AgentTTSFailedCategory:
         return "auth_failed"
     if category == "rate_limited":
         return "rate_limited"
+    return "unknown"
+
+
+def _classify_stage_failure(exc: BaseException) -> PipelineStageFailedCategory:
+    """Best-effort failure category for a non-TTS stage (Johnny-8zv.3).
+
+    STT/LLM providers raise heterogeneous errors (httpx, openai SDK, NeMo,
+    raw OSError), so we sniff the stringified exception. Used only for
+    operator-facing copy — never for control flow. ``unavailable`` is the
+    common "local sidecar / Ollama is down" case (connection refused /
+    DNS / network).
+    """
+    text = f"{type(exc).__name__}: {exc}".lower()
+
+    def has(*needles: str) -> bool:
+        return any(n in text for n in needles)
+
+    if has("401", "403", "unauthor", "forbidden", "api key", "api_key", "invalid key"):
+        return "auth_failed"
+    if has("quota", "insufficient_quota", "out of credit", "credit"):
+        return "quota_exceeded"
+    if has("429", "rate limit", "rate_limit", "too many requests"):
+        return "rate_limited"
+    if has("timed out", "timeout", "deadline", "timederror"):
+        return "timeout"
+    if has(
+        "connection",
+        "connect",
+        "refused",
+        "unreachable",
+        "getaddrinfo",
+        "name or service",
+        "network",
+        "econnrefused",
+        "failed to establish",
+        "all connection attempts failed",
+    ):
+        return "unavailable"
     return "unknown"
 
 

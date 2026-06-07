@@ -37,6 +37,7 @@ export type SessionEventType =
 	| 'agent_spoke'
 	| 'agent_suggested'
 	| 'agent_tts_failed'
+	| 'pipeline_stage_failed'
 	| 'session_status_change';
 
 export type GlobalEventType = 'session_status_change' | 'calendar_event_changed';
@@ -131,6 +132,24 @@ export interface AgentTTSFailedEvent extends BaseEnvelope {
 	session_id?: string | null;
 }
 
+/**
+ * A non-TTS pipeline stage (STT / router LLM / answer LLM) failed for a
+ * turn (Johnny-8zv.3). Companion to {@link AgentTTSFailedEvent} so the
+ * playground can surface "speech-to-text failed" / "the LLM isn't
+ * responding" instead of going silently dark. The session stays alive —
+ * `terminal` is reserved for a future suppress-this-stage behaviour.
+ */
+export interface PipelineStageFailedEvent extends BaseEnvelope {
+	type: 'pipeline_stage_failed';
+	stage: 'stt' | 'router_llm' | 'answer_llm';
+	category: 'auth_failed' | 'quota_exceeded' | 'rate_limited' | 'timeout' | 'unavailable' | 'unknown';
+	message: string;
+	provider_name: string | null;
+	terminal: boolean;
+	timestamp_ms: number;
+	session_id?: string | null;
+}
+
 export interface SessionStatusChangeEvent extends BaseEnvelope {
 	type: 'session_status_change';
 	status: BotSessionStatus;
@@ -157,6 +176,7 @@ export type SessionEvent =
 	| AgentSpokeEvent
 	| AgentSuggestedEvent
 	| AgentTTSFailedEvent
+	| PipelineStageFailedEvent
 	| SessionStatusChangeEvent;
 
 export type GlobalEvent = SessionStatusChangeEvent | CalendarEventChangedEvent;

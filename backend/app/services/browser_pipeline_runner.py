@@ -92,6 +92,22 @@ class BrowserPipelineSetupError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class BrowserRunOutcome:
+    """Terminal outcome of one browser pipeline run.
+
+    ``status`` is the lifecycle status to persist + broadcast on exit:
+    ``"ended"`` for a clean stop (stop_event fired, or the transport hit
+    EOF) and ``"failed"`` for an assembly error or a pipeline crash.
+    ``error_reason`` is populated only for failures so the playground can
+    surface *why* the session died (e.g. "no active STT provider")
+    instead of going silently dark.
+    """
+
+    status: str
+    error_reason: str | None = None
+
+
+@dataclass(frozen=True)
 class BrowserPipelineSpec:
     """Inputs the runner needs to assemble + run a session.
 
@@ -325,7 +341,7 @@ async def run_browser_pipeline(
     stop_event: asyncio.Event,
     vad: VADAnalyzer | None = None,
     on_assembled: Any = None,
-) -> None:
+) -> BrowserRunOutcome:
     """Assemble and run the pipeline until ``stop_event`` fires.
 
     ``on_assembled`` is an optional callback that receives the assembled
@@ -340,24 +356,29 @@ async def run_browser_pipeline(
     a transient provider error doesn't kill the API process. The
     transport is told to close on the way out so the WebSocket endpoint
     can flush remaining playback frames and disconnect cleanly.
+
+    Returns a :class:`BrowserRunOutcome` describing how the run ended so
+    the caller can persist + broadcast the right lifecycle status: a
+    setup error or a pipeline crash yields ``status="failed"`` with the
+    reason attached; any clean exit yields ``status="ended"``.
     """
     try:
         pipeline = assemble_browser_pipeline(transport, spec, vad=vad)
-    except BrowserPipelineSetupError:
+    except BrowserPipelineSetupError as exc:
         logger.exception(
             "browser pipeline assembly failed for session=%s", spec.session_id
         )
         await transport.stop()
         transport.close_playback()
-        return
-    except Exception:  # noqa: BLE001 — last-resort surface
+        return BrowserRunOutcome("failed", str(exc))
+    except Exception as exc:  # noqa: BLE001 — last-resort surface
         logger.exception(
             "browser pipeline unexpected setup error for session=%s",
             spec.session_id,
         )
         await transport.stop()
         transport.close_playback()
-        return
+        return BrowserRunOutcome("failed", f"pipeline setup error: {exc}")
 
     if on_assembled is not None:
         try:
@@ -376,6 +397,7 @@ async def run_browser_pipeline(
     await transport.start()
     run_task = asyncio.create_task(pipeline.run())
     stop_task = asyncio.create_task(stop_event.wait())
+    outcome = BrowserRunOutcome("ended", None)
     try:
         done, _ = await asyncio.wait(
             (run_task, stop_task),
@@ -390,10 +412,11 @@ async def run_browser_pipeline(
         if run_task in done:
             try:
                 run_task.result()
-            except Exception:  # noqa: BLE001 — pipeline crash is loggable
+            except Exception as exc:  # noqa: BLE001 — pipeline crash is loggable
                 logger.exception(
                     "browser pipeline crashed for session=%s", spec.session_id
                 )
+                outcome = BrowserRunOutcome("failed", f"pipeline crashed: {exc}")
     finally:
         if not run_task.done():
             run_task.cancel()
@@ -415,6 +438,7 @@ async def run_browser_pipeline(
                 logger.exception(
                     "approval gate close failed for session=%s", spec.session_id
                 )
+    return outcome
 
 
 # --- Type hints (mirror of pipeline_runner) -------------------------------
@@ -439,6 +463,7 @@ def _as_s2s(provider: Any) -> S2SProvider:
 __all__ = [
     "BrowserPipelineSetupError",
     "BrowserPipelineSpec",
+    "BrowserRunOutcome",
     "SPLIT_MODE",
     "SUPPORTED_PIPELINE_MODES",
     "UNIFIED_MODE",

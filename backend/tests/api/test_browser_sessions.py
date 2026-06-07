@@ -292,6 +292,58 @@ def test_start_rejects_unknown_fields(client: TestClient) -> None:
     assert res.status_code == 422
 
 
+# --- Johnny-8zv.2: one-active-browser-session rule -------------------------
+
+
+def test_start_rejects_when_live_session_exists(
+    client: TestClient,
+) -> None:
+    """A second start is refused with 409 + the active id while one is live."""
+    res1 = client.post("/sessions/browser/start", json={})
+    assert res1.status_code == 201, res1.text
+    sid = res1.json()["id"]
+
+    # Simulate a live in-process runner for the first session so the guard
+    # treats it as active rather than a stale row to reap.
+    with mock.patch.object(
+        browser_sessions_module, "get_session_runner", return_value=mock.Mock()
+    ):
+        res2 = client.post("/sessions/browser/start", json={})
+
+    assert res2.status_code == 409, res2.text
+    detail = res2.json()["detail"]
+    assert detail["active_session_id"] == sid
+    assert "already" in detail["message"].lower()
+
+
+def test_start_reaps_stale_active_session(
+    client: TestClient, db_session: Session
+) -> None:
+    """A JOINED row with no live runner is reaped, not a permanent lock-out.
+
+    Models the API having restarted and lost its in-memory runner
+    registry while a row is still JOINED. The guard must end the stale
+    row and let the new session start (Johnny-8zv.2).
+    """
+    stale = BotSession(
+        source=BotSessionSource.BROWSER, status=BotSessionStatus.JOINED
+    )
+    db_session.add(stale)
+    db_session.flush()
+    stale_id = stale.id
+
+    # get_session_runner returns None (the autouse _spawn_runner stub never
+    # registers a runner), so the stale row is reapable.
+    res = client.post("/sessions/browser/start", json={})
+    assert res.status_code == 201, res.text
+    new_id = res.json()["id"]
+    assert new_id != stale_id
+
+    reaped = db_session.get(BotSession, stale_id)
+    assert reaped is not None
+    assert reaped.status == BotSessionStatus.ENDED
+
+
 # --- Johnny-ckz.21: pipeline_mode wiring through session start -------------
 
 

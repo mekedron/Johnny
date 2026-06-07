@@ -42,6 +42,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     BotSession,
+    BotSessionSource,
     BotSessionStatus,
     CalendarEvent,
     MeetingConfig,
@@ -487,6 +488,30 @@ async def stop_session_by_id(
             f"no bot_sessions row with id={bot_session_id}"
         )
     if row.status in _TERMINAL_STATUSES:
+        return row
+
+    # Browser sessions run in-process in the API, not in a container.
+    # Route them to the in-process runner instead of the docker launcher
+    # so "Leave now" from the sidebar actually stops the pipeline and
+    # publishes the SessionStatusChanged event the playground listens for
+    # (Johnny-8zv). Importing lazily avoids an api↔service import cycle.
+    if row.source == BotSessionSource.BROWSER:
+        from app.api.browser_sessions import (
+            publish_session_status_oneoff,
+            request_browser_session_stop,
+        )
+
+        if request_browser_session_stop(row.id):
+            # A live runner was signalled; its cleanup marks the row ended
+            # and publishes the status event. Leave the row as-is here.
+            logger.info("stopped browser bot_session id=%s (in-process)", row.id)
+            return row
+        # No live runner (e.g. API restarted and lost the registry). The
+        # row is stale-active — end it directly and publish so the UI
+        # still reacts.
+        mark_session_ended(session, row.id)
+        await publish_session_status_oneoff(str(row.id), "ended", None)
+        logger.info("ended stale browser bot_session id=%s (no runner)", row.id)
         return row
 
     try:

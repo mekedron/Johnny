@@ -26,6 +26,29 @@ SessionStatusEventType = Literal["session_status_changed"]
 ApprovalPendingEventType = Literal["approval_pending"]
 ApprovalResolvedEventType = Literal["approval_resolved"]
 PipelineTimingEventType = Literal["pipeline_timing"]
+PipelineStageFailedEventType = Literal["pipeline_stage_failed"]
+
+PipelineStageFailedStage = Literal["stt", "router_llm", "answer_llm"]
+"""Which non-TTS pipeline stage failed (Johnny-8zv.3).
+
+TTS keeps its own richer :class:`AgentTTSFailed` event; this covers the
+other stages a playground user needs feedback on — speech-to-text and
+the (router / answer) LLM.
+"""
+
+PipelineStageFailedCategory = Literal[
+    "auth_failed",
+    "quota_exceeded",
+    "rate_limited",
+    "timeout",
+    "unavailable",
+    "unknown",
+]
+"""Best-effort reason a non-TTS stage failed (Johnny-8zv.3).
+
+Sniffed from the provider exception for operator-facing copy only —
+never used for control flow. ``unavailable`` covers connection-refused /
+DNS / network errors (e.g. a local STT sidecar or Ollama being down)."""
 
 AgentTTSFailedCategory = Literal[
     "quota_exceeded",
@@ -249,6 +272,35 @@ class AgentTTSFailed:
 
 
 @dataclass(frozen=True, slots=True)
+class PipelineStageFailed:
+    """A non-TTS pipeline stage failed for a turn (Johnny-8zv.3).
+
+    Companion to :class:`AgentTTSFailed`: lets the playground surface
+    "speech-to-text failed" or "the LLM isn't responding" with a concrete
+    message instead of going silently dark. The session stays alive —
+    STT and LLM failures are treated as transient and retried on the next
+    turn — so ``terminal`` defaults to ``False`` (kept for parity with
+    AgentTTSFailed and any future suppress-this-stage behaviour).
+
+    * ``stage`` — :data:`PipelineStageFailedStage`.
+    * ``category`` — :data:`PipelineStageFailedCategory`, sniffed from the
+      provider exception for operator-facing copy.
+    * ``message`` — the raw exception text, kept verbatim.
+    * ``provider_name`` — the failing provider (e.g. ``parakeet``,
+      ``openai-compatible``) so the UI can name it without a join.
+    """
+
+    stage: PipelineStageFailedStage
+    category: PipelineStageFailedCategory
+    message: str
+    timestamp_ms: int
+    provider_name: str | None = None
+    terminal: bool = False
+    session_id: str | None = None
+    type: PipelineStageFailedEventType = "pipeline_stage_failed"
+
+
+@dataclass(frozen=True, slots=True)
 class SessionStatusChanged:
     """The bot session moved to a new lifecycle status.
 
@@ -356,6 +408,7 @@ PipelineEvent = (
     | AgentSpoke
     | AgentSuggested
     | AgentTTSFailed
+    | PipelineStageFailed
     | SessionStatusChanged
     | ApprovalPending
     | ApprovalResolved
@@ -383,6 +436,9 @@ __all__ = [
     "ApprovalResolution",
     "ApprovalResolved",
     "PipelineEvent",
+    "PipelineStageFailed",
+    "PipelineStageFailedCategory",
+    "PipelineStageFailedStage",
     "PipelineTiming",
     "PipelineTimingStage",
     "RouterDecisionMade",

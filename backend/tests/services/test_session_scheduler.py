@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import sqlalchemy as sa
@@ -15,6 +15,7 @@ from app.db import Base
 from app.db.models import (
     BotMode,
     BotSession,
+    BotSessionSource,
     BotSessionStatus,
     CalendarEvent,
     GoogleAccount,
@@ -661,6 +662,62 @@ async def test_stop_session_marks_ended(db_session: Session) -> None:
     assert result.status == BotSessionStatus.ENDED
     assert row.ended_at is not None
     assert launcher.stopped == [(row.id, "meet-worker-session-1")]
+
+
+@pytest.mark.asyncio
+async def test_stop_session_browser_live_signals_runner_not_launcher(
+    db_session: Session,
+) -> None:
+    """Stopping a LIVE browser session signals the in-process runner and
+    skips the docker launcher entirely (Johnny-8zv). The row is left for
+    the runner's own cleanup to mark ended + publish."""
+    row = BotSession(
+        source=BotSessionSource.BROWSER, status=BotSessionStatus.JOINED
+    )
+    db_session.add(row)
+    db_session.flush()
+    launcher = NoopContainerLauncher()
+    with patch(
+        "app.api.browser_sessions.request_browser_session_stop",
+        return_value=True,
+    ) as req:
+        result = await stop_session_by_id(
+            db_session, bot_session_id=row.id, launcher=launcher
+        )
+    req.assert_called_once_with(row.id)
+    assert launcher.stopped == []
+    # Runner cleanup ends the row asynchronously — not here.
+    assert result.status == BotSessionStatus.JOINED
+
+
+@pytest.mark.asyncio
+async def test_stop_session_browser_stale_ends_and_publishes(
+    db_session: Session,
+) -> None:
+    """A stale browser row (no live runner) is ended directly + a status
+    event is published, without ever touching the docker launcher."""
+    row = BotSession(
+        source=BotSessionSource.BROWSER, status=BotSessionStatus.JOINED
+    )
+    db_session.add(row)
+    db_session.flush()
+    launcher = NoopContainerLauncher()
+    with (
+        patch(
+            "app.api.browser_sessions.request_browser_session_stop",
+            return_value=False,
+        ),
+        patch(
+            "app.api.browser_sessions.publish_session_status_oneoff",
+            new=AsyncMock(),
+        ) as pub,
+    ):
+        result = await stop_session_by_id(
+            db_session, bot_session_id=row.id, launcher=launcher
+        )
+    assert result.status == BotSessionStatus.ENDED
+    assert launcher.stopped == []
+    pub.assert_awaited_once()
 
 
 @pytest.mark.asyncio

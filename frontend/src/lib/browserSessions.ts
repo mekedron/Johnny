@@ -84,6 +84,9 @@ function extractDetail(body: unknown): string | null {
 	if (body && typeof body === 'object' && 'detail' in body) {
 		const detail = (body as { detail: unknown }).detail;
 		if (typeof detail === 'string') return detail;
+		if (detail && typeof detail === 'object' && 'message' in detail) {
+			return String((detail as { message: unknown }).message);
+		}
 		if (Array.isArray(detail)) {
 			return detail
 				.map((entry) => {
