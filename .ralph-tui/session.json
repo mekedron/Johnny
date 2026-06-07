@@ -3,10 +3,10 @@
   "sessionId": "92aa43ca-591e-4b12-ab32-62131855e44d",
   "status": "running",
   "startedAt": "2026-06-07T00:08:27.194Z",
-  "updatedAt": "2026-06-07T00:18:53.545Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-07T00:25:01.608Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -104,8 +104,8 @@
       {
         "id": "Johnny-wyd",
         "title": "Barge-in classifier LLM ReadTimeouts against Ollama Qwen 35B — every timeout is a missed interrupt + log noise",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-klh",
@@ -349,7 +349,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-wyd",
+      "taskTitle": "Barge-in classifier LLM ReadTimeouts against Ollama Qwen 35B — every timeout is a missed interrupt + log noise",
+      "taskCompleted": true,
+      "durationMs": 538355,
+      "startedAt": "2026-06-07T00:09:54.427Z",
+      "endedAt": "2026-06-07T00:18:52.782Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

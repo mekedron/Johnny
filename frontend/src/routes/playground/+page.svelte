@@ -60,10 +60,14 @@
 
 	type LiveState = 'idle' | 'listening' | 'thinking' | 'speaking';
 
+	// `speaker: 'speaker'` is the catch-all for DB rows / live events whose
+	// underlying `speaker` is NULL or anything other than "user". Without
+	// it we used to label every NULL row (STT silence hallucinations, any
+	// future non-user transcript) as "You" — see Johnny-klh.
 	interface TranscriptLine {
 		key: string;
 		text: string;
-		speaker: 'user' | 'bot';
+		speaker: 'user' | 'bot' | 'speaker';
 		isFinal: boolean;
 		timestamp: number;
 	}
@@ -350,7 +354,7 @@
 				seeded.push({
 					key: `seed-t-${t.id}`,
 					text: t.text,
-					speaker: 'user',
+					speaker: t.speaker === 'user' ? 'user' : 'speaker',
 					isFinal: true,
 					timestamp: new Date(t.created_at).getTime()
 				});
@@ -439,7 +443,7 @@
 				appendTranscript({
 					key: `final-${e.seq}`,
 					text: e.text,
-					speaker: 'user',
+					speaker: e.speaker === 'user' ? 'user' : 'speaker',
 					isFinal: true,
 					timestamp: ts
 				});
@@ -1114,6 +1118,7 @@
 				{:else}
 					{#each transcript as line (line.key)}
 						{@const isBot = line.speaker === 'bot'}
+						{@const isUser = line.speaker === 'user'}
 						<div
 							class="flex flex-col gap-1 rounded-md px-3 py-2"
 							class:bg-surface-2={isBot}
@@ -1121,7 +1126,13 @@
 							class:border-border={!line.isFinal}
 							class:border-dashed={!line.isFinal}
 							class:italic={!line.isFinal}
-							data-testid={isBot ? 'bot-line' : line.isFinal ? 'user-line' : 'partial-line'}
+							data-testid={isBot
+								? 'bot-line'
+								: isUser
+									? line.isFinal
+										? 'user-line'
+										: 'partial-line'
+									: 'speaker-line'}
 						>
 							<div
 								class="flex items-center gap-1.5 font-mono text-[0.7rem] font-semibold tracking-wide"
@@ -1131,9 +1142,11 @@
 								{#if isBot}
 									<BotIcon class="size-3" />
 									<span>Johnny</span>
-								{:else}
+								{:else if isUser}
 									<UserIcon class="size-3" />
 									<span>You</span>
+								{:else}
+									<span class="font-sans font-normal italic">Speaker</span>
 								{/if}
 								{#if !line.isFinal}
 									<span class="font-sans font-normal text-warning">· partial</span>
