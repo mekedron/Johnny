@@ -33,6 +33,7 @@ import httpx
 from app.providers.base import (
     ChatMessage,
     LLMError,
+    LLMModelInfo,
     LLMProvider,
     LLMResponse,
     ProviderConfig,
@@ -59,6 +60,9 @@ DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MAX_TOKENS = 1024
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_TIMEOUT_S = 60.0
+DEFAULT_CATALOG_TIMEOUT_S = 15.0
+DEFAULT_CATALOG_PAGE_SIZE = 100
+DEFAULT_CATALOG_MAX_PAGES = 20
 
 _STOP_REASON_MAP: dict[str, str] = {
     "end_turn": "stop",
@@ -515,6 +519,98 @@ def _parse_tool_use_block(block: dict[str, Any]) -> ToolCall:
     )
 
 
+async def fetch_model_catalog(
+    api_key: str,
+    *,
+    base_url: str = DEFAULT_BASE_URL,
+    anthropic_version: str = DEFAULT_ANTHROPIC_VERSION,
+    client: httpx.AsyncClient | None = None,
+    timeout_s: float = DEFAULT_CATALOG_TIMEOUT_S,
+    page_size: int = DEFAULT_CATALOG_PAGE_SIZE,
+    max_pages: int = DEFAULT_CATALOG_MAX_PAGES,
+) -> list[LLMModelInfo]:
+    """Return every model from ``GET {base_url}/models`` (Johnny-9eq).
+
+    Anthropic's catalog endpoint is paginated via ``after_id`` /
+    ``has_more`` / ``last_id`` (cursor-style). All listed models are
+    chat-completion capable so no kind filtering is needed. Sorted by
+    ``created_at`` newest first; the freshest Claude lands at the top
+    of the dropdown. Raises :class:`LLMError` on transport / parse
+    failure — the API surface re-raises as HTTP 502.
+    """
+    if not api_key:
+        raise LLMError("anthropic catalog requires an api_key")
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=timeout_s)
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": anthropic_version,
+        "Accept": "application/json",
+    }
+    url = f"{base_url.rstrip('/')}/models"
+    models: list[tuple[str, LLMModelInfo]] = []
+    after_id: str | None = None
+    try:
+        for _ in range(max_pages):
+            params: dict[str, Any] = {"limit": page_size}
+            if after_id:
+                params["after_id"] = after_id
+            try:
+                response = await client.get(url, headers=headers, params=params)
+                response.raise_for_status()
+                payload = response.json()
+            except httpx.HTTPError as exc:
+                raise LLMError(
+                    f"failed to fetch anthropic model catalog: {exc}"
+                ) from exc
+            except ValueError as exc:
+                raise LLMError(
+                    f"anthropic model catalog is not valid JSON: {exc}"
+                ) from exc
+            if not isinstance(payload, dict):
+                raise LLMError(
+                    "anthropic model catalog payload is not a JSON object"
+                )
+            data = payload.get("data")
+            if not isinstance(data, list):
+                raise LLMError(
+                    "anthropic model catalog payload missing 'data' array"
+                )
+            for entry in data:
+                if not isinstance(entry, dict):
+                    continue
+                model_id = entry.get("id")
+                if not isinstance(model_id, str) or not model_id:
+                    continue
+                display_name = entry.get("display_name")
+                label = (
+                    str(display_name)
+                    if isinstance(display_name, str) and display_name
+                    else model_id
+                )
+                created_at = entry.get("created_at")
+                created_key = (
+                    str(created_at) if isinstance(created_at, str) else ""
+                )
+                models.append(
+                    (created_key, LLMModelInfo(id=model_id, label=label))
+                )
+            if not payload.get("has_more"):
+                break
+            last_id = payload.get("last_id")
+            if not isinstance(last_id, str) or not last_id:
+                break
+            after_id = last_id
+        # Newest-first by created_at (ISO 8601 strings sort lexically), with
+        # ties broken alphabetically by id so the list is stable.
+        models.sort(key=lambda pair: (pair[0], pair[1].id), reverse=True)
+        return [info for _, info in models]
+    finally:
+        if owns_client:
+            await client.aclose()
+
+
 def register(*, replace: bool = False) -> None:
     """Register :class:`AnthropicLLM` under ``(ProviderKind.LLM, "anthropic")``.
 
@@ -536,5 +632,6 @@ __all__ = [
     "DEFAULT_TIMEOUT_S",
     "AnthropicLLM",
     "PROVIDER_NAME",
+    "fetch_model_catalog",
     "register",
 ]

@@ -187,6 +187,32 @@ class LLMResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class LLMModelInfo:
+    """One model exposed by an LLM provider's catalog endpoint (Johnny-9eq).
+
+    Returned by each LLM provider's module-level ``fetch_model_catalog``
+    so the ``/providers`` modal can render a live, current dropdown
+    instead of a stale hand-curated FieldOption list. ``id`` is the
+    canonical identifier sent to the chat completion endpoint (the
+    ``model`` body field for OpenAI/Anthropic/openai-compatible, the
+    URL path segment for Gemini). ``label`` is a UI-facing string —
+    typically equal to ``id`` but adapters may decorate it with the
+    short alias or the model family. ``description`` is an optional
+    one-line summary when the provider's catalog supplies one.
+    """
+
+    id: str
+    label: str
+    description: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"id": self.id, "label": self.label}
+        if self.description is not None:
+            out["description"] = self.description
+        return out
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderConfig:
     """Adapter-agnostic configuration passed to every provider factory.
 
@@ -404,6 +430,7 @@ __all__ = [
     "ChatMessage",
     "ChatRole",
     "LLMError",
+    "LLMModelInfo",
     "LLMProvider",
     "LLMResponse",
     "PCM_CHANNELS",

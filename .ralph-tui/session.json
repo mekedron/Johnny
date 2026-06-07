@@ -3,10 +3,10 @@
   "sessionId": "92aa43ca-591e-4b12-ab32-62131855e44d",
   "status": "running",
   "startedAt": "2026-06-07T00:08:27.194Z",
-  "updatedAt": "2026-06-07T09:33:20.531Z",
-  "currentIteration": 14,
+  "updatedAt": "2026-06-07T09:58:16.544Z",
+  "currentIteration": 15,
   "maxIterations": 0,
-  "tasksCompleted": 14,
+  "tasksCompleted": 15,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -260,8 +260,8 @@
       {
         "id": "Johnny-gft",
         "title": "Interrupt harness real-mode: stop scenario flakes when LLM round-trip is slow",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-9eq",
@@ -489,6 +489,16 @@
       "durationMs": 17526342,
       "startedAt": "2026-06-07T04:29:36.307Z",
       "endedAt": "2026-06-07T09:21:42.649Z"
+    },
+    {
+      "iteration": 15,
+      "status": "completed",
+      "taskId": "Johnny-gft",
+      "taskTitle": "Interrupt harness real-mode: stop scenario flakes when LLM round-trip is slow",
+      "taskCompleted": true,
+      "durationMs": 680964,
+      "startedAt": "2026-06-07T09:21:58.264Z",
+      "endedAt": "2026-06-07T09:33:19.228Z"
     }
   ],
   "skippedTaskIds": [],

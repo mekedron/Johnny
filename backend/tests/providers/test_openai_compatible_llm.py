@@ -18,6 +18,7 @@ import pytest
 from app.providers.base import (
     ChatMessage,
     LLMError,
+    LLMModelInfo,
     LLMResponse,
     ProviderConfig,
     ProviderKind,
@@ -29,6 +30,7 @@ from app.providers.openai_compatible_llm import (
     DEFAULT_TIMEOUT_S,
     PROVIDER_NAME,
     OpenAICompatibleLLM,
+    fetch_model_catalog,
     register,
 )
 from tests.providers._llm_contract import (
@@ -919,3 +921,99 @@ def test_register_is_idempotent_with_replace() -> None:
 
 def test_registered_on_package_import() -> None:
     assert get_registry().has(ProviderKind.LLM, PROVIDER_NAME)
+
+
+# --- fetch_model_catalog (Johnny-9eq) -------------------------------------
+
+
+def _compat_models_response(ids: list[str]) -> httpx.Response:
+    body = {
+        "object": "list",
+        "data": [{"id": mid, "object": "model"} for mid in ids],
+    }
+    return httpx.Response(200, content=json.dumps(body).encode())
+
+
+async def test_fetch_model_catalog_returns_every_id_no_filtering() -> None:
+    # Ollama-style local catalog: include even non-OpenAI-naming entries.
+    ids = [
+        "llama3.1:8b",
+        "qwen2.5",
+        "deepseek-r1:14b",
+        "nomic-embed-text",  # embedding-only — STILL surfaced (user knows what they pulled)
+    ]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.method == "GET"
+        assert req.url.path == "/v1/models"
+        assert "authorization" not in req.headers
+        return _compat_models_response(ids)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    out = await fetch_model_catalog(
+        "http://host.docker.internal:11434/v1", client=client
+    )
+    await client.aclose()
+    assert [m.id for m in out] == sorted(ids)
+    assert all(isinstance(m, LLMModelInfo) for m in out)
+
+
+async def test_fetch_model_catalog_sends_bearer_when_api_key_supplied() -> None:
+    # OpenRouter / Together-style gateway: api_key required.
+    captured_auth: list[str | None] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured_auth.append(req.headers.get("authorization"))
+        return _compat_models_response(["gpt-4o-mini"])
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    await fetch_model_catalog(
+        "https://openrouter.ai/api/v1",
+        api_key="or-test",
+        client=client,
+    )
+    await client.aclose()
+    assert captured_auth == ["Bearer or-test"]
+
+
+async def test_fetch_model_catalog_dedupes_ids() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return _compat_models_response(["a", "a", "b", "b", "c"])
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    out = await fetch_model_catalog(
+        "http://localhost:11434/v1", client=client
+    )
+    await client.aclose()
+    assert [m.id for m in out] == ["a", "b", "c"]
+
+
+async def test_fetch_model_catalog_raises_without_base_url() -> None:
+    with pytest.raises(LLMError, match="base_url"):
+        await fetch_model_catalog("")
+
+
+async def test_fetch_model_catalog_raises_on_http_error() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, content=b"server error")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(
+        LLMError, match="failed to fetch openai-compatible model catalog"
+    ):
+        await fetch_model_catalog(
+            "http://localhost:11434/v1", client=client
+        )
+    await client.aclose()
+
+
+async def test_fetch_model_catalog_raises_when_data_missing() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b'{"object": "list"}')
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(LLMError, match="missing 'data'"):
+        await fetch_model_catalog(
+            "http://localhost:11434/v1", client=client
+        )
+    await client.aclose()

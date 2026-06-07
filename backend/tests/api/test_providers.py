@@ -1881,8 +1881,8 @@ def _make_stt_row(client: TestClient, provider_name: str = "echo-stt") -> dict[s
 
 def test_stt_catalog_returns_registered_stt_providers(client: TestClient) -> None:
     """The catalog UI fetches schemas + metadata in one shot."""
-    from app.providers.faster_whisper_stt import FasterWhisperSTT
     from app.providers.faster_whisper_stt import PROVIDER_NAME as FW_NAME
+    from app.providers.faster_whisper_stt import FasterWhisperSTT
 
     get_registry().register(ProviderKind.STT, FW_NAME, FasterWhisperSTT)
     resp = client.get("/providers/stt_catalog")
@@ -2305,3 +2305,245 @@ def test_list_cartesia_voices_rejects_missing_api_key(
     # rejects with 400; the test below exercises that path via direct
     # update.
     assert created.status_code in (200, 201, 422)
+
+
+# --- LLM model catalog (Johnny-9eq) ---------------------------------------
+
+
+def _make_openai_llm_row(
+    client: TestClient, *, api_key: str = "sk-test-openai"
+) -> dict[str, Any]:
+    """Persist an ``llm:openai`` row via legacy buckets.
+
+    The ``clean_registry`` autouse fixture empties the global registry
+    so the create endpoint cannot resolve the OpenAI schema; legacy
+    ``credentials`` / ``options`` buckets bypass schema validation and
+    persist exactly the keys we hand in. That's enough for the
+    ``llm_models`` endpoints — they only read ``credentials.api_key``
+    + ``options.base_url`` back out of the row.
+    """
+    resp = client.post(
+        "/providers",
+        json={
+            "kind": "llm",
+            "provider_name": "openai",
+            "display_name": "OpenAI primary",
+            "credentials": {"api_key": api_key},
+            "options": {
+                "model": "gpt-4o-mini",
+                "base_url": "https://api.openai.com/v1",
+            },
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+def _stub_openai_catalog(
+    monkeypatch: Any, models: list[Any], *, capture: dict[str, Any] | None = None
+) -> None:
+    """Patch the openai fetch_model_catalog the API layer dispatches to."""
+    from app.providers.base import LLMModelInfo
+
+    async def fake_fetch(api_key: str, **kwargs: Any) -> list[Any]:
+        if capture is not None:
+            capture["api_key"] = api_key
+            capture.update(kwargs)
+        return [
+            LLMModelInfo(id=m["id"], label=m.get("label", m["id"]))
+            if isinstance(m, dict)
+            else m
+            for m in models
+        ]
+
+    monkeypatch.setattr(
+        "app.api.providers.openai_fetch_model_catalog", fake_fetch
+    )
+
+
+def test_list_llm_models_returns_models_for_openai_row(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """The endpoint forwards the row's decrypted API key + base_url to the
+    provider's fetch_model_catalog and surfaces the result back to the UI."""
+    created = _make_openai_llm_row(client, api_key="sk-test-real")
+    captured: dict[str, Any] = {}
+    _stub_openai_catalog(
+        monkeypatch,
+        [
+            {"id": "gpt-5-preview"},
+            {"id": "gpt-4o-mini"},
+        ],
+        capture=captured,
+    )
+    resp = client.get(f"/providers/{created['id']}/llm_models")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["models"] == [
+        {"id": "gpt-5-preview", "label": "gpt-5-preview", "description": None},
+        {"id": "gpt-4o-mini", "label": "gpt-4o-mini", "description": None},
+    ]
+    assert captured["api_key"] == "sk-test-real"
+    # Saved base_url survives the round trip into the fetcher.
+    assert captured["base_url"].startswith("https://api.openai.com")
+
+
+def test_list_llm_models_rejects_non_llm_kind(
+    client: TestClient,
+) -> None:
+    """STT / TTS / S2S rows must return 400 — wrong-kind dispatch."""
+    get_registry().register(ProviderKind.STT, "ok-stt", _OKSTT, replace=True)
+    created = client.post("/providers", json=_create_payload()).json()
+    resp = client.get(f"/providers/{created['id']}/llm_models")
+    assert resp.status_code == 400
+    assert "llm_models" in resp.json()["detail"]
+
+
+def test_list_llm_models_missing_row_returns_404(
+    client: TestClient,
+) -> None:
+    resp = client.get("/providers/9999/llm_models")
+    assert resp.status_code == 404
+
+
+def test_list_llm_models_propagates_fetch_error_as_502(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """Catalog fetch failures surface to the UI as 502, not 500."""
+    created = _make_openai_llm_row(client)
+
+    async def boom(*args: Any, **kwargs: Any) -> list[Any]:
+        raise LLMError("invalid api key")
+
+    monkeypatch.setattr(
+        "app.api.providers.openai_fetch_model_catalog", boom
+    )
+    resp = client.get(f"/providers/{created['id']}/llm_models")
+    assert resp.status_code == 502
+    assert "invalid api key" in resp.json()["detail"]
+
+
+def test_list_llm_models_unsupported_provider_returns_400(
+    client: TestClient,
+) -> None:
+    """A registered LLM adapter without a fetch_model_catalog mapping
+    (e.g. a third-party stub) must explain itself rather than 500."""
+    get_registry().register(ProviderKind.LLM, "ok-llm", _OKLLM, replace=True)
+    created = client.post(
+        "/providers",
+        json=_create_payload(
+            kind="llm", provider_name="ok-llm", display_name="L"
+        ),
+    ).json()
+    resp = client.get(f"/providers/{created['id']}/llm_models")
+    assert resp.status_code == 400
+    assert "ok-llm" in resp.json()["detail"]
+
+
+def test_preview_llm_models_uses_unsaved_values(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """The preview endpoint must use the payload's api_key directly,
+    no persisted row required."""
+    captured: dict[str, Any] = {}
+    _stub_openai_catalog(
+        monkeypatch,
+        [{"id": "gpt-4o-mini"}],
+        capture=captured,
+    )
+    resp = client.post(
+        "/providers/preview/llm_models",
+        json={
+            "kind": "llm",
+            "provider_name": "openai",
+            "values": {"api_key": "sk-fresh", "base_url": "https://proxy.example/v1"},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["models"] == [
+        {"id": "gpt-4o-mini", "label": "gpt-4o-mini", "description": None}
+    ]
+    # api_key + base_url flowed through to the fetcher.
+    assert captured["api_key"] == "sk-fresh"
+    assert captured["base_url"] == "https://proxy.example/v1"
+
+
+def test_preview_llm_models_rejects_non_llm_kind(
+    client: TestClient,
+) -> None:
+    resp = client.post(
+        "/providers/preview/llm_models",
+        json={
+            "kind": "tts",
+            "provider_name": "openai",
+            "values": {"api_key": "sk-test"},
+        },
+    )
+    assert resp.status_code == 400
+    assert "LLM" in resp.json()["detail"]
+
+
+def test_preview_llm_models_missing_api_key_returns_400(
+    client: TestClient,
+) -> None:
+    """Hosted providers need an api_key; the prompt the UI surfaces lives
+    in the 400 detail."""
+    resp = client.post(
+        "/providers/preview/llm_models",
+        json={
+            "kind": "llm",
+            "provider_name": "openai",
+            "values": {"api_key": ""},
+        },
+    )
+    assert resp.status_code == 400
+    assert "api key" in resp.json()["detail"].lower()
+
+
+def test_preview_llm_models_openai_compatible_needs_base_url(
+    client: TestClient,
+) -> None:
+    """For self-hosted / Ollama the api_key is optional but base_url is required."""
+    resp = client.post(
+        "/providers/preview/llm_models",
+        json={
+            "kind": "llm",
+            "provider_name": "openai-compatible",
+            "values": {"api_key": "", "base_url": ""},
+        },
+    )
+    assert resp.status_code == 400
+    assert "base url" in resp.json()["detail"].lower()
+
+
+def test_preview_llm_models_openai_compatible_does_not_require_api_key(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """For Ollama, only base_url matters — the api_key is genuinely optional."""
+    from app.providers.base import LLMModelInfo
+
+    captured: dict[str, Any] = {}
+
+    async def fake_fetch(base_url: str, **kwargs: Any) -> list[Any]:
+        captured["base_url"] = base_url
+        captured.update(kwargs)
+        return [LLMModelInfo(id="llama3.1:8b", label="llama3.1:8b")]
+
+    monkeypatch.setattr(
+        "app.api.providers.openai_compatible_fetch_model_catalog", fake_fetch
+    )
+    resp = client.post(
+        "/providers/preview/llm_models",
+        json={
+            "kind": "llm",
+            "provider_name": "openai-compatible",
+            "values": {"api_key": "", "base_url": "http://localhost:11434/v1"},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["models"] == [
+        {"id": "llama3.1:8b", "label": "llama3.1:8b", "description": None}
+    ]
+    assert captured["base_url"] == "http://localhost:11434/v1"
+    # No api_key passed because the payload didn't supply one.
+    assert captured.get("api_key") is None

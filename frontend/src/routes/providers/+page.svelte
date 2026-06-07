@@ -38,12 +38,14 @@
 		installProviderPackage,
 		listCartesiaVoices,
 		listCatalogPiperVoices,
+		listLlmModels,
 		listPiperVoices,
 		listProviders,
 		listSchemas,
 		listSttCatalog,
 		PIPELINE_MODE_LABEL,
 		playSample,
+		previewLlmModels,
 		previewPiperVoice,
 		previewPlaySample,
 		previewSttTestRecording,
@@ -59,6 +61,7 @@
 		validateClient,
 		ValidationFailure,
 		type CartesiaVoice,
+		type LlmModel,
 		type PackageStatus,
 		type PipelineMode,
 		type PipelineSettings,
@@ -166,6 +169,17 @@
 	let cartesiaVoiceLoading = $state(false);
 	let cartesiaVoiceError = $state<string | null>(null);
 	let cartesiaVoiceFilter = $state('');
+
+	// LLM model dropdown (Johnny-9eq) — fetched live from the provider's
+	// /v1/models (OpenAI, Anthropic, openai-compatible) or equivalent
+	// (Gemini /v1beta/models). `llmModelList` populates the model select
+	// when present; the static schema FieldOption list is the fallback for
+	// the first paint while the fetch is in flight or when the operator
+	// hasn't entered credentials yet.
+	let llmModelList = $state<LlmModel[]>([]);
+	let llmModelsLoading = $state(false);
+	let llmModelsError = $state<string | null>(null);
+	let llmModelsLoaded = $state(false);
 
 	let showExport = $state(false);
 	let exportWithSecrets = $state(false);
@@ -307,6 +321,9 @@
 		if (row.kind === 'tts' && row.provider_name === CARTESIA_PROVIDER_NAME) {
 			loadCartesiaVoiceList(row);
 		}
+		if (row.kind === 'llm') {
+			loadLlmModelList();
+		}
 	}
 
 	function closeModal() {
@@ -343,6 +360,10 @@
 		cartesiaVoiceList = [];
 		cartesiaVoiceError = null;
 		cartesiaVoiceFilter = '';
+		llmModelList = [];
+		llmModelsLoading = false;
+		llmModelsError = null;
+		llmModelsLoaded = false;
 	}
 
 	function selectKind(kind: ProviderKind) {
@@ -369,6 +390,14 @@
 		sttTestResult = null;
 		if (draftKind === 'tts' && name === PIPER_PROVIDER_NAME) {
 			loadVoiceListCatalog();
+		}
+		if (draftKind === 'llm') {
+			// First open of a fresh "new" LLM modal: the api_key field is blank,
+			// so the preview endpoint will return a 400 "enter an api key" and
+			// we surface that as the dropdown's inline hint. Once the operator
+			// pastes a key, the Refresh button (or the on-blur handler below)
+			// re-runs this with the new value.
+			loadLlmModelList({ preferPreview: true });
 		}
 	}
 
@@ -857,6 +886,52 @@
 			cartesiaVoiceError = e instanceof Error ? e.message : String(e);
 		} finally {
 			cartesiaVoiceLoading = false;
+		}
+	}
+
+	/**
+	 * Fetch the live model list for the LLM provider currently in the
+	 * modal (Johnny-9eq). When editing a saved row uses GET
+	 * /providers/{id}/llm_models (decrypted-on-server api_key); for the
+	 * "new" flow or when the operator edits the api_key in place uses
+	 * POST /providers/preview/llm_models with the unsaved draft values.
+	 * Errors are kept in `llmModelsError` so the dropdown can render an
+	 * inline hint (e.g. "enter an openai API key to load models") and
+	 * fall back to the static schema FieldOption list.
+	 */
+	async function loadLlmModelList(opts: { preferPreview?: boolean } = {}) {
+		if (draftKind !== 'llm' || draftProviderName === null) return;
+		llmModelsLoading = true;
+		llmModelsError = null;
+		try {
+			const useSavedRow =
+				!opts.preferPreview &&
+				mode === 'edit' &&
+				editingRow !== null &&
+				// Only use the saved-row fetcher if no api_key change is staged —
+				// the saved-row endpoint reads the encrypted-on-server secret, so
+				// it can't see a freshly-typed api_key in the modal.
+				(draftValues.api_key === '' ||
+					draftValues.api_key === undefined ||
+					draftValues.api_key === null);
+			let data;
+			if (useSavedRow && editingRow !== null) {
+				data = await listLlmModels(editingRow.id);
+			} else {
+				data = await previewLlmModels({
+					kind: 'llm',
+					provider_name: draftProviderName,
+					values: { ...draftValues }
+				});
+			}
+			llmModelList = data.models;
+			llmModelsLoaded = true;
+		} catch (e) {
+			llmModelsError = e instanceof Error ? e.message : String(e);
+			llmModelList = [];
+			llmModelsLoaded = true;
+		} finally {
+			llmModelsLoading = false;
 		}
 	}
 
@@ -1585,7 +1660,103 @@
 													<span class="text-destructive" aria-hidden="true">*</span>
 												{/if}
 											</label>
-											{#if field.type === 'select' && field.options}
+											{#if field.name === 'model' && selectedEntry.kind === 'llm'}
+												{@const dynamicOptions = llmModelList.map((m) => ({
+													value: m.id,
+													label: m.label
+												}))}
+												{@const fallbackOptions = field.options ?? []}
+												{@const hasLive = llmModelsLoaded && dynamicOptions.length > 0}
+												{@const liveOptions = hasLive ? dynamicOptions : fallbackOptions}
+												<div class="flex flex-col gap-1.5">
+													<div class="flex items-center gap-2">
+														{#if liveOptions.length > 0}
+															<select
+																id={inputId}
+																class="flex-1 rounded-sm border border-border-strong bg-surface-3 px-3 py-2 text-sm text-foreground outline-none focus-visible:border-ring focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+																value={String(draftValues[field.name] ?? '')}
+																onchange={(e) => {
+																	draftValues = {
+																		...draftValues,
+																		[field.name]: (e.currentTarget as HTMLSelectElement).value
+																	};
+																}}
+																aria-invalid={!!fieldError}
+																data-testid="llm-model-select"
+															>
+																<option value="" disabled>Pick a value…</option>
+																{#each liveOptions as opt (opt.value)}
+																	<option value={opt.value}>{opt.label}</option>
+																{/each}
+																{#if draftValues[field.name] && !liveOptions.some((o) => o.value === draftValues[field.name])}
+																	<option value={String(draftValues[field.name])}>
+																		{String(draftValues[field.name])} (saved)
+																	</option>
+																{/if}
+															</select>
+														{:else}
+															<Input
+																id={inputId}
+																type="text"
+																placeholder={field.placeholder ??
+																	'Enter your API key or base URL above, then click Refresh'}
+																value={String(draftValues[field.name] ?? '')}
+																oninput={(e) => {
+																	draftValues = {
+																		...draftValues,
+																		[field.name]: (e.currentTarget as HTMLInputElement).value
+																	};
+																}}
+																aria-invalid={!!fieldError}
+																data-testid="llm-model-text"
+															/>
+														{/if}
+														<Button
+															type="button"
+															variant="outline"
+															size="sm"
+															disabled={llmModelsLoading}
+															onclick={() => loadLlmModelList({ preferPreview: true })}
+															data-testid="llm-model-refresh"
+														>
+															{llmModelsLoading ? 'Loading…' : 'Refresh'}
+														</Button>
+													</div>
+													{#if llmModelsLoading}
+														<p
+															class="m-0 text-xs text-muted-foreground"
+															data-testid="llm-model-status"
+														>
+															Fetching live model list from the provider…
+														</p>
+													{:else if llmModelsError}
+														<p
+															class="m-0 text-xs text-destructive"
+															data-testid="llm-model-status"
+															role="alert"
+														>
+															{llmModelsError}
+														</p>
+													{:else if hasLive}
+														<p
+															class="m-0 text-xs text-muted-foreground"
+															data-testid="llm-model-status"
+														>
+															{dynamicOptions.length} model{dynamicOptions.length === 1
+																? ''
+																: 's'} from
+															{selectedEntry.display_name}
+														</p>
+													{:else if llmModelsLoaded && fallbackOptions.length > 0}
+														<p
+															class="m-0 text-xs text-muted-foreground"
+															data-testid="llm-model-status"
+														>
+															Showing the curated fallback list — enter credentials and Refresh for the live catalog.
+														</p>
+													{/if}
+												</div>
+											{:else if field.type === 'select' && field.options}
 												<select
 													id={inputId}
 													class="rounded-sm border border-border-strong bg-surface-3 px-3 py-2 text-sm text-foreground outline-none focus-visible:border-ring focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"

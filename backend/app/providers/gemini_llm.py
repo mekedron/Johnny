@@ -34,6 +34,7 @@ import httpx
 from app.providers.base import (
     ChatMessage,
     LLMError,
+    LLMModelInfo,
     LLMProvider,
     LLMResponse,
     ProviderConfig,
@@ -59,6 +60,9 @@ DEFAULT_MODEL = "gemini-1.5-flash"
 DEFAULT_MAX_OUTPUT_TOKENS = 1024
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_TIMEOUT_S = 60.0
+DEFAULT_CATALOG_TIMEOUT_S = 15.0
+DEFAULT_CATALOG_PAGE_SIZE = 200
+DEFAULT_CATALOG_MAX_PAGES = 10
 
 _FINISH_REASON_MAP: dict[str, str] = {
     "STOP": "stop",
@@ -533,6 +537,117 @@ def _extract_response_schema(response_format: dict[str, Any]) -> Any:
     return None
 
 
+async def fetch_model_catalog(
+    api_key: str,
+    *,
+    base_url: str = DEFAULT_BASE_URL,
+    client: httpx.AsyncClient | None = None,
+    timeout_s: float = DEFAULT_CATALOG_TIMEOUT_S,
+    page_size: int = DEFAULT_CATALOG_PAGE_SIZE,
+    max_pages: int = DEFAULT_CATALOG_MAX_PAGES,
+) -> list[LLMModelInfo]:
+    """Return generateContent-capable models from ``GET {base_url}/models`` (Johnny-9eq).
+
+    Gemini's catalog enumerates EVERY model the account has access to,
+    including embedding, image, and Live (bidi) endpoints that the
+    text/chat adapter cannot drive. Filters to entries with
+    ``generateContent`` in ``supportedGenerationMethods`` — the same
+    capability flag the Johnny-ckz.20 S2S adapter uses for its
+    ``bidiGenerateContent`` filter. Pagination follows
+    ``nextPageToken``. The ``models/`` prefix on each ``name`` is
+    stripped — the user-facing dropdown wants ``gemini-2.5-flash``,
+    not ``models/gemini-2.5-flash``. Raises :class:`LLMError` on
+    transport / parse failure.
+    """
+    if not api_key:
+        raise LLMError("gemini catalog requires an api_key")
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=timeout_s)
+    headers = {"Accept": "application/json"}
+    url = f"{base_url.rstrip('/')}/models"
+    models: list[LLMModelInfo] = []
+    page_token: str | None = None
+    seen_ids: set[str] = set()
+    try:
+        for _ in range(max_pages):
+            params: dict[str, Any] = {"key": api_key, "pageSize": page_size}
+            if page_token:
+                params["pageToken"] = page_token
+            try:
+                response = await client.get(url, headers=headers, params=params)
+                response.raise_for_status()
+                payload = response.json()
+            except httpx.HTTPError as exc:
+                raise LLMError(
+                    f"failed to fetch gemini model catalog: {exc}"
+                ) from exc
+            except ValueError as exc:
+                raise LLMError(
+                    f"gemini model catalog is not valid JSON: {exc}"
+                ) from exc
+            if not isinstance(payload, dict):
+                raise LLMError(
+                    "gemini model catalog payload is not a JSON object"
+                )
+            entries = payload.get("models")
+            if not isinstance(entries, list):
+                raise LLMError(
+                    "gemini model catalog payload missing 'models' array"
+                )
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                raw_name = entry.get("name")
+                if not isinstance(raw_name, str) or not raw_name:
+                    continue
+                methods = entry.get("supportedGenerationMethods")
+                if (
+                    not isinstance(methods, list)
+                    or "generateContent" not in methods
+                ):
+                    continue
+                # Catalog names look like "models/gemini-2.5-flash" but the
+                # API URL builder + the chat adapter both expect the bare
+                # id without the prefix.
+                model_id = (
+                    raw_name.removeprefix("models/")
+                    if raw_name.startswith("models/")
+                    else raw_name
+                )
+                if model_id in seen_ids:
+                    continue
+                seen_ids.add(model_id)
+                display_name = entry.get("displayName")
+                label = (
+                    str(display_name)
+                    if isinstance(display_name, str) and display_name
+                    else model_id
+                )
+                description_raw = entry.get("description")
+                description = (
+                    str(description_raw)
+                    if isinstance(description_raw, str) and description_raw
+                    else None
+                )
+                models.append(
+                    LLMModelInfo(
+                        id=model_id, label=label, description=description
+                    )
+                )
+            next_token = payload.get("nextPageToken")
+            if not isinstance(next_token, str) or not next_token:
+                break
+            page_token = next_token
+        # Stable alphabetical sort; Gemini doesn't ship a created_at so the
+        # UI can't usefully sort newest-first.
+        models.sort(key=lambda info: info.id)
+        return models
+    finally:
+        if owns_client:
+            await client.aclose()
+
+
 def register(*, replace: bool = False) -> None:
     """Register :class:`GeminiLLM` under ``(ProviderKind.LLM, "gemini")``.
 
@@ -553,5 +668,6 @@ __all__ = [
     "DEFAULT_TIMEOUT_S",
     "GeminiLLM",
     "PROVIDER_NAME",
+    "fetch_model_catalog",
     "register",
 ]

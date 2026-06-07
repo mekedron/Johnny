@@ -12,7 +12,15 @@ from __future__ import annotations
 from dataclasses import replace as dc_replace
 from typing import Any
 
-from app.providers.base import ProviderConfig, ProviderKind, get_registry
+import httpx
+
+from app.providers.base import (
+    LLMError,
+    LLMModelInfo,
+    ProviderConfig,
+    ProviderKind,
+    get_registry,
+)
 from app.providers.openai_compatible_llm import OpenAICompatibleLLM
 from app.providers.schema import (
     FieldDef,
@@ -26,7 +34,34 @@ from app.providers.schema import (
 PROVIDER_NAME = "openai"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_CATALOG_TIMEOUT_S = 15.0
 _REASONING_MODEL_PREFIXES = ("o1", "o3", "o4", "gpt-5")
+
+# Heuristic for "is this a chat-completion model?". The catalog endpoint
+# returns every model the account has access to, including embeddings,
+# moderation, audio, and image generation models that the chat-completion
+# adapter cannot drive. Keep this lenient (substring match against id) —
+# OpenAI ships new model families on a rolling basis and a broad whitelist
+# stays current longer than an exact-name allow-list. Operators can still
+# type an unlisted id in if they really need it.
+_OPENAI_CHAT_MODEL_PREFIXES: tuple[str, ...] = (
+    "gpt-",
+    "chatgpt-",
+    "o1",
+    "o3",
+    "o4",
+)
+_OPENAI_EXCLUDED_SUBSTRINGS: tuple[str, ...] = (
+    "embedding",
+    "tts",
+    "whisper",
+    "transcribe",
+    "moderation",
+    "realtime",
+    "image",
+    "dall-e",
+    "audio",
+)
 
 
 class OpenAILLM(OpenAICompatibleLLM):
@@ -234,6 +269,89 @@ class OpenAILLM(OpenAICompatibleLLM):
         return None
 
 
+def _is_openai_chat_model(model_id: str) -> bool:
+    """Heuristic filter: keep chat-completion models, drop everything else.
+
+    The /v1/models catalog enumerates EVERY model the account can call,
+    including embedding / audio / image / moderation endpoints that the
+    chat adapter cannot drive. A substring whitelist + exclusion list
+    catches the common cases without going stale every model release.
+    """
+    lower = model_id.lower()
+    if any(bad in lower for bad in _OPENAI_EXCLUDED_SUBSTRINGS):
+        return False
+    return lower.startswith(_OPENAI_CHAT_MODEL_PREFIXES)
+
+
+async def fetch_model_catalog(
+    api_key: str,
+    *,
+    base_url: str = DEFAULT_BASE_URL,
+    client: httpx.AsyncClient | None = None,
+    timeout_s: float = DEFAULT_CATALOG_TIMEOUT_S,
+) -> list[LLMModelInfo]:
+    """Return chat-completion models from ``GET {base_url}/models`` (Johnny-9eq).
+
+    Hits the OpenAI catalog endpoint with the configured API key and
+    filters the response to chat-completion models via
+    :func:`_is_openai_chat_model`. Sorted with the largest ``created``
+    timestamp first so the freshest models float to the top of the
+    dropdown. Raises :class:`LLMError` on transport / parse failure —
+    the API surface catches and re-raises as HTTP 502 so the operator
+    sees the upstream diagnostic verbatim.
+    """
+    if not api_key:
+        raise LLMError("openai catalog requires an api_key")
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=timeout_s)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+    }
+    url = f"{base_url.rstrip('/')}/models"
+    try:
+        try:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.HTTPError as exc:
+            raise LLMError(
+                f"failed to fetch openai model catalog: {exc}"
+            ) from exc
+        except ValueError as exc:
+            raise LLMError(
+                f"openai model catalog is not valid JSON: {exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise LLMError("openai model catalog payload is not a JSON object")
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise LLMError(
+                "openai model catalog payload missing 'data' array"
+            )
+        models: list[tuple[int, LLMModelInfo]] = []
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            model_id = entry.get("id")
+            if not isinstance(model_id, str) or not model_id:
+                continue
+            if not _is_openai_chat_model(model_id):
+                continue
+            created = entry.get("created")
+            created_ts = int(created) if isinstance(created, int) else 0
+            models.append(
+                (created_ts, LLMModelInfo(id=model_id, label=model_id))
+            )
+        # Newest first; ties broken alphabetically so the list is stable.
+        models.sort(key=lambda pair: (-pair[0], pair[1].id))
+        return [info for _, info in models]
+    finally:
+        if owns_client:
+            await client.aclose()
+
+
 def register(*, replace: bool = False) -> None:
     """Register :class:`OpenAILLM` under ``(ProviderKind.LLM, "openai")``.
 
@@ -251,5 +369,6 @@ __all__ = [
     "DEFAULT_MODEL",
     "OpenAILLM",
     "PROVIDER_NAME",
+    "fetch_model_catalog",
     "register",
 ]

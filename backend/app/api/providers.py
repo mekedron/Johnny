@@ -28,7 +28,15 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_crypto, get_session
 from app.db.models import PipelineMode, ProviderCredential
-from app.services.provider_payload import resolve_pipeline_mode, upsert_pipeline_mode
+from app.providers.anthropic_llm import (
+    DEFAULT_BASE_URL as ANTHROPIC_DEFAULT_BASE_URL,
+)
+from app.providers.anthropic_llm import (
+    PROVIDER_NAME as ANTHROPIC_PROVIDER_NAME,
+)
+from app.providers.anthropic_llm import (
+    fetch_model_catalog as anthropic_fetch_model_catalog,
+)
 from app.providers.base import (
     PCM_CHANNELS,
     PCM_SAMPLE_RATE_HZ,
@@ -47,6 +55,30 @@ from app.providers.cartesia_tts import (
 )
 from app.providers.cartesia_tts import (
     fetch_voice_catalog as cartesia_fetch_voice_catalog,
+)
+from app.providers.gemini_llm import (
+    DEFAULT_BASE_URL as GEMINI_DEFAULT_BASE_URL,
+)
+from app.providers.gemini_llm import (
+    PROVIDER_NAME as GEMINI_PROVIDER_NAME,
+)
+from app.providers.gemini_llm import (
+    fetch_model_catalog as gemini_fetch_model_catalog,
+)
+from app.providers.openai_compatible_llm import (
+    PROVIDER_NAME as OPENAI_COMPATIBLE_PROVIDER_NAME,
+)
+from app.providers.openai_compatible_llm import (
+    fetch_model_catalog as openai_compatible_fetch_model_catalog,
+)
+from app.providers.openai_llm import (
+    DEFAULT_BASE_URL as OPENAI_DEFAULT_BASE_URL,
+)
+from app.providers.openai_llm import (
+    PROVIDER_NAME as OPENAI_PROVIDER_NAME,
+)
+from app.providers.openai_llm import (
+    fetch_model_catalog as openai_fetch_model_catalog,
 )
 from app.providers.piper_tts import (
     DEFAULT_MODEL_DIR as PIPER_DEFAULT_MODEL_DIR,
@@ -70,6 +102,7 @@ from app.providers.schema_validation import (
     validate_payload,
 )
 from app.security.crypto import CredentialCrypto, CryptoError, decrypt_json, encrypt_json
+from app.services.provider_payload import resolve_pipeline_mode, upsert_pipeline_mode
 from app.services.providers_seed import SUPPORTED_FILE_VERSION
 
 router = APIRouter(prefix="/providers", tags=["providers"])
@@ -258,6 +291,30 @@ class CartesiaVoiceListResponse(BaseModel):
     """Response payload for ``GET /providers/{id}/cartesia/voices``."""
 
     voices: list[CartesiaVoiceRead]
+
+
+class LlmModelRead(BaseModel):
+    """One model entry returned by ``GET /providers/{id}/llm_models`` (Johnny-9eq).
+
+    ``id`` is the canonical model identifier the chat adapter expects.
+    ``label`` is the UI string the dropdown should display — usually the
+    same as ``id``, but adapters may decorate it (e.g. Anthropic's
+    ``display_name`` is friendlier than the raw model id). ``description``
+    is an optional one-line summary when the provider's catalog supplies
+    one — currently only Gemini.
+    """
+
+    id: str
+    label: str
+    description: str | None = None
+
+
+class LlmModelListResponse(BaseModel):
+    """Response payload for ``GET /providers/{id}/llm_models`` and
+    ``POST /providers/preview/llm_models`` (Johnny-9eq).
+    """
+
+    models: list[LlmModelRead]
 
 
 class PipelineSettingsRead(BaseModel):
@@ -1033,6 +1090,210 @@ def remove_catalog_piper_voice(voice_key: str) -> VoiceRemoveResponse:
             detail=f"failed to remove voice {voice_key!r}: {exc}",
         ) from exc
     return VoiceRemoveResponse(**result)
+
+
+# --- LLM model catalog (Johnny-9eq) ---------------------------------------
+#
+# Each LLM provider exposes a module-level ``fetch_model_catalog`` that
+# hits its catalog endpoint and returns a list of ``LLMModelInfo``. The
+# two endpoints below — ``GET /providers/{id}/llm_models`` and
+# ``POST /providers/preview/llm_models`` — dispatch to the right
+# provider's fetcher so the SvelteKit modal can populate the model
+# dropdown dynamically. Replaces the prior hand-curated
+# :class:`FieldOption` list that went stale every time a provider
+# shipped a new model.
+
+
+def _missing_llm_credentials_message(provider_name: str) -> str:
+    """Compose the "enter an API key first" prompt the UI surfaces."""
+    if provider_name == OPENAI_COMPATIBLE_PROVIDER_NAME:
+        return (
+            "enter the base URL for your OpenAI-compatible endpoint "
+            "before loading models"
+        )
+    return f"enter an {provider_name} API key before loading models"
+
+
+async def _fetch_llm_models(
+    provider_name: str,
+    *,
+    api_key: str | None,
+    base_url: str | None,
+    anthropic_version: str | None = None,
+) -> list[LlmModelRead]:
+    """Dispatch ``fetch_model_catalog`` to the right LLM adapter.
+
+    Returns ``LlmModelRead`` pydantic rows so the endpoint can pass them
+    straight into ``LlmModelListResponse``. Raises HTTP 400 when the
+    provider doesn't yet have the credentials needed to call its catalog
+    (so the UI can prompt for them), and HTTP 502 when the upstream call
+    fails — the upstream diagnostic is forwarded so the operator can
+    debug without checking server logs.
+    """
+    name = provider_name
+    if name == OPENAI_PROVIDER_NAME:
+        if not api_key:
+            raise HTTPException(
+                status_code=400,
+                detail=_missing_llm_credentials_message(name),
+            )
+        try:
+            entries = await openai_fetch_model_catalog(
+                api_key,
+                base_url=base_url or OPENAI_DEFAULT_BASE_URL,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+    elif name == ANTHROPIC_PROVIDER_NAME:
+        if not api_key:
+            raise HTTPException(
+                status_code=400,
+                detail=_missing_llm_credentials_message(name),
+            )
+        kwargs: dict[str, Any] = {
+            "base_url": base_url or ANTHROPIC_DEFAULT_BASE_URL,
+        }
+        if anthropic_version:
+            kwargs["anthropic_version"] = anthropic_version
+        try:
+            entries = await anthropic_fetch_model_catalog(api_key, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+    elif name == GEMINI_PROVIDER_NAME:
+        if not api_key:
+            raise HTTPException(
+                status_code=400,
+                detail=_missing_llm_credentials_message(name),
+            )
+        try:
+            entries = await gemini_fetch_model_catalog(
+                api_key,
+                base_url=base_url or GEMINI_DEFAULT_BASE_URL,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+    elif name == OPENAI_COMPATIBLE_PROVIDER_NAME:
+        if not base_url:
+            raise HTTPException(
+                status_code=400,
+                detail=_missing_llm_credentials_message(name),
+            )
+        try:
+            entries = await openai_compatible_fetch_model_catalog(
+                base_url, api_key=api_key
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"dynamic model catalog is not implemented for llm:{name}. "
+                "Edit the row manually with the field schema's default model "
+                "id, or pick a different provider."
+            ),
+        )
+    return [
+        LlmModelRead(
+            id=info.id, label=info.label, description=info.description
+        )
+        for info in entries
+    ]
+
+
+@router.post(
+    "/preview/llm_models",
+    response_model=LlmModelListResponse,
+)
+async def preview_llm_models(
+    payload: ProviderPreviewPayload,
+) -> LlmModelListResponse:
+    """LLM model catalog preview-without-save (Johnny-9eq).
+
+    Takes the same ``values`` dict the create / update endpoints accept
+    and pulls the api_key + base_url + anthropic_version out of it
+    without persisting anything. Lets the modal refresh the model
+    dropdown the moment the operator pastes a fresh API key — no need
+    to save a half-configured row first.
+
+    Defined BEFORE ``/{provider_id}/llm_models`` so the FastAPI matcher
+    routes ``/providers/preview/llm_models`` here instead of trying to
+    parse ``preview`` as a provider id.
+    """
+    if payload.kind is not ProviderKind.LLM:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"preview/llm_models only supports LLM, not {payload.kind.value}"
+            ),
+        )
+    values = payload.values or {}
+    api_key_raw = values.get("api_key")
+    api_key = str(api_key_raw).strip() if isinstance(api_key_raw, str) else ""
+    base_url_raw = values.get("base_url")
+    base_url = (
+        str(base_url_raw).strip() if isinstance(base_url_raw, str) else ""
+    )
+    anthropic_version_raw = values.get("anthropic_version")
+    anthropic_version = (
+        str(anthropic_version_raw).strip()
+        if isinstance(anthropic_version_raw, str)
+        else ""
+    )
+    models = await _fetch_llm_models(
+        payload.provider_name,
+        api_key=api_key or None,
+        base_url=base_url or None,
+        anthropic_version=anthropic_version or None,
+    )
+    return LlmModelListResponse(models=models)
+
+
+@router.get(
+    "/{provider_id}/llm_models",
+    response_model=LlmModelListResponse,
+)
+async def list_llm_models(
+    provider_id: int, session: SessionDep, crypto: CryptoDep
+) -> LlmModelListResponse:
+    """Fetch the live model list for a saved LLM provider row (Johnny-9eq).
+
+    Decrypts the row's saved API key + options, calls the provider's
+    ``fetch_model_catalog``, and returns the result. Only valid for
+    ``kind=llm`` rows; STT / TTS / S2S rows return 400. Auth or transport
+    failures forward as 502 with the upstream diagnostic.
+    """
+    row = _get_row_or_404(session, provider_id)
+    if row.kind is not ProviderKind.LLM:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "llm_models is only available for llm providers "
+                f"(got {row.kind.value}:{row.provider_name})"
+            ),
+        )
+    try:
+        creds = decrypt_json(crypto, row.credentials_encrypted)
+    except (CryptoError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"failed to decrypt credentials: {exc}",
+        ) from exc
+    options = dict(row.config or {})
+    api_key = (creds.get("api_key") or "").strip() if creds else ""
+    base_url = str(options.get("base_url") or "").strip()
+    anthropic_version = (
+        str(options.get("anthropic_version") or "").strip()
+        if row.provider_name == ANTHROPIC_PROVIDER_NAME
+        else None
+    )
+    models = await _fetch_llm_models(
+        row.provider_name,
+        api_key=api_key or None,
+        base_url=base_url or None,
+        anthropic_version=anthropic_version or None,
+    )
+    return LlmModelListResponse(models=models)
 
 
 @router.post("/{provider_id}/test", response_model=TestResult)

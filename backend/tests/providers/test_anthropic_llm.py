@@ -24,11 +24,13 @@ from app.providers.anthropic_llm import (
     DEFAULT_TIMEOUT_S,
     PROVIDER_NAME,
     AnthropicLLM,
+    fetch_model_catalog,
     register,
 )
 from app.providers.base import (
     ChatMessage,
     LLMError,
+    LLMModelInfo,
     LLMResponse,
     ProviderConfig,
     ProviderKind,
@@ -746,3 +748,117 @@ def test_register_is_idempotent_with_replace() -> None:
 
 def test_registered_on_package_import() -> None:
     assert get_registry().has(ProviderKind.LLM, PROVIDER_NAME)
+
+
+# --- fetch_model_catalog (Johnny-9eq) -------------------------------------
+
+
+def _anthropic_models_response(
+    data: list[dict[str, Any]],
+    *,
+    has_more: bool = False,
+    last_id: str | None = None,
+) -> httpx.Response:
+    payload: dict[str, Any] = {
+        "data": data,
+        "has_more": has_more,
+        "first_id": data[0]["id"] if data else None,
+        "last_id": last_id or (data[-1]["id"] if data else None),
+    }
+    return httpx.Response(200, content=json.dumps(payload).encode())
+
+
+async def test_fetch_model_catalog_uses_display_name_and_sorts_newest_first() -> None:
+    data = [
+        {
+            "id": "claude-3-5-sonnet-20241022",
+            "display_name": "Claude 3.5 Sonnet (2024-10-22)",
+            "type": "model",
+            "created_at": "2024-10-22T00:00:00Z",
+        },
+        {
+            "id": "claude-opus-4-7",
+            "display_name": "Claude Opus 4.7",
+            "type": "model",
+            "created_at": "2026-04-01T00:00:00Z",
+        },
+        {
+            "id": "claude-haiku-4-5",
+            "display_name": "Claude Haiku 4.5",
+            "type": "model",
+            "created_at": "2025-10-01T00:00:00Z",
+        },
+    ]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.method == "GET"
+        assert req.url.path == "/v1/models"
+        assert req.headers["x-api-key"] == "sk-ant-test"
+        assert req.headers["anthropic-version"] == DEFAULT_ANTHROPIC_VERSION
+        return _anthropic_models_response(data)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    out = await fetch_model_catalog("sk-ant-test", client=client)
+    await client.aclose()
+    # Newest created_at first.
+    assert [m.id for m in out] == [
+        "claude-opus-4-7",
+        "claude-haiku-4-5",
+        "claude-3-5-sonnet-20241022",
+    ]
+    assert all(isinstance(m, LLMModelInfo) for m in out)
+    # display_name surfaces as label.
+    assert out[0].label == "Claude Opus 4.7"
+
+
+async def test_fetch_model_catalog_follows_pagination() -> None:
+    page1 = [
+        {"id": f"claude-model-{i}", "display_name": f"Model {i}", "type": "model"}
+        for i in range(3)
+    ]
+    page2 = [
+        {"id": f"claude-model-{i}", "display_name": f"Model {i}", "type": "model"}
+        for i in range(3, 5)
+    ]
+    captured_after: list[str | None] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured_after.append(req.url.params.get("after_id"))
+        if req.url.params.get("after_id") is None:
+            return _anthropic_models_response(
+                page1, has_more=True, last_id="claude-model-2"
+            )
+        return _anthropic_models_response(page2, has_more=False)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    out = await fetch_model_catalog("sk-ant-test", client=client, page_size=3)
+    await client.aclose()
+    assert len(out) == 5
+    assert captured_after == [None, "claude-model-2"]
+
+
+async def test_fetch_model_catalog_raises_without_api_key() -> None:
+    with pytest.raises(LLMError, match="api_key"):
+        await fetch_model_catalog("")
+
+
+async def test_fetch_model_catalog_raises_on_http_error() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, content=b'{"error": "auth"}')
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(LLMError, match="failed to fetch anthropic model catalog"):
+        await fetch_model_catalog("sk-ant-test", client=client)
+    await client.aclose()
+
+
+async def test_fetch_model_catalog_falls_back_to_id_when_no_display_name() -> None:
+    data = [{"id": "claude-haiku-4-5", "type": "model"}]
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return _anthropic_models_response(data)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    out = await fetch_model_catalog("sk-ant-test", client=client)
+    await client.aclose()
+    assert out[0].label == "claude-haiku-4-5"

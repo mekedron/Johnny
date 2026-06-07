@@ -33,6 +33,7 @@ import httpx
 from app.providers.base import (
     ChatMessage,
     LLMError,
+    LLMModelInfo,
     LLMProvider,
     LLMResponse,
     ProviderConfig,
@@ -55,6 +56,7 @@ logger = logging.getLogger(__name__)
 PROVIDER_NAME = "openai-compatible"
 DEFAULT_TIMEOUT_S = 60.0
 DEFAULT_TEMPERATURE = 0.7
+DEFAULT_CATALOG_TIMEOUT_S = 15.0
 
 ToolFormat = str  # "openai" or "hermes"
 
@@ -794,6 +796,80 @@ def _parse_openai_tool_call(raw: Any) -> ToolCall:
     )
 
 
+async def fetch_model_catalog(
+    base_url: str,
+    *,
+    api_key: str | None = None,
+    client: httpx.AsyncClient | None = None,
+    timeout_s: float = DEFAULT_CATALOG_TIMEOUT_S,
+) -> list[LLMModelInfo]:
+    """Return every model from ``GET {base_url}/models`` (Johnny-9eq).
+
+    OpenAI-compatible endpoints (Ollama, vLLM, LM Studio, OpenRouter,
+    Together) all expose the ``/v1/models`` route with the OpenAI
+    response shape — ``{"object":"list","data":[{"id":"...","object":
+    "model"}]}``. Ollama specifically also exposes a native
+    ``/api/tags`` route but the OpenAI-compat one returns the same set
+    of locally-pulled models, so we use a single path that works
+    everywhere.
+
+    NO filtering — for self-hosted / local endpoints the user knows
+    what they pulled, and a "drop everything I don't recognise" heuristic
+    would silently hide models the operator deliberately installed.
+    Sorted alphabetically; ``api_key`` is sent as a Bearer token when
+    provided (Ollama ignores it; OpenRouter / hosted gateways require it).
+    Raises :class:`LLMError` on transport / parse failure.
+    """
+    if not base_url:
+        raise LLMError("openai-compatible catalog requires a base_url")
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=timeout_s)
+    headers: dict[str, str] = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    url = f"{base_url.rstrip('/')}/models"
+    try:
+        try:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.HTTPError as exc:
+            raise LLMError(
+                f"failed to fetch openai-compatible model catalog: {exc}"
+            ) from exc
+        except ValueError as exc:
+            raise LLMError(
+                f"openai-compatible model catalog is not valid JSON: {exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise LLMError(
+                "openai-compatible model catalog payload is not a JSON object"
+            )
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise LLMError(
+                "openai-compatible model catalog payload missing 'data' array"
+            )
+        models: list[LLMModelInfo] = []
+        seen: set[str] = set()
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            model_id = entry.get("id")
+            if not isinstance(model_id, str) or not model_id:
+                continue
+            if model_id in seen:
+                continue
+            seen.add(model_id)
+            models.append(LLMModelInfo(id=model_id, label=model_id))
+        models.sort(key=lambda info: info.id)
+        return models
+    finally:
+        if owns_client:
+            await client.aclose()
+
+
 def register(*, replace: bool = False) -> None:
     """Register :class:`OpenAICompatibleLLM` under ``(LLM, "openai-compatible")``.
 
@@ -811,5 +887,6 @@ __all__ = [
     "DEFAULT_TIMEOUT_S",
     "OpenAICompatibleLLM",
     "PROVIDER_NAME",
+    "fetch_model_catalog",
     "register",
 ]

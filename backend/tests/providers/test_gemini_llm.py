@@ -19,6 +19,7 @@ import pytest
 from app.providers.base import (
     ChatMessage,
     LLMError,
+    LLMModelInfo,
     LLMResponse,
     ProviderConfig,
     ProviderKind,
@@ -33,6 +34,7 @@ from app.providers.gemini_llm import (
     DEFAULT_TIMEOUT_S,
     PROVIDER_NAME,
     GeminiLLM,
+    fetch_model_catalog,
     register,
 )
 from tests.providers._llm_contract import (
@@ -762,3 +764,136 @@ def test_register_is_idempotent_with_replace() -> None:
 
 def test_registered_on_package_import() -> None:
     assert get_registry().has(ProviderKind.LLM, PROVIDER_NAME)
+
+
+# --- fetch_model_catalog (Johnny-9eq) -------------------------------------
+
+
+def _gemini_models_response(
+    models: list[dict[str, Any]],
+    *,
+    next_page_token: str | None = None,
+) -> httpx.Response:
+    payload: dict[str, Any] = {"models": models}
+    if next_page_token is not None:
+        payload["nextPageToken"] = next_page_token
+    return httpx.Response(200, content=json.dumps(payload).encode())
+
+
+async def test_fetch_model_catalog_filters_to_generate_content_capability() -> None:
+    entries = [
+        {
+            "name": "models/gemini-2.5-flash",
+            "displayName": "Gemini 2.5 Flash",
+            "description": "Fastest 2.5 tier",
+            "supportedGenerationMethods": ["generateContent", "countTokens"],
+        },
+        {
+            # Live (bidi) endpoint — chat adapter cannot drive it.
+            "name": "models/gemini-2.5-flash-native-audio-latest",
+            "supportedGenerationMethods": ["bidiGenerateContent"],
+        },
+        {
+            "name": "models/text-embedding-004",
+            "supportedGenerationMethods": ["embedContent"],
+        },
+        {
+            "name": "models/gemini-2.5-pro",
+            "displayName": "Gemini 2.5 Pro",
+            "supportedGenerationMethods": ["generateContent"],
+        },
+    ]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.method == "GET"
+        assert req.url.path == "/v1beta/models"
+        assert req.url.params.get("key") == "AIza-test"
+        return _gemini_models_response(entries)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    out = await fetch_model_catalog("AIza-test", client=client)
+    await client.aclose()
+    # Only generateContent entries; sorted alphabetically; models/ prefix stripped.
+    assert [m.id for m in out] == ["gemini-2.5-flash", "gemini-2.5-pro"]
+    assert all(isinstance(m, LLMModelInfo) for m in out)
+    assert out[0].label == "Gemini 2.5 Flash"
+    assert out[0].description == "Fastest 2.5 tier"
+
+
+async def test_fetch_model_catalog_follows_pagination() -> None:
+    page1 = [
+        {
+            "name": f"models/gem-{i}",
+            "displayName": f"Gem {i}",
+            "supportedGenerationMethods": ["generateContent"],
+        }
+        for i in range(3)
+    ]
+    page2 = [
+        {
+            "name": f"models/gem-{i}",
+            "displayName": f"Gem {i}",
+            "supportedGenerationMethods": ["generateContent"],
+        }
+        for i in range(3, 5)
+    ]
+    captured_tokens: list[str | None] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured_tokens.append(req.url.params.get("pageToken"))
+        if req.url.params.get("pageToken") is None:
+            return _gemini_models_response(page1, next_page_token="next-1")
+        return _gemini_models_response(page2)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    out = await fetch_model_catalog("AIza-test", client=client, page_size=3)
+    await client.aclose()
+    assert len(out) == 5
+    assert captured_tokens == [None, "next-1"]
+
+
+async def test_fetch_model_catalog_dedupes_repeated_ids_across_pages() -> None:
+    # Defensive: an unhealthy backend could return the same model twice.
+    entries = [
+        {
+            "name": "models/gemini-2.5-flash",
+            "supportedGenerationMethods": ["generateContent"],
+        },
+        {
+            "name": "models/gemini-2.5-flash",
+            "supportedGenerationMethods": ["generateContent"],
+        },
+    ]
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return _gemini_models_response(entries)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    out = await fetch_model_catalog("AIza-test", client=client)
+    await client.aclose()
+    assert [m.id for m in out] == ["gemini-2.5-flash"]
+
+
+async def test_fetch_model_catalog_raises_without_api_key() -> None:
+    with pytest.raises(LLMError, match="api_key"):
+        await fetch_model_catalog("")
+
+
+async def test_fetch_model_catalog_raises_on_http_error() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, content=b'{"error": "forbidden"}')
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(LLMError, match="failed to fetch gemini model catalog"):
+        await fetch_model_catalog("AIza-test", client=client)
+    await client.aclose()
+
+
+async def test_fetch_model_catalog_raises_when_models_missing() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b'{"foo": "bar"}')
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(LLMError, match="missing 'models'"):
+        await fetch_model_catalog("AIza-test", client=client)
+    await client.aclose()

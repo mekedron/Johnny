@@ -19,6 +19,8 @@ import pytest
 
 from app.providers.base import (
     ChatMessage,
+    LLMError,
+    LLMModelInfo,
     LLMResponse,
     ProviderConfig,
     ProviderKind,
@@ -30,6 +32,7 @@ from app.providers.openai_llm import (
     DEFAULT_MODEL,
     PROVIDER_NAME,
     OpenAILLM,
+    fetch_model_catalog,
     register,
 )
 from tests.providers._llm_contract import (
@@ -344,3 +347,124 @@ def test_register_is_idempotent_with_replace() -> None:
 
 def test_registered_on_package_import() -> None:
     assert get_registry().has(ProviderKind.LLM, PROVIDER_NAME)
+
+
+# --- fetch_model_catalog (Johnny-9eq) -------------------------------------
+
+
+def _models_response(models: list[dict[str, Any]]) -> httpx.Response:
+    body = {"object": "list", "data": models}
+    return httpx.Response(200, content=json.dumps(body).encode())
+
+
+async def test_fetch_model_catalog_returns_chat_models_newest_first() -> None:
+    models = [
+        {"id": "gpt-4o", "object": "model", "created": 1_700_000_000},
+        {"id": "gpt-4o-mini", "object": "model", "created": 1_710_000_000},
+        {"id": "text-embedding-3-large", "object": "model", "created": 1_690_000_000},
+        {"id": "whisper-1", "object": "model", "created": 1_600_000_000},
+        {"id": "gpt-5-preview", "object": "model", "created": 1_720_000_000},
+    ]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.method == "GET"
+        assert req.url.path == "/v1/models"
+        assert req.headers["authorization"] == "Bearer sk-test"
+        return _models_response(models)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    out = await fetch_model_catalog("sk-test", client=client)
+    await client.aclose()
+    # Embeddings and whisper filtered out; remaining chat models sorted newest first.
+    assert [m.id for m in out] == ["gpt-5-preview", "gpt-4o-mini", "gpt-4o"]
+    assert all(isinstance(m, LLMModelInfo) for m in out)
+    assert all(m.label == m.id for m in out)
+
+
+async def test_fetch_model_catalog_filters_non_chat_models() -> None:
+    models = [
+        {"id": "gpt-4o-mini", "object": "model"},
+        {"id": "tts-1", "object": "model"},
+        {"id": "dall-e-3", "object": "model"},
+        {"id": "gpt-realtime-2", "object": "model"},  # realtime excluded
+        {"id": "gpt-4o-transcribe", "object": "model"},
+        {"id": "text-moderation-latest", "object": "model"},
+        {"id": "o3-mini", "object": "model"},
+    ]
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return _models_response(models)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    out = await fetch_model_catalog("sk-test", client=client)
+    await client.aclose()
+    assert sorted(m.id for m in out) == ["gpt-4o-mini", "o3-mini"]
+
+
+async def test_fetch_model_catalog_raises_without_api_key() -> None:
+    with pytest.raises(LLMError, match="api_key"):
+        await fetch_model_catalog("")
+
+
+async def test_fetch_model_catalog_raises_on_http_error() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, content=b'{"error": {"message": "bad key"}}')
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(LLMError, match="failed to fetch openai model catalog"):
+        await fetch_model_catalog("sk-test", client=client)
+    await client.aclose()
+
+
+async def test_fetch_model_catalog_raises_on_non_json_body() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"not json")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(LLMError, match="not valid JSON"):
+        await fetch_model_catalog("sk-test", client=client)
+    await client.aclose()
+
+
+async def test_fetch_model_catalog_raises_when_data_missing() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b'{"object": "list"}')
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(LLMError, match="missing 'data'"):
+        await fetch_model_catalog("sk-test", client=client)
+    await client.aclose()
+
+
+async def test_fetch_model_catalog_skips_invalid_rows() -> None:
+    models: list[Any] = [
+        {"id": "gpt-4o"},
+        {},  # missing id → dropped
+        "not-even-a-dict",
+        {"id": ""},  # empty id → dropped
+    ]
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return _models_response(models)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    out = await fetch_model_catalog("sk-test", client=client)
+    await client.aclose()
+    assert [m.id for m in out] == ["gpt-4o"]
+
+
+async def test_fetch_model_catalog_honors_custom_base_url() -> None:
+    captured: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(str(req.url))
+        return _models_response([{"id": "gpt-4o"}])
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    await fetch_model_catalog(
+        "sk-test",
+        client=client,
+        base_url="https://proxy.example/v1",
+    )
+    await client.aclose()
+    assert captured == ["https://proxy.example/v1/models"]

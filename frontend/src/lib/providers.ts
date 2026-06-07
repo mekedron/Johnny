@@ -608,6 +608,47 @@ export function removeCatalogPiperVoice(
 	);
 }
 
+// --- LLM model catalog (Johnny-9eq) ---------------------------------------
+
+export interface LlmModel {
+	id: string;
+	label: string;
+	description: string | null;
+}
+
+export interface LlmModelList {
+	models: LlmModel[];
+}
+
+/**
+ * Fetch the live model list for a saved LLM provider row. The backend
+ * decrypts the row's API key + base_url and calls the provider's
+ * catalog endpoint (OpenAI /v1/models, Anthropic /v1/models, Gemini
+ * /v1beta/models, Ollama / vLLM /v1/models for openai-compatible).
+ *
+ * Throws when the row is not an LLM, the credentials are missing, or
+ * the upstream call fails — the message comes straight from the
+ * server's 400 / 502 detail so the modal can show the operator
+ * exactly what went wrong (e.g. "enter an openai API key first").
+ */
+export function listLlmModels(id: number): Promise<LlmModelList> {
+	return request<LlmModelList>(`/providers/${id}/llm_models`);
+}
+
+/**
+ * LLM model catalog preview-without-save: same shape as ``listLlmModels``
+ * but takes the unsaved values from the modal so the operator can refresh
+ * the dropdown after typing a fresh API key, before persisting the row.
+ */
+export function previewLlmModels(
+	payload: ProviderPreviewPayload
+): Promise<LlmModelList> {
+	return request<LlmModelList>('/providers/preview/llm_models', {
+		method: 'POST',
+		body: JSON.stringify(payload)
+	});
+}
+
 // --- Cartesia voice catalog (Johnny-ckz.18) -------------------------------
 
 export interface CartesiaVoice {
