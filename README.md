@@ -182,6 +182,29 @@ Sidecar management:
 
 Health check: `curl http://localhost:8775/health` → `{"ready": true, "voice": "...", "backend": "piper"}` once the default voice is loaded.
 
+## Local Kokoro TTS runtimes
+
+[Kokoro](https://github.com/hexgrad/kokoro) is an 82 M-parameter Apache-2.0 TTS model — multi-voice (American / British English plus Spanish, French, Hindi, Italian, Japanese, Portuguese and Mandarin), small enough to run on CPU, with cleaner prosody than most models its size. Every voice lives in the single checkpoint, so switching voice is instant and needs no per-voice install (unlike Piper). It emits 24 kHz mono float audio; the adapter converts to S16LE and resamples to the canonical 16 kHz bridge format. Pick the runtime from Settings → Providers → Kokoro → Runtime.
+
+| Runtime | Where it runs | Time-to-first-audio (warm) | Setup |
+| --- | --- | --- | --- |
+| `in-container` (default) | api container, `kokoro` in the api process; warm `KPipeline` (KModel) cached at module scope keyed by `(model, language)` | well under 200 ms warm | Requires the `kokoro` library in the api image. The first synth per language pays the multi-second model load; later turns are warm. CPU-only inside the container — for Apple-Silicon acceleration use the MLX sidecar. |
+| `mlx-sidecar` | macOS host, Kokoro under Apple MLX (Metal GPU) via `mlx-audio` | ~80–120 ms (network round-trip + warm synth) | `./scripts/start-kokoro-sidecar.sh mlx`. Runs `sidecars/kokoro-mlx/server.py` under `uv` on port 8772; the api POSTs to `http://host.docker.internal:8772`. |
+| `http-sidecar` | host process (CPU, or a CUDA GPU on a Linux box), upstream Kokoro | depends on host hardware | `./scripts/start-kokoro-sidecar.sh http`. Runs `sidecars/kokoro-http/server.py` under `uv` on port 8773; the api POSTs to `http://host.docker.internal:8773`. The non-MLX out-of-container path. |
+
+Both sidecars speak the same wire protocol as `sidecars/piper-http` (`POST /synthesize` JSON in, raw PCM + `X-Sample-Rate` out), so a single api-side adapter drives all three runtimes. Voices encode language + gender in the first two letters (`af`/`am` American, `bf`/`bm` British, plus the other-language sets); non-English voices use espeak-ng for grapheme-to-phoneme, so install it on whichever host runs the model (`brew install espeak-ng`).
+
+Sidecar management:
+
+```bash
+./scripts/start-kokoro-sidecar.sh mlx       # start MLX sidecar (:8772)
+./scripts/start-kokoro-sidecar.sh http      # start generic sidecar (:8773)
+./scripts/start-kokoro-sidecar.sh status    # which sidecars are up
+./scripts/start-kokoro-sidecar.sh stop      # stop any running sidecar
+```
+
+Health checks: `curl http://localhost:8772/health` (MLX) / `curl http://localhost:8773/health` (HTTP) — both return `{"ready": true, ...}` once the model has loaded.
+
 ## Voice transport (US-025)
 
 The voice pipeline runs over a swappable transport. The default —
