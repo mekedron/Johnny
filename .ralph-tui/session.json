@@ -3,10 +3,10 @@
   "sessionId": "426dba43-17e8-4f93-a179-086859618e18",
   "status": "running",
   "startedAt": "2026-06-07T20:27:08.873Z",
-  "updatedAt": "2026-06-07T22:38:16.549Z",
-  "currentIteration": 4,
+  "updatedAt": "2026-06-07T23:02:16.640Z",
+  "currentIteration": 5,
   "maxIterations": 0,
-  "tasksCompleted": 4,
+  "tasksCompleted": 5,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -57,8 +57,8 @@
       {
         "id": "Johnny-oly.6",
         "title": "Frontend: personality picker on calendar events + playground + active-session badge + history bot-name rendering (replaces hardcoded 'Johnny' constant)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-oly.7",
@@ -108,6 +108,16 @@
       "durationMs": 1662312,
       "startedAt": "2026-06-07T21:26:14.310Z",
       "endedAt": "2026-06-07T21:53:56.622Z"
+    },
+    {
+      "iteration": 5,
+      "status": "completed",
+      "taskId": "Johnny-oly.6",
+      "taskTitle": "Frontend: personality picker on calendar events + playground + active-session badge + history bot-name rendering (replaces hardcoded 'Johnny' constant)",
+      "taskCompleted": true,
+      "durationMs": 2650479,
+      "startedAt": "2026-06-07T21:54:05.301Z",
+      "endedAt": "2026-06-07T22:38:15.780Z"
     }
   ],
   "skippedTaskIds": [],
