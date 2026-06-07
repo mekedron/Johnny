@@ -13,6 +13,9 @@
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 	import CheckCircle2Icon from '@lucide/svelte/icons/check-circle-2';
 	import BotSigninModal from '$lib/components/settings/BotSigninModal.svelte';
+	import BotSigninMethodPicker from '$lib/components/settings/BotSigninMethodPicker.svelte';
+	import BotSigninUploadModal from '$lib/components/settings/BotSigninUploadModal.svelte';
+	type SigninMethod = 'novnc' | 'upload';
 	import {
 		disconnectAccount,
 		disconnectBotSession,
@@ -39,7 +42,49 @@
 	type BotSigninContext =
 		| { kind: 'new' }
 		| { kind: 'attach'; account: Account };
+	// pickerContext: shown FIRST when the user starts a sign-in flow,
+	// so they explicitly choose between noVNC (in-browser) and
+	// upload (CLI helper + storage_state.json). After the pick we
+	// open one of the two real modals below.
+	let pickerContext = $state<BotSigninContext | null>(null);
 	let botSigninContext = $state<BotSigninContext | null>(null);
+	let uploadContext = $state<BotSigninContext | null>(null);
+
+	/**
+	 * Picker memory (Johnny-ckz.23). Saved per account so re-signing
+	 * the same row defaults to its last method, and globally so a new
+	 * bot defaults to whichever method was last used anywhere. Lives
+	 * in localStorage because it's a pure UX preference — losing it
+	 * across browsers just means the picker defaults to noVNC again.
+	 */
+	const SIGNIN_METHOD_LAST_KEY = 'johnny:bot-signin:last-method';
+	function signinMethodAccountKey(accountId: number) {
+		return `johnny:bot-signin:account:${accountId}`;
+	}
+	function readSigninMethod(key: string): SigninMethod | null {
+		if (typeof window === 'undefined') return null;
+		const v = window.localStorage.getItem(key);
+		return v === 'novnc' || v === 'upload' ? v : null;
+	}
+	function writeSigninMethod(key: string, method: SigninMethod) {
+		if (typeof window === 'undefined') return;
+		window.localStorage.setItem(key, method);
+	}
+	function defaultMethodFor(ctx: BotSigninContext): SigninMethod {
+		if (ctx.kind === 'attach') {
+			const perAccount = readSigninMethod(
+				signinMethodAccountKey(ctx.account.id)
+			);
+			if (perAccount) return perAccount;
+		}
+		return readSigninMethod(SIGNIN_METHOD_LAST_KEY) ?? 'novnc';
+	}
+	function rememberMethod(ctx: BotSigninContext, method: SigninMethod) {
+		writeSigninMethod(SIGNIN_METHOD_LAST_KEY, method);
+		if (ctx.kind === 'attach') {
+			writeSigninMethod(signinMethodAccountKey(ctx.account.id), method);
+		}
+	}
 
 	let disconnectTarget = $state<{
 		account: Account;
@@ -165,16 +210,58 @@
 		return verifyResults[account.id]?.bot_session ?? null;
 	}
 
+	// Track which method the user picked AND for which context so we
+	// can backfill per-account memory once the sign-in completes (the
+	// new-bot flow doesn't know the account id until the row exists).
+	let lastPickedMethod = $state<SigninMethod | null>(null);
+
 	function openBotSigninForNew() {
-		botSigninContext = { kind: 'new' };
+		pickerContext = { kind: 'new' };
 	}
 
 	function openBotSigninForAccount(account: Account) {
-		botSigninContext = { kind: 'attach', account };
+		pickerContext = { kind: 'attach', account };
 	}
 
-	async function closeBotSignin() {
+	function onPickerCancel() {
+		pickerContext = null;
+	}
+
+	function onPickerChose(method: SigninMethod) {
+		const ctx = pickerContext;
+		if (!ctx) return;
+		rememberMethod(ctx, method);
+		lastPickedMethod = method;
+		pickerContext = null;
+		if (method === 'novnc') {
+			botSigninContext = ctx;
+		} else {
+			uploadContext = ctx;
+		}
+	}
+
+	function rememberPerAccountAfter(accountId: number | null | undefined) {
+		// Backfill the per-account key so a NEW bot signed in via
+		// either method now remembers its own preference, not just the
+		// global fallback. No-op for ATTACH because we already wrote
+		// the per-account key when the picker resolved.
+		if (!accountId || lastPickedMethod === null) return;
+		writeSigninMethod(signinMethodAccountKey(accountId), lastPickedMethod);
+	}
+
+	async function closeBotSignin(
+		result: { account: Account | null } | null = null
+	) {
 		botSigninContext = null;
+		rememberPerAccountAfter(result?.account?.id ?? null);
+		lastPickedMethod = null;
+		await loadAccounts();
+	}
+
+	async function closeUpload(result: Account | null) {
+		uploadContext = null;
+		rememberPerAccountAfter(result?.id ?? null);
+		lastPickedMethod = null;
 		await loadAccounts();
 	}
 
@@ -275,10 +362,11 @@
 
 	function handleSheetKeydown(event: KeyboardEvent) {
 		if (event.key !== 'Escape') return;
-		// The BotSigninModal owns its own Escape handler (it needs to
-		// call /cancel before closing); skip the global handler so we
-		// don't double-fire.
-		if (botSigninContext) return;
+		// The sign-in modals (noVNC + upload) and the method picker each
+		// own their own Escape handler (noVNC needs to call /cancel,
+		// upload may have an in-flight fetch); skip the global handler
+		// so we don't double-fire.
+		if (botSigninContext || uploadContext || pickerContext) return;
 		if (disconnectTarget) {
 			event.preventDefault();
 			cancelDisconnect();
@@ -647,6 +735,21 @@
 	</section>
 </Page>
 
+<!-- Sign-in method picker (Johnny-ckz.23) — comes BEFORE either real modal. -->
+{#if pickerContext}
+	<BotSigninMethodPicker
+		title={pickerContext.kind === 'attach'
+			? `Sign in as ${pickerContext.account.email}`
+			: 'Connect a meeting bot'}
+		subtitle={pickerContext.kind === 'attach'
+			? 'Pick a new sign-in method to replace this bot session.'
+			: null}
+		defaultMethod={defaultMethodFor(pickerContext)}
+		onPick={onPickerChose}
+		onClose={onPickerCancel}
+	/>
+{/if}
+
 <!-- Bot noVNC sign-in modal (Johnny-105). -->
 {#if botSigninContext}
 	<BotSigninModal
@@ -657,7 +760,22 @@
 		title={botSigninContext.kind === 'attach'
 			? `Replace bot session for ${botSigninContext.account.email}`
 			: null}
-		onClose={() => closeBotSignin()}
+		onClose={(result) =>
+			closeBotSignin(result ? { account: result.account } : null)}
+	/>
+{/if}
+
+<!-- Bot upload modal (Johnny-ckz.23) — CLI helper + file upload. -->
+{#if uploadContext}
+	<BotSigninUploadModal
+		account={uploadContext.kind === 'attach'
+			? uploadContext.account
+			: null}
+		title={uploadContext.kind === 'attach'
+			? `Replace bot session for ${uploadContext.account.email}`
+			: null}
+		emailLock={null}
+		onClose={(result) => closeUpload(result)}
 	/>
 {/if}
 

@@ -147,3 +147,69 @@ export function buildProxyWsUrl(
 	const qs = `?token=${encodeURIComponent(token)}`;
 	return `${wsBase}${proxyWsPath}${qs}`;
 }
+
+/**
+ * Upload a storage_state.json against an EXISTING account row.
+ *
+ * Used when the user picks "Upload" in the picker for the Replace
+ * session / Attach-to-existing-row flows. Server-side validation
+ * mirrors the noVNC supervisor's writer so a corrupt file lands as
+ * a 400, not a silent overwrite.
+ */
+export function uploadBotSessionToAccount(
+	accountId: number,
+	body: ArrayBuffer | Uint8Array
+): Promise<Account> {
+	return request<Account>(
+		`/auth/google/accounts/${accountId}/bot-session`,
+		{
+			method: 'PUT',
+			body: body as BodyInit,
+			headers: { 'Content-Type': 'application/json' }
+		}
+	);
+}
+
+/**
+ * Upload a storage_state.json for a NEW bot identity.
+ *
+ * Matches an existing row by email (so a calendar-only row gains the
+ * bot capability without forking the identity) or creates a fresh
+ * bot-only row. Returns the chosen / created row so the picker can
+ * persist the user's choice keyed by account id.
+ */
+export function uploadBotSessionForNew(
+	email: string,
+	body: ArrayBuffer | Uint8Array
+): Promise<Account> {
+	const qs = `?email=${encodeURIComponent(email)}`;
+	return request<Account>(`/auth/google/accounts/bot/upload${qs}`, {
+		method: 'POST',
+		body: body as BodyInit,
+		headers: { 'Content-Type': 'application/json' }
+	});
+}
+
+/**
+ * Render the `python -m johnny.tools.seed_auth_state` invocation the
+ * upload pane displays inline. Lives next to the upload client so the
+ * surface code can read one source of truth for what to copy.
+ *
+ * Accepts an email hint so the rendered command is ready to paste —
+ * the operator just changes the `--account-id` if they're seeding a
+ * specific row.
+ */
+export function buildSeedAuthStateCommand(opts: {
+	email?: string | null;
+	accountId?: number | null;
+}): string {
+	const email = opts.email?.trim() || 'bot@example.com';
+	const id = opts.accountId ?? 0;
+	const idArg = id > 0 ? `--account-id ${id} ` : '';
+	return [
+		'cd backend',
+		'uv sync --extra auth-seed',
+		'uv run playwright install chromium',
+		`uv run python -m johnny.tools.seed_auth_state ${idArg}--email ${email}`
+	].join(' && \\\n  ');
+}

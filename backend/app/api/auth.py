@@ -42,7 +42,7 @@ import time
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, func, select
@@ -53,10 +53,12 @@ from app.config import Settings, get_settings
 from app.db.models import GoogleAccount, MeetingConfig
 from app.security.crypto import CredentialCrypto
 from app.services.bot_auth_seed import (
+    MAX_STORAGE_STATE_BYTES,
     BotSessionError,
     bot_session_path,
     bot_session_status,
     delete_bot_session,
+    save_bot_session,
     validate_storage_state,
 )
 from app.services.google_client import (
@@ -700,6 +702,140 @@ async def verify_account(
         calendar=calendar_check,
         bot_session=bot_check,
     )
+
+
+@router.put(
+    "/accounts/{account_id}/bot-session",
+    response_model=AccountRead,
+)
+async def upload_bot_session(
+    account_id: int,
+    request: Request,
+    session: SessionDep,
+    crypto: CryptoDep,
+) -> AccountRead:
+    """Persist an uploaded ``storage_state.json`` against an existing row.
+
+    First-class alternative to the noVNC sign-in flow (Johnny-ckz.23):
+    the user runs ``python -m johnny.tools.seed_auth_state`` on the host
+    to generate the file, then uploads it here. Both paths land in the
+    SAME on-disk location, so the meet-worker and playground are
+    indistinguishable from there on.
+
+    Takes the raw JSON body so the frontend can post the file's bytes
+    without a multipart dep. Validation goes through the shared
+    :func:`~app.services.bot_auth_seed.validate_storage_state` helper,
+    so corrupt / empty / oversized files surface as 400 instead of
+    silently writing a broken session.
+    """
+    row = _get_account_or_404(session, account_id)
+    raw = await request.body()
+    if not raw:
+        raise HTTPException(
+            status_code=400,
+            detail="empty body — POST the storage_state.json content as the request body",
+        )
+    if len(raw) > MAX_STORAGE_STATE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"storage_state file is too large: {len(raw)} bytes "
+                f"(limit {MAX_STORAGE_STATE_BYTES})"
+            ),
+        )
+    try:
+        save_bot_session(account_id, raw)
+    except BotSessionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"failed to write storage_state to volume: {exc}",
+        ) from exc
+    return _account_read(row, crypto)
+
+
+@router.post(
+    "/accounts/bot/upload",
+    response_model=AccountRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_bot_session_new(
+    request: Request,
+    session: SessionDep,
+    crypto: CryptoDep,
+    email: Annotated[
+        str,
+        Query(
+            min_length=3,
+            max_length=320,
+            description=(
+                "Email the storage_state was signed in as. Match-or-create: "
+                "an existing row with this email gains the bot capability; "
+                "otherwise a new bot-only row is created."
+            ),
+        ),
+    ],
+) -> AccountRead:
+    """Create-or-attach a bot identity from an uploaded storage_state.
+
+    Twin to ``PUT /accounts/{id}/bot-session`` for the "Add another
+    meeting bot" → "Upload" flow. The picker UI doesn't know the row
+    id yet — it asks the user for the bot's email + file, then this
+    endpoint matches an existing row by email (so a calendar-only row
+    gains the bot capability without forking the identity) or creates
+    a new bot-only row.
+
+    The chosen / created row is returned so the picker can persist the
+    user's choice keyed by account id (last-method-per-account memory).
+    """
+    normalized_email = email.strip().lower()
+    if not normalized_email or "@" not in normalized_email:
+        raise HTTPException(status_code=400, detail="email is malformed")
+
+    raw = await request.body()
+    if not raw:
+        raise HTTPException(
+            status_code=400,
+            detail="empty body — POST the storage_state.json content as the request body",
+        )
+    if len(raw) > MAX_STORAGE_STATE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"storage_state file is too large: {len(raw)} bytes "
+                f"(limit {MAX_STORAGE_STATE_BYTES})"
+            ),
+        )
+    try:
+        validate_storage_state(raw)
+    except BotSessionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    existing = session.scalar(
+        select(GoogleAccount).where(GoogleAccount.email == normalized_email)
+    )
+    if existing is None:
+        row = GoogleAccount(
+            email=normalized_email,
+            refresh_token_encrypted=None,
+            access_token_encrypted=None,
+            token_expires_at=None,
+        )
+        session.add(row)
+        session.flush()
+    else:
+        row = existing
+
+    try:
+        save_bot_session(row.id, raw)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"failed to write storage_state to volume: {exc}",
+        ) from exc
+
+    return _account_read(row, crypto)
 
 
 __all__ = [

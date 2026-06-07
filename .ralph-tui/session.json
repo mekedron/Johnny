@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "sessionId": "d140062f-580d-4e80-b815-4dd296a98109",
+  "sessionId": "e098572e-3cd4-4977-850e-0294153096d6",
   "status": "running",
-  "startedAt": "2026-06-07T12:00:21.402Z",
-  "updatedAt": "2026-06-07T12:48:41.679Z",
-  "currentIteration": 2,
+  "startedAt": "2026-06-07T14:01:13.338Z",
+  "updatedAt": "2026-06-07T14:25:06.073Z",
+  "currentIteration": 0,
   "maxIterations": 0,
-  "tasksCompleted": 2,
+  "tasksCompleted": 0,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -27,7 +27,7 @@
         }
       }
     ],
-    "totalTasks": 62,
+    "totalTasks": 63,
     "tasks": [
       {
         "id": "Johnny-ckz.1",
@@ -234,26 +234,26 @@
         "completedInSession": false
       },
       {
+        "id": "Johnny-ckz.12",
+        "title": "STT provider settings: 'Record sample' button to verify transcription end-to-end (symmetric to existing TTS demo)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
         "id": "Johnny-al3",
         "title": "Multi-account bot identities: '+ Add another meeting bot' tile becomes a real button that creates a new bot row",
-        "status": "open",
+        "status": "completed",
         "completedInSession": false
       },
       {
         "id": "Johnny-105",
         "title": "noVNC bot sign-in: container + backend endpoints + frontend modal",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-pia",
         "title": "Settings page redesign — multi-account Calendars + Bots with noVNC sign-in",
-        "status": "completed",
-        "completedInSession": true
-      },
-      {
-        "id": "Johnny-ckz.12",
-        "title": "STT provider settings: 'Record sample' button to verify transcription end-to-end (symmetric to existing TTS demo)",
         "status": "completed",
         "completedInSession": false
       },
@@ -300,6 +300,12 @@
         "completedInSession": false
       },
       {
+        "id": "Johnny-ckz.20",
+        "title": "Backend: Google Gemini Live API S2S provider (audio in/out, barge-in, playground + Meet parity)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
         "id": "Johnny-g2n",
         "title": "ElevenLabs TTS: handle 'exceeds quota' 401 gracefully in the response loop",
         "status": "completed",
@@ -330,14 +336,14 @@
         "completedInSession": false
       },
       {
-        "id": "Johnny-ckz.20",
-        "title": "Backend: Google Gemini Live API S2S provider (audio in/out, barge-in, playground + Meet parity)",
+        "id": "Johnny-ckz.21",
+        "title": "Frontend: Providers page — pipeline-mode toggle (split vs unified) + S2S provider picker (Meet + playground)",
         "status": "completed",
         "completedInSession": false
       },
       {
-        "id": "Johnny-ckz.21",
-        "title": "Frontend: Providers page — pipeline-mode toggle (split vs unified) + S2S provider picker (Meet + playground)",
+        "id": "Johnny-ckz.22",
+        "title": "Adapt interruption test tool to drive S2S providers (OpenAI Realtime + Gemini Live) across Meet and playground",
         "status": "completed",
         "completedInSession": false
       },
@@ -354,9 +360,9 @@
         "completedInSession": false
       },
       {
-        "id": "Johnny-ckz.22",
-        "title": "Adapt interruption test tool to drive S2S providers (OpenAI Realtime + Gemini Live) across Meet and playground",
-        "status": "completed",
+        "id": "Johnny-ckz.23",
+        "title": "Bot sign-in method picker: keep CLI+upload path as a first-class option alongside noVNC",
+        "status": "open",
         "completedInSession": false
       },
       {
@@ -403,28 +409,7 @@
       }
     ]
   },
-  "iterations": [
-    {
-      "iteration": 1,
-      "status": "completed",
-      "taskId": "Johnny-pia",
-      "taskTitle": "Settings page redesign — multi-account Calendars + Bots with noVNC sign-in",
-      "taskCompleted": true,
-      "durationMs": 425050,
-      "startedAt": "2026-06-07T12:00:42.547Z",
-      "endedAt": "2026-06-07T12:07:47.597Z"
-    },
-    {
-      "iteration": 2,
-      "status": "completed",
-      "taskId": "Johnny-105",
-      "taskTitle": "noVNC bot sign-in: container + backend endpoints + frontend modal",
-      "taskCompleted": true,
-      "durationMs": 1813404,
-      "startedAt": "2026-06-07T12:08:04.436Z",
-      "endedAt": "2026-06-07T12:38:17.840Z"
-    }
-  ],
+  "iterations": [],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

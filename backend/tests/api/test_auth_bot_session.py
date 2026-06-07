@@ -1,14 +1,20 @@
-"""Tests for the bot-session storage_state helpers and disconnect endpoint.
+"""Tests for the bot-session storage_state HTTP endpoints.
 
-After the accounts redesign (Johnny-pia) the file-upload PUT endpoint is
-gone — bot identities are signed in via noVNC and the supervisor writes
-``storage_state.json`` directly. What remains:
+After Johnny-ckz.23 reinstated the CLI+upload path alongside noVNC, the
+surface has two upload-side endpoints:
 
+* ``PUT /auth/google/accounts/{id}/bot-session`` — replace / attach a
+  storage_state for an existing row (Replace session, Attach to existing).
+* ``POST /auth/google/accounts/bot/upload`` — create-or-attach a bot
+  identity by email (Add another meeting bot → Upload path).
 * ``DELETE /auth/google/accounts/{id}/bot-session`` — drops the bot
   capability, leaves the row (and any calendar capability) intact.
 * ``app.services.bot_auth_seed`` — file-level helpers used by the
-  supervisor and the API. Validated directly here since they no
-  longer have an upload endpoint to gate them.
+  supervisor and the API.
+
+Both upload endpoints land in the SAME on-disk location as the noVNC
+supervisor, so the meet-worker (live Meet) and the playground use the
+same file from there on (failure-domain test below).
 """
 
 from __future__ import annotations
@@ -519,3 +525,190 @@ def test_verify_bot_session_session_only_cookies_ok(
     body = resp.json()
     assert body["bot_session"]["ok"] is True
     assert "session-only" in body["bot_session"]["message"]
+
+
+# --- POST /accounts/bot/upload (create-or-attach) -------------------------
+
+
+def test_post_bot_upload_creates_new_row(
+    client: TestClient,
+    db_session: Session,
+    auth_state_root: Path,
+) -> None:
+    """No row with this email yet — endpoint creates a bot-only row and
+    writes the storage_state, returns the new AccountRead."""
+    payload = _valid_state_bytes()
+    resp = client.post(
+        "/auth/google/accounts/bot/upload",
+        params={"email": "fresh@example.com"},
+        content=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["email"] == "fresh@example.com"
+    assert body["has_calendar"] is False
+    assert body["bot_session"]["connected"] is True
+    assert body["bot_session"]["size_bytes"] == len(payload)
+    # File-on-disk parity with the noVNC supervisor path.
+    saved = bot_session_path(body["id"])
+    assert saved.exists()
+    assert saved.read_bytes() == payload
+
+
+def test_post_bot_upload_attaches_to_existing_calendar_row(
+    client: TestClient,
+    db_session: Session,
+    crypto: CredentialCrypto,
+    auth_state_root: Path,
+) -> None:
+    """A row that already has calendar capability can also gain bot
+    capability via upload — match by email so we don't fork the
+    identity."""
+    row = _add_calendar_account(db_session, crypto, email="dual@example.com")
+    db_session.commit()
+    payload = _valid_state_bytes()
+    resp = client.post(
+        "/auth/google/accounts/bot/upload",
+        params={"email": "dual@example.com"},
+        content=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["id"] == row.id
+    assert body["has_calendar"] is True
+    assert body["bot_session"]["connected"] is True
+
+
+def test_post_bot_upload_normalizes_email_case(
+    client: TestClient,
+    db_session: Session,
+    auth_state_root: Path,
+) -> None:
+    """Mixed-case email matches a row stored lowercase — Google emails
+    are case-insensitive so a "Bot@Example.com" upload must land on
+    the existing "bot@example.com" row, not fork it."""
+    existing = _add_bot_account(db_session, email="bot@example.com")
+    db_session.commit()
+    resp = client.post(
+        "/auth/google/accounts/bot/upload",
+        params={"email": "Bot@Example.COM"},
+        content=_valid_state_bytes(),
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["id"] == existing.id
+
+
+def test_post_bot_upload_rejects_invalid_json(
+    client: TestClient,
+    db_session: Session,
+    auth_state_root: Path,
+) -> None:
+    resp = client.post(
+        "/auth/google/accounts/bot/upload",
+        params={"email": "fresh@example.com"},
+        content=b"not valid json",
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 400
+    assert "JSON" in resp.json()["detail"]
+
+
+def test_post_bot_upload_rejects_malformed_email(
+    client: TestClient,
+    db_session: Session,
+    auth_state_root: Path,
+) -> None:
+    resp = client.post(
+        "/auth/google/accounts/bot/upload",
+        params={"email": "no-at-sign"},
+        content=_valid_state_bytes(),
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 400
+
+
+def test_post_bot_upload_rejects_empty_body(
+    client: TestClient,
+    db_session: Session,
+    auth_state_root: Path,
+) -> None:
+    resp = client.post(
+        "/auth/google/accounts/bot/upload",
+        params={"email": "fresh@example.com"},
+        content=b"",
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 400
+
+
+# --- Failure-domain: upload works independently of noVNC infra -----------
+
+
+def test_upload_works_when_novnc_launcher_is_down(
+    client: TestClient,
+    db_session: Session,
+    auth_state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the noVNC launcher / docker daemon is broken, the upload path
+    MUST still succeed end-to-end. The two sign-in methods are
+    independent failure domains; that's the whole reason the CLI/upload
+    path stays first-class (Johnny-ckz.23)."""
+    from app.api import bot_signin as bot_signin_api
+
+    class _BrokenLauncher:
+        def start(self, **_: object) -> str:
+            raise bot_signin_api.BotSigninLauncherError("docker daemon down")
+
+        def stop(self, **_: object) -> None:
+            raise bot_signin_api.BotSigninLauncherError("docker daemon down")
+
+    bot_signin_api.set_launcher(_BrokenLauncher())  # type: ignore[arg-type]
+    try:
+        # Confirm the noVNC path is indeed broken under the same client.
+        resp_novnc = client.post(
+            "/auth/google/accounts/bot/signin/start", json={}
+        )
+        assert resp_novnc.status_code == 503
+
+        # Upload path is unaffected: row is created, storage_state lands.
+        resp_upload = client.post(
+            "/auth/google/accounts/bot/upload",
+            params={"email": "fallback@example.com"},
+            content=_valid_state_bytes(),
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp_upload.status_code == 201
+        body = resp_upload.json()
+        assert body["bot_session"]["connected"] is True
+    finally:
+        bot_signin_api.set_launcher(None)
+
+
+# --- Playground / Meet parity --------------------------------------------
+
+
+def test_upload_path_matches_meet_worker_resolver(
+    auth_state_root: Path,
+) -> None:
+    """The upload endpoint writes to the same on-disk location the
+    meet-worker (and playground, which reuses the same worker) reads
+    from, so both paths see whichever storage_state was last written —
+    regardless of which sign-in method produced it.
+
+    Asserted directly so a refactor that drifts ``bot_session_path``
+    from ``storage_state_path_for_account`` fails loudly here."""
+    from johnny.meet_worker.storage_state import storage_state_path_for_account
+
+    saved = save_bot_session(account_id=11, raw=_valid_state_bytes())
+    api_path = bot_session_path(11)
+    worker_path = storage_state_path_for_account(
+        11, env={"JOHNNY_AUTH_STATE_DIR": str(auth_state_root)}
+    )
+    assert api_path == worker_path
+    assert saved["path"] == str(api_path)
+    assert worker_path.exists()
