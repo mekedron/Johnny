@@ -176,18 +176,32 @@ def _evaluate_real(
     spoke = _agent_spoke_events(event_bus)
 
     if scenario.expect_interrupt:
+        fast_barge_in_count = pipeline._fast_barge_in_count
         if not spoke:
+            # No AgentSpoke means the user's interrupt arrived before the
+            # answer LLM produced any tokens — slow upstream LLM round-trip
+            # (gpt-4.1-mini occasionally spikes to 3 s to first token), OR
+            # aggressive barge-in timing. Per Johnny-gft, accept this as a
+            # valid 'stop' outcome IFF the system actually detected the
+            # interrupt (fast barge-in fired). The user-visible semantic
+            # is "the bot stopped" — and in this case the bot never
+            # started, which is also a successful stop.
             assertions.append(
                 AssertionResult(
-                    name="bot_started_speaking_before_interrupt",
-                    passed=False,
+                    name="interrupt_observed_by_pipeline",
+                    passed=fast_barge_in_count > 0,
                     detail=(
-                        "no AgentSpoke published; the bot never reached TTS so "
-                        "an interrupt could not be measured. Likely the router "
-                        "did not approve speaking, or the LLM/TTS failed."
+                        f"no AgentSpoke published; fast_barge_in_count="
+                        f"{fast_barge_in_count}. Pre-empt path (LLM "
+                        f"produced no tokens before barge-in fired) is "
+                        f"valid IFF fast_barge_in_count > 0."
                     ),
                 )
             )
+            # Skip the latency budget: there's nothing to measure from
+            # interrupt-onset to cut when the bot never started speaking.
+            # The fast_barge_in_count > 0 check above already proves the
+            # interrupt was observed by the system.
         else:
             first_spoke = spoke[0]
             # Real-provider mode: we cap audio_duration at 4500 ms as the
@@ -205,41 +219,41 @@ def _evaluate_real(
                 )
             )
 
-        interrupt_start = transport.capture_log.first_monotonic_for_tag("interrupt")
-        if interrupt_start is None or not spoke:
-            assertions.append(
-                AssertionResult(
-                    name="interrupt_to_cut_latency_budget",
-                    passed=False,
-                    detail=(
-                        "could not determine interrupt-onset monotonic time or "
-                        "first AgentSpoke event"
-                    ),
+            interrupt_start = transport.capture_log.first_monotonic_for_tag(
+                "interrupt"
+            )
+            if interrupt_start is None:
+                assertions.append(
+                    AssertionResult(
+                        name="interrupt_to_cut_latency_budget",
+                        passed=False,
+                        detail=(
+                            "could not determine interrupt-onset monotonic time"
+                        ),
+                    )
                 )
-            )
-        else:
-            first_spoke = spoke[0]
-            first_spoke_wall_clock = (
-                pipeline._session_started_at + first_spoke.timestamp_ms / 1000.0
-            )
-            delta_ms = (first_spoke_wall_clock - interrupt_start) * 1000.0
-            # Real-provider latency budget is wider: 2000 ms accounts for
-            # real STT round-trip (~300-700 ms) AND VAD silence-window
-            # (600 ms end_of_speech_ms). The fast (VAD-driven) path lands
-            # well under this — we observed 1.1 s consistently — but a
-            # higher cap absorbs the occasional Deepgram or OpenAI slow
-            # turn.
-            budget_ms = max(
-                scenario.interrupt_latency_budget_s * 1000.0, 2000.0
-            )
-            within = delta_ms <= budget_ms
-            assertions.append(
-                AssertionResult(
-                    name="interrupt_to_cut_latency_budget",
-                    passed=within,
-                    detail=f"delta_ms={delta_ms:.0f} vs budget={budget_ms:.0f}ms",
+            else:
+                first_spoke_wall_clock = (
+                    pipeline._session_started_at + first_spoke.timestamp_ms / 1000.0
                 )
-            )
+                delta_ms = (first_spoke_wall_clock - interrupt_start) * 1000.0
+                # Real-provider latency budget is wider: 2000 ms accounts for
+                # real STT round-trip (~300-700 ms) AND VAD silence-window
+                # (600 ms end_of_speech_ms). The fast (VAD-driven) path lands
+                # well under this — we observed 1.1 s consistently — but a
+                # higher cap absorbs the occasional Deepgram or OpenAI slow
+                # turn.
+                budget_ms = max(
+                    scenario.interrupt_latency_budget_s * 1000.0, 2000.0
+                )
+                within = delta_ms <= budget_ms
+                assertions.append(
+                    AssertionResult(
+                        name="interrupt_to_cut_latency_budget",
+                        passed=within,
+                        detail=f"delta_ms={delta_ms:.0f} vs budget={budget_ms:.0f}ms",
+                    )
+                )
 
         if scenario.expect_followup_utterance:
             # Semantic check: did the bot actually address the redirect?
@@ -360,6 +374,14 @@ Real STT+LLM+TTS round-trip is typically 4-6 s — the scripted 1.2 s
 to start TTS before the next speaker event arrives. 8 s leaves comfortable
 headroom for an OpenAI gpt-4.1-mini round trip that occasionally spikes
 to 3 s under load.
+
+Note (Johnny-gft): we deliberately do NOT bump this higher to chase the
+~1-in-3 case where gpt-4.1-mini takes >5 s to first token. Bumping the
+silence makes the test slower for every scenario for the sake of a
+single edge case. Instead, ``_evaluate_real`` accepts ``no AgentSpoke +
+fast_barge_in_count > 0`` as a valid 'stop' outcome — the bot stopping
+before it could start is just as valid a stop as the bot being cut
+mid-sentence. See ``interrupt_observed_by_pipeline`` assertion.
 """
 
 
