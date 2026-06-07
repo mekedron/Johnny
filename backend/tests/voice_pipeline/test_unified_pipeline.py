@@ -216,3 +216,28 @@ async def test_unified_pipeline_exits_cleanly_when_provider_fails_to_open() -> N
     # ``run`` swallows the open error; we just confirm it completes.
     await asyncio.wait_for(pipeline.run(), timeout=2.0)
     assert pipeline.session is None
+
+
+def test_unified_pipeline_config_carries_prior_session_context() -> None:
+    """Johnny-dsy: prior_session_context round-trips on UnifiedPipelineConfig.
+
+    The unified pipeline does not yet weave the field into its S2S
+    ``open_session`` prompt — same not-yet-merged status as
+    ``calendar_context`` / ``calendar_attachments_text``. The field
+    round-trips so the launcher / API can forward it without code
+    changes when a future S2S prompt-assembler picks it up.
+    """
+    cfg = UnifiedPipelineConfig(
+        session_id="prior",
+        bot_session_id=5,
+        prior_session_context="Last week's open question: free-tier pricing.",
+    )
+    assert cfg.prior_session_context == (
+        "Last week's open question: free-tier pricing."
+    )
+
+
+def test_unified_pipeline_config_prior_session_context_defaults_empty() -> None:
+    """Field default is empty so existing constructions stay valid."""
+    cfg = UnifiedPipelineConfig(session_id="default", bot_session_id=6)
+    assert cfg.prior_session_context == ""

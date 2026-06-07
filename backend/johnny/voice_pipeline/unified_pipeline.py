@@ -102,6 +102,13 @@ class UnifiedPipelineConfig:
     not-yet-merged status — but the field round-trips so future S2S
     prompt-assembly can pick it up without a config change.
     """
+    prior_session_context: str = ""
+    """Previous-occurrence summary for recurring meetings (Johnny-dsy).
+
+    Same parity / round-trip story as :attr:`calendar_attachments_text`:
+    the launcher / API forwards the field so an upgrade-in-place worker
+    can read it once the unified prompt builder learns to merge it.
+    """
     voice_id: str | None = None
     frame_duration_ms: int = DEFAULT_FRAME_DURATION_MS
     session_id: str | None = None

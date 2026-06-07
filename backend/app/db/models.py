@@ -186,6 +186,7 @@ class CalendarEvent(TimestampMixin, Base):
             name="uq_calendar_events_account_external_id",
         ),
         Index("ix_calendar_events_start_time", "start_time"),
+        Index("ix_calendar_events_recurring_event_id", "recurring_event_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -225,6 +226,18 @@ class CalendarEvent(TimestampMixin, Base):
     is reused; when any file changed (or the URL list changed), the
     bodies are re-fetched. Lets us satisfy the bead's etag-invalidation
     contract without a per-doc body cache.
+    """
+    recurring_event_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
+    """Google ``recurringEventId`` — links occurrences of one series (Johnny-dsy).
+
+    With ``singleEvents=true`` (calendar_sync's expansion mode), Google
+    returns one row per occurrence and tags every row with its parent
+    series id under this key. Two occurrences of the same weekly standup
+    share this value; one-off events leave it ``None``. The scheduler
+    uses it to find a prior bot_session whose summary should be injected
+    as cross-meeting context.
     """
 
     account: Mapped[GoogleAccount] = relationship(back_populates="calendar_events")
@@ -346,6 +359,16 @@ class BotSession(TimestampMixin, Base):
     playground_overrides: Mapped[dict[str, Any] | None] = mapped_column(
         _json_column(), nullable=True
     )
+    session_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """Compact summary of what was discussed, written at clean session close (Johnny-dsy).
+
+    Surfaced by :func:`app.services.history.find_prior_session_summary` so
+    the *next* occurrence of a recurring meeting starts with a
+    "Last session summary: ..." line in its router + answer prompts.
+    Stays ``None`` for sessions that ended before this column landed, for
+    crashed sessions (no clean close hook), and for playground sessions
+    not tied to a recurring event.
+    """
 
     meeting_config: Mapped[MeetingConfig | None] = relationship(
         back_populates="bot_sessions"

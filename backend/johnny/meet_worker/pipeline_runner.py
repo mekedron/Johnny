@@ -80,6 +80,15 @@ INSTRUCTIONS_ENV = "JOHNNY_INSTRUCTIONS"
 CONTEXT_ENV = "JOHNNY_CONTEXT"
 CALENDAR_CONTEXT_ENV = "JOHNNY_CALENDAR_CONTEXT"
 CALENDAR_ATTACHMENTS_ENV = "JOHNNY_CALENDAR_ATTACHMENTS"
+PRIOR_SESSION_CONTEXT_ENV = "JOHNNY_PRIOR_SESSION_CONTEXT"
+"""Summary of the last occurrence of the same recurring meeting (Johnny-dsy).
+
+Set by :mod:`app.services.docker_launcher` from
+:attr:`app.services.session_scheduler.LaunchContext.prior_session_context`,
+which is sourced via
+:func:`app.services.history.find_prior_session_summary`. Empty string for
+one-off events and first-of-series sessions.
+"""
 SESSION_ID_ENV = "JOHNNY_SESSION_ID"
 REDIS_URL_ENV = "JOHNNY_REDIS_URL"
 API_BASE_URL_ENV = "JOHNNY_API_BASE_URL"
@@ -344,6 +353,7 @@ async def _assemble_unified_pipeline(
     context = env.get(CONTEXT_ENV, "")
     calendar_context = env.get(CALENDAR_CONTEXT_ENV, "")
     calendar_attachments_text = env.get(CALENDAR_ATTACHMENTS_ENV, "")
+    prior_session_context = env.get(PRIOR_SESSION_CONTEXT_ENV, "")
     bot_session_id = _resolve_bot_session_id(env, session_id=session_id)
     voice_id = _resolve_unified_voice_id(s2s_entry or {})
 
@@ -354,6 +364,7 @@ async def _assemble_unified_pipeline(
         context=context,
         calendar_context=calendar_context,
         calendar_attachments_text=calendar_attachments_text,
+        prior_session_context=prior_session_context,
         voice_id=voice_id,
     )
 
@@ -435,6 +446,7 @@ async def _assemble_pipeline(
     context = env.get(CONTEXT_ENV, "")
     calendar_context = env.get(CALENDAR_CONTEXT_ENV, "")
     calendar_attachments_text = env.get(CALENDAR_ATTACHMENTS_ENV, "")
+    prior_session_context = env.get(PRIOR_SESSION_CONTEXT_ENV, "")
     token_budget = _resolve_token_budget(env, session_id=session_id)
     bot_session_id = _resolve_bot_session_id(env, session_id=session_id)
 
@@ -447,6 +459,7 @@ async def _assemble_pipeline(
         context=context,
         calendar_context=calendar_context,
         calendar_attachments_text=calendar_attachments_text,
+        prior_session_context=prior_session_context,
         context_token_budget=token_budget,
     )
 
@@ -473,6 +486,7 @@ async def _assemble_pipeline(
             context=context,
             calendar_context=calendar_context,
             calendar_attachments_text=calendar_attachments_text,
+            prior_session_context=prior_session_context,
             context_token_budget=token_budget,
         )
 

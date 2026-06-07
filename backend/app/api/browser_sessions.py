@@ -417,6 +417,27 @@ def _build_spec_from_event(
     )
 
     pipeline_mode = resolve_pipeline_mode(session)
+    # Johnny-dsy: pull the most recent prior session's summary for the
+    # same recurring series so the bot can reference last week's open
+    # questions without re-asking. ``None`` when the event isn't part of
+    # a recurring series or when no prior bot_session wrote a summary.
+    prior_session_context = ""
+    try:
+        from app.services.history import find_prior_session_summary
+
+        prior = find_prior_session_summary(
+            session,
+            recurring_event_id=event.recurring_event_id,
+            exclude_bot_session_id=bot_session_id,
+        )
+        if prior is not None:
+            prior_session_context = prior.summary
+    except Exception:
+        logger.exception(
+            "browser session %s: prior_session_summary lookup failed; "
+            "continuing without cross-session context",
+            bot_session_id,
+        )
     spec = BrowserPipelineSpec(
         session_id=str(bot_session_id),
         bot_session_id=bot_session_id,
@@ -425,6 +446,7 @@ def _build_spec_from_event(
         context=effective_context,
         calendar_context=event.description or "",
         calendar_attachments_text=event.attachments_text or "",
+        prior_session_context=prior_session_context,
         provider_payload=effective_providers,
         event_bus=_build_event_bus(),
         pipeline_mode=pipeline_mode.value,

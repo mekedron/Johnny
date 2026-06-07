@@ -428,6 +428,18 @@ class PipelineConfig:
     characters before reaching the pipeline so a multi-tab Sheet or
     long Doc can't single-handedly blow ``context_token_budget``.
     """
+    prior_session_context: str = ""
+    """Summary of the previous occurrence of a recurring meeting (Johnny-dsy).
+
+    Sourced by :func:`app.services.history.find_prior_session_summary`
+    when the scheduled :class:`~app.db.models.CalendarEvent` shares a
+    ``recurring_event_id`` with a prior terminal bot_session that wrote
+    a ``session_summary`` at close. Rendered in both router and answer
+    system prompts as ``Last session summary: ...`` so the bot can
+    pick up open questions / decisions from last week without re-asking.
+    Kept distinct from :attr:`context` / :attr:`calendar_context` so
+    audits can tell cross-meeting memory apart from in-meeting brief.
+    """
     allowed_replies: tuple[str, ...] = ()
     speak: bool = True
     mode: str = DEFAULT_MODE
@@ -2078,6 +2090,10 @@ class VoicePipeline:
                 "\n\nCalendar attachments (linked documents from the event "
                 f"description):\n{self.config.calendar_attachments_text}"
             )
+        if self.config.prior_session_context:
+            system += (
+                f"\n\nLast session summary: {self.config.prior_session_context}"
+            )
         if self.config.allowed_replies:
             system += (
                 "\n\nAllowed replies (the answer stage will pick verbatim from "
@@ -2161,6 +2177,10 @@ class VoicePipeline:
             system += (
                 "\n\nCalendar attachments (linked documents from the event "
                 f"description):\n{self.config.calendar_attachments_text}"
+            )
+        if self.config.prior_session_context:
+            system += (
+                f"\n\nLast session summary: {self.config.prior_session_context}"
             )
         if decision.suggested_reply:
             system += f"\n\nRouter suggested: {decision.suggested_reply}"
@@ -2431,6 +2451,7 @@ class VoicePipeline:
             "context": self.config.context,
             "calendar_context": self.config.calendar_context,
             "calendar_attachments_text": self.config.calendar_attachments_text,
+            "prior_session_context": self.config.prior_session_context,
             "allowed_replies": list(self.config.allowed_replies),
             "mode": self.config.mode,
             "confidence_threshold": self.config.confidence_threshold,
@@ -2469,6 +2490,7 @@ class VoicePipeline:
             + _estimate_tokens(self.config.context)
             + _estimate_tokens(self.config.calendar_context)
             + _estimate_tokens(self.config.calendar_attachments_text)
+            + _estimate_tokens(self.config.prior_session_context)
         )
         full_tokens = static_tokens + sum(
             _estimate_tokens(t.text) for t in history

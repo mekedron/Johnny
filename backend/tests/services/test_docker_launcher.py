@@ -290,6 +290,7 @@ def _make_ctx(
     context: str = "Standup with the platform team.",
     calendar_context: str = "",
     calendar_attachments_text: str = "",
+    prior_session_context: str = "",
     provider_config: dict[str, Any] | None = None,
 ) -> LaunchContext:
     return LaunchContext(
@@ -304,6 +305,7 @@ def _make_ctx(
         context=context,
         calendar_context=calendar_context,
         calendar_attachments_text=calendar_attachments_text,
+        prior_session_context=prior_session_context,
         provider_config=provider_config or {"stt": "deepgram"},
     )
 
@@ -336,6 +338,8 @@ async def test_start_runs_container_with_env_and_labels(
     # Johnny-4da: same defaulting for the resolved-attachments env var
     # so the meet-worker side can `env.get(...) -> ""` without a guard.
     assert env["JOHNNY_CALENDAR_ATTACHMENTS"] == ""
+    # Johnny-dsy: same defaulting for the prior-session-context env var.
+    assert env["JOHNNY_PRIOR_SESSION_CONTEXT"] == ""
     assert json.loads(env["JOHNNY_PROVIDER_CONFIG"]) == {"stt": "deepgram"}
 
 
@@ -368,6 +372,22 @@ async def test_start_passes_calendar_attachments_env_var(
     _, kwargs = fake_client.containers.run_calls[0]
     env = kwargs["environment"]
     assert env["JOHNNY_CALENDAR_ATTACHMENTS"] == body
+
+
+@pytest.mark.asyncio
+async def test_start_passes_prior_session_context_env_var(
+    launcher: _StubLauncher, fake_client: _FakeDockerClient
+) -> None:
+    """Johnny-dsy: prior_session_context flows to JOHNNY_PRIOR_SESSION_CONTEXT."""
+    summary = (
+        "Last week: agreed on Friday ship; Alice owns docs; "
+        "open question on free-tier pricing."
+    )
+    ctx = _make_ctx(prior_session_context=summary)
+    await launcher.start(ctx)
+    _, kwargs = fake_client.containers.run_calls[0]
+    env = kwargs["environment"]
+    assert env["JOHNNY_PRIOR_SESSION_CONTEXT"] == summary
 
 
 @pytest.mark.asyncio

@@ -128,6 +128,7 @@ def _event_payload(
     attendees: list[dict[str, Any]] | None = None,
     status: str | None = None,
     conf_data: dict[str, Any] | None = None,
+    recurring_event_id: str | None = None,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "id": external_id,
@@ -149,6 +150,8 @@ def _event_payload(
         body["status"] = status
     if conf_data is not None:
         body["conferenceData"] = conf_data
+    if recurring_event_id is not None:
+        body["recurringEventId"] = recurring_event_id
     return body
 
 
@@ -226,6 +229,29 @@ def test_parse_event_payload_treats_empty_description_as_none() -> None:
     parsed = _parse_event_payload(_event_payload(description=""))
     assert parsed is not None
     assert parsed.description is None
+
+
+def test_parse_event_payload_captures_recurring_event_id() -> None:
+    """Johnny-dsy: recurringEventId rides into the parsed event."""
+    parsed = _parse_event_payload(
+        _event_payload(recurring_event_id="series-weekly-standup")
+    )
+    assert parsed is not None
+    assert parsed.recurring_event_id == "series-weekly-standup"
+
+
+def test_parse_event_payload_recurring_id_defaults_to_none() -> None:
+    """One-off events with no recurringEventId leave the field None."""
+    parsed = _parse_event_payload(_event_payload())
+    assert parsed is not None
+    assert parsed.recurring_event_id is None
+
+
+def test_parse_event_payload_empty_recurring_id_treated_as_none() -> None:
+    """Google never sends "" but guard against malformed input regardless."""
+    parsed = _parse_event_payload(_event_payload(recurring_event_id=""))
+    assert parsed is not None
+    assert parsed.recurring_event_id is None
 
 
 def test_parse_event_payload_rejects_missing_id() -> None:
@@ -445,6 +471,54 @@ async def test_sync_persists_event_description(
     )
     assert row is not None
     assert row.description == "Q3 launch readiness review."
+
+
+async def test_sync_persists_recurring_event_id(
+    session: Session, crypto: CredentialCrypto, settings: Settings
+) -> None:
+    """Johnny-dsy: recurringEventId on inserted rows is captured for series lookup."""
+    account = _make_account(session, crypto)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    _event_payload(
+                        external_id="evt-r-1",
+                        recurring_event_id="series-weekly-x",
+                    ),
+                    _event_payload(
+                        external_id="evt-r-2",
+                        start="2026-07-08T10:00:00Z",
+                        end="2026-07-08T10:30:00Z",
+                        recurring_event_id="series-weekly-x",
+                    ),
+                    # A one-off event in the same payload must NOT inherit
+                    # the recurring id from its siblings.
+                    _event_payload(
+                        external_id="evt-r-3",
+                        start="2026-07-15T09:00:00Z",
+                        end="2026-07-15T09:30:00Z",
+                    ),
+                ]
+            },
+        )
+
+    client = _make_client(
+        session=session, account=account, crypto=crypto,
+        settings=settings, handler=handler,
+    )
+    await sync_account_events(session=session, client=client)
+    await client.aclose()
+
+    rows = session.scalars(
+        sa.select(CalendarEvent).order_by(CalendarEvent.external_id)
+    ).all()
+    by_id = {r.external_id: r.recurring_event_id for r in rows}
+    assert by_id["evt-r-1"] == "series-weekly-x"
+    assert by_id["evt-r-2"] == "series-weekly-x"
+    assert by_id["evt-r-3"] is None
 
 
 async def test_sync_updates_changed_description(

@@ -187,3 +187,39 @@ def test_session_id_propagates_to_pipeline_config() -> None:
     pipeline = assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
     assert pipeline.config.session_id == "42"
     assert pipeline.config.bot_session_id == 42
+
+
+def test_prior_session_context_propagates_to_pipeline_config() -> None:
+    """Johnny-dsy: BrowserPipelineSpec.prior_session_context → PipelineConfig."""
+    transport = BrowserAudioTransport()
+    spec = BrowserPipelineSpec(
+        session_id="42",
+        bot_session_id=42,
+        mode="listen_only",
+        instructions="",
+        context="",
+        calendar_context="",
+        prior_session_context="Last week: agreed on Friday ship.",
+        provider_payload={
+            "stt": {"provider_name": "fake-stt", "credentials": {}, "options": {}},
+            "llm": {"provider_name": "fake-llm", "credentials": {}, "options": {}},
+        },
+        event_bus=InMemoryEventBus(),
+    )
+    pipeline = assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
+    assert pipeline.config.prior_session_context == (
+        "Last week: agreed on Friday ship."
+    )
+
+
+def test_prior_session_context_defaults_empty() -> None:
+    """Field defaults to empty so existing callsites don't need updates."""
+    transport = BrowserAudioTransport()
+    spec = _spec(
+        provider_payload={
+            "stt": {"provider_name": "fake-stt", "credentials": {}, "options": {}},
+            "llm": {"provider_name": "fake-llm", "credentials": {}, "options": {}},
+        }
+    )
+    pipeline = assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
+    assert pipeline.config.prior_session_context == ""

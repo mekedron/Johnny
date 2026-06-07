@@ -369,3 +369,44 @@ async def test_meet_unified_mode_threads_voice_id() -> None:
     )
     assert isinstance(pipeline, UnifiedVoicePipeline)
     assert pipeline.config.voice_id == "voice-xyz"
+
+
+@pytest.mark.asyncio
+async def test_meet_unified_mode_threads_prior_session_context() -> None:
+    """Johnny-dsy: JOHNNY_PRIOR_SESSION_CONTEXT → UnifiedPipelineConfig."""
+    bridge = _FakeBridge()
+    env = _meet_env(pipeline_mode="unified", include_s2s=True)
+    env["JOHNNY_PRIOR_SESSION_CONTEXT"] = "Carried-over summary for unified."
+    pipeline = await _assemble_unified_pipeline(
+        bridge,  # type: ignore[arg-type]
+        event_bus=InMemoryEventBus(),
+        session_id="meet-prior",
+        env=env,
+    )
+    assert isinstance(pipeline, UnifiedVoicePipeline)
+    assert pipeline.config.prior_session_context == (
+        "Carried-over summary for unified."
+    )
+
+
+def test_browser_unified_prior_session_context_propagates() -> None:
+    """Johnny-dsy: BrowserPipelineSpec.prior_session_context → UnifiedPipelineConfig."""
+    transport = BrowserAudioTransport()
+    base = _browser_spec(pipeline_mode=UNIFIED_MODE, include_s2s=True)
+    spec = BrowserPipelineSpec(
+        session_id=base.session_id,
+        bot_session_id=base.bot_session_id,
+        mode=base.mode,
+        instructions=base.instructions,
+        context=base.context,
+        calendar_context=base.calendar_context,
+        prior_session_context="Browser unified prior context.",
+        provider_payload=base.provider_payload,
+        event_bus=base.event_bus,
+        pipeline_mode=UNIFIED_MODE,
+    )
+    pipeline = assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
+    assert isinstance(pipeline, UnifiedVoicePipeline)
+    assert pipeline.config.prior_session_context == (
+        "Browser unified prior context."
+    )

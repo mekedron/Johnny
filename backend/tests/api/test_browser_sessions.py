@@ -206,6 +206,33 @@ def test_start_rehearsal_uses_event_meeting_context(
     assert overrides["calendar_event_id"] == event.id
 
 
+def test_start_rehearsal_no_crash_when_recurring_id_missing(
+    client: TestClient, db_session: Session
+) -> None:
+    """Johnny-dsy: one-off event (no recurring_event_id) starts cleanly."""
+    event, _ = _seed_meeting(db_session)
+    assert event.recurring_event_id is None
+    res = client.post(
+        "/sessions/browser/start",
+        json={"event_id": event.id},
+    )
+    assert res.status_code == 201, res.text
+
+
+def test_start_rehearsal_no_crash_when_no_prior_session(
+    client: TestClient, db_session: Session
+) -> None:
+    """Johnny-dsy: first occurrence of a series starts cleanly with empty prior."""
+    event, _ = _seed_meeting(db_session)
+    event.recurring_event_id = "series-fresh"
+    db_session.commit()
+    res = client.post(
+        "/sessions/browser/start",
+        json={"event_id": event.id},
+    )
+    assert res.status_code == 201, res.text
+
+
 def test_start_rehearsal_404s_when_event_missing(client: TestClient) -> None:
     res = client.post(
         "/sessions/browser/start",

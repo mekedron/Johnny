@@ -101,6 +101,21 @@ class SearchHit:
     """Similarity score in ``[0, 1]`` (1.0 = identical, 0.0 = orthogonal)."""
 
 
+@dataclass(frozen=True, slots=True)
+class PriorSessionSummary:
+    """Result of :func:`find_prior_session_summary` (Johnny-dsy).
+
+    ``bot_session_id`` lets the audit row name *which* prior occurrence
+    sourced the summary; ``summary`` is the text the pipeline weaves
+    into router + answer system prompts as the "Last session summary"
+    line. Pure value type so callers can pass it across the
+    SQLAlchemy / launcher boundary without holding a session open.
+    """
+
+    bot_session_id: int
+    summary: str
+
+
 def _duration_ms(
     started_at: datetime | None, ended_at: datetime | None
 ) -> int | None:
@@ -460,6 +475,84 @@ def _search_transcripts_python(
     return scored[:limit]
 
 
+def find_prior_session_summary(
+    session: Session,
+    *,
+    recurring_event_id: str | None,
+    exclude_bot_session_id: int | None = None,
+) -> PriorSessionSummary | None:
+    """Return the most recent prior session's summary for a recurring event (Johnny-dsy).
+
+    "Prior" means: a terminal :class:`BotSession` (``ended`` or
+    ``failed``) whose :class:`CalendarEvent` shares the requested
+    ``recurring_event_id`` AND whose ``session_summary`` is non-empty.
+    Used by the scheduler / browser-session entry points to inject
+    cross-meeting context into the pipeline's system prompt.
+
+    ``exclude_bot_session_id`` lets callers omit a row in flight (the
+    one they're about to start) so the lookup never returns the row's
+    own summary by accident.
+
+    Returns ``None`` when:
+
+    * ``recurring_event_id`` is ``None`` (one-off event — no series).
+    * No prior bot_session exists for the series.
+    * The most recent prior bot_session has no ``session_summary``
+      written (short meeting that never crossed the summarisation
+      threshold, or a session that ended before the column landed).
+
+    Ordering: newest-first by ``ended_at`` (falling back to ``id`` for
+    ties / null ended_at). The first match is returned — older summaries
+    can be retrieved by callers walking the series manually.
+    """
+    if not recurring_event_id:
+        return None
+    stmt = (
+        select(BotSession.id, BotSession.session_summary)
+        .join(MeetingConfig, MeetingConfig.id == BotSession.meeting_config_id)
+        .join(CalendarEvent, CalendarEvent.id == MeetingConfig.calendar_event_id)
+        .where(CalendarEvent.recurring_event_id == recurring_event_id)
+        .where(BotSession.status.in_(TERMINAL_STATUSES))
+        .where(BotSession.session_summary.is_not(None))
+        .where(func.length(func.coalesce(BotSession.session_summary, "")) > 0)
+        .order_by(BotSession.ended_at.desc().nulls_last(), BotSession.id.desc())
+    )
+    if exclude_bot_session_id is not None:
+        stmt = stmt.where(BotSession.id != exclude_bot_session_id)
+    row = session.execute(stmt).first()
+    if row is None:
+        return None
+    summary_text = row.session_summary
+    if not summary_text:
+        return None
+    return PriorSessionSummary(
+        bot_session_id=int(row.id), summary=str(summary_text)
+    )
+
+
+def set_session_summary(
+    session: Session,
+    bot_session_id: int,
+    summary: str | None,
+) -> BotSession:
+    """Write ``summary`` to :attr:`BotSession.session_summary` (Johnny-dsy).
+
+    Idempotent: passing the same text twice is a no-op flush. Pass
+    ``None`` or an empty string to clear the column (rare — used by
+    tests). Raises :class:`SessionNotFoundError` so callers can decide
+    whether a missing row is a retry-worthy race or a programming error.
+    """
+    row = session.get(BotSession, bot_session_id)
+    if row is None:
+        raise SessionNotFoundError(
+            f"no bot_sessions row with id={bot_session_id}"
+        )
+    cleaned = (summary or "").strip() or None
+    row.session_summary = cleaned
+    session.flush()
+    return row
+
+
 __all__ = [
     "DEFAULT_HISTORY_PAGE_SIZE",
     "DEFAULT_SEARCH_LIMIT",
@@ -467,12 +560,15 @@ __all__ = [
     "MAX_SEARCH_LIMIT",
     "PastSessionSummary",
     "PastSessionsPage",
+    "PriorSessionSummary",
     "SearchHit",
     "SessionNotFoundError",
     "TERMINAL_STATUSES",
     "delete_session",
     "export_session",
+    "find_prior_session_summary",
     "get_session_full_detail",
     "list_past_sessions",
     "search_transcripts",
+    "set_session_summary",
 ]

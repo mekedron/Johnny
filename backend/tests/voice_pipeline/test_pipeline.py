@@ -4466,6 +4466,73 @@ async def test_answer_prompt_includes_calendar_attachments_text() -> None:
     assert "EMEA" in system_content
 
 
+# --- Johnny-dsy: prior_session_context (cross-meeting continuity) ----------
+
+
+async def test_router_prompt_includes_prior_session_context() -> None:
+    """Johnny-dsy: prior_session_context reaches the router system prompt."""
+    cfg = PipelineConfig(
+        instructions="be brief",
+        prior_session_context=(
+            "Last week: agreed on Friday ship; Alice owns docs."
+        ),
+    )
+    pipeline = _bare_pipeline(config=cfg)
+    transcript = TranscriptFinalized(text="hello", timestamp_ms=0)
+    pipeline._remember_transcript(transcript)
+
+    snapshot = await pipeline._build_input_window(transcript)
+    messages = pipeline._router_messages(transcript, snapshot)
+    system_content = messages[0].content or ""
+
+    assert "Last session summary:" in system_content
+    assert "Friday ship; Alice owns docs." in system_content
+    # Snapshot persists the field so audit can reproduce the exact prompt.
+    assert snapshot["prior_session_context"] == (
+        "Last week: agreed on Friday ship; Alice owns docs."
+    )
+
+
+async def test_answer_prompt_includes_prior_session_context() -> None:
+    """Johnny-dsy: prior_session_context reaches the answer LLM system prompt."""
+    cfg = PipelineConfig(
+        prior_session_context="Last week we ran a 30-minute postmortem.",
+    )
+    pipeline = _bare_pipeline(config=cfg)
+    transcript = TranscriptFinalized(text="hello", timestamp_ms=0)
+    pipeline._remember_transcript(transcript)
+
+    decision = RouterDecision(
+        should_speak=True, confidence=0.9, reason="ack", suggested_reply=None
+    )
+    messages = pipeline._answer_messages(transcript, decision)
+    system_content = messages[0].content or ""
+
+    assert "Last session summary:" in system_content
+    assert "30-minute postmortem." in system_content
+
+
+async def test_prompts_omit_prior_session_line_when_empty() -> None:
+    """No prior context → no 'Last session summary:' line in either prompt."""
+    cfg = PipelineConfig(instructions="be brief")
+    assert cfg.prior_session_context == ""
+    pipeline = _bare_pipeline(config=cfg)
+    transcript = TranscriptFinalized(text="hello", timestamp_ms=0)
+    pipeline._remember_transcript(transcript)
+
+    snapshot = await pipeline._build_input_window(transcript)
+    router_messages = pipeline._router_messages(transcript, snapshot)
+    decision = RouterDecision(
+        should_speak=True, confidence=0.9, reason="ack", suggested_reply=None
+    )
+    answer_messages = pipeline._answer_messages(transcript, decision)
+
+    assert "Last session summary" not in (router_messages[0].content or "")
+    assert "Last session summary" not in (answer_messages[0].content or "")
+    # Snapshot still includes the empty field for audit shape consistency.
+    assert snapshot["prior_session_context"] == ""
+
+
 def test_estimate_tokens_uses_chars_per_token_heuristic() -> None:
     """The internal token estimator returns ``len // 4`` (floored at 1)."""
     from johnny.voice_pipeline.pipeline import _estimate_tokens

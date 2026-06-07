@@ -267,6 +267,7 @@ class _ParsedEvent:
     meet_link: str | None
     etag: str | None
     cancelled: bool
+    recurring_event_id: str | None
 
 
 def _parse_event_payload(payload: dict[str, Any]) -> _ParsedEvent | None:
@@ -296,6 +297,12 @@ def _parse_event_payload(payload: dict[str, Any]) -> _ParsedEvent | None:
     )
     etag_raw = payload.get("etag")
     etag = str(etag_raw) if isinstance(etag_raw, str) and etag_raw else None
+    recurring_raw = payload.get("recurringEventId")
+    recurring_event_id = (
+        str(recurring_raw)
+        if isinstance(recurring_raw, str) and recurring_raw
+        else None
+    )
     return _ParsedEvent(
         external_id=external_id,
         start_time=start or datetime.now(UTC),
@@ -307,6 +314,7 @@ def _parse_event_payload(payload: dict[str, Any]) -> _ParsedEvent | None:
         meet_link=_extract_meet_link(payload),
         etag=etag,
         cancelled=cancelled,
+        recurring_event_id=recurring_event_id,
     )
 
 
@@ -366,6 +374,7 @@ def _apply_parsed_event(
             end_time=parsed.end_time,
             meet_link=parsed.meet_link,
             etag=parsed.etag,
+            recurring_event_id=parsed.recurring_event_id,
             last_synced_at=synced_at,
         )
         session.add(row)
@@ -399,6 +408,10 @@ def _apply_parsed_event(
     if existing.etag != parsed.etag:
         existing.etag = parsed.etag
         # etag alone is not a user-visible change.
+    if existing.recurring_event_id != parsed.recurring_event_id:
+        existing.recurring_event_id = parsed.recurring_event_id
+        # Series-id changes happen when Google reclassifies an event
+        # (rare) — silent like etag, not a user-visible diff.
     existing.last_synced_at = synced_at
     return CalendarEventChange(
         kind="updated" if changed else "unchanged",

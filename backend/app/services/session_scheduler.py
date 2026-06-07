@@ -141,6 +141,18 @@ class LaunchContext:
     Drive URLs or the polling cycle hasn't yet resolved them — the bot
     still joins, it just doesn't see document bodies for that meeting.
     """
+    prior_session_context: str = ""
+    """Prior-occurrence summary for recurring meetings (Johnny-dsy).
+
+    Populated by the scheduler via
+    :func:`app.services.history.find_prior_session_summary` when the
+    upcoming :class:`~app.db.models.CalendarEvent` shares a
+    ``recurring_event_id`` with a previously-ended bot_session. The
+    docker launcher forwards via ``JOHNNY_PRIOR_SESSION_CONTEXT``. Empty
+    string when there's no prior occurrence (one-off events, first run
+    of a new series) — the pipeline simply skips the "Last session
+    summary" prompt line.
+    """
     provider_config: dict[str, Any] = field(default_factory=dict)
     pipeline_mode: str = "split"
     """Pipeline shape — ``split`` (STT→LLM→TTS) or ``unified`` (S2S) (Johnny-ckz.17).
@@ -385,12 +397,38 @@ async def start_session_for_meeting(
 
     calendar_description = ""
     calendar_attachments = ""
+    recurring_event_id: str | None = None
     event = meeting.calendar_event
     if event is not None:
         if event.description:
             calendar_description = event.description
         if event.attachments_text:
             calendar_attachments = event.attachments_text
+        recurring_event_id = event.recurring_event_id
+
+    # Johnny-dsy: cross-session continuity. When this calendar event is
+    # an occurrence of a recurring series, pull the previous terminal
+    # bot_session's summary so the bot can pick up open questions /
+    # decisions from last week without re-asking. ``exclude`` guards the
+    # corner case where this row already has a summary written (re-launch
+    # after a crash) so we don't echo our own state back at ourselves.
+    prior_session_context = ""
+    try:
+        from app.services.history import find_prior_session_summary
+
+        prior = find_prior_session_summary(
+            session,
+            recurring_event_id=recurring_event_id,
+            exclude_bot_session_id=row.id,
+        )
+        if prior is not None:
+            prior_session_context = prior.summary
+    except Exception:  # noqa: BLE001 — never block a launch on history lookup
+        logger.exception(
+            "prior_session_summary lookup failed for meeting_config=%s; "
+            "continuing without cross-session context",
+            meeting.id,
+        )
 
     ctx = LaunchContext(
         bot_session_id=row.id,
@@ -404,6 +442,7 @@ async def start_session_for_meeting(
         context=effective_context,
         calendar_context=calendar_description,
         calendar_attachments_text=calendar_attachments,
+        prior_session_context=prior_session_context,
         provider_config=provider_payload,
         pipeline_mode=pipeline_mode_value,
     )

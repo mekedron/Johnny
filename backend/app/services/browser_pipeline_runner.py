@@ -123,6 +123,17 @@ class BrowserPipelineSpec:
     resolved yet. Defaulted so every existing call site keeps working
     without modification.
     """
+    prior_session_context: str = ""
+    """Prior-occurrence summary for recurring meetings (Johnny-dsy).
+
+    Filled by the API session-start path from
+    :func:`app.services.history.find_prior_session_summary` when the
+    target calendar event shares a ``recurring_event_id`` with a prior
+    terminal bot_session whose ``session_summary`` is non-empty. Empty
+    for playground sessions and for one-off events. Defaulted so the
+    existing test fixtures and dispatch helpers keep working without
+    modification.
+    """
 
 
 def _build_provider(
@@ -235,6 +246,7 @@ def _assemble_split(
         context=spec.context,
         calendar_context=spec.calendar_context,
         calendar_attachments_text=spec.calendar_attachments_text,
+        prior_session_context=spec.prior_session_context,
     )
 
     if vad is None:
@@ -282,6 +294,7 @@ def _assemble_unified(
         context=spec.context,
         calendar_context=spec.calendar_context,
         calendar_attachments_text=spec.calendar_attachments_text,
+        prior_session_context=spec.prior_session_context,
         voice_id=_resolve_voice_id(s2s_entry),
     )
     return UnifiedVoicePipeline(

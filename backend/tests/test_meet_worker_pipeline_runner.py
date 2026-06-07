@@ -37,6 +37,7 @@ from johnny.meet_worker.pipeline_runner import (
     CONTEXT_ENV,
     CONTEXT_TOKEN_BUDGET_ENV,
     INSTRUCTIONS_ENV,
+    PRIOR_SESSION_CONTEXT_ENV,
     PROVIDER_CONFIG_ENV,
     REDIS_URL_ENV,
     SESSION_ID_ENV,
@@ -485,6 +486,62 @@ async def test_assemble_pipeline_calendar_context_survives_tts_degradation(
     assert pipeline.config.mode == SUGGEST_ONLY_MODE
     assert pipeline.config.calendar_context == "Calendar event description text."
     assert pipeline.config.context_token_budget == 8000
+
+
+async def test_assemble_pipeline_threads_prior_session_context(
+    _registered_fake_providers: Any,
+) -> None:
+    """Johnny-dsy: JOHNNY_PRIOR_SESSION_CONTEXT flows into PipelineConfig."""
+    env = _provider_payload(LIMITED_AUTO_SPEAK_MODE)
+    env[PRIOR_SESSION_CONTEXT_ENV] = (
+        "Last week: agreed on Friday ship; open question on free-tier pricing."
+    )
+
+    pipeline = await _assemble_pipeline(
+        cast(MeetAudioBridge, _FakeBridge()),
+        event_bus=InMemoryEventBus(),
+        session_id="42",
+        env=env,
+    )
+
+    assert pipeline.config.prior_session_context == (
+        "Last week: agreed on Friday ship; open question on free-tier pricing."
+    )
+
+
+async def test_assemble_pipeline_prior_context_defaults_to_empty(
+    _registered_fake_providers: Any,
+) -> None:
+    """Missing env var → empty prior_session_context (no crash)."""
+    env = _provider_payload(LIMITED_AUTO_SPEAK_MODE)
+    env.pop(PRIOR_SESSION_CONTEXT_ENV, None)
+
+    pipeline = await _assemble_pipeline(
+        cast(MeetAudioBridge, _FakeBridge()),
+        event_bus=InMemoryEventBus(),
+        session_id="42",
+        env=env,
+    )
+
+    assert pipeline.config.prior_session_context == ""
+
+
+async def test_assemble_pipeline_prior_context_survives_tts_degradation(
+    _registered_fake_providers: Any,
+) -> None:
+    """Johnny-dsy: prior_session_context survives the suggest_only rebuild."""
+    env = _provider_payload(APPROVAL_REQUIRED_MODE, include_tts=False)
+    env[PRIOR_SESSION_CONTEXT_ENV] = "Carried-over summary."
+
+    pipeline = await _assemble_pipeline(
+        cast(MeetAudioBridge, _FakeBridge()),
+        event_bus=InMemoryEventBus(),
+        session_id="42",
+        env=env,
+    )
+
+    assert pipeline.config.mode == SUGGEST_ONLY_MODE
+    assert pipeline.config.prior_session_context == "Carried-over summary."
 
 
 async def test_assemble_pipeline_threads_transcript_history_loader(

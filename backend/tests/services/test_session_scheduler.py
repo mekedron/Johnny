@@ -474,6 +474,87 @@ async def test_start_session_attachments_default_empty(
 
 
 @pytest.mark.asyncio
+async def test_start_session_injects_prior_session_summary(
+    db_session: Session,
+) -> None:
+    """Johnny-dsy: prior occurrence's summary rides into LaunchContext."""
+    # First occurrence: a prior bot_session with a written summary,
+    # already ended.
+    prior_cfg = _seed_full_meeting(
+        db_session,
+        start_offset=-timedelta(days=7, hours=1),
+        end_offset=-timedelta(days=7),
+        external_id="evt-week-old",
+    )
+    prior_cfg.calendar_event.recurring_event_id = "series-standup"
+    db_session.flush()
+    prior_row = BotSession(
+        meeting_config_id=prior_cfg.id,
+        status=BotSessionStatus.ENDED,
+        ended_at=datetime.now(UTC) - timedelta(days=7),
+        session_summary="Last week we agreed to ship Johnny-dsy by Friday.",
+    )
+    db_session.add(prior_row)
+    db_session.flush()
+
+    # Second occurrence: about to start, same series id.
+    next_cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+        external_id="evt-this-week",
+    )
+    next_cfg.calendar_event.recurring_event_id = "series-standup"
+    db_session.flush()
+
+    launcher = NoopContainerLauncher()
+    await start_session_for_meeting(
+        db_session, meeting=next_cfg, launcher=launcher
+    )
+    ctx = launcher.started[0]
+    assert ctx.prior_session_context == (
+        "Last week we agreed to ship Johnny-dsy by Friday."
+    )
+
+
+@pytest.mark.asyncio
+async def test_start_session_no_recurring_id_empty_prior_context(
+    db_session: Session,
+) -> None:
+    """One-off event (no recurringEventId) leaves prior_session_context empty."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    db_session.flush()
+    launcher = NoopContainerLauncher()
+    await start_session_for_meeting(
+        db_session, meeting=cfg, launcher=launcher
+    )
+    assert launcher.started[0].prior_session_context == ""
+
+
+@pytest.mark.asyncio
+async def test_start_session_recurring_but_no_prior_session(
+    db_session: Session,
+) -> None:
+    """First occurrence of a new series → no prior summary → empty context."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    cfg.calendar_event.recurring_event_id = "series-first-run"
+    db_session.flush()
+    launcher = NoopContainerLauncher()
+    await start_session_for_meeting(
+        db_session, meeting=cfg, launcher=launcher
+    )
+    assert launcher.started[0].prior_session_context == ""
+
+
+@pytest.mark.asyncio
 async def test_start_session_handles_empty_override_text(
     db_session: Session,
 ) -> None:
