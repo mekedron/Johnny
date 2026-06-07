@@ -22,6 +22,12 @@ if [[ -n "$all_sessions" ]]; then
   docker rm $all_sessions
 fi
 
+# Stop every host sidecar (Parakeet / Piper / Kokoro) BEFORE tearing the
+# Docker stack down, so an in-flight synthesis/transcription call drains into
+# a clean "sidecar stopped" error instead of hanging against a half-torn-down
+# api. Idempotent: sidecars that are not running are a no-op.
+"$(dirname "$0")/scripts/start-sidecars.sh" stop || true
+
 # `-v` wipes every compose-declared named volume (postgres_data,
 # redis_data, google_auth_state). The user has opted into a full factory
 # reset on every stop — beads issues, provider configs, session history

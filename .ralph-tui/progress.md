@@ -130,6 +130,33 @@ unknown voice_id" is ALREADY satisfied for free by `schema_validation._check_opt
 a SELECT (keep the static `options` as the offline fallback) gets validation +
 graceful degradation at once.
 
+### Sidecar launchers: one sourced bash library, thin per-provider hooks
+Every `scripts/start-<provider>-sidecar.sh` is ~30 lines: set `PROVIDER` /
+`PROVIDER_DESC` / `PROVIDER_BACKENDS` / `REPO_ROOT`, `. scripts/lib/sidecar-
+common.sh`, define hooks (`sc_dir`/`sc_port_default`/`sc_kind` required;
+`sc_blurb`/`sc_binary`/`sc_post_launch_hint` optional, guarded defaults), then
+`sc_main "$@"`. The library gives every launcher the SAME contract: commands
+`start|stop|restart|status|logs|--help` (+ machine `probe|port|backends`), a
+bare-backend transitional alias, env vars `<UPPER_PROVIDER>_<UPPER_BACKEND>_
+{PORT,HOST,MODEL}` + `JOHNNY_SIDECAR_LOG_DIR`, log/PID at
+`.validation/<provider>-<backend>-sidecar.{log,pid}`, and exit codes 0 ok / 1
+fail / 2 bad-usage / 3 toolchain-missing (SKIPPED) / 4 port-conflict. The
+umbrella `start-sidecars.sh` discovers launchers by globbing `start-*-sidecar.sh`
+and asks each for `backends`/`port`/`probe` — zero per-provider branching; it
+owns `JOHNNY_DISABLED_SIDECARS` (the launcher knows nothing about "disabled").
+`run.sh` calls `start-sidecars.sh start || true` after compose up; `stop.sh`
+calls `stop` before `down`. **bash 3.2 constraints** (macOS default): no
+`declare -A`/`${var^^}`/`mapfile`; uppercase via `tr`, indirect env read via
+`eval "v=\${$name:-}"` (set -u-safe); launchers use `set -o pipefail` only and
+the library checks return codes explicitly. "What port is a pid on" must use
+`lsof -F n` (default output splits `addr:port (LISTEN)` so `$NF`==`(LISTEN)`).
+Adding a sidecar to a provider = add a backend to `PROVIDER_BACKENDS` + its
+hook cases; the umbrella, health endpoint, and run.sh pick it up for free. The
+api side: `GET /sidecars/health[?url=]` builds its known-URL list from the
+adapters' own `SIDECAR_DEFAULT_URLS`, and the Providers-modal badge
+(`field.name==='runtime'` + a debounced `$effect`) probes the configured
+sidecar_url (override else schema default).
+
 ### Svelte 5: reload a picker on prop change WITHOUT reloading on every keystroke
 `VoicePicker` must refetch when the *target provider* changes (switching
 providers in the modal) but NOT when `values` mutates (the user typing an API
@@ -388,4 +415,92 @@ previous provider's voices + stale filters after switching the dropdown.
     shows the rich catalog immediately in the add-modal — the better showcase.
   - See Codebase Patterns for the `$effect`+`untrack` reload-on-provider-change
     gotcha and the one-`list_voices()`→picker recipe.
+---
+
+## 2026-06-07 - Johnny-1ge.6 (Auto-start sidecars + standardised launcher CLI)
+- `./run.sh` now boots every available host sidecar after `docker compose up`,
+  `./stop.sh` stops them before `down -v`, and all per-provider launchers share
+  one CLI contract (commands, env vars, exit codes, log layout) behind an
+  umbrella `start-sidecars.sh`. A `/sidecars/health` endpoint + a Providers-modal
+  badge surface live reachability next to the Runtime picker.
+- Files changed:
+  - `scripts/lib/sidecar-common.sh` (new) — sourced bash library implementing the
+    whole CLI (start/stop/restart/status/logs/--help + machine subcommands
+    probe/port/backends), env-var convention `<UPPER_PROVIDER>_<UPPER_BACKEND>_
+    {PORT,HOST,MODEL}`, `JOHNNY_SIDECAR_LOG_DIR`, exit codes 0/1/2/3/4, the shared
+    help-block generator, the transitional bare-backend alias, and python(uv)/
+    swift build+launch. bash 3.2-safe (no assoc arrays / `${var^^}`; eval-based
+    indirect env reads so `set -u` is safe).
+  - `scripts/start-parakeet-sidecar.sh` / `start-piper-sidecar.sh` /
+    `start-kokoro-sidecar.sh` — rewritten as ~30-line hook declarations
+    (`sc_dir`/`sc_port_default`/`sc_kind`/`sc_blurb`/`sc_binary`/
+    `sc_post_launch_hint`) that source the library and call `sc_main "$@"`.
+  - `scripts/start-sidecars.sh` (new) — umbrella; globs `start-*-sidecar.sh`,
+    reads each launcher's `backends`/`probe`/`port`, applies
+    `JOHNNY_DISABLED_SIDECARS` (warns on unknown keys), prints a one-line-per-key
+    start summary / status. Zero per-provider branching.
+  - `scripts/check-sidecar-cli.sh` (new) — acceptance harness: loops every
+    launcher asserting `--help` exit 0 + the shared help-block sections,
+    `status` exit 0, `stop bogus-backend` exit 2, plus an umbrella smoke.
+  - `run.sh` / `stop.sh` — call `start-sidecars.sh start || true` after compose
+    up / `stop` before compose down; run.sh trailing block lists the sidecar
+    status + log-path pointer.
+  - `sidecars/piper-http/server.py` — reads canonical `PIPER_HTTP_{PORT,HOST,
+    MODEL}` with legacy `PIPER_SIDECAR_*` fallback (kokoro/parakeet servers
+    already used the canonical names).
+  - `backend/app/api/sidecars.py` (new) + `app/main.py` — `GET /sidecars/health`
+    probes every adapter-default sidecar URL (or one `?url=`) in parallel via
+    httpx, returns `{name,url,ok,latency_ms,error}`. Derives the known list from
+    the adapters' own `SIDECAR_DEFAULT_URLS` so ports stay in sync.
+  - `frontend/src/lib/providers.ts` — `SidecarHealth`/`SidecarsHealthResponse` +
+    `sidecarHealth(url)`.
+  - `frontend/src/routes/providers/+page.svelte` — `sidecarProbeUrl` derived
+    (sidecar runtime ⇒ resolve sidecar_url override else field default), debounced
+    `$effect` probe, badge after the runtime `<select>` (`field.name==='runtime'`).
+  - `backend/tests/api/test_sidecars.py` (new, 3 tests, MockTransport).
+  - `README.md` "Sidecar management" section + canonical `start <backend>`
+    snippets; `.env.example` `JOHNNY_DISABLED_SIDECARS` / `JOHNNY_SIDECAR_LOG_DIR`
+    / env-var convention.
+- Verified (real, on host + browser):
+  - `check-sidecar-cli.sh` ALL PASS across the 3 launchers + umbrella.
+  - Exit codes all exercised: idempotent `start` (0), unknown command/backend
+    (2), missing-toolchain SKIPPED (3, via a throwaway fake launcher), and a real
+    port conflict (4, `PIPER_HTTP_PORT=8779` while it runs on 8775 — no
+    disruption). `restart` actually stopped+relaunched piper (new pid, healthy on
+    8775 via the rewritten server reading `PIPER_HTTP_PORT`).
+  - Umbrella `status` lists all 5 keys; `JOHNNY_DISABLED_SIDECARS` marks keys
+    `disabled` + warns on `bogus-sidecar`; `start` summary shows `:port ok` /
+    `DISABLED` / `SKIPPED`.
+  - `/sidecars/health` (curl + 3 unit tests): 8765/8772/8775 `ok`, 8766/8773
+    `unreachable`; `?url=` returns one `custom` entry.
+  - chrome-devtools: Parakeet modal badge → green "sidecar running
+    (…:8765)" for the live MLX sidecar; pointing Sidecar URL at down :8766 →
+    red "sidecar offline — start with ./scripts/start-sidecars.sh start";
+    network shows debounced `GET /sidecars/health?url=…` (one per settled URL,
+    not per keystroke). Artifacts in `.validation/Johnny-1ge.6/`.
+  - Backend: 125 api tests (sidecars+providers) pass; new files ruff+mypy clean;
+    main.py mypy clean. Frontend `pnpm check` + `pnpm lint` clean.
+- **Learnings:**
+  - macOS default bash is **3.2** — no `declare -A`, no `${var^^}`, no `mapfile`.
+    The shared library uses `tr` for uppercasing and `eval "v=\${$name:-}"` for
+    indirect env reads (which is also `set -u`-safe; plain `${!name}` of an unset
+    var aborts under nounset). Launchers run `set -o pipefail` only (no `-e`/`-u`)
+    and the library checks every fallible command's return explicitly — `set -e`
+    would abort on a `lsof` that legitimately exits non-zero.
+  - `lsof`'s default output splits `127.0.0.1:8765 (LISTEN)` into two awk
+    columns, so "what port is this pid on" must use `lsof -F n` field output
+    (`n<addr>:<port>` lines) parsed with sed — `$NF` returns `(LISTEN)`.
+  - Default hooks in the library are guarded with `command -v sc_blurb || …` so
+    they never clobber a launcher hook regardless of define-before/after-source
+    order. Required hooks (dir/port/kind) have no default and are read at
+    `sc_main` time, so the launcher can set its `PROVIDER*` vars + hooks in any
+    order as long as it's before `sc_main`.
+  - Exit-code 4 (port conflict) needs no extra state: compare the resolved port
+    against the live pid's actual listening port (`lsof -F n` on `-p <pid>`);
+    differ ⇒ 4. The umbrella stays provider-agnostic by asking each launcher
+    `backends`/`port`/`probe` instead of knowing any provider's ports itself.
+  - Frontend: the badge probes the *configured* sidecar_url (override else schema
+    default), not a per-runtime default — so switching runtime without touching
+    the URL keeps probing the same host:port (matches what the adapter will
+    actually call). Debounce the `$effect` (300 ms) or typing a URL spams probes.
 ---

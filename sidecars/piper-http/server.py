@@ -25,15 +25,20 @@ Wire protocol (must match ``app.providers.piper_tts._synth_http_sidecar``):
         Response: 200 application/json
             {"ready": true, "voice": "<default voice>", "backend": "piper"}
 
-Environment variables:
-    PIPER_SIDECAR_MODEL_DIR  Directory of .onnx + .onnx.json voices
+Environment variables (canonical PIPER_HTTP_* names match the
+``scripts/start-piper-sidecar.sh`` launcher convention; the legacy
+PIPER_SIDECAR_* names are still honoured as a fallback):
+    PIPER_HTTP_MODEL         Directory of .onnx + .onnx.json voices
                              (default: ~/.johnny/piper-models — the same host
                              bind-mount the api container reads).
+                             Legacy: PIPER_SIDECAR_MODEL_DIR.
     PIPER_SIDECAR_VOICE      Default voice key warmed on startup
                              (default: en_US-amy-medium).
-    PIPER_SIDECAR_HOST       Bind host (default: 127.0.0.1). Use 0.0.0.0 if the
+    PIPER_HTTP_HOST          Bind host (default: 127.0.0.1). Use 0.0.0.0 if the
                              api container is on a remote machine.
-    PIPER_SIDECAR_PORT       Bind port (default: 8775).
+                             Legacy: PIPER_SIDECAR_HOST.
+    PIPER_HTTP_PORT          Bind port (default: 8775).
+                             Legacy: PIPER_SIDECAR_PORT.
 """
 
 from __future__ import annotations
@@ -52,13 +57,19 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
-DEFAULT_MODEL_DIR = os.environ.get(
+def _env(canonical: str, legacy: str, default: str) -> str:
+    """Canonical PIPER_HTTP_* name wins; fall back to the legacy name."""
+    return os.environ.get(canonical) or os.environ.get(legacy) or default
+
+
+DEFAULT_MODEL_DIR = _env(
+    "PIPER_HTTP_MODEL",
     "PIPER_SIDECAR_MODEL_DIR",
     str(Path.home() / ".johnny" / "piper-models"),
 )
 DEFAULT_VOICE = os.environ.get("PIPER_SIDECAR_VOICE", "en_US-amy-medium")
-DEFAULT_HOST = os.environ.get("PIPER_SIDECAR_HOST", "127.0.0.1")
-DEFAULT_PORT = int(os.environ.get("PIPER_SIDECAR_PORT", "8775"))
+DEFAULT_HOST = _env("PIPER_HTTP_HOST", "PIPER_SIDECAR_HOST", "127.0.0.1")
+DEFAULT_PORT = int(_env("PIPER_HTTP_PORT", "PIPER_SIDECAR_PORT", "8775"))
 
 logger = logging.getLogger("piper-http-sidecar")
 

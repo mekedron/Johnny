@@ -137,6 +137,37 @@ Set `tool_format=hermes` for Hermes-style fine-tunes that emit
 `<tool_call>{...}</tool_call>` markers instead of OpenAI-native
 `tool_calls`.
 
+## Sidecar management
+
+Several STT/TTS runtimes run as **host sidecars** — native macOS processes outside Docker (Apple MLX / CoreML / espeak need hardware the arm64 Linux api container can't reach). The api talks to them over `host.docker.internal:<port>`. You rarely manage them by hand:
+
+- **`./run.sh` auto-starts every available sidecar** after the Docker stack is up, so a saved sidecar-runtime works immediately. **`./stop.sh` stops them** before tearing the stack down (so an in-flight call drains into a clean error).
+- A missing toolchain is a **soft skip**, never a hard failure: no `swift` → `parakeet-coreml` is reported `SKIPPED` and the rest still come up.
+- Opt out per-sidecar with `JOHNNY_DISABLED_SIDECARS` (comma-separated `<provider>-<backend>` keys), e.g. `JOHNNY_DISABLED_SIDECARS=parakeet-coreml,kokoro-mlx ./run.sh`.
+
+One umbrella drives them all:
+
+```bash
+./scripts/start-sidecars.sh start     # start every enabled sidecar (idempotent)
+./scripts/start-sidecars.sh status    # one line per sidecar: running | stopped | disabled | unavailable
+./scripts/start-sidecars.sh stop      # stop every running sidecar
+./scripts/start-sidecars.sh restart   # stop + start
+./scripts/start-sidecars.sh --help    # full help
+```
+
+**Standardised per-launcher CLI.** Every `scripts/start-<provider>-sidecar.sh` accepts the same commands so the umbrella can dispatch uniformly (run `--help` on any of them for the full block):
+
+| | |
+| --- | --- |
+| **Commands** | `start [<backend>]`, `stop [<backend>]`, `restart [<backend>]`, `status`, `logs [<backend>]`, `--help`. Omitting `<backend>` means "every backend this provider has". |
+| **Env vars** | `<PROVIDER>_<BACKEND>_PORT` / `_HOST` / `_MODEL` (e.g. `PARAKEET_MLX_PORT=8765`, `PIPER_HTTP_PORT=8775`), plus `JOHNNY_SIDECAR_LOG_DIR` (default `.validation/`). |
+| **Exit codes** | `0` ok · `1` failure · `2` bad usage · `3` toolchain unavailable (→ umbrella prints SKIPPED) · `4` port conflict. |
+| **Logs / PIDs** | `.validation/<provider>-<backend>-sidecar.{log,pid}` — one naming rule, so `status` and `/sidecars/health` discover everything by globbing one directory. |
+
+The current Parakeet `mlx` / `coreml` positional form still works as a transitional alias for `start mlx` / `start coreml` (it prints a one-line deprecation note). The shared contract is regression-checked by `./scripts/check-sidecar-cli.sh`.
+
+**Live status in the UI.** The api exposes `GET /sidecars/health` (probe all known sidecars) and `GET /sidecars/health?url=<base>` (probe one). The Providers modal uses it to badge the **Runtime** picker `sidecar running` / `sidecar offline — start with ./scripts/start-sidecars.sh start` the moment you pick a sidecar runtime, so you see *why* before clicking Test.
+
 ## NVIDIA Parakeet STT runtimes
 
 The Parakeet STT provider supports three runtimes selectable from the Providers page (Settings → Providers → NVIDIA Parakeet → Runtime). Pick whichever fits your speed / ops trade-off.
@@ -144,18 +175,18 @@ The Parakeet STT provider supports three runtimes selectable from the Providers 
 | Runtime | Where it runs | Latency for 5 s audio (warm) | Setup |
 | --- | --- | --- | --- |
 | `in-container` (default) | api container, PyTorch / NeMo on CPU | ~1 s | Click **Install package** on the provider card. NeMo + deps go to `~/.johnny/parakeet-packages` (~3 GB). The model is now cached at process scope, so only the first `/stt_test` after an api restart pays the multi-second `from_pretrained` cost. |
-| `mlx-sidecar` | macOS host, Apple MLX (Metal GPU) | ~100 ms | `./scripts/start-parakeet-sidecar.sh mlx`. Runs `sidecars/parakeet-mlx/server.py` under `uv` on port 8765. First launch downloads `mlx-community/parakeet-tdt-0.6b-v3` from HuggingFace. |
-| `coreml-sidecar` | macOS host, Swift + FluidAudio (CoreML on the Apple Neural Engine) | ~150 ms target (matches VoiceInk) | `./scripts/start-parakeet-sidecar.sh coreml`. Runs `sidecars/parakeet-coreml/.build/release/parakeet-coreml-sidecar` on port 8766. Requires Xcode command-line tools (`xcode-select --install`); first build fetches FluidAudio + Hummingbird and compiles the binary. |
+| `mlx-sidecar` | macOS host, Apple MLX (Metal GPU) | ~100 ms | `./scripts/start-parakeet-sidecar.sh start mlx`. Runs `sidecars/parakeet-mlx/server.py` under `uv` on port 8765. First launch downloads `mlx-community/parakeet-tdt-0.6b-v3` from HuggingFace. |
+| `coreml-sidecar` | macOS host, Swift + FluidAudio (CoreML on the Apple Neural Engine) | ~150 ms target (matches VoiceInk) | `./scripts/start-parakeet-sidecar.sh start coreml`. Runs `sidecars/parakeet-coreml/.build/release/parakeet-coreml-sidecar` on port 8766. Requires Xcode command-line tools (`xcode-select --install`); first build fetches FluidAudio + Hummingbird and compiles the binary. |
 
 Why sidecars exist: inside the arm64 Linux api container, PyTorch has no MPS / CoreML / ANE access — the model runs on CPU regardless of the `device` knob. Sidecars run natively on the macOS host and the api container POSTs raw PCM to them over `host.docker.internal`. Wire protocol is documented in each sidecar's README.
 
 Sidecar management:
 
 ```bash
-./scripts/start-parakeet-sidecar.sh mlx       # start MLX sidecar
-./scripts/start-parakeet-sidecar.sh coreml    # start CoreML sidecar
-./scripts/start-parakeet-sidecar.sh status    # which sidecars are up
-./scripts/start-parakeet-sidecar.sh stop      # stop any running sidecar
+./scripts/start-parakeet-sidecar.sh start mlx      # start MLX sidecar (:8765)
+./scripts/start-parakeet-sidecar.sh start coreml   # start CoreML sidecar (:8766)
+./scripts/start-parakeet-sidecar.sh status         # which sidecars are up
+./scripts/start-parakeet-sidecar.sh stop           # stop any running sidecar
 ```
 
 Health checks: `curl http://localhost:8765/health` (MLX) / `curl http://localhost:8766/health` (CoreML) — both return `{"ready": true, "model_id": "..."}` once loaded.
@@ -189,18 +220,18 @@ Health check: `curl http://localhost:8775/health` → `{"ready": true, "voice": 
 | Runtime | Where it runs | Time-to-first-audio (warm) | Setup |
 | --- | --- | --- | --- |
 | `in-container` (default) | api container, `kokoro` in the api process; warm `KPipeline` (KModel) cached at module scope keyed by `(model, language)` | well under 200 ms warm | Requires the `kokoro` library in the api image. The first synth per language pays the multi-second model load; later turns are warm. CPU-only inside the container — for Apple-Silicon acceleration use the MLX sidecar. |
-| `mlx-sidecar` | macOS host, Kokoro under Apple MLX (Metal GPU) via `mlx-audio` | ~80–120 ms (network round-trip + warm synth) | `./scripts/start-kokoro-sidecar.sh mlx`. Runs `sidecars/kokoro-mlx/server.py` under `uv` on port 8772; the api POSTs to `http://host.docker.internal:8772`. |
-| `http-sidecar` | host process (CPU, or a CUDA GPU on a Linux box), upstream Kokoro | depends on host hardware | `./scripts/start-kokoro-sidecar.sh http`. Runs `sidecars/kokoro-http/server.py` under `uv` on port 8773; the api POSTs to `http://host.docker.internal:8773`. The non-MLX out-of-container path. |
+| `mlx-sidecar` | macOS host, Kokoro under Apple MLX (Metal GPU) via `mlx-audio` | ~80–120 ms (network round-trip + warm synth) | `./scripts/start-kokoro-sidecar.sh start mlx`. Runs `sidecars/kokoro-mlx/server.py` under `uv` on port 8772; the api POSTs to `http://host.docker.internal:8772`. |
+| `http-sidecar` | host process (CPU, or a CUDA GPU on a Linux box), upstream Kokoro | depends on host hardware | `./scripts/start-kokoro-sidecar.sh start http`. Runs `sidecars/kokoro-http/server.py` under `uv` on port 8773; the api POSTs to `http://host.docker.internal:8773`. The non-MLX out-of-container path. |
 
 Both sidecars speak the same wire protocol as `sidecars/piper-http` (`POST /synthesize` JSON in, raw PCM + `X-Sample-Rate` out), so a single api-side adapter drives all three runtimes. Voices encode language + gender in the first two letters (`af`/`am` American, `bf`/`bm` British, plus the other-language sets); non-English voices use espeak-ng for grapheme-to-phoneme, so install it on whichever host runs the model (`brew install espeak-ng`).
 
 Sidecar management:
 
 ```bash
-./scripts/start-kokoro-sidecar.sh mlx       # start MLX sidecar (:8772)
-./scripts/start-kokoro-sidecar.sh http      # start generic sidecar (:8773)
-./scripts/start-kokoro-sidecar.sh status    # which sidecars are up
-./scripts/start-kokoro-sidecar.sh stop      # stop any running sidecar
+./scripts/start-kokoro-sidecar.sh start mlx     # start MLX sidecar (:8772)
+./scripts/start-kokoro-sidecar.sh start http    # start generic sidecar (:8773)
+./scripts/start-kokoro-sidecar.sh status        # which sidecars are up
+./scripts/start-kokoro-sidecar.sh stop          # stop any running sidecar
 ```
 
 Health checks: `curl http://localhost:8772/health` (MLX) / `curl http://localhost:8773/health` (HTTP) — both return `{"ready": true, ...}` once the model has loaded.

@@ -56,6 +56,7 @@
 		PROVIDER_KINDS,
 		removeCatalogPiperVoice,
 		removePiperVoice,
+		sidecarHealth,
 		sttTestRecording,
 		testProvider,
 		updatePipelineSettings,
@@ -73,6 +74,7 @@
 		type ProviderPreviewPayload,
 		type ProviderSchema,
 		type ProviderSchemaList,
+		type SidecarHealth,
 		type SttCatalogEntry,
 		type SttTestResult,
 		type TestResult
@@ -486,6 +488,52 @@
 	const isParakeetDraft = $derived(
 		draftKind === 'stt' && draftProviderName === 'parakeet'
 	);
+
+	// Host-sidecar reachability badge for the Runtime picker (Johnny-1ge.6).
+	// Sidecar runtime values all carry "sidecar" (mlx-sidecar, coreml-sidecar,
+	// http-sidecar). Probe the user's sidecar_url override, else the field's
+	// schema default, so the operator sees "running" / "offline" before Test.
+	const sidecarProbeUrl = $derived.by<string | null>(() => {
+		if (!selectedEntry) return null;
+		const runtime = draftValues['runtime'];
+		if (typeof runtime !== 'string' || !runtime.includes('sidecar')) return null;
+		const typed = draftValues['sidecar_url'];
+		if (typeof typed === 'string' && typed.trim() !== '') return typed.trim();
+		const field = selectedEntry.field_schema.fields.find((f) => f.name === 'sidecar_url');
+		const def = field?.default;
+		return typeof def === 'string' && def !== '' ? def : null;
+	});
+
+	let sidecarHealthState = $state<SidecarHealth | null>(null);
+	let sidecarHealthLoading = $state(false);
+
+	$effect(() => {
+		const url = sidecarProbeUrl;
+		if (!url) {
+			sidecarHealthState = null;
+			sidecarHealthLoading = false;
+			return;
+		}
+		let cancelled = false;
+		sidecarHealthLoading = true;
+		// Debounce so switching runtimes / typing a URL settles before probing.
+		const timer = setTimeout(() => {
+			sidecarHealth(url)
+				.then((res) => {
+					if (!cancelled) sidecarHealthState = res.sidecars[0] ?? null;
+				})
+				.catch(() => {
+					if (!cancelled) sidecarHealthState = null;
+				})
+				.finally(() => {
+					if (!cancelled) sidecarHealthLoading = false;
+				});
+		}, 300);
+		return () => {
+			cancelled = true;
+			clearTimeout(timer);
+		};
+	});
 
 	function previewPayload(): ProviderPreviewPayload | null {
 		if (draftKind === null || draftProviderName === null) return null;
@@ -1934,6 +1982,29 @@
 														<option value={opt.value}>{opt.label}</option>
 													{/each}
 												</select>
+												{#if field.name === 'runtime' && sidecarProbeUrl}
+													<p
+														class="m-0 flex items-center gap-1.5 text-xs"
+														data-testid="sidecar-health"
+													>
+														{#if sidecarHealthLoading}
+															<span class="text-muted-foreground">Checking sidecar…</span>
+														{:else if sidecarHealthState?.ok}
+															<span class="inline-block size-2 rounded-full bg-success"></span>
+															<span class="text-success"
+																>sidecar running ({sidecarHealthState.url})</span
+															>
+														{:else}
+															<span class="inline-block size-2 rounded-full bg-destructive"
+															></span>
+															<span class="text-destructive"
+																>sidecar offline — start with <code
+																	>./scripts/start-sidecars.sh start</code
+																></span
+															>
+														{/if}
+													</p>
+												{/if}
 											{:else if field.type === 'checkbox'}
 												<label class="flex items-center gap-2 text-sm text-foreground">
 													<input

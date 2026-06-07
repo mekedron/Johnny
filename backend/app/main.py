@@ -20,6 +20,7 @@ from app.api.history import router as history_router
 from app.api.meeting_configs import router as meeting_configs_router
 from app.api.providers import router as providers_router
 from app.api.sessions import router as sessions_router
+from app.api.sidecars import router as sidecars_router
 from app.api.stt_stream import router as stt_stream_router
 from app.api.templates import router as templates_router
 from app.api.ws import router as ws_router
@@ -132,6 +133,7 @@ app.include_router(history_router)
 app.include_router(meeting_configs_router)
 app.include_router(providers_router)
 app.include_router(sessions_router)
+app.include_router(sidecars_router)
 app.include_router(stt_stream_router)
 app.include_router(templates_router)
 app.include_router(ws_router)

@@ -182,6 +182,22 @@ export interface SttCatalogResponse {
 }
 
 /**
+ * Reachability of one host sidecar (Johnny-1ge.6). `ok` is true when the
+ * sidecar's `GET /health` answered 200 within the probe timeout.
+ */
+export interface SidecarHealth {
+	name: string;
+	url: string;
+	ok: boolean;
+	latency_ms: number | null;
+	error: string | null;
+}
+
+export interface SidecarsHealthResponse {
+	sidecars: SidecarHealth[];
+}
+
+/**
  * Result of a mic-recording STT test (Johnny-ckz.15.2).
  *
  * ``transcript`` is the final, concatenated text the provider returned.
@@ -287,6 +303,18 @@ function extractDetail(body: unknown): string | null {
 
 export function listSchemas(): Promise<ProviderSchemaList> {
 	return request<ProviderSchemaList>('/providers/schemas');
+}
+
+/**
+ * Probe whether the host sidecar backing a runtime is reachable (Johnny-1ge.6).
+ * The Providers modal calls this for the sidecar_url of a selected sidecar
+ * runtime so it can badge the Runtime picker "running" / "offline" before the
+ * user clicks Test.
+ */
+export function sidecarHealth(url: string): Promise<SidecarsHealthResponse> {
+	return request<SidecarsHealthResponse>(
+		`/sidecars/health?url=${encodeURIComponent(url)}`
+	);
 }
 
 export function listProviders(): Promise<ProviderList> {

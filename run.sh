@@ -70,10 +70,20 @@ docker compose --profile meet-worker build meet-worker
 # the shell.
 docker compose up -d --build "$@"
 
+# Boot every available host sidecar (Parakeet STT / Piper / Kokoro TTS) so a
+# saved sidecar-runtime works without a separate manual launch. Each sidecar is
+# a soft dependency: a missing toolchain (no swift / no uv) SKIPS just that one,
+# never fails the stack. Opt out per-sidecar with JOHNNY_DISABLED_SIDECARS
+# (comma-separated keys, e.g. parakeet-coreml,kokoro-mlx — see .env.example).
+# `|| true` keeps a single sidecar failure from aborting the whole bring-up.
+"$(dirname "$0")/scripts/start-sidecars.sh" start || true
+
 cat <<'EOF' >&2
 [run.sh] Stack started in the background.
-[run.sh]   Frontend:  http://localhost:5173
-[run.sh]   API:       http://localhost:8000
+[run.sh]   Frontend:     http://localhost:5173
+[run.sh]   API:          http://localhost:8000
+[run.sh]   Sidecars:     ./scripts/start-sidecars.sh status   (per-sidecar state)
+[run.sh]   Sidecar logs: tail -f .validation/<provider>-<backend>-sidecar.log
 [run.sh] Tail logs:   docker compose logs -f
 [run.sh] Stop stack:  ./stop.sh
 EOF
