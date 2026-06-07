@@ -540,6 +540,31 @@ export function removeCatalogPiperVoice(
 	);
 }
 
+// --- Cartesia voice catalog (Johnny-ckz.18) -------------------------------
+
+export interface CartesiaVoice {
+	id: string;
+	name: string;
+	description: string;
+	language: string;
+	gender: string;
+	is_public: boolean;
+}
+
+export interface CartesiaVoiceList {
+	voices: CartesiaVoice[];
+}
+
+/**
+ * List every Cartesia voice using the saved row's API key. Hits
+ * Cartesia's `GET /voices`, follows pagination, and returns a flat
+ * list sorted by (language, name). Only valid for `tts:cartesia`
+ * providers — other rows return 400.
+ */
+export function listCartesiaVoices(id: number): Promise<CartesiaVoiceList> {
+	return request<CartesiaVoiceList>(`/providers/${id}/cartesia/voices`);
+}
+
 // --- runtime package install (Parakeet / NeMo) ----------------------------
 
 export interface PackageStatus {

@@ -38,6 +38,8 @@ from app.providers.base import (
     UnknownProviderError,
     get_registry,
 )
+from app.providers.cartesia_tts import CartesiaTTS
+from app.providers.cartesia_tts import register as _register_cartesia_tts
 from app.providers.deepgram_stt import DeepgramSTT
 from app.providers.deepgram_stt import register as _register_deepgram_stt
 from app.providers.elevenlabs_stt import ElevenLabsSTT
@@ -83,6 +85,7 @@ from app.providers.schema_validation import (
 _register_piper_tts(replace=True)
 _register_openai_tts(replace=True)
 _register_elevenlabs_tts(replace=True)
+_register_cartesia_tts(replace=True)
 _register_openai_compatible_llm(replace=True)
 _register_openai_llm(replace=True)
 _register_anthropic_llm(replace=True)
@@ -95,6 +98,7 @@ _register_elevenlabs_stt(replace=True)
 
 __all__ = [
     "AnthropicLLM",
+    "CartesiaTTS",
     "ChatMessage",
     "ChatRole",
     "DeepgramSTT",

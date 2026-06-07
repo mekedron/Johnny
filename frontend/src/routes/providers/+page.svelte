@@ -35,6 +35,7 @@
 		installCatalogPiperVoice,
 		installPiperVoice,
 		installProviderPackage,
+		listCartesiaVoices,
 		listCatalogPiperVoices,
 		listPiperVoices,
 		listProviders,
@@ -54,6 +55,7 @@
 		updateProvider,
 		validateClient,
 		ValidationFailure,
+		type CartesiaVoice,
 		type PackageStatus,
 		type PiperVoice,
 		type Provider,
@@ -96,6 +98,7 @@
 
 	const MIC_RECORDING_MS = 5000;
 	const PIPER_PROVIDER_NAME = 'piper';
+	const CARTESIA_PROVIDER_NAME = 'cartesia';
 
 	let catalog = $state<CatalogEntry[]>([]);
 	let providersList = $state<Provider[]>([]);
@@ -144,6 +147,11 @@
 	let parakeetInstalling = $state(false);
 	let parakeetInstallLog = $state('');
 	let parakeetInstallError = $state<string | null>(null);
+
+	let cartesiaVoiceList = $state<CartesiaVoice[]>([]);
+	let cartesiaVoiceLoading = $state(false);
+	let cartesiaVoiceError = $state<string | null>(null);
+	let cartesiaVoiceFilter = $state('');
 
 	let showExport = $state(false);
 	let exportWithSecrets = $state(false);
@@ -259,6 +267,9 @@
 		if (row.kind === 'tts' && row.provider_name === PIPER_PROVIDER_NAME) {
 			loadVoiceList(row);
 		}
+		if (row.kind === 'tts' && row.provider_name === CARTESIA_PROVIDER_NAME) {
+			loadCartesiaVoiceList(row);
+		}
 	}
 
 	function closeModal() {
@@ -292,6 +303,9 @@
 		parakeetStatus = null;
 		parakeetInstallLog = '';
 		parakeetInstallError = null;
+		cartesiaVoiceList = [];
+		cartesiaVoiceError = null;
+		cartesiaVoiceFilter = '';
 	}
 
 	function selectKind(kind: ProviderKind) {
@@ -361,6 +375,9 @@
 
 	const isPiperDraft = $derived(
 		draftKind === 'tts' && draftProviderName === PIPER_PROVIDER_NAME
+	);
+	const isCartesiaDraft = $derived(
+		draftKind === 'tts' && draftProviderName === CARTESIA_PROVIDER_NAME
 	);
 	const isParakeetDraft = $derived(
 		draftKind === 'stt' && draftProviderName === 'parakeet'
@@ -792,6 +809,24 @@
 		draftValues = { ...draftValues, voice_id: voice.key };
 	}
 
+	async function loadCartesiaVoiceList(row: Provider) {
+		cartesiaVoiceLoading = true;
+		cartesiaVoiceError = null;
+		cartesiaVoiceList = [];
+		try {
+			const data = await listCartesiaVoices(row.id);
+			cartesiaVoiceList = data.voices;
+		} catch (e) {
+			cartesiaVoiceError = e instanceof Error ? e.message : String(e);
+		} finally {
+			cartesiaVoiceLoading = false;
+		}
+	}
+
+	function useCartesiaVoice(voice: CartesiaVoice) {
+		draftValues = { ...draftValues, voice_id: voice.id };
+	}
+
 	async function loadParakeetStatus(rowId: number) {
 		try {
 			parakeetStatus = await getProviderPackage(rowId);
@@ -914,6 +949,19 @@
 				v.language_code.toLowerCase().includes(term) ||
 				v.language_name.toLowerCase().includes(term) ||
 				v.quality.toLowerCase().includes(term)
+		);
+	});
+
+	const filteredCartesiaVoices = $derived.by<CartesiaVoice[]>(() => {
+		const term = cartesiaVoiceFilter.trim().toLowerCase();
+		if (!term) return cartesiaVoiceList;
+		return cartesiaVoiceList.filter(
+			(v) =>
+				v.name.toLowerCase().includes(term) ||
+				v.id.toLowerCase().includes(term) ||
+				v.language.toLowerCase().includes(term) ||
+				v.gender.toLowerCase().includes(term) ||
+				v.description.toLowerCase().includes(term)
 		);
 	});
 
@@ -1508,6 +1556,91 @@
 														{/if}
 													</Button>
 												{/if}
+											</li>
+										{/each}
+									</ul>
+								{/if}
+							</section>
+						{/if}
+
+						{#if isCartesiaDraft && mode === 'edit' && editingRow}
+							<section
+								class="flex flex-col gap-3 rounded-md border border-border bg-surface-1 px-4 py-4"
+								aria-label="Cartesia voice picker"
+								data-testid="cartesia-voice-library"
+							>
+								<div class="flex items-baseline justify-between">
+									<h3 class="m-0 text-sm font-semibold text-foreground">Voice library</h3>
+									{#if cartesiaVoiceList.length > 0}
+										<span class="text-xs text-ink-subtle">
+											{cartesiaVoiceList.length} voices
+										</span>
+									{/if}
+								</div>
+								<p class="m-0 text-xs text-muted-foreground">
+									Browse the live <span class="font-mono">GET /voices</span> catalog from
+									your Cartesia account. Click Use to set this voice as the configured
+									<span class="font-mono">voice_id</span>.
+								</p>
+								<Input
+									type="search"
+									placeholder="Filter by name, language, gender, or UUID…"
+									bind:value={cartesiaVoiceFilter}
+									data-testid="cartesia-voice-filter"
+								/>
+								{#if cartesiaVoiceError}
+									<Alert.Root variant="destructive">
+										<CircleAlertIcon />
+										<Alert.Description>{cartesiaVoiceError}</Alert.Description>
+									</Alert.Root>
+								{/if}
+								{#if cartesiaVoiceLoading}
+									<p class="text-xs text-muted-foreground">Loading voice catalog…</p>
+								{:else if filteredCartesiaVoices.length === 0}
+									<p class="text-xs text-muted-foreground">
+										{cartesiaVoiceFilter
+											? 'No voices match the filter.'
+											: 'No voices returned. Save the provider with an API key, then re-open.'}
+									</p>
+								{:else}
+									<ul
+										class="m-0 flex max-h-72 list-none flex-col gap-1.5 overflow-y-auto p-0"
+										data-testid="cartesia-voice-list"
+									>
+										{#each filteredCartesiaVoices as voice (voice.id)}
+											{@const isSelected = draftValues.voice_id === voice.id}
+											<li
+												class="flex items-center gap-2 rounded-sm border bg-surface-2 px-3 py-2"
+												class:border-foreground={isSelected}
+												class:border-border={!isSelected}
+												data-testid={`cartesia-voice-${voice.id}`}
+											>
+												<div class="flex min-w-0 flex-1 flex-col gap-0.5">
+													<span class="truncate text-sm font-medium text-foreground">
+														{voice.name}
+													</span>
+													<span class="text-[0.7rem] text-muted-foreground">
+														<span class="font-mono">{voice.language || '—'}</span>
+														{#if voice.gender}
+															· {voice.gender}
+														{/if}
+														{#if voice.description}
+															· {voice.description}
+														{/if}
+													</span>
+													<span class="font-mono text-[0.6rem] text-ink-subtle">
+														{voice.id}
+													</span>
+												</div>
+												<Button
+													variant="outline"
+													size="sm"
+													onclick={() => useCartesiaVoice(voice)}
+													disabled={isSelected}
+													data-testid={`cartesia-use-${voice.id}`}
+												>
+													{isSelected ? 'Selected' : 'Use'}
+												</Button>
 											</li>
 										{/each}
 									</ul>

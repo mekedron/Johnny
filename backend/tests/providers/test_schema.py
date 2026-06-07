@@ -6,6 +6,7 @@ import pytest
 
 from app.providers import (
     AnthropicLLM,
+    CartesiaTTS,
     DeepgramSTT,
     ElevenLabsTTS,
     FasterWhisperSTT,
@@ -31,6 +32,7 @@ from app.providers.schema_validation import (
 
 ADAPTERS = [
     AnthropicLLM,
+    CartesiaTTS,
     DeepgramSTT,
     ElevenLabsTTS,
     FasterWhisperSTT,

@@ -3,10 +3,10 @@
   "sessionId": "92aa43ca-591e-4b12-ab32-62131855e44d",
   "status": "running",
   "startedAt": "2026-06-07T00:08:27.194Z",
-  "updatedAt": "2026-06-07T01:40:56.016Z",
-  "currentIteration": 5,
+  "updatedAt": "2026-06-07T02:00:05.061Z",
+  "currentIteration": 6,
   "maxIterations": 0,
-  "tasksCompleted": 5,
+  "tasksCompleted": 6,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -92,8 +92,8 @@
       {
         "id": "Johnny-ckz.7",
         "title": "Per-session activity / timing log surfaced in chat history (per-turn pipeline events with durations)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-ckz.8",
@@ -399,6 +399,16 @@
       "durationMs": 1197067,
       "startedAt": "2026-06-07T00:55:21.615Z",
       "endedAt": "2026-06-07T01:15:18.682Z"
+    },
+    {
+      "iteration": 6,
+      "status": "completed",
+      "taskId": "Johnny-ckz.7",
+      "taskTitle": "Per-session activity / timing log surfaced in chat history (per-turn pipeline events with durations)",
+      "taskCompleted": true,
+      "durationMs": 1524410,
+      "startedAt": "2026-06-07T01:15:30.781Z",
+      "endedAt": "2026-06-07T01:40:55.191Z"
     }
   ],
   "skippedTaskIds": [],

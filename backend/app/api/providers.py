@@ -41,6 +41,12 @@ from app.providers.base import (
     UnknownProviderError,
     get_registry,
 )
+from app.providers.cartesia_tts import (
+    PROVIDER_NAME as CARTESIA_PROVIDER_NAME,
+)
+from app.providers.cartesia_tts import (
+    fetch_voice_catalog as cartesia_fetch_voice_catalog,
+)
 from app.providers.piper_tts import (
     DEFAULT_MODEL_DIR as PIPER_DEFAULT_MODEL_DIR,
 )
@@ -227,6 +233,28 @@ class VoiceRemoveResponse(BaseModel):
     installed: bool
     onnx_removed: bool
     onnx_json_removed: bool
+
+
+class CartesiaVoiceRead(BaseModel):
+    """One Cartesia voice entry returned by ``GET /voices``.
+
+    ``id`` is the UUID to paste into a CartesiaTTS provider's
+    ``voice_id`` field. ``language``, ``gender`` and ``description``
+    come straight from Cartesia so the picker can group / filter.
+    """
+
+    id: str
+    name: str
+    description: str
+    language: str
+    gender: str
+    is_public: bool
+
+
+class CartesiaVoiceListResponse(BaseModel):
+    """Response payload for ``GET /providers/{id}/cartesia/voices``."""
+
+    voices: list[CartesiaVoiceRead]
 
 
 class PlaySampleRequest(BaseModel):
@@ -1428,6 +1456,76 @@ async def install_voice(
     except Exception as exc:  # noqa: BLE001 — surface download errors
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return VoiceInstallResponse(**result)
+
+
+def _require_cartesia_row(
+    session: Session, provider_id: int
+) -> ProviderCredential:
+    """Look up a provider row and assert it is the Cartesia TTS adapter.
+
+    The voices endpoint hits Cartesia's ``GET /voices`` with the row's
+    saved API key — only meaningful for a Cartesia row. Reject anything
+    else with a 400 so the caller sees a precise diagnostic instead of an
+    auth failure against the wrong provider.
+    """
+    row = _get_row_or_404(session, provider_id)
+    if (
+        row.kind is not ProviderKind.TTS
+        or row.provider_name != CARTESIA_PROVIDER_NAME
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "cartesia voice catalog is only available for tts:cartesia "
+                f"providers (got {row.kind.value}:{row.provider_name})"
+            ),
+        )
+    return row
+
+
+@router.get(
+    "/{provider_id}/cartesia/voices",
+    response_model=CartesiaVoiceListResponse,
+)
+async def list_cartesia_voices(
+    provider_id: int, session: SessionDep, crypto: CryptoDep
+) -> CartesiaVoiceListResponse:
+    """List every Cartesia voice via the row's saved API key.
+
+    Returns HTTP 400 when the provider row is not a Cartesia TTS adapter
+    or 502 when the upstream call fails (network / auth / malformed
+    payload). The error detail forwards the Cartesia diagnostic so an
+    operator can debug from the browser without checking server logs.
+    """
+    row = _require_cartesia_row(session, provider_id)
+    try:
+        creds = decrypt_json(crypto, row.credentials_encrypted)
+    except (CryptoError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"failed to decrypt credentials: {exc}",
+        ) from exc
+    api_key = creds.get("api_key") or ""
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="cartesia provider row has no api_key in credentials",
+        )
+    options = dict(row.config or {})
+    base_url = str(options.get("base_url") or "").strip()
+    api_version = str(options.get("api_version") or "").strip()
+    fetch_kwargs: dict[str, Any] = {}
+    if base_url:
+        fetch_kwargs["base_url"] = base_url
+    if api_version:
+        fetch_kwargs["api_version"] = api_version
+    try:
+        voices = await cartesia_fetch_voice_catalog(api_key, **fetch_kwargs)
+    except Exception as exc:  # noqa: BLE001 — surface fetch errors as 502
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return CartesiaVoiceListResponse(
+        voices=[CartesiaVoiceRead(**v.to_dict()) for v in voices],
+    )
 
 
 @router.delete(
