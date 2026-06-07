@@ -1,0 +1,7 @@
+{
+  "_captured": "2026-06-08, live against the same signed-in Google Workspace session. This is the supervisor collector payload for the SECONDARY source, accounts.google.com/SignOutOptions. Note: this page exposes NO aria-label/data-* email candidates (candidates is empty) — the signed-in email is only present in the visible body text, which is exactly why the body-text sweep is the fallback that recovers it here.",
+  "expected_email": "nikita.rabykin@aikamatkat.fi",
+  "url": "https://accounts.google.com/SignOutOptions?hl=en&continue=https://myaccount.google.com",
+  "candidates": [],
+  "bodyText": "Choose an account\nNikita Rabykin\nnikita.rabykin@aikamatkat.fi\nManage your Google Account\nAdd account\nSign out\nAbout Google Privacy Terms Help"
+}

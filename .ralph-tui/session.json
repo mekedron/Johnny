@@ -3,10 +3,10 @@
   "sessionId": "fdf153cd-1429-4f44-9048-a1fbb60a77c5",
   "status": "running",
   "startedAt": "2026-06-07T23:21:19.573Z",
-  "updatedAt": "2026-06-07T23:36:10.373Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-07T23:57:08.518Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -399,8 +399,8 @@
       {
         "id": "Johnny-ckz.29",
         "title": "(BUG) Gemini model SELECT validator rejects models fetched live from Gemini's own API — 'gemini-3.5' returned by the catalog can't be saved",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-qow",
@@ -446,7 +446,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-ckz.29",
+      "taskTitle": "(BUG) Gemini model SELECT validator rejects models fetched live from Gemini's own API — 'gemini-3.5' returned by the catalog can't be saved",
+      "taskCompleted": true,
+      "durationMs": 863674,
+      "startedAt": "2026-06-07T23:21:45.882Z",
+      "endedAt": "2026-06-07T23:36:09.556Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

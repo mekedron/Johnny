@@ -267,6 +267,17 @@ def _maybe_finalize_signin(
     scraped_email = (
         str(scraped_email_raw).strip() if scraped_email_raw else None
     ) or None
+    if scraped_email is None:
+        # The supervisor signed in but couldn't resolve an email. Echo
+        # its debug context (page URL + body snippet) so a placeholder
+        # row is traceable to a real failure rather than a silent miss.
+        debug = marker.get("scrape_debug")
+        logger.warning(
+            "bot-signin %s: no email scraped — placeholder will be used "
+            "(scrape_debug=%s)",
+            signin.id,
+            debug if isinstance(debug, dict) else "<none>",
+        )
     account = _resolve_account_for_finalize(
         session=session,
         crypto=crypto,

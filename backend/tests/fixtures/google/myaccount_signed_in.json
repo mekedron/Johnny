@@ -1,0 +1,20 @@
+{
+  "_captured": "2026-06-08, live against a real signed-in Google Workspace session (the Johnny-ckz.26 repro account). This is the exact payload the supervisor's in-page collector returns for myaccount.google.com. The legacy [data-email]/[data-initial-email] markers produced NO hits; the live signal is the One Google Bar account chip aria-label. Obfuscated class names are intentionally omitted — only the stable aria-label signal is kept.",
+  "expected_email": "nikita.rabykin@aikamatkat.fi",
+  "url": "https://myaccount.google.com/",
+  "candidates": [
+    {
+      "value": "Google Account: Nikita Rabykin  \n(nikita.rabykin@aikamatkat.fi)",
+      "source": "a[href*=\"SignOutOptions\"][aria-label]"
+    },
+    {
+      "value": "Google Account: Nikita Rabykin  \n(nikita.rabykin@aikamatkat.fi)",
+      "source": "a[aria-label*=\"@\"][aria-label]"
+    },
+    {
+      "value": "Google Account: Nikita Rabykin  \n(nikita.rabykin@aikamatkat.fi)",
+      "source": "[aria-label*=\"Google Account\"][aria-label]"
+    }
+  ],
+  "bodyText": "Skip to main content\nAccount\nHelp\nHome\nHome\nPersonal info\nPersonal info\nSecurity & sign-in\nSecurity & sign-in\nData & privacy\nData & privacy\nPeople & sharing\nPeople & sharing\nWallet & subscriptions\nWallet & subscriptions\nNikita Rabykin\nnikita.rabykin@aikamatkat.fi\nsearch\n\nOnly you can see your settings."
+}
