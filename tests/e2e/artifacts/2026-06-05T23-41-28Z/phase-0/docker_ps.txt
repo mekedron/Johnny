@@ -1,5 +1,0 @@
-NAMES                                STATUS                    IMAGE
-johnny-frontend-1                    Up 17 minutes (healthy)   johnny-frontend
-johnny-api-1                         Up 18 minutes (healthy)   johnny-api
-johnny-redis-1                       Up 18 minutes (healthy)   redis:7-alpine
-johnny-postgres-1                    Up 18 minutes (healthy)   pgvector/pgvector:pg16
