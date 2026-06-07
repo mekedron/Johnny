@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "sessionId": "92aa43ca-591e-4b12-ab32-62131855e44d",
+  "sessionId": "d140062f-580d-4e80-b815-4dd296a98109",
   "status": "running",
-  "startedAt": "2026-06-07T00:08:27.194Z",
-  "updatedAt": "2026-06-07T11:26:06.297Z",
-  "currentIteration": 19,
+  "startedAt": "2026-06-07T12:00:21.402Z",
+  "updatedAt": "2026-06-07T12:07:48.562Z",
+  "currentIteration": 0,
   "maxIterations": 0,
-  "tasksCompleted": 19,
+  "tasksCompleted": 0,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -27,7 +27,7 @@
         }
       }
     ],
-    "totalTasks": 53,
+    "totalTasks": 62,
     "tasks": [
       {
         "id": "Johnny-ckz.1",
@@ -93,31 +93,31 @@
         "id": "Johnny-ckz.7",
         "title": "Per-session activity / timing log surfaced in chat history (per-turn pipeline events with durations)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-ckz.8",
         "title": "Profile + tune end-to-end voice latency on real local STT/TTS/LLM, and add in-UI optimization tips on each provider settings page",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-wyd",
         "title": "Barge-in classifier LLM ReadTimeouts against Ollama Qwen 35B — every timeout is a missed interrupt + log noise",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-klh",
         "title": "Playground transcripts label every speaker=null row as 'You' — including STT hallucinations and any non-user rows",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-31g",
         "title": "STT hallucinations from silence: faster-whisper produces 'Does Olam A.P.I.', '. . . .', etc. on quiet mic and persists them as transcripts",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-ckz.9",
@@ -147,7 +147,7 @@
         "id": "Johnny-3ha",
         "title": "Active LLM provider sometimes gets unselected (TTS and STT are not affected)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-1zg",
@@ -234,46 +234,34 @@
         "completedInSession": false
       },
       {
+        "id": "Johnny-al3",
+        "title": "Multi-account bot identities: '+ Add another meeting bot' tile becomes a real button that creates a new bot row",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-105",
+        "title": "noVNC bot sign-in: container + backend endpoints + frontend modal",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-pia",
+        "title": "Settings page redesign — multi-account Calendars + Bots with noVNC sign-in",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
         "id": "Johnny-ckz.12",
         "title": "STT provider settings: 'Record sample' button to verify transcription end-to-end (symmetric to existing TTS demo)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-ckz.13",
         "title": "Playground: voice barge-in does nothing — bot ignores user speech mid-utterance (interrupt bug recurring on WebRTC transport)",
         "status": "completed",
         "completedInSession": false
-      },
-      {
-        "id": "Johnny-g2n",
-        "title": "ElevenLabs TTS: handle 'exceeds quota' 401 gracefully in the response loop",
-        "status": "completed",
-        "completedInSession": true
-      },
-      {
-        "id": "Johnny-tjd",
-        "title": "Interrupt harness real-mode: clarification assertion shape doesn't match real behavior",
-        "status": "completed",
-        "completedInSession": true
-      },
-      {
-        "id": "Johnny-gft",
-        "title": "Interrupt harness real-mode: stop scenario flakes when LLM round-trip is slow",
-        "status": "completed",
-        "completedInSession": true
-      },
-      {
-        "id": "Johnny-9eq",
-        "title": "LLM providers: fetch model list dynamically from each provider's API instead of hardcoding",
-        "status": "completed",
-        "completedInSession": true
-      },
-      {
-        "id": "Johnny-uga",
-        "title": "ElevenLabs e2e plan uses library voice incompatible with free tier",
-        "status": "completed",
-        "completedInSession": true
       },
       {
         "id": "Johnny-ckz.14",
@@ -284,6 +272,72 @@
       {
         "id": "Johnny-ckz.15",
         "title": "STT provider catalog: VoiceInk parity + NVIDIA Parakeet + streaming-in-chat",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.16",
+        "title": "Playground: every audio stream rejected with 'Audio stream ended: session not active' — regression from Johnny-ckz.14",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.17",
+        "title": "Backend: Realtime S2S provider abstraction + dual-mode pipeline routing (split vs unified)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.18",
+        "title": "Backend + Frontend: Cartesia Sonic 3.5 TTS provider (split-pipeline option, playground + Meet parity)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.19",
+        "title": "Backend: OpenAI GPT-Realtime S2S provider (audio in/out, barge-in, playground + Meet parity)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-g2n",
+        "title": "ElevenLabs TTS: handle 'exceeds quota' 401 gracefully in the response loop",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-tjd",
+        "title": "Interrupt harness real-mode: clarification assertion shape doesn't match real behavior",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-gft",
+        "title": "Interrupt harness real-mode: stop scenario flakes when LLM round-trip is slow",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-9eq",
+        "title": "LLM providers: fetch model list dynamically from each provider's API instead of hardcoding",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-uga",
+        "title": "ElevenLabs e2e plan uses library voice incompatible with free tier",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.20",
+        "title": "Backend: Google Gemini Live API S2S provider (audio in/out, barge-in, playground + Meet parity)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-ckz.21",
+        "title": "Frontend: Providers page — pipeline-mode toggle (split vs unified) + S2S provider picker (Meet + playground)",
         "status": "completed",
         "completedInSession": false
       },
@@ -300,27 +354,27 @@
         "completedInSession": false
       },
       {
-        "id": "Johnny-ckz.16",
-        "title": "Playground: every audio stream rejected with 'Audio stream ended: session not active' — regression from Johnny-ckz.14",
+        "id": "Johnny-ckz.22",
+        "title": "Adapt interruption test tool to drive S2S providers (OpenAI Realtime + Gemini Live) across Meet and playground",
         "status": "completed",
         "completedInSession": false
       },
       {
         "id": "Johnny-qow",
         "title": "Add no-CLI bot sign-in: in-browser Chromium via noVNC helper container",
-        "status": "open",
+        "status": "completed",
         "completedInSession": false
       },
       {
         "id": "Johnny-4da",
         "title": "Read Google Docs/Sheets URLs linked in calendar event description and include as pre-meeting context",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-dsy",
         "title": "Cross-session continuity: rehydrate prior session summary for recurring events",
-        "status": "open",
+        "status": "completed",
         "completedInSession": false
       },
       {
@@ -349,198 +403,7 @@
       }
     ]
   },
-  "iterations": [
-    {
-      "iteration": 1,
-      "status": "completed",
-      "taskId": "Johnny-wyd",
-      "taskTitle": "Barge-in classifier LLM ReadTimeouts against Ollama Qwen 35B — every timeout is a missed interrupt + log noise",
-      "taskCompleted": true,
-      "durationMs": 538355,
-      "startedAt": "2026-06-07T00:09:54.427Z",
-      "endedAt": "2026-06-07T00:18:52.782Z"
-    },
-    {
-      "iteration": 2,
-      "status": "completed",
-      "taskId": "Johnny-klh",
-      "taskTitle": "Playground transcripts label every speaker=null row as 'You' — including STT hallucinations and any non-user rows",
-      "taskCompleted": true,
-      "durationMs": 356562,
-      "startedAt": "2026-06-07T00:19:04.237Z",
-      "endedAt": "2026-06-07T00:25:00.799Z"
-    },
-    {
-      "iteration": 3,
-      "status": "completed",
-      "taskId": "Johnny-31g",
-      "taskTitle": "STT hallucinations from silence: faster-whisper produces 'Does Olam A.P.I.', '. . . .', etc. on quiet mic and persists them as transcripts",
-      "taskCompleted": true,
-      "durationMs": 759586,
-      "startedAt": "2026-06-07T00:25:12.466Z",
-      "endedAt": "2026-06-07T00:37:52.052Z"
-    },
-    {
-      "iteration": 4,
-      "status": "completed",
-      "taskId": "Johnny-3ha",
-      "taskTitle": "Active LLM provider sometimes gets unselected (TTS and STT are not affected)",
-      "taskCompleted": true,
-      "durationMs": 1025813,
-      "startedAt": "2026-06-07T00:38:04.140Z",
-      "endedAt": "2026-06-07T00:55:09.953Z"
-    },
-    {
-      "iteration": 5,
-      "status": "completed",
-      "taskId": "Johnny-ckz.8",
-      "taskTitle": "Profile + tune end-to-end voice latency on real local STT/TTS/LLM, and add in-UI optimization tips on each provider settings page",
-      "taskCompleted": true,
-      "durationMs": 1197067,
-      "startedAt": "2026-06-07T00:55:21.615Z",
-      "endedAt": "2026-06-07T01:15:18.682Z"
-    },
-    {
-      "iteration": 6,
-      "status": "completed",
-      "taskId": "Johnny-ckz.7",
-      "taskTitle": "Per-session activity / timing log surfaced in chat history (per-turn pipeline events with durations)",
-      "taskCompleted": true,
-      "durationMs": 1524410,
-      "startedAt": "2026-06-07T01:15:30.781Z",
-      "endedAt": "2026-06-07T01:40:55.191Z"
-    },
-    {
-      "iteration": 7,
-      "status": "completed",
-      "taskId": "Johnny-ckz.18",
-      "taskTitle": "Backend + Frontend: Cartesia Sonic 3.5 TTS provider (split-pipeline option, playground + Meet parity)",
-      "taskCompleted": true,
-      "durationMs": 1133333,
-      "startedAt": "2026-06-07T01:41:10.955Z",
-      "endedAt": "2026-06-07T02:00:04.288Z"
-    },
-    {
-      "iteration": 8,
-      "status": "completed",
-      "taskId": "Johnny-ckz.17",
-      "taskTitle": "Backend: Realtime S2S provider abstraction + dual-mode pipeline routing (split vs unified)",
-      "taskCompleted": true,
-      "durationMs": 1809591,
-      "startedAt": "2026-06-07T02:00:17.045Z",
-      "endedAt": "2026-06-07T02:30:26.636Z"
-    },
-    {
-      "iteration": 9,
-      "status": "completed",
-      "taskId": "Johnny-ckz.21",
-      "taskTitle": "Frontend: Providers page — pipeline-mode toggle (split vs unified) + S2S provider picker (Meet + playground)",
-      "taskCompleted": true,
-      "durationMs": 1047272,
-      "startedAt": "2026-06-07T02:30:41.499Z",
-      "endedAt": "2026-06-07T02:48:08.771Z"
-    },
-    {
-      "iteration": 10,
-      "status": "completed",
-      "taskId": "Johnny-ckz.20",
-      "taskTitle": "Backend: Google Gemini Live API S2S provider (audio in/out, barge-in, playground + Meet parity)",
-      "taskCompleted": true,
-      "durationMs": 1561138,
-      "startedAt": "2026-06-07T02:48:22.176Z",
-      "endedAt": "2026-06-07T03:14:23.314Z"
-    },
-    {
-      "iteration": 11,
-      "status": "completed",
-      "taskId": "Johnny-ckz.19",
-      "taskTitle": "Backend: OpenAI GPT-Realtime S2S provider (audio in/out, barge-in, playground + Meet parity)",
-      "taskCompleted": true,
-      "durationMs": 1356185,
-      "startedAt": "2026-06-07T03:14:38.189Z",
-      "endedAt": "2026-06-07T03:37:14.374Z"
-    },
-    {
-      "iteration": 12,
-      "status": "completed",
-      "taskId": "Johnny-ckz.22",
-      "taskTitle": "Adapt interruption test tool to drive S2S providers (OpenAI Realtime + Gemini Live) across Meet and playground",
-      "taskCompleted": true,
-      "durationMs": 1919811,
-      "startedAt": "2026-06-07T03:37:33.244Z",
-      "endedAt": "2026-06-07T04:09:33.055Z"
-    },
-    {
-      "iteration": 13,
-      "status": "completed",
-      "taskId": "Johnny-g2n",
-      "taskTitle": "ElevenLabs TTS: handle 'exceeds quota' 401 gracefully in the response loop",
-      "taskCompleted": true,
-      "durationMs": 1168881,
-      "startedAt": "2026-06-07T04:09:47.991Z",
-      "endedAt": "2026-06-07T04:29:16.872Z"
-    },
-    {
-      "iteration": 14,
-      "status": "completed",
-      "taskId": "Johnny-tjd",
-      "taskTitle": "Interrupt harness real-mode: clarification assertion shape doesn't match real behavior",
-      "taskCompleted": true,
-      "durationMs": 17526342,
-      "startedAt": "2026-06-07T04:29:36.307Z",
-      "endedAt": "2026-06-07T09:21:42.649Z"
-    },
-    {
-      "iteration": 15,
-      "status": "completed",
-      "taskId": "Johnny-gft",
-      "taskTitle": "Interrupt harness real-mode: stop scenario flakes when LLM round-trip is slow",
-      "taskCompleted": true,
-      "durationMs": 680964,
-      "startedAt": "2026-06-07T09:21:58.264Z",
-      "endedAt": "2026-06-07T09:33:19.228Z"
-    },
-    {
-      "iteration": 16,
-      "status": "completed",
-      "taskId": "Johnny-9eq",
-      "taskTitle": "LLM providers: fetch model list dynamically from each provider's API instead of hardcoding",
-      "taskCompleted": true,
-      "durationMs": 1479907,
-      "startedAt": "2026-06-07T09:33:35.685Z",
-      "endedAt": "2026-06-07T09:58:15.592Z"
-    },
-    {
-      "iteration": 17,
-      "status": "completed",
-      "taskId": "Johnny-uga",
-      "taskTitle": "ElevenLabs e2e plan uses library voice incompatible with free tier",
-      "taskCompleted": true,
-      "durationMs": 751870,
-      "startedAt": "2026-06-07T09:58:31.826Z",
-      "endedAt": "2026-06-07T10:11:03.696Z"
-    },
-    {
-      "iteration": 18,
-      "status": "completed",
-      "taskId": "Johnny-ckz.12",
-      "taskTitle": "STT provider settings: 'Record sample' button to verify transcription end-to-end (symmetric to existing TTS demo)",
-      "taskCompleted": true,
-      "durationMs": 991611,
-      "startedAt": "2026-06-07T10:11:20.303Z",
-      "endedAt": "2026-06-07T10:27:51.914Z"
-    },
-    {
-      "iteration": 19,
-      "status": "completed",
-      "taskId": "Johnny-4da",
-      "taskTitle": "Read Google Docs/Sheets URLs linked in calendar event description and include as pre-meeting context",
-      "taskCompleted": true,
-      "durationMs": 1755255,
-      "startedAt": "2026-06-07T10:28:08.381Z",
-      "endedAt": "2026-06-07T10:57:23.636Z"
-    }
-  ],
+  "iterations": [],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],
