@@ -12,6 +12,7 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { BOT_MODE_LABEL, type BotMode } from '$lib/templates';
 	import { PIPELINE_MODE_LABEL, type Provider, type ProviderKind } from '$lib/providers';
+	import { readSessionPersonality, fallbackChipText } from '$lib/personalities';
 	import type { LiveState, PlaygroundController } from '$lib/playground/playgroundSession.svelte';
 
 	let { controller }: { controller: PlaygroundController } = $props();
@@ -80,12 +81,27 @@
 				if (def) chips.push({ label: kind.toUpperCase(), value: `${def.display_name} (default)` });
 			}
 		}
+		const liveCharacter =
+			typeof overrides.personality_name === 'string' ? overrides.personality_name : null;
+		if (liveCharacter) {
+			chips.push({ label: 'Character', value: liveCharacter });
+		}
 		const livePersona =
 			typeof overrides.persona === 'string' ? overrides.persona : controller.persona;
 		if (livePersona && livePersona.trim().length > 0) {
 			chips.push({ label: 'Persona', value: livePersona.trim().slice(0, 32) });
 		}
 		return chips;
+	});
+
+	// Johnny-oly.6: surface a personality provider fallback as a warning line.
+	const liveFallbacks = $derived.by(() => {
+		const session = controller.liveSession;
+		return session ? readSessionPersonality(session).fallbacks : [];
+	});
+	const liveCharacterName = $derived.by(() => {
+		const session = controller.liveSession;
+		return session ? readSessionPersonality(session).name : null;
 	});
 
 	function handleComposerKeydown(e: KeyboardEvent) {
@@ -144,6 +160,18 @@
 								<span class="font-semibold text-ink-subtle">{chip.label}</span>
 								<span class="text-foreground">{chip.value}</span>
 							</span>
+						{/each}
+					</div>
+				{/if}
+				{#if liveFallbacks.length > 0}
+					<div class="flex flex-col gap-1" data-testid="live-fallbacks">
+						{#each liveFallbacks as fb (fb.kind)}
+							<a
+								href="/personalities"
+								class="text-warning border-warning/40 bg-warning/10 hover:bg-warning/15 block rounded-sm border px-2 py-1 text-xs"
+							>
+								{fallbackChipText(liveCharacterName, fb)}
+							</a>
 						{/each}
 					</div>
 				{/if}

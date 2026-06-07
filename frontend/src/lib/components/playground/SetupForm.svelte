@@ -7,6 +7,7 @@
 	import { BOT_MODE_LABEL, BOT_MODES, type BotMode } from '$lib/templates';
 	import type { ProviderKind } from '$lib/providers';
 	import type { PlaygroundController } from '$lib/playground/playgroundSession.svelte';
+	import PersonalityPicker from '$lib/components/PersonalityPicker.svelte';
 
 	let { controller }: { controller: PlaygroundController } = $props();
 
@@ -83,6 +84,17 @@
 			<p class="m-0 text-xs text-muted-foreground">
 				Layers template instructions and base context on top of your persona / system prompt.
 			</p>
+		</div>
+
+		<!-- Personality -->
+		<div class="flex flex-col gap-1.5">
+			<PersonalityPicker
+				id="pg-personality"
+				personalities={controller.personalities}
+				value={controller.selectedPersonalityId}
+				onChange={controller.selectPersonality}
+				helpText="Applies a saved character (LLM + TTS). Blank uses the global default providers."
+			/>
 		</div>
 
 		<!-- Persona -->

@@ -48,6 +48,13 @@ export interface StartBrowserSessionPayload {
 	mode?: string;
 	persona?: string;
 	system_prompt?: string;
+	/**
+	 * Personality preset (Johnny-oly) to apply for this session. `null` /
+	 * omitted falls back to the meeting's personality (rehearsal) then the
+	 * `is_default` personality — see the resolver precedence in
+	 * `app/services/personality_resolver.py`.
+	 */
+	personality_id?: number | null;
 	provider_overrides?: Record<string, BrowserProviderOverride>;
 }
 

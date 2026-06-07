@@ -15,7 +15,7 @@ import type {
 	TranscriptChunk
 } from '$lib/sessionDetail';
 
-const API_BASE: string = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
+const API_BASE: string = import.meta.env?.VITE_API_BASE ?? 'http://localhost:8000';
 
 export interface PastSessionSummary {
 	id: number;
@@ -45,6 +45,11 @@ export interface HistorySessionRecord {
 	meeting_config_id: number | null;
 	status: BotSessionStatus;
 	container_name: string | null;
+	/**
+	 * Personality display name snapshotted at session start (Johnny-oly.6).
+	 * `null` for legacy sessions — the history page falls back to "Johnny".
+	 */
+	bot_name: string | null;
 	started_at: string | null;
 	ended_at: string | null;
 	error_reason: string | null;
@@ -57,6 +62,18 @@ export interface HistoryDetail {
 	transcripts: TranscriptChunk[];
 	decisions: AgentDecisionRecord[];
 	utterances: AgentUtteranceRecord[];
+}
+
+/** Historical default bot name for sessions with no personality snapshot. */
+export const DEFAULT_BOT_NAME = 'Johnny';
+
+/**
+ * The bot name to render for a session: the snapshotted `bot_name` when present
+ * (Johnny-oly.6), else the historical "Johnny" fallback for legacy sessions.
+ */
+export function botDisplayName(session: { bot_name?: string | null }): string {
+	const name = session.bot_name;
+	return typeof name === 'string' && name.length > 0 ? name : DEFAULT_BOT_NAME;
 }
 
 export interface TranscriptSearchHit {

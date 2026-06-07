@@ -35,6 +35,11 @@ import {
 	type ProviderKind
 } from '$lib/providers';
 import {
+	listPersonalities,
+	defaultPersonalitySelection,
+	type Personality
+} from '$lib/personalities';
+import {
 	PlaygroundMicDeniedError,
 	startPlaygroundStt,
 	type PlaygroundSttSession
@@ -127,6 +132,10 @@ export class PlaygroundController {
 	);
 	mode = $state<BotMode>('free_auto_speak');
 	selectedTemplateId = $state<number | null>(null);
+	// Johnny-oly.6: selected personality (null = blank/no override). Sticky in
+	// localStorage so the last pick survives a reload (seeded in loadMetadata).
+	selectedPersonalityId = $state<number | null>(null);
+	personalities = $state<Personality[]>([]);
 	contextInjection = $state('');
 	advancedOpen = $state(false);
 	providerOverrides = $state<Record<ProviderKind, number | null>>({
@@ -236,14 +245,17 @@ export class PlaygroundController {
 	loadMetadata = async (): Promise<void> => {
 		this.loadingMetadata = true;
 		try {
-			const [tpls, provs, settings] = await Promise.all([
+			const [tpls, provs, settings, persons] = await Promise.all([
 				listTemplates(),
 				listProviders(),
-				getPipelineSettings().catch(() => null)
+				getPipelineSettings().catch(() => null),
+				listPersonalities().catch(() => [] as Personality[])
 			]);
 			this.templates = tpls;
 			this.providers = provs;
 			this.pipelineSettings = settings;
+			this.personalities = persons;
+			this.seedPersonalitySelection();
 		} catch (err) {
 			this.setDiagnostic('general', {
 				severity: 'error',
@@ -254,6 +266,60 @@ export class PlaygroundController {
 			this.loadingMetadata = false;
 		}
 	};
+
+	// --- personality sticky selection (Johnny-oly.6) -----------------------
+
+	private static readonly PERSONALITY_KEY = 'johnny:playground:personality';
+
+	/**
+	 * Seed the selection from localStorage, falling back to the default
+	 * personality. A stored '' is the blank/no-override option; a stored id no
+	 * longer in the library falls back to the default.
+	 */
+	private seedPersonalitySelection(): void {
+		const stored = this.readStoredPersonality();
+		if (stored === undefined) {
+			this.selectedPersonalityId = defaultPersonalitySelection(this.personalities);
+			return;
+		}
+		if (stored !== null && !this.personalities.some((p) => p.id === stored)) {
+			this.selectedPersonalityId = defaultPersonalitySelection(this.personalities);
+			return;
+		}
+		this.selectedPersonalityId = stored;
+	}
+
+	/** Set the selection and persist it (sticky across reloads). */
+	selectPersonality = (value: number | null): void => {
+		this.selectedPersonalityId = value;
+		try {
+			if (typeof localStorage === 'undefined') return;
+			localStorage.setItem(
+				PlaygroundController.PERSONALITY_KEY,
+				value === null ? '' : String(value)
+			);
+		} catch {
+			// localStorage can throw (private mode / quota); a non-sticky
+			// selection is acceptable degradation.
+		}
+	};
+
+	/**
+	 * Read the stored selection: `undefined` = nothing stored, `null` = the
+	 * blank option, a number = a pinned personality id.
+	 */
+	private readStoredPersonality(): number | null | undefined {
+		try {
+			if (typeof localStorage === 'undefined') return undefined;
+			const raw = localStorage.getItem(PlaygroundController.PERSONALITY_KEY);
+			if (raw === null) return undefined;
+			if (raw === '') return null;
+			const n = Number(raw);
+			return Number.isFinite(n) ? n : undefined;
+		} catch {
+			return undefined;
+		}
+	}
 
 	private buildPayload(): StartBrowserSessionPayload {
 		const overrides: Record<string, BrowserProviderOverride> = {};
@@ -269,7 +335,8 @@ export class PlaygroundController {
 		}
 		const payload: StartBrowserSessionPayload = {
 			mode: this.mode,
-			persona: this.persona.trim() || undefined
+			persona: this.persona.trim() || undefined,
+			personality_id: this.selectedPersonalityId
 		};
 		if (Object.keys(overrides).length > 0) {
 			payload.provider_overrides = overrides;

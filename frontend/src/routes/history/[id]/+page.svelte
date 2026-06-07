@@ -24,6 +24,7 @@
 		type DecisionOutcome
 	} from '$lib/sessionDetail';
 	import {
+		botDisplayName,
 		deleteHistorySession,
 		exportHistoryUrl,
 		getHistoryDetail,
@@ -52,6 +53,10 @@
 	let activeTab = $state<Tab>('transcript');
 
 	const exportHref = $derived(exportHistoryUrl(sessionId));
+	// Johnny-oly.6: render the bot name snapshotted for THIS session. Legacy
+	// sessions (and any with no personality) carry a null snapshot and fall
+	// back to "Johnny", the historical default.
+	const botName = $derived(detail ? botDisplayName(detail.session) : 'Johnny');
 
 	async function loadDetail() {
 		loading = true;
@@ -214,7 +219,7 @@
 		const utterances: TranscriptTimelineEntry[] = d.utterances.map((u) => ({
 			key: `u-${u.id}`,
 			text: u.output_text,
-			speaker: 'Johnny',
+			speaker: botDisplayName(d.session),
 			createdAt: u.created_at,
 			isBot: true
 		}));
@@ -231,7 +236,7 @@
 </script>
 
 <svelte:head>
-	<title>Session #{sessionIdStr} · History · Johnny</title>
+	<title>Session #{sessionIdStr} · History · {botName}</title>
 </svelte:head>
 
 <Page testId="history-detail">
@@ -691,7 +696,7 @@
 				>
 					{#if detail.utterances.length === 0}
 						<p class="px-4 py-12 text-center text-sm text-muted-foreground italic">
-							Johnny didn't speak in this session.
+							{botName} didn't speak in this session.
 						</p>
 					{:else}
 						<ul

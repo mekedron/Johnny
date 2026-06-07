@@ -45,6 +45,12 @@
 	} from '$lib/meetingConfigs';
 	import { startSession } from '$lib/sessions';
 	import { startBrowserSession } from '$lib/browserSessions';
+	import PersonalityPicker from '$lib/components/PersonalityPicker.svelte';
+	import {
+		listPersonalities,
+		defaultPersonalitySelection,
+		type Personality
+	} from '$lib/personalities';
 	import { goto } from '$app/navigation';
 
 	const WINDOW_DAYS = 14;
@@ -78,12 +84,15 @@
 	let templates = $state<Template[]>([]);
 	let templatesLoaded = $state(false);
 	let templatesError = $state<string | null>(null);
+	let personalities = $state<Personality[]>([]);
+	let personalitiesLoaded = $state(false);
 	let panelLoading = $state(false);
 	let panelError = $state<string | null>(null);
 	let panelSuccess = $state<string | null>(null);
 	let existingConfig = $state<MeetingConfig | null>(null);
 	let formTemplateId = $state<number | null>(null);
 	let formIdentityId = $state<number | null>(null);
+	let formPersonalityId = $state<number | null>(null);
 	let formMode = $state<BotMode>('listen_only');
 	let formInstructions = $state('');
 	let formContext = $state('');
@@ -126,6 +135,7 @@
 		return (
 			formTemplateId !== existingConfig.profile_template_id ||
 			formIdentityId !== existingConfig.identity_account_id ||
+			formPersonalityId !== existingConfig.personality_id ||
 			formMode !== existingConfig.mode ||
 			formInstructions !== (existingConfig.instructions ?? '') ||
 			formContext !== (existingConfig.context ?? '') ||
@@ -214,12 +224,28 @@
 		joinNowSessionId = null;
 		tryBotMessage = null;
 		try {
-			await Promise.all([ensureTemplatesLoaded(), loadConfig(event.id)]);
+			await Promise.all([
+				ensureTemplatesLoaded(),
+				ensurePersonalitiesLoaded(),
+				loadConfig(event.id)
+			]);
 			seedForm(existingConfig);
 		} catch (e) {
 			panelError = e instanceof Error ? e.message : String(e);
 		} finally {
 			panelLoading = false;
+		}
+	}
+
+	async function ensurePersonalitiesLoaded() {
+		if (personalitiesLoaded) return;
+		// Best-effort: a personality load failure must not block configuring a
+		// meeting. The picker just shows the blank option until it loads.
+		try {
+			personalities = await listPersonalities();
+			personalitiesLoaded = true;
+		} catch {
+			personalities = [];
 		}
 	}
 
@@ -244,6 +270,7 @@
 			formTemplateId = config.profile_template_id;
 			formIdentityId = config.identity_account_id;
 			formMode = config.mode;
+			formPersonalityId = config.personality_id;
 			formInstructions = config.instructions ?? '';
 			formContext = config.context ?? '';
 			formAllowedRepliesText = formatAllowedRepliesText(config.allowed_replies);
@@ -257,6 +284,7 @@
 		const defaultAccount =
 			accounts.find((a) => a.bot_session.connected) ?? accounts[0];
 		formIdentityId = defaultAccount?.id ?? null;
+		formPersonalityId = defaultPersonalitySelection(personalities);
 		const seedTemplate = templates[0] ?? null;
 		formMode = seedTemplate?.mode ?? 'listen_only';
 		formInstructions = '';
@@ -328,6 +356,7 @@
 		const payload: MeetingConfigUpsertPayload = {
 			profile_template_id: formTemplateId,
 			identity_account_id: formIdentityId,
+			personality_id: formPersonalityId,
 			mode: formMode,
 			instructions: formInstructions.trim() === '' ? null : formInstructions,
 			context: formContext.trim() === '' ? null : formContext,
@@ -975,6 +1004,16 @@
 							>
 								{MODE_DESCRIPTION[formMode]}
 							</p>
+						</section>
+
+						<section class="flex flex-col gap-2">
+							<PersonalityPicker
+								id="mc-personality"
+								{personalities}
+								value={formPersonalityId}
+								onChange={(v) => (formPersonalityId = v)}
+								helpText="Overrides the bot's LLM + TTS for this meeting. Blank uses the global default providers."
+							/>
 						</section>
 
 						<section class="flex flex-col gap-2">

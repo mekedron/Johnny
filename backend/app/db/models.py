@@ -348,6 +348,11 @@ class BotSession(TimestampMixin, Base):
         default=BotSessionStatus.SCHEDULED,
     )
     container_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Johnny-oly.6: display name of the personality resolved at session start,
+    # snapshotted so history renders the bot's name as it was for THIS session.
+    # NULL for sessions created before this column landed (and whenever no
+    # personality resolved); the UI falls back to "Johnny" for a NULL value.
+    bot_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     logs: Mapped[str | None] = mapped_column(Text, nullable=True)

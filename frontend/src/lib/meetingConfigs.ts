@@ -13,6 +13,8 @@ export interface MeetingConfig {
 	calendar_event_id: number;
 	profile_template_id: number;
 	identity_account_id: number;
+	/** Personality preset for this meeting; `null` = inherit the default. */
+	personality_id: number | null;
 	mode: BotMode;
 	instructions: string | null;
 	context: string | null;
@@ -26,6 +28,7 @@ export interface MeetingConfig {
 export interface MeetingConfigUpsertPayload {
 	profile_template_id: number;
 	identity_account_id: number;
+	personality_id?: number | null;
 	mode?: BotMode | null;
 	instructions: string | null;
 	context: string | null;

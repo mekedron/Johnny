@@ -235,3 +235,118 @@ export function validatePersonalityForm(
 
 	return errors;
 }
+
+// --- picker helpers (Johnny-oly.6; pure, unit-tested in personalityPicker.test.ts) ---
+
+/** Label for the empty option = "no personality override, use global defaults". */
+export const PERSONALITY_BLANK_LABEL = 'Use global default providers (no personality override)';
+
+export interface PersonalityPickerOption {
+	/** `null` is the blank/no-override option; otherwise a personality id. */
+	value: number | null;
+	label: string;
+}
+
+/**
+ * Build the `<select>` options for a personality picker: the blank option
+ * first, then every personality. The `is_default` row is suffixed
+ * "(default)" so the operator can tell which one a blank/inherited choice
+ * resolves to. Input order is preserved (the API already returns
+ * default-first).
+ */
+export function personalityOptions(list: Personality[]): PersonalityPickerOption[] {
+	const options: PersonalityPickerOption[] = [{ value: null, label: PERSONALITY_BLANK_LABEL }];
+	for (const p of list) {
+		options.push({
+			value: p.id,
+			label: p.is_default ? `${p.display_name} (default)` : p.display_name
+		});
+	}
+	return options;
+}
+
+/**
+ * The selection a fresh surface pre-picks: the `is_default` personality's id,
+ * or `null` (blank) when the library has no default. This is the bead's
+ * "Default = the personality marked is_default" pre-selection.
+ */
+export function defaultPersonalitySelection(list: Personality[]): number | null {
+	const def = list.find((p) => p.is_default);
+	return def ? def.id : null;
+}
+
+/**
+ * Human label for a current selection — used by the active-session badge and
+ * the live chips. `null`/unknown id renders the blank label so a stale or
+ * blank selection never shows an empty string.
+ */
+export function personalityLabel(list: Personality[], value: number | null): string {
+	if (value === null) return PERSONALITY_BLANK_LABEL;
+	const match = list.find((p) => p.id === value);
+	return match ? match.display_name : PERSONALITY_BLANK_LABEL;
+}
+
+// --- active-session decoration (Johnny-oly.6) ------------------------------
+//
+// The resolver (Johnny-oly.3) snapshots which personality served a session
+// onto the session row: `bot_name` (the resolved display name) plus, inside
+// `playground_overrides`, the `personality_id` and any `personality_fallbacks`
+// (provider pins that couldn't be honored). These helpers read that decoration
+// back for the active-session badge + warning chip.
+
+export interface PersonalityFallbackInfo {
+	kind: string;
+	reason: string;
+}
+
+export interface SessionPersonality {
+	/** Resolved bot display name, or `null` (UI falls back to "Johnny"). */
+	name: string | null;
+	/** The applied personality's id, when one applied (for the detail panel). */
+	personalityId: number | null;
+	/** Provider pins that fell back to the global default. */
+	fallbacks: PersonalityFallbackInfo[];
+}
+
+interface SessionLike {
+	bot_name?: string | null;
+	playground_overrides?: Record<string, unknown> | null;
+}
+
+export function readSessionPersonality(session: SessionLike): SessionPersonality {
+	const ov = session.playground_overrides;
+	const overrides: Record<string, unknown> = ov && typeof ov === 'object' ? ov : {};
+	const idRaw = overrides['personality_id'];
+	const personalityId = typeof idRaw === 'number' ? idRaw : null;
+	const nameOverride = overrides['personality_name'];
+	const name =
+		typeof session.bot_name === 'string' && session.bot_name.length > 0
+			? session.bot_name
+			: typeof nameOverride === 'string' && nameOverride.length > 0
+				? nameOverride
+				: null;
+	const fbRaw = overrides['personality_fallbacks'];
+	const fallbacks: PersonalityFallbackInfo[] = Array.isArray(fbRaw)
+		? fbRaw
+				.filter((f): f is Record<string, unknown> => !!f && typeof f === 'object')
+				.map((f) => ({
+					kind: typeof f['kind'] === 'string' ? f['kind'] : '',
+					reason: typeof f['reason'] === 'string' ? f['reason'] : ''
+				}))
+				.filter((f) => f.kind.length > 0)
+		: [];
+	return { name, personalityId, fallbacks };
+}
+
+const FALLBACK_REASON_TEXT: Record<string, string> = {
+	missing: 'is no longer configured',
+	deactivated: 'is inactive',
+	undecryptable: 'could not be decrypted'
+};
+
+/** One-line warning describing a provider pin that fell back (bead §E). */
+export function fallbackChipText(name: string | null, fb: PersonalityFallbackInfo): string {
+	const who = name ? `Personality "${name}"` : 'This personality';
+	const why = FALLBACK_REASON_TEXT[fb.reason] ?? 'is unavailable';
+	return `${who}: its ${fb.kind.toUpperCase()} provider ${why} — using the global default instead.`;
+}

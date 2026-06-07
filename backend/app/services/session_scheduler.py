@@ -416,6 +416,22 @@ async def start_session_for_meeting(
             session, provider_payload, personality, crypto=get_crypto()
         )
         provider_payload = resolution.payload
+        # Johnny-oly.6: snapshot the resolved personality so history renders this
+        # session's bot name and the active-session card can show the character +
+        # any provider fallback. ``playground_overrides`` doubles as the generic
+        # per-session decoration bag here (the meet-worker itself never reads it).
+        row.bot_name = resolution.personality_name
+        if resolution.personality_id is not None:
+            snapshot: dict[str, Any] = {
+                "personality_id": resolution.personality_id,
+                "personality_name": resolution.personality_name,
+            }
+            if resolution.fallbacks:
+                snapshot["personality_fallbacks"] = [
+                    {"kind": fb.kind, "reason": fb.reason}
+                    for fb in resolution.fallbacks
+                ]
+            row.playground_overrides = snapshot
     except Exception:  # noqa: BLE001 — never block a launch on personality errors
         logger.exception(
             "personality resolution failed for meeting_config=%s; "

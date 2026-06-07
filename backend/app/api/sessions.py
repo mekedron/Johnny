@@ -104,6 +104,7 @@ class BotSessionRead(BaseModel):
     source: BotSessionSource
     status: BotSessionStatus
     container_name: str | None
+    bot_name: str | None = None
     started_at: datetime | None
     ended_at: datetime | None
     error_reason: str | None

@@ -3,10 +3,10 @@
   "sessionId": "426dba43-17e8-4f93-a179-086859618e18",
   "status": "running",
   "startedAt": "2026-06-07T20:27:08.873Z",
-  "updatedAt": "2026-06-07T21:53:57.395Z",
-  "currentIteration": 3,
+  "updatedAt": "2026-06-07T22:38:16.549Z",
+  "currentIteration": 4,
   "maxIterations": 0,
-  "tasksCompleted": 3,
+  "tasksCompleted": 4,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -45,8 +45,8 @@
       {
         "id": "Johnny-oly.3",
         "title": "Backend: personality-driven provider resolution at session start (LLM + TTS override with loud-fallback)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-oly.4",
@@ -98,6 +98,16 @@
       "durationMs": 1337903,
       "startedAt": "2026-06-07T21:03:47.544Z",
       "endedAt": "2026-06-07T21:26:05.447Z"
+    },
+    {
+      "iteration": 4,
+      "status": "completed",
+      "taskId": "Johnny-oly.3",
+      "taskTitle": "Backend: personality-driven provider resolution at session start (LLM + TTS override with loud-fallback)",
+      "taskCompleted": true,
+      "durationMs": 1662312,
+      "startedAt": "2026-06-07T21:26:14.310Z",
+      "endedAt": "2026-06-07T21:53:56.622Z"
     }
   ],
   "skippedTaskIds": [],

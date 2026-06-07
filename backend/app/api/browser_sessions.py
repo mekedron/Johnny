@@ -890,6 +890,11 @@ async def start_browser_session(
         )
 
     row.playground_overrides = overrides_snapshot
+    # Johnny-oly.6: snapshot the resolved personality's display name so history
+    # renders this session's bot name. ``_personality_snapshot`` only writes
+    # ``personality_name`` when a personality applied, so this stays NULL for a
+    # bare session and the UI falls back to "Johnny".
+    row.bot_name = overrides_snapshot.get("personality_name")
 
     _spawn_runner(bot_session_id=row.id, spec=spec)
 

@@ -46,6 +46,7 @@ from app.db.models import (
     CalendarEvent,
     GoogleAccount,
     MeetingConfig,
+    Personality,
     ProfileTemplate,
 )
 
@@ -67,6 +68,11 @@ class MeetingConfigUpsert(BaseModel):
 
     profile_template_id: int = Field(ge=1)
     identity_account_id: int = Field(ge=1)
+    personality_id: int | None = Field(default=None, ge=1)
+    """Optional personality preset (Johnny-oly) for this meeting. ``None`` =
+    inherit the global default personality at session start (PRD §4a). The
+    session resolver tolerates a stale id, but the upsert still 422s on an id
+    that doesn't reference an existing personality for clearer operator feedback."""
     mode: BotMode | None = None
     instructions: str | None = None
     context: str | None = None
@@ -91,6 +97,7 @@ class MeetingConfigRead(BaseModel):
     calendar_event_id: int
     profile_template_id: int
     identity_account_id: int
+    personality_id: int | None
     mode: BotMode
     instructions: str | None
     context: str | None
@@ -127,6 +134,21 @@ def _get_account_or_422(session: Session, account_id: int) -> GoogleAccount:
             status_code=422, detail="identity_account_id does not reference an account"
         )
     return row
+
+
+def _validate_personality_or_422(session: Session, personality_id: int | None) -> None:
+    """Reject a non-null ``personality_id`` that references no personality.
+
+    ``None`` is always valid (inherit the global default). A set-but-missing id
+    is a 422 — friendlier than letting the DB FK raise a generic IntegrityError.
+    """
+    if personality_id is None:
+        return
+    if session.get(Personality, personality_id) is None:
+        raise HTTPException(
+            status_code=422,
+            detail="personality_id does not reference a personality",
+        )
 
 
 def _validate_limited_auto_speak(
@@ -230,6 +252,7 @@ def upsert_meeting_config(
     _get_event_or_404(session, event_id)
     template = _get_template_or_422(session, payload.profile_template_id)
     _get_account_or_422(session, payload.identity_account_id)
+    _validate_personality_or_422(session, payload.personality_id)
 
     mode = payload.mode if payload.mode is not None else template.mode
     _validate_limited_auto_speak(mode, payload.allowed_replies, template)
@@ -241,6 +264,7 @@ def upsert_meeting_config(
             calendar_event_id=event_id,
             profile_template_id=payload.profile_template_id,
             identity_account_id=payload.identity_account_id,
+            personality_id=payload.personality_id,
             mode=mode,
             instructions=payload.instructions,
             context=payload.context,
@@ -257,6 +281,7 @@ def upsert_meeting_config(
         row = existing
         row.profile_template_id = payload.profile_template_id
         row.identity_account_id = payload.identity_account_id
+        row.personality_id = payload.personality_id
         row.mode = mode
         row.instructions = payload.instructions
         row.context = payload.context

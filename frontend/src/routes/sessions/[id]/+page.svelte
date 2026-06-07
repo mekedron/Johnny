@@ -18,6 +18,8 @@
 		type BotSession,
 		type BotSessionStatus
 	} from '$lib/sessions';
+	import { readSessionPersonality, fallbackChipText } from '$lib/personalities';
+	import PersonalityDetailPanel from '$lib/components/PersonalityDetailPanel.svelte';
 	import {
 		DECISION_OUTCOME_LABEL,
 		getSessionDetail,
@@ -109,6 +111,12 @@
 		session !== null &&
 			(session.status === 'ended' || session.status === 'failed')
 	);
+
+	// Johnny-oly.6: personality decoration for the active-session card.
+	const sessionPersonality = $derived(
+		session !== null ? readSessionPersonality(session) : null
+	);
+	let personalityPanelOpen = $state(false);
 
 	const startedAtMs = $derived<number | null>(
 		session !== null && session.started_at !== null
@@ -724,6 +732,21 @@
 			>
 				{#if session !== null}
 					<span class="font-mono">{session.source}</span>
+					{#if sessionPersonality?.name}
+						<span aria-hidden="true">·</span>
+						{#if sessionPersonality.personalityId !== null}
+							<button
+								type="button"
+								class="text-foreground hover:underline"
+								onclick={() => (personalityPanelOpen = true)}
+								data-testid="session-character"
+							>
+								Character: {sessionPersonality.name}
+							</button>
+						{:else}
+							<span data-testid="session-character">Character: {sessionPersonality.name}</span>
+						{/if}
+					{/if}
 					{#if durationLabel}
 						<span aria-hidden="true">·</span>
 						<time class="font-mono" data-testid="session-duration"
@@ -769,6 +792,19 @@
 			{/if}
 		{/snippet}
 	</PageHeader>
+
+	{#if sessionPersonality && sessionPersonality.fallbacks.length > 0}
+		<div class="flex flex-col gap-1.5" data-testid="session-fallbacks">
+			{#each sessionPersonality.fallbacks as fb (fb.kind)}
+				<a
+					href="/personalities"
+					class="text-warning border-warning/40 bg-warning/10 hover:bg-warning/15 block rounded-md border px-3 py-2 text-xs"
+				>
+					{fallbackChipText(sessionPersonality.name, fb)}
+				</a>
+			{/each}
+		</div>
+	{/if}
 
 	{#if loadError}
 		<Alert.Root variant="destructive" data-testid="load-error">
@@ -1224,3 +1260,10 @@
 		</Card.Root>
 	{/if}
 </Page>
+
+{#if personalityPanelOpen && sessionPersonality?.personalityId != null}
+	<PersonalityDetailPanel
+		personalityId={sessionPersonality.personalityId}
+		onClose={() => (personalityPanelOpen = false)}
+	/>
+{/if}

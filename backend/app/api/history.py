@@ -151,6 +151,7 @@ class HistorySessionRead(BaseModel):
     meeting_config_id: int | None
     status: BotSessionStatus
     container_name: str | None
+    bot_name: str | None = None
     started_at: datetime | None
     ended_at: datetime | None
     error_reason: str | None
