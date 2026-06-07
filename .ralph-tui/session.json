@@ -3,10 +3,10 @@
   "sessionId": "92aa43ca-591e-4b12-ab32-62131855e44d",
   "status": "running",
   "startedAt": "2026-06-07T00:08:27.194Z",
-  "updatedAt": "2026-06-07T04:29:18.561Z",
-  "currentIteration": 12,
+  "updatedAt": "2026-06-07T09:21:43.600Z",
+  "currentIteration": 13,
   "maxIterations": 0,
-  "tasksCompleted": 12,
+  "tasksCompleted": 13,
   "isPaused": false,
   "agentPlugin": "claude",
   "trackerState": {
@@ -248,8 +248,8 @@
       {
         "id": "Johnny-g2n",
         "title": "ElevenLabs TTS: handle 'exceeds quota' 401 gracefully in the response loop",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-tjd",
@@ -469,6 +469,16 @@
       "durationMs": 1919811,
       "startedAt": "2026-06-07T03:37:33.244Z",
       "endedAt": "2026-06-07T04:09:33.055Z"
+    },
+    {
+      "iteration": 13,
+      "status": "completed",
+      "taskId": "Johnny-g2n",
+      "taskTitle": "ElevenLabs TTS: handle 'exceeds quota' 401 gracefully in the response loop",
+      "taskCompleted": true,
+      "durationMs": 1168881,
+      "startedAt": "2026-06-07T04:09:47.991Z",
+      "endedAt": "2026-06-07T04:29:16.872Z"
     }
   ],
   "skippedTaskIds": [],

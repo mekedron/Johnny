@@ -110,6 +110,15 @@ class Scenario:
     # queued transcripts and any post-interrupt response cycle.
     drain_extra_s: float = 1.0
 
+    # Keyword the real follow-up answer must contain to be considered a
+    # successful redirect. Real LLMs phrase the answer non-deterministically
+    # ("Regarding the launch date..." / "The launch is scheduled for..." /
+    # "We're targeting end of quarter for launch"), so the assertion is on
+    # the keyword that locates the redirected topic in the produced text
+    # rather than on a literal full-sentence match. Only meaningful for
+    # scenarios where ``expect_followup_utterance`` is true (Johnny-tjd).
+    followup_keyword: str | None = None
+
     # Fields below are for the future container variant; the in-process
     # runner ignores them.
     notes: tuple[str, ...] = field(default_factory=tuple)
@@ -228,6 +237,13 @@ CLARIFICATION_REDIRECTS_LONG_ANSWER = Scenario(
         "give me a summary of project status",
         "wait, what about the launch date?",
     ),
+    # The follow-up question redirects to "launch date" — the real LLM's
+    # answer should mention "launch" somewhere. The real-mode runner uses
+    # this for the semantic "did the bot actually address the redirect?"
+    # assertion (Johnny-tjd) so it doesn't depend on whether the cut path
+    # publishes an AgentSpoke event (which is sensitive to interrupt
+    # timing relative to the first sentence boundary).
+    followup_keyword="launch",
     # The follow-up response needs to drain after the interrupt — give
     # the bot up to a few seconds extra.
     drain_extra_s=2.5,

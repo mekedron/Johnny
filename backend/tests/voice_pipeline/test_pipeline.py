@@ -2285,6 +2285,122 @@ async def test_pipeline_interrupt_during_tts_truncates_audio(
     assert elapsed < 0.5
 
 
+async def test_pipeline_interrupt_before_first_sentence_emits_observable_agent_spoke(
+    two_utterance_pcm: bytes,
+) -> None:
+    """Johnny-tjd: cut answer must publish ``AgentSpoke`` for observability.
+
+    When the user barges in mid-LLM-stream — after some tokens have
+    accumulated in ``sentence_buffer`` but BEFORE the first sentence
+    boundary flushes to TTS — the pipeline used to silently drop the
+    cut answer because ``collected`` was empty. The activity log would
+    then show only the post-barge-in follow-up utterance and the cut
+    answer was invisible, even though the LLM committed to producing it.
+
+    The fix emits ``AgentSpoke`` (and persists the utterance) whenever
+    the answer LLM produced text, with ``audio_duration_ms=0`` as the
+    signal that no audio reached the transport. Downstream consumers
+    (UI, audit log) can filter on ``audio_duration_ms > 0`` if they
+    only want the "actually heard" subset.
+    """
+    from johnny.voice_pipeline import InMemoryUtteranceSink
+
+    frame_size = 640
+    frames = [
+        two_utterance_pcm[i : i + frame_size]
+        for i in range(0, len(two_utterance_pcm), frame_size)
+        if i + frame_size <= len(two_utterance_pcm)
+    ]
+
+    class _PreSentenceInterruptLLM(LLMProvider):
+        """First call: yield tokens with NO sentence boundary, set interrupt.
+
+        ``"Sure, let me tell you a"`` has no period / question mark /
+        exclamation, so the pipeline's sentence-boundary scanner never
+        flushes to TTS while the deltas stream in. After the last delta,
+        the LLM sets the interrupt event and returns; the pipeline then
+        sees interrupt-set on the tail flush and SKIPS calling TTS, so
+        ``collected`` stays empty.
+
+        Second call (driven by the second utterance the two-utterance
+        fixture produces): yield nothing so no AgentSpoke fires for the
+        follow-up. Keeps the test focused on the cut-path observability
+        contract rather than what the follow-up turn does.
+        """
+
+        def __init__(self, pipeline_ref: list[Any]) -> None:
+            self._pipeline_ref = pipeline_ref
+            self._calls = 0
+
+        @property
+        def name(self) -> str:
+            return "pre-sentence-interrupt"
+
+        async def chat(
+            self,
+            messages: Sequence[ChatMessage],  # noqa: ARG002
+            tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
+            response_format: dict[str, Any] | None = None,  # noqa: ARG002
+        ) -> LLMResponse:
+            return LLMResponse(text="", finish_reason="stop")
+
+        async def stream_chat(
+            self,
+            messages: Sequence[ChatMessage],
+        ) -> AsyncIterator[str]:
+            del messages
+            self._calls += 1
+            if self._calls > 1:
+                return
+                yield  # pragma: no cover — make this a generator
+            for delta in ("Sure", ", ", "let me ", "tell you ", "a"):
+                yield delta
+            self._pipeline_ref[0].interrupt()
+
+    pipeline_ref: list[Any] = [None]
+    sink = InMemoryUtteranceSink()
+    transport = _BufferedTransport(frames=frames)
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=transport,
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hi"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": True, "confidence": 0.95, "reason": "ok"}]
+        ),
+        answer_llm=_PreSentenceInterruptLLM(pipeline_ref),
+        tts=_FakeTTS(frame_count=5),
+        event_bus=bus,
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            confidence_threshold=0.5,
+        ),
+        utterance_sink=sink,
+    )
+    pipeline_ref[0] = pipeline
+    await pipeline.run()
+
+    # No audio reached the transport — the interrupt fired before any
+    # sentence boundary, so the pipeline never called TTS.
+    assert transport.played == []
+
+    # But the cut path IS observable: one AgentSpoke event with the
+    # partial text and audio_duration_ms=0. Without this signal the
+    # activity log would silently lose the bot's intent.
+    spoke = [e for e in bus.snapshot() if isinstance(e, AgentSpoke)]
+    assert len(spoke) == 1
+    assert spoke[0].text == "Sure, let me tell you a"
+    assert spoke[0].audio_duration_ms == 0
+
+    # And the utterance is persisted so the audit-log row in
+    # ``agent_utterances`` records what the bot tried to say.
+    records = sink.snapshot()
+    assert len(records) == 1
+    assert records[0].output_text == "Sure, let me tell you a"
+    assert records[0].audio_duration_ms == 0
+
+
 async def test_pipeline_interrupt_calls_transport_cancel_playback() -> None:
     """Johnny-ckz.13: interrupt() must signal the transport to flush
     queued audio. Without this hook, transports with deep buffers (e.g.

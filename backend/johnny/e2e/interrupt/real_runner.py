@@ -242,13 +242,44 @@ def _evaluate_real(
             )
 
         if scenario.expect_followup_utterance:
-            assertions.append(
-                AssertionResult(
-                    name="bot_emitted_followup_utterance",
-                    passed=len(spoke) >= 2,
-                    detail=f"agent_spoke_count={len(spoke)} (must be ≥ 2)",
+            # Semantic check: did the bot actually address the redirect?
+            # The user-visible success criterion is "after the barge-in,
+            # the bot answered the new question" — not "two AgentSpoke
+            # events fired". With scenario.followup_keyword set, we look
+            # for that token in the persisted-utterance corpus, which is
+            # robust to (a) the cut answer not emitting AgentSpoke when
+            # the interrupt lands before any sentence flushes, and
+            # (b) real LLMs phrasing the redirect non-deterministically.
+            # Fall back to the count check when no keyword is declared
+            # (older scenarios).
+            persisted_utterance_texts = [
+                u.output_text for u in utterance_sink.snapshot()
+            ]
+            if scenario.followup_keyword:
+                keyword = scenario.followup_keyword
+                addressed = any(
+                    _has_keyword(text, keyword)
+                    for text in persisted_utterance_texts
                 )
-            )
+                assertions.append(
+                    AssertionResult(
+                        name="bot_addressed_followup_keyword",
+                        passed=addressed and pipeline._fast_barge_in_count > 0,
+                        detail=(
+                            f"keyword={keyword!r}; "
+                            f"fast_barge_in_count={pipeline._fast_barge_in_count}; "
+                            f"persisted_utterances={persisted_utterance_texts!r}"
+                        ),
+                    )
+                )
+            else:
+                assertions.append(
+                    AssertionResult(
+                        name="bot_emitted_followup_utterance",
+                        passed=len(spoke) >= 2,
+                        detail=f"agent_spoke_count={len(spoke)} (must be ≥ 2)",
+                    )
+                )
         else:
             assertions.append(
                 AssertionResult(

@@ -1759,12 +1759,22 @@ class VoicePipeline:
     ) -> bool:
         """Generate the answer, stream into TTS, play, persist utterance.
 
-        Returns ``True`` only when audio frames were actually streamed to
-        the transport. Returns ``False`` when:
+        Returns ``True`` whenever the answer LLM produced text — including
+        cut answers where the user barged in before any sentence flushed
+        to TTS. Returns ``False`` when there's nothing to attribute the
+        spoken event to:
 
         * the answer LLM produced empty text;
-        * ``allowed_replies`` is set and no candidate matched;
-        * the user interrupted before audio started playing.
+        * ``allowed_replies`` is set and no candidate matched.
+
+        Cut answers (Johnny-tjd) STILL publish :class:`AgentSpoke` and
+        persist an utterance — ``audio_duration_ms`` is ``0`` when the
+        interrupt fires before any audio reaches the transport, which is
+        the signal downstream consumers use to distinguish a clean
+        completion (``audio_duration_ms > 0``) from a cut-before-speaking
+        one. Without this, the activity log shows ONLY the post-barge-in
+        follow-up utterance and the cut answer is invisible, even though
+        the LLM committed to a response.
 
         :attr:`_interrupt_event` is cleared by the caller
         (:meth:`_respond_to_transcript_inner`) at the start of each
@@ -1787,17 +1797,14 @@ class VoicePipeline:
         )
         if use_allowlist:
             picked = await self._select_allowed_reply(messages)
-            if picked is None or self._interrupt_event.is_set():
+            if picked is None:
                 return False
             text = picked
             collected = await self._play_text_streamed(text)
         else:
             text, collected = await self._stream_answer_into_tts(messages)
-            if not text or not collected:
+            if not text:
                 return False
-
-        if not collected:
-            return False
 
         audio_bytes = b"".join(collected)
         audio_ms = _pcm_duration_ms(len(audio_bytes), PCM_SAMPLE_RATE_HZ)
