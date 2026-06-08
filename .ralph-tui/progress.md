@@ -106,6 +106,36 @@ content=...)))`. Key mapping facts:
   livekit-free (matches `johnny.agent`'s import-safety) while
   `from johnny.agent.adapters import JohnnyLLM` triggers the SDK import on access.
 
+### Self-host LiveKit in docker-compose as an internal-only SFU
+Add the room server as a normal compose service — single-node, stateless,
+reachable container-to-container only. Hard-won specifics:
+- **Image tag is `livekit/livekit-server:v1.12.0`** (WITH the `v`; the bare
+  `1.12.0` the Johnny-4em spike note wrote does NOT resolve). Alpine-based, so
+  `sh`/`wget`/`nc` exist → healthcheck `["CMD","wget","-q","-O","/dev/null",
+  "http://localhost:7880/"]` (LiveKit answers `GET /` with `OK`, exit 0).
+- **API secret MUST be >= 32 chars** in non-dev mode or the server logs
+  `secret is too short` and refuses real auth. `devkey`/`secret` (the spike's
+  `--dev` keys) FAILS outside `--dev`. Use a >=32-char default in `.env.example`.
+- **Keys via env, posture via a committed config file.** Pass
+  `LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"` (compose
+  substitutes → literal `key: secret`) so no secret is committed; put RTC
+  ports + `use_external_ip: false` in `livekit/livekit.yaml` (bind-mounted RO).
+  The api/worker get the SAME two vars so minted `livekit.api.AccessToken`
+  JWTs validate against the server. `LIVEKIT_URL` default → `ws://livekit:7880`.
+- **Internal-only = NO `ports:` mapping.** On a user-defined bridge, containers
+  reach each other on every port (incl. the RTC UDP media range) with nothing
+  published; `expose` is metadata only. Verified: `NetworkSettings.Ports` all
+  `null`, host `127.0.0.1:7880/7881` closed, bad token → `401` over WS. This is
+  the "no unauthenticated WS exposure" requirement met by topology, not a flag.
+- **Single-node = no `redis:` block** (adding one switches to distributed mode);
+  **stateless = no volume** (rooms ephemeral; survives `down -v` with nothing to
+  restore). Because the only mount is the committed `livekit/livekit.yaml`,
+  `run.sh` needs NO new bind-dir creation — there is no `~/.johnny/livekit` dir.
+- Validate without wiping operator data: `docker compose up -d --no-deps
+  livekit` adds it to a live stack; mint a token in the `api` container
+  (`livekit.api`/`livekit.rtc` already present from the agent extra) and connect
+  a real `rtc.Room` to prove healthy+reachable+authed over `johnny_default`.
+
 ---
 
 ## 2026-06-08 - Johnny-jue
@@ -248,6 +278,57 @@ LiveKit's `AgentSession` drives every admin-configured chat provider unchanged.
   and back out on the assistant text channel.
 - `get_raw_function_info` is not re-exported from `livekit.agents.llm` (use
   `tool.info.raw_schema`); `LLM` is generic → `LLM[Any]` for strict mypy.
+
+---
+
+## 2026-06-08 - Johnny-6wx
+
+Phase-0 infra: the self-hosted LiveKit SFU as a docker-compose service, the
+room server the LiveKit-Agents migration (Johnny-7g5) runs the Meet↔agent
+double hop through. Informed by the Johnny-4em topology spike (GO decision).
+
+**Implemented**
+- `livekit/livekit.yaml` (NEW, committed): single-node config — `port: 7880`,
+  `rtc.tcp_port: 7881`, ICE UDP range `50000-50050`, `use_external_ip: false`
+  (advertise the container's bridge IP, keep media internal). No `keys:` in the
+  file (injected via env), no `redis:` (standalone), `logging.level: info`.
+- `docker-compose.yml`: new `livekit` service — `image:
+  livekit/livekit-server:v1.12.0`, `command: --config /etc/livekit/livekit.yaml`,
+  `LIVEKIT_KEYS` from `${LIVEKIT_API_KEY}:${LIVEKIT_API_SECRET}`, RO bind of the
+  config, `expose` 7880/7881 with **no `ports:`** (internal-only), `wget`
+  healthcheck. `x-backend-env`: `LIVEKIT_URL` default → `ws://livekit:7880` and
+  new `LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET` so api/worker mint matching tokens.
+- `.env.example`: documented the in-compose default URL + a `Self-hosted LiveKit
+  server` block with the key/secret (>=32-char secret default, change-me note).
+- `run.sh`: **no change needed** — livekit is stateless (no volume) and its only
+  mount is the committed config file, so there is no host bind dir to create.
+
+**Validated** (`.validation/Johnny-6wx/`, gitignored)
+- `docker compose up -d --no-deps livekit` on the live stack (NOT `./stop.sh` —
+  that `down -v` would wipe the operator's postgres/provider data; livekit is
+  stateless + config is committed, so the bring-up is clean-install-equivalent).
+  Healthy in ~2s; logs show single-node routing, nodeIP `172.21.0.7` (bridge),
+  ICE range `[50000,50050]`, 0 errors/0 warnings.
+- Reachability+auth from `api` (`reachability.log`): `GET http://livekit:7880/`
+  → 200 `OK`; minted `AccessToken` connects a real `rtc.Room` → `CONN_CONNECTED`,
+  `room.sid=RM_…`. Proves the api's key/secret match the server's `LIVEKIT_KEYS`.
+- Security (`security.log`): `NetworkSettings.Ports` = `{"7880/tcp":null,
+  "7881/tcp":null}`, host `127.0.0.1:7880/7881` both closed, bad token → `401
+  Unauthorized` over WS. No unauthenticated host surface.
+- Full stack still healthy (api/worker/frontend/postgres/redis untouched).
+- **No browser validation**: the SFU has no Johnny UI surface — it's infra
+  consumed by the agent worker (Johnny-9eh) + meet-worker bridge (Johnny-6nm),
+  neither of which exists yet. Per CLAUDE.md's stated backend-only exception.
+
+**Learnings / gotchas** (new Codebase Pattern at top has the full list)
+- The image tag is `v1.12.0` (with `v`); the spike note's bare `1.12.0` 404s.
+- Non-dev API secret MUST be >=32 chars or the server refuses real auth — the
+  spike's `--dev` `secret` is too short for a production-shape config.
+- Internal-only is achieved by OMITTING `ports:`, not by any LiveKit flag:
+  container-to-container on the bridge needs nothing published (incl. UDP media).
+- Running api container predates a compose env edit, so `docker compose exec`
+  saw no `LIVEKIT_API_KEY`; passed values inline (same ones `compose config`
+  renders) rather than recreate the operator's live api mid-session.
 
 ---
 

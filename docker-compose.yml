@@ -55,10 +55,20 @@ x-backend-env: &backend-env
   JOHNNY_CONTAINER_PRUNE_INTERVAL_SECONDS: ${JOHNNY_CONTAINER_PRUNE_INTERVAL_SECONDS:-3600}
   JOHNNY_CONTAINER_PRUNE_AGE_SECONDS: ${JOHNNY_CONTAINER_PRUNE_AGE_SECONDS:-86400}
   JOHNNY_TRANSPORT: ${JOHNNY_TRANSPORT:-local}
-  LIVEKIT_URL: ${LIVEKIT_URL:-}
+  # Defaults point at the in-compose self-hosted LiveKit SFU (Johnny-6wx).
+  # Only consumed when JOHNNY_TRANSPORT=livekit (default is ``local``), so
+  # a non-empty URL here is harmless for the current pipeline — it just
+  # gives the agent worker (Johnny-9eh) a sane in-network endpoint.
+  LIVEKIT_URL: ${LIVEKIT_URL:-ws://livekit:7880}
   LIVEKIT_TOKEN: ${LIVEKIT_TOKEN:-}
   LIVEKIT_ROOM: ${LIVEKIT_ROOM:-}
   LIVEKIT_IDENTITY: ${LIVEKIT_IDENTITY:-johnny-bot}
+  # API key/secret used to mint LiveKit room tokens. MUST match the
+  # ``LIVEKIT_KEYS`` the ``livekit`` service is configured with — both read
+  # the same two .env vars so they cannot drift. The secret must be >= 32
+  # chars or the server refuses to start.
+  LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
+  LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-johnny-livekit-dev-secret-change-me-0123456789}
 
 services:
   postgres:
@@ -91,6 +101,48 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
+
+  # Self-hosted LiveKit SFU (Johnny-6wx). Carries the voice pipeline's
+  # double hop (Meet -> room -> agent -> room -> Meet) once the agent
+  # worker (Johnny-9eh) and the meet-worker bridge (Johnny-6nm) land.
+  # Single-node and stateless — rooms are ephemeral, so no volume is
+  # needed and it survives a ``docker compose down -v`` factory reset
+  # with nothing to restore. Topology validated by the Johnny-4em spike.
+  #
+  # INTERNAL ONLY: there is deliberately no ``ports:`` mapping, so the
+  # WebSocket signaling + RTC media surface is reachable only from other
+  # containers on ``johnny_default`` (api, worker, agent, meet-worker) and
+  # never from the host. That satisfies "no unauthenticated WS exposure":
+  # nothing is published off-box, and the configured API key/secret
+  # (``LIVEKIT_KEYS``) is required to mint the room tokens clients present.
+  # ``expose`` is metadata only — container-to-container reachability on a
+  # user-defined bridge network needs no published port (incl. the RTC UDP
+  # media range, which stays internal to the bridge).
+  livekit:
+    image: livekit/livekit-server:v1.12.0
+    command: ["--config", "/etc/livekit/livekit.yaml"]
+    environment:
+      # Compose substitutes ${LIVEKIT_API_KEY}/${LIVEKIT_API_SECRET} from
+      # .env, so the container receives a literal "key: secret". The same
+      # two vars feed api/worker (LIVEKIT_API_KEY / LIVEKIT_API_SECRET) so a
+      # token minted there validates against this server. The secret must
+      # be >= 32 chars or the server refuses to start.
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:-devkey}: ${LIVEKIT_API_SECRET:-johnny-livekit-dev-secret-change-me-0123456789}"
+    volumes:
+      # Committed config (RTC ports + internal-only posture). Read-only;
+      # the server never writes here, so it survives a clean checkout.
+      - ./livekit/livekit.yaml:/etc/livekit/livekit.yaml:ro
+    expose:
+      - "7880"
+      - "7881"
+    healthcheck:
+      # LiveKit answers GET / with "OK" on the signaling port once ready.
+      # The image is Alpine-based, so busybox ``wget`` is available.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:7880/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   # One-shot Alembic upgrade. Runs once, exits 0 on success, and
   # ``api`` / ``worker`` gate their start on ``service_completed_successfully``

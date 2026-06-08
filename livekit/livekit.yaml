@@ -1,0 +1,37 @@
+# Self-hosted LiveKit SFU config for Johnny (Johnny-6wx).
+#
+# Single-node, INTERNAL ONLY. This server is reachable only from other
+# containers on the `johnny_default` compose network (api, worker, agent,
+# meet-worker); docker-compose.yml deliberately gives the `livekit`
+# service no `ports:` mapping, so there is no host-published WebSocket /
+# RTC surface and therefore no unauthenticated endpoint exposed off-box.
+# Topology validated by the Johnny-4em spike (container-to-container
+# WebRTC on the compose bridge network, echo-free double hop).
+#
+# The API key/secret pair is injected at runtime via the LIVEKIT_KEYS env
+# var (docker-compose substitutes ${LIVEKIT_API_KEY}/${LIVEKIT_API_SECRET}
+# from .env), so no shared secret is committed here. The same two vars are
+# handed to the api/worker so they mint room tokens with a matching key.
+
+port: 7880
+
+rtc:
+  # TCP fallback for ICE when UDP is blocked. Reachable
+  # container-to-container on the compose bridge network.
+  tcp_port: 7881
+  # UDP media port range. Kept small on purpose: a single in-compose room
+  # only ever has the meet-worker bridge + the agent as peers, so a wide
+  # range would just be dead surface.
+  port_range_start: 50000
+  port_range_end: 50050
+  # All media stays on the Docker bridge network, so advertise the
+  # container's own network IP as the ICE candidate — never a host or
+  # external IP. Keeping this false is what keeps media internal.
+  use_external_ip: false
+
+# Single-node deployment: no `redis:` block, so LiveKit runs standalone.
+# (Adding redis here would switch it into distributed/multi-node mode.)
+
+logging:
+  level: info
+  json: false

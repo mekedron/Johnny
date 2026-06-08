@@ -3,10 +3,10 @@
   "sessionId": "17b1f649-1d33-441a-bfd0-469c8d89870f",
   "status": "running",
   "startedAt": "2026-06-08T17:25:57.487Z",
-  "updatedAt": "2026-06-08T18:24:58.614Z",
-  "currentIteration": 2,
+  "updatedAt": "2026-06-08T18:35:43.625Z",
+  "currentIteration": 3,
   "maxIterations": 0,
-  "tasksCompleted": 2,
+  "tasksCompleted": 3,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -51,8 +51,8 @@
       {
         "id": "Johnny-6nl",
         "title": "[BUILD] Phase 1: JohnnyLLM(llm.LLM) adapter over LLMProvider.chat/stream_chat",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-6nm",
@@ -232,6 +232,16 @@
       "durationMs": 1156408,
       "startedAt": "2026-06-08T17:51:22.943Z",
       "endedAt": "2026-06-08T18:10:39.351Z"
+    },
+    {
+      "iteration": 3,
+      "status": "completed",
+      "taskId": "Johnny-6nl",
+      "taskTitle": "[BUILD] Phase 1: JohnnyLLM(llm.LLM) adapter over LLMProvider.chat/stream_chat",
+      "taskCompleted": true,
+      "durationMs": 835272,
+      "startedAt": "2026-06-08T18:11:02.365Z",
+      "endedAt": "2026-06-08T18:24:57.637Z"
     }
   ],
   "skippedTaskIds": [],
