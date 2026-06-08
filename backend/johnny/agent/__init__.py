@@ -6,8 +6,9 @@ replacing the hand-rolled ``johnny/voice_pipeline/pipeline.py`` engine:
 * :mod:`johnny.agent.session` — the ``AgentSession`` harness
   (:func:`~johnny.agent.session.build_agent_session`) and
   :class:`~johnny.agent.session.JohnnyAgent`, the ``livekit.agents.Agent``
-  subclass that carries Johnny's instructions/personality and (in later
-  phases) the router "should-speak" gate.
+  subclass that carries Johnny's assembled instructions/personality and
+  rehydrates prior transcript history into the LiveKit ``chat_ctx`` on respawn
+  (Johnny-re2), with the router "should-speak" gate landing in a later phase.
 * :mod:`johnny.agent.adapters` — the provider adapter layer that wraps
   Johnny's ``STTProvider`` / ``LLMProvider`` / ``TTSProvider`` ABCs as
   LiveKit ``stt.STT`` / ``llm.LLM`` / ``tts.TTS`` plugins (Phase 1).

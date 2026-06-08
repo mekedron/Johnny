@@ -438,6 +438,54 @@ contextvar/FIFO correlation) is Johnny-xpa. Prove INV-1 with a seeded `random` f
 (no hypothesis in the image) gathering reordered/duplicated/late/lost emits across
 overlapping turns and asserting one terminal per opened turn id.
 
+### JohnnyAgent: assemble instructions + rehydrate transcripts into chat_ctx (Johnny-re2)
+`JohnnyAgent(Agent)` carries two things the legacy split pipeline computed
+separately: the static system prompt and the rehydrated conversation history.
+Both live in `johnny/agent/session.py` (the livekit-backed module). Hard-won
+SDK facts (verified `livekit-agents==1.5.17`, read from the `api` image):
+- **`Agent.__init__` takes `chat_ctx: NotGivenOr[ChatContext | None]`** and does
+  `self._chat_ctx = chat_ctx.copy(tools=...) if chat_ctx else ChatContext.empty()`
+  — so seed history at CONSTRUCTION (pass a built `ChatContext`); passing `None`
+  is equivalent to the `NOT_GIVEN` default (→ empty). No async `update_chat_ctx`
+  needed for the initial seed. `agent.chat_ctx` is a read-only view; its `.items`
+  is a union `ChatMessage | FunctionCall | FunctionCallOutput | AgentHandoff |
+  AgentConfigUpdate`, so tests reading `.role`/`.text_content` MUST narrow with
+  `isinstance(item, ChatMessage)` first (mypy `union-attr`); `.text_content` is
+  `str | None`.
+- **`ChatContext.add_message(role=, content=, created_at=NOT_GIVEN)` APPENDS when
+  `created_at` is omitted, but does a SORTED insert (`find_insertion_index`) when
+  given.** Persisted transcript timestamps are heterogeneous (session-relative
+  offset-ms for participant chunks vs. epoch-ms for bot utterances), so DON'T
+  pass `created_at` — append in the loader's already-chronological order. The
+  default `created_at` (`time.time()` via default_factory ≈ now) keeps later live
+  turns sorting after the rehydrated block.
+- **Mapping `TranscriptFinalized` → `ChatMessage`**: bot's own utterances
+  (`speaker == BOT_SPEAKER_LABEL`, Johnny-7qp) → `role="assistant"`; a participant
+  with a known speaker → `role="user"` prefixed `"{speaker}: {text}"` (preserves
+  multi-party attribution the legacy `"- {speaker}: {text}"` prompt had); no
+  speaker → bare `user`. Skip empty/whitespace text. `ChatRole` has no "tool"
+  role — only assistant/user/system/developer (same as the LLM adapter).
+- **Instructions = reuse the legacy `_answer_messages` assembly ORDER** (NOT a
+  shared helper — there isn't one; mirror the concatenation): generic base
+  framing → `personality_prompt` FIRST → history note → `Meeting instructions:`
+  → `Context:` → `Calendar event description:` → `Calendar attachments (...)`:\n
+  → `Last session summary:`. The per-turn pieces (`suggested_reply`,
+  `allowed_replies`) are NOT static instructions — they belong to the router gate
+  / per-turn handlers (Johnny-xpa). `personality_prompt` arrives PRE-WRAPPED
+  (`[personality: <name>]\n<desc>`) from the launcher env, same as `PipelineConfig`
+  — no `build_personality_system_prompt` call needed here.
+- **`async build_johnny_agent(...)` is the parity twin of `_rehydrate_transcript_
+  history`**: it accepts the SAME `TranscriptHistoryLoader` ABC, calls
+  `loader.load(session_id=, bot_session_id=)`, and on any exception logs +
+  continues with empty history (swallow-and-continue — better to lose context
+  than refuse to join). `JohnnyAgent.__init__` stays SYNC and takes a pre-loaded
+  `chat_history` list; the async factory is where the loader lives.
+- **`session.py` now imports `johnny.voice_pipeline.events` /
+  `.transcript_history`**, which pulls `app.providers` (NOT sqlalchemy/torch).
+  Fine: `session.py` is already the heavy livekit+silero module and is only
+  imported in full-stack contexts. The top-level `johnny.agent` /
+  `johnny.agent.adapters` bare imports stay livekit-free (re-verified).
+
 ---
 
 ## 2026-06-08 - Johnny-jue
@@ -1039,5 +1087,69 @@ fallback. Full write-up + GO decision in `.validation/Johnny-o3z/decision.md`.
 - Short-circuit-before-the-gate paths are deliberately NOT `open()`-ed, so the
   sweep can't invent phantom terminals for SDK-internal non-turns (mirrors the
   legacy `LISTEN_ONLY`/noise-gate "no terminal by design").
+
+---
+
+## 2026-06-09 - Johnny-re2
+
+Phase 2: `JohnnyAgent(Agent)` grows the two responsibilities the legacy split
+pipeline computed separately — the static system prompt (personality +
+meeting-context + calendar assembly) and the rehydrated conversation history
+(parity with `VoicePipeline._rehydrate_transcript_history`) seeded into the
+LiveKit `chat_ctx` so memory survives a container respawn.
+
+**Implemented** (`backend/johnny/agent/session.py`)
+- `AgentInstructionsConfig` (frozen dataclass) — the static prompt components
+  mirroring the `PipelineConfig` subset the answer LLM rendered: `instructions`,
+  `personality_prompt`, `context`, `calendar_context`,
+  `calendar_attachments_text`, `prior_session_context` (all default `""`).
+- `build_agent_instructions(config)` — reuses the legacy `_answer_messages`
+  assembly order (base framing → personality FIRST → history note → meeting
+  instructions → context → calendar description → calendar attachments → last
+  session summary). Per-turn-only pieces (router hint, `allowed_replies`)
+  excluded — they belong to the gate / per-turn handlers (Johnny-xpa).
+- `transcripts_to_chat_ctx(history)` — maps each `TranscriptFinalized` to a
+  `ChatContext` message: bot (`BOT_SPEAKER_LABEL`) → `assistant`; participant w/
+  speaker → `user` prefixed `"{speaker}: {text}"`; no speaker → bare `user`;
+  empty text skipped; appended in chronological order (no `created_at` → append,
+  avoiding the heterogeneous-timestamp sorted-insert trap).
+- `JohnnyAgent.__init__(*, instructions=None, prompt_config=None,
+  chat_history=None)` — explicit `instructions` wins; else build from
+  `prompt_config`; else `DEFAULT_INSTRUCTIONS`. Seeds `chat_ctx` from
+  `chat_history` at construction (base `Agent` copies it).
+- `async build_johnny_agent(...)` — the parity twin of
+  `_rehydrate_transcript_history`: same `TranscriptHistoryLoader` ABC, same
+  `loader.load(session_id=, bot_session_id=)`, swallow-and-continue on failure.
+- `johnny/agent/__init__.py` docstring updated.
+- `backend/tests/agent/test_johnny_agent.py` (NEW, 18 tests): instructions
+  empty/full/ordering + personality-first; transcript mapping (bot/participant/
+  no-speaker/empty-skip/order); JohnnyAgent defaults/config/override/seed;
+  `build_johnny_agent` rehydrate-from-loader (+ ids asserted)/no-loader/
+  failure-swallow/instructions-override.
+
+**Validated** (`.validation/Johnny-re2/results.md`; `--no-dev` prod-image gate)
+- ruff clean; mypy --strict clean (18 files); `pytest tests/agent` → **309
+  passed** (18 new + 291 prior, no regressions). Import-safety re-proven: bare
+  `import johnny.agent` / `johnny.agent.adapters` → livekit NOT loaded.
+- End-to-end probe built a real `livekit.agents...Agent` from a realistic config
+  + `InMemoryTranscriptHistoryLoader`; instructions matched the legacy order and
+  `chat_ctx.items` rehydrated chronologically with correct role/speaker mapping.
+- **Browser validation N/A**: pure backend, no UI/HTTP surface, zero new runtime
+  deps; unreachable until the agent worker (Johnny-9eh) exists (CLAUDE.md
+  backend-only exception; same posture as Johnny-jue/6nl/7a3/c81/zb3/4fn/88n/
+  9k2/o3z). Source-only change baked by `COPY` on the next `./run.sh`.
+
+**Learnings / gotchas** (full list in the new Codebase Pattern at top)
+- Seed history via `Agent(chat_ctx=...)` at construction (base `.copy()`s it);
+  `add_message` appends only when `created_at` is omitted — don't pass the
+  heterogeneous persisted timestamps or it sorted-inserts them wrong.
+- `agent.chat_ctx.items` is a union type → tests must `isinstance(item,
+  ChatMessage)`-narrow before `.role`/`.text_content` (mypy `union-attr`).
+- No shared prompt-builder helper exists in the legacy pipeline — mirror the
+  `_answer_messages` concatenation order; `personality_prompt` is pre-wrapped by
+  the launcher, so no personality-resolver call is needed in the agent.
+- `session.py` importing the voice_pipeline transcript value objects pulls
+  `app.providers` (not sqlalchemy/torch) — acceptable for the heavy livekit
+  module; top-level package import-safety is unaffected.
 
 ---

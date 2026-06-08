@@ -3,10 +3,10 @@
   "sessionId": "17b1f649-1d33-441a-bfd0-469c8d89870f",
   "status": "running",
   "startedAt": "2026-06-08T17:25:57.487Z",
-  "updatedAt": "2026-06-08T20:48:28.731Z",
-  "currentIteration": 11,
+  "updatedAt": "2026-06-08T21:07:00.982Z",
+  "currentIteration": 12,
   "maxIterations": 0,
-  "tasksCompleted": 10,
+  "tasksCompleted": 11,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -117,8 +117,8 @@
       {
         "id": "Johnny-o3z",
         "title": "[SPIKE] Phase 2: INV-1 single terminal-outcome choke-point under LiveKit turn lifecycle",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-qzj",
@@ -322,6 +322,16 @@
       "durationMs": 1266483,
       "startedAt": "2026-06-08T20:05:28.544Z",
       "endedAt": "2026-06-08T20:26:35.027Z"
+    },
+    {
+      "iteration": 12,
+      "status": "completed",
+      "taskId": "Johnny-o3z",
+      "taskTitle": "[SPIKE] Phase 2: INV-1 single terminal-outcome choke-point under LiveKit turn lifecycle",
+      "taskCompleted": true,
+      "durationMs": 1285436,
+      "startedAt": "2026-06-08T20:27:02.327Z",
+      "endedAt": "2026-06-08T20:48:27.763Z"
     }
   ],
   "skippedTaskIds": [],
