@@ -230,6 +230,45 @@ reachable container-to-container only. Hard-won specifics:
   (`livekit.api`/`livekit.rtc` already present from the agent extra) and connect
   a real `rtc.Room` to prove healthy+reachable+authed over `johnny_default`.
 
+### Adapter factory: load_active_providers() → the three JohnnyXXX plugins
+The compatibility core (Johnny-zb3) is `build_session_adapters(session, *,
+registry=None, decrypt=None) -> SessionAdapters` in
+`johnny/agent/adapters/factory.py`. It calls the **UNCHANGED**
+`app.providers.loader.load_active_providers(session, registry=, decrypt=,
+kinds=(STT,LLM,TTS))` and wraps each resolved provider in its adapter, returning
+a frozen `SessionAdapters(stt, llm, tts)` dataclass to spread into
+`build_agent_session(stt=…, llm=…, tts=…)`. Hard-won specifics:
+- **This module pulls in BOTH livekit (via the adapters) AND SQLAlchemy (via the
+  loader)** — the first adapter file to do so. So it MUST be lazy-exported from
+  `adapters/__init__.py`'s PEP-562 `__getattr__` exactly like the three
+  adapters, or a bare `import johnny.agent.adapters` stops being cheap/safe.
+  Verified by subprocess probe: bare import pulls neither livekit, sqlalchemy,
+  nor `…adapters.factory`; accessing `build_session_adapters` triggers all three.
+- **`load_active_providers` returns live instances, NOT their config/options** —
+  so the factory can't (and shouldn't) re-derive `voice`/`model`/`language`
+  labels from the DB. Construct `JohnnyTTS(provider)` with `voice=None`: the
+  provider already carries its admin-configured voice, and `voice_id=None` falls
+  through to that default (Johnny-7a3). Voice/model parity is its own task
+  (Johnny-88n). Keeps the loader/registry/schema untouched (acceptance: `git
+  status backend/app/providers/` stays EMPTY).
+- **mypy `type-abstract`:** you CANNOT pass an abstract ABC (`STTProvider`) as a
+  `type[_P]` argument to a generic narrower — mypy rejects abstract classes where
+  `type[T]` is expected. Mirror the meet-worker's `_as_stt` idiom instead: one
+  presence helper `_require(active, kind) -> ProviderInstance` (fail-fast on a
+  missing row) + **inline** `if not isinstance(x, STTProvider): raise` in the
+  builder (the ABC reference must be literal, per-kind). The isinstance both
+  narrows `ProviderInstance`→concrete ABC for the adapter ctor AND guards against
+  a misregistered factory.
+- **Split-mode only, fail fast:** scope the loader query to `(STT,LLM,TTS)` so an
+  active S2S row (unified mode) is ignored; a missing STT/LLM/TTS row raises
+  `AgentSessionSetupError(ProviderError)` at session start (the harness needs all
+  three), mirroring the meet-worker's `PipelineSetupError`. S2S/unified mode
+  bypasses this factory entirely.
+- Test against a real in-memory SQLite (mirror `tests/providers/test_base.py`'s
+  `session()` fixture + `_insert`); `(kind, provider_name, display_name)` is
+  **UNIQUE**, so two rows for the same kind/provider (e.g. active + inactive)
+  need distinct `display_name`s or the seed `INSERT` 500s.
+
 ---
 
 ## 2026-06-08 - Johnny-jue
@@ -549,3 +588,59 @@ Completes the Phase-1 split-pipeline trio (STT + LLM Johnny-6nl + TTS Johnny-7a3
 
 ---
 
+
+## 2026-06-08 - Johnny-zb3
+
+Phase-1 compatibility core: the adapter factory that turns the admin-active
+providers into a live LiveKit `AgentSession`'s plugin set. Completes the
+Phase-1 split trio wiring (STT Johnny-c81 + LLM Johnny-6nl + TTS Johnny-7a3 →
+ready to hand to the harness).
+
+**Implemented**
+- `backend/johnny/agent/adapters/factory.py` (NEW): `build_session_adapters(
+  session, *, registry=None, decrypt=None) -> SessionAdapters`. Calls the
+  UNCHANGED `app.providers.loader.load_active_providers(..., kinds=(STT,LLM,
+  TTS))` and wraps each resolved provider in `JohnnySTT`/`JohnnyLLM`/`JohnnyTTS`,
+  returning a frozen `SessionAdapters(stt, llm, tts)` dataclass. `registry` /
+  `decrypt` forwarded to the loader (prod passes the Fernet decryptor; tests
+  inject a fake registry + identity decryptor). Missing STT/LLM/TTS row →
+  fail-fast `AgentSessionSetupError(ProviderError)`. Helper `_require` (presence)
+  + inline `isinstance` narrowing per kind (mirrors meet-worker `_as_stt`).
+- `backend/johnny/agent/adapters/__init__.py`: added `build_session_adapters`,
+  `SessionAdapters`, `AgentSessionSetupError` to the PEP-562 `__getattr__` lazy
+  export (a `_FACTORY_EXPORTS` set routes them to the `factory` module) — keeps
+  bare `import johnny.agent.adapters` free of livekit + SQLAlchemy.
+- `backend/tests/agent/test_adapter_factory.py` (NEW): 11 tests (1 param ×3 → 13
+  cases) over a real in-memory SQLite + fake registry — three-adapter build with
+  decrypted creds/options per kind, inactive-row ignored, decrypt forwarding,
+  active-provider switch → different adapter, missing-kind/empty-db/s2s-only
+  fail-fast, registry-misconfig type guard, lazy-export wiring, golden API check.
+
+**Validated** (`.validation/Johnny-zb3/`, gitignored)
+- ruff + mypy(strict) clean on `johnny/agent tests/agent` (13 source files);
+  `pytest tests/agent` → 41 passed (13 new + 28 prior). Ran via the `--no-dev`
+  prod-image gate (bind-mount `./backend`, tools onto `/opt/venv`).
+- Import-safety subprocess probe (`import_safety_probe.py`): bare `import
+  johnny.agent.adapters` pulls NEITHER livekit, sqlalchemy, NOR the factory /
+  concrete-adapter modules; accessing `build_session_adapters` triggers the
+  factory import (then sqlalchemy + livekit); unknown attr → AttributeError.
+- `git status backend/app/providers/` is EMPTY — registry/schema/loader/ABCs
+  untouched (acceptance: providers public surface unchanged).
+- **No browser validation / no clean-install rebuild**: pure backend module, no
+  UI/HTTP surface, zero new runtime deps. Unreachable from any UI until the agent
+  worker / console entrypoint (Johnny-9eh) wires it into a job, so console e2e is
+  deferred there. Source-only change baked by `COPY` on the next `./run.sh`.
+
+**Learnings / gotchas** (see new Codebase Pattern at top)
+- First adapter-layer module to pull SQLAlchemy (loader) on top of livekit
+  (adapters) → must be lazy-exported or it breaks `johnny.agent.adapters`
+  import-safety.
+- mypy rejects passing an abstract ABC as `type[_P]` (`type-abstract`); narrow
+  with inline literal `isinstance` per kind, not a generic `type[]` helper.
+- `load_active_providers` returns instances, not config — don't try to surface
+  voice/model labels from it; `JohnnyTTS(provider, voice=None)` honors the
+  provider's admin-configured default (Johnny-7a3). Parity work is Johnny-88n.
+- `(kind, provider_name, display_name)` is UNIQUE — seeding active+inactive rows
+  for the same kind/provider needs distinct `display_name`s.
+
+---

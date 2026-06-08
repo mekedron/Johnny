@@ -3,10 +3,10 @@
   "sessionId": "17b1f649-1d33-441a-bfd0-469c8d89870f",
   "status": "running",
   "startedAt": "2026-06-08T17:25:57.487Z",
-  "updatedAt": "2026-06-08T19:06:40.097Z",
-  "currentIteration": 5,
+  "updatedAt": "2026-06-08T19:24:50.672Z",
+  "currentIteration": 7,
   "maxIterations": 0,
-  "tasksCompleted": 5,
+  "tasksCompleted": 6,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -93,8 +93,8 @@
       {
         "id": "Johnny-c81",
         "title": "[BUILD] Phase 1: JohnnySTT(stt.STT) adapter over STTProvider.transcribe_stream",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-d5z",
@@ -262,10 +262,32 @@
       "durationMs": 925228,
       "startedAt": "2026-06-08T18:36:13.759Z",
       "endedAt": "2026-06-08T18:51:38.987Z"
+    },
+    {
+      "iteration": 6,
+      "status": "completed",
+      "taskId": "Johnny-c81",
+      "taskTitle": "[BUILD] Phase 1: JohnnySTT(stt.STT) adapter over STTProvider.transcribe_stream",
+      "taskCompleted": true,
+      "durationMs": 876412,
+      "startedAt": "2026-06-08T18:52:02.718Z",
+      "endedAt": "2026-06-08T19:06:39.130Z"
+    },
+    {
+      "iteration": 7,
+      "status": "failed",
+      "taskId": "Johnny-y4j",
+      "taskTitle": "[SPIKE] Phase 0: Per-room JWT auth + agent dispatch contract (job payload)",
+      "taskCompleted": false,
+      "durationMs": 171408,
+      "startedAt": "2026-06-08T19:07:01.796Z",
+      "endedAt": "2026-06-08T19:09:53.204Z"
     }
   ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
-  "activeTaskIds": [],
+  "activeTaskIds": [
+    "Johnny-y4j"
+  ],
   "subagentPanelVisible": false
 }
