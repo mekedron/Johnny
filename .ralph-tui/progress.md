@@ -357,6 +357,43 @@ stamps the configured language onto transcripts. Hard-won specifics:
   because the long-running `api` image can be stale (no source mount) — `docker
   compose exec api` may not see new modules like `…adapters.factory`.
 
+### Bound + cancel the blocking `on_user_turn_completed` gate yourself (Johnny-9k2)
+The LiveKit `Agent.on_user_turn_completed` hook is the Phase-2 "should-speak"
+gate. Verified against `livekit-agents==1.5.17`
+(`voice/agent_activity.py::_user_turn_completed_task`), the SDK gives you NOTHING
+for free here — three load-bearing facts drive the whole design:
+- **The hook BLOCKS the response pipeline**: it's `await`ed before any reply is
+  scheduled (`_generate_reply`/preemptive). Until it returns, no answer.
+- **The SDK NEVER cancels the hook**: its own comment "We never cancel user code
+  …" — a newer turn's task literally `await old_task` (the previous hook). So a
+  hook with NO internal bound stalls EVERY subsequent turn (the legacy Session-14
+  ~60 s hang). Port the `asyncio.wait_for` bound (`voice_pipeline.pipeline.
+  DEFAULT_ROUTER_LLM_TIMEOUT_S = 30.0`) INTO the hook — it keeps the session alive.
+- **The SDK swallows `StopResponse` AND any `Exception` from the hook, writing NO
+  audit row** (`except StopResponse: return` / `except Exception: log; return`).
+  `TimeoutError` is an `Exception` subclass → caught here too. So `StopResponse`
+  alone loses the turn's terminal: a timed-out/declined/barged-in gate MUST emit
+  its own terminal BEFORE returning/raising.
+- **Barge-in mid-gate is cooperative, not task cancellation.** In LiveKit a
+  barge-in = a new user turn whose task awaits the old hook; the SDK won't cancel
+  the in-flight hook. So race the router call against an `abandon` `asyncio.Event`
+  (set by the fast-VAD path, Johnny-k8t) and cancel the inner router task
+  yourself for a prompt teardown. `CancelledError` only reaches the hook on hard
+  session teardown — still emit a best-effort terminal there, then NEVER swallow
+  the cancellation (re-raise).
+The harness implementing all this is `johnny/agent/gate.py`
+(`run_gate`/`run_router_call`/`TerminalTracker`), kept **stdlib-only** (no
+livekit/sqlalchemy/app — verified by an import probe) so `import johnny.agent.gate`
+stays cheap; the real `TurnTerminal`→EventBus→`agent_decisions` wiring is injected
+as a `TerminalEmitter` callback (Johnny-d5z). INV-1 ("exactly one terminal per
+turn") is the `_turn_terminal_emitted`-flag chokepoint + the
+`_handle_unaccounted_turn` belt-and-suspenders, ported as `TerminalTracker.emit`
+(first wins, 2nd dropped) + `.ensure_terminal` (fallback; `strict=True` raises on
+an unaccounted non-cancellation exit). On the SPEAK path emit NO terminal — the
+reply-completion path owns the turn's spoken/decline terminal. Keep the failure
+reasons a subset of `voice_pipeline.events.NoReplyReason` and drift-guard it
+(`test_router_gate.py::test_gate_reason_literals_subset_of_canonical`).
+
 ---
 
 ## 2026-06-08 - Johnny-jue
@@ -851,5 +888,54 @@ was configured.
   `docker compose run --rm -v "$PWD/backend":/workspace -w /workspace api`.
 - The operator's provider DB was empty; the 3 rows added for validation are left
   in place (valid local configs) and flagged in `results.md` for easy removal.
+
+---
+
+## 2026-06-08 - Johnny-9k2
+
+[SPIKE] Phase 2: timeout + cancellation semantics for the blocking
+`on_user_turn_completed` router gate. Deliverable = a measured decision +
+a tested, drop-in harness for Johnny-xpa (this spike BLOCKS it).
+
+**Implemented**
+- `backend/johnny/agent/gate.py` (NEW): the bounded router-gate harness —
+  `run_router_call` (`asyncio.wait_for`-equivalent bound + `abandon` race,
+  cancels the in-flight router cleanly), `TerminalTracker` (INV-1: first
+  terminal wins, 2nd dropped; `ensure_terminal` belt-and-suspenders; `strict`
+  mode), `run_gate` (composes both → `GateAction.SPEAK|STAY_SILENT`, emits
+  terminals on every silent path). Stdlib-only / livekit-free. The real
+  `TurnTerminal`→EventBus→`agent_decisions` wiring is injected as a
+  `TerminalEmitter` callback (Johnny-d5z).
+- `backend/tests/agent/test_router_gate.py` (NEW): 16 tests — timeout fires +
+  `stage_error` terminal + router cancelled + next gate not stalled; barge-in
+  (`abandon`) cancels in-flight router + `barge_in` terminal; outer cancel →
+  best-effort terminal + re-raise; router-raised → `stage_error`; SPEAK path
+  emits no terminal; INV-1 double-emit dropped; strict mode; drift guard;
+  default-timeout parity with the legacy bound.
+- `backend/johnny/agent/__init__.py`: docstring mention of the new module.
+- Decision doc: `.validation/Johnny-9k2/decision.md` (gitignored).
+
+**Validated** (prod-image gate pattern; backend-only, no UI surface)
+- ruff `johnny/agent tests/agent` clean; mypy --strict 16 files no issues
+  (PEP-695 generics); `pytest tests/agent` → 79 passed (16 new + 63 existing).
+- Import-safety probe: `import johnny.agent.gate` pulls neither livekit,
+  sqlalchemy, app, nor torch (stdlib-only).
+- Browser validation N/A: the harness has no UI/HTTP surface and is unreachable
+  until Johnny-xpa wires it into the hook + the agent-worker (Johnny-9eh) exists
+  (CLAUDE.md backend-only exception, same posture as the Phase-0/1 tasks).
+
+**Learnings / gotchas** (full list in the new Codebase Pattern above + decision.md)
+- The SDK NEVER cancels `on_user_turn_completed` ("We never cancel user code");
+  a newer turn `await`s the old hook, so an unbounded hook stalls ALL later
+  turns. The `asyncio.wait_for` bound is what keeps the session alive, not polish.
+- The SDK swallows `StopResponse` AND any `Exception` with no audit row, so the
+  terminal must be emitted inside the hook before it returns/raises.
+- Barge-in mid-gate is cooperative (a new turn), not task cancellation — race
+  the router against an `abandon` event; only hard teardown delivers a real
+  `CancelledError` (best-effort terminal, then re-raise; never swallow it).
+- `voice_pipeline.events` is stdlib-shaped BUT importing it runs the heavy
+  `voice_pipeline/__init__.py` (pulls all of `app.providers`) — so the gate
+  mirrors the `TerminalState`/`NoReplyReason` literals locally and drift-guards
+  them in tests instead of importing them, preserving import-safety.
 
 ---
