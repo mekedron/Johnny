@@ -417,11 +417,20 @@ def test_get_session_detail_includes_recent_history(
     outcomes = {d["id"]: d["outcome"] for d in decisions}
     assert outcomes[spoken.id] == "spoken"
     assert outcomes[pending.id] == "pending"
+    # Reasoning timeline (Johnny-ckz.28.4): input_window + raw_output are
+    # surfaced so the per-turn timeline renders the Heard / Context / Asked /
+    # Model-said steps from the canonical record instead of mocking them.
+    by_id = {d["id"]: d for d in decisions}
+    assert by_id[spoken.id]["input_window"] == {"transcript": "...?"}
+    assert by_id[spoken.id]["raw_output"] == {"raw": "stuff"}
 
     utterances = body["utterances"]
     assert len(utterances) == 1
     assert utterances[0]["output_text"] == "Yes."
     assert utterances[0]["matched_allowed_reply"] == "Yes."
+    # The answer-LLM prompt is now exposed for the timeline "View prompt"
+    # disclosure (Johnny-ckz.28.4).
+    assert utterances[0]["prompt"] == "hidden"
 
     pending_decisions = body["pending_decisions"]
     assert len(pending_decisions) == 1

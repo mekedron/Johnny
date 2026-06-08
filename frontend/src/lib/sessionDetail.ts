@@ -80,6 +80,13 @@ export interface AgentDecisionRecord {
 	terminal_state: TerminalState | null;
 	no_reply_reason: NoReplyReason | null;
 	outcome: DecisionOutcome;
+	// Reasoning timeline (Johnny-ckz.28.4): `input_window` is the full router
+	// prompt context (rolling transcript window with `is_current`, mode,
+	// instructions, calendar/prior-session context, allowed_replies, threshold);
+	// `raw_output` is the router LLM's raw response (text + structured +
+	// finish_reason). Both feed the per-turn "what is the bot thinking" steps.
+	input_window: Record<string, unknown>;
+	raw_output: Record<string, unknown>;
 	created_at: string;
 }
 
@@ -88,6 +95,10 @@ export interface AgentUtteranceRecord {
 	bot_session_id: number;
 	agent_decision_id: number | null;
 	mode: BotMode;
+	// Serialised answer-LLM prompt (JSON array of role/content messages) that
+	// produced this utterance — drives the timeline "View prompt" disclosure
+	// (Johnny-ckz.28.4).
+	prompt: string;
 	output_text: string;
 	audio_duration_ms: number | null;
 	matched_allowed_reply: string | null;

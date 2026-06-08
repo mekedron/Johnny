@@ -145,6 +145,11 @@ class HistoryDecisionRead(BaseModel):
     terminal_state: TerminalState | None
     no_reply_reason: NoReplyReason | None
     outcome: DecisionOutcome
+    # Reasoning timeline (Johnny-ckz.28.4) — same shape the live session
+    # detail serves so post-meeting review can render the same per-turn
+    # timeline from the shared frontend type.
+    input_window: dict[str, Any]
+    raw_output: dict[str, Any]
     created_at: datetime
 
 
@@ -155,6 +160,9 @@ class HistoryUtteranceRead(BaseModel):
     bot_session_id: int
     agent_decision_id: int | None
     mode: BotMode
+    # Answer-LLM prompt behind the utterance (Johnny-ckz.28.4) — kept in
+    # lock-step with the live serializer for the shared frontend type.
+    prompt: str
     output_text: str
     audio_duration_ms: int | None
     matched_allowed_reply: str | None

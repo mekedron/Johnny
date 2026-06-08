@@ -160,16 +160,10 @@ turns dropped without summarisation) — used by tests that want to pin
 exact behaviour.
 """
 DEFAULT_MODE = "limited_auto_speak"
-DEFAULT_RATE_LIMIT_MAX_UTTERANCES = 3
+# 0 disables the per-session over-talk cap for every session (see _is_rate_limited); set a positive value to re-enable.
+DEFAULT_RATE_LIMIT_MAX_UTTERANCES = 0
 DEFAULT_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000
-DEFAULT_AUTONOMOUS_RATE_LIMIT_MAX_UTTERANCES = 2
-"""Lower default cap for autonomous mode.
-
-Each autonomous utterance is free-form (so longer + more expensive)
-than a limited_auto_speak pick from a short allowlist, so the default
-cap is more conservative. The meeting config can override
-``rate_limit_max_utterances`` to raise or lower it per meeting.
-"""
+DEFAULT_AUTONOMOUS_RATE_LIMIT_MAX_UTTERANCES = 0
 DEFAULT_APPROVAL_TIMEOUT_SECONDS = 15.0
 DEFAULT_NOISE_FILTER_ENABLED = True
 """Whether to gate STT artifacts before the router LLM (Johnny-ckz.14).

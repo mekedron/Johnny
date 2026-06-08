@@ -50,6 +50,13 @@
 		type TurnTerminalEvent
 	} from '$lib/sessionEvents';
 	import { approveDecision, rejectDecision } from '$lib/decisions';
+	import SessionTurnTimeline from '$lib/components/SessionTurnTimeline.svelte';
+	import {
+		assembleTurns,
+		extractHeard,
+		type TurnSource,
+		type TurnTiming
+	} from '$lib/sessionTurns';
 
 	interface TranscriptLine {
 		key: string;
@@ -85,6 +92,16 @@
 		outcome: DecisionOutcome | 'spoken';
 		matchedReply: string | null;
 		timestampMs: number;
+		// Reasoning timeline (Johnny-ckz.28.4): deep per-turn fields that feed the
+		// "what is the bot thinking" steps. Null on a live router_decision until
+		// the next detail refresh (the WS event omits the prompt context).
+		heardText: string | null;
+		heardConfidence: number | null;
+		heardTimestampMs: number | null;
+		inputWindow: Record<string, unknown> | null;
+		rawOutput: Record<string, unknown> | null;
+		answerPrompt: string | null;
+		audioDurationMs: number | null;
 	}
 
 	interface PendingApproval {
@@ -108,6 +125,11 @@
 	let transcripts = $state<TranscriptLine[]>([]);
 	let partial = $state<TranscriptLine | null>(null);
 	let decisions = $state<DecisionEntry[]>([]);
+	// Most recent finalised USER transcript — used to seed a live decision's
+	// "Heard" step before the detail refresh fills in the full input_window
+	// (the router_decision WS event carries no transcript), since the pipeline
+	// emits transcript_final immediately before router_decision for a turn.
+	let lastUserTranscript = $state<{ text: string; timestampMs: number } | null>(null);
 	let pendingApprovals = $state<PendingApproval[]>([]);
 	let resolvingDecisionIds = $state<Set<number>>(new Set());
 	let approvalErrorMessage = $state<string | null>(null);
@@ -298,6 +320,7 @@
 		d: AgentDecisionRecord,
 		matchedUtterance: AgentUtteranceRecord | null
 	): DecisionEntry {
+		const heard = extractHeard(d.input_window);
 		return {
 			key: `db-d-${d.id}`,
 			decisionId: d.id,
@@ -315,7 +338,14 @@
 			noReplyReason: d.no_reply_reason,
 			outcome: d.outcome,
 			matchedReply: matchedUtterance?.matched_allowed_reply ?? null,
-			timestampMs: Date.parse(d.created_at) || 0
+			timestampMs: Date.parse(d.created_at) || 0,
+			heardText: heard?.text ?? null,
+			heardConfidence: heard?.confidence ?? null,
+			heardTimestampMs: heard?.timestampMs ?? null,
+			inputWindow: d.input_window,
+			rawOutput: d.raw_output,
+			answerPrompt: matchedUtterance?.prompt ?? null,
+			audioDurationMs: matchedUtterance?.audio_duration_ms ?? null
 		};
 	}
 
@@ -333,6 +363,23 @@
 	}
 
 	const groupedTimings = $derived(groupTimingsByTurn(timings));
+
+	// Per-turn reasoning timeline (Johnny-ckz.28.4). Derived from the same
+	// reactive `decisions` + `timings` the panels read, so the timeline updates
+	// live as WS events mutate them — a turn opened mid-session fills in
+	// step-by-step (heard → classified → terminal → spoke) without a reload.
+	const timingByTurn = $derived.by(() => {
+		const map = new Map<number, TurnTiming>();
+		for (const t of groupedTimings) {
+			map.set(t.turnId, {
+				events: t.events,
+				endToEndMs: t.endToEndMs,
+				hasError: t.hasError
+			});
+		}
+		return map;
+	});
+	const turns = $derived(assembleTurns(decisions as TurnSource[], timingByTurn));
 
 	function groupTimingsByTurn(rows: SessionTimingRecord[]): TimingTurn[] {
 		const byTurn = new Map<number, SessionTimingRecord[]>();
@@ -487,14 +534,16 @@
 	}
 
 	function handleFinal(ev: TranscriptFinalEvent) {
+		const timestampMs = Number(ev.timestamp_ms) || Date.now();
 		const line: TranscriptLine = {
 			key: `live-${ev.seq}`,
 			text: ev.text,
 			speaker: ev.speaker ?? null,
 			isFinal: true,
-			timestampMs: Number(ev.timestamp_ms) || Date.now()
+			timestampMs
 		};
 		transcripts = [...transcripts, line];
+		lastUserTranscript = { text: ev.text, timestampMs };
 		partial = null;
 		void autoScrollTranscript();
 	}
@@ -517,7 +566,17 @@
 			noReplyReason: null,
 			outcome: ev.should_speak ? 'pending' : 'suppressed',
 			matchedReply: null,
-			timestampMs: Number(ev.timestamp_ms) || Date.now()
+			timestampMs: Number(ev.timestamp_ms) || Date.now(),
+			// The WS event omits the prompt context; seed "Heard" from the
+			// just-finalised user transcript and let the detail refresh fill in
+			// the input_window / raw_output / answer prompt disclosures.
+			heardText: lastUserTranscript?.text ?? null,
+			heardConfidence: null,
+			heardTimestampMs: lastUserTranscript?.timestampMs ?? null,
+			inputWindow: null,
+			rawOutput: null,
+			answerPrompt: null,
+			audioDurationMs: null
 		};
 		decisions = [entry, ...decisions];
 	}
@@ -587,7 +646,12 @@
 				divergenceReason: diverged
 					? "answer LLM rephrased the router's recommended reply"
 					: d.divergenceReason,
-				overrideActor: diverged ? 'answer_llm' : d.overrideActor
+				overrideActor: diverged ? 'answer_llm' : d.overrideActor,
+				answerPrompt: typeof ev.prompt === 'string' ? ev.prompt : d.answerPrompt,
+				audioDurationMs:
+					typeof ev.audio_duration_ms === 'number'
+						? ev.audio_duration_ms
+						: d.audioDurationMs
 			};
 			decisions = next;
 		}
@@ -1078,6 +1142,8 @@
 				</p>
 			</section>
 		{/if}
+
+		<SessionTurnTimeline turns={turns} />
 
 		<div class="grid gap-5 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
 			<Card.Root class="flex max-h-[70vh] flex-col gap-0 py-0" data-testid="transcript-pane">

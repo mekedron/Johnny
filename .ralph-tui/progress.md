@@ -53,6 +53,24 @@ after each iteration and it's included in prompts for context.
   fails to spawn). (2) The `migrate` compose service has its OWN baked image: `docker compose build api
   worker frontend` does NOT rebuild it, so a new alembic revision won't apply ("Can't locate revision …")
   until you also `docker compose build migrate`.
+- **The per-turn reasoning timeline ("what is the bot thinking", Johnny-ckz.28.4) is a PURE CLIENT-SIDE
+  DERIVATION over the already-reactive `decisions` + `timings` — no new tables, no new events, no
+  migration.** The deep fields it needs were ALREADY persisted by .28.2/.28.3 but left UNEXPOSED:
+  `agent_decisions.input_window` (full router prompt: `transcript_window` with the `is_current` entry =
+  the "Heard" STT text+confidence, plus `mode`/`instructions`/`calendar_context`/`prior_session_context`/
+  `allowed_replies`), `agent_decisions.raw_output` (router LLM `{text, structured, finish_reason}`), and
+  `agent_utterances.prompt` (the answer-LLM messages JSON). .28.4 only (a) added those 3 fields to the
+  `/sessions/{id}` + `/history` serializers (`AgentDecisionRead`/`AgentUtteranceRead` + History*Read) and
+  (b) assembled them in `frontend/src/lib/sessionTurns.ts` (pure, unit-tested) → `frontend/src/lib/
+  components/SessionTurnTimeline.svelte`. The page derives `turns = assembleTurns(decisions, timingByTurn)`
+  off the SAME reactive state the panels read, so live WS events (`handleDecision`/`handleAgentSpoke`/
+  `handleTurnTerminal`) update the timeline step-by-step for free. **Linkage keys:** decision↔timing by
+  `turn_id` (NULL on historical/backfilled decisions → elapsed-ms shows "—"; fresh turns share the
+  pipeline counter so it lines up); utterance↔decision by `agent_decision_id` (robust, not turn_id). The
+  router prompt is the *context* (step 3), NOT the answer-model ask (step 4 = `agent_utterances.prompt`
+  only) — conflating them mislabels a router-declined turn as "asked the model". A step renders `done` /
+  `skipped` (terminal path never reached it, e.g. no-reply never asks the answer model) / `missing` (a
+  real upstream gap) — never mock data.
 
 ---
 
@@ -172,6 +190,60 @@ after each iteration and it's included in prompts for context.
   - I did NOT build a separate explicit FSM class; the "state machine" is the single-`TurnTerminal`-per-turn
     discipline + the `terminal_state` column. A full per-transition FSM would be over-engineering for the
     acceptance, which is about the terminal guarantee, not the intermediate states.
+
+---
+
+## 2026-06-08 - Johnny-ckz.28.4
+
+- **Implemented the "What is the bot thinking" per-turn reasoning timeline** (Sections A–E): one collapsed
+  row per turn (speaker + heard text, plain-language classification chip, terminal-state chip, the
+  spoken/suggestion/no-reply summary, a "Spoke instead" divergence badge) that expands into a vertical
+  eight-step timeline — Heard → Classified → Context → Asked the answer model → Model answered → Filters &
+  overrides → Final decision → Spoke — each with the measured stage cost + offset, "View context / router
+  prompt / answer prompt / raw output" disclosures, plain-language copy with the structured event/suppressor
+  name in tooltips, a filter-chip row (all / divergences / no-replies / autonomous / approvals), and live
+  step-by-step updates over the existing WebSocket. Everything is sourced from the canonical pipeline record
+  — no mock data; a genuinely-absent step renders `missing` (real upstream gap) vs `skipped` (n/a for the
+  path), never fabricated.
+- **Files changed:**
+  - `backend/app/api/sessions.py` + `backend/app/api/history.py` — expose `input_window` + `raw_output` on
+    the decision serializers and `prompt` on the utterance serializers (data was already persisted by
+    .28.2/.28.3, just unexposed). No model/migration change.
+  - `frontend/src/lib/sessionDetail.ts` — `input_window`/`raw_output` on `AgentDecisionRecord`, `prompt` on
+    `AgentUtteranceRecord`.
+  - `frontend/src/lib/sessionTurns.ts` (NEW, pure + unit-tested) — `assembleTurns` + the 8-step builder,
+    plain-language label helpers (`classifyTurn`/`summarizeTurn`/`terminalLabel`), `extractHeard`
+    (is_current transcript), `parsePromptMessages`, `attachStageTimings`, and the filter predicates.
+  - `frontend/src/lib/components/SessionTurnTimeline.svelte` (NEW) — collapsed rows, expandable numbered
+    timeline, disclosures, filter chips.
+  - `frontend/src/routes/sessions/[id]/+page.svelte` — enriched `DecisionEntry` with the deep fields,
+    populated them in `decisionRecordToEntry` + the live `handleDecision`/`handleAgentSpoke` paths (with a
+    `lastUserTranscript` tracker so a live turn shows its heard text immediately), derived
+    `turns`/`timingByTurn`, and rendered the timeline as the new primary surface above the existing
+    transcript/decisions/activity panes (kept intact — no regression).
+  - Tests: `frontend/src/lib/sessionTurns.test.ts` (NEW; 8-steps-in-order, divergence-in-final-step,
+    no-reply-skips-answer/spoke + names the suppressor, missing-Heard, stage-timing attach, filters);
+    extended `backend/tests/api/test_sessions.py` to assert the 3 new serialized fields.
+- **Validation:** backend ruff + mypy clean; `tests/api/test_sessions.py` + `tests/api/test_history.py` 38
+  passed; frontend `pnpm check` (svelte-check) 0 errors/0 warnings. Browser (chrome-devtools, `/sessions/2`,
+  prod-baked images rebuilt): injected two coherent turns via Redis (950 clean + 951 divergent, each with
+  5 matching-`turn_id` `pipeline_timing` rows) — the timeline renders all turns; turn 950 expands to 8
+  steps with real elapsed ms (240/520/880/410, e2e 2.13 s) and real "View router/answer prompt" + "View raw
+  output" disclosures; turn 951 shows the answer-LLM override EXPLICITLY in step 6 (guard) + step 7 (Decided
+  to say… / Actually said…); the router-declined turn shows "router decided not to respond · no_reply_reason
+  · router_declined"; "Only divergences" filters to exactly the 5 divergent rows; a live Redis publish
+  (turn 970) made a new row appear top-of-list with heard text + replied state with NO reload. Artifacts in
+  `.validation/Johnny-ckz.28.4/`.
+- **Learnings:**
+  - See the new Codebase Patterns entry at the top (pure-derivation timeline + the linkage keys + the
+    router-prompt-is-context-not-the-ask distinction).
+  - The live WS path forwards even for an `ended` session (`_run_ws` has no terminal-close), and the API
+    re-stamps `seq` server-side + maps raw→wire types — so a `redis-cli PUBLISH johnny.session.<id>` of a
+    `transcript_final` → `router_decision_made` → `turn_terminal` triple drives the live timeline without
+    audio; just don't publish in the ~1 s window right after a reload while the browser WS is reconnecting
+    (the first attempt raced that and silently did nothing).
+  - `agent_utterances.prompt` was previously serialized as "hidden"; exposing it is intentional here (the
+    PRD's "View prompt" disclosure), so the existing test's `prompt="hidden"` fixture became an assertion.
 
 ---
 

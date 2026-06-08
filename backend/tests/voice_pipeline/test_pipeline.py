@@ -2890,9 +2890,9 @@ async def test_pipeline_transcript_sink_failure_does_not_crash(
 
 
 def test_pipeline_config_has_rate_limit_defaults() -> None:
-    """Default rate limit: max 3 utterances per 5-minute (300_000 ms) window."""
+    """Rate limit disabled by default (0 = off); a positive cap opts back in."""
     cfg = PipelineConfig()
-    assert cfg.rate_limit_max_utterances == 3
+    assert cfg.rate_limit_max_utterances == 0
     assert cfg.rate_limit_window_ms == 5 * 60 * 1000
 
 

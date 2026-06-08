@@ -3,10 +3,10 @@
   "sessionId": "8f4e6e6d-2779-4c5e-b0f8-7304b6c45d29",
   "status": "running",
   "startedAt": "2026-06-08T05:53:42.265Z",
-  "updatedAt": "2026-06-08T08:48:13.862Z",
-  "currentIteration": 2,
+  "updatedAt": "2026-06-08T09:16:03.717Z",
+  "currentIteration": 3,
   "maxIterations": 0,
-  "tasksCompleted": 2,
+  "tasksCompleted": 3,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -45,8 +45,8 @@
       {
         "id": "Johnny-ckz.28.3",
         "title": "Pipeline reliability: never silently drop a user turn — every transcribed utterance ends in reply / approved-pending / explicit-no-reply",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-ckz.28.4",
@@ -94,6 +94,16 @@
       "durationMs": 1517973,
       "startedAt": "2026-06-08T07:14:16.050Z",
       "endedAt": "2026-06-08T07:39:34.023Z"
+    },
+    {
+      "iteration": 3,
+      "status": "completed",
+      "taskId": "Johnny-ckz.28.3",
+      "taskTitle": "Pipeline reliability: never silently drop a user turn — every transcribed utterance ends in reply / approved-pending / explicit-no-reply",
+      "taskCompleted": true,
+      "durationMs": 4107961,
+      "startedAt": "2026-06-08T07:39:44.932Z",
+      "endedAt": "2026-06-08T08:48:12.893Z"
     }
   ],
   "skippedTaskIds": [],

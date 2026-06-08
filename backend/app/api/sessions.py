@@ -170,6 +170,16 @@ class AgentDecisionRead(BaseModel):
     terminal_state: TerminalState | None
     no_reply_reason: NoReplyReason | None
     outcome: DecisionOutcome
+    # Reasoning timeline (Johnny-ckz.28.4). ``input_window`` is the full
+    # router prompt context (rolling transcript window incl. the current
+    # utterance, mode, instructions, calendar + prior-session context,
+    # allowed_replies, threshold); ``raw_output`` is the router LLM's raw
+    # response (text + parsed structured output + finish_reason). Surfaced
+    # so the per-turn "what is the bot thinking" timeline can render the
+    # Heard / Context-selected / Asked-the-model / Model-said steps from the
+    # canonical record instead of mocking them.
+    input_window: dict[str, Any]
+    raw_output: dict[str, Any]
     created_at: datetime
 
 
@@ -182,6 +192,10 @@ class AgentUtteranceRead(BaseModel):
     bot_session_id: int
     agent_decision_id: int | None
     mode: BotMode
+    # Serialised answer-LLM prompt (list of role/content messages) that
+    # produced this utterance — drives the timeline's "Asked the model →
+    # View prompt" disclosure (Johnny-ckz.28.4).
+    prompt: str
     output_text: str
     audio_duration_ms: int | None
     matched_allowed_reply: str | None
