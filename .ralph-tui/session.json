@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "sessionId": "17b1f649-1d33-441a-bfd0-469c8d89870f",
+  "sessionId": "737211f1-9739-40c0-8d3f-332e080d27b8",
   "status": "running",
-  "startedAt": "2026-06-08T17:25:57.487Z",
-  "updatedAt": "2026-06-08T22:05:06.385Z",
-  "currentIteration": 14,
+  "startedAt": "2026-06-08T22:23:12.909Z",
+  "updatedAt": "2026-06-08T22:46:17.376Z",
+  "currentIteration": 0,
   "maxIterations": 0,
-  "tasksCompleted": 13,
+  "tasksCompleted": 0,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -34,7 +34,7 @@
         "id": "Johnny-4em",
         "title": "[SPIKE] Phase 0: Audio topology + double-hop/echo e2e in a real Meet call",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-4k3",
@@ -52,7 +52,7 @@
         "id": "Johnny-6nl",
         "title": "[BUILD] Phase 1: JohnnyLLM(llm.LLM) adapter over LLMProvider.chat/stream_chat",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-6nm",
@@ -64,13 +64,13 @@
         "id": "Johnny-6wx",
         "title": "[BUILD] Phase 0: Self-hosted LiveKit server in docker-compose (clean-install)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-7a3",
         "title": "[BUILD] Phase 1: JohnnyTTS(tts.TTS) adapter over TTSProvider.synthesize_stream",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-7we",
@@ -88,13 +88,13 @@
         "id": "Johnny-9k2",
         "title": "[SPIKE] Phase 2: Blocking router-gate timeout + cancellation semantics",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-c81",
         "title": "[BUILD] Phase 1: JohnnySTT(stt.STT) adapter over STTProvider.transcribe_stream",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-d5z",
@@ -106,19 +106,19 @@
         "id": "Johnny-jue",
         "title": "[BUILD] Phase 0: Add livekit-agents deps + Dockerfile + johnny/agent package + model bake",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-k8t",
         "title": "[BUILD] Phase 2: Barge-in — fast native interrupt + slow LLM classifier (generation guard on turn id)",
-        "status": "open",
+        "status": "completed",
         "completedInSession": false
       },
       {
         "id": "Johnny-o3z",
         "title": "[SPIKE] Phase 2: INV-1 single terminal-outcome choke-point under LiveKit turn lifecycle",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-qzj",
@@ -130,7 +130,7 @@
         "id": "Johnny-re2",
         "title": "[BUILD] Phase 2: JohnnyAgent(Agent) — instructions/personality injection + transcript rehydration",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-wz5",
@@ -142,7 +142,7 @@
         "id": "Johnny-xpa",
         "title": "[BUILD] Phase 2: Router should-speak gate in on_user_turn_completed + StopResponse",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-y4j",
@@ -160,13 +160,13 @@
         "id": "Johnny-zb3",
         "title": "[BUILD] Phase 1: Adapter factory built from load_active_providers() at session start",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-4fn",
         "title": "[BUILD] Phase 1: StreamAdapter + Silero wrapper for non-streaming STT providers",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-5ag",
@@ -178,7 +178,7 @@
         "id": "Johnny-88n",
         "title": "[BUILD] Phase 1: Voice/model/tool selection parity into the adapters",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-a1w",
@@ -212,152 +212,9 @@
       }
     ]
   },
-  "iterations": [
-    {
-      "iteration": 1,
-      "status": "completed",
-      "taskId": "Johnny-jue",
-      "taskTitle": "[BUILD] Phase 0: Add livekit-agents deps + Dockerfile + johnny/agent package + model bake",
-      "taskCompleted": true,
-      "durationMs": 1476952,
-      "startedAt": "2026-06-08T17:26:24.047Z",
-      "endedAt": "2026-06-08T17:51:00.999Z"
-    },
-    {
-      "iteration": 2,
-      "status": "completed",
-      "taskId": "Johnny-4em",
-      "taskTitle": "[SPIKE] Phase 0: Audio topology + double-hop/echo e2e in a real Meet call",
-      "taskCompleted": true,
-      "durationMs": 1156408,
-      "startedAt": "2026-06-08T17:51:22.943Z",
-      "endedAt": "2026-06-08T18:10:39.351Z"
-    },
-    {
-      "iteration": 3,
-      "status": "completed",
-      "taskId": "Johnny-6nl",
-      "taskTitle": "[BUILD] Phase 1: JohnnyLLM(llm.LLM) adapter over LLMProvider.chat/stream_chat",
-      "taskCompleted": true,
-      "durationMs": 835272,
-      "startedAt": "2026-06-08T18:11:02.365Z",
-      "endedAt": "2026-06-08T18:24:57.637Z"
-    },
-    {
-      "iteration": 4,
-      "status": "completed",
-      "taskId": "Johnny-6wx",
-      "taskTitle": "[BUILD] Phase 0: Self-hosted LiveKit server in docker-compose (clean-install)",
-      "taskCompleted": true,
-      "durationMs": 621864,
-      "startedAt": "2026-06-08T18:25:20.800Z",
-      "endedAt": "2026-06-08T18:35:42.664Z"
-    },
-    {
-      "iteration": 5,
-      "status": "completed",
-      "taskId": "Johnny-7a3",
-      "taskTitle": "[BUILD] Phase 1: JohnnyTTS(tts.TTS) adapter over TTSProvider.synthesize_stream",
-      "taskCompleted": true,
-      "durationMs": 925228,
-      "startedAt": "2026-06-08T18:36:13.759Z",
-      "endedAt": "2026-06-08T18:51:38.987Z"
-    },
-    {
-      "iteration": 6,
-      "status": "completed",
-      "taskId": "Johnny-c81",
-      "taskTitle": "[BUILD] Phase 1: JohnnySTT(stt.STT) adapter over STTProvider.transcribe_stream",
-      "taskCompleted": true,
-      "durationMs": 876412,
-      "startedAt": "2026-06-08T18:52:02.718Z",
-      "endedAt": "2026-06-08T19:06:39.130Z"
-    },
-    {
-      "iteration": 7,
-      "status": "failed",
-      "taskId": "Johnny-y4j",
-      "taskTitle": "[SPIKE] Phase 0: Per-room JWT auth + agent dispatch contract (job payload)",
-      "taskCompleted": false,
-      "durationMs": 171408,
-      "startedAt": "2026-06-08T19:07:01.796Z",
-      "endedAt": "2026-06-08T19:09:53.204Z"
-    },
-    {
-      "iteration": 8,
-      "status": "completed",
-      "taskId": "Johnny-zb3",
-      "taskTitle": "[BUILD] Phase 1: Adapter factory built from load_active_providers() at session start",
-      "taskCompleted": true,
-      "durationMs": 876207,
-      "startedAt": "2026-06-08T19:10:13.491Z",
-      "endedAt": "2026-06-08T19:24:49.698Z"
-    },
-    {
-      "iteration": 9,
-      "status": "completed",
-      "taskId": "Johnny-4fn",
-      "taskTitle": "[BUILD] Phase 1: StreamAdapter + Silero wrapper for non-streaming STT providers",
-      "taskCompleted": true,
-      "durationMs": 1284034,
-      "startedAt": "2026-06-08T19:25:13.604Z",
-      "endedAt": "2026-06-08T19:46:37.638Z"
-    },
-    {
-      "iteration": 10,
-      "status": "completed",
-      "taskId": "Johnny-88n",
-      "taskTitle": "[BUILD] Phase 1: Voice/model/tool selection parity into the adapters",
-      "taskCompleted": true,
-      "durationMs": 1084539,
-      "startedAt": "2026-06-08T19:47:00.351Z",
-      "endedAt": "2026-06-08T20:05:04.890Z"
-    },
-    {
-      "iteration": 11,
-      "status": "completed",
-      "taskId": "Johnny-9k2",
-      "taskTitle": "[SPIKE] Phase 2: Blocking router-gate timeout + cancellation semantics",
-      "taskCompleted": true,
-      "durationMs": 1266483,
-      "startedAt": "2026-06-08T20:05:28.544Z",
-      "endedAt": "2026-06-08T20:26:35.027Z"
-    },
-    {
-      "iteration": 12,
-      "status": "completed",
-      "taskId": "Johnny-o3z",
-      "taskTitle": "[SPIKE] Phase 2: INV-1 single terminal-outcome choke-point under LiveKit turn lifecycle",
-      "taskCompleted": true,
-      "durationMs": 1285436,
-      "startedAt": "2026-06-08T20:27:02.327Z",
-      "endedAt": "2026-06-08T20:48:27.763Z"
-    },
-    {
-      "iteration": 13,
-      "status": "completed",
-      "taskId": "Johnny-re2",
-      "taskTitle": "[BUILD] Phase 2: JohnnyAgent(Agent) — instructions/personality injection + transcript rehydration",
-      "taskCompleted": true,
-      "durationMs": 1088487,
-      "startedAt": "2026-06-08T20:48:51.272Z",
-      "endedAt": "2026-06-08T21:06:59.759Z"
-    },
-    {
-      "iteration": 14,
-      "status": "completed",
-      "taskId": "Johnny-xpa",
-      "taskTitle": "[BUILD] Phase 2: Router should-speak gate in on_user_turn_completed + StopResponse",
-      "taskCompleted": true,
-      "durationMs": 1577799,
-      "startedAt": "2026-06-08T21:07:25.790Z",
-      "endedAt": "2026-06-08T21:33:43.589Z"
-    }
-  ],
+  "iterations": [],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
-  "activeTaskIds": [
-    "Johnny-y4j"
-  ],
+  "activeTaskIds": [],
   "subagentPanelVisible": false
 }

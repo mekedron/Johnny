@@ -31,6 +31,19 @@ replacing the hand-rolled ``johnny/voice_pipeline/pipeline.py`` engine:
   LiveKit-native (configured in :func:`~johnny.agent.session.build_agent_session`).
   ``livekit``-free; imported only by :mod:`johnny.agent.session`.
 
+* :mod:`johnny.agent.job_config` — the per-session agent **job-payload
+  contract** (:class:`~johnny.agent.job_config.SessionJobConfig`): the
+  serialisable description of one Meet session (providers, personality, mode,
+  instructions, approval/redis wiring) that the API dispatches to the agent
+  worker as room/dispatch metadata, mirroring the legacy ``JOHNNY_*`` launcher
+  env contract (spike Johnny-y4j; consumed by Johnny-7we). Stdlib-only.
+* :mod:`johnny.agent.room_auth` — per-room JWT minting for the meet-worker
+  bridge and (non-framework) agent participants (spike Johnny-y4j). Lazy
+  ``livekit.api`` import.
+* :mod:`johnny.agent.dispatch` — explicit one-room-per-session agent dispatch
+  (``api.AgentDispatch``) carrying the :class:`SessionJobConfig` metadata
+  (spike Johnny-y4j). Lazy ``livekit.api`` import.
+
 Importing this top-level package is intentionally side-effect free and
 does **not** import ``livekit`` — only the submodules that subclass the
 LiveKit SDK pull it in, mirroring the lazy-import discipline of
@@ -38,8 +51,22 @@ LiveKit SDK pull it in, mirroring the lazy-import discipline of
 johnny.agent`` cheap and safe in images/tests where the ``agent`` extra
 (``livekit-agents``) is absent; the SDK-backed pieces live behind explicit
 submodule imports (``from johnny.agent.session import build_agent_session``).
+The job-payload contract (:class:`SessionJobConfig`) is stdlib-only, so it is
+re-exported here for convenience.
 """
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from johnny.agent.job_config import (
+    SessionJobConfig,
+    agent_identity_for_session,
+    bridge_identity_for_session,
+    room_name_for_session,
+)
+
+__all__: list[str] = [
+    "SessionJobConfig",
+    "agent_identity_for_session",
+    "bridge_identity_for_session",
+    "room_name_for_session",
+]
