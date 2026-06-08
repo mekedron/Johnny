@@ -23,6 +23,7 @@ import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import sqlalchemy as sa
@@ -52,6 +53,73 @@ from app.services.bot_auth_seed import (
     save_bot_session,
     validate_storage_state,
 )
+from app.services.bot_session_probe import (
+    BotSessionProbeResult,
+    BotSessionProbeUnavailableError,
+)
+
+# The bot leg of POST /accounts/{id}/verify round-trips to Google via a
+# headless Playwright probe (Johnny-ckz.24). The tests below inject a fake
+# prober (patching ``app.api.auth.probe_bot_session``) so the ok/message
+# mapping is exercised deterministically without Docker. The opt-in test
+# that actually hits Google lives in tests/services/test_bot_session_probe.py.
+_PROBE_TARGET = "app.api.auth.probe_bot_session"
+
+
+def _signed_in(email: str | None) -> object:
+    """A fake prober that reports a live, signed-in session as ``email``."""
+
+    def _probe(_account_id: int, **_kwargs: object) -> BotSessionProbeResult:
+        return BotSessionProbeResult(
+            signed_in=True, email=email, final_url="https://myaccount.google.com/"
+        )
+
+    return _probe
+
+
+def _not_signed_in(error: str | None = None) -> object:
+    """A fake prober that reports Google bounced the cookies to sign-in."""
+
+    def _probe(_account_id: int, **_kwargs: object) -> BotSessionProbeResult:
+        return BotSessionProbeResult(
+            signed_in=False,
+            email=None,
+            final_url="https://accounts.google.com/v3/signin/identifier",
+            error=error,
+        )
+
+    return _probe
+
+
+def _probe_unavailable(reason: str) -> object:
+    """A fake prober that fails to run (infra), raising Unavailable."""
+
+    def _probe(_account_id: int, **_kwargs: object) -> BotSessionProbeResult:
+        raise BotSessionProbeUnavailableError(reason)
+
+    return _probe
+
+
+def _future_state_bytes(days: int = 30) -> bytes:
+    """A well-shaped storage_state whose soonest cookie expires in ``days``."""
+    expires = datetime.now(UTC) + timedelta(days=days)
+    return json.dumps(
+        {
+            "cookies": [
+                {
+                    "name": "SID",
+                    "value": "abc",
+                    "domain": ".google.com",
+                    "path": "/",
+                    "expires": expires.timestamp(),
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "None",
+                }
+            ],
+            "origins": [],
+        }
+    ).encode("utf-8")
 
 
 @pytest.fixture
@@ -408,62 +476,153 @@ def test_put_bot_session_works_on_calendar_account(
 # --- POST /accounts/{id}/verify · bot-session leg -------------------------
 
 
-def test_verify_bot_session_reports_cookie_count_and_expiry(
+def test_verify_bot_session_live_signed_in_reports_email(
     client: TestClient,
     db_session: Session,
     auth_state_root: Path,
 ) -> None:
-    """A real on-disk storage_state with a future-dated cookie reports OK
-    with the cookie count and a soonest-expiry timestamp."""
+    """A live session whose scraped email matches the row → ok with the
+    signed-in email, and the soonest-expiry detail is preserved."""
     bot = _add_bot_account(db_session, email="bot@example.com")
     db_session.commit()
-    # Cookie expiring 30 days from now.
-    expires = datetime.now(UTC) + timedelta(days=30)
-    payload = json.dumps(
-        {
-            "cookies": [
-                {
-                    "name": "SID",
-                    "value": "abc",
-                    "domain": ".google.com",
-                    "path": "/",
-                    "expires": expires.timestamp(),
-                    "httpOnly": True,
-                    "secure": True,
-                    "sameSite": "None",
-                },
-                {
-                    "name": "session-only",
-                    "value": "z",
-                    "domain": ".google.com",
-                    "path": "/",
-                    "expires": -1,
-                    "httpOnly": True,
-                    "secure": True,
-                    "sameSite": "Lax",
-                },
-            ],
-            "origins": [],
-        }
-    ).encode("utf-8")
-    bot_auth_seed.save_bot_session(bot.id, payload)
+    bot_auth_seed.save_bot_session(bot.id, _future_state_bytes(days=30))
 
-    resp = client.post(f"/auth/google/accounts/{bot.id}/verify")
+    with patch(_PROBE_TARGET, _signed_in("bot@example.com")):
+        resp = client.post(f"/auth/google/accounts/{bot.id}/verify")
     assert resp.status_code == 200
     body = resp.json()
     assert body["bot_session"]["ok"] is True
-    assert body["bot_session"]["detail"]["cookie_count"] == 2
+    assert "bot@example.com" in body["bot_session"]["message"]
+    # Regression: cookie-expiry detail survives the round-trip rewrite.
+    assert body["bot_session"]["detail"]["cookie_count"] == 1
     assert body["bot_session"]["detail"]["soonest_expiry"] is not None
     assert body["bot_session"]["detail"]["days_until_expiry"] > 25
 
 
-def test_verify_bot_session_reports_expired_cookie(
+def test_verify_bot_session_fake_cookies_not_signed_in(
     client: TestClient,
     db_session: Session,
     auth_state_root: Path,
 ) -> None:
-    """A storage_state where the soonest persistent cookie is past-due
-    must surface as ok=False so the UI can prompt re-sign-in."""
+    """The user's repro: a well-shaped but fake storage_state must flip to
+    ok=False — Google bounces the cookies to the sign-in page."""
+    bot = _add_bot_account(db_session, email="bot@example.com")
+    db_session.commit()
+    # The exact fake shape from the ticket: right shape, far-future expiry,
+    # but no real session behind it.
+    fake = json.dumps(
+        {
+            "cookies": [
+                {
+                    "name": "fake",
+                    "value": "fake",
+                    "domain": ".google.com",
+                    "path": "/",
+                    "expires": 9999999999,
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "Lax",
+                }
+            ]
+        }
+    ).encode("utf-8")
+    bot_auth_seed.save_bot_session(bot.id, fake)
+
+    with patch(_PROBE_TARGET, _not_signed_in()):
+        resp = client.post(f"/auth/google/accounts/{bot.id}/verify")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bot_session"]["ok"] is False
+    assert "sign-in page" in body["bot_session"]["message"].lower()
+    assert body["bot_session"]["detail"]["signed_in"] is False
+
+
+def test_verify_bot_session_mismatched_account(
+    client: TestClient,
+    db_session: Session,
+    auth_state_root: Path,
+) -> None:
+    """Cookies for a DIFFERENT Google account → ok=False naming both
+    emails so the user understands the row is bound to the wrong identity."""
+    bot = _add_bot_account(db_session, email="bot@example.com")
+    db_session.commit()
+    bot_auth_seed.save_bot_session(bot.id, _future_state_bytes())
+
+    with patch(_PROBE_TARGET, _signed_in("someone-else@gmail.com")):
+        resp = client.post(f"/auth/google/accounts/{bot.id}/verify")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bot_session"]["ok"] is False
+    message = body["bot_session"]["message"]
+    assert "someone-else@gmail.com" in message
+    assert "bot@example.com" in message
+    assert body["bot_session"]["detail"]["expected_email"] == "bot@example.com"
+
+
+def test_verify_bot_session_signed_in_no_email_still_ok(
+    client: TestClient,
+    db_session: Session,
+    auth_state_root: Path,
+) -> None:
+    """A live session whose email could not be scraped is still ok — the
+    session works; only identity confirmation is missing."""
+    bot = _add_bot_account(db_session, email="bot@example.com")
+    db_session.commit()
+    bot_auth_seed.save_bot_session(bot.id, _future_state_bytes())
+
+    with patch(_PROBE_TARGET, _signed_in(None)):
+        resp = client.post(f"/auth/google/accounts/{bot.id}/verify")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bot_session"]["ok"] is True
+    assert "could not read" in body["bot_session"]["message"].lower()
+
+
+def test_verify_bot_session_placeholder_email_skips_mismatch(
+    client: TestClient,
+    db_session: Session,
+    auth_state_root: Path,
+) -> None:
+    """A row whose email is the unknown-*@johnny.local placeholder doesn't
+    trigger the mismatch check — a scraped real email is an improvement."""
+    bot = _add_bot_account(db_session, email="unknown-deadbeef@johnny.local")
+    db_session.commit()
+    bot_auth_seed.save_bot_session(bot.id, _future_state_bytes())
+
+    with patch(_PROBE_TARGET, _signed_in("real-bot@gmail.com")):
+        resp = client.post(f"/auth/google/accounts/{bot.id}/verify")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bot_session"]["ok"] is True
+    assert "real-bot@gmail.com" in body["bot_session"]["message"]
+
+
+def test_verify_bot_session_probe_unavailable_is_not_a_pass(
+    client: TestClient,
+    db_session: Session,
+    auth_state_root: Path,
+) -> None:
+    """If the probe can't run at all, verify must NOT report a pass — a
+    silent pass on an unrunnable check is the bug this ticket fixes."""
+    bot = _add_bot_account(db_session, email="bot@example.com")
+    db_session.commit()
+    bot_auth_seed.save_bot_session(bot.id, _future_state_bytes())
+
+    with patch(_PROBE_TARGET, _probe_unavailable("docker daemon down")):
+        resp = client.post(f"/auth/google/accounts/{bot.id}/verify")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bot_session"]["ok"] is False
+    assert "could not run" in body["bot_session"]["message"].lower()
+
+
+def test_verify_bot_session_expired_cookie_fast_fails_without_probe(
+    client: TestClient,
+    db_session: Session,
+    auth_state_root: Path,
+) -> None:
+    """A storage_state whose soonest persistent cookie is past-due must
+    surface ok=False WITHOUT paying the probe cost (no probe call)."""
     bot = _add_bot_account(db_session, email="bot@example.com")
     db_session.commit()
     expires = datetime.now(UTC) - timedelta(days=1)
@@ -486,45 +645,16 @@ def test_verify_bot_session_reports_expired_cookie(
     ).encode("utf-8")
     bot_auth_seed.save_bot_session(bot.id, payload)
 
-    resp = client.post(f"/auth/google/accounts/{bot.id}/verify")
+    # The probe must never be reached for an already-expired state.
+    def _explode(*_a: object, **_k: object) -> BotSessionProbeResult:
+        raise AssertionError("probe must not run for expired cookies")
+
+    with patch(_PROBE_TARGET, _explode):
+        resp = client.post(f"/auth/google/accounts/{bot.id}/verify")
     assert resp.status_code == 200
     body = resp.json()
     assert body["bot_session"]["ok"] is False
     assert "past" in body["bot_session"]["message"].lower()
-
-
-def test_verify_bot_session_session_only_cookies_ok(
-    client: TestClient,
-    db_session: Session,
-    auth_state_root: Path,
-) -> None:
-    """Session-only cookies (expires<=0) are treated as live — file-level
-    verification has no way to invalidate them."""
-    bot = _add_bot_account(db_session, email="bot@example.com")
-    db_session.commit()
-    payload = json.dumps(
-        {
-            "cookies": [
-                {
-                    "name": "SID",
-                    "value": "abc",
-                    "domain": ".google.com",
-                    "path": "/",
-                    "expires": -1,
-                    "httpOnly": True,
-                    "secure": True,
-                    "sameSite": "None",
-                }
-            ],
-            "origins": [],
-        }
-    ).encode("utf-8")
-    bot_auth_seed.save_bot_session(bot.id, payload)
-    resp = client.post(f"/auth/google/accounts/{bot.id}/verify")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["bot_session"]["ok"] is True
-    assert "session-only" in body["bot_session"]["message"]
 
 
 # --- POST /accounts/bot/upload (create-or-attach) -------------------------

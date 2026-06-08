@@ -3,10 +3,10 @@
   "sessionId": "fdf153cd-1429-4f44-9048-a1fbb60a77c5",
   "status": "running",
   "startedAt": "2026-06-07T23:21:19.573Z",
-  "updatedAt": "2026-06-07T23:57:08.518Z",
-  "currentIteration": 1,
+  "updatedAt": "2026-06-08T00:26:31.610Z",
+  "currentIteration": 2,
   "maxIterations": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 2,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -339,8 +339,8 @@
       {
         "id": "Johnny-ckz.26",
         "title": "noVNC sign-in: email scrape fails for Workspace accounts → bot saved as 'unknown-<hex>@johnny.local' instead of real email",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-g2n",
@@ -456,6 +456,16 @@
       "durationMs": 863674,
       "startedAt": "2026-06-07T23:21:45.882Z",
       "endedAt": "2026-06-07T23:36:09.556Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "Johnny-ckz.26",
+      "taskTitle": "noVNC sign-in: email scrape fails for Workspace accounts → bot saved as 'unknown-<hex>@johnny.local' instead of real email",
+      "taskCompleted": true,
+      "durationMs": 1242149,
+      "startedAt": "2026-06-07T23:36:25.590Z",
+      "endedAt": "2026-06-07T23:57:07.739Z"
     }
   ],
   "skippedTaskIds": [],

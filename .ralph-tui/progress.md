@@ -49,6 +49,102 @@ after each iteration and it's included in prompts for context.
   -w /workspace johnny-bot-signin:latest <script>`. Point
   `supervisor.EMAIL_SCRAPE_URL` at a `file://` fixture to exercise
   goto/wait_for_load_state/wait_for_selector/evaluate for real.
+- **The browserless `api` image runs Playwright by spawning a one-shot
+  container, not in-process.** `api` is `python:3.12-slim` (no Chromium);
+  only `johnny-meet-worker` / `johnny-bot-signin` ship Playwright. To do a
+  real browser check from an API request, spawn the bot-signin image via
+  the Docker SDK (api already has `docker.sock` + the `google_auth_state`
+  volume mounted RW), override its noVNC entrypoint with
+  `entrypoint=["python"], command=["-m","johnny.bot_signin.probe"]` (set
+  BOTH so the image's CMD isn't appended as stray args), mount
+  `johnny_google_auth_state` RO, run headless, and read the verdict off
+  stdout (a `PROBE_RESULT:{json}` line via `container.logs()`) — no shared
+  marker volume needed. Pattern lives in
+  `app/services/bot_session_probe.py` (mirrors `docker_launcher` /
+  `bot_signin_launcher`: lazy docker import, `_create_client` override for
+  a fake client in tests). Treat "probe couldn't run" as a FAILURE, never
+  a pass. `connect_over_cdp` to the host `:9222` Chrome is NOT reachable
+  from a container (Chrome 403s a non-localhost `Host:` header), and a
+  *copy* of the macOS `.chrome-profile` is useless in a Linux container
+  (cookies are Keychain-encrypted) — the portable format is
+  `storage_state.json` (decrypted cookie values), which is exactly what
+  the probe consumes.
+
+---
+
+## 2026-06-08 - Johnny-ckz.24
+
+Fixed: the bot "Verify session" button was a file-shape-only check that
+NEVER round-tripped to Google, so any well-shaped `storage_state.json`
+(including the ticket's hand-crafted fake) reported `ok=true`. Now it
+loads the cookies into a real headless Chromium — the meet-worker's exact
+mechanism — and reports `ok=true` only for a live, signed-in session.
+
+- **Decision (cite for PR):** **Option A (Playwright probe)**, not the
+  bare-HTTPS Option B. Rationale: the project already learned
+  (Johnny-ckz.26) that non-DOM/bare-HTTP tricks are dead for Google cookie
+  sessions, and Google renders the account email via JS — so Option B
+  couldn't reliably satisfy the email/mismatch criteria. Web search
+  (fetch date 2026-06-08) confirmed the recommended Playwright pattern is
+  "load storage_state into a real context and assert signed-in via
+  navigation/DOM", and that the invalid-session signal is the redirect to
+  the sign-in page (`accounts.google.com`). Probe URL: `myaccount.google.com`
+  (primary; host ∈ SIGNED_IN_HOSTS = signed in) + `accounts.google.com/SignOutOptions`
+  (secondary, via the reused supervisor scrape) for the email.
+- **What:** new headless probe + API-side spawner; rewired the verify leg.
+  Fast-fail order preserved (missing file / bad JSON / empty cookies /
+  all-persistent-cookies-expired return ok=false BEFORE paying the probe
+  cost); soonest-cookie-expiry is still surfaced in `detail`. Mismatch
+  check is skipped for `unknown-*@johnny.local` placeholder rows (a scraped
+  real email is an improvement, not a mismatch). The calendar verify leg
+  was untouched.
+- **Files changed:**
+  - `backend/johnny/bot_signin/probe.py` (new) — headless probe: load
+    storage_state, navigate myaccount, host-based signed-in detection +
+    reuse `supervisor._scrape_email` for identity, emit `PROBE_RESULT:{json}`.
+  - `backend/app/services/bot_session_probe.py` (new) — Docker-SDK spawner
+    (`BotSessionProber` / `probe_bot_session`), parses the result line,
+    cleans up the container, raises `BotSessionProbeUnavailableError` on
+    any infra failure.
+  - `backend/app/api/auth.py` — `_verify_bot_session` now async + takes the
+    row, round-trips via `asyncio.to_thread(probe_bot_session, …)`,
+    `_cookie_expiry_summary` helper, honest messages per outcome.
+  - `frontend/src/routes/settings/+page.svelte` — replaced the now-false
+    "File-level check only …" caption with "Live check — loads the bot's
+    cookies in a real browser …". (UI already rendered `message`/ok-state,
+    so no other FE change needed.)
+  - tests: `tests/api/test_auth_bot_session.py` (rewrote the 3 verify
+    tests + added fake/mismatch/no-email/placeholder/unavailable/fast-fail),
+    `tests/services/test_bot_session_probe.py` (new, fake docker client +
+    opt-in live test), `tests/johnny/test_bot_signin_probe.py` (new, pure
+    helpers).
+- **Validation:**
+  - backend: `pytest tests/api tests/services tests/johnny` → 934 passed,
+    1 skipped (the opt-in live test). ruff clean; mypy clean on the 3
+    changed/new source files.
+  - **real Google (opt-in live test):** `JOHNNY_PROBE_LIVE=1 pytest …` —
+    spawned the real probe container against a fake storage_state →
+    `signed_in=False` in ~12 s (Google bounced it to the sign-in page).
+  - **real Google (real cookies):** ran `probe_bot_session(2)` against the
+    pre-existing account-2 storage_state → `signed_in=True`,
+    `email=nikita.rabykin@aikamatkat.fi`.
+  - **browser (chrome-devtools MCP):** on /settings, three bots —
+    fake-bot → "…Google returned the sign-in page…" (NOT connected);
+    real (account-2) → "Signed in to Google as nikita.rabykin@aikamatkat.fi."
+    (connected); wrong-account (real cookies, wrong email) → "…does NOT
+    match this account's expected email wrong-account@example.com." (NOT
+    connected). Screenshots in `.validation/Johnny-ckz.24/`. Test rows 3/4
+    cleaned up afterward.
+- **Learnings:**
+  - A real signed-in `storage_state` was already on the volume
+    (`account-2`, the Johnny-ckz.26 placeholder row) — invaluable for
+    proving the ok=true path without credentials.
+  - Getting a fresh real `storage_state` from this host is hard: CDP to
+    `:9222` 403s from a container (Host-header check) and a macOS profile
+    copy is Keychain-locked on Linux. (Promoted to Codebase Patterns.)
+  - Playground/Meet parity is automatic: verify, the meet-worker, and the
+    playground all read the SAME `account-<id>/storage_state.json`, so the
+    probe's answer is faithful to whatever launches next.
 
 ---
 

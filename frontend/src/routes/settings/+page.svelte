@@ -678,8 +678,8 @@
 								<div class="flex min-w-0 flex-col gap-0.5">
 									<span class="font-medium">{verifyResult.message}</span>
 									<span class="text-[0.7rem] text-muted-foreground">
-										File-level check only — Google's session is the final word at
-										join time.
+										Live check — loads the bot's cookies in a real browser, the same
+										way it joins a Meet.
 									</span>
 								</div>
 							</div>

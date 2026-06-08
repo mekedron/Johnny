@@ -35,6 +35,7 @@ to the database. Decryption only happens inside the shared
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import secrets
@@ -60,6 +61,10 @@ from app.services.bot_auth_seed import (
     delete_bot_session,
     save_bot_session,
     validate_storage_state,
+)
+from app.services.bot_session_probe import (
+    BotSessionProbeUnavailableError,
+    probe_bot_session,
 )
 from app.services.google_client import (
     GoogleApiClient,
@@ -584,22 +589,49 @@ async def _verify_calendar(
     )
 
 
-def _verify_bot_session(account_id: int) -> CapabilityCheck:
-    """Re-read ``storage_state.json`` and report the cookie state.
+def _cookie_expiry_summary(
+    cookies: list[object],
+) -> tuple[str | None, float | None, bool]:
+    """Summarise persistent-cookie expiry.
 
-    File-level only — we never round-trip to Google with the cookies
-    (that would require Playwright in this process). What we verify:
-
-    * The file is present, well-formed JSON, has a non-empty cookies
-      array (the same checks ``validate_storage_state`` enforces on
-      upload).
-    * The soonest persistent-cookie expiry, so the UI can warn before
-      Google logs the bot out.
-
-    Session cookies (``expires <= 0``) are ignored — Google's session
-    cookies don't carry an expiry, so reporting them as "expired" would
-    be misleading.
+    Returns ``(soonest_iso, days_until_expiry, expired)``. Session
+    cookies (``expires <= 0``) are ignored — Google's session cookies
+    carry no expiry, so counting them as "expired" would mislead. With
+    no persistent cookies at all, returns ``(None, None, False)``.
     """
+    persistent: list[float] = []
+    for cookie in cookies:
+        expires = cookie.get("expires") if isinstance(cookie, dict) else None
+        if isinstance(expires, int | float) and expires > 0:
+            persistent.append(float(expires))
+    if not persistent:
+        return None, None, False
+    soonest = min(persistent)
+    soonest_iso = datetime.fromtimestamp(soonest, tz=UTC).isoformat()
+    now_ts = time.time()
+    if soonest <= now_ts:
+        return soonest_iso, None, True
+    days_left = round((soonest - now_ts) / 86_400, 1)
+    return soonest_iso, days_left, False
+
+
+async def _verify_bot_session(account: GoogleAccount) -> CapabilityCheck:
+    """Confirm the bot's storage_state is a live, signed-in Google session.
+
+    Fast-fails on the cheap, deterministic problems first (no file, bad
+    JSON, bad shape, all persistent cookies already expired) so the common
+    failures don't pay the probe cost. Otherwise it loads the cookies into
+    a real headless Chromium — the SAME mechanism the meet-worker uses at
+    join time (:func:`app.services.bot_session_probe.probe_bot_session`) —
+    and reports whether Google still recognises the session, and as whom.
+
+    A hand-crafted / stale / revoked storage_state therefore reports
+    ``ok=False`` (Google bounces it to the sign-in page); a live session
+    reports ``ok=True`` with the signed-in email; cookies for a different
+    Google account report ``ok=False`` with both emails. The soonest
+    cookie-expiry is preserved in ``detail`` either way.
+    """
+    account_id = account.id
     path = bot_session_path(account_id)
     try:
         raw = path.read_bytes()
@@ -623,51 +655,106 @@ def _verify_bot_session(account_id: int) -> CapabilityCheck:
         )
 
     cookies = data.get("cookies", []) or []
-    persistent_expiries: list[float] = []
-    for cookie in cookies:
-        expires = cookie.get("expires") if isinstance(cookie, dict) else None
-        if isinstance(expires, int | float) and expires > 0:
-            persistent_expiries.append(float(expires))
+    soonest_iso, days_left, expired = _cookie_expiry_summary(cookies)
+    expiry_detail: dict[str, object] = {
+        "cookie_count": len(cookies),
+        "soonest_expiry": soonest_iso,
+    }
+    if days_left is not None:
+        expiry_detail["days_until_expiry"] = days_left
 
-    now_ts = time.time()
-    if persistent_expiries:
-        soonest = min(persistent_expiries)
-        soonest_iso = datetime.fromtimestamp(soonest, tz=UTC).isoformat()
-        already_expired = soonest <= now_ts
-        if already_expired:
-            return CapabilityCheck(
-                ok=False,
-                message=(
-                    f"{len(cookies)} cookies present, but the soonest expiry "
-                    f"({soonest_iso}) is already in the past."
-                ),
-                detail={
-                    "cookie_count": len(cookies),
-                    "soonest_expiry": soonest_iso,
-                    "expired": True,
-                },
-            )
-        days_left = round((soonest - now_ts) / 86_400, 1)
+    # Fast-fail: persistent cookies already expired — skip the probe cost.
+    if expired:
         return CapabilityCheck(
-            ok=True,
+            ok=False,
             message=(
-                f"{len(cookies)} cookies present; soonest persistent cookie "
-                f"expires in {days_left} day(s)."
+                f"{len(cookies)} cookies present, but the soonest expiry "
+                f"({soonest_iso}) is already in the past — re-sign-in required."
             ),
+            detail={**expiry_detail, "expired": True},
+        )
+
+    # Live round-trip: load the cookies into Chromium and ask Google. The
+    # probe is blocking (Docker SDK), so run it off the event loop.
+    start = time.monotonic()
+    try:
+        result = await asyncio.to_thread(probe_bot_session, account_id)
+    except BotSessionProbeUnavailableError as exc:
+        latency = int((time.monotonic() - start) * 1000)
+        return CapabilityCheck(
+            ok=False,
+            latency_ms=latency,
+            message=(
+                f"Cookies are present, but the live Google check could not run: {exc}"
+            ),
+            detail={**expiry_detail, "probe_error": str(exc)},
+        )
+    latency = int((time.monotonic() - start) * 1000)
+
+    if not result.signed_in:
+        if result.error:
+            message = (
+                f"Cookies are present, but the live Google check failed: {result.error}"
+            )
+        else:
+            message = (
+                "Cookies are present, but Google returned the sign-in page — "
+                "the session is no longer valid. Re-sign-in this bot."
+            )
+        return CapabilityCheck(
+            ok=False,
+            latency_ms=latency,
+            message=message,
             detail={
-                "cookie_count": len(cookies),
-                "soonest_expiry": soonest_iso,
-                "days_until_expiry": days_left,
+                **expiry_detail,
+                "signed_in": False,
+                "final_url": result.final_url,
+                "probe_error": result.error,
             },
         )
 
+    scraped = (result.email or "").strip()
+    expected = (account.email or "").strip()
+    is_placeholder = expected.startswith("unknown-") and expected.endswith(
+        "@johnny.local"
+    )
+    if (
+        scraped
+        and expected
+        and not is_placeholder
+        and scraped.casefold() != expected.casefold()
+    ):
+        return CapabilityCheck(
+            ok=False,
+            latency_ms=latency,
+            message=(
+                f"Signed in to Google as {scraped}, which does NOT match this "
+                f"account's expected email {expected}."
+            ),
+            detail={
+                **expiry_detail,
+                "signed_in": True,
+                "signed_in_email": scraped,
+                "expected_email": expected,
+            },
+        )
+
+    if scraped:
+        message = f"Signed in to Google as {scraped}."
+    else:
+        message = (
+            "Signed in to Google (the session is live; could not read the "
+            "account email to confirm identity)."
+        )
     return CapabilityCheck(
         ok=True,
-        message=(
-            f"{len(cookies)} cookies present (all session-only — Google's "
-            "live session decides validity)."
-        ),
-        detail={"cookie_count": len(cookies), "soonest_expiry": None},
+        latency_ms=latency,
+        message=message,
+        detail={
+            **expiry_detail,
+            "signed_in": True,
+            "signed_in_email": scraped or None,
+        },
     )
 
 
@@ -684,9 +771,11 @@ async def verify_account(
     """Run live checks against whichever capabilities the row carries.
 
     Calendar capability → real HTTP round-trip to Google /userinfo,
-    forcing a refresh if needed. Bot capability → file integrity +
-    cookie-expiry check. Either field is ``None`` in the response if
-    the row doesn't carry that capability.
+    forcing a refresh if needed. Bot capability → load the stored
+    cookies into a real headless Chromium (the meet-worker's mechanism)
+    and confirm Google still recognises the session, and as whom. Either
+    field is ``None`` in the response if the row doesn't carry that
+    capability.
     """
     row = _get_account_or_404(session, account_id)
     calendar_check: CapabilityCheck | None = None
@@ -696,7 +785,7 @@ async def verify_account(
         )
     bot_check: CapabilityCheck | None = None
     if bot_session_status(account_id)["connected"]:
-        bot_check = _verify_bot_session(account_id)
+        bot_check = await _verify_bot_session(row)
     return VerifyResponse(
         checked_at=datetime.now(UTC),
         calendar=calendar_check,
