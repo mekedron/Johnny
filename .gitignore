@@ -77,3 +77,6 @@ client_secret*.json
 # IDE state and per-machine dependency snapshots.
 .build/
 .swiftpm/
+
+# LiveKit examples
+agent-starter-python/

@@ -92,6 +92,23 @@ neural-tts = [
 auth-seed = [
     "playwright>=1.49.0",
 ]
+# LiveKit Agents orchestration engine (epic Johnny-7g5). `livekit-agents`
+# is the AgentSession runtime that is replacing the hand-rolled
+# johnny/voice_pipeline/pipeline.py; the `[silero,turn-detector]` extras
+# pull livekit-plugins-silero (Silero VAD) and livekit-plugins-turn-detector
+# (the MultilingualModel end-of-utterance detector). Pinned to the exact
+# release the operator validated from the cloned agent-starter-python.
+# The api/worker image BAKES this in (backend/Dockerfile installs
+# `--extra agent`) AND runs `python -m livekit.agents download-files` at
+# build time so the Silero VAD + multilingual turn-detector ONNX models
+# are present offline on a clean `./run.sh` — see the clean-install
+# contract in AGENTS.md. Johnny is SELF-HOSTED: it brings its own
+# STT/LLM/TTS provider adapters (johnny/agent/) and deliberately does NOT
+# use LiveKit Cloud Inference or the ai-coustics cloud noise-cancellation
+# plugin from the starter template.
+agent = [
+    "livekit-agents[silero,turn-detector]==1.5.17",
+]
 
 [dependency-groups]
 dev = [
@@ -163,4 +180,13 @@ disallow_untyped_decorators = false
 
 [[tool.mypy.overrides]]
 module = "pgvector.*"
+ignore_missing_imports = true
+
+# livekit-agents ships only in the api/agent image (the `agent` extra,
+# epic Johnny-7g5); the dev/CI mypy run does not install it, so resolving
+# the SDK imports in johnny/agent/* would otherwise fail. The package is
+# import-guarded (only johnny.agent.session pulls livekit in) and exercised
+# in the baked image, so silence missing-stub errors here.
+[[tool.mypy.overrides]]
+module = "livekit.*"
 ignore_missing_imports = true

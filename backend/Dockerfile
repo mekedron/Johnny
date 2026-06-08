@@ -7,7 +7,15 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/venv \
-    PATH="/opt/venv/bin:$PATH"
+    PATH="/opt/venv/bin:$PATH" \
+    # LiveKit Agents model cache (epic Johnny-7g5). `download-files` writes
+    # the Silero VAD + multilingual turn-detector artifacts here at build
+    # time and the runtime reads them back from the same paths. Kept OUTSIDE
+    # /workspace and /opt/venv on purpose: the run-dev.sh source bind mount
+    # (./backend:/workspace) and `uv sync` must never shadow the baked
+    # weights, otherwise first launch would re-fetch them over the network.
+    HF_HOME=/opt/livekit-models/huggingface \
+    TORCH_HOME=/opt/livekit-models/torch
 
 RUN pip install --no-cache-dir uv==0.11.19
 
@@ -25,7 +33,17 @@ WORKDIR /workspace
 # copies via pip; this layer covers the api/worker.
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project --no-dev \
-    --extra local-stt --extra local-tts --extra neural-tts
+    --extra local-stt --extra local-tts --extra neural-tts --extra agent
+
+# Bake the LiveKit Agents model files (Silero VAD + multilingual turn
+# detector) into the image so a clean `./run.sh` works with NO network
+# (clean-install contract, AGENTS.md). `python -m livekit.agents
+# download-files` discovers the installed livekit-plugins-* packages and
+# fetches their model artifacts into HF_HOME / TORCH_HOME (set above to a
+# path outside /workspace + /opt/venv). This RUN sits before the source
+# COPY so the heavy model-download layer stays cached across code-only
+# changes (epic Johnny-7g5).
+RUN python -m livekit.agents download-files
 
 # Audio system libs used by NeMo's transitive deps when the user
 # installs Parakeet at runtime (Johnny-stt.1). `libsndfile1` is
@@ -47,7 +65,7 @@ COPY alembic ./alembic
 COPY app ./app
 COPY johnny ./johnny
 RUN uv sync --frozen --no-dev \
-    --extra local-stt --extra local-tts --extra neural-tts
+    --extra local-stt --extra local-tts --extra neural-tts --extra agent
 
 EXPOSE 8000
 
