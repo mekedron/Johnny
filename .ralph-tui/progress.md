@@ -72,6 +72,40 @@ no clock drift), NOT the latency slope, which just reflects jitter-buffer settli
 — a LiveKit SFU never returns a participant its own track, so subclass the transport
 to record subscribed participant identities and assert `*_heard_itself=False`.
 
+### Subclass livekit `llm.LLM` over a Johnny `LLMProvider` (the adapter shape)
+`LLM.chat()` is **synchronous** — it returns an `LLMStream` immediately; the
+stream's `__init__` (base class) spawns `_main_task`→`_run` as an asyncio task,
+so you only implement `async def _run(self)` and push results with
+`self._event_ch.send_nowait(ChatChunk(id=..., delta=ChoiceDelta(role="assistant",
+content=...)))`. Key mapping facts:
+- LiveKit `ChatRole` has **no "tool"** — it's `developer|system|user|assistant`.
+  Tool *results* are separate `FunctionCallOutput` items and tool *calls* are
+  separate `FunctionCall` items in the flat `chat_ctx.items` list. Johnny (OpenAI
+  shape) hangs `tool_calls` off the assistant msg + carries results as
+  `role="tool"`. So: fold `developer`→`system`; merge consecutive `FunctionCall`
+  onto the preceding assistant `ChatMessage` (new content-less assistant msg if the
+  model opened with a tool call); map each `FunctionCallOutput`→`role="tool"` keyed
+  by `call_id`. `FunctionCall.arguments` is a JSON **string** (json.loads → dict).
+- Tool defs: `from livekit.agents.llm.utils import build_legacy_openai_schema(tool,
+  internally_tagged=True)` returns `{name, description, parameters}` straight into
+  Johnny `ToolDefinition`. Guard with `is_function_tool` / `is_raw_function_tool`
+  (raw tools carry `tool.info.raw_schema`); skip `ProviderTool` (no Johnny repr).
+  `get_raw_function_info` is NOT re-exported from `livekit.agents.llm` — read
+  `tool.info.raw_schema` directly.
+- Johnny's `LLMProvider.stream_chat(messages)` takes **only messages** (no tools, no
+  response_format). So route turns: tools or response_format present → fall back to
+  `provider.chat(...)` and re-emit text + a tool-call `ChatChunk`; else stream
+  `stream_chat` deltas one chunk each (incremental TTS).
+- LiveKit's `LLM.chat()` signature has **no `response_format`** param — pass
+  structured output through `extra_kwargs={"response_format": <json-schema dict>}`
+  (the only forward channel) and re-emit the JSON on the assistant text so the
+  router can re-parse it off the stream.
+- `LLM` is `Generic[TEvent]` → `class JohnnyLLM(LLM[Any])` for strict mypy
+  (`LLMStream` is plain `ABC`, not generic). Lazy-export adapters via PEP-562
+  `__getattr__` in `adapters/__init__.py` so `import johnny.agent.adapters` stays
+  livekit-free (matches `johnny.agent`'s import-safety) while
+  `from johnny.agent.adapters import JohnnyLLM` triggers the SDK import on access.
+
 ---
 
 ## 2026-06-08 - Johnny-jue
@@ -165,6 +199,55 @@ PA mic→speaker loopback; STT may drain continuously).
   delivers a participant its own track, so the agent can't hear its own TTS from the
   room. Run a stub-echo negative control (idle-gap energy must stay at the noise
   floor) to prove no feedback loop.
+
+---
+
+## 2026-06-08 - Johnny-6nl
+
+Phase-1 LLM adapter: `JohnnyLLM(llm.LLM)` wrapping Johnny's `LLMProvider` so
+LiveKit's `AgentSession` drives every admin-configured chat provider unchanged.
+
+**Implemented**
+- `backend/johnny/agent/adapters/johnny_llm.py`: `JohnnyLLM(LLM[Any])` +
+  `JohnnyLLMStream(LLMStream)`. `chat()` returns the stream; `_run()` routes
+  plain-text turns to `provider.stream_chat` (one `ChatChunk` per delta) and
+  tools/structured-output turns to `provider.chat` (re-emits text + a tool-call
+  chunk). Module-level mappers `chat_ctx_to_messages` (LiveKit ChatContext →
+  Johnny ChatMessage: developer→system, FunctionCall merged onto assistant
+  `tool_calls`, FunctionCallOutput → `role="tool"`) and `tools_to_definitions`
+  (`function_tool`/raw → `ToolDefinition` via `build_legacy_openai_schema`).
+  `response_format` flows in through `extra_kwargs`. Provider `LLMError` →
+  `APIConnectionError` (LiveKit error/retry plumbing).
+- `backend/johnny/agent/adapters/__init__.py`: PEP-562 `__getattr__` lazy export
+  of `JohnnyLLM` — keeps `import johnny.agent.adapters` livekit-free.
+- `backend/tests/agent/test_johnny_llm.py`: 8 unit tests (fake `LLMProvider`,
+  **real** LiveKit ChatContext/function_tool/LLMStream) — incremental deltas, role
+  mapping, FunctionCall↔ToolCall both directions, function_tool→ToolDefinition,
+  structured-output passthrough (+ json.dumps fallback), model/provider labels.
+
+**Validated**
+- ruff + mypy(strict) clean on `johnny/agent tests/agent`; `pytest tests/agent`
+  → 11 passed (8 new + 3 Phase-0 smoke). Import-safety re-proven: bare `import
+  johnny.agent.adapters` pulls neither `livekit` nor `johnny_llm` into
+  `sys.modules`; `.JohnnyLLM` access triggers the SDK import on demand; unknown
+  attr → AttributeError. Ran via the `--no-dev` prod-image gate pattern.
+- **No browser validation**: pure backend adapter with no UI/HTTP surface — it's
+  unreachable until the adapter factory (Johnny-zb3) and agent worker / console
+  entrypoint (Johnny-9eh) exist. The acceptance "console-mode integration with
+  OpenAI+Anthropic" is therefore deferred to those tasks; here the adapter is
+  proven against the real LiveKit stream machinery with a fake provider.
+
+**Learnings / gotchas** (see new Codebase Pattern at top)
+- `LLM.chat()` is sync and returns a self-driving `LLMStream`; you implement
+  `_run` and `send_nowait` ChatChunks — don't `await` chat().
+- LiveKit has no "tool" role and stores tool calls/results as flat sibling items,
+  not nested on the assistant message — the merge logic is the crux of the
+  ChatContext→Johnny mapping.
+- `LLMProvider.stream_chat` carries neither tools nor response_format, so those
+  turns MUST fall back to `chat()`; structured output rides in via `extra_kwargs`
+  and back out on the assistant text channel.
+- `get_raw_function_info` is not re-exported from `livekit.agents.llm` (use
+  `tool.info.raw_schema`); `LLM` is generic → `LLM[Any]` for strict mypy.
 
 ---
 
