@@ -21,7 +21,15 @@ See `tasks/prd-johnny-google-meet-ai-meeting-bot.md` for the full PRD.
 ```
 backend/    FastAPI app (Python, managed by uv)
 frontend/   SvelteKit UI (TypeScript, managed by pnpm)
+docs/       Reference documentation
 ```
+
+Key docs:
+
+- **[docs/PIPELINE_OVERVIEW.md](docs/PIPELINE_OVERVIEW.md)** — plain-language
+  tour of what Johnny does between hearing you and speaking. Start here.
+- **[docs/PIPELINE.md](docs/PIPELINE.md)** — the engineer-facing technical
+  deep-dive (companion to the overview).
 
 ## Prerequisites
 

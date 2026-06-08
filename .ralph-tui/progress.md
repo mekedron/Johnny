@@ -71,6 +71,17 @@ after each iteration and it's included in prompts for context.
   only) — conflating them mislabels a router-declined turn as "asked the model". A step renders `done` /
   `skipped` (terminal path never reached it, e.g. no-reply never asks the answer model) / `missing` (a
   real upstream gap) — never mock data.
+- **Operator-facing plain-language copy has a single source of truth in the frontend — reuse it verbatim
+  when writing operator docs.** The exact strings the operator reads in the UI live in
+  `frontend/src/lib/sessionDetail.ts` (`NO_REPLY_REASON_LABEL` = the "No reply — <reason>" gloss for all 13
+  `NoReplyReason`s; `BotMode` union) and `frontend/src/lib/sessionTurns.ts` (`TERMINAL_LABEL` = the three
+  chips **Replied** / **Awaiting approval** / **No reply**; the eight timeline step titles in `buildSteps`:
+  Heard you → Understood this as → Looked at the context → Asked the answer model → The model answered →
+  Filters & overrides → Final decision → Spoke). The five mode descriptions are duplicated identically in
+  `routes/templates/+page.svelte`, `routes/calendar/+page.svelte`, and
+  `lib/components/playground/SetupForm.svelte` (`listen_only` "Transcribe silently. Johnny never speaks." …
+  `autonomous` "Free-form speech guided only by the instructions. No approval, no allowlist."). A doc that
+  quotes these verbatim stays in lockstep with what the operator actually sees; paraphrasing drifts.
 
 ---
 
@@ -247,3 +258,41 @@ after each iteration and it's included in prompts for context.
 
 ---
 
+
+## 2026-06-08 - Johnny-etu.2
+
+- **Implemented the non-technical pipeline overview** `docs/PIPELINE_OVERVIEW.md`: a warm, plain-language
+  explainer (readable in <10 min by a non-coder) covering all six required sections — (1) the journey of a
+  single question (7 short paragraphs in Johnny's voice, no class names/jargon), (2) one Mermaid
+  `flowchart LR` schematic (7 boxes: You speak → Johnny listens → Johnny decides → drafts → checks → speaks,
+  with a side-branch "Johnny stays quiet and tells you why" off "Johnny decides"), (3) the three turn
+  outcomes (Replied / Awaiting approval / No reply) each with "what you see" + "when to expect it",
+  (4) the five modes in plain English (Listen only / Suggest only / Approval required / Limited auto-speak /
+  Autonomous), (5) where things go wrong + how the UI tells you (the "No reply — <reason>" line and the
+  reasoning timeline from Johnny-ckz.28.4), and (6) a single link to the technical companion `docs/PIPELINE.md`.
+- **Files changed:**
+  - `docs/PIPELINE_OVERVIEW.md` (new).
+  - `README.md` — expanded the "Layout" section with a `docs/` entry + a "Key docs" list cross-linking
+    `docs/PIPELINE_OVERVIEW.md` right next to `docs/PIPELINE.md`.
+  - `.ralph-tui/progress.md` (this entry + a new Codebase Patterns bullet on the plain-language copy source).
+- **Validation:** docs-only change with no in-app UI surface, but the schematic is a GitHub-rendered surface,
+  so I rendered the EXACT Mermaid source in a real browser via chrome-devtools (local harness loading
+  mermaid@11; `.validation/Johnny-etu.2/mermaid-check.html`). Result: "RENDER OK — svg present, 7 nodes",
+  all plain-language labels + both edge labels present, the `<br/>` line-break works, zero console errors.
+  Screenshot at `.validation/Johnny-etu.2/01-schematic-render.png` (local, not uploaded). Jargon sweep of the
+  prose (asyncio/WebSocket/FastAPI/STT/LLM/pipeline/router/subscriber) is clean — the only "router"/"TTS"
+  appearances are inside quoted UI labels, each immediately glossed in plain words.
+- **Learnings:**
+  - See the new Codebase Patterns bullet: the operator-facing strings (no-reply reasons, terminal chips,
+    mode copy, timeline step titles) have a single source of truth in the frontend — quote them verbatim so
+    the doc matches the UI instead of drifting.
+  - `docs/PIPELINE.md` does NOT exist yet — it is the companion task **Johnny-etu.1** (still OPEN). The links
+    to it (in the doc's section 6 and the README) are intentional forward references within epic Johnny-etu;
+    they resolve when etu.1 lands. Flagged for the operator/next session.
+  - The bead's suggested close command pointed at `.beads/beads.db`, which does not exist — this project's
+    beads store is embedded Dolt (`.beads/embeddeddolt/`). Close with plain `bd close <id> --reason ...`
+    (auto-discovery), NOT `--db .beads/beads.db`.
+  - Per the bead acceptance, the doc still needs **operator validation** before the epic (Johnny-etu) closes;
+    that is a human read-through of the prose, separate from the engineering checks done here.
+
+---
