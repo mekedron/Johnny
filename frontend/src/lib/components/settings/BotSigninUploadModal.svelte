@@ -130,7 +130,7 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <div
-	class="fixed inset-0 z-50 flex items-center justify-center bg-background/40 backdrop-blur-sm"
+	class="fixed inset-0 z-[var(--z-modal)] flex items-center justify-center bg-background/40 backdrop-blur-sm"
 	data-testid="bot-signin-upload-overlay"
 >
 	<div

@@ -69,6 +69,42 @@ after each iteration and it's included in prompts for context.
   (cookies are Keychain-encrypted) — the portable format is
   `storage_state.json` (decrypted cookie values), which is exactly what
   the probe consumes.
+- **Z-index is a documented token scale in `app.css:165-172`; the global nav
+  `<aside>` MUST sit at `--z-sticky` (1100), strictly below `--z-modal-backdrop`
+  (1200), so every modal automatically wins.** Two modal shapes coexist:
+  calendar / providers / personalities / templates use a SEPARATE backdrop
+  (`z-[var(--z-modal-backdrop)]`) + panel (`z-[var(--z-modal)]`); the settings
+  bot-signin family (`BotSignin{Modal,UploadModal,MethodPicker}`) uses a SINGLE
+  fused `fixed inset-0` overlay that is both backdrop AND centering container →
+  that one gets `z-[var(--z-modal)]` ALONE (a child dialog can't exceed its
+  parent's stacking context, so splitting tokens across parent/child is moot).
+  Mobile nav band must also live BELOW the modal band: sidebar `--z-sticky`
+  (1100), nav backdrop `calc(var(--z-sticky) - 1)` (1099 — a nav backdrop is NOT
+  a modal backdrop; at `--z-modal-backdrop` it would dim OVER the 1100 sidebar),
+  toggle `--z-sticky` (covered by the open sidebar via DOM order). Scope inner
+  absolute overlays with `isolate` (`isolation: isolate`) instead of giving their
+  `z-10`/`z-20` global tokens. Match the existing `z-[var(--z-...)]` arbitrary
+  form (Tailwind v4 also has a `z-(--token)` shorthand). Bare `z-50` still lurks
+  in `settings/+page.svelte:785,832` and `PersonalityDetailPanel.svelte:49`.
+- **Tailwind v4 implements `-translate-x-full` via the `translate` CSS property,
+  NOT `transform`** — `getComputedStyle(el).transform` reads `"none"` even when
+  the element is slid off-screen; detect slide state via
+  `getBoundingClientRect().left` or `getComputedStyle(el).translate`. Also,
+  chrome-devtools `resize_page` can't shrink the CSS viewport below the windowed
+  Chrome's OS minimum (a 390 request left `innerWidth` at 1197) — use
+  `emulate` with `viewport:"390x844x2,mobile,touch"`
+  (Emulation.setDeviceMetricsOverride) for a true mobile viewport.
+- **`migrate`, `api`, and `worker` each BUILD A SEPARATE image from `./backend`**
+  (no shared `image:` tag in docker-compose.yml), so `docker compose build api`
+  does NOT rebuild the `migrate` image. After a backend source change —
+  especially a new alembic migration — rebuild ALL THREE
+  (`docker compose build migrate api worker`) or the `migrate` one-shot (and
+  api's own startup `alembic upgrade head`) runs STALE code and dies with
+  `Can't locate revision '<n>'` while the DB is already stamped at `<n>`. That
+  `migrate` failure cascades: `up -d frontend` aborts and takes api+frontend down
+  with it. For a frontend-only change you can sidestep a broken backend with
+  `docker compose up -d --no-deps frontend`, but a healthy api makes validation
+  faithful.
 
 ---
 
@@ -247,6 +283,82 @@ user's Workspace account they returned nothing, so the row saved as the
   - Keep DOM extraction in JS minimal (collect raw strings) and do all
     regex/validation in Python — makes the fragile half browser-only and the
     logic half unit-testable against real captured strings.
+
+---
+
+## 2026-06-08 - Johnny-ckz.27
+
+Fixed: the persistent left sidebar rendered at `z-[1300]` (= `--z-modal`), so it
+competed with / beat modal overlays, while the noVNC bot-signin family
+(`BotSigninModal`, `BotSigninUploadModal`, `BotSigninMethodPicker`) used bare
+`z-50` on their outer overlays — 26× below the sidebar. Opening a bot-signin
+modal from /settings left the sidebar floating ON TOP of the modal, obscuring
+the embedded Chromium and the close affordance.
+
+- **What:** moved the sidebar into the nav band below the modal band, and
+  migrated the three bot-signin overlays onto the documented z-index tokens.
+  - Sidebar `<aside>` `z-[1300]` → `z-[var(--z-sticky)]` (1100): persistent nav
+    now sits strictly below `--z-modal-backdrop` (1200) so EVERY modal wins.
+  - Mobile nav backdrop `z-[1200]` → `z-[calc(var(--z-sticky)_-_1)]` (1099): a
+    nav backdrop is NOT a modal backdrop; it must sit directly beneath the
+    sidebar (so the slide-out floats over its own dim) yet well below the modal
+    band. Leaving it at 1200 would have dimmed OVER the 1100 sidebar on mobile.
+  - Mobile menu toggle `z-[1100]` → `z-[var(--z-sticky)]` (literal→token, no
+    behaviour change; the open sidebar covers it via DOM order).
+  - `BotSigninModal:254`, `BotSigninUploadModal:133`, `BotSigninMethodPicker:65`
+    outer overlay `z-50` → `z-[var(--z-modal)]` (1300). These three modals fuse
+    backdrop+dialog into ONE `fixed inset-0` overlay, so a single `--z-modal` is
+    correct (a child dialog can't exceed its parent's stacking context).
+  - `BotSigninModal:360` inner-overlay container gained `isolate`
+    (`isolation: isolate`) so its `z-10`/`z-20` status overlays form their own
+    stacking context — definitively local, never touching the global scale.
+- **Mandatory web search (cite, fetch date 2026-06-08):** Tailwind v4 supports
+  `z-[var(--token)]` arbitrary values (and a `z-(--token)` shorthand); the docs
+  recommend `@theme` tokens for a reused scale, but adding tokens was out of
+  scope so I matched the existing `z-[var(--z-modal)]` convention already used by
+  calendar/providers/personalities/templates (tailwindcss.com/docs/z-index,
+  /docs/theme). App-shell guidance: keep one named z-scale, modals are the top
+  interactive band, global nav sits below it; Radix leaves z-index to the app
+  (the app owns the scale — this project already does), and isolated stacking
+  contexts are why `isolation: isolate` cleanly scopes inner overlays
+  (DEV/pixelfreestudio z-index articles, Radix primitives discussion #3667).
+- **Files changed:** `frontend/src/routes/+layout.svelte`,
+  `frontend/src/lib/components/settings/BotSigninModal.svelte`,
+  `.../BotSigninUploadModal.svelte`, `.../BotSigninMethodPicker.svelte`.
+- **Validation (chrome-devtools MCP, against the rebuilt frontend image):**
+  - Desktop /settings: method-picker / noVNC / upload overlays each computed
+    z=1300 with sidebar z=1100; hit-test at (120,300) over the sidebar resolves
+    to the modal overlay, not the `<aside>`. noVNC spawned a real embedded
+    Chromium showing Google's sign-in with the sidebar dimmed behind it.
+    `.validation/Johnny-ckz-modal-zindex/0{1,2,3}-*.png`.
+  - Mobile (390×844 via `emulate`, since `resize_page` couldn't shrink below the
+    windowed Chrome's OS min): toggle → sidebar slides in (left 0, z 1100) over
+    backdrop (z 1099) over content; backdrop tap dismisses (sidebar → left −240);
+    a modal opened on mobile covers the full viewport incl. the toggle (z 1300
+    over every sampled point). `04/05/06-*.png`.
+  - Regression: /calendar and /providers drawers (backdrop 1200 / panel 1300)
+    still cover the 1100 sidebar — unchanged, already on tokens. `07/08-*.png`.
+  - `pnpm lint` clean; `pnpm typecheck` (svelte-check) 0 errors / 0 warnings.
+- **Out-of-scope bare-`z-[0-9]` audit (documented, NOT fixed — follow-up bead):**
+  - `frontend/src/routes/settings/+page.svelte:785` `z-50` — Disconnect account
+    alertdialog (REAL modal, still sidebar-covered — higher priority).
+  - `frontend/src/routes/settings/+page.svelte:832` `z-50` — Disconnect bot
+    session alertdialog (REAL modal, same).
+  - `frontend/src/lib/components/PersonalityDetailPanel.svelte:49` `z-50` —
+    personality detail slide-over dialog.
+  - (Inner `BotSigninModal` `z-10`/`z-20` at :369/:381/:389 are now scoped by the
+    `isolate` parent — intentionally local, not follow-ups.)
+- **Learnings:**
+  - The fused-overlay pattern means the bot-signin modals only need `--z-modal`
+    on the single overlay; the calendar-style split backdrop/panel pattern is
+    the other valid shape. (Promoted to Codebase Patterns.)
+  - Tailwind v4 slides via the `translate` property, not `transform`, and
+    chrome-devtools needs `emulate` (not `resize_page`) for a true mobile
+    viewport. (Promoted.)
+  - The dev stack had PRE-EXISTING migration drift unrelated to this change:
+    `migrate`/`api`/`worker` build separate images, so a stale `migrate` image
+    (missing 0014-0016) failed `alembic` against a DB stamped at 0016; rebuilding
+    all three backend images cleared it. (Promoted.)
 
 ---
 

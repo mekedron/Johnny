@@ -251,7 +251,7 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <div
-	class="fixed inset-0 z-50 flex items-center justify-center bg-background/40 backdrop-blur-sm"
+	class="fixed inset-0 z-[var(--z-modal)] flex items-center justify-center bg-background/40 backdrop-blur-sm"
 	data-testid="bot-signin-overlay"
 >
 	<div
@@ -357,7 +357,7 @@
 		{/if}
 
 		<div
-			class="relative flex aspect-[16/9] w-full overflow-hidden rounded-md border border-border bg-black"
+			class="relative isolate flex aspect-[16/9] w-full overflow-hidden rounded-md border border-border bg-black"
 		>
 			<div
 				bind:this={canvasContainer}

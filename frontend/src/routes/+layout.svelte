@@ -321,7 +321,7 @@
 	<Button
 		variant="ghost"
 		size="icon"
-		class="fixed top-3 left-3 z-[1100] size-9 md:hidden"
+		class="fixed top-3 left-3 z-[var(--z-sticky)] size-9 md:hidden"
 		aria-label="Toggle navigation"
 		aria-expanded={sidebarOpen}
 		onclick={() => (sidebarOpen = !sidebarOpen)}
@@ -332,7 +332,7 @@
 	<!-- Mobile backdrop -->
 	{#if sidebarOpen}
 		<button
-			class="fixed inset-0 z-[1200] bg-black/50 backdrop-blur-sm md:hidden"
+			class="fixed inset-0 z-[calc(var(--z-sticky)_-_1)] bg-black/50 backdrop-blur-sm md:hidden"
 			type="button"
 			aria-label="Close navigation"
 			onclick={closeSidebar}
@@ -341,7 +341,7 @@
 
 	<aside
 		class={cn(
-			'bg-sidebar border-border fixed top-0 bottom-0 left-0 z-[1300] flex w-60 flex-col border-r',
+			'bg-sidebar border-border fixed top-0 bottom-0 left-0 z-[var(--z-sticky)] flex w-60 flex-col border-r',
 			'transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)]',
 			sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'
 		)}
