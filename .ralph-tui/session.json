@@ -3,10 +3,10 @@
   "sessionId": "17b1f649-1d33-441a-bfd0-469c8d89870f",
   "status": "running",
   "startedAt": "2026-06-08T17:25:57.487Z",
-  "updatedAt": "2026-06-08T21:07:00.982Z",
-  "currentIteration": 12,
+  "updatedAt": "2026-06-08T21:33:44.578Z",
+  "currentIteration": 13,
   "maxIterations": 0,
-  "tasksCompleted": 11,
+  "tasksCompleted": 12,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -129,8 +129,8 @@
       {
         "id": "Johnny-re2",
         "title": "[BUILD] Phase 2: JohnnyAgent(Agent) — instructions/personality injection + transcript rehydration",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-wz5",
@@ -332,6 +332,16 @@
       "durationMs": 1285436,
       "startedAt": "2026-06-08T20:27:02.327Z",
       "endedAt": "2026-06-08T20:48:27.763Z"
+    },
+    {
+      "iteration": 13,
+      "status": "completed",
+      "taskId": "Johnny-re2",
+      "taskTitle": "[BUILD] Phase 2: JohnnyAgent(Agent) — instructions/personality injection + transcript rehydration",
+      "taskCompleted": true,
+      "durationMs": 1088487,
+      "startedAt": "2026-06-08T20:48:51.272Z",
+      "endedAt": "2026-06-08T21:06:59.759Z"
     }
   ],
   "skippedTaskIds": [],

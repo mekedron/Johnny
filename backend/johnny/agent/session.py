@@ -11,8 +11,11 @@ This module wires Johnny's voice orchestration onto LiveKit Agents'
   assembly) and rehydrates prior transcript history into the LiveKit
   ``chat_ctx`` on container respawn so memory survives restarts (Johnny-re2,
   parity with ``VoicePipeline._rehydrate_transcript_history``);
-* the router "should-speak" gate in ``on_user_turn_completed`` lands next
-  (Johnny-xpa, Phase 2) on top of the gate harness (:mod:`johnny.agent.gate`).
+* the router "should-speak" gate in ``on_user_turn_completed`` runs the
+  decision via :class:`~johnny.agent.router_gate.RouterGate` (Johnny-xpa,
+  Phase 2) on top of the gate harness (:mod:`johnny.agent.gate`), raising
+  ``StopResponse`` to keep Johnny silent and routing every turn's terminal
+  through the session :class:`~johnny.agent.gate.TurnLedger`.
 
 End-of-utterance detection follows the operator's locked decision: LiveKit's
 :class:`~livekit.plugins.turn_detector.multilingual.MultilingualModel` plus
@@ -37,6 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 from livekit.agents import Agent, AgentSession
 from livekit.agents.llm.chat_context import ChatContext
+from livekit.agents.llm.chat_context import ChatMessage as LKChatMessage
 from livekit.plugins import silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
@@ -58,6 +62,9 @@ if TYPE_CHECKING:
     from livekit.agents.stt import STT
     from livekit.agents.tts import TTS
     from livekit.agents.vad import VAD
+    from livekit.agents.voice import SpeechCreatedEvent
+
+    from johnny.agent.router_gate import RouterGate
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +204,7 @@ def build_agent_session(
     llm: LLM[Any],
     tts: TTS[Any],
     vad: VAD | None = None,
-    preemptive_generation: bool = True,
+    preemptive_generation: bool = False,
 ) -> AgentSession[Any]:
     """Construct Johnny's ``AgentSession`` from provider adapter instances.
 
@@ -206,6 +213,16 @@ def build_agent_session(
     providers by the adapter factory (Johnny-zb3). Turn-taking uses LiveKit's
     multilingual turn detector plus Silero VAD per the locked decision;
     ``vad`` defaults to a freshly loaded Silero model when not supplied.
+
+    ``preemptive_generation`` defaults to ``False`` because Johnny gates every
+    turn through the router "should-speak" decision in
+    :meth:`JohnnyAgent.on_user_turn_completed` (Johnny-xpa): preemptive
+    generation would (a) burn answer-LLM tokens producing a reply the gate may
+    decline, defeating the gate's purpose, and (b) fire ``speech_created``
+    *before* the hook runs, breaking the reply→turn correlation
+    (:meth:`RouterGate.bind_reply` relies on the reply being created *after* the
+    gate records the turn). Leave it ``False`` whenever a :class:`RouterGate`
+    is attached.
     """
     return AgentSession(
         stt=stt,
@@ -223,9 +240,14 @@ class JohnnyAgent(Agent):
     Carries the assembled meeting instructions (personality + brief + calendar
     + cross-session memory, see :func:`build_agent_instructions`) and seeds the
     LiveKit ``chat_ctx`` with rehydrated prior transcripts so a container
-    respawn doesn't wipe the bot's memory (Johnny-re2). A later phase overrides
-    ``on_user_turn_completed`` to run the router "should-speak" gate that raises
-    ``StopResponse`` when Johnny should stay silent (Johnny-xpa).
+    respawn doesn't wipe the bot's memory (Johnny-re2).
+
+    When a :class:`~johnny.agent.router_gate.RouterGate` is attached,
+    :meth:`on_user_turn_completed` runs the router "should-speak" decision and
+    raises ``StopResponse`` when Johnny should stay silent (Johnny-xpa), and
+    :meth:`on_enter` registers a ``speech_created`` listener so each reply's
+    completion emits the speak path's terminal. With no gate the agent replies
+    to every turn (the bare-construction / smoke-test behaviour).
 
     Construction is synchronous and takes a *pre-loaded* ``chat_history`` list;
     the async loader-driven path (parity with the legacy pipeline's injected
@@ -238,6 +260,7 @@ class JohnnyAgent(Agent):
         instructions: str | None = None,
         prompt_config: AgentInstructionsConfig | None = None,
         chat_history: Sequence[TranscriptFinalized] | None = None,
+        router_gate: RouterGate | None = None,
     ) -> None:
         if instructions is None:
             instructions = (
@@ -249,6 +272,39 @@ class JohnnyAgent(Agent):
         # the base Agent start from ``ChatContext.empty()``.
         chat_ctx = transcripts_to_chat_ctx(chat_history) if chat_history else None
         super().__init__(instructions=instructions, chat_ctx=chat_ctx)
+        self._router_gate = router_gate
+
+    async def on_enter(self) -> None:
+        """Wire the reply→turn correlation once the agent is active.
+
+        Registers a session ``speech_created`` listener that hands every
+        ``generate_reply`` reply to :meth:`RouterGate.bind_reply`, so the
+        reply's done-callback emits the turn's terminal (the speak path's INV-1
+        record). No-op without a gate.
+        """
+        gate = self._router_gate
+        if gate is None:
+            return
+
+        def _on_speech_created(ev: SpeechCreatedEvent) -> None:
+            if ev.source == "generate_reply":
+                gate.bind_reply(ev.speech_handle)
+
+        self.session.on("speech_created", _on_speech_created)
+
+    async def on_user_turn_completed(
+        self, turn_ctx: ChatContext, new_message: LKChatMessage
+    ) -> None:
+        """Run the router should-speak gate before the SDK generates a reply.
+
+        Delegates to :meth:`RouterGate.run_turn`, which raises ``StopResponse``
+        to keep Johnny silent (no-speak / low-confidence / rate-limited / gate
+        timeout / barge-in) and returns to let the reply proceed. With no gate
+        attached the turn always proceeds (default ``Agent`` behaviour).
+        """
+        if self._router_gate is None:
+            return
+        await self._router_gate.run_turn(turn_ctx, new_message)
 
 
 async def build_johnny_agent(
@@ -258,6 +314,7 @@ async def build_johnny_agent(
     transcript_history_loader: TranscriptHistoryLoader | None = None,
     session_id: str | None = None,
     bot_session_id: int | None = None,
+    router_gate: RouterGate | None = None,
 ) -> JohnnyAgent:
     """Build a :class:`JohnnyAgent`, rehydrating prior transcripts if available.
 
@@ -272,6 +329,10 @@ async def build_johnny_agent(
     no rehydration endpoint). Loader exceptions are logged and the agent starts
     with empty history — better to lose context than to refuse to start, the
     same swallow-and-continue contract the legacy method holds.
+
+    ``router_gate`` is the optional :class:`~johnny.agent.router_gate.RouterGate`
+    the agent runs in ``on_user_turn_completed``; passed straight through to
+    :class:`JohnnyAgent` (``None`` → the agent replies to every turn).
     """
     loader = transcript_history_loader or NoopTranscriptHistoryLoader()
     history: list[TranscriptFinalized] = []
@@ -295,6 +356,7 @@ async def build_johnny_agent(
         instructions=instructions,
         prompt_config=prompt_config,
         chat_history=history or None,
+        router_gate=router_gate,
     )
 
 

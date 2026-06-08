@@ -486,6 +486,52 @@ SDK facts (verified `livekit-agents==1.5.17`, read from the `api` image):
   imported in full-stack contexts. The top-level `johnny.agent` /
   `johnny.agent.adapters` bare imports stay livekit-free (re-verified).
 
+### Router should-speak gate in `on_user_turn_completed` (Johnny-xpa)
+The gate *body* is `RouterGate` in `johnny/agent/router_gate.py` (livekit +
+voice_pipeline; imported only by `session.py`). `RouterGate.run_turn(turn_ctx,
+new_message)` wraps the Johnny-9k2 `run_gate` harness with a Johnny-o3z
+`TurnLedger.gate_tracker(turn_id)` and `raise StopResponse()` to stay silent.
+Hard-won specifics:
+- **`preemptive_generation` MUST be `False` for a gated agent** (flipped the
+  `build_agent_session` default). Verified `livekit-agents==1.5.17`: preemptive
+  generation calls `_generate_reply` and fires `speech_created`
+  (`source="generate_reply"`) in `on_preemptive_generation` *before* the hook
+  runs — so it (a) burns answer-LLM tokens on turns the gate may decline and
+  (b) breaks the reply→turn FIFO correlation (the reply exists before
+  `run_turn` records the turn). With it off, `speech_created` fires *after* the
+  hook returns SPEAK → clean FIFO.
+- **The turn id is `new_message.id`** (`item_<shortuuid>`). The SDK builds
+  `temp_mutable_chat_ctx = self._agent.chat_ctx.copy()` and passes
+  `new_message` SEPARATELY — so `new_message` is NOT in `turn_ctx.items` at hook
+  entry; render history straight from `turn_ctx` with no de-dup. The hook
+  signature to override is `async def on_user_turn_completed(self, turn_ctx:
+  ChatContext, new_message: ChatMessage) -> None`; `StopResponse` is
+  re-exported from `livekit.agents.llm`.
+- **Speak path emits NO terminal in the gate** — the reply owns it.
+  `JohnnyAgent.on_enter` registers `self.session.on("speech_created", cb)`; `cb`
+  filters `ev.source == "generate_reply"` → `RouterGate.bind_reply(speech_handle)`,
+  which pops the oldest pending-SPEAK turn id (a `deque`) and
+  `speech_handle.add_done_callback`s a handler that emits via the ledger:
+  `handle.interrupted`→`barge_in`, empty `handle.chat_items`→`model_empty_output`,
+  else `replied` (and the utterance counts toward the over-talk cap). The
+  done-callback is sync → `asyncio.ensure_future` the async emit and keep a
+  strong ref in a set so it isn't GC'd. The ledger's first-wins makes a
+  double-fired callback a no-op.
+- **Verdict parity = reuse, don't reimplement.** Import the legacy router schema
+  + parser module-qualified (`from johnny.voice_pipeline import pipeline as
+  _legacy`; `_legacy._ROUTER_SCHEMA`, `_legacy._parse_router_response`) so the
+  gate's speak/decline/low-confidence verdicts are byte-for-byte identical to
+  `VoicePipeline._respond_to_transcript_inner` (the replay-harness criterion).
+  The in-scope branch order mirrors the legacy: `should_speak` →
+  `confidence < threshold` → rate-limit; suggest_only/listen_only/approval/
+  barge-in-classifier/noise are downstream beads (Johnny-5ag/cmd/qzj/k8t).
+- **Reason vocabulary** stays the gate-reachable subset
+  (`router_declined`/`low_confidence`/`rate_limited`/`stage_error`/`barge_in`)
+  plus the reply-path `replied`/`model_empty_output`; the real
+  `SessionTerminalEmitter` (→ `TurnTerminal`/EventBus/DB) is still injected by
+  Johnny-d5z. `RouterGate` keeps `session.py` importing it ONLY under
+  `TYPE_CHECKING` so bare `import johnny.agent` stays livekit-free (re-verified).
+
 ---
 
 ## 2026-06-08 - Johnny-jue
@@ -1151,5 +1197,69 @@ LiveKit `chat_ctx` so memory survives a container respawn.
 - `session.py` importing the voice_pipeline transcript value objects pulls
   `app.providers` (not sqlalchemy/torch) — acceptable for the heavy livekit
   module; top-level package import-safety is unaffected.
+
+---
+
+## 2026-06-09 - Johnny-xpa
+
+Phase 2: ported the router "should-speak" decision into LiveKit Agents'
+blocking `Agent.on_user_turn_completed` hook, raising `StopResponse` to keep
+Johnny silent and routing every turn's terminal through the session
+`TurnLedger` (INV-1). The in-scope decision subset: speak / router-declined /
+low-confidence / rate-limited (suggest_only/listen_only/approval/barge-in/noise
+are downstream beads).
+
+**Implemented**
+- `backend/johnny/agent/router_gate.py` (NEW): `RouterGateConfig` (router knobs
+  mirrored from the `PipelineConfig` subset) + `RouterGate`. `run_turn` wraps the
+  Johnny-9k2 `run_gate` harness (timeout + barge-in `abandon`) with a Johnny-o3z
+  `TurnLedger.gate_tracker(turn_id)`; on SPEAK it records the turn for the reply.
+  `_decide` builds the router prompt (mirrors `VoicePipeline._router_messages`)
+  and reuses the legacy `_ROUTER_SCHEMA`/`_parse_router_response`
+  (module-qualified) for verdict parity. `bind_reply` + `_on_reply_done` own the
+  speak path's terminal (`replied`/`model_empty_output`/`barge_in`). `_is_rate_limited`
+  ported verbatim from the legacy pipeline.
+- `backend/johnny/agent/session.py`: `JohnnyAgent` gains `router_gate=`,
+  `on_user_turn_completed` (delegates to `RouterGate.run_turn`) and `on_enter`
+  (registers the `speech_created` listener → `bind_reply`). `build_johnny_agent`
+  passes the gate through. `build_agent_session` default `preemptive_generation`
+  → **False** (gated agent decides before replying; also required for reply
+  correlation). Docstrings + `johnny/agent/__init__.py` updated. `RouterGate`
+  imported only under `TYPE_CHECKING` so bare `import johnny.agent` stays
+  livekit-free.
+- `backend/tests/agent/test_router_gate_decision.py` (NEW, 21 tests): speak /
+  no-speak / low-confidence / rate-limited (+ confidence-at-threshold,
+  allowlist-gated rate-limit, reply barge_in/model_empty_output, idempotent
+  done-callback, router error/timeout → stage_error, prompt-build parity) + a
+  parametrized replay harness asserting verdict parity with the legacy logic.
+
+**Files changed**: `johnny/agent/router_gate.py` (new),
+`johnny/agent/session.py`, `johnny/agent/__init__.py`,
+`tests/agent/test_router_gate_decision.py` (new).
+
+**Validated** (`--no-dev` prod-image gate; `.validation/Johnny-xpa/results.md`)
+- ruff clean; mypy --strict clean (20 files); `pytest tests/agent` → **330
+  passed** (21 new + 309 prior, no regressions).
+- Import-safety re-proven: bare `import johnny.agent` / `.adapters` → livekit
+  NOT leaked; `session.py` does not import `router_gate` at runtime.
+- Integration probe (`probe.py`) drove the REAL
+  `JohnnyAgent.on_user_turn_completed` over a multi-party transcript: silent on
+  side-chat (`router_declined`), spoke when addressed by name (`replied`),
+  exactly one terminal per turn id.
+- Browser validation **N/A**: backend-only, no UI/HTTP surface; the gate runs in
+  the agent worker (Johnny-9eh) which doesn't exist yet and `build_agent_session`
+  has no live caller (same posture as Johnny-9k2/o3z/re2). Source-only change,
+  NO new runtime deps → baked by `COPY` on the next `./run.sh`.
+
+**Learnings / gotchas** (full list in the new Codebase Pattern above)
+- Preemptive generation fires `speech_created` BEFORE the hook → must be off for
+  a gated agent (token waste + broken reply correlation).
+- `new_message` is NOT in `turn_ctx` at hook entry (SDK copies chat_ctx first) →
+  render history with no de-dup; turn id is `new_message.id`.
+- Speak path emits no gate terminal; the reply `SpeechHandle` done-callback owns
+  it (FIFO-correlated via the `speech_created` listener). Done-callback is sync →
+  `ensure_future` + keep a strong task ref.
+- Reuse the legacy schema/parser module-qualified for byte-identical verdicts
+  (replay-harness parity) instead of reimplementing.
 
 ---

@@ -17,6 +17,11 @@ replacing the hand-rolled ``johnny/voice_pipeline/pipeline.py`` engine:
   :class:`~johnny.agent.gate.TurnLedger` that guarantees INV-1 — exactly one
   terminal per LiveKit turn id across the gate and the reply done-callback
   (spike Johnny-o3z). Stdlib-only and ``livekit``-free.
+* :mod:`johnny.agent.router_gate` — the router "should-speak" decision that
+  runs inside ``Agent.on_user_turn_completed`` (Johnny-xpa): builds the router
+  prompt, calls Johnny's router ``LLMProvider`` through the gate harness, and
+  raises ``StopResponse`` on no-speak / low-confidence / rate-limited. Requires
+  the ``agent`` extra; imported only by :mod:`johnny.agent.session`.
 
 Importing this top-level package is intentionally side-effect free and
 does **not** import ``livekit`` — only the submodules that subclass the
