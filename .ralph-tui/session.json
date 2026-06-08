@@ -3,10 +3,10 @@
   "sessionId": "ab5feb19-dc62-4930-8a57-1d67734f9153",
   "status": "running",
   "startedAt": "2026-06-08T14:57:48.948Z",
-  "updatedAt": "2026-06-08T15:34:17.151Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-08T15:49:13.495Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -69,8 +69,8 @@
       {
         "id": "Johnny-oly.8",
         "title": "Personality character: keep it ONE freeform textarea (the existing description field), inject verbatim into the LLM system prompt at session start",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-oly.9",
@@ -80,7 +80,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-oly.8",
+      "taskTitle": "Personality character: keep it ONE freeform textarea (the existing description field), inject verbatim into the LLM system prompt at session start",
+      "taskCompleted": true,
+      "durationMs": 2167476,
+      "startedAt": "2026-06-08T14:58:08.693Z",
+      "endedAt": "2026-06-08T15:34:16.169Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

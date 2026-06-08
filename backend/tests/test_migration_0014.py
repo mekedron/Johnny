@@ -90,6 +90,12 @@ def test_upgrade_creates_table_and_seeds_johnny(sqlite_engine: sa.Engine) -> Non
         assert johnny.extra_metadata == {}
         assert johnny.created_at is not None
         assert johnny.updated_at is not None
+        # The seed carries Johnny's persona (Johnny-oly.9), injected verbatim
+        # into the session system prompt by oly.8 — not the old administrative
+        # placeholder. Pin it to the migration's source-of-truth constant so
+        # the SQL-quote round-trip (doubled apostrophes, literal newlines) is
+        # exercised and the persona can't silently regress.
+        assert johnny.description == _load_migration_module().JOHNNY_DEFAULT_DESCRIPTION
 
 
 def test_upgrade_is_idempotent_no_duplicate_johnny(

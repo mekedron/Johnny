@@ -352,8 +352,9 @@ and a default decision mode. The personality's character is freeform text
 injected verbatim as the LLM system prompt — write a paragraph, a bullet list,
 an Always/Never block, whatever helps the model act like the character. Attach a
 personality to a calendar meeting or pick one when starting a playground
-session; the bootstrap **Johnny** default inherits the globally active providers
-so an operator who never opens the page sees no change.
+session. The bootstrap **Johnny** default inherits the globally active providers
+(no provider setup needed) and ships with a built-in cyberpunk-rockerboy
+character; clone-and-edit it from the page if you want a tamer default.
 
 ## Quality gates
 

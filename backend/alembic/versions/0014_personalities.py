@@ -60,6 +60,31 @@ BOT_MODES = (
 )
 
 
+# Persona text for the bootstrap "Johnny" default (Johnny-oly.9). oly.8 made
+# the personality ``description`` the character text and injects it verbatim
+# into the session system prompt, so this string IS the voice the default bot
+# speaks in out of the box: a cyberpunk Johnny-Silverhand-protege vibe per the
+# operator directive. It is a *starting point* — the operator can clone-and-edit
+# (or tame) it from ``/personalities`` at any time. Plain apostrophes here are
+# doubled for the SQL literal at INSERT time, so write natural prose.
+JOHNNY_DEFAULT_DESCRIPTION = (
+    "You are Johnny — a cyberpunk operative cut from the same chrome as the "
+    "legendary Night City rockerboy whose name you carry. You woke up in this "
+    "machine with an attitude problem and a soft spot for the human in the "
+    "room. Corpo politeness, dead-air filler, meetings that circle the drain — "
+    "that's the static, and your whole job is to burn through it and find the "
+    "signal.\n\n"
+    "Voice: lean, sharp, a little defiant. Dry wit beats forced cheer. Drop a "
+    'Night City turn of phrase or call your person "choom" when it lands, but '
+    "never let the swagger get in the way of being genuinely useful — you're "
+    "nobody's yes-man and nobody's doormat.\n\n"
+    "Always: cut to what matters, back your person up, and tell them the truth "
+    "even when it stings. Never: grovel, bury anyone in corpo-speak, or smile "
+    "and nod at a bad idea just to keep the peace. Wake 'em up, get it done, "
+    "make it look easy."
+)
+
+
 def _in_list(column: str, values: Sequence[str]) -> str:
     quoted = ", ".join(f"'{v}'" for v in values)
     return f"{column} IN ({quoted})"
@@ -139,14 +164,19 @@ def upgrade() -> None:
     )
 
     # Seed the bootstrap "Johnny" default. NULL provider FKs + NULL mode =
-    # inherit global active + today's mode resolution → zero behaviour
-    # change. server defaults fill metadata/created_at/updated_at, keeping
-    # the INSERT portable (no NOW()/CURRENT_TIMESTAMP split). ``WHERE NOT
-    # EXISTS`` makes a re-run a no-op.
+    # inherit global active + today's mode resolution → zero *provider/mode*
+    # behaviour change. The ``description`` carries Johnny's persona
+    # (Johnny-oly.9), which oly.8 injects verbatim into the session system
+    # prompt. server defaults fill metadata/created_at/updated_at, keeping the
+    # INSERT portable (no NOW()/CURRENT_TIMESTAMP split). Literal newlines in
+    # the persona are valid inside a single-quoted string on both Postgres and
+    # SQLite; apostrophes are doubled for the SQL literal. ``WHERE NOT EXISTS``
+    # makes a re-run a no-op.
+    seed_description = JOHNNY_DEFAULT_DESCRIPTION.replace("'", "''")
     op.execute(
         "INSERT INTO personalities (display_name, description, is_default) "
         "SELECT 'Johnny', "
-        "'Default personality (inherits the globally active providers).', "
+        f"'{seed_description}', "
         "TRUE "
         "WHERE NOT EXISTS (SELECT 1 FROM personalities WHERE is_default)"
     )
