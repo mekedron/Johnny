@@ -76,6 +76,38 @@ Why this rule exists: a host-side `pnpm dev` for the frontend survives terminal 
 
 ---
 
+## Top rule: clean-install reproducibility — never "fix" by hot-patching a running container
+
+Every fix you ship has to survive the canonical clean-install cycle the operator runs:
+
+```bash
+./stop.sh    # docker compose down -v + sweep orphans
+./run.sh     # fresh `docker compose up -d --build`
+# now use the feature
+```
+
+If a feature requires a package, a model file, a config blob, a downloaded asset, or any other piece of state that did not exist on a fresh checkout, **it has to be added at the layer that `./run.sh` rebuilds from**:
+
+- **A new Python package** the api / worker needs at runtime → add it to `backend/pyproject.toml` (under the right optional extra) AND make sure `backend/Dockerfile` installs that extra, OR adopt the Parakeet-style runtime-install pattern (`POST /providers/{id}/package/install` + `~/.johnny/<name>-packages` bind-mount). Do not `docker compose exec api pip install …`; that change vanishes the next `./stop.sh`.
+- **A new sidecar dependency** (sidecar venv, Swift package, model checkpoint) → pin it in the sidecar's `pyproject.toml` / `Package.swift` / install script. The sidecar launcher (`scripts/start-*-sidecar.sh`) is the only place that should produce the runnable artifact; first launch on a clean checkout must produce a working sidecar without any extra `pip install` / `swift build` / `brew install` the operator runs by hand.
+- **A new frontend dep** → add to `frontend/package.json`; the dev-mode bind mount and prod-mode image build both pick it up automatically once `pnpm install` runs in the image. Never `docker compose exec frontend pnpm add …`.
+- **A new env var, a new bind-mount, a new model directory** → wire it in `docker-compose.yml`, `.env.example`, and `./run.sh` (which creates the host bind-mount dirs idempotently before bringing the stack up). Do not assume the operator will `mkdir` something themselves.
+
+**Verification before closing any task that touches runtime deps:**
+
+```bash
+./stop.sh
+./run.sh
+# then exercise the feature end-to-end from the UI (chrome-devtools MCP)
+# capture the screenshot / log line under .validation/ for the PR description
+```
+
+If that cycle does not reproduce success on your machine, you are not done. If you close a bd issue and the operator hits the same error on their next clean install, you hot-patched a running container instead of fixing the source-of-truth artifact — that is the failure mode this rule exists to prevent.
+
+Why this rule exists: closed bd issues that "worked when the agent tested" have repeatedly re-failed for the operator on the next `./stop.sh && ./run.sh` because the agent ran `pip install` inside the running api container or `pip install` inside the running sidecar venv, neither of which survives a compose rebuild. The operator does not SSH into containers to fix their machine; the stack has to come up clean from the scripts on every host.
+
+---
+
 This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
 
 > **Architecture in one line:** Issues live in a local Dolt database

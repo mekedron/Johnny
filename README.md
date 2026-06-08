@@ -95,6 +95,12 @@ cd backend
 uv run johnny-smoke --project-root ..
 ```
 
+### Clean-install contract
+
+`./stop.sh` then `./run.sh` is the canonical reproduction step. It is the cycle the project's contributors are expected to run before closing any task that touches runtime dependencies, and it is the cycle every operator runs when they hit a problem. Everything the stack needs at runtime — Python packages, model files, sidecar deps, env vars, host bind-mount dirs — must come up automatically from those two commands. If a feature requires a `pip install` inside a running container or a `swift build` the operator has to remember, that feature is not finished: the install belongs in `backend/Dockerfile`, in a sidecar's `pyproject.toml` / `Package.swift`, in a `start-*-sidecar.sh` script, or in `./run.sh` itself. Hot-patching a live container ships a fix that vanishes on the next `./stop.sh`.
+
+For contributors: this is also recorded as a top-rule in `AGENTS.md` (the agent-instructions file in this repo).
+
 The smoke test prints one PASS / SKIP / FAIL row per check (compose health,
 migrations, Fernet, Google OAuth config, provider credentials, local model
 dirs, Ollama reachability, Docker launcher, WS upgrade, frontend) and exits
