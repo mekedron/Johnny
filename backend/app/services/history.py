@@ -310,6 +310,17 @@ def _serialise_decision(row: AgentDecision) -> dict[str, Any]:
         "final_text": row.final_text,
         "divergence_reason": row.divergence_reason,
         "override_actor": row.override_actor,
+        "turn_id": row.turn_id,
+        "terminal_state": (
+            row.terminal_state.value
+            if row.terminal_state is not None
+            else None
+        ),
+        "no_reply_reason": (
+            row.no_reply_reason.value
+            if row.no_reply_reason is not None
+            else None
+        ),
         "input_window": row.input_window,
         "raw_output": row.raw_output,
         "outcome": (

@@ -26,7 +26,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_session
-from app.db.models import BotMode, BotSessionStatus, DecisionOutcome
+from app.db.models import (
+    BotMode,
+    BotSessionStatus,
+    DecisionOutcome,
+    NoReplyReason,
+    TerminalState,
+)
 from app.services.history import (
     DEFAULT_HISTORY_PAGE_SIZE,
     DEFAULT_SEARCH_LIMIT,
@@ -133,6 +139,11 @@ class HistoryDecisionRead(BaseModel):
     final_text: str | None
     divergence_reason: str | None
     override_actor: str | None
+    # Terminal-state-per-turn (INV-1, Johnny-ckz.28.3) — same shape the live
+    # session detail serves so the shared frontend type stays accurate.
+    turn_id: int | None
+    terminal_state: TerminalState | None
+    no_reply_reason: NoReplyReason | None
     outcome: DecisionOutcome
     created_at: datetime
 

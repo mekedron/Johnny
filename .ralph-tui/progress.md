@@ -37,6 +37,22 @@ after each iteration and it's included in prompts for context.
 - **`SqlAlchemyUtteranceSink` / `SqlAlchemyDecisionSink` are DEFINED but never CONSTRUCTED in production**
   (grep: only class defs + test/e2e `InMemory*`/`Noop*`). The sole durable decision/utterance writer is the
   event-sourced subscriber. Don't waste time wiring the sinks for a browser/playground change.
+- **Per-turn terminal accounting (INV-1, Johnny-ckz.28.3) rides the SAME event-sourced spine.** The pipeline
+  emits exactly one `TurnTerminal{turn_id, terminal_state, outcome, no_reply_reason, detail}` per turn from a
+  single chokepoint (`_emit_turn_terminal` in `pipeline.py`); the subscriber's `apply_turn_terminal_event`
+  binds it to the turn's `agent_decisions` row BY `turn_id` (not a most-recent scan — that races the
+  concurrent transcribe loop), stamps `terminal_state`/`no_reply_reason`, demotes the optimistic `SPOKEN`
+  outcome when the turn actually said nothing, and CREATES a fresh row when the router crashed before emitting
+  `router_decision_made` (the silent drop). `transcript_filtered` gets its own branch → durable noise
+  `no_reply` rows. To add a new suppressor: emit a terminal at the early-return site with a typed
+  `NoReplyReason` (in BOTH `events.py` and `models.py` enums) — the dev/test guard (`STRICT_TURN_TERMINAL`)
+  rejects any response-pipeline path that returns without one.
+- **Two Docker gotchas that cost real time here:** (1) the dev-mounted test/lint container mount must use the
+  ABSOLUTE backend path — `-v /Users/nikita/Projects/Johnny/backend:/workspace` — because the Bash cwd drifts
+  into `backend/` and `$PWD/backend` then resolves to an empty dir (silent: uv finds no project, `pytest`
+  fails to spawn). (2) The `migrate` compose service has its OWN baked image: `docker compose build api
+  worker frontend` does NOT rebuild it, so a new alembic revision won't apply ("Can't locate revision …")
+  until you also `docker compose build migrate`.
 
 ---
 
@@ -106,6 +122,56 @@ after each iteration and it's included in prompts for context.
     `docker compose run --rm --no-deps -v $PWD/backend:/workspace api uv run pytest ...` (venv at `/opt/venv`
     is NOT shadowed by the mount). The frontend image DOES bake src + devDeps, so `docker compose exec
     frontend pnpm check` works directly after a `docker compose build frontend`.
+
+---
+
+## 2026-06-08 - Johnny-ckz.28.3
+
+- **Implemented INV-1 (terminal-state-per-turn / no silent drops):** every transcribed turn that enters the
+  response pipeline now ends in exactly one of three terminal states — `replied` / `pending_approval` /
+  `no_reply` (with a typed reason) — persisted on the canonical `agent_decisions` row and rendered inline in
+  the chat. The session-14 silent drop (router hung ~60 s, zero rows) is killed two ways: the router call is
+  now bounded by `asyncio.wait_for(router_llm_timeout_s)`, and a `TurnTerminal` event is emitted on EVERY
+  exit path (incl. the exception path), so even a crashed turn leaves a durable, operator-visible row.
+- **Files changed:**
+  - `backend/johnny/voice_pipeline/events.py` — new `TurnTerminal` event + `TerminalState` / `NoReplyReason`
+    Literals; `turn_id` added to `RouterDecisionMade`. (`__init__.py` re-exports them.)
+  - `backend/johnny/voice_pipeline/pipeline.py` — `_emit_turn_terminal` (single chokepoint, logs
+    `pipeline.turn.terminal:`), `_handle_unaccounted_turn` (fallback + `STRICT_TURN_TERMINAL` assert),
+    bounded router call (`DEFAULT_ROUTER_LLM_TIMEOUT_S=30`, mirrors the barge-in classifier idiom), a terminal
+    emit at every suppressor in `_respond_to_transcript_inner` + `_handle_suggest_only` +
+    `_handle_approval_required`, and `_answer_and_speak` now returns `(spoke, no_reply_reason)`.
+  - `backend/app/db/models.py` — `TerminalState` / `NoReplyReason` StrEnums; `turn_id` / `terminal_state` /
+    `no_reply_reason` columns on `AgentDecision`; `terminal_state_for_outcome()`; the parity guard now also
+    rejects a `no_reply` terminal with no reason.
+  - `backend/app/services/session_status_subscriber.py` — dispatch branches for `turn_terminal`
+    (stamp-by-turn_id, create-when-missing for the silent drop, demote optimistic SPOKEN) and
+    `transcript_filtered` (durable noise `no_reply` rows, skips pre-STT `audio_too_short`);
+    `apply_router_decision_event` sets `turn_id` + stamps `pending_approval` for PENDING.
+  - `backend/alembic/versions/0019_turn_terminal_state.py` — 3 nullable columns + backfill (terminal_state
+    from outcome; `legacy` reason on backfilled no_reply rows).
+  - `backend/app/api/sessions.py` + `app/api/history.py` + `app/services/history.py` — surface the 3 fields.
+  - `frontend/src/lib/sessionDetail.ts` (types + `noReplyReasonLabel`), `sessionEvents.ts` (`TurnTerminalEvent`),
+    `routes/sessions/[id]/+page.svelte` (no-reply chat rows from persisted decisions + live `handleTurnTerminal`).
+  - Tests: `tests/test_migration_0019.py`, +terminal-state cases in `test_decision_parity.py` and
+    `test_session_status_subscriber.py` (incl. the session-14 replay regression), +4 pipeline tests in
+    `test_pipeline.py` (every-turn-one-terminal, router-timeout silent-drop, low-confidence, strict-assert).
+- **Validation:** alembic at `0019` (backfill: 5 replied + 1 legacy no_reply). Backend 2900 unit tests pass (4
+  pre-existing env failures: OpenAI-realtime live + docker-CLI wizard). ruff + mypy clean on changed files;
+  svelte-check 0 errors. Browser (chrome-devtools, `/sessions/2`): published a router-declined turn (LIVE WS →
+  "No reply — router decided not to respond" appears instantly + Decisions panel updates), a silent-drop turn
+  (`turn_terminal` with NO prior `router_decision_made` → subscriber CREATES the row → reload shows "No reply —
+  a processing step failed"), and a noise drop ("No reply — filtered as background noise"). All 3
+  `pipeline.turn.terminal:` lines confirmed in `docker logs worker` with full fields. Artifacts in
+  `.validation/Johnny-ckz.28.3/`.
+- **Learnings:**
+  - See the new Codebase Patterns entries at the top (terminal-event pattern + the migrate-image / mount gotchas).
+  - Scope call: listen-only / `speak=False` sessions return BEFORE the response pipeline and do NOT emit a
+    terminal — the invariant applies to turns that could get a reply, not to modes that contractually never
+    speak. This kept the existing `test_listen_only_*` / `test_speak_false_*` contracts intact.
+  - I did NOT build a separate explicit FSM class; the "state machine" is the single-`TurnTerminal`-per-turn
+    discipline + the `terminal_state` column. A full per-transition FSM would be over-engineering for the
+    acceptance, which is about the terminal guarantee, not the intermediate states.
 
 ---
 

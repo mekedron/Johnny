@@ -24,12 +24,15 @@
 		DECISION_OUTCOME_LABEL,
 		getSessionDetail,
 		getSessionTimings,
+		noReplyReasonLabel,
 		SESSION_TIMING_STAGE_LABEL,
 		type AgentDecisionRecord,
 		type AgentUtteranceRecord,
 		type DecisionOutcome,
+		type NoReplyReason,
 		type SessionDetail,
 		type SessionTimingRecord,
+		type TerminalState,
 		type TranscriptChunk
 	} from '$lib/sessionDetail';
 	import {
@@ -43,7 +46,8 @@
 		type SessionStatusChangeEvent,
 		type Subscription,
 		type TranscriptFinalEvent,
-		type TranscriptPartialEvent
+		type TranscriptPartialEvent,
+		type TurnTerminalEvent
 	} from '$lib/sessionEvents';
 	import { approveDecision, rejectDecision } from '$lib/decisions';
 
@@ -54,11 +58,17 @@
 		isFinal: boolean;
 		timestampMs: number;
 		isBot?: boolean;
+		// 'no_reply' renders a muted "No reply — <reason>" row inline in the
+		// chat (INV-1, Johnny-ckz.28.3) so a suppressed turn is visible instead
+		// of silent. Undefined = a normal speech line.
+		kind?: 'no_reply';
+		noReplyReason?: NoReplyReason | null;
 	}
 
 	interface DecisionEntry {
 		key: string;
 		decisionId: number | null;
+		turnId: number | null;
 		shouldSpeak: boolean;
 		confidence: number;
 		reason: string;
@@ -69,6 +79,9 @@
 		finalText: string | null;
 		divergenceReason: string | null;
 		overrideActor: string | null;
+		// Terminal-state-per-turn (INV-1, Johnny-ckz.28.3).
+		terminalState: TerminalState | null;
+		noReplyReason: NoReplyReason | null;
 		outcome: DecisionOutcome | 'spoken';
 		matchedReply: string | null;
 		timestampMs: number;
@@ -215,7 +228,13 @@
 		session = detail.session;
 		const transcriptLines = detail.transcripts.map(transcriptToLine);
 		const utteranceLines = detail.utterances.map(utteranceToLine);
-		transcripts = [...transcriptLines, ...utteranceLines].sort(
+		// INV-1 (Johnny-ckz.28.3): surface every no_reply turn inline in the
+		// chat so a suppressed turn is visible, not silent — the affordance the
+		// operator lacked in session 14.
+		const noReplyLines = detail.decisions
+			.map(decisionToNoReplyLine)
+			.filter((l): l is TranscriptLine => l !== null);
+		transcripts = [...transcriptLines, ...utteranceLines, ...noReplyLines].sort(
 			(a, b) => a.timestampMs - b.timestampMs
 		);
 		const utteranceMap = new Map<number, AgentUtteranceRecord>();
@@ -258,6 +277,23 @@
 		};
 	}
 
+	// A decision that terminated in no_reply becomes a muted inline chat row.
+	// Decisions that replied / are pending / have no terminal state yet are
+	// left out — those already show as a spoken line or an approval card.
+	function decisionToNoReplyLine(d: AgentDecisionRecord): TranscriptLine | null {
+		if (d.terminal_state !== 'no_reply') return null;
+		return {
+			key: `db-nr-${d.id}`,
+			text: '',
+			speaker: 'Johnny',
+			isFinal: true,
+			timestampMs: Date.parse(d.created_at) || 0,
+			isBot: true,
+			kind: 'no_reply',
+			noReplyReason: d.no_reply_reason
+		};
+	}
+
 	function decisionRecordToEntry(
 		d: AgentDecisionRecord,
 		matchedUtterance: AgentUtteranceRecord | null
@@ -265,6 +301,7 @@
 		return {
 			key: `db-d-${d.id}`,
 			decisionId: d.id,
+			turnId: d.turn_id,
 			shouldSpeak: d.should_speak,
 			confidence: d.confidence,
 			reason: d.reason,
@@ -274,6 +311,8 @@
 			finalText: d.final_text ?? matchedUtterance?.output_text ?? null,
 			divergenceReason: d.divergence_reason,
 			overrideActor: d.override_actor,
+			terminalState: d.terminal_state,
+			noReplyReason: d.no_reply_reason,
 			outcome: d.outcome,
 			matchedReply: matchedUtterance?.matched_allowed_reply ?? null,
 			timestampMs: Date.parse(d.created_at) || 0
@@ -429,6 +468,8 @@
 				return handleAgentSpoke(event);
 			case 'agent_suggested':
 				return handleAgentSuggested(event);
+			case 'turn_terminal':
+				return handleTurnTerminal(event);
 			case 'session_status_change':
 				return handleStatus(event);
 		}
@@ -462,6 +503,7 @@
 		const entry: DecisionEntry = {
 			key: `live-d-${ev.seq}`,
 			decisionId: typeof ev.decision_id === 'number' ? ev.decision_id : null,
+			turnId: typeof ev.turn_id === 'number' ? ev.turn_id : null,
 			shouldSpeak: ev.should_speak,
 			confidence: ev.confidence,
 			reason: ev.reason,
@@ -471,6 +513,8 @@
 			finalText: null,
 			divergenceReason: null,
 			overrideActor: null,
+			terminalState: null,
+			noReplyReason: null,
 			outcome: ev.should_speak ? 'pending' : 'suppressed',
 			matchedReply: null,
 			timestampMs: Number(ev.timestamp_ms) || Date.now()
@@ -577,6 +621,42 @@
 				suggestedReply: suggested || next[idx].suggestedReply
 			};
 			decisions = next;
+		}
+	}
+
+	function handleTurnTerminal(ev: TurnTerminalEvent) {
+		// Update the decisions panel: stamp the turn's terminal state and the
+		// honest outcome on its row (matched by turn id).
+		const reason = (ev.no_reply_reason ?? null) as NoReplyReason | null;
+		const outcome = ev.outcome as DecisionOutcome;
+		if (typeof ev.turn_id === 'number') {
+			const idx = decisions.findIndex((d) => d.turnId === ev.turn_id);
+			if (idx >= 0) {
+				const next = [...decisions];
+				next[idx] = {
+					...next[idx],
+					terminalState: ev.terminal_state,
+					noReplyReason: reason,
+					outcome
+				};
+				decisions = next;
+			}
+		}
+		// INV-1: a suppressed turn becomes a muted inline chat row the instant
+		// it resolves — the affordance the operator lacked in session 14.
+		if (ev.terminal_state === 'no_reply') {
+			const line: TranscriptLine = {
+				key: `live-nr-${ev.seq}`,
+				text: '',
+				speaker: 'Johnny',
+				isFinal: true,
+				timestampMs: Number(ev.timestamp_ms) || Date.now(),
+				isBot: true,
+				kind: 'no_reply',
+				noReplyReason: reason
+			};
+			transcripts = [...transcripts, line];
+			void autoScrollTranscript();
 		}
 	}
 
@@ -1026,39 +1106,56 @@
 					{:else}
 						<ul class="m-0 flex list-none flex-col gap-2 p-0">
 							{#each transcripts as line (line.key)}
-								<li
-									class="rounded-md border border-border px-3 py-2 {line.isBot
-										? 'bg-muted'
-										: 'bg-surface-2'}"
-									data-testid={line.isBot
-										? 'bot-transcript-line'
-										: 'transcript-line'}
-								>
-									<div
-										class="mb-1 flex items-baseline justify-between gap-3 text-xs"
+								{#if line.kind === 'no_reply'}
+									<li
+										class="rounded-md border border-dashed border-border bg-surface-2/50 px-3 py-1.5"
+										data-testid="no-reply-line"
+										data-no-reply-reason={line.noReplyReason}
 									>
-										{#if line.isBot}
-											<span
-												class="inline-flex items-center gap-1.5 font-mono font-semibold text-foreground"
-											>
-												<BotIcon class="size-3" />
-												{line.speaker}
+										<div class="flex items-baseline justify-between gap-3 text-xs">
+											<span class="text-muted-foreground italic">
+												No reply — {noReplyReasonLabel(line.noReplyReason)}
 											</span>
-										{:else if line.speaker}
-											<span class="font-medium text-foreground">{line.speaker}</span>
-										{:else}
-											<span class="text-muted-foreground italic">Speaker</span>
-										{/if}
-										<time class="font-mono text-muted-foreground"
-											>{formatTimestamp(line.timestampMs)}</time
-										>
-									</div>
-									<p
-										class="m-0 text-sm leading-relaxed whitespace-pre-wrap text-foreground"
+											<time class="font-mono text-muted-foreground"
+												>{formatTimestamp(line.timestampMs)}</time
+											>
+										</div>
+									</li>
+								{:else}
+									<li
+										class="rounded-md border border-border px-3 py-2 {line.isBot
+											? 'bg-muted'
+											: 'bg-surface-2'}"
+										data-testid={line.isBot
+											? 'bot-transcript-line'
+											: 'transcript-line'}
 									>
-										{line.text}
-									</p>
-								</li>
+										<div
+											class="mb-1 flex items-baseline justify-between gap-3 text-xs"
+										>
+											{#if line.isBot}
+												<span
+													class="inline-flex items-center gap-1.5 font-mono font-semibold text-foreground"
+												>
+													<BotIcon class="size-3" />
+													{line.speaker}
+												</span>
+											{:else if line.speaker}
+												<span class="font-medium text-foreground">{line.speaker}</span>
+											{:else}
+												<span class="text-muted-foreground italic">Speaker</span>
+											{/if}
+											<time class="font-mono text-muted-foreground"
+												>{formatTimestamp(line.timestampMs)}</time
+											>
+										</div>
+										<p
+											class="m-0 text-sm leading-relaxed whitespace-pre-wrap text-foreground"
+										>
+											{line.text}
+										</p>
+									</li>
+								{/if}
 							{/each}
 							{#if partial !== null}
 								<li

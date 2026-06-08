@@ -27,6 +27,49 @@ ApprovalPendingEventType = Literal["approval_pending"]
 ApprovalResolvedEventType = Literal["approval_resolved"]
 PipelineTimingEventType = Literal["pipeline_timing"]
 PipelineStageFailedEventType = Literal["pipeline_stage_failed"]
+TurnTerminalEventType = Literal["turn_terminal"]
+
+TerminalState = Literal["replied", "pending_approval", "no_reply"]
+"""The single state a transcribed user turn resolves to (INV-1, Johnny-ckz.28.3).
+
+Every transcript dequeued from the response loop ends in exactly one of
+these — no silent drops. ``replied`` = the bot spoke; ``pending_approval``
+= an approval is queued and awaiting a human; ``no_reply`` = the bot
+deliberately said nothing (carries a typed :data:`NoReplyReason`).
+"""
+
+NoReplyReason = Literal[
+    "router_declined",
+    "low_confidence",
+    "barge_in",
+    "rate_limited",
+    "tts_unavailable",
+    "suggest_only",
+    "approval_rejected",
+    "model_empty_output",
+    "no_allowed_reply_match",
+    "noise_filtered",
+    "stage_error",
+    "listen_only",
+]
+"""Why a turn terminated in ``no_reply`` (INV-1, Johnny-ckz.28.3).
+
+Each value names the suppressor that fired so the operator sees *where*
+the turn went instead of silence:
+
+* ``router_declined`` — router scored ``should_speak=false``.
+* ``low_confidence`` — router approved but below ``confidence_threshold``.
+* ``barge_in`` — the participant resumed speaking before the answer stage.
+* ``rate_limited`` — the per-session utterance cap was hit.
+* ``tts_unavailable`` — the TTS circuit breaker is tripped (quota/auth).
+* ``suggest_only`` — suggest-only mode surfaced a suggestion, spoke nothing.
+* ``approval_rejected`` — approval was rejected or timed out.
+* ``model_empty_output`` — the answer LLM produced no text.
+* ``no_allowed_reply_match`` — allow-list set, no candidate matched.
+* ``noise_filtered`` — the STT noise gate dropped the candidate.
+* ``stage_error`` — a stage (STT / router / answer / TTS) raised.
+* ``listen_only`` — the session is listen-only (the bot never speaks).
+"""
 
 PipelineStageFailedStage = Literal["stt", "router_llm", "answer_llm"]
 """Which non-TTS pipeline stage failed (Johnny-8zv.3).
@@ -185,6 +228,12 @@ class RouterDecisionMade:
     session_id: str | None = None
     input_window: dict[str, Any] = field(default_factory=dict)
     raw_output: dict[str, Any] = field(default_factory=dict)
+    # Per-turn id (the pipeline's per-session utterance counter, shared with
+    # ``PipelineTiming.turn_id``). Lets the subscriber bind the durable
+    # ``agent_decisions`` row to its later :class:`TurnTerminal` deterministically
+    # instead of a most-recent scan that races the concurrent transcribe loop
+    # (INV-1, Johnny-ckz.28.3). ``None`` for callers that predate the field.
+    turn_id: int | None = None
     type: RouterEventType = "router_decision_made"
 
 
@@ -301,6 +350,44 @@ class PipelineStageFailed:
 
 
 @dataclass(frozen=True, slots=True)
+class TurnTerminal:
+    """The one terminal state a transcribed user turn resolves to (INV-1, Johnny-ckz.28.3).
+
+    Session 14 had a user question ("tell us the progress for the upcoming
+    week") that produced no reply, no error toast, no audit row — silence
+    indistinguishable from a crash. The fix is a hard invariant: every
+    transcript the response loop dequeues emits **exactly one** of these,
+    so a turn can never vanish. The subscriber binds it to the turn's
+    ``agent_decisions`` row by :attr:`turn_id` and stamps ``terminal_state``
+    + ``no_reply_reason`` on that single canonical record (Johnny-ckz.28.2).
+    When no decision row exists for the turn (the router crashed before
+    emitting :class:`RouterDecisionMade`, or the noise gate fired), the
+    subscriber creates one so the turn is still accounted for.
+
+    * ``turn_id`` — the per-session utterance counter (shared with
+      :class:`PipelineTiming` / :class:`RouterDecisionMade`).
+    * ``terminal_state`` — :data:`TerminalState`.
+    * ``outcome`` — the fine-grained ``DecisionOutcome`` value the row
+      should carry (``spoken`` / ``suppressed`` / ``suggested`` /
+      ``pending`` / ``rejected``); the coarse ``terminal_state`` is the
+      operator-facing bucket, ``outcome`` the existing audit detail.
+    * ``no_reply_reason`` — :data:`NoReplyReason`, set iff
+      ``terminal_state == "no_reply"``.
+    * ``detail`` — free-text extra (an exception message, the noise
+      sub-reason) for the reasoning timeline (Johnny-ckz.28.4).
+    """
+
+    turn_id: int
+    terminal_state: TerminalState
+    outcome: str
+    timestamp_ms: int
+    no_reply_reason: NoReplyReason | None = None
+    detail: str = ""
+    session_id: str | None = None
+    type: TurnTerminalEventType = "turn_terminal"
+
+
+@dataclass(frozen=True, slots=True)
 class SessionStatusChanged:
     """The bot session moved to a new lifecycle status.
 
@@ -413,6 +500,7 @@ PipelineEvent = (
     | ApprovalPending
     | ApprovalResolved
     | PipelineTiming
+    | TurnTerminal
 )
 """Union of every event the pipeline emits."""
 
@@ -439,13 +527,16 @@ __all__ = [
     "PipelineStageFailed",
     "PipelineStageFailedCategory",
     "PipelineStageFailedStage",
+    "NoReplyReason",
     "PipelineTiming",
     "PipelineTimingStage",
     "RouterDecisionMade",
     "SessionStatus",
     "SessionStatusChanged",
+    "TerminalState",
     "TranscriptFiltered",
     "TranscriptFilteredReason",
     "TranscriptFinalized",
+    "TurnTerminal",
     "event_to_dict",
 ]

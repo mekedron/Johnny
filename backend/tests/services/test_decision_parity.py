@@ -28,8 +28,10 @@ from app.db.models import (
     DecisionParityError,
     GoogleAccount,
     MeetingConfig,
+    NoReplyReason,
     ProfileTemplate,
     SessionTiming,
+    TerminalState,
     decision_texts_diverge,
 )
 
@@ -124,6 +126,57 @@ def test_guard_allows_matching_text(db: Session, session_id: int) -> None:
             final_text="identical",
         )
     )
+    db.flush()  # no raise
+
+
+# --- Terminal-state invariant (INV-1, Johnny-ckz.28.3) -------------------
+
+
+def test_guard_rejects_no_reply_without_reason(db: Session, session_id: int) -> None:
+    """A no_reply terminal must name its suppressor — the guard enforces it."""
+    db.add(
+        _decision(
+            session_id,
+            outcome=DecisionOutcome.SUPPRESSED,
+            terminal_state=TerminalState.NO_REPLY,
+            no_reply_reason=None,
+        )
+    )
+    with pytest.raises(DecisionParityError):
+        db.flush()
+
+
+def test_guard_allows_no_reply_with_reason(db: Session, session_id: int) -> None:
+    db.add(
+        _decision(
+            session_id,
+            outcome=DecisionOutcome.SUPPRESSED,
+            terminal_state=TerminalState.NO_REPLY,
+            no_reply_reason=NoReplyReason.ROUTER_DECLINED,
+        )
+    )
+    db.flush()  # no raise
+    row = db.scalars(sa.select(AgentDecision)).one()
+    assert row.terminal_state == TerminalState.NO_REPLY
+
+
+def test_guard_allows_replied_without_no_reply_reason(
+    db: Session, session_id: int
+) -> None:
+    """replied / pending_approval never need a no_reply_reason."""
+    db.add(
+        _decision(
+            session_id,
+            outcome=DecisionOutcome.SPOKEN,
+            terminal_state=TerminalState.REPLIED,
+        )
+    )
+    db.flush()  # no raise
+
+
+def test_guard_allows_null_terminal_state(db: Session, session_id: int) -> None:
+    """The in-progress window (terminal_state NULL) is allowed."""
+    db.add(_decision(session_id, terminal_state=None))
     db.flush()  # no raise
 
 

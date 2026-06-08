@@ -38,6 +38,7 @@ export type SessionEventType =
 	| 'agent_suggested'
 	| 'agent_tts_failed'
 	| 'pipeline_stage_failed'
+	| 'turn_terminal'
 	| 'session_status_change';
 
 export type GlobalEventType = 'session_status_change' | 'calendar_event_changed';
@@ -71,6 +72,7 @@ export interface RouterDecisionEvent extends BaseEnvelope {
 	timestamp_ms: number;
 	reply_type?: string | null;
 	suggested_reply?: string | null;
+	turn_id?: number | null;
 }
 
 export interface ApprovalPendingEvent extends BaseEnvelope {
@@ -150,6 +152,23 @@ export interface PipelineStageFailedEvent extends BaseEnvelope {
 	session_id?: string | null;
 }
 
+/**
+ * The single terminal state a transcribed turn resolved to (INV-1,
+ * Johnny-ckz.28.3). Emitted exactly once per turn so the live chat can
+ * render a "No reply — <reason>" row the moment a turn is suppressed,
+ * instead of the operator seeing silence (the session-14 failure).
+ */
+export interface TurnTerminalEvent extends BaseEnvelope {
+	type: 'turn_terminal';
+	turn_id: number;
+	terminal_state: 'replied' | 'pending_approval' | 'no_reply';
+	outcome: string;
+	no_reply_reason?: string | null;
+	detail?: string;
+	timestamp_ms: number;
+	session_id?: string | null;
+}
+
 export interface SessionStatusChangeEvent extends BaseEnvelope {
 	type: 'session_status_change';
 	status: BotSessionStatus;
@@ -177,6 +196,7 @@ export type SessionEvent =
 	| AgentSuggestedEvent
 	| AgentTTSFailedEvent
 	| PipelineStageFailedEvent
+	| TurnTerminalEvent
 	| SessionStatusChangeEvent;
 
 export type GlobalEvent = SessionStatusChangeEvent | CalendarEventChangedEvent;

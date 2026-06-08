@@ -20,6 +20,26 @@ export type DecisionOutcome =
 	| 'rejected'
 	| 'suggested';
 
+// Terminal-state-per-turn (INV-1, Johnny-ckz.28.3): the coarse,
+// operator-facing bucket every transcribed turn resolves to.
+export type TerminalState = 'replied' | 'pending_approval' | 'no_reply';
+
+// Why a turn terminated in `no_reply` — names the suppressor that fired.
+export type NoReplyReason =
+	| 'router_declined'
+	| 'low_confidence'
+	| 'barge_in'
+	| 'rate_limited'
+	| 'tts_unavailable'
+	| 'suggest_only'
+	| 'approval_rejected'
+	| 'model_empty_output'
+	| 'no_allowed_reply_match'
+	| 'noise_filtered'
+	| 'stage_error'
+	| 'listen_only'
+	| 'legacy';
+
 export type BotMode =
 	| 'listen_only'
 	| 'suggest_only'
@@ -53,6 +73,12 @@ export interface AgentDecisionRecord {
 	final_text: string | null;
 	divergence_reason: string | null;
 	override_actor: string | null;
+	// Terminal-state-per-turn (INV-1, Johnny-ckz.28.3): `terminal_state` is the
+	// coarse bucket; `no_reply_reason` names the suppressor (set iff no_reply);
+	// `turn_id` ties this row to its transcript/timing rows.
+	turn_id: number | null;
+	terminal_state: TerminalState | null;
+	no_reply_reason: NoReplyReason | null;
 	outcome: DecisionOutcome;
 	created_at: string;
 }
@@ -110,6 +136,33 @@ export const DECISION_OUTCOME_LABEL: Record<DecisionOutcome, string> = {
 	rejected: 'Rejected',
 	suggested: 'Suggested'
 };
+
+// Human-readable copy for the inline "No reply — <reason>" chat row
+// (INV-1, Johnny-ckz.28.3). This is the affordance the operator lacked in
+// session 14: a turn that produced no reply now says *why* instead of
+// vanishing into silence.
+export const NO_REPLY_REASON_LABEL: Record<NoReplyReason, string> = {
+	router_declined: 'router decided not to respond',
+	low_confidence: 'below the confidence threshold',
+	barge_in: 'you started speaking again',
+	rate_limited: 'reply rate limit reached',
+	tts_unavailable: 'text-to-speech unavailable',
+	suggest_only: 'suggestion only (not spoken)',
+	approval_rejected: 'approval rejected or timed out',
+	model_empty_output: 'the model returned nothing',
+	no_allowed_reply_match: 'no allowed reply matched',
+	noise_filtered: 'filtered as background noise',
+	stage_error: 'a processing step failed',
+	listen_only: 'listen-only mode',
+	legacy: 'no reply'
+};
+
+export function noReplyReasonLabel(reason: NoReplyReason | null | undefined): string {
+	if (reason && reason in NO_REPLY_REASON_LABEL) {
+		return NO_REPLY_REASON_LABEL[reason];
+	}
+	return 'no reply';
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	const res = await fetch(`${API_BASE}${path}`, {

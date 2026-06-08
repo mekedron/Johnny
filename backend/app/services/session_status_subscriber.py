@@ -34,7 +34,9 @@ from app.db.models import (
     BotMode,
     BotSession,
     DecisionOutcome,
+    NoReplyReason,
     SessionTiming,
+    TerminalState,
     TranscriptChunk,
     decision_texts_diverge,
 )
@@ -57,6 +59,8 @@ TRANSCRIPT_EVENT_TYPE = "transcript_finalized"
 ROUTER_DECISION_EVENT_TYPE = "router_decision_made"
 AGENT_SPOKE_EVENT_TYPE = "agent_spoke"
 PIPELINE_TIMING_EVENT_TYPE = "pipeline_timing"
+TURN_TERMINAL_EVENT_TYPE = "turn_terminal"
+TRANSCRIPT_FILTERED_EVENT_TYPE = "transcript_filtered"
 
 # Whitelist of stages persisted to ``session_timings`` (Johnny-ckz.7). The
 # pipeline may emit additional stages in the future; an unknown value is
@@ -225,6 +229,7 @@ def apply_router_decision_event(
     reason = str(payload.get("reason") or "")
     reply_type = payload.get("reply_type")
     suggested_reply = payload.get("suggested_reply")
+    turn_id = _coerce_int_id(payload.get("turn_id"))
     input_window_raw = payload.get("input_window") or {}
     input_window = input_window_raw if isinstance(input_window_raw, dict) else {}
     raw_output_raw = payload.get("raw_output") or {}
@@ -261,6 +266,18 @@ def apply_router_decision_event(
             str(suggested_reply) if isinstance(suggested_reply, str) else None
         ),
         outcome=outcome,
+        # Bind the row to its turn so the later TurnTerminal event stamps the
+        # right record (INV-1, Johnny-ckz.28.3). ``terminal_state`` stays NULL
+        # here — the in-progress window — and is set when the turn resolves,
+        # EXCEPT for approval rounds: a PENDING row is genuinely awaiting a
+        # human, so stamp ``pending_approval`` immediately for operator
+        # visibility; TurnTerminal flips it to replied / no_reply on resolution.
+        turn_id=turn_id,
+        terminal_state=(
+            TerminalState.PENDING_APPROVAL
+            if outcome == DecisionOutcome.PENDING
+            else None
+        ),
         input_window=input_window,
         raw_output=raw_output,
     )
@@ -438,12 +455,163 @@ def apply_pipeline_timing_event(db: Session, payload: dict[str, Any]) -> bool:
     return True
 
 
+def apply_turn_terminal_event(db: Session, payload: dict[str, Any]) -> bool:
+    """Stamp the turn's terminal state on its decision row (INV-1, Johnny-ckz.28.3).
+
+    Every transcribed turn emits exactly one ``turn_terminal`` event. We
+    bind it to the turn's ``agent_decisions`` row by ``turn_id`` (set when
+    :func:`apply_router_decision_event` wrote the row) and stamp
+    ``terminal_state`` + ``no_reply_reason``. Two corrections happen here:
+
+    * **Honest outcome.** Autonomous / limited turns are written ``spoken``
+      optimistically at router time, before the answer + TTS run. A
+      ``no_reply`` terminal means the bot never actually spoke (barge-in,
+      rate-limit, empty output, ...), so the optimistic ``spoken`` is
+      demoted to the real outcome carried on the event.
+    * **The silent drop.** When no decision row exists for the turn — the
+      router crashed before emitting ``router_decision_made`` (session 14
+      turn 4) — we *create* the terminal row so the turn is accounted for
+      instead of vanishing.
+    """
+    if payload.get("type") != TURN_TERMINAL_EVENT_TYPE:
+        return False
+    session_id = _coerce_int_id(payload.get("session_id"))
+    if session_id is None:
+        return False
+    raw_state = payload.get("terminal_state")
+    if not isinstance(raw_state, str):
+        return False
+    try:
+        terminal_state = TerminalState(raw_state)
+    except ValueError:
+        logger.warning(
+            "status-sub: dropping turn_terminal with unknown terminal_state=%r",
+            raw_state,
+        )
+        return False
+    turn_id = _coerce_int_id(payload.get("turn_id"))
+    detail = str(payload.get("detail") or "")
+    no_reply_reason = _coerce_no_reply_reason(payload.get("no_reply_reason"))
+    outcome = _coerce_outcome(payload.get("outcome"))
+
+    row: AgentDecision | None = None
+    if turn_id is not None:
+        row = db.scalar(
+            select(AgentDecision)
+            .where(
+                AgentDecision.bot_session_id == session_id,
+                AgentDecision.turn_id == turn_id,
+            )
+            .order_by(AgentDecision.id.desc())
+            .limit(1)
+        )
+    if row is None:
+        if db.get(BotSession, session_id) is None:
+            raise BotSessionNotFoundError(session_id)
+        row = AgentDecision(
+            bot_session_id=session_id,
+            should_speak=False,
+            confidence=0.0,
+            reason=detail or f"turn terminated: {terminal_state.value}",
+            turn_id=turn_id,
+            outcome=outcome or DecisionOutcome.SUPPRESSED,
+            input_window={},
+            raw_output={},
+        )
+        db.add(row)
+    elif outcome is not None:
+        row.outcome = outcome
+    row.terminal_state = terminal_state
+    if terminal_state == TerminalState.NO_REPLY:
+        row.no_reply_reason = no_reply_reason or NoReplyReason.STAGE_ERROR
+    db.flush()
+    logger.info(
+        "pipeline.turn.terminal: session=%s turn=%s state=%s outcome=%s "
+        "reason=%s detail=%r",
+        session_id,
+        turn_id,
+        terminal_state.value,
+        row.outcome.value if row.outcome is not None else None,
+        row.no_reply_reason.value if row.no_reply_reason is not None else None,
+        detail,
+    )
+    return True
+
+
+def apply_transcript_filtered_event(db: Session, payload: dict[str, Any]) -> bool:
+    """Persist a noise-gate drop as a durable ``no_reply`` row (INV-3, Johnny-ckz.28.3).
+
+    The STT noise gate (Johnny-ckz.14) drops candidates before the router,
+    so they never produced a decision row — the drop was live-only and
+    invisible after the session ended. Persisting it makes "the bot heard
+    something and decided it was noise" auditable and renderable inline.
+
+    Pre-STT VAD blips (``audio_too_short`` — coughs, clicks) carry no
+    transcribed words and would flood the table; only post-STT content
+    drops are persisted. Skipping them is logged at the pipeline so the
+    gap is explained, not silent.
+    """
+    if payload.get("type") != TRANSCRIPT_FILTERED_EVENT_TYPE:
+        return False
+    session_id = _coerce_int_id(payload.get("session_id"))
+    if session_id is None:
+        return False
+    reason = str(payload.get("reason") or "")
+    if reason == "audio_too_short":
+        return False
+    if db.get(BotSession, session_id) is None:
+        raise BotSessionNotFoundError(session_id)
+    text = str(payload.get("text") or "")
+    confidence_raw = payload.get("confidence")
+    confidence = (
+        float(confidence_raw) if isinstance(confidence_raw, (int, float)) else 0.0
+    )
+    row = AgentDecision(
+        bot_session_id=session_id,
+        should_speak=False,
+        confidence=confidence,
+        reason=f"noise gate dropped candidate: {reason}",
+        outcome=DecisionOutcome.SUPPRESSED,
+        terminal_state=TerminalState.NO_REPLY,
+        no_reply_reason=NoReplyReason.NOISE_FILTERED,
+        input_window={"noise_reason": reason, "text": text},
+        raw_output={},
+    )
+    db.add(row)
+    db.flush()
+    logger.info(
+        "pipeline.turn.terminal: session=%s turn=None state=no_reply "
+        "outcome=suppressed reason=noise_filtered detail=%r",
+        session_id,
+        reason,
+    )
+    return True
+
+
 def _coerce_int_id(value: Any) -> int | None:
     if value is None:
         return None
     try:
         return int(value)
     except (TypeError, ValueError):
+        return None
+
+
+def _coerce_outcome(value: Any) -> DecisionOutcome | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return DecisionOutcome(value)
+    except ValueError:
+        return None
+
+
+def _coerce_no_reply_reason(value: Any) -> NoReplyReason | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return NoReplyReason(value)
+    except ValueError:
         return None
 
 
@@ -493,6 +661,10 @@ async def _apply_in_transaction(
                     applied = apply_agent_spoke_event(db, payload)
                 elif event_type == PIPELINE_TIMING_EVENT_TYPE:
                     applied = apply_pipeline_timing_event(db, payload)
+                elif event_type == TURN_TERMINAL_EVENT_TYPE:
+                    applied = apply_turn_terminal_event(db, payload)
+                elif event_type == TRANSCRIPT_FILTERED_EVENT_TYPE:
+                    applied = apply_transcript_filtered_event(db, payload)
             except BotSessionNotFoundError as exc:
                 logger.warning("status-sub: %s", exc)
                 return False
@@ -683,10 +855,14 @@ __all__ = [
     "SESSION_CHANNEL_PATTERN",
     "SESSION_STATUS_EVENT_TYPE",
     "TRANSCRIPT_EVENT_TYPE",
+    "TRANSCRIPT_FILTERED_EVENT_TYPE",
+    "TURN_TERMINAL_EVENT_TYPE",
     "apply_agent_spoke_event",
     "apply_pipeline_timing_event",
     "apply_router_decision_event",
     "apply_status_event",
     "apply_transcript_event",
+    "apply_transcript_filtered_event",
+    "apply_turn_terminal_event",
     "run_subscriber",
 ]

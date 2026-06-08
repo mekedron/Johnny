@@ -37,6 +37,7 @@ from johnny.voice_pipeline import (
     PipelineTiming,
     RouterDecisionMade,
     TranscriptFinalized,
+    TurnTerminal,
     VoicePipeline,
 )
 from johnny.voice_pipeline.decision_sink import DecisionSink
@@ -265,10 +266,15 @@ async def test_pipeline_emits_events_in_order_for_two_utterance_wav(
     await pipeline.run()
 
     events = bus.snapshot()
-    # Activity-log timings (Johnny-ckz.7) share the same event bus but
-    # are observability; filter them out before asserting the
+    # Activity-log timings (Johnny-ckz.7) and per-turn terminal events
+    # (INV-1, Johnny-ckz.28.3) share the same event bus but are
+    # observability / accounting; filter them out before asserting the
     # transcript/decision/utterance contract.
-    types = [e.type for e in events if e.type != "pipeline_timing"]
+    types = [
+        e.type
+        for e in events
+        if e.type not in ("pipeline_timing", "turn_terminal")
+    ]
     # Transcription and response run as concurrent tasks (Johnny-har),
     # so the two transcripts may both publish before the response loop
     # catches up. The contract is: two transcripts, two router
@@ -280,6 +286,10 @@ async def test_pipeline_emits_events_in_order_for_two_utterance_wav(
         "transcript_finalized",
         "router_decision_made",
     ])
+    # INV-1: every transcribed turn terminates — turn 1 replied, turn 2
+    # was a router decline.
+    terminals = [e for e in events if isinstance(e, TurnTerminal)]
+    assert sorted(t.terminal_state for t in terminals) == ["no_reply", "replied"]
 
     transcripts = [e for e in events if isinstance(e, TranscriptFinalized)]
     assert [t.text for t in transcripts] == ["hello team", "any updates"]
@@ -3609,10 +3619,15 @@ async def test_suggest_only_mode_runs_router_emits_agent_suggested_no_tts(
     )
     await pipeline.run()
     events = bus.snapshot()
-    # Activity-log timings (Johnny-ckz.7) share the same event bus but
-    # are observability; filter them out before asserting the
+    # Activity-log timings (Johnny-ckz.7) and per-turn terminal events
+    # (INV-1, Johnny-ckz.28.3) share the same bus but are observability /
+    # accounting; filter them out before asserting the
     # transcript/decision/utterance contract.
-    types = [e.type for e in events if e.type != "pipeline_timing"]
+    types = [
+        e.type
+        for e in events
+        if e.type not in ("pipeline_timing", "turn_terminal")
+    ]
     # Transcription runs concurrently with response (Johnny-har), so
     # the cross-utterance event order can interleave. The contract
     # is: two transcripts, two router decisions, one agent_suggested
@@ -3624,6 +3639,15 @@ async def test_suggest_only_mode_runs_router_emits_agent_suggested_no_tts(
         "transcript_finalized",
         "router_decision_made",
     ])
+    # INV-1: both turns still terminate. The approved suggestion is a
+    # no_reply(suggest_only) (nothing was spoken into the meeting); the
+    # second is a no_reply(router_declined).
+    terminals = [e for e in events if isinstance(e, TurnTerminal)]
+    assert {t.no_reply_reason for t in terminals} == {
+        "suggest_only",
+        "router_declined",
+    }
+    assert all(t.terminal_state == "no_reply" for t in terminals)
     # AgentSuggested carries the suggested reply.
     suggested = [e for e in events if e.type == "agent_suggested"]
     assert len(suggested) == 1
@@ -7253,3 +7277,195 @@ async def test_pipeline_transient_tts_failure_does_not_trip_breaker(
     assert len(failures) == 2
     assert all(f.terminal is False for f in failures)
     assert all(f.category == "rate_limited" for f in failures)
+
+
+# --- Terminal-state-per-turn (INV-1, Johnny-ckz.28.3) --------------------
+
+
+class _HangingRouterLLM(LLMProvider):
+    """Sleeps longer than ``router_llm_timeout_s`` so the bound trips."""
+
+    def __init__(self, sleep_s: float = 1.0) -> None:
+        self._sleep_s = sleep_s
+
+    @property
+    def name(self) -> str:
+        return "hanging-router"
+
+    async def chat(
+        self,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
+        response_format: dict[str, Any] | None = None,  # noqa: ARG002
+    ) -> LLMResponse:
+        await asyncio.sleep(self._sleep_s)
+        return LLMResponse(text="{}", finish_reason="stop")
+
+
+def _frames_for(pcm: bytes, frame_size: int = 640) -> list[bytes]:
+    return [
+        pcm[i : i + frame_size]
+        for i in range(0, len(pcm), frame_size)
+        if i + frame_size <= len(pcm)
+    ]
+
+
+def _terminals(bus: InMemoryEventBus) -> list[TurnTerminal]:
+    return [e for e in bus.snapshot() if isinstance(e, TurnTerminal)]
+
+
+async def test_every_turn_emits_exactly_one_terminal(
+    two_utterance_pcm: bytes,
+) -> None:
+    """INV-1: each transcribed turn resolves to exactly one terminal event."""
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=_frames_for(two_utterance_pcm)),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hello team", "any updates"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {
+                    "should_speak": True,
+                    "confidence": 0.9,
+                    "reason": "greeting",
+                    "suggested_reply": "Hi",
+                },
+                {"should_speak": False, "confidence": 0.4, "reason": "not addressed"},
+            ]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["Hi"]),
+        tts=_FakeTTS(frame_count=3),
+        event_bus=bus,
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            frame_duration_ms=20,
+            session_id="terminal-each",
+            confidence_threshold=0.7,
+        ),
+    )
+    await pipeline.run()
+
+    terminals = _terminals(bus)
+    # One terminal per transcribed turn, each carrying its turn id.
+    assert len(terminals) == 2
+    by_turn = {t.turn_id: t for t in terminals}
+    assert set(by_turn) == {1, 2}
+    assert by_turn[1].terminal_state == "replied"
+    assert by_turn[2].terminal_state == "no_reply"
+    assert by_turn[2].no_reply_reason == "router_declined"
+
+
+async def test_router_timeout_terminates_turn_no_silent_drop(
+    two_utterance_pcm: bytes,
+) -> None:
+    """The flagship fix: a hung router no longer drops the turn silently.
+
+    Session 14 turn 4 hung ~60 s and produced no decision row at all. With
+    the bound + terminal-on-exception, the turn now ends in a durable
+    no_reply(stage_error) event even though no RouterDecisionMade was made.
+    """
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=_frames_for(two_utterance_pcm)),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["tell us the progress for the week", "again"]),
+        router_llm=_HangingRouterLLM(sleep_s=1.0),
+        answer_llm=_FakeAnswerLLM(answers=["unused"]),
+        tts=_FakeTTS(),
+        event_bus=bus,
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            frame_duration_ms=20,
+            session_id="router-timeout",
+            router_llm_timeout_s=0.05,
+        ),
+    )
+    await pipeline.run()
+
+    terminals = _terminals(bus)
+    assert len(terminals) >= 1
+    assert all(t.terminal_state == "no_reply" for t in terminals)
+    assert all(t.no_reply_reason == "stage_error" for t in terminals)
+    # The router never produced a decision for the hung turn — proving the
+    # terminal came from the exception path, not a normal decision.
+    assert not [e for e in bus.snapshot() if isinstance(e, RouterDecisionMade)]
+
+
+async def test_low_confidence_turn_terminates_no_reply(
+    two_utterance_pcm: bytes,
+) -> None:
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=_frames_for(two_utterance_pcm)),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["hi", "hi again"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[
+                {"should_speak": True, "confidence": 0.4, "reason": "unsure"},
+            ]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["unused"]),
+        tts=_FakeTTS(),
+        event_bus=bus,
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            end_of_speech_ms=300,
+            frame_duration_ms=20,
+            session_id="low-conf",
+            confidence_threshold=0.7,
+        ),
+    )
+    await pipeline.run()
+
+    terminals = _terminals(bus)
+    assert terminals
+    assert all(t.no_reply_reason == "low_confidence" for t in terminals)
+
+
+async def test_strict_mode_raises_on_unaccounted_turn(monkeypatch: Any) -> None:
+    """The dev/test guard rejects a path that returns without a terminal.
+
+    We force the impossible (an inner that emits nothing) and assert STRICT
+    mode raises AssertionError — and that a fallback terminal is still
+    emitted so even the guarded case is accounted for.
+    """
+    from johnny.voice_pipeline import pipeline as pipeline_mod
+
+    monkeypatch.setattr(pipeline_mod, "STRICT_TURN_TERMINAL", True)
+    bus = InMemoryEventBus()
+    pipeline = VoicePipeline(
+        transport=_BufferedTransport(frames=[]),
+        vad=EnergyVAD(threshold=0.05),
+        stt=_FakeSTT(transcripts=["unused"]),
+        router_llm=_FakeRouterLLM(
+            decisions=[{"should_speak": False, "confidence": 0.1, "reason": "x"}]
+        ),
+        answer_llm=_FakeAnswerLLM(answers=["x"]),
+        tts=_FakeTTS(),
+        event_bus=bus,
+        config=PipelineConfig(
+            vad_threshold=0.05,
+            frame_duration_ms=20,
+            session_id="strict",
+        ),
+    )
+    pipeline._session_started_at = asyncio.get_running_loop().time()
+
+    async def _noop_inner(_transcript: TranscriptFinalized) -> None:
+        return None
+
+    monkeypatch.setattr(pipeline, "_respond_to_transcript_inner", _noop_inner)
+
+    transcript = TranscriptFinalized(
+        text="where did my turn go", timestamp_ms=1000, session_id="strict"
+    )
+    with pytest.raises(AssertionError):
+        await pipeline._respond_to_transcript(transcript)
+
+    # Even though the guard fired, the turn was still accounted for.
+    terminals = _terminals(bus)
+    assert len(terminals) == 1
+    assert terminals[0].terminal_state == "no_reply"

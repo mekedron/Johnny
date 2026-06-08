@@ -44,7 +44,9 @@ from app.db.models import (
     CalendarEvent,
     DecisionOutcome,
     MeetingConfig,
+    NoReplyReason,
     SessionTiming,
+    TerminalState,
     TranscriptChunk,
 )
 from app.services.bot_sessions import BotSessionNotFoundError
@@ -160,6 +162,13 @@ class AgentDecisionRead(BaseModel):
     final_text: str | None
     divergence_reason: str | None
     override_actor: str | None
+    # Terminal-state-per-turn (INV-1, Johnny-ckz.28.3). ``terminal_state`` is
+    # the coarse operator-facing bucket (replied / pending_approval /
+    # no_reply); ``no_reply_reason`` names the suppressor that fired (set iff
+    # no_reply); ``turn_id`` ties the row to its transcript/timing rows.
+    turn_id: int | None
+    terminal_state: TerminalState | None
+    no_reply_reason: NoReplyReason | None
     outcome: DecisionOutcome
     created_at: datetime
 

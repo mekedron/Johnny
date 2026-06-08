@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import suppress
@@ -52,15 +53,18 @@ from johnny.voice_pipeline.events import (
     AgentTTSFailedCategory,
     ApprovalPending,
     ApprovalResolved,
+    NoReplyReason,
     PipelineStageFailed,
     PipelineStageFailedCategory,
     PipelineStageFailedStage,
     PipelineTiming,
     PipelineTimingStage,
     RouterDecisionMade,
+    TerminalState,
     TranscriptFiltered,
     TranscriptFilteredReason,
     TranscriptFinalized,
+    TurnTerminal,
 )
 from johnny.voice_pipeline.transcript_history import (
     BOT_SPEAKER_LABEL,
@@ -76,6 +80,18 @@ from johnny.voice_pipeline.utterance_sink import NoopUtteranceSink, UtteranceSin
 from johnny.voice_pipeline.vad import DEFAULT_VAD_THRESHOLD, VADAnalyzer
 
 logger = logging.getLogger(__name__)
+
+STRICT_TURN_TERMINAL = os.environ.get("JOHNNY_STRICT_TURN_TERMINAL") == "1"
+"""Hard-fail on an unaccounted turn instead of just logging (INV-1, Johnny-ckz.28.3).
+
+Every transcribed turn must emit exactly one :class:`TurnTerminal`. When a
+response path returns without one it is a bug — the silent drop the
+invariant exists to kill. In dev / test builds (this flag on) the pipeline
+raises ``AssertionError`` so the gap surfaces immediately; in production it
+stays off and the pipeline emits a fallback terminal + a loud error log so a
+real session is never torn down by the guard itself. Tests set the env var
+(or monkeypatch this module attribute) to assert the guard fires.
+"""
 
 DEFAULT_MAX_UTTERANCE_MS = 30_000
 DEFAULT_END_OF_SPEECH_MS = 800
@@ -109,6 +125,19 @@ Set short enough to be a tight upper bound (the slow path's only
 purpose is observability + catching utterances the fast path missed —
 nothing in the user-facing 500 ms barge-in budget depends on it) but
 long enough that a sensibly-sized router model returns under load.
+"""
+DEFAULT_ROUTER_LLM_TIMEOUT_S = 30.0
+"""Wall-clock cap on the main router LLM call (INV-1, Johnny-ckz.28.3).
+
+Session 14 turn 4 hung here for ~60 s — the router ``chat`` call had no
+bound, so a provider read-timeout stall turned a user question into a
+dead minute and the turn was dropped silently. We bound it with
+``asyncio.wait_for`` exactly the way the barge-in classifier already is
+(Johnny-wyd). On timeout the call raises, the turn terminates in a
+``no_reply`` row with ``no_reply_reason=stage_error`` instead of
+vanishing, and the session stays alive for the next turn. Generous
+enough not to trip a sensibly-sized local model under load; a value
+``<= 0`` disables the bound.
 """
 DEFAULT_BARGE_IN_MIN_SPEECH_MS = 160
 """Confirmed speech duration that triggers a fast (VAD-driven) barge-in (Johnny-ze3).
@@ -465,6 +494,14 @@ class PipelineConfig:
     Also gates the fast (VAD-driven) barge-in path: turning the feature
     off disables both the LLM classifier and the speech-onset interrupt.
     """
+    router_llm_timeout_s: float = DEFAULT_ROUTER_LLM_TIMEOUT_S
+    """Wall-clock cap on the main router LLM call (INV-1, Johnny-ckz.28.3).
+
+    Bounds :meth:`VoicePipeline._run_router` via ``asyncio.wait_for`` so a
+    provider stall can't turn a user turn into a silent dead minute (the
+    session-14 silent drop). On timeout the turn terminates in a durable
+    ``no_reply`` row instead of vanishing. ``<= 0`` disables the bound.
+    """
     barge_in_classifier_timeout_s: float = DEFAULT_BARGE_IN_CLASSIFIER_TIMEOUT_S
     """Wall-clock cap on the post-utterance classifier LLM call (Johnny-wyd).
 
@@ -697,6 +734,12 @@ class VoicePipeline:
         # would never hear. Resets per session, not per pipeline
         # instance — a new session re-instantiates the pipeline.
         self._tts_tripped: bool = False
+        # Whether the turn currently being processed has emitted its single
+        # terminal event yet (INV-1, Johnny-ckz.28.3). Reset per turn by
+        # ``_respond_to_transcript``; set by ``_emit_turn_terminal``. A turn
+        # that leaves the response loop with this still False is the silent
+        # drop the invariant forbids.
+        self._turn_terminal_emitted: bool = False
 
     # ------------------------------------------------------------------
     # Public lifecycle
@@ -1459,11 +1502,11 @@ class VoicePipeline:
         when several participant turns arrive during a single long bot
         answer.
         """
-        # Mode-based server-side enforcement (US-026). Listen-only never
-        # runs the router so no router_decision / agent_spoke /
-        # agent_suggested events can be emitted; suggest-only runs the
-        # router for UI suggestions but the answer stage is replaced by
-        # an :class:`AgentSuggested` event below.
+        # Mode-based server-side enforcement (US-026). Listen-only and
+        # speaking-disabled sessions never enter the response pipeline at all
+        # — no router, no answer, no terminal — so the no-silent-drop
+        # invariant (INV-1) does not apply: there is no turn to account for,
+        # by design. Return before any terminal bookkeeping.
         if self.config.mode == LISTEN_ONLY_MODE:
             return
         if not self.config.speak:
@@ -1493,12 +1536,111 @@ class VoicePipeline:
             self._current_response_turn_id = self._utterance_count
             self._turn_started_at_ms = self._now_ms()
         self._end_to_end_emitted_for_turn = False
+        self._turn_terminal_emitted = False
         try:
             await self._respond_to_transcript_inner(transcript)
+            # Belt-and-suspenders: an inner path that returned without a
+            # terminal is the silent drop the invariant forbids. Account for
+            # it loudly rather than letting the turn vanish.
+            if not self._turn_terminal_emitted:
+                await self._handle_unaccounted_turn(
+                    "response path returned without a terminal state"
+                )
+        except Exception as exc:
+            # A raised stage (router timeout, answer/TTS crash) must still
+            # leave a terminal record before the exception propagates to the
+            # response loop's handler — that re-raise is how TTS failures
+            # reach the circuit breaker, so keep it.
+            if not self._turn_terminal_emitted:
+                await self._emit_turn_terminal(
+                    terminal_state="no_reply",
+                    outcome="suppressed",
+                    no_reply_reason="stage_error",
+                    detail=f"{type(exc).__name__}: {exc}",
+                )
+            raise
         finally:
             self._response_in_flight = False
             self._current_response_turn_id = 0
             self._turn_started_at_ms = -1
+
+    async def _emit_turn_terminal(
+        self,
+        *,
+        terminal_state: TerminalState,
+        outcome: DecisionOutcome,
+        no_reply_reason: NoReplyReason | None = None,
+        detail: str = "",
+    ) -> None:
+        """Publish the turn's single terminal event (INV-1, Johnny-ckz.28.3).
+
+        The one chokepoint through which a turn terminates. Marks the turn
+        accounted-for, emits the structured ``pipeline.turn.terminal:`` log
+        line (visible in ``docker logs``), and publishes a
+        :class:`TurnTerminal` the subscriber persists onto the turn's
+        canonical decision row. Defensive like :meth:`_emit_timing`: a
+        failing bus is logged but never re-raised, so the terminal path
+        cannot itself crash the response loop — but unlike timing, the log
+        is at ``error`` because a dropped terminal means a lost audit row.
+        """
+        self._turn_terminal_emitted = True
+        logger.info(
+            "pipeline.turn.terminal: session=%s turn=%s state=%s outcome=%s "
+            "reason=%s detail=%r",
+            self.config.session_id,
+            self._current_response_turn_id,
+            terminal_state,
+            outcome,
+            no_reply_reason,
+            detail,
+        )
+        event = TurnTerminal(
+            turn_id=self._current_response_turn_id,
+            terminal_state=terminal_state,
+            outcome=outcome,
+            no_reply_reason=no_reply_reason,
+            detail=detail,
+            timestamp_ms=self._now_ms(),
+            session_id=self.config.session_id,
+        )
+        try:
+            await self.event_bus.publish(event)
+        except Exception:
+            logger.exception(
+                "failed to publish turn_terminal for session=%s turn=%s — "
+                "the turn's terminal audit row will be missing",
+                self.config.session_id,
+                self._current_response_turn_id,
+            )
+
+    async def _handle_unaccounted_turn(self, why: str) -> None:
+        """Account for a turn that reached the loop exit without a terminal.
+
+        This should be impossible — every path in
+        :meth:`_respond_to_transcript_inner` emits a terminal. If one
+        doesn't, that is the silent drop the invariant exists to kill, so we
+        emit a fallback ``no_reply`` terminal (the turn is still accounted
+        for) and, in dev / test builds, raise so the gap is caught at
+        source rather than shipped.
+        """
+        logger.error(
+            "pipeline.turn.terminal: UNACCOUNTED turn session=%s turn=%s — %s; "
+            "emitting fallback no_reply terminal",
+            self.config.session_id,
+            self._current_response_turn_id,
+            why,
+        )
+        await self._emit_turn_terminal(
+            terminal_state="no_reply",
+            outcome="suppressed",
+            no_reply_reason="stage_error",
+            detail=f"unaccounted turn: {why}",
+        )
+        if STRICT_TURN_TERMINAL:
+            raise AssertionError(
+                f"turn {self._current_response_turn_id} terminated without a "
+                f"terminal state: {why}"
+            )
 
     async def _respond_to_transcript_inner(
         self, transcript: TranscriptFinalized
@@ -1529,9 +1671,15 @@ class VoicePipeline:
             session_id=self.config.session_id,
             input_window=input_window,
             raw_output=_serialize_raw_output(raw_response, decision),
+            turn_id=self._current_response_turn_id,
         )
         await self.event_bus.publish(decision_event)
         self._last_decision = decision_event
+
+        # Every branch below is a terminal point: it persists the decision
+        # outcome AND emits the turn's single terminal event (INV-1,
+        # Johnny-ckz.28.3) so the suppressor that fired is named, durable, and
+        # operator-visible instead of a silent early return.
 
         # TTS circuit breaker (Johnny-g2n): once a terminal failure has
         # fired for the session (quota exhausted, key revoked), skip
@@ -1545,13 +1693,34 @@ class VoicePipeline:
                 self.config.session_id,
             )
             await self._persist_decision(decision_event, "suppressed")
+            await self._emit_turn_terminal(
+                terminal_state="no_reply",
+                outcome="suppressed",
+                no_reply_reason="tts_unavailable",
+                detail="TTS circuit breaker tripped (quota/auth)",
+            )
             return
 
         if not decision.should_speak:
             await self._persist_decision(decision_event, "suppressed")
+            await self._emit_turn_terminal(
+                terminal_state="no_reply",
+                outcome="suppressed",
+                no_reply_reason="router_declined",
+                detail=decision.reason,
+            )
             return
         if decision.confidence < self.config.confidence_threshold:
             await self._persist_decision(decision_event, "suppressed")
+            await self._emit_turn_terminal(
+                terminal_state="no_reply",
+                outcome="suppressed",
+                no_reply_reason="low_confidence",
+                detail=(
+                    f"confidence {decision.confidence:.2f} < threshold "
+                    f"{self.config.confidence_threshold:.2f}"
+                ),
+            )
             return
 
         # Johnny-arh: if a fast barge-in (or any other interrupt source)
@@ -1569,6 +1738,12 @@ class VoicePipeline:
                 self.config.session_id,
             )
             await self._persist_decision(decision_event, "suppressed")
+            await self._emit_turn_terminal(
+                terminal_state="no_reply",
+                outcome="suppressed",
+                no_reply_reason="barge_in",
+                detail="participant resumed speaking before the answer stage",
+            )
             return
 
         if self.config.mode == SUGGEST_ONLY_MODE:
@@ -1585,19 +1760,37 @@ class VoicePipeline:
                 len(self._recent_utterance_times),
             )
             await self._persist_decision(decision_event, "suppressed")
+            await self._emit_turn_terminal(
+                terminal_state="no_reply",
+                outcome="suppressed",
+                no_reply_reason="rate_limited",
+                detail=(
+                    f"rate limit: {self.config.rate_limit_max_utterances} "
+                    f"per {self.config.rate_limit_window_ms}ms"
+                ),
+            )
             return
 
         if self.config.mode == APPROVAL_REQUIRED_MODE:
             await self._handle_approval_required(transcript, decision, decision_event)
             return
 
-        spoke = await self._answer_and_speak(transcript, decision)
+        spoke, no_reply_reason = await self._answer_and_speak(transcript, decision)
         if spoke:
             self._recent_utterance_times.append(self._now_ms())
-        await self._persist_decision(
-            decision_event,
-            "spoken" if spoke else "suppressed",
-        )
+            await self._persist_decision(decision_event, "spoken")
+            await self._emit_turn_terminal(
+                terminal_state="replied",
+                outcome="spoken",
+            )
+        else:
+            await self._persist_decision(decision_event, "suppressed")
+            await self._emit_turn_terminal(
+                terminal_state="no_reply",
+                outcome="suppressed",
+                no_reply_reason=no_reply_reason or "model_empty_output",
+                detail="answer stage produced nothing to speak",
+            )
 
     async def _handle_suggest_only(
         self,
@@ -1624,6 +1817,15 @@ class VoicePipeline:
                 timestamp_ms=self._now_ms(),
                 session_id=self.config.session_id,
             )
+        )
+        # The bot produced a suggestion but spoke nothing into the meeting, so
+        # from the operator's chat the turn is a (deliberate) no_reply; the
+        # suggestion remains independently visible via AgentSuggested.
+        await self._emit_turn_terminal(
+            terminal_state="no_reply",
+            outcome="suggested",
+            no_reply_reason="suggest_only",
+            detail="suggest-only mode: suggestion surfaced, nothing spoken",
         )
 
     async def _handle_approval_required(
@@ -1665,6 +1867,12 @@ class VoicePipeline:
                     session_id=self.config.session_id,
                 )
             )
+            await self._emit_turn_terminal(
+                terminal_state="no_reply",
+                outcome="rejected",
+                no_reply_reason="approval_rejected",
+                detail="approval gate misconfigured (no decision id)",
+            )
             return
 
         timeout_s = max(0.1, float(self.config.approval_timeout_seconds))
@@ -1689,14 +1897,23 @@ class VoicePipeline:
         )
 
         resolution = outcome
+        terminal_state: TerminalState = "no_reply"
+        terminal_outcome: DecisionOutcome = "rejected"
+        terminal_reason: NoReplyReason | None = "approval_rejected"
+        terminal_detail = ""
         if outcome == "approved":
-            spoke = await self._answer_and_speak(transcript, decision)
+            spoke, answer_reason = await self._answer_and_speak(transcript, decision)
             if spoke:
                 self._recent_utterance_times.append(self._now_ms())
                 await self.decision_sink.update_outcome(decision_id, "spoken")
+                terminal_state = "replied"
+                terminal_outcome = "spoken"
+                terminal_reason = None
             else:
                 await self.decision_sink.update_outcome(decision_id, "rejected")
                 resolution = "rejected"
+                terminal_reason = answer_reason or "model_empty_output"
+                terminal_detail = "approved but answer stage produced nothing"
         else:
             if outcome == "timeout":
                 logger.info(
@@ -1704,6 +1921,9 @@ class VoicePipeline:
                     decision_id,
                     timeout_s,
                 )
+                terminal_detail = f"approval timed out after {timeout_s:.1f}s"
+            else:
+                terminal_detail = "approval rejected by operator"
             await self.decision_sink.update_outcome(decision_id, "rejected")
 
         await self.event_bus.publish(
@@ -1713,6 +1933,12 @@ class VoicePipeline:
                 timestamp_ms=self._now_ms(),
                 session_id=self.config.session_id,
             )
+        )
+        await self._emit_turn_terminal(
+            terminal_state=terminal_state,
+            outcome=terminal_outcome,
+            no_reply_reason=terminal_reason,
+            detail=terminal_detail,
         )
 
     # ------------------------------------------------------------------
@@ -1756,10 +1982,21 @@ class VoicePipeline:
         messages = self._router_messages(transcript, input_window)
         router_started_at = self._now_ms()
         try:
-            response = await self.router_llm.chat(
+            # Bound the call (INV-1, Johnny-ckz.28.3) exactly like the barge-in
+            # classifier above. Session 14 turn 4 hung here ~60 s with no bound;
+            # on timeout this raises TimeoutError, the response loop's terminal
+            # handler writes a no_reply(stage_error) row, and the session lives.
+            chat_coro = self.router_llm.chat(
                 messages,
                 response_format=_ROUTER_SCHEMA,
             )
+            router_timeout = self.config.router_llm_timeout_s
+            if router_timeout > 0:
+                response = await asyncio.wait_for(
+                    chat_coro, timeout=router_timeout
+                )
+            else:
+                response = await chat_coro
         except Exception as exc:
             duration = self._now_ms() - router_started_at
             await self._emit_timing(
@@ -1791,16 +2028,19 @@ class VoicePipeline:
         self,
         transcript: TranscriptFinalized,
         decision: RouterDecision,
-    ) -> bool:
+    ) -> tuple[bool, NoReplyReason | None]:
         """Generate the answer, stream into TTS, play, persist utterance.
 
-        Returns ``True`` whenever the answer LLM produced text — including
-        cut answers where the user barged in before any sentence flushed
-        to TTS. Returns ``False`` when there's nothing to attribute the
-        spoken event to:
+        Returns ``(spoke, no_reply_reason)``. ``spoke`` is ``True`` whenever
+        the answer LLM produced text — including cut answers where the user
+        barged in before any sentence flushed to TTS — and the reason is
+        ``None``. ``spoke`` is ``False`` when there's nothing to attribute a
+        spoken event to, and the reason names which suppressor fired so the
+        caller can stamp the turn's terminal record (INV-1, Johnny-ckz.28.3):
 
-        * the answer LLM produced empty text;
-        * ``allowed_replies`` is set and no candidate matched.
+        * ``model_empty_output`` — the answer LLM produced empty text;
+        * ``no_allowed_reply_match`` — ``allowed_replies`` is set and no
+          candidate matched.
 
         Cut answers (Johnny-tjd) STILL publish :class:`AgentSpoke` and
         persist an utterance — ``audio_duration_ms`` is ``0`` when the
@@ -1832,13 +2072,13 @@ class VoicePipeline:
         if use_allowlist:
             picked = await self._select_allowed_reply(messages)
             if picked is None:
-                return False
+                return False, "no_allowed_reply_match"
             text = picked
             collected = await self._play_text_streamed(text)
         else:
             text, collected = await self._stream_answer_into_tts(messages)
             if not text:
-                return False
+                return False, "model_empty_output"
 
         audio_bytes = b"".join(collected)
         audio_ms = _pcm_duration_ms(len(audio_bytes), PCM_SAMPLE_RATE_HZ)
@@ -1860,7 +2100,7 @@ class VoicePipeline:
             matched_allowed_reply=matched_allowed_reply,
         )
         self._remember_bot_utterance(text, spoke_event.timestamp_ms)
-        return True
+        return True, None
 
     async def _select_allowed_reply(
         self,

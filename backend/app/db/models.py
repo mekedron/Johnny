@@ -105,6 +105,47 @@ class DecisionOutcome(enum.StrEnum):
     SUGGESTED = "suggested"
 
 
+class TerminalState(enum.StrEnum):
+    """The one state every transcribed turn resolves to (INV-1, Johnny-ckz.28.3).
+
+    Coarse, operator-facing bucket layered on the finer-grained
+    :class:`DecisionOutcome`: ``replied`` (the bot spoke),
+    ``pending_approval`` (an approval is queued), ``no_reply`` (the bot
+    deliberately said nothing — paired with a :class:`NoReplyReason`).
+    No transcribed turn may end without one; a turn that does is a bug
+    (the silent drop from session 14).
+    """
+
+    REPLIED = "replied"
+    PENDING_APPROVAL = "pending_approval"
+    NO_REPLY = "no_reply"
+
+
+class NoReplyReason(enum.StrEnum):
+    """Why a turn terminated in ``no_reply`` — mirrors the pipeline enum.
+
+    Kept in lock-step with
+    :data:`johnny.voice_pipeline.events.NoReplyReason` (the wire side);
+    ``LEGACY`` is the persistence-only value the 0019 backfill stamps on
+    pre-invariant rows so historical sessions satisfy the
+    every-turn-has-a-reason rule without inventing a specific cause.
+    """
+
+    ROUTER_DECLINED = "router_declined"
+    LOW_CONFIDENCE = "low_confidence"
+    BARGE_IN = "barge_in"
+    RATE_LIMITED = "rate_limited"
+    TTS_UNAVAILABLE = "tts_unavailable"
+    SUGGEST_ONLY = "suggest_only"
+    APPROVAL_REJECTED = "approval_rejected"
+    MODEL_EMPTY_OUTPUT = "model_empty_output"
+    NO_ALLOWED_REPLY_MATCH = "no_allowed_reply_match"
+    NOISE_FILTERED = "noise_filtered"
+    STAGE_ERROR = "stage_error"
+    LISTEN_ONLY = "listen_only"
+    LEGACY = "legacy"
+
+
 def _str_enum_values(enum_cls: type[enum.Enum]) -> list[str]:
     """Return enum members' ``.value`` strings — used so SAEnum stores the
     lowercase value (matching the migrations' CHECK constraints) instead of
@@ -451,6 +492,39 @@ class AgentDecision(Base):
     final_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     divergence_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     override_actor: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # --- Terminal-state-per-turn (INV-1, Johnny-ckz.28.3) -----------------
+    # No transcribed turn may end without a terminal state. ``turn_id`` is
+    # the pipeline's per-session utterance counter (shared with
+    # ``session_timings.turn_id``); it binds this row to the turn's
+    # ``TurnTerminal`` event so the stamp lands on the right record instead
+    # of via a most-recent scan that races the concurrent transcribe loop.
+    # ``terminal_state`` is the coarse operator-facing bucket;
+    # ``no_reply_reason`` names the suppressor and is required whenever
+    # ``terminal_state == NO_REPLY`` (enforced by the guard below). All three
+    # are nullable so pre-invariant history (backfilled by 0019) and the
+    # in-progress window between the router decision and its terminal stamp
+    # are representable.
+    turn_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    terminal_state: Mapped[TerminalState | None] = mapped_column(
+        SAEnum(
+            TerminalState,
+            name="decision_terminal_state",
+            native_enum=False,
+            length=32,
+            values_callable=_str_enum_values,
+        ),
+        nullable=True,
+    )
+    no_reply_reason: Mapped[NoReplyReason | None] = mapped_column(
+        SAEnum(
+            NoReplyReason,
+            name="decision_no_reply_reason",
+            native_enum=False,
+            length=48,
+            values_callable=_str_enum_values,
+        ),
+        nullable=True,
+    )
     input_window: Mapped[dict[str, Any]] = mapped_column(_json_column(), nullable=False)
     raw_output: Mapped[dict[str, Any]] = mapped_column(_json_column(), nullable=False)
     outcome: Mapped[DecisionOutcome] = mapped_column(
@@ -506,7 +580,35 @@ def decision_texts_diverge(recommended: str | None, final: str | None) -> bool:
     return _normalize_parity_text(recommended) != _normalize_parity_text(final)
 
 
+def terminal_state_for_outcome(outcome: DecisionOutcome) -> TerminalState:
+    """Map a fine-grained outcome to its coarse terminal bucket (INV-1).
+
+    ``spoken`` is the only ``replied`` outcome; ``pending`` is the only
+    ``pending_approval``; everything else (``suppressed`` / ``rejected`` /
+    ``suggested``) is a flavour of ``no_reply``. Shared by the 0019 backfill
+    and the subscriber so the two can't disagree about the mapping.
+    """
+    if outcome == DecisionOutcome.SPOKEN:
+        return TerminalState.REPLIED
+    if outcome == DecisionOutcome.PENDING:
+        return TerminalState.PENDING_APPROVAL
+    return TerminalState.NO_REPLY
+
+
 def _enforce_decision_parity(target: AgentDecision) -> None:
+    # INV-1 (Johnny-ckz.28.3): a no_reply terminal must name its suppressor.
+    # Enforced centrally here — like the spoken-text parity below — so every
+    # ORM write path is covered without each re-implementing the check. NULL
+    # terminal_state (the in-progress window before the terminal stamp) is
+    # allowed; only a stamped no_reply without a reason is rejected.
+    if (
+        target.terminal_state == TerminalState.NO_REPLY
+        and not target.no_reply_reason
+    ):
+        raise DecisionParityError(
+            "agent_decisions.terminal_state=no_reply requires a no_reply_reason "
+            f"(decision_id={target.id!r})"
+        )
     if not decision_texts_diverge(
         target.decision_recommended_text, target.final_text
     ):

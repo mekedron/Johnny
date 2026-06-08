@@ -24,20 +24,27 @@ from app.db.models import (
     DecisionOutcome,
     GoogleAccount,
     MeetingConfig,
+    NoReplyReason,
     ProfileTemplate,
     SessionTiming,
+    TerminalState,
 )
 from app.services import session_status_subscriber
+from app.services.bot_sessions import BotSessionNotFoundError
 from app.services.session_status_subscriber import (
     AGENT_SPOKE_EVENT_TYPE,
     PIPELINE_TIMING_EVENT_TYPE,
     ROUTER_DECISION_EVENT_TYPE,
     SESSION_STATUS_EVENT_TYPE,
+    TRANSCRIPT_FILTERED_EVENT_TYPE,
+    TURN_TERMINAL_EVENT_TYPE,
     _PendingApprovalEvent,
     apply_agent_spoke_event,
     apply_pipeline_timing_event,
     apply_router_decision_event,
     apply_status_event,
+    apply_transcript_filtered_event,
+    apply_turn_terminal_event,
     run_subscriber,
 )
 
@@ -949,3 +956,333 @@ def test_apply_pipeline_timing_event_clamps_negative_values(
     saved = db_session.scalars(sa.select(SessionTiming)).one()
     assert saved.started_at_ms == 0
     assert saved.duration_ms == 0
+
+
+# --- Terminal-state-per-turn (INV-1, Johnny-ckz.28.3) --------------------
+
+
+def _turn_terminal_payload(
+    *,
+    session_id: int,
+    turn_id: int | None,
+    terminal_state: str,
+    outcome: str = "suppressed",
+    no_reply_reason: str | None = None,
+    detail: str = "",
+) -> dict[str, Any]:
+    return {
+        "type": TURN_TERMINAL_EVENT_TYPE,
+        "session_id": session_id,
+        "turn_id": turn_id,
+        "terminal_state": terminal_state,
+        "outcome": outcome,
+        "no_reply_reason": no_reply_reason,
+        "detail": detail,
+        "timestamp_ms": 0,
+    }
+
+
+def _transcript_filtered_payload(
+    *,
+    session_id: int,
+    reason: str,
+    text: str = "you",
+    confidence: float | None = 0.2,
+) -> dict[str, Any]:
+    return {
+        "type": TRANSCRIPT_FILTERED_EVENT_TYPE,
+        "session_id": session_id,
+        "reason": reason,
+        "text": text,
+        "confidence": confidence,
+        "timestamp_ms": 0,
+    }
+
+
+def test_router_decision_sets_turn_id_and_leaves_terminal_unset(
+    db_session: Session,
+) -> None:
+    """A speak-path decision is bound to its turn but not yet terminal-stamped."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    apply_router_decision_event(
+        db_session,
+        {
+            **_router_decision_payload(session_id=bot_session.id, mode="autonomous"),
+            "turn_id": 7,
+        },
+    )
+    row = db_session.scalars(sa.select(AgentDecision)).one()
+    assert row.turn_id == 7
+    assert row.terminal_state is None
+
+
+def test_router_decision_pending_stamps_pending_approval(
+    db_session: Session,
+) -> None:
+    """An approval-required PENDING row is immediately terminal=pending_approval."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    apply_router_decision_event(
+        db_session,
+        {
+            **_router_decision_payload(
+                session_id=bot_session.id, mode="approval_required"
+            ),
+            "turn_id": 3,
+        },
+    )
+    row = db_session.scalars(sa.select(AgentDecision)).one()
+    assert row.outcome == DecisionOutcome.PENDING
+    assert row.terminal_state == TerminalState.PENDING_APPROVAL
+
+
+def test_turn_terminal_stamps_existing_row_and_corrects_optimistic_spoken(
+    db_session: Session,
+) -> None:
+    """A no_reply terminal demotes the optimistic SPOKEN outcome (INV-1).
+
+    Autonomous turns are written SPOKEN at router time, before the answer
+    runs. When the turn is actually suppressed (here: low confidence), the
+    terminal event must correct the row to the honest outcome and name the
+    suppressor — otherwise the panel keeps lying that the bot spoke.
+    """
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    apply_router_decision_event(
+        db_session,
+        {
+            **_router_decision_payload(session_id=bot_session.id, mode="autonomous"),
+            "turn_id": 4,
+        },
+    )
+    row = db_session.scalars(sa.select(AgentDecision)).one()
+    optimistic_outcome = row.outcome
+    assert optimistic_outcome == DecisionOutcome.SPOKEN  # optimistic
+
+    applied = apply_turn_terminal_event(
+        db_session,
+        _turn_terminal_payload(
+            session_id=bot_session.id,
+            turn_id=4,
+            terminal_state="no_reply",
+            outcome="suppressed",
+            no_reply_reason="low_confidence",
+            detail="confidence 0.20 < threshold 0.70",
+        ),
+    )
+    assert applied is True
+    db_session.refresh(row)
+    assert row.outcome == DecisionOutcome.SUPPRESSED
+    assert row.terminal_state == TerminalState.NO_REPLY
+    assert row.no_reply_reason == NoReplyReason.LOW_CONFIDENCE
+
+
+def test_turn_terminal_replied_marks_row_replied(db_session: Session) -> None:
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    apply_router_decision_event(
+        db_session,
+        {
+            **_router_decision_payload(session_id=bot_session.id, mode="autonomous"),
+            "turn_id": 2,
+        },
+    )
+    apply_turn_terminal_event(
+        db_session,
+        _turn_terminal_payload(
+            session_id=bot_session.id,
+            turn_id=2,
+            terminal_state="replied",
+            outcome="spoken",
+        ),
+    )
+    row = db_session.scalars(sa.select(AgentDecision)).one()
+    assert row.terminal_state == TerminalState.REPLIED
+    assert row.outcome == DecisionOutcome.SPOKEN
+    assert row.no_reply_reason is None
+
+
+def test_turn_terminal_creates_row_for_silent_drop(db_session: Session) -> None:
+    """The flagship fix: a turn whose router crashed before emitting a decision.
+
+    No ``router_decision_made`` was ever published (session 14 turn 4), so
+    there is no row to stamp. The terminal handler must *create* one so the
+    dropped question is accounted for instead of vanishing.
+    """
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    applied = apply_turn_terminal_event(
+        db_session,
+        _turn_terminal_payload(
+            session_id=bot_session.id,
+            turn_id=14,
+            terminal_state="no_reply",
+            outcome="suppressed",
+            no_reply_reason="stage_error",
+            detail="TimeoutError: router timed out",
+        ),
+    )
+    assert applied is True
+    row = db_session.scalars(sa.select(AgentDecision)).one()
+    assert row.turn_id == 14
+    assert row.terminal_state == TerminalState.NO_REPLY
+    assert row.no_reply_reason == NoReplyReason.STAGE_ERROR
+    assert row.should_speak is False
+
+
+def test_turn_terminal_no_reply_without_reason_defaults_to_stage_error(
+    db_session: Session,
+) -> None:
+    """The parity guard forbids a reasonless no_reply; the handler supplies one."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    apply_turn_terminal_event(
+        db_session,
+        _turn_terminal_payload(
+            session_id=bot_session.id,
+            turn_id=1,
+            terminal_state="no_reply",
+            outcome="suppressed",
+            no_reply_reason=None,
+        ),
+    )
+    row = db_session.scalars(sa.select(AgentDecision)).one()
+    assert row.no_reply_reason == NoReplyReason.STAGE_ERROR
+
+
+def test_turn_terminal_unknown_session_raises(db_session: Session) -> None:
+    with pytest.raises(BotSessionNotFoundError):
+        apply_turn_terminal_event(
+            db_session,
+            _turn_terminal_payload(
+                session_id=99999,
+                turn_id=1,
+                terminal_state="no_reply",
+                no_reply_reason="stage_error",
+            ),
+        )
+
+
+def test_turn_terminal_drops_unknown_terminal_state(db_session: Session) -> None:
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    applied = apply_turn_terminal_event(
+        db_session,
+        _turn_terminal_payload(
+            session_id=bot_session.id, turn_id=1, terminal_state="bogus"
+        ),
+    )
+    assert applied is False
+
+
+def test_transcript_filtered_persists_durable_no_reply_row(
+    db_session: Session,
+) -> None:
+    """A post-STT noise drop becomes a durable, queryable no_reply row (INV-3)."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    applied = apply_transcript_filtered_event(
+        db_session,
+        _transcript_filtered_payload(
+            session_id=bot_session.id, reason="stoplist_match", text="you"
+        ),
+    )
+    assert applied is True
+    row = db_session.scalars(sa.select(AgentDecision)).one()
+    assert row.should_speak is False
+    assert row.outcome == DecisionOutcome.SUPPRESSED
+    assert row.terminal_state == TerminalState.NO_REPLY
+    assert row.no_reply_reason == NoReplyReason.NOISE_FILTERED
+
+
+def test_transcript_filtered_skips_pre_stt_audio_blip(db_session: Session) -> None:
+    """Pre-STT VAD blips carry no words and would flood the table — skipped."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    applied = apply_transcript_filtered_event(
+        db_session,
+        _transcript_filtered_payload(
+            session_id=bot_session.id, reason="audio_too_short", text=""
+        ),
+    )
+    assert applied is False
+    assert db_session.scalars(sa.select(AgentDecision)).all() == []
+
+
+def test_replay_session_14_leaves_no_unaccounted_turns(db_session: Session) -> None:
+    """Acceptance: replay a session-14-shaped event stream → every turn terminal.
+
+    Four transcribed turns: two router-gate suppressions, one spoken, and
+    the flagship silent drop (turn 4's product-owner question whose router
+    crashed before emitting a decision). After replay, EVERY turn must have
+    a decision row with a non-null terminal_state — zero unaccounted turns
+    — and turn 4 must terminate in no_reply, not silence.
+    """
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    sid = bot_session.id
+
+    # Turns 1 & 2: router declined (should_speak=false).
+    for turn in (1, 2):
+        apply_router_decision_event(
+            db_session,
+            {
+                **_router_decision_payload(
+                    session_id=sid, mode="autonomous", should_speak=False
+                ),
+                "turn_id": turn,
+            },
+        )
+        apply_turn_terminal_event(
+            db_session,
+            _turn_terminal_payload(
+                session_id=sid,
+                turn_id=turn,
+                terminal_state="no_reply",
+                outcome="suppressed",
+                no_reply_reason="router_declined",
+            ),
+        )
+
+    # Turn 3: spoke.
+    apply_router_decision_event(
+        db_session,
+        {
+            **_router_decision_payload(session_id=sid, mode="autonomous"),
+            "turn_id": 3,
+        },
+    )
+    apply_turn_terminal_event(
+        db_session,
+        _turn_terminal_payload(
+            session_id=sid, turn_id=3, terminal_state="replied", outcome="spoken"
+        ),
+    )
+
+    # Turn 4: silent drop — router crashed, NO router_decision_made emitted,
+    # only the terminal event written by the response loop's exception path.
+    apply_turn_terminal_event(
+        db_session,
+        _turn_terminal_payload(
+            session_id=sid,
+            turn_id=4,
+            terminal_state="no_reply",
+            outcome="suppressed",
+            no_reply_reason="stage_error",
+            detail="TimeoutError: router LLM exceeded router_llm_timeout_s",
+        ),
+    )
+    db_session.commit()
+
+    rows = db_session.scalars(
+        sa.select(AgentDecision).where(AgentDecision.bot_session_id == sid)
+    ).all()
+    by_turn = {r.turn_id: r for r in rows}
+    # Every transcribed turn is accounted for with a terminal state.
+    assert set(by_turn) == {1, 2, 3, 4}
+    assert all(r.terminal_state is not None for r in rows)
+    # The dropped product-owner question is now a labelled no_reply, not silence.
+    assert by_turn[4].terminal_state == TerminalState.NO_REPLY
+    assert by_turn[4].no_reply_reason == NoReplyReason.STAGE_ERROR
+    assert by_turn[3].terminal_state == TerminalState.REPLIED
