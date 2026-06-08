@@ -204,14 +204,21 @@ def _synthesize_via_file(
 
     tmpdir = tempfile.mkdtemp(prefix="kokoro-mlx-")
     prefix = os.path.join(tmpdir, "out")
+    # The mlx-audio 0.4.x signature is generate_audio(text, model=..., ...,
+    # save=False). The old call passed model_path= (silently swallowed by
+    # **kwargs, leaving model=None -> "Model path or model instance must be
+    # provided") and never set save=True, so no WAV was ever written. Both are
+    # fixed here, though in practice the in-memory generate() path above wins
+    # once misaki is installed.
     generate_audio(
         text=text,
-        model_path=_state["model_id"],
+        model=_state["model_id"],
         voice=voice,
         speed=speed,
         lang_code=lang_code,
         file_prefix=prefix,
         audio_format="wav",
+        save=True,
         verbose=False,
     )
     # generate_audio writes "<prefix>.wav" (or a numbered variant).
@@ -245,9 +252,22 @@ def _synthesize_sync(
     start = time.perf_counter()
     try:
         pcm = _synthesize_via_generate(model, text, voice, speed, lang_code)
-    except Exception as exc:  # noqa: BLE001 — fall back to the file path
-        logger.warning("generate() path failed (%s); trying file path", exc)
-        pcm = _synthesize_via_file(text, voice, speed, lang_code)
+    except Exception as primary_exc:  # noqa: BLE001 — fall back to the file path
+        logger.warning(
+            "generate() path failed (%s); trying file path", primary_exc
+        )
+        try:
+            pcm = _synthesize_via_file(text, voice, speed, lang_code)
+        except Exception as fallback_exc:
+            # Surface the PRIMARY cause — it is the actionable one (e.g. the
+            # missing-misaki ImportError). The old code raised only the file
+            # path's "no .wav output", which masked the real fix.
+            raise RuntimeError(
+                f"kokoro mlx synthesis failed for voice={voice!r} "
+                f"lang={lang_code!r}: in-memory generate() raised "
+                f"({primary_exc}); the file fallback then raised "
+                f"({fallback_exc})"
+            ) from primary_exc
     # The whole point of Johnny-1ge.7: never hand the api an empty body and let
     # the operator click Play sample to silence. Fail loudly with the cause so
     # the 500 body is actionable, not a generic "synthesis failed".

@@ -1961,6 +1961,30 @@ def test_preview_voices_returns_catalog_without_saving(client: TestClient) -> No
     assert client.get("/providers").json()["tts"] == []
 
 
+def test_preview_voices_relaxes_required_voice_catalog_field(
+    client: TestClient,
+) -> None:
+    """preview/voices lists the catalog even with an empty voice_catalog field.
+
+    Regression (Johnny-1ge.10): a ``required`` ``voice_id`` 422'd the catalog
+    request before ``list_voices()`` ran — you browse the catalog precisely to
+    pick that value, so requiring it first is a chicken-and-egg deadlock. It
+    left the Piper picker empty (Piper has no static fallback options).
+    """
+    get_registry().register(ProviderKind.TTS, "catalog-tts", _VoiceCatalogTTS)
+    resp = client.post(
+        "/providers/preview/voices",
+        json={
+            "kind": "tts",
+            "provider_name": "catalog-tts",
+            "values": {},  # no voice picked yet — the picker is how you pick
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    ids = {v["id"] for v in resp.json()["voices"]}
+    assert ids == {"vox_a", "vox_b"}
+
+
 def test_preview_voices_rejects_non_tts(client: TestClient) -> None:
     get_registry().register(ProviderKind.LLM, "schema-llm", _SchemaAwareLLM)
     resp = client.post(

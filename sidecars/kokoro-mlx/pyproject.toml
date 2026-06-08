@@ -5,6 +5,12 @@ description = "Apple MLX Kokoro TTS sidecar — runs Kokoro natively on macOS fo
 requires-python = ">=3.10"
 dependencies = [
     "mlx-audio>=0.2.0",
+    # mlx-audio's Kokoro pipeline does grapheme-to-phoneme via misaki but does
+    # not pull it in itself; without it model.generate() raises ImportError on
+    # the first synth and the sidecar silently falls back to the broken file
+    # path. The [en] extra brings spacy + the English G2P deps (mirrors what
+    # the upstream `kokoro` dependency installs in sidecars/kokoro-http).
+    "misaki[en]>=0.9.4",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "numpy>=1.26.0",

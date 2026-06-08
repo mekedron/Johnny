@@ -16,6 +16,7 @@ after validation succeeds.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import Any
 
@@ -46,6 +47,7 @@ class FieldValidationError:
 def validate_payload(
     schema: ProviderSchema,
     values: Mapping[str, Any],
+    ignore_required: AbstractSet[str] = frozenset(),
 ) -> list[FieldValidationError]:
     """Validate a flat ``values`` dict against ``schema``.
 
@@ -53,13 +55,18 @@ def validate_payload(
     passes. Unknown keys are tolerated (the form may carry extra
     transient state) but logged-style errors do not surface — only
     declared fields are validated.
+
+    ``ignore_required`` names fields whose ``required`` flag is suppressed
+    for this call. The voice-catalog endpoint uses it to list a provider's
+    voices before the operator has picked one (you can't be required to
+    supply the very value you're browsing the catalog to choose).
     """
     errors: list[FieldValidationError] = []
     declared = {f.name: f for f in schema.fields}
 
     for name, fdef in declared.items():
         if name not in values or _is_empty(values[name]):
-            if fdef.required:
+            if fdef.required and name not in ignore_required:
                 errors.append(
                     FieldValidationError(
                         field=name,

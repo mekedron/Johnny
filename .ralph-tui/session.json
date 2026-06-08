@@ -1,141 +1,92 @@
 {
   "version": 1,
-  "sessionId": "8f4e6e6d-2779-4c5e-b0f8-7304b6c45d29",
+  "sessionId": "7f78f2d9-46f8-469e-9f27-0015c0af3c98",
   "status": "running",
-  "startedAt": "2026-06-08T05:53:42.265Z",
-  "updatedAt": "2026-06-08T10:28:34.458Z",
-  "currentIteration": 6,
+  "startedAt": "2026-06-08T13:04:18.655Z",
+  "updatedAt": "2026-06-08T13:38:08.023Z",
+  "currentIteration": 0,
   "maxIterations": 0,
-  "tasksCompleted": 6,
+  "tasksCompleted": 0,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
   "trackerState": {
     "plugin": "beads-bv",
-    "epicId": "Johnny-etu",
+    "epicId": "Johnny-1ge",
     "epicIds": [
-      "Johnny-etu"
+      "Johnny-1ge"
     ],
     "executionScopes": [
       {
-        "id": "Johnny-etu",
-        "title": "Pipeline + decision-making revision: stop silent drops, enforce decision↔utterance parity, expose the bot's reasoning to the operator",
+        "id": "Johnny-1ge",
+        "title": "Local TTS performance + new providers: persistent processes, sidecars, KittenTTS, Kokoro",
         "type": "epic",
-        "description": "## Why this exists\n\nOperator session at http://localhost:5173/sessions/14 shows two distinct failure modes on the default playground prompt (no custom instructions, nothing fancy):\n\n1. **Silent drops** — the operator asked the bot to \"tell us the progress for the upcoming week\" and the bot just ignored the question. No reply, no error, no visible reason in the chat or decisions surfaces.\n2. **Decision ↔ utterance divergence** — the decisions panel recommended one phrasing, but the bot actually spoke something different in the chat. Repeatedly. The operator cannot tell whether the decision system is being bypassed, overridden, or simply ignored downstream.\n\nThese are not \"tune the prompt\" problems. The operator already noted the instructions were defaults. The complaint is that the pipeline + decision-making layer is unreliable AND opaque — and the right fix is to take the whole pipeline + decision plumbing apart, find the gaps (silent drops, divergence, missing audit trail), redesign so divergence is impossible by construction, and surface a \"what the bot is thinking\" timeline so the operator can read the bots reasoning per turn the same way they read a debugger.\n\nThis is the scope captured here. Sub-tasks under this issue carve it into independently shippable pieces; the parent is the place to discuss the overall design and the dependency order between them.\n\n## Operator’s ask, restated structurally\n\n- An agent picking this up MUST first analyse session 14 end-to-end (transcripts, decisions, bot utterances, pipeline event log, LLM traces) before proposing any refactor. The bug is concrete and reproducible there; everything downstream depends on understanding what actually went wrong.\n- The agent MUST then catalogue every observed gap between (a) what the user said, (b) what the router/decision system decided, (c) what the LLM was asked to produce, and (d) what the bot actually spoke. Each gap is a candidate for being made impossible by construction OR loudly visible in the UI.\n- The agent MUST propose a redesign of the pipeline + decision-making layer that closes those gaps. The PRD shape (Context / Goals / Non-goals / Architecture / Acceptance) used by tasks/prd-piper-tts-runtime-options.md is the canonical example.\n- The operator’s priority order, in their words: **decisions** matter most → **observability** of the bots reasoning second → **performance** a distant third. Optimise the refactor accordingly.\n\n## Sub-tasks (filed as children below)\n\n1. Root-cause analysis from session 14 — replay the session, document every silent drop + every decision/utterance divergence with exact pipeline-event timestamps, deliver a written failure-mode catalogue. **MUST happen first.**\n2. Decision ↔ utterance parity: single source of truth for the spoken text — the decisions surface and the chat surface read from the same canonical record, or any divergence raises a visible error rather than going to the speaker.\n3. Pipeline reliability: never silently drop a user turn — every transcribed user utterance ends in either (a) a final spoken reply, (b) an approved-but-not-yet-spoken suggestion, or (c) a recorded reason for not replying, surfaced to the operator. No turn falls off the floor invisibly.\n4. \"What is the bot thinking\" — per-turn reasoning timeline surfaced in the session UI. STT in → router classification → context selection → LLM prompt → LLM raw output → guard/filter decisions → final spoken text. Customer-readable, not just dev logs.\n5. Offline replay harness against persisted session history — take any past session id, replay its transcript through the current pipeline offline, assert the produced decisions and utterances match the recorded ones; lights up regressions in CI.\n\n## Cross-links — earlier work that informs this\n\nClosed issues whose context the agent should re-read before refactoring:\n\n- **Johnny-vgl** — \"Review and standardize bot free mode speech decision logic\". The previous attempt at this exact territory; whatever decision logic landed there is the starting point for what to refactor here.\n- **Johnny-cdw** — \"Approving a pending suggestion doesn’t make the bot actually speak it\". Same divergence pattern (decisions panel says one thing, bot does another) at a different point in the pipeline.\n- **Johnny-arh** — \"Bot speaks over user mid-sentence\". Floor-management / partial-transcript gating; relevant to the silent-drop symptom because the same gate can over-suppress legitimate turns.\n- **Johnny-ckz.14** — \"STT artifacts trigger AI replies — no noise-floor gate\". Same gate, opposite failure mode (false-positive replies). The redesign has to balance both.\n- **Johnny-har** — \"STT transcription of participants must never pause while bot is speaking or thinking\". Relevant to the \"Where did my question go?\" silent-drop symptom.\n- **Johnny-7qp** — \"Bot loses conversation context mid-session\". Reliability precedent.\n- **Johnny-ckz.7** — \"Per-session activity / timing log surfaced in chat history\". Observability precedent — likely the substrate the new reasoning timeline (sub-task 4) extends.\n- **Johnny-klh** — \"Playground transcripts mislabel speakers\". Reliability precedent.\n\nStill-open issue that WILL collide with this refactor:\n\n- **Johnny-ckz.25** — \"Consolidate free_auto_speak into autonomous — remove FREE_AUTO_SPEAK BotMode\". Touches the same decision-mode plumbing; sequence with sub-task 2 (parity) or absorb into it.\n\n## Acceptance for the umbrella\n\n- All five sub-tasks closed.\n- Session 14 replays end-to-end through the new pipeline with no silent drops; every user turn lands in one of the three documented outcomes.\n- The decisions surface and the chat surface for any given turn either show the same text, or the divergence is rendered as an explicit \"spoke X instead of recommended Y because Z\" line — never silently.\n- A new operator opening any session can read the per-turn reasoning timeline and explain why the bot spoke what it spoke, without reading the source code or docker logs.\n- The offline replay harness runs in CI against at least three persisted sessions including session 14, and gates merges.\n\n## Non-goals\n\n- Not changing the LLM / STT / TTS providers. Provider choice is orthogonal.\n- Not tuning the default playground prompt. The complaint is that even with sane defaults the pipeline misbehaves; prompt tuning hides that.\n- Not adding new bot modes. Consolidating the existing ones (Johnny-ckz.25) is in scope; inventing new ones is not.\n\n## Reference for the agent picking this up\n\n- Session under investigation: http://localhost:5173/sessions/14\n- Canonical PRD shape: `tasks/prd-piper-tts-runtime-options.md`\n- Pipeline source (current): `backend/johnny/voice_pipeline/`, `backend/app/services/browser_pipeline_runner.py`, `backend/app/services/session_scheduler.py`\n- Decisions persistence: search `backend/app/db/models.py` for the decisions / approvals / utterances tables\n- Session UI: `frontend/src/routes/sessions/[id]/+page.svelte` (and the playground page) — where the reasoning timeline needs to land\n",
+        "description": "## Why this exists\n\nToday every PiperTTS.synthesize_stream call spawns a fresh piper subprocess (backend/app/providers/piper_tts.py:693 -> _spawn_process at line 746). The ONNX runtime + voice-model cold-start adds ~200-400 ms of pure overhead PER conversation turn. Unlike Parakeet (where per-request load only hurt the catalog Test button — meeting providers are pre-loaded by load_active_providers), TTS pays this cost on every reply Johnny speaks in a real meeting.\n\nThis epic does for TTS what the Parakeet runtime split did for STT:\n\n1. Give the existing Piper provider a runtime picker (subprocess / persistent-subprocess / http-sidecar), defaulting to the safe current behaviour. PRD already written at tasks/prd-piper-tts-runtime-options.md.\n2. Add two new local TTS providers (KittenTTS, Kokoro) with the same 3-runtime shape so the user can pick whichever voice + speed trade-off they want.\n\nEach provider exposes the same kind of Runtime dropdown in Settings -> Providers, with structured `<provider>.synth: runtime=... ttfa_ms=...` INFO logs visible in docker logs api so the user can verify the picker is actually doing what they expect and debug runtime-specific failures independently.\n\n## Acceptance for the epic as a whole\n\n- Three providers (Piper, KittenTTS, Kokoro) each ship with three selectable runtimes covering the in-container default, an in-container optimised path, and an out-of-container sidecar option.\n- Real meeting hot-path TTS latency drops from ~300 ms cold to <= 100 ms warm on whichever provider the user picks for the in-container optimised path.\n- README has a new \"Local TTS providers\" table listing voices, sample-rate quirks, and the three runtime options per provider.\n- Browser-validated via chrome-devtools MCP for each provider: switch runtime in the modal, click Play sample, observe latency badge + structured log.\n\n## Child issues\n\n- Piper runtime split (subprocess / persistent / http-sidecar) — PRD at tasks/prd-piper-tts-runtime-options.md.\n- KittenTTS provider (https://github.com/KittenML/KittenTTS) with the same 3-runtime picker.\n- Kokoro provider (https://github.com/hexgrad/kokoro) with the same 3-runtime picker.\n\n## Reference implementation\n\nThe Parakeet runtime split is the canonical example to copy:\n- Module-level cache + per-key asyncio.Lock + global load gate: backend/app/providers/parakeet_stt.py (search for `_LAST`, `_LOAD_LOCKS`, `_GLOBAL_LOAD_GATE`, `_ensure_model`, `evict_process_cache`).\n- Runtime dispatch inside transcribe_stream: parakeet_stt.py:_transcribe_in_container vs _transcribe_via_sidecar.\n- Sidecar wire protocol + launcher script: sidecars/parakeet-mlx/ and scripts/start-parakeet-sidecar.sh.\n- Test seam (autouse fixture evicts the module cache between tests): backend/tests/providers/test_parakeet_stt.py:_reset_parakeet_process_cache.",
         "metadata": {
           "dependencyCount": 0,
           "dependentCount": 0
         }
       }
     ],
-    "totalTasks": 7,
+    "totalTasks": 9,
     "tasks": [
       {
-        "id": "Johnny-ckz.28.1",
-        "title": "Root-cause analysis from session 14: failure-mode catalogue (silent drops + decision/utterance divergence) + redesign proposal",
+        "id": "Johnny-1ge.1",
+        "title": "Piper TTS runtime picker: subprocess / persistent-subprocess / http-sidecar",
         "status": "completed",
-        "completedInSession": true
-      },
-      {
-        "id": "Johnny-ckz.28.2",
-        "title": "Decision ↔ utterance parity: single source of truth so the chat and the decisions panel cannot diverge silently",
-        "status": "completed",
-        "completedInSession": true
-      },
-      {
-        "id": "Johnny-ckz.28.3",
-        "title": "Pipeline reliability: never silently drop a user turn — every transcribed utterance ends in reply / approved-pending / explicit-no-reply",
-        "status": "completed",
-        "completedInSession": true
-      },
-      {
-        "id": "Johnny-ckz.28.4",
-        "title": "'What is the bot thinking' — per-turn reasoning timeline in the session UI (STT in → router → context → LLM → guard → speak)",
-        "status": "completed",
-        "completedInSession": true
-      },
-      {
-        "id": "Johnny-ckz.28.5",
-        "title": "Offline replay harness: feed any persisted session transcript through the pipeline and assert decisions + utterances match",
-        "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-etu.1",
-        "title": "Pipeline architecture doc (technical): full deep-dive into how STT → router → decisions → LLM → guards → TTS actually work today",
+        "id": "Johnny-1ge.2",
+        "title": "New TTS provider: KittenTTS with 3-runtime picker (in-container / persistent / sidecar)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
-        "id": "Johnny-etu.2",
-        "title": "Pipeline overview (non-technical): plain-language explainer + simple schematic so the operator understands what the bot does between hearing and speaking",
+        "id": "Johnny-1ge.3",
+        "title": "New TTS provider: Kokoro with 3-runtime picker (in-container / mlx-sidecar / http-sidecar)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-1ge.5",
+        "title": "Docs pass for the TTS runtime epic: how it works, how to configure, comparison table",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-1ge.6",
+        "title": "Auto-start sidecars from ./run.sh + standardised per-launcher CLI (commands, env vars, exit codes, log layout)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-1ge.7",
+        "title": "End-to-end audio output validation for every TTS provider × runtime combination",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-1ge.8",
+        "title": "Unified voice picker UX: SELECT with preview / language / sample-rate across every TTS provider",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-1ge.9",
+        "title": "Converge Piper + cloud voice selection onto the shared VoicePicker; add download-progress UI",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-1ge.10",
+        "title": "TTS test surface broken across providers on a CLEAN install: Piper voice picker empty, Kokoro+KittenTTS in-container 'No module' errors, Kokoro sidecars HTTP 500 'no .wav output'",
+        "status": "open",
+        "completedInSession": false
       }
     ]
   },
-  "iterations": [
-    {
-      "iteration": 1,
-      "status": "completed",
-      "taskId": "Johnny-ckz.28.1",
-      "taskTitle": "Root-cause analysis from session 14: failure-mode catalogue (silent drops + decision/utterance divergence) + redesign proposal",
-      "taskCompleted": true,
-      "durationMs": 1107490,
-      "startedAt": "2026-06-08T06:55:36.656Z",
-      "endedAt": "2026-06-08T07:14:04.146Z"
-    },
-    {
-      "iteration": 2,
-      "status": "completed",
-      "taskId": "Johnny-ckz.28.2",
-      "taskTitle": "Decision ↔ utterance parity: single source of truth so the chat and the decisions panel cannot diverge silently",
-      "taskCompleted": true,
-      "durationMs": 1517973,
-      "startedAt": "2026-06-08T07:14:16.050Z",
-      "endedAt": "2026-06-08T07:39:34.023Z"
-    },
-    {
-      "iteration": 3,
-      "status": "completed",
-      "taskId": "Johnny-ckz.28.3",
-      "taskTitle": "Pipeline reliability: never silently drop a user turn — every transcribed utterance ends in reply / approved-pending / explicit-no-reply",
-      "taskCompleted": true,
-      "durationMs": 4107961,
-      "startedAt": "2026-06-08T07:39:44.932Z",
-      "endedAt": "2026-06-08T08:48:12.893Z"
-    },
-    {
-      "iteration": 4,
-      "status": "completed",
-      "taskId": "Johnny-ckz.28.4",
-      "taskTitle": "'What is the bot thinking' — per-turn reasoning timeline in the session UI (STT in → router → context → LLM → guard → speak)",
-      "taskCompleted": true,
-      "durationMs": 1658972,
-      "startedAt": "2026-06-08T08:48:23.784Z",
-      "endedAt": "2026-06-08T09:16:02.756Z"
-    },
-    {
-      "iteration": 5,
-      "status": "completed",
-      "taskId": "Johnny-etu.2",
-      "taskTitle": "Pipeline overview (non-technical): plain-language explainer + simple schematic so the operator understands what the bot does between hearing and speaking",
-      "taskCompleted": true,
-      "durationMs": 432592,
-      "startedAt": "2026-06-08T09:16:13.350Z",
-      "endedAt": "2026-06-08T09:23:25.942Z"
-    },
-    {
-      "iteration": 6,
-      "status": "completed",
-      "taskId": "Johnny-etu.1",
-      "taskTitle": "Pipeline architecture doc (technical): full deep-dive into how STT → router → decisions → LLM → guards → TTS actually work today",
-      "taskCompleted": true,
-      "durationMs": 1600928,
-      "startedAt": "2026-06-08T09:23:37.002Z",
-      "endedAt": "2026-06-08T09:50:17.930Z"
-    }
-  ],
+  "iterations": [],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

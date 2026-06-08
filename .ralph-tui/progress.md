@@ -122,6 +122,42 @@ after each iteration and it's included in prompts for context.
   Replay button). Router-timeout sim: a fixture turn with `"simulate":"timeout"` sleeps past a small
   `router_llm_timeout_s` so `asyncio.wait_for` fires → durable `no_reply(stage_error)` (the session-14
   silent-drop proof). Source-of-truth doc: `docs/REPLAY_HARNESS.md`.
+- **The unified voice picker (`VoicePicker.svelte`, Johnny-1ge.8) loads its catalog from `POST
+  /providers/preview/voices` (draft) or `GET /providers/{id}/voices` (saved).** The draft endpoint builds a
+  transient provider via `_instantiate_preview` → `validate_payload`, which 422s on ANY empty `required`
+  field — including the `voice_id` you're browsing the catalog to choose. That deadlock left providers with
+  no static `options=` fallback (Piper) showing an empty "No voices available" picker, while providers WITH
+  fallbacks (Kokoro et al.) masked it behind their static list. Fix lives in the catalog endpoint only:
+  `_instantiate_preview(payload, relax_voice_catalog=True)` → `validate_payload(..., ignore_required={voice_catalog field names})`.
+  Do NOT make `voice_id` `required=False` globally — the create/save path (`POST /providers`) must still
+  enforce it. Every TTS provider sets `voice_id` `required=True` + `voice_catalog=True`, so the difference
+  between "works" and "empty" is purely the presence of static fallback `options`.
+- **TTS preview/synthesis contract for browser validation (Johnny-1ge.7):** the per-voice Preview button and
+  the modal "Play sample" both POST `…/preview/play_sample` (draft) or `…/{id}/play_sample` (saved) and
+  return a WAV body + `X-TTS-*` response headers. Assert `X-TTS-Audible: 1`, `X-TTS-Peak > 0.01`,
+  `X-TTS-Audio-Bytes >= 16000`, and `X-TTS-Runtime` == the runtime under test. These headers are the cheapest
+  audible-vs-silent proof in chrome-devtools (`list_network_requests` → `get_network_request`); no need to
+  decode the audio. The silent-output failure surfaces as 200 with `X-TTS-Audible: 0` +
+  `X-TTS-Audible-Reason`, or a 500/502 with an actionable body.
+- **Local TTS sidecars run on the HOST in their own uv venvs (`sidecars/<name>/.venv`), managed by
+  `./scripts/start-<name>-sidecar.sh {start|stop|status|logs}` — NOT the Docker rule's scope.** Logs/pids live
+  under `.validation/<provider>-<backend>-sidecar.{log,pid}`. To reproduce a sidecar bug, `curl` its
+  `/synthesize` directly (ports: piper 8775, kitten 8771, kokoro-mlx 8772, kokoro-http 8773) and read its
+  log — the api proxies to `http://host.docker.internal:<port>`. A sidecar dep change means editing
+  `sidecars/<name>/pyproject.toml` then re-running `start-…-sidecar.sh start <backend>` (it `uv pip install -e .`
+  on launch). Gotcha: `mlx-audio`'s Kokoro pipeline needs `misaki[en]` for G2P but doesn't declare it —
+  without it `model.generate()` raises ImportError and the file fallback (which was also calling
+  `generate_audio(model_path=…)` instead of `model=…`, never `save=True`) masked the real cause. misaki
+  auto-downloads `en_core_web_sm` via `spacy.cli.download` on first English synth.
+- **Running backend tests/ruff in the DEV stack:** the api image is built `uv sync --frozen --no-dev`, so
+  pytest/ruff are absent. `docker compose exec api uv sync --frozen` adds them — BUT it ALSO prunes the
+  `--extra local-stt --extra local-tts` packages (piper-tts, faster-whisper, tokenizers), degrading the live
+  api. Restore right after with `docker compose exec api uv sync --frozen --extra local-stt --extra local-tts`.
+- **`./run.sh` / `./run-dev.sh` sweep whatever listens on :5173 — and Docker Desktop's `com.docker.backend`
+  port-forwarder for the frontend container binds :5173, so the sweep can `kill` Docker's own backend and
+  take the daemon down mid-rebuild.** If the daemon is fragile or already up, bring the dev stack up WITHOUT
+  the sweep: `export COMPOSE_FILE=docker-compose.yml:docker-compose.dev.yml; docker compose up -d --build`.
+  Recovery if it happens: `open -a Docker`, wait for `docker version` to answer, then the compose-up above.
 
 ---
 
@@ -431,5 +467,68 @@ after each iteration and it's included in prompts for context.
   - Unified-S2S can't be replayed turn-by-turn the way split can (the pipeline commits once per capture
     stream, and there's no router/terminal spine), so unified gets a reduced existence-parity invariant
     rather than INV-1/INV-2 — an honest scope call documented in `docs/REPLAY_HARNESS.md`.
+
+---
+
+
+## 2026-06-08 - Johnny-1ge.10
+
+- **Fixed the two highest-impact failures of the broken TTS test surface and browser-validated 6 of the 8
+  matrix cells; split the two `in-container` cells into a tracked follow-up.**
+- **Symptom A (Piper voice picker empty — the P1 regression):** the diagnosis in the bead (and the first
+  investigation pass) blamed `voice_id required=True`, but that is WRONG — every TTS provider sets
+  `voice_id` `required=True` + `voice_catalog=True`. Reproduced against the live api: `POST
+  /providers/preview/voices` 422s on empty `voice_id` for BOTH Piper and Kokoro ("Voice ID is required" /
+  "Voice is required"); only Piper LOOKS empty because it has no static fallback `options`. Root cause: the
+  catalog endpoint validates the very field you browse the catalog to choose. Fix is scoped to the catalog
+  endpoint, not a global `required` change (see the new Codebase Patterns bullet). Proven: with the fix the
+  picker loads 161 Piper voices (33 installed) with Preview/Install/Remove all restored.
+- **Symptom C (Kokoro mlx-sidecar HTTP 500 "no .wav output"):** the 500 was the FALLBACK path. Real cause
+  (from the sidecar log): `model.generate()` raised `ImportError: … misaki` — `mlx-audio`'s Kokoro pipeline
+  needs `misaki[en]` for G2P but `sidecars/kokoro-mlx/pyproject.toml` never declared it (the working
+  `kokoro-http` sidecar gets it transitively via `kokoro>=0.9.0`). The file fallback then failed on its own
+  bug (`generate_audio(model_path=…)` → param is `model=`; `save` defaulted False so no WAV was written),
+  which masked the misaki error. The bead's claim that http-sidecar ALSO fails is stale — it works (200,
+  PCM). Fixed all three: added `misaki[en]` to the mlx pyproject, corrected the `generate_audio` call, and
+  made the fallback re-raise the PRIMARY (actionable) error instead of the misleading "no .wav output".
+- **Symptoms B + D (Kokoro / KittenTTS `in-container` — "No module named 'kokoro'/'kittentts'"):** the
+  optional libs are genuinely not in the api image (`--no-dev --extra local-stt --extra local-tts`). The fix
+  is the Parakeet runtime-install pattern — a substantial, separable feature requiring multi-GB runtime
+  installs to validate, and both providers already have a working fast path on this Mac (Kokoro→MLX sidecar
+  fixed above, KittenTTS→http-sidecar). Split into **Johnny-8hq** (P2, discovered-from this bead) with the
+  full implementation plan. Their existing error messages already name the runtime + give a concrete next
+  step, satisfying the actionable-error acceptance for those cells.
+- **Files changed:**
+  - `backend/app/providers/schema_validation.py` — `validate_payload(..., ignore_required=frozenset())`.
+  - `backend/app/api/providers.py` — `_instantiate_preview(payload, *, relax_voice_catalog=False)` computes
+    the voice_catalog field names to ignore; `preview/voices` calls it with `relax_voice_catalog=True`.
+  - `sidecars/kokoro-mlx/pyproject.toml` — added `misaki[en]>=0.9.4`.
+  - `sidecars/kokoro-mlx/server.py` — `_synthesize_via_file` uses `model=`/`save=True`; `_synthesize_sync`
+    re-raises the primary generate() error on double failure.
+  - `backend/tests/api/test_providers.py` — `test_preview_voices_relaxes_required_voice_catalog_field`.
+- **Validation (chrome-devtools MCP + api, dev stack):** browser-drove the providers modal per provider ×
+  runtime, asserting the `X-TTS-*` audio contract on each `play_sample`:
+  - Piper × subprocess → audible=1, peak 0.99, ttfa 813 ms.
+  - Piper × persistent-subprocess → audible=1, peak 1.00 (the bead's "suspected broken" prediction did NOT
+    hold once voice selection was restored).
+  - Piper × http-sidecar → audible=1, peak 1.00, ttfa 76 ms.
+  - Kokoro × mlx-sidecar → audible=1, peak 0.27, ttfa 202 ms (**symptom C fixed** — was 500).
+  - Kokoro × http-sidecar → audible=1, peak 0.37 (via api).
+  - KittenTTS × http-sidecar → audible=1, peak 0.52 (**symptom E** — no regression).
+  - Kokoro × in-container → 502 "No module named 'kokoro'" (**symptom B**, deferred to Johnny-8hq).
+  - Voice picker populates for Piper (161) / Kokoro (50+) / KittenTTS (8) with Install/Preview/Remove
+    (**symptom A fixed** for all three).
+  - Backend: ruff clean on changed files; `tests/providers/test_schema.py` + `tests/api/test_providers.py`
+    243 passed (incl. the new regression test). Screenshots in `.validation/tts-fix/`.
+- **Learnings:**
+  - See the new Codebase Patterns bullets (voice-catalog validation deadlock + scoped fix; the TTS
+    `X-TTS-*` audio contract; host sidecars + the misaki gotcha; dev-stack test-deps prune the extras; the
+    `run.sh` :5173 / Docker-Desktop-backend hazard).
+  - Trust-but-verify earned its keep twice: the "required=True is the bug" hypothesis was disproven by a
+    one-line cross-provider grep + a live 422 reproduction; and the Kokoro 500 was a masked misaki
+    ImportError, not the temp-file race the message implied. Reproducing against the running system beat
+    reading the code.
+  - The Docker daemon died mid-task when `run.sh`'s :5173 sweep killed `com.docker.backend`; recovered with
+    `open -a Docker` + a sweep-free `docker compose up`. Documented so the next session doesn't lose the time.
 
 ---

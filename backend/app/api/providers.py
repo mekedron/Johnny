@@ -893,8 +893,17 @@ class ProviderPreviewPayload(BaseModel):
 
 def _instantiate_preview(
     payload: ProviderPreviewPayload,
+    *,
+    relax_voice_catalog: bool = False,
 ) -> STTProvider | LLMProvider | TTSProvider:
-    """Build a transient provider instance from a preview payload."""
+    """Build a transient provider instance from a preview payload.
+
+    ``relax_voice_catalog`` suppresses the ``required`` check on
+    ``voice_catalog`` fields so the voice-catalog endpoint can list a
+    provider's voices before the operator has picked one — otherwise an
+    empty (still-unchosen) ``voice_id`` 422s before ``list_voices()`` ever
+    runs, leaving the picker empty.
+    """
     schema = _schema_for(payload.kind, payload.provider_name)
     if schema is None:
         raise HTTPException(
@@ -903,7 +912,12 @@ def _instantiate_preview(
                 f"no registered provider for {payload.kind.value}:{payload.provider_name}"
             ),
         )
-    errors = validate_payload(schema, payload.values)
+    ignore_required = (
+        {f.name for f in schema.fields if f.voice_catalog}
+        if relax_voice_catalog
+        else frozenset()
+    )
+    errors = validate_payload(schema, payload.values, ignore_required=ignore_required)
     if errors:
         _raise_validation_errors(errors)
     credentials, options = split_values(schema, payload.values)
@@ -1031,7 +1045,7 @@ async def preview_voices(
             status_code=400,
             detail=f"preview/voices only supports TTS, not {payload.kind.value}",
         )
-    instance = _instantiate_preview(payload)
+    instance = _instantiate_preview(payload, relax_voice_catalog=True)
     assert isinstance(instance, TTSProvider)
     try:
         return await _voice_catalog_response(instance)
