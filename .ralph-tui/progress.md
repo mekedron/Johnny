@@ -9,11 +9,13 @@ after each iteration and it's included in prompts for context.
   `VoicePipeline` (`backend/johnny/voice_pipeline/pipeline.py`) does NOT write the DB directly — it runs
   with `NoopDecisionSink`/`NoopUtteranceSink` and publishes events to a Redis `EventBus`. The sole durable
   writer is `app/services/session_status_subscriber.py::_apply_in_transaction`, whose dispatch table
-  (~lines 444-455) only handles 5 event types: `session_status`, `transcript_finalized`,
-  `router_decision_made`, `agent_spoke`, `pipeline_timing`. Events with no branch
-  (`pipeline_stage_failed`, `agent_suggested`, `transcript_filtered`) are silently dropped — visible live
-  on the browser WebSocket (`api/ws.py`) but never persisted. To make any pipeline outcome durable you
-  must add both an event AND a subscriber dispatch branch.
+  (~L652-667) now handles 7 event types (Johnny-ckz.28.3 added the last two): `session_status_changed`,
+  `transcript_finalized`, `router_decision_made`, `agent_spoke`, `pipeline_timing`, `turn_terminal`,
+  `transcript_filtered`. Events with no branch (`agent_suggested`, `agent_tts_failed`,
+  `pipeline_stage_failed`, `approval_pending`, `approval_resolved`) are silently dropped — visible live
+  on the browser WebSocket (`api/ws.py`) but never persisted (approval events get their own WS-only
+  publish from the subscriber). To make any pipeline outcome durable you must add both an event AND a
+  subscriber dispatch branch.
 - **`agent_decisions` (router `suggested_reply`) vs `agent_utterances` (answer-LLM `output_text`) are two
   independent LLM outputs**, stitched after the fact by a "most-recent `should_speak` decision" scan in
   `apply_agent_spoke_event` — not a causal turn key. `outcome=SPOKEN` is pre-assigned optimistically at
@@ -82,6 +84,17 @@ after each iteration and it's included in prompts for context.
   `lib/components/playground/SetupForm.svelte` (`listen_only` "Transcribe silently. Johnny never speaks." …
   `autonomous` "Free-form speech guided only by the instructions. No approval, no allowlist."). A doc that
   quotes these verbatim stays in lockstep with what the operator actually sees; paraphrasing drifts.
+- **The pipeline's technical source-of-truth is now `docs/PIPELINE.md`** (Johnny-etu.1) — the full split
+  vs unified routes, the component reference, the gate/mode matrix, every event + table schema, and the
+  failure-mode catalogue with file:function refs. Update it when pipeline behaviour changes; it is the
+  companion to the plain-language `docs/PIPELINE_OVERVIEW.md` and is linked from the README "Layout".
+- **Mermaid-on-GitHub gotcha (validate diagrams in a real browser before shipping docs).** A `;`
+  semicolon inside a `sequenceDiagram` `Note` is parsed as a statement separator and **breaks the whole
+  diagram render** on GitHub (use a comma). Angle-bracket tokens like `<id>` are swallowed as HTML both
+  in Mermaid labels and in un-backticked markdown prose — use `{id}` in diagrams and wrap such tokens in
+  backticks in prose. Headings with an em dash (`—`) slugify to a **double** hyphen, so intra-doc anchor
+  links must use `--`. The cheap check: a local `mermaid@11` ESM harness that `mermaid.parse()` +
+  `mermaid.render()`s each block, driven via chrome-devtools (`.validation/<task>/mermaid-check.html`).
 
 ---
 
@@ -294,5 +307,53 @@ after each iteration and it's included in prompts for context.
     (auto-discovery), NOT `--db .beads/beads.db`.
   - Per the bead acceptance, the doc still needs **operator validation** before the epic (Johnny-etu) closes;
     that is a human read-through of the prose, separate from the engineering checks done here.
+
+---
+
+
+## 2026-06-08 - Johnny-etu.1
+
+- **Implemented the technical pipeline reference** `docs/PIPELINE.md` — long-form, dense, file:function
+  anchored. All 7 required sections: (1) high-level data flow with a Mermaid sequence diagram per route
+  (split + unified) + a divergence table, (2) component reference (transport/VAD/STT/LLM/TTS/S2S,
+  EventBus, the three sinks, ApprovalGate, TranscriptHistoryLoader, provider registry+loader, the
+  subscriber, and `UnifiedVoicePipeline`), (3) the router/decision layer — router output schema, every
+  gate/suppressor in dispatch order, the 5×gate mode matrix, a per-turn lifecycle state diagram, and the
+  canonical decision-record shape (INV-2), (4) the exhaustive event catalogue (12 events, which the UI
+  renders vs which are WS-only) + the WS wire-type remap, (5) storage — an ER diagram + column-level
+  schema + write timing for every pipeline table + the parity guard + migration lineage, (6) the
+  failure-mode catalogue (every catch / silent early-return / LLM-output override with file:line), and
+  (7) cross-references reconciling the ckz.28.2/.3/.4/.5 invariants and 19 closed issues against current
+  code. Companion to `docs/PIPELINE_OVERVIEW.md` (etu.2); README "Layout" already links it (etu.2 wired
+  the forward-ref, which now resolves).
+- **Files changed:** `docs/PIPELINE.md` (new), `.ralph-tui/progress.md` (this entry + corrected the stale
+  "subscriber handles 5 event types" pattern → 7, and added the PIPELINE.md-is-source-of-truth + Mermaid
+  gotcha patterns). No code touched — pure documentation of what exists TODAY.
+- **Method:** read every line of `events.py` + the 3222-line `pipeline.py` myself (the spine), then fanned
+  out 8 sonnet readers via a background Workflow for the breadth (unified route, subscriber, models +
+  migrations, component stages, production wiring + WS, closed-issue reconciliation, UI surfacing +
+  serializers, router/modes corroboration). Reconciled cross-source discrepancies against my own read
+  (e.g. the subscriber now dispatches 7 types not 5; `NoReplyReason` is 12 on the wire / 13 in DB+frontend).
+- **Validation:** docs-only, no in-app UI surface — but the 4 Mermaid diagrams are a GitHub-rendered
+  surface, so I rendered the EXACT block sources in a real browser via chrome-devtools (`mermaid@11` ESM
+  harness, `.validation/Johnny-etu.1/mermaid-check.html`): all 4 `parse=true render=true` (split-seq 99
+  nodes, unified-seq 45, state 10, ER 8), zero console errors. The render caught a real bug — a `;` in a
+  `sequenceDiagram` Note broke the split-sequence parse — fixed (→ comma) and re-validated green.
+  Screenshot `.validation/Johnny-etu.1/01-mermaid-render.png` (local, gitignored, not uploaded). Also
+  audited intra-doc anchors (em-dash heading → `--` slug) and confirmed all `<…>` tokens are inside code
+  spans / Mermaid fences so GitHub won't strip them.
+- **Learnings:**
+  - See the two new Codebase Patterns bullets at the top (PIPELINE.md as source-of-truth; the
+    Mermaid-on-GitHub render gotchas + the browser-render harness).
+  - The playground "listen_only" mislabel is two truths at different layers: browser sessions *run*
+    `autonomous` (the spec default), but the persisted `agent_utterances.mode` is stamped `listen_only`
+    because `apply_agent_spoke_event` reads `BotSession.meeting_config.mode` and falls back to
+    `LISTEN_ONLY` when `meeting_config_id` is NULL (and the `AgentSpoke` event carries no mode). Documented
+    as a live bug in §6.2.
+  - The biggest durability risk in the system: the subscriber is a single un-restarted daemon thread —
+    if it crashes, all subsequent pipeline events are permanently lost until the process restarts
+    (`app/worker.py` L303-308). Captured in §7.7.
+  - Per the bead acceptance, the doc still wants a human **operator read-through** before epic Johnny-etu
+    closes; the only remaining open child is Johnny-ckz.28.5 (the replay harness — not yet implemented).
 
 ---
