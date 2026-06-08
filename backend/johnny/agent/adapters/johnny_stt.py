@@ -50,6 +50,7 @@ from livekit.agents.stt import (
     SpeechData,
     SpeechEvent,
     SpeechEventType,
+    StreamAdapter,
     STTCapabilities,
 )
 from livekit.agents.types import (
@@ -70,6 +71,34 @@ from app.providers.base import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator
+
+    from livekit.agents.vad import VAD
+
+
+BATCH_ONLY_STT_PROVIDER_NAMES: frozenset[str] = frozenset(
+    {"faster-whisper", "parakeet", "elevenlabs"}
+)
+"""Johnny STT providers whose ``transcribe_stream`` is batch-only (Johnny-4fn).
+
+These adapters drain the entire ``audio_iter`` and emit ``FINAL_TRANSCRIPT``\\ s
+only once it is exhausted: faster-whisper and Parakeet buffer the whole
+utterance and run a single transcribe call; ElevenLabs Scribe POSTs the whole
+clip to its batch ``/v1/speech-to-text`` endpoint. Under LiveKit's
+continuously-fed :class:`RecognizeStream` the ``audio_iter`` only ends at
+teardown, so without VAD segmentation these would never emit mid-call — hence
+:func:`build_stt_adapter` wraps exactly these in a VAD-buffered
+:class:`~livekit.agents.stt.StreamAdapter`.
+
+Truly-streaming providers are intentionally absent. Deepgram emits interim +
+final transcripts incrementally under continuous feed (its own server-side
+endpointing fires finals), so it is driven directly through :class:`JohnnySTT`.
+OpenAI Realtime is also absent: its split-STT path (manual ``commit`` on
+``audio_iter`` exhaustion, ``turn_detection: null``) is superseded by the
+dedicated S2S / RealtimeModel adapter work (Johnny-20h), not this batch wrapper.
+
+Keyed by provider ``name`` (the registry / DB identifier, == each adapter's
+``PROVIDER_NAME``); a drift-guard test pins this set to those constants.
+"""
 
 
 def _frame_to_pcm_bytes(frame: rtc.AudioFrame) -> bytes:
@@ -309,4 +338,63 @@ class JohnnySTT(STT[Any]):
         )
 
 
-__all__ = ["JohnnySTT", "JohnnySTTStream", "transcript_to_speech_event"]
+def _load_default_vad() -> VAD:
+    """Load Johnny's default Silero VAD for StreamAdapter segmentation.
+
+    Lazy fallback used only when :func:`build_stt_adapter` wraps a batch-only
+    provider and the caller did not inject a shared VAD. Reuses
+    :func:`johnny.agent.session.load_vad` (a function-local import so importing
+    this module stays free of the turn-detector import chain unless the fallback
+    actually fires) so the StreamAdapter's VAD is the same Silero model the
+    ``AgentSession`` uses for turn detection.
+    """
+    from johnny.agent.session import load_vad
+
+    return load_vad()
+
+
+def build_stt_adapter(
+    provider: STTProvider,
+    *,
+    vad: VAD | None = None,
+    language: str | None = None,
+    model: str | None = None,
+) -> STT[Any]:
+    """Wrap a Johnny :class:`STTProvider` as the LiveKit STT plugin for a session.
+
+    Truly-streaming providers (Deepgram) emit interim + final transcripts
+    incrementally as audio flows, so they are driven directly through
+    :class:`JohnnySTT`: ``AgentSession`` feeds the recognition stream
+    continuously and the provider's own endpointing fires the finals.
+
+    Batch-only providers (:data:`BATCH_ONLY_STT_PROVIDER_NAMES`: faster-whisper,
+    Parakeet, ElevenLabs Scribe) buffer the whole input and only emit once it is
+    exhausted, so under a continuously-fed :class:`RecognizeStream` they would
+    never emit until teardown. They are wrapped in LiveKit's
+    :class:`~livekit.agents.stt.StreamAdapter`, which uses Silero ``vad`` to
+    segment the audio into utterances and runs the wrapped
+    :meth:`JohnnySTT.recognize` (the batch path) on each speech segment, emitting
+    a ``FINAL_TRANSCRIPT`` at end-of-speech — exactly the VAD-bounded-utterance
+    contract the legacy ``VoicePipeline._utterances()`` gave these providers.
+
+    ``vad`` is the Silero model to segment with; pass the same instance the
+    ``AgentSession`` uses for turn detection so only one model is loaded. When a
+    batch-only provider is active and ``vad`` is ``None``, a default Silero VAD
+    is loaded lazily. ``vad`` is ignored for streaming providers. ``language`` /
+    ``model`` are forwarded to :class:`JohnnySTT` (voice/model parity: Johnny-88n).
+    """
+    johnny_stt = JohnnySTT(provider, language=language, model=model)
+    if provider.name not in BATCH_ONLY_STT_PROVIDER_NAMES:
+        return johnny_stt
+    return StreamAdapter(
+        stt=johnny_stt, vad=vad if vad is not None else _load_default_vad()
+    )
+
+
+__all__ = [
+    "BATCH_ONLY_STT_PROVIDER_NAMES",
+    "JohnnySTT",
+    "JohnnySTTStream",
+    "build_stt_adapter",
+    "transcript_to_speech_event",
+]

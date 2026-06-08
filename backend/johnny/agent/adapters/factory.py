@@ -32,7 +32,7 @@ packages — it is lazy-exported through the adapters' :pep:`562` ``__getattr__`
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from app.providers.base import (
     LLMProvider,
@@ -44,12 +44,14 @@ from app.providers.base import (
 )
 from app.providers.loader import load_active_providers
 from johnny.agent.adapters.johnny_llm import JohnnyLLM
-from johnny.agent.adapters.johnny_stt import JohnnySTT
+from johnny.agent.adapters.johnny_stt import build_stt_adapter
 from johnny.agent.adapters.johnny_tts import JohnnyTTS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from livekit.agents.stt import STT
+    from livekit.agents.vad import VAD
     from sqlalchemy.orm import Session
 
     from app.providers.base import ProviderRegistry
@@ -80,13 +82,19 @@ class SessionAdapters:
 
     Spread straight into the session harness::
 
-        adapters = build_session_adapters(db)
+        adapters = build_session_adapters(db, vad=vad)
         session = build_agent_session(
-            stt=adapters.stt, llm=adapters.llm, tts=adapters.tts
+            stt=adapters.stt, llm=adapters.llm, tts=adapters.tts, vad=vad
         )
+
+    ``stt`` is a :class:`~livekit.agents.stt.STT`: a bare :class:`JohnnySTT` for
+    truly-streaming providers, or a VAD-buffered
+    :class:`~livekit.agents.stt.StreamAdapter` wrapping one for batch-only
+    providers (:func:`~johnny.agent.adapters.johnny_stt.build_stt_adapter`,
+    Johnny-4fn).
     """
 
-    stt: JohnnySTT
+    stt: STT[Any]
     llm: JohnnyLLM
     tts: JohnnyTTS
 
@@ -128,6 +136,7 @@ def build_session_adapters(
     *,
     registry: ProviderRegistry | None = None,
     decrypt: CredentialDecryptor | None = None,
+    vad: VAD | None = None,
 ) -> SessionAdapters:
     """Build the LiveKit STT/LLM/TTS plugin set from the admin-active providers.
 
@@ -137,6 +146,16 @@ def build_session_adapters(
     / ``decrypt`` are forwarded to the loader: production passes the
     Fernet-backed decryptor; tests can inject a fake registry + identity
     decryptor.
+
+    The STT adapter is built via
+    :func:`~johnny.agent.adapters.johnny_stt.build_stt_adapter`: truly-streaming
+    providers (Deepgram) become a bare :class:`JohnnySTT`, while batch-only
+    providers (faster-whisper, Parakeet, ElevenLabs) are wrapped in a
+    VAD-buffered :class:`~livekit.agents.stt.StreamAdapter` so they present a
+    streaming surface to ``AgentSession`` (Johnny-4fn). Pass ``vad`` (the same
+    Silero model the session uses for turn detection) so only one model is
+    loaded; when a batch-only STT is active and ``vad`` is ``None`` a default
+    Silero VAD is loaded lazily.
 
     The adapters are constructed with no ``voice`` / ``model`` / ``language``
     overrides — each provider already carries its admin-configured model and
@@ -165,7 +184,11 @@ def build_session_adapters(
     tts = _require(active, ProviderKind.TTS)
     if not isinstance(tts, TTSProvider):
         raise AgentSessionSetupError(_wrong_type(ProviderKind.TTS, tts, "TTSProvider"))
-    return SessionAdapters(stt=JohnnySTT(stt), llm=JohnnyLLM(llm), tts=JohnnyTTS(tts))
+    return SessionAdapters(
+        stt=build_stt_adapter(stt, vad=vad),
+        llm=JohnnyLLM(llm),
+        tts=JohnnyTTS(tts),
+    )
 
 
 __all__ = [

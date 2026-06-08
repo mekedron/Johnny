@@ -36,7 +36,7 @@ if TYPE_CHECKING:
         build_session_adapters,
     )
     from johnny.agent.adapters.johnny_llm import JohnnyLLM
-    from johnny.agent.adapters.johnny_stt import JohnnySTT
+    from johnny.agent.adapters.johnny_stt import JohnnySTT, build_stt_adapter
     from johnny.agent.adapters.johnny_tts import JohnnyTTS
 
 __all__ = [
@@ -46,6 +46,7 @@ __all__ = [
     "JohnnyTTS",
     "SessionAdapters",
     "build_session_adapters",
+    "build_stt_adapter",
 ]
 
 _FACTORY_EXPORTS = frozenset(
@@ -58,6 +59,10 @@ def __getattr__(name: str) -> Any:
         from johnny.agent.adapters.johnny_stt import JohnnySTT
 
         return JohnnySTT
+    if name == "build_stt_adapter":
+        from johnny.agent.adapters.johnny_stt import build_stt_adapter
+
+        return build_stt_adapter
     if name == "JohnnyLLM":
         from johnny.agent.adapters.johnny_llm import JohnnyLLM
 

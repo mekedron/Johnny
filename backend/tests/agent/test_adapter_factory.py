@@ -50,6 +50,9 @@ from app.providers.loader import load_active_providers
 
 pytest.importorskip("livekit.agents")
 
+from livekit.agents.stt import StreamAdapter  # noqa: E402
+from livekit.agents.vad import VAD, VADCapabilities, VADStream  # noqa: E402
+
 from johnny.agent.adapters.factory import (  # noqa: E402
     AgentSessionSetupError,
     SessionAdapters,
@@ -58,6 +61,22 @@ from johnny.agent.adapters.factory import (  # noqa: E402
 from johnny.agent.adapters.johnny_llm import JohnnyLLM  # noqa: E402
 from johnny.agent.adapters.johnny_stt import JohnnySTT  # noqa: E402
 from johnny.agent.adapters.johnny_tts import JohnnyTTS  # noqa: E402
+
+
+class _NullVAD(VAD):
+    """Minimal VAD for type-only assertions — its stream is never driven here.
+
+    The factory only hands this to :class:`StreamAdapter` (which stores it
+    without streaming), so the StreamAdapter-vs-JohnnySTT classification can be
+    checked without loading a real Silero model. Driving the VAD-segmentation
+    behaviour lives in ``test_stt_stream_adapter.py``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(capabilities=VADCapabilities(update_interval=0.1))
+
+    def stream(self) -> VADStream:  # pragma: no cover - not exercised here
+        raise NotImplementedError
 
 # --- Fake providers: record the config the loader hands them ----------------
 # None of these stream — the factory only *constructs* the adapter around the
@@ -205,17 +224,20 @@ def test_builds_the_three_adapters_from_seeded_db(session: Session) -> None:
     adapters = build_session_adapters(session, registry=_registry())
 
     assert isinstance(adapters, SessionAdapters)
-    assert isinstance(adapters.stt, JohnnySTT)
+    # deepgram streams -> a bare JohnnySTT (not a StreamAdapter). Bind a local
+    # so its provider-specific surface stays narrowed for the assertions below.
+    stt_adapter = adapters.stt
+    assert isinstance(stt_adapter, JohnnySTT)
     assert isinstance(adapters.llm, JohnnyLLM)
     assert isinstance(adapters.tts, JohnnyTTS)
 
     # The right provider was wrapped in each adapter...
-    assert adapters.stt.provider == "deepgram"
+    assert stt_adapter.provider == "deepgram"
     assert adapters.llm.provider == "openai"
     assert adapters.tts.provider == "cartesia"
 
     # ...and the decrypted credentials + options reached the provider.
-    stt_provider = adapters.stt._provider
+    stt_provider = stt_adapter._provider
     assert isinstance(stt_provider, _FakeSTT)
     assert stt_provider.config.credentials == {"api_key": "sk-stt"}
     assert stt_provider.config.options == {"model": "nova-3"}
@@ -255,7 +277,9 @@ def test_decrypt_callable_is_forwarded_to_loader(session: Session) -> None:
     adapters = build_session_adapters(session, registry=_registry(), decrypt=fake_decrypt)
 
     assert "opaque-fernet-token" in seen
-    stt_provider = adapters.stt._provider
+    stt_adapter = adapters.stt
+    assert isinstance(stt_adapter, JohnnySTT)
+    stt_provider = stt_adapter._provider
     assert isinstance(stt_provider, _FakeSTT)
     assert stt_provider.config.credentials == {"api_key": "DECRYPTED"}
 
@@ -265,8 +289,10 @@ def test_switching_active_provider_yields_a_different_adapter(session: Session) 
     reg.register(ProviderKind.STT, "elevenlabs", _FakeSTT)
 
     _seed_split(session, stt="deepgram")
-    first = build_session_adapters(session, registry=reg)
+    first = build_session_adapters(session, registry=reg, vad=_NullVAD())
     assert first.stt.provider == "deepgram"
+    # deepgram streams -> driven directly as a bare JohnnySTT.
+    assert isinstance(first.stt, JohnnySTT)
 
     # Operator switches the active STT provider in admin: deactivate the old
     # row, activate a new one.
@@ -283,11 +309,37 @@ def test_switching_active_provider_yields_a_different_adapter(session: Session) 
     )
     session.commit()
 
-    second = build_session_adapters(session, registry=reg)
+    second = build_session_adapters(session, registry=reg, vad=_NullVAD())
 
     # Next session start -> a different live adapter, same untouched registry.
+    # elevenlabs is batch-only, so the switch also flips the STT surface from a
+    # bare JohnnySTT to a VAD-buffered StreamAdapter (Johnny-4fn).
     assert second.stt.provider == "elevenlabs"
     assert second.stt is not first.stt
+    assert isinstance(second.stt, StreamAdapter)
+
+
+def test_active_batch_stt_is_vad_wrapped(session: Session) -> None:
+    reg = _registry()
+    reg.register(ProviderKind.STT, "faster-whisper", _FakeSTT)
+    _seed_split(session, stt="faster-whisper")
+
+    adapters = build_session_adapters(session, registry=reg, vad=_NullVAD())
+
+    assert isinstance(adapters.stt, StreamAdapter)
+    assert isinstance(adapters.stt.wrapped_stt, JohnnySTT)
+    assert adapters.stt.provider == "faster-whisper"
+
+
+def test_active_streaming_stt_is_not_wrapped(session: Session) -> None:
+    # deepgram streams natively -> a bare JohnnySTT, no VAD needed even when one
+    # is available.
+    _seed_split(session, stt="deepgram")
+
+    adapters = build_session_adapters(session, registry=_registry(), vad=_NullVAD())
+
+    assert isinstance(adapters.stt, JohnnySTT)
+    assert not isinstance(adapters.stt, StreamAdapter)
 
 
 @pytest.mark.parametrize("omit", [ProviderKind.STT, ProviderKind.LLM, ProviderKind.TTS])

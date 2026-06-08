@@ -269,6 +269,54 @@ a frozen `SessionAdapters(stt, llm, tts)` dataclass to spread into
   **UNIQUE**, so two rows for the same kind/provider (e.g. active + inactive)
   need distinct `display_name`s or the seed `INSERT` 500s.
 
+### StreamAdapter-wrap batch-only STT providers behind a Silero VAD (Johnny-4fn)
+Batch-only Johnny STT adapters (`transcribe_stream` drains the WHOLE `audio_iter`
+then emits finals: faster-whisper, Parakeet, ElevenLabs Scribe) never emit under
+LiveKit's continuously-fed `RecognizeStream` (the iter only ends at teardown).
+Fix: wrap them in `from livekit.agents.stt import StreamAdapter`.
+- `StreamAdapter(*, stt, vad)` is itself an `STT`. Its `.stream()` returns a
+  `StreamAdapterWrapper` that forwards frames to `vad.stream()` and, on each
+  `END_OF_SPEECH`, `merge_frames(event.frames)` → `wrapped_stt.recognize(buffer)`
+  → emits one `FINAL_TRANSCRIPT`. So your **existing** `JohnnySTT._recognize_impl`
+  (the batch path from Johnny-c81) IS the surface it drives — no new recognition
+  code; the VAD hands the provider a complete VAD-bounded utterance, exactly like
+  the legacy `VoicePipeline._utterances()` did. `StreamAdapter` proxies
+  `.model`/`.provider` to the wrapped STT (so `.provider` assertions still pass);
+  caps are `streaming=True, interim_results=False`.
+- **Classify by provider `name`**, in an allowlist
+  `BATCH_ONLY_STT_PROVIDER_NAMES = {faster-whisper, parakeet, elevenlabs}` in
+  `johnny_stt.py`. `build_stt_adapter(provider, *, vad=None, language, model)`
+  returns a bare `JohnnySTT` for streaming providers (Deepgram — its server
+  endpointing emits interims/finals under continuous feed) and a wrapped
+  `StreamAdapter` for the allowlist. `openai-realtime` (turn_detection:null,
+  commit-on-exhaustion) is ALSO effectively batch under continuous feed, but is
+  intentionally NOT wrapped — its split path is superseded by the S2S /
+  RealtimeModel epic (Johnny-20h). A drift-guard test pins the set to the three
+  adapters' own `PROVIDER_NAME` constants.
+- **Share ONE Silero VAD**: pass it into both `build_session_adapters(vad=...)`
+  (new optional param; forwarded to `build_stt_adapter`) and
+  `build_agent_session(vad=...)` so the StreamAdapter segmenter and the session
+  turn-detector use the same model. `vad=None` + a batch provider lazily loads one
+  via a **function-local** `from johnny.agent.session import load_vad` (keeps
+  `johnny_stt` free of the turn-detector import chain unless the fallback fires;
+  monkeypatch `johnny.agent.session.load_vad` in tests). Bare
+  `import johnny.agent.adapters` stays livekit/sqlalchemy-free (lazy `__getattr__`).
+- `SessionAdapters.stt` is now `STT[Any]` (was `JohnnySTT`) — it may be a
+  `StreamAdapter`. Tests touching `JohnnySTT`-private `._provider` must
+  `assert isinstance(local, JohnnySTT)` to narrow first.
+- **Fake VAD for unit tests** (no model, deterministic): subclass `VAD`
+  (`VADCapabilities(update_interval=...)`) + `VADStream` implementing only
+  `async def _main_task` — read `self._input_ch` (skip `self._FlushSentinel`),
+  emit `VADEvent(type=…, frames=…, samples_index/timestamp/*_duration=0)` on
+  `self._event_ch`. A "silence-segmenting" fake (all-zero frame closes the active
+  segment; `end_input()`'s trailing flush sentinel closes the last) turns
+  `[speech][silence][speech]` into two `END_OF_SPEECH`s → two recognise calls →
+  two finals. `merge_frames`/`combine_frames` preserve a single 16 kHz frame's
+  bytes exactly, so you can assert per-utterance `received` PCM.
+- ruff `order-by-type`: `StreamAdapter` sorts BEFORE `STTCapabilities` in the
+  `livekit.agents.stt` import (PascalCase group, "stream" < "sttc"); `ruff
+  check --fix` resolves it.
+
 ---
 
 ## 2026-06-08 - Johnny-jue
@@ -642,5 +690,71 @@ ready to hand to the harness).
   provider's admin-configured default (Johnny-7a3). Parity work is Johnny-88n.
 - `(kind, provider_name, display_name)` is UNIQUE — seeding active+inactive rows
   for the same kind/provider needs distinct `display_name`s.
+
+---
+
+## 2026-06-08 - Johnny-4fn
+
+Phase-1: give batch-only STT providers a streaming surface to `AgentSession` by
+wrapping them in LiveKit's `StreamAdapter` + Silero VAD. faster-whisper /
+Parakeet / ElevenLabs Scribe drain the whole `transcribe_stream` `audio_iter`
+before emitting, so under a continuously-fed `RecognizeStream` they'd never emit
+mid-call — the VAD now segments speech into utterances and each gets a batch
+recognise → one `FINAL_TRANSCRIPT` at speech end.
+
+**Implemented**
+- `backend/johnny/agent/adapters/johnny_stt.py`: `BATCH_ONLY_STT_PROVIDER_NAMES`
+  = `{faster-whisper, parakeet, elevenlabs}` + `build_stt_adapter(provider, *,
+  vad=None, language=None, model=None) -> STT[Any]`. Streaming providers
+  (Deepgram) → bare `JohnnySTT`; batch-only → `StreamAdapter(stt=JohnnySTT(…),
+  vad=…)`, which VAD-segments and drives the existing `JohnnySTT._recognize_impl`
+  (Johnny-c81) per utterance. `_load_default_vad()` lazily loads Silero via a
+  function-local `johnny.agent.session.load_vad` when no shared VAD is injected.
+- `backend/johnny/agent/adapters/factory.py`: new optional `vad` param on
+  `build_session_adapters`, forwarded to `build_stt_adapter`; `SessionAdapters.stt`
+  retyped `JohnnySTT` → `STT[Any]` (may be a `StreamAdapter`).
+- `backend/johnny/agent/adapters/__init__.py`: `build_stt_adapter` added to the
+  PEP-562 lazy export (routes to `johnny_stt`, keeps bare-import safety).
+- `backend/tests/agent/test_stt_stream_adapter.py` (NEW, 15 cases): classification
+  (streaming pass-through / batch wrapped / vad ignored for streaming), drift guard
+  vs `PROVIDER_NAME`s, language+model forwarding, lazy-export, and the REAL
+  StreamAdapter machinery driven by a fake batch provider + deterministic
+  silence-segmenting fake VAD — one segment → one final, `[speech][silence][speech]`
+  → two finals (each recognised from its own utterance's PCM), silence-only → none,
+  lazy-default-VAD via monkeypatch, streaming-never-loads-VAD.
+- `backend/tests/agent/test_adapter_factory.py`: `vad` passed in switching test
+  (elevenlabs is now batch → asserts the surface flips to `StreamAdapter`); two new
+  tests (active batch STT wrapped / active streaming STT not wrapped); `_provider`
+  accesses narrowed through a local `isinstance` for the new `STT[Any]` field.
+
+**Validated** (prod-image `--no-dev` gate: bind-mount `./backend`, tools onto
+`/opt/venv`)
+- ruff + mypy(strict) clean on `johnny/agent tests/agent` (14 source files);
+  `pytest tests/agent` → **58 passed** (41 prior + 17 new). Import-safety probe
+  (`.validation/Johnny-4fn/`): bare `import johnny.agent.adapters` pulls neither
+  livekit, sqlalchemy, the johnny_stt/factory submodules, NOR `johnny.agent.session`;
+  accessing `build_stt_adapter` triggers johnny_stt (+ livekit) but defers
+  session.py (function-local import) and never pulls the factory; unknown attr →
+  AttributeError. `git status backend/app/providers/` EMPTY (providers untouched).
+- **No browser validation / no clean-install rebuild**: pure backend adapter, no
+  UI/HTTP surface, **zero new runtime deps** (`StreamAdapter` is in
+  `livekit.agents.stt`; Silero came with Johnny-jue's `agent` extra + the baked
+  download-files models). Unreachable from any UI until the agent worker / console
+  entrypoint (Johnny-9eh) exists, so the acceptance's **console-mode faster-whisper
+  two-sentence integration is deferred there** (mirrors Johnny-c81/6nl/7a3/zb3); the
+  two-finals behaviour is proven here against the real StreamAdapter with a fake
+  provider+VAD. Source-only change baked by `COPY` on the next `./run.sh`.
+
+**Learnings / gotchas** (full list in the new Codebase Pattern at top)
+- `StreamAdapter` reuses your batch `_recognize_impl` — no new recognition code;
+  it proxies `.model`/`.provider` so factory assertions survive the wrap.
+- `openai-realtime` (turn_detection:null, commit-on-exhaustion) is ALSO effectively
+  batch under continuous feed, but is deliberately left unwrapped — handled by the
+  S2S/RealtimeModel follow-up epic (Johnny-20h), not this batch path.
+- A fake `VAD`/`VADStream` (emit `VADEvent`s on `self._event_ch` from
+  `_main_task`) is the clean, deterministic way to unit-test segmentation without a
+  real Silero model; `end_input()`'s trailing flush sentinel closes the last
+  segment, and `merge_frames` preserves a single 16 kHz frame's PCM exactly.
+- ruff `order-by-type` sorts `StreamAdapter` before `STTCapabilities`.
 
 ---
