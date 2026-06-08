@@ -106,6 +106,53 @@ content=...)))`. Key mapping facts:
   livekit-free (matches `johnny.agent`'s import-safety) while
   `from johnny.agent.adapters import JohnnyLLM` triggers the SDK import on access.
 
+### Subclass livekit `tts.TTS` over a Johnny `TTSProvider` (the adapter shape)
+`TTS.synthesize(text, *, conn_options)` is **synchronous** — it returns a
+`ChunkedStream` immediately; the base `ChunkedStream.__init__` spawns
+`_main_task` (a retry loop) which calls your `async def _run(self,
+output_emitter: AudioEmitter)`. Inside `_run`:
+`output_emitter.initialize(request_id=shortuuid(...), sample_rate=self._tts.sample_rate,
+num_channels=..., mime_type="audio/pcm", stream=False)` then `output_emitter.push(pcm_bytes)`
+per chunk. With `mime_type="audio/pcm"` + `stream=False` the emitter reframes raw
+16 kHz mono S16LE PCM into 200 ms `rtc.AudioFrame`s itself — you do NOT build
+`SynthesizedAudio`/`rtc.AudioFrame` by hand. Do NOT call `output_emitter.flush()`
+or `end_input()` yourself; the base calls `end_input()`+`join()` after `_run`
+returns, which releases the held-back tail and marks the last real frame
+`is_final` (an explicit flush instead appends a synthetic ~10 ms silence marker).
+Samples are conserved exactly (push 16000 samples → frames summing to 16000).
+- **Circuit-breaker / retry mapping is the crux.** `ChunkedStream`'s retry loop
+  retries **any `APIError`** up to `conn_options.max_retry` (default **3**)
+  *regardless of the error's `retryable` flag* (unlike `SynthesizeStream`, which
+  checks `e.retryable`). So to make Johnny's terminal categories
+  (`quota_exceeded`/`auth_failed`) **not retried**, a terminal failure must be a
+  **non-`APIError`**: emit the event manually via `self._emit_error(johnny_exc,
+  recoverable=False)` (sets `_current_attempt_has_error` to suppress bogus
+  zero-duration metrics, and carries the categorised Johnny `TTSError` as the
+  event's `.error` so a session breaker can read `.category`) then `raise
+  johnny_exc` — non-`APIError` bypasses `except APIError` and propagates on the
+  first attempt. Transient categories (`rate_limited`/`unknown`) → raise a
+  retryable LiveKit `APIError` (`APIStatusError(status_code=429, retryable=True)`
+  for rate-limit; else `APIConnectionError(retryable=True)`) so the loop retries
+  and emits `tts.TTSError` each attempt. Mirror
+  `voice_pipeline.pipeline.TERMINAL_TTS_FAILURE_CATEGORIES` = `{quota_exceeded,
+  auth_failed}` (Johnny-g2n).
+- `synthesize_stream(text, voice_id)` is the provider's async generator —
+  `cast` it to `AsyncGenerator[bytes, None]` and `await gen.aclose()` in a
+  `finally` so a barge-in cancellation tears down the provider HTTP/subprocess
+  promptly (mirrors the legacy pipeline's `_tts_frame_iter`). `CancelledError`
+  is BaseException, so `with suppress(Exception): await gen.aclose()` won't
+  swallow the cancellation.
+- `voice_id=None` falls through to the provider's own admin-configured default,
+  so passing `JohnnyTTS(provider, voice=...)` OR `None` both honor admin config.
+- `TTS` is `Generic[TEvent]` → `class JohnnyTTS(TTS[Any])` for strict mypy
+  (`ChunkedStream` is a plain `ABC`, not generic). `TTSCapabilities(streaming=False)`
+  since `synthesize_stream` is one-shot text→audio and `AgentSession` drives it
+  per sentence. Override `model`/`provider` properties (→ `self._provider.name`).
+  Lazy-export via the same PEP-562 `__getattr__` in `adapters/__init__.py` as
+  `JohnnyLLM` to keep `import johnny.agent.adapters` livekit-free. Imports:
+  `from livekit.agents.tts import TTS, AudioEmitter, ChunkedStream, TTSCapabilities`;
+  errors `from livekit.agents._exceptions import APIConnectionError, APIStatusError`.
+
 ### Self-host LiveKit in docker-compose as an internal-only SFU
 Add the room server as a normal compose service — single-node, stateless,
 reachable container-to-container only. Hard-won specifics:
@@ -329,6 +376,68 @@ double hop through. Informed by the Johnny-4em topology spike (GO decision).
 - Running api container predates a compose env edit, so `docker compose exec`
   saw no `LIVEKIT_API_KEY`; passed values inline (same ones `compose config`
   renders) rather than recreate the operator's live api mid-session.
+
+---
+
+## 2026-06-08 - Johnny-7a3
+
+Phase-1 TTS adapter: `JohnnyTTS(tts.TTS)` wrapping Johnny's `TTSProvider` so
+LiveKit's `AgentSession` drives every admin-configured TTS provider unchanged.
+Symmetric with the Johnny-6nl LLM adapter.
+
+**Implemented**
+- `backend/johnny/agent/adapters/johnny_tts.py`: `JohnnyTTS(TTS[Any])` +
+  `JohnnyTTSStream(ChunkedStream)`. `synthesize()` returns the stream; `_run()`
+  initialises an `AudioEmitter` for raw 16 kHz mono PCM (`mime_type="audio/pcm"`,
+  `stream=False`) and pushes every frame `provider.synthesize_stream(text,
+  voice_id)` yields — the emitter reframes PCM → `rtc.AudioFrame` →
+  `SynthesizedAudio`. `voice` (factory/admin) is forwarded as `voice_id` (`None`
+  → provider default). TTS circuit-breaker (Johnny-g2n): terminal categories
+  `{quota_exceeded, auth_failed}` emit a non-recoverable `tts.TTSError` event
+  carrying the categorised Johnny error and re-raise the original non-`APIError`
+  to bypass LiveKit's retry loop (which ignores `retryable` for ChunkedStream);
+  transient (`rate_limited`/`unknown`) → retryable `APIStatusError(429)` /
+  `APIConnectionError`. Provider generator `aclose()`-d in a `finally` for clean
+  barge-in teardown.
+- `backend/johnny/agent/adapters/__init__.py`: added `JohnnyTTS` to the PEP-562
+  `__getattr__` lazy export alongside `JohnnyLLM`.
+- `backend/tests/agent/test_johnny_tts.py`: 9 unit tests (fake `TTSProvider`,
+  **real** LiveKit `ChunkedStream`/`AudioEmitter`) — PCM→AudioFrame framing +
+  sample conservation + ~1.0 s expected duration, multi-chunk concat, voice_id
+  forwarding (set + default None), terminal-not-retried×2 (quota/auth) with
+  recoverable=False + category survival, transient retried→APIError, rate_limited
+  →429, model/provider/capability labels.
+
+**Validated**
+- ruff + mypy(strict) clean on `johnny/agent tests/agent` (9 source files);
+  `pytest tests/agent` → 20 passed (9 new + 11 prior). Import-safety re-proven:
+  bare `import johnny.agent.adapters` pulls neither `livekit` nor either concrete
+  adapter into `sys.modules`; `.JohnnyTTS` access triggers the SDK import on
+  demand; unknown attr → AttributeError. Ran via the `--no-dev` prod-image gate
+  pattern (bind-mount `./backend`, tools added onto `/opt/venv`).
+- **No browser validation / no clean-install rebuild**: pure backend adapter
+  with no UI/HTTP surface and **zero new runtime deps** (`livekit-agents` came
+  with Johnny-jue's `agent` extra; `app.providers.base` already baked). It is
+  unreachable until the adapter factory (Johnny-zb3) + agent worker / console
+  entrypoint (Johnny-9eh) exist, so the acceptance "console-mode integration with
+  Cartesia + Kokoro" is deferred to those tasks; here the adapter is proven
+  against the real LiveKit stream/emitter machinery with a fake provider (the
+  "non-empty audio of expected duration" assertion lives in the framing test).
+  Did NOT rebuild/restart the running stack — source-only change baked by
+  `COPY` on the next `./run.sh`, identical to the bind-mounted code under test.
+
+**Learnings / gotchas** (see new Codebase Pattern at top)
+- `ChunkedStream`'s retry loop retries **any `APIError`** up to `max_retry`
+  ignoring `e.retryable` (`SynthesizeStream` does honor it) — so "terminal = not
+  retried" REQUIRES raising a non-`APIError`; manually `self._emit_error(exc,
+  recoverable=False)` first to keep the LiveKit error event + suppress the bogus
+  zero-duration metric.
+- Push raw PCM with `mime_type="audio/pcm"` and let `AudioEmitter` build the
+  `rtc.AudioFrame`s; don't call `flush()`/`end_input()` (base does, and marks the
+  last real frame `is_final` — an explicit flush appends synthetic silence).
+- Most Johnny TTS providers raise `TTSError(category="unknown")`; only ElevenLabs
+  categorises quota/auth/rate today (Cartesia included). The adapter just honors
+  whatever `.category` the provider sets.
 
 ---
 

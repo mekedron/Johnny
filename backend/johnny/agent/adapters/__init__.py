@@ -29,8 +29,9 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from johnny.agent.adapters.johnny_llm import JohnnyLLM
+    from johnny.agent.adapters.johnny_tts import JohnnyTTS
 
-__all__ = ["JohnnyLLM"]
+__all__ = ["JohnnyLLM", "JohnnyTTS"]
 
 
 def __getattr__(name: str) -> Any:
@@ -38,4 +39,8 @@ def __getattr__(name: str) -> Any:
         from johnny.agent.adapters.johnny_llm import JohnnyLLM
 
         return JohnnyLLM
+    if name == "JohnnyTTS":
+        from johnny.agent.adapters.johnny_tts import JohnnyTTS
+
+        return JohnnyTTS
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
