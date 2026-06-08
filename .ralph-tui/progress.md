@@ -153,6 +153,53 @@ Samples are conserved exactly (push 16000 samples → frames summing to 16000).
   `from livekit.agents.tts import TTS, AudioEmitter, ChunkedStream, TTSCapabilities`;
   errors `from livekit.agents._exceptions import APIConnectionError, APIStatusError`.
 
+### Subclass livekit `stt.STT` over a Johnny `STTProvider` (the adapter shape)
+`STT.stream(*, language, conn_options)` is **synchronous** — it returns a
+`RecognizeStream` immediately; the base `RecognizeStream.__init__` spawns
+`_main_task` (a retry loop) which calls your `async def _run(self)`. You also
+MUST implement the abstract `async def _recognize_impl(self, buffer, *,
+language, conn_options) -> SpeechEvent` (the batch path) even for a streaming
+STT — run the buffer through `transcribe_stream` as a single chunk.
+- **Bridge LiveKit's push model → Johnny's pull model.** Frames arrive on
+  `self._input_ch` (an `aio.Chan[rtc.AudioFrame | RecognizeStream._FlushSentinel]`)
+  via the base `push_frame()`. In `_run`, make an async generator that
+  `async for item in self._input_ch`, **skips** `self._FlushSentinel` (Johnny's
+  `transcribe_stream` is one continuous byte stream, no segment-commit), yields
+  `bytes(frame.data)` PCM, and ends when the channel closes (`end_input()`).
+  Pass it to `provider.transcribe_stream(audio_iter)` and forward each yielded
+  `TranscriptEvent` to `self._event_ch.send_nowait(SpeechEvent(...))`.
+- **Pass `sample_rate=PCM_SAMPLE_RATE_HZ` to `RecognizeStream.__init__`.** Real
+  LiveKit room audio is often 48 kHz; the base `push_frame()` then auto-resamples
+  (its own `rtc.AudioResampler`) to 16 kHz before `_run` ever sees a frame, so the
+  provider always gets the 16 kHz mono bridge format (verified: 1 s of 48 kHz in →
+  ~32000 B of 16 kHz out).
+- **TranscriptEvent → SpeechEvent mapping:** `is_final` picks
+  `FINAL_TRANSCRIPT` vs `INTERIM_TRANSCRIPT`; one `SpeechData` alternative carries
+  text, `confidence` (None → `0.0`, the SpeechData default), `speaker` →
+  `speaker_id`, and `timestamp_ms/1000` → `start_time`/`end_time` (seconds).
+  Johnny's `TranscriptEvent` has **no language** → fill `SpeechData.language`
+  (a `LanguageCode(str)`, `from livekit.agents.language import LanguageCode`) from
+  a constructor default + per-`stream(language=...)` override; `""` = unknown.
+  Do NOT emit `START_OF_SPEECH`/`END_OF_SPEECH` — the SDK marks them optional and
+  the session VAD owns speech boundaries.
+- **Error mapping is simpler than TTS:** `STTError` has **no `category`** (unlike
+  `TTSError`, Johnny-g2n), so there's no terminal/transient split — map every
+  `STTError` → retryable `APIConnectionError(str(exc))`; the base
+  `RecognizeStream._main_task` / `STT.recognize` retry loop catches `APIError` up
+  to `conn_options.max_retry` (verified 1+2 retries = 3 provider calls, last error
+  event `recoverable=False`). No `_emit_error`/circuit-breaker branch needed.
+- Annotate the audio generator `-> AsyncGenerator[bytes, None]` (NOT
+  `AsyncIterator`) so `await gen.aclose()` typechecks under strict mypy; `cast`
+  `transcribe_stream(...)` to `AsyncGenerator[TranscriptEvent, None]` and
+  `aclose()` BOTH it and the audio generator in a `finally` for prompt barge-in
+  teardown (mirrors the TTS adapter). `STT` is `Generic[TEvent]` → `JohnnySTT(STT[Any])`
+  (`RecognizeStream` is a plain ABC). `combine_frames(buffer)` (`AudioBuffer` =
+  `frame | list[frame]`) collapses the batch buffer to one frame in
+  `_recognize_impl`. `STTCapabilities(streaming=True, interim_results=True)`.
+  Lazy-export via the same PEP-562 `__getattr__` in `adapters/__init__.py` as
+  `JohnnyLLM`/`JohnnyTTS`. Imports: `from livekit.agents.stt import STT,
+  RecognizeStream, SpeechData, SpeechEvent, SpeechEventType, STTCapabilities`.
+
 ### Self-host LiveKit in docker-compose as an internal-only SFU
 Add the room server as a normal compose service — single-node, stateless,
 reachable container-to-container only. Hard-won specifics:
@@ -438,6 +485,67 @@ Symmetric with the Johnny-6nl LLM adapter.
 - Most Johnny TTS providers raise `TTSError(category="unknown")`; only ElevenLabs
   categorises quota/auth/rate today (Cartesia included). The adapter just honors
   whatever `.category` the provider sets.
+
+---
+
+## 2026-06-08 - Johnny-c81
+
+Phase-1 STT adapter: `JohnnySTT(stt.STT)` wrapping Johnny's `STTProvider` so
+LiveKit's `AgentSession` drives every admin-configured STT provider unchanged.
+Completes the Phase-1 split-pipeline trio (STT + LLM Johnny-6nl + TTS Johnny-7a3).
+
+**Implemented**
+- `backend/johnny/agent/adapters/johnny_stt.py`: `JohnnySTT(STT[Any])` +
+  `JohnnySTTStream(RecognizeStream)`. `stream()` returns the stream; `_run()`
+  bridges LiveKit's push model (`rtc.AudioFrame`s on `self._input_ch`) to Johnny's
+  pull model — an `_audio_frames()` async generator drains the channel (skipping
+  `_FlushSentinel`), yields S16LE PCM, and feeds `provider.transcribe_stream`;
+  each `TranscriptEvent` → `SpeechEvent` (INTERIM/FINAL with a `SpeechData`
+  alternative: text/confidence/speaker_id/language/timestamps). `sample_rate=
+  PCM_SAMPLE_RATE_HZ` pins the base resampler so 48 kHz room audio arrives at the
+  provider as 16 kHz mono. `_recognize_impl()` is the batch fallback (whole buffer
+  → one chunk → last final, else last interim). `STTError` → retryable
+  `APIConnectionError` (no category split, unlike TTS). Module helpers
+  `transcript_to_speech_event` + `_frame_to_pcm_bytes`.
+- `backend/johnny/agent/adapters/__init__.py`: added `JohnnySTT` to the PEP-562
+  `__getattr__` lazy export alongside `JohnnyLLM`/`JohnnyTTS`.
+- `backend/tests/agent/test_johnny_stt.py`: 10 unit tests (fake `STTProvider`,
+  **real** LiveKit `RecognizeStream`/`STT`) — interim+final mapping with full
+  metadata, PCM byte conservation, 48 kHz→16 kHz resample, confidence None→0.0,
+  stream-language override + empty default, STTError retried→APIError (3 calls,
+  recoverable flags), batch recognize returns final, empty-when-no-transcript,
+  model/provider/capability labels.
+
+**Validated**
+- ruff + mypy(strict) clean on `johnny/agent tests/agent` (11 source files);
+  `pytest tests/agent` → 30 passed (10 new + 20 prior). Import-safety re-proven:
+  bare `import johnny.agent.adapters` pulls neither `livekit` nor `johnny_stt`
+  into `sys.modules`; `.JohnnySTT` access triggers the SDK import on demand;
+  unknown attr → AttributeError. Ran via the `--no-dev` prod-image gate pattern
+  (bind-mount `./backend:/workspace`, tools added onto `/opt/venv`). Also ran a
+  standalone e2e smoke (`.validation/Johnny-c81/probe.py`) through the real
+  RecognizeStream proving all five behaviors before finalising the suite.
+- **No browser validation / no clean-install rebuild**: pure backend adapter
+  with no UI/HTTP surface and **zero new runtime deps** (`livekit-agents` came
+  with Johnny-jue's `agent` extra; `app.providers.base` already baked). Unreachable
+  until the adapter factory (Johnny-zb3) + agent worker / console entrypoint
+  (Johnny-9eh) exist, so the console-mode acceptance is deferred there; here it's
+  proven against the real LiveKit stream machinery with a fake provider. Did NOT
+  rebuild/restart the running stack — source-only change baked by `COPY` on the
+  next `./run.sh`, identical to the bind-mounted code under test.
+
+**Learnings / gotchas** (see new Codebase Pattern at top)
+- The base `RecognizeStream`, given `sample_rate=`, auto-resamples every pushed
+  frame to that rate before `_run` — so the adapter gets 16 kHz for free even
+  though room audio is 48 kHz; no manual resample in the adapter.
+- `_recognize_impl` is abstract on `STT` and MUST be implemented even for a
+  streaming-only provider (the fallback adapter / `recognize()` path call it).
+- `STTError` carries no `category` (the TTS circuit-breaker machinery has no STT
+  analogue), so the error mapping is just "always retryable APIConnectionError".
+- An async-generator method annotated `-> AsyncIterator[bytes]` fails strict mypy
+  on `.aclose()`; use `-> AsyncGenerator[bytes, None]`.
+- Skip `_FlushSentinel` in the audio generator — LiveKit segment boundaries have
+  no meaning for Johnny's continuous `transcribe_stream` contract.
 
 ---
 

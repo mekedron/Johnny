@@ -3,10 +3,10 @@
   "sessionId": "17b1f649-1d33-441a-bfd0-469c8d89870f",
   "status": "running",
   "startedAt": "2026-06-08T17:25:57.487Z",
-  "updatedAt": "2026-06-08T18:51:40.369Z",
-  "currentIteration": 4,
+  "updatedAt": "2026-06-08T19:06:40.097Z",
+  "currentIteration": 5,
   "maxIterations": 0,
-  "tasksCompleted": 4,
+  "tasksCompleted": 5,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -69,8 +69,8 @@
       {
         "id": "Johnny-7a3",
         "title": "[BUILD] Phase 1: JohnnyTTS(tts.TTS) adapter over TTSProvider.synthesize_stream",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-7we",
@@ -252,6 +252,16 @@
       "durationMs": 621864,
       "startedAt": "2026-06-08T18:25:20.800Z",
       "endedAt": "2026-06-08T18:35:42.664Z"
+    },
+    {
+      "iteration": 5,
+      "status": "completed",
+      "taskId": "Johnny-7a3",
+      "taskTitle": "[BUILD] Phase 1: JohnnyTTS(tts.TTS) adapter over TTSProvider.synthesize_stream",
+      "taskCompleted": true,
+      "durationMs": 925228,
+      "startedAt": "2026-06-08T18:36:13.759Z",
+      "endedAt": "2026-06-08T18:51:38.987Z"
     }
   ],
   "skippedTaskIds": [],

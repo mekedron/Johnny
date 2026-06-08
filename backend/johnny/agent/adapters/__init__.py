@@ -29,12 +29,17 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from johnny.agent.adapters.johnny_llm import JohnnyLLM
+    from johnny.agent.adapters.johnny_stt import JohnnySTT
     from johnny.agent.adapters.johnny_tts import JohnnyTTS
 
-__all__ = ["JohnnyLLM", "JohnnyTTS"]
+__all__ = ["JohnnyLLM", "JohnnySTT", "JohnnyTTS"]
 
 
 def __getattr__(name: str) -> Any:
+    if name == "JohnnySTT":
+        from johnny.agent.adapters.johnny_stt import JohnnySTT
+
+        return JohnnySTT
     if name == "JohnnyLLM":
         from johnny.agent.adapters.johnny_llm import JohnnyLLM
 
