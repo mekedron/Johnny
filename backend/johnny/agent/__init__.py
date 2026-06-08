@@ -12,8 +12,10 @@ replacing the hand-rolled ``johnny/voice_pipeline/pipeline.py`` engine:
   Johnny's ``STTProvider`` / ``LLMProvider`` / ``TTSProvider`` ABCs as
   LiveKit ``stt.STT`` / ``llm.LLM`` / ``tts.TTS`` plugins (Phase 1).
 * :mod:`johnny.agent.gate` — the bounded router-gate harness (timeout +
-  barge-in cancellation + INV-1 terminal) the Phase-2 "should-speak" gate
-  wraps its router call in (spike Johnny-9k2). Stdlib-only and ``livekit``-free.
+  barge-in cancellation; spike Johnny-9k2) plus the session-scoped
+  :class:`~johnny.agent.gate.TurnLedger` that guarantees INV-1 — exactly one
+  terminal per LiveKit turn id across the gate and the reply done-callback
+  (spike Johnny-o3z). Stdlib-only and ``livekit``-free.
 
 Importing this top-level package is intentionally side-effect free and
 does **not** import ``livekit`` — only the submodules that subclass the

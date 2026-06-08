@@ -3,10 +3,10 @@
   "sessionId": "17b1f649-1d33-441a-bfd0-469c8d89870f",
   "status": "running",
   "startedAt": "2026-06-08T17:25:57.487Z",
-  "updatedAt": "2026-06-08T20:26:36.036Z",
-  "currentIteration": 10,
+  "updatedAt": "2026-06-08T20:48:28.731Z",
+  "currentIteration": 11,
   "maxIterations": 0,
-  "tasksCompleted": 9,
+  "tasksCompleted": 10,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -87,8 +87,8 @@
       {
         "id": "Johnny-9k2",
         "title": "[SPIKE] Phase 2: Blocking router-gate timeout + cancellation semantics",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-c81",
@@ -312,6 +312,16 @@
       "durationMs": 1084539,
       "startedAt": "2026-06-08T19:47:00.351Z",
       "endedAt": "2026-06-08T20:05:04.890Z"
+    },
+    {
+      "iteration": 11,
+      "status": "completed",
+      "taskId": "Johnny-9k2",
+      "taskTitle": "[SPIKE] Phase 2: Blocking router-gate timeout + cancellation semantics",
+      "taskCompleted": true,
+      "durationMs": 1266483,
+      "startedAt": "2026-06-08T20:05:28.544Z",
+      "endedAt": "2026-06-08T20:26:35.027Z"
     }
   ],
   "skippedTaskIds": [],

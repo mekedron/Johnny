@@ -51,11 +51,28 @@ How Johnny-xpa composes this in the real, livekit-importing hook::
         # turn's terminal (spoken / interrupted-mid-reply). Returning normally
         # lets the SDK generate the reply.
 
+:class:`TerminalTracker` enforces INV-1 within *one* gate invocation. The
+**session-level** authority is :class:`TurnLedger` (spike **Johnny-o3z**): the
+legacy ``voice_pipeline.pipeline`` could key INV-1 on a single
+``_turn_terminal_emitted`` bool because ``_respond_to_transcript`` was
+serialised, but under ``AgentSession`` the gate and the reply ``SpeechHandle``
+done-callback are temporally disjoint *and turns overlap* (turn N's reply
+done-callback races turn N+1's gate). So the flag must be **per-turn-id**, not
+per-session. :class:`TurnLedger` is one ``dict[turn_id, GateTerminal | None]``
+per session, keyed by the user ``ChatMessage.id`` (``item_<shortuuid>`` — the
+only id available *at gate entry* and preserved through LiveKit's
+``_generate_reply``). Both emitters (the gate, via :meth:`TurnLedger.gate_tracker`,
+and the reply done-callback, via :meth:`TurnLedger.emit`) route through its
+atomic first-wins chokepoint; :meth:`TurnLedger.close` sweeps any turn that was
+opened but never terminalized (the zero-emission fallback). See
+``.validation/Johnny-o3z/decision.md`` for the full path enumeration.
+
 This module is deliberately ``livekit``-free and ``sqlalchemy``-free (stdlib
 only) so ``import johnny.agent.gate`` stays cheap and safe, mirroring the
 adapter package's import-safety discipline. The real ``TurnTerminal`` →
 ``EventBus`` → ``agent_decisions`` wiring is injected as a
-:data:`TerminalEmitter` callback (event/observability parity is Johnny-d5z).
+:data:`TerminalEmitter` / :data:`SessionTerminalEmitter` callback
+(event/observability parity is Johnny-d5z).
 """
 
 from __future__ import annotations
@@ -87,10 +104,32 @@ GateNoReplyReason = Literal[
     "barge_in",
     "stage_error",
 ]
-"""The ``no_reply`` sub-reasons reachable from the gate (subset of
-events.NoReplyReason): ``router_declined``/``low_confidence`` (decision paths,
-emitted by the caller), ``barge_in`` (abandoned / cancelled mid-gate),
+"""The ``no_reply`` sub-reasons the *gate harness itself* produces (subset of
+:data:`TurnNoReplyReason`): ``router_declined``/``low_confidence`` (decision
+paths, emitted by the caller), ``barge_in`` (abandoned / cancelled mid-gate),
 ``stage_error`` (router timeout, router raised, or an unaccounted exit)."""
+
+TurnNoReplyReason = Literal[
+    "router_declined",
+    "low_confidence",
+    "barge_in",
+    "rate_limited",
+    "tts_unavailable",
+    "suggest_only",
+    "approval_rejected",
+    "model_empty_output",
+    "no_allowed_reply_match",
+    "noise_filtered",
+    "stage_error",
+    "listen_only",
+]
+"""The full ``no_reply`` vocabulary the **session ledger** records — every reason
+any phase of a turn can resolve to, not just the gate-reachable ones. The gate
+emits the :data:`GateNoReplyReason` subset; the reply-completion path adds
+``model_empty_output`` (reply produced no audio) and the caller's mode handlers
+(Johnny-xpa) add ``rate_limited`` / ``tts_unavailable`` / ``suggest_only`` /
+``approval_rejected`` / etc. A full mirror of ``events.NoReplyReason`` (kept
+stdlib-only; a drift-guard test asserts equality so the audit shape never skews)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,12 +143,19 @@ class GateTerminal:
     """
 
     terminal_state: GateTerminalState
-    no_reply_reason: GateNoReplyReason | None
+    no_reply_reason: TurnNoReplyReason | None
     detail: str
 
 
 # Injected by the caller: persist/publish the turn's terminal audit row.
 TerminalEmitter = Callable[[GateTerminal], Awaitable[None]]
+
+# Session-level variant injected into :class:`TurnLedger`: persist/publish the
+# durable terminal for a specific LiveKit turn id. Johnny-d5z maps
+# ``(turn_id, GateTerminal)`` onto a ``voice_pipeline.events.TurnTerminal`` →
+# ``EventBus`` → ``agent_decisions`` row (the turn id binds it to the turn's
+# canonical decision record).
+SessionTerminalEmitter = Callable[[str, GateTerminal], Awaitable[None]]
 
 
 class GateAction(Enum):
@@ -149,11 +195,15 @@ class TerminalTracker:
         self,
         emit: TerminalEmitter,
         *,
-        turn_id: int,
+        turn_id: str | int,
         strict: bool = False,
     ) -> None:
         self._emit = emit
-        self.turn_id = turn_id
+        # The LiveKit turn id is the user ChatMessage.id (``item_<shortuuid>``,
+        # a str); the legacy pipeline / unit fixtures use the int utterance
+        # counter. Only ever rendered into logs / the strict assertion, never
+        # used arithmetically, so both are accepted (Johnny-o3z).
+        self.turn_id: str | int = turn_id
         # When True, an unaccounted gate exit (no terminal emitted) raises
         # AssertionError after the fallback fires — mirrors STRICT_TURN_TERMINAL
         # so the gap surfaces in dev/test instead of shipping a silent drop.
@@ -165,7 +215,7 @@ class TerminalTracker:
         self,
         *,
         terminal_state: GateTerminalState,
-        no_reply_reason: GateNoReplyReason | None = None,
+        no_reply_reason: TurnNoReplyReason | None = None,
         detail: str = "",
     ) -> bool:
         """Emit the turn's single terminal. Returns ``False`` on a 2nd call.
@@ -235,6 +285,170 @@ class TerminalTracker:
         if self._strict and not isinstance(exc, asyncio.CancelledError):
             raise AssertionError(
                 f"turn {self.turn_id} exited the gate without a terminal: {detail}"
+            )
+
+
+class TurnLedger:
+    """Session-scoped INV-1 authority — *exactly one* terminal per LiveKit turn id.
+
+    Spike **Johnny-o3z**. The legacy ``voice_pipeline.pipeline`` enforced INV-1
+    with one session-scalar ``_turn_terminal_emitted`` bool, which is correct
+    **only because** ``_respond_to_transcript`` is serialised (one turn in
+    flight at a time). Under ``AgentSession`` that assumption is gone:
+
+    * our terminal-emitting code runs in two *temporally disjoint* places — the
+      ``on_user_turn_completed`` gate, and (only on the speak path) the reply
+      :class:`SpeechHandle`'s done-callback, fired *later* by the SDK;
+    * turns **overlap** — turn N's reply done-callback races turn N+1's gate, so
+      a single shared flag would clobber.
+
+    So INV-1 moves to a per-turn-id ledger. One :class:`TurnLedger` per session
+    holds ``dict[turn_id, GateTerminal | None]`` keyed by the user
+    ``ChatMessage.id`` (``item_<shortuuid>`` — the only id available *at gate
+    entry* and preserved through LiveKit's ``_generate_reply``). Both emitters
+    route through :meth:`emit` (the gate via :meth:`gate_tracker`; the reply
+    done-callback directly), whose first-wins claim is **atomic** — the slot is
+    taken *before* any ``await`` so two concurrent emits for one turn id can
+    never both publish. :meth:`close` is the belt-and-suspenders sweep: a turn
+    ``open``-ed but never terminalized (a lost reply handle, a hard teardown)
+    gets a fallback ``no_reply(stage_error)`` so it can never vanish.
+
+    LiveKit emits no Johnny terminal of its own (``speech_created`` /
+    ``conversation_item_added`` / ``metrics_collected`` are observability only),
+    so reconciliation is entirely between *our* two emitters — there is no
+    SDK-side terminal to double with.
+
+    Stdlib-only, like the rest of this module: the durable ``TurnTerminal`` →
+    ``EventBus`` → ``agent_decisions`` wiring is injected as a
+    :data:`SessionTerminalEmitter` (Johnny-d5z).
+    """
+
+    def __init__(self, emit: SessionTerminalEmitter, *, strict: bool = False) -> None:
+        self._emit = emit
+        # Strict mirrors STRICT_TURN_TERMINAL: an unaccounted turn at session
+        # close raises so the gap surfaces in dev/test instead of shipping.
+        self._strict = strict
+        # None = opened but not yet terminal; a GateTerminal = accounted-for.
+        self._turns: dict[str, GateTerminal | None] = {}
+
+    def open(self, turn_id: str) -> None:
+        """Register a turn the moment we first own it (gate entry). Idempotent.
+
+        Only registered turns are chased by :meth:`close`. Paths LiveKit
+        short-circuits *before* the gate (``skip_reply``, too-short transcript,
+        scheduling paused, no LLM, realtime server-side turn detection) are
+        deliberately never opened — they are not turns we own, exactly like the
+        legacy ``LISTEN_ONLY`` / noise-gate paths that emit no terminal.
+        """
+        self._turns.setdefault(turn_id, None)
+
+    @property
+    def open_turns(self) -> tuple[str, ...]:
+        """Turn ids registered via :meth:`open` that have not yet terminalized."""
+        return tuple(tid for tid, term in self._turns.items() if term is None)
+
+    def terminal_for(self, turn_id: str) -> GateTerminal | None:
+        """The recorded terminal for ``turn_id`` (``None`` if open or unknown)."""
+        return self._turns.get(turn_id)
+
+    async def emit(
+        self,
+        turn_id: str,
+        *,
+        terminal_state: GateTerminalState,
+        no_reply_reason: TurnNoReplyReason | None = None,
+        detail: str = "",
+    ) -> bool:
+        """Emit ``turn_id``'s single terminal. First wins; a 2nd returns ``False``.
+
+        The one session-wide chokepoint. Called by the reply done-callback
+        (``replied`` / ``barge_in`` / ``stage_error`` / ``model_empty_output``)
+        and by the gate (via :meth:`gate_tracker`). A second call for the same
+        turn id — a done-callback that fires twice, a sweep racing a late reply,
+        the gate and reply both firing — is logged and dropped.
+        """
+        terminal = GateTerminal(
+            terminal_state=terminal_state,
+            no_reply_reason=no_reply_reason,
+            detail=detail,
+        )
+        return await self._publish(turn_id, terminal)
+
+    async def _publish(self, turn_id: str, terminal: GateTerminal) -> bool:
+        # Atomic check-and-set: claim the slot BEFORE the first await so two
+        # concurrent emits for the same turn id can never both publish (the
+        # event loop is single-threaded; with no await between the get and the
+        # set, no other coroutine interleaves). Mirrors the legacy
+        # ``self._turn_terminal_emitted = True`` placed before the bus await.
+        if self._turns.get(turn_id) is not None:
+            logger.error(
+                "INV-1 violation: turn=%s already terminal %r; ignoring 2nd %s/%s",
+                turn_id,
+                self._turns[turn_id],
+                terminal.terminal_state,
+                terminal.no_reply_reason,
+            )
+            return False
+        self._turns[turn_id] = terminal
+        logger.info(
+            "agent.turn.terminal: turn=%s state=%s reason=%s detail=%r",
+            turn_id,
+            terminal.terminal_state,
+            terminal.no_reply_reason,
+            terminal.detail,
+        )
+        try:
+            await self._emit(turn_id, terminal)
+        except Exception:
+            logger.exception(
+                "failed to emit terminal for turn=%s — the turn's audit row "
+                "will be missing",
+                turn_id,
+            )
+        return True
+
+    def gate_tracker(self, turn_id: str) -> TerminalTracker:
+        """A per-turn :class:`TerminalTracker` whose emit routes into this ledger.
+
+        Lets Johnny-xpa compose :func:`run_gate` unchanged while the session-wide
+        first-wins authority is the ledger — so the gate's ``no_reply`` and the
+        reply done-callback's ``replied`` for the *same* turn id reconcile to a
+        single terminal. Opens the turn as a side effect (gate entry is the
+        moment we first own it). The tracker's own per-call flag is now redundant
+        local defense; :meth:`_publish` is the authoritative chokepoint.
+        """
+        self.open(turn_id)
+
+        async def _route(terminal: GateTerminal) -> None:
+            await self._publish(turn_id, terminal)
+
+        return TerminalTracker(_route, turn_id=turn_id)
+
+    async def close(self) -> None:
+        """Sweep every still-open turn at session close (belt-and-suspenders).
+
+        A turn ``open``-ed but never terminalized is the silent drop the
+        invariant forbids — emit a fallback ``no_reply(stage_error)`` so it is
+        accounted for. In strict mode, raise afterwards so the gap is caught at
+        source. Idempotent: turns already terminal are skipped.
+        """
+        stranded = self.open_turns
+        for turn_id in stranded:
+            logger.error(
+                "agent.turn.terminal: UNACCOUNTED turn=%s at session close — "
+                "emitting fallback no_reply terminal",
+                turn_id,
+            )
+            await self.emit(
+                turn_id,
+                terminal_state="no_reply",
+                no_reply_reason="stage_error",
+                detail="session closed with the turn unaccounted for",
+            )
+        if self._strict and stranded:
+            raise AssertionError(
+                f"session closed with {len(stranded)} unaccounted turn(s): "
+                f"{', '.join(stranded)}"
             )
 
 
@@ -389,8 +603,11 @@ __all__ = [
     "GateTerminal",
     "GateTerminalState",
     "RouterStatus",
+    "SessionTerminalEmitter",
     "TerminalEmitter",
     "TerminalTracker",
+    "TurnLedger",
+    "TurnNoReplyReason",
     "run_gate",
     "run_router_call",
 ]

@@ -394,6 +394,50 @@ reply-completion path owns the turn's spoken/decline terminal. Keep the failure
 reasons a subset of `voice_pipeline.events.NoReplyReason` and drift-guard it
 (`test_router_gate.py::test_gate_reason_literals_subset_of_canonical`).
 
+### Session-level INV-1 ledger keyed by the LiveKit turn id (Johnny-o3z)
+The legacy `pipeline.py` enforced INV-1 ("exactly one terminal per turn") with ONE
+session-scalar `_turn_terminal_emitted` bool — correct **only because**
+`_respond_to_transcript` is serialised (one turn in flight). Under `AgentSession`
+that breaks: our terminal-emitting code runs in TWO temporally disjoint places (the
+`on_user_turn_completed` gate, and — only on speak — the reply `SpeechHandle`'s
+done-callback fired LATER by the SDK), and **turns overlap** (turn N's reply
+done-callback races turn N+1's gate). So INV-1 must be **per-turn-id**, not
+per-session. Hard-won SDK facts (verified `livekit-agents==1.5.17`):
+- **The turn id is the user `ChatMessage.id`** (`item_<shortuuid>`,
+  `llm/chat_context.py`). It's the ONLY id available *at gate entry*
+  (`on_user_turn_completed(turn_ctx, new_message)`) AND preserved through
+  `_generate_reply(user_message=…)`. The reply's `SpeechHandle.id` is a SEPARATE
+  `speech_<shortuuid>` (per reply, not per turn) — use it only to *find* the reply.
+- **LiveKit emits NO Johnny terminal of its own.** `speech_created` /
+  `conversation_item_added` / `metrics_collected` (the session `EventTypes`) are
+  observability only — so "double-emission" is purely the risk that OUR two emitters
+  (gate + reply done-callback) both fire for one turn id; reconciliation is entirely
+  in our code.
+- **Several paths short-circuit BEFORE the gate** (`agent_activity.py`): `skip_reply`,
+  transcript shorter than `interruption.min_words`, `current_speech` not
+  interruptible, scheduling paused / new turns blocked, RealtimeModel server-side
+  turn detection, `llm is None`. The hook never runs → these are NOT turns we own
+  (the analogue of legacy `LISTEN_ONLY` / noise-gate paths that emit no terminal).
+The harness is `TurnLedger` in `johnny/agent/gate.py` (stdlib-only, same import-safety
+as the gate): `open(turn_id)` registers a turn at gate entry; `emit(turn_id, …)` is
+the session-wide first-wins chokepoint; `gate_tracker(turn_id)` returns a Johnny-9k2
+`TerminalTracker` whose emit routes into the ledger so `run_gate(...)` composes
+unchanged; `close()` sweeps any opened-but-unterminalized turn → fallback
+`no_reply(stage_error)` (zero-emission belt-and-suspenders; strict raises). **First-wins
+is an ATOMIC check-and-set**: claim `self._turns[turn_id]` BEFORE the first `await`
+(mirrors the legacy `_turn_terminal_emitted = True` before the bus await) so two
+*concurrent* emits for one turn id can never both publish (single-threaded loop, no
+interleave between get and set). The ledger records the FULL `no_reply` vocabulary
+(`TurnNoReplyReason` = full mirror of `events.NoReplyReason`; the gate's narrower
+`GateNoReplyReason` is the subset the harness itself produces) since the reply path
+adds `model_empty_output` and the caller's mode handlers add
+`rate_limited`/`tts_unavailable`/`suggest_only`/`approval_rejected`. The real
+`SessionTerminalEmitter` (`(turn_id, GateTerminal) → TurnTerminal`/EventBus) is
+injected by Johnny-d5z; the reply→turn binding (a `speech_created` listener +
+contextvar/FIFO correlation) is Johnny-xpa. Prove INV-1 with a seeded `random` fuzz
+(no hypothesis in the image) gathering reordered/duplicated/late/lost emits across
+overlapping turns and asserting one terminal per opened turn id.
+
 ---
 
 ## 2026-06-08 - Johnny-jue
@@ -937,5 +981,63 @@ a tested, drop-in harness for Johnny-xpa (this spike BLOCKS it).
   `voice_pipeline/__init__.py` (pulls all of `app.providers`) — so the gate
   mirrors the `TerminalState`/`NoReplyReason` literals locally and drift-guards
   them in tests instead of importing them, preserving import-safety.
+
+---
+
+## 2026-06-08 - Johnny-o3z
+
+[SPIKE] Phase 2: the INV-1 single terminal-outcome choke-point under LiveKit's
+turn lifecycle. Deliverable = a design doc + a tested drop-in prototype. Gates
+Johnny-d5z (event/observability parity) and Johnny-xpa (router gate).
+
+**Design.** The legacy `pipeline.py` enforced INV-1 with one session-scalar
+`_turn_terminal_emitted` bool — safe only because `_respond_to_transcript` is
+serialised. Under `AgentSession` our terminal emitters are temporally disjoint
+(gate hook + reply `SpeechHandle` done-callback) and turns overlap, so INV-1
+moves to a **per-turn-id ledger**. Verified the SDK turn lifecycle against
+`livekit-agents==1.5.17` (read from the `api` image): the turn id is the user
+`ChatMessage.id` (`item_<shortuuid>`, available at gate entry + preserved through
+`_generate_reply`); the SDK emits no Johnny terminal of its own; six paths
+short-circuit before the gate (not turns we own). Enumerated every turn-ending
+path → exactly-one-emit table; defined the `close()` sweep as the zero-emission
+fallback. Full write-up + GO decision in `.validation/Johnny-o3z/decision.md`.
+
+**Implemented**
+- `backend/johnny/agent/gate.py`: new `TurnLedger` (session-scoped INV-1
+  authority) + `SessionTerminalEmitter = Callable[[str, GateTerminal], …]` +
+  `TurnNoReplyReason` (full canonical `no_reply` mirror; `GateNoReplyReason`
+  stays the gate-only subset). `open`/`emit`/`gate_tracker`/`close` with an
+  **atomic claim-before-await** first-wins chokepoint. Widened
+  `TerminalTracker.turn_id` to `str | int` (LiveKit id is a str) and
+  `GateTerminal.no_reply_reason` / the two `emit` params to `TurnNoReplyReason`.
+  The existing `run_gate`/`run_router_call`/`TerminalTracker` logic is untouched.
+- `backend/tests/agent/test_turn_ledger.py` (NEW): 13 edge/compose tests + a
+  seeded `random` property/fuzz over 200 seeds (overlapping turns;
+  reordered/duplicated/late/lost emits gathered concurrently) asserting exactly
+  one terminal per opened turn id, zero double-, zero zero-emission, plus a
+  drift guard `TurnNoReplyReason == events.NoReplyReason`.
+- `backend/johnny/agent/__init__.py` + `gate.py` docstrings updated.
+
+**Validated** (`--no-dev` prod-image gate; `.validation/Johnny-o3z/results.md`)
+- ruff clean; mypy --strict clean (17 files); `pytest tests/agent` → **293
+  passed** (200 fuzz + 13 + 1 new; 79 prior, no regressions). Import-safety
+  probe: `import johnny.agent.gate` pulls neither livekit, sqlalchemy, torch,
+  nor app (stdlib-only preserved).
+- **Browser validation N/A**: backend-only module, no UI/HTTP surface,
+  unreachable until Johnny-xpa wires it into the hook + the agent worker
+  (Johnny-9eh) exists (CLAUDE.md backend-only exception; same posture as
+  Johnny-9k2 and the Phase-0/1 tasks).
+
+**Learnings / gotchas** (full list in the new Codebase Pattern above + decision.md)
+- The turn id is the user `ChatMessage.id`, NOT the reply `SpeechHandle.id` —
+  the latter is per-reply and unknown until after the hook returns.
+- First-wins MUST be an atomic check-and-set (claim the dict slot before any
+  `await`) or two concurrent same-turn emits both publish; a dedicated test with
+  a yielding emitter proves the placement.
+- `hypothesis` is NOT installed in the image — a seeded `random.Random` fuzz
+  over a range of seeds satisfies "property/fuzz" with no new dep.
+- Short-circuit-before-the-gate paths are deliberately NOT `open()`-ed, so the
+  sweep can't invent phantom terminals for SDK-internal non-turns (mirrors the
+  legacy `LISTEN_ONLY`/noise-gate "no terminal by design").
 
 ---
