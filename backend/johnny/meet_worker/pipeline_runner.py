@@ -466,8 +466,9 @@ async def _assemble_pipeline(
     # If TTS is missing but the mode would speak, degrade to suggest_only
     # so the router still records decisions and the UI surfaces them as
     # suggestions instead of silently failing mid-pipeline (Johnny-vgl —
-    # free_auto_speak was previously left out of this set, so a missing
-    # TTS produced a "decided to speak" audit row with no audible reply).
+    # a free-form speaking mode was previously left out of this set, so a
+    # missing TTS produced a "decided to speak" audit row with no audible
+    # reply).
     if tts is None and mode in SPEAKING_MODES:
         log_stage(
             STAGE_AUDIO_BRIDGE,

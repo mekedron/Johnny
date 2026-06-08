@@ -707,7 +707,7 @@ async def test_run_subscriber_does_not_emit_pending_for_non_approval_mode(
             session_id=bot_session.id, mode="suggest_only"
         ),
         _router_decision_payload(
-            session_id=bot_session.id, mode="free_auto_speak"
+            session_id=bot_session.id, mode="autonomous"
         ),
     ]
 

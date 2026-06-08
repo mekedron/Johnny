@@ -31,7 +31,6 @@
 		suggest_only: 'Propose replies in the UI. Operator decides whether to speak.',
 		approval_required: 'Propose a reply, then wait for operator approval before speaking.',
 		limited_auto_speak: 'Auto-speak — but only from a fixed allowlist below.',
-		free_auto_speak: 'Auto-speak any generated reply, no allowlist.',
 		autonomous: 'Free-form speech guided only by the instructions. No approval, no allowlist.'
 	};
 

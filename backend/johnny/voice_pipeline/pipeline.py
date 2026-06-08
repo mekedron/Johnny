@@ -263,18 +263,14 @@ APPROVAL_REQUIRED_MODE = "approval_required"
 LISTEN_ONLY_MODE = "listen_only"
 SUGGEST_ONLY_MODE = "suggest_only"
 LIMITED_AUTO_SPEAK_MODE = "limited_auto_speak"
-# Free-speech: chat without an allowed_replies allowlist and without
-# the approval round. The router still gates whether the bot speaks
-# (via confidence_threshold), so ambient chatter doesn't trigger
-# replies, but anything the model wants to say goes through.
-FREE_AUTO_SPEAK_MODE = "free_auto_speak"
-# Autonomous: like FREE_AUTO_SPEAK in pipeline behaviour (no allowlist,
-# no approval round, router gates via confidence_threshold), but the
-# rate limit is always enforced (regardless of ``allowed_replies``)
-# and templates / meeting configs are validated to require non-empty
-# instructions before they save. Instructions are the only governance
-# for what the bot says, so blank instructions in autonomous mode are
-# never a valid configuration.
+# Autonomous: free-form chat with no allowlist and no approval round —
+# the router gates whether the bot speaks (via confidence_threshold),
+# but anything the model wants to say goes through. The rate limit is
+# always enforced (regardless of ``allowed_replies``) and templates /
+# meeting configs are validated to require non-empty instructions
+# before they save. Instructions are the only governance for what the
+# bot says, so blank instructions in autonomous mode are never a valid
+# configuration.
 AUTONOMOUS_MODE = "autonomous"
 
 NON_SPEAKING_MODES: frozenset[str] = frozenset(
@@ -293,7 +289,6 @@ SPEAKING_MODES: frozenset[str] = frozenset(
     {
         APPROVAL_REQUIRED_MODE,
         LIMITED_AUTO_SPEAK_MODE,
-        FREE_AUTO_SPEAK_MODE,
         AUTONOMOUS_MODE,
     }
 )
@@ -304,12 +299,10 @@ decide whether a missing TTS provider must trigger the degradation to
 ``suggest_only``. Keeping this list in one place means a new speaking
 mode automatically picks up the degradation path instead of silently
 shipping a regression where the router approves a reply but TTS can't
-play it (the Johnny-vgl free_auto_speak symptom).
+play it (the Johnny-vgl free-form-speech symptom).
 """
 
-FREE_FORM_MODES: frozenset[str] = frozenset(
-    {FREE_AUTO_SPEAK_MODE, AUTONOMOUS_MODE}
-)
+FREE_FORM_MODES: frozenset[str] = frozenset({AUTONOMOUS_MODE})
 """Speaking modes that bypass the ``allowed_replies`` allowlist.
 
 Used by :meth:`VoicePipeline._answer_and_speak` to decide whether the
@@ -1828,11 +1821,10 @@ class VoicePipeline:
         prompt_text = _serialize_prompt(messages)
 
         collected: list[bytes]
-        # Free-form modes (free_auto_speak / autonomous) ignore
-        # allowed_replies — the bot is meant to chat naturally so we
-        # always stream the LLM's free-text response straight into TTS,
-        # regardless of any allowlist that might still be configured on
-        # the meeting.
+        # Free-form modes (autonomous) ignore allowed_replies — the bot
+        # is meant to chat naturally so we always stream the LLM's
+        # free-text response straight into TTS, regardless of any
+        # allowlist that might still be configured on the meeting.
         use_allowlist = (
             bool(self.config.allowed_replies)
             and self.config.mode not in FREE_FORM_MODES
@@ -2386,10 +2378,6 @@ class VoicePipeline:
           Limited auto-speak mode), OR
         * the mode is ``autonomous`` (free-form output with no
           allowlist — capped explicitly to limit cost + over-talking).
-
-        ``free_auto_speak`` is deliberately *not* rate-limited so
-        prototypes / dev sessions can iterate freely; AUTONOMOUS is the
-        production-ready free-form mode where the cap is required.
 
         Setting either ``rate_limit_max_utterances`` or
         ``rate_limit_window_ms`` to a non-positive value disables the
@@ -2967,7 +2955,6 @@ __all__ = [
     "AUTONOMOUS_MODE",
     "BARGE_IN_CATEGORIES",
     "BargeInDecision",
-    "FREE_AUTO_SPEAK_MODE",
     "FREE_FORM_MODES",
     "DEFAULT_APPROVAL_TIMEOUT_SECONDS",
     "DEFAULT_AUTONOMOUS_RATE_LIMIT_MAX_UTTERANCES",

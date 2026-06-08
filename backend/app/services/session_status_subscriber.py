@@ -201,7 +201,7 @@ def apply_router_decision_event(
 
     * approval_required + should_speak: ``pending`` — the human is
       expected to approve / reject.
-    * limited_auto_speak / free_auto_speak / autonomous + should_speak:
+    * limited_auto_speak / autonomous + should_speak:
       ``spoken`` — the answer + TTS stages run immediately, no human
       in the loop. (If TTS fails, the audit row is slightly optimistic;
       the missing ``agent_utterances`` row distinguishes a real failure.)
@@ -237,7 +237,7 @@ def apply_router_decision_event(
         outcome = DecisionOutcome.PENDING
     elif mode == "suggest_only":
         outcome = DecisionOutcome.SUGGESTED
-    elif mode in ("limited_auto_speak", "free_auto_speak", "autonomous"):
+    elif mode in ("limited_auto_speak", "autonomous"):
         outcome = DecisionOutcome.SPOKEN
     else:
         # Unknown / listen_only — leave as suppressed; the bot isn't

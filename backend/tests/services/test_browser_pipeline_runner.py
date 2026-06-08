@@ -143,10 +143,10 @@ def test_assemble_with_tts_keeps_speaking_mode() -> None:
             "llm": {"provider_name": "fake-llm", "credentials": {}, "options": {}},
             "tts": {"provider_name": "fake-tts", "credentials": {}, "options": {}},
         },
-        mode="free_auto_speak",
+        mode="autonomous",
     )
     pipeline = assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
-    assert pipeline.config.mode == "free_auto_speak"
+    assert pipeline.config.mode == "autonomous"
     assert pipeline.tts is not None
 
 
@@ -158,7 +158,7 @@ def test_speaking_mode_degrades_to_suggest_only_when_tts_missing() -> None:
             "stt": {"provider_name": "fake-stt", "credentials": {}, "options": {}},
             "llm": {"provider_name": "fake-llm", "credentials": {}, "options": {}},
         },
-        mode="free_auto_speak",
+        mode="autonomous",
     )
     pipeline = assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
     assert pipeline.config.mode == SUGGEST_ONLY_MODE

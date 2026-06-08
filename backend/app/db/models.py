@@ -48,11 +48,6 @@ class BotMode(enum.StrEnum):
     SUGGEST_ONLY = "suggest_only"
     APPROVAL_REQUIRED = "approval_required"
     LIMITED_AUTO_SPEAK = "limited_auto_speak"
-    # Free-speech: like LIMITED_AUTO_SPEAK but the bot answers freely
-    # (no ``allowed_replies`` allowlist, no approval round). The
-    # router's confidence_threshold still gates whether the bot speaks
-    # at all, so noise + ambient chatter still get filtered.
-    FREE_AUTO_SPEAK = "free_auto_speak"
     # Autonomous: free-form generation governed solely by the profile
     # template's instructions and context. No allowed_replies allowlist,
     # no approval round; the router's confidence_threshold and a

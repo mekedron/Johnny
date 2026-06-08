@@ -105,6 +105,116 @@ after each iteration and it's included in prompts for context.
   with it. For a frontend-only change you can sidestep a broken backend with
   `docker compose up -d --no-deps frontend`, but a healthy api makes validation
   faithful.
+- **`BotMode` (and the other enums) is VARCHAR + CHECK, NOT a native PG enum**
+  (`native_enum=False` in `app/db/models.py`), so adding/removing a mode value is
+  a plain `UPDATE` + a redefinition of the CHECK constraints — no `ALTER TYPE …
+  RENAME VALUE`/enum-swap dance. The mode is constrained in FOUR places:
+  `ck_{profile_templates,meeting_configs,agent_utterances}_mode` (column `mode`)
+  AND `ck_personalities_default_mode` (column `default_mode`, nullable). Miss the
+  personalities one and a `default_mode` row can hold a value the others reject.
+  Precedent migrations: `0004`/`0006` (add a value), `0017` (drop a value). On a
+  value-drop, the data `UPDATE` must run BEFORE the constraint is tightened, else
+  the still-present old-value rows violate the new constraint. SQLite can't `ALTER
+  TABLE DROP CONSTRAINT`, so guard the constraint swap with
+  `op.get_bind().dialect.name == "sqlite": return` — production is Postgres-only
+  and the app test harness builds schema from the models (which already carry the
+  current CHECK via SAEnum), so the portable data `UPDATE` is the part a migration
+  test exercises. Merging two values is one-way: `downgrade` re-widens the CHECK
+  (restores the schema capability) but can't disambiguate the merged rows back.
+- **The api/worker image is built `--no-dev` and does NOT `COPY tests/`** (Dockerfile
+  copies only `alembic app johnny`), so `docker compose exec api pytest` from
+  CLAUDE.md only works in the `./run-dev.sh` (bind-mounted `./backend`) stack. On a
+  production-shape stack (`./run.sh` / `docker compose up`), pytest isn't even
+  installed. To run the suite there without switching stacks: `docker compose exec
+  api uv sync --frozen --extra local-stt --extra local-tts` (adds the `dev` group —
+  pytest/ruff/mypy — into `/opt/venv`; uv.lock unchanged so it's fast), then
+  `docker compose cp tests api:/workspace/tests`, then `docker compose exec api
+  python -m pytest …` (pytest/ruff/mypy live at `/opt/venv/bin/`, not on the bare
+  `sh -lc` PATH — invoke `python -m pytest` or the absolute `/opt/venv/bin/ruff`).
+- **`./run.sh` / `./run-dev.sh` / `./stop.sh` sweep port 5173 with `lsof … -t
+  -iTCP:5173 -sTCP:LISTEN | xargs kill` — and on macOS Docker Desktop the listener
+  on a *published* container port is `com.docker.backend` itself.** So running the
+  helper while the dockerized frontend's 5173 is published kills Docker Desktop's
+  backend (the API socket at `~/.docker/run/docker.sock` vanishes; every `docker`
+  command then fails with "no such file or directory"). Recover with `open -a
+  Docker` and poll `until docker system info; do sleep 3; done`; containers/volumes
+  survive (they were only disconnected). To re-launch the stack afterward WITHOUT
+  re-triggering the sweep, use `docker compose build … && docker compose up -d`
+  directly (the sweep lives only in the `*.sh` wrappers, not in compose).
+
+---
+
+## 2026-06-08 - Johnny-ckz.25
+
+Consolidated the `free_auto_speak` BotMode into `autonomous` and removed it
+everywhere. The two were operationally equivalent in the speak-or-not decision;
+`autonomous` keeps the two guard rails (non-empty-instructions validation, lower
+rate-limit cap) and is now the single "answers freely" mode.
+
+- **What:** dropped `FREE_AUTO_SPEAK` from the `BotMode` enum; folded its pipeline
+  membership into `AUTONOMOUS`; switched the two hardcoded mode fallbacks
+  (calendar + playground) to autonomous; added a data+schema migration; ported all
+  tests; removed the UI option from every mode dropdown.
+- **Backend files:** `app/db/models.py` (enum member removed),
+  `johnny/voice_pipeline/pipeline.py` (removed `FREE_AUTO_SPEAK_MODE`,
+  `SPEAKING_MODES`/`FREE_FORM_MODES` now `{… AUTONOMOUS}`, `__all__`),
+  `johnny/voice_pipeline/__init__.py` (re-export), `johnny/meet_worker/
+  pipeline_runner.py` (comment), `app/services/session_status_subscriber.py`
+  (mode tuple + docstring), `app/api/browser_sessions.py` (calendar default
+  `or "autonomous"`, playground `BotMode.AUTONOMOUS.value`). The autonomous
+  instructions validation in `templates.py`/`meeting_configs.py` was already
+  AUTONOMOUS-only (no `free_auto_speak` branch) — left intact.
+- **Migration:** `alembic/versions/0017_drop_free_auto_speak_mode.py` —
+  (1a) backfill empty `base_instructions` on free templates with a default string;
+  (1b) backfill `meeting_configs` whose *effective* instructions (own override OR
+  template base) would still be empty — runs after 1a so a config inheriting a
+  now-backfilled template is left inheriting (`instructions` stays NULL) instead of
+  pinned to the generic default; (2) swap the value across all 4 tables; (3) tighten
+  the 4 CHECK constraints (Postgres only). `downgrade` re-widens the constraints
+  (data merge is one-way).
+- **Frontend files:** `lib/templates.ts` (union + `BOT_MODES` + `BOT_MODE_LABEL`),
+  `lib/sessionDetail.ts` (union), `lib/playground/playgroundSession.svelte.ts`
+  (default `$state` → `'autonomous'`), and the three `MODE_DESCRIPTION` maps
+  (`SetupForm.svelte`, `templates/+page.svelte`, `calendar/+page.svelte`). The mode
+  `<select>`s iterate `BOT_MODES`, so removing the array entry drops the option; the
+  `Record<BotMode,…>` maps force every consumer to drop the key (typecheck-enforced).
+- **Tests:** deleted the two redundant `test_free_auto_speak_*` pipeline behaviour
+  tests (the `test_autonomous_*` equivalents already exist) and the
+  rate-limit-not-applied test (pinned the removed behaviour); updated
+  `test_mode_constants_match_db_string_values`; ported `mode="free_auto_speak"` →
+  `"autonomous"` in browser-pipeline-runner / session-status-subscriber /
+  meet-worker-runner tests; updated `test_db_models` enum set; added
+  `test_start_playground_defaults_to_autonomous`; new `test_migration_0017.py`
+  (SQLite harness — seeds mixed free rows across 4 tables, asserts conversion +
+  inherit-vs-backfill + effective-instructions validity).
+- **Validation:**
+  - backend: full suite 2869 passed (8 pre-existing unrelated failures: live
+    OpenAI/ElevenLabs network + e2e provider-UI + wizard docker-CLI-in-container).
+    New migration test green. ruff clean; mypy clean on changed source (the 2
+    `pipeline_runner.py` errors at :224/:702 are pre-existing — my diff there is a
+    comment-only reword).
+  - frontend: `pnpm check` 0 errors / 0 warnings; `pnpm lint` clean.
+  - migration on live Postgres: alembic at `0017 (head)`; all 4 CHECK constraints
+    now list exactly the 5 surviving modes; 0 `free_auto_speak` rows remain;
+    a `free_auto_speak` INSERT is rejected by `ck_profile_templates_mode`.
+  - **browser (chrome-devtools MCP)** — `.validation/Johnny-ckz.25/0{1..4}-*.png`:
+    /templates New-template Mode dropdown = 5 options, no "Free auto-speak";
+    /playground Decision-mode defaults to **Autonomous**, option absent, and
+    `POST /sessions/browser/start` body `{"mode":"autonomous",…}` → **201** joined
+    (passed validation; it then `failed` only on "no active STT provider" — an env
+    config gap, not the mode); /calendar meeting-config Mode dropdown = 5 options,
+    Autonomous present, no "Free auto-speak".
+- **Learnings:**
+  - The four-place CHECK constraint set (incl. `personalities.default_mode`), the
+    Postgres-only constraint swap, the `--no-dev`/no-`tests` prod image, and the
+    `run.sh` 5173-sweep-kills-Docker hazard are all promoted to Codebase Patterns.
+  - `evaluate_script` (CDP `Runtime.evaluate`) errored "No page found" all session
+    against Chrome 148 while `take_snapshot`/`click`/`navigate` worked — the a11y
+    snapshot (read off the live DOM) is the reliable way to assert `<option>` sets;
+    `select_page` is 1-indexed here even though `evaluate` still failed after it.
+  - This dev stack has no active STT/LLM/TTS providers, so a real session can't be
+    driven to "speak"; the autonomous speak path is covered by the surviving
+    `test_autonomous_speaks_without_approval_or_allowlist` unit test instead.
 
 ---
 

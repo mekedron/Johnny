@@ -11,7 +11,6 @@ export type BotMode =
 	| 'suggest_only'
 	| 'approval_required'
 	| 'limited_auto_speak'
-	| 'free_auto_speak'
 	| 'autonomous';
 
 export const BOT_MODES: readonly BotMode[] = [
@@ -19,7 +18,6 @@ export const BOT_MODES: readonly BotMode[] = [
 	'suggest_only',
 	'approval_required',
 	'limited_auto_speak',
-	'free_auto_speak',
 	'autonomous'
 ];
 
@@ -28,7 +26,6 @@ export const BOT_MODE_LABEL: Record<BotMode, string> = {
 	suggest_only: 'Suggest only',
 	approval_required: 'Approval required',
 	limited_auto_speak: 'Limited auto-speak',
-	free_auto_speak: 'Free auto-speak',
 	autonomous: 'Autonomous'
 };
 

@@ -138,7 +138,7 @@ class StartBrowserSessionPayload(BaseModel):
 
     mode: str | None = None
     """Override the bot mode for this session. Defaults to the meeting
-    config's mode when ``event_id`` is set, otherwise ``free_auto_speak``
+    config's mode when ``event_id`` is set, otherwise ``autonomous``
     so the playground can have a casual chat without an allowlist."""
 
     persona: str | None = None
@@ -605,7 +605,7 @@ def _build_spec_from_event(
     mode = (
         payload.mode
         or (meeting.mode.value if hasattr(meeting.mode, "value") else meeting.mode)
-        or "free_auto_speak"
+        or "autonomous"
     )
 
     pipeline_mode = resolve_pipeline_mode(session)
@@ -685,7 +685,7 @@ def _build_spec_playground(
         base_payload = {}
     # Playground has no per-meeting mode, so the personality's ``default_mode``
     # seeds it here (PRD §4c priority 3): explicit request mode > personality
-    # default > hardcoded free_auto_speak.
+    # default > hardcoded autonomous.
     resolution = _resolve_personality(
         session,
         bot_session_id=bot_session_id,
@@ -693,7 +693,7 @@ def _build_spec_playground(
         meeting=None,
         base_payload=base_payload,
     )
-    mode = payload.mode or resolution.default_mode or BotMode.FREE_AUTO_SPEAK.value
+    mode = payload.mode or resolution.default_mode or BotMode.AUTONOMOUS.value
     effective_providers = _resolve_provider_overrides(
         session, payload.provider_overrides, resolution.payload
     )

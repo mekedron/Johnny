@@ -130,7 +130,7 @@ export class PlaygroundController {
 	systemPrompt = $state(
 		'Respond directly without any speaker label, bot name, role prefix, or text before the actual message.'
 	);
-	mode = $state<BotMode>('free_auto_speak');
+	mode = $state<BotMode>('autonomous');
 	selectedTemplateId = $state<number | null>(null);
 	// Johnny-oly.6: selected personality (null = blank/no override). Sticky in
 	// localStorage so the last pick survives a reload (seeded in loadMetadata).

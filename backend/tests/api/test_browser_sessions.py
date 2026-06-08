@@ -6,7 +6,7 @@ Smoke-level coverage that:
   ``source='browser'``, persists the playground overrides snapshot,
   and returns the audio WebSocket path.
 * Rehearsal path picks up the meeting's mode and context.
-* Playground path defaults to free_auto_speak when no event is given.
+* Playground path defaults to autonomous when no event is given.
 * ``POST /sessions/browser/{id}/stop`` is idempotent and rejects
   meet-source sessions.
 * ``GET /sessions/browser/active`` only returns browser-source rows.
@@ -1006,6 +1006,22 @@ def test_start_playground_personality_seeds_mode(
     assert res.status_code == 201, res.text
     spec = spawn.call_args.kwargs["spec"]
     assert spec.mode == "listen_only"  # personality.default_mode seeded it
+
+
+def test_start_playground_defaults_to_autonomous(
+    client: TestClient, db_session: Session, _patch_crypto: None
+) -> None:
+    """No mode and no personality default_mode → the playground falls back to
+    autonomous (Johnny-ckz.25). The playground always supplies a non-empty
+    system prompt, so the autonomous session has governing instructions."""
+    _seed_provider(db_session, kind=ProviderKind.LLM, name="anthropic", display="Claude")
+    _seed_personality(db_session, name="Johnny", is_default=True, mode=None)
+    with mock.patch.object(browser_sessions_module, "_spawn_runner") as spawn:
+        res = client.post("/sessions/browser/start", json={})
+    assert res.status_code == 201, res.text
+    spec = spawn.call_args.kwargs["spec"]
+    assert spec.mode == "autonomous"
+    assert spec.instructions.strip() != ""
 
 
 def test_start_playground_explicit_mode_beats_personality(
