@@ -22,6 +22,14 @@ replacing the hand-rolled ``johnny/voice_pipeline/pipeline.py`` engine:
   prompt, calls Johnny's router ``LLMProvider`` through the gate harness, and
   raises ``StopResponse`` on no-speak / low-confidence / rate-limited. Requires
   the ``agent`` extra; imported only by :mod:`johnny.agent.session`.
+* :mod:`johnny.agent.barge_in` — the slow out-of-band barge-in intent
+  classifier (Johnny-k8t): asks Johnny's router ``LLMProvider`` whether the
+  latest speech is an actionable interruption and calls LiveKit's interrupt API
+  for ``stop`` / ``correct`` / ``new_question`` only, guarded against stale
+  verdicts by the live reply ``SpeechHandle`` (the LiveKit-turn-keyed analogue
+  of the legacy generation counter). The fast VAD-onset interrupt itself is
+  LiveKit-native (configured in :func:`~johnny.agent.session.build_agent_session`).
+  ``livekit``-free; imported only by :mod:`johnny.agent.session`.
 
 Importing this top-level package is intentionally side-effect free and
 does **not** import ``livekit`` — only the submodules that subclass the

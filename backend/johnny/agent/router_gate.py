@@ -147,6 +147,12 @@ class RouterGate:
         # Strong refs to in-flight reply-done emit tasks so they aren't GC'd
         # mid-flight (and to avoid "task exception never retrieved" warnings).
         self._reply_tasks: set[asyncio.Task[None]] = set()
+        # The reply currently being spoken: ``(turn_id, SpeechHandle)``, set when
+        # a reply binds and cleared when it completes. The barge-in classifier
+        # (Johnny-k8t) reads this to capture the turn id of the reply it might
+        # interrupt — the LiveKit-turn-keyed analogue of the legacy
+        # ``_response_generation`` counter.
+        self._active_reply: tuple[str, SpeechHandle] | None = None
 
     # ------------------------------------------------------------------ #
     # The blocking gate                                                  #
@@ -265,6 +271,10 @@ class RouterGate:
         if not self._pending_speak_turns:
             return
         turn_id = self._pending_speak_turns.popleft()
+        # Record the reply now playing so the barge-in classifier (Johnny-k8t)
+        # can capture (turn_id, handle) as the interrupt target + generation
+        # guard key. Cleared when the reply completes (_on_reply_done).
+        self._active_reply = (turn_id, speech_handle)
 
         def _on_done(handle: SpeechHandle) -> None:
             task = asyncio.ensure_future(self._on_reply_done(turn_id, handle))
@@ -272,6 +282,16 @@ class RouterGate:
             task.add_done_callback(self._reply_tasks.discard)
 
         speech_handle.add_done_callback(_on_done)
+
+    @property
+    def active_reply(self) -> tuple[str, SpeechHandle] | None:
+        """The reply currently being spoken as ``(turn_id, SpeechHandle)``.
+
+        ``None`` when the bot is idle. The barge-in path (Johnny-k8t) reads this
+        to label the interrupt target with its LiveKit turn id; the authoritative
+        "is it still playing" check is the session's ``current_speech``.
+        """
+        return self._active_reply
 
     async def _on_reply_done(self, turn_id: str, handle: SpeechHandle) -> None:
         """Emit the speak path's single terminal once the reply is done.
@@ -281,6 +301,10 @@ class RouterGate:
         (and the utterance counts toward the over-talk cap). First-wins via the
         ledger, so a duplicate done-callback can never double-emit.
         """
+        # The reply is finished — clear it so a barge-in classifier started for a
+        # later turn doesn't capture a dead handle as its interrupt target.
+        if self._active_reply is not None and self._active_reply[0] == turn_id:
+            self._active_reply = None
         if handle.interrupted:
             await self._ledger.emit(
                 turn_id,

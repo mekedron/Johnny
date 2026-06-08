@@ -375,6 +375,32 @@ async def test_bind_reply_without_pending_turn_is_noop() -> None:
     assert handle._cbs == []  # no done-callback registered
 
 
+async def test_active_reply_tracks_bind_and_clears_on_done() -> None:
+    """``active_reply`` exposes the playing reply (turn id + handle) for barge-in.
+
+    The barge-in classifier (Johnny-k8t) reads this to label its interrupt
+    target with the LiveKit turn id. It is set when the reply binds and cleared
+    when the reply completes so a later turn can't capture a dead handle.
+    """
+    gate, _, _ = _make_gate(
+        [{"should_speak": True, "confidence": 0.9, "reason": "ok"}]
+    )
+    msg = _user_msg("Johnny?")
+    await gate.run_turn(ChatContext.empty(), msg)
+    assert gate.active_reply is None  # decided SPEAK, but no reply bound yet
+
+    handle = _handle(chat_items=["reply"])
+    gate.bind_reply(handle)
+    active = gate.active_reply
+    assert active is not None
+    assert active[0] == msg.id  # the LiveKit turn id
+    assert active[1] is handle
+
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+    assert gate.active_reply is None  # cleared on completion
+
+
 # --------------------------------------------------------------------------- #
 # Gate harness integration — router error → stage_error                       #
 # --------------------------------------------------------------------------- #

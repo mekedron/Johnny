@@ -3,10 +3,10 @@
   "sessionId": "17b1f649-1d33-441a-bfd0-469c8d89870f",
   "status": "running",
   "startedAt": "2026-06-08T17:25:57.487Z",
-  "updatedAt": "2026-06-08T21:33:44.578Z",
-  "currentIteration": 13,
+  "updatedAt": "2026-06-08T22:05:06.385Z",
+  "currentIteration": 14,
   "maxIterations": 0,
-  "tasksCompleted": 12,
+  "tasksCompleted": 13,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -141,8 +141,8 @@
       {
         "id": "Johnny-xpa",
         "title": "[BUILD] Phase 2: Router should-speak gate in on_user_turn_completed + StopResponse",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-y4j",
@@ -342,6 +342,16 @@
       "durationMs": 1088487,
       "startedAt": "2026-06-08T20:48:51.272Z",
       "endedAt": "2026-06-08T21:06:59.759Z"
+    },
+    {
+      "iteration": 14,
+      "status": "completed",
+      "taskId": "Johnny-xpa",
+      "taskTitle": "[BUILD] Phase 2: Router should-speak gate in on_user_turn_completed + StopResponse",
+      "taskCompleted": true,
+      "durationMs": 1577799,
+      "startedAt": "2026-06-08T21:07:25.790Z",
+      "endedAt": "2026-06-08T21:33:43.589Z"
     }
   ],
   "skippedTaskIds": [],

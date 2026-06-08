@@ -532,6 +532,53 @@ Hard-won specifics:
   Johnny-d5z. `RouterGate` keeps `session.py` importing it ONLY under
   `TYPE_CHECKING` so bare `import johnny.agent` stays livekit-free (re-verified).
 
+### Barge-in: native fast interrupt + out-of-band LLM classifier (Johnny-k8t)
+Barge-in splits cleanly under `AgentSession`; the legacy two-path design
+(Johnny-di9 slow classifier + Johnny-ze3 fast VAD) maps onto LiveKit as:
+- **Fast VAD-onset interrupt → 100% LiveKit-native.** Configured via
+  `AgentSession(turn_handling=TurnHandlingOptions(...))`. `interruption.enabled`
+  is the on/off (legacy `enable_barge_in`); `interruption.min_duration` is the
+  speech-length threshold (legacy `barge_in_min_speech_ms`, exported as
+  `barge_in.DEFAULT_NATIVE_INTERRUPTION_MIN_DURATION_S` = 0.16 s; `None` keeps
+  LiveKit's 0.5 s default). **Gotcha:** when `turn_handling` is GIVEN, the
+  deprecated top-level kwargs (`turn_detection`, `preemptive_generation`,
+  `min_interruption_duration`, …) are IGNORED — fold ALL of them into the
+  `turn_handling` dict (they live under `turn_detection` / `preemptive_generation`
+  / `interruption` keys). `TurnHandlingOptions`/`InterruptionOptions` import from
+  `livekit.agents` (top-level) — NOT from `livekit.agents.voice`.
+- **Slow LLM classifier → out-of-band fire-and-forget task** in
+  `johnny/agent/barge_in.py` (`BargeInClassifier`). Spawned from
+  `JohnnyAgent.on_user_turn_completed` (non-blocking — runs alongside the gate)
+  whenever `session.current_speech` is playing. Calls
+  `SpeechHandle.interrupt()` ONLY for `stop`/`correct`/`new_question`. Reuses the
+  legacy schema/parser/prompt module-qualified (`_legacy._BARGE_IN_SCHEMA`,
+  `_legacy._parse_barge_in_response`, and the NEW module-level
+  `_legacy.build_barge_in_messages` extracted from `VoicePipeline._barge_in_messages`)
+  for verdict parity. **Stays livekit-free** (interacts with the reply via a
+  duck-typed `InterruptibleSpeech` Protocol: `id`/`interrupted`/`done()`/`interrupt()`),
+  so `import johnny.agent.barge_in` pulls neither livekit nor sqlalchemy/torch —
+  unit-testable with a fake handle, no `importorskip`.
+- **Generation guard re-expressed against the live SpeechHandle (= the LiveKit
+  turn), not Johnny's int counter.** The classifier captures the bot's current
+  reply handle at spawn and interrupts it ONLY IF `current_speech() is target and
+  not target.interrupted and not target.done()` (re-evaluated at *verdict* time).
+  Because it targets the *specific* captured handle, a slow verdict structurally
+  cannot abort a *newer* reply (legacy `_response_generation` guard) AND cannot
+  double-interrupt one the native VAD already stopped (`interrupted` is set).
+- **Turn-id labelling:** `RouterGate` now tracks `active_reply = (turn_id,
+  handle)` (set in `bind_reply`, cleared in `_on_reply_done`); `JohnnyAgent`
+  reads it to label the interrupt target with its real LiveKit turn id, falling
+  back to `SpeechHandle.id` when the gate's handle doesn't match `current_speech`.
+- **Test split:** classifier/guard/timeout/spawn tests are livekit-free; the
+  `build_interruption_options` + `_maybe_spawn_barge_in` wiring tests guard with
+  `pytest.mark.skipif(find_spec("livekit.agents") is None)` so the file still
+  collects + runs the pure tests without the agent extra.
+- **`build_agent_session` can't be unit-constructed** — it builds
+  `MultilingualModel()`, which raises `RuntimeError: no job context found`
+  outside a job entrypoint. So the native-interrupt mapping is factored into the
+  pure `build_interruption_options(...)` helper and tested there; the full
+  AgentSession wiring is integration-only (deferred to the Johnny-9eh worker).
+
 ---
 
 ## 2026-06-08 - Johnny-jue
@@ -1261,5 +1308,75 @@ are downstream beads).
   `ensure_future` + keep a strong task ref.
 - Reuse the legacy schema/parser module-qualified for byte-identical verdicts
   (replay-harness parity) instead of reimplementing.
+
+---
+
+## 2026-06-09 - Johnny-k8t
+
+Phase 2: barge-in for the LiveKit-Agents session. Split the legacy two-path
+design into (1) the **fast VAD-onset interrupt made LiveKit-native** via
+`TurnHandlingOptions` and (2) the **slow LLM intent classifier re-homed as an
+out-of-band task** that calls LiveKit's interrupt API only for actionable
+categories, with the stale-verdict generation guard re-expressed against the
+live reply `SpeechHandle` (= the LiveKit turn) instead of Johnny's int counter.
+
+**Implemented**
+- `backend/johnny/agent/barge_in.py` (NEW, livekit-free): `BargeInClassifier`
+  (+ `BargeInClassifierConfig`, `InterruptibleSpeech` Protocol). `spawn(...)`
+  fires a fire-and-forget classify task; `classify_and_maybe_interrupt(...)`
+  runs the bounded classifier LLM (reusing `_legacy` schema/parser/prompt for
+  verdict parity), and on an actionable verdict interrupts the captured reply
+  **iff** it's still `current_speech()`, not interrupted, not done — the
+  generation guard + no-double-interrupt-with-native-VAD in one check. Timeout /
+  error degrade to a safe no-interrupt decision.
+- `backend/johnny/voice_pipeline/pipeline.py`: extracted the classifier prompt
+  into a module-level `build_barge_in_messages(...)` (the instance method now
+  delegates) so the agent path reuses the EXACT legacy prompt. Behaviour-
+  preserving (38 legacy barge-in parity tests pass).
+- `backend/johnny/agent/session.py`: `build_agent_session` gains
+  `enable_barge_in` + `min_interruption_duration_s`, now built via
+  `turn_handling=TurnHandlingOptions(...)` (folding in turn_detector +
+  preemptive_generation + the new `build_interruption_options(...)` helper).
+  `JohnnyAgent` gains a `barge_in` param + `_maybe_spawn_barge_in(new_message)`
+  called from `on_user_turn_completed` (spawns the classifier against
+  `session.current_speech`). `build_johnny_agent` threads `barge_in` through.
+- `backend/johnny/agent/router_gate.py`: `RouterGate` tracks
+  `active_reply = (turn_id, SpeechHandle)` (set in `bind_reply`, cleared in
+  `_on_reply_done`) + exposes the `active_reply` property so the barge-in path
+  can label its target with the LiveKit turn id.
+- Docstrings: `johnny/agent/__init__.py`, `session.py` module docstring.
+- Tests: `backend/tests/agent/test_barge_in.py` (NEW, 30 tests — category
+  gating, stale-verdict guard, no-double-interrupt, timeout/error, spawn
+  gating, prompt/schema/constant parity, `build_interruption_options`,
+  `_maybe_spawn_barge_in` wiring) + 1 new `active_reply` test in
+  `test_router_gate_decision.py`.
+
+**Files changed**: `johnny/agent/barge_in.py` (new),
+`johnny/agent/session.py`, `johnny/agent/router_gate.py`,
+`johnny/agent/__init__.py`, `johnny/voice_pipeline/pipeline.py`,
+`tests/agent/test_barge_in.py` (new), `tests/agent/test_router_gate_decision.py`.
+
+**Validated** (`--no-dev` prod-image gate; `.validation/Johnny-k8t/results.md`)
+- ruff clean (`johnny/agent tests/agent`); mypy --strict clean (22 files);
+  `pytest tests/agent` → 361 passed (31 new + 330 prior, no regressions);
+  legacy `-k barge_in` → 38 passed (extract parity).
+- Import-safety re-proven: bare `import johnny.agent` / `.adapters` / `.barge_in`
+  pull no livekit/sqlalchemy/torch; `.session` does pull livekit (by design).
+- E2E component probe through the real classifier: actionable "stop" interrupts;
+  "side_chat" aside keeps talking; stale verdict interrupts neither old nor new
+  reply (guard held).
+- **Browser validation N/A**: the agent path has no live caller — no LiveKit
+  worker entrypoint (`WorkerOptions`/`cli.run_app`) exists yet (Johnny-9eh). The
+  live meet-worker barge-in is behaviourally unchanged (extract-only edit). Same
+  posture as Johnny-9k2/o3z/re2/xpa. Source-only change, no new runtime deps →
+  clean-install safe (`COPY` on next `./run.sh`).
+
+**Learnings / gotchas** (full list in the new Codebase Pattern at top)
+- `turn_handling` GIVEN ⇒ deprecated AgentSession kwargs ignored — fold
+  turn_detector/preemptive/interruption all into the dict.
+- `MultilingualModel()` needs a job context, so `build_agent_session` is
+  integration-only; the native-interrupt mapping lives in a pure helper.
+- The captured-SpeechHandle guard makes "don't interrupt a newer reply" and
+  "don't double-interrupt the native VAD" the same check — no int counter.
 
 ---

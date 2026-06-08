@@ -15,7 +15,12 @@ This module wires Johnny's voice orchestration onto LiveKit Agents'
   decision via :class:`~johnny.agent.router_gate.RouterGate` (Johnny-xpa,
   Phase 2) on top of the gate harness (:mod:`johnny.agent.gate`), raising
   ``StopResponse`` to keep Johnny silent and routing every turn's terminal
-  through the session :class:`~johnny.agent.gate.TurnLedger`.
+  through the session :class:`~johnny.agent.gate.TurnLedger`;
+* barge-in (Johnny-k8t, Phase 2) splits into the LiveKit-native fast VAD-onset
+  interrupt (configured on the session via ``TurnHandlingOptions`` in
+  :func:`build_agent_session`) and the slow out-of-band intent classifier
+  (:class:`~johnny.agent.barge_in.BargeInClassifier`), which
+  :meth:`JohnnyAgent.on_user_turn_completed` fires while the bot is mid-reply.
 
 End-of-utterance detection follows the operator's locked decision: LiveKit's
 :class:`~livekit.plugins.turn_detector.multilingual.MultilingualModel` plus
@@ -38,7 +43,12 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from livekit.agents import Agent, AgentSession
+from livekit.agents import (
+    Agent,
+    AgentSession,
+    InterruptionOptions,
+    TurnHandlingOptions,
+)
 from livekit.agents.llm.chat_context import ChatContext
 from livekit.agents.llm.chat_context import ChatMessage as LKChatMessage
 from livekit.plugins import silero
@@ -64,6 +74,7 @@ if TYPE_CHECKING:
     from livekit.agents.vad import VAD
     from livekit.agents.voice import SpeechCreatedEvent
 
+    from johnny.agent.barge_in import BargeInClassifier
     from johnny.agent.router_gate import RouterGate
 
 logger = logging.getLogger(__name__)
@@ -205,6 +216,8 @@ def build_agent_session(
     tts: TTS[Any],
     vad: VAD | None = None,
     preemptive_generation: bool = False,
+    enable_barge_in: bool = True,
+    min_interruption_duration_s: float | None = None,
 ) -> AgentSession[Any]:
     """Construct Johnny's ``AgentSession`` from provider adapter instances.
 
@@ -223,15 +236,56 @@ def build_agent_session(
     (:meth:`RouterGate.bind_reply` relies on the reply being created *after* the
     gate records the turn). Leave it ``False`` whenever a :class:`RouterGate`
     is attached.
+
+    ``enable_barge_in`` (default ``True``) configures the **fast VAD-onset
+    interrupt as LiveKit-native** (Johnny-k8t): it toggles
+    ``TurnHandlingOptions``' ``interruption.enabled``, so confirmed user speech
+    stops the bot's TTS the moment it crosses ``min_duration`` — no Johnny code
+    on the hot path. Setting it ``False`` disables interruption entirely (the
+    operator should also disable the out-of-band classifier,
+    :class:`~johnny.agent.barge_in.BargeInClassifier`, to mirror the legacy
+    ``enable_barge_in`` flag that gated both paths). ``min_interruption_duration_s``
+    overrides the native interrupt threshold; ``None`` leaves LiveKit's own
+    default (0.5 s) in place (see
+    :data:`~johnny.agent.barge_in.DEFAULT_NATIVE_INTERRUPTION_MIN_DURATION_S` for
+    the legacy fast-trigger value).
     """
+    turn_handling: TurnHandlingOptions = {
+        "turn_detection": MultilingualModel(),
+        "preemptive_generation": {"enabled": preemptive_generation},
+        "interruption": build_interruption_options(
+            enable_barge_in=enable_barge_in,
+            min_interruption_duration_s=min_interruption_duration_s,
+        ),
+    }
     return AgentSession(
         stt=stt,
         llm=llm,
         tts=tts,
         vad=vad if vad is not None else load_vad(),
-        turn_detection=MultilingualModel(),
-        preemptive_generation=preemptive_generation,
+        turn_handling=turn_handling,
     )
+
+
+def build_interruption_options(
+    *,
+    enable_barge_in: bool = True,
+    min_interruption_duration_s: float | None = None,
+) -> InterruptionOptions:
+    """Build the native interruption (fast VAD-onset barge-in) config (Johnny-k8t).
+
+    ``enable_barge_in`` maps to ``interruption.enabled`` — the LiveKit-native
+    fast path that stops the bot's TTS the instant confirmed speech crosses the
+    duration threshold. ``min_interruption_duration_s`` overrides that threshold
+    (``interruption.min_duration``); ``None`` leaves the key unset so LiveKit
+    applies its own default (0.5 s). Factored out of :func:`build_agent_session`
+    so the mapping is unit-testable without a job context (constructing the
+    turn detector requires one).
+    """
+    options: InterruptionOptions = {"enabled": enable_barge_in}
+    if min_interruption_duration_s is not None:
+        options["min_duration"] = min_interruption_duration_s
+    return options
 
 
 class JohnnyAgent(Agent):
@@ -249,6 +303,13 @@ class JohnnyAgent(Agent):
     completion emits the speak path's terminal. With no gate the agent replies
     to every turn (the bare-construction / smoke-test behaviour).
 
+    When a :class:`~johnny.agent.barge_in.BargeInClassifier` is attached,
+    :meth:`on_user_turn_completed` *also* spawns the out-of-band barge-in
+    classifier (Johnny-k8t) whenever the bot is mid-reply, so an actionable
+    interruption below the native VAD threshold still yields the floor. The fast
+    VAD-onset interrupt itself is LiveKit-native (configured on the session, see
+    :func:`build_agent_session`), so nothing happens here for it.
+
     Construction is synchronous and takes a *pre-loaded* ``chat_history`` list;
     the async loader-driven path (parity with the legacy pipeline's injected
     :class:`TranscriptHistoryLoader`) is :func:`build_johnny_agent`.
@@ -261,6 +322,7 @@ class JohnnyAgent(Agent):
         prompt_config: AgentInstructionsConfig | None = None,
         chat_history: Sequence[TranscriptFinalized] | None = None,
         router_gate: RouterGate | None = None,
+        barge_in: BargeInClassifier | None = None,
     ) -> None:
         if instructions is None:
             instructions = (
@@ -273,6 +335,7 @@ class JohnnyAgent(Agent):
         chat_ctx = transcripts_to_chat_ctx(chat_history) if chat_history else None
         super().__init__(instructions=instructions, chat_ctx=chat_ctx)
         self._router_gate = router_gate
+        self._barge_in = barge_in
 
     async def on_enter(self) -> None:
         """Wire the reply→turn correlation once the agent is active.
@@ -297,14 +360,53 @@ class JohnnyAgent(Agent):
     ) -> None:
         """Run the router should-speak gate before the SDK generates a reply.
 
-        Delegates to :meth:`RouterGate.run_turn`, which raises ``StopResponse``
-        to keep Johnny silent (no-speak / low-confidence / rate-limited / gate
-        timeout / barge-in) and returns to let the reply proceed. With no gate
-        attached the turn always proceeds (default ``Agent`` behaviour).
+        First spawns the out-of-band barge-in classifier (Johnny-k8t) if the bot
+        is mid-reply — a fire-and-forget task that may interrupt the current
+        reply for an actionable verdict, running concurrently with the gate below
+        (it never blocks the turn). Then delegates to :meth:`RouterGate.run_turn`,
+        which raises ``StopResponse`` to keep Johnny silent (no-speak /
+        low-confidence / rate-limited / gate timeout / barge-in) and returns to
+        let the reply proceed. With no gate attached the turn always proceeds
+        (default ``Agent`` behaviour).
         """
+        self._maybe_spawn_barge_in(new_message)
         if self._router_gate is None:
             return
         await self._router_gate.run_turn(turn_ctx, new_message)
+
+    def _maybe_spawn_barge_in(self, new_message: LKChatMessage) -> None:
+        """Spawn the out-of-band barge-in classifier when the bot is mid-reply.
+
+        No-op unless a :class:`~johnny.agent.barge_in.BargeInClassifier` is
+        attached and enabled and there is a current, unfinished reply to target.
+        The interrupt target is the session's ``current_speech`` (authoritative
+        "what is playing now"); its LiveKit turn id is read from the gate's
+        tracked active reply when it matches, else the speech id is used as a
+        stable, non-counter label. The classifier re-checks ``current_speech`` at
+        verdict time so a stale verdict cannot interrupt a newer reply.
+        """
+        barge_in = self._barge_in
+        if barge_in is None or not barge_in.enabled:
+            return
+        target = self.session.current_speech
+        if target is None or target.done():
+            return
+        text = (new_message.text_content or "").strip()
+        if not text:
+            return
+        turn_id = target.id
+        gate = self._router_gate
+        if gate is not None:
+            active = gate.active_reply
+            if active is not None and active[1] is target:
+                turn_id = active[0]
+        barge_in.spawn(
+            text=text,
+            speaker=None,
+            target=target,
+            target_turn_id=turn_id,
+            current_speech=lambda: self.session.current_speech,
+        )
 
 
 async def build_johnny_agent(
@@ -315,6 +417,7 @@ async def build_johnny_agent(
     session_id: str | None = None,
     bot_session_id: int | None = None,
     router_gate: RouterGate | None = None,
+    barge_in: BargeInClassifier | None = None,
 ) -> JohnnyAgent:
     """Build a :class:`JohnnyAgent`, rehydrating prior transcripts if available.
 
@@ -333,6 +436,9 @@ async def build_johnny_agent(
     ``router_gate`` is the optional :class:`~johnny.agent.router_gate.RouterGate`
     the agent runs in ``on_user_turn_completed``; passed straight through to
     :class:`JohnnyAgent` (``None`` → the agent replies to every turn).
+    ``barge_in`` is the optional :class:`~johnny.agent.barge_in.BargeInClassifier`
+    the agent spawns out-of-band while mid-reply (``None`` → no slow-classifier
+    barge-in; the native VAD interrupt is still configured on the session).
     """
     loader = transcript_history_loader or NoopTranscriptHistoryLoader()
     history: list[TranscriptFinalized] = []
@@ -357,6 +463,7 @@ async def build_johnny_agent(
         prompt_config=prompt_config,
         chat_history=history or None,
         router_gate=router_gate,
+        barge_in=barge_in,
     )
 
 
@@ -366,6 +473,7 @@ __all__ = [
     "JohnnyAgent",
     "build_agent_instructions",
     "build_agent_session",
+    "build_interruption_options",
     "build_johnny_agent",
     "load_vad",
     "transcripts_to_chat_ctx",

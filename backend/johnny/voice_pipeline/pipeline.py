@@ -1447,54 +1447,16 @@ class VoicePipeline:
         self, transcript: TranscriptFinalized
     ) -> list[ChatMessage]:
         """Build the prompt for the barge-in intent classifier."""
-        system = (
-            "You are the barge-in intent classifier for an AI meeting bot. "
-            "The bot is currently mid-utterance (speaking or thinking about "
-            "a reply). Classify the latest participant speech into ONE of "
-            "these categories and decide whether to interrupt the bot:\n"
-            "- 'stop': Direct interruption — the user wants the bot to "
-            "stop ('hey Johnny stop', 'wait', 'hold on', 'shut up'). "
-            "should_interrupt=true.\n"
-            "- 'correct': Correction or redirection of the bot ('no, focus "
-            "on X', \"that's wrong, it's actually Y\"). "
-            "should_interrupt=true.\n"
-            "- 'new_question': A new question or topic addressed to the "
-            "bot ('actually, what about Y?', 'by the way, how does Z "
-            "work?'). should_interrupt=true.\n"
-            "- 'side_chat': Side conversation between human participants, "
-            "NOT addressed to the bot. should_interrupt=false.\n"
-            "- 'noise': Background noise, cough, mumbling, filler word, "
-            "or unintelligible speech. should_interrupt=false.\n\n"
-            "Reply as JSON matching the supplied schema. When uncertain, "
-            "default to side_chat or noise — false positives (interrupting "
-            "the bot for nothing) are worse than false negatives (not "
-            "interrupting when the user wanted to)."
-        )
-        if self.config.instructions:
-            system += f"\n\nMeeting instructions: {self.config.instructions}"
-
-        user_parts: list[str] = []
         last_decision = self._last_decision
-        if (
-            last_decision is not None
-            and last_decision.suggested_reply
-        ):
-            user_parts.append(
-                "The bot is currently saying / about to say: "
-                f"{last_decision.suggested_reply}"
-            )
-            user_parts.append("")
-        speaker_label = (
-            f"Participant '{transcript.speaker}'"
-            if transcript.speaker
-            else "Participant"
+        suggested_reply = (
+            last_decision.suggested_reply if last_decision is not None else None
         )
-        user_parts.append(f"{speaker_label} said: {transcript.text}")
-
-        return [
-            ChatMessage(role="system", content=system),
-            ChatMessage(role="user", content="\n".join(user_parts)),
-        ]
+        return build_barge_in_messages(
+            text=transcript.text,
+            speaker=transcript.speaker,
+            instructions=self.config.instructions,
+            suggested_reply=suggested_reply,
+        )
 
     async def _respond_to_transcript(self, transcript: TranscriptFinalized) -> None:
         """Run router (and answer + TTS, when appropriate) for ``transcript``.
@@ -3082,6 +3044,64 @@ def _parse_barge_in_response(response: LLMResponse) -> BargeInDecision:
         reason=reason,
         raw=structured,
     )
+
+
+def build_barge_in_messages(
+    *,
+    text: str,
+    speaker: str | None,
+    instructions: str = "",
+    suggested_reply: str | None = None,
+) -> list[ChatMessage]:
+    """Build the barge-in intent classifier prompt (shared with the LiveKit gate).
+
+    Module-level so the LiveKit-Agents barge-in path
+    (:mod:`johnny.agent.barge_in`, Johnny-k8t) reuses the *exact* prompt the
+    legacy pipeline sends — the same "reuse, don't reimplement" discipline the
+    router schema/parser follow — keeping the classifier verdicts comparable
+    across both orchestrators. ``speaker``/``suggested_reply`` are optional: a
+    missing speaker renders a bare ``Participant`` label, and a missing
+    ``suggested_reply`` omits the "currently saying" context line.
+    """
+    system = (
+        "You are the barge-in intent classifier for an AI meeting bot. "
+        "The bot is currently mid-utterance (speaking or thinking about "
+        "a reply). Classify the latest participant speech into ONE of "
+        "these categories and decide whether to interrupt the bot:\n"
+        "- 'stop': Direct interruption — the user wants the bot to "
+        "stop ('hey Johnny stop', 'wait', 'hold on', 'shut up'). "
+        "should_interrupt=true.\n"
+        "- 'correct': Correction or redirection of the bot ('no, focus "
+        "on X', \"that's wrong, it's actually Y\"). "
+        "should_interrupt=true.\n"
+        "- 'new_question': A new question or topic addressed to the "
+        "bot ('actually, what about Y?', 'by the way, how does Z "
+        "work?'). should_interrupt=true.\n"
+        "- 'side_chat': Side conversation between human participants, "
+        "NOT addressed to the bot. should_interrupt=false.\n"
+        "- 'noise': Background noise, cough, mumbling, filler word, "
+        "or unintelligible speech. should_interrupt=false.\n\n"
+        "Reply as JSON matching the supplied schema. When uncertain, "
+        "default to side_chat or noise — false positives (interrupting "
+        "the bot for nothing) are worse than false negatives (not "
+        "interrupting when the user wanted to)."
+    )
+    if instructions:
+        system += f"\n\nMeeting instructions: {instructions}"
+
+    user_parts: list[str] = []
+    if suggested_reply:
+        user_parts.append(
+            "The bot is currently saying / about to say: " f"{suggested_reply}"
+        )
+        user_parts.append("")
+    speaker_label = f"Participant '{speaker}'" if speaker else "Participant"
+    user_parts.append(f"{speaker_label} said: {text}")
+
+    return [
+        ChatMessage(role="system", content=system),
+        ChatMessage(role="user", content="\n".join(user_parts)),
+    ]
 
 
 def _parse_router_response(response: LLMResponse) -> RouterDecision:
