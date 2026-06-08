@@ -1,493 +1,80 @@
 {
   "version": 1,
-  "sessionId": "fdf153cd-1429-4f44-9048-a1fbb60a77c5",
+  "sessionId": "8f4e6e6d-2779-4c5e-b0f8-7304b6c45d29",
   "status": "running",
-  "startedAt": "2026-06-07T23:21:19.573Z",
-  "updatedAt": "2026-06-08T01:19:18.543Z",
-  "currentIteration": 4,
+  "startedAt": "2026-06-08T05:53:42.265Z",
+  "updatedAt": "2026-06-08T07:14:05.120Z",
+  "currentIteration": 0,
   "maxIterations": 0,
-  "tasksCompleted": 4,
+  "tasksCompleted": 0,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
   "trackerState": {
     "plugin": "beads-bv",
-    "epicId": "Johnny-ckz",
+    "epicId": "Johnny-etu",
     "epicIds": [
-      "Johnny-ckz"
+      "Johnny-etu"
     ],
     "executionScopes": [
       {
-        "id": "Johnny-ckz",
-        "title": "Johnny meeting bot — ongoing work, fixes, and end-to-end validation",
+        "id": "Johnny-etu",
+        "title": "Pipeline + decision-making revision: stop silent drops, enforce decision↔utterance parity, expose the bot's reasoning to the operator",
         "type": "epic",
-        "description": "## Why this exists\n\nUmbrella epic for the Johnny Google Meet AI Meeting Bot post-MVP work.\n\nThe original join-stuck bug (Johnny-ckz.1) is fixed and the bot now reliably joins meetings (commit 979447e). The remaining scope spans:\n- End-to-end validation against real Google Meet (across all modes)\n- Adding/refining bot behavior modes (Autonomous, free-mode speech logic)\n- Provider integration polish (TTS demo playback, ElevenLabs verification, openai-realtime fix)\n- UX improvements (UI-driven Google sign-in, full-meeting context vs rolling window)\n- Smoke tests and provider management UI tests\n\nAll child issues here are tracked under this single epic.\n\n## Acceptance\n\n- All child issues closed\n- Bot has been validated end-to-end across every mode against a real Google Meet\n- Provider management surface is polished and tested via UI",
+        "description": "## Why this exists\n\nOperator session at http://localhost:5173/sessions/14 shows two distinct failure modes on the default playground prompt (no custom instructions, nothing fancy):\n\n1. **Silent drops** — the operator asked the bot to \"tell us the progress for the upcoming week\" and the bot just ignored the question. No reply, no error, no visible reason in the chat or decisions surfaces.\n2. **Decision ↔ utterance divergence** — the decisions panel recommended one phrasing, but the bot actually spoke something different in the chat. Repeatedly. The operator cannot tell whether the decision system is being bypassed, overridden, or simply ignored downstream.\n\nThese are not \"tune the prompt\" problems. The operator already noted the instructions were defaults. The complaint is that the pipeline + decision-making layer is unreliable AND opaque — and the right fix is to take the whole pipeline + decision plumbing apart, find the gaps (silent drops, divergence, missing audit trail), redesign so divergence is impossible by construction, and surface a \"what the bot is thinking\" timeline so the operator can read the bots reasoning per turn the same way they read a debugger.\n\nThis is the scope captured here. Sub-tasks under this issue carve it into independently shippable pieces; the parent is the place to discuss the overall design and the dependency order between them.\n\n## Operator’s ask, restated structurally\n\n- An agent picking this up MUST first analyse session 14 end-to-end (transcripts, decisions, bot utterances, pipeline event log, LLM traces) before proposing any refactor. The bug is concrete and reproducible there; everything downstream depends on understanding what actually went wrong.\n- The agent MUST then catalogue every observed gap between (a) what the user said, (b) what the router/decision system decided, (c) what the LLM was asked to produce, and (d) what the bot actually spoke. Each gap is a candidate for being made impossible by construction OR loudly visible in the UI.\n- The agent MUST propose a redesign of the pipeline + decision-making layer that closes those gaps. The PRD shape (Context / Goals / Non-goals / Architecture / Acceptance) used by tasks/prd-piper-tts-runtime-options.md is the canonical example.\n- The operator’s priority order, in their words: **decisions** matter most → **observability** of the bots reasoning second → **performance** a distant third. Optimise the refactor accordingly.\n\n## Sub-tasks (filed as children below)\n\n1. Root-cause analysis from session 14 — replay the session, document every silent drop + every decision/utterance divergence with exact pipeline-event timestamps, deliver a written failure-mode catalogue. **MUST happen first.**\n2. Decision ↔ utterance parity: single source of truth for the spoken text — the decisions surface and the chat surface read from the same canonical record, or any divergence raises a visible error rather than going to the speaker.\n3. Pipeline reliability: never silently drop a user turn — every transcribed user utterance ends in either (a) a final spoken reply, (b) an approved-but-not-yet-spoken suggestion, or (c) a recorded reason for not replying, surfaced to the operator. No turn falls off the floor invisibly.\n4. \"What is the bot thinking\" — per-turn reasoning timeline surfaced in the session UI. STT in → router classification → context selection → LLM prompt → LLM raw output → guard/filter decisions → final spoken text. Customer-readable, not just dev logs.\n5. Offline replay harness against persisted session history — take any past session id, replay its transcript through the current pipeline offline, assert the produced decisions and utterances match the recorded ones; lights up regressions in CI.\n\n## Cross-links — earlier work that informs this\n\nClosed issues whose context the agent should re-read before refactoring:\n\n- **Johnny-vgl** — \"Review and standardize bot free mode speech decision logic\". The previous attempt at this exact territory; whatever decision logic landed there is the starting point for what to refactor here.\n- **Johnny-cdw** — \"Approving a pending suggestion doesn’t make the bot actually speak it\". Same divergence pattern (decisions panel says one thing, bot does another) at a different point in the pipeline.\n- **Johnny-arh** — \"Bot speaks over user mid-sentence\". Floor-management / partial-transcript gating; relevant to the silent-drop symptom because the same gate can over-suppress legitimate turns.\n- **Johnny-ckz.14** — \"STT artifacts trigger AI replies — no noise-floor gate\". Same gate, opposite failure mode (false-positive replies). The redesign has to balance both.\n- **Johnny-har** — \"STT transcription of participants must never pause while bot is speaking or thinking\". Relevant to the \"Where did my question go?\" silent-drop symptom.\n- **Johnny-7qp** — \"Bot loses conversation context mid-session\". Reliability precedent.\n- **Johnny-ckz.7** — \"Per-session activity / timing log surfaced in chat history\". Observability precedent — likely the substrate the new reasoning timeline (sub-task 4) extends.\n- **Johnny-klh** — \"Playground transcripts mislabel speakers\". Reliability precedent.\n\nStill-open issue that WILL collide with this refactor:\n\n- **Johnny-ckz.25** — \"Consolidate free_auto_speak into autonomous — remove FREE_AUTO_SPEAK BotMode\". Touches the same decision-mode plumbing; sequence with sub-task 2 (parity) or absorb into it.\n\n## Acceptance for the umbrella\n\n- All five sub-tasks closed.\n- Session 14 replays end-to-end through the new pipeline with no silent drops; every user turn lands in one of the three documented outcomes.\n- The decisions surface and the chat surface for any given turn either show the same text, or the divergence is rendered as an explicit \"spoke X instead of recommended Y because Z\" line — never silently.\n- A new operator opening any session can read the per-turn reasoning timeline and explain why the bot spoke what it spoke, without reading the source code or docker logs.\n- The offline replay harness runs in CI against at least three persisted sessions including session 14, and gates merges.\n\n## Non-goals\n\n- Not changing the LLM / STT / TTS providers. Provider choice is orthogonal.\n- Not tuning the default playground prompt. The complaint is that even with sane defaults the pipeline misbehaves; prompt tuning hides that.\n- Not adding new bot modes. Consolidating the existing ones (Johnny-ckz.25) is in scope; inventing new ones is not.\n\n## Reference for the agent picking this up\n\n- Session under investigation: http://localhost:5173/sessions/14\n- Canonical PRD shape: `tasks/prd-piper-tts-runtime-options.md`\n- Pipeline source (current): `backend/johnny/voice_pipeline/`, `backend/app/services/browser_pipeline_runner.py`, `backend/app/services/session_scheduler.py`\n- Decisions persistence: search `backend/app/db/models.py` for the decisions / approvals / utterances tables\n- Session UI: `frontend/src/routes/sessions/[id]/+page.svelte` (and the playground page) — where the reasoning timeline needs to land\n",
         "metadata": {
           "dependencyCount": 0,
           "dependentCount": 0
         }
       }
     ],
-    "totalTasks": 69,
+    "totalTasks": 7,
     "tasks": [
       {
-        "id": "Johnny-ckz.1",
-        "title": "Bot join hangs at 'Johnny is joining — session #N': bot never appears in Meet, Active sessions stays 0, no logs",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.2",
-        "title": "Add 'Autonomous' mode: bot speaks freely per profile instructions, no whitelist, no approval gate",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.3",
-        "title": "Bot carries the whole meeting's context (not a 6-turn rolling window) when routing and answering",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-c8t",
-        "title": "Playground audio path never opens WebSocket — no voice, no bot replies (Johnny-ckz.6 regression)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.4",
-        "title": "Run the two-bot voice-interrupt harness end-to-end against real models, fix any bugs it surfaces",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.5",
-        "title": "Local Piper follow-up: voice catalog fetcher fails on HF 307 redirect, plus model dirs must move to host bind mounts (~/.johnny/...)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.6",
-        "title": "In-browser voice/text chat with the bot — per-event 'Try with bot' button + standalone playground (no Meet required)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-4c0",
-        "title": "Local Piper TTS: smoke test fails with opaque 'exit code 1' — need easy voice install + real error surfacing",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ze3",
-        "title": "Voice interrupt doesn't actually work end-to-end: bot ignores user speech mid-utterance (reopens Johnny-har / Johnny-di9)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-d2g",
-        "title": "Bot joined but voice pipeline never runs: no transcription, no decisions, no speech, no audio bridge",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.7",
-        "title": "Per-session activity / timing log surfaced in chat history (per-turn pipeline events with durations)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.8",
-        "title": "Profile + tune end-to-end voice latency on real local STT/TTS/LLM, and add in-UI optimization tips on each provider settings page",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.9",
-        "title": "bot_sessions schema drift: ORM expects 'source' and 'playground_overrides' columns that don't exist — worker monitor + /sessions/active both 500",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.10",
-        "title": "Validate in-browser live chat / live talking (Johnny-ckz.6) end-to-end via chrome-devtools MCP — pure verification, file follow-up bugs for any gap",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.11",
-        "title": "Playground / live mode: no audio playback (critical) + needs template-driven mode picker, volume control, and resume-from-session-page UX",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.12",
-        "title": "STT provider settings: 'Record sample' button to verify transcription end-to-end (symmetric to existing TTS demo)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-wyd",
-        "title": "Barge-in classifier LLM ReadTimeouts against Ollama Qwen 35B — every timeout is a missed interrupt + log noise",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-klh",
-        "title": "Playground transcripts label every speaker=null row as 'You' — including STT hallucinations and any non-user rows",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-31g",
-        "title": "STT hallucinations from silence: faster-whisper produces 'Does Olam A.P.I.', '. . . .', etc. on quiet mic and persists them as transcripts",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.13",
-        "title": "Playground: voice barge-in does nothing — bot ignores user speech mid-utterance (interrupt bug recurring on WebRTC transport)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.14",
-        "title": "Playground: STT artifacts ('you', 'uh', '...' dot sequences) trigger AI replies — no noise-floor / floor-management gate before invoking LLM",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.15",
-        "title": "STT provider catalog: VoiceInk parity + NVIDIA Parakeet + streaming-in-chat",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ajc",
-        "title": "Active session 'Leave now' button: UI marks session ended but bot stays in the Google Meet",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-3ha",
-        "title": "Active LLM provider sometimes gets unselected (TTS and STT are not affected)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-1zg",
-        "title": "Add ElevenLabs as an STT provider (missing from Add Provider dropdown when kind=stt)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-arh",
-        "title": "Bot speaks over user mid-sentence: partial transcripts trigger responses before user finishes",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-2bw",
-        "title": "Build automated two-bot test harness to reproduce voice-interrupt failure (simulated speaker vs Johnny)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-7qp",
-        "title": "Bot loses conversation context mid-session: can't recall its own prior utterances",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-di9",
-        "title": "Voice-triggered barge-in: user can interrupt the bot mid-utterance by speaking",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-har",
-        "title": "STT transcription of participants must never pause while bot is speaking or thinking",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-cdw",
-        "title": "Approving a pending suggestion doesn't make the bot actually speak it",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-hn6",
-        "title": "Pending approvals don't appear in UI until page is refreshed",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-awh",
-        "title": "Persist bot utterances to meeting history (everything the bot says)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-vgl",
-        "title": "Review and standardize bot free mode speech decision logic",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-jrd",
-        "title": "Verify ElevenLabs TTS provider works end-to-end with updated API key",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-pdf",
-        "title": "Execute comprehensive end-to-end validation: bot joins real Google Meet and exercises every product feature across all modes",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-upg",
-        "title": "End-to-end UI test of provider management via chrome-devtools-mcp",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-f7k",
-        "title": "Smoke-test populated .env: bring stack up and verify end-to-end",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.16",
-        "title": "Playground: every audio stream rejected with 'Audio stream ended: session not active' — regression from Johnny-ckz.14",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.17",
-        "title": "Backend: Realtime S2S provider abstraction + dual-mode pipeline routing (split vs unified)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.18",
-        "title": "Backend + Frontend: Cartesia Sonic 3.5 TTS provider (split-pipeline option, playground + Meet parity)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-al3",
-        "title": "Multi-account bot identities: '+ Add another meeting bot' tile becomes a real button that creates a new bot row",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-105",
-        "title": "noVNC bot sign-in: container + backend endpoints + frontend modal",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-pia",
-        "title": "Settings page redesign — multi-account Calendars + Bots with noVNC sign-in",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.19",
-        "title": "Backend: OpenAI GPT-Realtime S2S provider (audio in/out, barge-in, playground + Meet parity)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.20",
-        "title": "Backend: Google Gemini Live API S2S provider (audio in/out, barge-in, playground + Meet parity)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.21",
-        "title": "Frontend: Providers page — pipeline-mode toggle (split vs unified) + S2S provider picker (Meet + playground)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.22",
-        "title": "Adapt interruption test tool to drive S2S providers (OpenAI Realtime + Gemini Live) across Meet and playground",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.23",
-        "title": "Bot sign-in method picker: keep CLI+upload path as a first-class option alongside noVNC",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.24",
-        "title": "Bot 'Verify session' button always returns connected — file-shape-only check, never round-trips to Google",
-        "status": "completed",
-        "completedInSession": true
-      },
-      {
-        "id": "Johnny-ckz.25",
-        "title": "Consolidate free_auto_speak into autonomous — remove FREE_AUTO_SPEAK BotMode",
+        "id": "Johnny-ckz.28.1",
+        "title": "Root-cause analysis from session 14: failure-mode catalogue (silent drops + decision/utterance divergence) + redesign proposal",
         "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-ckz.26",
-        "title": "noVNC sign-in: email scrape fails for Workspace accounts → bot saved as 'unknown-<hex>@johnny.local' instead of real email",
-        "status": "completed",
-        "completedInSession": true
-      },
-      {
-        "id": "Johnny-g2n",
-        "title": "ElevenLabs TTS: handle 'exceeds quota' 401 gracefully in the response loop",
-        "status": "completed",
+        "id": "Johnny-ckz.28.2",
+        "title": "Decision ↔ utterance parity: single source of truth so the chat and the decisions panel cannot diverge silently",
+        "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-tjd",
-        "title": "Interrupt harness real-mode: clarification assertion shape doesn't match real behavior",
-        "status": "completed",
+        "id": "Johnny-ckz.28.3",
+        "title": "Pipeline reliability: never silently drop a user turn — every transcribed utterance ends in reply / approved-pending / explicit-no-reply",
+        "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-gft",
-        "title": "Interrupt harness real-mode: stop scenario flakes when LLM round-trip is slow",
-        "status": "completed",
+        "id": "Johnny-ckz.28.4",
+        "title": "'What is the bot thinking' — per-turn reasoning timeline in the session UI (STT in → router → context → LLM → guard → speak)",
+        "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-9eq",
-        "title": "LLM providers: fetch model list dynamically from each provider's API instead of hardcoding",
-        "status": "completed",
+        "id": "Johnny-ckz.28.5",
+        "title": "Offline replay harness: feed any persisted session transcript through the pipeline and assert decisions + utterances match",
+        "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-uga",
-        "title": "ElevenLabs e2e plan uses library voice incompatible with free tier",
-        "status": "completed",
+        "id": "Johnny-etu.1",
+        "title": "Pipeline architecture doc (technical): full deep-dive into how STT → router → decisions → LLM → guards → TTS actually work today",
+        "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-ckz.27",
-        "title": "Sidebar (z-1300) renders above modals — noVNC sign-in + BotSigninUpload + BotSigninMethodPicker use bare z-50 instead of --z-modal tokens",
-        "status": "completed",
-        "completedInSession": true
-      },
-      {
-        "id": "Johnny-ckz.28",
-        "title": "Pipeline + decision-making revision: stop silent drops, enforce decision↔utterance parity, expose the bot's reasoning to the operator",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-466",
-        "title": "openai-realtime STT adapter targets deprecated Realtime Beta API",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-kgc",
-        "title": "Johnny — Google Meet AI Meeting Bot",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-ckz.29",
-        "title": "(BUG) Gemini model SELECT validator rejects models fetched live from Gemini's own API — 'gemini-3.5' returned by the catalog can't be saved",
-        "status": "completed",
-        "completedInSession": true
-      },
-      {
-        "id": "Johnny-qow",
-        "title": "Add no-CLI bot sign-in: in-browser Chromium via noVNC helper container",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-4da",
-        "title": "Read Google Docs/Sheets URLs linked in calendar event description and include as pre-meeting context",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-dsy",
-        "title": "Cross-session continuity: rehydrate prior session summary for recurring events",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-4ph",
-        "title": "Add UI button to trigger bot Google sign-in (CLI helper stays as alternative)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-6ij",
-        "title": "TTS providers: separate Play button to hear a demo phrase, with Stop while playing",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-d3e",
-        "title": "Seed providers from JSON/config file on startup",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-k3z",
-        "title": "Export all provider configurations as JSON from the UI",
-        "status": "completed",
+        "id": "Johnny-etu.2",
+        "title": "Pipeline overview (non-technical): plain-language explainer + simple schematic so the operator understands what the bot does between hearing and speaking",
+        "status": "open",
         "completedInSession": false
       }
     ]
   },
-  "iterations": [
-    {
-      "iteration": 1,
-      "status": "completed",
-      "taskId": "Johnny-ckz.29",
-      "taskTitle": "(BUG) Gemini model SELECT validator rejects models fetched live from Gemini's own API — 'gemini-3.5' returned by the catalog can't be saved",
-      "taskCompleted": true,
-      "durationMs": 863674,
-      "startedAt": "2026-06-07T23:21:45.882Z",
-      "endedAt": "2026-06-07T23:36:09.556Z"
-    },
-    {
-      "iteration": 2,
-      "status": "completed",
-      "taskId": "Johnny-ckz.26",
-      "taskTitle": "noVNC sign-in: email scrape fails for Workspace accounts → bot saved as 'unknown-<hex>@johnny.local' instead of real email",
-      "taskCompleted": true,
-      "durationMs": 1242149,
-      "startedAt": "2026-06-07T23:36:25.590Z",
-      "endedAt": "2026-06-07T23:57:07.739Z"
-    },
-    {
-      "iteration": 3,
-      "status": "completed",
-      "taskId": "Johnny-ckz.24",
-      "taskTitle": "Bot 'Verify session' button always returns connected — file-shape-only check, never round-trips to Google",
-      "taskCompleted": true,
-      "durationMs": 1744807,
-      "startedAt": "2026-06-07T23:57:26.014Z",
-      "endedAt": "2026-06-08T00:26:30.821Z"
-    },
-    {
-      "iteration": 4,
-      "status": "completed",
-      "taskId": "Johnny-ckz.27",
-      "taskTitle": "Sidebar (z-1300) renders above modals — noVNC sign-in + BotSigninUpload + BotSigninMethodPicker use bare z-50 instead of --z-modal tokens",
-      "taskCompleted": true,
-      "durationMs": 1268847,
-      "startedAt": "2026-06-08T00:26:47.255Z",
-      "endedAt": "2026-06-08T00:47:56.102Z"
-    }
-  ],
+  "iterations": [],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],
