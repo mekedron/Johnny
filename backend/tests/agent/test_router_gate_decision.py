@@ -131,8 +131,13 @@ class _FakeSpeechHandle:
     """
 
     def __init__(
-        self, *, interrupted: bool = False, chat_items: list[Any] | None = None
+        self,
+        *,
+        handle_id: str = "item_reply",
+        interrupted: bool = False,
+        chat_items: list[Any] | None = None,
     ) -> None:
+        self.id = handle_id
         self.interrupted = interrupted
         self.chat_items = chat_items if chat_items is not None else []
         self._cbs: list[Any] = []

@@ -89,9 +89,7 @@ DEFAULT_INSTRUCTIONS = "You are Johnny, an AI participant in a live voice meetin
 # ``VoicePipeline._answer_messages`` so a LiveKit-driven Johnny opens with the
 # same job description the meet-worker answer LLM had. Deliberately nameless so
 # a configured personality (rendered next) owns the persona without conflict.
-_BASE_INSTRUCTIONS = (
-    "You are an AI meeting participant. Produce concise, natural spoken replies."
-)
+_BASE_INSTRUCTIONS = "You are an AI meeting participant. Produce concise, natural spoken replies."
 
 # Note explaining the rehydrated/streamed conversation history, mirroring the
 # legacy answer prompt's "Recent conversation" guidance (Johnny-7qp): assistant
@@ -100,8 +98,8 @@ _BASE_INSTRUCTIONS = (
 # respawn from the rehydrated assistant turns.
 _HISTORY_NOTE = (
     "Earlier turns in this meeting are provided as conversation history: "
-    "assistant turns are your own prior speech (ground any \"what did you "
-    "say?\" answer in their exact words), and user turns are meeting "
+    'assistant turns are your own prior speech (ground any "what did you '
+    'say?" answer in their exact words), and user turns are meeting '
     "participants, sometimes prefixed with the speaker's name."
 )
 
@@ -355,6 +353,17 @@ class JohnnyAgent(Agent):
 
         self.session.on("speech_created", _on_speech_created)
 
+    async def on_exit(self) -> None:
+        """Tear down the gate + approval coordinator at session end (Johnny-qzj).
+
+        Cancels any in-flight approval resolver (settling its parked turn
+        ``approval_rejected``) and sweeps the session ledger so every turn carries
+        its INV-1 terminal even on a hard teardown. No-op without a gate.
+        """
+        gate = self._router_gate
+        if gate is not None:
+            await gate.aclose()
+
     async def on_user_turn_completed(
         self, turn_ctx: ChatContext, new_message: LKChatMessage
     ) -> None:
@@ -443,9 +452,7 @@ async def build_johnny_agent(
     loader = transcript_history_loader or NoopTranscriptHistoryLoader()
     history: list[TranscriptFinalized] = []
     try:
-        history = list(
-            await loader.load(session_id=session_id, bot_session_id=bot_session_id)
-        )
+        history = list(await loader.load(session_id=session_id, bot_session_id=bot_session_id))
     except Exception:
         logger.exception(
             "transcript history loader failed for session=%s — "

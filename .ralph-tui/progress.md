@@ -79,6 +79,33 @@ after each iteration and it's included in prompts for context.
   push the approval turn onto `RouterGate._pending_speak_turns`.
 - Decision record: `.validation/Johnny-z97/decision.md`.
 
+### Approval-required build wiring (Johnny-qzj)
+- The production seams live in `backend/johnny/agent/approval_wiring.py`
+  (livekit+pipeline-importing, worker-only): `build_request_approval`
+  (wraps any `voice_pipeline.approval.ApprovalGate`, e.g. the Redis one),
+  `build_generate_reply` (`AgentSession.generate_reply` + `SpeechHandle` →
+  `ReplyOutcome`), `build_approval_event_hooks` (publish `ApprovalPending` /
+  `ApprovalResolved` on the `EventBus` + flip the `agent_decisions` row via
+  `DecisionSink.update_outcome`), `build_persist_pending_decision`, and the
+  `build_approval_coordinator` factory the agent worker (Johnny-9eh) calls.
+- **`RouterGate` approval branch** sits in `run_turn` after the
+  should-speak/confidence/rate-limit checks (mirrors legacy order): in
+  `APPROVAL_REQUIRED_MODE` it persists the `pending` row, `coordinator.begin`s the
+  `ApprovalRound`, and raises `StopResponse`. The turn is **never** added to
+  `_pending_speak_turns`. Misconfig (no coordinator / no decision id) terminalizes
+  the still-open turn `no_reply(approval_rejected)` via the gate tracker.
+- **Mutual ref:** gate first (`approval=None`), then coordinator (its
+  `generate_reply` wrapper holds the gate to call `register_approval_reply`), then
+  `gate.attach_approval(coordinator)`. **Persist is a gate-construction injection**
+  (`persist_pending_decision=`), NOT in the factory — the `decision_id` must exist
+  before the synchronous `begin()` parks.
+- **Teardown:** `JohnnyAgent.on_exit` → `RouterGate.aclose()` =
+  `coordinator.aclose()` (cancel resolvers) then `ledger.close()` (sweep parked → A9).
+- **`speech_created` disambiguation** is inside `RouterGate.bind_reply`: it
+  early-returns for `speech_handle.id in self._approval_reply_handles` (the wrapper
+  registers the id before `generate_reply` returns). Any reply-handle test fake the
+  gate touches must now expose `.id`.
+
 ---
 
 ## 2026-06-09 - Johnny-y4j [SPIKE] Per-room JWT auth + agent dispatch contract
@@ -191,6 +218,57 @@ validation (CLAUDE.md exception; qzj browser-validates the approval UI).
   `model_empty_output`, approve-interrupted → `barge_in`, approve-error /
   source-error → `stage_error`, reject/timeout/cancel/close →
   `approval_rejected`), so INV-1 is structurally guaranteed off the turn loop.
+
+---
+
+## 2026-06-09 - Johnny-qzj [BUILD] Phase 2: Approval-required mode
+
+Wired the spike Johnny-z97 `ApprovalCoordinator` + parked `TurnLedger` into the
+real agent path so `approval_required` mode holds the bot's reply for human
+approval out of band.
+
+**Implemented:**
+- `backend/johnny/agent/router_gate.py` — `RouterGateConfig.approval_timeout_seconds`;
+  `RouterGate(approval=, persist_pending_decision=)` + `PersistPendingDecision` alias;
+  `run_turn` approval branch (after should-speak/confidence/rate-limit → `_begin_approval`
+  + `StopResponse`, never pushed onto `_pending_speak_turns`); `_begin_approval` (persist
+  `pending` → `ApprovalRound` → `coordinator.begin`; misconfig → `no_reply(approval_rejected)`);
+  `bind_reply` skips approval-owned handles (`speech_created` §7.3 disambiguation);
+  `register_approval_reply` / `attach_approval` / `aclose` (teardown = coordinator.aclose +
+  ledger.close).
+- `backend/johnny/agent/approval_wiring.py` (new) — the production seams for Johnny-9eh:
+  `build_request_approval` (wraps `ApprovalGate`), `build_generate_reply`
+  (`session.generate_reply` + handle→`ReplyOutcome`, registers handle), `build_approval_event_hooks`
+  (publish `ApprovalPending`/`ApprovalResolved` + flip `agent_decisions` row), `build_persist_pending_decision`,
+  and the `build_approval_coordinator` factory that attaches to the gate.
+- `backend/johnny/agent/session.py` — `JohnnyAgent.on_exit` → `gate.aclose()`.
+- `backend/tests/agent/test_approval_wiring.py` (new) — full-chain approve/reject/timeout →
+  events + terminal + row flip, configurable timeout, park/no-speak/StopResponse, disambiguation,
+  teardown, misconfig, per-builder unit coverage. (`test_router_gate_decision`'s `_FakeSpeechHandle`
+  gained an `id` to match the real `SpeechHandle` surface `bind_reply` now reads.)
+
+**Quality gates:** ruff clean; mypy --strict clean (3 source files); `tests/agent` (minus
+live-SFU smoke) = **434 passed**, no regressions. Browser validation N/A — no agent worker
+(Johnny-9eh) runs the new agent path yet (no `RouterGate(` / `WorkerOptions` outside tests);
+the legacy meet-worker still serves the live approval UI, untouched here. Validation note:
+`.validation/Johnny-qzj/notes.md`.
+
+**Learnings:**
+- **Gate↔coordinator mutual ref** resolved by build-order: construct the gate (approval=None),
+  build the coordinator (its `generate_reply` wrapper captures the gate for
+  `register_approval_reply`), then `gate.attach_approval(coordinator)`.
+- **Persist-before-park ordering is load-bearing:** the `decision_id` must exist *before*
+  `begin()` (the `ApprovalRound` carries it), so the pending-decision persistence is a
+  *gate-construction* injection (`persist_pending_decision=`), separate from the coordinator
+  factory — `begin()` is synchronous/no-await and can't persist itself.
+- **A not-yet-started resolver cancelled at teardown never runs its body** (not even the
+  `except CancelledError: resolve` handler) — `ledger.close()`'s parked-sweep (A9) is the net
+  that settles it `approval_rejected`. So `on_pending`/`ApprovalPending` does NOT fire if you
+  `aclose()` before the loop ever ticks the resolver; assert event emission only after the
+  resolver has actually run (or in the approve/reject/timeout drive tests).
+- `SpeechHandle.id` is the disambiguation key — any reply-handle fake the gate's `bind_reply`
+  touches must expose `.id` now (the real SDK surface: `id` / `interrupted` / `chat_items` /
+  `add_done_callback` / awaitable).
 
 ---
 

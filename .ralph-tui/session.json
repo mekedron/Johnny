@@ -3,10 +3,10 @@
   "sessionId": "737211f1-9739-40c0-8d3f-332e080d27b8",
   "status": "running",
   "startedAt": "2026-06-08T22:23:12.909Z",
-  "updatedAt": "2026-06-08T23:06:52.801Z",
-  "currentIteration": 1,
+  "updatedAt": "2026-06-08T23:31:59.354Z",
+  "currentIteration": 2,
   "maxIterations": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 2,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -153,8 +153,8 @@
       {
         "id": "Johnny-z97",
         "title": "[SPIKE] Phase 2: Approval-required mapping (out-of-band generate_reply vs in-gate block)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-zb3",
@@ -222,6 +222,16 @@
       "durationMs": 1360163,
       "startedAt": "2026-06-08T22:23:35.833Z",
       "endedAt": "2026-06-08T22:46:15.996Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "Johnny-z97",
+      "taskTitle": "[SPIKE] Phase 2: Approval-required mapping (out-of-band generate_reply vs in-gate block)",
+      "taskCompleted": true,
+      "durationMs": 1214854,
+      "startedAt": "2026-06-08T22:46:37.031Z",
+      "endedAt": "2026-06-08T23:06:51.885Z"
     }
   ],
   "skippedTaskIds": [],
