@@ -251,8 +251,7 @@ class TerminalTracker:
             await self._emit(terminal)
         except Exception:
             logger.exception(
-                "failed to emit terminal for turn=%s — the turn's audit row "
-                "will be missing",
+                "failed to emit terminal for turn=%s — the turn's audit row will be missing",
                 self.turn_id,
             )
         return True
@@ -279,9 +278,7 @@ class TerminalTracker:
         else:
             reason = "stage_error"
             detail = "gate returned without a terminal"
-        await self.emit(
-            terminal_state="no_reply", no_reply_reason=reason, detail=detail
-        )
+        await self.emit(terminal_state="no_reply", no_reply_reason=reason, detail=detail)
         if self._strict and not isinstance(exc, asyncio.CancelledError):
             raise AssertionError(
                 f"turn {self.turn_id} exited the gate without a terminal: {detail}"
@@ -318,6 +315,18 @@ class TurnLedger:
     so reconciliation is entirely between *our* two emitters — there is no
     SDK-side terminal to double with.
 
+    **Approval-required mode (spike Johnny-z97)** adds a third, *non-final* slot
+    state between open and terminal: a turn the gate hands to the out-of-band
+    approval round is :meth:`park`-ed (a ``pending_approval`` marker) rather than
+    terminalized, because the ~15 s human wait cannot block the gate. A parked
+    turn is excluded from :attr:`open_turns` (so the sweep does not call it an
+    unaccounted drop) and is settled to its single final terminal by
+    :meth:`resolve` — the only call that may overwrite the marker, and only once.
+    Three states, three transitions: ``open → emit`` (normal), ``open → park →
+    resolve`` (approval), ``open/park → close`` (sweep). INV-1 still holds as
+    *exactly one final terminal per turn id*; ``pending_approval`` is a transient
+    parked marker, never the turn's durable terminal.
+
     Stdlib-only, like the rest of this module: the durable ``TurnTerminal`` →
     ``EventBus`` → ``agent_decisions`` wiring is injected as a
     :data:`SessionTerminalEmitter` (Johnny-d5z).
@@ -344,11 +353,36 @@ class TurnLedger:
 
     @property
     def open_turns(self) -> tuple[str, ...]:
-        """Turn ids registered via :meth:`open` that have not yet terminalized."""
+        """Turn ids registered via :meth:`open` that have not yet terminalized.
+
+        Excludes **parked** turns (see :meth:`park`): a turn awaiting human
+        approval is accounted-for (it has a ``pending_approval`` marker), so the
+        :meth:`close` *open*-sweep must not treat it as an unaccounted drop.
+        """
         return tuple(tid for tid, term in self._turns.items() if term is None)
 
+    @property
+    def parked_turns(self) -> tuple[str, ...]:
+        """Turn ids parked via :meth:`park` and not yet :meth:`resolve`-d.
+
+        A parked turn holds a non-final ``pending_approval`` marker — the
+        out-of-band approval round (spike Johnny-z97) owns its single final
+        terminal, emitted by :meth:`resolve`. :meth:`close` force-resolves any
+        still-parked turn so an abandoned approval can never leave a turn open.
+        """
+        return tuple(
+            tid
+            for tid, term in self._turns.items()
+            if term is not None and term.terminal_state == "pending_approval"
+        )
+
     def terminal_for(self, turn_id: str) -> GateTerminal | None:
-        """The recorded terminal for ``turn_id`` (``None`` if open or unknown)."""
+        """The recorded terminal for ``turn_id``.
+
+        ``None`` if open or unknown; the ``pending_approval`` marker if parked
+        (a *non-final* state — :meth:`resolve` replaces it with the real
+        terminal); the final :class:`GateTerminal` once resolved.
+        """
         return self._turns.get(turn_id)
 
     async def emit(
@@ -401,8 +435,107 @@ class TurnLedger:
             await self._emit(turn_id, terminal)
         except Exception:
             logger.exception(
-                "failed to emit terminal for turn=%s — the turn's audit row "
-                "will be missing",
+                "failed to emit terminal for turn=%s — the turn's audit row will be missing",
+                turn_id,
+            )
+        return True
+
+    def park(self, turn_id: str, *, detail: str = "") -> bool:
+        """Mark a turn as awaiting out-of-band human approval (spike Johnny-z97).
+
+        The ``approval_required`` mode cannot block the ``on_user_turn_completed``
+        gate for the ~15 s human wait — the SDK await-chains each turn's hook, so a
+        blocking gate would head-of-line-stall every later turn. Instead the gate
+        **parks** the turn (records a *non-final* ``pending_approval`` marker) and
+        raises ``StopResponse`` immediately, and the out-of-band
+        :class:`~johnny.agent.approval.ApprovalCoordinator` later calls
+        :meth:`resolve` with the single final terminal.
+
+        Parking is *not* a terminal: it claims the slot so :meth:`emit` (a stray
+        reply done-callback, the close open-sweep) cannot clobber it, while leaving
+        it :meth:`resolve`-able exactly once. Records **no** ``TurnTerminal`` — the
+        live UI learns the pending state from the separate ``ApprovalPending``
+        event; the turn's one durable terminal lands at resolution (legacy parity:
+        ``voice_pipeline.pipeline._handle_approval_required`` emits its single
+        terminal *after* the approval resolves, never a ``pending_approval`` row).
+
+        First-wins like :meth:`emit`: returns ``False`` if the turn is already
+        parked or already terminal (synchronous; no ``await``, so atomic).
+        """
+        current = self._turns.get(turn_id)
+        if current is not None:
+            logger.error(
+                "approval.park: turn=%s already %s %r; ignoring park",
+                turn_id,
+                "parked" if current.terminal_state == "pending_approval" else "terminal",
+                current,
+            )
+            return False
+        self._turns[turn_id] = GateTerminal(
+            terminal_state="pending_approval",
+            no_reply_reason=None,
+            detail=detail,
+        )
+        logger.info("approval.park: turn=%s awaiting approval detail=%r", turn_id, detail)
+        return True
+
+    async def resolve(
+        self,
+        turn_id: str,
+        *,
+        terminal_state: GateTerminalState,
+        no_reply_reason: TurnNoReplyReason | None = None,
+        detail: str = "",
+    ) -> bool:
+        """Settle a :meth:`park`-ed turn with its single final terminal (Johnny-z97).
+
+        The terminal transition for an approval turn: ``replied`` (approved and
+        spoke), ``no_reply(approval_rejected)`` (rejected / timed out / session
+        closed), ``no_reply(model_empty_output)`` (approved but the reply produced
+        nothing), or ``no_reply(stage_error)`` (the approval round itself errored).
+        This is the *only* call that may overwrite a ``pending_approval`` marker,
+        and it does so exactly once: the final terminal is written **before** the
+        first ``await`` (atomic claim), so two concurrent resolves (a human approve
+        racing the timeout, or the close sweep racing a late resolution) reconcile
+        to one publish — the later one sees a now-final slot and drops.
+
+        Returns ``False`` (and emits nothing) if ``turn_id`` is **not parked** — an
+        open, already-final, or unknown turn. The approval path must :meth:`park`
+        before it resolves; a non-parked resolve is a misuse and is dropped rather
+        than inventing a second terminal for a turn the normal :meth:`emit` path
+        already owns.
+        """
+        current = self._turns.get(turn_id)
+        if current is None or current.terminal_state != "pending_approval":
+            logger.error(
+                "approval.resolve: turn=%s is not parked (slot=%r); dropping %s/%s",
+                turn_id,
+                current,
+                terminal_state,
+                no_reply_reason,
+            )
+            return False
+        terminal = GateTerminal(
+            terminal_state=terminal_state,
+            no_reply_reason=no_reply_reason,
+            detail=detail,
+        )
+        # Atomic claim: replace the park marker with the FINAL terminal before any
+        # await, so a racing second resolve sees a non-``pending_approval`` slot
+        # and drops (mirrors _publish's claim-before-await first-wins).
+        self._turns[turn_id] = terminal
+        logger.info(
+            "agent.turn.terminal: turn=%s state=%s reason=%s detail=%r (approval)",
+            turn_id,
+            terminal_state,
+            no_reply_reason,
+            detail,
+        )
+        try:
+            await self._emit(turn_id, terminal)
+        except Exception:
+            logger.exception(
+                "failed to emit terminal for turn=%s — the turn's audit row will be missing",
                 turn_id,
             )
         return True
@@ -425,15 +558,26 @@ class TurnLedger:
         return TerminalTracker(_route, turn_id=turn_id)
 
     async def close(self) -> None:
-        """Sweep every still-open turn at session close (belt-and-suspenders).
+        """Sweep every still-open or still-parked turn at session close.
 
-        A turn ``open``-ed but never terminalized is the silent drop the
-        invariant forbids — emit a fallback ``no_reply(stage_error)`` so it is
-        accounted for. In strict mode, raise afterwards so the gap is caught at
-        source. Idempotent: turns already terminal are skipped.
+        Belt-and-suspenders for the two ways a turn can outlive the session
+        without a final terminal:
+
+        * **open** (gate ran, reply handle lost) → fallback
+          ``no_reply(stage_error)`` (the legacy unaccounted-turn drop).
+        * **parked** (an approval round that never resolved — the coordinator's
+          resolver task was cancelled at teardown, or the human never answered and
+          the timeout was lost) → :meth:`resolve` to ``no_reply(approval_rejected)``
+          so the parked turn settles instead of silently vanishing.
+
+        Both lists are snapshotted before any ``await`` so a resolver racing the
+        sweep reconciles via first-wins (the loser drops). In strict mode, raise
+        afterwards if either list was non-empty so the gap is caught at source.
+        Idempotent: turns already terminal are skipped.
         """
-        stranded = self.open_turns
-        for turn_id in stranded:
+        stranded_open = self.open_turns
+        stranded_parked = self.parked_turns
+        for turn_id in stranded_open:
             logger.error(
                 "agent.turn.terminal: UNACCOUNTED turn=%s at session close — "
                 "emitting fallback no_reply terminal",
@@ -445,10 +589,22 @@ class TurnLedger:
                 no_reply_reason="stage_error",
                 detail="session closed with the turn unaccounted for",
             )
+        for turn_id in stranded_parked:
+            logger.error(
+                "agent.turn.terminal: PARKED turn=%s at session close — "
+                "resolving approval_rejected (approval never settled)",
+                turn_id,
+            )
+            await self.resolve(
+                turn_id,
+                terminal_state="no_reply",
+                no_reply_reason="approval_rejected",
+                detail="session closed with the approval round unresolved",
+            )
+        stranded = stranded_open + stranded_parked
         if self._strict and stranded:
             raise AssertionError(
-                f"session closed with {len(stranded)} unaccounted turn(s): "
-                f"{', '.join(stranded)}"
+                f"session closed with {len(stranded)} unaccounted turn(s): {', '.join(stranded)}"
             )
 
 
@@ -557,9 +713,7 @@ async def run_gate[T](
     The caller maps ``STAY_SILENT`` → ``raise StopResponse`` in the real hook.
     """
     try:
-        status, decision = await run_router_call(
-            router_call, timeout_s=timeout_s, abandon=abandon
-        )
+        status, decision = await run_router_call(router_call, timeout_s=timeout_s, abandon=abandon)
     except asyncio.CancelledError as exc:
         # Outer task cancelled (hard teardown). Emit a best-effort terminal,
         # then never swallow the cancellation.

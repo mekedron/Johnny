@@ -3,10 +3,10 @@
   "sessionId": "737211f1-9739-40c0-8d3f-332e080d27b8",
   "status": "running",
   "startedAt": "2026-06-08T22:23:12.909Z",
-  "updatedAt": "2026-06-08T22:46:17.376Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-08T23:06:52.801Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -147,8 +147,8 @@
       {
         "id": "Johnny-y4j",
         "title": "[SPIKE] Phase 0: Per-room JWT auth + agent dispatch contract (job payload)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-z97",
@@ -212,7 +212,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-y4j",
+      "taskTitle": "[SPIKE] Phase 0: Per-room JWT auth + agent dispatch contract (job payload)",
+      "taskCompleted": true,
+      "durationMs": 1360163,
+      "startedAt": "2026-06-08T22:23:35.833Z",
+      "endedAt": "2026-06-08T22:46:15.996Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],
