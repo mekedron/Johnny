@@ -50,6 +50,14 @@ from app.providers.loader import load_active_providers
 
 pytest.importorskip("livekit.agents")
 
+from livekit.agents.llm import (  # noqa: E402
+    ChatChunk,
+    ChatContext,
+    function_tool,
+)
+from livekit.agents.llm.chat_context import (  # noqa: E402
+    ChatMessage as LKChatMessage,
+)
 from livekit.agents.stt import StreamAdapter  # noqa: E402
 from livekit.agents.vad import VAD, VADCapabilities, VADStream  # noqa: E402
 
@@ -101,6 +109,7 @@ class _FakeSTT(STTProvider):
 class _FakeLLM(LLMProvider):
     def __init__(self, config: ProviderConfig) -> None:
         self.config = config
+        self.received_tools: list[ToolDefinition] | None = None
 
     @property
     def name(self) -> str:
@@ -112,6 +121,7 @@ class _FakeLLM(LLMProvider):
         tools: Sequence[ToolDefinition] | None = None,
         response_format: dict[str, Any] | None = None,
     ) -> LLMResponse:
+        self.received_tools = list(tools) if tools is not None else None
         return LLMResponse(text="", finish_reason="stop")
 
 
@@ -398,6 +408,151 @@ def test_factory_is_lazy_exported_through_package() -> None:
 
     with pytest.raises(AttributeError):
         _ = adapters.does_not_exist
+
+
+async def _collect_chunks(stream: Any) -> list[ChatChunk]:
+    chunks: list[ChatChunk] = []
+    async with stream:
+        async for chunk in stream:
+            chunks.append(chunk)
+    return chunks
+
+
+def test_selected_voice_model_language_propagate_into_adapters(
+    session: Session,
+) -> None:
+    # The operator's admin selections (voice + model + language) must reach the
+    # built adapters so the session uses — and reports — exactly them (Johnny-88n).
+    _insert(
+        session,
+        kind=ProviderKind.STT,
+        provider_name="deepgram",
+        credentials={"api_key": "s"},
+        options={"model": "nova-3", "language": "en-US"},
+    )
+    _insert(
+        session,
+        kind=ProviderKind.LLM,
+        provider_name="openai",
+        credentials={"api_key": "l"},
+        options={"model": "gpt-4o"},
+    )
+    _insert(
+        session,
+        kind=ProviderKind.TTS,
+        provider_name="cartesia",
+        credentials={"api_key": "t"},
+        options={"voice_id": "sonic", "model_id": "sonic-2024"},
+    )
+
+    adapters = build_session_adapters(session, registry=_registry())
+
+    # deepgram streams -> a bare JohnnySTT; narrow for the model/language probe.
+    stt_adapter = adapters.stt
+    assert isinstance(stt_adapter, JohnnySTT)
+    assert stt_adapter.model == "nova-3"
+    assert stt_adapter._language == "en-US"
+
+    assert adapters.llm.model == "gpt-4o"
+
+    # voice_id is passed through explicitly (not left to the provider default),
+    # and the TTS model label resolves via the model_id fallback key.
+    assert adapters.tts._voice == "sonic"
+    assert adapters.tts.model == "sonic-2024"
+
+
+def test_unset_selections_fall_back_to_provider_defaults(session: Session) -> None:
+    # No voice/model/language in any config row: the adapters override nothing
+    # (voice=None -> provider default), and the labels read "unknown".
+    _seed_split(session)
+
+    adapters = build_session_adapters(session, registry=_registry())
+
+    stt_adapter = adapters.stt
+    assert isinstance(stt_adapter, JohnnySTT)
+    assert stt_adapter.model == "unknown"
+    assert stt_adapter._language is None
+
+    assert adapters.llm.model == "unknown"
+
+    assert adapters.tts._voice is None
+    assert adapters.tts.model == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "options", "expected_model", "expected_language"),
+    [
+        # ElevenLabs Scribe stores its selection under model_id / language_code.
+        (
+            "elevenlabs",
+            {"model_id": "scribe_v2", "language_code": "fi"},
+            "scribe_v2",
+            "fi",
+        ),
+        # faster-whisper names its model option model_size.
+        (
+            "faster-whisper",
+            {"model_size": "small", "language": "sv"},
+            "small",
+            "sv",
+        ),
+    ],
+)
+def test_heterogeneous_stt_config_keys_are_read(
+    session: Session,
+    provider_name: str,
+    options: dict[str, Any],
+    expected_model: str,
+    expected_language: str,
+) -> None:
+    # The split STT providers use non-uniform config keys for model/language;
+    # the factory's candidate-key lookup resolves each so the label is correct
+    # regardless of which provider is active. Both of these are batch-only, so
+    # the STT surface is a VAD-buffered StreamAdapter wrapping a JohnnySTT.
+    reg = _registry()
+    reg.register(ProviderKind.STT, provider_name, _FakeSTT)
+    _insert(
+        session,
+        kind=ProviderKind.STT,
+        provider_name=provider_name,
+        credentials={"api_key": "s"},
+        options=options,
+    )
+    _insert(session, kind=ProviderKind.LLM, provider_name="openai", credentials={"api_key": "l"})
+    _insert(session, kind=ProviderKind.TTS, provider_name="cartesia", credentials={"api_key": "t"})
+
+    adapters = build_session_adapters(session, registry=reg, vad=_NullVAD())
+
+    assert isinstance(adapters.stt, StreamAdapter)
+    wrapped = adapters.stt.wrapped_stt
+    assert isinstance(wrapped, JohnnySTT)
+    assert wrapped.model == expected_model
+    assert wrapped._language == expected_language
+
+
+async def test_configured_tools_propagate_through_factory_llm_adapter(
+    session: Session,
+) -> None:
+    # Tools are not configured in admin and are not a factory-construction
+    # concern — in a LiveKit session they come from the Agent per turn. Parity
+    # means the factory-built JohnnyLLM forwards them to LLMProvider.chat: drive
+    # a real function_tool through the built adapter and assert it lands on the
+    # wrapped provider as a Johnny ToolDefinition.
+    _seed_split(session)
+    adapters = build_session_adapters(session, registry=_registry())
+    llm_provider = adapters.llm._provider
+    assert isinstance(llm_provider, _FakeLLM)
+
+    @function_tool
+    async def get_weather(location: str) -> str:
+        """Look up the weather for a location."""
+        return "sunny"
+
+    ctx = ChatContext(items=[LKChatMessage(role="user", content=["weather?"])])
+    await _collect_chunks(adapters.llm.chat(chat_ctx=ctx, tools=[get_weather]))
+
+    assert llm_provider.received_tools is not None
+    assert [tool.name for tool in llm_provider.received_tools] == ["get_weather"]
 
 
 def test_providers_public_surface_unchanged() -> None:

@@ -34,6 +34,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from sqlalchemy import select
+
+from app.db.models import ProviderCredential
 from app.providers.base import (
     LLMProvider,
     ProviderError,
@@ -65,6 +68,28 @@ _SPLIT_KINDS: tuple[ProviderKind, ...] = (
     ProviderKind.LLM,
     ProviderKind.TTS,
 )
+
+# Admin-config option keys carrying the operator's voice / model / language
+# selection, in priority order per kind. The admin UI writes the choice into
+# ``provider_credentials.config`` under a provider-specific key, and those keys
+# are NOT uniform across the split stack: STT model is ``model`` (Deepgram),
+# ``model_id`` (ElevenLabs, Parakeet) or ``model_size`` (faster-whisper); STT
+# language is ``language`` or ``language_code`` (ElevenLabs); TTS model is
+# ``model`` (OpenAI) or ``model_id`` (the rest); TTS voice is always
+# ``voice_id``; LLM model is always ``model``. Reading the config row (rather
+# than the live provider) is the one uniform source — provider instances expose
+# these under inconsistent property names, and some not at all (``openai`` LLM
+# has no ``model`` property; faster-whisper's ``model`` is the loaded weights
+# object, not its name). These selections are threaded into the adapters purely
+# so LiveKit metrics / traces name the real model+voice (and so STT stamps the
+# configured language onto each transcript); the *behaviour* is provider-owned —
+# every live provider already applies its own config — so a key this map misses
+# degrades only the label, never the audio. ``app.providers`` stays untouched.
+_VOICE_KEYS: tuple[str, ...] = ("voice_id",)
+_TTS_MODEL_KEYS: tuple[str, ...] = ("model", "model_id")
+_LLM_MODEL_KEYS: tuple[str, ...] = ("model",)
+_STT_MODEL_KEYS: tuple[str, ...] = ("model", "model_id", "model_size")
+_STT_LANGUAGE_KEYS: tuple[str, ...] = ("language", "language_code")
 
 
 class AgentSessionSetupError(ProviderError):
@@ -131,6 +156,41 @@ def _wrong_type(kind: ProviderKind, instance: ProviderInstance, expected: str) -
     )
 
 
+def _active_options(
+    session: Session,
+    kinds: tuple[ProviderKind, ...],
+) -> dict[ProviderKind, dict[str, Any]]:
+    """Read each active split-kind row's admin config (the ``config`` JSON).
+
+    A second, read-only pass over ``provider_credentials`` alongside
+    :func:`~app.providers.loader.load_active_providers` (which returns live
+    instances and discards their config). The partial unique index
+    ``uq_provider_credentials_active_per_kind`` guarantees at most one active
+    row per kind, so the result has one entry per configured kind. Kept here —
+    not in the loader — so ``app.providers`` stays untouched.
+    """
+    stmt = (
+        select(ProviderCredential.kind, ProviderCredential.config)
+        .where(ProviderCredential.is_active.is_(True))
+        .where(ProviderCredential.kind.in_(list(kinds)))
+    )
+    return {row.kind: dict(row.config or {}) for row in session.execute(stmt).all()}
+
+
+def _selected(options: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    """First non-empty string value in ``options`` under any of ``keys``.
+
+    Returns ``None`` when the operator left the selection unset, so the adapter
+    falls back to the provider's own configured default (and the label simply
+    reflects "not overridden" rather than a guessed value).
+    """
+    for key in keys:
+        value = options.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def build_session_adapters(
     session: Session,
     *,
@@ -157,13 +217,21 @@ def build_session_adapters(
     loaded; when a batch-only STT is active and ``vad`` is ``None`` a default
     Silero VAD is loaded lazily.
 
-    The adapters are constructed with no ``voice`` / ``model`` / ``language``
-    overrides — each provider already carries its admin-configured model and
-    voice, and the TTS adapter's ``voice=None`` falls through to that same
-    configured default — so the operator's choices are honored without the
-    factory re-deriving them (``load_active_providers`` returns live instances,
-    not their config, and stays untouched). Voice/model selection parity at the
-    adapter layer is Johnny-88n.
+    The operator's admin selections are threaded into the adapters so a session
+    uses — and reports — exactly the configured values (Johnny-88n): the TTS
+    voice is passed as the adapter's ``voice`` (and the TTS model as its
+    ``model`` label), the LLM model as the LLM adapter's ``model`` label, and
+    the STT model + language into :func:`build_stt_adapter` (language is also
+    stamped onto every transcript). The values come from the active rows'
+    ``config`` JSON (:func:`_active_options`) — the one uniform source of the
+    operator's choice — not from re-deriving them off the live providers, whose
+    config-property names are inconsistent (see :data:`_VOICE_KEYS` &c.).
+    Behaviour was already correct without this (each provider applies its own
+    config, and ``voice=None`` falls through to the provider default); this adds
+    label/observability parity and the explicit voice pass-through. *Tool*
+    definitions are not a factory concern: Johnny has no admin-configured static
+    tools — in a LiveKit session tools come from the :class:`Agent` per turn and
+    :class:`JohnnyLLM` already forwards them to ``LLMProvider.chat(tools=...)``.
 
     Raises :class:`AgentSessionSetupError` if any of STT / LLM / TTS has no
     active provider, so misconfiguration fails fast at session start instead of
@@ -175,6 +243,7 @@ def build_session_adapters(
         decrypt=decrypt,
         kinds=_SPLIT_KINDS,
     )
+    options = _active_options(session, _SPLIT_KINDS)
     stt = _require(active, ProviderKind.STT)
     if not isinstance(stt, STTProvider):
         raise AgentSessionSetupError(_wrong_type(ProviderKind.STT, stt, "STTProvider"))
@@ -184,10 +253,22 @@ def build_session_adapters(
     tts = _require(active, ProviderKind.TTS)
     if not isinstance(tts, TTSProvider):
         raise AgentSessionSetupError(_wrong_type(ProviderKind.TTS, tts, "TTSProvider"))
+    stt_opts = options.get(ProviderKind.STT, {})
+    llm_opts = options.get(ProviderKind.LLM, {})
+    tts_opts = options.get(ProviderKind.TTS, {})
     return SessionAdapters(
-        stt=build_stt_adapter(stt, vad=vad),
-        llm=JohnnyLLM(llm),
-        tts=JohnnyTTS(tts),
+        stt=build_stt_adapter(
+            stt,
+            vad=vad,
+            language=_selected(stt_opts, _STT_LANGUAGE_KEYS),
+            model=_selected(stt_opts, _STT_MODEL_KEYS),
+        ),
+        llm=JohnnyLLM(llm, model=_selected(llm_opts, _LLM_MODEL_KEYS)),
+        tts=JohnnyTTS(
+            tts,
+            voice=_selected(tts_opts, _VOICE_KEYS),
+            model=_selected(tts_opts, _TTS_MODEL_KEYS),
+        ),
     )
 
 

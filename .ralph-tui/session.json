@@ -3,10 +3,10 @@
   "sessionId": "17b1f649-1d33-441a-bfd0-469c8d89870f",
   "status": "running",
   "startedAt": "2026-06-08T17:25:57.487Z",
-  "updatedAt": "2026-06-08T19:46:38.596Z",
-  "currentIteration": 8,
+  "updatedAt": "2026-06-08T20:05:06.022Z",
+  "currentIteration": 9,
   "maxIterations": 0,
-  "tasksCompleted": 7,
+  "tasksCompleted": 8,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -165,8 +165,8 @@
       {
         "id": "Johnny-4fn",
         "title": "[BUILD] Phase 1: StreamAdapter + Silero wrapper for non-streaming STT providers",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-5ag",
@@ -292,6 +292,16 @@
       "durationMs": 876207,
       "startedAt": "2026-06-08T19:10:13.491Z",
       "endedAt": "2026-06-08T19:24:49.698Z"
+    },
+    {
+      "iteration": 9,
+      "status": "completed",
+      "taskId": "Johnny-4fn",
+      "taskTitle": "[BUILD] Phase 1: StreamAdapter + Silero wrapper for non-streaming STT providers",
+      "taskCompleted": true,
+      "durationMs": 1284034,
+      "startedAt": "2026-06-08T19:25:13.604Z",
+      "endedAt": "2026-06-08T19:46:37.638Z"
     }
   ],
   "skippedTaskIds": [],

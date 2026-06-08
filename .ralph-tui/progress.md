@@ -317,6 +317,46 @@ Fix: wrap them in `from livekit.agents.stt import StreamAdapter`.
   `livekit.agents.stt` import (PascalCase group, "stream" < "sttc"); `ruff
   check --fix` resolves it.
 
+### Thread admin voice/model/language into the adapters from the config row (Johnny-88n)
+`build_session_adapters` already gets the right *behaviour* for free (each live
+provider applies its own DB config; `JohnnyTTS(voice=None)` falls through to the
+provider default). Johnny-88n adds **label/observability parity** + the explicit
+voice pass-through so LiveKit metrics/traces name the real model+voice and STT
+stamps the configured language onto transcripts. Hard-won specifics:
+- **Read the active row's `config` JSON, NOT the live provider.** `load_active_providers`
+  returns instances and discards their options, and the providers expose
+  voice/model/language under INCONSISTENT property names — some not at all
+  (`openai` LLM has no `.model` property; faster-whisper's `.model` is the
+  loaded weights object, not a name). The admin `config` JSON is the one uniform
+  source of the operator's choice. The factory does a second read-only
+  `select(ProviderCredential.kind, ProviderCredential.config).where(is_active)`
+  scoped to the split kinds (`app.providers` stays UNTOUCHED — the query lives in
+  the factory, reading the `app.db.models.ProviderCredential` ORM, not the
+  loader). The partial unique index `uq_provider_credentials_active_per_kind`
+  guarantees ≤1 active row/kind so the `{kind: options}` map is unambiguous.
+- **Config keys are heterogeneous across providers** — use per-kind candidate-key
+  fallback lists, first non-empty string wins: TTS voice=`voice_id` (uniform);
+  TTS model=`model`|`model_id`; LLM model=`model` (uniform); STT
+  model=`model`|`model_id`|`model_size` (deepgram|elevenlabs/parakeet|faster-whisper);
+  STT language=`language`|`language_code` (elevenlabs). A missed key degrades
+  only the LABEL (→ `"unknown"`/`None`), never the audio. Unset selection → pass
+  `None` so the adapter keeps the provider's own default.
+- **Tools are NOT a factory concern.** Johnny has no admin-configured static
+  tools; in a LiveKit session tools come from the `Agent` per turn and
+  `JohnnyLLM.chat(tools=...)` already forwards them to `LLMProvider.chat`. Parity
+  test = drive a real `@function_tool` through the factory-built adapter and
+  assert the wrapped provider received the mapped `ToolDefinition`.
+- **Browser-validate the parity even with no live session yet** (no agent worker
+  exists): configure a split stack on `/providers` (Kokoro voice catalog pick +
+  faster-whisper model_size/language + openai-compatible free-text model — all
+  keyless/local), then run a probe that calls `build_session_adapters` against the
+  real DB with the real Fernet decryptor (`decrypt_json(get_crypto(), blob)`) and
+  the registry populated by `import app.providers`. Adapter labels must equal the
+  UI selections. Run the probe with the host backend bind-mounted
+  (`docker compose run --rm -v "$PWD/backend":/workspace -w /workspace api python - < probe.py`)
+  because the long-running `api` image can be stale (no source mount) — `docker
+  compose exec api` may not see new modules like `…adapters.factory`.
+
 ---
 
 ## 2026-06-08 - Johnny-jue
@@ -756,5 +796,60 @@ recognise → one `FINAL_TRANSCRIPT` at speech end.
   real Silero model; `end_input()`'s trailing flush sentinel closes the last
   segment, and `merge_frames` preserves a single 16 kHz frame's PCM exactly.
 - ruff `order-by-type` sorts `StreamAdapter` before `STTCapabilities`.
+
+---
+
+## 2026-06-08 - Johnny-88n
+
+Phase-1: thread the operator's admin selections (voice, LLM model, STT
+model/language) from the active provider rows through the adapter factory into
+the `JohnnyXXX` adapters so a LiveKit session uses — and reports — exactly what
+was configured.
+
+**Implemented**
+- `backend/johnny/agent/adapters/factory.py`: added candidate-key constants
+  (`_VOICE_KEYS`/`_TTS_MODEL_KEYS`/`_LLM_MODEL_KEYS`/`_STT_MODEL_KEYS`/
+  `_STT_LANGUAGE_KEYS`), `_active_options()` (a second read-only
+  `select(ProviderCredential.kind, ProviderCredential.config)` over the active
+  split rows — `app.providers` untouched) and `_selected()` (first non-empty
+  string under any candidate key). `build_session_adapters` now passes
+  `JohnnyTTS(voice=…, model=…)`, `JohnnyLLM(model=…)`, and
+  `build_stt_adapter(language=…, model=…)`. The adapter ctors already accepted
+  these params (added "for Johnny-88n" by 6nl/7a3/c81/zb3); this fills them.
+  Behaviour was already correct (provider applies its own config); this adds
+  label/observability parity + explicit voice pass-through.
+- `backend/tests/agent/test_adapter_factory.py`: `_FakeLLM` now records
+  `received_tools`; added `test_selected_voice_model_language_propagate_into_adapters`,
+  `test_unset_selections_fall_back_to_provider_defaults`,
+  `test_heterogeneous_stt_config_keys_are_read` (parametrized: elevenlabs
+  `model_id`/`language_code`, faster-whisper `model_size`),
+  `test_configured_tools_propagate_through_factory_llm_adapter` (real
+  `@function_tool` driven through the built adapter).
+
+**Validated** (artifacts under `.validation/Johnny-88n/`, gitignored)
+- Gates via the `--no-dev` prod-image pattern: ruff + mypy(strict, 14 files)
+  clean; `pytest tests/agent` → 63 passed.
+- Real-browser (chrome-devtools MCP): configured a full split stack on
+  `/providers` — Kokoro voice `bm_george` (voice catalog pick), faster-whisper
+  `small.en`/`en`, openai-compatible `qwen2.5:7b-instruct` — Saved + Activated
+  each. Probe (`probe.py`) called `build_session_adapters` against the real DB
+  with the real Fernet decryptor; adapter labels matched the UI selections
+  exactly, incl. heterogeneous keys (STT model from `model_size`, TTS model from
+  `model_id`) and the batch-only faster-whisper wrapped in a `StreamAdapter`.
+  See `results.md`.
+
+**Learnings / gotchas**
+- Provider voice/model/language property names are NOT uniform and sometimes
+  absent (`openai` LLM has no `.model`; faster-whisper `.model` is the loaded
+  model object) — the admin `config` JSON is the only reliable uniform source.
+  Config KEYS are also heterogeneous (`model`/`model_id`/`model_size`,
+  `language`/`language_code`) → per-kind candidate-key fallback. (Promoted to a
+  Codebase Pattern above.)
+- The long-running `api` container can be stale (prod-shape image, no source
+  mount) so `docker compose exec api` failed to import the (committed)
+  `…adapters.factory`. Run probes with the host backend bind-mounted via
+  `docker compose run --rm -v "$PWD/backend":/workspace -w /workspace api`.
+- The operator's provider DB was empty; the 3 rows added for validation are left
+  in place (valid local configs) and flagged in `results.md` for easy removal.
 
 ---
