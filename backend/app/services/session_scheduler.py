@@ -123,6 +123,15 @@ class LaunchContext:
     container_name: str
     mode: str = ""
     instructions: str = ""
+    personality_prompt: str = ""
+    """Personality IDENTITY-layer system prompt (Johnny-oly.8).
+
+    The resolved personality's ``description`` wrapped as
+    ``[personality: <name>]\\n<description>``. Forwarded to the meet-worker
+    via the ``JOHNNY_PERSONALITY_PROMPT`` env var so a scheduled bot adopts
+    the same persona a playground session would. Empty when no personality
+    applied.
+    """
     context: str = ""
     calendar_context: str = ""
     """Calendar event description — pre-meeting context from the event itself.
@@ -378,6 +387,7 @@ async def start_session_for_meeting(
     # session.
     provider_payload: dict[str, Any] = {}
     pipeline_mode_value = "split"
+    personality_prompt = ""
     try:
         from app.security.crypto import CryptoError, get_crypto
         from app.services.provider_payload import (
@@ -416,6 +426,10 @@ async def start_session_for_meeting(
             session, provider_payload, personality, crypto=get_crypto()
         )
         provider_payload = resolution.payload
+        # Johnny-oly.8: the personality's description rides to the DB-free
+        # meet-worker as JOHNNY_PERSONALITY_PROMPT so the scheduled bot adopts
+        # the same persona a playground session would.
+        personality_prompt = resolution.personality_prompt
         # Johnny-oly.6: snapshot the resolved personality so history renders this
         # session's bot name and the active-session card can show the character +
         # any provider fallback. ``playground_overrides`` doubles as the generic
@@ -483,6 +497,7 @@ async def start_session_for_meeting(
         container_name=container_name_for_session(row.id),
         mode=str(meeting.mode.value if hasattr(meeting.mode, "value") else meeting.mode),
         instructions=effective_instructions,
+        personality_prompt=personality_prompt,
         context=effective_context,
         calendar_context=calendar_description,
         calendar_attachments_text=calendar_attachments,

@@ -636,6 +636,7 @@ class DockerContainerLauncher(ContainerLauncher):
             "JOHNNY_MEET_LINK": ctx.meet_link,
             "JOHNNY_MODE": ctx.mode or "",
             "JOHNNY_INSTRUCTIONS": ctx.instructions or "",
+            "JOHNNY_PERSONALITY_PROMPT": ctx.personality_prompt or "",
             "JOHNNY_CONTEXT": ctx.context or "",
             "JOHNNY_CALENDAR_CONTEXT": ctx.calendar_context or "",
             "JOHNNY_CALENDAR_ATTACHMENTS": ctx.calendar_attachments_text or "",

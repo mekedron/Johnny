@@ -107,6 +107,15 @@ class PersonalityResolution:
     personality_id: int | None = None
     personality_name: str | None = None
     default_mode: str | None = None
+    personality_prompt: str = ""
+    """The personality's character text, assembled by
+    :func:`build_personality_system_prompt` (Johnny-oly.8).
+
+    Empty when no personality applied. Carried through to the pipeline as
+    the IDENTITY layer of the LLM system prompt (upstream of the per-mode /
+    per-template JOB layer). The session-start callsites copy it onto the
+    pipeline spec / launch context so it reaches the model verbatim.
+    """
     fallbacks: tuple[PersonalityFallback, ...] = field(default_factory=tuple)
 
     @property
@@ -200,6 +209,7 @@ def apply_personality(
         personality_id=personality.id,
         personality_name=personality.display_name,
         default_mode=_mode_value(personality.default_mode),
+        personality_prompt=build_personality_system_prompt(personality),
         fallbacks=tuple(fallbacks),
     )
 
@@ -243,9 +253,44 @@ def _mode_value(mode: Any) -> str | None:
     return mode.value if hasattr(mode, "value") else str(mode)
 
 
+def build_personality_system_prompt(
+    personality: Personality, *, include_preamble: bool = True
+) -> str:
+    """Assemble a personality's IDENTITY-layer system prompt (Johnny-oly.8).
+
+    The personality's freeform ``description`` IS its character text — a
+    paragraph, a bullet list, a YAML-ish blob, whatever the operator wrote —
+    and this function hands it to the LLM verbatim, with at most a one-line
+    preamble naming the personality:
+
+        [personality: <display_name>]
+        <description>
+
+    Deterministic and side-effect-free: no LLM call, no templating beyond the
+    preamble. It composes *upstream* of the per-mode / per-template prompt
+    fragments the pipeline already assembles — personality is the IDENTITY
+    layer, mode/template is the JOB layer.
+
+    Edge cases (the prompt hash must stay stable across saves, so leading /
+    trailing whitespace is normalised away rather than passed through):
+
+    * empty / ``NULL`` description, ``include_preamble=True`` → the preamble
+      alone (``[personality: <name>]``);
+    * empty description, ``include_preamble=False`` → ``""``;
+    * ``include_preamble=False`` → the description alone, no preamble.
+    """
+    name = (personality.display_name or "").strip()
+    description = (personality.description or "").strip()
+    if include_preamble and name:
+        preamble = f"[personality: {name}]"
+        return f"{preamble}\n{description}" if description else preamble
+    return description
+
+
 __all__ = [
     "PersonalityFallback",
     "PersonalityResolution",
     "apply_personality",
+    "build_personality_system_prompt",
     "select_personality",
 ]

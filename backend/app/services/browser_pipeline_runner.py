@@ -150,6 +150,17 @@ class BrowserPipelineSpec:
     existing test fixtures and dispatch helpers keep working without
     modification.
     """
+    personality_prompt: str = ""
+    """Personality IDENTITY-layer system prompt (Johnny-oly.8).
+
+    Filled by the API session-start path from
+    :attr:`~app.services.personality_resolver.PersonalityResolution.personality_prompt`
+    (the resolved personality's ``description`` wrapped as
+    ``[personality: <name>]\\n<description>``). Mapped onto the split
+    :class:`PipelineConfig` and the unified :class:`UnifiedPipelineConfig`
+    so the persona reaches the model in either pipeline shape. Empty for a
+    session that resolved no personality.
+    """
 
 
 def _build_provider(
@@ -259,6 +270,7 @@ def _assemble_split(
         bot_session_id=spec.bot_session_id,
         mode=effective_mode,
         instructions=spec.instructions,
+        personality_prompt=spec.personality_prompt,
         context=spec.context,
         calendar_context=spec.calendar_context,
         calendar_attachments_text=spec.calendar_attachments_text,
@@ -307,6 +319,7 @@ def _assemble_unified(
         session_id=spec.session_id,
         bot_session_id=spec.bot_session_id,
         instructions=spec.instructions,
+        personality_prompt=spec.personality_prompt,
         context=spec.context,
         calendar_context=spec.calendar_context,
         calendar_attachments_text=spec.calendar_attachments_text,

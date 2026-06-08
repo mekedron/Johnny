@@ -89,6 +89,14 @@ class UnifiedPipelineConfig:
     """
 
     instructions: str = ""
+    personality_prompt: str = ""
+    """Personality IDENTITY-layer system prompt (Johnny-oly.8).
+
+    Composed ahead of :attr:`instructions` by :attr:`system_instructions` and
+    handed to the S2S provider as the session's persona. Empty string when no
+    personality applied (regression guard — the S2S prompt is then just
+    ``instructions``).
+    """
     context: str = ""
     calendar_context: str = ""
     calendar_attachments_text: str = ""
@@ -113,6 +121,19 @@ class UnifiedPipelineConfig:
     frame_duration_ms: int = DEFAULT_FRAME_DURATION_MS
     session_id: str | None = None
     bot_session_id: int | None = None
+
+    @property
+    def system_instructions(self) -> str:
+        """Personality persona composed ahead of the meeting instructions.
+
+        The S2S provider takes a single ``instructions`` string as its whole
+        system prompt, so the personality IDENTITY layer (Johnny-oly.8) is
+        prepended to the JOB-layer instructions here. Returns ``instructions``
+        unchanged when no personality applied.
+        """
+        if self.personality_prompt and self.instructions:
+            return f"{self.personality_prompt}\n\n{self.instructions}"
+        return self.personality_prompt or self.instructions
 
 
 class UnifiedVoicePipeline:
@@ -168,7 +189,7 @@ class UnifiedVoicePipeline:
         self._session_started_at = loop.time()
         try:
             session = await self.s2s.open_session(
-                instructions=self.config.instructions,
+                instructions=self.config.system_instructions,
                 voice_id=self.config.voice_id,
             )
         except Exception as exc:  # noqa: BLE001 — surface to caller
@@ -454,7 +475,7 @@ class UnifiedVoicePipeline:
         try:
             await self.utterance_sink.record(
                 mode="unified",
-                prompt=self.config.instructions,
+                prompt=self.config.system_instructions,
                 output_text=text,
                 audio_duration_ms=audio_duration_ms,
                 matched_allowed_reply=None,

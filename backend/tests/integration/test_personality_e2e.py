@@ -16,17 +16,21 @@ adapter or pay model cost — the "faked provider adapters" the bead asks for).
 Every assertion is on what actually flows into ``BrowserPipelineSpec`` or the
 ``playground_overrides`` snapshot the operator's browser renders.
 
-Three premises in the bead text predate the Johnny-oly.1 PRD and were corrected
+Two premises in the bead text predate the Johnny-oly.1 PRD and were corrected
 by the shipped Johnny-oly.3 resolver; this file is faithful to the *code*, not
 the stale prose, and documents each correction inline:
 
-* **The personality ``description`` is NOT injected as a system prompt in v1.**
-  PRD §1 / the .oly.3 deviations: there is no DB-stored global "Johnny" prompt
-  to replace, and the bootstrap description is operator helper-text. So we
-  assert the personality *identity* rides in the snapshot + ``bot_name`` and
-  that the description is deliberately absent from ``spec.instructions`` — the
-  opposite of the bead's "system prompt contains the description verbatim",
-  which would break the zero-behaviour-change guarantee.
+* **The personality ``description`` IS injected as the LLM system prompt
+  (Johnny-oly.8).** The original .oly.1 PRD deferred persona text to a v2
+  field, and the first cut of this suite asserted the description was *absent*
+  from the prompt. Johnny-oly.8 reversed that operator-side: the single
+  freeform ``description`` is now THE personality's character text, assembled
+  by ``build_personality_system_prompt`` into ``[personality: <name>]\n<desc>``
+  and carried to the pipeline on ``spec.personality_prompt`` (a distinct
+  IDENTITY layer — deliberately NOT folded into ``spec.instructions``, which
+  stays the JOB layer). So we assert the description rides on
+  ``spec.personality_prompt``; ``tests/voice_pipeline/test_pipeline.py`` proves
+  that field reaches the router + answer system messages verbatim.
 * **One-active-provider-per-kind** (the ``uq_provider_credentials_active_per_kind``
   partial unique index) means a *valid* personality override can only point at
   the single active row for its kind — i.e. it resolves byte-for-byte to the
@@ -359,8 +363,9 @@ def test_personality_a_session_loads_pinned_providers_and_snapshot(
 ) -> None:
     """Bead A.2: start a session passing personality A → the resolved
     ``provider_payload`` carries A's (active) LLM + TTS, the snapshot names A,
-    ``bot_name`` is A's name, and — per the §B correction — A's *description*
-    is NOT leaked into the system prompt."""
+    ``bot_name`` is A's name, and — per Johnny-oly.8 — A's *description* rides
+    to the pipeline as the IDENTITY-layer ``personality_prompt`` (NOT folded
+    into the JOB-layer ``instructions``)."""
     llm_a = _provider(db_session, kind=ProviderKind.LLM, name="brain-a", is_active=True)
     tts_a = _provider(db_session, kind=ProviderKind.TTS, name="voice-a", is_active=True)
     a = _create_personality(
@@ -377,7 +382,9 @@ def test_personality_a_session_loads_pinned_providers_and_snapshot(
     spec = _spec(_no_real_pipeline)
     assert spec.provider_payload["llm"]["provider_name"] == "brain-a"
     assert spec.provider_payload["tts"]["provider_name"] == "voice-a"
-    # description must NOT have become a system prompt (zero-behaviour-change).
+    # Johnny-oly.8: the description becomes the IDENTITY-layer persona prompt,
+    # wrapped with the preamble, and is kept OUT of the JOB-layer instructions.
+    assert spec.personality_prompt == "[personality: Alice]\nALICE-SECRET-PERSONA-TEXT"
     assert "ALICE-SECRET-PERSONA-TEXT" not in (spec.instructions or "")
 
     ov = res.json()["playground_overrides"]

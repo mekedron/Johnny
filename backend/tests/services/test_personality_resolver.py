@@ -39,6 +39,7 @@ from app.db.models import (
 from app.security.crypto import CredentialCrypto, encrypt_json
 from app.services.personality_resolver import (
     apply_personality,
+    build_personality_system_prompt,
     select_personality,
 )
 from app.services.provider_payload import build_provider_payload
@@ -451,3 +452,82 @@ def test_apply_does_not_mutate_base_and_is_independent_across_calls(
     res1.payload["llm"]["provider_name"] = "MUTATED"
     assert res2.payload["llm"]["provider_name"] == "A"
     assert base["llm"]["provider_name"] == "A"
+
+
+# --- build_personality_system_prompt (Johnny-oly.8) ------------------------
+
+
+def test_build_prompt_default_format_is_preamble_plus_description() -> None:
+    """Default output is ``[personality: <name>]\\n<description>`` and the
+    description rides verbatim — the contract the session prompt depends on."""
+    p = Personality(
+        display_name="Sarah",
+        description="You are a calm therapist. xx-marker-12345-xx",
+    )
+    out = build_personality_system_prompt(p)
+    assert out == "[personality: Sarah]\nYou are a calm therapist. xx-marker-12345-xx"
+    assert "xx-marker-12345-xx" in out
+
+
+def test_build_prompt_preserves_internal_multiline_formatting() -> None:
+    """A multi-line, indented description (lists / examples) survives verbatim
+    below the preamble — operators may write any shape."""
+    desc = "Style:\n  - short sentences\n  - warm but precise\nNever: give advice"
+    p = Personality(display_name="Coach", description=desc)
+    out = build_personality_system_prompt(p)
+    assert out == f"[personality: Coach]\n{desc}"
+
+
+def test_build_prompt_empty_description_returns_preamble_alone() -> None:
+    """Empty / NULL description → the preamble alone, with NO trailing newline
+    (a dangling ``\\n`` would change the prompt hash for no reason)."""
+    assert build_personality_system_prompt(
+        Personality(display_name="Johnny", description=None)
+    ) == "[personality: Johnny]"
+    assert build_personality_system_prompt(
+        Personality(display_name="Johnny", description="")
+    ) == "[personality: Johnny]"
+
+
+def test_build_prompt_skip_preamble_returns_description_only() -> None:
+    p = Personality(display_name="Sarah", description="Just the persona text.")
+    assert (
+        build_personality_system_prompt(p, include_preamble=False)
+        == "Just the persona text."
+    )
+
+
+def test_build_prompt_skip_preamble_empty_description_is_empty() -> None:
+    p = Personality(display_name="Sarah", description=None)
+    assert build_personality_system_prompt(p, include_preamble=False) == ""
+
+
+def test_build_prompt_normalises_surrounding_whitespace_for_stable_hash() -> None:
+    """Leading / trailing whitespace (e.g. a textarea's trailing newline) is
+    normalised away so re-saving the same text yields the same prompt — no
+    surprise hash churn across saves."""
+    p = Personality(display_name="Sarah", description="  persona body\n\n")
+    out = build_personality_system_prompt(p)
+    assert out == "[personality: Sarah]\npersona body"
+    assert out == out.strip()  # no leading/trailing whitespace
+
+
+def test_apply_personality_carries_personality_prompt(
+    session: Session, crypto: CredentialCrypto
+) -> None:
+    """The resolver surfaces the assembled persona on the resolution so the
+    session-start callsites can forward it to the pipeline."""
+    p = Personality(display_name="Sarah", description="xx-marker-12345-xx")
+    session.add(p)
+    session.flush()
+    res = apply_personality(session, {}, p, crypto=crypto)
+    assert res.personality_prompt == "[personality: Sarah]\nxx-marker-12345-xx"
+
+
+def test_apply_no_personality_has_empty_prompt(
+    session: Session, crypto: CredentialCrypto
+) -> None:
+    """No personality → empty persona, so nothing is injected (regression
+    guard: today's no-personality sessions get an unchanged prompt)."""
+    res = apply_personality(session, {}, None, crypto=crypto)
+    assert res.personality_prompt == ""

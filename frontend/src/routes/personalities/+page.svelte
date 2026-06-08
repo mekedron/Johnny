@@ -32,8 +32,21 @@
 		type PersonalityFormErrors
 	} from '$lib/personalities';
 
-	const DESCRIPTION_PLACEHOLDER =
-		'Warm, supportive, never sarcastic. Asks clarifying questions before drafting code. Avoids hedging.';
+	// Johnny-oly.8: the description IS the personality's character text, injected
+	// verbatim as the LLM system prompt. The placeholder coaches structure
+	// without dictating it — the operator may keep, rewrite, or delete any of it.
+	const DESCRIPTION_PLACEHOLDER = `Example (you can write anything, in any shape):
+
+You are Sarah, a calm therapist with a CBT background.
+Style: short sentences, warm but precise. Ask one clarifying
+question before offering a perspective.
+Always: discuss communication patterns and emotional regulation
+in general terms.
+Never: give medical advice or make diagnostic claims; redirect
+to a licensed professional instead.`;
+
+	// Past this length we nudge about token cost — informational, never a block.
+	const DESCRIPTION_TOKEN_HINT_THRESHOLD = 4000;
 
 	let personalities = $state<Personality[]>([]);
 	let llmProviders = $state<Provider[]>([]);
@@ -61,6 +74,7 @@
 	const llmById = $derived(new Map(llmProviders.map((p) => [p.id, p])));
 	const ttsById = $derived(new Map(ttsProviders.map((p) => [p.id, p])));
 	const selectedTts = $derived(formTtsId === null ? null : (ttsById.get(formTtsId) ?? null));
+	const descriptionIsLong = $derived(formDescription.length > DESCRIPTION_TOKEN_HINT_THRESHOLD);
 
 	async function loadAll() {
 		loading = true;
@@ -290,7 +304,7 @@
 <Page>
 	<PageHeader
 		title="Personalities"
-		description="Named presets that pick Johnny's brain (LLM), voice (TTS), and default mode for a session. Attach one to a meeting or playground run."
+		description="Named presets that pick Johnny's character (system prompt), brain (LLM), voice (TTS), and default mode for a session. Attach one to a meeting or playground run."
 	>
 		{#snippet actions()}
 			<Button onclick={openNewForm} data-testid="new-personality-button">
@@ -510,22 +524,28 @@
 								Description
 							</label>
 							<span class="font-mono text-xs text-ink-subtle" data-testid="form-description-count">
-								{formDescription.length}
+								{formDescription.length.toLocaleString()}
 							</span>
 						</div>
 						<textarea
 							id="p-description"
 							bind:value={formDescription}
 							use:autoResize
-							rows="3"
+							rows="10"
 							placeholder={DESCRIPTION_PLACEHOLDER}
-							class="border-input flex max-h-72 min-h-[4.5rem] w-full resize-none overflow-y-auto rounded-md border bg-background px-3 py-2 font-mono text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
+							class="border-input flex max-h-[28rem] min-h-[14rem] w-full resize-y overflow-y-auto rounded-md border bg-background px-3 py-2 font-mono text-sm leading-relaxed shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
 							data-testid="form-description"
 						></textarea>
 						<p class="m-0 text-xs text-muted-foreground">
-							A short note on what this personality is for. Helper text only — it does not
-							change Johnny's behaviour.
+							Freeform character text — injected verbatim as Johnny's system prompt for this
+							personality. Write a paragraph, a bullet list, an Always/Never block, whatever
+							helps the model act like the character.
 						</p>
+						{#if descriptionIsLong}
+							<p class="m-0 text-xs text-ink-subtle" data-testid="form-description-token-hint">
+								Long prompts cost more tokens per turn — trim if you can.
+							</p>
+						{/if}
 					</section>
 
 					<section class="flex flex-col gap-2">

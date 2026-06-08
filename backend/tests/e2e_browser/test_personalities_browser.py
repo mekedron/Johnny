@@ -71,6 +71,36 @@ two live browser sessions were present and ``SINGLE_SESSION_POLICY="reject"``
 would 409 a new start (and reaping would disturb the operator's sessions).
 
 ----------------------------------------------------------------------------
+Johnny-oly.8 addendum — character → system prompt (2026-06-08, chrome-devtools
+MCP against the live dev Compose stack). Artifacts under
+``.validation/Johnny-oly.8/NN-*.png`` (local-path notes; never committed):
+
+  1. /personalities → "New personality": the description editor renders the
+     multi-line placeholder example (Sarah/CBT, Style/Always/Never), the helper
+     text now reads "Freeform character text — injected verbatim as Johnny's
+     system prompt", a ~10-row monospace textarea with a vertical resize handle,
+     and a live char counter.                                      01-*.png
+  2. Filled the description with a sentinel ("xx-marker-12345-xx"); counter
+     showed 226; "Create personality" → POST /personalities 201.   02-*.png
+  3. Playground → the Personality picker listed "Sarah CBT oly8"; selecting it +
+     "Start session" → POST /sessions/browser/start 201; the live session chip
+     showed Character "Sarah CBT oly8" (Split pipeline, Autonomous).03-*.png
+  4. Token-cost hint: typed a 4 559-char description → counter "4,559" and the
+     muted "Long prompts cost more tokens per turn — trim if you can." line
+     appeared (hidden under 4 000).                                 04-*.png
+  5. LIVE CHAIN PROOF (container-side, against the row created in step 2):
+     ``select_personality`` + ``apply_personality`` on the real DB row →
+     ``resolution.personality_prompt == "[personality: Sarah CBT oly8]\n<desc>"``
+     (sentinel present); feeding that into a real ``PipelineConfig`` and calling
+     ``VoicePipeline._router_messages`` / ``_answer_messages`` put the sentinel
+     in BOTH system messages, with the persona rendered ABOVE "Meeting
+     instructions:" (IDENTITY before JOB). This is the deterministic backend
+     proof behind ``tests/voice_pipeline/test_pipeline.py``'s
+     ``test_personality_prompt_reaches_router_and_answer_system_prompt``.
+  6. Cleanup: the playground session ended on idle; deleted "Sarah CBT oly8"
+     (confirm dialog → DELETE 204) → operator DB back to the bootstrap "Johnny".
+
+----------------------------------------------------------------------------
 Re-run recipe (manual, agent-driven):
 
   1. ``./run-dev.sh`` (or ``./run.sh``) to bring the stack up; ``./scripts/

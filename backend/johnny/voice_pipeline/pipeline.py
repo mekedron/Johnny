@@ -422,6 +422,16 @@ class PipelineConfig:
     """
 
     instructions: str = ""
+    personality_prompt: str = ""
+    """Personality IDENTITY-layer system prompt (Johnny-oly.8).
+
+    The session's personality ``description`` assembled by
+    :func:`app.services.personality_resolver.build_personality_system_prompt`
+    (``[personality: <name>]\\n<description>``). Rendered FIRST in the router /
+    answer system message — upstream of mode, instructions, and context — so
+    the model adopts the character before it reads the job. Empty string when
+    no personality applied, in which case nothing is added (regression guard).
+    """
     context: str = ""
     calendar_context: str = ""
     """Calendar event description merged into the system prompt.
@@ -2308,6 +2318,8 @@ class VoicePipeline:
             "the bot should speak in response to the latest transcript. "
             "Reply as JSON matching the supplied schema."
         )
+        if self.config.personality_prompt:
+            system += f"\n\n{self.config.personality_prompt}"
         system += (
             f"\n\nIn the 'Recent conversation' list below, lines prefixed "
             f"'{BOT_SPEAKER_LABEL}:' are the bot's OWN earlier utterances "
@@ -2399,6 +2411,8 @@ class VoicePipeline:
             "You are an AI meeting participant. Produce a concise spoken "
             "reply to the latest transcript."
         )
+        if self.config.personality_prompt:
+            system += f"\n\n{self.config.personality_prompt}"
         system += (
             f"\n\nIn the 'Recent conversation' list below, lines prefixed "
             f"'{BOT_SPEAKER_LABEL}:' are YOUR own earlier utterances in this "

@@ -342,6 +342,19 @@ JOHNNY_LIVEKIT_SMOKE_TOKEN=<token-minted-with-livekit-cli> \
 uv run pytest -k livekit_smoke -v
 ```
 
+## Personalities
+
+A **personality** is a named, reusable preset that decides which character,
+brain, and voice Johnny brings to a session. Manage them at
+[`/personalities`](http://localhost:5173/personalities): each one bundles a
+freeform **character** field, an optional LLM override, an optional TTS voice,
+and a default decision mode. The personality's character is freeform text
+injected verbatim as the LLM system prompt — write a paragraph, a bullet list,
+an Always/Never block, whatever helps the model act like the character. Attach a
+personality to a calendar meeting or pick one when starting a playground
+session; the bootstrap **Johnny** default inherits the globally active providers
+so an operator who never opens the page sees no change.
+
 ## Quality gates
 
 Backend (from `backend/`):

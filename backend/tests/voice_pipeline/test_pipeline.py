@@ -4379,6 +4379,59 @@ async def test_answer_prompt_includes_calendar_context_and_summary() -> None:
     assert "Earlier (summary): Earlier: ten minutes of agenda review." in user_content
 
 
+async def test_personality_prompt_reaches_router_and_answer_system_prompt() -> None:
+    """Johnny-oly.8: the personality persona (carried on
+    ``PipelineConfig.personality_prompt``) is injected verbatim into BOTH the
+    router and answer LLM system messages, upstream of the meeting instructions
+    — IDENTITY layer before JOB layer. This is the "captures the LLM call"
+    assertion: ``messages[0]`` is exactly the system message handed to the
+    provider's ``chat``."""
+    persona = "[personality: Sarah]\nYou are a calm therapist. xx-marker-12345-xx"
+    cfg = PipelineConfig(
+        personality_prompt=persona,
+        instructions="Stay on the agenda.",
+    )
+    pipeline = _bare_pipeline(config=cfg)
+    transcript = TranscriptFinalized(
+        text="hello there", timestamp_ms=100, speaker="Alice"
+    )
+    pipeline._remember_transcript(transcript)
+
+    snapshot = await pipeline._build_input_window(transcript)
+    router_sys = pipeline._router_messages(transcript, snapshot)[0].content or ""
+    decision = RouterDecision(should_speak=True, confidence=0.9, reason="ack")
+    answer_sys = pipeline._answer_messages(transcript, decision)[0].content or ""
+
+    # the persona (with the description's sentinel) reaches both LLM calls.
+    assert "xx-marker-12345-xx" in router_sys
+    assert "xx-marker-12345-xx" in answer_sys
+    # IDENTITY upstream of JOB: the persona precedes the meeting instructions.
+    assert router_sys.index("[personality: Sarah]") < router_sys.index(
+        "Meeting instructions:"
+    )
+    assert answer_sys.index("[personality: Sarah]") < answer_sys.index(
+        "Meeting instructions:"
+    )
+
+
+async def test_no_personality_prompt_leaves_system_prompt_unchanged() -> None:
+    """Regression guard: an empty ``personality_prompt`` (no personality
+    applied) injects nothing, so today's no-personality sessions keep their
+    exact prompt."""
+    cfg = PipelineConfig(instructions="Stay on the agenda.")  # personality_prompt=""
+    pipeline = _bare_pipeline(config=cfg)
+    transcript = TranscriptFinalized(text="hello", timestamp_ms=100, speaker="Alice")
+    pipeline._remember_transcript(transcript)
+
+    snapshot = await pipeline._build_input_window(transcript)
+    router_sys = pipeline._router_messages(transcript, snapshot)[0].content or ""
+    answer_sys = pipeline._answer_messages(
+        transcript, RouterDecision(should_speak=False, confidence=0.1, reason="n")
+    )[0].content or ""
+    assert "[personality:" not in router_sys
+    assert "[personality:" not in answer_sys
+
+
 async def test_router_prompt_includes_calendar_attachments_text() -> None:
     """Johnny-4da: resolved Drive bodies reach the router system prompt."""
     router = _build_summary_router("Earlier: planning.")

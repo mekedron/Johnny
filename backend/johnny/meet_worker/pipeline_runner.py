@@ -77,6 +77,16 @@ logger = logging.getLogger(__name__)
 PROVIDER_CONFIG_ENV = "JOHNNY_PROVIDER_CONFIG"
 MODE_ENV = "JOHNNY_MODE"
 INSTRUCTIONS_ENV = "JOHNNY_INSTRUCTIONS"
+PERSONALITY_PROMPT_ENV = "JOHNNY_PERSONALITY_PROMPT"
+"""Personality IDENTITY-layer system prompt (Johnny-oly.8).
+
+Set by :mod:`app.services.docker_launcher` from
+:attr:`app.services.session_scheduler.LaunchContext.personality_prompt`
+(the resolved personality's ``description`` wrapped as
+``[personality: <name>]\\n<description>``). Rendered as the persona ahead of
+the meeting instructions so a scheduled bot adopts the same character a
+playground session would. Empty string when no personality applied.
+"""
 CONTEXT_ENV = "JOHNNY_CONTEXT"
 CALENDAR_CONTEXT_ENV = "JOHNNY_CALENDAR_CONTEXT"
 CALENDAR_ATTACHMENTS_ENV = "JOHNNY_CALENDAR_ATTACHMENTS"
@@ -350,6 +360,7 @@ async def _assemble_unified_pipeline(
         )
 
     instructions = env.get(INSTRUCTIONS_ENV, "")
+    personality_prompt = env.get(PERSONALITY_PROMPT_ENV, "")
     context = env.get(CONTEXT_ENV, "")
     calendar_context = env.get(CALENDAR_CONTEXT_ENV, "")
     calendar_attachments_text = env.get(CALENDAR_ATTACHMENTS_ENV, "")
@@ -361,6 +372,7 @@ async def _assemble_unified_pipeline(
         session_id=session_id,
         bot_session_id=bot_session_id,
         instructions=instructions,
+        personality_prompt=personality_prompt,
         context=context,
         calendar_context=calendar_context,
         calendar_attachments_text=calendar_attachments_text,
@@ -443,6 +455,7 @@ async def _assemble_pipeline(
 
     mode = _resolve_mode(env)
     instructions = env.get(INSTRUCTIONS_ENV, "")
+    personality_prompt = env.get(PERSONALITY_PROMPT_ENV, "")
     context = env.get(CONTEXT_ENV, "")
     calendar_context = env.get(CALENDAR_CONTEXT_ENV, "")
     calendar_attachments_text = env.get(CALENDAR_ATTACHMENTS_ENV, "")
@@ -456,6 +469,7 @@ async def _assemble_pipeline(
         bot_session_id=bot_session_id,
         mode=mode,
         instructions=instructions,
+        personality_prompt=personality_prompt,
         context=context,
         calendar_context=calendar_context,
         calendar_attachments_text=calendar_attachments_text,
@@ -484,6 +498,7 @@ async def _assemble_pipeline(
             bot_session_id=bot_session_id,
             mode=SUGGEST_ONLY_MODE,
             instructions=instructions,
+            personality_prompt=personality_prompt,
             context=context,
             calendar_context=calendar_context,
             calendar_attachments_text=calendar_attachments_text,
