@@ -1,0 +1,79 @@
+{
+  "session_id": "14",
+  "label": "session-14-silent-drop",
+  "runtime": "split",
+  "mode": "autonomous",
+  "confidence_threshold": 0.7,
+  "allowed_replies": [],
+  "instructions": "Respond directly without any speaker label, bot name, role prefix, or text before the actual message.",
+  "_provenance": "Reconstructed from tasks/prd-pipeline-decision-revision.md Section A (the .28.1 forensic timeline). The original Postgres volume was reset before this fixture was authored, so the data comes from the audit reconstruction, not a live dump. 4 transcripts, 3 decisions, 1 utterance: turn 4 was the flagship silent drop (router LLM hung ~60s with no timeout bound). With the .28.3 router timeout + terminal-on-every-path fix in place, replaying this fixture now terminates turn 4 in a durable no_reply(stage_error) instead of vanishing — invariants mode PASSES (the fix holds) and regression mode shows turn 4's terminal_state changing from null (recorded silence) to no_reply (the fix).",
+  "turns": [
+    {
+      "text": "Hey, can you send me something? Because I'm just testing all the things here.",
+      "confidence": 0.9,
+      "router": {
+        "should_speak": false,
+        "confidence": 0.15,
+        "reason": "user is testing functionality, no specific request; no prior utterances to reference.",
+        "reply_type": null,
+        "suggested_reply": null
+      },
+      "answer": null,
+      "recorded": {
+        "should_speak": false,
+        "terminal_state": "no_reply",
+        "outcome": "suppressed",
+        "spoke_text": null
+      }
+    },
+    {
+      "text": "Hey, but tell me something.",
+      "confidence": 0.9,
+      "router": {
+        "should_speak": false,
+        "confidence": 0.15,
+        "reason": "message is vague; no specific topic or action requested.",
+        "reply_type": null,
+        "suggested_reply": null
+      },
+      "answer": null,
+      "recorded": {
+        "should_speak": false,
+        "terminal_state": "no_reply",
+        "outcome": "suppressed",
+        "spoke_text": null
+      }
+    },
+    {
+      "text": "Hey Bot, why are you not talking to me? I need to ensure that someone hears me.",
+      "confidence": 0.9,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.92,
+        "reason": "direct address to the bot expressing being unheard; an empathetic acknowledgement is warranted.",
+        "reply_type": "empathetic_response",
+        "suggested_reply": "I'm sorry I've been quiet—your voice matters, and I'm here to listen now. What would you like to share or discuss? I'm listening and ready to talk with you."
+      },
+      "answer": "Because I'm here to listen now, and I just realized I've been quiet. I'm sorry—I didn't want to interrupt or miss what you said. You asked me to share or discuss something, and I'm listening and ready to talk with you. What would you like to share or discuss?",
+      "recorded": {
+        "should_speak": true,
+        "terminal_state": "replied",
+        "outcome": "spoken",
+        "spoke_text": "Because I'm here to listen now, and I just realized I've been quiet. I'm sorry—I didn't want to interrupt or miss what you said. You asked me to share or discuss something, and I'm listening and ready to talk with you. What would you like to share or discuss?"
+      }
+    },
+    {
+      "text": "Hey, do you have some sort of updates for the upcoming week, which you're gonna do with your IT and marketing teams because you're the product owner.",
+      "confidence": 0.9,
+      "simulate": "timeout",
+      "router": {},
+      "answer": null,
+      "recorded": {
+        "should_speak": null,
+        "terminal_state": null,
+        "outcome": null,
+        "spoke_text": null
+      }
+    }
+  ]
+}

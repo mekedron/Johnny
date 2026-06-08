@@ -51,6 +51,7 @@
 	} from '$lib/sessionEvents';
 	import { approveDecision, rejectDecision } from '$lib/decisions';
 	import SessionTurnTimeline from '$lib/components/SessionTurnTimeline.svelte';
+import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 	import {
 		assembleTurns,
 		extractHeard,
@@ -1144,6 +1145,8 @@
 		{/if}
 
 		<SessionTurnTimeline turns={turns} />
+
+		<SessionReplayPanel {sessionId} />
 
 		<div class="grid gap-5 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
 			<Card.Root class="flex max-h-[70vh] flex-col gap-0 py-0" data-testid="transcript-pane">

@@ -37,6 +37,10 @@ johnny-smoke = "johnny.smoketest.cli:main"
 # play_sample and asserts audible PCM (Johnny-1ge.7), catching silent-failure
 # runtimes that return a 200 with empty/all-zero audio.
 johnny-tts-smoke = "johnny.smoketest.tts_cli:main"
+# `johnny-replay` replays committed session fixtures through the real voice
+# pipeline and asserts the .28.x invariants (no silent drops, decision↔utterance
+# parity) — the offline regression harness for the pipeline (Johnny-ckz.28.5).
+johnny-replay = "johnny.smoketest.replay_cli:main"
 
 [project.optional-dependencies]
 # Heavy ML dep for on-device STT. Only the meet-worker image needs it

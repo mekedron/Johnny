@@ -30,6 +30,10 @@ Key docs:
   tour of what Johnny does between hearing you and speaking. Start here.
 - **[docs/PIPELINE.md](docs/PIPELINE.md)** — the engineer-facing technical
   deep-dive (companion to the overview).
+- **[docs/REPLAY_HARNESS.md](docs/REPLAY_HARNESS.md)** — the offline replay
+  harness: feed any saved session's transcripts back through the pipeline and
+  assert the decision/utterance invariants (`johnny-replay` + the per-session
+  Replay button).
 
 ## Prerequisites
 

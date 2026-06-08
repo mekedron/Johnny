@@ -3,10 +3,10 @@
   "sessionId": "8f4e6e6d-2779-4c5e-b0f8-7304b6c45d29",
   "status": "running",
   "startedAt": "2026-06-08T05:53:42.265Z",
-  "updatedAt": "2026-06-08T09:50:19.058Z",
-  "currentIteration": 5,
+  "updatedAt": "2026-06-08T10:28:34.458Z",
+  "currentIteration": 6,
   "maxIterations": 0,
-  "tasksCompleted": 5,
+  "tasksCompleted": 6,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -63,8 +63,8 @@
       {
         "id": "Johnny-etu.1",
         "title": "Pipeline architecture doc (technical): full deep-dive into how STT → router → decisions → LLM → guards → TTS actually work today",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-etu.2",
@@ -124,6 +124,16 @@
       "durationMs": 432592,
       "startedAt": "2026-06-08T09:16:13.350Z",
       "endedAt": "2026-06-08T09:23:25.942Z"
+    },
+    {
+      "iteration": 6,
+      "status": "completed",
+      "taskId": "Johnny-etu.1",
+      "taskTitle": "Pipeline architecture doc (technical): full deep-dive into how STT → router → decisions → LLM → guards → TTS actually work today",
+      "taskCompleted": true,
+      "durationMs": 1600928,
+      "startedAt": "2026-06-08T09:23:37.002Z",
+      "endedAt": "2026-06-08T09:50:17.930Z"
     }
   ],
   "skippedTaskIds": [],

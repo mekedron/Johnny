@@ -50,6 +50,7 @@ from app.db.models import (
     TranscriptChunk,
 )
 from app.services.bot_sessions import BotSessionNotFoundError
+from app.services.replay_session import load_replay_fixture
 from app.services.session_scheduler import (
     ContainerLauncher,
     LauncherError,
@@ -57,6 +58,11 @@ from app.services.session_scheduler import (
     list_active_sessions,
     start_session_for_meeting,
     stop_session_by_id,
+)
+from johnny.smoketest.replay import (
+    check_invariants,
+    diff_against_recorded,
+    run_replay,
 )
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -246,6 +252,48 @@ class SessionDetailResponse(BaseModel):
     pending_decisions: list[AgentDecisionRead]
 
 
+class ReplayInvariantView(BaseModel):
+    """One invariant violation surfaced by a replay (Johnny-ckz.28.5)."""
+
+    invariant: str
+    turn_id: int | None
+    detail: str
+
+
+class ReplayTurnView(BaseModel):
+    """One turn's replayed-vs-recorded comparison for the diff view."""
+
+    turn_id: int
+    heard_text: str | None
+    runtime_speaks: bool
+    replayed_terminal_state: str | None
+    replayed_outcome: str | None
+    replayed_spoke_text: str | None
+    recorded_terminal_state: str | None
+    recorded_outcome: str | None
+    recorded_spoke_text: str | None
+    diverged: bool
+    changed_fields: list[str]
+
+
+class SessionReplayResponse(BaseModel):
+    """Result of replaying a session's persisted transcripts (Johnny-ckz.28.5).
+
+    Behind the per-session page's Replay button: re-runs the session's current
+    transcripts through the real pipeline (recorded LLM outputs) and reports
+    whether the .28.x invariants hold plus a per-turn diff against what the
+    session originally recorded. Lets the operator iterate on prompt / config
+    against the same session without re-running a live Meet.
+    """
+
+    session_id: int
+    runtime: str
+    turn_count: int
+    invariants_ok: bool
+    violations: list[ReplayInvariantView]
+    turns: list[ReplayTurnView]
+
+
 # --- Helpers ---------------------------------------------------------------
 
 
@@ -356,6 +404,75 @@ def get_session_detail(
         decisions=[AgentDecisionRead.model_validate(d) for d in decisions],
         utterances=[AgentUtteranceRead.model_validate(u) for u in utterances],
         pending_decisions=[AgentDecisionRead.model_validate(d) for d in pending],
+    )
+
+
+@router.post("/{bot_session_id}/replay", response_model=SessionReplayResponse)
+async def replay_session(
+    bot_session_id: int,
+    session: SessionDep,
+) -> SessionReplayResponse:
+    """Replay this session's persisted transcripts through the real pipeline.
+
+    Reconstructs a replay fixture from the session's ``agent_decisions`` (each
+    carries its heard text + router output + linked utterance), drives the real
+    pipeline with those recorded outputs, and returns the .28.x invariant
+    verdict plus a per-turn diff against what was originally recorded. The
+    Replay button on the per-session page (Johnny-ckz.28.5) renders this.
+    """
+    fixture = load_replay_fixture(session, bot_session_id)
+    if fixture is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="bot_session not found",
+        )
+    if fixture.turn_count == 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "session has no replayable turns (no decisions with a "
+                "reconstructable transcript)"
+            ),
+        )
+
+    result = await run_replay(fixture)
+    violations = check_invariants(result.events, fixture.runtime)
+    diffs = diff_against_recorded(fixture, result.records)
+
+    changed_by_turn: dict[int, list[str]] = {}
+    for d in diffs:
+        changed_by_turn.setdefault(d.turn_id, []).append(d.field)
+
+    routed = [r for r in result.records if r.turn_id > 0]
+    turn_views: list[ReplayTurnView] = []
+    for idx, record in enumerate(routed):
+        recorded = fixture.turns[idx].recorded if idx < len(fixture.turns) else {}
+        turn_views.append(
+            ReplayTurnView(
+                turn_id=record.turn_id,
+                heard_text=record.heard_text,
+                runtime_speaks=bool(record.should_speak),
+                replayed_terminal_state=record.terminal_state,
+                replayed_outcome=record.outcome,
+                replayed_spoke_text=record.spoke_text,
+                recorded_terminal_state=recorded.get("terminal_state"),
+                recorded_outcome=recorded.get("outcome"),
+                recorded_spoke_text=recorded.get("spoke_text"),
+                diverged=record.diverged,
+                changed_fields=changed_by_turn.get(record.turn_id, []),
+            )
+        )
+
+    return SessionReplayResponse(
+        session_id=int(fixture.session_id) if fixture.session_id.isdigit() else bot_session_id,
+        runtime=fixture.runtime,
+        turn_count=fixture.turn_count,
+        invariants_ok=not violations,
+        violations=[
+            ReplayInvariantView(invariant=v.invariant, turn_id=v.turn_id, detail=v.detail)
+            for v in violations
+        ],
+        turns=turn_views,
     )
 
 

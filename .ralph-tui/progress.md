@@ -95,6 +95,33 @@ after each iteration and it's included in prompts for context.
   backticks in prose. Headings with an em dash (`—`) slugify to a **double** hyphen, so intra-doc anchor
   links must use `--`. The cheap check: a local `mermaid@11` ESM harness that `mermaid.parse()` +
   `mermaid.render()`s each block, driven via chrome-devtools (`.validation/<task>/mermaid-check.html`).
+- **The offline replay harness (Johnny-ckz.28.5) drives the REAL pipeline, not a mock, and asserts the
+  .28.x invariants on the captured event stream — no DB needed.** `backend/johnny/smoketest/replay.py`
+  is split into a PURE half (`ReplayFixture`/`fixture_from_dict`/`load_fixture`, `assemble_turns`,
+  `check_invariants`, `diff_against_recorded` — no providers) and a DRIVING half (`run_replay`). Split
+  fixtures: synthesise ONE VAD-detectable tone burst per turn (reusing the `conftest.py` tone/silence
+  recipe — `EnergyVAD(0.05)`, 600ms tone / 800ms gap), `_ReplaySTT` returns the recorded transcript per
+  segment, recorded router+answer LLMs replay the structured outputs, `InMemoryEventBus` captures
+  everything. **Drive the AUDIO path, NOT `feed_text`** — `feed_text` leaves every injected turn at
+  `turn_id=0` (it doesn't increment `_utterance_count` or map `_transcript_turn_ids`), so the per-turn
+  `turn_id` the invariants key on collapses; the audio path assigns 1..N. **Disable the noise gate**
+  (`noise_filter_enabled=False`) — the recordings are already post-gate finalised transcripts. **The
+  recorded answer must be keyed to the TURN, not a positional list**: an approved turn the original
+  session never actually spoke (rate-limited before the answer stage) has `answer=None`; a positional
+  answer list drifts and fabricates a stale answer → false `replied`. The fix is a shared `_AnswerCursor`
+  the router sets per-turn and the answer LLM reads (None→"" → `model_empty_output` no_reply, the faithful
+  outcome). **Time-window gates (rate limiter, barge-in) are NOT reproduced** — the replay normalises
+  inter-turn cadence, so a turn the original rate-limited replays as `model_empty_output` no_reply (same
+  `terminal_state`/`outcome`, different `no_reply_reason`, which the diff does NOT compare). Unified-S2S
+  has no router/terminal spine (only `TranscriptFinalized`+`AgentSpoke`), so it gets a reduced invariant
+  **INV-U** (assistant-transcript↔`agent_spoke` existence parity) driven through the real
+  `UnifiedVoicePipeline` + a `_ReplayS2S` that queues all turns on the single end-of-capture
+  `commit_user_turn`. Fixture loader is `app/services/replay_session.py` (decision row = per-turn spine:
+  heard text from `input_window.transcript_window` is_current entry, answer from the linked utterance) —
+  shared by the offline capture and the live `POST /sessions/{id}/replay` endpoint (the per-session
+  Replay button). Router-timeout sim: a fixture turn with `"simulate":"timeout"` sleeps past a small
+  `router_llm_timeout_s` so `asyncio.wait_for` fires → durable `no_reply(stage_error)` (the session-14
+  silent-drop proof). Source-of-truth doc: `docs/REPLAY_HARNESS.md`.
 
 ---
 
@@ -355,5 +382,54 @@ after each iteration and it's included in prompts for context.
     (`app/worker.py` L303-308). Captured in §7.7.
   - Per the bead acceptance, the doc still wants a human **operator read-through** before epic Johnny-etu
     closes; the only remaining open child is Johnny-ckz.28.5 (the replay harness — not yet implemented).
+
+---
+
+
+## 2026-06-08 - Johnny-ckz.28.5
+
+- **Implemented the offline replay harness** (Sections A–E): feed any persisted session's transcripts back
+  through the REAL `VoicePipeline` / `UnifiedVoicePipeline` (fake STT/TTS, recorded LLM/S2S), capture every
+  event, and assert the .28.x invariants (`invariants` mode, the CI gate) or diff the replayed outcome
+  against what was recorded (`regression` mode, manual review). `johnny-replay --session-id <N> --mode
+  invariants --use-recorded-llm` runs to completion and exits 0 now that the redesign has landed (the
+  session-14 silent-drop turn 4 terminates in a durable `no_reply(stage_error)` instead of vanishing);
+  regression mode surfaces that fix as `turn 4 terminal_state: recorded=None → replayed=no_reply`.
+- **Files changed:**
+  - `backend/johnny/smoketest/replay.py` (NEW) — fixture model + loader, synthetic-audio split driver,
+    recorded router/answer LLMs with a shared `_AnswerCursor`, recorded `_ReplayS2S` unified driver,
+    `assemble_turns`, `check_invariants` (INV-1/INV-2 split, INV-U unified), `diff_against_recorded`.
+  - `backend/johnny/smoketest/replay_cli.py` (NEW) — the `johnny-replay` Click CLI (modelled on
+    `johnny-tts-smoke`); `--session-id`/`--all`, `--mode invariants|regression`, `--use-recorded-llm`,
+    `--fixtures-dir`. `backend/pyproject.toml` — registered the `johnny-replay` script entry.
+  - `backend/app/services/replay_session.py` (NEW) — DB→`ReplayFixture` loader (decision row = per-turn
+    spine), shared by the offline capture and the live endpoint.
+  - `backend/app/api/sessions.py` — `POST /sessions/{id}/replay` + the `SessionReplayResponse` /
+    `ReplayTurnView` / `ReplayInvariantView` models.
+  - `backend/tests/fixtures/sessions/{14,3,unified-demo}/fixture.json` (NEW) — 3 fixtures covering split
+    (reconstructed session-14 silent-drop + a real captured browser session) + unified-S2S (hand-authored).
+  - `backend/tests/smoketest/test_replay_harness.py` (NEW) — CI gate (every fixture parametrised) + teeth
+    tests proving the checker flags INV-1/INV-2/INV-U violations; `tests/api/test_sessions.py` — 3 endpoint
+    tests.
+  - `frontend/src/lib/sessions.ts` (`replaySession` + types), `frontend/src/lib/components/
+    SessionReplayPanel.svelte` (NEW), `frontend/src/routes/sessions/[id]/+page.svelte` (mounted the panel
+    above the timeline).
+  - `docs/REPLAY_HARNESS.md` (NEW) + README "Key docs" cross-link.
+- **Validation:** backend ruff + mypy clean on all changed files; `tests/smoketest/test_replay_harness.py`
+  (10) + `tests/api/test_sessions.py` (34 total) pass; full backend suite run for regressions. CLI exit
+  code 0 on passing fixtures. Frontend svelte-check 0/0 + eslint clean. **Browser (chrome-devtools,
+  `/sessions/3`, prod-baked images):** clicked Replay → verdict "Invariants hold — 12 turns (split)" + the
+  12-row recorded-vs-replayed diff table; no console errors. The browser run CAUGHT A REAL BUG — turns the
+  original rate-limited replayed as `replied`/`spoken` because the positional answer list returned a stale
+  answer; fixed with the shared `_AnswerCursor` (now session-3 regression is a clean MATCH). Artifacts in
+  `.validation/Johnny-ckz.28.5/`.
+- **Learnings:**
+  - See the new Codebase Patterns bullet at the top (audio-path-not-feed_text, turn-keyed answer cursor,
+    noise-gate-off, INV-U for unified, the time-window-gate limitation).
+  - The mandated browser validation paid for itself here: the rate-limit fidelity bug was invisible to the
+    invariants gate (which stayed green) and only showed up as a wrong `replied` in the live diff view.
+  - Unified-S2S can't be replayed turn-by-turn the way split can (the pipeline commits once per capture
+    stream, and there's no router/terminal spine), so unified gets a reduced existence-parity invariant
+    rather than INV-1/INV-2 — an honest scope call documented in `docs/REPLAY_HARNESS.md`.
 
 ---

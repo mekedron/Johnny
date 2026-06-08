@@ -117,6 +117,50 @@ export function stopSession(botSessionId: number): Promise<BotSession> {
 	});
 }
 
+/** One invariant violation reported by an offline replay (Johnny-ckz.28.5). */
+export interface ReplayInvariantView {
+	invariant: string;
+	turn_id: number | null;
+	detail: string;
+}
+
+/** One turn's replayed-vs-recorded comparison in the replay diff view. */
+export interface ReplayTurnView {
+	turn_id: number;
+	heard_text: string | null;
+	runtime_speaks: boolean;
+	replayed_terminal_state: string | null;
+	replayed_outcome: string | null;
+	replayed_spoke_text: string | null;
+	recorded_terminal_state: string | null;
+	recorded_outcome: string | null;
+	recorded_spoke_text: string | null;
+	diverged: boolean;
+	changed_fields: string[];
+}
+
+/** Response from `POST /sessions/{id}/replay` (Johnny-ckz.28.5). */
+export interface SessionReplayResponse {
+	session_id: number;
+	runtime: string;
+	turn_count: number;
+	invariants_ok: boolean;
+	violations: ReplayInvariantView[];
+	turns: ReplayTurnView[];
+}
+
+/**
+ * Replay this session's persisted transcripts through the real pipeline and
+ * return the invariant verdict + a per-turn diff against what was recorded.
+ * Backs the per-session page's Replay button — lets the operator iterate on
+ * prompt / config against the same session without re-running a live Meet.
+ */
+export function replaySession(botSessionId: number): Promise<SessionReplayResponse> {
+	return request<SessionReplayResponse>(`/sessions/${botSessionId}/replay`, {
+		method: 'POST'
+	});
+}
+
 export const BOT_SESSION_STATUS_LABEL: Record<BotSessionStatus, string> = {
 	scheduled: 'Scheduled',
 	joining: 'Joining…',

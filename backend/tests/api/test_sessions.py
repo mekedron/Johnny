@@ -610,3 +610,116 @@ def test_get_session_timings_rejects_invalid_limit(client: TestClient) -> None:
     assert res.status_code == 422
     res = client.get("/sessions/1/timings?limit=10000")
     assert res.status_code == 422
+
+
+# --- POST /sessions/{id}/replay (Johnny-ckz.28.5) --------------------------
+
+
+def _seed_replayable_browser_session(db_session: Session) -> int:
+    """A browser session with two decisions (one spoken, one suppressed),
+    each carrying the input_window the replay loader reconstructs from."""
+    from app.db.models import BotSessionSource, NoReplyReason, TerminalState
+
+    row = BotSession(
+        meeting_config_id=None,
+        source=BotSessionSource.BROWSER,
+        status=BotSessionStatus.ENDED,
+        playground_overrides={"pipeline_mode": "split"},
+    )
+    db_session.add(row)
+    db_session.flush()
+
+    def _iw(text: str) -> dict[str, object]:
+        return {
+            "transcript_window": [{"text": text, "is_current": True, "confidence": 0.9}],
+            "mode": "autonomous",
+            "confidence_threshold": 0.7,
+            "allowed_replies": [],
+            "instructions": "",
+        }
+
+    spoken = AgentDecision(
+        bot_session_id=row.id,
+        should_speak=True,
+        confidence=0.92,
+        reason="direct question",
+        reply_type="answer",
+        suggested_reply="The standup is at 9am.",
+        decision_recommended_text="The standup is at 9am.",
+        final_text="The standup is at 9am.",
+        turn_id=1,
+        terminal_state=TerminalState.REPLIED,
+        input_window=_iw("When is the standup?"),
+        raw_output={},
+        outcome=DecisionOutcome.SPOKEN,
+    )
+    suppressed = AgentDecision(
+        bot_session_id=row.id,
+        should_speak=False,
+        confidence=0.1,
+        reason="not addressed to the bot",
+        turn_id=2,
+        terminal_state=TerminalState.NO_REPLY,
+        no_reply_reason=NoReplyReason.ROUTER_DECLINED,
+        input_window=_iw("just chatting amongst ourselves"),
+        raw_output={},
+        outcome=DecisionOutcome.SUPPRESSED,
+    )
+    db_session.add(spoken)
+    db_session.add(suppressed)
+    db_session.flush()
+    db_session.add(
+        AgentUtterance(
+            bot_session_id=row.id,
+            agent_decision_id=spoken.id,
+            mode=BotMode.AUTONOMOUS,
+            prompt="hidden",
+            output_text="The standup is at 9am.",
+            audio_duration_ms=400,
+        )
+    )
+    db_session.commit()
+    return row.id
+
+
+def test_replay_session_holds_invariants(
+    client: TestClient, db_session: Session
+) -> None:
+    sid = _seed_replayable_browser_session(db_session)
+    res = client.post(f"/sessions/{sid}/replay")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["runtime"] == "split"
+    assert body["turn_count"] == 2
+    assert body["invariants_ok"] is True
+    assert body["violations"] == []
+    assert len(body["turns"]) == 2
+    t1, t2 = body["turns"]
+    assert t1["heard_text"] == "When is the standup?"
+    assert t1["runtime_speaks"] is True
+    assert t1["replayed_terminal_state"] == "replied"
+    assert t2["runtime_speaks"] is False
+    assert t2["replayed_terminal_state"] == "no_reply"
+    # Recorded == replayed for a clean session, so no changed fields.
+    assert t1["changed_fields"] == []
+    assert t2["changed_fields"] == []
+
+
+def test_replay_session_404_for_missing_session(client: TestClient) -> None:
+    assert client.post("/sessions/99999/replay").status_code == 404
+
+
+def test_replay_session_422_when_no_replayable_turns(
+    client: TestClient, db_session: Session
+) -> None:
+    from app.db.models import BotSessionSource
+
+    row = BotSession(
+        meeting_config_id=None,
+        source=BotSessionSource.BROWSER,
+        status=BotSessionStatus.ENDED,
+    )
+    db_session.add(row)
+    db_session.commit()
+    res = client.post(f"/sessions/{row.id}/replay")
+    assert res.status_code == 422
