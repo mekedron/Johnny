@@ -52,6 +52,26 @@ in, mirroring `voice_pipeline/livekit_transport.py`'s lazy discipline. Keeps
 `[Any]` for strict mypy. A `[[tool.mypy.overrides]] module="livekit.*"
 ignore_missing_imports=true` lets the dev/CI mypy (no `agent` extra) pass.
 
+### Measure a real LiveKit room round-trip without LiveKit-in-compose
+To de-risk anything room-related (latency, drift, echo) before Johnny-6wx exists,
+run a throwaway SFU on the existing compose network and drive it from the `api`
+container (which already has `livekit.rtc`/`livekit.api` from the `agent` extra):
+```bash
+docker run -d --name lk-spike --network johnny_default \
+  livekit/livekit-server:latest --dev --bind 0.0.0.0   # dev keys: devkey/secret
+# api reaches it at ws://lk-spike:7880 (no host port publishing needed)
+docker compose exec -T api python - < .validation/<task>/probe.py
+docker rm -f lk-spike
+```
+Build the double hop from TWO real `LiveKitTransport` instances (one publishes a
+known signal, one echoes) so you exercise the actual publish/subscribe/resample
+code. Measurement gotchas: (1) use the **received/emitted sample ratio** (~1.0 =
+no clock drift), NOT the latency slope, which just reflects jitter-buffer settling;
+(2) FFT a **continuous-tone steady-state slice** for fidelity, not a gated burst
+(edge spread tanks the SNR); (3) the echo question is answered by self-subscription
+— a LiveKit SFU never returns a participant its own track, so subclass the transport
+to record subscribed participant identities and assert `*_heard_itself=False`.
+
 ---
 
 ## 2026-06-08 - Johnny-jue
@@ -93,6 +113,58 @@ Dockerfile model bake + the `johnny/agent/` package skeleton.
 - Did NOT run `./stop.sh` (it's `down -v` and would wipe the operator's postgres
   volume / configured provider creds). Recreated api/worker in place; verified the
   clean-install model-bake independently on the freshly built image.
+
+---
+
+## 2026-06-08 - Johnny-4em
+
+Phase-0 SPIKE (the #1 unknown): is the LiveKit room double-hop
+(`Meet->room->agent->room->Meet`) viable, and does it reintroduce echo /
+self-transcription? **Deliverable is a measured decision, not production code.**
+
+**Approach.** Isolated and measured the *new* surface — the room double hop — with
+a throwaway `livekit/livekit-server:1.12.0 --dev` on the `johnny_default` network +
+two REAL `LiveKitTransport` participants in the `api` container (a bridge publishing
+a known test signal; a stub echo agent re-publishing what it hears) so audio takes
+the real hop `bridge->SFU->agent->SFU->bridge` through the actual transport code.
+The live Meet boundary was deferred (with evidence) — the meet-worker image lacks
+`livekit-rtc` (Johnny-6nm), and the agent-worker (9eh) + LiveKit-in-compose (6wx)
+don't exist yet; all are gated by this spike.
+
+**Decision: GO.** Topology viable; echo-free; no AEC required.
+- Round-trip latency: median 105–150 ms, p95 ≤153 ms, ~55–75 ms one-way; stable.
+- Clock drift: NONE — recv/emit sample ratio 1.015 over 75 s; latency plateaus
+  (jitter-buffer settling, not skew).
+- Fidelity (16k→48k→Opus→48k→16k ×2): exact pitch 300/1000/3000 Hz, ~14 dB SNR,
+  THD <0.2% — voice-grade, STT-adequate.
+- Echo / self-transcription: NO at all 3 layers — room (SFU self-exclusion, measured
+  `*_heard_itself=False`, agent idle-gap RMS 0.0), PulseAudio (independent null
+  sinks, no loopback), Meet/WebRTC (never returns own uplink). Echo only via misconfig.
+
+**Files changed:** none in production. Added throwaway harnesses + logs + the
+decision doc under `.validation/Johnny-4em/` (gitignored). Decision also stored as
+bd note on Johnny-4em and `bd remember --key livekit-room-double-hop-echo`. Required
+config checklist handed to Johnny-6nm/9eh/6wx (one room/2 participants; agent STT
+subscribes only to the bridge track; bridge never re-publishes the agent track; no
+PA mic→speaker loopback; STT may drain continuously).
+
+**Learnings / gotchas:**
+- The throwaway LiveKit server attaches to `johnny_default` so the `api` container
+  reaches it at `ws://lk-spike:7880` — no host port publishing needed; dev keys are
+  `devkey`/`secret`. Container-to-container WebRTC (ICE/UDP) works on the bridge net.
+- `livekit.rtc` + `livekit.api` (AccessToken/VideoGrants) are already importable in
+  the `api` image (came in with `livekit-agents` from Johnny-jue) — you can mint
+  tokens and run real room participants from `api` with no extra deps.
+- Distinguish jitter-buffer settling from clock drift: a short window shows a
+  nonzero latency slope (buffer growing), but over a long window latency plateaus and
+  the received/emitted sample ratio stays ~1.0. Use the SAMPLE RATIO, not the slope,
+  as the drift signal.
+- FFT a *gated burst* and you get an artificially low SNR (edge spread); use a
+  continuous-tone steady-state slice for the real resampling/codec fidelity number.
+- Self-exclusion is the whole echo story at the room layer: a LiveKit SFU never
+  delivers a participant its own track, so the agent can't hear its own TTS from the
+  room. Run a stub-echo negative control (idle-gap energy must stay at the noise
+  floor) to prove no feedback loop.
 
 ---
 
