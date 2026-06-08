@@ -8,9 +8,16 @@ dependencies = [
     # mlx-audio's Kokoro pipeline does grapheme-to-phoneme via misaki but does
     # not pull it in itself; without it model.generate() raises ImportError on
     # the first synth and the sidecar silently falls back to the broken file
-    # path. The [en] extra brings spacy + the English G2P deps (mirrors what
-    # the upstream `kokoro` dependency installs in sidecars/kokoro-http).
+    # path. The [en] extra brings spacy + the English G2P deps. The same
+    # explicit pin lives in sidecars/kokoro-http/pyproject.toml — Kokoro treats
+    # misaki as optional, so neither the mlx nor the upstream `kokoro` path
+    # installs it transitively (Johnny-1ge.11).
     "misaki[en]>=0.9.4",
+    # misaki[en]'s English G2P loads spaCy's `en_core_web_sm` and pip-installs
+    # it at the FIRST synth when absent. Pin the model wheel so a clean
+    # `./scripts/start-kokoro-sidecar.sh start mlx` produces a venv that can
+    # synth offline immediately, with no first-call download (Johnny-1ge.11).
+    "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "numpy>=1.26.0",
@@ -22,6 +29,11 @@ kokoro-mlx-sidecar = "server:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+# en_core_web_sm is a direct GitHub-release wheel URL (not on PyPI);
+# hatchling rejects direct references unless this is opted in.
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]

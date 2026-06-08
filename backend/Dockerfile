@@ -17,11 +17,15 @@ WORKDIR /workspace
 # `--extra local-stt` pulls in faster-whisper, `--extra local-tts` pulls
 # in piper-tts so the providers `/test` endpoint can run real smoke
 # calls against on-device STT and TTS; without them the smoke calls die
-# on `import faster_whisper` / "piper binary not found". The meet-worker
-# image installs its own pinned copies via pip; this layer covers the
-# api/worker.
+# on `import faster_whisper` / "piper binary not found". `--extra neural-tts`
+# bakes in Kokoro + KittenTTS + misaki[en] so the `in-container` runtime of
+# those TTS providers works on a clean boot with no manual install step
+# (Johnny-1ge.11; torch is pinned CPU-only via [tool.uv] in pyproject so this
+# stays ~1.5 GB, not ~5 GB). The meet-worker image installs its own pinned
+# copies via pip; this layer covers the api/worker.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-install-project --no-dev --extra local-stt --extra local-tts
+RUN uv sync --frozen --no-install-project --no-dev \
+    --extra local-stt --extra local-tts --extra neural-tts
 
 # Audio system libs used by NeMo's transitive deps when the user
 # installs Parakeet at runtime (Johnny-stt.1). `libsndfile1` is
@@ -42,7 +46,8 @@ COPY alembic.ini ./
 COPY alembic ./alembic
 COPY app ./app
 COPY johnny ./johnny
-RUN uv sync --frozen --no-dev --extra local-stt --extra local-tts
+RUN uv sync --frozen --no-dev \
+    --extra local-stt --extra local-tts --extra neural-tts
 
 EXPOSE 8000
 

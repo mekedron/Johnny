@@ -57,6 +57,34 @@ local-stt = [
 local-tts = [
     "piper-tts>=1.4.0",
 ]
+# Neural on-device TTS for the `in-container` runtime of the Kokoro and
+# KittenTTS providers (Johnny-1ge.11). Kokoro is an 82 M torch model;
+# KittenTTS is a <25 M ONNX model shipped as a GitHub-release wheel;
+# `misaki[en]` is Kokoro's English grapheme-to-phoneme stack. These are
+# BAKED into the api/worker image (the Dockerfile installs this extra) so
+# the in-container runtime works on a clean `./run.sh` with zero manual
+# install steps — see the clean-install contract in AGENTS.md. torch is
+# pinned to the CPU wheel index in [tool.uv] below so the image does not
+# drag in ~5 GB of CUDA libraries it can never use on a CPU/Apple-Silicon
+# host.
+neural-tts = [
+    # torch is declared DIRECTLY (not just left as kokoro's transitive dep)
+    # so the [tool.uv.sources] CPU-index pin below actually binds to it —
+    # uv sources only apply to direct project dependencies. Without this the
+    # resolver takes torch's default PyPI wheel, which drags ~5 GB of
+    # nvidia-*/cuda-* packages onto arm64 Linux too (Johnny-1ge.11).
+    "torch>=2.2",
+    "kokoro>=0.9.4",
+    "misaki[en]>=0.9.4",
+    # Kokoro's English G2P (misaki[en]) loads spaCy's `en_core_web_sm`
+    # pipeline and, when it is absent, runs `pip install en_core_web_sm` at
+    # the FIRST synth — a runtime download into the ephemeral container venv
+    # that vanishes on every container recreate and needs network on every
+    # clean boot. Pin the model wheel so it is baked into the image and the
+    # first synth is offline-clean (Johnny-1ge.11). 3.8.0 matches spaCy 3.8.x.
+    "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+    "kittentts @ https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl",
+]
 # Host-side helpers (auth-state seeder for Johnny-ckz.1). Installs
 # Playwright on the host so the operator can open Chromium headed,
 # sign into Google as the bot account, and persist the resulting
@@ -82,6 +110,28 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app", "johnny"]
+
+[tool.hatch.metadata]
+# The kittentts dependency (neural-tts extra) is a direct GitHub-release
+# wheel URL — it is not on PyPI. hatchling rejects direct references when
+# building/installing this project unless this is opted in.
+allow-direct-references = true
+
+[tool.uv]
+# torch's default wheels bundle the full CUDA runtime (~5 GB of nvidia-*
+# packages) even for arm64 Linux, but Johnny runs CPU-only (Apple Silicon
+# hosts, generic CPU boxes). Pin torch — pulled in transitively by kokoro
+# (the neural-tts extra) — to PyTorch's CPU wheel index so the api/worker
+# image stays lean (torch==X.Y.Z+cpu, no nvidia-* packages). `explicit`
+# keeps this index from shadowing PyPI for any package that does not opt in
+# via [tool.uv.sources] below.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

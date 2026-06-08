@@ -16,7 +16,9 @@ mkdir -p \
   "${HOME}/.johnny/piper-models" \
   "${HOME}/.johnny/whisper-models" \
   "${HOME}/.johnny/parakeet-models" \
-  "${HOME}/.johnny/parakeet-packages"
+  "${HOME}/.johnny/parakeet-packages" \
+  "${HOME}/.johnny/kokoro-models" \
+  "${HOME}/.johnny/kitten-models"
 
 # Legacy migration hint: older installs kept the models in named Docker
 # volumes (johnny_piper_models / johnny_whisper_models). Detect them and

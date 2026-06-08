@@ -136,6 +136,13 @@ services:
       - ${HOME}/.johnny/whisper-models:/var/lib/johnny/whisper-models
       - ${HOME}/.johnny/piper-models:/var/lib/johnny/piper-models
       - ${HOME}/.johnny/parakeet-models:/var/lib/johnny/parakeet-models
+      # Kokoro (82 M) and KittenTTS (<25 M) weights for the in-container
+      # runtime (Johnny-1ge.11). Same host-bind-mount pattern as the other
+      # model caches: the first synth downloads from HuggingFace into these
+      # dirs, and the download survives `docker compose down -v` so a clean
+      # `./run.sh` does not re-fetch. `run.sh` creates the host dirs idempotently.
+      - ${HOME}/.johnny/kokoro-models:/var/lib/johnny/kokoro-models
+      - ${HOME}/.johnny/kitten-models:/var/lib/johnny/kitten-models
       # Runtime-installed Parakeet Python packages (Johnny-stt.1). Empty
       # on first boot; populated by clicking Install on the Parakeet
       # provider card. The api server prepends this dir to sys.path so
@@ -195,6 +202,9 @@ services:
       - ${HOME}/.johnny/whisper-models:/var/lib/johnny/whisper-models
       - ${HOME}/.johnny/piper-models:/var/lib/johnny/piper-models
       - ${HOME}/.johnny/parakeet-models:/var/lib/johnny/parakeet-models
+      # Kokoro + KittenTTS in-container weights (Johnny-1ge.11) — see api notes.
+      - ${HOME}/.johnny/kokoro-models:/var/lib/johnny/kokoro-models
+      - ${HOME}/.johnny/kitten-models:/var/lib/johnny/kitten-models
       - ${HOME}/.johnny/parakeet-packages:/var/lib/johnny/parakeet-packages
       # Same shared google-auth volume as the API (read-write here so
       # an admin endpoint or one-time helper can refresh stored cookies
