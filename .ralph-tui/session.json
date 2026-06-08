@@ -3,10 +3,10 @@
   "sessionId": "8f4e6e6d-2779-4c5e-b0f8-7304b6c45d29",
   "status": "running",
   "startedAt": "2026-06-08T05:53:42.265Z",
-  "updatedAt": "2026-06-08T07:14:05.120Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-08T07:39:34.977Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -33,8 +33,8 @@
       {
         "id": "Johnny-ckz.28.1",
         "title": "Root-cause analysis from session 14: failure-mode catalogue (silent drops + decision/utterance divergence) + redesign proposal",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-ckz.28.2",
@@ -74,7 +74,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-ckz.28.1",
+      "taskTitle": "Root-cause analysis from session 14: failure-mode catalogue (silent drops + decision/utterance divergence) + redesign proposal",
+      "taskCompleted": true,
+      "durationMs": 1107490,
+      "startedAt": "2026-06-08T06:55:36.656Z",
+      "endedAt": "2026-06-08T07:14:04.146Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

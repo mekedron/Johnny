@@ -127,6 +127,12 @@ class HistoryDecisionRead(BaseModel):
     reason: str
     reply_type: str | None
     suggested_reply: str | None
+    # Canonical per-turn record (INV-2, Johnny-ckz.28.2) — same shape the live
+    # session detail serves so the shared frontend type stays accurate.
+    decision_recommended_text: str | None
+    final_text: str | None
+    divergence_reason: str | None
+    override_actor: str | None
     outcome: DecisionOutcome
     created_at: datetime
 

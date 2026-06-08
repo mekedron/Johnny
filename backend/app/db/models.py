@@ -24,6 +24,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     func,
     text,
 )
@@ -433,6 +434,23 @@ class AgentDecision(Base):
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     reply_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     suggested_reply: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # --- Canonical per-turn record (INV-2, Johnny-ckz.28.2) ---------------
+    # One source of truth for "what the bot will speak this turn", read by
+    # every surface that displays it so the chat and the decisions panel can
+    # never diverge silently. ``decision_recommended_text`` snapshots what the
+    # decision layer recommended (the router's ``suggested_reply`` at decision
+    # time, or whatever an approval flow approved); ``final_text`` is what was
+    # actually spoken, written when the turn's utterance is confirmed. When the
+    # two differ, ``override_actor`` (which layer rewrote it) AND
+    # ``divergence_reason`` (why) must both be set — enforced by the
+    # ``before_insert``/``before_update`` guard below so a silent swap is
+    # impossible at the ORM layer.
+    decision_recommended_text: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+    final_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    divergence_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    override_actor: Mapped[str | None] = mapped_column(String(64), nullable=True)
     input_window: Mapped[dict[str, Any]] = mapped_column(_json_column(), nullable=False)
     raw_output: Mapped[dict[str, Any]] = mapped_column(_json_column(), nullable=False)
     outcome: Mapped[DecisionOutcome] = mapped_column(
@@ -454,6 +472,61 @@ class AgentDecision(Base):
 
     bot_session: Mapped[BotSession] = relationship(back_populates="agent_decisions")
     utterances: Mapped[list[AgentUtterance]] = relationship(back_populates="decision")
+
+
+class DecisionParityError(ValueError):
+    """A write would let a decision's spoken text diverge silently (INV-2).
+
+    Raised by the ``agent_decisions`` parity guard when ``final_text``
+    differs from ``decision_recommended_text`` without recording *who*
+    overrode it (``override_actor``) and *why* (``divergence_reason``).
+    Surfacing this as an error at flush time is the structural guarantee
+    behind Johnny-ckz.28.2: the chat and the decisions panel cannot show
+    different text for the same turn without that swap being audited.
+    """
+
+
+def _normalize_parity_text(value: str | None) -> str:
+    """Collapse surrounding/internal whitespace so trivial reflow is not divergence."""
+    if value is None:
+        return ""
+    return " ".join(value.split())
+
+
+def decision_texts_diverge(recommended: str | None, final: str | None) -> bool:
+    """True when both texts are present and differ after whitespace-normalization.
+
+    A NULL on either side is *not* divergence: a turn with no recommendation
+    (router emitted no ``suggested_reply``) or no spoken text yet has nothing
+    to reconcile. Shared by the parity guard and the subscriber so the two
+    can never disagree about what counts as a divergence.
+    """
+    if recommended is None or final is None:
+        return False
+    return _normalize_parity_text(recommended) != _normalize_parity_text(final)
+
+
+def _enforce_decision_parity(target: AgentDecision) -> None:
+    if not decision_texts_diverge(
+        target.decision_recommended_text, target.final_text
+    ):
+        return
+    has_actor = bool(target.override_actor and target.override_actor.strip())
+    has_reason = bool(target.divergence_reason and target.divergence_reason.strip())
+    if has_actor and has_reason:
+        return
+    raise DecisionParityError(
+        "agent_decisions.final_text diverges from decision_recommended_text "
+        "without override_actor + divergence_reason "
+        f"(decision_id={target.id!r}, actor={target.override_actor!r}, "
+        f"reason={target.divergence_reason!r})"
+    )
+
+
+@event.listens_for(AgentDecision, "before_insert")
+@event.listens_for(AgentDecision, "before_update")
+def _agent_decision_parity_guard(_mapper: Any, _connection: Any, target: AgentDecision) -> None:
+    _enforce_decision_parity(target)
 
 
 class AgentUtterance(Base):

@@ -152,6 +152,14 @@ class AgentDecisionRead(BaseModel):
     reason: str
     reply_type: str | None
     suggested_reply: str | None
+    # Canonical per-turn record (INV-2, Johnny-ckz.28.2). ``final_text`` is
+    # what the bot actually spoke; ``decision_recommended_text`` is what the
+    # decision layer recommended; ``divergence_reason`` / ``override_actor``
+    # are set together when the two differ so the panel can render the swap.
+    decision_recommended_text: str | None
+    final_text: str | None
+    divergence_reason: str | None
+    override_actor: str | None
     outcome: DecisionOutcome
     created_at: datetime
 

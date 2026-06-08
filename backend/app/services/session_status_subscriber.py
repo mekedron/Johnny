@@ -36,6 +36,7 @@ from app.db.models import (
     DecisionOutcome,
     SessionTiming,
     TranscriptChunk,
+    decision_texts_diverge,
 )
 from app.db.session import session_scope
 from app.services.approval import publish_approval_pending_event
@@ -252,6 +253,13 @@ def apply_router_decision_event(
         suggested_reply=(
             str(suggested_reply) if isinstance(suggested_reply, str) else None
         ),
+        # Snapshot the recommended text onto the canonical record at decision
+        # time (INV-2). ``final_text`` stays NULL until the utterance is
+        # confirmed in ``apply_agent_spoke_event``; the parity guard only
+        # fires once both are set and differ.
+        decision_recommended_text=(
+            str(suggested_reply) if isinstance(suggested_reply, str) else None
+        ),
         outcome=outcome,
         input_window=input_window,
         raw_output=raw_output,
@@ -328,6 +336,38 @@ def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
         decision_id = linked_decision.id
         if linked_decision.outcome == DecisionOutcome.PENDING:
             linked_decision.outcome = DecisionOutcome.SPOKEN
+        # INV-2: write the spoken text onto the turn's canonical record so the
+        # chat and the decisions panel read the same field. If it differs from
+        # what the decision layer recommended, record who overrode it and why
+        # — the parity guard rejects the write otherwise, and the structured
+        # ``decision.override:`` log line makes the swap visible in the worker
+        # logs (and to the reasoning timeline, Johnny-ckz.28.4).
+        linked_decision.final_text = text
+        recommended = linked_decision.decision_recommended_text
+        if decision_texts_diverge(recommended, text):
+            actor = (
+                "allowlist"
+                if (matched is not None and str(matched) == text)
+                else "answer_llm"
+            )
+            reason = (
+                "spoke an allow-listed reply that differs from the router's "
+                "recommended text"
+                if actor == "allowlist"
+                else "answer LLM rephrased the router's recommended reply"
+            )
+            linked_decision.override_actor = actor
+            linked_decision.divergence_reason = reason
+            logger.info(
+                "decision.override: session=%s decision=%s actor=%s "
+                "recommended=%r final=%r reason=%s",
+                session_id,
+                decision_id,
+                actor,
+                recommended,
+                text,
+                reason,
+            )
     row = AgentUtterance(
         bot_session_id=session_id,
         agent_decision_id=decision_id,

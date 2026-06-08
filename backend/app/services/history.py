@@ -306,6 +306,10 @@ def _serialise_decision(row: AgentDecision) -> dict[str, Any]:
         "reason": row.reason,
         "reply_type": row.reply_type,
         "suggested_reply": row.suggested_reply,
+        "decision_recommended_text": row.decision_recommended_text,
+        "final_text": row.final_text,
+        "divergence_reason": row.divergence_reason,
+        "override_actor": row.override_actor,
         "input_window": row.input_window,
         "raw_output": row.raw_output,
         "outcome": (

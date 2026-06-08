@@ -64,6 +64,11 @@
 		reason: string;
 		replyType: string | null;
 		suggestedReply: string | null;
+		// Canonical per-turn record (INV-2, Johnny-ckz.28.2).
+		recommendedText: string | null;
+		finalText: string | null;
+		divergenceReason: string | null;
+		overrideActor: string | null;
 		outcome: DecisionOutcome | 'spoken';
 		matchedReply: string | null;
 		timestampMs: number;
@@ -265,10 +270,20 @@
 			reason: d.reason,
 			replyType: d.reply_type,
 			suggestedReply: d.suggested_reply,
+			recommendedText: d.decision_recommended_text ?? d.suggested_reply,
+			finalText: d.final_text ?? matchedUtterance?.output_text ?? null,
+			divergenceReason: d.divergence_reason,
+			overrideActor: d.override_actor,
 			outcome: d.outcome,
 			matchedReply: matchedUtterance?.matched_allowed_reply ?? null,
 			timestampMs: Date.parse(d.created_at) || 0
 		};
+	}
+
+	// Trivial reflow (whitespace) is not a divergence — mirrors the backend
+	// parity guard's normalisation so the live UI and the persisted record agree.
+	function normalizeSpoken(value: string | null): string {
+		return (value ?? '').split(/\s+/).filter(Boolean).join(' ');
 	}
 
 	interface TimingTurn {
@@ -452,6 +467,10 @@
 			reason: ev.reason,
 			replyType: ev.reply_type ?? null,
 			suggestedReply: ev.suggested_reply ?? null,
+			recommendedText: ev.suggested_reply ?? null,
+			finalText: null,
+			divergenceReason: null,
+			overrideActor: null,
 			outcome: ev.should_speak ? 'pending' : 'suppressed',
 			matchedReply: null,
 			timestampMs: Number(ev.timestamp_ms) || Date.now()
@@ -511,7 +530,21 @@
 		const idx = decisions.findIndex((d) => d.outcome === 'pending');
 		if (idx >= 0) {
 			const next = [...decisions];
-			next[idx] = { ...next[idx], outcome: 'spoken', matchedReply: matched };
+			const d = next[idx];
+			const recommended = d.recommendedText ?? d.suggestedReply;
+			const diverged =
+				recommended != null &&
+				normalizeSpoken(recommended) !== normalizeSpoken(ev.text);
+			next[idx] = {
+				...d,
+				outcome: 'spoken',
+				matchedReply: matched,
+				finalText: ev.text,
+				divergenceReason: diverged
+					? "answer LLM rephrased the router's recommended reply"
+					: d.divergenceReason,
+				overrideActor: diverged ? 'answer_llm' : d.overrideActor
+			};
 			decisions = next;
 		}
 		const botLine: TranscriptLine = {
@@ -1102,10 +1135,38 @@
 										>
 									</div>
 									<p class="m-0 mb-1 text-sm text-foreground">{d.reason}</p>
-									{#if d.suggestedReply}
-										<p class="m-0 mt-1 text-sm text-muted-foreground italic">
-											&ldquo;{d.suggestedReply}&rdquo;
+									{#if d.recommendedText}
+										<p
+											class="m-0 mt-1 text-sm text-muted-foreground italic"
+											data-testid="decision-recommended"
+										>
+											&ldquo;{d.recommendedText}&rdquo;
 										</p>
+									{/if}
+									{#if d.divergenceReason}
+										<div
+											class="mt-1.5 rounded-sm border border-warning/40 bg-warning/10 px-2 py-1"
+											data-testid="decision-divergence"
+										>
+											<span
+												class="text-[0.65rem] font-semibold tracking-wide uppercase text-warning"
+											>
+												Spoke instead
+											</span>
+											{#if d.finalText}
+												<p
+													class="m-0 mt-0.5 text-sm text-foreground"
+													data-testid="decision-final-text"
+												>
+													&ldquo;{d.finalText}&rdquo;
+												</p>
+											{/if}
+											<p class="m-0 mt-0.5 text-xs text-muted-foreground">
+												{#if d.overrideActor}<span class="font-mono"
+														>{d.overrideActor}</span
+													>: {/if}{d.divergenceReason}
+											</p>
+										</div>
 									{/if}
 									{#if d.replyType || d.matchedReply}
 										<div

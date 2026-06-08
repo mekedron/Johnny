@@ -529,6 +529,75 @@ def test_apply_agent_spoke_event_defaults_mode_to_listen_only(
     assert row.mode == BotMode.LISTEN_ONLY
 
 
+def test_apply_agent_spoke_event_records_divergence_when_text_differs(
+    db_session: Session,
+) -> None:
+    """Session-14 shape: router recommends (R), answer LLM speaks (U) ≠ (R).
+
+    The canonical record on the decision must carry both texts and an
+    audited override (INV-2, Johnny-ckz.28.2) so the panel can render the
+    swap instead of the two surfaces diverging silently.
+    """
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    apply_router_decision_event(
+        db_session,
+        _router_decision_payload(
+            session_id=bot_session.id,
+            mode="autonomous",
+            should_speak=True,
+            suggested_reply="Please share the weekly update.",
+        ),
+    )
+    db_session.flush()
+    apply_agent_spoke_event(
+        db_session,
+        _agent_spoke_payload(
+            session_id=bot_session.id,
+            text="Here is the weekly update you asked for.",
+        ),
+    )
+    db_session.flush()
+    decision = db_session.scalars(
+        sa.select(AgentDecision).order_by(AgentDecision.id.desc())
+    ).first()
+    assert decision is not None
+    assert decision.decision_recommended_text == "Please share the weekly update."
+    assert decision.final_text == "Here is the weekly update you asked for."
+    assert decision.divergence_reason is not None
+    assert decision.override_actor == "answer_llm"
+
+
+def test_apply_agent_spoke_event_no_divergence_when_text_matches(
+    db_session: Session,
+) -> None:
+    """When the spoken text matches the recommendation, no override is recorded."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    apply_router_decision_event(
+        db_session,
+        _router_decision_payload(
+            session_id=bot_session.id,
+            mode="autonomous",
+            should_speak=True,
+            suggested_reply="Affirmative.",
+        ),
+    )
+    db_session.flush()
+    apply_agent_spoke_event(
+        db_session,
+        _agent_spoke_payload(session_id=bot_session.id, text="Affirmative."),
+    )
+    db_session.flush()
+    decision = db_session.scalars(
+        sa.select(AgentDecision).order_by(AgentDecision.id.desc())
+    ).first()
+    assert decision is not None
+    assert decision.final_text == "Affirmative."
+    assert decision.divergence_reason is None
+    assert decision.override_actor is None
+
+
 # --- run_subscriber loop end-to-end --------------------------------------
 
 

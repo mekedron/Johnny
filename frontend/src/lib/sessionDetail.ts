@@ -45,6 +45,14 @@ export interface AgentDecisionRecord {
 	reason: string;
 	reply_type: string | null;
 	suggested_reply: string | null;
+	// Canonical per-turn record (INV-2, Johnny-ckz.28.2): `final_text` is what
+	// the bot spoke, `decision_recommended_text` is what the decision layer
+	// recommended; `divergence_reason`/`override_actor` are set together when
+	// the two differ so the panel can render the swap explicitly.
+	decision_recommended_text: string | null;
+	final_text: string | null;
+	divergence_reason: string | null;
+	override_actor: string | null;
 	outcome: DecisionOutcome;
 	created_at: string;
 }

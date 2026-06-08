@@ -107,6 +107,9 @@ class SqlAlchemyDecisionSink(DecisionSink):
             reason=decision.reason,
             reply_type=decision.reply_type,
             suggested_reply=decision.suggested_reply,
+            # Canonical-record snapshot (INV-2, Johnny-ckz.28.2): the
+            # recommended text is the router's suggestion at decision time.
+            decision_recommended_text=decision.suggested_reply,
             input_window=dict(decision.input_window),
             raw_output=dict(decision.raw_output),
             outcome=_OUTCOME_MAP.get(outcome, DecisionOutcome.PENDING),
