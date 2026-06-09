@@ -17,22 +17,39 @@ extra (``livekit-agents``) is absent.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Sequence
+from typing import Any, cast
+
 import pytest
 
 pytest.importorskip("livekit.agents")
 
+from livekit.agents import ModelSettings  # noqa: E402
 from livekit.agents.llm import ChatContext  # noqa: E402
 from livekit.agents.llm.chat_context import ChatMessage as LKChatMessage  # noqa: E402
 
+from app.providers.base import (  # noqa: E402
+    ChatMessage,
+    LLMProvider,
+    LLMResponse,
+    ToolDefinition,
+    TTSProvider,
+)
+from johnny.agent.adapters.johnny_tts import JohnnyTTS  # noqa: E402
 from johnny.agent.session import (  # noqa: E402
     DEFAULT_INSTRUCTIONS,
     AgentInstructionsConfig,
+    AnswerConfig,
     JohnnyAgent,
     build_agent_instructions,
     build_johnny_agent,
     transcripts_to_chat_ctx,
 )
 from johnny.voice_pipeline.events import TranscriptFinalized  # noqa: E402
+from johnny.voice_pipeline.pipeline import (  # noqa: E402
+    AUTONOMOUS_MODE,
+    LIMITED_AUTO_SPEAK_MODE,
+)
 from johnny.voice_pipeline.transcript_history import (  # noqa: E402
     BOT_SPEAKER_LABEL,
     InMemoryTranscriptHistoryLoader,
@@ -258,3 +275,177 @@ async def test_build_johnny_agent_explicit_instructions_win() -> None:
     assert agent.instructions == "OVERRIDE"
     # Rehydration still happens regardless of how instructions were chosen.
     assert _pairs(agent.chat_ctx) == [("assistant", "hi")]
+
+
+# --- llm_node: allowed-reply coercion (Johnny-5ag) -------------------------
+
+
+class _FakeAnswerLLM(LLMProvider):
+    """A scripted answer ``LLMProvider`` for the coercion node tests."""
+
+    def __init__(self, *, structured: Any = None, text: str = "") -> None:
+        self._structured = structured
+        self._text = text
+        self.calls: list[Sequence[ChatMessage]] = []
+
+    @property
+    def name(self) -> str:
+        return "fake-answer"
+
+    async def chat(
+        self,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
+        response_format: dict[str, Any] | None = None,  # noqa: ARG002
+    ) -> LLMResponse:
+        self.calls.append(list(messages))
+        return LLMResponse(
+            text=self._text, finish_reason="stop", structured_output=self._structured
+        )
+
+
+class _RecordingGate:
+    """Duck-typed stand-in for RouterGate — records coercion-no-match flags."""
+
+    def __init__(self) -> None:
+        self.no_match_calls = 0
+
+    def note_coercion_no_match(self) -> None:
+        self.no_match_calls += 1
+
+
+async def _drain(agen: AsyncIterator[Any]) -> list[Any]:
+    return [chunk async for chunk in agen]
+
+
+async def test_llm_node_coerces_to_matched_allowed_reply() -> None:
+    answer_llm = _FakeAnswerLLM(structured={"selected_reply": "Yes"})
+    agent = JohnnyAgent(
+        answer_llm=answer_llm,
+        answer_config=AnswerConfig(
+            mode=LIMITED_AUTO_SPEAK_MODE, allowed_replies=("Yes", "No")
+        ),
+    )
+
+    out = await _drain(agent.llm_node(ChatContext.empty(), [], ModelSettings()))
+
+    # The single matched reply is yielded as one text chunk (streams into TTS).
+    assert out == ["Yes"]
+    assert len(answer_llm.calls) == 1  # one structured coercion call
+
+
+async def test_llm_node_no_match_yields_nothing_and_flags_gate() -> None:
+    # Off-list structured pick → no match → silent, gate flagged.
+    answer_llm = _FakeAnswerLLM(structured={"selected_reply": "Maybe later"})
+    gate = _RecordingGate()
+    agent = JohnnyAgent(
+        answer_llm=answer_llm,
+        answer_config=AnswerConfig(
+            mode=LIMITED_AUTO_SPEAK_MODE, allowed_replies=("Yes", "No")
+        ),
+        router_gate=cast(Any, gate),
+    )
+
+    out = await _drain(agent.llm_node(ChatContext.empty(), [], ModelSettings()))
+
+    assert out == []  # nothing spoken
+    assert gate.no_match_calls == 1  # gate told to terminalize no_allowed_reply_match
+
+
+async def test_llm_node_autonomous_bypasses_coercion() -> None:
+    # Free-form mode never coerces; it delegates to the default streaming node,
+    # which needs a running activity (absent here) — proving the bypass.
+    answer_llm = _FakeAnswerLLM(structured={"selected_reply": "Yes"})
+    agent = JohnnyAgent(
+        answer_llm=answer_llm,
+        answer_config=AnswerConfig(
+            mode=AUTONOMOUS_MODE, allowed_replies=("Yes", "No")
+        ),
+    )
+
+    with pytest.raises(RuntimeError):
+        await _drain(agent.llm_node(ChatContext.empty(), [], ModelSettings()))
+
+    assert answer_llm.calls == []  # autonomous bypassed the allow-list coercion
+
+
+# --- tts_node: per-sentence flush + TTS-missing degrade (Johnny-5ag) --------
+
+
+class _RecordingTTSProvider(TTSProvider):
+    """A TTS provider that records the text of every synthesize call."""
+
+    def __init__(self, frames: list[bytes]) -> None:
+        self._frames = list(frames)
+        self.texts: list[str] = []
+
+    @property
+    def name(self) -> str:
+        return "fake-tts"
+
+    async def synthesize_stream(
+        self, text: str, voice_id: str | None = None  # noqa: ARG002
+    ) -> AsyncIterator[bytes]:
+        self.texts.append(text)
+        for frame in self._frames:
+            yield frame
+
+
+class _FakeActivity:
+    """Minimal stand-in for the running AgentActivity (only ``tts`` is read)."""
+
+    def __init__(self, tts: Any) -> None:
+        self.tts = tts
+
+
+async def _astream(*deltas: str) -> AsyncIterator[str]:
+    for delta in deltas:
+        yield delta
+
+
+async def test_tts_node_synthesizes_per_sentence() -> None:
+    provider = _RecordingTTSProvider([b"\x01\x02" * 1_600])  # 0.1 s per sentence
+    agent = JohnnyAgent()
+    agent._activity = cast(Any, _FakeActivity(JohnnyTTS(provider)))
+
+    frames = [
+        fr
+        async for fr in agent.tts_node(
+            _astream("Hello world. ", "How are you?\n"), ModelSettings()
+        )
+    ]
+
+    # Each complete sentence was synthesised separately (per-sentence flush).
+    assert provider.texts == ["Hello world.", "How are you?"]
+    # Audio was produced at the provider's 16 kHz mono contract.
+    assert frames
+    assert all(f.sample_rate == 16_000 and f.num_channels == 1 for f in frames)
+
+
+async def test_tts_node_degrades_to_no_audio_without_session_tts() -> None:
+    agent = JohnnyAgent()
+    agent._activity = None  # no activity → no session TTS
+
+    consumed: list[str] = []
+
+    async def _recording_stream() -> AsyncIterator[str]:
+        for delta in ("Hello. ", "World."):
+            consumed.append(delta)
+            yield delta
+
+    frames = [fr async for fr in agent.tts_node(_recording_stream(), ModelSettings())]
+
+    assert frames == []  # degraded: no audio, no crash
+    # The text stream was fully consumed so the upstream generation completes.
+    assert consumed == ["Hello. ", "World."]
+
+
+async def test_tts_node_degrades_when_tts_unavailable_flag_set() -> None:
+    provider = _RecordingTTSProvider([b"\x00\x00" * 1_600])
+    agent = JohnnyAgent(tts_available=False)
+    agent._activity = cast(Any, _FakeActivity(JohnnyTTS(provider)))
+
+    frames = [fr async for fr in agent.tts_node(_astream("Hi."), ModelSettings())]
+
+    assert frames == []  # forced degrade even though a TTS exists
+    assert provider.texts == []  # synthesize never called

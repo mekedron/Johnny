@@ -106,6 +106,47 @@ after each iteration and it's included in prompts for context.
   registers the id before `generate_reply` returns). Any reply-handle test fake the
   gate touches must now expose `.id`.
 
+### Answer-path nodes: llm_node coercion + tts_node per-sentence (Johnny-5ag)
+- **The answer stage splits across two `Agent` node overrides** in
+  `JohnnyAgent` (`backend/johnny/agent/session.py`); the pure, `livekit`-free
+  logic lives in `backend/johnny/agent/answer.py` (mirrors how `gate.py` is the
+  pure core under the `livekit`-importing `router_gate.py`). `answer.py` reuses
+  the legacy `_SENTENCE_BOUNDARY` regex + `_match_allowed_reply` verbatim
+  (`_legacy._SENTENCE_BOUNDARY`) so flush points / matching are byte-identical.
+- **`llm_node` = allowed-reply coercion.** When
+  `uses_allowlist(mode, allowed)` (allow-list set AND mode ∉ `FREE_FORM_MODES`),
+  it calls `coerce_allowed_reply(answer_llm, chat_ctx_to_messages(chat_ctx),
+  allowed)` — a SEPARATE structured `enum` `chat()` call (NOT the streaming
+  path), case-insensitive text fallback — and yields the single matched reply as
+  one `str` chunk. Free-form / no-allowlist delegates to
+  `Agent.default.llm_node(self, …)`. The **answer LLM provider is injected**
+  (`JohnnyAgent(answer_llm=…)`), separate from the session `JohnnyLLM` adapter,
+  because coercion needs the raw `LLMProvider.chat(response_format=…)`.
+- **no-match → `no_allowed_reply_match` crosses llm_node → gate.** On no match
+  `llm_node` yields nothing and calls `gate.note_coercion_no_match()`; the gate
+  keys it off its own `_active_reply[0]` (set by `bind_reply`, which fires from
+  the synchronous `speech_created` emit BEFORE the reply task runs `llm_node` —
+  verified ordering in `agent_activity._pipeline_reply_task_impl`). The empty
+  reply then hits `_on_reply_done`'s `not handle.chat_items` branch, which emits
+  `no_allowed_reply_match` instead of `model_empty_output`. So the agent never
+  touches a turn id; the gate owns the INV-1 mapping.
+- **`tts_node` = per-sentence flush + TTS-missing degrade.** `iter_sentences`
+  buffers the text stream and yields each complete sentence as its boundary
+  arrives (first-audio bounded by the first sentence); each is `synthesize()`-d
+  separately. The session TTS is read through the `_session_tts()` seam
+  (`self._activity.tts`, `None`-safe) so tests inject a fake activity and the
+  node degrades — consume the text, emit NO audio — instead of the default
+  node's `RuntimeError` when no TTS is bound.
+- **Modes are gate-level, not node-level.** `RouterGate.run_turn` handles
+  `listen_only` (short-circuit `StopResponse` BEFORE `gate_tracker` opens the
+  turn → no router call, **no terminal**, legacy parity) and `suggest_only`
+  (after the should-speak/confidence checks, before rate-limit/approval → emit
+  `no_reply(suggest_only)`, `StopResponse`). The `AgentSuggested` event + the
+  `suggested` decision outcome are deferred to Johnny-d5z; the gate owns only the
+  INV-1 terminal here. `degrade_speaking_mode_if_no_tts(mode, tts_available=)`
+  maps `SPEAKING_MODES`→`suggest_only` when no TTS — the worker (Johnny-un2/7we)
+  applies it; this bead ships the primitive + the node-level safety net.
+
 ---
 
 ## 2026-06-09 - Johnny-y4j [SPIKE] Per-room JWT auth + agent dispatch contract
@@ -269,6 +310,67 @@ the legacy meet-worker still serves the live approval UI, untouched here. Valida
 - `SpeechHandle.id` is the disambiguation key — any reply-handle fake the gate's `bind_reply`
   touches must expose `.id` now (the real SDK surface: `id` / `interrupted` / `chat_items` /
   `add_done_callback` / awaitable).
+
+---
+
+## 2026-06-09 - Johnny-5ag [BUILD] Phase 2: Allowed-reply coercion + per-sentence streaming + suggest_only/listen_only + TTS-missing degrade
+
+Ported the legacy answer-stage behaviours into the LiveKit reply path:
+allowed-reply coercion + per-sentence flush onto `JohnnyAgent.llm_node` /
+`tts_node`, the `suggest_only` / `listen_only` modes into the gate, and the
+graceful TTS-missing degrade.
+
+**Implemented:**
+- `backend/johnny/agent/answer.py` (new, `livekit`-free) — `AnswerConfig` (mode +
+  allow-list), `coerce_allowed_reply` (structured `enum` + case-insensitive text
+  fallback; no-match → `None`), `iter_sentences` (per-sentence flush reusing the
+  legacy `_SENTENCE_BOUNDARY`), `degrade_speaking_mode_if_no_tts`
+  (`SPEAKING_MODES`→`suggest_only`), `uses_allowlist` / `is_non_speaking_mode`.
+- `backend/johnny/agent/session.py` — `JohnnyAgent(answer_llm=, answer_config=,
+  tts_available=)`; `llm_node` (coerce when `uses_allowlist`, else default
+  streaming; no-match → `gate.note_coercion_no_match()` + yield nothing);
+  `tts_node` (per-sentence `synthesize`; degrade to no-audio when no session TTS);
+  `_session_tts()` seam (`self._activity.tts`, `None`-safe); threaded through
+  `build_johnny_agent`; `AnswerConfig` re-exported.
+- `backend/johnny/agent/router_gate.py` — `run_turn` `listen_only` short-circuit
+  (no turn opened, no terminal) + `suggest_only` branch (after confidence →
+  `no_reply(suggest_only)`); `_handle_suggest_only`; `note_coercion_no_match` +
+  `_coercion_no_match_turns`; `_on_reply_done` empty-output maps to
+  `no_allowed_reply_match` when flagged, else `model_empty_output`.
+- Tests: `tests/agent/test_answer.py` (new, `livekit`-free — coercion
+  match/fallback/no-match, sentence boundaries, degrade, mode predicates);
+  `tests/agent/test_router_gate_decision.py` (+listen_only/suggest_only/no-match
+  terminal); `tests/agent/test_johnny_agent.py` (+llm_node coercion match/no-match/
+  autonomous-bypass, tts_node per-sentence + degrade).
+
+**Quality gates:** ruff check + format clean; mypy `--strict` clean (3 source
+files); `tests/agent` (minus live-SFU smoke) = **464 passed**, no regressions
+(Johnny-5ag adds 27). Pure-backend — **no browser validation**: no agent worker
+(Johnny-9eh) runs the new agent path yet, and these node behaviours have no UI
+surface; the legacy meet-worker still serves the live UI untouched. The
+console-mode first-audio-latency integration is gated on the console smoke
+harness (Johnny-y6e, still open) — the per-sentence flush bound is unit-proven
+via `iter_sentences` until then.
+
+**Learnings:**
+- The framework's default `tts_node` ALREADY chunks per sentence for a
+  non-streaming TTS (wraps it in `StreamAdapter(sentence_tokenizer=blingfire…)`),
+  so per-sentence streaming was partly free — but the bead wants it as our own
+  testable unit + a place for the degrade, so `tts_node` does an explicit
+  `iter_sentences` flush with Johnny's boundary regex instead of delegating.
+- `speech_created` is emitted **synchronously** (pyee) right after
+  `SpeechHandle.create`, before the reply task runs `llm_node`, so
+  `gate._active_reply` is reliably set when `llm_node` calls
+  `note_coercion_no_match()` — the gate can key the no-match off its own active
+  reply and the agent never needs the turn id (clean cross-component seam).
+- `Agent.tts` returns the AGENT-level TTS (`self._tts`, usually unset); the
+  SESSION TTS is on `self._activity.tts`. `_get_activity_or_raise()` raises when
+  inactive, so the `_session_tts()` seam reads `self._activity` directly and
+  returns `None` — that's both the degrade path and the test-injection seam.
+- `coerce_allowed_reply` appends its own allow-list constraint system message:
+  the agent answer `chat_ctx` carries instructions+history but deliberately omits
+  per-turn pieces, so (unlike the legacy `_answer_messages`) the constraint has
+  to be added at coercion time for the text-fallback path to have a chance.
 
 ---
 

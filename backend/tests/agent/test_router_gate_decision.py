@@ -407,6 +407,115 @@ async def test_active_reply_tracks_bind_and_clears_on_done() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Modes — listen_only / suggest_only (Johnny-5ag)                             #
+# --------------------------------------------------------------------------- #
+
+
+async def test_listen_only_stays_silent_without_router_or_terminal() -> None:
+    """listen_only skips the router and opens no turn — no terminal, by design."""
+    from johnny.voice_pipeline.pipeline import LISTEN_ONLY_MODE
+
+    gate, emitter, router = _make_gate(
+        [{"should_speak": True, "confidence": 1.0, "reason": "n/a"}],
+        config=RouterGateConfig(mode=LISTEN_ONLY_MODE),
+    )
+    msg = _user_msg("just background chatter")
+
+    with pytest.raises(StopResponse):
+        await gate.run_turn(ChatContext.empty(), msg)
+
+    # The router never ran (listen-only is silent before the decision)...
+    assert router.calls == []
+    # ...the turn was never opened, so INV-1 accounts for nothing here...
+    assert gate._ledger.open_turns == ()
+    # ...and no terminal was emitted (parity with the legacy early return).
+    assert emitter.records == []
+
+
+async def test_suggest_only_emits_suggest_only_terminal_after_router_approves() -> None:
+    from johnny.voice_pipeline.pipeline import SUGGEST_ONLY_MODE
+
+    gate, emitter, router = _make_gate(
+        [
+            {
+                "should_speak": True,
+                "confidence": 0.9,
+                "reason": "addressed",
+                "suggested_reply": "On track for Friday.",
+            }
+        ],
+        config=RouterGateConfig(mode=SUGGEST_ONLY_MODE),
+    )
+    msg = _user_msg("Johnny, status?")
+
+    with pytest.raises(StopResponse):
+        await gate.run_turn(ChatContext.empty(), msg)
+
+    # The router DID run (the UI needs the suggestion) and approved.
+    assert len(router.calls) == 1
+    assert len(emitter.records) == 1
+    turn_id, term = emitter.records[0]
+    assert turn_id == msg.id
+    assert term.terminal_state == "no_reply"
+    assert term.no_reply_reason == "suggest_only"
+    # The suggested reply rides along in the detail until Johnny-d5z wires the
+    # dedicated AgentSuggested event.
+    assert "On track for Friday." in term.detail
+
+
+async def test_suggest_only_router_decline_still_declines() -> None:
+    """suggest_only is checked AFTER should-speak — a decline is router_declined."""
+    from johnny.voice_pipeline.pipeline import SUGGEST_ONLY_MODE
+
+    gate, emitter, _ = _make_gate(
+        [{"should_speak": False, "confidence": 0.9, "reason": "side chatter"}],
+        config=RouterGateConfig(mode=SUGGEST_ONLY_MODE),
+    )
+
+    with pytest.raises(StopResponse):
+        await gate.run_turn(ChatContext.empty(), _user_msg("...lunch?"))
+
+    assert emitter.reasons == ["router_declined"]
+
+
+# --------------------------------------------------------------------------- #
+# Allowed-reply coercion no-match terminal (Johnny-5ag)                        #
+# --------------------------------------------------------------------------- #
+
+
+async def test_coercion_no_match_terminalizes_no_allowed_reply_match() -> None:
+    """llm_node's no-match flag maps the empty reply to no_allowed_reply_match."""
+    gate, emitter, _ = _make_gate(
+        [{"should_speak": True, "confidence": 0.95, "reason": "addressed"}],
+        config=RouterGateConfig(allowed_replies=("yes", "no")),
+    )
+    msg = _user_msg("are we on track?")
+    await gate.run_turn(ChatContext.empty(), msg)
+
+    # The reply binds (speech_created), the coercion finds no allowed reply, and
+    # the reply completes empty.
+    handle = _handle(chat_items=[])
+    gate.bind_reply(handle)
+    gate.note_coercion_no_match()  # llm_node would call this on no-match
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+
+    assert len(emitter.records) == 1
+    turn_id, term = emitter.records[0]
+    assert turn_id == msg.id
+    assert term.terminal_state == "no_reply"
+    assert term.no_reply_reason == "no_allowed_reply_match"
+
+
+async def test_note_coercion_no_match_is_noop_without_active_reply() -> None:
+    """No active reply (degenerate) → nothing flagged, empty reply stays generic."""
+    gate, emitter, _ = _make_gate()
+    gate.note_coercion_no_match()  # no active reply — must not raise or flag
+    await gate._on_reply_done("item_q", _handle(chat_items=[]))
+    assert emitter.reasons == ["model_empty_output"]
+
+
+# --------------------------------------------------------------------------- #
 # Gate harness integration — router error → stage_error                       #
 # --------------------------------------------------------------------------- #
 

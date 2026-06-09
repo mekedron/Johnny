@@ -70,6 +70,8 @@ from johnny.voice_pipeline.pipeline import (
     DEFAULT_RATE_LIMIT_MAX_UTTERANCES,
     DEFAULT_RATE_LIMIT_WINDOW_MS,
     DEFAULT_ROUTER_LLM_TIMEOUT_S,
+    LISTEN_ONLY_MODE,
+    SUGGEST_ONLY_MODE,
     RouterDecision,
 )
 from johnny.voice_pipeline.transcript_history import BOT_SPEAKER_LABEL
@@ -187,6 +189,13 @@ class RouterGate:
         # interrupt — the LiveKit-turn-keyed analogue of the legacy
         # ``_response_generation`` counter.
         self._active_reply: tuple[str, SpeechHandle] | None = None
+        # Turn ids whose allowed-reply coercion found no match (Johnny-5ag): the
+        # llm_node yields nothing, so the reply completes empty, and
+        # :meth:`_on_reply_done` maps that empty reply to
+        # ``no_reply(no_allowed_reply_match)`` instead of ``model_empty_output``.
+        # Flagged via :meth:`note_coercion_no_match` (keyed off the active reply's
+        # turn id) and consumed when that reply's done-callback fires.
+        self._coercion_no_match_turns: set[str] = set()
 
     # ------------------------------------------------------------------ #
     # The blocking gate                                                  #
@@ -197,11 +206,15 @@ class RouterGate:
 
         Returns normally to **speak** (the SDK then generates the reply); raises
         :class:`~livekit.agents.llm.StopResponse` to stay silent. Every silent
-        exit leaves exactly one terminal in the ledger (INV-1):
+        exit leaves exactly one terminal in the ledger (INV-1) — except
+        ``listen_only``, which (like the legacy early return) is never opened, so
+        it accounts for no turn:
 
+        * ``listen_only`` → silent, **no terminal** (router skipped, turn never opened);
         * gate timeout / barge-in / router error → emitted by :func:`run_gate`;
         * ``should_speak=false`` → ``no_reply(router_declined)``;
         * ``confidence < threshold`` → ``no_reply(low_confidence)``;
+        * ``suggest_only`` (after the router approves) → ``no_reply(suggest_only)``;
         * rate-limited → ``no_reply(rate_limited)``.
 
         In ``approval_required`` mode an approved-to-speak turn is **parked** for
@@ -217,6 +230,13 @@ class RouterGate:
         :meth:`bind_reply` to terminalize on reply completion.
         """
         turn_id = new_message.id
+        if self._config.mode == LISTEN_ONLY_MODE:
+            # Listen-only never speaks and skips the router entirely — parity with
+            # the legacy ``VoicePipeline._respond_to_transcript`` early return. The
+            # turn is deliberately NOT opened in the ledger: there is no turn to
+            # account for, so INV-1 emits no terminal (exactly like the noise-gate /
+            # skip_reply paths documented on :meth:`TurnLedger.open`). Stay silent.
+            raise StopResponse()
         tracker = self._ledger.gate_tracker(turn_id)  # opens the turn (INV-1)
         action, decision = await run_gate(
             lambda: self._decide(turn_ctx, new_message),
@@ -255,6 +275,16 @@ class RouterGate:
                     f"{self._config.confidence_threshold:.2f}"
                 ),
             )
+            raise StopResponse()
+
+        if self._config.mode == SUGGEST_ONLY_MODE:
+            # suggest_only: the router ran (so the UI sees a suggestion) and
+            # approved, but the bot speaks nothing. Mirrors the legacy order
+            # (``_respond_to_transcript_inner`` checks suggest_only after
+            # should-speak/confidence, before rate-limit/approval). The terminal
+            # is owned here; the AgentSuggested event that carries the suggested
+            # reply to the UI is event/observability parity (Johnny-d5z).
+            await self._handle_suggest_only(tracker, decision)
             raise StopResponse()
 
         if self._is_rate_limited():
@@ -357,6 +387,26 @@ class RouterGate:
                 turn_id,
             )
 
+    async def _handle_suggest_only(
+        self, tracker: TerminalTracker, decision: RouterDecision
+    ) -> None:
+        """Terminalize a suggest_only turn (Johnny-5ag) — suggestion, no speech.
+
+        Port of ``VoicePipeline._handle_suggest_only``'s terminal: the router
+        approved, so a suggestion exists (``decision.suggested_reply``), but the
+        bot speaks nothing into the meeting — from the operator's chat the turn is
+        a deliberate ``no_reply(suggest_only)``. The suggested reply is carried in
+        the detail for now; the dedicated :class:`AgentSuggested` event (and the
+        ``suggested`` decision outcome) are wired by the event/observability parity
+        bead (Johnny-d5z).
+        """
+        suggested = (decision.suggested_reply or "").strip()
+        await tracker.emit(
+            terminal_state="no_reply",
+            no_reply_reason="suggest_only",
+            detail=f"suggest-only mode: nothing spoken (suggested={suggested!r})",
+        )
+
     async def _decide(self, turn_ctx: ChatContext, new_message: LKChatMessage) -> RouterDecision:
         """Call the router LLM and parse its structured decision.
 
@@ -420,18 +470,41 @@ class RouterGate:
         """
         return self._active_reply
 
+    def note_coercion_no_match(self) -> None:
+        """Flag the active reply's turn as an allowed-reply coercion no-match (Johnny-5ag).
+
+        Called by :meth:`JohnnyAgent.llm_node` when
+        :func:`~johnny.agent.answer.coerce_allowed_reply` finds no allowed reply:
+        the node yields nothing, so the reply completes with no assistant output.
+        Recording the active reply's turn id makes :meth:`_on_reply_done` emit
+        ``no_reply(no_allowed_reply_match)`` for that empty reply instead of the
+        generic ``model_empty_output`` (parity with the legacy
+        ``_answer_and_speak`` → ``no_allowed_reply_match``). The active reply is
+        set by :meth:`bind_reply` (fired by the session ``speech_created``
+        listener) *before* ``llm_node`` runs, so the turn id is available here;
+        a no-op when there is no active reply (a degenerate, unbound coercion).
+        """
+        if self._active_reply is not None:
+            self._coercion_no_match_turns.add(self._active_reply[0])
+
     async def _on_reply_done(self, turn_id: str, handle: SpeechHandle) -> None:
         """Emit the speak path's single terminal once the reply is done.
 
         ``interrupted`` → ``barge_in`` (the user cut the bot off mid-reply);
-        no chat items produced → ``model_empty_output``; otherwise ``replied``
-        (and the utterance counts toward the over-talk cap). First-wins via the
-        ledger, so a duplicate done-callback can never double-emit.
+        no chat items produced → ``no_allowed_reply_match`` when allowed-reply
+        coercion flagged this turn (Johnny-5ag), else ``model_empty_output``;
+        otherwise ``replied`` (and the utterance counts toward the over-talk cap).
+        First-wins via the ledger, so a duplicate done-callback can never
+        double-emit.
         """
         # The reply is finished — clear it so a barge-in classifier started for a
         # later turn doesn't capture a dead handle as its interrupt target.
         if self._active_reply is not None and self._active_reply[0] == turn_id:
             self._active_reply = None
+        # Consume any coercion-no-match flag for this turn (set by llm_node) so the
+        # set stays bounded regardless of which terminal branch fires below.
+        coercion_no_match = turn_id in self._coercion_no_match_turns
+        self._coercion_no_match_turns.discard(turn_id)
         if handle.interrupted:
             await self._ledger.emit(
                 turn_id,
@@ -444,8 +517,14 @@ class RouterGate:
             await self._ledger.emit(
                 turn_id,
                 terminal_state="no_reply",
-                no_reply_reason="model_empty_output",
-                detail="reply produced no assistant output",
+                no_reply_reason=(
+                    "no_allowed_reply_match" if coercion_no_match else "model_empty_output"
+                ),
+                detail=(
+                    "allowed-reply coercion found no match"
+                    if coercion_no_match
+                    else "reply produced no assistant output"
+                ),
             )
             return
         self._recent_utterance_times.append(self._clock())

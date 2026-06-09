@@ -3,10 +3,10 @@
   "sessionId": "737211f1-9739-40c0-8d3f-332e080d27b8",
   "status": "running",
   "startedAt": "2026-06-08T22:23:12.909Z",
-  "updatedAt": "2026-06-08T23:31:59.354Z",
-  "currentIteration": 2,
+  "updatedAt": "2026-06-09T00:02:45.131Z",
+  "currentIteration": 3,
   "maxIterations": 0,
-  "tasksCompleted": 2,
+  "tasksCompleted": 3,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -123,8 +123,8 @@
       {
         "id": "Johnny-qzj",
         "title": "[BUILD] Phase 2: Approval-required mode (ApprovalPending/Resolved + terminal outcomes)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-re2",
@@ -232,6 +232,16 @@
       "durationMs": 1214854,
       "startedAt": "2026-06-08T22:46:37.031Z",
       "endedAt": "2026-06-08T23:06:51.885Z"
+    },
+    {
+      "iteration": 3,
+      "status": "completed",
+      "taskId": "Johnny-qzj",
+      "taskTitle": "[BUILD] Phase 2: Approval-required mode (ApprovalPending/Resolved + terminal outcomes)",
+      "taskCompleted": true,
+      "durationMs": 1485404,
+      "startedAt": "2026-06-08T23:07:13.053Z",
+      "endedAt": "2026-06-08T23:31:58.457Z"
     }
   ],
   "skippedTaskIds": [],

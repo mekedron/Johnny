@@ -54,6 +54,13 @@ from livekit.agents.llm.chat_context import ChatMessage as LKChatMessage
 from livekit.plugins import silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
+from johnny.agent.adapters.johnny_llm import chat_ctx_to_messages
+from johnny.agent.answer import (
+    AnswerConfig,
+    coerce_allowed_reply,
+    iter_sentences,
+    uses_allowlist,
+)
 from johnny.voice_pipeline.events import TranscriptFinalized
 from johnny.voice_pipeline.transcript_history import (
     BOT_SPEAKER_LABEL,
@@ -62,18 +69,22 @@ from johnny.voice_pipeline.transcript_history import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterable, AsyncIterator, Sequence
+
+    from livekit import rtc
 
     # STT / LLM / TTS are Generic over their event type (TEvent) and
     # AgentSession over Userdata_T; the harness is event/userdata-agnostic,
     # so it accepts any concrete adapter via the [Any] parametrization. The
     # Phase-1 adapters (johnny.agent.adapters) subclass with concrete events.
-    from livekit.agents.llm import LLM
+    from livekit.agents import FlushSentinel, ModelSettings
+    from livekit.agents.llm import LLM, ChatChunk, Tool
     from livekit.agents.stt import STT
     from livekit.agents.tts import TTS
     from livekit.agents.vad import VAD
     from livekit.agents.voice import SpeechCreatedEvent
 
+    from app.providers.base import LLMProvider
     from johnny.agent.barge_in import BargeInClassifier
     from johnny.agent.router_gate import RouterGate
 
@@ -321,6 +332,9 @@ class JohnnyAgent(Agent):
         chat_history: Sequence[TranscriptFinalized] | None = None,
         router_gate: RouterGate | None = None,
         barge_in: BargeInClassifier | None = None,
+        answer_llm: LLMProvider | None = None,
+        answer_config: AnswerConfig | None = None,
+        tts_available: bool = True,
     ) -> None:
         if instructions is None:
             instructions = (
@@ -334,6 +348,16 @@ class JohnnyAgent(Agent):
         super().__init__(instructions=instructions, chat_ctx=chat_ctx)
         self._router_gate = router_gate
         self._barge_in = barge_in
+        # Answer-path config (Johnny-5ag). ``answer_llm`` is the raw answer
+        # ``LLMProvider`` used for allowed-reply coercion (a separate structured
+        # call, mirroring the legacy ``answer_llm.chat(response_format=...)``);
+        # ``answer_config`` carries the mode + allow-list the node overrides read;
+        # ``tts_available`` is the graceful-degrade signal (a missing TTS makes
+        # ``tts_node`` emit no audio instead of crashing). All optional so a
+        # bare/smoke ``JohnnyAgent`` keeps the default reply behaviour.
+        self._answer_llm = answer_llm
+        self._answer_config = answer_config
+        self._tts_available = tts_available
 
     async def on_enter(self) -> None:
         """Wire the reply→turn correlation once the agent is active.
@@ -417,6 +441,98 @@ class JohnnyAgent(Agent):
             current_speech=lambda: self.session.current_speech,
         )
 
+    # ------------------------------------------------------------------ #
+    # Answer-path nodes (Johnny-5ag)                                      #
+    # ------------------------------------------------------------------ #
+
+    async def llm_node(
+        self,
+        chat_ctx: ChatContext,
+        tools: list[Tool],
+        model_settings: ModelSettings,
+    ) -> AsyncIterator[ChatChunk | str | FlushSentinel]:
+        """Generate the answer text, coercing to an allowed reply when configured.
+
+        Port of ``VoicePipeline._answer_and_speak``'s answer-stage branch into the
+        LiveKit reply pipeline. In a Limited-auto-speak session with an allow-list
+        (and any non-free-form mode), the answer is **coerced** to a verbatim
+        allowed reply via :func:`~johnny.agent.answer.coerce_allowed_reply`
+        (structured ``enum`` + case-insensitive text fallback); the single matched
+        reply is yielded as one text chunk so it streams into TTS. When no allowed
+        reply matches, the node yields nothing and flags the gate
+        (:meth:`RouterGate.note_coercion_no_match`) so the reply's empty completion
+        terminalizes ``no_reply(no_allowed_reply_match)`` rather than the generic
+        ``model_empty_output``.
+
+        Every other mode (free-form ``autonomous``, or no allow-list configured)
+        streams the answer LLM verbatim through the default node, so token-by-token
+        output still reaches TTS for low latency.
+        """
+        config = self._answer_config
+        if (
+            config is not None
+            and self._answer_llm is not None
+            and uses_allowlist(config.mode, config.allowed_replies)
+        ):
+            picked = await coerce_allowed_reply(
+                self._answer_llm,
+                chat_ctx_to_messages(chat_ctx),
+                config.allowed_replies,
+            )
+            if picked is None:
+                if self._router_gate is not None:
+                    self._router_gate.note_coercion_no_match()
+                return
+            yield picked
+            return
+        async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
+            yield chunk
+
+    async def tts_node(
+        self,
+        text: AsyncIterable[str],
+        model_settings: ModelSettings,
+    ) -> AsyncIterator[rtc.AudioFrame]:
+        """Synthesise the answer per sentence, degrading silently with no TTS.
+
+        Two ported behaviours (Johnny-5ag):
+
+        * **per-sentence flush** — :func:`~johnny.agent.answer.iter_sentences`
+          buffers the streaming answer text and yields each complete sentence the
+          instant a boundary arrives; each is synthesised immediately, so
+          time-to-first-audio is bounded by the first sentence, not the whole
+          reply (parity with ``VoicePipeline._stream_answer_into_tts``);
+        * **graceful TTS-missing degrade** — when no TTS provider is available
+          (or the session was degraded to ``suggest_only``), the node consumes the
+          text so the upstream generation completes cleanly and emits **no audio**,
+          instead of the default node's ``RuntimeError`` — the bot keeps thinking
+          rather than crashing the turn.
+        """
+        tts = self._session_tts()
+        if tts is None or not self._tts_available:
+            async for _ in text:
+                pass
+            return
+        async for sentence in iter_sentences(text):
+            stream = tts.synthesize(sentence)
+            async with stream:
+                async for ev in stream:
+                    yield ev.frame
+
+    def _session_tts(self) -> TTS[Any] | None:
+        """The session's TTS plugin, or ``None`` when none is bound.
+
+        The default :meth:`tts_node` reaches the TTS through the running
+        ``AgentActivity``; reading it through this seam lets :meth:`tts_node`
+        degrade gracefully when the agent has no activity yet or no TTS provider
+        is configured (instead of raising), and keeps the node unit-testable by
+        injecting the activity.
+        """
+        activity = self._activity
+        if activity is None:
+            return None
+        return activity.tts
+
 
 async def build_johnny_agent(
     *,
@@ -427,6 +543,9 @@ async def build_johnny_agent(
     bot_session_id: int | None = None,
     router_gate: RouterGate | None = None,
     barge_in: BargeInClassifier | None = None,
+    answer_llm: LLMProvider | None = None,
+    answer_config: AnswerConfig | None = None,
+    tts_available: bool = True,
 ) -> JohnnyAgent:
     """Build a :class:`JohnnyAgent`, rehydrating prior transcripts if available.
 
@@ -471,12 +590,16 @@ async def build_johnny_agent(
         chat_history=history or None,
         router_gate=router_gate,
         barge_in=barge_in,
+        answer_llm=answer_llm,
+        answer_config=answer_config,
+        tts_available=tts_available,
     )
 
 
 __all__ = [
     "DEFAULT_INSTRUCTIONS",
     "AgentInstructionsConfig",
+    "AnswerConfig",
     "JohnnyAgent",
     "build_agent_instructions",
     "build_agent_session",
