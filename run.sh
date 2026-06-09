@@ -46,19 +46,26 @@ fi
 # The frontend MUST come from the compose `frontend` service — never from
 # a host-side `pnpm dev` in ./frontend. A stray host vite survives terminal
 # close (PPID becomes 1) and silently steals port 5173 from the dockerized
-# frontend, so `docker compose up` then fails to bind. Sweep any host
-# process still holding 5173 before bringing the stack up. Compose's own
-# port forwarder (docker-proxy / com.docker.* / vpnkit) is skipped — if
-# it is listening, that just means the stack is already partly up and
-# `up -d --build` below will reconcile it.
+# frontend, so `docker compose up` then fails to bind. Sweep any such stray
+# host dev-server still holding 5173 before bringing the stack up.
+#
+# ALLOWLIST, not denylist: only a recognized host dev-server (vite/esbuild
+# run as `node`; a `pnpm`/`npm` parent) is killed. Everything else on :5173
+# is LEFT ALONE — most importantly Docker Desktop's own port forwarder, which
+# publishes the dockerized frontend's 5173. The earlier denylist (`com.docker.*`)
+# silently missed it because macOS `ps -o comm=` returns the FULL path
+# (`/Applications/Docker.app/.../com.docker.backend`), so the sweep killed
+# Docker Desktop's backend and took the daemon down (bug Johnny-9ph). An
+# allowlist makes that impossible: an unrecognized process is never killed —
+# at worst `up -d --build` below prints a clear "address already in use".
 for pid in $(lsof -nP -t -iTCP:5173 -sTCP:LISTEN 2>/dev/null || true); do
   cmd=$(ps -p "$pid" -o comm= 2>/dev/null || true)
-  case "$cmd" in
-    com.docker.*|*vpnkit*|*docker-proxy*) ;;
-    *)
-      echo "[run.sh] Killing host process on :5173 (pid $pid, $cmd) — the dockerized frontend will take over." >&2
+  case "$(basename "${cmd:-/unknown}")" in
+    node|vite|pnpm|npm|esbuild)
+      echo "[run.sh] Killing stray host dev-server on :5173 (pid $pid, $cmd) — the dockerized frontend will take over." >&2
       kill "$pid" 2>/dev/null || true
       ;;
+    *) ;;  # Docker port-forwarder or anything unrecognized — never touched.
   esac
 done
 

@@ -31,8 +31,20 @@ WORKDIR /workspace
 # (Johnny-1ge.11; torch is pinned CPU-only via [tool.uv] in pyproject so this
 # stays ~1.5 GB, not ~5 GB). The meet-worker image installs its own pinned
 # copies via pip; this layer covers the api/worker.
+#
+# The `dev` dependency-group (pytest, pytest-asyncio, ruff, mypy, aiosqlite)
+# is intentionally LEFT IN — note the absence of `--no-dev`. CLAUDE.md /
+# AGENTS.md make `docker compose exec api pytest` (and `ruff` / `mypy`) THE
+# quality gates, run against this same image; "Docker is the only runtime"
+# means the operator never installs test tooling on the host. Installing the
+# group here (in the cached deps layer) keeps the documented gate working on
+# a clean `./run.sh` and stops the recurring failure mode of agents
+# hot-patching `uv pip install pytest` into the running container — a change
+# that vanishes on the next `./stop.sh` (Johnny-012). The group is
+# pure-Python + the ruff/mypy binaries (~60 MB total), negligible next to the
+# baked ML deps.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-install-project --no-dev \
+RUN uv sync --frozen --no-install-project \
     --extra local-stt --extra local-tts --extra neural-tts --extra agent
 
 # Bake the LiveKit Agents model files (Silero VAD + multilingual turn
@@ -64,7 +76,10 @@ COPY alembic.ini ./
 COPY alembic ./alembic
 COPY app ./app
 COPY johnny ./johnny
-RUN uv sync --frozen --no-dev \
+# No `--no-dev`: the dev group (pytest/ruff/mypy/aiosqlite) was installed in
+# the cached deps layer above so `docker compose exec api pytest` works on a
+# clean build (Johnny-012). This sync only installs the project itself.
+RUN uv sync --frozen \
     --extra local-stt --extra local-tts --extra neural-tts --extra agent
 
 EXPOSE 8000

@@ -48,13 +48,20 @@ done
 # a container, ports 5173:5173). If someone — usually a developer in a
 # hurry — also ran `pnpm dev` from ./frontend on the host, that process
 # survives terminal close (PPID becomes 1) and quietly steals port 5173
-# from the dockerized frontend on the next `./run.sh`. Compose down has
-# already released its own port forwarder, so anything still listening
-# here is a host process and is safe to terminate.
+# from the dockerized frontend on the next `./run.sh`. `docker compose
+# down -v` above has already released the container's port forwarder, so
+# sweep any leftover stray host dev-server here.
+#
+# ALLOWLIST, not denylist (bug Johnny-9ph): only kill a recognized host
+# dev-server (vite/esbuild run as `node`; pnpm/npm parents). Docker
+# Desktop's backend shows up via `ps -o comm=` as the FULL path
+# (/Applications/Docker.app/.../com.docker.backend) on macOS, so the old
+# `com.docker.*` denylist missed it and the sweep killed the daemon. An
+# allowlist can never kill an unrecognized process.
 for pid in $(lsof -nP -t -iTCP:5173 -sTCP:LISTEN 2>/dev/null || true); do
   cmd=$(ps -p "$pid" -o comm= 2>/dev/null || true)
-  case "$cmd" in
-    com.docker.*|*vpnkit*|*docker-proxy*) ;;
-    *) kill "$pid" 2>/dev/null || true ;;
+  case "$(basename "${cmd:-/unknown}")" in
+    node|vite|pnpm|npm|esbuild) kill "$pid" 2>/dev/null || true ;;
+    *) ;;
   esac
 done
