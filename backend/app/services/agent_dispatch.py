@@ -46,13 +46,26 @@ logger = logging.getLogger(__name__)
 
 # Orchestrator selection (Johnny-9eh; expanded into the full per-session engine
 # selector by Johnny-wz5). ``legacy`` keeps the Docker meet-worker voice pipeline;
-# ``agentsession`` additionally dispatches the LiveKit agent worker for the session.
-# Default stays ``legacy`` until parity is proven — a single env flip is the rollback.
+# ``agentsession`` dispatches the LiveKit agent worker AND switches the spawned
+# meet-worker to pure-bridge mode (:func:`bridge_launch_environment`) so the two
+# halves run side by side. Default stays ``legacy`` until parity is proven — a
+# single env flip is the rollback.
 ENV_ORCHESTRATOR = "JOHNNY_ORCHESTRATOR"
 ORCHESTRATOR_AGENTSESSION = "agentsession"
 ORCHESTRATOR_LEGACY = "legacy"
 DEFAULT_ORCHESTRATOR = ORCHESTRATOR_LEGACY
 ENV_REDIS_URL = "REDIS_URL"
+
+# LiveKit connection vars the meet-worker bridge reads via
+# ``johnny.voice_pipeline.livekit_transport.create_meet_room_bridge_from_env``.
+# Kept in lockstep with that reader and with the launcher env the bridge token is
+# minted for (Johnny-y4j / Johnny-6nm).
+ENV_LIVEKIT_URL = "LIVEKIT_URL"
+ENV_LIVEKIT_TOKEN = "LIVEKIT_TOKEN"
+ENV_LIVEKIT_ROOM = "LIVEKIT_ROOM"
+ENV_LIVEKIT_IDENTITY = "LIVEKIT_IDENTITY"
+ENV_LIVEKIT_API_KEY = "LIVEKIT_API_KEY"
+ENV_LIVEKIT_API_SECRET = "LIVEKIT_API_SECRET"
 
 
 def session_job_config_from_launch_context(
@@ -140,6 +153,65 @@ def agent_orchestrator_enabled(environ: Mapping[str, str] | None = None) -> bool
     return value == ORCHESTRATOR_AGENTSESSION
 
 
+def bridge_launch_environment(
+    *,
+    bot_session_id: int,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Extra meet-worker env that switches it to pure-bridge mode (Johnny-wz5).
+
+    The launcher-side half of the per-session engine switch, merged into the
+    spawned container's environment by
+    :meth:`app.services.docker_launcher.DockerContainerLauncher._build_environment`.
+
+    * ``legacy`` mode (default) → ``{}``: the meet-worker runs the in-worker
+      voice pipeline exactly as before — zero behaviour change.
+    * ``agentsession`` mode → the orchestrator flag plus the four LiveKit vars
+      :func:`~johnny.voice_pipeline.livekit_transport.create_meet_room_bridge_from_env`
+      reads: ``LIVEKIT_URL`` (the SFU the API already points at), ``LIVEKIT_ROOM``
+      (one room per session), ``LIVEKIT_IDENTITY`` (the ``meet-bridge-<id>``
+      participant) and ``LIVEKIT_TOKEN`` — the per-room **bridge** token minted
+      here because the API holds the LiveKit credentials
+      (:func:`johnny.agent.room_auth.mint_bridge_token`, Johnny-y4j).
+
+    Defensive, mirroring :func:`maybe_dispatch_session_agent`: if the token can't
+    be minted (missing ``LIVEKIT_API_KEY`` / ``LIVEKIT_API_SECRET``) the call
+    degrades to ``{}`` with a logged warning, so the meet-worker falls back to the
+    proven legacy pipeline rather than launching a dead bridge. ``room_auth`` is
+    imported lazily so this module stays ``livekit``-free at import time.
+    """
+    src = environ if environ is not None else os.environ
+    if not agent_orchestrator_enabled(src):
+        return {}
+
+    from johnny.agent.job_config import bridge_identity_for_session
+    from johnny.agent.room_auth import mint_bridge_token
+
+    api_key = (src.get(ENV_LIVEKIT_API_KEY) or "").strip() or None
+    api_secret = (src.get(ENV_LIVEKIT_API_SECRET) or "").strip() or None
+    try:
+        token = mint_bridge_token(
+            bot_session_id=bot_session_id,
+            api_key=api_key,
+            api_secret=api_secret,
+        )
+    except Exception:
+        logger.exception(
+            "bridge token mint failed for bot_session_id=%s; the meet-worker "
+            "will fall back to the legacy pipeline for this session",
+            bot_session_id,
+        )
+        return {}
+
+    return {
+        ENV_ORCHESTRATOR: ORCHESTRATOR_AGENTSESSION,
+        ENV_LIVEKIT_URL: (src.get(ENV_LIVEKIT_URL) or "").strip(),
+        ENV_LIVEKIT_ROOM: room_name_for_session(bot_session_id),
+        ENV_LIVEKIT_IDENTITY: bridge_identity_for_session(bot_session_id),
+        ENV_LIVEKIT_TOKEN: token,
+    }
+
+
 async def maybe_dispatch_session_agent(
     ctx: LaunchContext,
     *,
@@ -188,6 +260,7 @@ __all__ = [
     "ORCHESTRATOR_AGENTSESSION",
     "ORCHESTRATOR_LEGACY",
     "agent_orchestrator_enabled",
+    "bridge_launch_environment",
     "dispatch_session_agent",
     "maybe_dispatch_session_agent",
     "session_job_config_from_launch_context",

@@ -40,6 +40,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import BotSession, BotSessionStatus
+from app.services.agent_dispatch import bridge_launch_environment
 from app.services.bot_sessions import (
     BotSessionNotFoundError,
     mark_session_ended,
@@ -654,6 +655,13 @@ class DockerContainerLauncher(ContainerLauncher):
         # Johnny-ckz.1's "perpetual joining".
         if self._redis_url:
             env["JOHNNY_REDIS_URL"] = self._redis_url
+        # Johnny-wz5: per-session engine selection. In agentsession mode this
+        # adds JOHNNY_ORCHESTRATOR + the minted per-room bridge token + room /
+        # identity so the meet-worker runs as a pure audio bridge into the
+        # session's LiveKit room (the STT→LLM→TTS pipeline runs in the
+        # dispatched agent worker). Empty in the default legacy mode → the env
+        # is byte-identical to before, so no behaviour change ships.
+        env.update(bridge_launch_environment(bot_session_id=ctx.bot_session_id))
         env.update(self._extra_environment)
         return env
 

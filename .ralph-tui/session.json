@@ -3,10 +3,10 @@
   "sessionId": "737211f1-9739-40c0-8d3f-332e080d27b8",
   "status": "running",
   "startedAt": "2026-06-08T22:23:12.909Z",
-  "updatedAt": "2026-06-09T02:08:59.339Z",
-  "currentIteration": 8,
+  "updatedAt": "2026-06-09T02:39:36.749Z",
+  "currentIteration": 9,
   "maxIterations": 0,
-  "tasksCompleted": 8,
+  "tasksCompleted": 9,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -81,8 +81,8 @@
       {
         "id": "Johnny-9eh",
         "title": "[BUILD] Phase 3: Agent-worker service in docker-compose + dispatch lifecycle (one room per session)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-9k2",
@@ -292,6 +292,16 @@
       "durationMs": 1217881,
       "startedAt": "2026-06-09T01:13:49.752Z",
       "endedAt": "2026-06-09T01:34:07.633Z"
+    },
+    {
+      "iteration": 9,
+      "status": "completed",
+      "taskId": "Johnny-9eh",
+      "taskTitle": "[BUILD] Phase 3: Agent-worker service in docker-compose + dispatch lifecycle (one room per session)",
+      "taskCompleted": true,
+      "durationMs": 2068797,
+      "startedAt": "2026-06-09T01:34:29.614Z",
+      "endedAt": "2026-06-09T02:08:58.411Z"
     }
   ],
   "skippedTaskIds": [],

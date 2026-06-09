@@ -31,6 +31,7 @@ import signal
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from johnny.meet_worker import selfcheck
 from johnny.meet_worker.audio_bridge import MeetAudioBridge
@@ -47,11 +48,11 @@ from johnny.meet_worker.log_stages import (
     log_stage_error,
 )
 from johnny.meet_worker.meet_join import (
+    MeetingAccessDeniedError,
+    MeetingNotStartedError,
     MeetJoinError,
     MeetJoinTimeoutError,
     MeetSignInError,
-    MeetingAccessDeniedError,
-    MeetingNotStartedError,
     open_meeting_session,
 )
 from johnny.meet_worker.storage_state import (
@@ -66,6 +67,7 @@ from johnny.voice_pipeline.event_bus import (
     RedisEventBus,
 )
 from johnny.voice_pipeline.events import SessionStatusChanged
+from johnny.voice_pipeline.livekit_transport import create_meet_room_bridge_from_env
 
 # Env vars the launcher passes via DockerContainerLauncher._build_environment.
 SESSION_ID_ENV = "JOHNNY_SESSION_ID"
@@ -76,6 +78,17 @@ REDIS_URL_ENV = "JOHNNY_REDIS_URL"
 JOIN_TIMEOUT_ENV = "JOHNNY_JOIN_TIMEOUT_S"
 HEADLESS_ENV = "JOHNNY_PLAYWRIGHT_HEADLESS"
 SKIP_SELFCHECK_ENV = "JOHNNY_BOOTSTRAP_SKIP_SELFCHECK"
+
+# Per-session engine selector (Johnny-wz5). ``agentsession`` runs this
+# meet-worker as a pure audio *bridge* into the session's LiveKit room — the
+# STT→LLM→TTS pipeline runs in the separately-dispatched agent worker
+# (Johnny-9eh). ``legacy`` (the default, and the value for any unrecognised
+# string) runs the in-worker voice pipeline unchanged. The value is set by the
+# launcher (app.services.agent_dispatch.bridge_launch_environment), which mirrors
+# the same JOHNNY_ORCHESTRATOR vocabulary.
+ORCHESTRATOR_ENV = "JOHNNY_ORCHESTRATOR"
+ORCHESTRATOR_AGENTSESSION = "agentsession"
+ORCHESTRATOR_LEGACY = "legacy"
 
 
 DEFAULT_JOIN_TIMEOUT_S = 60.0
@@ -104,6 +117,12 @@ class BootstrapConfig:
     join_timeout_s: float
     headless: bool
     skip_selfcheck: bool
+    orchestrator: str = ORCHESTRATOR_LEGACY
+    """Per-session engine (Johnny-wz5): ``legacy`` or ``agentsession``.
+
+    Defaulted so existing callers / tests that build a config without it keep
+    the proven in-worker pipeline path.
+    """
 
 
 def _read_env_required(env: dict[str, str], name: str) -> str:
@@ -142,6 +161,20 @@ def _read_env_bool(env: dict[str, str], name: str, default: bool) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _read_env_orchestrator(env: dict[str, str]) -> str:
+    """Resolve :data:`ORCHESTRATOR_ENV` to ``agentsession`` or ``legacy``.
+
+    Case / whitespace tolerant; any unrecognised value falls back to ``legacy``
+    so an operator typo degrades to the proven in-worker pipeline rather than a
+    dead bridge — the same fail-safe posture as
+    :func:`app.services.agent_dispatch.agent_orchestrator_enabled`.
+    """
+    value = env.get(ORCHESTRATOR_ENV, "").strip().lower()
+    if value == ORCHESTRATOR_AGENTSESSION:
+        return ORCHESTRATOR_AGENTSESSION
+    return ORCHESTRATOR_LEGACY
+
+
 def load_bootstrap_config(env: dict[str, str] | None = None) -> BootstrapConfig:
     """Resolve env vars to a :class:`BootstrapConfig` or raise."""
     src = dict(env if env is not None else os.environ)
@@ -155,7 +188,13 @@ def load_bootstrap_config(env: dict[str, str] | None = None) -> BootstrapConfig:
         ),
         headless=_read_env_bool(src, HEADLESS_ENV, False),
         skip_selfcheck=_read_env_bool(src, SKIP_SELFCHECK_ENV, False),
+        orchestrator=_read_env_orchestrator(src),
     )
+
+
+def _orchestrator_is_agentsession(config: BootstrapConfig) -> bool:
+    """Whether this session runs the meet-worker as a pure room bridge."""
+    return config.orchestrator == ORCHESTRATOR_AGENTSESSION
 
 
 def build_event_bus(redis_url: str | None) -> EventBus:
@@ -579,71 +618,100 @@ async def run(config: BootstrapConfig) -> int:
                 join_timeout_s=config.join_timeout_s,
                 headless=config.headless,
             ) as session:
-                # 4. Wire the audio bridge so we actually capture meeting
-                # audio (Johnny-d2g). The bridge spawns parec/pacat
-                # subprocesses against PulseAudio's johnny_speaker sink
-                # and johnny_mic loopback.
-                bridge = MeetAudioBridge()
+                # 4. Select the per-session engine (Johnny-wz5).
+                #
+                # ``legacy`` (default): capture meeting audio here via the
+                # PulseAudio bridge (Johnny-d2g) and run the STT→LLM→TTS voice
+                # pipeline in-worker. ``agentsession``: the meet-worker is a pure
+                # audio bridge into this session's LiveKit room — the pipeline
+                # runs in the separately-dispatched agent worker (Johnny-9eh).
+                # MeetRoomBridge owns its OWN MeetAudioBridge against the same
+                # PulseAudio sinks, so in bridge mode we do NOT also start the
+                # in-worker capture bridge (two would fight for the same sinks).
+                bridge: MeetAudioBridge | None = None
                 pump_stop = asyncio.Event()
                 shot_stop = asyncio.Event()
-                pipeline_stop = asyncio.Event()
+                engine_stop = asyncio.Event()
                 pump_task: asyncio.Task[None] | None = None
                 shot_task: asyncio.Task[None] | None = None
-                pipeline_task: asyncio.Task[None] | None = None
+                engine_task: asyncio.Task[None] | None = None
                 try:
-                    try:
-                        await bridge.start()
+                    if _orchestrator_is_agentsession(config):
+                        # Pure-bridge mode: shuttle Meet audio ↔ the room. The
+                        # bridge connects with the per-room bridge token the
+                        # launcher minted into LIVEKIT_TOKEN; the pipeline lives
+                        # in the agent worker, so there is no provider payload to
+                        # consult here.
+                        room_bridge = create_meet_room_bridge_from_env()
                         log_stage(
                             STAGE_AUDIO_BRIDGE,
                             session_id=config.session_id,
-                            msg="parec + pacat subprocesses spawned",
-                        )
-                    except Exception as exc:  # noqa: BLE001 — capture is best-effort
-                        log_stage_error(
-                            STAGE_AUDIO_BRIDGE,
-                            session_id=config.session_id,
-                            error=exc,
-                        )
-
-                    # Either the voice pipeline OR the logging-only
-                    # capture pump runs — both call bridge.capture_frames()
-                    # and would compete for queue items. The pipeline is
-                    # the production path; the capture pump is a fallback
-                    # for diagnostics when no providers are configured.
-                    from johnny.meet_worker.pipeline_runner import (
-                        build_and_run_pipeline,
-                    )
-
-                    if _provider_config_present():
-                        pipeline_task = asyncio.create_task(
-                            build_and_run_pipeline(
-                                bridge,
-                                event_bus=bus,
-                                session_id=config.session_id,
-                                stop_event=pipeline_stop,
-                            )
-                        )
-                    else:
-                        log_stage(
-                            STAGE_AUDIO_BRIDGE,
-                            session_id=config.session_id,
-                            level=logging.WARNING,
                             msg=(
-                                "no provider payload set; running "
-                                "audio capture pump only (no transcription)"
+                                "orchestrator=agentsession — bridging Meet audio "
+                                "into the LiveKit room; the STT/LLM/TTS pipeline "
+                                "runs in the dispatched agent worker"
                             ),
                         )
-                        pump_task = asyncio.create_task(
-                            _run_audio_capture_pump(
-                                bridge,
+                        engine_task = asyncio.create_task(room_bridge.run(engine_stop))
+                    else:
+                        # Legacy in-worker pipeline. Wire the audio bridge so we
+                        # actually capture meeting audio (Johnny-d2g). The bridge
+                        # spawns parec/pacat subprocesses against PulseAudio's
+                        # johnny_speaker sink and johnny_mic loopback.
+                        bridge = MeetAudioBridge()
+                        try:
+                            await bridge.start()
+                            log_stage(
+                                STAGE_AUDIO_BRIDGE,
                                 session_id=config.session_id,
-                                stop_event=pump_stop,
+                                msg="parec + pacat subprocesses spawned",
                             )
+                        except Exception as exc:  # noqa: BLE001 — capture is best-effort
+                            log_stage_error(
+                                STAGE_AUDIO_BRIDGE,
+                                session_id=config.session_id,
+                                error=exc,
+                            )
+
+                        # Either the voice pipeline OR the logging-only
+                        # capture pump runs — both call bridge.capture_frames()
+                        # and would compete for queue items. The pipeline is
+                        # the production path; the capture pump is a fallback
+                        # for diagnostics when no providers are configured.
+                        from johnny.meet_worker.pipeline_runner import (
+                            build_and_run_pipeline,
                         )
+
+                        if _provider_config_present():
+                            engine_task = asyncio.create_task(
+                                build_and_run_pipeline(
+                                    bridge,
+                                    event_bus=bus,
+                                    session_id=config.session_id,
+                                    stop_event=engine_stop,
+                                )
+                            )
+                        else:
+                            log_stage(
+                                STAGE_AUDIO_BRIDGE,
+                                session_id=config.session_id,
+                                level=logging.WARNING,
+                                msg=(
+                                    "no provider payload set; running "
+                                    "audio capture pump only (no transcription)"
+                                ),
+                            )
+                            pump_task = asyncio.create_task(
+                                _run_audio_capture_pump(
+                                    bridge,
+                                    session_id=config.session_id,
+                                    stop_event=pump_stop,
+                                )
+                            )
 
                     # Screenshot loop: every 15s save a frame so an
                     # operator can ``docker cp`` it out without crashing
-                    # the bot's in-meeting state.
+                    # the bot's in-meeting state. Runs in both engines.
                     shot_task = asyncio.create_task(
                         _run_screenshot_loop(
                             session._page,
@@ -672,16 +740,17 @@ async def run(config: BootstrapConfig) -> int:
                 finally:
                     pump_stop.set()
                     shot_stop.set()
-                    pipeline_stop.set()
-                    for task in (pump_task, shot_task, pipeline_task):
+                    engine_stop.set()
+                    for task in (pump_task, shot_task, engine_task):
                         if task is not None:
                             task.cancel()
                             with contextlib.suppress(
                                 asyncio.CancelledError, Exception
                             ):
                                 await task
-                    with contextlib.suppress(Exception):
-                        await bridge.stop()
+                    if bridge is not None:
+                        with contextlib.suppress(Exception):
+                            await bridge.stop()
         except (MeetJoinError, Exception) as exc:  # noqa: BLE001 — last-resort surface
             stage, reason = _classify_join_error(exc)
             log_stage_error(stage, session_id=config.session_id, error=exc)
@@ -775,6 +844,9 @@ __all__ = [
     "HEADLESS_ENV",
     "JOIN_TIMEOUT_ENV",
     "MEET_LINK_ENV",
+    "ORCHESTRATOR_AGENTSESSION",
+    "ORCHESTRATOR_ENV",
+    "ORCHESTRATOR_LEGACY",
     "REDIS_URL_ENV",
     "SESSION_ID_ENV",
     "SKIP_SELFCHECK_ENV",

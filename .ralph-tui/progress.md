@@ -361,6 +361,45 @@ after each iteration and it's included in prompts for context.
   session=99999 ... mode=listen_only`) and a missing-provider payload is abandoned gracefully
   (no crash, worker survives for the next job).
 
+### Per-session engine switch: JOHNNY_ORCHESTRATOR flips meet-worker → bridge (Johnny-wz5)
+- **Two launcher-side halves + one meet-worker half, default `legacy` ships ZERO
+  behaviour change.** The API gate `agent_orchestrator_enabled()` already dispatched the
+  agent (Johnny-9eh); wz5 adds the meet-worker side. **API/launcher:**
+  `bridge_launch_environment(bot_session_id)` (`app/services/agent_dispatch.py`), merged into
+  the spawned container env by `DockerContainerLauncher._build_environment`. **legacy → `{}`**
+  (env byte-identical to before); **agentsession →** `JOHNNY_ORCHESTRATOR=agentsession` + the
+  four vars `create_meet_room_bridge_from_env` reads (`LIVEKIT_URL`/`LIVEKIT_ROOM`/
+  `LIVEKIT_IDENTITY`/`LIVEKIT_TOKEN`). The **API mints the bridge token** (`mint_bridge_token`,
+  Johnny-y4j — it holds the creds); a mint failure **degrades to legacy** (empty dict +
+  warning), the same fail-to-proven-path posture as `maybe_dispatch_session_agent`.
+- **Meet-worker half = a clean if/else in `bootstrap.run()`** (`johnny/meet_worker/bootstrap.py`):
+  `_orchestrator_is_agentsession(config)` → `MeetRoomBridge.run(engine_stop)` (Johnny-6nm)
+  INSTEAD of `build_and_run_pipeline`/the capture pump. The bridge owns its OWN
+  `MeetAudioBridge`, so in bridge mode the bootstrap does **not** create/start the in-worker
+  capture bridge (two would fight the same PulseAudio sinks) — `bridge: MeetAudioBridge | None
+  = None`; the `finally` stops it only when legacy created it. The Playwright join + screenshot
+  loop run in BOTH modes (the bridge still needs Meet audio flowing into the sinks). 6nm built
+  `MeetRoomBridge.run(stop_event)` to mirror `build_and_run_pipeline`'s seam exactly (same
+  `engine_task`/`engine_stop` shape), so the swap is a branch, not a restructure.
+- **The flag mirrors across two modules with the SAME vocabulary but NO shared import** — the
+  meet-worker must stay `app.services`-free, so `agent_dispatch.ORCHESTRATOR_*` (API) and
+  `bootstrap.ORCHESTRATOR_*` (worker) are independent string constants; both normalise
+  case/space and fall back to `legacy` on any unknown value. `bridge_launch_environment` keeps
+  `agent_dispatch` livekit-free at import (lazy `room_auth`/`job_config` import inside the fn).
+- **Full live both-engines audio comparison is Johnny-52b** (the e2e bead wz5 blocks) — it needs
+  real Google sign-in cookies + a live Meet + provider creds. wz5 ships + proves the *switch*
+  via real-`_build_environment` / real-bootstrap-selection tests + a non-destructive
+  image-rebuild + browser regression smoke; the live audio is 52b's scope (same deferral
+  9eh/6nm/7we made).
+- **Old-file ruff gotcha:** `bootstrap.py`/`docker_launcher.py` predate the project's
+  `line-length=100` (they wrap at 88), so `ruff format --check` reports pre-existing reflow on
+  them. Keep edits focused: make only your *added* lines conform, run `ruff check --fix` for
+  lint (it also surfaced a latent `bootstrap.py` F821 — `Any` used but never imported, hidden
+  by `from __future__ import annotations`), and do NOT mass-reformat the pre-existing 88-char
+  lines (that balloons the diff with unrelated churn). The locked ruff is **0.15.16** (root
+  `uv.lock`); install that exact version or its UP037/F-rules differ from a bare `pip install
+  ruff`.
+
 ---
 
 ## 2026-06-09 - Johnny-y4j [SPIKE] Per-room JWT auth + agent dispatch contract
@@ -909,5 +948,71 @@ creds. So the speak-in-a-real-Meet e2e is gated on wz5 + the e2e validation bead
 job-context-bound split; approval is the only DB-needing mode; reuse the api image / zero new
 deps; the room-scoped no-orphan lifecycle; the gated+defensive dispatch hook; live-register +
 live-dispatch-pickup as the validation in lieu of the destructive clean-install cycle).
+
+---
+
+## 2026-06-09 - Johnny-wz5 [BUILD] Phase 4: JOHNNY_ORCHESTRATOR feature flag (agentsession|legacy)
+
+Completed the per-session engine switch: `JOHNNY_ORCHESTRATOR=agentsession|legacy` now
+selects the *whole* engine for a session. Johnny-9eh already gated the agent **dispatch**
+behind the flag; wz5 adds the missing meet-worker half — when `agentsession`, the spawned
+meet-worker runs as a pure audio **bridge** into the session's LiveKit room (Johnny-6nm's
+`MeetRoomBridge`) instead of the in-worker STT→LLM→TTS pipeline, and the dispatched agent
+worker (Johnny-9eh) runs the pipeline. Default stays `legacy`; rollback is one env flip, no
+data migration.
+
+**Implemented:**
+- `backend/app/services/agent_dispatch.py` — `bridge_launch_environment(bot_session_id)`: the
+  launcher-side half. Returns `{}` in legacy mode (env unchanged) or, in agentsession mode,
+  `JOHNNY_ORCHESTRATOR` + the four LiveKit vars `create_meet_room_bridge_from_env` reads,
+  minting the per-room **bridge** token (`mint_bridge_token`) since the API holds the creds.
+  Degrades to `{}`+warning if the mint fails (no creds) so a session never ships a dead bridge.
+  Added the `ENV_LIVEKIT_*` constants; kept livekit-free at import (lazy `room_auth`/`job_config`).
+- `backend/app/services/docker_launcher.py` — `_build_environment` merges
+  `bridge_launch_environment(ctx.bot_session_id)` (after redis, before `_extra_environment`).
+- `backend/johnny/meet_worker/bootstrap.py` — `ORCHESTRATOR_ENV`/`_AGENTSESSION`/`_LEGACY`
+  constants; `BootstrapConfig.orchestrator` (defaulted `legacy`); `_read_env_orchestrator`
+  (case/space-tolerant, unknown→legacy) wired into `load_bootstrap_config`;
+  `_orchestrator_is_agentsession`; the `run()` engine-selection branch (bridge mode runs
+  `MeetRoomBridge.run(engine_stop)` and skips the legacy `MeetAudioBridge`/pump; `bridge:
+  MeetAudioBridge | None` so the `finally` only stops the legacy one). Also: added the missing
+  `from typing import Any` (latent pre-existing F821) and a top-level
+  `create_meet_room_bridge_from_env` import (already transitively loaded via the package init).
+- `docker-compose.yml` — `JOHNNY_ORCHESTRATOR: ${JOHNNY_ORCHESTRATOR:-legacy}` on the shared
+  `*backend-env` anchor (api/worker/agent-worker read it). `.env.example` — documented the flag.
+- Tests: `tests/services/test_agent_dispatch.py` (+3: legacy→{}, agentsession full env with the
+  minted token forwarded creds, mint-failure→{}); `tests/services/test_docker_launcher.py` (+2:
+  `_build_environment` adds/omits the bridge env per mode, additive to the legacy env);
+  `tests/test_meet_worker_bootstrap.py` (+4: orchestrator config default/agentsession/unknown,
+  and a `run()` bridge-mode test proving `MeetRoomBridge.run` is driven and the legacy
+  `MeetAudioBridge` is never constructed).
+
+**Quality gates:** ruff (0.15.16, locked) check CLEAN on all 6 touched files; mypy `--strict`
+clean (3 source files); pytest **101 passed** (3 targeted files) + **527 passed / 1 skipped**
+(full `tests/services/`), no regressions. My added lines are ruff-format-clean (proven via a
+`+/-`-filtered `ruff format --diff`); the residual format diff on the two old files is
+pre-existing 88→100-char debt, left untouched to keep the change focused.
+
+**Clean-install reproducibility (non-destructive — did NOT `./stop.sh && ./run.sh`; `down -v`
+wipes the operator's DB/redis):** `docker compose build meet-worker` + `build api` both exit 0
+with my source baked (`COPY`); inside the rebuilt meet-worker image `import
+johnny.meet_worker.bootstrap` + `from ...livekit_transport import
+create_meet_room_bridge_from_env` resolve with `livekit.rtc` present — **zero new deps** (reuses
+6nm's `livekit==1.1.8`). Restarted `api` → healthy, 0 import errors; agent-worker still
+registered.
+
+**Browser validation (chrome-devtools MCP):** the wz5 switch has **no new UI surface** (it's a
+backend launch-path flag set in `.env`/compose). Smoke-tested the rebuilt-api stack in the real
+browser — `/providers` renders live api data (SPLIT mode, active Whisper/OpenAI/Kokoro), **no
+console errors** → the default `legacy` path ships zero behaviour change and the app is
+unbroken (`.validation/Johnny-wz5/01-providers-legacy-default.png`). The **full both-engines
+live-Meet audio comparison** (transcripts/decisions under each engine) is **Johnny-52b's**
+explicit scope (the e2e bead wz5 blocks) — it needs real Google sign-in cookies + a live Meet +
+provider creds, the same deferral 9eh/6nm/7we made for the live audio path.
+
+**Learnings:** captured in the Codebase Patterns section at the top (the two launcher halves +
+the meet-worker if/else; bridge owns its own MeetAudioBridge so don't double-start; the
+mirrored-but-unshared orchestrator vocabulary; mint-failure degrade-to-legacy; the old-file
+ruff line-length gotcha + the locked ruff 0.15.16).
 
 ---

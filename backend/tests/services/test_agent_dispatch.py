@@ -17,8 +17,10 @@ stubs ``johnny.agent.dispatch.dispatch_agent`` so the SDK is never imported.
 from __future__ import annotations
 
 import johnny.agent.dispatch as dispatch_mod
+import johnny.agent.room_auth as room_auth_mod
 from app.services.agent_dispatch import (
     agent_orchestrator_enabled,
+    bridge_launch_environment,
     dispatch_session_agent,
     maybe_dispatch_session_agent,
     session_job_config_from_launch_context,
@@ -210,3 +212,78 @@ async def test_maybe_dispatch_swallows_failure(monkeypatch: object) -> None:
     )
 
     assert result is None
+
+
+# --- Bridge-mode launch env (Johnny-wz5) ------------------------------------
+
+
+def test_bridge_launch_environment_empty_in_legacy() -> None:
+    # Default + explicit legacy both add nothing → the meet-worker env is
+    # byte-identical to before, so the legacy pipeline path is unchanged.
+    assert bridge_launch_environment(bot_session_id=42, environ={}) == {}
+    assert (
+        bridge_launch_environment(
+            bot_session_id=42, environ={"JOHNNY_ORCHESTRATOR": "legacy"}
+        )
+        == {}
+    )
+
+
+def test_bridge_launch_environment_agentsession(monkeypatch: object) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_mint(
+        *,
+        bot_session_id: int | str,
+        api_key: str | None = None,
+        api_secret: str | None = None,
+        **_kwargs: object,
+    ) -> str:
+        captured["bot_session_id"] = bot_session_id
+        captured["api_key"] = api_key
+        captured["api_secret"] = api_secret
+        return "bridge-jwt"
+
+    # Lazy `from johnny.agent.room_auth import mint_bridge_token` resolves the
+    # patched module attribute at call time.
+    monkeypatch.setattr(room_auth_mod, "mint_bridge_token", _fake_mint)  # type: ignore[attr-defined]
+
+    env = bridge_launch_environment(
+        bot_session_id=42,
+        environ={
+            "JOHNNY_ORCHESTRATOR": "agentsession",
+            "LIVEKIT_URL": "ws://livekit:7880",
+            "LIVEKIT_API_KEY": "devkey",
+            "LIVEKIT_API_SECRET": "secret",
+        },
+    )
+
+    assert env == {
+        "JOHNNY_ORCHESTRATOR": "agentsession",
+        "LIVEKIT_URL": "ws://livekit:7880",
+        "LIVEKIT_ROOM": "johnny-session-42",  # one room per session
+        "LIVEKIT_IDENTITY": "meet-bridge-42",  # the bridge participant
+        "LIVEKIT_TOKEN": "bridge-jwt",  # minted per-room bridge token
+    }
+    # The creds from the env are forwarded to the minter (so the same key/secret
+    # pair the SFU validates against is used).
+    assert captured["bot_session_id"] == 42
+    assert captured["api_key"] == "devkey"
+    assert captured["api_secret"] == "secret"
+
+
+def test_bridge_launch_environment_degrades_on_mint_failure(
+    monkeypatch: object,
+) -> None:
+    # Missing creds → the minter raises → degrade to {} so the meet-worker runs
+    # the proven legacy pipeline instead of a dead bridge (never break a launch).
+    def _boom(**_kwargs: object) -> str:
+        raise ValueError("missing LIVEKIT_API_KEY, LIVEKIT_API_SECRET")
+
+    monkeypatch.setattr(room_auth_mod, "mint_bridge_token", _boom)  # type: ignore[attr-defined]
+
+    env = bridge_launch_environment(
+        bot_session_id=7, environ={"JOHNNY_ORCHESTRATOR": "agentsession"}
+    )
+
+    assert env == {}

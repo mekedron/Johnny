@@ -9,7 +9,6 @@ the live join flow is exercised in ``test_meet_join.py``.
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -31,7 +30,6 @@ from johnny.meet_worker.meet_join import (
 )
 from johnny.voice_pipeline.event_bus import InMemoryEventBus
 from johnny.voice_pipeline.events import SessionStatusChanged
-
 
 # --- env validation --------------------------------------------------------
 
@@ -113,6 +111,26 @@ def test_load_bootstrap_config_headless_truthy(value: str, expected: bool) -> No
     assert cfg.headless is expected
 
 
+# --- orchestrator selection (Johnny-wz5) -----------------------------------
+
+
+def test_load_bootstrap_config_orchestrator_default_legacy() -> None:
+    cfg = load_bootstrap_config(_valid_env())
+    assert cfg.orchestrator == "legacy"
+
+
+@pytest.mark.parametrize("raw", ["agentsession", "AgentSession", "  AGENTSESSION "])
+def test_load_bootstrap_config_orchestrator_agentsession(raw: str) -> None:
+    cfg = load_bootstrap_config(_valid_env(JOHNNY_ORCHESTRATOR=raw))
+    assert cfg.orchestrator == "agentsession"
+
+
+def test_load_bootstrap_config_orchestrator_unknown_falls_back_legacy() -> None:
+    # A typo / unknown value degrades to the proven in-worker pipeline.
+    cfg = load_bootstrap_config(_valid_env(JOHNNY_ORCHESTRATOR="experimental"))
+    assert cfg.orchestrator == "legacy"
+
+
 # --- event bus selection ---------------------------------------------------
 
 
@@ -186,13 +204,13 @@ class _FakeOpenSession:
         # nothing raises.
         self._page = _FakePage()
 
-    def __call__(self, **kwargs: Any) -> "_FakeOpenSession":
+    def __call__(self, **kwargs: Any) -> _FakeOpenSession:
         # Stash the bus so __aenter__ can publish into it.
         self._bus = kwargs.get("event_bus")
         self._session_id = kwargs.get("session_id")
         return self
 
-    async def __aenter__(self) -> "_FakeOpenSession":
+    async def __aenter__(self) -> _FakeOpenSession:
         self.entered = True
         if self._publish_status is not None and self._bus is not None:
             # Mirror MeetJoiner.join: publishes joining → joined/failed
@@ -358,3 +376,65 @@ def test_run_returns_six_when_browser_disconnects(monkeypatch: pytest.MonkeyPatc
         if isinstance(e, SessionStatusChanged) and e.status == "failed"
     ]
     assert any("chromium_disconnected" in (e.error_reason or "") for e in failed)
+
+
+class _FakeRoomBridge:
+    """MeetRoomBridge test double — records that run() was driven to completion."""
+
+    def __init__(self) -> None:
+        self.ran = False
+
+    async def run(self, stop_event: asyncio.Event) -> None:
+        self.ran = True
+        await stop_event.wait()
+
+
+def test_run_bridge_mode_uses_meet_room_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
+    """agentsession mode drives the MeetRoomBridge, NOT the in-worker pipeline."""
+    bus = InMemoryEventBus()
+    fake = _FakeOpenSession(publish_status="joined", is_alive=True)
+    room_bridge = _FakeRoomBridge()
+
+    async def fake_idle(
+        _session_id: str,
+        *,
+        is_alive: Any = None,
+        health_check_interval_s: float = 5.0,
+    ) -> str | None:
+        return None
+
+    def _no_legacy_bridge() -> Any:
+        raise AssertionError(
+            "legacy MeetAudioBridge must NOT be started in agentsession mode"
+        )
+
+    monkeypatch.setattr(bootstrap, "open_meeting_session", fake)
+    monkeypatch.setattr(
+        bootstrap, "_idle_until_signal_or_disconnect", fake_idle
+    )
+    monkeypatch.setattr(bootstrap, "build_event_bus", lambda _url: bus)
+    monkeypatch.setattr(
+        bootstrap, "create_meet_room_bridge_from_env", lambda: room_bridge
+    )
+    # In bridge mode the legacy capture bridge must never be constructed (it
+    # would fight the MeetRoomBridge's own MeetAudioBridge for the sinks).
+    monkeypatch.setattr(bootstrap, "MeetAudioBridge", _no_legacy_bridge)
+
+    config = BootstrapConfig(
+        session_id="200",
+        meet_link="https://meet.google.com/abc-defg-hij",
+        account_id=None,
+        redis_url=None,
+        join_timeout_s=1.0,
+        headless=True,
+        skip_selfcheck=True,
+        orchestrator="agentsession",
+    )
+
+    code = asyncio.run(bootstrap.run(config))
+
+    assert code == 0
+    assert room_bridge.ran is True
+    statuses = [e.status for e in bus.snapshot() if isinstance(e, SessionStatusChanged)]
+    assert "joined" in statuses
+    assert "ended" in statuses

@@ -69,6 +69,11 @@ x-backend-env: &backend-env
   # chars or the server refuses to start.
   LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
   LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-johnny-livekit-dev-secret-change-me-0123456789}
+  # Per-session orchestrator (Johnny-wz5): ``legacy`` (default) keeps the
+  # in-worker voice pipeline; ``agentsession`` dispatches the LiveKit agent
+  # worker AND switches each spawned meet-worker to pure-bridge mode. A single
+  # flip here is the rollback — default stays ``legacy`` until parity is proven.
+  JOHNNY_ORCHESTRATOR: ${JOHNNY_ORCHESTRATOR:-legacy}
 
 services:
   postgres:

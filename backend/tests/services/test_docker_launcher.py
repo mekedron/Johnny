@@ -348,6 +348,39 @@ async def test_start_runs_container_with_env_and_labels(
     assert json.loads(env["JOHNNY_PROVIDER_CONFIG"]) == {"stt": "deepgram"}
 
 
+def test_build_environment_no_bridge_env_in_legacy(
+    launcher: _StubLauncher, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Johnny-wz5: default legacy mode adds NO LiveKit bridge vars (no change)."""
+    monkeypatch.delenv("JOHNNY_ORCHESTRATOR", raising=False)
+    env = launcher._build_environment(_make_ctx(bot_session_id=55))
+    assert "JOHNNY_ORCHESTRATOR" not in env
+    assert "LIVEKIT_TOKEN" not in env
+    assert "LIVEKIT_ROOM" not in env
+    assert "LIVEKIT_IDENTITY" not in env
+
+
+def test_build_environment_adds_bridge_env_in_agentsession(
+    launcher: _StubLauncher, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Johnny-wz5: agentsession mode adds the orchestrator flag + bridge token."""
+    monkeypatch.setenv("JOHNNY_ORCHESTRATOR", "agentsession")
+    monkeypatch.setenv("LIVEKIT_URL", "ws://livekit:7880")
+    # Patch the minter so the test doesn't need real LiveKit credentials.
+    monkeypatch.setattr(
+        "johnny.agent.room_auth.mint_bridge_token", lambda **_kw: "bridge-jwt"
+    )
+    env = launcher._build_environment(_make_ctx(bot_session_id=55))
+    assert env["JOHNNY_ORCHESTRATOR"] == "agentsession"
+    assert env["LIVEKIT_URL"] == "ws://livekit:7880"
+    assert env["LIVEKIT_ROOM"] == "johnny-session-55"
+    assert env["LIVEKIT_IDENTITY"] == "meet-bridge-55"
+    assert env["LIVEKIT_TOKEN"] == "bridge-jwt"
+    # Bridge vars are ADDITIVE — the legacy meet-worker env is still present.
+    assert env["JOHNNY_SESSION_ID"] == "55"
+    assert json.loads(env["JOHNNY_PROVIDER_CONFIG"]) == {"stt": "deepgram"}
+
+
 @pytest.mark.asyncio
 async def test_start_passes_calendar_context_env_var(
     launcher: _StubLauncher, fake_client: _FakeDockerClient
