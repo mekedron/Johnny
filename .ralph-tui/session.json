@@ -3,10 +3,10 @@
   "sessionId": "737211f1-9739-40c0-8d3f-332e080d27b8",
   "status": "running",
   "startedAt": "2026-06-08T22:23:12.909Z",
-  "updatedAt": "2026-06-09T00:02:45.131Z",
-  "currentIteration": 3,
+  "updatedAt": "2026-06-09T00:27:05.610Z",
+  "currentIteration": 4,
   "maxIterations": 0,
-  "tasksCompleted": 3,
+  "tasksCompleted": 4,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -171,8 +171,8 @@
       {
         "id": "Johnny-5ag",
         "title": "[BUILD] Phase 2: Allowed-reply coercion + per-sentence streaming + suggest_only/listen_only + TTS-missing degrade",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-88n",
@@ -242,6 +242,16 @@
       "durationMs": 1485404,
       "startedAt": "2026-06-08T23:07:13.053Z",
       "endedAt": "2026-06-08T23:31:58.457Z"
+    },
+    {
+      "iteration": 4,
+      "status": "completed",
+      "taskId": "Johnny-5ag",
+      "taskTitle": "[BUILD] Phase 2: Allowed-reply coercion + per-sentence streaming + suggest_only/listen_only + TTS-missing degrade",
+      "taskCompleted": true,
+      "durationMs": 1825317,
+      "startedAt": "2026-06-08T23:32:18.906Z",
+      "endedAt": "2026-06-09T00:02:44.223Z"
     }
   ],
   "skippedTaskIds": [],

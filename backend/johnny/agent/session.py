@@ -40,6 +40,7 @@ only ever imported in the full-stack worker / api / test contexts.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -51,6 +52,7 @@ from livekit.agents import (
 )
 from livekit.agents.llm.chat_context import ChatContext
 from livekit.agents.llm.chat_context import ChatMessage as LKChatMessage
+from livekit.agents.stt import SpeechEvent, SpeechEventType
 from livekit.plugins import silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
@@ -61,7 +63,13 @@ from johnny.agent.answer import (
     iter_sentences,
     uses_allowlist,
 )
-from johnny.voice_pipeline.events import TranscriptFinalized
+from johnny.agent.noise_filter import (
+    NoiseFilterConfig,
+    TranscriptFilteredSink,
+    classify_noise,
+    classify_transcript_text,
+)
+from johnny.voice_pipeline.events import TranscriptFiltered, TranscriptFinalized
 from johnny.voice_pipeline.transcript_history import (
     BOT_SPEAKER_LABEL,
     NoopTranscriptHistoryLoader,
@@ -79,7 +87,7 @@ if TYPE_CHECKING:
     # Phase-1 adapters (johnny.agent.adapters) subclass with concrete events.
     from livekit.agents import FlushSentinel, ModelSettings
     from livekit.agents.llm import LLM, ChatChunk, Tool
-    from livekit.agents.stt import STT
+    from livekit.agents.stt import STT, SpeechData
     from livekit.agents.tts import TTS
     from livekit.agents.vad import VAD
     from livekit.agents.voice import SpeechCreatedEvent
@@ -218,6 +226,29 @@ def load_vad() -> VAD:
     return silero.VAD.load()
 
 
+def _now_ms() -> int:
+    """Wall-clock milliseconds for stamping ``TranscriptFiltered`` events (Johnny-cmd)."""
+    return int(time.time() * 1000)
+
+
+def _speech_alt_duration_ms(alt: SpeechData | None) -> int | None:
+    """Segment duration (ms) of an STT alternative, or ``None`` when unknown.
+
+    The pre-STT audio floor needs the VAD-cut speech duration; a LiveKit
+    ``SpeechData`` carries it as ``end_time - start_time`` (seconds) when the
+    provider reports per-segment timing. Johnny's STT adapters stamp
+    ``start_time == end_time`` (a ``TranscriptEvent`` carries a single offset), so
+    the span is ``0`` → ``None`` → the audio floor is skipped and only the content
+    gate applies. A genuinely positive span is rounded to whole milliseconds.
+    """
+    if alt is None:
+        return None
+    span_s = alt.end_time - alt.start_time
+    if span_s <= 0:
+        return None
+    return round(span_s * 1000)
+
+
 def build_agent_session(
     *,
     stt: STT[Any],
@@ -335,6 +366,9 @@ class JohnnyAgent(Agent):
         answer_llm: LLMProvider | None = None,
         answer_config: AnswerConfig | None = None,
         tts_available: bool = True,
+        noise_filter: NoiseFilterConfig | None = None,
+        transcript_filtered_sink: TranscriptFilteredSink | None = None,
+        session_id: str | None = None,
     ) -> None:
         if instructions is None:
             instructions = (
@@ -358,6 +392,16 @@ class JohnnyAgent(Agent):
         self._answer_llm = answer_llm
         self._answer_config = answer_config
         self._tts_available = tts_available
+        # Noise gate (Johnny-cmd). ``noise_filter`` carries the stoplist /
+        # length / duration / confidence thresholds the ``stt_node`` applies to
+        # each final transcript; ``transcript_filtered_sink`` publishes a
+        # ``TranscriptFiltered`` for every dropped candidate (``None`` = no
+        # observability wiring, e.g. a smoke agent); ``session_id`` stamps that
+        # event. ``noise_filter=None`` leaves ``stt_node`` a transparent
+        # pass-through (the bare/smoke default), like the answer-path nodes.
+        self._noise_filter = noise_filter
+        self._transcript_filtered_sink = transcript_filtered_sink
+        self._session_id = session_id
 
     async def on_enter(self) -> None:
         """Wire the reply→turn correlation once the agent is active.
@@ -440,6 +484,153 @@ class JohnnyAgent(Agent):
             target_turn_id=turn_id,
             current_speech=lambda: self.session.current_speech,
         )
+
+    # ------------------------------------------------------------------ #
+    # STT noise gate (Johnny-cmd)                                         #
+    # ------------------------------------------------------------------ #
+
+    async def stt_node(
+        self,
+        audio: AsyncIterable[rtc.AudioFrame],
+        model_settings: ModelSettings,
+    ) -> AsyncIterator[SpeechEvent | str]:
+        """Transcribe, dropping noise candidates before they can open a turn (Johnny-cmd).
+
+        Port of the legacy ``VoicePipeline._transcribe_loop`` noise gate
+        (Johnny-ckz.14) into the LiveKit STT node. The default node
+        (:meth:`Agent.default.stt_node`) drives the session STT; this override
+        wraps its event stream and, when a :class:`~johnny.agent.noise_filter.NoiseFilterConfig`
+        is configured, runs each transcript through the gate
+        (:func:`~johnny.agent.noise_filter.classify_noise`): a cough / lip-smack /
+        filler / Whisper hallucination is **dropped** so the SDK's audio
+        recognition never accumulates it into the user turn and the turn detector
+        never fires — no ``on_user_turn_completed``, no router call, no terminal
+        (the legacy "the turn never begins" contract).
+
+        A dropped ``FINAL_TRANSCRIPT`` publishes a
+        :class:`~johnny.voice_pipeline.events.TranscriptFiltered` (the durable
+        record, one per utterance, as the legacy ``_publish_noise_filtered`` did).
+        A noise ``INTERIM_TRANSCRIPT`` is suppressed *silently* (no event): the SDK
+        promotes a leftover interim to a final at turn-commit
+        (``AudioRecognition._commit_user_turn``), so a passed-through "uh" interim
+        would re-open the turn the dropped final was meant to stop — but the final
+        is authoritative, so dropping the interim only suppresses its live display.
+        Every non-transcript event (start/end-of-speech, usage) and, with no filter
+        configured, every event passes straight through (the bare/smoke default).
+        """
+        source = Agent.default.stt_node(self, audio, model_settings)
+        async for event in self._gate_stt_events(source):
+            yield event
+
+    async def _gate_stt_events(
+        self, source: AsyncIterable[SpeechEvent | str]
+    ) -> AsyncIterator[SpeechEvent | str]:
+        """Apply the noise gate to an STT event stream (the pure wrapper, Johnny-cmd).
+
+        Split out of :meth:`stt_node` so the gate is unit-testable on a crafted
+        event stream without a running ``AgentActivity`` (the default STT source
+        needs one), mirroring how :func:`~johnny.agent.answer.iter_sentences` is
+        tested apart from :meth:`tts_node`. With no filter configured — or for a
+        non-:class:`SpeechEvent` item — the item passes through untouched. A noise
+        ``FINAL_TRANSCRIPT`` is dropped *and* publishes its
+        :class:`~johnny.voice_pipeline.events.TranscriptFiltered`; a noise
+        ``INTERIM_TRANSCRIPT`` is dropped silently so it cannot be promoted at
+        turn-commit; everything else is yielded.
+        """
+        config = self._noise_filter
+        async for event in source:
+            if config is None or not config.enabled or not isinstance(event, SpeechEvent):
+                yield event
+                continue
+            if event.type is SpeechEventType.FINAL_TRANSCRIPT:
+                dropped = self._classify_noise_final(event, config)
+                if dropped is not None:
+                    await self._emit_transcript_filtered(dropped)
+                    continue
+            elif event.type is SpeechEventType.INTERIM_TRANSCRIPT and self._interim_is_noise(
+                event, config
+            ):
+                continue
+            yield event
+
+    def _interim_is_noise(self, event: SpeechEvent, config: NoiseFilterConfig) -> bool:
+        """Whether an interim transcript is noise, by the content gate alone.
+
+        Interims carry no reliable segment duration (the audio floor is a
+        final-only, pre-STT concern), so only the text/confidence content gate
+        (:func:`~johnny.agent.noise_filter.classify_transcript_text`) applies. A
+        suppressed interim emits no event — the legacy gate recorded one
+        :class:`~johnny.voice_pipeline.events.TranscriptFiltered` per finalized
+        utterance, not per partial fragment.
+        """
+        alt = event.alternatives[0] if event.alternatives else None
+        text = alt.text if alt is not None else ""
+        confidence = alt.confidence if alt is not None else None
+        return classify_transcript_text(text, confidence, config) is not None
+
+    def _classify_noise_final(
+        self, event: SpeechEvent, config: NoiseFilterConfig
+    ) -> TranscriptFiltered | None:
+        """Build the ``TranscriptFiltered`` for a noise final, or ``None`` to keep it.
+
+        Called only for ``FINAL_TRANSCRIPT`` events (interims go through
+        :meth:`_interim_is_noise`). The text / confidence / speaker come off the
+        first alternative; the segment duration (``end_time - start_time``) feeds
+        the pre-STT audio floor only when the provider actually reports it (Johnny's
+        adapters stamp ``start_time == end_time`` → ``None`` → the audio floor is
+        skipped, never dropping a final on an unmeasured duration).
+        """
+        alt = event.alternatives[0] if event.alternatives else None
+        text = alt.text if alt is not None else ""
+        confidence = alt.confidence if alt is not None else None
+        speaker = alt.speaker_id if alt is not None else None
+        audio_duration_ms = _speech_alt_duration_ms(alt)
+        reason = classify_noise(
+            text=text,
+            confidence=confidence,
+            audio_duration_ms=audio_duration_ms,
+            config=config,
+        )
+        if reason is None:
+            return None
+        return TranscriptFiltered(
+            text=text,
+            timestamp_ms=_now_ms(),
+            reason=reason,
+            speaker=speaker,
+            confidence=confidence,
+            audio_duration_ms=audio_duration_ms,
+            session_id=self._session_id,
+        )
+
+    async def _emit_transcript_filtered(self, event: TranscriptFiltered) -> None:
+        """Publish a dropped-candidate event through the injected sink, defensively.
+
+        Logged at ``info`` so a noisy mic / mis-tuned stoplist is visible in
+        production tails without debug, and the sink is wrapped so a publish
+        failure (a lost audit row) never crashes the STT node — the same
+        swallow-and-continue contract as the legacy ``_publish_noise_filtered``.
+        """
+        logger.info(
+            "noise gate dropped candidate for session=%s reason=%s "
+            "audio_ms=%s confidence=%s text=%r",
+            self._session_id,
+            event.reason,
+            event.audio_duration_ms,
+            event.confidence,
+            event.text,
+        )
+        sink = self._transcript_filtered_sink
+        if sink is None:
+            return
+        try:
+            await sink(event)
+        except Exception:
+            logger.exception(
+                "failed to publish transcript_filtered for session=%s reason=%s",
+                self._session_id,
+                event.reason,
+            )
 
     # ------------------------------------------------------------------ #
     # Answer-path nodes (Johnny-5ag)                                      #
@@ -546,6 +737,8 @@ async def build_johnny_agent(
     answer_llm: LLMProvider | None = None,
     answer_config: AnswerConfig | None = None,
     tts_available: bool = True,
+    noise_filter: NoiseFilterConfig | None = None,
+    transcript_filtered_sink: TranscriptFilteredSink | None = None,
 ) -> JohnnyAgent:
     """Build a :class:`JohnnyAgent`, rehydrating prior transcripts if available.
 
@@ -593,6 +786,9 @@ async def build_johnny_agent(
         answer_llm=answer_llm,
         answer_config=answer_config,
         tts_available=tts_available,
+        noise_filter=noise_filter,
+        transcript_filtered_sink=transcript_filtered_sink,
+        session_id=session_id,
     )
 
 
@@ -601,6 +797,7 @@ __all__ = [
     "AgentInstructionsConfig",
     "AnswerConfig",
     "JohnnyAgent",
+    "NoiseFilterConfig",
     "build_agent_instructions",
     "build_agent_session",
     "build_interruption_options",

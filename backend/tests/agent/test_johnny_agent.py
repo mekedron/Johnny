@@ -27,6 +27,7 @@ pytest.importorskip("livekit.agents")
 from livekit.agents import ModelSettings  # noqa: E402
 from livekit.agents.llm import ChatContext  # noqa: E402
 from livekit.agents.llm.chat_context import ChatMessage as LKChatMessage  # noqa: E402
+from livekit.agents.stt import SpeechData, SpeechEvent, SpeechEventType  # noqa: E402
 
 from app.providers.base import (  # noqa: E402
     ChatMessage,
@@ -41,11 +42,12 @@ from johnny.agent.session import (  # noqa: E402
     AgentInstructionsConfig,
     AnswerConfig,
     JohnnyAgent,
+    NoiseFilterConfig,
     build_agent_instructions,
     build_johnny_agent,
     transcripts_to_chat_ctx,
 )
-from johnny.voice_pipeline.events import TranscriptFinalized  # noqa: E402
+from johnny.voice_pipeline.events import TranscriptFiltered, TranscriptFinalized  # noqa: E402
 from johnny.voice_pipeline.pipeline import (  # noqa: E402
     AUTONOMOUS_MODE,
     LIMITED_AUTO_SPEAK_MODE,
@@ -130,9 +132,7 @@ def test_personality_renders_before_history_note() -> None:
     text = build_agent_instructions(
         AgentInstructionsConfig(personality_prompt="[personality: X]\nBe X.")
     )
-    assert text.index("[personality: X]") < text.index(
-        "assistant turns are your own prior speech"
-    )
+    assert text.index("[personality: X]") < text.index("assistant turns are your own prior speech")
 
 
 # --- transcripts_to_chat_ctx -----------------------------------------------
@@ -241,9 +241,7 @@ async def test_build_johnny_agent_rehydrates_from_loader() -> None:
 
 
 async def test_build_johnny_agent_without_loader_starts_empty() -> None:
-    agent = await build_johnny_agent(
-        prompt_config=AgentInstructionsConfig(instructions="x")
-    )
+    agent = await build_johnny_agent(prompt_config=AgentInstructionsConfig(instructions="x"))
     assert list(agent.chat_ctx.items) == []
     assert "Meeting instructions: x" in agent.instructions
 
@@ -322,9 +320,7 @@ async def test_llm_node_coerces_to_matched_allowed_reply() -> None:
     answer_llm = _FakeAnswerLLM(structured={"selected_reply": "Yes"})
     agent = JohnnyAgent(
         answer_llm=answer_llm,
-        answer_config=AnswerConfig(
-            mode=LIMITED_AUTO_SPEAK_MODE, allowed_replies=("Yes", "No")
-        ),
+        answer_config=AnswerConfig(mode=LIMITED_AUTO_SPEAK_MODE, allowed_replies=("Yes", "No")),
     )
 
     out = await _drain(agent.llm_node(ChatContext.empty(), [], ModelSettings()))
@@ -340,9 +336,7 @@ async def test_llm_node_no_match_yields_nothing_and_flags_gate() -> None:
     gate = _RecordingGate()
     agent = JohnnyAgent(
         answer_llm=answer_llm,
-        answer_config=AnswerConfig(
-            mode=LIMITED_AUTO_SPEAK_MODE, allowed_replies=("Yes", "No")
-        ),
+        answer_config=AnswerConfig(mode=LIMITED_AUTO_SPEAK_MODE, allowed_replies=("Yes", "No")),
         router_gate=cast(Any, gate),
     )
 
@@ -358,9 +352,7 @@ async def test_llm_node_autonomous_bypasses_coercion() -> None:
     answer_llm = _FakeAnswerLLM(structured={"selected_reply": "Yes"})
     agent = JohnnyAgent(
         answer_llm=answer_llm,
-        answer_config=AnswerConfig(
-            mode=AUTONOMOUS_MODE, allowed_replies=("Yes", "No")
-        ),
+        answer_config=AnswerConfig(mode=AUTONOMOUS_MODE, allowed_replies=("Yes", "No")),
     )
 
     with pytest.raises(RuntimeError):
@@ -384,7 +376,9 @@ class _RecordingTTSProvider(TTSProvider):
         return "fake-tts"
 
     async def synthesize_stream(
-        self, text: str, voice_id: str | None = None  # noqa: ARG002
+        self,
+        text: str,
+        voice_id: str | None = None,  # noqa: ARG002
     ) -> AsyncIterator[bytes]:
         self.texts.append(text)
         for frame in self._frames:
@@ -410,9 +404,7 @@ async def test_tts_node_synthesizes_per_sentence() -> None:
 
     frames = [
         fr
-        async for fr in agent.tts_node(
-            _astream("Hello world. ", "How are you?\n"), ModelSettings()
-        )
+        async for fr in agent.tts_node(_astream("Hello world. ", "How are you?\n"), ModelSettings())
     ]
 
     # Each complete sentence was synthesised separately (per-sentence flush).
@@ -449,3 +441,175 @@ async def test_tts_node_degrades_when_tts_unavailable_flag_set() -> None:
 
     assert frames == []  # forced degrade even though a TTS exists
     assert provider.texts == []  # synthesize never called
+
+
+# --- stt_node: noise gate (Johnny-cmd) -------------------------------------
+
+
+class _RecordingSink:
+    """Records every TranscriptFiltered the gate publishes."""
+
+    def __init__(self) -> None:
+        self.events: list[TranscriptFiltered] = []
+
+    async def __call__(self, event: TranscriptFiltered) -> None:
+        self.events.append(event)
+
+
+def _final(
+    text: str,
+    *,
+    confidence: float = 0.0,
+    speaker: str | None = None,
+    start: float = 0.0,
+    end: float = 0.0,
+) -> SpeechEvent:
+    return SpeechEvent(
+        type=SpeechEventType.FINAL_TRANSCRIPT,
+        alternatives=[
+            SpeechData(
+                language="en",
+                text=text,
+                start_time=start,
+                end_time=end,
+                confidence=confidence,
+                speaker_id=speaker,
+            )
+        ],
+    )
+
+
+def _interim(text: str) -> SpeechEvent:
+    return SpeechEvent(
+        type=SpeechEventType.INTERIM_TRANSCRIPT,
+        alternatives=[SpeechData(language="en", text=text)],
+    )
+
+
+async def _source(*events: Any) -> AsyncIterator[Any]:
+    for event in events:
+        yield event
+
+
+async def test_stt_gate_drops_noise_final_and_publishes_event() -> None:
+    sink = _RecordingSink()
+    agent = JohnnyAgent(
+        noise_filter=NoiseFilterConfig(),
+        transcript_filtered_sink=sink,
+        session_id="sess-noise",
+    )
+
+    out = await _drain(agent._gate_stt_events(_source(_final("uh"), _final("What's the plan?"))))
+
+    # The filler final is dropped; the real turn passes through.
+    assert [e.alternatives[0].text for e in out] == ["What's the plan?"]
+    # ...and the drop emitted exactly one TranscriptFiltered with the reason.
+    assert len(sink.events) == 1
+    dropped = sink.events[0]
+    assert dropped.reason == "stoplist_match"
+    assert dropped.text == "uh"
+    assert dropped.session_id == "sess-noise"
+
+
+async def test_stt_gate_suppresses_noise_interim_silently() -> None:
+    # A noise interim is dropped so the SDK can't promote it to a final at
+    # turn-commit (the leftover-interim hole) — but silently, with no event
+    # (the legacy gate recorded one TranscriptFiltered per finalized utterance).
+    sink = _RecordingSink()
+    agent = JohnnyAgent(noise_filter=NoiseFilterConfig(), transcript_filtered_sink=sink)
+
+    out = await _drain(agent._gate_stt_events(_source(_interim("uh"))))
+
+    assert out == []  # suppressed
+    assert sink.events == []  # no event for a partial fragment
+
+
+async def test_stt_gate_passes_real_interim() -> None:
+    # A genuine partial transcript flows through for live display.
+    agent = JohnnyAgent(noise_filter=NoiseFilterConfig())
+
+    out = await _drain(agent._gate_stt_events(_source(_interim("what's the"))))
+
+    assert [e.alternatives[0].text for e in out] == ["what's the"]
+
+
+async def test_stt_gate_noise_interim_then_final_yields_nothing() -> None:
+    # The end-to-end "cough produces zero turns" shape: a provider that emits an
+    # interim then a final for the same filler (Deepgram-style) yields no event
+    # the turn detector can accumulate, so no turn is opened. The final still
+    # records its TranscriptFiltered.
+    sink = _RecordingSink()
+    agent = JohnnyAgent(noise_filter=NoiseFilterConfig(), transcript_filtered_sink=sink)
+
+    out = await _drain(agent._gate_stt_events(_source(_interim("uh"), _final("uh"))))
+
+    assert out == []  # nothing reaches the turn detector
+    assert [e.reason for e in sink.events] == ["stoplist_match"]  # one event, the final
+
+
+async def test_stt_gate_audio_too_short_from_segment_timing() -> None:
+    # A final whose segment timing reports < min_audio_ms is dropped as
+    # audio_too_short even though its text is real speech (pre-STT floor parity).
+    sink = _RecordingSink()
+    agent = JohnnyAgent(noise_filter=NoiseFilterConfig(), transcript_filtered_sink=sink)
+
+    out = await _drain(agent._gate_stt_events(_source(_final("Hello there.", start=0.0, end=0.12))))
+
+    assert out == []
+    assert len(sink.events) == 1
+    assert sink.events[0].reason == "audio_too_short"
+    assert sink.events[0].audio_duration_ms == 120
+
+
+async def test_stt_gate_no_config_passes_everything() -> None:
+    # No filter configured → transparent pass-through (bare/smoke default).
+    agent = JohnnyAgent()  # noise_filter=None
+
+    out = await _drain(agent._gate_stt_events(_source(_final("uh"), _final(""))))
+
+    assert [e.alternatives[0].text for e in out] == ["uh", ""]
+
+
+async def test_stt_gate_disabled_config_passes_everything() -> None:
+    sink = _RecordingSink()
+    agent = JohnnyAgent(
+        noise_filter=NoiseFilterConfig(enabled=False),
+        transcript_filtered_sink=sink,
+    )
+
+    out = await _drain(agent._gate_stt_events(_source(_final("uh"))))
+
+    assert [e.alternatives[0].text for e in out] == ["uh"]
+    assert sink.events == []
+
+
+async def test_stt_gate_passes_non_speech_events_through() -> None:
+    # A non-SpeechEvent item (the node type also allows str) is never gated.
+    agent = JohnnyAgent(noise_filter=NoiseFilterConfig())
+
+    out = await _drain(agent._gate_stt_events(_source("raw-string-item")))
+
+    assert out == ["raw-string-item"]
+
+
+async def test_stt_gate_swallows_sink_failure() -> None:
+    # A publish failure must not crash the STT node — the candidate is still
+    # dropped, the session keeps running (legacy swallow-and-continue contract).
+    async def _boom(_event: TranscriptFiltered) -> None:
+        raise RuntimeError("event bus down")
+
+    agent = JohnnyAgent(noise_filter=NoiseFilterConfig(), transcript_filtered_sink=cast(Any, _boom))
+
+    out = await _drain(agent._gate_stt_events(_source(_final("uh"), _final("Real."))))
+
+    # The noise final is still dropped despite the sink raising; the real one flows.
+    assert [e.alternatives[0].text for e in out] == ["Real."]
+
+
+async def test_stt_gate_drop_without_sink_is_safe() -> None:
+    # No sink wired (observability off) → still drops, just doesn't publish.
+    agent = JohnnyAgent(noise_filter=NoiseFilterConfig())
+
+    out = await _drain(agent._gate_stt_events(_source(_final("um"), _final("Hi there."))))
+
+    assert [e.alternatives[0].text for e in out] == ["Hi there."]

@@ -147,6 +147,45 @@ after each iteration and it's included in prompts for context.
   maps `SPEAKING_MODES`→`suggest_only` when no TTS — the worker (Johnny-un2/7we)
   applies it; this bead ships the primitive + the node-level safety net.
 
+### STT noise gate: stt_node + dropping a turn before it opens (Johnny-cmd)
+- **The noise gate is an `Agent.stt_node` override** in `JohnnyAgent`
+  (`backend/johnny/agent/session.py`); the pure, `livekit`-free classification is
+  `backend/johnny/agent/noise_filter.py` (mirrors `answer.py`/`gate.py`). It reuses
+  the legacy thresholds/stoplist/regexes **verbatim** via `_legacy` (the
+  `johnny.voice_pipeline.pipeline` module): `DEFAULT_NOISE_*`, `_PUNCTUATION_ONLY_RE`,
+  `_PUNCTUATION_STRIP_CHARS`. `classify_transcript_text` is the byte-for-byte port of
+  `_classify_transcript_as_noise`; `classify_noise` adds the audio-floor-first stage.
+- **How "never opens a turn" works in the SDK.** A user turn opens only when
+  `AudioRecognition._run_eou_detection` runs with a non-empty `_audio_transcript`
+  (it early-returns on empty). `_audio_transcript` accumulates from
+  `FINAL_TRANSCRIPT` events the `stt_node` yields. So dropping a noise final at
+  `stt_node` keeps it out of `_audio_transcript` → EOU early-returns → no
+  `on_user_turn_completed` → no router/terminal. This is the analogue of the gate's
+  `listen_only` early-return: a filtered candidate emits **no** INV-1 terminal (only
+  a `TranscriptFiltered`), exactly like the legacy `_publish_noise_filtered`.
+- **GOTCHA — the leftover-interim hole (streaming providers).** Dropping only the
+  final is insufficient: `_commit_user_turn` promotes a surviving
+  `_audio_interim_transcript` to a final (a normal final clears the interim, but the
+  *dropped* one never runs that reset). So a passed-through "uh" interim re-opens the
+  turn. Fix: also suppress noise **interims** (content gate only — interims carry no
+  reliable segment duration), and do it **silently** (no `TranscriptFiltered` — the
+  legacy recorded one event per *finalized* utterance, not per partial). Batch
+  providers (StreamAdapter: faster-whisper/Parakeet/ElevenLabs) emit no interims so
+  the final-drop alone suffices there.
+- **`audio_too_short` is a no-op in the real path today** — Johnny's STT adapters
+  stamp `start_time == end_time` (`transcript_to_speech_event`), so
+  `_speech_alt_duration_ms` → `None` → audio floor skipped (it MUST skip unknown
+  durations — duration 0 < 250 would otherwise drop every final). It's a faithful,
+  unit-tested port that activates only if a provider reports real segment timing; the
+  content gate is the universal catch. The pre-STT cost-skip belongs to Silero VAD
+  `min_speech_duration`, not the node.
+- **Injection seams (worker wires later, Johnny-9eh):** `JohnnyAgent(noise_filter=
+  NoiseFilterConfig(...), transcript_filtered_sink=<EventBus.publish wrapper>,
+  session_id=...)`, also on `build_johnny_agent`. `transcript_filtered_sink=None` =
+  no emission (smoke); `noise_filter=None` = transparent `stt_node` pass-through. The
+  testable seam is `_gate_stt_events(source)` — feed crafted `SpeechEvent`s, no
+  `AgentActivity` needed (like `iter_sentences` vs `tts_node`).
+
 ---
 
 ## 2026-06-09 - Johnny-y4j [SPIKE] Per-room JWT auth + agent dispatch contract
@@ -371,6 +410,65 @@ via `iter_sentences` until then.
   the agent answer `chat_ctx` carries instructions+history but deliberately omits
   per-turn pieces, so (unlike the legacy `_answer_messages`) the constraint has
   to be added at coercion time for the text-fallback path to have a chance.
+
+---
+
+## 2026-06-09 - Johnny-cmd [BUILD] Phase 2: Noise filtering parity → TranscriptFiltered
+
+Ported the legacy `VoicePipeline` noise gate (Johnny-ckz.14) into the LiveKit
+`Agent.stt_node`, dropping coughs / fillers / Whisper hallucinations before the
+turn detector can open a turn and publishing a `TranscriptFiltered` per dropped
+final.
+
+**Implemented:**
+- `backend/johnny/agent/noise_filter.py` (new, `livekit`-free) — `NoiseFilterConfig`
+  (mirrors the `PipelineConfig` `noise_filter_*` subset; defaults from `_legacy`),
+  `classify_transcript_text` (verbatim port of `_classify_transcript_as_noise`:
+  empty → punctuation_only → too_short → stoplist_match → low_confidence, reusing
+  `_legacy._PUNCTUATION_ONLY_RE` / `_PUNCTUATION_STRIP_CHARS`), `is_audio_below_noise_floor`
+  (port of `_is_audio_below_noise_floor`, extended to treat `None`/unknown duration
+  as above-floor), `classify_noise` (audio-floor-first then content), and the
+  `TranscriptFilteredSink` injection alias.
+- `backend/johnny/agent/session.py` — `JohnnyAgent(noise_filter=, transcript_filtered_sink=,
+  session_id=)` threaded through `build_johnny_agent`; `stt_node` override wrapping
+  `Agent.default.stt_node` via the testable `_gate_stt_events` seam; `_classify_noise_final`
+  (final → `TranscriptFiltered` or keep), `_interim_is_noise` (content-gate-only interim
+  suppression), `_emit_transcript_filtered` (defensive sink publish + info log);
+  `_now_ms` / `_speech_alt_duration_ms` helpers; `NoiseFilterConfig` re-exported.
+- Tests: `tests/agent/test_noise_filter.py` (new, `livekit`-free — every reason +
+  regression controls + per-knob escape hatches + audio precedence); `tests/agent/test_johnny_agent.py`
+  (+`_gate_stt_events`: final drop+event, interim silent-suppression, interim→final
+  yields-nothing, audio_too_short from segment timing, no-config/disabled pass-through,
+  non-SpeechEvent pass-through, sink-failure swallow).
+
+**Quality gates:** ruff check + format clean; mypy `--strict` clean (2 source files);
+`tests/agent` (incl. live-SFU smoke, reachable) = **519 passed**, legacy
+`tests/voice_pipeline` noise tests = 22 passed, no regressions. Pure-backend, **no
+browser validation**: the new agent path has no live UI surface yet — no worker
+(Johnny-9eh) constructs `JohnnyAgent` with a `noise_filter` outside tests; the legacy
+meet-worker still serves the live UI untouched (CLAUDE.md pure-backend exception).
+
+**Learnings:**
+- **The leftover-interim hole.** Dropping only the noise `FINAL_TRANSCRIPT` is NOT
+  enough for streaming providers (Deepgram): `AudioRecognition._commit_user_turn`
+  promotes a surviving `_audio_interim_transcript` to a final, so a passed-through
+  "uh" interim re-opens the turn the dropped final was meant to stop. Fix: suppress
+  noise *interims* too (content gate only — interims carry no segment duration),
+  silently (no event — the legacy emitted one `TranscriptFiltered` per finalized
+  utterance, not per fragment). Verified the turn-suppression mechanism in the SDK:
+  `_run_eou_detection` early-returns when `_audio_transcript` is empty, so with both
+  the final dropped and interims suppressed nothing accumulates → no
+  `on_user_turn_completed` → no router call → no terminal (legacy "the turn never
+  begins" contract — and no INV-1 terminal, exactly like the gate's `listen_only`
+  early-return).
+- **audio_too_short is effectively a no-op in the real agent path today.** Johnny's
+  STT adapters stamp `start_time == end_time` on every `SpeechData`, so the segment
+  duration is 0 → treated as unknown → the audio floor is skipped (it must be —
+  firing on duration 0 would drop *every* final). The check is a faithful, unit-tested
+  port that activates only when a provider reports real segment timing; the post-STT
+  content gate is the universal catch for coughs/fillers. The pre-STT cost-skip is the
+  natural home for Silero VAD `min_speech_duration` (a follow-up / worker concern),
+  not the node.
 
 ---
 
