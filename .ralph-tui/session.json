@@ -3,10 +3,10 @@
   "sessionId": "737211f1-9739-40c0-8d3f-332e080d27b8",
   "status": "running",
   "startedAt": "2026-06-08T22:23:12.909Z",
-  "updatedAt": "2026-06-09T00:27:05.610Z",
-  "currentIteration": 4,
+  "updatedAt": "2026-06-09T00:56:21.308Z",
+  "currentIteration": 5,
   "maxIterations": 0,
-  "tasksCompleted": 4,
+  "tasksCompleted": 5,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -189,8 +189,8 @@
       {
         "id": "Johnny-cmd",
         "title": "[BUILD] Phase 2: Noise filtering parity (stoplist/min-chars/confidence) → TranscriptFiltered",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-n22",
@@ -252,6 +252,16 @@
       "durationMs": 1825317,
       "startedAt": "2026-06-08T23:32:18.906Z",
       "endedAt": "2026-06-09T00:02:44.223Z"
+    },
+    {
+      "iteration": 5,
+      "status": "completed",
+      "taskId": "Johnny-cmd",
+      "taskTitle": "[BUILD] Phase 2: Noise filtering parity (stoplist/min-chars/confidence) → TranscriptFiltered",
+      "taskCompleted": true,
+      "durationMs": 1440071,
+      "startedAt": "2026-06-09T00:03:04.627Z",
+      "endedAt": "2026-06-09T00:27:04.698Z"
     }
   ],
   "skippedTaskIds": [],

@@ -77,7 +77,7 @@ from johnny.voice_pipeline.transcript_history import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterable, AsyncIterator, Sequence
+    from collections.abc import AsyncIterable, AsyncIterator, Callable, Sequence
 
     from livekit import rtc
 
@@ -91,10 +91,14 @@ if TYPE_CHECKING:
     from livekit.agents.tts import TTS
     from livekit.agents.vad import VAD
     from livekit.agents.voice import SpeechCreatedEvent
+    from livekit.agents.voice.events import MetricsCollectedEvent
 
     from app.providers.base import LLMProvider
     from johnny.agent.barge_in import BargeInClassifier
+    from johnny.agent.observability import TranscriptFinalizedSink
     from johnny.agent.router_gate import RouterGate
+
+    MetricsListener = Callable[[MetricsCollectedEvent], None]
 
 logger = logging.getLogger(__name__)
 
@@ -368,6 +372,8 @@ class JohnnyAgent(Agent):
         tts_available: bool = True,
         noise_filter: NoiseFilterConfig | None = None,
         transcript_filtered_sink: TranscriptFilteredSink | None = None,
+        transcript_finalized_sink: TranscriptFinalizedSink | None = None,
+        metrics_listener: MetricsListener | None = None,
         session_id: str | None = None,
     ) -> None:
         if instructions is None:
@@ -401,16 +407,33 @@ class JohnnyAgent(Agent):
         # pass-through (the bare/smoke default), like the answer-path nodes.
         self._noise_filter = noise_filter
         self._transcript_filtered_sink = transcript_filtered_sink
+        # Observability parity (Johnny-d5z). ``transcript_finalized_sink`` publishes
+        # a ``TranscriptFinalized`` for every STT final the noise gate KEEPS (the
+        # durable transcript the subscriber writes to ``transcript_chunks``); the
+        # mirror of ``transcript_filtered_sink`` for the non-noise path.
+        # ``metrics_listener`` is the session ``metrics_collected`` callback (the
+        # :class:`~johnny.agent.observability.MetricsTranslator`) that maps LiveKit
+        # provider metrics to ``PipelineTiming`` events. Both ``None`` on a
+        # bare/smoke agent (no emission).
+        self._transcript_finalized_sink = transcript_finalized_sink
+        self._metrics_listener = metrics_listener
         self._session_id = session_id
 
     async def on_enter(self) -> None:
-        """Wire the reply→turn correlation once the agent is active.
+        """Wire the reply→turn correlation + metrics translation once active.
 
-        Registers a session ``speech_created`` listener that hands every
-        ``generate_reply`` reply to :meth:`RouterGate.bind_reply`, so the
-        reply's done-callback emits the turn's terminal (the speak path's INV-1
-        record). No-op without a gate.
+        Registers a session ``metrics_collected`` listener (Johnny-d5z) that maps
+        LiveKit provider metrics onto ``PipelineTiming`` events for the activity
+        log, and a ``speech_created`` listener that hands every ``generate_reply``
+        reply to :meth:`RouterGate.bind_reply` so the reply's done-callback emits
+        the turn's terminal (the speak path's INV-1 record). Each is independent —
+        the metrics listener runs with no gate; the ``speech_created`` binding
+        no-ops without one.
         """
+        listener = self._metrics_listener
+        if listener is not None:
+            self.session.on("metrics_collected", listener)
+
         gate = self._router_gate
         if gate is None:
             return
@@ -539,16 +562,26 @@ class JohnnyAgent(Agent):
         """
         config = self._noise_filter
         async for event in source:
-            if config is None or not config.enabled or not isinstance(event, SpeechEvent):
+            if not isinstance(event, SpeechEvent):
                 yield event
                 continue
             if event.type is SpeechEventType.FINAL_TRANSCRIPT:
-                dropped = self._classify_noise_final(event, config)
-                if dropped is not None:
-                    await self._emit_transcript_filtered(dropped)
-                    continue
-            elif event.type is SpeechEventType.INTERIM_TRANSCRIPT and self._interim_is_noise(
-                event, config
+                if config is not None and config.enabled:
+                    dropped = self._classify_noise_final(event, config)
+                    if dropped is not None:
+                        await self._emit_transcript_filtered(dropped)
+                        continue
+                # Kept final → durable transcript (Johnny-d5z). Emitted whether or
+                # not the noise gate is configured, so a session with filtering off
+                # still records its transcripts.
+                await self._emit_transcript_finalized(event)
+                yield event
+                continue
+            if (
+                event.type is SpeechEventType.INTERIM_TRANSCRIPT
+                and config is not None
+                and config.enabled
+                and self._interim_is_noise(event, config)
             ):
                 continue
             yield event
@@ -630,6 +663,38 @@ class JohnnyAgent(Agent):
                 "failed to publish transcript_filtered for session=%s reason=%s",
                 self._session_id,
                 event.reason,
+            )
+
+    async def _emit_transcript_finalized(self, event: SpeechEvent) -> None:
+        """Publish a kept final's :class:`TranscriptFinalized` (Johnny-d5z), defensively.
+
+        Builds the durable transcript event from the first alternative (text,
+        speaker, confidence) and the wall-clock stamp, then publishes through the
+        injected sink. A final with no alternative or empty text is skipped (no row
+        worth writing); a sink failure is swallowed so the STT node cannot crash on
+        a lost audit row — the same swallow-and-continue contract as
+        :meth:`_emit_transcript_filtered`.
+        """
+        sink = self._transcript_finalized_sink
+        if sink is None:
+            return
+        alt = event.alternatives[0] if event.alternatives else None
+        text = alt.text if alt is not None else ""
+        if not text.strip():
+            return
+        finalized = TranscriptFinalized(
+            text=text,
+            timestamp_ms=_now_ms(),
+            speaker=alt.speaker_id if alt is not None else None,
+            confidence=alt.confidence if alt is not None else None,
+            session_id=self._session_id,
+        )
+        try:
+            await sink(finalized)
+        except Exception:
+            logger.exception(
+                "failed to publish transcript_finalized for session=%s",
+                self._session_id,
             )
 
     # ------------------------------------------------------------------ #
@@ -739,6 +804,8 @@ async def build_johnny_agent(
     tts_available: bool = True,
     noise_filter: NoiseFilterConfig | None = None,
     transcript_filtered_sink: TranscriptFilteredSink | None = None,
+    transcript_finalized_sink: TranscriptFinalizedSink | None = None,
+    metrics_listener: MetricsListener | None = None,
 ) -> JohnnyAgent:
     """Build a :class:`JohnnyAgent`, rehydrating prior transcripts if available.
 
@@ -788,6 +855,8 @@ async def build_johnny_agent(
         tts_available=tts_available,
         noise_filter=noise_filter,
         transcript_filtered_sink=transcript_filtered_sink,
+        transcript_finalized_sink=transcript_finalized_sink,
+        metrics_listener=metrics_listener,
         session_id=session_id,
     )
 

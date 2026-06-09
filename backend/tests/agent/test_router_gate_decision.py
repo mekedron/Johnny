@@ -93,9 +93,7 @@ class _FakeRouterLLM(LLMProvider):
         if self._raises is not None:
             raise self._raises
         decision = (
-            self._decisions[self._idx]
-            if self._idx < len(self._decisions)
-            else self._decisions[-1]
+            self._decisions[self._idx] if self._idx < len(self._decisions) else self._decisions[-1]
         )
         self._idx += 1
         return LLMResponse(
@@ -387,9 +385,7 @@ async def test_active_reply_tracks_bind_and_clears_on_done() -> None:
     target with the LiveKit turn id. It is set when the reply binds and cleared
     when the reply completes so a later turn can't capture a dead handle.
     """
-    gate, _, _ = _make_gate(
-        [{"should_speak": True, "confidence": 0.9, "reason": "ok"}]
-    )
+    gate, _, _ = _make_gate([{"should_speak": True, "confidence": 0.9, "reason": "ok"}])
     msg = _user_msg("Johnny?")
     await gate.run_turn(ChatContext.empty(), msg)
     assert gate.active_reply is None  # decided SPEAK, but no reply bound yet
@@ -656,3 +652,117 @@ async def test_replay_fixtures_reproduce_legacy_verdict(
             await gate.run_turn(ChatContext.empty(), msg)
         assert len(emitter.records) == 1
         assert emitter.records[0][1].no_reply_reason == expected
+
+
+# --------------------------------------------------------------------------- #
+# Observability emit seams (Johnny-d5z)                                        #
+# --------------------------------------------------------------------------- #
+
+
+class _RecordingObservability:
+    """Captures the gate's ``record_decision`` / ``record_spoke`` / ``record_suggested``."""
+
+    def __init__(self) -> None:
+        self.decisions: list[tuple[Any, str]] = []
+        self.spoke: list[str] = []
+        self.suggested: list[tuple[Any, str]] = []
+
+    async def record_decision(self, decision: Any, turn_id: str) -> None:
+        self.decisions.append((decision, turn_id))
+
+    async def record_spoke(self, text: str) -> None:
+        self.spoke.append(text)
+
+    async def record_suggested(self, decision: Any, turn_id: str) -> None:
+        self.suggested.append((decision, turn_id))
+
+
+def _make_observed_gate(
+    decisions: list[dict[str, Any]] | None = None,
+    *,
+    config: RouterGateConfig | None = None,
+) -> tuple[RouterGate, _RecordingEmitter, _RecordingObservability]:
+    emitter = _RecordingEmitter()
+    ledger = TurnLedger(emitter)
+    obs = _RecordingObservability()
+    gate = RouterGate(
+        _FakeRouterLLM(decisions),
+        config=config or RouterGateConfig(),
+        ledger=ledger,
+        record_decision=obs.record_decision,
+        record_spoke=obs.record_spoke,
+        record_suggested=obs.record_suggested,
+    )
+    return gate, emitter, obs
+
+
+async def test_gate_emits_decision_and_spoke_on_speak_path() -> None:
+    gate, _emitter, obs = _make_observed_gate(
+        [{"should_speak": True, "confidence": 0.95, "reason": "addressed"}]
+    )
+    msg = _user_msg("Johnny, status?")
+    await gate.run_turn(ChatContext.empty(), msg)
+
+    # Decision emitted with the LiveKit turn id; no spoke yet (reply pending).
+    assert len(obs.decisions) == 1
+    decision, turn_id = obs.decisions[0]
+    assert turn_id == msg.id
+    assert decision.should_speak is True
+    assert obs.spoke == []
+
+    # Reply completes with assistant text → AgentSpoke carries that text.
+    handle = _handle(chat_items=[LKChatMessage(role="assistant", content=["the status is green"])])
+    gate.bind_reply(handle)
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+    assert obs.spoke == ["the status is green"]
+
+
+async def test_gate_emits_decision_but_not_spoke_when_declined() -> None:
+    gate, _emitter, obs = _make_observed_gate(
+        [{"should_speak": False, "confidence": 0.9, "reason": "side chatter"}]
+    )
+    with pytest.raises(StopResponse):
+        await gate.run_turn(ChatContext.empty(), _user_msg("...lunch then"))
+    assert len(obs.decisions) == 1  # decision still recorded
+    assert obs.spoke == []  # nothing spoken
+
+
+async def test_gate_emits_suggested_in_suggest_only_mode() -> None:
+    gate, _emitter, obs = _make_observed_gate(
+        [{"should_speak": True, "confidence": 0.95, "reason": "ask", "suggested_reply": "Try X"}],
+        config=RouterGateConfig(mode="suggest_only"),
+    )
+    with pytest.raises(StopResponse):
+        await gate.run_turn(ChatContext.empty(), _user_msg("what should we do?"))
+    assert len(obs.decisions) == 1
+    assert len(obs.suggested) == 1
+    decision, _turn = obs.suggested[0]
+    assert decision.suggested_reply == "Try X"
+    assert obs.spoke == []
+
+
+async def test_gate_skips_decision_emit_in_approval_required_mode() -> None:
+    """approval_required persists its own pending row (Johnny-qzj) — no decision emit."""
+    gate, emitter, obs = _make_observed_gate(
+        [{"should_speak": True, "confidence": 0.95, "reason": "ask"}],
+        config=RouterGateConfig(mode="approval_required"),
+    )
+    with pytest.raises(StopResponse):
+        await gate.run_turn(ChatContext.empty(), _user_msg("approve this?"))
+    # No coordinator wired → the turn terminalizes approval_rejected, and the
+    # observability decision emit is deliberately skipped for this mode.
+    assert obs.decisions == []
+    assert emitter.reasons == ["approval_rejected"]
+
+
+async def test_gate_without_seams_emits_nothing_extra() -> None:
+    """A gate with no observability callbacks behaves exactly as before (smoke parity)."""
+    gate, emitter, _ = _make_gate([{"should_speak": True, "confidence": 0.95, "reason": "ok"}])
+    msg = _user_msg("hello")
+    await gate.run_turn(ChatContext.empty(), msg)
+    handle = _handle(chat_items=["x"])
+    gate.bind_reply(handle)
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+    assert emitter.states == ["replied"]

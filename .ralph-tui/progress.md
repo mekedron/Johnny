@@ -186,6 +186,50 @@ after each iteration and it's included in prompts for context.
   testable seam is `_gate_stt_events(source)` — feed crafted `SpeechEvent`s, no
   `AgentActivity` needed (like `iter_sentences` vs `tts_node`).
 
+### Event/observability parity: emit PipelineEvents, reuse the subscriber (Johnny-d5z)
+- **The DB-write path in production is the Redis subscriber, NOT the sinks.** The
+  legacy meet-worker is SQLAlchemy-free: it publishes `PipelineEvent`s to the Redis
+  `EventBus`, and `app/services/session_status_subscriber.py` (`run_subscriber` →
+  `apply_*_event`) is the *sole* DB writer — `transcript_finalized`→`transcript_chunks`,
+  `router_decision_made`→`agent_decisions`, `agent_spoke`→`agent_utterances`(+links to
+  the decision row), `pipeline_timing`→`session_timings`, `turn_terminal` *stamps* the
+  decision row by `turn_id`. The SqlAlchemy sinks (`router_decisions.py` etc.) are an
+  alternate injection used only by the approval path for its synchronous decision id
+  (Johnny-qzj). So the new agent path achieves parity by **emitting the same events to
+  the same `EventBus`** — no new DB code. `backend/johnny/agent/observability.py` is the
+  emit half (mirrors `approval_wiring.py`): pure `build_*` builders the worker (Johnny-9eh)
+  injects into the gate/agent as optional callbacks (`None`=no emission, smoke-safe).
+- **The lynchpin is `TurnIndex` (`gate.py`, stdlib): LiveKit `str` turn id → stable
+  per-session `int`.** The subscriber binds a turn's decision/terminal/timing by an
+  **int** `turn_id` and `_coerce_int_id`s a non-int to `None` — which would orphan every
+  terminal from its decision row and silently break decision↔terminal↔timing parity. So
+  one shared `TurnIndex.resolve(str)→int` (idempotent, monotonic) is threaded through the
+  decision emitter, the `SessionTerminalEmitter`, and the metrics translator so all of a
+  turn's events carry one identical int. `TurnIndex.last()` is the STT-timing fallback
+  (STT metrics carry no `speech_id`), analogous to the legacy `_emit_timing` falling back
+  to `_utterance_count`.
+- **`approval_required` is the one mode the gate SKIPS for `record_decision`** — it
+  persists its own pending row via the sink (Johnny-qzj) to get the id before parking;
+  emitting a `RouterDecisionMade` too would make the subscriber double-create the row. Its
+  terminal still flows through the shared `SessionTerminalEmitter`. Every OTHER decision
+  path (declined/low-conf/suggest/rate-limit/speak) emits one `RouterDecisionMade` in
+  `run_turn` right after the router returns (pre-branch, legacy `_respond_to_transcript_inner`
+  order), and the subscriber picks the row's outcome from `input_window["mode"]`.
+- **LiveKit metrics are pydantic, not dataclasses** (`livekit.agents.metrics`): read
+  fields with `getattr` (`metric_to_timing` is a pure, getattr-based translator). Only
+  `stt_metrics`→`stt`, `llm_metrics`→`answer_llm`, `tts_metrics`→`tts` map cleanly — the
+  **router LLM runs as a side `LLMProvider.chat` call, NOT through the session `llm_node`,
+  so the sole `llm_metrics` the SDK emits is the answer LLM** (unambiguous). `eou_metrics`
+  /`vad_metrics` describe turn detection, not a Johnny stage, and have no faithful
+  `end_to_end` mapping, so they're dropped (the subscriber drops non-whitelisted stages
+  anyway). Durations are float-seconds → `round(*1000)` ms. The sync `metrics_collected`
+  callback → async bus bridge is `MetricsTranslator` (fire-and-forget task set +
+  `aclose()` drain, the gate's `_reply_tasks` pattern).
+- **Strong test = feed emitted events through the REAL subscriber.** `event_to_dict(event)`
+  then call `apply_*_event(db, payload)` against an in-memory SQLite — proves the emitted
+  shapes persist with decision↔utterance↔terminal parity using the actual production
+  persistence code, not a re-implementation (the "replay harness" acceptance).
+
 ---
 
 ## 2026-06-09 - Johnny-y4j [SPIKE] Per-room JWT auth + agent dispatch contract
@@ -469,6 +513,62 @@ meet-worker still serves the live UI untouched (CLAUDE.md pure-backend exception
   content gate is the universal catch for coughs/fillers. The pre-STT cost-skip is the
   natural home for Silero VAD `min_speech_duration` (a follow-up / worker concern),
   not the node.
+
+---
+
+## 2026-06-09 - Johnny-d5z [BUILD] Phase 2: Event/observability parity (PipelineEvents → EventBus → DB sinks; metrics translation)
+
+Mapped the new `AgentSession` path's gate decisions + lifecycle onto the existing
+`PipelineEvent` set so the *existing* Redis subscriber persists them with no DB
+change — `RouterDecisionMade` / `AgentSpoke` / `AgentSuggested` / `TurnTerminal` /
+`TranscriptFinalized` / `PipelineTiming` — preserving decision↔utterance↔terminal
+parity via a shared str→int turn id, plus a LiveKit-metrics→`PipelineTiming`
+translator.
+
+**Implemented:**
+- `backend/johnny/agent/observability.py` (new, `livekit`-free at runtime; mirrors
+  `approval_wiring.py`) — `terminal_outcome` (GateTerminal→DecisionOutcome map),
+  `build_session_terminal_emitter` (→`TurnTerminal`, the o3z-promised seam),
+  `build_decision_emitter` (→`RouterDecisionMade`, int turn_id + `input_window["mode"]`),
+  `build_spoke_emitter` (→`AgentSpoke`, allow-list match heuristic),
+  `build_suggested_emitter` (→`AgentSuggested`), `build_transcript_finalized_emitter`,
+  the pure `metric_to_timing` translator + `MetricsTranslator` (sync→async bridge),
+  `Observability` bundle + `build_observability` factory.
+- `backend/johnny/agent/gate.py` — `TurnIndex` (stdlib): LiveKit `str` turn id →
+  stable per-session `int` (`resolve`/`get`/`last`), the parity lynchpin. Import-safety
+  preserved (no `livekit`/`sqlalchemy` leak).
+- `backend/johnny/agent/router_gate.py` — `RouterGate(record_decision=, record_spoke=,
+  record_suggested=)` (all optional); emits `RouterDecisionMade` in `run_turn`
+  pre-branch (skipping `approval_required`, which owns its sink-based pending row),
+  `AgentSuggested` in `_handle_suggest_only`, `AgentSpoke` in `_on_reply_done`'s replied
+  branch (`_extract_spoken_text` off the reply chat items).
+- `backend/johnny/agent/session.py` — `JohnnyAgent(transcript_finalized_sink=,
+  metrics_listener=)` threaded through `build_johnny_agent`; `_gate_stt_events` emits
+  `TranscriptFinalized` for kept finals (filter-on or off) via `_emit_transcript_finalized`;
+  `on_enter` registers the `metrics_collected` listener.
+- Tests: `tests/agent/test_observability.py` (new, 41) — builders, `terminal_outcome`,
+  `metric_to_timing`, `MetricsTranslator`, factory, and **replay parity through the real
+  subscriber** (`event_to_dict`→`apply_*_event`→in-memory DB: speak/declined/suggest/
+  auto-speak-demote, transcript, timing). `tests/agent/test_router_gate_decision.py`
+  (+6 gate-wiring tests).
+
+**Quality gates:** ruff check + format clean (whole `johnny/agent/` + tests); mypy
+`--strict` clean (4 source files); `tests/agent` + `tests/services/test_session_status_subscriber`
+= **612 passed** (incl. the 2 live-SFU smoke tests), no regressions. Import-safety probe:
+`import johnny.agent.gate` pulls neither `livekit` nor `sqlalchemy`; `observability`
+imports without loading `livekit` at runtime (`MetricsCollectedEvent` is TYPE_CHECKING-only).
+
+**Browser validation: N/A** (CLAUDE.md pure-backend exception). No running worker
+constructs the new agent path yet (no `RouterGate(` / `build_observability(` outside the
+module defs + tests; Johnny-9eh is still open), and every observability seam defaults to
+`None`=no-emission, so there is no live UI surface exercising the emission path. The
+legacy meet-worker still serves the live UI untouched. The replay-through-the-real-subscriber
+integration test is the validation that the emitted events land in the right DB rows.
+
+**Learnings:** captured in the Codebase Patterns section at the top (subscriber-is-the-
+DB-path, the `TurnIndex` parity lynchpin, the `approval_required` decision-emit skip, the
+pydantic-metrics/router-is-a-side-call mapping, and the feed-through-the-real-subscriber
+test technique).
 
 ---
 

@@ -1,0 +1,598 @@
+"""Event/observability parity for the LiveKit agent path (Johnny-d5z — epic Johnny-7g5).
+
+The legacy ``VoicePipeline`` published a fixed set of ``PipelineEvent``\\s to the
+Redis :class:`~johnny.voice_pipeline.event_bus.EventBus`; a single subscriber
+(``app.services.session_status_subscriber``) consumes that channel and persists
+each event to its DB table — ``transcript_finalized`` → ``transcript_chunks``,
+``router_decision_made`` → ``agent_decisions``, ``agent_spoke`` →
+``agent_utterances`` (+ links the utterance to its decision row),
+``pipeline_timing`` → ``session_timings``, and ``turn_terminal`` *stamps* the
+turn's ``agent_decisions`` row by ``turn_id``. The meet-worker stays
+SQLAlchemy-free; the subscriber owns every write.
+
+This module is the **emit half** for the new :class:`~livekit.agents.AgentSession`
+path: it maps the gate decisions + ``AgentSession`` lifecycle onto the *same*
+``PipelineEvent`` set so the *same* subscriber persists them with no DB-side
+change. It mirrors :mod:`johnny.agent.approval_wiring` — pure builders the agent
+worker (Johnny-9eh) calls; the spike modules (:mod:`johnny.agent.gate`,
+:mod:`johnny.agent.router_gate`) stay decoupled, taking these as injected
+callbacks.
+
+The lynchpin is the **str→int turn id** (:class:`~johnny.agent.gate.TurnIndex`).
+The subscriber binds a turn's decision, terminal, and timing rows by an **int**
+``turn_id`` (the legacy utterance counter), and coerces a non-int id to ``None``
+— which would orphan every terminal from its decision row. So every event this
+module emits for a turn carries the *same* int from the shared index, preserving
+the decision↔utterance↔terminal parity the serialised legacy pipeline got for
+free.
+
+What this module maps (each `→` is "published to the EventBus; subscriber
+persists"):
+
+* gate decision (every non-``approval_required`` path) → ``RouterDecisionMade``
+  → ``agent_decisions`` row, outcome chosen by the subscriber from the mode in
+  ``input_window``. ``approval_required`` keeps its own sink-based pending row
+  (Johnny-qzj) — emitting here too would double-write, so the gate skips it.
+* reply spoke → ``AgentSpoke`` → ``agent_utterances`` (+ flips the decision row's
+  ``final_text`` / outcome, INV-2).
+* suggest-only → ``AgentSuggested`` → live UI (the ``suggested`` decision row is
+  the ``RouterDecisionMade`` above).
+* kept STT final → ``TranscriptFinalized`` → ``transcript_chunks``.
+* turn terminal → ``TurnTerminal`` → stamps the decision row (INV-1).
+* LiveKit ``MetricsCollectedEvent`` → ``PipelineTiming`` → ``session_timings``.
+
+``ApprovalPending`` / ``ApprovalResolved`` are already wired by
+:mod:`johnny.agent.approval_wiring`; they are out of scope here.
+
+Imported only by the full-stack worker / tests — it reaches ``livekit`` (the
+metrics event types) and ``johnny.voice_pipeline`` (events, event_bus), so it is
+never pulled from the import-safe top-level :mod:`johnny.agent` package.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+from johnny.agent.gate import (
+    GateTerminal,
+    GateTerminalState,
+    SessionTerminalEmitter,
+    TurnIndex,
+    TurnNoReplyReason,
+)
+from johnny.voice_pipeline.event_bus import EventBus
+from johnny.voice_pipeline.events import (
+    AgentSpoke,
+    AgentSuggested,
+    PipelineTiming,
+    PipelineTimingStage,
+    RouterDecisionMade,
+    TranscriptFinalized,
+    TurnTerminal,
+)
+from johnny.voice_pipeline.pipeline import FREE_FORM_MODES, RouterDecision
+
+if TYPE_CHECKING:
+    from livekit.agents.voice.events import MetricsCollectedEvent
+
+logger = logging.getLogger(__name__)
+
+
+def _default_clock_ms() -> int:
+    """Epoch milliseconds — the timestamp shape every pipeline event carries."""
+    return int(time.time() * 1000)
+
+
+# Callbacks the gate / agent invoke at each emit point. Kept as plain callables
+# (not a bundle interface) so the gate stays decoupled and a smoke/bare agent
+# omits them entirely (``None`` → no emission), exactly like the approval seams.
+
+RecordDecision = Callable[[RouterDecision, str], Awaitable[None]]
+"""Publish a turn's ``RouterDecisionMade``. Args: the parsed decision and the
+LiveKit ``str`` turn id (translated to the durable ``int`` via the shared
+:class:`~johnny.agent.gate.TurnIndex`)."""
+
+RecordSuggested = Callable[[RouterDecision, str], Awaitable[None]]
+"""Publish a suggest-only turn's ``AgentSuggested``. Same args as
+:data:`RecordDecision`; the ``suggested`` decision row is the ``RouterDecisionMade``
+the gate already emitted, so no decision id is needed here."""
+
+RecordSpoke = Callable[[str], Awaitable[None]]
+"""Publish a spoken reply's ``AgentSpoke``. Arg: the text the bot spoke (extracted
+from the reply ``SpeechHandle``'s chat items). The builder fills the rest
+(mode, matched-allowed-reply heuristic, session id)."""
+
+TranscriptFinalizedSink = Callable[[TranscriptFinalized], Awaitable[None]]
+"""Publish a kept STT final's ``TranscriptFinalized`` (mirror of
+:data:`~johnny.agent.noise_filter.TranscriptFilteredSink` for the non-noise path)."""
+
+
+def terminal_outcome(
+    terminal_state: GateTerminalState,
+    no_reply_reason: TurnNoReplyReason | None,
+) -> str:
+    """Map a :class:`~johnny.agent.gate.GateTerminal` to a ``DecisionOutcome`` value.
+
+    The gate harness carries only the coarse ``terminal_state`` + the
+    ``no_reply_reason``; the ``agent_decisions.outcome`` column wants the
+    fine-grained value the legacy pipeline stamped per terminal branch
+    (``VoicePipeline._respond_to_transcript_inner``):
+
+    * ``replied`` → ``spoken``;
+    * ``pending_approval`` → ``pending``;
+    * ``no_reply(suggest_only)`` → ``suggested`` (router approved, mode silenced it);
+    * ``no_reply(approval_rejected)`` → ``rejected``;
+    * every other ``no_reply`` (declined / low-confidence / barge-in / rate-limit /
+      tts-unavailable / empty / no-match / noise / stage-error / listen-only) →
+      ``suppressed``.
+
+    The subscriber stamps this onto the row and demotes an optimistic ``spoken``
+    (written at router time for auto-speak modes) when the terminal is a real
+    ``no_reply``.
+    """
+    if terminal_state == "replied":
+        return "spoken"
+    if terminal_state == "pending_approval":
+        return "pending"
+    if no_reply_reason == "suggest_only":
+        return "suggested"
+    if no_reply_reason == "approval_rejected":
+        return "rejected"
+    return "suppressed"
+
+
+def build_session_terminal_emitter(
+    event_bus: EventBus,
+    turn_index: TurnIndex,
+    *,
+    session_id: str | None = None,
+    clock: Callable[[], int] = _default_clock_ms,
+) -> SessionTerminalEmitter:
+    """Build the ledger's :data:`~johnny.agent.gate.SessionTerminalEmitter` (INV-1).
+
+    The spike Johnny-o3z left the durable terminal wiring as an injected
+    ``Callable[[str, GateTerminal], Awaitable[None]]``; this is its production
+    body. It translates the LiveKit ``str`` turn id to the durable ``int`` (so
+    the subscriber binds the terminal to the turn's decision row) and publishes a
+    :class:`~johnny.voice_pipeline.events.TurnTerminal`. Defensive: a failing bus
+    is logged but never re-raised, so emitting a terminal can never crash the
+    teardown / reply-completion path that calls it (legacy
+    ``_emit_turn_terminal`` parity).
+    """
+
+    async def _emit(turn_id: str, terminal: GateTerminal) -> None:
+        event = TurnTerminal(
+            turn_id=turn_index.resolve(turn_id),
+            terminal_state=terminal.terminal_state,
+            outcome=terminal_outcome(terminal.terminal_state, terminal.no_reply_reason),
+            no_reply_reason=terminal.no_reply_reason,
+            detail=terminal.detail,
+            timestamp_ms=clock(),
+            session_id=session_id,
+        )
+        try:
+            await event_bus.publish(event)
+        except Exception:
+            logger.exception(
+                "failed to publish turn_terminal for session=%s turn=%s — "
+                "the turn's terminal audit row will be missing",
+                session_id,
+                event.turn_id,
+            )
+
+    return _emit
+
+
+def build_decision_emitter(
+    event_bus: EventBus,
+    turn_index: TurnIndex,
+    *,
+    mode: str,
+    approval_timeout_seconds: float | None = None,
+    session_id: str | None = None,
+    clock: Callable[[], int] = _default_clock_ms,
+) -> RecordDecision:
+    """Build the gate's per-turn ``RouterDecisionMade`` emitter.
+
+    Mirrors the legacy publish in ``_respond_to_transcript_inner`` right after the
+    router returns: one event per turn the router decided on, carrying the int
+    ``turn_id`` (so the later ``TurnTerminal`` stamps the same row) and an
+    ``input_window`` whose ``mode`` lets the subscriber pick the row's outcome
+    (``suggested`` / ``spoken`` / ``suppressed``). ``approval_timeout_seconds`` is
+    included for shape parity (the subscriber reads it for approval rounds) though
+    the gate skips this emitter in ``approval_required`` mode.
+    """
+    input_window: dict[str, Any] = {"mode": mode}
+    if approval_timeout_seconds is not None:
+        input_window["approval_timeout_seconds"] = approval_timeout_seconds
+
+    async def _record(decision: RouterDecision, turn_id: str) -> None:
+        event = RouterDecisionMade(
+            should_speak=decision.should_speak,
+            confidence=decision.confidence,
+            reason=decision.reason,
+            reply_type=decision.reply_type,
+            suggested_reply=decision.suggested_reply,
+            timestamp_ms=clock(),
+            session_id=session_id,
+            input_window=dict(input_window),
+            raw_output=dict(decision.raw),
+            turn_id=turn_index.resolve(turn_id),
+        )
+        try:
+            await event_bus.publish(event)
+        except Exception:
+            logger.exception(
+                "failed to publish router_decision_made for session=%s turn=%s",
+                session_id,
+                turn_id,
+            )
+
+    return _record
+
+
+def build_suggested_emitter(
+    event_bus: EventBus,
+    *,
+    session_id: str | None = None,
+    clock: Callable[[], int] = _default_clock_ms,
+) -> RecordSuggested:
+    """Build the suggest-only ``AgentSuggested`` emitter (Johnny-5ag deferred this here).
+
+    Port of ``VoicePipeline._handle_suggest_only``'s event: the router approved a
+    reply but the meeting is ``suggest_only``, so the suggestion is surfaced to
+    the UI and nothing is spoken. ``decision_id`` is ``None`` — unlike the legacy
+    (which had a synchronous sink id), the new path's decision row is written
+    asynchronously by the subscriber, so the UI correlates the suggestion by
+    session + recency, not by id.
+    """
+
+    async def _record(decision: RouterDecision, turn_id: str) -> None:
+        del turn_id  # carried by the paired RouterDecisionMade / TurnTerminal
+        event = AgentSuggested(
+            suggested_reply=(decision.suggested_reply or "").strip(),
+            timestamp_ms=clock(),
+            decision_id=None,
+            reason=decision.reason,
+            reply_type=decision.reply_type,
+            session_id=session_id,
+        )
+        try:
+            await event_bus.publish(event)
+        except Exception:
+            logger.exception("failed to publish agent_suggested for session=%s", session_id)
+
+    return _record
+
+
+def build_spoke_emitter(
+    event_bus: EventBus,
+    *,
+    mode: str,
+    allowed_replies: tuple[str, ...] = (),
+    session_id: str | None = None,
+    clock: Callable[[], int] = _default_clock_ms,
+) -> RecordSpoke:
+    """Build the speak-path ``AgentSpoke`` emitter.
+
+    Port of ``VoicePipeline._answer_and_speak``'s publish: emitted once when a
+    reply completes with assistant output. The subscriber inserts the
+    ``agent_utterances`` row and writes the spoken text back onto the turn's
+    decision row (INV-2). ``matched_allowed_reply`` is inferred from the active
+    mode + allow-list (an exact, case-insensitive match means the answer stage
+    spoke a verbatim allow-listed reply, so the subscriber attributes the
+    divergence to ``allowlist`` rather than ``answer_llm``); ``audio_duration_ms``
+    is ``0`` (the reply ``SpeechHandle`` exposes no synth duration — the real TTS
+    duration lives on the ``tts`` :class:`PipelineTiming`) and ``prompt`` is empty
+    (the per-turn answer prompt is internal to the LiveKit reply pipeline). Both
+    are accepted ``None``/``0``/empty by the subscriber and the utterance audit
+    view.
+    """
+    uses_allowlist = bool(allowed_replies) and mode not in FREE_FORM_MODES
+    lowered = {r.casefold(): r for r in allowed_replies}
+
+    async def _record(text: str) -> None:
+        matched: str | None = None
+        if uses_allowlist:
+            matched = lowered.get(text.strip().casefold())
+        event = AgentSpoke(
+            text=text,
+            audio_duration_ms=0,
+            timestamp_ms=clock(),
+            matched_allowed_reply=matched,
+            session_id=session_id,
+            prompt="",
+        )
+        try:
+            await event_bus.publish(event)
+        except Exception:
+            logger.exception("failed to publish agent_spoke for session=%s", session_id)
+
+    return _record
+
+
+def build_transcript_finalized_emitter(
+    event_bus: EventBus,
+    *,
+    session_id: str | None = None,
+) -> TranscriptFinalizedSink:
+    """Build the kept-STT-final ``TranscriptFinalized`` emitter.
+
+    Mirror of :data:`~johnny.agent.noise_filter.TranscriptFilteredSink` for the
+    candidates the noise gate *keeps*: the agent's ``stt_node`` publishes one of
+    these per final transcript that survived the gate, so the subscriber writes a
+    ``transcript_chunks`` row (the durable transcript the history view renders and
+    the next session rehydrates). The event is pre-built by the node (it owns the
+    timestamp / speaker / confidence); this sink only publishes, defensively.
+    """
+
+    async def _record(event: TranscriptFinalized) -> None:
+        try:
+            await event_bus.publish(event)
+        except Exception:
+            logger.exception("failed to publish transcript_finalized for session=%s", session_id)
+
+    return _record
+
+
+# --- LiveKit metrics → PipelineTiming translation -------------------------- #
+
+# LiveKit ``MetricsCollectedEvent.metrics.type`` → our ``PipelineTimingStage``.
+# Only the three provider stages map cleanly: the router LLM runs as a *side*
+# ``LLMProvider`` call (not through the session ``llm_node``), so the sole
+# ``llm_metrics`` the SDK emits is the *answer* LLM. ``eou_metrics`` /
+# ``vad_metrics`` describe turn detection, not a Johnny pipeline stage, and have
+# no faithful ``end_to_end`` mapping (the true user-speech-end→first-audio number
+# isn't reconstructable from a single metric), so they are dropped here — the
+# subscriber would drop any non-whitelisted stage anyway.
+_METRIC_TYPE_TO_STAGE: dict[str, PipelineTimingStage] = {
+    "stt_metrics": "stt",
+    "llm_metrics": "answer_llm",
+    "tts_metrics": "tts",
+}
+
+
+def _ms(seconds: Any) -> int:
+    """Whole milliseconds from a float-seconds metric field; ``0`` when absent/bad."""
+    try:
+        return max(0, round(float(seconds) * 1000))
+    except (TypeError, ValueError):
+        return 0
+
+
+def metric_to_timing(
+    metric: Any,
+    *,
+    turn_id: int,
+    started_at_ms: int,
+    session_id: str | None = None,
+) -> PipelineTiming | None:
+    """Translate one LiveKit metric to a :class:`PipelineTiming`, or ``None`` to drop.
+
+    Pure (no I/O), so the mapping is unit-testable on a crafted metric without a
+    running session — the analogue of :func:`~johnny.agent.answer.iter_sentences`
+    vs ``tts_node``. Reads fields by name with :func:`getattr` so it tolerates the
+    metric pydantic models without importing them. ``duration`` (and the
+    ``ttft`` / ``ttfb`` / ``audio_duration`` sub-timings) are seconds on the
+    metric and converted to ms; the ``details`` bag carries the same TTFT /
+    first-audio / token extras the legacy ``_emit_timing`` stashed for the
+    activity log.
+    """
+    metric_type = getattr(metric, "type", None)
+    if not isinstance(metric_type, str):
+        return None
+    stage = _METRIC_TYPE_TO_STAGE.get(metric_type)
+    if stage is None:
+        return None
+    provider_name = getattr(metric, "label", None)
+    if not isinstance(provider_name, str) or not provider_name:
+        provider_name = None
+    details: dict[str, Any] = {}
+    if stage == "stt":
+        details["audio_duration_ms"] = _ms(getattr(metric, "audio_duration", 0))
+        details["streamed"] = bool(getattr(metric, "streamed", False))
+    elif stage == "answer_llm":
+        details["time_to_first_token_ms"] = _ms(getattr(metric, "ttft", 0))
+        details["completion_tokens"] = int(getattr(metric, "completion_tokens", 0) or 0)
+        details["prompt_tokens"] = int(getattr(metric, "prompt_tokens", 0) or 0)
+        details["total_tokens"] = int(getattr(metric, "total_tokens", 0) or 0)
+        details["cancelled"] = bool(getattr(metric, "cancelled", False))
+    else:  # tts
+        details["time_to_first_audio_ms"] = _ms(getattr(metric, "ttfb", 0))
+        details["audio_duration_ms"] = _ms(getattr(metric, "audio_duration", 0))
+        details["characters_count"] = int(getattr(metric, "characters_count", 0) or 0)
+        details["cancelled"] = bool(getattr(metric, "cancelled", False))
+    return PipelineTiming(
+        turn_id=max(0, turn_id),
+        stage=stage,
+        started_at_ms=max(0, started_at_ms),
+        duration_ms=_ms(getattr(metric, "duration", 0)),
+        provider_name=provider_name,
+        details=details,
+        session_id=session_id,
+    )
+
+
+# Resolve a metric's ``speech_id`` (the reply ``SpeechHandle.id``, present on
+# LLM/TTS metrics; absent on STT) to the durable int turn id. The worker wires
+# this to the gate's reply→turn binding + the shared TurnIndex.
+ResolveTurnId = Callable[[str | None], int]
+
+
+class MetricsTranslator:
+    """Adapt LiveKit's sync ``metrics_collected`` callback to ``PipelineTiming`` emits.
+
+    ``AgentSession.on("metrics_collected", cb)`` fires a *synchronous* callback on
+    the event loop; publishing to the (async) bus must be scheduled as a task.
+    This translator owns that bridge: :meth:`on_metrics_collected` is the sync
+    callback the agent registers; it resolves the turn id, translates the metric
+    (:func:`metric_to_timing`), and fire-and-forgets the publish, holding a strong
+    ref to each task so it isn't GC'd mid-flight (the gate's ``_reply_tasks``
+    pattern). :meth:`aclose` drains any in-flight publishes at teardown.
+
+    ``session_started_at`` is the loop/epoch reference the metric ``timestamp`` is
+    offset from to produce the session-relative ``started_at_ms`` the activity log
+    renders; ``0`` falls back to the raw metric timestamp.
+    """
+
+    def __init__(
+        self,
+        event_bus: EventBus,
+        *,
+        resolve_turn_id: ResolveTurnId,
+        session_started_at: float = 0.0,
+        session_id: str | None = None,
+    ) -> None:
+        self._event_bus = event_bus
+        self._resolve_turn_id = resolve_turn_id
+        self._session_started_at = session_started_at
+        self._session_id = session_id
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    def on_metrics_collected(self, ev: MetricsCollectedEvent) -> None:
+        """Sync ``metrics_collected`` listener — translate + schedule the publish."""
+        metric = getattr(ev, "metrics", None)
+        if metric is None:
+            return
+        timing = self._translate(metric)
+        if timing is None:
+            return
+        task = asyncio.ensure_future(self._publish(timing))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    def _translate(self, metric: Any) -> PipelineTiming | None:
+        speech_id = getattr(metric, "speech_id", None)
+        turn_id = self._resolve_turn_id(speech_id if isinstance(speech_id, str) else None)
+        started_at_ms = self._started_at_ms(metric)
+        return metric_to_timing(
+            metric,
+            turn_id=turn_id,
+            started_at_ms=started_at_ms,
+            session_id=self._session_id,
+        )
+
+    def _started_at_ms(self, metric: Any) -> int:
+        ts: Any = getattr(metric, "timestamp", None)
+        try:
+            ts_f = float(ts)
+        except (TypeError, ValueError):
+            return 0
+        if self._session_started_at <= 0:
+            return max(0, round(ts_f * 1000))
+        return max(0, round((ts_f - self._session_started_at) * 1000))
+
+    async def _publish(self, timing: PipelineTiming) -> None:
+        try:
+            await self._event_bus.publish(timing)
+        except Exception:
+            logger.debug(
+                "timing emit failed for session=%s stage=%s",
+                self._session_id,
+                timing.stage,
+                exc_info=True,
+            )
+
+    async def aclose(self) -> None:
+        """Await any in-flight publishes so a teardown doesn't drop the last timings."""
+        if not self._tasks:
+            return
+        await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
+
+
+@dataclass(frozen=True, slots=True)
+class Observability:
+    """The wired emit seams for one agent session (the factory's return).
+
+    The agent worker (Johnny-9eh) threads these into the gate / agent:
+    ``record_decision`` / ``record_spoke`` / ``record_suggested`` onto the
+    :class:`~johnny.agent.router_gate.RouterGate`; ``transcript_finalized_sink``
+    onto the :class:`~johnny.agent.session.JohnnyAgent`; ``session_terminal_emitter``
+    onto the :class:`~johnny.agent.gate.TurnLedger`; and ``metrics_translator``'s
+    :meth:`~MetricsTranslator.on_metrics_collected` onto the session's
+    ``metrics_collected`` event (and its :meth:`~MetricsTranslator.aclose` at
+    teardown).
+    """
+
+    session_terminal_emitter: SessionTerminalEmitter
+    record_decision: RecordDecision
+    record_spoke: RecordSpoke
+    record_suggested: RecordSuggested
+    transcript_finalized_sink: TranscriptFinalizedSink
+    metrics_translator: MetricsTranslator
+
+
+def build_observability(
+    event_bus: EventBus,
+    turn_index: TurnIndex,
+    *,
+    mode: str,
+    allowed_replies: tuple[str, ...] = (),
+    approval_timeout_seconds: float | None = None,
+    resolve_turn_id: ResolveTurnId,
+    session_started_at: float = 0.0,
+    session_id: str | None = None,
+    clock: Callable[[], int] = _default_clock_ms,
+) -> Observability:
+    """Wire every emit seam against one ``EventBus`` + shared ``TurnIndex``.
+
+    The single entry point the agent worker calls once it has the session's mode,
+    allow-list, and a ``resolve_turn_id`` bound to the gate's reply→turn map. The
+    gate skips ``record_decision`` in ``approval_required`` mode (Johnny-qzj owns
+    that row), so passing the emitter unconditionally here is safe — it is only
+    invoked on the non-approval paths.
+    """
+    return Observability(
+        session_terminal_emitter=build_session_terminal_emitter(
+            event_bus, turn_index, session_id=session_id, clock=clock
+        ),
+        record_decision=build_decision_emitter(
+            event_bus,
+            turn_index,
+            mode=mode,
+            approval_timeout_seconds=approval_timeout_seconds,
+            session_id=session_id,
+            clock=clock,
+        ),
+        record_spoke=build_spoke_emitter(
+            event_bus,
+            mode=mode,
+            allowed_replies=allowed_replies,
+            session_id=session_id,
+            clock=clock,
+        ),
+        record_suggested=build_suggested_emitter(event_bus, session_id=session_id, clock=clock),
+        transcript_finalized_sink=build_transcript_finalized_emitter(
+            event_bus, session_id=session_id
+        ),
+        metrics_translator=MetricsTranslator(
+            event_bus,
+            resolve_turn_id=resolve_turn_id,
+            session_started_at=session_started_at,
+            session_id=session_id,
+        ),
+    )
+
+
+__all__ = [
+    "MetricsTranslator",
+    "Observability",
+    "RecordDecision",
+    "RecordSpoke",
+    "RecordSuggested",
+    "ResolveTurnId",
+    "TranscriptFinalizedSink",
+    "build_decision_emitter",
+    "build_observability",
+    "build_session_terminal_emitter",
+    "build_spoke_emitter",
+    "build_suggested_emitter",
+    "build_transcript_finalized_emitter",
+    "metric_to_timing",
+    "terminal_outcome",
+]

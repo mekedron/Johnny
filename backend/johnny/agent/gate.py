@@ -608,6 +608,72 @@ class TurnLedger:
             )
 
 
+class TurnIndex:
+    """Per-session map from the LiveKit turn id (``str``) to a stable ``int`` (Johnny-d5z).
+
+    The LiveKit turn id is the user ``ChatMessage.id`` (``item_<shortuuid>``, a
+    ``str``; spike Johnny-o3z), but the durable observability schema — the
+    ``RouterDecisionMade`` / ``TurnTerminal`` / ``PipelineTiming`` events, the
+    ``agent_decisions.turn_id`` / ``session_timings.turn_id`` columns, and the
+    subscriber that binds a terminal to its decision row
+    (``app.services.session_status_subscriber``) — is keyed by an **int** turn
+    id (the legacy per-session utterance counter). The subscriber coerces a
+    non-int ``turn_id`` to ``None``, which would orphan every terminal from its
+    decision row and silently break decision↔terminal↔timing parity.
+
+    This index closes that impedance gap: :meth:`resolve` assigns each distinct
+    ``str`` turn id a monotonically increasing ``int`` on first sight and returns
+    the same ``int`` for every later lookup, so all of a turn's events
+    (``RouterDecisionMade`` at the gate, ``TurnTerminal`` at resolution,
+    ``PipelineTiming`` from metrics) carry one identical ``int`` and the
+    subscriber binds them to a single ``agent_decisions`` row — exactly the
+    parity the serialised legacy pipeline got for free from its ``int``
+    ``_utterance_count``.
+
+    Stdlib-only and ``livekit``-free, like the rest of this module. One instance
+    per session, shared by the gate (decision emit), the
+    :data:`SessionTerminalEmitter` (terminal emit), and the metrics translator
+    (timing emit), so they agree on the mapping. Single-threaded-loop safe: the
+    assign is a plain dict write with no ``await``.
+    """
+
+    def __init__(self) -> None:
+        self._ids: dict[str, int] = {}
+        self._next = 1
+        self._last = 0
+
+    def resolve(self, turn_id: str) -> int:
+        """Return ``turn_id``'s stable ``int``, assigning a fresh one on first sight.
+
+        Idempotent: the same ``str`` always maps to the same ``int``. Updates the
+        :meth:`last` high-water mark so timing events with no turn correlation
+        (STT metrics carry no ``speech_id``) can attribute to the most recent
+        turn, mirroring the legacy fallback to ``_utterance_count``.
+        """
+        existing = self._ids.get(turn_id)
+        if existing is not None:
+            self._last = existing
+            return existing
+        assigned = self._next
+        self._next += 1
+        self._ids[turn_id] = assigned
+        self._last = assigned
+        return assigned
+
+    def get(self, turn_id: str) -> int | None:
+        """The ``int`` for ``turn_id`` if already assigned, else ``None`` (no assign)."""
+        return self._ids.get(turn_id)
+
+    def last(self) -> int:
+        """The most recently resolved ``int`` turn id (``0`` before any resolve).
+
+        The attribution fallback for timing events that carry no turn
+        correlation — the analogue of the legacy ``_emit_timing`` falling back to
+        the latest ``_utterance_count`` when no response-loop turn id is set.
+        """
+        return self._last
+
+
 async def _discard(task: asyncio.Task[Any]) -> None:
     """Cancel a child task we no longer need and await its teardown cleanly.
 
@@ -760,6 +826,7 @@ __all__ = [
     "SessionTerminalEmitter",
     "TerminalEmitter",
     "TerminalTracker",
+    "TurnIndex",
     "TurnLedger",
     "TurnNoReplyReason",
     "run_gate",

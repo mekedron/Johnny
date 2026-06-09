@@ -60,6 +60,7 @@ from johnny.agent.gate import (
     TurnLedger,
     run_gate,
 )
+from johnny.agent.observability import RecordDecision, RecordSpoke, RecordSuggested
 from johnny.voice_pipeline import pipeline as _legacy
 from johnny.voice_pipeline.pipeline import (
     APPROVAL_REQUIRED_MODE,
@@ -89,6 +90,24 @@ ROUTER_DECISION_SCHEMA = _legacy._ROUTER_SCHEMA
 def _default_clock() -> int:
     """Monotonic wall clock in milliseconds for the rate-limit window."""
     return int(time.monotonic() * 1000)
+
+
+def _extract_spoken_text(handle: SpeechHandle) -> str:
+    """Join the assistant text a completed reply produced, for ``AgentSpoke`` (Johnny-d5z).
+
+    The reply's terminal text lives on the ``SpeechHandle.chat_items`` (the same
+    items :meth:`RouterGate._on_reply_done` reads for the empty-reply check), so
+    this is only called when there is at least one item. Empty ``text_content`` is
+    skipped and multiple chunks are space-joined — a best-effort reconstruction of
+    what the bot said for the audit row, with no dependency on the answer pipeline
+    internals.
+    """
+    parts: list[str] = []
+    for item in handle.chat_items:
+        text = (getattr(item, "text_content", None) or "").strip()
+        if text:
+            parts.append(text)
+    return " ".join(parts)
 
 
 PersistPendingDecision = Callable[[RouterDecision, str], Awaitable[int | None]]
@@ -157,6 +176,9 @@ class RouterGate:
         ledger: TurnLedger,
         approval: ApprovalCoordinator | None = None,
         persist_pending_decision: PersistPendingDecision | None = None,
+        record_decision: RecordDecision | None = None,
+        record_spoke: RecordSpoke | None = None,
+        record_suggested: RecordSuggested | None = None,
         abandon: asyncio.Event | None = None,
         clock: Callable[[], int] = _default_clock,
     ) -> None:
@@ -165,6 +187,15 @@ class RouterGate:
         self._ledger = ledger
         self._approval = approval
         self._persist_pending_decision = persist_pending_decision
+        # Observability emit seams (Johnny-d5z), all optional so a smoke/bare gate
+        # emits nothing. ``record_decision`` publishes the turn's RouterDecisionMade
+        # (non-approval paths); ``record_spoke`` the speak path's AgentSpoke;
+        # ``record_suggested`` the suggest-only AgentSuggested. Built by
+        # :func:`johnny.agent.observability.build_observability` against the session
+        # EventBus + shared TurnIndex.
+        self._record_decision = record_decision
+        self._record_spoke = record_spoke
+        self._record_suggested = record_suggested
         self._abandon = abandon
         self._clock = clock
         # SpeechHandle ids the approval coordinator owns (it created them via its
@@ -258,6 +289,17 @@ class RouterGate:
             )
             raise StopResponse()
 
+        # Observability parity (Johnny-d5z): publish this turn's RouterDecisionMade
+        # so the subscriber writes its agent_decisions row (outcome derived from the
+        # mode in input_window) and the turn's later TurnTerminal stamps that same
+        # row by the int turn id. Emitted once, before the branch — exactly like the
+        # legacy ``_respond_to_transcript_inner`` published the decision event right
+        # after the router returned, then branched. ``approval_required`` persists
+        # its own pending row via ``persist_pending_decision`` (Johnny-qzj); emitting
+        # here too would double-write, so that mode is skipped.
+        if self._record_decision is not None and self._config.mode != APPROVAL_REQUIRED_MODE:
+            await self._record_decision(decision, turn_id)
+
         if not decision.should_speak:
             await tracker.emit(
                 terminal_state="no_reply",
@@ -284,7 +326,7 @@ class RouterGate:
             # should-speak/confidence, before rate-limit/approval). The terminal
             # is owned here; the AgentSuggested event that carries the suggested
             # reply to the UI is event/observability parity (Johnny-d5z).
-            await self._handle_suggest_only(tracker, decision)
+            await self._handle_suggest_only(tracker, decision, turn_id)
             raise StopResponse()
 
         if self._is_rate_limited():
@@ -388,17 +430,18 @@ class RouterGate:
             )
 
     async def _handle_suggest_only(
-        self, tracker: TerminalTracker, decision: RouterDecision
+        self, tracker: TerminalTracker, decision: RouterDecision, turn_id: str
     ) -> None:
         """Terminalize a suggest_only turn (Johnny-5ag) — suggestion, no speech.
 
         Port of ``VoicePipeline._handle_suggest_only``'s terminal: the router
         approved, so a suggestion exists (``decision.suggested_reply``), but the
         bot speaks nothing into the meeting — from the operator's chat the turn is
-        a deliberate ``no_reply(suggest_only)``. The suggested reply is carried in
-        the detail for now; the dedicated :class:`AgentSuggested` event (and the
-        ``suggested`` decision outcome) are wired by the event/observability parity
-        bead (Johnny-d5z).
+        a deliberate ``no_reply(suggest_only)``. The terminal's ``outcome`` maps to
+        ``suggested`` (so the decision row reads ``suggested``, not ``suppressed``);
+        the :class:`AgentSuggested` event that surfaces the suggestion to the UI is
+        published via the injected ``record_suggested`` seam (Johnny-d5z). The
+        ``RouterDecisionMade`` for this turn was already emitted in :meth:`run_turn`.
         """
         suggested = (decision.suggested_reply or "").strip()
         await tracker.emit(
@@ -406,6 +449,8 @@ class RouterGate:
             no_reply_reason="suggest_only",
             detail=f"suggest-only mode: nothing spoken (suggested={suggested!r})",
         )
+        if self._record_suggested is not None:
+            await self._record_suggested(decision, turn_id)
 
     async def _decide(self, turn_ctx: ChatContext, new_message: LKChatMessage) -> RouterDecision:
         """Call the router LLM and parse its structured decision.
@@ -529,6 +574,13 @@ class RouterGate:
             return
         self._recent_utterance_times.append(self._clock())
         await self._ledger.emit(turn_id, terminal_state="replied", detail="bot spoke")
+        # Observability parity (Johnny-d5z): the bot actually spoke, so publish the
+        # AgentSpoke the subscriber turns into the agent_utterances row (and writes
+        # the spoken text back onto the turn's decision row, INV-2). The text comes
+        # off the reply's chat items — the same items the empty-reply check above
+        # read, so it is non-empty here.
+        if self._record_spoke is not None:
+            await self._record_spoke(_extract_spoken_text(handle))
 
     # ------------------------------------------------------------------ #
     # Approval-required wiring (Johnny-z97 / qzj)                         #
