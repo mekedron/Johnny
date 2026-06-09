@@ -65,6 +65,14 @@ construction sites:
   reads `spec.pipeline_mode` (unknown → raises `BrowserPipelineSetupError`, no
   silent fallback).
 
+> **Migration note (epic Johnny-7g5).** The LiveKit `AgentSession` migration moves
+> the **Meet** path off this in-process engine behind `JOHNNY_ORCHESTRATOR=agentsession`
+> (a Meet-only flag — `session_scheduler` + `meet_worker/bootstrap`). The **browser /
+> playground** path intentionally stays on `VoicePipeline` **regardless of that flag**,
+> so cutover cannot silently break the playground; its migration is deferred
+> (Johnny-a1w → follow-up Johnny-7g5.1). Rationale + the two migration designs:
+> [playground-orchestration-deferral.md](playground-orchestration-deferral.md).
+
 ---
 
 ## 2. High-level data flow

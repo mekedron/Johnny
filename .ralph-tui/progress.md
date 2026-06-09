@@ -5,6 +5,33 @@ after each iteration and it's included in prompts for context.
 
 ## Codebase Patterns (Study These First)
 
+### A migration epic's second orchestration consumer can be SAFELY deferred when it's flag-isolated (Johnny-a1w)
+- **The in-browser playground is a separate orchestration consumer from the Meet path** and stays on
+  the legacy in-process `VoicePipeline` (migration deferred to Johnny-7g5.1, which blocks the
+  pipeline.py-retirement bead Johnny-n22). Don't assume every consumer must cut over together.
+- **The playground is a different transport model entirely:** `browser → WebSocket raw-PCM →
+  in-process VoicePipeline in the API` (`browser_transport.py` + `app/services/browser_pipeline_runner.py`
+  → `assemble_browser_pipeline`). NO container, NO meet-worker, NO LiveKit room. By contrast the agent
+  engine is bound to a LiveKit `JobContext` (`worker.entrypoint` → `ctx.connect()` →
+  `session.start(room=ctx.room)`); `johnny/agent/` has **no roomless in-process `AgentSession.start`
+  seam**. So `feed_text → session.generate_reply()` is *not* a small adapter swap — it needs either a
+  roomless in-process AgentSession (custom `AudioInput`/`AudioOutput` over `BrowserAudioTransport` —
+  Option A, recommended) or a `browser→room` bridge + a cross-process `generate_reply` signal (Option B).
+- **The deferral is safe because the cutover flag is path-isolated — VERIFY THIS, don't assume it.**
+  `JOHNNY_ORCHESTRATOR` is read ONLY on the Meet path: `app/services/agent_dispatch.py`
+  (`agent_orchestrator_enabled` / `maybe_dispatch_session_agent`, called from
+  `session_scheduler.start_session_for_meeting`; `bridge_launch_environment`) and
+  `johnny/meet_worker/bootstrap.py` (`_orchestrator_is_agentsession`). The browser surface never reads
+  the flag and never dispatches the agent, so flipping it to `agentsession` re-routes Meet sessions only
+  — the playground can't silently break. Grep the flag's full consult-set to PROVE isolation before
+  deferring.
+- **Lock the safety invariant with a cheap regression guard, then it's not just prose.**
+  `tests/services/test_browser_pipeline_runner.py`: assert `assemble_browser_pipeline` still returns a
+  legacy `VoicePipeline` with `JOHNNY_ORCHESTRATOR=agentsession` set, AND a source-level tripwire that
+  the runner/endpoint modules contain no flag / agent-dispatch reference. A documented deferral =
+  decision record (`docs/playground-orchestration-deferral.md`) + doc pointer (`PIPELINE.md`) + a
+  follow-up bead wired to block the dependent + a test — NOT a one-line "deferred" note.
+
 ### Validate the REAL dispatch path, not just the gate — the cutover gate's blind spot (Johnny-52b)
 - **The gate-level replay (Johnny-4k3) cannot catch dispatch-contract bugs.**
   `replay_agent.run_agent_replay` drives `RouterGate.run_turn` directly, bypassing
@@ -1214,5 +1241,62 @@ gate"). Key points: the gate-level replay is blind to the dispatch contract; `SU
 == the full `NON_SPEAKING_MODES | SPEAKING_MODES` union; you can prove the whole engine assembles +
 joins a room with a real-provider dispatch (no live Meet needed) because adapter instantiation never
 calls the models; rebuild a single service to prove the fix is baked rather than wiping operator data.
+
+---
+
+## 2026-06-09 - Johnny-a1w
+
+**Outcome: documented deferral (AC option 2), not a migration.** The in-browser playground voice
+surface (`browser_transport.py`) + `feed_text` typed-input stay on the legacy in-process
+`VoicePipeline`; the room/`AgentSession` migration is deferred to follow-up **Johnny-7g5.1**, which
+now **blocks Johnny-n22** (legacy `pipeline.py` retirement). `bd close Johnny-a1w` with the decision
+inline.
+
+**Why defer (not a cop-out — both the epic plan and the bead AC explicitly sanction it):** the
+playground is a structurally different consumer from the Meet path — `browser → WebSocket PCM →
+in-process VoicePipeline in the API`, with no container / meet-worker / room. The new engine is bound
+to a LiveKit `JobContext` (`worker.entrypoint` → `ctx.connect()` → `session.start(room=ctx.room)`),
+and `johnny/agent/` exposes **no roomless in-process `AgentSession.start` seam**. `feed_text` is an
+in-process method call today; on the new engine it needs either Option A (roomless in-process
+`AgentSession` over a custom `AudioInput`/`AudioOutput` on `BrowserAudioTransport` — recommended, keeps
+`feed_text → generate_reply` a direct same-process call) or Option B (a `browser→room` bridge + a
+dispatched agent-worker + a cross-process `generate_reply` signal). Large build for a P2 dev surface;
+a half-build would leave the playground broken and un-validatable (violates "no half-finished work").
+
+**Why the deferral is SAFE (the bead's actual worry — "cutover does not silently break the
+playground"):** `JOHNNY_ORCHESTRATOR` is consulted ONLY on the Meet path (`agent_dispatch` /
+`session_scheduler.start_session_for_meeting` + `meet_worker/bootstrap`). The browser surface
+(`browser_sessions.py` → `browser_pipeline_runner.py` → `VoicePipeline`) never reads the flag and
+never dispatches the agent, so flipping the flag re-routes Meet sessions only. The playground is never
+on the new path → cutover cannot break it.
+
+**Files changed:**
+- `docs/playground-orchestration-deferral.md` (NEW) — decision record: rationale, the flag-independence
+  safety argument, and the two concrete migration designs (Option A recommended) as a head start.
+- `docs/PIPELINE.md` — pointer note in §1 (the two-construction-sites list) flagging the browser path
+  stays on `VoicePipeline` regardless of `JOHNNY_ORCHESTRATOR`, linking the decision record.
+- `backend/tests/services/test_browser_pipeline_runner.py` — two regression guards that lock the
+  safety invariant: `test_browser_pipeline_is_orchestrator_flag_independent` (assembling with
+  `JOHNNY_ORCHESTRATOR=agentsession` still yields a legacy `VoicePipeline`) +
+  `test_browser_surface_not_wired_to_agent_dispatch` (the runner/endpoint source carries no flag or
+  agent-dispatch reference — the tripwire if someone wires cutover into the browser path).
+- beads: created **Johnny-7g5.1** (the real migration, P2, under epic Johnny-7g5); `bd dep
+  Johnny-7g5.1 --blocks Johnny-n22`; appended the decision to Johnny-a1w then closed it.
+
+**Quality gates** (throwaway prod-shape container, ruff 0.15.16 locked): `pytest
+tests/services/test_browser_pipeline_runner.py` → **11 passed** (9 existing + 2 new); `ruff check`
+clean; `ruff format --check` flags only a PRE-EXISTING 88-col line (lines ~208–211, not mine) — left
+untouched per the "don't churn pre-existing reflow" rule.
+
+**Browser validation: N/A for this change.** It alters no playground behavior — docs + a regression
+test only. The playground continues on the already-validated legacy path; there is no new UI surface
+to drive. (Stated explicitly per CLAUDE.md's "if the change can't be browser-tested, say so".)
+
+**Doc-home note:** the bead AC says "this issue + DESIGN.md", but the repo's `DESIGN.md` is the
+frontend *visual* design system — wrong home for a backend orchestration deferral. Used a dedicated
+decision record + `PIPELINE.md` (the orchestration doc the epic plan pairs with "DESIGN.md") instead.
+
+**Learnings:** captured as a new pattern at the top ("A migration epic's second orchestration
+consumer …").
 
 ---

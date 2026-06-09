@@ -3,10 +3,10 @@
   "sessionId": "737211f1-9739-40c0-8d3f-332e080d27b8",
   "status": "running",
   "startedAt": "2026-06-08T22:23:12.909Z",
-  "updatedAt": "2026-06-09T03:23:02.007Z",
-  "currentIteration": 11,
+  "updatedAt": "2026-06-09T03:35:12.242Z",
+  "currentIteration": 12,
   "maxIterations": 0,
-  "tasksCompleted": 11,
+  "tasksCompleted": 12,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -45,8 +45,8 @@
       {
         "id": "Johnny-52b",
         "title": "[CHORE] Phase 4: Real-browser e2e validation + clean-install reproducibility pass",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-6nl",
@@ -322,6 +322,16 @@
       "durationMs": 1274588,
       "startedAt": "2026-06-09T02:39:57.644Z",
       "endedAt": "2026-06-09T03:01:12.232Z"
+    },
+    {
+      "iteration": 12,
+      "status": "completed",
+      "taskId": "Johnny-52b",
+      "taskTitle": "[CHORE] Phase 4: Real-browser e2e validation + clean-install reproducibility pass",
+      "taskCompleted": true,
+      "durationMs": 1284742,
+      "startedAt": "2026-06-09T03:01:35.969Z",
+      "endedAt": "2026-06-09T03:23:00.711Z"
     }
   ],
   "skippedTaskIds": [],

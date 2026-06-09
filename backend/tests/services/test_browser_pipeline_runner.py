@@ -23,6 +23,7 @@ from johnny.voice_pipeline import (
     BrowserAudioTransport,
     EnergyVAD,
     InMemoryEventBus,
+    VoicePipeline,
 )
 
 
@@ -223,3 +224,53 @@ def test_prior_session_context_defaults_empty() -> None:
     )
     pipeline = assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
     assert pipeline.config.prior_session_context == ""
+
+
+# --- Orchestrator-cutover independence (Johnny-a1w deferral) ---------------
+#
+# The in-browser playground stays on the legacy in-process VoicePipeline; the
+# LiveKit AgentSession migration is deferred (follow-up Johnny-7g5.1, decision
+# record docs/playground-orchestration-deferral.md). The deferral is only safe
+# because flipping JOHNNY_ORCHESTRATOR=agentsession at cutover re-routes Meet
+# sessions ONLY and never touches the browser surface. These guards fail loudly
+# if a future change wires the cutover flag — or the agent engine — into the
+# browser path.
+
+
+def test_browser_pipeline_is_orchestrator_flag_independent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """JOHNNY_ORCHESTRATOR=agentsession must NOT change what the playground builds."""
+    monkeypatch.setenv("JOHNNY_ORCHESTRATOR", "agentsession")
+    transport = BrowserAudioTransport()
+    spec = _spec(
+        provider_payload={
+            "stt": {"provider_name": "fake-stt", "credentials": {}, "options": {}},
+            "llm": {"provider_name": "fake-llm", "credentials": {}, "options": {}},
+            "tts": {"provider_name": "fake-tts", "credentials": {}, "options": {}},
+        },
+        mode="autonomous",
+    )
+    pipeline = assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
+    # Still the legacy in-process engine, not anything from johnny.agent.
+    assert isinstance(pipeline, VoicePipeline)
+    assert type(pipeline).__module__ == "johnny.voice_pipeline.pipeline"
+
+
+def test_browser_surface_not_wired_to_agent_dispatch() -> None:
+    """The browser runner + endpoint must not read the cutover flag or dispatch.
+
+    A source-level guard: the only thing that protects the playground at cutover
+    is that these modules never consult JOHNNY_ORCHESTRATOR and never trigger the
+    agent dispatch. If someone adds that wiring, this test is the tripwire.
+    """
+    from pathlib import Path
+
+    import app.api.browser_sessions as endpoint_mod
+    import app.services.browser_pipeline_runner as runner_mod
+
+    for mod in (runner_mod, endpoint_mod):
+        src = Path(mod.__file__).read_text()
+        assert "JOHNNY_ORCHESTRATOR" not in src, f"{mod.__name__} reads the cutover flag"
+        assert "dispatch_agent" not in src, f"{mod.__name__} triggers agent dispatch"
+        assert "maybe_dispatch" not in src, f"{mod.__name__} triggers agent dispatch"
