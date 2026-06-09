@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "sessionId": "737211f1-9739-40c0-8d3f-332e080d27b8",
+  "sessionId": "2666b8b0-612b-4f66-a03c-0a0a2ce4247c",
   "status": "running",
-  "startedAt": "2026-06-08T22:23:12.909Z",
-  "updatedAt": "2026-06-09T05:23:06.633Z",
-  "currentIteration": 15,
+  "startedAt": "2026-06-09T08:40:13.109Z",
+  "updatedAt": "2026-06-09T08:41:04.560Z",
+  "currentIteration": 0,
   "maxIterations": 0,
-  "tasksCompleted": 15,
+  "tasksCompleted": 0,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -28,7 +28,7 @@
         }
       }
     ],
-    "totalTasks": 30,
+    "totalTasks": 31,
     "tasks": [
       {
         "id": "Johnny-4em",
@@ -40,13 +40,13 @@
         "id": "Johnny-4k3",
         "title": "[BUILD] Phase 4: Port replay/eval harness + tts-smoke to new engine (cutover gate)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-52b",
         "title": "[CHORE] Phase 4: Real-browser e2e validation + clean-install reproducibility pass",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-6nl",
@@ -58,7 +58,7 @@
         "id": "Johnny-6nm",
         "title": "[BUILD] Phase 3: Repurpose livekit_transport.py as the meet-worker↔room bridge",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-6wx",
@@ -76,13 +76,13 @@
         "id": "Johnny-7we",
         "title": "[BUILD] Phase 3: Thread session config (providers/personality/mode) into the agent job",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-9eh",
         "title": "[BUILD] Phase 3: Agent-worker service in docker-compose + dispatch lifecycle (one room per session)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-9k2",
@@ -100,7 +100,7 @@
         "id": "Johnny-d5z",
         "title": "[BUILD] Phase 2: Event/observability parity (PipelineEvents → EventBus → DB sinks; metrics translation)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-jue",
@@ -124,7 +124,7 @@
         "id": "Johnny-qzj",
         "title": "[BUILD] Phase 2: Approval-required mode (ApprovalPending/Resolved + terminal outcomes)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-re2",
@@ -136,7 +136,7 @@
         "id": "Johnny-wz5",
         "title": "[BUILD] Phase 4: JOHNNY_ORCHESTRATOR feature flag (agentsession|legacy)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-xpa",
@@ -148,17 +148,23 @@
         "id": "Johnny-y4j",
         "title": "[SPIKE] Phase 0: Per-room JWT auth + agent dispatch contract (job payload)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-z97",
         "title": "[SPIKE] Phase 2: Approval-required mapping (out-of-band generate_reply vs in-gate block)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-zb3",
         "title": "[BUILD] Phase 1: Adapter factory built from load_active_providers() at session start",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-7g5.1",
+        "title": "[BUILD] Phase 3: Migrate in-browser playground to AgentSession (roomless in-process or room bridge)",
         "status": "completed",
         "completedInSession": false
       },
@@ -172,7 +178,7 @@
         "id": "Johnny-5ag",
         "title": "[BUILD] Phase 2: Allowed-reply coercion + per-sentence streaming + suggest_only/listen_only + TTS-missing degrade",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-88n",
@@ -184,13 +190,13 @@
         "id": "Johnny-a1w",
         "title": "[BUILD] Phase 3: In-browser playground migration (browser_transport + feed_text → generate_reply)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-cmd",
         "title": "[BUILD] Phase 2: Noise filtering parity (stoplist/min-chars/confidence) → TranscriptFiltered",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-n22",
@@ -202,168 +208,17 @@
         "id": "Johnny-un2",
         "title": "[BUILD] Phase 3: Graceful no-provider-configured degrade parity",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-y6e",
         "title": "[BUILD] Phase 0: Console-mode AgentSession smoke harness with a stub provider",
-        "status": "open",
+        "status": "completed",
         "completedInSession": false
       }
     ]
   },
-  "iterations": [
-    {
-      "iteration": 1,
-      "status": "completed",
-      "taskId": "Johnny-y4j",
-      "taskTitle": "[SPIKE] Phase 0: Per-room JWT auth + agent dispatch contract (job payload)",
-      "taskCompleted": true,
-      "durationMs": 1360163,
-      "startedAt": "2026-06-08T22:23:35.833Z",
-      "endedAt": "2026-06-08T22:46:15.996Z"
-    },
-    {
-      "iteration": 2,
-      "status": "completed",
-      "taskId": "Johnny-z97",
-      "taskTitle": "[SPIKE] Phase 2: Approval-required mapping (out-of-band generate_reply vs in-gate block)",
-      "taskCompleted": true,
-      "durationMs": 1214854,
-      "startedAt": "2026-06-08T22:46:37.031Z",
-      "endedAt": "2026-06-08T23:06:51.885Z"
-    },
-    {
-      "iteration": 3,
-      "status": "completed",
-      "taskId": "Johnny-qzj",
-      "taskTitle": "[BUILD] Phase 2: Approval-required mode (ApprovalPending/Resolved + terminal outcomes)",
-      "taskCompleted": true,
-      "durationMs": 1485404,
-      "startedAt": "2026-06-08T23:07:13.053Z",
-      "endedAt": "2026-06-08T23:31:58.457Z"
-    },
-    {
-      "iteration": 4,
-      "status": "completed",
-      "taskId": "Johnny-5ag",
-      "taskTitle": "[BUILD] Phase 2: Allowed-reply coercion + per-sentence streaming + suggest_only/listen_only + TTS-missing degrade",
-      "taskCompleted": true,
-      "durationMs": 1825317,
-      "startedAt": "2026-06-08T23:32:18.906Z",
-      "endedAt": "2026-06-09T00:02:44.223Z"
-    },
-    {
-      "iteration": 5,
-      "status": "completed",
-      "taskId": "Johnny-cmd",
-      "taskTitle": "[BUILD] Phase 2: Noise filtering parity (stoplist/min-chars/confidence) → TranscriptFiltered",
-      "taskCompleted": true,
-      "durationMs": 1440071,
-      "startedAt": "2026-06-09T00:03:04.627Z",
-      "endedAt": "2026-06-09T00:27:04.698Z"
-    },
-    {
-      "iteration": 6,
-      "status": "completed",
-      "taskId": "Johnny-d5z",
-      "taskTitle": "[BUILD] Phase 2: Event/observability parity (PipelineEvents → EventBus → DB sinks; metrics translation)",
-      "taskCompleted": true,
-      "durationMs": 1730757,
-      "startedAt": "2026-06-09T00:27:29.276Z",
-      "endedAt": "2026-06-09T00:56:20.033Z"
-    },
-    {
-      "iteration": 7,
-      "status": "completed",
-      "taskId": "Johnny-6nm",
-      "taskTitle": "[BUILD] Phase 3: Repurpose livekit_transport.py as the meet-worker↔room bridge",
-      "taskCompleted": true,
-      "durationMs": 1002417,
-      "startedAt": "2026-06-09T00:56:41.301Z",
-      "endedAt": "2026-06-09T01:13:23.718Z"
-    },
-    {
-      "iteration": 8,
-      "status": "completed",
-      "taskId": "Johnny-7we",
-      "taskTitle": "[BUILD] Phase 3: Thread session config (providers/personality/mode) into the agent job",
-      "taskCompleted": true,
-      "durationMs": 1217881,
-      "startedAt": "2026-06-09T01:13:49.752Z",
-      "endedAt": "2026-06-09T01:34:07.633Z"
-    },
-    {
-      "iteration": 9,
-      "status": "completed",
-      "taskId": "Johnny-9eh",
-      "taskTitle": "[BUILD] Phase 3: Agent-worker service in docker-compose + dispatch lifecycle (one room per session)",
-      "taskCompleted": true,
-      "durationMs": 2068797,
-      "startedAt": "2026-06-09T01:34:29.614Z",
-      "endedAt": "2026-06-09T02:08:58.411Z"
-    },
-    {
-      "iteration": 10,
-      "status": "completed",
-      "taskId": "Johnny-wz5",
-      "taskTitle": "[BUILD] Phase 4: JOHNNY_ORCHESTRATOR feature flag (agentsession|legacy)",
-      "taskCompleted": true,
-      "durationMs": 1816503,
-      "startedAt": "2026-06-09T02:09:18.741Z",
-      "endedAt": "2026-06-09T02:39:35.244Z"
-    },
-    {
-      "iteration": 11,
-      "status": "completed",
-      "taskId": "Johnny-4k3",
-      "taskTitle": "[BUILD] Phase 4: Port replay/eval harness + tts-smoke to new engine (cutover gate)",
-      "taskCompleted": true,
-      "durationMs": 1274588,
-      "startedAt": "2026-06-09T02:39:57.644Z",
-      "endedAt": "2026-06-09T03:01:12.232Z"
-    },
-    {
-      "iteration": 12,
-      "status": "completed",
-      "taskId": "Johnny-52b",
-      "taskTitle": "[CHORE] Phase 4: Real-browser e2e validation + clean-install reproducibility pass",
-      "taskCompleted": true,
-      "durationMs": 1284742,
-      "startedAt": "2026-06-09T03:01:35.969Z",
-      "endedAt": "2026-06-09T03:23:00.711Z"
-    },
-    {
-      "iteration": 13,
-      "status": "completed",
-      "taskId": "Johnny-a1w",
-      "taskTitle": "[BUILD] Phase 3: In-browser playground migration (browser_transport + feed_text → generate_reply)",
-      "taskCompleted": true,
-      "durationMs": 708837,
-      "startedAt": "2026-06-09T03:23:22.477Z",
-      "endedAt": "2026-06-09T03:35:11.314Z"
-    },
-    {
-      "iteration": 14,
-      "status": "completed",
-      "taskId": "Johnny-7g5.1",
-      "taskTitle": "[BUILD] Phase 3: Migrate in-browser playground to AgentSession (roomless in-process or room bridge)",
-      "taskCompleted": true,
-      "durationMs": 3613552,
-      "startedAt": "2026-06-09T03:35:32.127Z",
-      "endedAt": "2026-06-09T04:35:45.679Z"
-    },
-    {
-      "iteration": 15,
-      "status": "completed",
-      "taskId": "Johnny-un2",
-      "taskTitle": "[BUILD] Phase 3: Graceful no-provider-configured degrade parity",
-      "taskCompleted": true,
-      "durationMs": 1931526,
-      "startedAt": "2026-06-09T04:36:07.299Z",
-      "endedAt": "2026-06-09T05:08:18.825Z"
-    }
-  ],
+  "iterations": [],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],
