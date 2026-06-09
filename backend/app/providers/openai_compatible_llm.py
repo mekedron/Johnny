@@ -100,10 +100,13 @@ class OpenAICompatibleLLM(LLMProvider):
     * ``frequency_penalty`` — repeat penalty; default unset.
     * ``presence_penalty`` — novelty penalty; default unset.
     * ``seed`` — deterministic sampling seed; default unset.
-    * ``disable_thinking`` — for Qwen3 / DeepSeek-R1-style models served by
-      Ollama, sends top-level ``think: false`` and prepends ``/no_think``
-      to the first system message. Harmless on servers that don't honor
-      it. Default ``False``.
+    * ``disable_thinking`` — for Qwen3 / DeepSeek-R1-style models served
+      over an OpenAI-compatible endpoint, suppresses the reasoning trace.
+      Sends ``reasoning_effort: "none"`` (Ollama's documented
+      ``/v1/chat/completions`` knob) plus ``think: false`` /
+      ``chat_template_kwargs`` / a ``/no_think`` prefix as fallbacks. See
+      :meth:`_apply_disable_thinking_to_body`. Harmless on servers that
+      don't honor it. Default ``False``.
     * ``max_tokens`` — response length cap; default unset.
     * ``timeout_s`` — HTTP timeout in seconds; default ``60``.
 
@@ -231,7 +234,10 @@ class OpenAICompatibleLLM(LLMProvider):
                     label="Top-p (nucleus sampling)",
                     type=FieldType.NUMBER,
                     placeholder="(leave blank for server default)",
-                    help_text="Restrict sampling to tokens whose cumulative probability exceeds this value (0-1).",
+                    help_text=(
+                        "Restrict sampling to tokens whose cumulative "
+                        "probability exceeds this value (0-1)."
+                    ),
                     group=FieldGroup.ADVANCED,
                 ),
                 FieldDef(
@@ -239,7 +245,10 @@ class OpenAICompatibleLLM(LLMProvider):
                     label="Top-k",
                     type=FieldType.NUMBER,
                     placeholder="(Ollama / llama.cpp only)",
-                    help_text="Restrict sampling to the top K most-likely tokens. Honored by Ollama / llama.cpp; ignored by OpenAI.",
+                    help_text=(
+                        "Restrict sampling to the top K most-likely tokens. "
+                        "Honored by Ollama / llama.cpp; ignored by OpenAI."
+                    ),
                     group=FieldGroup.ADVANCED,
                 ),
                 FieldDef(
@@ -247,7 +256,10 @@ class OpenAICompatibleLLM(LLMProvider):
                     label="Frequency penalty",
                     type=FieldType.NUMBER,
                     placeholder="(leave blank for server default)",
-                    help_text="Penalize tokens proportional to how often they have appeared so far (-2 to 2).",
+                    help_text=(
+                        "Penalize tokens proportional to how often they "
+                        "have appeared so far (-2 to 2)."
+                    ),
                     group=FieldGroup.ADVANCED,
                 ),
                 FieldDef(
@@ -255,7 +267,10 @@ class OpenAICompatibleLLM(LLMProvider):
                     label="Presence penalty",
                     type=FieldType.NUMBER,
                     placeholder="(leave blank for server default)",
-                    help_text="Penalize tokens that have already appeared at all (-2 to 2). Encourages topic novelty.",
+                    help_text=(
+                        "Penalize tokens that have already appeared at all "
+                        "(-2 to 2). Encourages topic novelty."
+                    ),
                     group=FieldGroup.ADVANCED,
                 ),
                 FieldDef(
@@ -263,7 +278,10 @@ class OpenAICompatibleLLM(LLMProvider):
                     label="Seed",
                     type=FieldType.NUMBER,
                     placeholder="(leave blank for random)",
-                    help_text="Integer seed for deterministic sampling. Best-effort on most servers.",
+                    help_text=(
+                        "Integer seed for deterministic sampling. "
+                        "Best-effort on most servers."
+                    ),
                     group=FieldGroup.ADVANCED,
                 ),
                 FieldDef(
@@ -272,17 +290,21 @@ class OpenAICompatibleLLM(LLMProvider):
                     type=FieldType.CHECKBOX,
                     default=False,
                     help_text=(
-                        "Sends three mechanisms in parallel: top-level "
-                        "'think: false' (Ollama Qwen3 / Qwen3.5), "
-                        "'chat_template_kwargs: {enable_thinking: false}' "
-                        "(Qwen3.6 / vLLM), and a '/no_think' system prefix "
-                        "(Qwen3 soft switch). Harmless on servers that "
-                        "ignore unknown keys. NOTE: Ollama models whose "
-                        "chat template is the bare '{{ .Prompt }}' (e.g. "
-                        "the Qwen3.6 uncensored remixes) have no thinking "
-                        "control branch and ignore all three — you must "
-                        "install a Modelfile with a proper Qwen3 chat "
-                        "template or switch to a non-bare build."
+                        "Suppresses the reasoning trace on thinking models "
+                        "(Qwen3, DeepSeek-R1 / V3.1) over an "
+                        "OpenAI-compatible endpoint. Sends in parallel: "
+                        "'reasoning_effort: none' — Ollama's documented "
+                        "/v1/chat/completions knob; top-level 'think: false' "
+                        "— Ollama's native field, kept as a fallback; "
+                        "'chat_template_kwargs: {enable_thinking: false}' — "
+                        "vLLM's Qwen3 mechanism; and a '/no_think' system "
+                        "prefix — the Qwen3 soft switch. Harmless on servers "
+                        "that ignore unknown keys. NOTE: GPT-OSS only "
+                        "supports thinking LEVELS (low/medium/high) and "
+                        "cannot be fully disabled; and Ollama models with a "
+                        "bare '{{ .Prompt }}' chat template (e.g. the "
+                        "uncensored remixes) ignore all of these — install a "
+                        "proper Qwen3 Modelfile or switch builds."
                     ),
                     group=FieldGroup.ADVANCED,
                 ),
@@ -497,32 +519,47 @@ class OpenAICompatibleLLM(LLMProvider):
     def _apply_disable_thinking_to_body(self, body: dict[str, Any]) -> None:
         """Mutate ``body`` so the upstream model skips its reasoning trace.
 
-        Sends three known mechanisms in parallel so the request works
-        across the variants in the wild:
+        This adapter only ever POSTs to ``/v1/chat/completions``, so the
+        primary knob is the one Ollama documents for *that* endpoint —
+        not the native ``/api/chat`` field. We send several mechanisms in
+        parallel so the request works across the OpenAI-compatible
+        servers this class targets (Ollama, vLLM, LM Studio, …):
 
-        * ``think: false`` (top-level, not under ``options``) — Ollama's
-          built-in toggle. Works for Qwen3 / Qwen3.5 and most DeepSeek-R1
-          builds whose chat template references ``$.Think``.
-        * ``chat_template_kwargs: {"enable_thinking": false}`` — the
-          canonical Qwen3.6 / vLLM mechanism. Required because Qwen3.6
-          dropped the ``/think`` / ``/no_think`` soft switches and the
-          ``think`` flag has no effect on its chat template.
-        * The ``/no_think`` system prefix (added in :meth:`chat`) — Qwen3
-          (original) soft switch; ignored by Qwen3.6 templates that lack
-          the control logic.
+        * ``reasoning_effort: "none"`` — Ollama's documented
+          ``/v1/chat/completions`` control. Per the OpenAI-compatibility
+          docs the field accepts ``"high" | "medium" | "low" | "none"``,
+          and ``"none"`` disables the reasoning trace. This is the
+          correct knob for our endpoint; ``think`` is *not* in the
+          supported-request-fields list for ``/v1/chat/completions``
+          (it is a native ``/api/chat`` / ``/api/generate`` field).
+        * ``think: false`` (top-level) — Ollama's *native*-API toggle.
+          Kept as a fallback because some Ollama builds bridge it onto
+          the compat endpoint, and it is harmless where ignored.
+        * ``chat_template_kwargs: {"enable_thinking": false}`` — vLLM's
+          mechanism for the Qwen3 series; vLLM ignores ``think`` and
+          (older builds) ``reasoning_effort``.
+        * The ``/no_think`` system prefix (added in :meth:`chat`) — the
+          Qwen3 (original) soft switch.
 
-        Caveat: Ollama-hosted models whose chat template is the bare
-        ``{{ .Prompt }}`` (e.g. the ``Qwen3.6-35B-A3B-Uncensored-…``
-        family) ignore *all three* mechanisms because the template
-        contains no thinking-control branches. For those models the
-        user must either (a) install a Modelfile that wraps the model
-        in a proper Qwen3 chat template, or (b) switch to a build that
-        ships with one. The adapter cannot rewrite a server-side
-        template from the client.
+        Caveats:
 
-        Subclasses override this when they prefer a different mechanism
-        (e.g. OpenAI's ``reasoning_effort``).
+        * **GPT-OSS cannot be fully disabled.** Ollama's thinking docs
+          state GPT-OSS only accepts *levels* (``low`` / ``medium`` /
+          ``high``); ``"none"`` / ``think: false`` are clamped or
+          ignored. For GPT-OSS the best available is the lowest level,
+          not a true off.
+        * Ollama-hosted models whose chat template is the bare
+          ``{{ .Prompt }}`` (e.g. the ``Qwen3.6-…-Uncensored`` remixes)
+          ignore *all* of these because the template has no
+          thinking-control branch. The user must install a Modelfile
+          with a proper Qwen3 chat template or switch to a non-bare
+          build — the adapter cannot rewrite a server-side template.
+
+        Subclasses override this when the upstream API expects different
+        values (e.g. hosted OpenAI uses ``reasoning_effort: "minimal"``,
+        since ``"none"`` is not valid there).
         """
+        body["reasoning_effort"] = "none"
         body["think"] = False
         body["chat_template_kwargs"] = {"enable_thinking": False}
 
