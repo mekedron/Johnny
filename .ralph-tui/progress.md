@@ -400,6 +400,40 @@ after each iteration and it's included in prompts for context.
   `uv.lock`); install that exact version or its UP037/F-rules differ from a bare `pip install
   ruff`.
 
+### Cutover gate: replay the same fixtures through the AgentSession engine (Johnny-4k3)
+- **The new engine emits the SAME `PipelineEvent` types the legacy pipeline does** (via the
+  `johnny.agent.observability.build_*` emitters → `RouterDecisionMade` / `AgentSpoke` /
+  `TurnTerminal` / `TranscriptFinalized`), so the legacy replay harness's *pure* checkers
+  (`johnny.smoketest.replay.check_invariants` / `assemble_turns` / `diff_against_recorded`) gate
+  BOTH engines with ZERO change. The whole agent-engine port is "assemble the seams + feed the
+  fixtures," no new invariant code.
+- **Gate-level, not full-AgentSession.** `johnny.smoketest.replay_agent.run_agent_replay` drives
+  `RouterGate.run_turn` + `TurnLedger` + observability — the seams that PRODUCE INV-1 (one
+  terminal per turn) + INV-2 (decision↔utterance parity). The STT/VAD/turn-detector front half
+  needs a live job context + baked models and is the e2e bead's (Johnny-52b) scope. It assembles
+  exactly like `job_session.build_agent_runtime` (shared `TurnIndex`, `build_observability` →
+  in-memory `EventBus`). Technique = `tests/agent/test_router_gate_decision.py`: feed recorded
+  router verdicts via a scripted `LLMProvider`, deliver the recorded answer via a duck-typed reply
+  `SpeechHandle` (`bind_reply` + `fire_done` → speak-path terminal), and `await
+  gate._reply_tasks` to drain the done-callback task before snapshotting the bus.
+- **Split-only.** The agent engine rejects unified fixtures (unified/S2S stays on the legacy
+  `UnifiedVoicePipeline`). The CLI `johnny-replay --engine [legacy|agentsession]` (default
+  `legacy`) skips unified with a SKIP row; `agentsession` lazily imports `replay_agent` to keep
+  the legacy CLI path livekit-free. `johnny-replay --all --engine agentsession` is the cutover
+  command (exit 1 on violation).
+- **A recorded SPEAK turn with `answer == None` must produce an empty reply** (`chat_items=[]`) →
+  `model_empty_output` no_reply (outcome `suppressed`), matching the legacy empty answer-LLM
+  (session-3 turns 6/7/8/12). `DEFAULT_RATE_LIMIT_MAX_UTTERANCES = 0` disables the over-talk cap,
+  so session-3's suppressions are null-answer, not rate-limit — cross-engine parity holds with no
+  clock control. Session-14 turn-4 (`simulate=="timeout"`) emits NO `RouterDecisionMade` (router
+  cancelled pre-decision) but DOES emit a `no_reply(stage_error)` terminal — the silent-drop fix;
+  both engines show the same turn-4 `terminal_state: None → no_reply` regression diff.
+- **tts-smoke is engine-agnostic** — `johnny-tts-smoke` hits the admin `/providers/{id}/play_sample`
+  which calls the same `TTSProvider.synthesize_stream` the new engine's `JohnnyTTS`
+  (`tts_node` → `JohnnyTTSStream._run`) calls. No code port needed; the `JohnnyTTS` bridge is
+  unit-covered in `tests/agent/test_johnny_tts.py`. "Port tts-smoke to new engine" = confirm it
+  runs + the bridge is covered, NOT duplicate the provider-level smoke.
+
 ---
 
 ## 2026-06-09 - Johnny-y4j [SPIKE] Per-room JWT auth + agent dispatch contract
@@ -1014,5 +1048,84 @@ provider creds, the same deferral 9eh/6nm/7we made for the live audio path.
 the meet-worker if/else; bridge owns its own MeetAudioBridge so don't double-start; the
 mirrored-but-unshared orchestrator vocabulary; mint-failure degrade-to-legacy; the old-file
 ruff line-length gotcha + the locked ruff 0.15.16).
+
+---
+
+## 2026-06-09 - Johnny-4k3 [BUILD] Phase 4: Port replay/eval harness + tts-smoke to new engine (cutover gate)
+
+**What was implemented:** the cutover gate — the committed session fixtures now replay through the
+**new AgentSession engine** (RouterGate + TurnLedger + observability) and assert the SAME
+``.28.x`` invariants (INV-1 one-terminal-per-turn, INV-2 decision↔utterance parity) the legacy
+``VoicePipeline`` harness asserts, PLUS cross-engine equivalence. Green here authorises flipping
+``JOHNNY_ORCHESTRATOR`` default to ``agentsession`` (Johnny-wz5 built the switch).
+
+**Files changed:**
+- `backend/johnny/smoketest/replay_agent.py` (NEW) — `run_agent_replay(fixture)`, the agent-engine
+  driver. Assembles gate/ledger/observability exactly as `job_session.build_agent_runtime` does
+  (shared `TurnIndex`, `build_observability` → in-memory `EventBus`), then replays each recorded
+  turn through `RouterGate.run_turn`: recorded router verdict via a scripted `LLMProvider`
+  (`_RecordedRouterLLM`), recorded answer delivered via a duck-typed reply `SpeechHandle`
+  (`_ReplaySpeechHandle`, `bind_reply` + `fire_done` → the speak-path terminal), and a
+  `simulate=="timeout"` turn that sleeps past the gate bound (the session-14 hang). Returns the
+  SAME `ReplayResult` the legacy `run_replay` returns, so the pure checkers
+  (`check_invariants`/`assemble_turns`/`diff_against_recorded`) gate both engines unchanged.
+  Split-only (rejects unified — that stays on the legacy `UnifiedVoicePipeline`).
+- `backend/tests/smoketest/test_replay_harness_agent.py` (NEW) — the gate tests: every split
+  fixture holds INV-1/INV-2 on the new engine; the flagship session-14 silent drop terminates in
+  `no_reply(stage_error)`; the new engine reproduces the legacy engine's per-turn outcome
+  field-by-field on every split fixture (cutover equivalence) + identical regression diffs;
+  unified rejected. `importorskip("livekit.agents")`-guarded.
+- `backend/johnny/smoketest/replay_cli.py` (EDIT) — added `--engine [legacy|agentsession]`
+  (default `legacy`, zero behaviour change). `agentsession` lazily imports `run_agent_replay`
+  (keeps the legacy CLI path livekit-free), skips unified fixtures with a SKIP row, and mutes the
+  agent gate loggers' expected timeout noise. `johnny-replay --all --engine agentsession` is the
+  cutover-gate command (exit 1 on any violation).
+
+**TTS-smoke:** it is **engine-agnostic** and needed no code port — `johnny-tts-smoke`
+(`tts_runner.py`) hits the admin `/providers/{id}/play_sample`, which calls the same
+`TTSProvider.synthesize_stream` the new engine's `JohnnyTTS` adapter (`tts_node` →
+`JohnnyTTSStream._run`) calls. So a green tts-smoke validates the providers BOTH engines use. The
+new engine's TTS bridge is already unit-covered (`tests/agent/test_johnny_tts.py`: PCM→AudioFrame
+reframing, voice forwarding, error mapping). Verified live: `docker compose exec api
+johnny-tts-smoke` → **3 PASS · 0 SKIP · 0 FAIL** (kokoro × in-container/mlx-sidecar/http-sidecar,
+all audible).
+
+**Quality gates:** ruff (0.15.16, locked) check CLEAN on all 3 touched files; my added lines are
+ruff-format-clean (the residual `replay_cli.py` format diff is pre-existing churn on two
+untouched blocks — left alone to keep the change focused, per the wz5 old-file gotcha); mypy
+clean on `replay_agent.py`. pytest: `tests/smoketest` **106 passed** (incl. 7 new agent-replay +
+the unchanged legacy replay + tts-smoke unit). Cutover-gate CLI verified live in the throwaway
+container: `johnny-replay --all --engine agentsession` → all split fixtures PASS (session-14 +
+session-3), unified SKIP, exit 0; `--mode regression` → session-3 MATCH, session-14 shows the
+expected turn-4 `terminal_state: None → no_reply` divergence (the silent-drop-now-terminates fix,
+mirroring the legacy engine).
+
+**Browser validation:** N/A — this is a backend test/CLI harness with no UI surface (the live
+both-engines Meet audio comparison is Johnny-52b's e2e scope, same deferral as 9eh/6nm/7we/wz5).
+
+**CI wiring:** the repo has **no GitHub Actions test workflow** (only `pages.yml` for docs); the
+project's gate is `docker compose exec api pytest`. Both gates are now part of that suite
+(`tests/smoketest/` is under `testpaths`), and the exit-code-gated CLIs (`johnny-replay --engine
+agentsession`, `johnny-tts-smoke`) are CI-callable. Filed a follow-up bead for the actual GH
+Actions workflow (needs operator decisions: runner, Docker-in-CI vs `.[agent]` install, provider
+secrets) rather than shipping an unvalidated workflow.
+
+**Learnings:**
+- The cutover gate is correctly a **gate-level** replay (RouterGate + TurnLedger + observability),
+  not a full live `AgentSession`: INV-1/INV-2 are produced by those seams, while the
+  STT/VAD/turn-detector front half needs a live job context + baked models and is the e2e bead's
+  (Johnny-52b) scope. Driving `RouterGate.run_turn` + a fake reply `SpeechHandle` is the exact
+  technique `tests/agent/test_router_gate_decision.py` uses.
+- The new engine emits the **same `PipelineEvent` types** as the legacy pipeline (via the
+  observability `build_*` emitters), so the legacy harness's pure checkers apply with ZERO change
+  — the whole port is "assemble the seams + feed the fixtures," no new invariant code.
+- A recorded SPEAK turn with `answer == None` must produce an **empty** reply `SpeechHandle`
+  (`chat_items=[]`) → `model_empty_output` no_reply (outcome `suppressed`), matching the legacy
+  harness's empty answer-LLM. Session-3's turns 6/7/8/12 are exactly this; both engines agree.
+- `DEFAULT_RATE_LIMIT_MAX_UTTERANCES = 0` disables the over-talk cap, so session-3's suppressions
+  are all null-answer `model_empty_output`, not rate limits — cross-engine parity holds without
+  clock control.
+- tts-smoke is engine-agnostic (same provider adapters); "port to new engine" = confirm it runs +
+  the `JohnnyTTS` bridge is covered, not duplicate the provider-level smoke.
 
 ---

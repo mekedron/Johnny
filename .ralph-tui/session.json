@@ -3,10 +3,10 @@
   "sessionId": "737211f1-9739-40c0-8d3f-332e080d27b8",
   "status": "running",
   "startedAt": "2026-06-08T22:23:12.909Z",
-  "updatedAt": "2026-06-09T02:39:36.749Z",
-  "currentIteration": 9,
+  "updatedAt": "2026-06-09T03:01:13.494Z",
+  "currentIteration": 10,
   "maxIterations": 0,
-  "tasksCompleted": 9,
+  "tasksCompleted": 10,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -135,8 +135,8 @@
       {
         "id": "Johnny-wz5",
         "title": "[BUILD] Phase 4: JOHNNY_ORCHESTRATOR feature flag (agentsession|legacy)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-xpa",
@@ -302,6 +302,16 @@
       "durationMs": 2068797,
       "startedAt": "2026-06-09T01:34:29.614Z",
       "endedAt": "2026-06-09T02:08:58.411Z"
+    },
+    {
+      "iteration": 10,
+      "status": "completed",
+      "taskId": "Johnny-wz5",
+      "taskTitle": "[BUILD] Phase 4: JOHNNY_ORCHESTRATOR feature flag (agentsession|legacy)",
+      "taskCompleted": true,
+      "durationMs": 1816503,
+      "startedAt": "2026-06-09T02:09:18.741Z",
+      "endedAt": "2026-06-09T02:39:35.244Z"
     }
   ],
   "skippedTaskIds": [],
