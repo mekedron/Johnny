@@ -1,4 +1,8 @@
 node_modules
+# pnpm's content-addressable store can land here when `pnpm install` runs
+# inside the bind-mounted dev container (store-dir resolves to /workspace).
+# It's build cache, never source — keep it out of git and the image.
+.pnpm-store/
 
 # Output
 .output

@@ -2,19 +2,16 @@
  * Unit tests for the personality-picker pure helpers + active-session
  * decoration readers (Johnny-oly.6, section F).
  *
- * Written against Node's built-in test runner (`node:test` + `node:assert`) so
- * they need zero extra dependencies and type-check cleanly under svelte-check
- * via `@types/node` — matching the convention established in
- * `src/routes/personalities/page.test.ts`. The project has no standing
- * `pnpm test`; run with a TypeScript-capable loader, e.g.
- *   node --import tsx --test src/lib/personalityPicker.test.ts
+ * Run via `pnpm test` (vitest): `describe`/`it` come from vitest, assertions
+ * use `node:assert/strict`, and the `$lib` alias resolves through
+ * vitest.config.ts. svelte-check (`pnpm check`) also type-checks the file.
  *
  * The component's branching logic is extracted into `$lib/personalities` (and
  * the bot-name fallback into `$lib/history`) precisely so it is unit-testable
  * without mounting Svelte.
  */
 
-import { describe, it } from 'node:test';
+import { describe, it } from 'vitest';
 import assert from 'node:assert/strict';
 import {
 	PERSONALITY_BLANK_LABEL,

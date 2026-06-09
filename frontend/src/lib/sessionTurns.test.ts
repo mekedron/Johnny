@@ -2,13 +2,12 @@
  * Unit tests for the per-turn reasoning-timeline assembly (Johnny-ckz.28.4).
  *
  * Pure functions in `$lib/sessionTurns` are extracted precisely so the
- * eight-step timeline can be tested without mounting Svelte. Written against
- * Node's built-in test runner (`node:test` + `node:assert`) to match the
- * convention in `personalityPicker.test.ts`; svelte-check (`pnpm check`)
- * type-checks the file as part of the quality gate.
+ * eight-step timeline can be tested without mounting Svelte. Run via
+ * `pnpm test` (vitest): `describe`/`it` come from vitest, assertions use
+ * `node:assert/strict`. svelte-check (`pnpm check`) also type-checks the file.
  */
 
-import { describe, it } from 'node:test';
+import { describe, it } from 'vitest';
 import assert from 'node:assert/strict';
 import type { SessionTimingRecord } from '$lib/sessionDetail';
 import {
@@ -194,7 +193,11 @@ describe('buildTurnView', () => {
 				noReplyReason: 'router_declined',
 				outcome: 'suppressed',
 				finalText: null,
-				audioDurationMs: null
+				audioDurationMs: null,
+				// A router-declined turn never invokes the answer LLM, so no prompt
+				// is ever built — without this the default makeSource() prompt would
+				// mark the 'asked' step 'done' instead of 'skipped'.
+				answerPrompt: null
 			}),
 			undefined
 		);

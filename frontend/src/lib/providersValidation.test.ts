@@ -7,13 +7,11 @@
  * freshly released model picked from the live list would be rejected before the
  * request ever reaches the backend.
  *
- * Written against Node's built-in test runner (`node:test` + `node:assert`),
- * matching the convention in `src/lib/personalityPicker.test.ts`. The project
- * has no standing `pnpm test`; run with a TypeScript-capable loader, e.g.
- *   node --import tsx --test src/lib/providersValidation.test.ts
+ * Run via `pnpm test` (vitest): `describe`/`it` come from vitest, assertions
+ * use `node:assert/strict`.
  */
 
-import { describe, it } from 'node:test';
+import { describe, it } from 'vitest';
 import assert from 'node:assert/strict';
 import { validateClient, type FieldDef, type ProviderSchema } from '$lib/providers';
 

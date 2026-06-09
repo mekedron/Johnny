@@ -60,9 +60,9 @@ Why this rule exists: a host-side `pnpm dev` for the frontend survives terminal 
 - `./run-dev.sh` — starts the full stack in **hot-reload mode**. Layers `docker-compose.dev.yml` on top of the base file, bind-mounts `./frontend` + `./backend` into the containers, swaps the api command for `uvicorn --reload` and the worker command for `watchfiles ... python -m app.worker`. Saves on the host trigger a reload in seconds — no rebuild needed for source changes. Dependency changes (`pyproject.toml` / `package.json`) still need `./run-dev.sh` to rerun, since they're installed at image-build time.
 - `./stop.sh` — full `docker compose down -v` reset. Also kills `meet-worker-session-*` orphan containers and any host process still listening on 5173. Works for both `./run.sh` and `./run-dev.sh` stacks.
 - `docker compose exec <service> <cmd>` — for any one-off command inside a running service. Examples:
-  - Backend tests: `docker compose exec api pytest`
+  - Backend tests: `docker compose exec api pytest` (run against the `./run-dev.sh` stack — `tests/` reaches the container via the bind mount; the prod image deliberately excludes it via `.dockerignore`)
   - Frontend tests / build / lint: `docker compose exec frontend pnpm test` (or `pnpm build`, etc.)
-  - DB shell: `docker compose exec postgres psql -U postgres johnny`
+  - DB shell: `docker compose exec postgres psql -U johnny johnny`
   - Redis CLI: `docker compose exec redis redis-cli`
   - Open a shell: `docker compose exec api bash`
 - `docker compose logs -f [service]` — tail logs (omit the service name to follow all).

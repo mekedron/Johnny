@@ -2,19 +2,15 @@
  * Unit tests for the /personalities editor-modal validation + metadata helpers
  * (Johnny-oly.4, section D).
  *
- * Written against Node's built-in test runner (`node:test` + `node:assert`) so
- * they need zero extra dependencies and type-check cleanly under svelte-check
- * via `@types/node`. Run with a TypeScript-capable loader, e.g.
- *   node --import tsx --test src/routes/personalities/+page.test.ts
- * The project does not yet wire a standing `pnpm test`; see the follow-up
- * issue for adding the runner to CI.
+ * Run via `pnpm test` (vitest): `describe`/`it` come from vitest, assertions
+ * use `node:assert/strict`. svelte-check (`pnpm check`) also type-checks the file.
  *
  * The functions under test are the pure core extracted into `$lib/personalities`
  * precisely so the modal's branching logic is unit-testable without mounting
  * the component.
  */
 
-import { describe, it } from 'node:test';
+import { describe, it } from 'vitest';
 import assert from 'node:assert/strict';
 import {
 	DISPLAY_NAME_MAX,
