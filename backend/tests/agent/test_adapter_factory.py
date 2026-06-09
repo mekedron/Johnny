@@ -10,8 +10,9 @@ asserting the contract the factory owns:
   with the decrypted credentials / options carried through to the provider;
 * switching which row is active yields a different live adapter at the next
   build (no process restart, no registry edit);
-* a missing active STT / LLM / TTS row fails fast with
-  :class:`AgentSessionSetupError` instead of half-building a session;
+* a missing active STT or LLM row fails fast with
+  :class:`AgentSessionSetupError` instead of half-building a session, while a
+  missing TTS degrades to ``adapters.tts = None`` (Johnny-un2) rather than failing;
 * the factory is lazy-exported through the package ``__getattr__`` (so a bare
   ``import johnny.agent.adapters`` stays free of livekit + SQLAlchemy);
 * the ``app.providers`` public surface the factory depends on is unchanged
@@ -354,7 +355,7 @@ def test_active_streaming_stt_is_not_wrapped(session: Session) -> None:
     assert not isinstance(adapters.stt, StreamAdapter)
 
 
-@pytest.mark.parametrize("omit", [ProviderKind.STT, ProviderKind.LLM, ProviderKind.TTS])
+@pytest.mark.parametrize("omit", [ProviderKind.STT, ProviderKind.LLM])
 def test_missing_required_kind_fails_fast(session: Session, omit: ProviderKind) -> None:
     rows = {
         ProviderKind.STT: "deepgram",
@@ -371,6 +372,20 @@ def test_missing_required_kind_fails_fast(session: Session, omit: ProviderKind) 
 
     # The error names the missing stage so a misconfiguration is obvious.
     assert omit.value in str(excinfo.value)
+
+
+def test_missing_tts_degrades_to_none(session: Session) -> None:
+    # TTS is optional (Johnny-un2): STT + LLM active but no TTS row -> the session
+    # binds no TTS (adapters.tts is None) and the worker degrades to suggest_only,
+    # instead of the fail-fast the required kinds get.
+    _insert(session, kind=ProviderKind.STT, provider_name="deepgram", credentials={"api_key": "k"})
+    _insert(session, kind=ProviderKind.LLM, provider_name="openai", credentials={"api_key": "k"})
+
+    adapters = build_session_adapters(session, registry=_registry())
+
+    assert isinstance(adapters.stt, JohnnySTT)
+    assert isinstance(adapters.llm, JohnnyLLM)
+    assert adapters.tts is None
 
 
 def test_empty_db_fails_fast(session: Session) -> None:
@@ -459,6 +474,7 @@ def test_selected_voice_model_language_propagate_into_adapters(
 
     # voice_id is passed through explicitly (not left to the provider default),
     # and the TTS model label resolves via the model_id fallback key.
+    assert adapters.tts is not None
     assert adapters.tts._voice == "sonic"
     assert adapters.tts.model == "sonic-2024"
 
@@ -477,6 +493,7 @@ def test_unset_selections_fall_back_to_provider_defaults(session: Session) -> No
 
     assert adapters.llm.model == "unknown"
 
+    assert adapters.tts is not None
     assert adapters.tts._voice is None
     assert adapters.tts.model == "unknown"
 
@@ -712,7 +729,7 @@ def test_payload_streaming_stt_is_not_wrapped() -> None:
     assert not isinstance(adapters.stt, StreamAdapter)
 
 
-@pytest.mark.parametrize("omit", ["stt", "llm", "tts"])
+@pytest.mark.parametrize("omit", ["stt", "llm"])
 def test_payload_missing_required_kind_fails_fast(omit: str) -> None:
     payload = _split_payload()
     del payload[omit]
@@ -722,13 +739,38 @@ def test_payload_missing_required_kind_fails_fast(omit: str) -> None:
     assert omit in str(excinfo.value)
 
 
-def test_payload_blank_provider_name_fails_fast() -> None:
+def test_payload_missing_tts_degrades_to_none() -> None:
+    # TTS is optional (Johnny-un2): an absent TTS entry yields adapters.tts is None
+    # (no fail-fast), so the worker can degrade a speaking mode to suggest_only.
+    payload = _split_payload()
+    del payload["tts"]
+
+    adapters = build_session_adapters_from_payload(payload, registry=_registry())
+
+    assert isinstance(adapters.stt, JohnnySTT)
+    assert isinstance(adapters.llm, JohnnyLLM)
+    assert adapters.tts is None
+
+
+def test_payload_blank_tts_degrades_to_none() -> None:
+    # A blank TTS provider_name reads as "no TTS configured" -> degrade, not raise.
     payload = _split_payload()
     payload["tts"] = {"provider_name": "  ", "credentials": {}, "options": {}}
 
+    adapters = build_session_adapters_from_payload(payload, registry=_registry())
+
+    assert adapters.tts is None
+
+
+def test_payload_blank_provider_name_fails_fast() -> None:
+    # A blank provider_name on a *required* kind (LLM) is still a fail-fast — only
+    # TTS treats blank/absent as a degrade.
+    payload = _split_payload()
+    payload["llm"] = {"provider_name": "  ", "credentials": {}, "options": {}}
+
     with pytest.raises(AgentSessionSetupError) as excinfo:
         build_session_adapters_from_payload(payload, registry=_registry())
-    assert "tts" in str(excinfo.value)
+    assert "llm" in str(excinfo.value)
     assert "provider_name" in str(excinfo.value)
 
 

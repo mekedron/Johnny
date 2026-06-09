@@ -362,6 +362,7 @@ def test_session_config_round_trips_provider_personality_mode(
     # 5. Consume it inside the "worker": the configured providers + the personality
     #    identity + the meeting mode all survive end-to-end.
     adapters = build_session_adapters_for_job(rehydrated, registry=_registry())
+    assert adapters.tts is not None
     assert adapters.stt.provider == "deepgram"
     assert adapters.llm.provider == "openai"
     assert adapters.tts.provider == "cartesia"

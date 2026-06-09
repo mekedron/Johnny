@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from app.providers.base import (
@@ -50,6 +50,7 @@ from app.providers.base import (
     get_registry,
 )
 from johnny.agent.adapters.factory import AgentSessionSetupError, SessionAdapters
+from johnny.agent.answer import degrade_speaking_mode_if_no_tts
 from johnny.agent.barge_in import BargeInClassifier, BargeInClassifierConfig
 from johnny.agent.gate import TurnIndex, TurnLedger
 from johnny.agent.job_config import APPROVAL_REQUIRED_MODE, SessionJobConfig
@@ -299,20 +300,47 @@ async def build_agent_runtime(
     Redis approval gate + synchronous decision sink (left for the worker to attach to a
     live :class:`AgentSession`).
 
+    A speaking mode dispatched with no configured TTS is degraded to ``suggest_only``
+    (Johnny-un2): the assembled config's ``mode`` is rewritten, the agent runs with
+    ``tts_available=False``, and the router still records decisions surfaced as
+    suggestions — parity with the meet-worker's graceful TTS-missing degrade, rather
+    than failing the job. Missing STT or LLM still raises.
+
     ``event_bus`` defaults to one built from ``config.redis_url`` (and is then owned —
     closed by :meth:`AgentRuntime.aclose`); an injected bus is left for the caller to
     own. ``vad`` is the process-warmed Silero model (the worker's prewarm), forwarded to
     the batch-STT adapter wrapping. ``db_session_factory`` (``SessionLocal``) backs the
     approval decision sink. Raises :class:`AgentSessionSetupError` for a unified payload
-    or a missing split provider — the agent path is split-only.
+    or a missing STT / LLM provider — the agent path is split-only (a missing TTS
+    degrades to ``suggest_only`` rather than raising).
     """
     session_id = str(config.bot_session_id)
 
-    # STT/LLM/TTS adapters + the raw LLM the router gate / coercion reuse. Built first
-    # so a misconfigured payload (unified / missing provider) fails fast before any
-    # event-bus / Redis / DB resource is created.
+    # STT/LLM adapters (required) + an optional TTS + the raw LLM the router gate /
+    # coercion reuse. Built first so a misconfigured payload (unified / missing
+    # STT or LLM) fails fast before any event-bus / Redis / DB resource is created.
     adapters = build_session_adapters_for_job(config, registry=registry, vad=vad)
     router_llm = _build_llm_provider(config.provider_config, registry=registry)
+
+    # Graceful no-TTS degrade (Johnny-un2), parity with the meet-worker's
+    # ``pipeline_runner._assemble_pipeline``: a speaking mode with no configured TTS
+    # downgrades to ``suggest_only`` so the router still records decisions —
+    # surfaced through the normal ``RouterDecisionMade`` / ``AgentSuggested`` events
+    # — instead of approving a reply that can never play (or the worker abandoning
+    # the job). Threaded onto ``config`` so every downstream consumer (the approval
+    # pieces, the gate, the answer nodes, the decision emitter) sees the effective
+    # mode. Missing STT / LLM stays fail-fast above; only TTS degrades.
+    tts_available = adapters.tts is not None
+    effective_mode = degrade_speaking_mode_if_no_tts(config.mode, tts_available=tts_available)
+    if effective_mode != config.mode:
+        logger.warning(
+            "agent runtime: mode=%s but no TTS configured for session=%s — degrading "
+            "to %s (router still records decisions, surfaced as suggestions)",
+            config.mode,
+            session_id,
+            effective_mode,
+        )
+        config = replace(config, mode=effective_mode)
 
     bus = event_bus if event_bus is not None else build_event_bus(config.redis_url)
     owns_bus = event_bus is None
@@ -396,7 +424,7 @@ async def build_agent_runtime(
         barge_in=barge_in,
         answer_llm=router_llm,
         answer_config=answer_config_from_job(config),
-        tts_available=True,
+        tts_available=tts_available,
         noise_filter=NoiseFilterConfig(),
         transcript_filtered_sink=_publish_transcript_filtered,
         transcript_finalized_sink=build_transcript_finalized_emitter(bus, session_id=session_id),

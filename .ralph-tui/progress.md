@@ -536,6 +536,44 @@ after each iteration and it's included in prompts for context.
   unit-covered in `tests/agent/test_johnny_tts.py`. "Port tts-smoke to new engine" = confirm it
   runs + the bridge is covered, NOT duplicate the provider-level smoke.
 
+### Graceful no-provider degrade parity: STT/LLM fail-fast, TTS degrades (Johnny-un2)
+- **The legacy `PipelineSetupError` contract has TWO halves with DIFFERENT agent-path
+  mappings.** Missing STT/LLM = fail-fast (`AgentSessionSetupError` → the worker logs +
+  abandons the job; the bridge stays in the Meet, no transcription — parity with legacy
+  `log_stage_error` + `return`). Missing TTS = **degrade**, NOT fail: a speaking mode
+  downgrades to `suggest_only` so the router still records decisions. Don't treat all three
+  as uniformly required — TTS has ALWAYS been optional in the legacy `_assemble_pipeline`.
+- **TTS is optional in the adapter factory** (`SessionAdapters.tts: JohnnyTTS | None`).
+  `_assemble_split_adapters` builds the TTS adapter only when the provider is present; the
+  payload path uses `_optional_provider_from_payload_entry` (absent/blank entry → `(None,{})`),
+  the DB path uses `active.get(TTS)` not `_require`. STT/LLM keep `_require` / the required
+  payload resolver. The DB-path `build_session_adapters` has NO prod caller anymore (worker +
+  browser both use the payload path) — so making TTS optional there is low-risk.
+- **The degrade lives in `build_agent_runtime` (job_session.py), the agent analogue of
+  `meet_worker.pipeline_runner._assemble_pipeline`.** After building adapters:
+  `tts_available = adapters.tts is not None`; `degrade_speaking_mode_if_no_tts(config.mode, …)`;
+  on degrade, log a warning + `config = replace(config, mode=effective_mode)` (SessionJobConfig
+  is frozen+slots → `dataclasses.replace` works, no `__post_init__` revalidation; `suggest_only`
+  is always a valid mode). Rewriting `config` THREADS the effective mode to every downstream
+  consumer (approval pieces, gate, answer config, decision/spoke emitters) with no other edits —
+  they all read `config.mode`. Do the `replace` BEFORE `is_approval`/`_build_approval_pieces` so
+  `approval_required`+no-TTS (approval_required ∈ SPEAKING_MODES → suggest_only) builds NO
+  approval gate (legacy parity: TTS check rewrites mode first, then the approval gate keys off it).
+- **Binding "no TTS" to the live `AgentSession`:** `build_agent_session(tts: TTS[Any] | None)`
+  passes `tts if tts is not None else NOT_GIVEN`. `AgentSession.__init__` does
+  `self._tts = tts or None`, and the `tts` annotation `NotGivenOr[TTS|TTSModels|str]` excludes
+  `None` — so pass `NOT_GIVEN` (falsy → `_tts=None`), NOT `tts=None` (mypy-incorrect). Then
+  `JohnnyAgent.tts_node`'s `_session_tts()` returns `None` → degrades (consume text, emit no
+  audio) — the exact "no TTS bound" state Johnny-5ag built the `tts_node` safety net for.
+- **"Surface the state through the normal events" = the suggest_only path's existing
+  `RouterDecisionMade`/`AgentSuggested` emission**, NOT a new event type. The degrade just
+  SELECTS that path. `log_stage_error` (legacy) only logs — so the missing-STT/LLM error is a
+  log line only (no event), and parity holds.
+- **`SessionAdapters.tts` widening to `| None` touches mypy:** tests ARE in the strict scope
+  (`files=["app","johnny","tests"]`), so every `adapters.tts.<attr>` needs a preceding
+  `assert adapters.tts is not None` / `isinstance(...)` narrow. (The factory tests already
+  narrowed via `isinstance` in most spots.)
+
 ---
 
 ## 2026-06-09 - Johnny-y4j [SPIKE] Per-room JWT auth + agent dispatch contract
@@ -1387,5 +1425,30 @@ SQLite-based unit tests, surfaced only on Postgres) affected BOTH browser + Meet
 DB-active LLM `model='qwen2.5:7b-instruct'` is NOT pulled in their ollama (only `…-q4_K_M` is) — the
 playground/Meet router 404s on it. Validation temporarily pointed at the q4 tag, then RESTORED the
 operator's original — flagged to the operator to pull the model or switch the config.
+
+---
+
+## 2026-06-09 - Johnny-un2 [BUILD] Phase 3: Graceful no-provider-configured degrade parity
+
+Reproduced the meet-worker's `PipelineSetupError` degrade parity in the agent
+engine: missing STT/LLM → clear operator-facing error (no crash loop, unchanged);
+**missing TTS → degrade the speaking mode to `suggest_only`** instead of the worker
+abandoning the job. The `degrade_speaking_mode_if_no_tts` primitive + the `tts_node`
+safety net already existed (Johnny-5ag); this bead APPLIES them in the assembler.
+
+**Implemented:**
+- `backend/johnny/agent/adapters/factory.py` — TTS is now **optional**. `SessionAdapters.tts: JohnnyTTS | None`; `_assemble_split_adapters` builds the TTS adapter only when present; the DB path uses `active.get(TTS)` (not `_require`); the payload path uses a new `_optional_provider_from_payload_entry` (absent/blank TTS entry → `(None, {})`). STT/LLM stay fail-fast.
+- `backend/johnny/agent/job_session.py` (`build_agent_runtime`) — after building adapters, `tts_available = adapters.tts is not None`; `degrade_speaking_mode_if_no_tts(config.mode, ...)`; on degrade, log a warning + `config = replace(config, mode=effective_mode)` so EVERY downstream consumer (approval pieces, gate, answer nodes, decision emitter) sees the effective mode; pass real `tts_available` to `build_johnny_agent` (was hardcoded `True`).
+- `backend/johnny/agent/session.py` (`build_agent_session`) — `tts: TTS[Any] | None = None`; pass `tts if tts is not None else NOT_GIVEN` (so `AgentSession._tts = None` and `tts_node` degrades). Worker / browser-session call sites unchanged (they pass `runtime.adapters.tts`, now possibly None).
+- Tests: `tests/agent/test_adapter_factory.py` (DB + payload missing-TTS → `adapters.tts is None`; blank-TTS degrade; blank required-kind still fails; narrowing asserts for `tts: | None`), `tests/agent/test_job_session.py` (3 degrade tests: speaking→suggest_only, approval→suggest_only-no-wiring, non-speaking unchanged), `tests/agent/test_job_runtime.py` (narrowing assert).
+
+**Validation:** full `tests/agent` = **616 passed**; `tests/services/test_browser_pipeline_runner.py` + `test_pipeline_mode_dispatch.py` = **26 passed**; mypy --strict + ruff clean on touched source. Real-provider in-process smoke (`.validation/Johnny-un2/smoke_no_tts_degrade.py`): a no-TTS `autonomous` session through the REAL `BrowserAgentSession` engine ASSEMBLES + STARTS (pre-un2 it raised), degrades to `suggest_only` (`adapters.tts=None`, `tts_available=False`), emits `RouterDecisionMade`, and produces **0 audio bytes**. No UI surface of its own → pure-backend exception (same posture as Johnny-9eh/y4j/qzj); validation in `.validation/Johnny-un2/notes.md`.
+
+**Learnings:**
+- The degrade primitive (`degrade_speaking_mode_if_no_tts`) + the `tts_node` `None`-safe seam were SHIPPED by Johnny-5ag specifically for this bead to wire — "the worker (Johnny-un2/7we) applies it." So un2 was an application/integration bead, not new primitives. The factory was the one place still treating TTS as required (it pre-dated the degrade design): fixing the data model (`SessionAdapters.tts: JohnnyTTS | None`) + applying the primitive in `build_agent_runtime` was the whole job.
+- `replace(config, mode=effective_mode)` BEFORE `is_approval`/`_build_approval_pieces` is what makes `approval_required` + no-TTS degrade correctly: `approval_required ∈ SPEAKING_MODES`, so it maps to `suggest_only`, and `_build_approval_pieces` (which keys off `config.mode != APPROVAL_REQUIRED_MODE`) then short-circuits — no approval gate built for a session that can never speak. Matches legacy: the TTS check rewrites `PipelineConfig.mode` first, then `_build_approval_gate(mode=config.mode)` sees the rewritten mode.
+- `AgentSession.__init__` does `self._tts = tts or None`, and `tts`'s annotation is `NotGivenOr[TTS | TTSModels | str]` (no `None`). So pass `NOT_GIVEN` (falsy → `_tts = None`), NOT `tts=None` (type-incorrect). `tts_node`'s `_session_tts()` then returns `None` and degrades — the design intent the Johnny-5ag note already described ("the default node's RuntimeError when no TTS is bound").
+- `log_stage_error` (legacy) only LOGS — it emits no `PipelineEvent`. So "surface the state through the normal events" = the `suggest_only` path's existing `RouterDecisionMade`/`AgentSuggested` emission (the degrade just SELECTS that path); there is no new event type, and the missing-STT/LLM error is a log line only (parity).
+- Tests ARE in the `mypy strict` scope (`files=["app","johnny","tests"]`), so widening `SessionAdapters.tts` to `| None` requires a narrowing `assert adapters.tts is not None` / `isinstance(...)` before any `adapters.tts.<attr>` access. (Aside: `tests/agent/test_job_session.py` already carried 4 pre-existing mypy errors — `lambda: _FakeDbSession()` vs `Callable[[], Session]` — so the project's typecheck gate is source-scoped, not the full tree.)
 
 ---

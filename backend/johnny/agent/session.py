@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from livekit.agents import (
+    NOT_GIVEN,
     Agent,
     AgentSession,
     InterruptionOptions,
@@ -252,7 +253,7 @@ def build_agent_session(
     *,
     stt: STT[Any],
     llm: LLM[Any],
-    tts: TTS[Any],
+    tts: TTS[Any] | None = None,
     vad: VAD | None = None,
     preemptive_generation: bool = False,
     enable_barge_in: bool = True,
@@ -266,6 +267,14 @@ def build_agent_session(
     providers by the adapter factory (Johnny-zb3). Turn-taking uses LiveKit's
     multilingual turn detector plus Silero VAD per the locked decision;
     ``vad`` defaults to a freshly loaded Silero model when not supplied.
+
+    ``tts`` is optional (Johnny-un2): ``None`` binds no TTS to the session (it is
+    passed as ``NOT_GIVEN``, so ``AgentSession`` runs with ``_tts = None``), which
+    :meth:`JohnnyAgent.tts_node` degrades on — it consumes the answer text and emits
+    no audio instead of raising. The adapter factory returns ``tts=None`` when no TTS
+    provider is configured, and the worker degrades the speaking mode to
+    ``suggest_only`` (parity with the meet-worker's graceful TTS-missing degrade), so
+    a reply is never generated for the silent session in the first place.
 
     ``turn_detection`` overrides the turn-detection strategy. It defaults to the
     :class:`~livekit.plugins.turn_detector.multilingual.MultilingualModel` (the
@@ -312,7 +321,7 @@ def build_agent_session(
     return AgentSession(
         stt=stt,
         llm=llm,
-        tts=tts,
+        tts=tts if tts is not None else NOT_GIVEN,
         vad=vad if vad is not None else load_vad(),
         turn_handling=turn_handling,
     )

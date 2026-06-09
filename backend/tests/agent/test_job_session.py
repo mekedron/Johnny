@@ -35,6 +35,8 @@ from app.providers.base import ProviderKind as Kind
 from johnny.agent.job_config import (
     APPROVAL_REQUIRED_MODE,
     LIMITED_AUTO_SPEAK_MODE,
+    LISTEN_ONLY_MODE,
+    SUGGEST_ONLY_MODE,
     UNIFIED_PIPELINE_MODE,
     SessionJobConfig,
 )
@@ -123,6 +125,12 @@ def _split_provider_config() -> dict[str, Any]:
     return {"stt": _entry("deepgram"), "llm": _entry("openai"), "tts": _entry("cartesia")}
 
 
+def _provider_config_without_tts() -> dict[str, Any]:
+    pc = _split_provider_config()
+    del pc["tts"]
+    return pc
+
+
 def _job(**overrides: Any) -> SessionJobConfig:
     fields: dict[str, Any] = {
         "bot_session_id": 7,
@@ -160,6 +168,7 @@ async def test_build_runtime_wires_full_session() -> None:
 
     assert isinstance(runtime, AgentRuntime)
     # Adapters from the payload.
+    assert runtime.adapters.tts is not None
     assert runtime.adapters.stt.provider == "deepgram"
     assert runtime.adapters.llm.provider == "openai"
     assert runtime.adapters.tts.provider == "cartesia"
@@ -212,6 +221,69 @@ async def test_build_runtime_rejects_missing_llm() -> None:
     del pc["llm"]
     with pytest.raises(AgentSessionSetupError):
         await build_agent_runtime(_job(provider_config=pc), registry=_registry())
+
+
+# --- graceful no-TTS degrade (Johnny-un2) -----------------------------------
+
+
+async def test_build_runtime_degrades_speaking_mode_without_tts() -> None:
+    # A speaking mode dispatched with no TTS entry degrades to suggest_only: the
+    # adapters carry no TTS, the assembled config + gate + answer config all run
+    # suggest_only, and the agent runs with tts_available=False — so the router
+    # still records decisions (surfaced as suggestions) instead of the worker
+    # abandoning the job. Parity with meet_worker.pipeline_runner._assemble_pipeline.
+    runtime = await build_agent_runtime(
+        _job(mode=LIMITED_AUTO_SPEAK_MODE, provider_config=_provider_config_without_tts()),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+    )
+
+    assert runtime.adapters.tts is None
+    assert runtime.config.mode == SUGGEST_ONLY_MODE
+    assert runtime.gate._config.mode == SUGGEST_ONLY_MODE
+    assert runtime.agent._answer_config is not None
+    assert runtime.agent._answer_config.mode == SUGGEST_ONLY_MODE
+    assert runtime.agent._tts_available is False
+
+
+async def test_build_runtime_approval_without_tts_degrades_to_suggest() -> None:
+    # approval_required is a speaking mode, so a missing TTS degrades it to
+    # suggest_only BEFORE the approval pieces are considered (the legacy order: the
+    # TTS check rewrites the mode, then the approval gate keys off the rewritten
+    # mode). The rewritten config.mode is the smoking gun — _build_approval_pieces
+    # short-circuits on mode != approval_required, so no gate/sink/persist is built
+    # even though redis is configured (and the DB is never consulted).
+    runtime = await build_agent_runtime(
+        _job(
+            mode=APPROVAL_REQUIRED_MODE,
+            redis_url="redis://r:6379/0",
+            provider_config=_provider_config_without_tts(),
+        ),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+    )
+
+    assert runtime.config.mode == SUGGEST_ONLY_MODE
+    assert runtime.gate._config.mode == SUGGEST_ONLY_MODE
+    assert runtime.needs_approval_wiring is False
+    assert runtime.approval_gate is None
+    assert runtime.decision_sink is None
+    assert runtime.gate._persist_pending_decision is None
+
+
+async def test_build_runtime_non_speaking_mode_without_tts_unchanged() -> None:
+    # listen_only never needs TTS, so a missing TTS is NOT a degrade: the mode is
+    # untouched (no spurious suggest_only rewrite), tts is None, tts_available False.
+    runtime = await build_agent_runtime(
+        _job(mode=LISTEN_ONLY_MODE, provider_config=_provider_config_without_tts()),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+    )
+
+    assert runtime.adapters.tts is None
+    assert runtime.config.mode == LISTEN_ONLY_MODE
+    assert runtime.gate._config.mode == LISTEN_ONLY_MODE
+    assert runtime.agent._tts_available is False
 
 
 # --- approval_required wiring -----------------------------------------------

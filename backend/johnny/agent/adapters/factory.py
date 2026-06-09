@@ -16,12 +16,15 @@ only *consumes* ``load_active_providers`` and the existing adapter classes, so
 switching the active provider in admin yields a different live adapter at the
 next session start with no change to ``app.providers``' public surface.
 
-**Split mode only.** A LiveKit ``AgentSession`` in split mode needs all three
-of STT + LLM + TTS (the harness takes them as required arguments), so a missing
-active row for any of them is a fail-fast :class:`AgentSessionSetupError` at
-session start rather than a mid-meeting surprise — mirroring the meet-worker's
-``PipelineSetupError`` and the loader's own "fail fast at startup" contract.
-Unified (S2S) mode does not use this factory.
+**Split mode only.** A LiveKit ``AgentSession`` in split mode needs STT + LLM to
+transcribe and decide, so a missing active row for either is a fail-fast
+:class:`AgentSessionSetupError` at session start rather than a mid-meeting
+surprise — mirroring the meet-worker's ``PipelineSetupError`` and the loader's own
+"fail fast at startup" contract. **TTS is optional**: a missing TTS yields
+``SessionAdapters.tts = None`` (the session binds no TTS and the worker degrades a
+speaking mode to ``suggest_only``, Johnny-un2), exactly as the meet-worker's
+``_assemble_pipeline`` degrades rather than crashing. Unified (S2S) mode does not
+use this factory.
 
 Requires both the ``agent`` extra (``livekit-agents``, via the adapters) and
 SQLAlchemy (via the loader); imported only in the api/agent image, never from
@@ -104,7 +107,7 @@ class AgentSessionSetupError(ProviderError):
 
 @dataclass(frozen=True, slots=True)
 class SessionAdapters:
-    """The three LiveKit plugin instances for one split-pipeline session.
+    """The LiveKit plugin instances for one split-pipeline session.
 
     Spread straight into the session harness::
 
@@ -118,11 +121,16 @@ class SessionAdapters:
     :class:`~livekit.agents.stt.StreamAdapter` wrapping one for batch-only
     providers (:func:`~johnny.agent.adapters.johnny_stt.build_stt_adapter`,
     Johnny-4fn).
+
+    ``tts`` is ``None`` when no TTS provider is configured (Johnny-un2): STT + LLM
+    are required, but TTS is optional — :func:`~johnny.agent.session.build_agent_session`
+    binds no TTS to the session and the worker degrades a speaking mode to
+    ``suggest_only`` (parity with the meet-worker's graceful TTS-missing degrade).
     """
 
     stt: STT[Any]
     llm: JohnnyLLM
-    tts: JohnnyTTS
+    tts: JohnnyTTS | None
 
 
 def _require(
@@ -196,30 +204,42 @@ def _assemble_split_adapters(
     *,
     stt: ProviderInstance,
     llm: ProviderInstance,
-    tts: ProviderInstance,
+    tts: ProviderInstance | None,
     stt_options: dict[str, Any],
     llm_options: dict[str, Any],
     tts_options: dict[str, Any],
     vad: VAD | None,
 ) -> SessionAdapters:
-    """Wrap three resolved providers (+ their option dicts) in LiveKit adapters.
+    """Wrap the resolved providers (+ their option dicts) in LiveKit adapters.
 
     The shared tail of both factory paths — the DB-backed
     :func:`build_session_adapters` and the payload-backed
-    :func:`build_session_adapters_from_payload` resolve the three providers from
+    :func:`build_session_adapters_from_payload` resolve the providers from
     different sources (admin rows vs. the dispatched ``provider_config``) but
     converge here: narrow each to its ABC (a registry misconfiguration that
     produced the wrong kind fails fast as :class:`AgentSessionSetupError`) and
     thread the operator's voice / model / language selections from the matching
     option dict into the adapters (Johnny-88n) so the session uses — and reports —
     exactly them.
+
+    ``tts`` is optional (Johnny-un2): ``None`` means no TTS provider is configured,
+    so :attr:`SessionAdapters.tts` is ``None`` and the session binds no TTS — the
+    worker then degrades a speaking mode to ``suggest_only``. STT + LLM are still
+    required (a ``None`` there is a programming error, not a degrade).
     """
     if not isinstance(stt, STTProvider):
         raise AgentSessionSetupError(_wrong_type(ProviderKind.STT, stt, "STTProvider"))
     if not isinstance(llm, LLMProvider):
         raise AgentSessionSetupError(_wrong_type(ProviderKind.LLM, llm, "LLMProvider"))
-    if not isinstance(tts, TTSProvider):
-        raise AgentSessionSetupError(_wrong_type(ProviderKind.TTS, tts, "TTSProvider"))
+    tts_adapter: JohnnyTTS | None = None
+    if tts is not None:
+        if not isinstance(tts, TTSProvider):
+            raise AgentSessionSetupError(_wrong_type(ProviderKind.TTS, tts, "TTSProvider"))
+        tts_adapter = JohnnyTTS(
+            tts,
+            voice=_selected(tts_options, _VOICE_KEYS),
+            model=_selected(tts_options, _TTS_MODEL_KEYS),
+        )
     return SessionAdapters(
         stt=build_stt_adapter(
             stt,
@@ -228,11 +248,7 @@ def _assemble_split_adapters(
             model=_selected(stt_options, _STT_MODEL_KEYS),
         ),
         llm=JohnnyLLM(llm, model=_selected(llm_options, _LLM_MODEL_KEYS)),
-        tts=JohnnyTTS(
-            tts,
-            voice=_selected(tts_options, _VOICE_KEYS),
-            model=_selected(tts_options, _TTS_MODEL_KEYS),
-        ),
+        tts=tts_adapter,
     )
 
 
@@ -278,9 +294,10 @@ def build_session_adapters(
     tools — in a LiveKit session tools come from the :class:`Agent` per turn and
     :class:`JohnnyLLM` already forwards them to ``LLMProvider.chat(tools=...)``.
 
-    Raises :class:`AgentSessionSetupError` if any of STT / LLM / TTS has no
-    active provider, so misconfiguration fails fast at session start instead of
-    mid-meeting.
+    Raises :class:`AgentSessionSetupError` if STT or LLM has no active provider, so
+    misconfiguration fails fast at session start instead of mid-meeting. TTS is
+    optional (Johnny-un2): a missing TTS row yields ``SessionAdapters.tts = None``
+    and the worker degrades a speaking mode to ``suggest_only`` rather than failing.
     """
     active = load_active_providers(
         session,
@@ -292,7 +309,7 @@ def build_session_adapters(
     return _assemble_split_adapters(
         stt=_require(active, ProviderKind.STT),
         llm=_require(active, ProviderKind.LLM),
-        tts=_require(active, ProviderKind.TTS),
+        tts=active.get(ProviderKind.TTS),
         stt_options=options.get(ProviderKind.STT, {}),
         llm_options=options.get(ProviderKind.LLM, {}),
         tts_options=options.get(ProviderKind.TTS, {}),
@@ -319,8 +336,9 @@ def _provider_from_payload_entry(
     pass-through).
 
     A missing entry (or a blank ``provider_name``) is a fail-fast
-    :class:`AgentSessionSetupError` — a split AgentSession needs all three of
-    STT/LLM/TTS, so an under-configured payload must not half-build a session.
+    :class:`AgentSessionSetupError` — a split AgentSession requires STT + LLM (TTS
+    is optional, resolved via :func:`_optional_provider_from_payload_entry`), so an
+    under-configured payload must not half-build a session.
     An entry naming an unregistered provider raises the registry's
     :class:`~app.providers.base.UnknownProviderError` (also a
     :class:`~app.providers.base.ProviderError`), mirroring the DB path.
@@ -339,6 +357,40 @@ def _provider_from_payload_entry(
         raise AgentSessionSetupError(
             f"the {kind.value!r} entry in the dispatched job payload has no provider_name"
         )
+    options = dict(entry.get("options") or {})
+    config = ProviderConfig(
+        kind=kind,
+        provider_name=provider_name,
+        display_name=str(entry.get("display_name") or provider_name),
+        credentials={str(k): str(v) for k, v in (entry.get("credentials") or {}).items()},
+        options=options,
+    )
+    return registry.instantiate(config), options
+
+
+def _optional_provider_from_payload_entry(
+    registry: ProviderRegistry,
+    kind: ProviderKind,
+    provider_config: Mapping[str, Any],
+) -> tuple[ProviderInstance | None, dict[str, Any]]:
+    """Instantiate the ``kind`` provider, or ``(None, {})`` when absent/blank.
+
+    The optional counterpart of :func:`_provider_from_payload_entry`, used for TTS
+    (Johnny-un2): a split AgentSession requires STT + LLM, but TTS is optional — a
+    missing entry (or one with a blank ``provider_name``) means no configured TTS,
+    which the worker degrades to ``suggest_only`` (parity with the meet-worker's
+    ``_assemble_pipeline`` TTS degrade), not a fail-fast. An entry that IS present
+    and names a provider still instantiates through the same registry path, so an
+    unregistered provider still raises the registry's
+    :class:`~app.providers.base.UnknownProviderError` (a real misconfiguration,
+    distinct from "no TTS configured").
+    """
+    entry = provider_config.get(kind.value)
+    if not isinstance(entry, Mapping):
+        return None, {}
+    provider_name = str(entry.get("provider_name") or "").strip()
+    if not provider_name:
+        return None, {}
     options = dict(entry.get("options") or {})
     config = ProviderConfig(
         kind=kind,
@@ -376,14 +428,16 @@ def build_session_adapters_from_payload(
     forwarded to :func:`~johnny.agent.adapters.johnny_stt.build_stt_adapter` for the
     batch-only STT wrapping, exactly as in :func:`build_session_adapters`.
 
-    Raises :class:`AgentSessionSetupError` if any of STT / LLM / TTS is absent from
-    the payload, so a misconfigured dispatch fails fast at session start instead of
-    mid-meeting.
+    Raises :class:`AgentSessionSetupError` if STT or LLM is absent from the payload,
+    so a misconfigured dispatch fails fast at session start instead of mid-meeting.
+    TTS is optional (Johnny-un2): an absent/blank TTS entry yields
+    ``SessionAdapters.tts = None`` and the worker degrades a speaking mode to
+    ``suggest_only`` (parity with the meet-worker's graceful TTS-missing degrade).
     """
     reg = registry if registry is not None else get_registry()
     stt, stt_options = _provider_from_payload_entry(reg, ProviderKind.STT, provider_config)
     llm, llm_options = _provider_from_payload_entry(reg, ProviderKind.LLM, provider_config)
-    tts, tts_options = _provider_from_payload_entry(reg, ProviderKind.TTS, provider_config)
+    tts, tts_options = _optional_provider_from_payload_entry(reg, ProviderKind.TTS, provider_config)
     return _assemble_split_adapters(
         stt=stt,
         llm=llm,
