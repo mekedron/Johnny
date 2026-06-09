@@ -98,6 +98,11 @@ self.addEventListener('notificationclick', (event) => {
 		event.waitUntil(openReloginSettings(Number(data.accountId)));
 		return;
 	}
+	if (data.kind === 'test') {
+		event.notification.close();
+		event.waitUntil(focusOrOpenClient());
+		return;
+	}
 	event.notification.close();
 });
 

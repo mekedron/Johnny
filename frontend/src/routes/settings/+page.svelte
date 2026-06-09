@@ -5,6 +5,7 @@
 	import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
 	import CalendarIcon from '@lucide/svelte/icons/calendar';
 	import BotIcon from '@lucide/svelte/icons/bot';
+	import BellIcon from '@lucide/svelte/icons/bell';
 	import UnlinkIcon from '@lucide/svelte/icons/unlink';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Alert from '$lib/components/ui/alert/index.js';
@@ -26,6 +27,12 @@
 		type CapabilityCheck,
 		type VerifyResponse
 	} from '$lib/accounts';
+	import {
+		getNotificationPermission,
+		requestNotificationPermission,
+		showTestNotification,
+		type NotificationPermissionLike
+	} from '$lib/notifications';
 
 	let accounts = $state<Account[]>([]);
 	let loading = $state(false);
@@ -38,6 +45,11 @@
 
 	let verifyingId = $state<number | null>(null);
 	let verifyResults = $state<Record<number, VerifyResponse>>({});
+
+	// Browser notification status (approvals + signed-out re-logins).
+	let notifPermission = $state<NotificationPermissionLike>('default');
+	let notifBusy = $state(false);
+	let notifTestSentAt = $state<number | null>(null);
 
 	type BotSigninContext =
 		| { kind: 'new' }
@@ -110,10 +122,51 @@
 		}
 	}
 
+	let notifPermStatus: PermissionStatus | null = null;
+
 	onMount(() => {
 		void loadAccounts().then(maybeOpenReloginFromQuery);
 		window.addEventListener('message', handleOAuthMessage);
+		notifPermission = getNotificationPermission();
+		void watchNotifPermission();
 	});
+
+	function onNotifPermissionChange() {
+		notifPermission = getNotificationPermission();
+	}
+
+	async function watchNotifPermission() {
+		// Live-update the status if the user flips it in browser site settings.
+		if (typeof navigator === 'undefined' || !navigator.permissions?.query) return;
+		try {
+			notifPermStatus = await navigator.permissions.query({
+				name: 'notifications' as PermissionName
+			});
+			notifPermStatus.addEventListener('change', onNotifPermissionChange);
+		} catch {
+			// Permissions API may not support the 'notifications' name — ignore.
+		}
+	}
+
+	async function enableNotifications() {
+		notifBusy = true;
+		try {
+			notifPermission = await requestNotificationPermission();
+		} finally {
+			notifBusy = false;
+		}
+	}
+
+	async function sendTestNotification() {
+		notifBusy = true;
+		try {
+			await showTestNotification();
+			notifPermission = getNotificationPermission();
+			notifTestSentAt = Date.now();
+		} finally {
+			notifBusy = false;
+		}
+	}
 
 	function maybeOpenReloginFromQuery() {
 		// A re-login notification (Johnny-ebf) deep-links here as
@@ -135,6 +188,10 @@
 
 	onDestroy(() => {
 		stopPopupWatch();
+		if (notifPermStatus) {
+			notifPermStatus.removeEventListener('change', onNotifPermissionChange);
+			notifPermStatus = null;
+		}
 		if (typeof window !== 'undefined') {
 			window.removeEventListener('message', handleOAuthMessage);
 		}
@@ -416,6 +473,87 @@
 			<Alert.Description>{error}</Alert.Description>
 		</Alert.Root>
 	{/if}
+
+	<!-- Notifications section -->
+	<section class="flex flex-col gap-4" data-testid="notifications-section">
+		<div class="flex min-w-0 flex-col gap-1">
+			<h2 class="m-0 text-lg leading-tight font-semibold tracking-tight text-foreground">
+				Notifications
+			</h2>
+			<p class="m-0 text-sm text-muted-foreground">
+				Johnny raises a browser notification when a meeting needs your approval, or a
+				bot account is signed out and needs re-login. Enable them here and send a test
+				to confirm they reach your desktop.
+			</p>
+		</div>
+
+		<div
+			class="flex flex-col gap-4 rounded-md border border-border bg-card p-5 sm:flex-row sm:items-center sm:justify-between"
+			class:border-warning={notifPermission === 'denied'}
+			data-testid="notifications-card"
+		>
+			<div class="flex min-w-0 items-start gap-3">
+				<BellIcon class="mt-0.5 size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
+				<div class="flex min-w-0 flex-col gap-1">
+					{#if notifPermission === 'granted'}
+						<span
+							class="inline-flex items-center gap-1.5 text-sm font-medium text-success"
+							data-testid="notif-status"
+						>
+							<CheckCircle2Icon class="size-4" /> Browser notifications are enabled
+						</span>
+						<span class="text-xs text-muted-foreground">
+							You'll get a desktop alert for approvals and signed-out re-logins.
+						</span>
+						{#if notifTestSentAt !== null}
+							<span class="text-xs text-success" data-testid="notif-test-sent">
+								Test sent — check your desktop.
+							</span>
+						{/if}
+					{:else if notifPermission === 'denied'}
+						<span
+							class="inline-flex items-center gap-1.5 text-sm font-medium text-warning"
+							data-testid="notif-status"
+						>
+							<TriangleAlertIcon class="size-4" /> Blocked in this browser
+						</span>
+						<span class="text-xs text-muted-foreground">
+							You've blocked notifications for this site. Re-enable them in your
+							browser's site settings (the lock icon in the address bar), then reload.
+						</span>
+					{:else if notifPermission === 'unsupported'}
+						<span class="text-sm font-medium text-muted-foreground" data-testid="notif-status">
+							Not supported in this browser
+						</span>
+					{:else}
+						<span class="text-sm font-medium text-foreground" data-testid="notif-status">
+							Browser notifications are not enabled yet
+						</span>
+						<span class="text-xs text-muted-foreground">
+							Enable them so you're alerted even when the Johnny tab is in the background.
+						</span>
+					{/if}
+				</div>
+			</div>
+
+			<div class="flex shrink-0 flex-wrap items-center gap-2">
+				{#if notifPermission === 'default'}
+					<Button onclick={enableNotifications} disabled={notifBusy} data-testid="notif-enable">
+						<BellIcon class="size-4" /> Enable notifications
+					</Button>
+				{:else if notifPermission === 'granted'}
+					<Button
+						variant="outline"
+						onclick={sendTestNotification}
+						disabled={notifBusy}
+						data-testid="notif-test"
+					>
+						Send test notification
+					</Button>
+				{/if}
+			</div>
+		</div>
+	</section>
 
 	<!-- Calendars section -->
 	<section class="flex flex-col gap-4" data-testid="calendars-section">

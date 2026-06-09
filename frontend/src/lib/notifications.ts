@@ -75,14 +75,7 @@ function markRequested(): void {
 	}
 }
 
-/**
- * Register the service worker (once) and, when appropriate, request
- * notification permission. Returns the current permission level so the
- * caller can render UI cues.
- */
-export async function bootstrapNotifications(): Promise<NotificationPermissionLike> {
-	if (!notificationsSupported()) return 'unsupported';
-
+function ensureServiceWorkerRegistered(): Promise<ServiceWorkerRegistration | null> {
 	if (registrationPromise === null) {
 		registrationPromise = navigator.serviceWorker
 			.register('/service-worker.js', { type: 'classic' })
@@ -94,7 +87,18 @@ export async function bootstrapNotifications(): Promise<NotificationPermissionLi
 				return null;
 			});
 	}
-	await registrationPromise;
+	return registrationPromise;
+}
+
+/**
+ * Register the service worker (once) and, when appropriate, request
+ * notification permission. Returns the current permission level so the
+ * caller can render UI cues.
+ */
+export async function bootstrapNotifications(): Promise<NotificationPermissionLike> {
+	if (!notificationsSupported()) return 'unsupported';
+
+	await ensureServiceWorkerRegistered();
 
 	const current = Notification.permission;
 	if (current !== 'default') {
@@ -110,6 +114,66 @@ export async function bootstrapNotifications(): Promise<NotificationPermissionLi
 	} catch (err) {
 		console.warn('johnny: notification permission request failed', err);
 		return 'default';
+	}
+}
+
+/**
+ * Current notification permission, including the `'unsupported'` case.
+ * Synchronous read for rendering the Settings status — does not prompt.
+ */
+export function getNotificationPermission(): NotificationPermissionLike {
+	if (!notificationsSupported()) return 'unsupported';
+	return Notification.permission as NotificationPermissionLike;
+}
+
+/**
+ * Explicitly request notification permission from a user gesture (the
+ * Settings "Enable" button). Unlike {@link bootstrapNotifications} this is
+ * NOT gated by the once-per-session guard — the operator asked for it. Safe
+ * to call when already granted/denied (the browser resolves immediately).
+ */
+export async function requestNotificationPermission(): Promise<NotificationPermissionLike> {
+	if (!notificationsSupported()) return 'unsupported';
+	await ensureServiceWorkerRegistered();
+	try {
+		markRequested();
+		return await Notification.requestPermission();
+	} catch (err) {
+		console.warn('johnny: notification permission request failed', err);
+		return getNotificationPermission();
+	}
+}
+
+/**
+ * Fire a one-off test notification so the operator can confirm alerts
+ * actually surface (approvals + signed-out re-logins use the same path).
+ * No-op unless permission is already granted.
+ */
+export async function showTestNotification(): Promise<void> {
+	if (!notificationsSupported()) return;
+	if (Notification.permission !== 'granted') return;
+
+	const tag = 'johnny:test';
+	const title = 'Johnny notifications are on';
+	const body =
+		"This is a test alert — you'll get one like this when a meeting " +
+		'needs approval or a bot account needs re-login.';
+	const data = { kind: 'test' };
+
+	try {
+		const reg = await navigator.serviceWorker.ready;
+		await reg.showNotification(title, { body, tag, data } as NotificationOptions);
+	} catch (err) {
+		console.warn('johnny: test showNotification via SW failed; falling back', err);
+		try {
+			const fallback = new Notification(title, { body, tag, data });
+			fallback.onclick = () => {
+				window.focus();
+				fallback.close();
+			};
+		} catch (err2) {
+			console.warn('johnny: in-page test Notification fallback failed', err2);
+		}
 	}
 }
 
