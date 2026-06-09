@@ -241,3 +241,74 @@ def test_unified_pipeline_config_prior_session_context_defaults_empty() -> None:
     """Field default is empty so existing constructions stay valid."""
     cfg = UnifiedPipelineConfig(session_id="default", bot_session_id=6)
     assert cfg.prior_session_context == ""
+
+
+@pytest.mark.asyncio
+async def test_unified_pipeline_captures_reply_audio(tmp_path) -> None:
+    """A completed assistant turn flushes one WAV and stamps the AgentSpoke (Johnny-od1)."""
+    import wave
+
+    from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
+
+    transport = BrowserAudioTransport()
+    event_bus = InMemoryEventBus()
+    recorder = SpokenAudioRecorder(tmp_path, 7)
+    pipeline = UnifiedVoicePipeline(
+        transport=transport,
+        s2s=_stub_provider(response_text="captured reply", response_pcm_ms=40),
+        event_bus=event_bus,
+        config=UnifiedPipelineConfig(session_id="cap", bot_session_id=7),
+        audio_recorder=recorder,
+    )
+
+    await transport.start()
+    transport.push_capture_frame(b"\x01\x01" * 100)
+    run_task = asyncio.create_task(pipeline.run())
+
+    async def stop_after_audio() -> None:
+        await asyncio.sleep(0.05)
+        await transport.stop()
+
+    await asyncio.wait_for(
+        asyncio.gather(run_task, stop_after_audio()), timeout=5.0
+    )
+
+    spoke = [e for e in event_bus.snapshot() if isinstance(e, AgentSpoke)]
+    assert spoke, "expected an AgentSpoke event"
+    assert spoke[0].audio_file is not None
+    wav_path = tmp_path / "7" / spoke[0].audio_file
+    assert wav_path.is_file()
+    with wave.open(str(wav_path), "rb") as wf:
+        # 40 ms of 16 kHz mono S16LE from the stub = 640 samples.
+        assert wf.getframerate() == 16_000
+        assert wf.getnframes() > 0
+        expected_ms = wf.getnframes() * 1000 // 16_000
+    assert spoke[0].audio_duration_ms == expected_ms
+
+
+@pytest.mark.asyncio
+async def test_unified_pipeline_without_recorder_leaves_audio_file_none() -> None:
+    """No recorder (capture off) keeps the pre-capture AgentSpoke shape."""
+    transport = BrowserAudioTransport()
+    event_bus = InMemoryEventBus()
+    pipeline = UnifiedVoicePipeline(
+        transport=transport,
+        s2s=_stub_provider(response_text="plain reply", response_pcm_ms=40),
+        event_bus=event_bus,
+        config=UnifiedPipelineConfig(session_id="plain", bot_session_id=8),
+    )
+
+    await transport.start()
+    transport.push_capture_frame(b"\x01\x01" * 100)
+    run_task = asyncio.create_task(pipeline.run())
+
+    async def stop_after_audio() -> None:
+        await asyncio.sleep(0.05)
+        await transport.stop()
+
+    await asyncio.wait_for(
+        asyncio.gather(run_task, stop_after_audio()), timeout=5.0
+    )
+
+    spoke = [e for e in event_bus.snapshot() if isinstance(e, AgentSpoke)]
+    assert spoke and spoke[0].audio_file is None

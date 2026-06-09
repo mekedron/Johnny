@@ -70,6 +70,7 @@ from johnny.agent.observability import (
 )
 from johnny.agent.router_gate import RouterGate, RouterGateConfig
 from johnny.agent.session import JohnnyAgent, build_johnny_agent
+from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder, build_recorder_from_env
 from johnny.voice_pipeline.event_bus import (
     DEFAULT_CHANNEL_PREFIX,
     EventBus,
@@ -289,6 +290,7 @@ async def build_agent_runtime(
     transcript_history_loader: TranscriptHistoryLoader | None = None,
     db_session_factory: Callable[[], Session] | None = None,
     session_started_at: float = 0.0,
+    audio_recorder: SpokenAudioRecorder | None = None,
 ) -> AgentRuntime:
     """Assemble the full :class:`AgentRuntime` for one dispatched Meet session.
 
@@ -316,10 +318,22 @@ async def build_agent_runtime(
     """
     session_id = str(config.bot_session_id)
 
+    # The session's reply-audio recorder (Johnny-od1): the TTS adapter feeds it
+    # every synthesized segment and the spoke emitter flushes one WAV per kept
+    # reply under JOHNNY_SESSION_AUDIO_DIR/<bot_session_id>/. Disabled (no-op)
+    # when the env var is unset. Tests inject a tmp-rooted recorder.
+    recorder = (
+        audio_recorder
+        if audio_recorder is not None
+        else build_recorder_from_env(config.bot_session_id)
+    )
+
     # STT/LLM adapters (required) + an optional TTS + the raw LLM the router gate /
     # coercion reuse. Built first so a misconfigured payload (unified / missing
     # STT or LLM) fails fast before any event-bus / Redis / DB resource is created.
-    adapters = build_session_adapters_for_job(config, registry=registry, vad=vad)
+    adapters = build_session_adapters_for_job(
+        config, registry=registry, vad=vad, tts_recorder=recorder
+    )
     router_llm = _build_llm_provider(config.provider_config, registry=registry)
 
     # Graceful no-TTS degrade (Johnny-un2), parity with the meet-worker's
@@ -385,8 +399,11 @@ async def build_agent_runtime(
             ),
             session_id=session_id,
         ),
-        record_spoke=build_spoke_emitter(bus, mode=config.mode, session_id=session_id),
+        record_spoke=build_spoke_emitter(
+            bus, mode=config.mode, session_id=session_id, recorder=recorder
+        ),
         record_suggested=build_suggested_emitter(bus, session_id=session_id),
+        reply_audio=recorder,
     )
 
     # The metrics translator resolves a LiveKit metric's speech_id (the reply

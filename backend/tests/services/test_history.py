@@ -516,6 +516,44 @@ def test_delete_session_404(db_session: Session) -> None:
         delete_session(db_session, 9999)
 
 
+def test_delete_session_removes_audio_dir(
+    db_session: Session, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Johnny-od1: deleting a session also drops its captured reply audio."""
+    from johnny.voice_pipeline.audio_recorder import SESSION_AUDIO_DIR_ENV
+
+    monkeypatch.setenv(SESSION_AUDIO_DIR_ENV, str(tmp_path))
+    row = _seed_session(db_session, status=BotSessionStatus.ENDED)
+    db_session.commit()
+    audio_dir = tmp_path / str(row.id)
+    audio_dir.mkdir()
+    (audio_dir / "utt-1000-1.wav").write_bytes(b"RIFFfake")
+
+    delete_session(db_session, row.id)
+
+    assert not audio_dir.exists()
+
+
+def test_export_session_includes_audio_file(db_session: Session) -> None:
+    """Johnny-od1: the JSON export carries the utterance's audio filename."""
+    row = _seed_session(db_session, status=BotSessionStatus.ENDED)
+    db_session.add(
+        AgentUtterance(
+            bot_session_id=row.id,
+            agent_decision_id=None,
+            mode=BotMode.AUTONOMOUS,
+            prompt="p",
+            output_text="hi",
+            audio_file="utt-1000-1.wav",
+        )
+    )
+    db_session.commit()
+
+    dump = export_session(db_session, row.id)
+
+    assert dump["utterances"][0]["audio_file"] == "utt-1000-1.wav"
+
+
 # --- export_session --------------------------------------------------------
 
 

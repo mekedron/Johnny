@@ -102,6 +102,9 @@ export interface AgentUtteranceRecord {
 	output_text: string;
 	audio_duration_ms: number | null;
 	matched_allowed_reply: string | null;
+	// Bare WAV filename of the captured reply audio (Johnny-od1); null when no
+	// audio was captured for this utterance. Play via sessionAudioUrl().
+	audio_file: string | null;
 	created_at: string;
 }
 
@@ -230,6 +233,15 @@ export function getSessionDetail(
 ): Promise<SessionDetail> {
 	const qs = limit !== undefined ? `?limit=${encodeURIComponent(limit)}` : '';
 	return request<SessionDetail>(`/sessions/${botSessionId}${qs}`);
+}
+
+/**
+ * Playback URL for one captured reply WAV (Johnny-od1). Used by both the live
+ * session view (filename from the `agent_spoke` event) and the History detail
+ * page (`AgentUtteranceRecord.audio_file`).
+ */
+export function sessionAudioUrl(botSessionId: number, filename: string): string {
+	return `${API_BASE}/sessions/${botSessionId}/audio/${encodeURIComponent(filename)}`;
 }
 
 export const SESSION_TIMING_STAGE_LABEL: Record<string, string> = {

@@ -482,6 +482,33 @@ def test_apply_agent_spoke_event_persists_row(db_session: Session) -> None:
     assert row.audio_duration_ms == 1200
 
 
+def test_apply_agent_spoke_event_carries_audio_file(db_session: Session) -> None:
+    """``audio_file`` from the event lands on the utterance row (Johnny-od1)."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    payload = _agent_spoke_payload(session_id=bot_session.id)
+    payload["audio_file"] = "utt-1718000000000-1.wav"
+    assert apply_agent_spoke_event(db_session, payload) is True
+    row = db_session.scalars(sa.select(AgentUtterance)).one()
+    assert row.audio_file == "utt-1718000000000-1.wav"
+
+
+def test_apply_agent_spoke_event_audio_file_defaults_none(
+    db_session: Session,
+) -> None:
+    """Events without ``audio_file`` (capture off / older workers) store NULL."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    assert (
+        apply_agent_spoke_event(
+            db_session, _agent_spoke_payload(session_id=bot_session.id)
+        )
+        is True
+    )
+    row = db_session.scalars(sa.select(AgentUtterance)).one()
+    assert row.audio_file is None
+
+
 def test_apply_agent_spoke_event_carries_prompt(db_session: Session) -> None:
     """``prompt`` from the event lands on the utterance row (Johnny-awh)."""
     bot_session = _seed(db_session, status=BotSessionStatus.JOINED)

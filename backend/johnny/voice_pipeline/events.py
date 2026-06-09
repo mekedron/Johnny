@@ -247,6 +247,13 @@ class AgentSpoke:
     utterance so the audit row in ``agent_utterances`` can render the
     exact input that drove the bot to say what it said. Optional + default
     empty string keeps prior callers (tests, old subscribers) working.
+
+    ``audio_file`` is the bare WAV filename the
+    :class:`~johnny.voice_pipeline.audio_recorder.SpokenAudioRecorder` wrote
+    for this reply under ``<session-audio root>/<bot_session_id>/``
+    (Johnny-od1); ``None`` when recording is disabled or the write failed.
+    Never a path — the api resolves it under the configured root when
+    serving playback.
     """
 
     text: str
@@ -255,6 +262,7 @@ class AgentSpoke:
     matched_allowed_reply: str | None = None
     session_id: str | None = None
     prompt: str = ""
+    audio_file: str | None = None
     type: AgentEventType = "agent_spoke"
 
 

@@ -65,6 +65,7 @@ from johnny.agent.gate import (
     TurnIndex,
     TurnNoReplyReason,
 )
+from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
 from johnny.voice_pipeline.event_bus import EventBus
 from johnny.voice_pipeline.events import (
     AgentSpoke,
@@ -277,6 +278,7 @@ def build_spoke_emitter(
     allowed_replies: tuple[str, ...] = (),
     session_id: str | None = None,
     clock: Callable[[], int] = _default_clock_ms,
+    recorder: SpokenAudioRecorder | None = None,
 ) -> RecordSpoke:
     """Build the speak-path ``AgentSpoke`` emitter.
 
@@ -286,12 +288,19 @@ def build_spoke_emitter(
     decision row (INV-2). ``matched_allowed_reply`` is inferred from the active
     mode + allow-list (an exact, case-insensitive match means the answer stage
     spoke a verbatim allow-listed reply, so the subscriber attributes the
-    divergence to ``allowlist`` rather than ``answer_llm``); ``audio_duration_ms``
-    is ``0`` (the reply ``SpeechHandle`` exposes no synth duration — the real TTS
-    duration lives on the ``tts`` :class:`PipelineTiming`) and ``prompt`` is empty
+    divergence to ``allowlist`` rather than ``answer_llm``); ``prompt`` is empty
     (the per-turn answer prompt is internal to the LiveKit reply pipeline). Both
     are accepted ``None``/``0``/empty by the subscriber and the utterance audit
     view.
+
+    ``recorder`` is the session's :class:`SpokenAudioRecorder` (Johnny-od1): the
+    TTS adapter fed it every synthesized segment of this reply, and flushing it
+    here yields the reply's WAV filename + exact duration for the event
+    (``take_reply`` does file I/O, so it runs in a thread). Without a recorder
+    — or when it has nothing buffered (recording disabled, no-TTS degrade) —
+    ``audio_file`` is ``None`` and ``audio_duration_ms`` stays ``0``, the
+    pre-capture shape (the reply ``SpeechHandle`` exposes no synth duration;
+    the TTS :class:`PipelineTiming` still carries the LiveKit metric).
     """
     uses_allowlist = bool(allowed_replies) and mode not in FREE_FORM_MODES
     lowered = {r.casefold(): r for r in allowed_replies}
@@ -300,13 +309,22 @@ def build_spoke_emitter(
         matched: str | None = None
         if uses_allowlist:
             matched = lowered.get(text.strip().casefold())
+        reply_audio = None
+        if recorder is not None:
+            try:
+                reply_audio = await asyncio.to_thread(recorder.take_reply)
+            except Exception:
+                logger.exception(
+                    "failed flushing reply audio for session=%s", session_id
+                )
         event = AgentSpoke(
             text=text,
-            audio_duration_ms=0,
+            audio_duration_ms=reply_audio.duration_ms if reply_audio is not None else 0,
             timestamp_ms=clock(),
             matched_allowed_reply=matched,
             session_id=session_id,
             prompt="",
+            audio_file=reply_audio.filename if reply_audio is not None else None,
         )
         try:
             await event_bus.publish(event)
@@ -538,6 +556,7 @@ def build_observability(
     session_started_at: float = 0.0,
     session_id: str | None = None,
     clock: Callable[[], int] = _default_clock_ms,
+    recorder: SpokenAudioRecorder | None = None,
 ) -> Observability:
     """Wire every emit seam against one ``EventBus`` + shared ``TurnIndex``.
 
@@ -565,6 +584,7 @@ def build_observability(
             allowed_replies=allowed_replies,
             session_id=session_id,
             clock=clock,
+            recorder=recorder,
         ),
         record_suggested=build_suggested_emitter(event_bus, session_id=session_id, clock=clock),
         transcript_finalized_sink=build_transcript_finalized_emitter(

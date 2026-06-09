@@ -26,6 +26,7 @@
 		getSessionTimings,
 		noReplyReasonLabel,
 		SESSION_TIMING_STAGE_LABEL,
+		sessionAudioUrl,
 		type AgentDecisionRecord,
 		type AgentUtteranceRecord,
 		type DecisionOutcome,
@@ -35,6 +36,7 @@
 		type TerminalState,
 		type TranscriptChunk
 	} from '$lib/sessionDetail';
+	import UtteranceAudioButton from '$lib/components/UtteranceAudioButton.svelte';
 	import {
 		subscribeToSession,
 		type AgentSpokeEvent,
@@ -71,6 +73,8 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 		// of silent. Undefined = a normal speech line.
 		kind?: 'no_reply';
 		noReplyReason?: NoReplyReason | null;
+		// Captured reply WAV for bot lines (Johnny-od1) — renders a play button.
+		audioFile?: string | null;
 	}
 
 	interface DecisionEntry {
@@ -296,7 +300,8 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 			speaker: 'Johnny',
 			isFinal: true,
 			timestampMs: Date.parse(u.created_at) || 0,
-			isBot: true
+			isBot: true,
+			audioFile: u.audio_file
 		};
 	}
 
@@ -662,7 +667,8 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 			speaker: 'Johnny',
 			isFinal: true,
 			timestampMs: Date.now(),
-			isBot: true
+			isBot: true,
+			audioFile: typeof ev.audio_file === 'string' && ev.audio_file ? ev.audio_file : null
 		};
 		transcripts = [...transcripts, botLine];
 		void autoScrollTranscript();
@@ -1208,6 +1214,11 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 												>
 													<BotIcon class="size-3" />
 													{line.speaker}
+													{#if line.audioFile}
+														<UtteranceAudioButton
+															src={sessionAudioUrl(sessionId, line.audioFile)}
+														/>
+													{/if}
 												</span>
 											{:else if line.speaker}
 												<span class="font-medium text-foreground">{line.speaker}</span>

@@ -198,3 +198,73 @@ async def test_model_provider_and_capability_labels() -> None:
     assert JohnnyTTS(provider).sample_rate == 16_000
     assert JohnnyTTS(provider).num_channels == 1
     assert JohnnyTTS(provider).capabilities.streaming is False
+
+
+# --- Reply-audio capture (Johnny-od1) ----------------------------------------
+
+
+async def test_clean_stream_feeds_one_concatenated_segment(tmp_path) -> None:
+    from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
+
+    chunks = [b"\x00\x10" * 3_200 for _ in range(3)]
+    recorder = SpokenAudioRecorder(tmp_path, 1)
+    tts = JohnnyTTS(FakeTTSProvider(frames=chunks), recorder=recorder)
+
+    await _drain(tts.synthesize("hi"))
+
+    reply = recorder.take_reply()
+    assert reply is not None
+    import wave
+
+    with wave.open(str(tmp_path / "1" / reply.filename), "rb") as wf:
+        assert wf.readframes(wf.getnframes()) == b"".join(chunks)
+
+
+async def test_failed_stream_feeds_nothing(tmp_path) -> None:
+    from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
+
+    recorder = SpokenAudioRecorder(tmp_path, 1)
+    err = TTSError("out of credits", category="quota_exceeded")
+    tts = JohnnyTTS(
+        FakeTTSProvider(frames=[b"\x00\x10" * 3_200], error=err),
+        recorder=recorder,
+    )
+
+    with pytest.raises(TTSError):
+        await _drain(tts.synthesize("hi"))
+
+    # Frames yielded before the failure are NOT captured — a retry would
+    # otherwise double-feed them.
+    assert recorder.take_reply() is None
+
+
+async def test_retried_stream_feeds_exactly_one_copy(tmp_path) -> None:
+    from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
+
+    class FlakyProvider(FakeTTSProvider):
+        """Fails the first call, succeeds on the retry."""
+
+        async def synthesize_stream(self, text, voice_id=None):
+            self.calls += 1
+            yield b"\x00\x10" * 3_200
+            if self.calls == 1:
+                raise TTSError("blip", category="unknown")
+
+    recorder = SpokenAudioRecorder(tmp_path, 1)
+    tts = JohnnyTTS(FlakyProvider(), recorder=recorder)
+
+    await _drain(tts.synthesize("hi", conn_options=_retry(2)))
+
+    reply = recorder.take_reply()
+    assert reply is not None
+    import wave
+
+    with wave.open(str(tmp_path / "1" / reply.filename), "rb") as wf:
+        # One clean copy from the successful attempt — not first + retry.
+        assert wf.getnframes() == 3_200
+
+
+async def test_no_recorder_keeps_legacy_shape(tmp_path) -> None:
+    tts = JohnnyTTS(FakeTTSProvider(frames=[b"\x00\x10" * 3_200]))
+    frames = [ev.frame for ev in await _collect(tts.synthesize("hi"))]
+    assert sum(f.samples_per_channel for f in frames) == 3_200

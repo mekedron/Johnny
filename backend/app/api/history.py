@@ -193,6 +193,9 @@ class HistoryUtteranceRead(BaseModel):
     output_text: str
     audio_duration_ms: int | None
     matched_allowed_reply: str | None
+    # Bare WAV filename for replay via GET /sessions/{id}/audio/{filename}
+    # (Johnny-od1); None when no audio was captured for the reply.
+    audio_file: str | None = None
     created_at: datetime
 
 

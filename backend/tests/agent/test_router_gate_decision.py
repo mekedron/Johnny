@@ -766,3 +766,100 @@ async def test_gate_without_seams_emits_nothing_extra() -> None:
     cast(_FakeSpeechHandle, handle).fire_done()
     await asyncio.gather(*gate._reply_tasks)
     assert emitter.states == ["replied"]
+
+
+# --------------------------------------------------------------------------- #
+# Reply-audio buffer hygiene (Johnny-od1)                                     #
+# --------------------------------------------------------------------------- #
+
+
+def _gate_with_recorder(
+    tmp_path: Any, decisions: list[dict[str, Any]]
+) -> tuple[RouterGate, Any]:
+    from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
+
+    recorder = SpokenAudioRecorder(tmp_path, 1)
+    gate = RouterGate(
+        _FakeRouterLLM(decisions),
+        config=RouterGateConfig(),
+        ledger=TurnLedger(_RecordingEmitter()),
+        reply_audio=recorder,
+    )
+    return gate, recorder
+
+
+async def test_bind_reply_clears_stale_reply_audio(tmp_path: Any) -> None:
+    """A new speech binding drops segments left over from a previous speech."""
+    gate, recorder = _gate_with_recorder(
+        tmp_path, [{"should_speak": True, "confidence": 0.9, "reason": "ok"}]
+    )
+    # Stale audio from e.g. an unbound say() or an approval reply.
+    recorder.feed_segment(b"\x00\x01" * 64)
+
+    await gate.run_turn(ChatContext.empty(), _user_msg("Johnny?"))
+    gate.bind_reply(_handle(chat_items=["reply"]))
+
+    assert recorder.take_reply() is None  # buffer was reset at bind time
+
+
+async def test_bind_reply_clears_buffer_for_approval_handles_too(
+    tmp_path: Any,
+) -> None:
+    """The reset fires before the approval-handle early return."""
+    gate, recorder = _gate_with_recorder(tmp_path, [])
+    recorder.feed_segment(b"\x00\x01" * 64)
+    gate.register_approval_reply("item_approval")
+
+    gate.bind_reply(_handle(handle_id="item_approval"))
+
+    assert recorder.take_reply() is None
+
+
+async def test_interrupted_reply_discards_audio(tmp_path: Any) -> None:
+    """Barge-in → no utterance row → the captured segments are dropped."""
+    gate, recorder = _gate_with_recorder(
+        tmp_path, [{"should_speak": True, "confidence": 0.9, "reason": "ok"}]
+    )
+    await gate.run_turn(ChatContext.empty(), _user_msg("Johnny, status?"))
+    handle = _handle(interrupted=True, chat_items=["partial reply"])
+    gate.bind_reply(handle)
+    recorder.feed_segment(b"\x00\x01" * 64)  # TTS segments fed during playback
+
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+
+    assert recorder.take_reply() is None
+
+
+async def test_empty_reply_discards_audio(tmp_path: Any) -> None:
+    """No assistant output → model_empty_output terminal → buffer dropped."""
+    gate, recorder = _gate_with_recorder(
+        tmp_path, [{"should_speak": True, "confidence": 0.9, "reason": "ok"}]
+    )
+    await gate.run_turn(ChatContext.empty(), _user_msg("Johnny?"))
+    handle = _handle(chat_items=[])
+    gate.bind_reply(handle)
+    recorder.feed_segment(b"\x00\x01" * 64)
+
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+
+    assert recorder.take_reply() is None
+
+
+async def test_replied_path_leaves_audio_for_the_spoke_emitter(
+    tmp_path: Any,
+) -> None:
+    """A kept reply does NOT discard — the spoke emitter owns the flush."""
+    gate, recorder = _gate_with_recorder(
+        tmp_path, [{"should_speak": True, "confidence": 0.9, "reason": "ok"}]
+    )
+    await gate.run_turn(ChatContext.empty(), _user_msg("Johnny, summarise"))
+    handle = _handle(chat_items=["assistant reply item"])
+    gate.bind_reply(handle)
+    recorder.feed_segment(b"\x00\x01" * 64)
+
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+
+    assert recorder.take_reply() is not None

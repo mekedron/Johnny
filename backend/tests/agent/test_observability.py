@@ -368,6 +368,40 @@ async def test_spoke_emitter_autonomous_never_matches_allowlist() -> None:
     assert event.matched_allowed_reply is None
 
 
+async def test_spoke_emitter_attaches_reply_audio(tmp_path) -> None:
+    """With a recorder, the event carries the flushed WAV name + exact duration (Johnny-od1)."""
+    from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
+
+    recorder = SpokenAudioRecorder(tmp_path, 4, clock_ms=lambda: 77)
+    recorder.feed_segment(b"\x01\x02" * 16_000)  # 1.0 s @ 32 000 B/s
+    bus = InMemoryEventBus()
+    record = build_spoke_emitter(
+        bus, mode="autonomous", session_id="4", clock=lambda: 9, recorder=recorder
+    )
+    await record("Here is the summary.")
+    (event,) = bus.snapshot()
+    assert event.audio_file == "utt-77-1.wav"
+    assert event.audio_duration_ms == 1000
+    assert (tmp_path / "4" / "utt-77-1.wav").is_file()
+
+
+async def test_spoke_emitter_empty_recorder_keeps_legacy_shape(tmp_path) -> None:
+    """A recorder with nothing buffered (no-TTS degrade) yields the pre-capture shape."""
+    from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
+
+    bus = InMemoryEventBus()
+    record = build_spoke_emitter(
+        bus,
+        mode="autonomous",
+        session_id="4",
+        recorder=SpokenAudioRecorder(tmp_path, 4),
+    )
+    await record("text only")
+    (event,) = bus.snapshot()
+    assert event.audio_file is None
+    assert event.audio_duration_ms == 0
+
+
 # --------------------------------------------------------------------------- #
 # build_transcript_finalized_emitter                                          #
 # --------------------------------------------------------------------------- #

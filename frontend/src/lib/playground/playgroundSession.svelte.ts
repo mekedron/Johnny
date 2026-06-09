@@ -70,6 +70,8 @@ export interface TranscriptLine {
 	speaker: 'user' | 'bot' | 'speaker';
 	isFinal: boolean;
 	timestamp: number;
+	// Captured reply WAV for bot lines (Johnny-od1) — renders a play button.
+	audioFile?: string | null;
 }
 
 /** Connection health of the live session's event stream. */
@@ -544,7 +546,8 @@ export class PlaygroundController {
 				text: u.output_text,
 				speaker: 'bot',
 				isFinal: true,
-				timestamp: new Date(u.created_at).getTime()
+				timestamp: new Date(u.created_at).getTime(),
+				audioFile: u.audio_file
 			});
 		}
 		seeded.sort((a, b) => a.timestamp - b.timestamp);
@@ -753,7 +756,8 @@ export class PlaygroundController {
 					text: e.text,
 					speaker: 'bot',
 					isFinal: true,
-					timestamp: ts
+					timestamp: ts,
+					audioFile: typeof e.audio_file === 'string' && e.audio_file ? e.audio_file : null
 				});
 				this.lastSpokenAt = ts;
 				// A successful turn clears stale stage diagnostics.

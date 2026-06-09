@@ -19,10 +19,12 @@
 	import { BOT_SESSION_STATUS_LABEL } from '$lib/sessions';
 	import {
 		DECISION_OUTCOME_LABEL,
+		sessionAudioUrl,
 		type AgentDecisionRecord,
 		type AgentUtteranceRecord,
 		type DecisionOutcome
 	} from '$lib/sessionDetail';
+	import UtteranceAudioButton from '$lib/components/UtteranceAudioButton.svelte';
 	import {
 		botDisplayName,
 		deleteHistorySession,
@@ -206,6 +208,8 @@
 		speaker: string | null;
 		createdAt: string | null;
 		isBot: boolean;
+		// Captured reply WAV for bot entries (Johnny-od1) — renders a play button.
+		audioFile: string | null;
 	}
 
 	function transcriptsForRender(d: HistoryDetail): TranscriptTimelineEntry[] {
@@ -214,14 +218,16 @@
 			text: t.text,
 			speaker: t.speaker,
 			createdAt: t.created_at,
-			isBot: false
+			isBot: false,
+			audioFile: null
 		}));
 		const utterances: TranscriptTimelineEntry[] = d.utterances.map((u) => ({
 			key: `u-${u.id}`,
 			text: u.output_text,
 			speaker: botDisplayName(d.session),
 			createdAt: u.created_at,
-			isBot: true
+			isBot: true,
+			audioFile: u.audio_file
 		}));
 		return [...lines, ...utterances].sort(
 			(a, b) =>
@@ -590,6 +596,11 @@
 											>
 												<BotIcon class="size-3" />
 												{line.speaker}
+												{#if line.audioFile}
+													<UtteranceAudioButton
+														src={sessionAudioUrl(sessionId, line.audioFile)}
+													/>
+												{/if}
 											</span>
 										{:else if line.speaker}
 											<span class="font-medium text-foreground">
@@ -707,10 +718,17 @@
 									<div
 										class="mb-1.5 flex items-baseline justify-between gap-2 text-xs"
 									>
-										<span
-											class="inline-flex items-center rounded-sm border border-border bg-muted px-1.5 py-0.5 font-mono text-[0.65rem] tracking-wide text-muted-foreground uppercase"
-										>
-											{u.mode}
+										<span class="inline-flex items-center gap-1.5">
+											<span
+												class="inline-flex items-center rounded-sm border border-border bg-muted px-1.5 py-0.5 font-mono text-[0.65rem] tracking-wide text-muted-foreground uppercase"
+											>
+												{u.mode}
+											</span>
+											{#if u.audio_file}
+												<UtteranceAudioButton
+													src={sessionAudioUrl(sessionId, u.audio_file)}
+												/>
+											{/if}
 										</span>
 										<time class="font-mono text-muted-foreground">
 											{formatTimestamp(u.created_at)}

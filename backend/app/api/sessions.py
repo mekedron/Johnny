@@ -29,6 +29,7 @@ from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -51,6 +52,7 @@ from app.db.models import (
 )
 from app.services.bot_sessions import BotSessionNotFoundError
 from app.services.replay_session import load_replay_fixture
+from app.services.session_audio import resolve_session_audio_file
 from app.services.session_scheduler import (
     ContainerLauncher,
     LauncherError,
@@ -205,6 +207,9 @@ class AgentUtteranceRead(BaseModel):
     output_text: str
     audio_duration_ms: int | None
     matched_allowed_reply: str | None
+    # Bare WAV filename for replay via GET /sessions/{id}/audio/{filename}
+    # (Johnny-od1); None when no audio was captured for the reply.
+    audio_file: str | None = None
     created_at: datetime
 
 
@@ -534,6 +539,33 @@ def get_session_timings(
     return SessionTimingsResponse(
         timings=[SessionTimingRead.model_validate(t) for t in timings],
     )
+
+
+@router.get("/{bot_session_id}/audio/{filename}")
+def get_session_audio(bot_session_id: int, filename: str) -> FileResponse:
+    """Serve one captured reply WAV for playback (Johnny-od1).
+
+    Used by both the live session view (the ``agent_spoke`` event carries the
+    filename) and the History detail page (``agent_utterances.audio_file``).
+    The filename arrives from the URL, so it is validated against the
+    recorder's naming shape and resolved strictly under the session's audio
+    dir — anything else is 400, a missing file (or recording disabled) is 404.
+    No DB check: the per-session directory is the authority, and a deleted
+    session's files are removed with it.
+    """
+    try:
+        path = resolve_session_audio_file(bot_session_id, filename)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="invalid audio filename",
+        ) from exc
+    if path is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="session audio not found",
+        )
+    return FileResponse(path, media_type="audio/wav", filename=filename)
 
 
 @router.post(

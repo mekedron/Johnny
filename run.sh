@@ -10,6 +10,8 @@ fi
 # Piper voices, Whisper, and Parakeet STT models live in host bind
 # mounts under ~/.johnny so the user can `ls` them, drop files in
 # manually, and not lose them across `docker compose down -v` resets.
+# session-audio holds Johnny's captured reply WAVs (one dir per session)
+# for History / live playback — same survive-a-reset reasoning.
 # Create idempotently on first boot so the very first run does not
 # fail mounting a missing directory.
 mkdir -p \
@@ -18,7 +20,8 @@ mkdir -p \
   "${HOME}/.johnny/parakeet-models" \
   "${HOME}/.johnny/parakeet-packages" \
   "${HOME}/.johnny/kokoro-models" \
-  "${HOME}/.johnny/kitten-models"
+  "${HOME}/.johnny/kitten-models" \
+  "${HOME}/.johnny/session-audio"
 
 # Legacy migration hint: older installs kept the models in named Docker
 # volumes (johnny_piper_models / johnny_whisper_models). Detect them and

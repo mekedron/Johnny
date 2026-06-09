@@ -55,6 +55,7 @@ from johnny.voice_pipeline import (
     UnifiedPipelineConfig,
     UnifiedVoicePipeline,
 )
+from johnny.voice_pipeline.audio_recorder import build_recorder_from_env
 
 if TYPE_CHECKING:
     pass
@@ -271,6 +272,10 @@ def _assemble_unified(
         s2s=_as_s2s(s2s),
         event_bus=spec.event_bus,
         config=config,
+        # Reply-audio capture (Johnny-od1): the api container mounts the
+        # session-audio volume and carries JOHNNY_SESSION_AUDIO_DIR in its
+        # env; unset → disabled recorder (no-op).
+        audio_recorder=build_recorder_from_env(spec.bot_session_id),
     )
 
 

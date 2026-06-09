@@ -60,6 +60,7 @@ from app.providers.base import (
     TTSError,
     TTSProvider,
 )
+from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -92,10 +93,12 @@ class JohnnyTTSStream(ChunkedStream):
         input_text: str,
         voice_id: str | None,
         conn_options: APIConnectOptions,
+        recorder: SpokenAudioRecorder | None = None,
     ) -> None:
         super().__init__(tts=tts, input_text=input_text, conn_options=conn_options)
         self._provider = provider
         self._voice_id = voice_id
+        self._recorder = recorder
 
     async def _run(self, output_emitter: AudioEmitter) -> None:
         output_emitter.initialize(
@@ -111,13 +114,23 @@ class JohnnyTTSStream(ChunkedStream):
             "AsyncGenerator[bytes, None]",
             self._provider.synthesize_stream(self._input_text, self._voice_id),
         )
+        # Reply-audio capture (Johnny-od1): frames are buffered locally and fed
+        # to the recorder only after the provider stream completes cleanly. A
+        # TTSError (LiveKit may retry _run) or a barge-in cancellation discards
+        # the local list, so a retried segment can never be double-fed and an
+        # interrupted one is never kept.
+        captured: list[bytes] = []
         try:
             async for frame in gen:
                 if frame:
                     output_emitter.push(frame)
+                    if self._recorder is not None:
+                        captured.append(frame)
             # The base ChunkedStream calls end_input()/join() after _run
             # returns, which flushes the AudioByteStream's held-back tail and
             # marks the final real frame is_final — no explicit flush needed.
+            if self._recorder is not None and captured:
+                self._recorder.feed_segment(b"".join(captured))
         except TTSError as exc:
             self._raise_tts_error(exc)
         finally:
@@ -162,6 +175,7 @@ class JohnnyTTS(TTS[Any]):
         voice: str | None = None,
         model: str | None = None,
         sample_rate: int = PCM_SAMPLE_RATE_HZ,
+        recorder: SpokenAudioRecorder | None = None,
     ) -> None:
         super().__init__(
             capabilities=TTSCapabilities(streaming=False),
@@ -171,6 +185,9 @@ class JohnnyTTS(TTS[Any]):
         self._provider = provider
         self._voice = voice
         self._model = model
+        # Session-scoped reply-audio capture (Johnny-od1): each stream feeds the
+        # PCM it pushed; the speak-path emitter flushes one WAV per reply.
+        self._recorder = recorder
 
     @property
     def model(self) -> str:
@@ -192,6 +209,7 @@ class JohnnyTTS(TTS[Any]):
             input_text=text,
             voice_id=self._voice,
             conn_options=conn_options,
+            recorder=self._recorder,
         )
 
 

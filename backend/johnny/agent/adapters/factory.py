@@ -55,6 +55,7 @@ from app.providers.loader import load_active_providers
 from johnny.agent.adapters.johnny_llm import JohnnyLLM
 from johnny.agent.adapters.johnny_stt import build_stt_adapter
 from johnny.agent.adapters.johnny_tts import JohnnyTTS
+from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
 
 if TYPE_CHECKING:
     from livekit.agents.stt import STT
@@ -209,6 +210,7 @@ def _assemble_split_adapters(
     llm_options: dict[str, Any],
     tts_options: dict[str, Any],
     vad: VAD | None,
+    tts_recorder: SpokenAudioRecorder | None = None,
 ) -> SessionAdapters:
     """Wrap the resolved providers (+ their option dicts) in LiveKit adapters.
 
@@ -239,6 +241,7 @@ def _assemble_split_adapters(
             tts,
             voice=_selected(tts_options, _VOICE_KEYS),
             model=_selected(tts_options, _TTS_MODEL_KEYS),
+            recorder=tts_recorder,
         )
     return SessionAdapters(
         stt=build_stt_adapter(
@@ -258,6 +261,7 @@ def build_session_adapters(
     registry: ProviderRegistry | None = None,
     decrypt: CredentialDecryptor | None = None,
     vad: VAD | None = None,
+    tts_recorder: SpokenAudioRecorder | None = None,
 ) -> SessionAdapters:
     """Build the LiveKit STT/LLM/TTS plugin set from the admin-active providers.
 
@@ -314,6 +318,7 @@ def build_session_adapters(
         llm_options=options.get(ProviderKind.LLM, {}),
         tts_options=options.get(ProviderKind.TTS, {}),
         vad=vad,
+        tts_recorder=tts_recorder,
     )
 
 
@@ -407,6 +412,7 @@ def build_session_adapters_from_payload(
     *,
     registry: ProviderRegistry | None = None,
     vad: VAD | None = None,
+    tts_recorder: SpokenAudioRecorder | None = None,
 ) -> SessionAdapters:
     """Build the LiveKit STT/LLM/TTS plugin set from a dispatched ``provider_config``.
 
@@ -446,6 +452,7 @@ def build_session_adapters_from_payload(
         llm_options=llm_options,
         tts_options=tts_options,
         vad=vad,
+        tts_recorder=tts_recorder,
     )
 
 

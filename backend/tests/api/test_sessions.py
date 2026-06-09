@@ -723,3 +723,81 @@ def test_replay_session_422_when_no_replayable_turns(
     db_session.commit()
     res = client.post(f"/sessions/{row.id}/replay")
     assert res.status_code == 422
+
+
+# --- GET /sessions/{id}/audio/{filename} (Johnny-od1) ------------------------
+
+
+@pytest.fixture
+def audio_root(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    from johnny.voice_pipeline.audio_recorder import SESSION_AUDIO_DIR_ENV
+
+    root = tmp_path / "session-audio"
+    root.mkdir()
+    monkeypatch.setenv(SESSION_AUDIO_DIR_ENV, str(root))
+    return root
+
+
+def _seed_wav(root, session_id: int, name: str = "utt-1000-1.wav") -> bytes:
+    import io
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16_000)
+        wf.writeframes(b"\x01\x02" * 1_600)
+    data = buf.getvalue()
+    session_dir = root / str(session_id)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / name).write_bytes(data)
+    return data
+
+
+def test_get_session_audio_serves_wav(client: TestClient, audio_root) -> None:
+    data = _seed_wav(audio_root, 5)
+
+    res = client.get("/sessions/5/audio/utt-1000-1.wav")
+
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "audio/wav"
+    assert res.content == data
+
+
+def test_get_session_audio_404_for_missing_file(
+    client: TestClient, audio_root
+) -> None:
+    assert client.get("/sessions/5/audio/utt-1000-1.wav").status_code == 404
+
+
+def test_get_session_audio_404_when_capture_disabled(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from johnny.voice_pipeline.audio_recorder import SESSION_AUDIO_DIR_ENV
+
+    monkeypatch.delenv(SESSION_AUDIO_DIR_ENV, raising=False)
+    assert client.get("/sessions/5/audio/utt-1000-1.wav").status_code == 404
+
+
+def test_get_session_audio_400_for_invalid_filename(
+    client: TestClient, audio_root
+) -> None:
+    _seed_wav(audio_root, 5)
+    # Wrong extension and dotfile-shaped names are rejected before any
+    # filesystem access. (Path traversal with `/` or `..%2F` can't reach the
+    # handler as a single path segment, and the regex rejects it anyway.)
+    assert client.get("/sessions/5/audio/utt-1000-1.mp3").status_code == 400
+    assert client.get("/sessions/5/audio/.hidden.wav").status_code == 400
+    assert client.get("/sessions/5/audio/..%2F6%2Futt-1000-1.wav").status_code in (
+        400,
+        404,
+    )
+
+
+def test_get_session_audio_cannot_cross_sessions(
+    client: TestClient, audio_root
+) -> None:
+    _seed_wav(audio_root, 6, "utt-2000-1.wav")
+    # Session 5 has no dir — session 6's file must not be reachable via id 5.
+    assert client.get("/sessions/5/audio/utt-2000-1.wav").status_code == 404

@@ -56,6 +56,7 @@ from johnny.voice_pipeline import (
     UnifiedPipelineConfig,
     UnifiedVoicePipeline,
 )
+from johnny.voice_pipeline.audio_recorder import build_recorder_from_env
 
 logger = logging.getLogger(__name__)
 
@@ -336,6 +337,10 @@ async def _assemble_unified_pipeline(
         s2s=_as_s2s(s2s),
         event_bus=event_bus,
         config=config,
+        # Reply-audio capture (Johnny-od1): the launcher injects
+        # JOHNNY_SESSION_AUDIO_DIR + mounts the shared volume into this
+        # container; unset → disabled recorder (no-op).
+        audio_recorder=build_recorder_from_env(bot_session_id, env),
     )
 
 

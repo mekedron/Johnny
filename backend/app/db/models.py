@@ -666,6 +666,9 @@ class AgentUtterance(Base):
     output_text: Mapped[str] = mapped_column(Text, nullable=False)
     audio_duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     matched_allowed_reply: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Bare WAV filename under <session-audio root>/<bot_session_id>/ (Johnny-od1);
+    # NULL when no audio was captured for the reply (disabled, failed, or legacy).
+    audio_file: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

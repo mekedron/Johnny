@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from livekit.agents.vad import VAD
 
     from app.providers.base import ProviderRegistry
+    from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
 
 
 def instructions_config_from_job(config: SessionJobConfig) -> AgentInstructionsConfig:
@@ -88,6 +89,7 @@ def build_session_adapters_for_job(
     *,
     registry: ProviderRegistry | None = None,
     vad: VAD | None = None,
+    tts_recorder: SpokenAudioRecorder | None = None,
 ) -> SessionAdapters:
     """Build the session's LiveKit STT/LLM/TTS adapters from the job payload.
 
@@ -110,7 +112,9 @@ def build_session_adapters_for_job(
             "adapter factory; a unified session runs on the legacy meet-worker "
             "UnifiedVoicePipeline (set pipeline_mode=split for the agent path)"
         )
-    return build_session_adapters_from_payload(config.provider_config, registry=registry, vad=vad)
+    return build_session_adapters_from_payload(
+        config.provider_config, registry=registry, vad=vad, tts_recorder=tts_recorder
+    )
 
 
 __all__ = [

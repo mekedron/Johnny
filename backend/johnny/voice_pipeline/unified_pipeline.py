@@ -51,6 +51,7 @@ from app.providers.s2s_base import (
     S2SSession,
     S2STranscript,
 )
+from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
 from johnny.voice_pipeline.event_bus import EventBus
 from johnny.voice_pipeline.events import (
     AgentSpoke,
@@ -162,6 +163,7 @@ class UnifiedVoicePipeline:
         config: UnifiedPipelineConfig | None = None,
         transcript_sink: TranscriptSink | None = None,
         utterance_sink: UtteranceSink | None = None,
+        audio_recorder: SpokenAudioRecorder | None = None,
     ) -> None:
         self.transport = transport
         self.s2s = s2s
@@ -169,6 +171,10 @@ class UnifiedVoicePipeline:
         self.config = config or UnifiedPipelineConfig()
         self.transcript_sink = transcript_sink or NoopTranscriptSink()
         self.utterance_sink = utterance_sink or NoopUtteranceSink()
+        # Reply-audio capture (Johnny-od1): assistant frames are fed per
+        # response and flushed to one WAV when the response completes; the
+        # filename rides the AgentSpoke. None/disabled → no-op.
+        self.audio_recorder = audio_recorder
         self._session: S2SSession | None = None
         self._stop_event = asyncio.Event()
         self._assistant_audio_running_text: list[str] = []
@@ -295,7 +301,13 @@ class UnifiedVoicePipeline:
         unified provider may emit a few in-flight frames before
         observing the cancellation; those are drained as no-ops by the
         events loop and discarded by ``transport.cancel_playback``.
+
+        The reply-audio buffer is dropped too (Johnny-od1): an interrupted
+        response's audio is not persisted, matching the split engine's
+        barge-in semantics.
         """
+        if self.audio_recorder is not None:
+            self.audio_recorder.discard_reply()
         try:
             self.transport.cancel_playback()
         except Exception:  # noqa: BLE001 — never block the interrupt
@@ -390,6 +402,8 @@ class UnifiedVoicePipeline:
         if not event.pcm:
             return
         self._assistant_audio_byte_count += len(event.pcm)
+        if self.audio_recorder is not None:
+            self.audio_recorder.feed_segment(event.pcm)
         try:
             await self.transport.play_frames(_single_frame(event.pcm))
         except Exception:  # noqa: BLE001 — log + continue
@@ -445,6 +459,8 @@ class UnifiedVoicePipeline:
         _ = event
         self._assistant_audio_running_text = []
         self._assistant_audio_byte_count = 0
+        if self.audio_recorder is not None:
+            self.audio_recorder.discard_reply()
 
     async def _on_response_completed(
         self, event: S2SResponseCompleted
@@ -452,6 +468,10 @@ class UnifiedVoicePipeline:
         """Persist the completed assistant turn as an :class:`AgentSpoke`."""
         text = " ".join(self._assistant_audio_running_text).strip()
         if not text:
+            # No transcript → no utterance row to attach audio to; drop any
+            # frames buffered for this response (Johnny-od1).
+            if self.audio_recorder is not None:
+                self.audio_recorder.discard_reply()
             return
         # Crude duration estimate: bytes / (sample_rate * 2). Adapters
         # that need a more precise figure can override by emitting their
@@ -459,11 +479,29 @@ class UnifiedVoicePipeline:
         audio_duration_ms = int(
             self._assistant_audio_byte_count * 1000 / 32_000
         )
+        # Flush the response's captured audio to one WAV (Johnny-od1). The
+        # recorder's duration is exact (from the written bytes), so it
+        # supersedes the byte-count estimate when available; file I/O runs in
+        # a thread to keep the events loop responsive.
+        audio_file: str | None = None
+        if self.audio_recorder is not None:
+            try:
+                reply_audio = await asyncio.to_thread(self.audio_recorder.take_reply)
+            except Exception:  # noqa: BLE001 — capture is best-effort
+                reply_audio = None
+                logger.exception(
+                    "audio_recorder.take_reply raised for session=%s",
+                    self.config.session_id,
+                )
+            if reply_audio is not None:
+                audio_file = reply_audio.filename
+                audio_duration_ms = reply_audio.duration_ms
         spoke = AgentSpoke(
             text=text,
             audio_duration_ms=audio_duration_ms,
             timestamp_ms=self._now_ms(),
             session_id=self.config.session_id,
+            audio_file=audio_file,
         )
         try:
             await self.event_bus.publish(spoke)

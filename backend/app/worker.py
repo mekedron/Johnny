@@ -22,6 +22,11 @@ Six responsibilities at runtime:
 * Nightly embedding pass — computes transcript embeddings (US-033 AC
   #5). Cadence defaults to 24 h; override via
   ``JOHNNY_EMBEDDING_INTERVAL_SECONDS``.
+* Session-audio orphan sweep — every
+  ``JOHNNY_SESSION_AUDIO_SWEEP_INTERVAL_SECONDS`` (default 1h) removes
+  per-session reply-audio dirs whose ``bot_sessions`` row no longer exists
+  (Johnny-od1) — e.g. after a ``./stop.sh`` DB reset that left the host
+  bind mount behind.
 
 A real task queue (Celery / Dramatiq) is still pending; until then this
 in-process loop is the scheduler. The job functions themselves
@@ -66,6 +71,7 @@ from app.services.docker_launcher import (
     prune_stopped_containers,
     should_use_docker_launcher,
 )
+from app.services.session_audio import sweep_orphan_session_audio
 from app.services.session_scheduler import (
     DEFAULT_SCHEDULER_INTERVAL_SECONDS,
     ContainerLauncher,
@@ -84,6 +90,7 @@ HEARTBEAT_PATH = Path("/var/lib/johnny/worker/heartbeat")
 INTERVAL_SECONDS = 5
 DEFAULT_EMBEDDING_INTERVAL_SECONDS = 24 * 60 * 60  # nightly
 DEFAULT_BOT_SIGNIN_SWEEP_INTERVAL_SECONDS = 60
+DEFAULT_SESSION_AUDIO_SWEEP_INTERVAL_SECONDS = 60 * 60  # hourly
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +156,37 @@ def run_container_prune_pass(
     if not isinstance(launcher, DockerContainerLauncher):
         return 0
     return prune_stopped_containers(launcher, max_age_seconds=max_age_seconds)
+
+
+def get_session_audio_sweep_interval_seconds() -> int:
+    """Read ``JOHNNY_SESSION_AUDIO_SWEEP_INTERVAL_SECONDS`` from the environment.
+
+    Defaults to hourly when unset or malformed; clamps to at least 1
+    second so a misconfiguration can't spin the loop.
+    """
+    raw = os.environ.get("JOHNNY_SESSION_AUDIO_SWEEP_INTERVAL_SECONDS")
+    if raw is None:
+        return DEFAULT_SESSION_AUDIO_SWEEP_INTERVAL_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "ignoring invalid JOHNNY_SESSION_AUDIO_SWEEP_INTERVAL_SECONDS=%r; "
+            "using default",
+            raw,
+        )
+        return DEFAULT_SESSION_AUDIO_SWEEP_INTERVAL_SECONDS
+    return max(1, value)
+
+
+def run_session_audio_sweep_pass() -> int:
+    """Remove orphan per-session audio dirs in a fresh DB session (Johnny-od1).
+
+    Returns the number of dirs removed. A no-op (0) when
+    ``JOHNNY_SESSION_AUDIO_DIR`` is unset or the root doesn't exist.
+    """
+    with session_scope() as session:
+        return sweep_orphan_session_audio(session)
 
 
 def run_bot_signin_sweep_pass(
@@ -356,12 +394,14 @@ def main() -> None:
         DEFAULT_PRUNE_INTERVAL_SECONDS,
     )
 
+    session_audio_sweep_interval = get_session_audio_sweep_interval_seconds()
     last_embedding_at = 0.0
     last_poll_at = 0.0
     last_scheduler_at = 0.0
     last_monitor_at = 0.0
     last_prune_at = 0.0
     last_bot_signin_sweep_at = 0.0
+    last_session_audio_sweep_at = 0.0
     while True:
         write_heartbeat()
         now = time.time()
@@ -436,6 +476,21 @@ def main() -> None:
             except Exception:
                 logger.exception("bot-signin sweep failed")
             last_bot_signin_sweep_at = now
+        if _should_run(
+            now,
+            last_session_audio_sweep_at,
+            session_audio_sweep_interval,
+        ):
+            try:
+                removed = run_session_audio_sweep_pass()
+                if removed > 0:
+                    logger.info(
+                        "session-audio sweep complete: %d orphan dirs removed",
+                        removed,
+                    )
+            except Exception:
+                logger.exception("session-audio sweep failed")
+            last_session_audio_sweep_at = now
         time.sleep(INTERVAL_SECONDS)
 
 

@@ -62,6 +62,7 @@ from johnny.agent.gate import (
 )
 from johnny.agent.observability import RecordDecision, RecordSpoke, RecordSuggested
 from johnny.voice_pipeline import reasoning as _reasoning
+from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
 from johnny.voice_pipeline.reasoning import (
     APPROVAL_REQUIRED_MODE,
     AUTONOMOUS_MODE,
@@ -179,6 +180,7 @@ class RouterGate:
         record_decision: RecordDecision | None = None,
         record_spoke: RecordSpoke | None = None,
         record_suggested: RecordSuggested | None = None,
+        reply_audio: SpokenAudioRecorder | None = None,
         abandon: asyncio.Event | None = None,
         clock: Callable[[], int] = _default_clock,
     ) -> None:
@@ -196,6 +198,12 @@ class RouterGate:
         self._record_decision = record_decision
         self._record_spoke = record_spoke
         self._record_suggested = record_suggested
+        # The session's reply-audio recorder (Johnny-od1). The gate only does
+        # buffer hygiene: reset at every speech bind so stale segments (an
+        # approval reply, a say(), an interrupted reply) never leak into the
+        # next reply's file, and discard on the non-spoke terminals. The spoke
+        # emitter owns the flush-to-WAV.
+        self._reply_audio = reply_audio
         self._abandon = abandon
         self._clock = clock
         # SpeechHandle ids the approval coordinator owns (it created them via its
@@ -487,6 +495,13 @@ class RouterGate:
         completion to an unrelated pending SPEAK turn). It is consumed from the set
         on the way out so the set stays bounded.
         """
+        # A new speech is starting: drop any reply audio still buffered from a
+        # previous speech (Johnny-od1). This fires before the new speech's TTS
+        # produces a single segment — including for approval replies and
+        # explicit say()s, whose audio is never persisted — so a kept reply's
+        # WAV can only ever contain its own segments.
+        if self._reply_audio is not None:
+            self._reply_audio.discard_reply()
         if speech_handle.id in self._approval_reply_handles:
             self._approval_reply_handles.discard(speech_handle.id)
             return
@@ -551,6 +566,10 @@ class RouterGate:
         coercion_no_match = turn_id in self._coercion_no_match_turns
         self._coercion_no_match_turns.discard(turn_id)
         if handle.interrupted:
+            # Barge-in: the reply has no terminal row/chat line to attach audio
+            # to, so the buffered segments are dropped, not persisted (Johnny-od1).
+            if self._reply_audio is not None:
+                self._reply_audio.discard_reply()
             await self._ledger.emit(
                 turn_id,
                 terminal_state="no_reply",
@@ -559,6 +578,8 @@ class RouterGate:
             )
             return
         if not handle.chat_items:
+            if self._reply_audio is not None:
+                self._reply_audio.discard_reply()
             await self._ledger.emit(
                 turn_id,
                 terminal_state="no_reply",

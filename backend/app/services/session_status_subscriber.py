@@ -484,6 +484,7 @@ def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
                 text,
                 reason,
             )
+    audio_file = payload.get("audio_file")
     row = AgentUtterance(
         bot_session_id=session_id,
         agent_decision_id=decision_id,
@@ -493,6 +494,9 @@ def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
         audio_duration_ms=int(duration) if isinstance(duration, (int, float)) else None,
         matched_allowed_reply=(
             str(matched) if isinstance(matched, str) else None
+        ),
+        audio_file=(
+            str(audio_file) if isinstance(audio_file, str) and audio_file else None
         ),
     )
     db.add(row)

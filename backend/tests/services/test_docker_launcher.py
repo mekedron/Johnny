@@ -348,6 +348,46 @@ async def test_start_runs_container_with_env_and_labels(
     assert json.loads(env["JOHNNY_PROVIDER_CONFIG"]) == {"stt": "deepgram"}
 
 
+def test_build_environment_sets_session_audio_dir(
+    launcher: _StubLauncher, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Johnny-od1: the spawned container gets the in-container capture root."""
+    monkeypatch.delenv("JOHNNY_MEET_WORKER_SESSION_AUDIO_VOLUME", raising=False)
+    env = launcher._build_environment(_make_ctx(bot_session_id=55))
+    assert env["JOHNNY_SESSION_AUDIO_DIR"] == "/var/lib/johnny/session-audio"
+
+
+def test_build_environment_omits_session_audio_dir_when_volume_disabled(
+    launcher: _StubLauncher, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Johnny-od1: volume disabled → no env var → in-worker recorder no-ops."""
+    monkeypatch.setenv("JOHNNY_MEET_WORKER_SESSION_AUDIO_VOLUME", "none")
+    env = launcher._build_environment(_make_ctx(bot_session_id=55))
+    assert "JOHNNY_SESSION_AUDIO_DIR" not in env
+
+
+def test_meet_worker_volumes_include_session_audio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Johnny-od1: spawned meet-workers mount the shared session-audio dir rw."""
+    from app.services.docker_launcher import get_meet_worker_volumes
+
+    monkeypatch.setenv(
+        "JOHNNY_MEET_WORKER_SESSION_AUDIO_VOLUME", "/host/.johnny/session-audio"
+    )
+    volumes = get_meet_worker_volumes()
+    assert volumes["/host/.johnny/session-audio"] == {
+        "bind": "/var/lib/johnny/session-audio",
+        "mode": "rw",
+    }
+
+    monkeypatch.setenv("JOHNNY_MEET_WORKER_SESSION_AUDIO_VOLUME", "none")
+    assert not any(
+        spec["bind"] == "/var/lib/johnny/session-audio"
+        for spec in get_meet_worker_volumes().values()
+    )
+
+
 def test_build_environment_no_bridge_env_in_legacy(
     launcher: _StubLauncher, monkeypatch: pytest.MonkeyPatch
 ) -> None:

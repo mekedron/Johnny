@@ -44,6 +44,7 @@ from app.db.models import (
     MeetingConfig,
     TranscriptChunk,
 )
+from app.services.session_audio import delete_session_audio
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -375,7 +376,9 @@ def delete_session(session: Session, bot_session_id: int) -> None:
     """Delete a session row; the ORM cascade drops dependent rows.
 
     Raises :class:`SessionNotFoundError` if the row doesn't exist so the
-    HTTP layer can return 404 without a separate existence check.
+    HTTP layer can return 404 without a separate existence check. The
+    session's captured reply audio (Johnny-od1) is removed after the commit —
+    best-effort, since the files live outside the transaction.
     """
     row = session.get(BotSession, bot_session_id)
     if row is None:
@@ -384,6 +387,7 @@ def delete_session(session: Session, bot_session_id: int) -> None:
         )
     session.delete(row)
     session.commit()
+    delete_session_audio(bot_session_id)
 
 
 def _serialise_datetime(value: datetime | None) -> str | None:
@@ -458,6 +462,7 @@ def _serialise_utterance(row: AgentUtterance) -> dict[str, Any]:
         "output_text": row.output_text,
         "audio_duration_ms": row.audio_duration_ms,
         "matched_allowed_reply": row.matched_allowed_reply,
+        "audio_file": row.audio_file,
         "created_at": _serialise_datetime(row.created_at),
     }
 

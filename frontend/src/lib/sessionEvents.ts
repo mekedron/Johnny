@@ -119,6 +119,9 @@ export interface AgentSpokeEvent extends BaseEnvelope {
 	timestamp_ms: number;
 	matched_allowed_reply?: string | null;
 	prompt?: string;
+	// Bare WAV filename of the captured reply audio (Johnny-od1), playable via
+	// GET /sessions/{id}/audio/{audio_file}; absent/null when capture is off.
+	audio_file?: string | null;
 }
 
 export interface AgentSuggestedEvent extends BaseEnvelope {

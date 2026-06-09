@@ -10,6 +10,8 @@
 	import Volume2Icon from '@lucide/svelte/icons/volume-2';
 	import VolumeXIcon from '@lucide/svelte/icons/volume-x';
 	import { Button } from '$lib/components/ui/button/index.js';
+	import UtteranceAudioButton from '$lib/components/UtteranceAudioButton.svelte';
+	import { sessionAudioUrl } from '$lib/sessionDetail';
 	import { BOT_MODE_LABEL, type BotMode } from '$lib/templates';
 	import { PIPELINE_MODE_LABEL, type Provider, type ProviderKind } from '$lib/providers';
 	import { readSessionPersonality, fallbackChipText } from '$lib/personalities';
@@ -336,6 +338,11 @@
 							{#if isBot}
 								<BotIcon class="size-3" />
 								<span>Johnny</span>
+								{#if line.audioFile && controller.liveSession}
+									<UtteranceAudioButton
+										src={sessionAudioUrl(controller.liveSession.id, line.audioFile)}
+									/>
+								{/if}
 							{:else if isUser}
 								<UserIcon class="size-3" />
 								<span>You</span>

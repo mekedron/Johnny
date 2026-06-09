@@ -115,3 +115,41 @@ def test_run_container_monitor_pass_noop_for_non_docker_launcher() -> None:
 
 def test_run_container_prune_pass_noop_for_non_docker_launcher() -> None:
     assert run_container_prune_pass(NoopContainerLauncher(), max_age_seconds=1) == 0
+
+
+# --- session-audio sweep cadence (Johnny-od1) --------------------------------
+
+
+def test_default_session_audio_sweep_interval_is_hourly() -> None:
+    from app.worker import DEFAULT_SESSION_AUDIO_SWEEP_INTERVAL_SECONDS
+
+    assert DEFAULT_SESSION_AUDIO_SWEEP_INTERVAL_SECONDS == 3600
+
+
+def test_get_session_audio_sweep_interval_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.worker import get_session_audio_sweep_interval_seconds
+
+    monkeypatch.delenv(
+        "JOHNNY_SESSION_AUDIO_SWEEP_INTERVAL_SECONDS", raising=False
+    )
+    assert get_session_audio_sweep_interval_seconds() == 3600
+
+
+def test_get_session_audio_sweep_interval_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.worker import get_session_audio_sweep_interval_seconds
+
+    monkeypatch.setenv("JOHNNY_SESSION_AUDIO_SWEEP_INTERVAL_SECONDS", "120")
+    assert get_session_audio_sweep_interval_seconds() == 120
+
+
+def test_get_session_audio_sweep_interval_invalid_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.worker import get_session_audio_sweep_interval_seconds
+
+    monkeypatch.setenv("JOHNNY_SESSION_AUDIO_SWEEP_INTERVAL_SECONDS", "soon")
+    assert get_session_audio_sweep_interval_seconds() == 3600

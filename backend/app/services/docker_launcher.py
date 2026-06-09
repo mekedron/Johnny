@@ -89,6 +89,11 @@ DEFAULT_MEET_WORKER_PARAKEET_VOLUME = (
     str(Path.home() / ".johnny" / "parakeet-models")
 )
 DEFAULT_MEET_WORKER_PARAKEET_TARGET = "/var/lib/johnny/parakeet-models"
+MEET_WORKER_SESSION_AUDIO_VOLUME_ENV = "JOHNNY_MEET_WORKER_SESSION_AUDIO_VOLUME"
+DEFAULT_MEET_WORKER_SESSION_AUDIO_VOLUME = (
+    str(Path.home() / ".johnny" / "session-audio")
+)
+DEFAULT_MEET_WORKER_SESSION_AUDIO_TARGET = "/var/lib/johnny/session-audio"
 
 DEFAULT_STOP_TIMEOUT_SECONDS = 10
 DEFAULT_LOG_TAIL_LINES = 500
@@ -195,6 +200,10 @@ def get_meet_worker_volumes() -> dict[str, dict[str, str]]:
       ``/var/lib/johnny/parakeet-models`` — NeMo Parakeet ASR
       checkpoints (Johnny-stt.1), same host-bind-mount UX as the
       others so the ~600 MB download is reused across containers.
+    * ``~/.johnny/session-audio`` (or named volume) →
+      ``/var/lib/johnny/session-audio`` — captured reply audio
+      (Johnny-od1): a unified S2S session writes one WAV per assistant
+      response here; the api serves them for History / live playback.
 
     Returns a Docker SDK-compatible mapping. An operator can disable any
     mount by setting the matching env var to ``none``. An absolute path
@@ -225,6 +234,14 @@ def get_meet_worker_volumes() -> dict[str, dict[str, str]]:
     if parakeet is not None:
         out[parakeet] = {
             "bind": DEFAULT_MEET_WORKER_PARAKEET_TARGET,
+            "mode": "rw",
+        }
+    session_audio = _read_volume_env(
+        MEET_WORKER_SESSION_AUDIO_VOLUME_ENV, DEFAULT_MEET_WORKER_SESSION_AUDIO_VOLUME
+    )
+    if session_audio is not None:
+        out[session_audio] = {
+            "bind": DEFAULT_MEET_WORKER_SESSION_AUDIO_TARGET,
             "mode": "rw",
         }
     return out
@@ -655,6 +672,18 @@ class DockerContainerLauncher(ContainerLauncher):
         # Johnny-ckz.1's "perpetual joining".
         if self._redis_url:
             env["JOHNNY_REDIS_URL"] = self._redis_url
+        # Reply-audio capture root inside the spawned container (Johnny-od1).
+        # Points at the fixed mount target from get_meet_worker_volumes();
+        # omitted when the operator disabled that volume, which leaves the
+        # in-worker recorder a no-op.
+        if (
+            _read_volume_env(
+                MEET_WORKER_SESSION_AUDIO_VOLUME_ENV,
+                DEFAULT_MEET_WORKER_SESSION_AUDIO_VOLUME,
+            )
+            is not None
+        ):
+            env["JOHNNY_SESSION_AUDIO_DIR"] = DEFAULT_MEET_WORKER_SESSION_AUDIO_TARGET
         # Johnny-wz5: per-session engine selection. In agentsession mode this
         # adds JOHNNY_ORCHESTRATOR + the minted per-room bridge token + room /
         # identity so the meet-worker runs as a pure audio bridge into the
