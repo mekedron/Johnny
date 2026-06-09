@@ -299,6 +299,7 @@ async def test_chat_omits_tuning_knobs_by_default() -> None:
         "frequency_penalty",
         "presence_penalty",
         "seed",
+        "reasoning_effort",
         "think",
         "chat_template_kwargs",
     ):
@@ -325,6 +326,21 @@ async def test_chat_forwards_tuning_knobs_when_set() -> None:
     assert body["seed"] == 7
 
 
+async def test_chat_disable_thinking_sets_reasoning_effort_none() -> None:
+    # The documented disable knob for Ollama's OpenAI-compatible
+    # /v1/chat/completions endpoint is `reasoning_effort: "none"`
+    # (values: high | medium | low | none). `think` is NOT in that
+    # endpoint's supported-request-fields list — it is a native
+    # /api/chat field — so reasoning_effort is the correct primary.
+    adapter = _FakeOpenAICompatibleLLM(
+        _config(disable_thinking=True),
+        handler=_ok_handler(_chat_completion()),
+    )
+    await adapter.chat([ChatMessage(role="user", content="hi")])
+    body = json.loads(adapter.requests[0].content)
+    assert body["reasoning_effort"] == "none"
+
+
 async def test_chat_disable_thinking_sets_top_level_think_false() -> None:
     adapter = _FakeOpenAICompatibleLLM(
         _config(disable_thinking=True),
@@ -332,7 +348,9 @@ async def test_chat_disable_thinking_sets_top_level_think_false() -> None:
     )
     await adapter.chat([ChatMessage(role="user", content="hi")])
     body = json.loads(adapter.requests[0].content)
-    # think MUST be top-level, not nested under options — per Ollama docs.
+    # think: false is kept as a top-level fallback (native-API field that
+    # some Ollama builds bridge onto the compat endpoint); when present it
+    # MUST be top-level, never nested under options.
     assert body["think"] is False
     assert "options" not in body or "think" not in body.get("options", {})
 
@@ -393,6 +411,7 @@ async def test_chat_disable_thinking_does_not_mutate_messages_when_off() -> None
     )
     body = json.loads(adapter.requests[0].content)
     assert body["messages"][0] == {"role": "system", "content": "be brief"}
+    assert "reasoning_effort" not in body
     assert "think" not in body
     assert "chat_template_kwargs" not in body
 

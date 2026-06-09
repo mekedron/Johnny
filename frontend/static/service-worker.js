@@ -81,13 +81,24 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
 	const data = event.notification && event.notification.data;
-	if (!data || data.kind !== 'approval') {
+	if (!data) {
 		event.notification.close();
 		return;
 	}
-	const action = event.action || 'open';
+	if (data.kind === 'approval') {
+		const action = event.action || 'open';
+		event.notification.close();
+		event.waitUntil(handleApprovalAction(action, data));
+		return;
+	}
+	if (data.kind === 'relogin') {
+		// Any click (the "Log in again" action or the body) deep-links
+		// straight into the signed-out account's sign-in (Johnny-ebf).
+		event.notification.close();
+		event.waitUntil(openReloginSettings(Number(data.accountId)));
+		return;
+	}
 	event.notification.close();
-	event.waitUntil(handleApprovalAction(action, data));
 });
 
 async function handleApprovalAction(action, data) {
@@ -142,6 +153,36 @@ async function resolveApiBase() {
 		// fall through
 	}
 	return self.location.origin.replace(/:\d+$/, ':8000');
+}
+
+async function openReloginSettings(accountId) {
+	// Land the operator on the settings page with the target account's
+	// sign-in already opening (the page reads ?relogin=<id> on mount).
+	const url = Number.isFinite(accountId)
+		? `/settings?relogin=${accountId}`
+		: '/settings';
+	try {
+		const allClients = await self.clients.matchAll({
+			type: 'window',
+			includeUncontrolled: true
+		});
+		for (const client of allClients) {
+			if ('navigate' in client && 'focus' in client) {
+				try {
+					await client.focus();
+					return await client.navigate(url);
+				} catch {
+					// client not controlled / cross-origin — fall through to openWindow
+				}
+			}
+		}
+		if (self.clients.openWindow) {
+			return await self.clients.openWindow(url);
+		}
+	} catch {
+		// Nothing to do — just exit cleanly.
+	}
+	return undefined;
 }
 
 async function focusOrOpenClient() {

@@ -48,6 +48,7 @@ from johnny.meet_worker.log_stages import (
     log_stage_error,
 )
 from johnny.meet_worker.meet_join import (
+    MeetAccountSignedOutError,
     MeetingAccessDeniedError,
     MeetingNotStartedError,
     MeetJoinError,
@@ -316,6 +317,10 @@ def _resolve_storage_state(
 
 def _classify_join_error(exc: BaseException) -> tuple[str, str]:
     """Map an exception to ``(stage, error_reason)`` for logging + publishing."""
+    # Checked before MeetSignInError (its base) so the signed-out account
+    # gets its own distinct reason rather than the generic sign-in one.
+    if isinstance(exc, MeetAccountSignedOutError):
+        return "blocker_check", f"account_signed_out: {exc}"
     if isinstance(exc, MeetSignInError):
         return "blocker_check", f"sign_in_required: {exc}"
     if isinstance(exc, MeetingAccessDeniedError):

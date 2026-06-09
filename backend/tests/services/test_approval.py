@@ -13,6 +13,7 @@ from app.services.approval import (
     SESSION_CHANNEL_PREFIX,
     RedisApprovalGate,
     approval_channel,
+    publish_account_relogin_event,
     publish_approval,
     publish_approval_pending_event,
     publish_approval_resolved_event,
@@ -315,6 +316,31 @@ async def test_publish_approval_pending_event_lands_on_session_channel() -> None
     assert body["reason"] == "user-asked"
     assert body["reply_type"] == "answer"
     assert body["timeout_s"] == 12.5
+    assert body["session_id"] == "7"
+    assert isinstance(body["timestamp_ms"], int)
+
+
+async def test_publish_account_relogin_event_lands_on_session_channel() -> None:
+    fake = _FakeRedis()
+    fake.publish_result = 3
+    subs = await publish_account_relogin_event(
+        fake,  # type: ignore[arg-type]
+        session_id="7",
+        account_id=5,
+        account_email="bot@example.com",
+        meet_link="https://meet.google.com/abc-defg-hij",
+        message="Couldn't join — the account bot@example.com is signed out.",
+    )
+    assert subs == 3
+    assert len(fake.published) == 1
+    channel, payload = fake.published[0]
+    assert channel == session_channel("7")
+    body = json.loads(payload)
+    assert body["type"] == "account_relogin_needed"
+    assert body["account_id"] == 5
+    assert body["account_email"] == "bot@example.com"
+    assert body["meet_link"] == "https://meet.google.com/abc-defg-hij"
+    assert "bot@example.com" in body["message"]
     assert body["session_id"] == "7"
     assert isinstance(body["timestamp_ms"], int)
 

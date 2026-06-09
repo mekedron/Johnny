@@ -34,6 +34,7 @@ from app.db.models import (
     BotMode,
     BotSession,
     DecisionOutcome,
+    GoogleAccount,
     NoReplyReason,
     SessionTiming,
     TerminalState,
@@ -41,13 +42,17 @@ from app.db.models import (
     decision_texts_diverge,
 )
 from app.db.session import session_scope
-from app.services.approval import publish_approval_pending_event
+from app.services.approval import (
+    publish_account_relogin_event,
+    publish_approval_pending_event,
+)
 from app.services.bot_sessions import (
     BotSessionNotFoundError,
     mark_session_ended,
     mark_session_failed,
     mark_session_joined,
     mark_session_joining,
+    mark_session_waiting_for_relogin,
 )
 
 logger = logging.getLogger(__name__)
@@ -108,39 +113,64 @@ class _PendingApprovalEvent:
     timeout_s: float
 
 
+@dataclass(frozen=True, slots=True)
+class _ReloginEvent:
+    """Info needed to publish an ``account_relogin_needed`` WS event.
+
+    Returned by :func:`apply_status_event` when it persists a
+    ``waiting_for_relogin`` transition; the subscriber loop uses it to push
+    a browser notification naming which bot account is signed out and for
+    which meeting, with a one-click deep-link into that account's re-login
+    (Johnny-ebf). ``account_email`` and ``meet_link`` are resolved from the
+    session row here (the SQLAlchemy-free meet-worker only knows the
+    ``account_id``).
+    """
+
+    session_id: int
+    account_id: int
+    account_email: str
+    meet_link: str
+    message: str
+
+
 # --- Pure handler ---------------------------------------------------------
 
 
 def apply_status_event(
     db: Session,
     payload: dict[str, Any],
-) -> bool:
-    """Persist one ``session_status_changed`` payload. Returns ``True`` on apply.
+) -> tuple[bool, _ReloginEvent | None]:
+    """Persist one ``session_status_changed`` payload.
 
-    Returns ``False`` when the payload is malformed or the event type is
-    something we don't handle — caller treats these as drops, not errors.
+    Returns ``(applied, relogin_event)``. ``applied`` is ``True`` when a row
+    was updated; ``False`` when the payload is malformed or the event type is
+    something we don't handle (caller treats these as drops, not errors).
+    ``relogin_event`` is non-``None`` only for a ``waiting_for_relogin``
+    transition that resolved a target account — the caller publishes it as an
+    ``account_relogin_needed`` WS event after the transaction commits (mirrors
+    the ``apply_router_decision_event`` → ``_PendingApprovalEvent`` seam).
     Raises :class:`BotSessionNotFoundError` when ``session_id`` doesn't
     match any row so the caller can log and move on.
     """
     if payload.get("type") != SESSION_STATUS_EVENT_TYPE:
-        return False
+        return False, None
     raw_id = payload.get("session_id")
     if raw_id is None:
         logger.warning("status-sub: dropping event without session_id: %r", payload)
-        return False
+        return False, None
     try:
         session_id = int(raw_id)
     except (TypeError, ValueError):
         logger.warning(
             "status-sub: dropping event with non-int session_id=%r", raw_id
         )
-        return False
+        return False, None
     status = payload.get("status")
     if not isinstance(status, str):
         logger.warning(
             "status-sub: dropping event with missing status: %r", payload
         )
-        return False
+        return False, None
 
     error_reason = payload.get("error_reason")
     if status == "joining":
@@ -154,20 +184,89 @@ def apply_status_event(
             else "unspecified (meet-worker failure)"
         )
         mark_session_failed(db, session_id, reason)
+    elif status == "waiting_for_relogin":
+        reason = (
+            str(error_reason)
+            if isinstance(error_reason, str) and error_reason
+            else "the bot account is signed out"
+        )
+        mark_session_waiting_for_relogin(db, session_id, reason)
+        return True, _build_relogin_event(db, session_id)
     elif status == "ended":
         mark_session_ended(db, session_id)
     elif status == "scheduled":
         # The API creates rows in scheduled; the meet-worker never
         # publishes that transition. Treat as no-op.
-        return False
+        return False, None
     else:
         logger.warning(
             "status-sub: ignoring unknown status %r on session_id=%s",
             status,
             session_id,
         )
-        return False
-    return True
+        return False, None
+    return True, None
+
+
+def _build_relogin_event(
+    db: Session, session_id: int
+) -> _ReloginEvent | None:
+    """Enrich the just-marked ``waiting_for_relogin`` row and build its event.
+
+    The meet-worker only knows the ``account_id``, so here (with DB access) we
+    resolve the account email and meeting link, rewrite ``error_reason`` to an
+    operator-facing message that names the account, and return the event used
+    to fire the one-click re-login notification. Returns ``None`` when the
+    session has no resolvable account to target (the clear status is still
+    shown, but there's nothing to deep-link a re-login to).
+    """
+    row = db.get(BotSession, session_id)
+    if row is None:  # pragma: no cover — mark_* above already raises otherwise
+        return None
+
+    account = (
+        db.get(GoogleAccount, row.account_id)
+        if row.account_id is not None
+        else None
+    )
+    email = account.email if account is not None else None
+
+    meet_link = ""
+    meeting = row.meeting_config
+    if meeting is not None and meeting.calendar_event is not None:
+        meet_link = meeting.calendar_event.meet_link or ""
+
+    if email:
+        message = (
+            f"Couldn't join — the account {email} is signed out. "
+            "Please log in again."
+        )
+    else:
+        message = (
+            "Couldn't join — the bot account is signed out. "
+            "Please log in again."
+        )
+    # Surface the email-bearing message on the session itself so the active
+    # panel shows the same clear text the notification carries.
+    row.error_reason = message
+    db.flush()
+
+    if row.account_id is None or not email:
+        logger.warning(
+            "status-sub: session_id=%s signed out but has no resolvable "
+            "account to re-login (account_id=%r); showing status without a "
+            "notification deep-link",
+            session_id,
+            row.account_id,
+        )
+        return None
+    return _ReloginEvent(
+        session_id=session_id,
+        account_id=row.account_id,
+        account_email=email,
+        meet_link=meet_link,
+        message=message,
+    )
 
 
 def apply_transcript_event(db: Session, payload: dict[str, Any]) -> bool:
@@ -625,10 +724,20 @@ cannot poison the persistence transaction.
 """
 
 
+ReloginEventPublisher = Callable[[_ReloginEvent], Awaitable[None]]
+"""Callback invoked after a ``waiting_for_relogin`` row is committed.
+
+The subscriber uses it to publish the WS ``account_relogin_needed`` event
+so the operator gets a one-click re-login notification. Awaited *after* the
+commit for the same reason as :data:`PendingEventPublisher` (Johnny-ebf).
+"""
+
+
 async def _apply_in_transaction(
     payload: dict[str, Any],
     *,
     pending_publisher: PendingEventPublisher | None = None,
+    relogin_publisher: ReloginEventPublisher | None = None,
 ) -> bool:
     """Open a fresh session, apply the event, commit on success.
 
@@ -641,16 +750,19 @@ async def _apply_in_transaction(
     accompanying :class:`_PendingApprovalEvent` is handed to
     ``pending_publisher`` (when supplied) *after* the surrounding
     transaction commits — the publish lives outside the DB transaction
-    so a Redis hiccup never rolls back a successful insert.
+    so a Redis hiccup never rolls back a successful insert. A
+    ``waiting_for_relogin`` status change is handled the same way via
+    :class:`_ReloginEvent` / ``relogin_publisher`` (Johnny-ebf).
     """
     event_type = payload.get("type")
     pending_event: _PendingApprovalEvent | None = None
+    relogin_event: _ReloginEvent | None = None
     applied = False
     try:
         with session_scope() as db:
             try:
                 if event_type == SESSION_STATUS_EVENT_TYPE:
-                    applied = apply_status_event(db, payload)
+                    applied, relogin_event = apply_status_event(db, payload)
                 elif event_type == TRANSCRIPT_EVENT_TYPE:
                     applied = apply_transcript_event(db, payload)
                 elif event_type == ROUTER_DECISION_EVENT_TYPE:
@@ -684,6 +796,16 @@ async def _apply_in_transaction(
                 "for decision_id=%d session_id=%d",
                 pending_event.decision_id,
                 pending_event.session_id,
+            )
+    if applied and relogin_event is not None and relogin_publisher is not None:
+        try:
+            await relogin_publisher(relogin_event)
+        except Exception:
+            logger.exception(
+                "status-sub: failed to publish account_relogin_needed event "
+                "for account_id=%d session_id=%d",
+                relogin_event.account_id,
+                relogin_event.session_id,
             )
     return applied
 
@@ -808,8 +930,45 @@ async def _default_pending_publisher_factory(
     return _publish
 
 
+async def _default_relogin_publisher_factory(
+    redis_url: str,
+) -> ReloginEventPublisher | None:
+    """Build the production publisher for ``account_relogin_needed`` events.
+
+    Companion to :func:`_default_pending_publisher_factory` — the subscriber
+    owns the ``waiting_for_relogin`` row transition, so it also owns fanning
+    the one-click re-login notification onto the session WS channel
+    (Johnny-ebf).
+    """
+    try:
+        from redis.asyncio import Redis as RedisClient
+    except ImportError:  # pragma: no cover — redis ships with the image
+        logger.warning(
+            "status-sub: redis package missing, account_relogin_needed "
+            "events will NOT be published"
+        )
+        return None
+
+    client = RedisClient.from_url(redis_url, decode_responses=False)
+
+    async def _publish(event: _ReloginEvent) -> None:
+        await publish_account_relogin_event(
+            client,
+            session_id=str(event.session_id),
+            account_id=event.account_id,
+            account_email=event.account_email,
+            meet_link=event.meet_link,
+            message=event.message,
+        )
+
+    return _publish
+
+
 PendingPublisherFactory = Callable[
     [str], Awaitable[PendingEventPublisher | None]
+]
+ReloginPublisherFactory = Callable[
+    [str], Awaitable[ReloginEventPublisher | None]
 ]
 
 
@@ -818,6 +977,7 @@ async def run_subscriber(
     *,
     message_stream_factory: StreamFactory | None = None,
     pending_publisher_factory: PendingPublisherFactory | None = None,
+    relogin_publisher_factory: ReloginPublisherFactory | None = None,
 ) -> None:
     """Subscribe and persist forever (until cancelled).
 
@@ -829,17 +989,25 @@ async def run_subscriber(
     ``pending_publisher_factory`` builds a callback the subscriber
     invokes after persisting a PENDING decision row — used to fan a
     live ``approval_pending`` event onto the session WS channel
-    (Johnny-hn6). The default factory wraps a fresh Redis publisher;
-    tests inject one that captures the events.
+    (Johnny-hn6). ``relogin_publisher_factory`` is the analogous hook for
+    ``account_relogin_needed`` events on a ``waiting_for_relogin`` transition
+    (Johnny-ebf). Both default to a fresh Redis publisher; tests inject ones
+    that capture the events.
     """
     factory = message_stream_factory or _redis_message_stream
     publisher_factory = (
         pending_publisher_factory or _default_pending_publisher_factory
     )
+    relogin_factory = (
+        relogin_publisher_factory or _default_relogin_publisher_factory
+    )
     pending_publisher = await publisher_factory(redis_url)
+    relogin_publisher = await relogin_factory(redis_url)
     async for payload in factory(redis_url):
         await _apply_in_transaction(
-            payload, pending_publisher=pending_publisher
+            payload,
+            pending_publisher=pending_publisher,
+            relogin_publisher=relogin_publisher,
         )
 
 

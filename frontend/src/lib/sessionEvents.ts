@@ -34,6 +34,7 @@ export type SessionEventType =
 	| 'router_decision'
 	| 'approval_pending'
 	| 'approval_resolved'
+	| 'account_relogin_needed'
 	| 'agent_spoke'
 	| 'agent_suggested'
 	| 'agent_tts_failed'
@@ -90,6 +91,23 @@ export interface ApprovalResolvedEvent extends BaseEnvelope {
 	type: 'approval_resolved';
 	decision_id: number;
 	resolution: 'approved' | 'rejected' | 'timeout';
+	timestamp_ms: number;
+	session_id?: string | null;
+}
+
+/**
+ * The bot account's Google login expired (Johnny-ebf). The meet-worker hit
+ * the account-chooser "Signed out" page; the session is parked in
+ * `waiting_for_relogin`. Carries which account needs re-login (so the
+ * notification can deep-link straight into that account's sign-in) and the
+ * meeting it was trying to join.
+ */
+export interface AccountReloginNeededEvent extends BaseEnvelope {
+	type: 'account_relogin_needed';
+	account_id: number;
+	account_email: string;
+	meet_link: string;
+	message: string;
 	timestamp_ms: number;
 	session_id?: string | null;
 }
@@ -192,6 +210,7 @@ export type SessionEvent =
 	| RouterDecisionEvent
 	| ApprovalPendingEvent
 	| ApprovalResolvedEvent
+	| AccountReloginNeededEvent
 	| AgentSpokeEvent
 	| AgentSuggestedEvent
 	| AgentTTSFailedEvent

@@ -384,9 +384,11 @@ def main() -> None:
             try:
                 scheduler_result = asyncio.run(run_scheduler_pass(launcher))
                 logger.info(
-                    "scheduler pass complete: started=%d stopped=%d errors=%d",
+                    "scheduler pass complete: started=%d stopped=%d "
+                    "settled=%d errors=%d",
                     scheduler_result.started_count,
                     scheduler_result.stopped_count,
+                    scheduler_result.settled_count,
                     scheduler_result.error_count,
                 )
             except Exception:

@@ -259,6 +259,39 @@ async def publish_approval_pending_event(
     return int(result)
 
 
+async def publish_account_relogin_event(
+    redis_client: Redis,
+    *,
+    session_id: str,
+    account_id: int,
+    account_email: str,
+    meet_link: str,
+    message: str,
+) -> int:
+    """Publish an ``account_relogin_needed`` event on the session WS channel.
+
+    Fired by the session-status subscriber when a meet-worker reports a
+    signed-out bot account (Johnny-ebf). Mirrors
+    :func:`publish_approval_pending_event`: the frontend's existing per-session
+    WS subscription receives it and raises a browser notification naming which
+    account needs re-login and for which meeting, with a one-click deep-link
+    into that account's sign-in. ``account_id`` lets the click target a
+    specific account; ``account_email`` and ``meet_link`` are for the message.
+    """
+    payload = {
+        "type": "account_relogin_needed",
+        "account_id": account_id,
+        "account_email": account_email,
+        "meet_link": meet_link,
+        "message": message,
+        "timestamp_ms": int(time.time() * 1000),
+        "session_id": session_id,
+    }
+    channel = session_channel(session_id)
+    result = await redis_client.publish(channel, json.dumps(payload))
+    return int(result)
+
+
 async def publish_approval_resolved_event(
     redis_client: Redis,
     *,
@@ -291,6 +324,7 @@ __all__ = [
     "SESSION_CHANNEL_PREFIX",
     "RedisApprovalGate",
     "approval_channel",
+    "publish_account_relogin_event",
     "publish_approval",
     "publish_approval_pending_event",
     "publish_approval_resolved_event",

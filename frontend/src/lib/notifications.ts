@@ -31,6 +31,12 @@ export interface ApprovalNotificationPayload {
 	timeoutS: number;
 }
 
+export interface ReloginNotificationPayload {
+	accountId: number;
+	accountEmail: string;
+	message: string;
+}
+
 export type NotificationPermissionLike =
 	| 'default'
 	| 'granted'
@@ -155,6 +161,53 @@ export async function showApprovalNotification(
 			};
 		} catch (err2) {
 			console.warn('johnny: in-page Notification fallback failed', err2);
+		}
+	}
+}
+
+/**
+ * Surface a system notification telling the operator a bot account is
+ * signed out and needs re-login (Johnny-ebf). The service worker handles
+ * the click: it deep-links to ``/settings?relogin=<accountId>`` which opens
+ * that account's sign-in directly — one click from alert to fix.
+ *
+ * Falls back to an in-page ``Notification`` (focuses the window on click)
+ * when the service worker isn't available.
+ */
+export async function showReloginNotification(
+	payload: ReloginNotificationPayload
+): Promise<void> {
+	if (!notificationsSupported()) return;
+	if (Notification.permission !== 'granted') return;
+
+	const tag = `johnny:relogin:${payload.accountId}`;
+	const title = 'Bot account signed out';
+	const body = payload.message;
+	const data = {
+		kind: 'relogin',
+		accountId: payload.accountId,
+		accountEmail: payload.accountEmail
+	};
+
+	try {
+		const reg = await navigator.serviceWorker.ready;
+		await reg.showNotification(title, {
+			body,
+			tag,
+			requireInteraction: true,
+			actions: [{ action: 'relogin', title: 'Log in again' }],
+			data
+		} as NotificationOptions);
+	} catch (err) {
+		console.warn('johnny: relogin showNotification via SW failed; falling back', err);
+		try {
+			const fallback = new Notification(title, { body, tag, data });
+			fallback.onclick = () => {
+				window.open(`/settings?relogin=${payload.accountId}`, '_blank');
+				fallback.close();
+			};
+		} catch (err2) {
+			console.warn('johnny: in-page relogin Notification fallback failed', err2);
 		}
 	}
 }

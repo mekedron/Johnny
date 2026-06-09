@@ -160,7 +160,9 @@ fire after STT when the transcript text fails the content gate.
 below ``noise_filter_min_confidence``.
 """
 
-SessionStatus = Literal["scheduled", "joining", "joined", "ended", "failed"]
+SessionStatus = Literal[
+    "scheduled", "joining", "joined", "ended", "failed", "waiting_for_relogin"
+]
 ApprovalResolution = Literal["approved", "rejected", "timeout"]
 
 

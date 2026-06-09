@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -62,16 +62,28 @@ logger = logging.getLogger(__name__)
 DEFAULT_JOIN_WINDOW_SECONDS = 120
 # How long after end_time before we ask the launcher to stop the worker.
 DEFAULT_STOP_GRACE_SECONDS = 60
+# How long a session may sit in ``waiting_for_relogin`` before we give up and
+# settle it to ``failed`` even if the meeting is still live (the operator
+# never re-logged in). Matches the bot-signin link TTL (Johnny-ebf).
+DEFAULT_RELOGIN_TTL_SECONDS = 600
 # How often the worker's periodic loop ticks the scheduler.
 DEFAULT_SCHEDULER_INTERVAL_SECONDS = 60
 SCHEDULER_INTERVAL_ENV = "JOHNNY_SCHEDULER_INTERVAL_SECONDS"
 
-# Statuses that count as "this meeting already has a worker (or had one
-# scheduled) — don't queue another".
-_ACTIVE_STATUSES = (
+# Statuses the stop sweep acts on (a live/scheduled worker to wind down).
+_STOP_SWEEP_STATUSES = (
     BotSessionStatus.SCHEDULED,
     BotSessionStatus.JOINING,
     BotSessionStatus.JOINED,
+)
+# Statuses that count as "this meeting already has a worker (or had one
+# scheduled), or is waiting on the operator — don't queue another, and keep
+# it in the active-sessions panel". ``waiting_for_relogin`` is active-but-not-
+# stoppable: the stop sweep would mark it ``ended``, but the relogin settle
+# sweep marks it ``failed`` with the signed-out reason instead (Johnny-ebf).
+_ACTIVE_STATUSES = (
+    *_STOP_SWEEP_STATUSES,
+    BotSessionStatus.WAITING_FOR_RELOGIN,
 )
 _TERMINAL_STATUSES = (BotSessionStatus.ENDED, BotSessionStatus.FAILED)
 
@@ -232,6 +244,17 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _as_utc(value: datetime) -> datetime:
+    """Coerce a DB datetime to aware-UTC for Python-side comparison.
+
+    ``DateTime(timezone=True)`` round-trips as naive on SQLite (the test
+    engine) but aware on Postgres; assume stored times are UTC so a naive
+    value can be compared against :func:`_now`-derived thresholds without a
+    "can't compare offset-naive and offset-aware" error.
+    """
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 def select_due_meetings(
     session: Session,
     *,
@@ -293,8 +316,47 @@ def select_due_stops(
         .join(
             CalendarEvent, CalendarEvent.id == MeetingConfig.calendar_event_id
         )
-        .where(BotSession.status.in_(_ACTIVE_STATUSES))
+        .where(BotSession.status.in_(_STOP_SWEEP_STATUSES))
         .where(CalendarEvent.end_time <= threshold)
+        .order_by(BotSession.id)
+    )
+    return list(session.scalars(stmt).all())
+
+
+def select_relogin_to_settle(
+    session: Session,
+    *,
+    now: datetime | None = None,
+    stop_grace_seconds: int = DEFAULT_STOP_GRACE_SECONDS,
+    ttl_seconds: int = DEFAULT_RELOGIN_TTL_SECONDS,
+) -> list[BotSession]:
+    """``waiting_for_relogin`` rows that should now settle to ``failed``.
+
+    A signed-out session waits for the operator to re-login, but it must not
+    wait forever (Johnny-ebf). It settles when EITHER the meeting has ended
+    (``end_time`` past by the grace window — the same trigger the stop sweep
+    uses for live sessions) OR it has been waiting longer than ``ttl_seconds``
+    (the operator never acted while the meeting is still live). Returns rows
+    oldest-first; the caller flips each to ``failed`` with a clear reason.
+    """
+    moment = now or _now()
+    end_threshold = moment - timedelta(seconds=stop_grace_seconds)
+    ttl_threshold = moment - timedelta(seconds=ttl_seconds)
+    stmt = (
+        select(BotSession)
+        .join(
+            MeetingConfig, MeetingConfig.id == BotSession.meeting_config_id
+        )
+        .join(
+            CalendarEvent, CalendarEvent.id == MeetingConfig.calendar_event_id
+        )
+        .where(BotSession.status == BotSessionStatus.WAITING_FOR_RELOGIN)
+        .where(
+            or_(
+                CalendarEvent.end_time <= end_threshold,
+                BotSession.updated_at <= ttl_threshold,
+            )
+        )
         .order_by(BotSession.id)
     )
     return list(session.scalars(stmt).all())
@@ -610,6 +672,9 @@ class SchedulerPassResult:
     started_count: int
     stopped_count: int
     error_count: int
+    # Rows moved out of ``waiting_for_relogin`` into ``failed`` because the
+    # meeting ended or the re-login wait timed out (Johnny-ebf).
+    settled_count: int = 0
 
 
 async def run_scheduler_pass_with_session(
@@ -619,6 +684,7 @@ async def run_scheduler_pass_with_session(
     now: datetime | None = None,
     join_window_seconds: int = DEFAULT_JOIN_WINDOW_SECONDS,
     stop_grace_seconds: int = DEFAULT_STOP_GRACE_SECONDS,
+    relogin_ttl_seconds: int = DEFAULT_RELOGIN_TTL_SECONDS,
 ) -> SchedulerPassResult:
     """Run one scheduler pass against the given session.
 
@@ -630,6 +696,7 @@ async def run_scheduler_pass_with_session(
     moment = now or _now()
     started = 0
     stopped = 0
+    settled = 0
     errors = 0
 
     # Start sweep.
@@ -682,8 +749,48 @@ async def run_scheduler_pass_with_session(
             )
             errors += 1
 
+    # Relogin settle sweep. A signed-out session waits for the operator to
+    # re-login, but settles to ``failed`` (preserving a clear reason) once the
+    # meeting ends or the wait times out — a pure status flip, no container to
+    # stop (the worker already exited when it hit the chooser page). Johnny-ebf.
+    end_threshold = moment - timedelta(seconds=stop_grace_seconds)
+    for row in select_relogin_to_settle(
+        session,
+        now=moment,
+        stop_grace_seconds=stop_grace_seconds,
+        ttl_seconds=relogin_ttl_seconds,
+    ):
+        try:
+            event = row.meeting_config.calendar_event if row.meeting_config else None
+            meeting_ended = (
+                event is not None and _as_utc(event.end_time) <= end_threshold
+            )
+            reason = (
+                "Account was signed out and the meeting ended before re-login."
+                if meeting_ended
+                else "Account was signed out and re-login was not completed in time."
+            )
+            mark_session_failed(session, row.id, reason)
+            settled += 1
+        except BotSessionNotFoundError as exc:  # pragma: no cover — row vanished
+            logger.warning(
+                "scheduler relogin-settle failed bot_session_id=%s: %s",
+                row.id,
+                exc,
+            )
+            errors += 1
+        except Exception:  # noqa: BLE001 — last-resort safety net
+            logger.exception(
+                "scheduler relogin-settle crashed for bot_session_id=%s",
+                row.id,
+            )
+            errors += 1
+
     return SchedulerPassResult(
-        started_count=started, stopped_count=stopped, error_count=errors
+        started_count=started,
+        stopped_count=stopped,
+        error_count=errors,
+        settled_count=settled,
     )
 
 
@@ -709,6 +816,7 @@ async def run_scheduler_pass(
 __all__ = [
     "ContainerLauncher",
     "DEFAULT_JOIN_WINDOW_SECONDS",
+    "DEFAULT_RELOGIN_TTL_SECONDS",
     "DEFAULT_SCHEDULER_INTERVAL_SECONDS",
     "DEFAULT_STOP_GRACE_SECONDS",
     "LaunchContext",
@@ -724,6 +832,7 @@ __all__ = [
     "run_scheduler_pass_with_session",
     "select_due_meetings",
     "select_due_stops",
+    "select_relogin_to_settle",
     "start_session_for_meeting",
     "stop_session_by_id",
 ]

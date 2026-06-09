@@ -24,12 +24,14 @@
 		type Subscription,
 		type SessionEvent,
 		type ApprovalPendingEvent,
-		type ApprovalResolvedEvent
+		type ApprovalResolvedEvent,
+		type AccountReloginNeededEvent
 	} from '$lib/sessionEvents';
 	import {
 		bootstrapNotifications,
 		clearApprovalNotification,
 		showApprovalNotification,
+		showReloginNotification,
 		type NotificationPermissionLike
 	} from '$lib/notifications';
 	import { approveDecision, rejectDecision } from '$lib/decisions';
@@ -99,7 +101,16 @@
 	}
 
 	function syncApprovalSubscriptions() {
-		const liveStatuses = new Set(['scheduled', 'joining', 'joined']);
+		// waiting_for_relogin stays "live" so the per-session WS subscription
+		// is retained when a join flips joining→waiting_for_relogin — that
+		// subscription is how the account_relogin_needed notification arrives
+		// (Johnny-ebf).
+		const liveStatuses = new Set([
+			'scheduled',
+			'joining',
+			'joined',
+			'waiting_for_relogin'
+		]);
 		const wantedIds = new Set(
 			activeSessions.filter((s) => liveStatuses.has(s.status)).map((s) => s.id)
 		);
@@ -144,7 +155,21 @@
 			handleApprovalPending(sessionId, event as ApprovalPendingEvent);
 		} else if (event.type === 'approval_resolved') {
 			handleApprovalResolved(event as ApprovalResolvedEvent);
+		} else if (event.type === 'account_relogin_needed') {
+			handleAccountReloginNeeded(event as AccountReloginNeededEvent);
 		}
+	}
+
+	function handleAccountReloginNeeded(ev: AccountReloginNeededEvent) {
+		// Refresh so the active-sessions panel shows the new
+		// "Waiting for re-login" status + message, then raise the
+		// one-click re-login notification (Johnny-ebf).
+		void refreshActiveSessions();
+		void showReloginNotification({
+			accountId: ev.account_id,
+			accountEmail: ev.account_email,
+			message: ev.message
+		});
 	}
 
 	function handleApprovalPending(sessionId: number, ev: ApprovalPendingEvent) {

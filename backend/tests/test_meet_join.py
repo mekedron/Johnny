@@ -8,6 +8,7 @@ import pytest
 
 from johnny.meet_worker.meet_join import (
     ACCESS_DENIED_SELECTORS,
+    ACCOUNT_SIGNED_OUT_SELECTORS,
     ADMISSION_DENIED_SELECTORS,
     ASK_TO_JOIN_SELECTORS,
     CAM_OFF_SELECTORS,
@@ -17,12 +18,14 @@ from johnny.meet_worker.meet_join import (
     MIC_OFF_SELECTORS,
     SIGN_IN_REQUIRED_SELECTORS,
     JoinResult,
+    MeetAccountSignedOutError,
     MeetingAccessDeniedError,
     MeetingNotStartedError,
     MeetJoiner,
     MeetJoinError,
     MeetJoinTimeoutError,
     MeetSignInError,
+    _status_for_error,
     join_meeting,
 )
 from johnny.voice_pipeline.event_bus import InMemoryEventBus
@@ -30,6 +33,13 @@ from johnny.voice_pipeline.events import SessionStatusChanged
 
 MEET_LINK = "https://meet.google.com/abc-defg-hij"
 SESSION_ID = "sess-1"
+# The real redirect Google performs when the bot's cookies have expired
+# (captured in .validation/meet-debug/session-45.log).
+ACCOUNTS_CHOOSER_URL = (
+    "https://accounts.google.com/v3/signin/accountchooser?authuser=0"
+    "&continue=https%3A%2F%2Fmeet.google.com%2Fabc-defg-hij"
+    "&flowName=GlifWebSignIn&flowEntry=ServiceLogin"
+)
 
 
 class _FakeElement:
@@ -61,6 +71,7 @@ class _FakePage:
         goto_raises: BaseException | None = None,
         query_raises: dict[str, BaseException] | None = None,
         click_raises: dict[str, BaseException] | None = None,
+        redirect_url: str | None = None,
     ) -> None:
         self.visible: set[str] = set(initial_visible or ())
         self.vanish_on_click: set[str] = set(vanish_on_click or ())
@@ -71,6 +82,11 @@ class _FakePage:
         self._goto_raises = goto_raises
         self._query_raises = dict(query_raises or {})
         self._click_raises = dict(click_raises or {})
+        # When set, goto() lands on this URL instead of the requested one —
+        # models Google redirecting a stale-cookie Meet link to the
+        # accounts.google.com account-chooser (real Playwright updates
+        # page.url to the redirected location).
+        self._redirect_url = redirect_url
         self.url = ""
         self.actions: list[tuple[str, str]] = []
         self.closed = False
@@ -79,7 +95,7 @@ class _FakePage:
         self.actions.append(("goto", url))
         if self._goto_raises is not None:
             raise self._goto_raises
-        self.url = url
+        self.url = self._redirect_url if self._redirect_url is not None else url
 
     async def query_selector(self, selector: str) -> Any | None:
         self.actions.append(("query_selector", selector))
@@ -332,6 +348,95 @@ async def test_blocker_check_prefers_sign_in_over_other_states() -> None:
     )
     with pytest.raises(MeetSignInError):
         await _joiner(page).join()
+
+
+# --- Account signed out (Johnny-ebf) --------------------------------------
+
+
+class _ResolvingRedirectPage(_FakePage):
+    """A *healthy* account whose Meet link briefly redirects through
+    accounts.google.com but resolves to Meet by the time we probe the DOM.
+
+    The signed-out guard must NOT fire here (Johnny-ebf R1 — no false
+    positive on the legitimate first-load redirect). Modelled by flipping
+    ``url`` to the Meet link on the first DOM probe, so the post-redirect
+    URL check sees Meet, not accounts.google.com.
+    """
+
+    async def query_selector(self, selector: str) -> Any | None:
+        self.url = MEET_LINK
+        return await super().query_selector(selector)
+
+
+async def test_join_raises_account_signed_out_on_chooser_dom() -> None:
+    """The account-chooser 'Signed out' DOM is the primary signal."""
+    page = _FakePage(initial_visible={ACCOUNT_SIGNED_OUT_SELECTORS[0]})
+    with pytest.raises(MeetAccountSignedOutError):
+        await _joiner(page).join()
+
+
+async def test_join_raises_account_signed_out_on_accounts_redirect() -> None:
+    """A stale-cookie Meet link that redirects to (and stays on) the
+    accounts.google.com chooser is detected even without a DOM match.
+
+    ``_FakePage.goto`` would normally set ``url`` to the Meet link, so we use
+    ``redirect_url`` to model the real redirect; ``signed_out_settle_s=0``
+    keeps the settle re-check instant.
+    """
+    page = _FakePage(redirect_url=ACCOUNTS_CHOOSER_URL)
+    with pytest.raises(MeetAccountSignedOutError):
+        await _joiner(page, signed_out_settle_s=0.0).join()
+
+
+async def test_account_signed_out_preferred_over_generic_sign_in() -> None:
+    """Both the chooser DOM and the generic sign-in wall visible → the more
+    specific (recoverable) signed-out error wins, not MeetSignInError."""
+    page = _FakePage(
+        initial_visible={
+            ACCOUNT_SIGNED_OUT_SELECTORS[0],
+            SIGN_IN_REQUIRED_SELECTORS[0],
+        }
+    )
+    with pytest.raises(MeetAccountSignedOutError):
+        await _joiner(page).join()
+
+
+async def test_transient_accounts_redirect_does_not_flag_signed_out() -> None:
+    """A healthy account that resolves Meet after a brief accounts.google.com
+    bounce joins normally — the URL-only signal must not false-positive."""
+    page = _ResolvingRedirectPage(
+        initial_visible={JOIN_BUTTON_SELECTORS[0]},
+        vanish_on_click={JOIN_BUTTON_SELECTORS[0]},
+        appear_on_click=_happy_appear(),
+        redirect_url=ACCOUNTS_CHOOSER_URL,
+    )
+    result = await _joiner(page, signed_out_settle_s=0.0).join()
+    assert isinstance(result, JoinResult)
+
+
+def test_status_for_error_maps_signed_out_to_waiting() -> None:
+    assert (
+        _status_for_error(MeetAccountSignedOutError("signed out"))
+        == "waiting_for_relogin"
+    )
+    assert _status_for_error(MeetSignInError("no cookies")) == "failed"
+    assert _status_for_error(MeetJoinError("boom")) == "failed"
+
+
+async def test_join_emits_waiting_for_relogin_on_signed_out() -> None:
+    """The signed-out path publishes the soft waiting_for_relogin status
+    (not failed) so the operator gets a guided recovery (Johnny-ebf)."""
+    page = _FakePage(initial_visible={ACCOUNT_SIGNED_OUT_SELECTORS[0]})
+    bus = InMemoryEventBus()
+    with pytest.raises(MeetAccountSignedOutError):
+        await _joiner(page, event_bus=bus).join()
+    statuses = [
+        e for e in bus.snapshot() if isinstance(e, SessionStatusChanged)
+    ]
+    assert statuses[0].status == "joining"
+    assert statuses[-1].status == "waiting_for_relogin"
+    assert statuses[-1].error_reason is not None
+    assert "signed out" in statuses[-1].error_reason.lower()
 
 
 # --- Timeouts -------------------------------------------------------------
