@@ -75,55 +75,6 @@ function markRequested(): void {
 	}
 }
 
-let notificationAudioCtx: AudioContext | null = null;
-
-/**
- * Play a short in-page chime alongside a notification.
- *
- * The OS notification *can* play a sound, but only when the system is
- * configured to (on macOS: System Settings → Notifications → <browser> →
- * "Play sound", and not in a Focus / Do Not Disturb mode). The Notification
- * API gives no portable way to force that, so we synthesise a soft two-tone
- * chime via WebAudio as a reliable, OS-independent cue. Best-effort: browser
- * autoplay policy can block it until the page has been interacted with (the
- * Settings "Send test notification" click is itself a gesture), and we set
- * ``silent: false`` on the notification so the OS sound still plays where
- * enabled. Never throws.
- */
-function playNotificationSound(): void {
-	if (!isBrowser()) return;
-	try {
-		const Ctx =
-			window.AudioContext ||
-			(window as unknown as { webkitAudioContext?: typeof AudioContext })
-				.webkitAudioContext;
-		if (!Ctx) return;
-		notificationAudioCtx ??= new Ctx();
-		const ctx = notificationAudioCtx;
-		if (ctx.state === 'suspended') void ctx.resume();
-		const now = ctx.currentTime;
-		// Two gentle sine tones — a pleasant "ding-dong", not a harsh beep.
-		for (const { freq, at } of [
-			{ freq: 880, at: 0 },
-			{ freq: 1318.5, at: 0.12 }
-		]) {
-			const osc = ctx.createOscillator();
-			const gain = ctx.createGain();
-			osc.type = 'sine';
-			osc.frequency.value = freq;
-			gain.gain.setValueAtTime(0.0001, now + at);
-			gain.gain.exponentialRampToValueAtTime(0.18, now + at + 0.02);
-			gain.gain.exponentialRampToValueAtTime(0.0001, now + at + 0.2);
-			osc.connect(gain).connect(ctx.destination);
-			osc.start(now + at);
-			osc.stop(now + at + 0.22);
-		}
-	} catch {
-		// WebAudio unavailable or autoplay-blocked — the OS notification
-		// sound (when enabled) is the fallback.
-	}
-}
-
 function ensureServiceWorkerRegistered(): Promise<ServiceWorkerRegistration | null> {
 	if (registrationPromise === null) {
 		registrationPromise = navigator.serviceWorker
@@ -194,42 +145,54 @@ export async function requestNotificationPermission(): Promise<NotificationPermi
 }
 
 /**
- * Fire a one-off test notification so the operator can confirm alerts
- * actually surface (approvals + signed-out re-logins use the same path).
- * No-op unless permission is already granted.
+ * Schedule a one-off test notification after ``delayMs`` so the operator can
+ * confirm alerts surface — including their native OS sound — even when this
+ * tab is in the background or closed.
+ *
+ * The delay + the actual ``showNotification`` happen INSIDE the service
+ * worker (via postMessage), and the worker keeps itself alive with
+ * ``waitUntil`` for the delay, so the notification still fires after the
+ * operator switches away. We deliberately do NOT play an in-page sound — the
+ * notification's own sound is what's being tested (``silent: false`` lets the
+ * OS play it where enabled). No-op unless permission is already granted.
  */
-export async function showTestNotification(): Promise<void> {
+export async function showTestNotification(delayMs = 3000): Promise<void> {
 	if (!notificationsSupported()) return;
 	if (Notification.permission !== 'granted') return;
 
-	const tag = 'johnny:test';
-	const title = 'Johnny notifications are on';
-	const body =
-		"This is a test alert — you'll get one like this when a meeting " +
-		'needs approval or a bot account needs re-login.';
-	const data = { kind: 'test' };
-
-	playNotificationSound();
+	let reg: ServiceWorkerRegistration | null = null;
 	try {
-		const reg = await navigator.serviceWorker.ready;
-		await reg.showNotification(title, {
-			body,
-			tag,
-			silent: false,
-			data
-		} as NotificationOptions);
-	} catch (err) {
-		console.warn('johnny: test showNotification via SW failed; falling back', err);
+		reg = await navigator.serviceWorker.ready;
+	} catch {
+		reg = null;
+	}
+
+	if (reg?.active) {
+		reg.active.postMessage({ type: 'johnny:show-test-notification', delayMs });
+		return;
+	}
+
+	// Fallback when no active SW: schedule from the page. This will NOT
+	// survive the tab being closed, but still covers backgrounding it.
+	setTimeout(() => {
 		try {
-			const fallback = new Notification(title, { body, tag, silent: false, data });
+			const fallback = new Notification('Johnny notifications are on', {
+				body:
+					"This is a test alert — you'll get one like this when a meeting " +
+					'needs approval or a bot account needs re-login.',
+				tag: 'johnny:test',
+				renotify: true,
+				silent: false,
+				data: { kind: 'test' }
+			} as NotificationOptions);
 			fallback.onclick = () => {
 				window.focus();
 				fallback.close();
 			};
-		} catch (err2) {
-			console.warn('johnny: in-page test Notification fallback failed', err2);
+		} catch (err) {
+			console.warn('johnny: in-page test Notification fallback failed', err);
 		}
-	}
+	}, delayMs);
 }
 
 /**
@@ -261,13 +224,15 @@ export async function showApprovalNotification(
 		timeoutS: payload.timeoutS
 	};
 
-	playNotificationSound();
 	try {
 		const reg = await navigator.serviceWorker.ready;
 		await reg.showNotification(title, {
 			body,
 			tag,
 			requireInteraction: true,
+			// Re-alert (with sound) even if a same-tag notification is still
+			// up — otherwise Chrome replaces it silently (Johnny-ebf).
+			renotify: true,
 			silent: false,
 			data
 		} as NotificationOptions);
@@ -310,13 +275,15 @@ export async function showReloginNotification(
 		accountEmail: payload.accountEmail
 	};
 
-	playNotificationSound();
 	try {
 		const reg = await navigator.serviceWorker.ready;
 		await reg.showNotification(title, {
 			body,
 			tag,
 			requireInteraction: true,
+			// Re-alert (with sound) on a repeat for the same account instead
+			// of a silent same-tag replace (Johnny-ebf).
+			renotify: true,
 			silent: false,
 			actions: [{ action: 'relogin', title: 'Log in again' }],
 			data

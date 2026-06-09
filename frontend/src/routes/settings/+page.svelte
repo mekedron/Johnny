@@ -162,7 +162,9 @@
 	async function sendTestNotification() {
 		notifBusy = true;
 		try {
-			await showTestNotification();
+			// Fires ~3s later from the service worker, so the operator can
+			// switch away / close the tab and still get it (Johnny-ebf).
+			await showTestNotification(3000);
 			notifPermission = getNotificationPermission();
 			notifTestSentAt = Date.now();
 		} finally {
@@ -505,7 +507,8 @@
 							<CheckCircle2Icon class="size-4" /> Browser notifications are enabled
 						</span>
 						<span class="text-xs text-muted-foreground">
-							You'll get a desktop alert (with a chime) for approvals and signed-out re-logins.
+							You'll get a desktop alert — with its notification sound — for approvals
+							and signed-out re-logins.
 						</span>
 						{#if isMac}
 							<span
@@ -523,7 +526,8 @@
 						{/if}
 						{#if notifTestSentAt !== null}
 							<span class="text-xs text-success" data-testid="notif-test-sent">
-								Test sent — check your desktop (and listen for the chime).
+								Test scheduled — switch to another app or close this tab now; it
+								appears in ~3 seconds, with its sound.
 							</span>
 						{/if}
 					{:else if notifPermission === 'denied'}
@@ -564,7 +568,7 @@
 						disabled={notifBusy}
 						data-testid="notif-test"
 					>
-						Send test notification
+						Send test notification (in 3s)
 					</Button>
 				{/if}
 			</div>

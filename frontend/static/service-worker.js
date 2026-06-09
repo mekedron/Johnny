@@ -24,12 +24,46 @@
 // have to compute the base itself.
 const NOTIFICATION_TAG_PREFIX = 'johnny:approval:';
 
+const TEST_TITLE = 'Johnny notifications are on';
+const TEST_BODY =
+	"This is a test alert — you'll get one like this when a meeting needs " +
+	'approval or a bot account needs re-login.';
+
 self.addEventListener('install', (event) => {
 	event.waitUntil(self.skipWaiting());
 });
 
 self.addEventListener('activate', (event) => {
 	event.waitUntil(self.clients.claim());
+});
+
+// Page asks the worker to fire a TEST notification after a short delay. Doing
+// it here (not in the page) — and holding the worker alive with waitUntil for
+// the delay — means the notification still appears, with its native OS sound,
+// after the operator switches away from or closes the tab (Johnny-ebf).
+self.addEventListener('message', (event) => {
+	const data = event.data;
+	if (!data || data.type !== 'johnny:show-test-notification') return;
+	const delayMs = Math.max(0, Math.min(Number(data.delayMs) || 0, 30000));
+	event.waitUntil(
+		new Promise((resolve) => {
+			setTimeout(() => {
+				self.registration
+					.showNotification(TEST_TITLE, {
+						body: TEST_BODY,
+						tag: 'johnny:test',
+						// renotify: re-alert (sound!) even though this reuses the
+						// 'johnny:test' tag. Without it, Chrome REPLACES a same-tag
+						// notification silently — the #1 reason a repeat test makes
+						// no sound on macOS.
+						renotify: true,
+						silent: false,
+						data: { kind: 'test' }
+					})
+					.then(resolve, resolve);
+			}, delayMs);
+		})
+	);
 });
 
 self.addEventListener('push', (event) => {
