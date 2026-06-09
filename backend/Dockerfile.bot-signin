@@ -1,9 +1,16 @@
-# Bot sign-in container image (Johnny-105). One container per sign-in
-# session is spawned by the API process (see
+# Bot sign-in container image (Johnny-105, Johnny-hvg). One container per
+# sign-in session is spawned by the API process (see
 # ``app.services.bot_signin_launcher``); inside, the entrypoint brings
 # up Xvfb + x11vnc + websockify and the supervisor at
-# ``johnny.bot_signin.supervisor`` drives Playwright Chromium toward a
-# signed-in Google session.
+# ``johnny.bot_signin.supervisor`` drives a signed-in Google session.
+#
+# Johnny-hvg: the interactive login now runs in a real Chrome/Chromium
+# launched as a plain subprocess (no --enable-automation, no webdriver),
+# NOT driven by Playwright — Google's sign-in flags the automated browser.
+# Branded Google Chrome is used on amd64 (extra hardening); on arm64 we use
+# the headed Chromium the base image bundles. Playwright is still installed,
+# but only to attach over a passive CDP port AFTER login to dump the
+# storage_state.
 #
 # Build with: ``docker compose --profile bot-signin build bot-signin``.
 # The main Compose stack only *builds* the image; the launcher spawns
@@ -33,8 +40,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /workspace
 
 # Pinned Playwright matches the api/meet-worker images so a storage_state
-# written here is interoperable. The base image already ships Chromium.
+# written here is interoperable. The base image already ships Chromium
+# (used only for the post-login CDP attach, never for the login itself).
 RUN pip install --no-cache-dir playwright==1.49.0
+
+# Branded Google Chrome for the interactive login — WHERE THE PLATFORM HAS IT.
+# Google ships Chrome for Linux on amd64 only; on arm64 (e.g. Apple-Silicon
+# Docker) there is no Linux Chrome, so we fall back to the headed Chromium the
+# Playwright base image already bundles (at /ms-playwright/chromium-*). Either
+# way the supervisor launches the binary as a plain, NON-automated subprocess
+# (the actual fix); branded Chrome is just extra hardening where available.
+# ``playwright install chrome`` installs google-chrome-stable at
+# /opt/google/chrome/chrome (symlinked /usr/bin/google-chrome).
+RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
+        playwright install --with-deps chrome \
+            || echo "[bot-signin] branded Chrome install failed; falling back to bundled Chromium"; \
+    else \
+        echo "[bot-signin] arch=$(dpkg --print-architecture): no Linux branded Chrome; using bundled Chromium"; \
+    fi
 
 # Just enough of the codebase for the supervisor: the bot_signin module
 # itself, plus ``johnny.tools.seed_auth_state`` which the supervisor
