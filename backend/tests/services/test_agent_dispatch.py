@@ -220,15 +220,14 @@ async def test_maybe_dispatch_swallows_failure(monkeypatch: object) -> None:
 # --- Bridge-mode launch env (Johnny-wz5) ------------------------------------
 
 
-def test_bridge_launch_environment_empty_in_legacy() -> None:
-    # Explicit legacy adds nothing → the meet-worker env is byte-identical to
-    # before, so the in-worker (S2S) pipeline path runs without bridge vars.
-    assert (
-        bridge_launch_environment(
-            bot_session_id=42, environ={"JOHNNY_ORCHESTRATOR": "legacy"}
-        )
-        == {}
-    )
+def test_bridge_launch_environment_pins_legacy() -> None:
+    # Legacy mode pins JOHNNY_ORCHESTRATOR=legacy (no LiveKit vars) so the
+    # meet-worker runs the in-worker pipeline. It must NOT return {} — an unset
+    # var makes the meet-worker default to agentsession and crash with no token
+    # (Johnny-9xt). The two halves must agree on the mode.
+    assert bridge_launch_environment(
+        bot_session_id=42, environ={"JOHNNY_ORCHESTRATOR": "legacy"}
+    ) == {"JOHNNY_ORCHESTRATOR": "legacy"}
 
 
 def test_bridge_launch_environment_agentsession(monkeypatch: object) -> None:
@@ -277,8 +276,10 @@ def test_bridge_launch_environment_agentsession(monkeypatch: object) -> None:
 def test_bridge_launch_environment_degrades_on_mint_failure(
     monkeypatch: object,
 ) -> None:
-    # Missing creds → the minter raises → degrade to {} so the meet-worker runs
-    # the proven legacy pipeline instead of a dead bridge (never break a launch).
+    # Missing creds → the minter raises → degrade to a pinned legacy flag so the
+    # meet-worker runs the proven legacy pipeline instead of a dead bridge (never
+    # break a launch). Pinning (not {}) is what actually forces legacy — an unset
+    # var would default the meet-worker to agentsession and crash (Johnny-9xt).
     def _boom(**_kwargs: object) -> str:
         raise ValueError("missing LIVEKIT_API_KEY, LIVEKIT_API_SECRET")
 
@@ -288,4 +289,4 @@ def test_bridge_launch_environment_degrades_on_mint_failure(
         bot_session_id=7, environ={"JOHNNY_ORCHESTRATOR": "agentsession"}
     )
 
-    assert env == {}
+    assert env == {"JOHNNY_ORCHESTRATOR": "legacy"}

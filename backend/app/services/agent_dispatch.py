@@ -163,8 +163,11 @@ def bridge_launch_environment(
     spawned container's environment by
     :meth:`app.services.docker_launcher.DockerContainerLauncher._build_environment`.
 
-    * ``legacy`` mode (default) → ``{}``: the meet-worker runs the in-worker
-      voice pipeline exactly as before — zero behaviour change.
+    * ``legacy`` mode → ``{JOHNNY_ORCHESTRATOR: legacy}``: the meet-worker runs
+      the in-worker voice pipeline. The flag is pinned **explicitly** (not an
+      empty dict) because the meet-worker's absent-default is ``agentsession``
+      (bootstrap.py) — leaving it unset would flip the spawned container to the
+      opposite mode and crash it with no LiveKit token (Johnny-9xt).
     * ``agentsession`` mode → the orchestrator flag plus the four LiveKit vars
       :func:`~johnny.voice_pipeline.livekit_transport.create_meet_room_bridge_from_env`
       reads: ``LIVEKIT_URL`` (the SFU the API already points at), ``LIVEKIT_ROOM``
@@ -175,13 +178,20 @@ def bridge_launch_environment(
 
     Defensive, mirroring :func:`maybe_dispatch_session_agent`: if the token can't
     be minted (missing ``LIVEKIT_API_KEY`` / ``LIVEKIT_API_SECRET``) the call
-    degrades to ``{}`` with a logged warning, so the meet-worker falls back to the
-    proven legacy pipeline rather than launching a dead bridge. ``room_auth`` is
-    imported lazily so this module stays ``livekit``-free at import time.
+    degrades to ``{JOHNNY_ORCHESTRATOR: legacy}`` with a logged warning, so the
+    meet-worker falls back to the proven legacy pipeline rather than launching a
+    dead bridge. ``room_auth`` is imported lazily so this module stays
+    ``livekit``-free at import time.
     """
     src = environ if environ is not None else os.environ
     if not agent_orchestrator_enabled(src):
-        return {}
+        # Pin JOHNNY_ORCHESTRATOR=legacy explicitly. Returning {} would leave the
+        # var UNSET in the spawned meet-worker, whose absent-default is
+        # ``agentsession`` (bootstrap.py) — the opposite of what the API intends
+        # — so it would try to build a LiveKit room bridge with no token and
+        # crash-loop (exit 3, Johnny-9xt). Pinning legacy keeps both halves in
+        # agreement: the meet-worker runs the in-worker pipeline.
+        return {ENV_ORCHESTRATOR: ORCHESTRATOR_LEGACY}
 
     from johnny.agent.job_config import bridge_identity_for_session
     from johnny.agent.room_auth import mint_bridge_token
@@ -200,7 +210,10 @@ def bridge_launch_environment(
             "will fall back to the legacy pipeline for this session",
             bot_session_id,
         )
-        return {}
+        # Pin legacy (not {}) for the same reason as the disabled branch above:
+        # an unset orchestrator var makes the meet-worker default to
+        # agentsession and crash with no token (Johnny-9xt).
+        return {ENV_ORCHESTRATOR: ORCHESTRATOR_LEGACY}
 
     return {
         ENV_ORCHESTRATOR: ORCHESTRATOR_AGENTSESSION,
