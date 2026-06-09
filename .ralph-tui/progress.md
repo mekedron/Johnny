@@ -5,6 +5,40 @@ after each iteration and it's included in prompts for context.
 
 ## Codebase Patterns (Study These First)
 
+### Validate the REAL dispatch path, not just the gate — the cutover gate's blind spot (Johnny-52b)
+- **The gate-level replay (Johnny-4k3) cannot catch dispatch-contract bugs.**
+  `replay_agent.run_agent_replay` drives `RouterGate.run_turn` directly, bypassing
+  `SessionJobConfig.from_metadata`. The REAL path (`worker.entrypoint` →
+  `_parse_job_config` → `from_metadata` → `from_dict`) validates `mode` / `pipeline_mode`
+  strictly against `SUPPORTED_MODES` / `SUPPORTED_PIPELINE_MODES`. A mode the gate handles
+  fine can still be rejected at dispatch parse → the worker **abandons the job** → the bot
+  silently no-shows. Always exercise an actual dispatch, not only the replay.
+- **`SUPPORTED_MODES` must equal `NON_SPEAKING_MODES | SPEAKING_MODES`** — the full set of
+  legacy `BotMode`s a meeting can be in: `listen_only`, `suggest_only`, `approval_required`,
+  `limited_auto_speak`, **`autonomous`**. `autonomous` (the sole `FREE_FORM_MODE`, which
+  `johnny/agent/answer.py` already special-cases) was MISSING from the agent contract, so
+  every autonomous-mode meeting was rejected with `ValueError: unknown mode 'autonomous'`.
+  Fixed in `job_config.py`; the drift guard in `tests/agent/test_job_config.py` now asserts
+  the union (not a hand-listed 4-set) so future omissions fail the test.
+- **Prove the agentsession engine end-to-end WITHOUT a live Meet / human audio** by
+  dispatching a real-provider job from inside the api container:
+  `payload = build_provider_payload(db, get_crypto())` →
+  `SessionJobConfig(bot_session_id=…, room_name=room_name_for_session(id), mode="autonomous",
+  pipeline_mode="split", provider_config=payload, redis_url=os.environ["REDIS_URL"])` →
+  `await dispatch_agent(room=config.room_name, config=config)`. The registered worker
+  assembles the full split `AgentSession` from the real Whisper/OpenAI/Kokoro creds, connects,
+  and logs `agent worker: session=X started; agent joined room=Y` — the strongest non-live
+  proof (assembly + room-connect; adapter instantiation does NOT call the models, so an
+  unreachable LLM/STT still assembles). Clean up the idle room with
+  `LiveKitAPI().room.delete_room(api.DeleteRoomRequest(room=…))`. Only the human-audio loop
+  (live transcripts, reasoning rows in History, barge-in) genuinely needs an operator-hosted
+  Meet (Johnny-68o).
+- **Validate the fix is baked, not hot-patched:** `docker compose build agent-worker` +
+  `up -d agent-worker` (the fix is in shared `backend/` source baked via `COPY`) — re-dispatch
+  and confirm acceptance. The destructive `./stop.sh && ./run.sh` (`down -v` wipes
+  postgres/redis) is operator-gated — don't wipe operator data to prove reproducibility when a
+  single-service rebuild does it.
+
 ### LiveKit room auth + agent dispatch + job-payload contract (Johnny-y4j)
 - **One room per Meet session**, named `johnny-session-<bot_session_id>`
   (`johnny.agent.job_config.room_name_for_session`). Bridge identity
@@ -1127,5 +1161,58 @@ secrets) rather than shipping an unvalidated workflow.
   clock control.
 - tts-smoke is engine-agnostic (same provider adapters); "port to new engine" = confirm it runs +
   the `JohnnyTTS` bridge is covered, not duplicate the provider-level smoke.
+
+---
+
+## 2026-06-09 - Johnny-52b [CHORE] Phase 4: Real-browser e2e validation + clean-install reproducibility
+
+**What was implemented:** the Phase-4 cutover validation pass — and, in doing it, found + fixed a
+**cutover-blocking bug**. Browser-validated (chrome-devtools MCP) every autonomously-verifiable
+surface on the prod-shape stack, then exercised the REAL agent dispatch path (not just the
+gate-level replay), which surfaced that the agentsession engine rejected `mode="autonomous"` at
+dispatch parse → the bot would silently no-show for every autonomous-mode meeting.
+
+**The bug + fix:** `SessionJobConfig.SUPPORTED_MODES` (`backend/johnny/agent/job_config.py`)
+omitted `autonomous`, even though it is a first-class legacy `SPEAKING_MODE` / sole `FREE_FORM_MODE`
+that `johnny/agent/answer.py` already imports and special-cases. So `from_metadata` raised
+`unknown mode 'autonomous'` and `worker.entrypoint` abandoned the job. Johnny-4k3's replay couldn't
+catch it because `run_agent_replay` drives `RouterGate` directly, bypassing `from_metadata`. Added
+`AUTONOMOUS_MODE` to `SUPPORTED_MODES` (+ `__all__`); the downstream gate/answer handling already
+existed (proven by 4k3's `mode="autonomous"` fixtures), so the contract gap was the entire bug.
+
+**Files changed:**
+- `backend/johnny/agent/job_config.py` — `AUTONOMOUS_MODE = "autonomous"` added to `SUPPORTED_MODES`
+  + `__all__`, with a "why" comment on the no-show regression it prevents.
+- `backend/tests/agent/test_job_config.py` — drift guard strengthened from a hand-listed 4-set to
+  `SUPPORTED_MODES == NON_SPEAKING_MODES | SPEAKING_MODES` (catches any future mode omission) +
+  `test_from_metadata_accepts_autonomous_mode` round-trip regression test.
+
+**Validation (artifacts under `.validation/Johnny-52b/`, local only):**
+- Providers page renders (SPLIT: Whisper/OpenAI/Kokoro active), 0 console errors.
+- TTS **Play sample** → `POST /providers/1/play_sample` 200; LLM **Test** → `POST /providers/3/test`
+  200 (round-trips; surfaced an operator-config 404 — saved model `qwen2.5:7b-instruct` not on the
+  Ollama host, only `…-q4_K_M`; assembly unaffected, but a live session's LLM calls would 404).
+- History page renders (empty — no completed sessions on this stack).
+- agent-worker registers (`agent_name=johnny`, Silero VAD + turn detector, `ws://livekit:7880`).
+- **Real-provider dispatch → full split AgentSession assembled + agent JOINED room** in autonomous
+  mode (after the fix), via `build_provider_payload` → `SessionJobConfig` → `dispatch_agent` from
+  inside the api container. Before/after worker logs in `04-autonomous-mode-fix-worker-logs.txt`.
+- Clean-install: rebuilt agent-worker so the fix is baked via `COPY` (not hot-patched) and
+  re-validated. Did NOT run the destructive `./stop.sh && ./run.sh` (`down -v` wipes operator
+  postgres/redis).
+
+**Quality gates** (throwaway container, ruff 0.15.16 locked): ruff check + format clean, mypy clean
+on `job_config.py`, `pytest tests/agent/` **605 passed**.
+
+**Operator-gated remainder → filed Johnny-68o** (blocks the legacy-retirement bead Johnny-n22): the
+live-human loop (Google sign-in + hosted Meet + a human talking → live transcripts, reasoning rows
+in History, barge-in) and the destructive clean-install cycle cannot be self-driven by an agent.
+Includes the Ollama model-id prereq.
+
+**Learnings:** captured as a new pattern at the top ("Validate the REAL dispatch path, not just the
+gate"). Key points: the gate-level replay is blind to the dispatch contract; `SUPPORTED_MODES` must
+== the full `NON_SPEAKING_MODES | SPEAKING_MODES` union; you can prove the whole engine assembles +
+joins a room with a real-provider dispatch (no live Meet needed) because adapter instantiation never
+calls the models; rebuild a single service to prove the fix is baked rather than wiping operator data.
 
 ---

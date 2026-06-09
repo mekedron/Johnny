@@ -3,10 +3,10 @@
   "sessionId": "737211f1-9739-40c0-8d3f-332e080d27b8",
   "status": "running",
   "startedAt": "2026-06-08T22:23:12.909Z",
-  "updatedAt": "2026-06-09T03:01:13.494Z",
-  "currentIteration": 10,
+  "updatedAt": "2026-06-09T03:23:02.007Z",
+  "currentIteration": 11,
   "maxIterations": 0,
-  "tasksCompleted": 10,
+  "tasksCompleted": 11,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -39,8 +39,8 @@
       {
         "id": "Johnny-4k3",
         "title": "[BUILD] Phase 4: Port replay/eval harness + tts-smoke to new engine (cutover gate)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-52b",
@@ -312,6 +312,16 @@
       "durationMs": 1816503,
       "startedAt": "2026-06-09T02:09:18.741Z",
       "endedAt": "2026-06-09T02:39:35.244Z"
+    },
+    {
+      "iteration": 11,
+      "status": "completed",
+      "taskId": "Johnny-4k3",
+      "taskTitle": "[BUILD] Phase 4: Port replay/eval harness + tts-smoke to new engine (cutover gate)",
+      "taskCompleted": true,
+      "durationMs": 1274588,
+      "startedAt": "2026-06-09T02:39:57.644Z",
+      "endedAt": "2026-06-09T03:01:12.232Z"
     }
   ],
   "skippedTaskIds": [],

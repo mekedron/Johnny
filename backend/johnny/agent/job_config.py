@@ -42,12 +42,19 @@ LISTEN_ONLY_MODE = "listen_only"
 SUGGEST_ONLY_MODE = "suggest_only"
 APPROVAL_REQUIRED_MODE = "approval_required"
 LIMITED_AUTO_SPEAK_MODE = "limited_auto_speak"
+# Free-form full-auto-speak: a first-class legacy SPEAKING_MODE and the sole
+# FREE_FORM_MODE, which the agent answer path (johnny.agent.answer) already
+# special-cases. It MUST be accepted here — if a dispatch for an autonomous-mode
+# meeting hits from_metadata without it, the contract rejects the payload and the
+# worker abandons the job, so the bot silently no-shows (cutover gap, Johnny-52b).
+AUTONOMOUS_MODE = "autonomous"
 SUPPORTED_MODES: frozenset[str] = frozenset(
     {
         LISTEN_ONLY_MODE,
         SUGGEST_ONLY_MODE,
         APPROVAL_REQUIRED_MODE,
         LIMITED_AUTO_SPEAK_MODE,
+        AUTONOMOUS_MODE,
     }
 )
 DEFAULT_MODE = LISTEN_ONLY_MODE
@@ -352,6 +359,7 @@ def _parse_provider_config(raw: str | None) -> dict[str, Any]:
 __all__ = [
     "AGENT_IDENTITY_PREFIX",
     "APPROVAL_REQUIRED_MODE",
+    "AUTONOMOUS_MODE",
     "BRIDGE_IDENTITY_PREFIX",
     "DEFAULT_MODE",
     "DEFAULT_PIPELINE_MODE",

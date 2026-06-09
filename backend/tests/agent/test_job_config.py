@@ -186,8 +186,11 @@ def test_mode_vocabularies_match_canonical_pipeline_constants() -> None:
         from johnny.meet_worker.pipeline_runner import SPLIT_MODE, UNIFIED_MODE
         from johnny.voice_pipeline.pipeline import (
             APPROVAL_REQUIRED_MODE,
+            AUTONOMOUS_MODE,
             LIMITED_AUTO_SPEAK_MODE,
             LISTEN_ONLY_MODE,
+            NON_SPEAKING_MODES,
+            SPEAKING_MODES,
             SUGGEST_ONLY_MODE,
         )
     except Exception as exc:  # pragma: no cover - env without heavy deps
@@ -198,5 +201,32 @@ def test_mode_vocabularies_match_canonical_pipeline_constants() -> None:
         SUGGEST_ONLY_MODE,
         APPROVAL_REQUIRED_MODE,
         LIMITED_AUTO_SPEAK_MODE,
+        AUTONOMOUS_MODE,
     }
+    # The real invariant: the dispatch contract must accept EVERY mode a meeting
+    # can be configured in — the full union of the engine's non-speaking and
+    # speaking modes. autonomous was missing from SUPPORTED_MODES, so a dispatch
+    # for an autonomous meeting was rejected at parse and the agent abandoned the
+    # job (Johnny-52b). This union assertion catches any future such omission.
+    assert SUPPORTED_MODES == NON_SPEAKING_MODES | SPEAKING_MODES
     assert SUPPORTED_PIPELINE_MODES == {SPLIT_MODE, UNIFIED_MODE}
+
+
+def test_from_metadata_accepts_autonomous_mode() -> None:
+    """Autonomous (free-form full-auto-speak) must survive the dispatch round trip.
+
+    Regression guard (Johnny-52b): autonomous is a first-class legacy SPEAKING_MODE
+    and the sole FREE_FORM_MODE, and the agent answer path special-cases it — yet it
+    was missing from SUPPORTED_MODES, so from_metadata raised ``unknown mode
+    'autonomous'`` and the worker abandoned the dispatch (autonomous meetings got no
+    bot). A real-provider dispatch into the live agent-worker reproduced exactly this.
+    """
+    cfg = SessionJobConfig(
+        bot_session_id=42,
+        room_name=room_name_for_session(42),
+        mode="autonomous",
+        pipeline_mode="split",
+    )
+    restored = SessionJobConfig.from_metadata(cfg.to_metadata())
+    assert restored.mode == "autonomous"
+    assert "autonomous" in SUPPORTED_MODES
