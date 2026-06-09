@@ -11,7 +11,8 @@ export type BotSessionStatus =
 	| 'joining'
 	| 'joined'
 	| 'ended'
-	| 'failed';
+	| 'failed'
+	| 'waiting_for_relogin';
 
 export type BotSessionSource = 'meet' | 'browser';
 
@@ -166,5 +167,6 @@ export const BOT_SESSION_STATUS_LABEL: Record<BotSessionStatus, string> = {
 	joining: 'Joining…',
 	joined: 'Joined',
 	ended: 'Ended',
-	failed: 'Failed'
+	failed: 'Failed',
+	waiting_for_relogin: 'Waiting for re-login'
 };

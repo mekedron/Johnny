@@ -84,10 +84,31 @@ def mark_session_ended(session: Session, bot_session_id: int) -> BotSession:
     return row
 
 
+def mark_session_waiting_for_relogin(
+    session: Session,
+    bot_session_id: int,
+    error_reason: str,
+) -> BotSession:
+    """Transition to ``waiting_for_relogin`` — the bot account is signed out.
+
+    A *soft*, recoverable state (Johnny-ebf): the operator is asked to
+    re-login the account, so unlike :func:`mark_session_failed` we record the
+    human-readable ``error_reason`` but deliberately do NOT stamp ``ended_at``
+    (the session has not ended — it is waiting). The scheduler later settles it
+    to ``failed`` if the meeting ends or the re-login times out.
+    """
+    row = _load(session, bot_session_id)
+    row.status = BotSessionStatus.WAITING_FOR_RELOGIN
+    row.error_reason = error_reason
+    session.flush()
+    return row
+
+
 __all__ = [
     "BotSessionNotFoundError",
     "mark_session_ended",
     "mark_session_failed",
     "mark_session_joined",
     "mark_session_joining",
+    "mark_session_waiting_for_relogin",
 ]

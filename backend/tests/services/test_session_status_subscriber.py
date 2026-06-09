@@ -7,6 +7,7 @@ validation) and the end-to-end loop with a fake message stream.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -39,6 +40,7 @@ from app.services.session_status_subscriber import (
     TRANSCRIPT_FILTERED_EVENT_TYPE,
     TURN_TERMINAL_EVENT_TYPE,
     _PendingApprovalEvent,
+    _ReloginEvent,
     apply_agent_spoke_event,
     apply_pipeline_timing_event,
     apply_router_decision_event,
@@ -115,7 +117,7 @@ def test_apply_status_event_joined_sets_status_and_clears_error(
     row.error_reason = "earlier flake"
     db_session.flush()
 
-    applied = apply_status_event(
+    applied, _relogin = apply_status_event(
         db_session, _payload(session_id=row.id, status="joined")
     )
 
@@ -128,7 +130,7 @@ def test_apply_status_event_joined_sets_status_and_clears_error(
 
 def test_apply_status_event_failed_records_reason(db_session: Session) -> None:
     row = _seed(db_session)
-    applied = apply_status_event(
+    applied, _relogin = apply_status_event(
         db_session,
         _payload(
             session_id=row.id,
@@ -147,7 +149,7 @@ def test_apply_status_event_failed_falls_back_to_default_reason(
     db_session: Session,
 ) -> None:
     row = _seed(db_session)
-    applied = apply_status_event(
+    applied, _relogin = apply_status_event(
         db_session,
         _payload(session_id=row.id, status="failed", error_reason=None),
     )
@@ -160,7 +162,7 @@ def test_apply_status_event_failed_falls_back_to_default_reason(
 
 def test_apply_status_event_ended_sets_status(db_session: Session) -> None:
     row = _seed(db_session, status=BotSessionStatus.JOINED)
-    applied = apply_status_event(
+    applied, _relogin = apply_status_event(
         db_session, _payload(session_id=row.id, status="ended")
     )
     assert applied is True
@@ -170,7 +172,7 @@ def test_apply_status_event_ended_sets_status(db_session: Session) -> None:
 
 def test_apply_status_event_scheduled_is_noop(db_session: Session) -> None:
     row = _seed(db_session, status=BotSessionStatus.JOINING)
-    applied = apply_status_event(
+    applied, _relogin = apply_status_event(
         db_session, _payload(session_id=row.id, status="scheduled")
     )
     assert applied is False
@@ -180,7 +182,7 @@ def test_apply_status_event_scheduled_is_noop(db_session: Session) -> None:
 
 def test_apply_status_event_drops_wrong_event_type(db_session: Session) -> None:
     row = _seed(db_session)
-    applied = apply_status_event(
+    applied, _relogin = apply_status_event(
         db_session,
         _payload(
             session_id=row.id, status="joined", event_type="transcript_finalized"
@@ -193,13 +195,13 @@ def test_apply_status_event_drops_wrong_event_type(db_session: Session) -> None:
 
 def test_apply_status_event_drops_missing_session_id(db_session: Session) -> None:
     payload = _payload(session_id=None, status="joined")
-    applied = apply_status_event(db_session, payload)
+    applied, _relogin = apply_status_event(db_session, payload)
     assert applied is False
 
 
 def test_apply_status_event_drops_non_int_session_id(db_session: Session) -> None:
     payload = _payload(session_id="not-an-int", status="joined")
-    applied = apply_status_event(db_session, payload)
+    applied, _relogin = apply_status_event(db_session, payload)
     assert applied is False
 
 
@@ -207,13 +209,13 @@ def test_apply_status_event_drops_missing_status(db_session: Session) -> None:
     row = _seed(db_session)
     payload = _payload(session_id=row.id, status="")
     payload["status"] = None  # force the type check to fail
-    applied = apply_status_event(db_session, payload)
+    applied, _relogin = apply_status_event(db_session, payload)
     assert applied is False
 
 
 def test_apply_status_event_accepts_string_session_id(db_session: Session) -> None:
     row = _seed(db_session)
-    applied = apply_status_event(
+    applied, _relogin = apply_status_event(
         db_session, _payload(session_id=str(row.id), status="joined")
     )
     assert applied is True
@@ -223,12 +225,107 @@ def test_apply_status_event_accepts_string_session_id(db_session: Session) -> No
 
 def test_apply_status_event_ignores_unknown_status(db_session: Session) -> None:
     row = _seed(db_session)
-    applied = apply_status_event(
+    applied, _relogin = apply_status_event(
         db_session, _payload(session_id=row.id, status="dreaming")
     )
     assert applied is False
     db_session.refresh(row)
     assert row.status == BotSessionStatus.JOINING
+
+
+def _seed_signed_out_meeting(
+    db_session: Session,
+    *,
+    email: str = "bot@example.com",
+    meet_link: str = "https://meet.google.com/abc-defg-hij",
+) -> BotSession:
+    """Build a full MEET session chain (account → event → meeting → session).
+
+    Needed for the ``waiting_for_relogin`` path, which resolves the account
+    email and meet link off the session row to build the re-login event.
+    """
+    account = GoogleAccount(email=email)
+    db_session.add(account)
+    db_session.flush()
+    event = CalendarEvent(
+        account_id=account.id,
+        external_id="ext-signed-out",
+        start_time=datetime(2026, 6, 9, 12, 0, tzinfo=UTC),
+        end_time=datetime(2026, 6, 9, 13, 0, tzinfo=UTC),
+        meet_link=meet_link,
+    )
+    db_session.add(event)
+    db_session.flush()
+    template = ProfileTemplate(name="signed-out-tmpl", mode=BotMode.LISTEN_ONLY)
+    db_session.add(template)
+    db_session.flush()
+    meeting = MeetingConfig(
+        calendar_event_id=event.id,
+        profile_template_id=template.id,
+        identity_account_id=account.id,
+        mode=BotMode.LISTEN_ONLY,
+    )
+    db_session.add(meeting)
+    db_session.flush()
+    row = BotSession(
+        meeting_config_id=meeting.id,
+        account_id=account.id,
+        status=BotSessionStatus.JOINING,
+    )
+    db_session.add(row)
+    db_session.flush()
+    return row
+
+
+def test_apply_status_event_waiting_for_relogin_marks_row_and_builds_event(
+    db_session: Session,
+) -> None:
+    row = _seed_signed_out_meeting(db_session, email="alice@example.com")
+    applied, relogin = apply_status_event(
+        db_session,
+        _payload(
+            session_id=row.id,
+            status="waiting_for_relogin",
+            error_reason="account_signed_out: chooser shown",
+        ),
+    )
+
+    assert applied is True
+    db_session.refresh(row)
+    assert row.status == BotSessionStatus.WAITING_FOR_RELOGIN
+    # Soft state — not ended.
+    assert row.ended_at is None
+    # The persisted message names the account so the active panel is clear.
+    assert row.error_reason is not None
+    assert "alice@example.com" in row.error_reason
+    assert "log in again" in row.error_reason.lower()
+    # The event carries everything the notification + one-click deep-link need.
+    assert relogin is not None
+    assert isinstance(relogin, _ReloginEvent)
+    assert relogin.session_id == row.id
+    assert relogin.account_email == "alice@example.com"
+    assert relogin.meet_link == "https://meet.google.com/abc-defg-hij"
+    assert relogin.message == row.error_reason
+
+
+def test_apply_status_event_waiting_for_relogin_without_account_returns_none(
+    db_session: Session,
+) -> None:
+    # The plain _seed row has no resolvable account (account_id is NULL).
+    row = _seed(db_session)
+    applied, relogin = apply_status_event(
+        db_session,
+        _payload(session_id=row.id, status="waiting_for_relogin"),
+    )
+
+    assert applied is True
+    db_session.refresh(row)
+    # Status + a clear (generic) message are still shown...
+    assert row.status == BotSessionStatus.WAITING_FOR_RELOGIN
+    assert row.error_reason is not None
+    assert "log in again" in row.error_reason.lower()
+    # ...but with nothing to target there is no one-click notification.
+    assert relogin is None
 
 
 # --- apply_router_decision_event approval_pending wiring -----------------
@@ -806,6 +903,83 @@ async def test_run_subscriber_does_not_emit_pending_for_non_approval_mode(
     )
 
     assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_run_subscriber_emits_account_relogin_needed(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: a waiting_for_relogin status fires the WS event (Johnny-ebf).
+
+    The subscriber persists the soft state, then invokes the relogin
+    publisher so the operator's browser raises a one-click re-login
+    notification within one subscriber loop iteration.
+    """
+    bot_session = _seed_signed_out_meeting(db_session, email="carol@example.com")
+    db_session.commit()
+    engine = db_session.bind
+    assert engine is not None
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_scope() -> Iterator[Session]:
+        sess = Session(engine)
+        try:
+            yield sess
+            sess.commit()
+        except BaseException:
+            sess.rollback()
+            raise
+        finally:
+            sess.close()
+
+    monkeypatch.setattr(
+        session_status_subscriber, "session_scope", fake_scope
+    )
+
+    payloads = [
+        _payload(
+            session_id=bot_session.id,
+            status="waiting_for_relogin",
+            error_reason="account_signed_out: chooser shown",
+        ),
+    ]
+
+    async def factory(_url: str) -> AsyncIterator[dict[str, Any]]:
+        for p in payloads:
+            yield p
+
+    captured: list[_ReloginEvent] = []
+
+    async def fake_publisher(event: _ReloginEvent) -> None:
+        captured.append(event)
+
+    async def fake_publisher_factory(_url: str) -> Any:
+        return fake_publisher
+
+    await run_subscriber(
+        "redis://ignored",
+        message_stream_factory=factory,
+        relogin_publisher_factory=fake_publisher_factory,
+    )
+
+    assert len(captured) == 1
+    event = captured[0]
+    assert event.session_id == bot_session.id
+    assert event.account_email == "carol@example.com"
+    assert event.meet_link == "https://meet.google.com/abc-defg-hij"
+    assert "carol@example.com" in event.message
+
+    # The row settled into the soft waiting state, not failed.
+    refreshed = Session(engine)
+    try:
+        row = refreshed.get(BotSession, bot_session.id)
+        assert row is not None
+        assert row.status == BotSessionStatus.WAITING_FOR_RELOGIN
+    finally:
+        refreshed.close()
 
 
 # --- pipeline_timing event tests (Johnny-ckz.7) ----------------------------

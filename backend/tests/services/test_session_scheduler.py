@@ -24,6 +24,7 @@ from app.db.models import (
     ProfileTemplate,
 )
 from app.services.session_scheduler import (
+    DEFAULT_RELOGIN_TTL_SECONDS,
     DEFAULT_SCHEDULER_INTERVAL_SECONDS,
     ContainerLauncher,
     LaunchContext,
@@ -36,6 +37,7 @@ from app.services.session_scheduler import (
     run_scheduler_pass_with_session,
     select_due_meetings,
     select_due_stops,
+    select_relogin_to_settle,
     start_session_for_meeting,
     stop_session_by_id,
 )
@@ -318,6 +320,113 @@ def test_select_due_stops_honors_custom_grace(db_session: Session) -> None:
     assert [r.id for r in due] == [row.id]
 
 
+def test_select_due_stops_skips_waiting_for_relogin(db_session: Session) -> None:
+    """A signed-out session past its meeting end is settled by the relogin
+    sweep (→ failed), NOT the stop sweep (→ ended) — so it must be excluded
+    from select_due_stops (Johnny-ebf)."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(minutes=-30),
+        end_offset=timedelta(minutes=-5),
+    )
+    db_session.add(
+        BotSession(
+            meeting_config_id=cfg.id,
+            status=BotSessionStatus.WAITING_FOR_RELOGIN,
+        )
+    )
+    db_session.flush()
+    assert select_due_stops(db_session) == []
+
+
+# --- select_relogin_to_settle (Johnny-ebf) ---------------------------------
+
+
+def test_select_relogin_to_settle_picks_waiting_after_meeting_end(
+    db_session: Session,
+) -> None:
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(minutes=-30),
+        end_offset=timedelta(minutes=-2),
+    )
+    row = BotSession(
+        meeting_config_id=cfg.id, status=BotSessionStatus.WAITING_FOR_RELOGIN
+    )
+    db_session.add(row)
+    db_session.flush()
+    settle = select_relogin_to_settle(db_session)
+    assert [r.id for r in settle] == [row.id]
+
+
+def test_select_relogin_to_settle_skips_live_meeting_within_ttl(
+    db_session: Session,
+) -> None:
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(minutes=-5),
+        end_offset=timedelta(hours=2),
+    )
+    row = BotSession(
+        meeting_config_id=cfg.id, status=BotSessionStatus.WAITING_FOR_RELOGIN
+    )
+    db_session.add(row)
+    db_session.flush()
+    # Meeting still live and the wait just started → leave it waiting.
+    assert select_relogin_to_settle(db_session) == []
+
+
+def test_select_relogin_to_settle_picks_waiting_past_ttl_while_live(
+    db_session: Session,
+) -> None:
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(minutes=-5),
+        end_offset=timedelta(hours=2),
+    )
+    # Entered waiting longer ago than the TTL — operator never re-logged in.
+    old = datetime.now(UTC).replace(microsecond=0) - timedelta(
+        seconds=DEFAULT_RELOGIN_TTL_SECONDS + 60
+    )
+    row = BotSession(
+        meeting_config_id=cfg.id, status=BotSessionStatus.WAITING_FOR_RELOGIN
+    )
+    row.updated_at = old  # explicit value overrides server_default/onupdate
+    db_session.add(row)
+    db_session.flush()
+    settle = select_relogin_to_settle(db_session)
+    assert [r.id for r in settle] == [row.id]
+
+
+def test_run_scheduler_pass_settles_waiting_to_failed(
+    db_session: Session,
+) -> None:
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(minutes=-30),
+        end_offset=timedelta(minutes=-2),
+    )
+    row = BotSession(
+        meeting_config_id=cfg.id, status=BotSessionStatus.WAITING_FOR_RELOGIN
+    )
+    db_session.add(row)
+    db_session.flush()
+
+    import asyncio
+
+    result = asyncio.run(
+        run_scheduler_pass_with_session(
+            db_session, launcher=NoopContainerLauncher()
+        )
+    )
+    assert result.settled_count == 1
+    db_session.refresh(row)
+    assert row.status == BotSessionStatus.FAILED
+    assert row.error_reason is not None
+    assert "signed out" in row.error_reason.lower()
+    assert "meeting ended" in row.error_reason.lower()
+
+
 # --- list_active_sessions --------------------------------------------------
 
 
@@ -345,6 +454,47 @@ def test_list_active_sessions_excludes_terminal(db_session: Session) -> None:
     assert statuses == sorted(
         [BotSessionStatus.SCHEDULED, BotSessionStatus.JOINED]
     )
+
+
+def test_list_active_sessions_includes_waiting_for_relogin(
+    db_session: Session,
+) -> None:
+    """waiting_for_relogin must stay in the active panel so the frontend keeps
+    its WS subscription open and shows the status (Johnny-ebf)."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(minutes=1),
+        end_offset=timedelta(minutes=30),
+    )
+    db_session.add(
+        BotSession(
+            meeting_config_id=cfg.id,
+            status=BotSessionStatus.WAITING_FOR_RELOGIN,
+        )
+    )
+    db_session.flush()
+    rows = list_active_sessions(db_session)
+    assert [r.status for r in rows] == [BotSessionStatus.WAITING_FOR_RELOGIN]
+
+
+def test_select_due_meetings_skips_meeting_with_waiting_session(
+    db_session: Session,
+) -> None:
+    """A meeting whose session is waiting for re-login must not be re-queued
+    (no duplicate worker) — the existing row owns the recovery (Johnny-ebf)."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    db_session.add(
+        BotSession(
+            meeting_config_id=cfg.id,
+            status=BotSessionStatus.WAITING_FOR_RELOGIN,
+        )
+    )
+    db_session.flush()
+    assert select_due_meetings(db_session) == []
 
 
 # --- start_session_for_meeting --------------------------------------------

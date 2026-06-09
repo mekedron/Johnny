@@ -62,6 +62,14 @@ DEFAULT_ADMISSION_TIMEOUT_S = 300.0
 guest after clicking "Ask to join". Far longer than the preview timeout
 because a human has to notice the knock and click "Admit"."""
 
+DEFAULT_SIGNED_OUT_SETTLE_S = 2.0
+"""When the page is parked on accounts.google.com with no chooser DOM yet,
+wait this long before declaring the account signed out. A *healthy* account
+also bounces through accounts.google.com briefly during a valid cookie
+handshake, but that resolves to Meet within ~1-2s; the account-chooser page
+is terminal and never auto-advances. The settle re-check avoids a false
+positive on the legitimate first-load redirect (Johnny-ebf)."""
+
 
 # Selectors for the preview / in-meeting UI elements. Lists are tried in
 # order; first visible match wins. Google Meet's DOM is unstable across
@@ -152,6 +160,22 @@ SIGN_IN_REQUIRED_SELECTORS: tuple[str, ...] = (
     'input[type="email"][name="identifier"]',
     "text=/Sign in to join/i",
 )
+# Google's account-chooser / "Signed out" page. When the bot account's
+# stored cookies have expired, navigating to a meet.google.com link
+# redirects to accounts.google.com and Google shows this chooser with a
+# "Signed out" badge on the account (captured real case:
+# .validation/meet-debug/session-45-failure.png). It is NOT matched by
+# SIGN_IN_REQUIRED_SELECTORS above (the chooser has no ServiceLogin link and
+# no email input yet), so without these the bot sails past blocker_check and
+# only fails ~10s later at click_join with a misleading "no Join now button"
+# error. Detected distinctly so the operator gets a guided "re-login this
+# account" recovery path instead of a cryptic dead-end (Johnny-ebf).
+ACCOUNT_SIGNED_OUT_SELECTORS: tuple[str, ...] = (
+    "text=/Choose an account/i",
+    "text=/Signed out/i",
+    "text=/Use another account/i",
+    "text=/Remove an account/i",
+)
 
 
 class MeetJoinError(Exception):
@@ -160,6 +184,17 @@ class MeetJoinError(Exception):
 
 class MeetSignInError(MeetJoinError):
     """Google sign-in is required (no usable cookies / consent expired)."""
+
+
+class MeetAccountSignedOutError(MeetSignInError):
+    """The bot account's session expired: Google showed the account-chooser
+    "Signed out" page instead of the meeting.
+
+    Distinct from the generic sign-in wall so the session can enter a
+    ``waiting_for_relogin`` state (not a hard ``failed``) and the operator
+    can be guided to re-login this specific account (Johnny-ebf). Subclasses
+    :class:`MeetSignInError` so it stays a :class:`MeetJoinError`; callers
+    that only know about the base classes keep working unchanged."""
 
 
 class MeetingNotStartedError(MeetJoinError):
@@ -212,6 +247,19 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _status_for_error(exc: MeetJoinError) -> SessionStatus:
+    """Map a join failure to the session status the worker should publish.
+
+    A signed-out account is recoverable: the operator re-logs in and the
+    bot can try again, so it goes to ``waiting_for_relogin`` (a soft,
+    guided-recovery state) rather than a hard ``failed`` (Johnny-ebf).
+    Every other join failure is terminal for this attempt → ``failed``.
+    """
+    if isinstance(exc, MeetAccountSignedOutError):
+        return "waiting_for_relogin"
+    return "failed"
+
+
 class MeetJoiner:
     """Drive a Playwright Page through the Google Meet join flow.
 
@@ -237,6 +285,7 @@ class MeetJoiner:
         preview_timeout_s: float = DEFAULT_PREVIEW_TIMEOUT_S,
         poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
         admission_timeout_s: float = DEFAULT_ADMISSION_TIMEOUT_S,
+        signed_out_settle_s: float = DEFAULT_SIGNED_OUT_SETTLE_S,
         join_button_selectors: Sequence[str] = JOIN_BUTTON_SELECTORS,
         ask_to_join_selectors: Sequence[str] = ASK_TO_JOIN_SELECTORS,
         admission_denied_selectors: Sequence[str] = ADMISSION_DENIED_SELECTORS,
@@ -245,6 +294,7 @@ class MeetJoiner:
         meeting_not_started_selectors: Sequence[str] = MEETING_NOT_STARTED_SELECTORS,
         access_denied_selectors: Sequence[str] = ACCESS_DENIED_SELECTORS,
         sign_in_required_selectors: Sequence[str] = SIGN_IN_REQUIRED_SELECTORS,
+        account_signed_out_selectors: Sequence[str] = ACCOUNT_SIGNED_OUT_SELECTORS,
         in_meeting_selectors: Sequence[str] = IN_MEETING_SELECTORS,
         switch_call_selectors: Sequence[str] = SWITCH_CALL_HERE_SELECTORS,
     ) -> None:
@@ -262,6 +312,7 @@ class MeetJoiner:
         self._preview_timeout_s = preview_timeout_s
         self._poll_interval_s = poll_interval_s
         self._admission_timeout_s = admission_timeout_s
+        self._signed_out_settle_s = signed_out_settle_s
         self._join_button_selectors = tuple(join_button_selectors)
         self._ask_to_join_selectors = tuple(ask_to_join_selectors)
         self._admission_denied_selectors = tuple(admission_denied_selectors)
@@ -270,6 +321,7 @@ class MeetJoiner:
         self._meeting_not_started_selectors = tuple(meeting_not_started_selectors)
         self._access_denied_selectors = tuple(access_denied_selectors)
         self._sign_in_required_selectors = tuple(sign_in_required_selectors)
+        self._account_signed_out_selectors = tuple(account_signed_out_selectors)
         self._in_meeting_selectors = tuple(in_meeting_selectors)
         self._switch_call_selectors = tuple(switch_call_selectors)
 
@@ -346,13 +398,15 @@ class MeetJoiner:
                 "join: stage=wait_joined done session_id=%s", self._session_id
             )
         except MeetJoinError as exc:
+            status = _status_for_error(exc)
             logger.warning(
-                "join: failure session_id=%s exc=%s",
+                "join: failure session_id=%s status=%s exc=%s",
                 self._session_id,
+                status,
                 exc,
             )
             await self._capture_failure_screenshot()
-            await self._publish_status("failed", error_reason=str(exc))
+            await self._publish_status(status, error_reason=str(exc))
             raise
         except Exception as exc:
             msg = f"unexpected error during Meet join: {exc}"
@@ -419,6 +473,14 @@ class MeetJoiner:
 
     async def _check_for_blockers(self) -> None:
         """Look for sign-in / access-denied / not-started states; raise if found."""
+        # Checked first, and more specifically than the generic sign-in wall
+        # below: a redirect to the account-chooser "Signed out" page is a
+        # *recoverable* signed-out account, not a missing-cookies hard failure.
+        if await self._detect_account_signed_out():
+            raise MeetAccountSignedOutError(
+                "Google account is signed out — Meet redirected to the "
+                "account-chooser page; the bot account must be re-logged-in"
+            )
         if await self._any_selector_visible(self._sign_in_required_selectors):
             raise MeetSignInError(
                 "Google sign-in required — storage_state is missing or expired"
@@ -429,6 +491,41 @@ class MeetJoiner:
             )
         if await self._any_selector_visible(self._meeting_not_started_selectors):
             raise MeetingNotStartedError("Meeting has not started yet")
+
+    def _on_account_chooser_url(self) -> bool:
+        """True when we navigated to a Meet link but the page is parked on
+        accounts.google.com — the redirect Google performs when the bot's
+        cookies have expired (captured real case: session-45.log shows
+        ``url=https://accounts.google.com/v3/signin/accountchooser?...``)."""
+        url = getattr(self._page, "url", "") or ""
+        return "accounts.google.com" in url and "meet.google.com" in (
+            self._meet_link or ""
+        )
+
+    async def _detect_account_signed_out(self) -> bool:
+        """Detect Google's account-chooser / "Signed out" page.
+
+        Primary signal is the chooser DOM (a *terminal* page — it never
+        auto-advances), so a DOM match raises immediately. The bare URL
+        redirect to accounts.google.com is only a confirmation: a *healthy*
+        account also bounces through accounts.google.com briefly during a
+        valid cookie handshake, but that resolves to Meet within ~1-2s. So
+        when only the URL signal is present we let the page settle and
+        re-check before declaring the account signed out, to avoid a false
+        positive on the legitimate first-load redirect (Johnny-ebf R1).
+        """
+        if await self._any_selector_visible(self._account_signed_out_selectors):
+            return True
+        if not self._on_account_chooser_url():
+            return False
+        # URL-only: could be a healthy mid-handshake redirect. Let it settle,
+        # then require either the chooser DOM, or that we are STILL parked on
+        # accounts.google.com (a healthy redirect would have reached Meet).
+        if self._signed_out_settle_s > 0:
+            await asyncio.sleep(self._signed_out_settle_s)
+        if await self._any_selector_visible(self._account_signed_out_selectors):
+            return True
+        return self._on_account_chooser_url()
 
     async def _mute_av(self) -> None:
         """Click mic/camera toggles if visible. Best-effort — never raises."""
@@ -855,6 +952,7 @@ def _attach_browser_log_forwarders(page: Any, *, session_id: str) -> None:
 
 __all__ = [
     "ACCESS_DENIED_SELECTORS",
+    "ACCOUNT_SIGNED_OUT_SELECTORS",
     "CAM_OFF_SELECTORS",
     "DEFAULT_JOIN_TIMEOUT_S",
     "DEFAULT_POLL_INTERVAL_S",
@@ -864,6 +962,7 @@ __all__ = [
     "JoinResult",
     "MEETING_NOT_STARTED_SELECTORS",
     "MIC_OFF_SELECTORS",
+    "MeetAccountSignedOutError",
     "MeetJoinError",
     "MeetJoinTimeoutError",
     "MeetJoiner",

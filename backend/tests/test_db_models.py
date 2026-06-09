@@ -89,6 +89,7 @@ def test_enums_have_expected_members() -> None:
         "joined",
         "ended",
         "failed",
+        "waiting_for_relogin",
     }
     assert {e.value for e in BotSessionSource} == {"meet", "browser"}
     assert {e.value for e in DecisionOutcome} == {

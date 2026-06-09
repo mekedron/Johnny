@@ -65,6 +65,10 @@ class BotSessionStatus(enum.StrEnum):
     JOINED = "joined"
     ENDED = "ended"
     FAILED = "failed"
+    # Soft, recoverable state: the bot account's Google login expired and we
+    # landed on the account-chooser "Signed out" page. The operator is asked
+    # to re-login; the session waits rather than hard-failing (Johnny-ebf).
+    WAITING_FOR_RELOGIN = "waiting_for_relogin"
 
 
 class BotSessionSource(enum.StrEnum):

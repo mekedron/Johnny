@@ -111,9 +111,27 @@
 	}
 
 	onMount(() => {
-		loadAccounts();
+		void loadAccounts().then(maybeOpenReloginFromQuery);
 		window.addEventListener('message', handleOAuthMessage);
 	});
+
+	function maybeOpenReloginFromQuery() {
+		// A re-login notification (Johnny-ebf) deep-links here as
+		// /settings?relogin=<accountId>; open that account's sign-in
+		// straight away so the fix is one click from the alert.
+		if (typeof window === 'undefined') return;
+		const raw = new URLSearchParams(window.location.search).get('relogin');
+		if (!raw) return;
+		const id = Number(raw);
+		if (Number.isFinite(id)) {
+			const account = accounts.find((a) => a.id === id);
+			if (account) openBotSigninForAccount(account);
+		}
+		// Drop the param so a refresh / back-nav doesn't reopen the picker.
+		const url = new URL(window.location.href);
+		url.searchParams.delete('relogin');
+		history.replaceState(history.state, '', url);
+	}
 
 	onDestroy(() => {
 		stopPopupWatch();
