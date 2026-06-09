@@ -277,6 +277,43 @@ services:
       retries: 5
       start_period: 15s
 
+  # Long-running LiveKit agent worker (Johnny-9eh, epic Johnny-7g5). Registers
+  # with the in-compose `livekit` SFU under agent_name="johnny" (a non-empty name
+  # disables LiveKit automatic dispatch) and runs one AgentSession job per Meet
+  # session the API dispatches into that session's room (johnny-session-<id>).
+  # Shares the api/worker image (same ./backend build + backend-env): the `agent`
+  # extra and the baked LiveKit model files (Silero VAD + multilingual turn
+  # detector) already live in that image (Johnny-jue), so a clean ./run.sh brings
+  # it up offline. No host `ports:` — it reaches the SFU only over the internal
+  # johnny_default network. Lifecycle is per-room: each job ends when the bridge /
+  # humans leave the room, so there are no orphan workers — the single service
+  # stays up waiting for the next dispatch.
+  agent-worker:
+    build:
+      context: ./backend
+    command: ["python", "-m", "johnny.agent.worker", "start"]
+    environment: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      livekit:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      # Share the on-device model caches with api/worker/meet-worker so the
+      # split-session adapters built from the dispatched provider_config load the
+      # same downloaded weights (faster-whisper, Piper, Parakeet, Kokoro,
+      # KittenTTS) instead of re-fetching. Host bind mounts — see api notes above.
+      - ${HOME}/.johnny/whisper-models:/var/lib/johnny/whisper-models
+      - ${HOME}/.johnny/piper-models:/var/lib/johnny/piper-models
+      - ${HOME}/.johnny/parakeet-models:/var/lib/johnny/parakeet-models
+      - ${HOME}/.johnny/kokoro-models:/var/lib/johnny/kokoro-models
+      - ${HOME}/.johnny/kitten-models:/var/lib/johnny/kitten-models
+      - ${HOME}/.johnny/parakeet-packages:/var/lib/johnny/parakeet-packages
+
   frontend:
     build:
       context: ./frontend

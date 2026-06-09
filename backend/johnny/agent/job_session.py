@@ -1,0 +1,428 @@
+"""Assemble one Meet session's ``AgentSession`` harness from its job payload (Johnny-9eh).
+
+The agent worker (:mod:`johnny.agent.worker`) receives one Meet session's whole
+configuration as a :class:`~johnny.agent.job_config.SessionJobConfig` in its LiveKit
+job metadata. The translation seam (:mod:`johnny.agent.job_runtime`, Johnny-7we) turns
+that payload into adapters + instructions + an :class:`AnswerConfig`; *this* module is
+the next layer up — it wires every Phase-2 component the running session needs into a
+single :class:`AgentRuntime`:
+
+* the STT/LLM/TTS LiveKit adapters
+  (:func:`~johnny.agent.job_runtime.build_session_adapters_for_job`);
+* the session :class:`~johnny.agent.gate.TurnLedger` + :class:`~johnny.agent.gate.TurnIndex`
+  (INV-1 authority + the durable str→int turn id, Johnny-o3z/d5z);
+* the observability emit seams (:mod:`johnny.agent.observability`) publishing
+  ``RouterDecisionMade`` / ``AgentSpoke`` / ``AgentSuggested`` / ``TranscriptFinalized`` /
+  ``TurnTerminal`` / ``PipelineTiming`` to the Redis ``EventBus`` the existing subscriber
+  persists (Johnny-d5z — emit-half parity, no new DB code);
+* the router "should-speak" :class:`~johnny.agent.router_gate.RouterGate` (Johnny-xpa);
+* the out-of-band barge-in classifier (:class:`~johnny.agent.barge_in.BargeInClassifier`,
+  Johnny-k8t);
+* the :class:`~johnny.agent.session.JohnnyAgent` with the noise gate, the answer-path
+  nodes, transcript rehydration, and the metrics listener (Johnny-cmd/5ag/re2/d5z).
+
+The one piece this module does **not** build is the
+:class:`~livekit.agents.AgentSession` itself and the ``approval_required``
+coordinator: both need a live LiveKit job context (the multilingual turn detector
+and ``AgentSession.generate_reply``), so the worker constructs the session and — only
+in ``approval_required`` mode — calls
+:func:`~johnny.agent.approval_wiring.build_approval_coordinator` with the
+:class:`AgentRuntime`'s ledger / gate / approval gate / decision sink afterwards. The
+runtime carries those handles so the worker can finish that wiring without re-deriving
+anything, and :meth:`AgentRuntime.aclose` drains the rest at teardown.
+
+Requires the ``agent`` extra (it reaches the livekit-backed adapters + gate); imported
+only by the agent worker / its tests, never from the import-safe top-level
+:mod:`johnny.agent` package.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+from app.providers.base import (
+    LLMProvider,
+    ProviderConfig,
+    ProviderKind,
+    get_registry,
+)
+from johnny.agent.adapters.factory import AgentSessionSetupError, SessionAdapters
+from johnny.agent.barge_in import BargeInClassifier, BargeInClassifierConfig
+from johnny.agent.gate import TurnIndex, TurnLedger
+from johnny.agent.job_config import APPROVAL_REQUIRED_MODE, SessionJobConfig
+from johnny.agent.job_runtime import (
+    answer_config_from_job,
+    build_session_adapters_for_job,
+    instructions_config_from_job,
+)
+from johnny.agent.noise_filter import NoiseFilterConfig
+from johnny.agent.observability import (
+    MetricsTranslator,
+    build_decision_emitter,
+    build_session_terminal_emitter,
+    build_spoke_emitter,
+    build_suggested_emitter,
+    build_transcript_finalized_emitter,
+)
+from johnny.agent.router_gate import RouterGate, RouterGateConfig
+from johnny.agent.session import JohnnyAgent, build_johnny_agent
+from johnny.voice_pipeline.event_bus import (
+    DEFAULT_CHANNEL_PREFIX,
+    EventBus,
+    InMemoryEventBus,
+    RedisEventBus,
+)
+from johnny.voice_pipeline.events import TranscriptFiltered
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from livekit.agents.vad import VAD
+    from sqlalchemy.orm import Session
+
+    from app.providers.base import ProviderRegistry
+    from johnny.voice_pipeline.approval import ApprovalGate
+    from johnny.voice_pipeline.transcript_history import TranscriptHistoryLoader
+
+logger = logging.getLogger(__name__)
+
+
+def build_event_bus(redis_url: str | None) -> EventBus:
+    """Connect the Redis :class:`EventBus` when ``redis_url`` is set, else in-memory.
+
+    Mirrors :func:`johnny.meet_worker.bootstrap.build_event_bus` (the meet-worker's
+    own factory) but without importing that Playwright-heavy bootstrap module: a
+    blank URL falls back to :class:`InMemoryEventBus` (a smoke / no-Redis run, where
+    status events simply do not reach the API), and a real URL builds a
+    :class:`RedisEventBus` on the default ``johnny.session`` channel prefix — the
+    exact channel ``app.services.session_status_subscriber`` reads, so the agent
+    path's events land in the same DB tables as the legacy pipeline's.
+    """
+    if not redis_url:
+        logger.warning(
+            "no redis_url in job payload; using in-memory event bus "
+            "(status/decision/transcript events will NOT reach the API)"
+        )
+        return InMemoryEventBus()
+    from redis.asyncio import Redis
+
+    client = Redis.from_url(redis_url, decode_responses=False)
+    return RedisEventBus(client, channel_prefix=DEFAULT_CHANNEL_PREFIX)
+
+
+def _build_llm_provider(
+    provider_config: Mapping[str, Any],
+    *,
+    registry: ProviderRegistry | None = None,
+) -> LLMProvider:
+    """Instantiate the raw answer/router :class:`LLMProvider` from the job payload.
+
+    The router gate (:class:`RouterGate`) and the allowed-reply coercion both need
+    the *raw* :class:`~app.providers.base.LLMProvider` — not the session
+    :class:`~johnny.agent.adapters.johnny_llm.JohnnyLLM` adapter (which only exposes
+    the provider *name*). One instance is reused for both, mirroring the legacy
+    meet-worker's ``router_llm=answer_llm=_as_llm(llm)`` (the same provider drives the
+    router decision and the answer stage). Built from the same personality-resolved
+    ``provider_config`` entry the adapter factory reads, so the session, the router,
+    and the coercion all run the operator's configured (and personality-overridden)
+    LLM. Fail-fast :class:`AgentSessionSetupError` on a missing/blank/wrong-type
+    entry, like the split adapter factory.
+    """
+    entry = provider_config.get(ProviderKind.LLM.value)
+    if not isinstance(entry, Mapping):
+        raise AgentSessionSetupError(
+            "no active LLM provider in the dispatched job payload — the router gate "
+            "and answer stage need an 'llm' entry in provider_config"
+        )
+    provider_name = str(entry.get("provider_name") or "").strip()
+    if not provider_name:
+        raise AgentSessionSetupError("the 'llm' entry in the job payload has no provider_name")
+    config = ProviderConfig(
+        kind=ProviderKind.LLM,
+        provider_name=provider_name,
+        display_name=str(entry.get("display_name") or provider_name),
+        credentials={str(k): str(v) for k, v in (entry.get("credentials") or {}).items()},
+        options=dict(entry.get("options") or {}),
+    )
+    reg = registry if registry is not None else get_registry()
+    instance = reg.instantiate(config)
+    if not isinstance(instance, LLMProvider):
+        raise AgentSessionSetupError(
+            f"the active LLM provider is not an LLMProvider: {type(instance).__name__}"
+        )
+    return instance
+
+
+@dataclass(slots=True)
+class AgentRuntime:
+    """Everything the worker needs to start + tear down one session's ``AgentSession``.
+
+    :func:`build_agent_runtime` assembles the gate / agent / adapters / observability;
+    the worker (Johnny-9eh) builds the :class:`~livekit.agents.AgentSession` from
+    :attr:`adapters`, starts it with :attr:`agent`, and — only when
+    :attr:`needs_approval_wiring` — finishes the ``approval_required`` wiring with the
+    ledger / gate / approval gate / decision sink carried here. :meth:`aclose` drains
+    the metrics publisher, closes the approval gate + owned event bus, and releases the
+    approval DB session at teardown; the gate / ledger are swept by
+    :meth:`~johnny.agent.session.JohnnyAgent.on_exit` (``RouterGate.aclose``).
+    """
+
+    config: SessionJobConfig
+    session_id: str
+    agent: JohnnyAgent
+    adapters: SessionAdapters
+    ledger: TurnLedger
+    gate: RouterGate
+    metrics_translator: MetricsTranslator
+    event_bus: EventBus
+    enable_barge_in: bool
+    min_interruption_duration_s: float | None
+    approval_gate: ApprovalGate | None = None
+    decision_sink: Any = None
+    _db_session: Session | None = None
+    _owns_event_bus: bool = True
+
+    @property
+    def needs_approval_wiring(self) -> bool:
+        """Whether the worker should build the out-of-band approval coordinator.
+
+        True only for ``approval_required`` mode *with* a live approval gate +
+        decision sink (both built from ``redis_url`` + ``DATABASE_URL`` in
+        :func:`build_agent_runtime`). A misconfigured approval session (no redis / no
+        DB) leaves these ``None``, so the gate's own misconfig branch terminalizes the
+        turn ``no_reply(approval_rejected)`` — the agent-path analogue of the legacy
+        "approval_required but no JOHNNY_REDIS_URL → auto-reject on timeout".
+        """
+        return (
+            self.config.mode == APPROVAL_REQUIRED_MODE
+            and self.approval_gate is not None
+            and self.decision_sink is not None
+        )
+
+    async def aclose(self) -> None:
+        """Drain + release the resources the agent ``on_exit`` does not own.
+
+        Defensive throughout: teardown of one resource never blocks the next, so a
+        flaky Redis close cannot strand the DB session. ``RouterGate.aclose`` (the
+        ledger sweep + approval-resolver cancellation) is fired by
+        :meth:`JohnnyAgent.on_exit`; this handles the metrics drain, the approval
+        gate, the owned event bus, and the approval DB session.
+        """
+        sid = self.session_id
+        try:
+            await self.metrics_translator.aclose()
+        except Exception:
+            logger.exception("agent runtime: metrics translator close failed for %s", sid)
+        if self.approval_gate is not None:
+            try:
+                await self.approval_gate.close()
+            except Exception:
+                logger.exception("agent runtime: approval gate close failed for %s", sid)
+        if self._owns_event_bus:
+            try:
+                await self.event_bus.close()
+            except Exception:
+                logger.exception("agent runtime: event bus close failed for %s", sid)
+        if self._db_session is not None:
+            try:
+                self._db_session.close()
+            except Exception:
+                logger.exception("agent runtime: db session close failed for %s", sid)
+
+
+def _build_approval_pieces(
+    config: SessionJobConfig,
+    *,
+    db_session_factory: Callable[[], Session] | None,
+) -> tuple[ApprovalGate | None, Any, Session | None]:
+    """Build the ``approval_required`` approval gate + synchronous decision sink.
+
+    The agent approval path needs the decision row's id *synchronously* before it
+    parks a turn (Johnny-qzj), so — unlike every other event, which the async Redis
+    subscriber persists — it writes the ``pending`` row through a SQLAlchemy
+    :class:`~app.services.router_decisions.SqlAlchemyDecisionSink` directly. That
+    needs a DB session, so the worker passes a ``db_session_factory`` (``SessionLocal``
+    in production). The approval source is the Redis-backed
+    :class:`~app.services.approval.RedisApprovalGate` keyed off the session id (the
+    same channel the API publishes approve/reject clicks to). Any missing piece
+    (no redis, no DB) returns ``(None, None, None)`` so the session still runs — the
+    gate auto-rejects on its misconfig branch, parity with the legacy degrade.
+    """
+    if config.mode != APPROVAL_REQUIRED_MODE:
+        return None, None, None
+    session_id = str(config.bot_session_id)
+    redis_url = config.redis_url
+    if not redis_url:
+        logger.warning(
+            "mode=approval_required but no redis_url in job payload for %s — "
+            "approval clicks cannot reach the agent; turns auto-reject",
+            session_id,
+        )
+        return None, None, None
+    if db_session_factory is None:
+        logger.warning(
+            "mode=approval_required but no DB session factory for %s — "
+            "cannot persist the pending decision row; turns auto-reject",
+            session_id,
+        )
+        return None, None, None
+    from app.services.approval import RedisApprovalGate
+    from app.services.router_decisions import SqlAlchemyDecisionSink
+
+    db_session = db_session_factory()
+    decision_sink = SqlAlchemyDecisionSink(db_session, config.bot_session_id)
+    approval_gate = RedisApprovalGate(redis_url=redis_url, session_id=session_id)
+    logger.info("approval gate wired to redis channel johnny.approval.%s", session_id)
+    return approval_gate, decision_sink, db_session
+
+
+async def build_agent_runtime(
+    config: SessionJobConfig,
+    *,
+    vad: VAD | None = None,
+    event_bus: EventBus | None = None,
+    registry: ProviderRegistry | None = None,
+    transcript_history_loader: TranscriptHistoryLoader | None = None,
+    db_session_factory: Callable[[], Session] | None = None,
+    session_started_at: float = 0.0,
+) -> AgentRuntime:
+    """Assemble the full :class:`AgentRuntime` for one dispatched Meet session.
+
+    Wires, in the legacy ``VoicePipeline`` assembly order: the STT/LLM/TTS adapters
+    (from the personality-resolved ``provider_config``), the raw router/answer LLM,
+    the turn ledger + index, the observability emitters, the router gate, the barge-in
+    classifier, and the :class:`JohnnyAgent` (noise gate + answer nodes + transcript
+    rehydration + metrics listener). ``approval_required`` mode additionally builds the
+    Redis approval gate + synchronous decision sink (left for the worker to attach to a
+    live :class:`AgentSession`).
+
+    ``event_bus`` defaults to one built from ``config.redis_url`` (and is then owned —
+    closed by :meth:`AgentRuntime.aclose`); an injected bus is left for the caller to
+    own. ``vad`` is the process-warmed Silero model (the worker's prewarm), forwarded to
+    the batch-STT adapter wrapping. ``db_session_factory`` (``SessionLocal``) backs the
+    approval decision sink. Raises :class:`AgentSessionSetupError` for a unified payload
+    or a missing split provider — the agent path is split-only.
+    """
+    session_id = str(config.bot_session_id)
+
+    # STT/LLM/TTS adapters + the raw LLM the router gate / coercion reuse. Built first
+    # so a misconfigured payload (unified / missing provider) fails fast before any
+    # event-bus / Redis / DB resource is created.
+    adapters = build_session_adapters_for_job(config, registry=registry, vad=vad)
+    router_llm = _build_llm_provider(config.provider_config, registry=registry)
+
+    bus = event_bus if event_bus is not None else build_event_bus(config.redis_url)
+    owns_bus = event_bus is None
+
+    # Turn accounting (INV-1 ledger + the shared str→int index) and the observability
+    # emit seams that publish to the EventBus the subscriber persists.
+    turn_index = TurnIndex()
+    ledger = TurnLedger(build_session_terminal_emitter(bus, turn_index, session_id=session_id))
+
+    is_approval = config.mode == APPROVAL_REQUIRED_MODE
+    approval_gate, decision_sink, db_session = _build_approval_pieces(
+        config, db_session_factory=db_session_factory
+    )
+    persist_pending_decision = None
+    if decision_sink is not None:
+        from johnny.agent.approval_wiring import build_persist_pending_decision
+
+        persist_pending_decision = build_persist_pending_decision(
+            decision_sink, session_id=session_id, bot_session_id=config.bot_session_id
+        )
+
+    gate_config = RouterGateConfig(
+        mode=config.mode,
+        personality_prompt=config.personality_prompt,
+        instructions=config.instructions,
+        context=config.context,
+        calendar_context=config.calendar_context,
+        calendar_attachments_text=config.calendar_attachments_text,
+        prior_session_context=config.prior_session_context,
+    )
+    gate = RouterGate(
+        router_llm,
+        config=gate_config,
+        ledger=ledger,
+        persist_pending_decision=persist_pending_decision,
+        record_decision=build_decision_emitter(
+            bus,
+            turn_index,
+            mode=config.mode,
+            approval_timeout_seconds=(
+                gate_config.approval_timeout_seconds if is_approval else None
+            ),
+            session_id=session_id,
+        ),
+        record_spoke=build_spoke_emitter(bus, mode=config.mode, session_id=session_id),
+        record_suggested=build_suggested_emitter(bus, session_id=session_id),
+    )
+
+    # The metrics translator resolves a LiveKit metric's speech_id (the reply
+    # SpeechHandle.id, on LLM/TTS metrics) to the durable int turn id via the gate's
+    # live reply→turn binding, falling back to the most recent turn for STT metrics
+    # (which carry no speech_id) — the analogue of the legacy timing's utterance-count
+    # fallback.
+    def _resolve_turn_id(speech_id: str | None) -> int:
+        active = gate.active_reply
+        if active is not None and speech_id is not None and active[1].id == speech_id:
+            return turn_index.resolve(active[0])
+        return turn_index.last()
+
+    metrics_translator = MetricsTranslator(
+        bus,
+        resolve_turn_id=_resolve_turn_id,
+        session_started_at=session_started_at,
+        session_id=session_id,
+    )
+
+    barge_in = BargeInClassifier(
+        router_llm,
+        config=BargeInClassifierConfig(enable_barge_in=True, instructions=config.instructions),
+    )
+
+    async def _publish_transcript_filtered(event: TranscriptFiltered) -> None:
+        await bus.publish(event)
+
+    agent = await build_johnny_agent(
+        prompt_config=instructions_config_from_job(config),
+        transcript_history_loader=transcript_history_loader,
+        session_id=session_id,
+        bot_session_id=config.bot_session_id,
+        router_gate=gate,
+        barge_in=barge_in,
+        answer_llm=router_llm,
+        answer_config=answer_config_from_job(config),
+        tts_available=True,
+        noise_filter=NoiseFilterConfig(),
+        transcript_filtered_sink=_publish_transcript_filtered,
+        transcript_finalized_sink=build_transcript_finalized_emitter(bus, session_id=session_id),
+        metrics_listener=metrics_translator.on_metrics_collected,
+    )
+
+    return AgentRuntime(
+        config=config,
+        session_id=session_id,
+        agent=agent,
+        adapters=adapters,
+        ledger=ledger,
+        gate=gate,
+        metrics_translator=metrics_translator,
+        event_bus=bus,
+        enable_barge_in=barge_in.enabled,
+        min_interruption_duration_s=None,
+        approval_gate=approval_gate,
+        decision_sink=decision_sink,
+        _db_session=db_session,
+        _owns_event_bus=owns_bus,
+    )
+
+
+__all__ = [
+    "AgentRuntime",
+    "build_agent_runtime",
+    "build_event_bus",
+]

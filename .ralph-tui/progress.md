@@ -311,6 +311,56 @@ after each iteration and it's included in prompts for context.
   + mode survive end-to-end (the d5z "replay through the real code" technique, applied to
   the dispatch round trip).
 
+### Agent-worker service + dispatch lifecycle (Johnny-9eh)
+- **The capstone integration: two new modules + one compose service + one gated hook.**
+  `backend/johnny/agent/job_session.py` (`build_agent_runtime`) is the assembler — it wires
+  EVERY Phase-2 piece into one `AgentRuntime`: adapters (job_runtime), the raw router/answer
+  `LLMProvider` (reused for both, like legacy `router_llm=answer_llm=_as_llm(llm)`),
+  `TurnIndex`+`TurnLedger`, the observability emitters (decision/spoke/suggested/terminal/
+  transcript-finalized + `MetricsTranslator`), `RouterGate`, `BargeInClassifier`, and the
+  `JohnnyAgent` (noise gate + answer nodes + transcript rehydration + metrics listener).
+  `backend/johnny/agent/worker.py` is the LiveKit worker (`cli.run_app(WorkerOptions(
+  entrypoint_fnc, prewarm_fnc, agent_name="johnny", ws_url/api_key/api_secret))`).
+- **What the assembler does NOT build (job-context-bound, so the worker does it):** the
+  `AgentSession` itself (`build_agent_session` constructs `MultilingualModel()` + Silero VAD,
+  which need a live job context) and the `approval_required` coordinator (needs the live
+  `AgentSession.generate_reply`). The runtime carries the ledger/gate/approval-gate/
+  decision-sink so the worker calls `build_approval_coordinator(...)` AFTER `build_agent_session`,
+  then `session.start(agent=, room=)`. So: assemble runtime → build session → wire approval
+  (only if `needs_approval_wiring`) → `ctx.connect()` → `session.start`.
+- **`approval_required` is the ONE mode that needs DB in the worker.** It writes the `pending`
+  decision row *synchronously* (the `decision_id` must exist before parking), so the worker
+  passes `db_session_factory=SessionLocal` and `_build_approval_pieces` builds a
+  `SqlAlchemyDecisionSink` + `RedisApprovalGate`. Missing redis/DB → `(None,None,None)` and the
+  gate auto-rejects (legacy degrade parity). Every other mode is DB-free (Redis EventBus only —
+  the subscriber writes the rows, d5z). Reuse `build_event_bus(redis_url)` locally (NOT from
+  `meet_worker.bootstrap`, which drags Playwright) — same `johnny.session` channel prefix.
+- **Lifecycle = the room's lifecycle (no orphan workers).** The worker is ONE long-running
+  service (no per-session containers → nothing to orphan). Each *job* is room-scoped; a
+  `participant_disconnected` → `ctx.shutdown()` guard ends the job promptly when the bridge/
+  humans leave (before LiveKit's empty-room timeout). Concurrent sessions = separate rooms
+  (`room_name_for_session`) = separate prewarmed job processes → isolated turn state.
+  `AgentRuntime.aclose()` drains metrics + closes approval gate / owned bus / DB; the gate +
+  ledger are swept by `JohnnyAgent.on_exit`.
+- **Dispatch trigger is GATED + off by default.** `app.services.agent_dispatch
+  .maybe_dispatch_session_agent(ctx)` runs at the END of `start_session_for_meeting` (after the
+  meet-worker launches): no-op in `legacy` mode, dispatches in `agentsession` mode
+  (`JOHNNY_ORCHESTRATOR=agentsession`). DEFENSIVE — a dispatch failure is logged, never
+  propagated (the legacy meet-worker is already running the session). The full per-session
+  engine selection + the meet-worker→bridge switch is **Johnny-wz5** (this is the single env
+  rollback switch it builds on); a full successful live session (audio) also needs that bridge
+  switch + real provider creds, so it's gated on wz5 + the e2e bead (Johnny-52b).
+- **Reuses the api image — clean-install reproducible with ZERO new deps.** The `agent-worker`
+  compose service (no profile → built+started by `./run.sh`'s `up -d --build`) shares the
+  ./backend build: the `agent` extra (livekit-agents 1.5.17) + the baked LiveKit model files
+  (Silero VAD + multilingual turn detector, Johnny-jue) are already in that image. It mounts the
+  same host model caches as `worker` (whisper/piper/parakeet/kokoro/kitten) for the payload-built
+  STT/TTS adapters. depends_on livekit healthy. **Validated live:** the service registers
+  (`agent_name=johnny`, `id=AW_...`, `ws://livekit:7880`); a manual `dispatch_agent` into
+  `johnny-session-99999` is picked up (`received job request` → the entrypoint logs `dispatched
+  session=99999 ... mode=listen_only`) and a missing-provider payload is abandoned gracefully
+  (no crash, worker survives for the next job).
+
 ---
 
 ## 2026-06-09 - Johnny-y4j [SPIKE] Per-room JWT auth + agent dispatch contract
@@ -795,5 +845,69 @@ replay-through-the-real-subscriber).
 producer/consumer threading; adapters-from-payload-not-DB for personality-override parity;
 the shared `_assemble_split_adapters` tail; `allowed_replies` is out of contract; the
 real-assembly-both-ends test technique).
+
+---
+
+## 2026-06-09 - Johnny-9eh [BUILD] Phase 3: Agent-worker service + dispatch lifecycle
+
+The capstone Phase-3 integration: a long-running LiveKit agent-worker service that
+registers with the SFU and runs the full `AgentSession` harness on each per-session
+dispatch, with the dispatch lifecycle tied to session start/stop.
+
+**Implemented (new files):**
+- `backend/johnny/agent/job_session.py` — `build_agent_runtime(config, ...)` assembles the
+  whole session from one `SessionJobConfig`: adapters (job_runtime) + raw router/answer
+  `LLMProvider` + `TurnIndex`/`TurnLedger` + observability emitters + `MetricsTranslator` +
+  `RouterGate` + `BargeInClassifier` + `JohnnyAgent` (noise gate, answer nodes, transcript
+  rehydration, metrics listener). Returns an `AgentRuntime` carrying the pieces the worker
+  needs to build the `AgentSession`, wire `approval_required` (out-of-band, needs the live
+  session), and tear down (`aclose`). Plus a local `build_event_bus` (no Playwright-heavy
+  bootstrap import) and the approval-pieces builder (`SqlAlchemyDecisionSink` +
+  `RedisApprovalGate`, degrading to auto-reject when redis/DB are absent).
+- `backend/johnny/agent/worker.py` — the worker: `prewarm` (warm Silero VAD per process),
+  `entrypoint` (parse metadata → build runtime → build session → wire approval → connect →
+  `session.start` → arm empty-room shutdown), `build_worker_options`
+  (`agent_name="johnny"` ⇒ explicit dispatch only), `main` (`cli.run_app`). Runs as
+  `python -m johnny.agent.worker start`.
+
+**Implemented (edits):**
+- `docker-compose.yml` — new `agent-worker` service (api/backend image, no profile so
+  `./run.sh` builds+starts it, depends_on livekit healthy, shares the host model caches).
+- `app/services/agent_dispatch.py` — `agent_orchestrator_enabled()` (reads
+  `JOHNNY_ORCHESTRATOR`, default `legacy`) + `maybe_dispatch_session_agent(ctx)` (gated,
+  defensive — swallows dispatch failures so the legacy meet-worker is never broken).
+- `app/services/session_scheduler.py` — calls `maybe_dispatch_session_agent(ctx)` at the end
+  of `start_session_for_meeting` (the lifecycle hook; no-op in legacy mode).
+
+**Tests:** `tests/agent/test_job_session.py` (assembler wiring: emitters on the gate, seams
+on the agent, approval built only for `approval_required` + degrades without redis/DB,
+defensive teardown, unified/missing-provider rejection), `tests/agent/test_worker.py`
+(entrypoint orchestration against a fake JobContext: build→connect→start→teardown,
+empty-room shutdown, approval-only-when-needed, graceful abandon on bad metadata / setup
+error; prewarm; worker options), and extended `tests/services/test_agent_dispatch.py`
+(orchestrator gating + the defensive hook). 35 new pass; 652 in the agent+scheduler sweep;
+522 services; 3582 collected (no import breakage). ruff + mypy clean.
+
+**Live validation (the real SFU, non-destructive — did NOT run `./stop.sh && ./run.sh`
+since `down -v` wipes the operator's DB/redis):** `docker compose up -d --build agent-worker`
+→ the service **registers** (`registered worker agent_name=johnny id=AW_... url=ws://livekit:7880
+protocol=17`) and stays up. A manual `dispatch_agent` into `johnny-session-99999` is **picked
+up** (`received job request room=johnny-session-99999` → entrypoint logs `dispatched
+session=99999 room=johnny-session-99999 mode=listen_only pipeline_mode=split`) and an
+under-configured payload is **abandoned gracefully** (no crash; worker survives). This proves
+registration + one-room-per-session dispatch + entrypoint + lifecycle handling against the
+in-compose SFU; no new runtime deps (reuses the api image's `agent` extra + baked models), so
+the same `./run.sh` path brings it up clean.
+
+**Scope boundary (honest):** a FULL successful live session (agent joins + STT/LLM/TTS + audio)
+needs `JOHNNY_ORCHESTRATOR=agentsession` flipped AND the meet-worker switched to bridge mode
+(Johnny-6nm built the bridge; wiring the launcher to run it is **Johnny-wz5**) AND real provider
+creds. So the speak-in-a-real-Meet e2e is gated on wz5 + the e2e validation bead (Johnny-52b);
+9eh ships the service + worker + assembler + the single gated rollback switch they build on.
+
+**Learnings:** captured in the Codebase Patterns section at the top (the assembler vs.
+job-context-bound split; approval is the only DB-needing mode; reuse the api image / zero new
+deps; the room-scoped no-orphan lifecycle; the gated+defensive dispatch hook; live-register +
+live-dispatch-pickup as the validation in lieu of the destructive clean-install cycle).
 
 ---

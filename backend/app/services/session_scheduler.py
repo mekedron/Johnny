@@ -47,6 +47,7 @@ from app.db.models import (
     CalendarEvent,
     MeetingConfig,
 )
+from app.services.agent_dispatch import maybe_dispatch_session_agent
 from app.services.bot_sessions import (
     BotSessionNotFoundError,
     mark_session_ended,
@@ -524,6 +525,13 @@ async def start_session_for_meeting(
         meeting.id,
         result.container_name,
     )
+
+    # Agent-worker lifecycle (Johnny-9eh): when JOHNNY_ORCHESTRATOR=agentsession,
+    # dispatch the LiveKit agent into this session's room (one room per session).
+    # No-op + cheap in the default `legacy` mode, and defensive — a dispatch
+    # failure never breaks the meet-worker that is already running. The full
+    # per-session engine selection (and the meet-worker→bridge switch) is Johnny-wz5.
+    await maybe_dispatch_session_agent(ctx)
     return row
 
 

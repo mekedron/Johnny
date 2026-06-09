@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import johnny.agent.dispatch as dispatch_mod
 from app.services.agent_dispatch import (
+    agent_orchestrator_enabled,
     dispatch_session_agent,
+    maybe_dispatch_session_agent,
     session_job_config_from_launch_context,
 )
 from app.services.session_scheduler import LaunchContext
@@ -137,3 +139,74 @@ async def test_dispatch_session_agent_calls_dispatch_with_room_and_metadata(
     assert config.account_id == 3
     # The metadata the agent worker will parse carries the same config.
     assert SessionJobConfig.from_metadata(config.to_metadata()) == config
+
+
+# --- Orchestrator gating + lifecycle hook (Johnny-9eh) ----------------------
+
+
+def test_orchestrator_enabled_default_is_legacy() -> None:
+    # No env var set -> default legacy -> agent path OFF.
+    assert agent_orchestrator_enabled({}) is False
+    assert agent_orchestrator_enabled({"JOHNNY_ORCHESTRATOR": "legacy"}) is False
+
+
+def test_orchestrator_enabled_when_agentsession() -> None:
+    assert agent_orchestrator_enabled({"JOHNNY_ORCHESTRATOR": "agentsession"}) is True
+    # Case/space tolerant so an operator typo in .env still flips it.
+    assert agent_orchestrator_enabled({"JOHNNY_ORCHESTRATOR": "  AgentSession "}) is True
+    # An unrecognised value is treated as legacy (fail safe to the proven path).
+    assert agent_orchestrator_enabled({"JOHNNY_ORCHESTRATOR": "experimental"}) is False
+
+
+async def test_maybe_dispatch_is_noop_in_legacy(monkeypatch: object) -> None:
+    called = False
+
+    async def _fake_dispatch(**_kwargs: object) -> str:
+        nonlocal called
+        called = True
+        return "x"
+
+    monkeypatch.setattr(dispatch_mod, "dispatch_agent", _fake_dispatch)  # type: ignore[attr-defined]
+
+    result = await maybe_dispatch_session_agent(_full_ctx(), environ={})
+
+    assert result is None
+    assert called is False  # legacy mode never reaches the SDK
+
+
+async def test_maybe_dispatch_dispatches_in_agentsession(monkeypatch: object) -> None:
+    captured: dict[str, object] = {}
+
+    async def _fake_dispatch(
+        *, room: str, config: SessionJobConfig, **_kwargs: object
+    ) -> str:
+        captured["room"] = room
+        captured["redis_url"] = config.redis_url
+        return "dispatch-sentinel"
+
+    monkeypatch.setattr(dispatch_mod, "dispatch_agent", _fake_dispatch)  # type: ignore[attr-defined]
+
+    result = await maybe_dispatch_session_agent(
+        _full_ctx(),
+        environ={"JOHNNY_ORCHESTRATOR": "agentsession", "REDIS_URL": "redis://r:6379/0"},
+    )
+
+    assert result == "dispatch-sentinel"
+    assert captured["room"] == "johnny-session-42"
+    # REDIS_URL from the API env is threaded into the dispatched config.
+    assert captured["redis_url"] == "redis://r:6379/0"
+
+
+async def test_maybe_dispatch_swallows_failure(monkeypatch: object) -> None:
+    # A dispatch failure must NOT propagate — the legacy meet-worker is already
+    # running the session, so session start must not break on the agent path.
+    async def _boom(**_kwargs: object) -> str:
+        raise RuntimeError("livekit unreachable")
+
+    monkeypatch.setattr(dispatch_mod, "dispatch_agent", _boom)  # type: ignore[attr-defined]
+
+    result = await maybe_dispatch_session_agent(
+        _full_ctx(), environ={"JOHNNY_ORCHESTRATOR": "agentsession"}
+    )
+
+    assert result is None

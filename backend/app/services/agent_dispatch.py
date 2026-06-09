@@ -25,6 +25,9 @@ Johnny-wz5); this module is the building block they call.
 
 from __future__ import annotations
 
+import logging
+import os
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from johnny.agent.job_config import (
@@ -38,6 +41,18 @@ if TYPE_CHECKING:
     from livekit.protocol.agent_dispatch import AgentDispatch
 
     from app.services.session_scheduler import LaunchContext
+
+logger = logging.getLogger(__name__)
+
+# Orchestrator selection (Johnny-9eh; expanded into the full per-session engine
+# selector by Johnny-wz5). ``legacy`` keeps the Docker meet-worker voice pipeline;
+# ``agentsession`` additionally dispatches the LiveKit agent worker for the session.
+# Default stays ``legacy`` until parity is proven — a single env flip is the rollback.
+ENV_ORCHESTRATOR = "JOHNNY_ORCHESTRATOR"
+ORCHESTRATOR_AGENTSESSION = "agentsession"
+ORCHESTRATOR_LEGACY = "legacy"
+DEFAULT_ORCHESTRATOR = ORCHESTRATOR_LEGACY
+ENV_REDIS_URL = "REDIS_URL"
 
 
 def session_job_config_from_launch_context(
@@ -109,7 +124,71 @@ async def dispatch_session_agent(
     )
 
 
+def agent_orchestrator_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether the LiveKit ``AgentSession`` path is enabled for new sessions.
+
+    Reads ``JOHNNY_ORCHESTRATOR`` (default :data:`DEFAULT_ORCHESTRATOR` =
+    ``legacy``); only the exact value ``agentsession`` turns the agent worker on.
+    This is the minimal gate Johnny-9eh needs so the agent-worker lifecycle is
+    *off by default* (the legacy Docker meet-worker is unchanged) yet can be
+    enabled for the dispatch/lifecycle acceptance test with one env var. Johnny-wz5
+    grows this into the full per-session engine selector + the meet-worker→bridge
+    switch; this is the single rollback switch it builds on.
+    """
+    src = environ if environ is not None else os.environ
+    value = (src.get(ENV_ORCHESTRATOR, "") or DEFAULT_ORCHESTRATOR).strip().lower()
+    return value == ORCHESTRATOR_AGENTSESSION
+
+
+async def maybe_dispatch_session_agent(
+    ctx: LaunchContext,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> AgentDispatch | None:
+    """Dispatch the agent for ``ctx`` iff the AgentSession orchestrator is enabled.
+
+    The lifecycle hook the session scheduler calls right after the meet-worker is
+    launched (Johnny-9eh): in ``legacy`` mode it is a no-op (returns ``None``); in
+    ``agentsession`` mode it issues the one-room-per-session dispatch carrying the
+    session's :class:`SessionJobConfig` as metadata, so the registered agent worker
+    joins ``johnny-session-<id>``. ``redis_url`` is read from the API's own
+    ``REDIS_URL`` env (the agent worker then connects to the same bus for
+    event/approval wiring).
+
+    Defensive by design: a dispatch failure (missing ``LIVEKIT_*`` creds, SFU
+    unreachable) is logged and swallowed — the legacy meet-worker is already running
+    the session, so an experimental agent dispatch must never break session start.
+    """
+    src = environ if environ is not None else os.environ
+    if not agent_orchestrator_enabled(src):
+        return None
+    redis_url = (src.get(ENV_REDIS_URL) or "").strip() or None
+    room_name = room_name_for_session(ctx.bot_session_id)
+    try:
+        dispatch = await dispatch_session_agent(ctx, redis_url=redis_url)
+    except Exception:
+        logger.exception(
+            "agent dispatch failed for bot_session_id=%s room=%s — the legacy "
+            "meet-worker remains; not failing session start",
+            ctx.bot_session_id,
+            room_name,
+        )
+        return None
+    logger.info(
+        "dispatched agent worker for bot_session_id=%s into room=%s",
+        ctx.bot_session_id,
+        room_name,
+    )
+    return dispatch
+
+
 __all__ = [
+    "DEFAULT_ORCHESTRATOR",
+    "ENV_ORCHESTRATOR",
+    "ORCHESTRATOR_AGENTSESSION",
+    "ORCHESTRATOR_LEGACY",
+    "agent_orchestrator_enabled",
     "dispatch_session_agent",
+    "maybe_dispatch_session_agent",
     "session_job_config_from_launch_context",
 ]
