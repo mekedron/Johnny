@@ -8,6 +8,8 @@ import pytest
 
 from johnny.meet_worker.meet_join import (
     ACCESS_DENIED_SELECTORS,
+    ADMISSION_DENIED_SELECTORS,
+    ASK_TO_JOIN_SELECTORS,
     CAM_OFF_SELECTORS,
     IN_MEETING_SELECTORS,
     JOIN_BUTTON_SELECTORS,
@@ -236,6 +238,67 @@ async def test_join_falls_back_to_secondary_join_selector() -> None:
     clicked = [a[1] for a in page.actions if a[0] == "click"]
     assert fallback in clicked
     assert JOIN_BUTTON_SELECTORS[0] not in clicked
+
+
+# --- Ask-to-join (external guest knock) -----------------------------------
+
+
+def _admit_on_ask() -> dict[str, set[str]]:
+    """Clicking "Ask to join" reveals the in-meeting toolbar — simulates a
+    participant admitting the guest from the lobby."""
+    return {sel: {IN_MEETING_SELECTORS[0]} for sel in ASK_TO_JOIN_SELECTORS}
+
+
+async def test_join_knocks_when_only_ask_to_join_present() -> None:
+    """External guest: no "Join now", only "Ask to join" → bot knocks, waits,
+    and joins once admitted."""
+    page = _FakePage(
+        initial_visible={ASK_TO_JOIN_SELECTORS[0]},
+        vanish_on_click={ASK_TO_JOIN_SELECTORS[0]},
+        appear_on_click=_admit_on_ask(),
+    )
+    result = await _joiner(page, admission_timeout_s=1.0).join()
+    assert isinstance(result, JoinResult)
+    clicked = [a[1] for a in page.actions if a[0] == "click"]
+    assert ASK_TO_JOIN_SELECTORS[0] in clicked
+
+
+async def test_join_prefers_join_now_over_ask_to_join() -> None:
+    """When both buttons exist, a direct join is taken — never the slow knock."""
+    page = _FakePage(
+        initial_visible={JOIN_BUTTON_SELECTORS[0], ASK_TO_JOIN_SELECTORS[0]},
+        vanish_on_click={JOIN_BUTTON_SELECTORS[0]},
+        appear_on_click=_happy_appear(),
+    )
+    await _joiner(page).join()
+    clicked = [a[1] for a in page.actions if a[0] == "click"]
+    assert JOIN_BUTTON_SELECTORS[0] in clicked
+    assert ASK_TO_JOIN_SELECTORS[0] not in clicked
+
+
+async def test_join_raises_access_denied_when_knock_declined() -> None:
+    """A declined knock surfaces a "you can't join" notice → fail fast with
+    MeetingAccessDeniedError instead of burning the whole admission timeout."""
+    page = _FakePage(
+        initial_visible={ASK_TO_JOIN_SELECTORS[0]},
+        vanish_on_click={ASK_TO_JOIN_SELECTORS[0]},
+        appear_on_click={
+            ASK_TO_JOIN_SELECTORS[0]: {ADMISSION_DENIED_SELECTORS[0]}
+        },
+    )
+    with pytest.raises(MeetingAccessDeniedError):
+        await _joiner(page, admission_timeout_s=2.0).join()
+
+
+async def test_join_times_out_when_no_one_admits() -> None:
+    """Knock registers but nobody admits and no decline appears → the
+    admission wait times out (distinct from an outright denial)."""
+    page = _FakePage(
+        initial_visible={ASK_TO_JOIN_SELECTORS[0]},
+        vanish_on_click={ASK_TO_JOIN_SELECTORS[0]},
+    )
+    with pytest.raises(MeetJoinTimeoutError):
+        await _joiner(page, admission_timeout_s=0.15).join()
 
 
 # --- Blocker detection ----------------------------------------------------

@@ -57,6 +57,11 @@ DEFAULT_PREVIEW_TIMEOUT_S = 10.0
 DEFAULT_POLL_INTERVAL_S = 0.25
 """Re-check selectors at this cadence inside :meth:`MeetJoiner._click_first_present`."""
 
+DEFAULT_ADMISSION_TIMEOUT_S = 300.0
+"""How long to wait in the lobby for a participant to admit an external
+guest after clicking "Ask to join". Far longer than the preview timeout
+because a human has to notice the knock and click "Admit"."""
+
 
 # Selectors for the preview / in-meeting UI elements. Lists are tried in
 # order; first visible match wins. Google Meet's DOM is unstable across
@@ -69,6 +74,26 @@ JOIN_BUTTON_SELECTORS: tuple[str, ...] = (
     'button:has-text("Join now")',
     '[aria-label*="Join now"]',
     'div[role="button"]:has-text("Join now")',
+)
+# External guests — accounts not on the meeting host's org, or not invited —
+# see "Ask to join" instead of "Join now" (Meet's knock-to-join flow).
+# Clicking it puts the bot in the lobby until a human participant admits it,
+# so without these selectors the bot finds no "Join now" button and times out
+# (Johnny: gmail guest account couldn't join). Tried after the Join-now set so
+# a direct join is always preferred when both could exist.
+ASK_TO_JOIN_SELECTORS: tuple[str, ...] = (
+    'button:has-text("Ask to join")',
+    '[aria-label*="Ask to join"]',
+    'div[role="button"]:has-text("Ask to join")',
+)
+# Shown once the knock is resolved negatively: a participant declined, or no
+# one responded before Meet gave up. Lets the admission wait fail fast with a
+# clear reason instead of burning the full admission timeout.
+ADMISSION_DENIED_SELECTORS: tuple[str, ...] = (
+    "text=/You can.?t join this( video)? call/i",
+    "text=/no one responded to your request/i",
+    "text=/request to join was denied/i",
+    "text=/Your request to join wasn.?t accepted/i",
 )
 # Positive in-meeting markers. We wait for one of these to APPEAR after
 # clicking Join so a browser disconnect (which would also make the Join
@@ -211,7 +236,10 @@ class MeetJoiner:
         join_timeout_s: float = DEFAULT_JOIN_TIMEOUT_S,
         preview_timeout_s: float = DEFAULT_PREVIEW_TIMEOUT_S,
         poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
+        admission_timeout_s: float = DEFAULT_ADMISSION_TIMEOUT_S,
         join_button_selectors: Sequence[str] = JOIN_BUTTON_SELECTORS,
+        ask_to_join_selectors: Sequence[str] = ASK_TO_JOIN_SELECTORS,
+        admission_denied_selectors: Sequence[str] = ADMISSION_DENIED_SELECTORS,
         mic_off_selectors: Sequence[str] = MIC_OFF_SELECTORS,
         cam_off_selectors: Sequence[str] = CAM_OFF_SELECTORS,
         meeting_not_started_selectors: Sequence[str] = MEETING_NOT_STARTED_SELECTORS,
@@ -233,7 +261,10 @@ class MeetJoiner:
         self._join_timeout_s = join_timeout_s
         self._preview_timeout_s = preview_timeout_s
         self._poll_interval_s = poll_interval_s
+        self._admission_timeout_s = admission_timeout_s
         self._join_button_selectors = tuple(join_button_selectors)
+        self._ask_to_join_selectors = tuple(ask_to_join_selectors)
+        self._admission_denied_selectors = tuple(admission_denied_selectors)
         self._mic_off_selectors = tuple(mic_off_selectors)
         self._cam_off_selectors = tuple(cam_off_selectors)
         self._meeting_not_started_selectors = tuple(meeting_not_started_selectors)
@@ -279,21 +310,38 @@ class MeetJoiner:
             # exists in that flow).
             switched = await self._handle_switch_call_prompt()
 
+            if switched:
+                action = "switched"
+            else:
+                action = await self._click_join_or_ask()
             logger.info(
-                "join: stage=click_join session_id=%s switched=%s",
+                "join: stage=click_join session_id=%s switched=%s action=%s",
                 self._session_id,
                 switched,
-            )
-            await self._click_join_button(required=not switched)
-            logger.info(
-                "join: stage=click_join done session_id=%s", self._session_id
+                action,
             )
 
-            logger.info(
-                "join: stage=wait_joined session_id=%s (polling in-meeting selector)",
-                self._session_id,
-            )
-            await self._wait_for_joined_state()
+            if action == "ask_to_join":
+                # External guest: the knock is in; a human in the meeting now
+                # has to click "Admit". Wait far longer than a normal join and
+                # watch for an explicit decline so we fail fast if rejected.
+                logger.info(
+                    "join: stage=await_admission session_id=%s "
+                    "(external guest knocked; waiting up to %.0fs for a "
+                    "participant to admit)",
+                    self._session_id,
+                    self._admission_timeout_s,
+                )
+                await self._wait_for_joined_state(
+                    timeout_s=self._admission_timeout_s, check_denied=True
+                )
+            else:
+                logger.info(
+                    "join: stage=wait_joined session_id=%s "
+                    "(polling in-meeting selector)",
+                    self._session_id,
+                )
+                await self._wait_for_joined_state()
             logger.info(
                 "join: stage=wait_joined done session_id=%s", self._session_id
             )
@@ -303,6 +351,7 @@ class MeetJoiner:
                 self._session_id,
                 exc,
             )
+            await self._capture_failure_screenshot()
             await self._publish_status("failed", error_reason=str(exc))
             raise
         except Exception as exc:
@@ -310,6 +359,7 @@ class MeetJoiner:
             logger.exception(
                 "join: unexpected error session_id=%s", self._session_id
             )
+            await self._capture_failure_screenshot()
             await self._publish_status("failed", error_reason=msg)
             raise MeetJoinError(msg) from exc
         result = JoinResult(
@@ -320,6 +370,40 @@ class MeetJoiner:
         await self._publish_status("joined")
         logger.info("join: COMPLETE session_id=%s", self._session_id)
         return result
+
+    async def _capture_failure_screenshot(self) -> None:
+        """Best-effort: dump the current page to /tmp on a join failure.
+
+        The periodic screenshot loop only starts once the bot is
+        in-meeting, so a join that fails *before* admission (an
+        "Ask to join" knock screen, a sign-in wall, a denied request)
+        otherwise leaves no visual to debug from. Writes
+        ``/tmp/johnny-screenshots/session-<id>-failure.png`` so the
+        operator can ``docker cp`` it out. Never raises — diagnostics
+        must not mask the original join error.
+        """
+        screenshot = getattr(self._page, "screenshot", None)
+        if not callable(screenshot):
+            return
+        try:
+            output_dir = Path("/tmp/johnny-screenshots")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            path = output_dir / f"session-{self._session_id}-failure.png"
+            await screenshot(path=str(path), full_page=False)
+            logger.info(
+                "join: failure screenshot written session_id=%s path=%s "
+                "(docker cp meet-worker-session-%s:%s .)",
+                self._session_id,
+                path,
+                self._session_id,
+                path,
+            )
+        except Exception as exc:  # noqa: BLE001 — screenshot is best-effort
+            logger.warning(
+                "join: failure screenshot failed session_id=%s: %s",
+                self._session_id,
+                exc,
+            )
 
     async def _navigate(self) -> None:
         try:
@@ -363,16 +447,38 @@ class MeetJoiner:
                 required=False,
             )
 
-    async def _click_join_button(self, *, required: bool = True) -> None:
-        clicked = await self._click_first_present(
+    async def _click_join_or_ask(self) -> str:
+        """Click "Join now" if present, else "Ask to join" (external guest).
+
+        Returns ``"join_now"`` for a direct join or ``"ask_to_join"`` when
+        only the knock button was available (the caller then waits for a
+        participant to admit the bot). Raises :class:`MeetJoinError` if
+        neither button appears within the preview timeout — the same
+        failure as before, now also covering the knock-to-join case.
+
+        Join-now is tried first so an account that *can* join directly
+        never falls into the (much slower) admission wait.
+        """
+        if await self._click_first_present(
             self._join_button_selectors,
             timeout_s=self._preview_timeout_s,
             what="Join now button",
-            required=required,
+            required=False,
+        ):
+            return "join_now"
+        if await self._click_first_present(
+            self._ask_to_join_selectors,
+            timeout_s=self._preview_timeout_s,
+            what="Ask to join button",
+            required=False,
+        ):
+            return "ask_to_join"
+        raise MeetJoinError(
+            "neither 'Join now' nor 'Ask to join' button visible within "
+            f"{self._preview_timeout_s:.1f}s "
+            f"(join: {list(self._join_button_selectors)}; "
+            f"ask: {list(self._ask_to_join_selectors)})"
         )
-        if required and not clicked:
-            # _click_first_present(required=True) raises on miss; defensive.
-            raise MeetJoinError("Join now button click did not register")
 
     async def _handle_switch_call_prompt(self) -> bool:
         """Click "Switch here" if Meet shows the multi-device prompt.
@@ -399,7 +505,9 @@ class MeetJoiner:
         )
         return clicked
 
-    async def _wait_for_joined_state(self) -> None:
+    async def _wait_for_joined_state(
+        self, *, timeout_s: float | None = None, check_denied: bool = False
+    ) -> None:
         """Confirm the page is actually IN the meeting (positive signal).
 
         Originally the check was "Join now selectors disappeared" — but
@@ -413,14 +521,28 @@ class MeetJoiner:
         (the leave-call button etc.) to APPEAR. We still treat the Join
         now button disappearing as progress, but require the in-meeting
         signal to confirm the join.
+
+        ``timeout_s`` overrides the default join timeout — the knock flow
+        passes the (much longer) admission timeout. ``check_denied`` also
+        polls :data:`ADMISSION_DENIED_SELECTORS` so a declined knock
+        raises :class:`MeetingAccessDeniedError` immediately instead of
+        waiting out the whole timeout.
         """
-        deadline = time.monotonic() + self._join_timeout_s
+        timeout = self._join_timeout_s if timeout_s is None else timeout_s
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if await self._any_selector_visible(self._in_meeting_selectors):
                 return
+            if check_denied and await self._any_selector_visible(
+                self._admission_denied_selectors
+            ):
+                raise MeetingAccessDeniedError(
+                    "Admission request was declined or expired — a meeting "
+                    "participant did not admit the bot"
+                )
             await asyncio.sleep(self._poll_interval_s)
         raise MeetJoinTimeoutError(
-            f"Did not reach in-meeting state within {self._join_timeout_s:.1f}s "
+            f"Did not reach in-meeting state within {timeout:.1f}s "
             f"(no in-meeting selector visible: {list(self._in_meeting_selectors)})"
         )
 
