@@ -45,6 +45,12 @@ export interface BrowserProviderOverride {
 
 export interface StartBrowserSessionPayload {
 	event_id?: number;
+	/**
+	 * Google account this playground session belongs to (Johnny-8th) so History
+	 * can filter playground runs by account. `null` / omitted records an
+	 * account-less run; for a rehearsal it defaults to the event's owner.
+	 */
+	account_id?: number | null;
 	mode?: string;
 	persona?: string;
 	system_prompt?: string;

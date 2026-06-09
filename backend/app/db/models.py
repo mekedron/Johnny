@@ -350,6 +350,7 @@ class BotSession(TimestampMixin, Base):
     __table_args__ = (
         Index("ix_bot_sessions_meeting_config_id", "meeting_config_id"),
         Index("ix_bot_sessions_status", "status"),
+        Index("ix_bot_sessions_account_id", "account_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -359,6 +360,16 @@ class BotSession(TimestampMixin, Base):
     # FK, so meet sessions are still tied to a real meeting_config.
     meeting_config_id: Mapped[int | None] = mapped_column(
         ForeignKey("meeting_configs.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    # Johnny-8th: the Google account this session belongs to, so History
+    # can filter by account across BOTH paths. For meet sessions it's the
+    # calendar owner (meeting_config -> calendar_event -> account_id);
+    # for playground sessions it's the account the user picked in the
+    # recorder. ON DELETE SET NULL keeps audit history when an account is
+    # removed. NULL for legacy rows and account-less playground runs.
+    account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("google_accounts.id", ondelete="SET NULL"),
         nullable=True,
     )
     source: Mapped[BotSessionSource] = mapped_column(

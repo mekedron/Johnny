@@ -16,6 +16,7 @@ from app.db.models import (
     AgentUtterance,
     BotMode,
     BotSession,
+    BotSessionSource,
     BotSessionStatus,
     CalendarEvent,
     DecisionOutcome,
@@ -33,6 +34,7 @@ from app.services.history import (
     export_session,
     find_prior_session_summary,
     get_session_full_detail,
+    list_history_filters,
     list_past_sessions,
     search_transcripts,
     set_session_summary,
@@ -126,7 +128,38 @@ def _seed_session(
     db_session.flush()
     row = BotSession(
         meeting_config_id=cfg.id,
+        account_id=acc.id,
         status=status,
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+    db_session.add(row)
+    db_session.commit()
+    db_session.refresh(row)
+    return row
+
+
+def _seed_playground_session(
+    db_session: Session,
+    *,
+    status: BotSessionStatus = BotSessionStatus.ENDED,
+    bot_name: str | None = "Johnny-oly.6",
+    account_id: int | None = None,
+    started_at: datetime | None = None,
+    ended_at: datetime | None = None,
+) -> BotSession:
+    """Seed a playground (browser-source) session with NO meeting_config.
+
+    Mirrors what ``start_browser_session`` writes for a free-form playground
+    run: ``source='browser'``, ``meeting_config_id IS NULL``, an optional
+    ``account_id``, and a snapshotted ``bot_name``.
+    """
+    row = BotSession(
+        meeting_config_id=None,
+        account_id=account_id,
+        source=BotSessionSource.BROWSER,
+        status=status,
+        bot_name=bot_name,
         started_at=started_at,
         ended_at=ended_at,
     )
@@ -301,6 +334,99 @@ def test_list_past_sessions_rejects_bad_limit(db_session: Session) -> None:
 def test_list_past_sessions_rejects_negative_offset(db_session: Session) -> None:
     with pytest.raises(ValueError):
         list_past_sessions(db_session, offset=-1)
+
+
+# --- playground sessions + filters (Johnny-8th) ----------------------------
+
+
+def test_list_past_sessions_includes_playground(db_session: Session) -> None:
+    """Regression for Johnny-8th: playground sessions (no meeting_config) must
+    appear — the old INNER JOIN on meeting_configs silently dropped them."""
+    pg = _seed_playground_session(db_session, bot_name="Aria")
+    page = list_past_sessions(db_session)
+    assert [s.id for s in page.sessions] == [pg.id]
+    summary = page.sessions[0]
+    assert summary.source == BotSessionSource.BROWSER
+    assert summary.meeting_config_id is None
+    assert summary.mode is None
+    assert summary.meeting_summary is None
+    assert summary.bot_name == "Aria"
+
+
+def test_list_past_sessions_mixes_meet_and_playground(db_session: Session) -> None:
+    meet = _seed_session(db_session, status=BotSessionStatus.ENDED)
+    pg = _seed_playground_session(db_session)
+    page = list_past_sessions(db_session)
+    assert {s.id for s in page.sessions} == {meet.id, pg.id}
+    assert page.total == 2
+
+
+def test_list_past_sessions_filter_by_source(db_session: Session) -> None:
+    meet = _seed_session(db_session, status=BotSessionStatus.ENDED)
+    pg = _seed_playground_session(db_session)
+
+    meet_page = list_past_sessions(db_session, source=BotSessionSource.MEET)
+    assert [s.id for s in meet_page.sessions] == [meet.id]
+    assert meet_page.total == 1
+
+    browser_page = list_past_sessions(db_session, source=BotSessionSource.BROWSER)
+    assert [s.id for s in browser_page.sessions] == [pg.id]
+    assert browser_page.total == 1
+
+
+def test_list_past_sessions_filter_by_account_real(db_session: Session) -> None:
+    meet = _seed_session(db_session, status=BotSessionStatus.ENDED, seed=0)
+    _seed_session(db_session, status=BotSessionStatus.ENDED, seed=1)
+    assert meet.account_id is not None
+    page = list_past_sessions(db_session, account_id=meet.account_id)
+    assert [s.id for s in page.sessions] == [meet.id]
+    assert page.total == 1
+    assert page.sessions[0].account_id == meet.account_id
+    assert page.sessions[0].account_email == "u0@example.com"
+
+
+def test_list_past_sessions_filter_by_account_covers_playground(
+    db_session: Session,
+) -> None:
+    acc = GoogleAccount(email="pg@example.com", refresh_token_encrypted="x")
+    db_session.add(acc)
+    db_session.commit()
+    pg = _seed_playground_session(db_session, account_id=acc.id)
+    _seed_playground_session(db_session, account_id=None)  # account-less run
+
+    page = list_past_sessions(db_session, account_id=acc.id)
+    assert [s.id for s in page.sessions] == [pg.id]
+    assert page.total == 1
+    assert page.sessions[0].account_email == "pg@example.com"
+
+
+def test_list_past_sessions_filter_by_bot_name(db_session: Session) -> None:
+    aria = _seed_playground_session(db_session, bot_name="Aria")
+    _seed_playground_session(db_session, bot_name="Max")
+    page = list_past_sessions(db_session, bot_name="Aria")
+    assert [s.id for s in page.sessions] == [aria.id]
+    assert page.total == 1
+
+
+def test_list_history_filters_only_present_terminal_values(
+    db_session: Session,
+) -> None:
+    _seed_session(db_session, status=BotSessionStatus.ENDED)  # u0@example.com / meet
+    acc = GoogleAccount(email="pg@example.com", refresh_token_encrypted="x")
+    db_session.add(acc)
+    db_session.commit()
+    _seed_playground_session(db_session, bot_name="Aria", account_id=acc.id)
+    # A non-terminal session must NOT contribute filter options.
+    _seed_playground_session(
+        db_session, status=BotSessionStatus.JOINED, bot_name="Ghost"
+    )
+
+    options = list_history_filters(db_session)
+    emails = {a.email for a in options.accounts}
+    assert emails == {"u0@example.com", "pg@example.com"}
+    assert "Aria" in options.personalities
+    assert "Ghost" not in options.personalities
+    assert set(options.sources) == {"meet", "browser"}
 
 
 # --- get_session_full_detail ----------------------------------------------

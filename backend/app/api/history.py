@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_session
 from app.db.models import (
     BotMode,
+    BotSessionSource,
     BotSessionStatus,
     DecisionOutcome,
     NoReplyReason,
@@ -38,12 +39,14 @@ from app.services.history import (
     DEFAULT_SEARCH_LIMIT,
     MAX_HISTORY_PAGE_SIZE,
     MAX_SEARCH_LIMIT,
+    HistoryFilterOptions,
     PastSessionsPage,
     SearchHit,
     SessionNotFoundError,
     delete_session,
     export_session,
     get_session_full_detail,
+    list_history_filters,
     list_past_sessions,
     search_transcripts,
 )
@@ -83,14 +86,23 @@ def get_search_embedder() -> EmbeddingProvider:
 
 
 class PastSessionSummaryRead(BaseModel):
-    """One row in the history list."""
+    """One row in the history list.
+
+    ``meeting_config_id`` / ``mode`` / ``meeting_summary`` are ``None`` for
+    playground sessions; ``source`` distinguishes meet (real) from browser
+    (playground); ``account_id`` / ``account_email`` tag the owning account.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    meeting_config_id: int
+    meeting_config_id: int | None
+    source: BotSessionSource
     status: BotSessionStatus
-    mode: BotMode
+    mode: BotMode | None
+    bot_name: str | None
+    account_id: int | None
+    account_email: str | None
     meeting_summary: str | None
     started_at: datetime | None
     ended_at: datetime | None
@@ -109,6 +121,21 @@ class HistoryListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class HistoryAccountOptionRead(BaseModel):
+    """One account that appears in the history list (filter dropdown)."""
+
+    id: int
+    email: str
+
+
+class HistoryFiltersResponse(BaseModel):
+    """Distinct filter values present across terminal sessions."""
+
+    accounts: list[HistoryAccountOptionRead]
+    personalities: list[str]
+    sources: list[str]
 
 
 class HistoryTranscriptRead(BaseModel):
@@ -232,10 +259,22 @@ def list_history(
     session: SessionDep,
     limit: Annotated[int, Query(ge=1, le=MAX_HISTORY_PAGE_SIZE)] = DEFAULT_HISTORY_PAGE_SIZE,
     offset: Annotated[int, Query(ge=0)] = 0,
+    source: Annotated[BotSessionSource | None, Query()] = None,
+    account_id: Annotated[int | None, Query(ge=1)] = None,
+    bot_name: Annotated[str | None, Query(min_length=1)] = None,
 ) -> HistoryListResponse:
-    """List past (terminal) sessions ordered by most recently ended."""
+    """List past (terminal) sessions ordered by most recently ended.
+
+    Optional ``source`` (meet/browser), ``account_id``, and ``bot_name``
+    filters narrow the page and the total.
+    """
     page: PastSessionsPage = list_past_sessions(
-        session, limit=limit, offset=offset
+        session,
+        limit=limit,
+        offset=offset,
+        source=source,
+        account_id=account_id,
+        bot_name=bot_name,
     )
     return HistoryListResponse(
         sessions=[
@@ -244,6 +283,24 @@ def list_history(
         total=page.total,
         limit=page.limit,
         offset=page.offset,
+    )
+
+
+@router.get("/filters", response_model=HistoryFiltersResponse)
+def list_history_filter_options(session: SessionDep) -> HistoryFiltersResponse:
+    """Distinct account / personality / source values present in history.
+
+    Powers the History page filter dropdowns; only values with at least one
+    terminal session are returned.
+    """
+    options: HistoryFilterOptions = list_history_filters(session)
+    return HistoryFiltersResponse(
+        accounts=[
+            HistoryAccountOptionRead(id=opt.id, email=opt.email)
+            for opt in options.accounts
+        ],
+        personalities=options.personalities,
+        sources=options.sources,
     )
 
 
@@ -349,7 +406,9 @@ async def search_history(
 
 
 __all__ = [
+    "HistoryAccountOptionRead",
     "HistoryDetailResponse",
+    "HistoryFiltersResponse",
     "HistoryListResponse",
     "PastSessionSummaryRead",
     "TranscriptSearchPayload",

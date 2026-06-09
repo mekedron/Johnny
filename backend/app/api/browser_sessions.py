@@ -136,6 +136,12 @@ class StartBrowserSessionPayload(BaseModel):
     a free-form playground run (no calendar context, mode + persona
     come from the request)."""
 
+    account_id: int | None = None
+    """Google account this playground session belongs to (Johnny-8th) so
+    History can filter playground runs by account. Optional — ``None`` records
+    an account-less run. For a rehearsal (``event_id`` set) it defaults to the
+    event's calendar owner when omitted."""
+
     mode: str | None = None
     """Override the bot mode for this session. Defaults to the meeting
     config's mode when ``event_id`` is set, otherwise ``autonomous``
@@ -864,6 +870,7 @@ async def start_browser_session(
             )
 
     meeting_config_id: int | None = None
+    account_id: int | None = payload.account_id
     if payload.event_id is not None:
         _, meeting = _load_event_meeting(session, payload.event_id)
         if meeting is None:
@@ -872,9 +879,13 @@ async def start_browser_session(
                 detail="meeting config not set for event",
             )
         meeting_config_id = meeting.id
+        # Rehearsal with no explicit account → default to the event owner.
+        if account_id is None:
+            account_id = meeting.calendar_event.account_id
 
     row = BotSession(
         meeting_config_id=meeting_config_id,
+        account_id=account_id,
         source=BotSessionSource.BROWSER,
         status=BotSessionStatus.JOINING,
     )

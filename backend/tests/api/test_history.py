@@ -20,6 +20,7 @@ from app.db.models import (
     AgentUtterance,
     BotMode,
     BotSession,
+    BotSessionSource,
     BotSessionStatus,
     CalendarEvent,
     DecisionOutcome,
@@ -130,9 +131,37 @@ def _seed_session(
     db_session.flush()
     row = BotSession(
         meeting_config_id=cfg.id,
+        account_id=acc.id,
         status=status,
         started_at=started_at,
         ended_at=ended_at,
+    )
+    db_session.add(row)
+    db_session.commit()
+    db_session.refresh(row)
+    return row
+
+
+def _seed_playground_session(
+    db_session: Session,
+    *,
+    status: BotSessionStatus = BotSessionStatus.ENDED,
+    bot_name: str | None = "Aria",
+    account_email: str | None = None,
+) -> BotSession:
+    """Seed a playground (browser-source) session with NO meeting_config."""
+    account_id: int | None = None
+    if account_email is not None:
+        acc = GoogleAccount(email=account_email, refresh_token_encrypted="x")
+        db_session.add(acc)
+        db_session.flush()
+        account_id = acc.id
+    row = BotSession(
+        meeting_config_id=None,
+        account_id=account_id,
+        source=BotSessionSource.BROWSER,
+        status=status,
+        bot_name=bot_name,
     )
     db_session.add(row)
     db_session.commit()
@@ -226,6 +255,94 @@ def test_list_history_pagination_params(
 def test_list_history_rejects_out_of_range_limit(client: TestClient) -> None:
     assert client.get("/history/sessions?limit=0").status_code == 422
     assert client.get("/history/sessions?limit=10000").status_code == 422
+
+
+def test_list_history_includes_playground_and_new_fields(
+    client: TestClient, db_session: Session
+) -> None:
+    pg = _seed_playground_session(
+        db_session, bot_name="Aria", account_email="pg@example.com"
+    )
+    res = client.get("/history/sessions")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["total"] == 1
+    summary = body["sessions"][0]
+    assert summary["id"] == pg.id
+    assert summary["source"] == "browser"
+    assert summary["bot_name"] == "Aria"
+    assert summary["account_email"] == "pg@example.com"
+    assert summary["meeting_config_id"] is None
+    assert summary["mode"] is None
+    assert summary["meeting_summary"] is None
+
+
+def test_list_history_filter_by_source(
+    client: TestClient, db_session: Session
+) -> None:
+    meet = _seed_session(db_session, status=BotSessionStatus.ENDED, seed=0)
+    pg = _seed_playground_session(db_session)
+
+    res_meet = client.get("/history/sessions?source=meet")
+    assert {s["id"] for s in res_meet.json()["sessions"]} == {meet.id}
+    assert res_meet.json()["total"] == 1
+
+    res_browser = client.get("/history/sessions?source=browser")
+    assert {s["id"] for s in res_browser.json()["sessions"]} == {pg.id}
+    assert res_browser.json()["total"] == 1
+
+
+def test_list_history_filter_by_account(
+    client: TestClient, db_session: Session
+) -> None:
+    meet = _seed_session(db_session, status=BotSessionStatus.ENDED, seed=0)
+    _seed_session(db_session, status=BotSessionStatus.ENDED, seed=1)
+    res = client.get(f"/history/sessions?account_id={meet.account_id}")
+    body = res.json()
+    assert [s["id"] for s in body["sessions"]] == [meet.id]
+    assert body["total"] == 1
+
+
+def test_list_history_filter_by_bot_name(
+    client: TestClient, db_session: Session
+) -> None:
+    aria = _seed_playground_session(db_session, bot_name="Aria")
+    _seed_playground_session(db_session, bot_name="Max")
+    res = client.get("/history/sessions?bot_name=Aria")
+    body = res.json()
+    assert [s["id"] for s in body["sessions"]] == [aria.id]
+    assert body["total"] == 1
+
+
+def test_list_history_rejects_unknown_source(client: TestClient) -> None:
+    assert client.get("/history/sessions?source=bogus").status_code == 422
+
+
+# --- GET /history/filters -------------------------------------------------
+
+
+def test_history_filters_lists_present_values(
+    client: TestClient, db_session: Session
+) -> None:
+    _seed_session(db_session, status=BotSessionStatus.ENDED, seed=0)
+    _seed_playground_session(
+        db_session, bot_name="Aria", account_email="pg@example.com"
+    )
+    res = client.get("/history/filters")
+    assert res.status_code == 200
+    body = res.json()
+    assert {a["email"] for a in body["accounts"]} == {
+        "u0@example.com",
+        "pg@example.com",
+    }
+    assert "Aria" in body["personalities"]
+    assert set(body["sources"]) == {"meet", "browser"}
+
+
+def test_history_filters_empty(client: TestClient) -> None:
+    res = client.get("/history/filters")
+    assert res.status_code == 200
+    assert res.json() == {"accounts": [], "personalities": [], "sources": []}
 
 
 # --- GET /history/sessions/{id} -------------------------------------------

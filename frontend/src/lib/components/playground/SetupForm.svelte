@@ -85,6 +85,31 @@
 			</p>
 		</div>
 
+		<!-- Account (Johnny-8th) -->
+		<div class="flex flex-col gap-1.5">
+			<label for="pg-account" class="text-sm leading-none font-medium text-foreground">
+				Run as account <span class="text-ink-subtle font-normal">· optional</span>
+			</label>
+			<select
+				id="pg-account"
+				value={controller.selectedAccountId ?? ''}
+				onchange={(e) =>
+					controller.selectAccount(
+						e.currentTarget.value === '' ? null : Number(e.currentTarget.value)
+					)}
+				class="{FIELD_CLASS} h-9"
+				data-testid="playground-account-select"
+			>
+				<option value="">No account — account-less run</option>
+				{#each controller.accounts as a (a.id)}
+					<option value={a.id}>{a.email}</option>
+				{/each}
+			</select>
+			<p class="m-0 text-xs text-muted-foreground">
+				Tags this recording with an account so it can be filtered by account in History.
+			</p>
+		</div>
+
 		<!-- Personality -->
 		<div class="flex flex-col gap-1.5">
 			<PersonalityPicker

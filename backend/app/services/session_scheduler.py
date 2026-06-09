@@ -368,6 +368,9 @@ async def start_session_for_meeting(
 
     row = BotSession(
         meeting_config_id=meeting.id,
+        # Tag with the calendar owner so History can filter by account
+        # (Johnny-8th). MeetingConfig.calendar_event is non-null by schema.
+        account_id=meeting.calendar_event.account_id,
         status=BotSessionStatus.SCHEDULED,
     )
     session.add(row)

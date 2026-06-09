@@ -36,9 +36,11 @@ from app.db.models import (
     AgentUtterance,
     BotMode,
     BotSession,
+    BotSessionSource,
     BotSessionStatus,
     CalendarEvent,
     DecisionOutcome,
+    GoogleAccount,
     MeetingConfig,
     TranscriptChunk,
 )
@@ -65,12 +67,22 @@ class SessionNotFoundError(LookupError):
 
 @dataclass(frozen=True, slots=True)
 class PastSessionSummary:
-    """One row in the history list, with aggregated counts and metadata."""
+    """One row in the history list, with aggregated counts and metadata.
+
+    ``meeting_config_id``, ``mode``, and ``meeting_summary`` are ``None`` for
+    playground sessions (no calendar event). ``source`` distinguishes meet
+    (real) from browser (playground); ``account_id`` / ``account_email`` tag the
+    owning Google account (``None`` for account-less playground runs).
+    """
 
     id: int
-    meeting_config_id: int
+    meeting_config_id: int | None
+    source: BotSessionSource
     status: BotSessionStatus
-    mode: BotMode
+    mode: BotMode | None
+    bot_name: str | None
+    account_id: int | None
+    account_email: str | None
     meeting_summary: str | None
     started_at: datetime | None
     ended_at: datetime | None
@@ -90,6 +102,27 @@ class PastSessionsPage:
     total: int
     limit: int
     offset: int
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryAccountOption:
+    """One account that appears in the history list (for the filter dropdown)."""
+
+    id: int
+    email: str
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryFilterOptions:
+    """Distinct filter values present in terminal sessions.
+
+    Powers the History page filter dropdowns so they only offer values that
+    actually exist in the data (e.g. accounts/personalities with ≥1 session).
+    """
+
+    accounts: list[HistoryAccountOption]
+    personalities: list[str]
+    sources: list[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,13 +163,24 @@ def list_past_sessions(
     *,
     limit: int = DEFAULT_HISTORY_PAGE_SIZE,
     offset: int = 0,
+    source: BotSessionSource | None = None,
+    account_id: int | None = None,
+    bot_name: str | None = None,
 ) -> PastSessionsPage:
     """Return a paginated page of terminal sessions, newest first.
 
     Aggregates per-session counts in a single query using LEFT JOIN +
-    GROUP BY so the page doesn't fan out into per-row count queries.
-    The meeting summary and mode come from the joined ``meeting_configs``
-    + ``calendar_events`` chain so the UI doesn't need a second round-trip.
+    GROUP BY so the page doesn't fan out into per-row count queries. The
+    meeting summary and mode come from an **OUTER** JOIN on the
+    ``meeting_configs`` + ``calendar_events`` chain so playground sessions
+    (which have no calendar event, ``meeting_config_id IS NULL``) are
+    included rather than silently dropped — that INNER JOIN was the bug
+    that hid every playground session from History (Johnny-8th). The owning
+    account email comes from an OUTER JOIN on ``google_accounts``.
+
+    Optional filters narrow both the page and the ``total`` (so paging stays
+    correct) by session ``source`` (meet vs browser), owning ``account_id``,
+    and snapshotted ``bot_name`` (personality).
     """
     if limit < 1 or limit > MAX_HISTORY_PAGE_SIZE:
         raise ValueError(
@@ -144,6 +188,14 @@ def list_past_sessions(
         )
     if offset < 0:
         raise ValueError(f"offset must be >= 0; got {offset}")
+
+    filters = [BotSession.status.in_(TERMINAL_STATUSES)]
+    if source is not None:
+        filters.append(BotSession.source == source)
+    if account_id is not None:
+        filters.append(BotSession.account_id == account_id)
+    if bot_name is not None:
+        filters.append(BotSession.bot_name == bot_name)
 
     transcript_count = func.count(TranscriptChunk.id.distinct()).label("transcript_count")
     decision_count = func.count(AgentDecision.id.distinct()).label("decision_count")
@@ -153,29 +205,39 @@ def list_past_sessions(
         select(
             BotSession.id,
             BotSession.meeting_config_id,
+            BotSession.source,
             BotSession.status,
+            BotSession.bot_name,
+            BotSession.account_id,
             BotSession.started_at,
             BotSession.ended_at,
             BotSession.created_at,
             BotSession.updated_at,
             MeetingConfig.mode,
             CalendarEvent.summary.label("meeting_summary"),
+            GoogleAccount.email.label("account_email"),
             transcript_count,
             decision_count,
             utterance_count,
         )
-        .join(MeetingConfig, MeetingConfig.id == BotSession.meeting_config_id)
-        .join(CalendarEvent, CalendarEvent.id == MeetingConfig.calendar_event_id)
+        .outerjoin(
+            MeetingConfig, MeetingConfig.id == BotSession.meeting_config_id
+        )
+        .outerjoin(
+            CalendarEvent, CalendarEvent.id == MeetingConfig.calendar_event_id
+        )
+        .outerjoin(GoogleAccount, GoogleAccount.id == BotSession.account_id)
         .outerjoin(
             TranscriptChunk, TranscriptChunk.bot_session_id == BotSession.id
         )
         .outerjoin(AgentDecision, AgentDecision.bot_session_id == BotSession.id)
         .outerjoin(AgentUtterance, AgentUtterance.bot_session_id == BotSession.id)
-        .where(BotSession.status.in_(TERMINAL_STATUSES))
+        .where(*filters)
         .group_by(
             BotSession.id,
             MeetingConfig.id,
             CalendarEvent.id,
+            GoogleAccount.id,
         )
         .order_by(BotSession.ended_at.desc().nulls_last(), BotSession.id.desc())
         .limit(limit)
@@ -187,8 +249,12 @@ def list_past_sessions(
         PastSessionSummary(
             id=row.id,
             meeting_config_id=row.meeting_config_id,
+            source=row.source,
             status=row.status,
             mode=row.mode,
+            bot_name=row.bot_name,
+            account_id=row.account_id,
+            account_email=row.account_email,
             meeting_summary=row.meeting_summary,
             started_at=row.started_at,
             ended_at=row.ended_at,
@@ -203,14 +269,62 @@ def list_past_sessions(
     ]
 
     total_stmt = (
-        select(func.count())
-        .select_from(BotSession)
-        .where(BotSession.status.in_(TERMINAL_STATUSES))
+        select(func.count()).select_from(BotSession).where(*filters)
     )
     total = int(session.scalar(total_stmt) or 0)
 
     return PastSessionsPage(
         sessions=summaries, total=total, limit=limit, offset=offset
+    )
+
+
+def list_history_filters(session: Session) -> HistoryFilterOptions:
+    """Return the distinct filter values present across terminal sessions.
+
+    Only surfaces accounts / personalities / sources that actually have at
+    least one terminal session, so the History filter dropdowns never offer a
+    value that would yield an empty page.
+    """
+    account_rows = list(
+        session.execute(
+            select(GoogleAccount.id, GoogleAccount.email)
+            .join(BotSession, BotSession.account_id == GoogleAccount.id)
+            .where(BotSession.status.in_(TERMINAL_STATUSES))
+            .distinct()
+            .order_by(GoogleAccount.email.asc())
+        ).all()
+    )
+    accounts = [
+        HistoryAccountOption(id=row.id, email=row.email) for row in account_rows
+    ]
+
+    bot_names = list(
+        session.scalars(
+            select(BotSession.bot_name)
+            .where(BotSession.status.in_(TERMINAL_STATUSES))
+            .where(BotSession.bot_name.is_not(None))
+            .distinct()
+            .order_by(BotSession.bot_name.asc())
+        ).all()
+    )
+    personalities = [name for name in bot_names if name]
+
+    source_values = list(
+        session.scalars(
+            select(BotSession.source)
+            .where(BotSession.status.in_(TERMINAL_STATUSES))
+            .distinct()
+        ).all()
+    )
+    sources = sorted(
+        {
+            value.value if isinstance(value, BotSessionSource) else str(value)
+            for value in source_values
+        }
+    )
+
+    return HistoryFilterOptions(
+        accounts=accounts, personalities=personalities, sources=sources
     )
 
 
@@ -573,6 +687,8 @@ __all__ = [
     "DEFAULT_SEARCH_LIMIT",
     "MAX_HISTORY_PAGE_SIZE",
     "MAX_SEARCH_LIMIT",
+    "HistoryAccountOption",
+    "HistoryFilterOptions",
     "PastSessionSummary",
     "PastSessionsPage",
     "PriorSessionSummary",
@@ -583,6 +699,7 @@ __all__ = [
     "export_session",
     "find_prior_session_summary",
     "get_session_full_detail",
+    "list_history_filters",
     "list_past_sessions",
     "search_transcripts",
     "set_session_summary",

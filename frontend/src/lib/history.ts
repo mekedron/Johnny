@@ -8,7 +8,7 @@
  */
 
 import type { BotMode } from '$lib/templates';
-import type { BotSessionStatus } from '$lib/sessions';
+import type { BotSessionStatus, BotSessionSource } from '$lib/sessions';
 import type {
 	AgentDecisionRecord,
 	AgentUtteranceRecord,
@@ -19,9 +19,18 @@ const API_BASE: string = import.meta.env?.VITE_API_BASE ?? 'http://localhost:800
 
 export interface PastSessionSummary {
 	id: number;
-	meeting_config_id: number;
+	/** `null` for playground sessions (no calendar meeting). */
+	meeting_config_id: number | null;
+	/** `meet` = real calendar session; `browser` = playground. */
+	source: BotSessionSource;
 	status: BotSessionStatus;
-	mode: BotMode;
+	/** `null` for playground sessions (mode comes from the meeting config). */
+	mode: BotMode | null;
+	/** Snapshotted personality display name; `null` falls back to "Johnny". */
+	bot_name: string | null;
+	/** Owning Google account; `null` for account-less playground runs. */
+	account_id: number | null;
+	account_email: string | null;
 	meeting_summary: string | null;
 	started_at: string | null;
 	ended_at: string | null;
@@ -38,6 +47,25 @@ export interface HistoryListResponse {
 	total: number;
 	limit: number;
 	offset: number;
+}
+
+/** Server-side filters for the history list (all optional). */
+export interface HistoryFilters {
+	source?: BotSessionSource | null;
+	account_id?: number | null;
+	bot_name?: string | null;
+}
+
+export interface HistoryAccountOption {
+	id: number;
+	email: string;
+}
+
+/** Distinct filter values present across terminal sessions (for dropdowns). */
+export interface HistoryFilterOptions {
+	accounts: HistoryAccountOption[];
+	personalities: string[];
+	sources: BotSessionSource[];
 }
 
 export interface HistorySessionRecord {
@@ -137,13 +165,23 @@ function extractDetail(body: unknown): string | null {
 
 export function listHistorySessions(
 	limit = 25,
-	offset = 0
+	offset = 0,
+	filters: HistoryFilters = {}
 ): Promise<HistoryListResponse> {
 	const qs = new URLSearchParams({
 		limit: String(limit),
 		offset: String(offset)
 	});
+	if (filters.source) qs.set('source', filters.source);
+	if (filters.account_id != null) qs.set('account_id', String(filters.account_id));
+	if (filters.bot_name) qs.set('bot_name', filters.bot_name);
 	return request<HistoryListResponse>(`/history/sessions?${qs.toString()}`);
+}
+
+/** Distinct accounts / personalities / sources present in history — for the
+ * filter dropdowns, so they only offer values that actually have sessions. */
+export function listHistoryFilters(): Promise<HistoryFilterOptions> {
+	return request<HistoryFilterOptions>('/history/filters');
 }
 
 export function getHistoryDetail(

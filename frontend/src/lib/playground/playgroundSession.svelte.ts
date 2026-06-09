@@ -39,6 +39,7 @@ import {
 	defaultPersonalitySelection,
 	type Personality
 } from '$lib/personalities';
+import { listAccounts, type Account } from '$lib/accounts';
 import {
 	PlaygroundMicDeniedError,
 	startPlaygroundStt,
@@ -136,6 +137,10 @@ export class PlaygroundController {
 	// localStorage so the last pick survives a reload (seeded in loadMetadata).
 	selectedPersonalityId = $state<number | null>(null);
 	personalities = $state<Personality[]>([]);
+	// Johnny-8th: account this playground run belongs to (null = account-less).
+	// Sticky in localStorage like the personality pick (seeded in loadMetadata).
+	selectedAccountId = $state<number | null>(null);
+	accounts = $state<Account[]>([]);
 	contextInjection = $state('');
 	advancedOpen = $state(false);
 	providerOverrides = $state<Record<ProviderKind, number | null>>({
@@ -245,17 +250,20 @@ export class PlaygroundController {
 	loadMetadata = async (): Promise<void> => {
 		this.loadingMetadata = true;
 		try {
-			const [tpls, provs, settings, persons] = await Promise.all([
+			const [tpls, provs, settings, persons, accts] = await Promise.all([
 				listTemplates(),
 				listProviders(),
 				getPipelineSettings().catch(() => null),
-				listPersonalities().catch(() => [] as Personality[])
+				listPersonalities().catch(() => [] as Personality[]),
+				listAccounts().catch(() => [] as Account[])
 			]);
 			this.templates = tpls;
 			this.providers = provs;
 			this.pipelineSettings = settings;
 			this.personalities = persons;
+			this.accounts = accts;
 			this.seedPersonalitySelection();
+			this.seedAccountSelection();
 		} catch (err) {
 			this.setDiagnostic('general', {
 				severity: 'error',
@@ -321,6 +329,51 @@ export class PlaygroundController {
 		}
 	}
 
+	// --- account sticky selection (Johnny-8th) -----------------------------
+
+	private static readonly ACCOUNT_KEY = 'johnny:playground:account';
+
+	/**
+	 * Seed the account from localStorage. A stored '' is the account-less
+	 * option; a stored id no longer present falls back to account-less.
+	 */
+	private seedAccountSelection(): void {
+		const stored = this.readStoredAccount();
+		if (stored === undefined || stored === null) {
+			this.selectedAccountId = null;
+			return;
+		}
+		this.selectedAccountId = this.accounts.some((a) => a.id === stored) ? stored : null;
+	}
+
+	/** Set the account selection and persist it (sticky across reloads). */
+	selectAccount = (value: number | null): void => {
+		this.selectedAccountId = value;
+		try {
+			if (typeof localStorage === 'undefined') return;
+			localStorage.setItem(
+				PlaygroundController.ACCOUNT_KEY,
+				value === null ? '' : String(value)
+			);
+		} catch {
+			// localStorage can throw (private mode / quota); a non-sticky
+			// selection is acceptable degradation.
+		}
+	};
+
+	private readStoredAccount(): number | null | undefined {
+		try {
+			if (typeof localStorage === 'undefined') return undefined;
+			const raw = localStorage.getItem(PlaygroundController.ACCOUNT_KEY);
+			if (raw === null) return undefined;
+			if (raw === '') return null;
+			const n = Number(raw);
+			return Number.isFinite(n) ? n : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
 	private buildPayload(): StartBrowserSessionPayload {
 		const overrides: Record<string, BrowserProviderOverride> = {};
 		const overrideKinds: readonly ProviderKind[] =
@@ -336,7 +389,8 @@ export class PlaygroundController {
 		const payload: StartBrowserSessionPayload = {
 			mode: this.mode,
 			persona: this.persona.trim() || undefined,
-			personality_id: this.selectedPersonalityId
+			personality_id: this.selectedPersonalityId,
+			account_id: this.selectedAccountId
 		};
 		if (Object.keys(overrides).length > 0) {
 			payload.provider_overrides = overrides;

@@ -196,6 +196,40 @@ def test_start_playground_creates_browser_session(
     assert row.source == BotSessionSource.BROWSER
 
 
+def test_start_playground_persists_account_id(
+    client: TestClient, db_session: Session
+) -> None:
+    """Johnny-8th: a playground run tagged with an account stores it on the row
+    so History can filter playground sessions by account."""
+    acc = GoogleAccount(email="pg@example.com", refresh_token_encrypted="x")
+    db_session.add(acc)
+    db_session.commit()
+    res = client.post(
+        "/sessions/browser/start",
+        json={"account_id": acc.id},
+    )
+    assert res.status_code == 201, res.text
+    row = db_session.get(BotSession, res.json()["id"])
+    assert row is not None
+    assert row.account_id == acc.id
+
+
+def test_start_rehearsal_defaults_account_to_event_owner(
+    client: TestClient, db_session: Session
+) -> None:
+    """Johnny-8th: a rehearsal with no explicit account inherits the event's
+    calendar owner."""
+    event, _ = _seed_meeting(db_session)
+    res = client.post(
+        "/sessions/browser/start",
+        json={"event_id": event.id},
+    )
+    assert res.status_code == 201, res.text
+    row = db_session.get(BotSession, res.json()["id"])
+    assert row is not None
+    assert row.account_id == event.account_id
+
+
 def test_start_rehearsal_uses_event_meeting_context(
     client: TestClient, db_session: Session
 ) -> None:
