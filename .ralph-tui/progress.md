@@ -574,6 +574,39 @@ after each iteration and it's included in prompts for context.
   `assert adapters.tts is not None` / `isinstance(...)` narrow. (The factory tests already
   narrowed via `isinstance` in most spots.)
 
+### Console-mode liveness smoke via `AgentSession.run()` + stub providers (Johnny-y6e)
+- **`AgentSession.run(user_input=..., input_modality="text")` is the SDK's built-in eval
+  harness** (livekit-agents 1.5.17). It calls `generate_reply(...)` directly (so it BYPASSES
+  `on_user_turn_completed` / the router gate — same caveat as `feed_text`'s note) and returns a
+  `RunResult` you `await` for completion. Assert on `result.events`: each `ChatMessageEvent` has
+  `.item` = the `llm.ChatMessage` (`.role`, `.text_content`). `result.done()` + ≥1 non-empty
+  assistant message = one completed turn. `result.expect` (a `RunAssert`) is the fluent
+  alternative. There is NO `livekit.agents.testing` module — `run()`/`RunResult` live on
+  `livekit.agents.voice` / `…voice.run_result`.
+- **Roomless start needs NO audio I/O for a text turn.** Unlike `browser_session.py` (which sets
+  `session.input.audio`/`output.audio` before start to forward mic/playout frames), a
+  text-modality `run()` feeds text straight into `generate_reply`, so you can
+  `session.start(agent=...)` roomless and never wire an audio sink — the TTS frames are just
+  dropped. Still pass `turn_detection="vad"` (the MultilingualModel needs a job context; Silero
+  VAD doesn't). Loading the Silero VAD IS the "warm the models" step. `session.aclose()` is
+  idempotent (second call is a no-op; `_activity` → `None`).
+- **Stub at the Johnny *provider* layer, reuse the real LiveKit adapters.** A
+  `_ConsoleStub{STT,LLM,TTS}Provider(<ABC>)` wrapped in the real `JohnnySTT`/`JohnnyLLM`/`JohnnyTTS`
+  exercises Johnny's actual adapter bridges with zero creds/network/model. Minimal contracts: LLM
+  needs only `name` + `chat` (the base `stream_chat` default replays `chat`'s text as one delta,
+  which the plain `llm_node` drives → deterministic reply); STT's `transcribe_stream` must be an
+  *async generator* even when it yields nothing (drain input, then `return` + an unreachable
+  `yield`) — text-modality never calls it but the session still needs it wired; TTS yields one
+  short S16LE silence frame. A stub STT name NOT in `BATCH_ONLY_STT_PROVIDER_NAMES` keeps
+  `JohnnySTT` direct (no `StreamAdapter`).
+- **CI-friendliness = text modality + injected shared VAD.** The pure reducer (`summarize_run`)
+  unit-tests with crafted `ChatMessageEvent`s (no model). The full-run tests load the real VAD
+  ONCE via a module-scoped fixture and inject it (`run_console_smoke(vad=)` /
+  `build_console_session(vad=)`) so the ~1 s Silero load isn't paid per test. `importorskip`
+  guards collection without the `agent` extra; the runner (api/agent image) has the extra + baked
+  VAD. NOTE: the compose service is `agent-worker`, not `agent` (the bead's shorthand) —
+  `docker compose exec agent-worker python -m johnny.agent.console_smoke` exits 0.
+
 ---
 
 ## 2026-06-09 - Johnny-y4j [SPIKE] Per-room JWT auth + agent dispatch contract
@@ -1451,4 +1484,48 @@ safety net already existed (Johnny-5ag); this bead APPLIES them in the assembler
 - `log_stage_error` (legacy) only LOGS — it emits no `PipelineEvent`. So "surface the state through the normal events" = the `suggest_only` path's existing `RouterDecisionMade`/`AgentSuggested` emission (the degrade just SELECTS that path); there is no new event type, and the missing-STT/LLM error is a log line only (parity).
 - Tests ARE in the `mypy strict` scope (`files=["app","johnny","tests"]`), so widening `SessionAdapters.tts` to `| None` requires a narrowing `assert adapters.tts is not None` / `isinstance(...)` before any `adapters.tts.<attr>` access. (Aside: `tests/agent/test_job_session.py` already carried 4 pre-existing mypy errors — `lambda: _FakeDbSession()` vs `Callable[[], Session]` — so the project's typecheck gate is source-scoped, not the full tree.)
 
+---
+
+## 2026-06-09 - Johnny-y6e [BUILD] Phase 0: Console-mode AgentSession smoke harness with a stub provider
+
+Built the Phase-0 liveness smoke that proves the LiveKit Agents engine starts,
+warms models, and completes one turn in-container with NO room / creds / network.
+
+**Implemented:**
+- `backend/johnny/agent/console_smoke.py` — stub `STTProvider`/`LLMProvider`/`TTSProvider`
+  wrapped in the real `JohnnySTT`/`JohnnyLLM`/`JohnnyTTS` adapters; `build_console_session`
+  assembles the real `build_agent_session(..., turn_detection="vad")` harness + a bare
+  `JohnnyAgent` (no gate); `run_console_smoke` starts roomless, drives ONE text turn via
+  `AgentSession.run`, reduces the `RunResult` events to a `ConsoleSmokeResult`, and always
+  `aclose()`s; `main()` is the `python -m johnny.agent.console_smoke` CLI (exit 0/1).
+- `backend/tests/agent/test_console_smoke.py` — 6 tests: 4 pure-reducer (`summarize_run` on
+  crafted events, no model) + 2 full-run (real VAD via a module-scoped fixture, roomless
+  `AgentSession.run` → one completed turn + idempotent clean shutdown). `importorskip`-guarded.
+
+**Files changed:** `backend/johnny/agent/console_smoke.py` (new),
+`backend/tests/agent/test_console_smoke.py` (new). No deps, no compose, no `__init__` export
+(livekit-heavy module, imported only where the `agent` extra exists — same discipline as
+`worker.py`/`browser_session.py`).
+
+**Validation:**
+- `ruff==0.15.16` check + format: clean. `mypy==2.1.0` (strict): clean.
+- `pytest tests/agent/test_console_smoke.py`: 6 passed (~5 s). Full `tests/agent` collects 622.
+- `python -m johnny.agent.console_smoke` exits 0 (bind-mounted current source AND, after
+  `docker compose build agent-worker && up -d agent-worker`, the BAKED image via
+  `docker compose exec agent-worker …`). Worker re-registered cleanly (`agent_name=johnny`).
+- No browser surface (pure backend smoke) — CLAUDE.md browser-validation rule N/A.
+
+**Learnings:**
+- `AgentSession.run()`/`RunResult` are the SDK's eval harness (`livekit.agents.voice` /
+  `…voice.run_result`); `run()` calls `generate_reply` directly so it bypasses the router gate
+  (fine for a liveness smoke). No `livekit.agents.testing` module exists.
+- Roomless start needs NO audio I/O for a text-modality turn (unlike `browser_session.py`); TTS
+  frames are dropped with no output sink. `aclose()` is idempotent.
+- Stub the Johnny provider ABCs (not the LiveKit layer) to exercise the real adapter bridges;
+  the STT stub's `transcribe_stream` must lexically be an async generator even yielding nothing.
+- mypy flags `result = await session.run(...)` (`Need type annotation`) because `output_type`
+  defaults to `None` → unbound `Run_T`; annotate `result: RunResult[Any]`.
+- The compose service is `agent-worker`, not `agent` (the bead's shorthand). The running image
+  bakes `backend/` via `COPY`, so it was STALE (no `turn_detection` kwarg); a single-service
+  rebuild is the non-destructive way to validate the baked path (no `./stop.sh` data wipe).
 ---

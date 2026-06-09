@@ -3,10 +3,10 @@
   "sessionId": "737211f1-9739-40c0-8d3f-332e080d27b8",
   "status": "running",
   "startedAt": "2026-06-08T22:23:12.909Z",
-  "updatedAt": "2026-06-09T05:08:19.765Z",
-  "currentIteration": 14,
+  "updatedAt": "2026-06-09T05:23:06.633Z",
+  "currentIteration": 15,
   "maxIterations": 0,
-  "tasksCompleted": 14,
+  "tasksCompleted": 15,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "claude-opus-4-8",
@@ -201,8 +201,8 @@
       {
         "id": "Johnny-un2",
         "title": "[BUILD] Phase 3: Graceful no-provider-configured degrade parity",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-y6e",
@@ -352,6 +352,16 @@
       "durationMs": 3613552,
       "startedAt": "2026-06-09T03:35:32.127Z",
       "endedAt": "2026-06-09T04:35:45.679Z"
+    },
+    {
+      "iteration": 15,
+      "status": "completed",
+      "taskId": "Johnny-un2",
+      "taskTitle": "[BUILD] Phase 3: Graceful no-provider-configured degrade parity",
+      "taskCompleted": true,
+      "durationMs": 1931526,
+      "startedAt": "2026-06-09T04:36:07.299Z",
+      "endedAt": "2026-06-09T05:08:18.825Z"
     }
   ],
   "skippedTaskIds": [],
