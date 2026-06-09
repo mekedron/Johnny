@@ -50,6 +50,7 @@
 	let notifPermission = $state<NotificationPermissionLike>('default');
 	let notifBusy = $state(false);
 	let notifTestSentAt = $state<number | null>(null);
+	let isMac = $state(false);
 
 	type BotSigninContext =
 		| { kind: 'new' }
@@ -128,6 +129,7 @@
 		void loadAccounts().then(maybeOpenReloginFromQuery);
 		window.addEventListener('message', handleOAuthMessage);
 		notifPermission = getNotificationPermission();
+		isMac = typeof navigator !== 'undefined' && /Mac/i.test(navigator.userAgent);
 		void watchNotifPermission();
 	});
 
@@ -503,11 +505,25 @@
 							<CheckCircle2Icon class="size-4" /> Browser notifications are enabled
 						</span>
 						<span class="text-xs text-muted-foreground">
-							You'll get a desktop alert for approvals and signed-out re-logins.
+							You'll get a desktop alert (with a chime) for approvals and signed-out re-logins.
 						</span>
+						{#if isMac}
+							<span
+								class="mt-1 border-l-2 border-border pl-2 text-xs text-muted-foreground"
+								data-testid="notif-macos-hint"
+							>
+								On macOS, also confirm
+								<strong class="font-medium text-foreground"
+									>System Settings → Notifications →</strong
+								>
+								your browser (Chrome / Safari) is <em>Allowed</em> and set to
+								<em>Play sound for notifications</em>. Focus / Do&nbsp;Not&nbsp;Disturb
+								can silence alerts even when this permission is granted.
+							</span>
+						{/if}
 						{#if notifTestSentAt !== null}
 							<span class="text-xs text-success" data-testid="notif-test-sent">
-								Test sent — check your desktop.
+								Test sent — check your desktop (and listen for the chime).
 							</span>
 						{/if}
 					{:else if notifPermission === 'denied'}

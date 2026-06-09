@@ -75,6 +75,55 @@ function markRequested(): void {
 	}
 }
 
+let notificationAudioCtx: AudioContext | null = null;
+
+/**
+ * Play a short in-page chime alongside a notification.
+ *
+ * The OS notification *can* play a sound, but only when the system is
+ * configured to (on macOS: System Settings → Notifications → <browser> →
+ * "Play sound", and not in a Focus / Do Not Disturb mode). The Notification
+ * API gives no portable way to force that, so we synthesise a soft two-tone
+ * chime via WebAudio as a reliable, OS-independent cue. Best-effort: browser
+ * autoplay policy can block it until the page has been interacted with (the
+ * Settings "Send test notification" click is itself a gesture), and we set
+ * ``silent: false`` on the notification so the OS sound still plays where
+ * enabled. Never throws.
+ */
+function playNotificationSound(): void {
+	if (!isBrowser()) return;
+	try {
+		const Ctx =
+			window.AudioContext ||
+			(window as unknown as { webkitAudioContext?: typeof AudioContext })
+				.webkitAudioContext;
+		if (!Ctx) return;
+		notificationAudioCtx ??= new Ctx();
+		const ctx = notificationAudioCtx;
+		if (ctx.state === 'suspended') void ctx.resume();
+		const now = ctx.currentTime;
+		// Two gentle sine tones — a pleasant "ding-dong", not a harsh beep.
+		for (const { freq, at } of [
+			{ freq: 880, at: 0 },
+			{ freq: 1318.5, at: 0.12 }
+		]) {
+			const osc = ctx.createOscillator();
+			const gain = ctx.createGain();
+			osc.type = 'sine';
+			osc.frequency.value = freq;
+			gain.gain.setValueAtTime(0.0001, now + at);
+			gain.gain.exponentialRampToValueAtTime(0.18, now + at + 0.02);
+			gain.gain.exponentialRampToValueAtTime(0.0001, now + at + 0.2);
+			osc.connect(gain).connect(ctx.destination);
+			osc.start(now + at);
+			osc.stop(now + at + 0.22);
+		}
+	} catch {
+		// WebAudio unavailable or autoplay-blocked — the OS notification
+		// sound (when enabled) is the fallback.
+	}
+}
+
 function ensureServiceWorkerRegistered(): Promise<ServiceWorkerRegistration | null> {
 	if (registrationPromise === null) {
 		registrationPromise = navigator.serviceWorker
@@ -160,13 +209,19 @@ export async function showTestNotification(): Promise<void> {
 		'needs approval or a bot account needs re-login.';
 	const data = { kind: 'test' };
 
+	playNotificationSound();
 	try {
 		const reg = await navigator.serviceWorker.ready;
-		await reg.showNotification(title, { body, tag, data } as NotificationOptions);
+		await reg.showNotification(title, {
+			body,
+			tag,
+			silent: false,
+			data
+		} as NotificationOptions);
 	} catch (err) {
 		console.warn('johnny: test showNotification via SW failed; falling back', err);
 		try {
-			const fallback = new Notification(title, { body, tag, data });
+			const fallback = new Notification(title, { body, tag, silent: false, data });
 			fallback.onclick = () => {
 				window.focus();
 				fallback.close();
@@ -206,19 +261,21 @@ export async function showApprovalNotification(
 		timeoutS: payload.timeoutS
 	};
 
+	playNotificationSound();
 	try {
 		const reg = await navigator.serviceWorker.ready;
 		await reg.showNotification(title, {
 			body,
 			tag,
 			requireInteraction: true,
+			silent: false,
 			data
 		} as NotificationOptions);
 	} catch (err) {
 		console.warn('johnny: showNotification via SW failed; falling back', err);
 		// Fallback path — no actions, but at least the user sees the alert.
 		try {
-			const fallback = new Notification(title, { body, tag, data });
+			const fallback = new Notification(title, { body, tag, silent: false, data });
 			fallback.onclick = () => {
 				window.focus();
 				fallback.close();
@@ -253,19 +310,21 @@ export async function showReloginNotification(
 		accountEmail: payload.accountEmail
 	};
 
+	playNotificationSound();
 	try {
 		const reg = await navigator.serviceWorker.ready;
 		await reg.showNotification(title, {
 			body,
 			tag,
 			requireInteraction: true,
+			silent: false,
 			actions: [{ action: 'relogin', title: 'Log in again' }],
 			data
 		} as NotificationOptions);
 	} catch (err) {
 		console.warn('johnny: relogin showNotification via SW failed; falling back', err);
 		try {
-			const fallback = new Notification(title, { body, tag, data });
+			const fallback = new Notification(title, { body, tag, silent: false, data });
 			fallback.onclick = () => {
 				window.open(`/settings?relogin=${payload.accountId}`, '_blank');
 				fallback.close();
