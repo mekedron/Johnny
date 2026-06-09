@@ -11,7 +11,7 @@ The adapter expects 16 kHz mono S16LE PCM frames in ``audio_iter`` —
 the format produced by the meet-worker audio bridge. PCM bytes are
 concatenated into a single utterance buffer and passed to the model
 in one call; this honours VAD boundaries supplied by the pipeline.
-``VoicePipeline._utterances()`` already segments audio into speech
+the legacy split pipeline already segments audio into speech
 chunks bounded by silence, so the STT adapter treats each
 ``transcribe_stream`` invocation as one complete utterance rather than
 imposing its own fixed window — no buffering windows, no stride.

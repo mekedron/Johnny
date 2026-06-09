@@ -49,36 +49,19 @@ def test_fixtures_exist_and_cover_both_runtimes() -> None:
 
 @pytest.mark.parametrize("fixture_dir", discover_fixtures(FIXTURES_DIR), ids=_fixture_ids())
 async def test_fixture_holds_invariants(fixture_dir: Path) -> None:
-    """Every committed fixture replays cleanly under the invariants gate."""
+    """Every committed UNIFIED fixture replays cleanly under the invariants gate.
+
+    Split fixtures run on the LiveKit-Agents engine and are gated by
+    ``test_replay_harness_agent.py`` — the hand-rolled split in-worker
+    orchestrator was retired in Johnny-n22, so ``run_replay`` only drives the
+    unified (S2S) path now.
+    """
     fixture = load_fixture(fixture_dir)
+    if fixture.runtime != "unified":
+        pytest.skip("split fixtures run on the agent engine (test_replay_harness_agent)")
     result = await run_replay(fixture)
-    if fixture.runtime == "split":
-        assert result.stt_calls == fixture.turn_count, (
-            f"{fixture.label}: synthesized audio segmented into "
-            f"{result.stt_calls} turns, expected {fixture.turn_count}"
-        )
     violations = check_invariants(result.events, fixture.runtime)
     assert not violations, f"{fixture.label} invariant violations: {violations}"
-
-
-async def test_session_14_silent_drop_now_terminates() -> None:
-    """The flagship: session-14 turn 4 (the silent drop) now ends in a durable
-    no_reply(stage_error) instead of vanishing — the proof the .28.3 fix landed."""
-    fixture = load_fixture(FIXTURES_DIR / "14")
-    result = await run_replay(fixture)
-    terminals = [e for e in result.events if isinstance(e, TurnTerminal)]
-    # Four transcribed turns, four terminals — none dropped.
-    assert len(terminals) == fixture.turn_count
-    turn4 = [t for t in terminals if t.turn_id == 4]
-    assert turn4, "turn 4 produced no terminal — the silent drop is back"
-    assert turn4[0].terminal_state == "no_reply"
-    assert turn4[0].no_reply_reason == "stage_error"
-    # Regression diff surfaces the fix: recorded None → replayed no_reply.
-    diffs = diff_against_recorded(fixture, result.records)
-    assert any(
-        d.turn_id == 4 and d.field == "terminal_state" and d.replayed == "no_reply"
-        for d in diffs
-    ), f"expected turn-4 terminal_state divergence, got {diffs}"
 
 
 # --- teeth: the checker must catch real violations --------------------------

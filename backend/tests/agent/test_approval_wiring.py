@@ -73,7 +73,7 @@ from johnny.voice_pipeline.events import (  # noqa: E402
     ApprovalPending,
     ApprovalResolved,
 )
-from johnny.voice_pipeline.pipeline import (  # noqa: E402
+from johnny.voice_pipeline.reasoning import (  # noqa: E402
     APPROVAL_REQUIRED_MODE,
     RouterDecision,
 )

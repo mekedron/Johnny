@@ -19,7 +19,7 @@ Why a harness is needed — verified against ``livekit-agents==1.5.17``
   on_user_turn_completed to finish."* A newer turn's task literally
   ``await old_task``\\s the older hook. So a hook with **no internal bound
   stalls EVERY subsequent turn** — this is the Session-14 ~60 s hang the
-  legacy ``asyncio.wait_for`` bound (``voice_pipeline.pipeline._run_router``,
+  legacy ``asyncio.wait_for`` bound (the legacy split engine,
   ``DEFAULT_ROUTER_LLM_TIMEOUT_S``) was added to kill. We port that bound here.
 * The SDK **swallows** ``StopResponse`` *and any* ``Exception`` raised by the
   hook (``except StopResponse: return`` / ``except Exception: ...; return``)
@@ -27,7 +27,7 @@ Why a harness is needed — verified against ``livekit-agents==1.5.17``
   terminal — a timed-out / declined / barged-in gate must emit its own terminal
   *before* it returns or raises. That is :class:`TerminalTracker`'s job
   (the INV-1 "exactly one terminal per turn" guard, ported from
-  ``voice_pipeline.pipeline._emit_turn_terminal`` + its belt-and-suspenders).
+  the legacy split engine + its belt-and-suspenders).
 
 How Johnny-xpa composes this in the real, livekit-importing hook::
 
@@ -53,7 +53,7 @@ How Johnny-xpa composes this in the real, livekit-importing hook::
 
 :class:`TerminalTracker` enforces INV-1 within *one* gate invocation. The
 **session-level** authority is :class:`TurnLedger` (spike **Johnny-o3z**): the
-legacy ``voice_pipeline.pipeline`` could key INV-1 on a single
+legacy split engine could key INV-1 on a single
 ``_turn_terminal_emitted`` bool because ``_respond_to_transcript`` was
 serialised, but under ``AgentSession`` the gate and the reply ``SpeechHandle``
 done-callback are temporally disjoint *and turns overlap* (turn N's reply
@@ -86,7 +86,7 @@ from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
-# Ported verbatim from voice_pipeline.pipeline.DEFAULT_ROUTER_LLM_TIMEOUT_S.
+# Ported verbatim from the legacy split engine.
 # Session 14 turn 4 hung ~60 s with no bound; 30 s is generous for a sensibly
 # sized local model under load yet kills the dead-minute stall. ``<= 0`` (or a
 # ``None`` timeout) disables the wall-clock bound but keeps the abandon race.
@@ -183,7 +183,7 @@ class RouterStatus(Enum):
 class TerminalTracker:
     """Enforce INV-1 — *exactly one* terminal per turn — across every gate exit.
 
-    Ported from ``voice_pipeline.pipeline``'s ``_turn_terminal_emitted`` flag +
+    Ported from the legacy split engine's ``_turn_terminal_emitted`` flag +
     ``_emit_turn_terminal`` chokepoint + ``_handle_unaccounted_turn``
     belt-and-suspenders. The first :meth:`emit` wins and marks the turn
     accounted-for; a second is logged and dropped (never two rows).
@@ -288,7 +288,7 @@ class TerminalTracker:
 class TurnLedger:
     """Session-scoped INV-1 authority — *exactly one* terminal per LiveKit turn id.
 
-    Spike **Johnny-o3z**. The legacy ``voice_pipeline.pipeline`` enforced INV-1
+    Spike **Johnny-o3z**. The legacy split engine enforced INV-1
     with one session-scalar ``_turn_terminal_emitted`` bool, which is correct
     **only because** ``_respond_to_transcript`` is serialised (one turn in
     flight at a time). Under ``AgentSession`` that assumption is gone:
@@ -456,7 +456,7 @@ class TurnLedger:
         it :meth:`resolve`-able exactly once. Records **no** ``TurnTerminal`` — the
         live UI learns the pending state from the separate ``ApprovalPending``
         event; the turn's one durable terminal lands at resolution (legacy parity:
-        ``voice_pipeline.pipeline._handle_approval_required`` emits its single
+        the legacy split engine emits its single
         terminal *after* the approval resolves, never a ``pending_approval`` row).
 
         First-wins like :meth:`emit`: returns ``False`` if the turn is already
@@ -704,7 +704,7 @@ async def run_router_call[T](
 ) -> tuple[RouterStatus, T | None]:
     """Run the router call bounded by ``timeout_s`` and racing ``abandon``.
 
-    Ports ``voice_pipeline.pipeline._run_router``'s ``asyncio.wait_for`` bound
+    Ports the legacy split engine's ``asyncio.wait_for`` bound
     and adds a cooperative barge-in race: ``abandon`` is an
     :class:`asyncio.Event` the fast-VAD interrupt path (Johnny-k8t) sets when
     the user resumes speaking mid-gate. Because the SDK never cancels the hook,

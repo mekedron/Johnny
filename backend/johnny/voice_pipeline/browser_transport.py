@@ -5,7 +5,7 @@ API process over a WebSocket. This transport is the pipeline-side
 adapter: the WebSocket endpoint pushes inbound frames in via
 :meth:`push_capture_frame` and pulls outbound TTS frames out via
 :meth:`drain_playback_frames`. The pipeline itself is unchanged — only
-the transport instance handed to :class:`VoicePipeline` differs.
+the transport instance handed to the legacy split pipeline differs.
 
 Design notes
 ------------
@@ -248,7 +248,7 @@ class BrowserAudioTransport(JohnnyTransport):
     def cancel_playback(self) -> None:
         """Synchronously drop queued playback frames + signal browser interrupt.
 
-        Called by :meth:`VoicePipeline.interrupt` on barge-in and by the
+        Called by the legacy split pipeline on barge-in and by the
         WebSocket endpoint when the browser sends a stop control message
         (Johnny-ckz.13). Both effects combined produce the < 500 ms p95
         cut budget:

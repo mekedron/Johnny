@@ -1,7 +1,7 @@
 """Agent-engine half of the offline replay harness — the cutover gate (Johnny-4k3).
 
 The legacy harness (:mod:`johnny.smoketest.replay`) drives a committed session
-fixture through the *legacy* :class:`~johnny.voice_pipeline.VoicePipeline` and
+fixture through the *legacy* :class:`~johnny.voice_pipeline.the legacy split pipeline` and
 captures the :class:`~johnny.voice_pipeline.events.PipelineEvent` stream so the
 ``.28.x`` invariants can gate the run. This module is the parallel driver for the
 **new** LiveKit-Agents ``AgentSession`` engine: it feeds the *same* fixtures

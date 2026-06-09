@@ -1,6 +1,6 @@
 """Event/observability parity for the LiveKit agent path (Johnny-d5z — epic Johnny-7g5).
 
-The legacy ``VoicePipeline`` published a fixed set of ``PipelineEvent``\\s to the
+The legacy split pipeline published a fixed set of ``PipelineEvent``\\s to the
 Redis :class:`~johnny.voice_pipeline.event_bus.EventBus`; a single subscriber
 (``app.services.session_status_subscriber``) consumes that channel and persists
 each event to its DB table — ``transcript_finalized`` → ``transcript_chunks``,
@@ -75,7 +75,7 @@ from johnny.voice_pipeline.events import (
     TranscriptFinalized,
     TurnTerminal,
 )
-from johnny.voice_pipeline.pipeline import FREE_FORM_MODES, RouterDecision
+from johnny.voice_pipeline.reasoning import FREE_FORM_MODES, RouterDecision
 
 if TYPE_CHECKING:
     from livekit.agents.voice.events import MetricsCollectedEvent
@@ -121,7 +121,7 @@ def terminal_outcome(
     The gate harness carries only the coarse ``terminal_state`` + the
     ``no_reply_reason``; the ``agent_decisions.outcome`` column wants the
     fine-grained value the legacy pipeline stamped per terminal branch
-    (``VoicePipeline._respond_to_transcript_inner``):
+    (the legacy split pipeline):
 
     * ``replied`` → ``spoken``;
     * ``pending_approval`` → ``pending``;
@@ -244,7 +244,7 @@ def build_suggested_emitter(
 ) -> RecordSuggested:
     """Build the suggest-only ``AgentSuggested`` emitter (Johnny-5ag deferred this here).
 
-    Port of ``VoicePipeline._handle_suggest_only``'s event: the router approved a
+    Port of the legacy split pipeline's event: the router approved a
     reply but the meeting is ``suggest_only``, so the suggestion is surfaced to
     the UI and nothing is spoken. ``decision_id`` is ``None`` — unlike the legacy
     (which had a synchronous sink id), the new path's decision row is written
@@ -280,7 +280,7 @@ def build_spoke_emitter(
 ) -> RecordSpoke:
     """Build the speak-path ``AgentSpoke`` emitter.
 
-    Port of ``VoicePipeline._answer_and_speak``'s publish: emitted once when a
+    Port of the legacy split pipeline's publish: emitted once when a
     reply completes with assistant output. The subscriber inserts the
     ``agent_utterances`` row and writes the spoken text back onto the turn's
     decision row (INV-2). ``matched_allowed_reply`` is inferred from the active

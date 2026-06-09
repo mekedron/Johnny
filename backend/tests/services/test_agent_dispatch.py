@@ -146,18 +146,19 @@ async def test_dispatch_session_agent_calls_dispatch_with_room_and_metadata(
 # --- Orchestrator gating + lifecycle hook (Johnny-9eh) ----------------------
 
 
-def test_orchestrator_enabled_default_is_legacy() -> None:
-    # No env var set -> default legacy -> agent path OFF.
-    assert agent_orchestrator_enabled({}) is False
+def test_orchestrator_enabled_default_is_agentsession() -> None:
+    # No env var set -> default agentsession (Johnny-n22) -> agent path ON.
+    assert agent_orchestrator_enabled({}) is True
+    # Only an explicit ``legacy`` opts a session out.
     assert agent_orchestrator_enabled({"JOHNNY_ORCHESTRATOR": "legacy"}) is False
 
 
 def test_orchestrator_enabled_when_agentsession() -> None:
     assert agent_orchestrator_enabled({"JOHNNY_ORCHESTRATOR": "agentsession"}) is True
-    # Case/space tolerant so an operator typo in .env still flips it.
+    # Case/space tolerant.
     assert agent_orchestrator_enabled({"JOHNNY_ORCHESTRATOR": "  AgentSession "}) is True
-    # An unrecognised value is treated as legacy (fail safe to the proven path).
-    assert agent_orchestrator_enabled({"JOHNNY_ORCHESTRATOR": "experimental"}) is False
+    # An unrecognised value fails safe to the proven agent path (default flip, Johnny-n22).
+    assert agent_orchestrator_enabled({"JOHNNY_ORCHESTRATOR": "experimental"}) is True
 
 
 async def test_maybe_dispatch_is_noop_in_legacy(monkeypatch: object) -> None:
@@ -170,7 +171,9 @@ async def test_maybe_dispatch_is_noop_in_legacy(monkeypatch: object) -> None:
 
     monkeypatch.setattr(dispatch_mod, "dispatch_agent", _fake_dispatch)  # type: ignore[attr-defined]
 
-    result = await maybe_dispatch_session_agent(_full_ctx(), environ={})
+    result = await maybe_dispatch_session_agent(
+        _full_ctx(), environ={"JOHNNY_ORCHESTRATOR": "legacy"}
+    )
 
     assert result is None
     assert called is False  # legacy mode never reaches the SDK
@@ -218,9 +221,8 @@ async def test_maybe_dispatch_swallows_failure(monkeypatch: object) -> None:
 
 
 def test_bridge_launch_environment_empty_in_legacy() -> None:
-    # Default + explicit legacy both add nothing → the meet-worker env is
-    # byte-identical to before, so the legacy pipeline path is unchanged.
-    assert bridge_launch_environment(bot_session_id=42, environ={}) == {}
+    # Explicit legacy adds nothing → the meet-worker env is byte-identical to
+    # before, so the in-worker (S2S) pipeline path runs without bridge vars.
     assert (
         bridge_launch_environment(
             bot_session_id=42, environ={"JOHNNY_ORCHESTRATOR": "legacy"}

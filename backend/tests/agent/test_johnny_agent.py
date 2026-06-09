@@ -5,11 +5,11 @@ Covers the two responsibilities Phase 2 adds to
 
 * :func:`~johnny.agent.session.build_agent_instructions` assembles the static
   system prompt from the personality / meeting-context / calendar components,
-  reusing the legacy ``VoicePipeline._answer_messages`` ordering;
+  reusing the legacy split pipeline ordering;
 * :func:`~johnny.agent.session.transcripts_to_chat_ctx` /
   :func:`~johnny.agent.session.build_johnny_agent` rehydrate persisted
   transcripts into the LiveKit ``chat_ctx`` so a container respawn keeps the
-  bot's memory (parity with ``VoicePipeline._rehydrate_transcript_history``).
+  bot's memory (parity with the legacy split pipeline).
 
 Guarded by ``importorskip`` so the suite still collects where the ``agent``
 extra (``livekit-agents``) is absent.
@@ -48,7 +48,7 @@ from johnny.agent.session import (  # noqa: E402
     transcripts_to_chat_ctx,
 )
 from johnny.voice_pipeline.events import TranscriptFiltered, TranscriptFinalized  # noqa: E402
-from johnny.voice_pipeline.pipeline import (  # noqa: E402
+from johnny.voice_pipeline.reasoning import (  # noqa: E402
     AUTONOMOUS_MODE,
     LIMITED_AUTO_SPEAK_MODE,
 )

@@ -6,7 +6,7 @@ either ``split`` mode (legacy STT+LLM+TTS) or ``unified`` S2S mode
 
 The same harness covers two distinct surfaces:
 
-* ``--surface=meet`` — exercises the same ``VoicePipeline`` /
+* ``--surface=meet`` — exercises the same the legacy split pipeline /
   ``UnifiedVoicePipeline`` shape the meet-worker container runs via
   ``johnny.meet_worker.pipeline_runner.build_and_run_pipeline``. The
   pipeline constructor and provider wiring match exactly.
@@ -75,14 +75,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from johnny.e2e.interrupt.real_providers import (
-    RealProviderError,
-    load_real_providers,
-)
-from johnny.e2e.interrupt.real_runner import run_suite_real
-from johnny.e2e.interrupt.real_speaker import warm_cache
 from johnny.e2e.interrupt.report import SuiteReport, render_summary, write_report
-from johnny.e2e.interrupt.runner import run_suite
 from johnny.e2e.interrupt.s2s_providers import (
     S2SProviderError,
     disable_server_vad_options,
@@ -96,7 +89,6 @@ from johnny.e2e.interrupt.s2s_scenarios import (
     S2S_SCENARIOS,
     s2s_scenarios_by_name,
 )
-from johnny.e2e.interrupt.scenarios import SCENARIOS, scenarios_by_name
 
 SPLIT_MODE = "split"
 UNIFIED_MODE = "unified"
@@ -253,71 +245,21 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_split(args: argparse.Namespace) -> int:
-    """Drive the split (STT+LLM+TTS) pipeline scenarios."""
-    if args.only:
-        try:
-            scenarios = scenarios_by_name(args.only)
-        except KeyError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            return 2
-    else:
-        scenarios = SCENARIOS
+    """The split (STT+LLM+TTS) interrupt harness was retired in Johnny-n22.
 
-    if args.real:
-        if args.providers_file is None:
-            print(
-                "ERROR: --real requires --providers-file <path>",
-                file=sys.stderr,
-            )
-            return 2
-        try:
-            bundle = load_real_providers(
-                args.providers_file,
-                fallback_tts_to_openai=args.fallback_tts_openai,
-            )
-        except RealProviderError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            return 2
-        voice_id = getattr(bundle.tts, "_default_voice_id", None)
-        voice_label = voice_id or bundle.tts.name
-
-        async def _run() -> list[Any]:
-            try:
-                await warm_cache(
-                    bundle.tts,
-                    list(scenarios),
-                    cache_root=args.speech_cache_root,
-                    voice_label=voice_label,
-                    voice_id=voice_id,
-                )
-                return await run_suite_real(
-                    list(scenarios),
-                    bundle,
-                    cache_root=args.speech_cache_root,
-                    voice_label=voice_label,
-                    voice_id=voice_id,
-                )
-            finally:
-                await bundle.aclose()
-
-        results = asyncio.run(_run())
-    else:
-        results = asyncio.run(run_suite(list(scenarios)))
-    report = SuiteReport(scenarios=results)
-
-    artifact_label = "interrupt"
-    if not args.no_artifacts:
-        run_dir = _artifact_dir(args.artifact_root, label=artifact_label)
-        report.artifact_dir = str(run_dir)
-
-    print(render_summary(report))
-    print(f"\nmode: {SPLIT_MODE}  surface: {args.surface}")
-
-    if not args.no_artifacts and report.artifact_dir is not None:
-        report_path = write_report(report, Path(report.artifact_dir))
-        print(f"\nreport: {report_path}")
-
-    return report.exit_code
+    The hand-rolled split orchestrator is gone; barge-in for the split path is
+    now covered by the LiveKit-Agents engine's own tests
+    (``tests/agent/test_barge_in.py``). Use ``--mode=unified`` for the S2S
+    interrupt scenarios.
+    """
+    print(
+        "ERROR: the split interrupt harness was retired in Johnny-n22 (the "
+        "hand-rolled split orchestrator was removed). Barge-in for the split "
+        "path is covered by tests/agent/test_barge_in.py; use --mode=unified "
+        "for the S2S interrupt scenarios.",
+        file=sys.stderr,
+    )
+    return 2
 
 
 def _run_unified(args: argparse.Namespace) -> int:

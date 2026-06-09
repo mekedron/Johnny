@@ -10,7 +10,7 @@ vs ``unified``) and dispatches to the appropriate engine. Per Johnny-7g5.1 the
 **split** path now runs on the LiveKit Agents ``AgentSession`` engine — the same
 engine the Meet path uses — bound to the browser transport in-process and roomless
 (:class:`johnny.agent.browser_session.BrowserAgentSession`), so the legacy
-in-process :class:`~johnny.voice_pipeline.pipeline.VoicePipeline` is no longer
+in-process the legacy split pipeline is no longer
 constructed for the browser:
 
 * ``split`` → :class:`~johnny.agent.browser_session.BrowserAgentSession` over the
@@ -19,7 +19,7 @@ constructed for the browser:
 * ``unified`` → :class:`~johnny.voice_pipeline.unified_pipeline.UnifiedVoicePipeline`
   over an :class:`~app.providers.s2s_base.S2SProvider` (the agent engine is
   split-only; unified stays on its own in-process pipeline, which is *not*
-  ``VoicePipeline``).
+  the legacy split pipeline).
 
 Persistence (transcripts, decisions, utterances) goes through the same Redis
 event bus + ``session_status_subscriber`` the Meet path writes through (the split

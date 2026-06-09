@@ -10,7 +10,7 @@ This module wires Johnny's voice orchestration onto LiveKit Agents'
   meeting-context + calendar prompt, reusing the legacy answer-stage prompt
   assembly) and rehydrates prior transcript history into the LiveKit
   ``chat_ctx`` on container respawn so memory survives restarts (Johnny-re2,
-  parity with ``VoicePipeline._rehydrate_transcript_history``);
+  parity with the legacy split pipeline);
 * the router "should-speak" gate in ``on_user_turn_completed`` runs the
   decision via :class:`~johnny.agent.router_gate.RouterGate` (Johnny-xpa,
   Phase 2) on top of the gate harness (:mod:`johnny.agent.gate`), raising
@@ -110,7 +110,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_INSTRUCTIONS = "You are Johnny, an AI participant in a live voice meeting."
 
 # Generic answer-stage framing, mirrored from
-# ``VoicePipeline._answer_messages`` so a LiveKit-driven Johnny opens with the
+# the legacy split pipeline so a LiveKit-driven Johnny opens with the
 # same job description the meet-worker answer LLM had. Deliberately nameless so
 # a configured personality (rendered next) owns the persona without conflict.
 _BASE_INSTRUCTIONS = "You are an AI meeting participant. Produce concise, natural spoken replies."
@@ -132,7 +132,7 @@ _HISTORY_NOTE = (
 class AgentInstructionsConfig:
     """Static prompt components assembled into ``Agent.instructions``.
 
-    Mirrors the subset of :class:`~johnny.voice_pipeline.pipeline.PipelineConfig`
+    Mirrors the subset of the legacy pipeline config
     the legacy answer LLM rendered into its system message — the Johnny-oly.8
     personality identity layer, the meeting brief, the calendar background, and
     the cross-session memory (Johnny-dsy). The agent worker fills these from the
@@ -156,7 +156,7 @@ def build_agent_instructions(config: AgentInstructionsConfig) -> str:
     """Assemble the persistent system prompt for :class:`JohnnyAgent`.
 
     Reuses the legacy answer-stage assembly order from
-    ``VoicePipeline._answer_messages``: base framing → personality (FIRST, so
+    the legacy split pipeline: base framing → personality (FIRST, so
     the model adopts the character before it reads the job) → history note →
     meeting instructions → context → calendar description → calendar
     attachments → last-session summary. Per-turn-only pieces from the legacy
@@ -186,7 +186,7 @@ def build_agent_instructions(config: AgentInstructionsConfig) -> str:
 def transcripts_to_chat_ctx(history: Sequence[TranscriptFinalized]) -> ChatContext:
     """Map persisted transcripts into a LiveKit :class:`ChatContext`.
 
-    Parity with ``VoicePipeline._rehydrate_transcript_history``: a container
+    Parity with the legacy split pipeline: a container
     respawn mid-session would otherwise start the LiveKit chat context empty,
     so the bot would forget everything spoken before the restart. Each prior
     transcript becomes one chat message:
@@ -283,7 +283,7 @@ def build_agent_session(
     dispatched job. The in-browser playground (Johnny-7g5.1) runs the session
     *in the API process* with no job context, so it passes ``"vad"`` — Silero
     VAD endpointing, which needs no job context and matches the legacy browser
-    ``VoicePipeline``'s own VAD-based turn-taking (it never used a semantic EOU
+    the legacy split pipeline's own VAD-based turn-taking (it never used a semantic EOU
     model). Any value LiveKit accepts (a model, ``"vad"`` / ``"stt"`` / …) is
     forwarded verbatim.
 
@@ -437,7 +437,7 @@ class JohnnyAgent(Agent):
         # Session-start reference for transcript ``timestamp_ms`` (Johnny-7g5.1).
         # The status subscriber writes ``timestamp_ms`` into
         # ``transcript_chunks.start_offset_ms`` (a 4-byte INTEGER) as an
-        # offset-from-start, mirroring the legacy ``VoicePipeline._now_ms``
+        # offset-from-start, mirroring the legacy split pipeline
         # (``loop.time() - session_started_at``). Emitting raw epoch-ms here
         # overflows that column on Postgres, so transcript timestamps are
         # session-relative from agent construction.
@@ -537,7 +537,7 @@ class JohnnyAgent(Agent):
 
         The offset-from-start the status subscriber writes into the INTEGER
         ``transcript_chunks.start_offset_ms`` column (parity with the legacy
-        ``VoicePipeline._now_ms``), so a transcript can never overflow it with a
+        the legacy split pipeline), so a transcript can never overflow it with a
         raw epoch-ms value.
         """
         return max(0, int((time.monotonic() - self._session_started_at) * 1000))
@@ -553,7 +553,7 @@ class JohnnyAgent(Agent):
     ) -> AsyncIterator[SpeechEvent | str]:
         """Transcribe, dropping noise candidates before they can open a turn (Johnny-cmd).
 
-        Port of the legacy ``VoicePipeline._transcribe_loop`` noise gate
+        Port of the legacy split pipeline noise gate
         (Johnny-ckz.14) into the LiveKit STT node. The default node
         (:meth:`Agent.default.stt_node`) drives the session STT; this override
         wraps its event stream and, when a :class:`~johnny.agent.noise_filter.NoiseFilterConfig`
@@ -743,7 +743,7 @@ class JohnnyAgent(Agent):
     ) -> AsyncIterator[ChatChunk | str | FlushSentinel]:
         """Generate the answer text, coercing to an allowed reply when configured.
 
-        Port of ``VoicePipeline._answer_and_speak``'s answer-stage branch into the
+        Port of the legacy split pipeline's answer-stage branch into the
         LiveKit reply pipeline. In a Limited-auto-speak session with an allow-list
         (and any non-free-form mode), the answer is **coerced** to a verbatim
         allowed reply via :func:`~johnny.agent.answer.coerce_allowed_reply`
@@ -791,7 +791,7 @@ class JohnnyAgent(Agent):
           buffers the streaming answer text and yields each complete sentence the
           instant a boundary arrives; each is synthesised immediately, so
           time-to-first-audio is bounded by the first sentence, not the whole
-          reply (parity with ``VoicePipeline._stream_answer_into_tts``);
+          reply (parity with the legacy split pipeline);
         * **graceful TTS-missing degrade** — when no TTS provider is available
           (or the session was degraded to ``suggest_only``), the node consumes the
           text so the upstream generation completes cleanly and emits **no audio**,
@@ -843,7 +843,7 @@ async def build_johnny_agent(
 ) -> JohnnyAgent:
     """Build a :class:`JohnnyAgent`, rehydrating prior transcripts if available.
 
-    Parity with ``VoicePipeline.run()`` → ``_rehydrate_transcript_history``: on
+    Parity with the legacy split pipeline → ``_rehydrate_transcript_history``: on
     a container respawn the injected loader pulls the durable transcript rows
     for this session (keyed off ``session_id`` / ``bot_session_id``, whichever
     the implementation prefers) and seeds them into the agent's LiveKit chat

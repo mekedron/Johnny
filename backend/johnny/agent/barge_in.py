@@ -1,6 +1,6 @@
 """Slow LLM barge-in intent classifier for the LiveKit-Agents session (Johnny-k8t).
 
-Phase-2 port of the legacy ``VoicePipeline`` barge-in handling (Johnny-di9 /
+Phase-2 port of the legacy split pipeline barge-in handling (Johnny-di9 /
 Johnny-ze3 / Johnny-wyd). Barge-in splits into two paths under ``AgentSession``:
 
 * the **fast VAD-onset interrupt** is now LiveKit-native — configured on the
@@ -32,14 +32,14 @@ double-interrupt fighting LiveKit's own VAD interruption: if the native path
 
 Verdict parity is by reuse, not reimplementation (the Johnny-xpa discipline):
 the classifier schema, response parser, prompt builder and interrupting-category
-set are imported from :mod:`johnny.voice_pipeline.pipeline` so the LiveKit-driven
+set are imported from the legacy split pipeline so the LiveKit-driven
 barge-in produces the same decision the legacy pipeline did on the same model
 output.
 
 This module is deliberately ``livekit``-free (it interacts with the reply via
 the small :class:`InterruptibleSpeech` protocol, satisfied structurally by
 ``SpeechHandle``) so ``import johnny.agent.barge_in`` stays cheap and unit tests
-need no LiveKit session. It pulls ``johnny.voice_pipeline.pipeline`` (and thus
+need no LiveKit session. It pulls ``johnny.voice_pipeline.reasoning`` (and thus
 ``app.providers``) for the shared classifier helpers, exactly like
 :mod:`johnny.agent.router_gate`; it is imported only from
 :mod:`johnny.agent.session`, never from the import-safe top-level
@@ -55,7 +55,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from app.providers.base import LLMProvider
-from johnny.voice_pipeline import pipeline as _legacy
+from johnny.voice_pipeline import reasoning as _reasoning
 
 logger = logging.getLogger(__name__)
 
@@ -63,23 +63,23 @@ logger = logging.getLogger(__name__)
 # category set verbatim (module-qualified) so the LiveKit barge-in path produces
 # byte-for-byte identical verdicts on the same model output — the same
 # "reuse, don't reimplement" parity the router gate (Johnny-xpa) holds.
-BARGE_IN_DECISION_SCHEMA: dict[str, Any] = _legacy._BARGE_IN_SCHEMA
-INTERRUPTING_BARGE_IN_CATEGORIES = _legacy.INTERRUPTING_BARGE_IN_CATEGORIES
-BargeInDecision = _legacy.BargeInDecision
+BARGE_IN_DECISION_SCHEMA: dict[str, Any] = _reasoning._BARGE_IN_SCHEMA
+INTERRUPTING_BARGE_IN_CATEGORIES = _reasoning.INTERRUPTING_BARGE_IN_CATEGORIES
+BargeInDecision = _reasoning.BargeInDecision
 
-# Ported from voice_pipeline.pipeline.DEFAULT_BARGE_IN_CLASSIFIER_TIMEOUT_S
+# Ported from the legacy split engine
 # (Johnny-wyd): a tight wall-clock bound on the classifier LLM call so a slow
 # upstream model cannot leave the out-of-band task wedged for the provider's
 # full HTTP timeout. The user-facing barge-in budget is owned by the native VAD
 # path, so a missed verdict only loses the edge-case / observability refinement.
-DEFAULT_BARGE_IN_CLASSIFIER_TIMEOUT_S = _legacy.DEFAULT_BARGE_IN_CLASSIFIER_TIMEOUT_S
+DEFAULT_BARGE_IN_CLASSIFIER_TIMEOUT_S = _reasoning.DEFAULT_BARGE_IN_CLASSIFIER_TIMEOUT_S
 
 # Default minimum confirmed-speech duration (seconds) for the native VAD-onset
 # interrupt, ported from voice_pipeline's barge_in_min_speech_ms fast-trigger
 # (Johnny-ze3, 160 ms). Surfaced here so build_agent_session and the classifier
 # config share one source; ``None`` leaves LiveKit's own default (0.5 s) in play.
 DEFAULT_NATIVE_INTERRUPTION_MIN_DURATION_S = (
-    _legacy.DEFAULT_BARGE_IN_MIN_SPEECH_MS / 1000.0
+    _reasoning.DEFAULT_BARGE_IN_MIN_SPEECH_MS / 1000.0
 )
 
 
@@ -250,7 +250,7 @@ class BargeInClassifier:
         native VAD path owns the user-facing barge-in budget, so a missed verdict
         is only a lost refinement.
         """
-        messages = _legacy.build_barge_in_messages(
+        messages = _reasoning.build_barge_in_messages(
             text=text,
             speaker=speaker,
             instructions=self._config.instructions,
@@ -285,7 +285,7 @@ class BargeInClassifier:
                 category="noise",
                 reason="barge-in classifier raised",
             )
-        return _legacy._parse_barge_in_response(response)
+        return _reasoning._parse_barge_in_response(response)
 
     @staticmethod
     def _target_is_live(

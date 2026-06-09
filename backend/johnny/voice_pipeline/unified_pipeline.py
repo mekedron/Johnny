@@ -1,6 +1,6 @@
 """Unified voice pipeline driven by a single S2S provider (Johnny-ckz.17).
 
-The split pipeline (:class:`johnny.voice_pipeline.pipeline.VoicePipeline`)
+The split pipeline (the legacy split pipeline)
 runs STT, an LLM router/answer, and TTS as three independent stages.
 The unified pipeline collapses all three into one bidirectional session
 with an :class:`app.providers.s2s_base.S2SProvider` — OpenAI

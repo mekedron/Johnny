@@ -1,6 +1,6 @@
 """Router "should-speak" gate for ``Agent.on_user_turn_completed`` (Johnny-xpa).
 
-This is the Phase-2 port of the legacy ``VoicePipeline`` router decision into
+This is the Phase-2 port of the legacy split pipeline router decision into
 LiveKit Agents' blocking turn hook. When the user finishes speaking, the SDK
 ``await``\\s :meth:`livekit.agents.Agent.on_user_turn_completed` *before* it
 generates any reply (verified ``livekit-agents==1.5.17``); raising
@@ -8,7 +8,7 @@ generates any reply (verified ``livekit-agents==1.5.17``); raising
 turn silently. :class:`RouterGate` runs Johnny's router ``LLMProvider`` inside
 that hook and raises ``StopResponse`` when the bot should stay silent.
 
-The decision logic mirrors ``VoicePipeline._respond_to_transcript_inner`` in
+The decision logic mirrors the legacy split pipeline in
 order and outcome (the in-scope subset for this bead — the other modes are
 downstream):
 
@@ -18,7 +18,7 @@ downstream):
 * the per-session over-talk cap is hit → ``no_reply(rate_limited)``;
 * otherwise **speak** — the hook returns normally and the SDK generates the
   reply. The router prompt build / parse / confidence clamp are *reused verbatim*
-  from ``johnny.voice_pipeline.pipeline`` so the verdicts replay identically
+  from ``johnny.voice_pipeline.reasoning`` so the verdicts replay identically
   (the replay-harness acceptance).
 
 INV-1 ("exactly one terminal per turn") is enforced by the session-scoped
@@ -34,7 +34,7 @@ the turn and registers a done-callback that emits ``replied`` /
 ``model_empty_output`` / ``barge_in`` when the reply completes.
 
 Requires the ``agent`` extra (``livekit-agents``) and pulls
-``johnny.voice_pipeline.pipeline``; imported only from
+``johnny.voice_pipeline.reasoning``; imported only from
 :mod:`johnny.agent.session` (the full-stack integration module), never from the
 import-safe top-level :mod:`johnny.agent` package.
 """
@@ -61,8 +61,8 @@ from johnny.agent.gate import (
     run_gate,
 )
 from johnny.agent.observability import RecordDecision, RecordSpoke, RecordSuggested
-from johnny.voice_pipeline import pipeline as _legacy
-from johnny.voice_pipeline.pipeline import (
+from johnny.voice_pipeline import reasoning as _reasoning
+from johnny.voice_pipeline.reasoning import (
     APPROVAL_REQUIRED_MODE,
     AUTONOMOUS_MODE,
     DEFAULT_APPROVAL_TIMEOUT_SECONDS,
@@ -84,7 +84,7 @@ logger = logging.getLogger(__name__)
 # identical verdicts on the same model output — the "replay harness reproduces
 # the same speak/no-speak verdicts" acceptance. A divergent copy would silently
 # change behaviour.
-ROUTER_DECISION_SCHEMA = _legacy._ROUTER_SCHEMA
+ROUTER_DECISION_SCHEMA = _reasoning._ROUTER_SCHEMA
 
 
 def _default_clock() -> int:
@@ -126,7 +126,7 @@ class RouterGateConfig:
 
     Only the fields the router actually reads are carried here — the answer /
     TTS / approval / noise-filter knobs belong to the (downstream) reply and
-    mode handlers. Defaults match ``johnny.voice_pipeline.pipeline`` so an
+    mode handlers. Defaults match ``johnny.voice_pipeline.reasoning`` so an
     unconfigured gate behaves like the legacy default session.
     """
 
@@ -263,7 +263,7 @@ class RouterGate:
         turn_id = new_message.id
         if self._config.mode == LISTEN_ONLY_MODE:
             # Listen-only never speaks and skips the router entirely — parity with
-            # the legacy ``VoicePipeline._respond_to_transcript`` early return. The
+            # the legacy split pipeline early return. The
             # turn is deliberately NOT opened in the ledger: there is no turn to
             # account for, so INV-1 emits no terminal (exactly like the noise-gate /
             # skip_reply paths documented on :meth:`TurnLedger.open`). Stay silent.
@@ -434,7 +434,7 @@ class RouterGate:
     ) -> None:
         """Terminalize a suggest_only turn (Johnny-5ag) — suggestion, no speech.
 
-        Port of ``VoicePipeline._handle_suggest_only``'s terminal: the router
+        Port of the legacy split pipeline's terminal: the router
         approved, so a suggestion exists (``decision.suggested_reply``), but the
         bot speaks nothing into the meeting — from the operator's chat the turn is
         a deliberate ``no_reply(suggest_only)``. The terminal's ``outcome`` maps to
@@ -462,7 +462,7 @@ class RouterGate:
         """
         messages = self._router_messages(turn_ctx, new_message)
         response = await self._router_llm.chat(messages, response_format=ROUTER_DECISION_SCHEMA)
-        return _legacy._parse_router_response(response)
+        return _reasoning._parse_router_response(response)
 
     # ------------------------------------------------------------------ #
     # Reply → turn correlation (the speak path's terminal)               #
@@ -625,7 +625,7 @@ class RouterGate:
     # ------------------------------------------------------------------ #
 
     def _is_rate_limited(self) -> bool:
-        """Per-session over-talk cap, ported from ``VoicePipeline._is_rate_limited``.
+        """Per-session over-talk cap, ported from the legacy split pipeline.
 
         Enforced only when ``allowed_replies`` is set (the Limited-auto-speak
         marker) or the mode is ``autonomous``; a non-positive cap or window
@@ -643,7 +643,7 @@ class RouterGate:
     def _router_messages(
         self, turn_ctx: ChatContext, new_message: LKChatMessage
     ) -> list[ChatMessage]:
-        """Build the router prompt, mirroring ``VoicePipeline._router_messages``.
+        """Build the router prompt, mirroring the legacy split pipeline.
 
         System message: the gating-router framing + personality + mode +
         confidence threshold + meeting/calendar context + allowed replies. User

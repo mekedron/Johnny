@@ -1,7 +1,7 @@
 """Real-time end-to-end harnesses for the voice pipeline.
 
 These are not unit tests. Each harness drives the real
-:class:`johnny.voice_pipeline.VoicePipeline` with frame-by-frame production
+:class:`johnny.voice_pipeline.the legacy split pipeline` with frame-by-frame production
 pacing (≈20 ms async sleep per frame) so latency-budget assertions
 (barge-in cut, transcript landing) actually mean something. Unit tests use
 :mod:`tests.voice_pipeline.conftest`'s ``_BufferedTransport`` which races

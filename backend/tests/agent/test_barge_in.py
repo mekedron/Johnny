@@ -45,7 +45,7 @@ from johnny.agent.barge_in import (
     BargeInClassifierConfig,
     InterruptibleSpeech,
 )
-from johnny.voice_pipeline import pipeline as _legacy
+from johnny.voice_pipeline import reasoning as _reasoning
 
 # pytest is configured with ``asyncio_mode = "auto"`` — async tests need no mark.
 
@@ -471,7 +471,7 @@ async def test_prompt_reuses_legacy_builder() -> None:
         current_speech=lambda: target,
     )
 
-    expected = _legacy.build_barge_in_messages(
+    expected = _reasoning.build_barge_in_messages(
         text="what about Y?",
         speaker="Alice",
         instructions="Stay on topic.",
@@ -486,8 +486,8 @@ async def test_prompt_reuses_legacy_builder() -> None:
 
 
 def test_schema_and_categories_reuse_legacy() -> None:
-    assert BARGE_IN_DECISION_SCHEMA is _legacy._BARGE_IN_SCHEMA
-    assert INTERRUPTING_BARGE_IN_CATEGORIES is _legacy.INTERRUPTING_BARGE_IN_CATEGORIES
+    assert BARGE_IN_DECISION_SCHEMA is _reasoning._BARGE_IN_SCHEMA
+    assert INTERRUPTING_BARGE_IN_CATEGORIES is _reasoning.INTERRUPTING_BARGE_IN_CATEGORIES
     assert INTERRUPTING_BARGE_IN_CATEGORIES == frozenset(
         {"stop", "correct", "new_question"}
     )
@@ -496,10 +496,10 @@ def test_schema_and_categories_reuse_legacy() -> None:
 def test_default_constants_track_legacy() -> None:
     assert (
         DEFAULT_BARGE_IN_CLASSIFIER_TIMEOUT_S
-        == _legacy.DEFAULT_BARGE_IN_CLASSIFIER_TIMEOUT_S
+        == _reasoning.DEFAULT_BARGE_IN_CLASSIFIER_TIMEOUT_S
     )
     assert DEFAULT_NATIVE_INTERRUPTION_MIN_DURATION_S == pytest.approx(
-        _legacy.DEFAULT_BARGE_IN_MIN_SPEECH_MS / 1000.0
+        _reasoning.DEFAULT_BARGE_IN_MIN_SPEECH_MS / 1000.0
     )
 
 

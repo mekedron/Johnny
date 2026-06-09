@@ -292,7 +292,7 @@ async def build_agent_runtime(
 ) -> AgentRuntime:
     """Assemble the full :class:`AgentRuntime` for one dispatched Meet session.
 
-    Wires, in the legacy ``VoicePipeline`` assembly order: the STT/LLM/TTS adapters
+    Wires, in the legacy split pipeline assembly order: the STT/LLM/TTS adapters
     (from the personality-resolved ``provider_config``), the raw router/answer LLM,
     the turn ledger + index, the observability emitters, the router gate, the barge-in
     classifier, and the :class:`JohnnyAgent` (noise gate + answer nodes + transcript

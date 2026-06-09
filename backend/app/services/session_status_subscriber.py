@@ -84,7 +84,7 @@ RECONNECT_BACKOFF_S = 2.0
 
 # Fallback timeout published on the WS approval_pending event when the
 # router_decision_made payload does not carry one. Matches
-# :data:`johnny.voice_pipeline.pipeline.DEFAULT_APPROVAL_TIMEOUT_SECONDS`
+# :data:`~johnny.voice_pipeline.reasoning.DEFAULT_APPROVAL_TIMEOUT_SECONDS`
 # — kept in sync manually since the meet-worker module is not imported
 # here (no SQLAlchemy in the meet-worker side).
 DEFAULT_APPROVAL_TIMEOUT_S = 15.0

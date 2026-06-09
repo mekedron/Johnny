@@ -25,7 +25,7 @@ completes and its INV-1 terminal is never emitted (the gate's
 after the captured audio's real-time duration elapses — the standard "blind
 sink" pattern. A barge-in (``clear_buffer``) cuts that short, draining the
 transport's playback queue + signalling the browser interrupt exactly as the
-legacy ``VoicePipeline.interrupt`` did, and reports the already-played position.
+legacy split pipeline did, and reports the already-played position.
 
 Requires the ``agent`` extra (``livekit-agents``) and ``livekit.rtc``; imported
 only from the browser session runner (:mod:`johnny.agent.browser_session`),

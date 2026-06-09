@@ -1076,7 +1076,7 @@ async def browser_audio_socket(
                       the client side.
                     - ``{"type": "stop"}`` (Johnny-ckz.13) interrupts the
                       bot mid-utterance: triggers
-                      :meth:`VoicePipeline.interrupt`, drains the playback
+                      the legacy split pipeline, drains the playback
                       queue, and pushes an ``{"type": "interrupt"}`` ack
                       back to the client so the browser stops its
                       already-scheduled audio buffers.

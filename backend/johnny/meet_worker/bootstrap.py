@@ -117,11 +117,12 @@ class BootstrapConfig:
     join_timeout_s: float
     headless: bool
     skip_selfcheck: bool
-    orchestrator: str = ORCHESTRATOR_LEGACY
-    """Per-session engine (Johnny-wz5): ``legacy`` or ``agentsession``.
+    orchestrator: str = ORCHESTRATOR_AGENTSESSION
+    """Per-session engine (Johnny-wz5; default flipped in Johnny-n22):
+    ``agentsession`` (default) or ``legacy``.
 
-    Defaulted so existing callers / tests that build a config without it keep
-    the proven in-worker pipeline path.
+    Defaulted to the proven agent path; ``legacy`` opts a session out to the
+    in-worker S2S (unified) pipeline.
     """
 
 
@@ -164,15 +165,15 @@ def _read_env_bool(env: dict[str, str], name: str, default: bool) -> bool:
 def _read_env_orchestrator(env: dict[str, str]) -> str:
     """Resolve :data:`ORCHESTRATOR_ENV` to ``agentsession`` or ``legacy``.
 
-    Case / whitespace tolerant; any unrecognised value falls back to ``legacy``
-    so an operator typo degrades to the proven in-worker pipeline rather than a
-    dead bridge — the same fail-safe posture as
+    Case / whitespace tolerant; only the exact value ``legacy`` opts out — any
+    unset / unrecognised value resolves to ``agentsession`` (the default since
+    Johnny-n22), the same fail-safe posture as
     :func:`app.services.agent_dispatch.agent_orchestrator_enabled`.
     """
     value = env.get(ORCHESTRATOR_ENV, "").strip().lower()
-    if value == ORCHESTRATOR_AGENTSESSION:
-        return ORCHESTRATOR_AGENTSESSION
-    return ORCHESTRATOR_LEGACY
+    if value == ORCHESTRATOR_LEGACY:
+        return ORCHESTRATOR_LEGACY
+    return ORCHESTRATOR_AGENTSESSION
 
 
 def load_bootstrap_config(env: dict[str, str] | None = None) -> BootstrapConfig:

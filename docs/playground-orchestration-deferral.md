@@ -12,10 +12,14 @@
 > legacy browser pipeline anyway). `app/services/browser_pipeline_runner.py`
 > dispatches `split → BrowserAgentSession`, `unified → UnifiedVoicePipeline` (the
 > agent engine is split-only; unified stays on its own pipeline, which is *not*
-> `VoicePipeline`). The browser path no longer constructs `VoicePipeline`. Verified
+> the retired split engine). The browser path no longer constructs the retired split engine. Verified
 > end-to-end via chrome-devtools MCP (typed input + a real-speech voice round-trip)
 > with INV-1 + decision↔utterance parity persisted. The rest of this record is kept
 > for the original rationale + the design it pointed at.
+>
+> **Superseded by Johnny-n22.** With the playground migrated, the hand-rolled
+> split in-worker orchestrator was deleted entirely and `JOHNNY_ORCHESTRATOR`
+> now defaults to `agentsession`; no production path constructs it.
 
 Decision record for **Johnny-a1w** (Phase 3, epic Johnny-7g5 — migrate voice
 orchestration to LiveKit Agents `AgentSession`).
@@ -29,10 +33,10 @@ orchestration to LiveKit Agents `AgentSession`).
 ## Decision
 
 **The in-browser playground voice surface and its typed-input (`feed_text`) path
-stay on the legacy in-process `VoicePipeline` for now.** The migration to the
+stay on the legacy in-process the retired split engine for now.** The migration to the
 room / `AgentSession` engine is deferred to a dedicated follow-up bead
 (**Johnny-7g5.1**), which **blocks** the legacy-retirement chore (**Johnny-n22**):
-`pipeline.py` / `VoicePipeline` cannot be deleted while the browser surface still
+`the retired split engine` / the retired split engine cannot be deleted while the browser surface still
 depends on it.
 
 ## Why the playground is a different problem from the Meet path
@@ -47,7 +51,7 @@ Meet ──> meet-worker (PulseAudio bridge) ──> [ LiveKit room ] <── ag
 The playground is a structurally different consumer (`Johnny-ckz.6`):
 
 ```
-Browser ──(raw 16 kHz PCM over WebSocket)──> API process ──> in-process VoicePipeline
+Browser ──(raw 16 kHz PCM over WebSocket)──> API process ──> in-process the retired split engine
 ```
 
 - **No container, no meet-worker, no Playwright, no PulseAudio, no room.** Audio
@@ -56,7 +60,7 @@ Browser ──(raw 16 kHz PCM over WebSocket)──> API process ──> in-proc
   (`app/services/browser_pipeline_runner.py` → `assemble_browser_pipeline`).
 - **`feed_text` is an in-process method call.** The playground's
   `POST /sessions/browser/{id}/text` endpoint reaches the running pipeline object
-  in the same process and calls `VoicePipeline.feed_text(...)`, which enqueues a
+  in the same process and calls `the retired split engine(...)`, which enqueues a
   synthetic `TranscriptFinalized` on the response loop. There is no process
   boundary to cross.
 
@@ -87,7 +91,7 @@ exactly three places, all Meet-only:
   `MeetRoomBridge` vs `build_and_run_pipeline` inside the meet-worker).
 
 The browser surface (`app/api/browser_sessions.py` →
-`app/services/browser_pipeline_runner.py` → `VoicePipeline`) **never reads the
+`app/services/browser_pipeline_runner.py` → the retired split engine) **never reads the
 flag and never dispatches the agent.** Flipping `JOHNNY_ORCHESTRATOR=agentsession`
 re-routes Meet sessions only; the playground keeps running the legacy in-process
 pipeline unchanged. The playground is never on the new path, so cutover cannot
@@ -98,7 +102,7 @@ A regression guard locks this property:
 `test_browser_pipeline_is_orchestrator_flag_independent` /
 `test_browser_surface_not_wired_to_agent_dispatch` — assembling a browser
 pipeline with `JOHNNY_ORCHESTRATOR=agentsession` set still yields a legacy
-`VoicePipeline`, and the browser runner/endpoint source carries no agent-dispatch
+the retired split engine, and the browser runner/endpoint source carries no agent-dispatch
 or orchestrator-flag reference. If a future change wires the cutover flag (or the
 agent engine) into the browser path, those tests fail.
 

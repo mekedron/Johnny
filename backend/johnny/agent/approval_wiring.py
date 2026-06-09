@@ -57,7 +57,7 @@ from johnny.voice_pipeline.events import (
     ApprovalResolved,
     RouterDecisionMade,
 )
-from johnny.voice_pipeline.pipeline import RouterDecision
+from johnny.voice_pipeline.reasoning import RouterDecision
 
 if TYPE_CHECKING:
     from livekit.agents.voice import AgentSession
@@ -188,7 +188,7 @@ def build_persist_pending_decision(
 ) -> PersistPendingDecision:
     """Persist the ``pending`` ``agent_decisions`` row for an approval turn.
 
-    Mirrors ``VoicePipeline._persist_decision(..., "pending")``: records a
+    Mirrors ``the legacy split pipeline._persist_decision(..., "pending")``: records a
     :class:`RouterDecisionMade` with ``outcome="pending"`` and returns the row id
     the :class:`ApprovalRound` / UI correlate on. Swallows sink failures (returns
     ``None`` → the gate rejects the turn rather than crashing the turn hook). Wired

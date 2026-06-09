@@ -1,6 +1,6 @@
 """Answer-path behaviours for the LiveKit ``Agent`` reply (Johnny-5ag, Phase 2).
 
-The Phase-2 port of the legacy ``VoicePipeline`` *answer stage* behaviours into
+The Phase-2 port of the legacy split pipeline *answer stage* behaviours into
 the LiveKit-Agents reply path. The legacy engine fused these into
 ``_answer_and_speak`` / ``_select_allowed_reply`` / ``_stream_answer_into_tts``;
 under ``AgentSession`` they split cleanly across the agent's ``llm_node`` (text
@@ -13,7 +13,7 @@ gate (:mod:`johnny.agent.router_gate`) compose:
   reply, with a case-insensitive text-match fallback for providers that ignore
   ``response_format``; no match → ``None`` (the caller terminalizes the turn
   ``no_reply(no_allowed_reply_match)``). Ported from
-  ``VoicePipeline._select_allowed_reply`` + ``_match_allowed_reply``.
+  the legacy split pipeline + ``_match_allowed_reply``.
 * :func:`iter_sentences` — the *per-sentence flush* (``tts_node``): buffers the
   streaming answer text and yields each complete sentence the instant a boundary
   arrives, so time-to-first-audio is bounded by the first sentence rather than
@@ -39,8 +39,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.providers.base import ChatMessage, LLMProvider
-from johnny.voice_pipeline import pipeline as _legacy
-from johnny.voice_pipeline.pipeline import (
+from johnny.voice_pipeline import reasoning as _reasoning
+from johnny.voice_pipeline.reasoning import (
     DEFAULT_MODE,
     FREE_FORM_MODES,
     LISTEN_ONLY_MODE,
@@ -54,8 +54,8 @@ from johnny.voice_pipeline.pipeline import (
 # :mod:`johnny.agent.router_gate` reuses ``_ROUTER_SCHEMA`` / ``_parse_router_response``)
 # so the flush points and the case-insensitive match are byte-for-byte identical
 # to the legacy answer stage. A divergent copy would silently change behaviour.
-_SENTENCE_BOUNDARY = _legacy._SENTENCE_BOUNDARY
-_match_allowed_reply = _legacy._match_allowed_reply
+_SENTENCE_BOUNDARY = _reasoning._SENTENCE_BOUNDARY
+_match_allowed_reply = _reasoning._match_allowed_reply
 
 __all__ = [
     "LISTEN_ONLY_MODE",
@@ -81,7 +81,7 @@ class AnswerConfig:
     approval, and noise knobs belong to :class:`~johnny.agent.router_gate.RouterGateConfig`
     and the gate; the prompt/personality pieces belong to
     :class:`~johnny.agent.session.AgentInstructionsConfig`. Defaults match
-    :mod:`johnny.voice_pipeline.pipeline` so an unconfigured reply behaves like
+    the legacy split pipeline so an unconfigured reply behaves like
     the legacy default session.
     """
 
@@ -92,7 +92,7 @@ class AnswerConfig:
 def uses_allowlist(mode: str, allowed_replies: Sequence[str]) -> bool:
     """Whether the reply must be coerced to an allowed reply (``llm_node``).
 
-    Ported from ``VoicePipeline._answer_and_speak``'s ``use_allowlist`` guard:
+    Ported from the legacy split pipeline's ``use_allowlist`` guard:
     coerce only when ``allowed_replies`` is set **and** the mode is not a
     free-form mode (``autonomous``), which bypasses the allow-list so the bot
     chats naturally. Centralising the membership here means a future free-form
@@ -104,7 +104,7 @@ def uses_allowlist(mode: str, allowed_replies: Sequence[str]) -> bool:
 def is_non_speaking_mode(mode: str) -> bool:
     """Whether ``mode`` must never produce audio (``listen_only`` / ``suggest_only``).
 
-    Mirror of the legacy :data:`~johnny.voice_pipeline.pipeline.NON_SPEAKING_MODES`
+    Mirror of the legacy :data:`~johnny.voice_pipeline.reasoning.NON_SPEAKING_MODES`
     server-side enforcement: in these modes the reply stage produces no TTS frames
     (``listen_only`` is silenced at the gate before the router even runs;
     ``suggest_only`` runs the router to surface a suggestion but speaks nothing).
@@ -116,7 +116,7 @@ def degrade_speaking_mode_if_no_tts(mode: str, *, tts_available: bool) -> str:
     """Downgrade a speaking mode to ``suggest_only`` when no TTS is configured.
 
     The graceful TTS-missing degrade (Johnny-5ag): a session whose mode depends
-    on a working TTS provider (:data:`~johnny.voice_pipeline.pipeline.SPEAKING_MODES`
+    on a working TTS provider (:data:`~johnny.voice_pipeline.reasoning.SPEAKING_MODES`
     — ``limited_auto_speak`` / ``autonomous`` / ``approval_required``) must not
     crash when the operator has configured no TTS; instead the bot keeps
     *thinking* and surfaces suggestions (``suggest_only``) rather than approving a
@@ -136,7 +136,7 @@ def build_allowed_reply_schema(allowed_replies: Sequence[str]) -> dict[str, Any]
     """The JSON-schema ``response_format`` that pins the answer to the allow-list.
 
     A single ``selected_reply`` string constrained to the ``enum`` of allowed
-    replies — verbatim from ``VoicePipeline._select_allowed_reply``. Adapters that
+    replies — verbatim from the legacy split pipeline. Adapters that
     honour structured output return the choice on ``LLMResponse.structured_output``;
     those that don't fall through to the text-match path in
     :func:`coerce_allowed_reply`.
@@ -156,7 +156,7 @@ def build_allowed_reply_schema(allowed_replies: Sequence[str]) -> dict[str, Any]
 def _allowlist_constraint_message(allowed_replies: Sequence[str]) -> ChatMessage:
     """A system message naming the allow-list, for providers that ignore schemas.
 
-    The legacy answer prompt (``VoicePipeline._answer_messages``) carried
+    The legacy answer prompt (the legacy split pipeline) carried
     ``"You MUST pick verbatim from these allowed replies: [...]"`` in its system
     message, so the text-match fallback had a fighting chance even when the
     provider ignored ``response_format``. The agent path builds the answer
@@ -179,7 +179,7 @@ async def coerce_allowed_reply(
 ) -> str | None:
     """Force the answer LLM to pick a verbatim allowed reply, or return ``None``.
 
-    Ported from ``VoicePipeline._select_allowed_reply``: request the answer with
+    Ported from the legacy split pipeline: request the answer with
     the ``enum``-constrained schema (:func:`build_allowed_reply_schema`) plus the
     allow-list constraint message. A provider that honours structured output
     returns the pick on ``LLMResponse.structured_output["selected_reply"]``; one
@@ -207,7 +207,7 @@ async def coerce_allowed_reply(
 async def iter_sentences(text_stream: AsyncIterable[str]) -> AsyncIterator[str]:
     """Yield complete sentences from a streaming answer as boundaries arrive.
 
-    The per-sentence flush of ``VoicePipeline._stream_answer_into_tts``, lifted
+    The per-sentence flush of the legacy split pipeline, lifted
     out of the TTS loop so it is pure and directly testable: buffer the incoming
     deltas and, each time the legacy :data:`_SENTENCE_BOUNDARY` matches, emit the
     complete sentence (stripped) and keep the remainder. Any trailing text with no

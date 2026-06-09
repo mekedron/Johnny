@@ -4,7 +4,7 @@ The Meet path dispatches the agent worker into a LiveKit room and starts the
 session bound to that room (:mod:`johnny.agent.worker`). The in-browser
 playground has no room, no container, no meet-worker: audio flows browser ↔ API
 over a WebSocket and the session must run *in the API process itself* (the
-legacy in-process :class:`~johnny.voice_pipeline.pipeline.VoicePipeline` it
+legacy in-process the legacy split pipeline it
 replaces did the same). This module is the in-process counterpart of the worker:
 
 * it reuses :func:`~johnny.agent.job_session.build_agent_runtime` to assemble
@@ -87,7 +87,7 @@ class BrowserAgentSession:
     turn; :meth:`interrupt` cuts the bot off (barge-in / Stop button);
     :meth:`aclose` tears everything down. It exposes the same ``feed_text`` /
     ``interrupt`` surface the playground's text-input + stop endpoints called on
-    the legacy ``VoicePipeline``, so the endpoint wiring is unchanged.
+    the legacy split pipeline, so the endpoint wiring is unchanged.
     """
 
     def __init__(
@@ -204,7 +204,7 @@ class BrowserAgentSession:
     async def feed_text(self, text: str) -> bool:
         """Drive a typed-input turn through the router gate, then speak on SPEAK.
 
-        Parity with the legacy ``VoicePipeline.feed_text`` + the bead's
+        Parity with the legacy split pipeline + the bead's
         ``feed_text → generate_reply`` mapping, while preserving INV-1 +
         decision↔utterance parity: the typed text is published as a
         ``TranscriptFinalized`` (so it lands in the transcript pane + history),

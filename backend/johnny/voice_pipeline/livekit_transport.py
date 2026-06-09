@@ -3,7 +3,7 @@
 Wraps the official ``livekit-rtc`` Python SDK so the pipeline can run
 inside a LiveKit room instead of the meet-worker's local PulseAudio
 bridge. The pipeline itself is unchanged — only the transport instance
-handed to :class:`VoicePipeline` differs, which is the "single config
+handed to the legacy split pipeline differs, which is the "single config
 flag" called out in US-025's acceptance criteria. Selection lives in
 :func:`johnny.voice_pipeline.transport.create_transport_from_env` so the
 meet-worker entrypoint switches transports by setting one env var.

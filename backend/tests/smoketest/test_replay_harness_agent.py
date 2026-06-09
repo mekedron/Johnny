@@ -1,28 +1,22 @@
-"""Cutover gate: the committed fixtures replayed through the AgentSession engine (Johnny-4k3).
+"""Gate: the committed split fixtures replayed through the AgentSession engine.
 
-The legacy gate (``test_replay_harness.py``) replays each committed fixture
-through the legacy :class:`~johnny.voice_pipeline.VoicePipeline` and asserts the
-``.28.x`` invariants. This is the parallel gate for the **new** LiveKit-Agents
-``AgentSession`` engine: the same fixtures, fed through
+The LiveKit-Agents ``AgentSession`` engine is the split STT→LLM→TTS path
+(``JOHNNY_ORCHESTRATOR=agentsession``, the default since Johnny-n22). Every
+committed **split** fixture is fed through
 :func:`johnny.smoketest.replay_agent.run_agent_replay` (RouterGate + TurnLedger +
-observability), must hold the *same* invariants and reproduce the *same* per-turn
-outcomes as the legacy engine. Green here is the prerequisite that authorises
-flipping ``JOHNNY_ORCHESTRATOR`` to ``agentsession`` (Johnny-wz5).
+observability) and must hold the ``.28.x`` invariants. ``test_replay_harness.py``
+gates the unified (S2S) fixtures on ``UnifiedVoicePipeline``.
 
-Three jobs:
+Jobs:
 
 1. every committed **split** fixture holds INV-1 (one terminal per turn) +
-   INV-2 (decision↔utterance parity) under the new engine;
-2. the flagship session-14 silent drop now terminates in a durable
-   ``no_reply(stage_error)`` on the new engine too (the timeout fix ported to the
-   gate, Johnny-9k2);
-3. the new engine reproduces the legacy engine's per-turn outcome on every split
-   fixture (cutover equivalence) — and rejects unified fixtures, which stay on
-   the legacy ``UnifiedVoicePipeline``.
+   INV-2 (decision↔utterance parity) under the engine;
+2. the flagship session-14 silent drop terminates in a durable
+   ``no_reply(stage_error)`` (the router-timeout fix, Johnny-9k2);
+3. a unified fixture is rejected (unified/S2S stays on ``UnifiedVoicePipeline``).
 
 Guarded by ``importorskip`` so the suite still collects without the ``agent``
-extra (``livekit-agents``); the legacy ``test_replay_harness.py`` keeps gating
-the ``VoicePipeline`` regardless.
+extra (``livekit-agents``).
 """
 
 from __future__ import annotations
@@ -39,7 +33,6 @@ from johnny.smoketest.replay import (  # noqa: E402
     discover_fixtures,
     load_fixture,
 )
-from johnny.smoketest.replay import run_replay as run_legacy_replay  # noqa: E402
 from johnny.smoketest.replay_agent import run_agent_replay  # noqa: E402
 from johnny.voice_pipeline.events import TurnTerminal  # noqa: E402
 
@@ -93,47 +86,6 @@ async def test_session_14_silent_drop_terminates_on_agent_engine() -> None:
     assert any(
         d.turn_id == 4 and d.field == "terminal_state" and d.replayed == "no_reply" for d in diffs
     ), f"expected turn-4 terminal_state divergence on the agent engine, got {diffs}"
-
-
-@pytest.mark.parametrize("fixture_dir", _split_fixture_dirs(), ids=_split_ids())
-async def test_agent_engine_reproduces_legacy_outcome(fixture_dir: Path) -> None:
-    """Cutover equivalence: the new engine produces the same per-turn outcome as
-    the legacy engine on every split fixture.
-
-    Compares the assembled per-turn records field-by-field on the four outcome
-    fields the regression diff keys on (``should_speak`` / ``terminal_state`` /
-    ``outcome`` / ``spoke_text``), and asserts both engines diverge from the
-    recorded fixture in exactly the same way. If these match, flipping the
-    default to agentsession changes no committed session's decision accounting.
-    """
-    fixture = load_fixture(fixture_dir)
-    agent = await run_agent_replay(fixture)
-    legacy = await run_legacy_replay(fixture)
-
-    agent_by_turn = {r.turn_id: r for r in agent.records}
-    legacy_by_turn = {r.turn_id: r for r in legacy.records}
-    assert set(agent_by_turn) == set(legacy_by_turn), (
-        f"{fixture.label}: agent turns {sorted(agent_by_turn)} != "
-        f"legacy turns {sorted(legacy_by_turn)}"
-    )
-    for turn_id, a in agent_by_turn.items():
-        legacy_rec = legacy_by_turn[turn_id]
-        agent_outcome = (a.should_speak, a.terminal_state, a.outcome, a.spoke_text)
-        legacy_outcome = (
-            legacy_rec.should_speak,
-            legacy_rec.terminal_state,
-            legacy_rec.outcome,
-            legacy_rec.spoke_text,
-        )
-        assert agent_outcome == legacy_outcome, (
-            f"{fixture.label} turn {turn_id} diverged between engines: "
-            f"agent={agent_outcome} legacy={legacy_outcome}"
-        )
-
-    # Both engines diverge from the recorded fixture identically.
-    assert diff_against_recorded(fixture, agent.records) == diff_against_recorded(
-        fixture, legacy.records
-    ), f"{fixture.label}: agent vs legacy regression diff differs"
 
 
 async def test_unified_fixture_rejected_by_agent_engine() -> None:

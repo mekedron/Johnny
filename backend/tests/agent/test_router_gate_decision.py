@@ -1,7 +1,7 @@
 """Unit + replay-parity tests for the router should-speak gate (Johnny-xpa).
 
 Drives :class:`johnny.agent.router_gate.RouterGate` — the Phase-2 port of the
-legacy ``VoicePipeline`` router decision into LiveKit Agents'
+legacy split pipeline router decision into LiveKit Agents'
 ``on_user_turn_completed`` hook. Coverage maps to the bead acceptance:
 
 * the four decision scenarios — **speak** / **no-speak** / **low-confidence** /
@@ -12,7 +12,7 @@ legacy ``VoicePipeline`` router decision into LiveKit Agents'
   :meth:`RouterGate.bind_reply` + the reply done-callback;
 * a **replay harness** runs a table of router-model outputs through the gate and
   asserts the verdict matches the legacy ``_respond_to_transcript_inner`` logic;
-* the router prompt build mirrors ``VoicePipeline._router_messages`` (framing,
+* the router prompt build mirrors the legacy split pipeline (framing,
   mode, threshold, personality, recent-conversation rendering, latest
   transcript) and requests the legacy decision schema.
 
@@ -409,7 +409,7 @@ async def test_active_reply_tracks_bind_and_clears_on_done() -> None:
 
 async def test_listen_only_stays_silent_without_router_or_terminal() -> None:
     """listen_only skips the router and opens no turn — no terminal, by design."""
-    from johnny.voice_pipeline.pipeline import LISTEN_ONLY_MODE
+    from johnny.voice_pipeline.reasoning import LISTEN_ONLY_MODE
 
     gate, emitter, router = _make_gate(
         [{"should_speak": True, "confidence": 1.0, "reason": "n/a"}],
@@ -429,7 +429,7 @@ async def test_listen_only_stays_silent_without_router_or_terminal() -> None:
 
 
 async def test_suggest_only_emits_suggest_only_terminal_after_router_approves() -> None:
-    from johnny.voice_pipeline.pipeline import SUGGEST_ONLY_MODE
+    from johnny.voice_pipeline.reasoning import SUGGEST_ONLY_MODE
 
     gate, emitter, router = _make_gate(
         [
@@ -461,7 +461,7 @@ async def test_suggest_only_emits_suggest_only_terminal_after_router_approves() 
 
 async def test_suggest_only_router_decline_still_declines() -> None:
     """suggest_only is checked AFTER should-speak — a decline is router_declined."""
-    from johnny.voice_pipeline.pipeline import SUGGEST_ONLY_MODE
+    from johnny.voice_pipeline.reasoning import SUGGEST_ONLY_MODE
 
     gate, emitter, _ = _make_gate(
         [{"should_speak": False, "confidence": 0.9, "reason": "side chatter"}],
@@ -607,7 +607,7 @@ def _legacy_verdict(decision: dict[str, Any], threshold: float) -> str:
 
     Uses the legacy parser so confidence clamping / defaulting matches exactly.
     """
-    from johnny.voice_pipeline.pipeline import _parse_router_response
+    from johnny.voice_pipeline.reasoning import _parse_router_response
 
     parsed = _parse_router_response(
         LLMResponse(text=json.dumps(decision), finish_reason="stop", structured_output=decision)

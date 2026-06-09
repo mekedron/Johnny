@@ -1,8 +1,8 @@
 """STT noise-gate parity for the LiveKit ``Agent`` reply path (Johnny-cmd, Phase 2).
 
-The Phase-2 port of the legacy ``VoicePipeline`` *noise gate* (Johnny-ckz.14) into
+The Phase-2 port of the legacy split pipeline *noise gate* (Johnny-ckz.14) into
 the LiveKit-Agents pipeline. The legacy engine ran the gate inline in
-``VoicePipeline._transcribe_loop`` — a pre-STT audio-duration floor plus a
+the legacy split pipeline — a pre-STT audio-duration floor plus a
 post-STT layered content check (length, punctuation-only, stoplist of filler
 tokens / Whisper hallucinations, confidence floor) — dropping a candidate before
 it reached the router and publishing a
@@ -22,7 +22,7 @@ This module holds the pure, ``livekit``-free classification — mirroring how
 :mod:`johnny.agent.answer` and :mod:`johnny.agent.gate` keep the testable core
 out of the SDK-importing node wiring. The legacy thresholds, stoplist, and
 normalisation regexes are reused **verbatim** (module-qualified through
-:mod:`johnny.voice_pipeline.pipeline`) so a candidate is classified
+the legacy split pipeline) so a candidate is classified
 byte-for-byte identically to the legacy engine — a divergent copy would silently
 change which utterances the bot answers.
 
@@ -36,9 +36,9 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from johnny.voice_pipeline import pipeline as _legacy
+from johnny.voice_pipeline import reasoning as _reasoning
 from johnny.voice_pipeline.events import TranscriptFiltered, TranscriptFilteredReason
-from johnny.voice_pipeline.pipeline import (
+from johnny.voice_pipeline.reasoning import (
     DEFAULT_NOISE_FILTER_ENABLED,
     DEFAULT_NOISE_FILTER_MIN_AUDIO_MS,
     DEFAULT_NOISE_FILTER_MIN_CHARS,
@@ -51,8 +51,8 @@ from johnny.voice_pipeline.pipeline import (
 # :mod:`johnny.agent.answer` reuses ``_SENTENCE_BOUNDARY`` / ``_match_allowed_reply``)
 # so "Uh." / "..." / "  i  " classify identically to the legacy gate. A divergent
 # copy would silently change which candidates the bot answers.
-_PUNCTUATION_ONLY_RE = _legacy._PUNCTUATION_ONLY_RE
-_PUNCTUATION_STRIP_CHARS = _legacy._PUNCTUATION_STRIP_CHARS
+_PUNCTUATION_ONLY_RE = _reasoning._PUNCTUATION_ONLY_RE
+_PUNCTUATION_STRIP_CHARS = _reasoning._PUNCTUATION_STRIP_CHARS
 
 # Publish a dropped-candidate event. Injected by the worker (Johnny-9eh/d5z) as a
 # thin wrapper over ``EventBus.publish``; ``None`` means "don't emit" (a bare /
@@ -65,10 +65,10 @@ TranscriptFilteredSink = Callable[[TranscriptFiltered], Awaitable[None]]
 class NoiseFilterConfig:
     """The noise-gate knobs, mirrored from the legacy ``PipelineConfig`` subset.
 
-    The ``noise_filter_*`` fields the legacy ``VoicePipeline`` consumed in
+    The ``noise_filter_*`` fields the legacy split pipeline consumed in
     :meth:`_classify_transcript_as_noise` / :meth:`_is_audio_below_noise_floor`,
     carried here so the gate is configured the same way per session. Defaults
-    match :mod:`johnny.voice_pipeline.pipeline` so an unconfigured filter behaves
+    match the legacy split pipeline so an unconfigured filter behaves
     like the legacy default session; ``enabled=False`` is the per-meeting escape
     hatch (every candidate flows through, the pre-Johnny-ckz.14 behaviour).
     """
@@ -83,7 +83,7 @@ class NoiseFilterConfig:
 def is_audio_below_noise_floor(audio_duration_ms: int | None, config: NoiseFilterConfig) -> bool:
     """Whether VAD-cut audio is too short to be a real turn (Johnny-ckz.14).
 
-    Port of ``VoicePipeline._is_audio_below_noise_floor``: a floor of ``0`` (or a
+    Port of the legacy split pipeline: a floor of ``0`` (or a
     disabled filter) sends every burst through. Extended to accept ``None`` for
     the agent path, where a ``FINAL_TRANSCRIPT`` may not carry a segment duration
     (Johnny's adapters stamp ``start_time == end_time``): an unknown duration is
@@ -105,7 +105,7 @@ def classify_transcript_text(
 ) -> TranscriptFilteredReason | None:
     """Classify a transcript's text + confidence against the content gate.
 
-    Verbatim port of ``VoicePipeline._classify_transcript_as_noise``: returns a
+    Verbatim port of the legacy split pipeline: returns a
     :data:`~johnny.voice_pipeline.events.TranscriptFilteredReason` when the text
     fails a check, else ``None``. Order is deliberate and matches the legacy —
     cheapest first: empty → punctuation-only → length floor → stoplist lookup →

@@ -353,6 +353,6 @@ def test_gate_reason_literals_subset_of_canonical() -> None:
 
 
 def test_default_timeout_matches_legacy_router_bound() -> None:
-    from johnny.voice_pipeline.pipeline import DEFAULT_ROUTER_LLM_TIMEOUT_S
+    from johnny.voice_pipeline.reasoning import DEFAULT_ROUTER_LLM_TIMEOUT_S
 
     assert DEFAULT_ROUTER_GATE_TIMEOUT_S == DEFAULT_ROUTER_LLM_TIMEOUT_S

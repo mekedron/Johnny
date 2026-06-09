@@ -22,7 +22,7 @@ from johnny.voice_pipeline.events import TranscriptFinalized
 BOT_SPEAKER_LABEL = "Bot (you)"
 """Speaker label used for the bot's own prior utterances in the history (Johnny-7qp).
 
-The in-memory ``VoicePipeline._transcript_history`` list mixes participant
+The in-memory the legacy split pipeline list mixes participant
 transcripts and the bot's own utterances so the router and answer LLMs
 can recall what THEY said — without this, the bot couldn't answer "what
 did you just say?" because its own prior speech never reached the prompt.

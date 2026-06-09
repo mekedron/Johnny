@@ -1,7 +1,7 @@
 """Johnny — LiveKit Agents orchestration package (epic Johnny-7g5).
 
 This package hosts the ``AgentSession``-based voice orchestration that is
-replacing the hand-rolled ``johnny/voice_pipeline/pipeline.py`` engine:
+replacing the hand-rolled the legacy split pipeline engine:
 
 * :mod:`johnny.agent.session` — the ``AgentSession`` harness
   (:func:`~johnny.agent.session.build_agent_session`) and

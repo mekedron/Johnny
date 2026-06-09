@@ -30,7 +30,7 @@ from johnny.agent.answer import (
     iter_sentences,
     uses_allowlist,
 )
-from johnny.voice_pipeline.pipeline import (
+from johnny.voice_pipeline.reasoning import (
     APPROVAL_REQUIRED_MODE,
     AUTONOMOUS_MODE,
     LIMITED_AUTO_SPEAK_MODE,

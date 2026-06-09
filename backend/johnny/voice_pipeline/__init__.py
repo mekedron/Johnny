@@ -65,7 +65,7 @@ from johnny.voice_pipeline.livekit_transport import (
     create_meet_room_bridge_from_env,
     livekit_config_from_env,
 )
-from johnny.voice_pipeline.pipeline import (
+from johnny.voice_pipeline.reasoning import (
     APPROVAL_REQUIRED_MODE,
     AUTONOMOUS_MODE,
     BARGE_IN_CATEGORIES,
@@ -86,9 +86,7 @@ from johnny.voice_pipeline.pipeline import (
     SPEAKING_MODES,
     SUGGEST_ONLY_MODE,
     BargeInDecision,
-    PipelineConfig,
     RouterDecision,
-    VoicePipeline,
 )
 from johnny.voice_pipeline.transcript_history import (
     BOT_SPEAKER_LABEL,
@@ -195,7 +193,6 @@ __all__ = [
     "NoopTranscriptHistoryLoader",
     "NoopTranscriptSink",
     "NoopUtteranceSink",
-    "PipelineConfig",
     "PipelineEvent",
     "PipelineStageFailed",
     "PipelineStageFailedCategory",
@@ -223,7 +220,6 @@ __all__ = [
     "UtteranceSink",
     "VADAnalyzer",
     "VADResult",
-    "VoicePipeline",
     "create_transport_from_env",
     "event_to_dict",
     "livekit_config_from_env",

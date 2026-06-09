@@ -6,7 +6,7 @@ container). The same interface is implemented by
 :class:`johnny.voice_pipeline.livekit_transport.LiveKitTransport` so the
 pipeline can run inside a LiveKit room when stronger realtime infra is
 wanted; the only thing that changes is the transport instance handed to
-:class:`VoicePipeline`.
+the legacy split pipeline.
 
 US-025 calls for "transport selection is a single config flag": set
 ``JOHNNY_TRANSPORT=livekit`` and have the meet-worker entrypoint call
@@ -70,7 +70,7 @@ class JohnnyTransport(ABC):
     def cancel_playback(self) -> None:
         """Discard any audio queued for playback but not yet rendered (Johnny-ckz.13).
 
-        Called by :meth:`VoicePipeline.interrupt` so a barge-in (or an
+        Called by the legacy split pipeline so a barge-in (or an
         operator Stop button) cuts bot audio across every buffer in
         flight — server playback queue, network, and any client-side
         scheduler. Default is a no-op for transports where TTS is rendered

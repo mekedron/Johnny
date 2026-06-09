@@ -216,7 +216,7 @@ session without re-running a live Meet.
 
 ```
 fixture.json ─┐
-              ├─► run_replay() ─► real VoicePipeline / UnifiedVoicePipeline
+              ├─► run_replay() ─► real the retired split engine / UnifiedVoicePipeline
 DB session  ──┘      │                    │  (fake STT/TTS, recorded LLM/S2S)
  (load_replay_       │                    ▼
   fixture)           │            InMemoryEventBus  ──►  captured events

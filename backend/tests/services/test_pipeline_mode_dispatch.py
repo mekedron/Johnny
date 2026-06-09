@@ -10,9 +10,10 @@ The two entry points are:
 * :func:`app.services.browser_pipeline_runner.assemble_browser_pipeline`
   — the in-process runner used by the /playground + sandbox + preview
   WebSocket endpoint.
-* :func:`johnny.meet_worker.pipeline_runner._assemble_pipeline` /
-  :func:`_assemble_unified_pipeline` — the meet-worker bootstrap path
-  used by live Google Meet sessions.
+* :func:`johnny.meet_worker.pipeline_runner._assemble_unified_pipeline` — the
+  meet-worker bootstrap path for the in-worker S2S (unified) pipeline. The split
+  in-worker orchestrator was retired (Johnny-n22); split sessions run on the
+  dispatched LiveKit agent worker (``JOHNNY_ORCHESTRATOR=agentsession``).
 
 Both paths must honour the persisted ``pipeline_mode`` toggle and route
 to the right orchestrator. The shared parameterised tests in this file
@@ -48,16 +49,15 @@ from johnny.meet_worker.pipeline_runner import (
     PIPELINE_MODE_ENV,
     PROVIDER_CONFIG_ENV,
     PipelineSetupError,
-    _assemble_pipeline,
     _assemble_unified_pipeline,
     _resolve_pipeline_mode,
+    build_and_run_pipeline,
 )
 from johnny.voice_pipeline import (
     BrowserAudioTransport,
     EnergyVAD,
     InMemoryEventBus,
     UnifiedVoicePipeline,
-    VoicePipeline,
 )
 
 # --- Shared fake adapters --------------------------------------------------
@@ -156,7 +156,7 @@ def _browser_spec(
 def test_browser_split_mode_runs_on_agent_engine_not_here() -> None:
     """Split browser sessions run on the in-process AgentSession engine (Johnny-7g5.1),
     so assemble_browser_pipeline (unified-only) rejects them rather than building a
-    VoicePipeline."""
+    the legacy split pipeline."""
     transport = BrowserAudioTransport()
     spec = _browser_spec(pipeline_mode=SPLIT_MODE)
     with pytest.raises(BrowserPipelineSetupError, match="AgentSession engine"):
@@ -314,15 +314,27 @@ class _FakeBridge:
 
 
 @pytest.mark.asyncio
-async def test_meet_split_mode_returns_voicepipeline() -> None:
-    bridge = _FakeBridge()
-    pipeline = await _assemble_pipeline(
-        bridge,  # type: ignore[arg-type]
+async def test_meet_split_mode_rejected_split_retired(monkeypatch: Any) -> None:
+    """The split in-worker orchestrator was retired (Johnny-n22): build_and_run
+    with ``pipeline_mode=split`` short-circuits before assembling anything (the
+    error is caught + logged), so the unified assembler is never reached."""
+    import asyncio
+
+    import johnny.meet_worker.pipeline_runner as pr
+
+    async def _fail_assemble(*_a: Any, **_k: Any) -> None:
+        raise AssertionError("unified assembler must not run for split mode")
+
+    monkeypatch.setattr(pr, "_assemble_unified_pipeline", _fail_assemble)
+    stop = asyncio.Event()
+    stop.set()
+    await build_and_run_pipeline(
+        _FakeBridge(),  # type: ignore[arg-type]
         event_bus=InMemoryEventBus(),
-        session_id="meet-split",
+        session_id="meet-split-retired",
+        stop_event=stop,
         env=_meet_env(pipeline_mode="split"),
     )
-    assert isinstance(pipeline, VoicePipeline)
 
 
 @pytest.mark.asyncio

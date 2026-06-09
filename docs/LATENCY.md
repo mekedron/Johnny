@@ -48,7 +48,7 @@ lives.
 VAD end-of-speech  ──┐
                      │  end_of_speech_ms (default 800 ms; bakes in
                      │  the wait by design — see DEFAULT_END_OF_SPEECH_MS
-                     │  comment in pipeline.py)
+                     │  comment in the retired split engine)
 STT first-partial  ──┤
 STT final          ──┤  Whisper batch: 100-400 ms CPU, 30-100 ms GPU
 LLM first-token    ──┤  Router LLM. Hot path.

@@ -38,7 +38,7 @@ call :meth:`ParakeetSTT.evict_process_cache` explicitly for that.
 The adapter expects 16 kHz mono S16LE PCM frames in ``audio_iter`` —
 the format produced by the meet-worker audio bridge. PCM bytes are
 concatenated into a single utterance buffer and passed to the runtime
-in one call. The pipeline (``VoicePipeline._utterances()``) segments
+in one call. The pipeline (the legacy split pipeline) segments
 audio into VAD-bounded chunks before handing them to STT, so the
 adapter treats each ``transcribe_stream`` invocation as one complete
 utterance. A v1 batch implementation that emits one final

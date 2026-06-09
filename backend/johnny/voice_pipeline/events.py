@@ -282,7 +282,7 @@ class AgentSuggested:
 class AgentTTSFailed:
     """TTS synthesis failed for a turn the router approved (Johnny-g2n).
 
-    Emitted from :meth:`VoicePipeline._respond_loop` when the TTS stage
+    Emitted from the legacy split pipeline when the TTS stage
     raises :class:`TTSError` (e.g. ElevenLabs returns 401 with "exceeds
     your quota"). Without this event the session continues silently —
     the user sees nothing on screen and just hears no audio, which made

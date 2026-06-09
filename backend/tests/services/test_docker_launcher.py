@@ -351,8 +351,9 @@ async def test_start_runs_container_with_env_and_labels(
 def test_build_environment_no_bridge_env_in_legacy(
     launcher: _StubLauncher, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Johnny-wz5: default legacy mode adds NO LiveKit bridge vars (no change)."""
-    monkeypatch.delenv("JOHNNY_ORCHESTRATOR", raising=False)
+    """Johnny-wz5: explicit legacy mode adds NO LiveKit bridge vars (Johnny-n22
+    flipped the default to agentsession, so legacy is now opt-in)."""
+    monkeypatch.setenv("JOHNNY_ORCHESTRATOR", "legacy")
     env = launcher._build_environment(_make_ctx(bot_session_id=55))
     assert "JOHNNY_ORCHESTRATOR" not in env
     assert "LIVEKIT_TOKEN" not in env

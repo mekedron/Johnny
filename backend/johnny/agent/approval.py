@@ -1,7 +1,7 @@
 """Out-of-band approval-required orchestration (spike Johnny-z97, Phase 2).
 
 ``approval_required`` mode holds the bot's reply until a human approves it. In
-the legacy ``voice_pipeline.pipeline`` that wait lived *inline* in
+the legacy split engine that wait lived *inline* in
 ``_handle_approval_required``: the serialised response loop emitted
 ``ApprovalPending``, **blocked** on ``ApprovalGate.request_approval`` for up to
 ``approval_timeout_seconds`` (~15 s), then ran the answer LLM + TTS on approve or
@@ -66,7 +66,7 @@ from johnny.agent.gate import TurnLedger, TurnNoReplyReason
 
 logger = logging.getLogger(__name__)
 
-# Ported from voice_pipeline.pipeline.DEFAULT_APPROVAL_TIMEOUT_SECONDS (US-027).
+# Ported from the legacy split engine (US-027).
 DEFAULT_APPROVAL_TIMEOUT_S = 15.0
 
 # Defensive outer bound added on top of the approval source's own timeout, so a

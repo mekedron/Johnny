@@ -1,7 +1,7 @@
 """Unit tests for the pure STT noise-gate classification (Johnny-cmd, Phase 2).
 
 Covers :mod:`johnny.agent.noise_filter` — the ``livekit``-free port of the legacy
-``VoicePipeline`` noise gate (Johnny-ckz.14). Each crafted transcript / audio
+the legacy split pipeline noise gate (Johnny-ckz.14). Each crafted transcript / audio
 duration exercises one filter and asserts the
 :data:`~johnny.voice_pipeline.events.TranscriptFilteredReason` the legacy engine
 would have produced, plus the regression controls (short real words like ``no`` /

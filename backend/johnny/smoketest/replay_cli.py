@@ -111,10 +111,10 @@ def _render_regression(console: Console, result: ReplayResult) -> None:
 
 @click.command(
     help=(
-        "Replay committed session fixtures through the voice engine "
-        "(--engine legacy|agentsession) and assert the .28.x invariants "
-        "(mode=invariants, the CI gate) or diff against the originally-recorded "
-        "outcome (mode=regression). --engine agentsession is the cutover gate."
+        "Replay committed session fixtures through the voice engine and assert "
+        "the .28.x invariants (mode=invariants, the CI gate) or diff against the "
+        "originally-recorded outcome (mode=regression). Split fixtures run on the "
+        "LiveKit-Agents engine; unified (S2S) fixtures run on UnifiedVoicePipeline."
     )
 )
 @click.option("--session-id", type=str, default=None, help="Replay one fixture by session id.")
@@ -125,17 +125,6 @@ def _render_regression(console: Console, result: ReplayResult) -> None:
     default="invariants",
     show_default=True,
     help="invariants = assert INV-1/INV-2 (CI gate); regression = diff vs recorded.",
-)
-@click.option(
-    "--engine",
-    type=click.Choice(["legacy", "agentsession"]),
-    default="legacy",
-    show_default=True,
-    help=(
-        "legacy = the VoicePipeline; agentsession = the LiveKit-Agents engine "
-        "(RouterGate + TurnLedger). The agentsession gate is the cutover "
-        "prerequisite — it is split-only, so unified fixtures are skipped."
-    ),
 )
 @click.option(
     "--use-recorded-llm/--use-real-llm",
@@ -158,7 +147,6 @@ def main(
     session_id: str | None,
     run_all: bool,
     mode: str,
-    engine: str,
     use_recorded_llm: bool,
     fixtures_dir: Path,
     verbose: bool,
@@ -171,9 +159,8 @@ def main(
     if not verbose:
         # A fixture that simulates the session-14 router hang makes the engine
         # log the (expected) router-timeout exception. That's the path under
-        # test, not a harness failure — mute it (both engines' loggers) so the
-        # report is clean. ``--verbose`` brings it back for debugging.
-        logging.getLogger("johnny.voice_pipeline.pipeline").setLevel(logging.CRITICAL)
+        # test, not a harness failure — mute the engine loggers so the report is
+        # clean. ``--verbose`` brings it back for debugging.
         logging.getLogger("johnny.agent.gate").setLevel(logging.CRITICAL)
         logging.getLogger("johnny.agent.router_gate").setLevel(logging.CRITICAL)
     if not use_recorded_llm:
@@ -183,31 +170,24 @@ def main(
             "fixture's recorded LLM outputs."
         )
 
-    # The agentsession engine is split-only and pulls livekit-agents; import its
-    # driver lazily so the legacy path stays usable without the ``agent`` extra.
-    runner = run_replay
-    if engine == "agentsession":
-        from johnny.smoketest.replay_agent import run_agent_replay
-
-        runner = run_agent_replay
-
+    # Split fixtures run on the LiveKit-Agents engine (lazy import so the
+    # unified/S2S path stays usable without the ``agent`` extra); unified
+    # fixtures run on UnifiedVoicePipeline via run_replay.
     console = Console()
     console.print(
-        f"[bold cyan]Johnny replay harness[/bold cyan] — engine={engine}, "
+        f"[bold cyan]Johnny replay harness[/bold cyan] — "
         f"mode={mode}, recorded-llm\n"
     )
 
     fixtures = _resolve_fixtures(fixtures_dir, session_id, run_all)
     failures = 0
     for fx in fixtures:
-        if engine == "agentsession" and fx.runtime != "split":
-            # The agent engine does not run unified/S2S (legacy UnifiedVoicePipeline
-            # owns those). Skip rather than fail so ``--all`` stays green.
-            console.print(
-                f"  [yellow]SKIP[/yellow] [bold]{fx.label}[/bold] "
-                f"(session {fx.session_id}, {fx.runtime}) — agentsession is split-only"
-            )
-            continue
+        if fx.runtime == "split":
+            from johnny.smoketest.replay_agent import run_agent_replay
+
+            runner = run_agent_replay
+        else:
+            runner = run_replay
         result = asyncio.run(runner(fx))
         if mode == "invariants":
             failures += _render_invariants(console, result)

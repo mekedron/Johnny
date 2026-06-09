@@ -435,7 +435,15 @@ async def replay_session(
             ),
         )
 
-    result = await run_replay(fixture)
+    if fixture.runtime == "split":
+        # The split STT→LLM→TTS replay runs on the LiveKit-Agents engine
+        # (Johnny-n22 retired the hand-rolled split orchestrator); unified
+        # (S2S) fixtures stay on run_replay / UnifiedVoicePipeline.
+        from johnny.smoketest.replay_agent import run_agent_replay
+
+        result = await run_agent_replay(fixture)
+    else:
+        result = await run_replay(fixture)
     violations = check_invariants(result.events, fixture.runtime)
     diffs = diff_against_recorded(fixture, result.records)
 

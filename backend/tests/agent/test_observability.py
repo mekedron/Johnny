@@ -75,7 +75,7 @@ from johnny.voice_pipeline.events import (  # noqa: E402
     TranscriptFinalized,
     event_to_dict,
 )
-from johnny.voice_pipeline.pipeline import RouterDecision  # noqa: E402
+from johnny.voice_pipeline.reasoning import RouterDecision  # noqa: E402
 
 # asyncio_mode = "auto" — async tests need no marker.
 

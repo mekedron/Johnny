@@ -375,7 +375,7 @@ def build_stt_adapter(
     segment the audio into utterances and runs the wrapped
     :meth:`JohnnySTT.recognize` (the batch path) on each speech segment, emitting
     a ``FINAL_TRANSCRIPT`` at end-of-speech — exactly the VAD-bounded-utterance
-    contract the legacy ``VoicePipeline._utterances()`` gave these providers.
+    contract the legacy split pipeline gave these providers.
 
     ``vad`` is the Silero model to segment with; pass the same instance the
     ``AgentSession`` uses for turn detection so only one model is loaded. When a

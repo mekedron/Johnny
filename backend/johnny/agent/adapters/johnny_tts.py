@@ -66,7 +66,7 @@ if TYPE_CHECKING:
 
 # TTS failure categories that will not recover within a session — quota
 # exhausted or a bad / revoked key. Mirrors
-# ``voice_pipeline.pipeline.TERMINAL_TTS_FAILURE_CATEGORIES`` (Johnny-g2n):
+# the legacy split engine (Johnny-g2n):
 # the session circuit breaker trips on these, and the adapter must NOT let
 # LiveKit retry them (re-calling a dead provider just burns error responses).
 _TERMINAL_TTS_CATEGORIES: frozenset[str] = frozenset({"quota_exceeded", "auth_failed"})

@@ -20,7 +20,7 @@ Deliberately **stdlib-only** (no ``livekit`` import, no ``app.providers`` /
 worker (which parses it), and unit tests, so it must import cheaply everywhere —
 the same import-safety discipline the top-level :mod:`johnny.agent` package
 holds. The mode / pipeline-mode literals are duplicated here rather than
-imported from the 138 KB ``voice_pipeline.pipeline`` module; a drift guard in
+imported from the 138 KB the legacy split engine module; a drift guard in
 ``tests/agent/test_job_config.py`` asserts they still match the canonical
 definitions.
 """
@@ -34,7 +34,7 @@ from typing import Any
 
 # --- Behaviour vocabularies -------------------------------------------------
 # These mirror the canonical constants in
-# ``johnny.voice_pipeline.pipeline`` (LISTEN_ONLY_MODE, …) and
+# ``johnny.voice_pipeline.reasoning`` (LISTEN_ONLY_MODE, …) and
 # ``johnny.meet_worker.pipeline_runner`` (SPLIT_MODE / UNIFIED_MODE). They are
 # re-declared here to keep this module dependency-free; the drift guard test
 # fails if the canonical values ever diverge.

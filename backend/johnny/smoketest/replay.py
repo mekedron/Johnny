@@ -1,7 +1,7 @@
 """Offline replay harness for the voice pipeline (Johnny-ckz.28.5).
 
 Feed a persisted session's STT-final transcripts back through the *real*
-:class:`~johnny.voice_pipeline.VoicePipeline` — against fake STT / fake TTS
+:class:`~johnny.voice_pipeline.the legacy split pipeline` — against fake STT / fake TTS
 adapters and either recorded or live LLM responses — capture every pipeline
 event it emits, and assert one of two things:
 
@@ -65,7 +65,6 @@ from johnny.voice_pipeline import (
     EnergyVAD,
     InMemoryEventBus,
     JohnnyTransport,
-    PipelineConfig,
     PipelineEvent,
     RouterDecisionMade,
     TranscriptFiltered,
@@ -73,7 +72,6 @@ from johnny.voice_pipeline import (
     TurnTerminal,
     UnifiedPipelineConfig,
     UnifiedVoicePipeline,
-    VoicePipeline,
     event_to_dict,
 )
 
@@ -506,211 +504,6 @@ def diff_against_recorded(
     return diffs
 
 
-# --- fake providers + transport (driving half) ------------------------------
-
-
-class _ReplaySTT(STTProvider):
-    """Return the recorded transcript text for each VAD-cut segment, in order."""
-
-    def __init__(self, turns: Sequence[ReplayTurn]) -> None:
-        self._turns = list(turns)
-        self._idx = 0
-        self.calls = 0
-
-    @property
-    def name(self) -> str:
-        return "replay-stt"
-
-    async def transcribe_stream(
-        self, audio_iter: AsyncIterator[bytes]
-    ) -> AsyncIterator[TranscriptEvent]:
-        async for _ in audio_iter:
-            pass
-        if self._idx >= len(self._turns):
-            return
-        turn = self._turns[self._idx]
-        self._idx += 1
-        self.calls += 1
-        yield TranscriptEvent(
-            text=turn.text,
-            is_final=True,
-            timestamp_ms=self.calls * 1000,
-            confidence=turn.confidence,
-        )
-
-
-class _AnswerCursor:
-    """Shared per-turn answer holder between the recorded router + answer LLMs.
-
-    The pipeline calls the router then (if it approves) the answer LLM
-    sequentially within one turn, and the response loop processes turns
-    serially — so the router can stash *this turn's* recorded answer here for
-    the answer LLM to read. This keys the answer to the turn rather than a
-    positional list, so an approved turn the original session never actually
-    spoke (e.g. it was rate-limited before the answer stage) replays as an empty
-    answer → ``model_empty_output`` no_reply, instead of fabricating a stale
-    answer borrowed from a different turn.
-    """
-
-    def __init__(self) -> None:
-        self.current: str | None = None
-
-
-class _RecordedRouterLLM(LLMProvider):
-    """Replay recorded router structured outputs in order.
-
-    A turn whose ``simulate == "timeout"`` sleeps past the configured router
-    timeout so the pipeline's ``asyncio.wait_for`` bound fires — reproducing the
-    session-14 hang and proving the fix turns it into a durable ``no_reply``.
-    """
-
-    def __init__(self, turns: Sequence[ReplayTurn], cursor: _AnswerCursor) -> None:
-        self._turns = list(turns)
-        self._cursor = cursor
-        self._idx = 0
-        self.calls = 0
-
-    @property
-    def name(self) -> str:
-        return "recorded-router"
-
-    async def chat(
-        self,
-        messages: Sequence[ChatMessage],  # noqa: ARG002
-        tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
-        response_format: dict[str, Any] | None = None,  # noqa: ARG002
-    ) -> LLMResponse:
-        idx = min(self._idx, len(self._turns) - 1)
-        turn = self._turns[idx]
-        self._idx += 1
-        self.calls += 1
-        # Stash this turn's recorded answer for the answer LLM (read only if the
-        # router approves AND the turn reaches the answer stage).
-        self._cursor.current = turn.answer
-        if turn.simulate == "timeout":
-            await asyncio.sleep(SIMULATED_HANG_SLEEP_S)
-        decision = dict(turn.router) or {
-            "should_speak": False,
-            "confidence": 0.0,
-            "reason": "no recorded router output",
-        }
-        return LLMResponse(
-            text=json.dumps(decision),
-            finish_reason="stop",
-            structured_output=decision,
-        )
-
-
-class _RecordedAnswerLLM(LLMProvider):
-    """Replay the recorded answer for the current turn (via the shared cursor).
-
-    Returns the empty string when the current turn recorded no answer — the
-    pipeline reads that as ``model_empty_output`` and terminates the turn in a
-    no_reply, which is the faithful outcome for a turn that never actually
-    produced an utterance.
-    """
-
-    def __init__(self, cursor: _AnswerCursor) -> None:
-        self._cursor = cursor
-        self.calls = 0
-
-    @property
-    def name(self) -> str:
-        return "recorded-answer"
-
-    async def chat(
-        self,
-        messages: Sequence[ChatMessage],  # noqa: ARG002
-        tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
-        response_format: dict[str, Any] | None = None,  # noqa: ARG002
-    ) -> LLMResponse:
-        self.calls += 1
-        return LLMResponse(text=self._cursor.current or "", finish_reason="stop")
-
-
-class _ReplayTTS(TTSProvider):
-    """Emit a handful of PCM frames so spoken turns carry a positive duration."""
-
-    def __init__(self, frame_count: int = 3) -> None:
-        self._frame_count = frame_count
-        self.calls: list[str] = []
-
-    @property
-    def name(self) -> str:
-        return "replay-tts"
-
-    async def synthesize_stream(
-        self, text: str, voice_id: str | None = None  # noqa: ARG002
-    ) -> AsyncIterator[bytes]:
-        self.calls.append(text)
-        for i in range(self._frame_count):
-            yield bytes([i & 0xFF, 0x00]) * 160
-
-
-class _BufferedTransport(JohnnyTransport):
-    """Push synthetic PCM frames in; capture played frames out."""
-
-    def __init__(self, frames: list[bytes], sample_rate: int = SAMPLE_RATE) -> None:
-        self._frames = list(frames)
-        self._sample_rate = sample_rate
-        self.played: list[bytes] = []
-
-    @property
-    def sample_rate(self) -> int:
-        return self._sample_rate
-
-    async def start(self) -> None:  # noqa: B027
-        pass
-
-    async def stop(self) -> None:  # noqa: B027
-        pass
-
-    async def capture_frames(self) -> AsyncIterator[bytes]:
-        for frame in self._frames:
-            yield frame
-
-    async def play_frames(
-        self,
-        frames: Iterable[bytes] | AsyncIterable[bytes],
-        source_rate: int | None = None,  # noqa: ARG002
-    ) -> None:
-        if isinstance(frames, AsyncIterable):
-            async for f in frames:
-                self.played.append(f)
-        else:
-            for f in frames:
-                self.played.append(f)
-
-
-def _tone_samples(duration_ms: int, freq_hz: int = 440, amplitude: int = 12_000) -> list[int]:
-    n = SAMPLE_RATE * duration_ms // 1000
-    return [
-        int(amplitude * math.sin(2 * math.pi * freq_hz * i / SAMPLE_RATE))
-        for i in range(n)
-    ]
-
-
-def _silence_samples(duration_ms: int) -> list[int]:
-    return [0] * (SAMPLE_RATE * duration_ms // 1000)
-
-
-def _synthesize_pcm(turn_count: int) -> bytes:
-    """One VAD-detectable tone burst per turn, separated by silence gaps."""
-    samples: list[int] = list(_silence_samples(LEAD_MS))
-    for _ in range(turn_count):
-        samples.extend(_tone_samples(TONE_MS))
-        samples.extend(_silence_samples(GAP_MS))
-    return array.array("h", samples).tobytes()
-
-
-def _frames(pcm: bytes) -> list[bytes]:
-    return [
-        pcm[i : i + BYTES_PER_FRAME]
-        for i in range(0, len(pcm), BYTES_PER_FRAME)
-        if i + BYTES_PER_FRAME <= len(pcm)
-    ]
-
-
 # --- run (driving half) -----------------------------------------------------
 
 
@@ -728,72 +521,19 @@ class ReplayResult:
 
 
 async def run_replay(fixture: ReplayFixture) -> ReplayResult:
-    """Drive ``fixture`` through the real pipeline and capture its events.
+    """Drive a ``unified`` (S2S) ``fixture`` through the real pipeline.
 
-    Dispatches on ``fixture.runtime``: ``split`` → :class:`VoicePipeline`
-    (router → answer → terminal), ``unified`` → :class:`UnifiedVoicePipeline`
-    over a recorded S2S provider. Both use recorded LLM/S2S outputs so the run
-    is deterministic and CI-safe.
+    Only ``unified`` fixtures run here, over a recorded S2S provider. The split
+    STT→LLM→TTS replay was retired with the hand-rolled split orchestrator
+    (Johnny-n22); split fixtures now run on the LiveKit-Agents engine via
+    :func:`johnny.smoketest.replay_agent.run_agent_replay`.
     """
     if fixture.runtime == UNIFIED_RUNTIME:
         return await _run_unified_replay(fixture)
-    return await _run_split_replay(fixture)
-
-
-async def _run_split_replay(fixture: ReplayFixture) -> ReplayResult:
-    """Split-pipeline replay: synthesise one tone burst per turn, let the real
-    VAD segment them, fake STT returns the recorded transcripts, and the
-    pipeline runs router → answer → terminal for each — the live meeting path.
-    """
-    pcm = _synthesize_pcm(fixture.turn_count)
-    transport = _BufferedTransport(frames=_frames(pcm))
-    stt = _ReplaySTT(fixture.turns)
-    cursor = _AnswerCursor()
-    router = _RecordedRouterLLM(fixture.turns, cursor)
-    answer = _RecordedAnswerLLM(cursor)
-    tts = _ReplayTTS()
-    bus = InMemoryEventBus()
-    has_timeout = any(t.simulate == "timeout" for t in fixture.turns)
-    config = PipelineConfig(
-        session_id=fixture.session_id,
-        mode=fixture.mode,
-        instructions=fixture.instructions,
-        confidence_threshold=fixture.confidence_threshold,
-        allowed_replies=fixture.allowed_replies,
-        vad_threshold=VAD_THRESHOLD,
-        end_of_speech_ms=END_OF_SPEECH_MS,
-        frame_duration_ms=FRAME_DURATION_MS,
-        # The recordings are already post-noise-gate finalised transcripts;
-        # replaying them through the gate again would double-filter.
-        noise_filter_enabled=False,
-        # Bound the router so a simulated hang fails fast into a durable
-        # no_reply instead of stalling the whole replay.
-        router_llm_timeout_s=(
-            SIMULATED_HANG_TIMEOUT_S if has_timeout else 0.0
-        ),
-        # The classifier needs a second LLM and isn't part of the
-        # decision/terminal contract under test.
-        enable_barge_in=False,
-    )
-    pipeline = VoicePipeline(
-        transport=transport,
-        vad=EnergyVAD(threshold=VAD_THRESHOLD),
-        stt=stt,
-        router_llm=router,
-        answer_llm=answer,
-        tts=tts,
-        event_bus=bus,
-        config=config,
-    )
-    await pipeline.run()
-
-    events = bus.snapshot()
-    records = assemble_turns(events, SPLIT_RUNTIME)
-    return ReplayResult(
-        fixture=fixture,
-        events=events,
-        records=records,
-        stt_calls=stt.calls,
+    raise RuntimeError(
+        f"split replay retired (Johnny-n22): fixture runtime={fixture.runtime!r} "
+        "runs on the LiveKit-Agents engine — use "
+        "johnny.smoketest.replay_agent.run_agent_replay"
     )
 
 

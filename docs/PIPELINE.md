@@ -14,7 +14,22 @@ the named file and grep the name.
 Reads like [LATENCY.md](LATENCY.md) and [SETUP_LOCAL.md](SETUP_LOCAL.md), not
 like the README. Dense, concrete, worked examples over prose.
 
-> **One-line architecture.** The in-process pipeline (`VoicePipeline` /
+> **⚠️ Retirement note (Johnny-n22).** The hand-rolled in-worker split
+> orchestrator (the ~3.2k-LoC `the retired split engine`) was **retired**. The
+> split STT→LLM→TTS path now runs on the **LiveKit-Agents `AgentSession` engine**
+> under `backend/johnny/agent/` — for Meet sessions via the dispatched agent
+> worker (`JOHNNY_ORCHESTRATOR=agentsession`, the default) and for the browser /
+> playground in-process. Its transport-independent decision core (modes, the
+> router/barge-in schemas + parsers, the noise-filter knobs) lives in
+> `backend/johnny/voice_pipeline/reasoning.py`. The in-worker engine that
+> remains is `UnifiedVoicePipeline` (the S2S route, opt-in via
+> `JOHNNY_ORCHESTRATOR=legacy`). Sections 2–7 below describe the retired split
+> engine's behavior **as a reference for what the AgentSession engine
+> reproduces** (INV-1 / INV-2, the gates, the event/DB model) — its file/line
+> anchors point into pre-retirement git history; for live code read
+> `johnny/agent/` (orchestration) + `voice_pipeline/reasoning.py` (decision core).
+
+> **One-line architecture.** The engine (the `AgentSession` split path /
 > `UnifiedVoicePipeline`) never writes the database directly. It publishes
 > `PipelineEvent`s to a Redis `EventBus`; a single subscriber in the API worker
 > (`session_status_subscriber.py`) is the **sole durable writer**, and the
@@ -41,7 +56,7 @@ A session runs in **exactly one** of two routes, chosen by the
 
 | | **Split pipeline** (default) | **Unified / S2S pipeline** |
 |---|---|---|
-| Class | `VoicePipeline` — `backend/johnny/voice_pipeline/pipeline.py` (~3222 LoC) | `UnifiedVoicePipeline` — `backend/johnny/voice_pipeline/unified_pipeline.py` |
+| Class | the retired split engine — the retired split engine) | `UnifiedVoicePipeline` — `backend/johnny/voice_pipeline/unified_pipeline.py` |
 | Provider kinds | `STT` + `LLM` (router **and** answer) + `TTS` | one `S2S` provider (GPT-Realtime, Gemini Live) |
 | Stages you can see | VAD → STT → router LLM → answer LLM → TTS, all instrumented | provider-internal; only transcripts + audio surface |
 | Modes | all five (`listen_only` … `autonomous`) | none — provider always answers |
@@ -76,7 +91,7 @@ construction sites:
 > over `BrowserAudioTransport` (`johnny/agent/browser_audio_io.py`), with
 > `feed_text → router gate → session.generate_reply()`. It does **not** read
 > `JOHNNY_ORCHESTRATOR` and does **not** dispatch a remote agent worker (the engine
-> runs in the API process). So the browser path no longer constructs `VoicePipeline`
+> runs in the API process). So the browser path no longer constructs the retired split engine
 > (`unified` keeps its own `UnifiedVoicePipeline`). History:
 > [playground-orchestration-deferral.md](playground-orchestration-deferral.md).
 
@@ -86,8 +101,8 @@ construction sites:
 
 ### 2.1 Split route
 
-The pipeline runs **two concurrent asyncio tasks** (`VoicePipeline.run`,
-pipeline.py L741): a *transcribe loop* that is never gated on the bot's
+The pipeline runs **two concurrent asyncio tasks** (the retired split engine,
+the retired split engine L741): a *transcribe loop* that is never gated on the bot's
 speak/think state (so participant audio always reaches `transcript_chunks` —
 the Johnny-har contract) and a *respond loop* that drains finalised transcripts
 in order. A bounded `asyncio.Queue` (`_response_queue`) bridges them; `None` is
@@ -196,9 +211,9 @@ Each subsection: **source + entry point**, **inputs/outputs** (concrete types
 from `events.py` / `app/providers/base.py`), **state owned**, **lifecycle**, and
 **where its output surfaces** (logs + UI).
 
-### 3.1 `VoicePipeline` — the split orchestrator
+### 3.1 the retired split engine — the split orchestrator
 
-- **Source:** `backend/johnny/voice_pipeline/pipeline.py::VoicePipeline` (L626). Entry: `run()` (L741).
+- **Source:** the retired split engine (L626). Entry: `run()` (L741).
 - **Inputs (constructor, L629):** `transport`, `vad`, `stt`, `router_llm`, `answer_llm`, `tts`, `event_bus`, `config: PipelineConfig`, and five optional sinks/gates (`decision_sink`, `utterance_sink`, `transcript_sink`, `approval_gate`, `transcript_history_loader`). All default to `Noop*`.
 - **Outputs:** `PipelineEvent`s on the bus; audio frames to the transport.
 - **State owned (in-memory, per session):** `_transcript_history: list[TranscriptFinalized]` (unbounded since Johnny-ckz.3), `_last_decision`, `_response_queue`, `_interrupt_event`, `_recent_utterance_times`, `_history_summary`, `_utterance_count`, barge-in bookkeeping (`_response_in_flight`, `_response_generation`, `_barge_in_tasks`, `_fast_barge_in_count`), per-turn anchors (`_transcript_turn_ids`, `_current_response_turn_id`, `_turn_started_at_ms`, `_end_to_end_emitted_for_turn`), the TTS circuit breaker `_tts_tripped`, and `_turn_terminal_emitted`. Nothing is persisted by the pipeline itself.
@@ -227,14 +242,14 @@ control entry points worth knowing:
 
 - **Source:** `vad.py::VADAnalyzer` (ABC, L53). `DEFAULT_VAD_THRESHOLD = 0.5` (L28). Output: `VADResult{is_speech: bool, score: float}` (L41).
 - **Implementations:** `EnergyVAD` (L78, RMS amplitude, stateless) and `SileroVAD` (L114, lazy-imports `silero-vad`+torch, expects 32 ms / 512-sample frames, stateful — `reset()` clears model state between utterances). The meet-worker tries `SileroVAD` first and falls back to `EnergyVAD(threshold=0.02)` on any exception (`pipeline_runner._build_vad`).
-- **Used by:** `VoicePipeline._utterances` (L949) — cuts an utterance after `end_of_speech_ms` consecutive silence frames and drives the fast barge-in counter.
+- **Used by:** the retired split engine (L949) — cuts an utterance after `end_of_speech_ms` consecutive silence frames and drives the fast barge-in counter.
 - **Lifecycle:** per-meeting, reads `PipelineConfig.vad_threshold`. Stateful — never shared across concurrent streams.
 
 ### 3.4 STT — `STTProvider`
 
 - **Source:** `app/providers/base.py::STTProvider` (ABC, L318). Single method `transcribe_stream(audio_iter) -> AsyncIterator[TranscriptEvent]`.
 - **`TranscriptEvent`** (L130): `{text, is_final, timestamp_ms, confidence?, speaker?}`.
-- **Driven by:** `VoicePipeline._run_stt` (L1941) — consumes the stream, keeps only `is_final` events, joins their text, and returns a single `TranscriptFinalized` (or `None` if no finals / empty text). Partial events are discarded here, which is the "partial-vs-final gate": the router only ever sees VAD-finalised, STT-finalised text (Johnny-arh).
+- **Driven by:** the retired split engine (L1941) — consumes the stream, keeps only `is_final` events, joins their text, and returns a single `TranscriptFinalized` (or `None` if no finals / empty text). Partial events are discarded here, which is the "partial-vs-final gate": the router only ever sees VAD-finalised, STT-finalised text (Johnny-arh).
 - **Errors:** `STTError` has no category (all STT failures treated transient). A raise is caught in `_transcribe_and_emit` (L1144) → `error` timing + `PipelineStageFailed(stage="stt")` event, then the turn is skipped (session stays alive).
 - **Lifecycle:** one instance per session from `load_active_providers`.
 
@@ -263,7 +278,7 @@ control entry points worth knowing:
 
 - **Sources:** `decision_sink.py`, `utterance_sink.py`, `transcript_sink.py`. Each defines an ABC + `Noop*` + `InMemory*` + a `SqlAlchemy*` variant.
 - **`DecisionSink.record(...) -> int | None`** returns the persisted row PK (used by `approval_required` two-phase write); `update_outcome(decision_id, outcome)`. `DecisionOutcome = Literal["spoken","suppressed","pending","rejected","suggested"]`.
-- **Critical fact — the `SqlAlchemy*Sink`s are dead in production.** `VoicePipeline.__init__` (L653–654) defaults `decision_sink`/`utterance_sink` to `Noop*`, and **no production path constructs the SQLAlchemy variants** (grep: only test files + the never-wired `router_decisions.py::SqlAlchemyDecisionSink` / `agent_utterances.py::SqlAlchemyUtteranceSink`). The meet-worker image is deliberately ORM-free. **All `agent_decisions` / `agent_utterances` / `transcript_chunks` rows are written by the subscriber** (§3.14), driven off the event bus — not by the sinks. Don't waste time wiring the sinks for a browser/playground change.
+- **Critical fact — the `SqlAlchemy*Sink`s are dead in production.** the retired split engine (L653–654) defaults `decision_sink`/`utterance_sink` to `Noop*`, and **no production path constructs the SQLAlchemy variants** (grep: only test files + the never-wired `router_decisions.py::SqlAlchemyDecisionSink` / `agent_utterances.py::SqlAlchemyUtteranceSink`). The meet-worker image is deliberately ORM-free. **All `agent_decisions` / `agent_utterances` / `transcript_chunks` rows are written by the subscriber** (§3.14), driven off the event bus — not by the sinks. Don't waste time wiring the sinks for a browser/playground change.
 - **Lifecycle:** per session; `Noop` in production.
 
 ### 3.9 ApprovalGate
@@ -276,7 +291,7 @@ control entry points worth knowing:
 ### 3.10 TranscriptHistoryLoader
 
 - **Source:** `transcript_history.py::TranscriptHistoryLoader` (ABC, L37). `load(session_id, bot_session_id) -> list[TranscriptFinalized]`. `BOT_SPEAKER_LABEL = "Bot (you)"` (L22, Johnny-7qp) tags the bot's own prior lines so the LLMs can answer "what did you just say?".
-- **Used by:** `VoicePipeline._rehydrate_transcript_history` (L837) on `run()` start — seeds `_transcript_history` so a mid-session container respawn doesn't forget everything. Loader exceptions are logged and the run continues with empty history.
+- **Used by:** the retired split engine (L837) on `run()` start — seeds `_transcript_history` so a mid-session container respawn doesn't forget everything. Loader exceptions are logged and the run continues with empty history.
 - **Wiring gotcha:** the meet-worker wires `HttpTranscriptHistoryLoader` **only when `JOHNNY_API_BASE_URL` is set**; otherwise `NoopTranscriptHistoryLoader` (no rehydration). Browser sessions get no loader.
 
 ### 3.11 Provider registry + loader
@@ -343,7 +358,7 @@ This is the part operators care about most: *why did the bot speak, or not?*
 
 ### 4.1 What the router emits
 
-`VoicePipeline._run_router` (L1971) calls `router_llm.chat(messages,
+the retired split engine (L1971) calls `router_llm.chat(messages,
 response_format=_ROUTER_SCHEMA)` bounded by
 `asyncio.wait_for(router_llm_timeout_s)` (default 30 s — the session-14 fix).
 `_ROUTER_SCHEMA` (L586) forces structured output:
@@ -379,7 +394,7 @@ router), the rest in `_respond_to_transcript_inner` (L1639). Each
 response-loop suppressor persists the decision **and** emits exactly one
 `TurnTerminal` (INV-1).
 
-| # | Gate | Where (pipeline.py) | Outcome → `NoReplyReason` |
+| # | Gate | Where (the retired split engine) | Outcome → `NoReplyReason` |
 |---|---|---|---|
 | — | Pre-STT audio floor (`audio_duration_ms < noise_filter_min_audio_ms`) | `_transcribe_and_emit` → `_is_audio_below_noise_floor` (L1125/L1242) | `TranscriptFiltered(audio_too_short)` — **no terminal** (never queued) |
 | — | Post-STT noise gate (empty / punctuation-only / too-short / stoplist / low-confidence) | `_transcribe_and_emit` → `_classify_transcript_as_noise` (L1190/L1257) | `TranscriptFiltered(<reason>)` — **no terminal**; subscriber later writes a `noise_filtered` `no_reply` row |
@@ -711,7 +726,7 @@ and a turn must never silently vanish.**
 ### 7.1 The split: transcription never blocks on the bot (Johnny-har)
 
 `run()` runs `_transcribe_loop` and `_respond_loop` as separate tasks
-(pipeline.py L819–820). The respond loop's `except Exception` (L809) logs and
+(the retired split engine). The respond loop's `except Exception` (L809) logs and
 **continues** — "gaps in `transcript_chunks` are the regression Johnny-har
 fixes." A separate `except TTSError` (L779) classifies the failure, trips the
 breaker on terminal categories, and emits `AgentTTSFailed`.
@@ -776,7 +791,7 @@ production the sinks are `Noop`, so the real writes happen in the subscriber).
 |---|---|---|---|
 | ckz.28.1 | closed | Session-14 root-cause + redesign proposal | `tasks/prd-pipeline-decision-revision.md` |
 | **ckz.28.2** | closed | **INV-2** decision↔utterance parity | `agent_decisions` parity columns + `_agent_decision_parity_guard` (`models.py`); subscriber stamps divergence; `0018` |
-| **ckz.28.3** | closed | **INV-1** terminal-state-per-turn, no silent drops | `TurnTerminal` event + `_emit_turn_terminal` (pipeline.py); `apply_turn_terminal_event` (subscriber); `0019` |
+| **ckz.28.3** | closed | **INV-1** terminal-state-per-turn, no silent drops | `TurnTerminal` event + `_emit_turn_terminal` (the retired split engine); `apply_turn_terminal_event` (subscriber); `0019` |
 | **ckz.28.4** | closed | "What is the bot thinking" reasoning timeline | `input_window`/`raw_output`/`prompt` serialized; `sessionTurns.ts` + `SessionTurnTimeline.svelte` |
 | ckz.28.5 | **open** | Offline replay harness (`johnny-replay` CLI + fixtures) | **not yet implemented** — no CLI, no fixtures, no Replay button |
 | **etu.1** | this doc | Technical pipeline reference | `docs/PIPELINE.md` |
@@ -794,7 +809,7 @@ lives today (file + function; grep the issue id in comments to find the site):
 
 | Issue | Behaviour it established | Implementing site (today) |
 |---|---|---|
-| Johnny-har | transcription must not pause while the bot speaks/thinks | `pipeline.py` two-task `run()` (`_transcribe_loop` / `_respond_loop`, L819) |
+| Johnny-har | transcription must not pause while the bot speaks/thinks | `the retired split engine` two-task `run()` (`_transcribe_loop` / `_respond_loop`, L819) |
 | Johnny-arh | only VAD-finalised utterances reach the router; `end_of_speech_ms` padding; clear `_interrupt_event` before the router call | `_utterances` (L949), `DEFAULT_END_OF_SPEECH_MS=800` (L97), `_respond_to_transcript_inner` L1655 |
 | Johnny-ckz.3 / Johnny-7qp | unbounded transcript history + bot recalls its own prior lines | `DEFAULT_TRANSCRIPT_WINDOW_SIZE=0` (L151), `_remember_bot_utterance` + `BOT_SPEAKER_LABEL` (L2655), `_rehydrate_transcript_history` (L837) |
 | Johnny-ckz.14 | noise gate (audio floor + stoplist + length + confidence) before the router | `_is_audio_below_noise_floor` (L1242), `_classify_transcript_as_noise` (L1257), `DEFAULT_NOISE_STOPLIST` (L210) |

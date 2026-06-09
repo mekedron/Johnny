@@ -45,15 +45,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Orchestrator selection (Johnny-9eh; expanded into the full per-session engine
-# selector by Johnny-wz5). ``legacy`` keeps the Docker meet-worker voice pipeline;
-# ``agentsession`` dispatches the LiveKit agent worker AND switches the spawned
-# meet-worker to pure-bridge mode (:func:`bridge_launch_environment`) so the two
-# halves run side by side. Default stays ``legacy`` until parity is proven — a
-# single env flip is the rollback.
+# selector by Johnny-wz5; the hand-rolled split orchestrator was retired and the
+# default flipped to ``agentsession`` in Johnny-n22). ``agentsession`` (the
+# default) dispatches the LiveKit agent worker AND switches the spawned
+# meet-worker to pure-bridge mode (:func:`bridge_launch_environment`).
+# ``legacy`` opts a session out of the agent worker and runs the in-worker S2S
+# (unified) pipeline only — a single env flip is the rollback.
 ENV_ORCHESTRATOR = "JOHNNY_ORCHESTRATOR"
 ORCHESTRATOR_AGENTSESSION = "agentsession"
 ORCHESTRATOR_LEGACY = "legacy"
-DEFAULT_ORCHESTRATOR = ORCHESTRATOR_LEGACY
+DEFAULT_ORCHESTRATOR = ORCHESTRATOR_AGENTSESSION
 ENV_REDIS_URL = "REDIS_URL"
 
 # LiveKit connection vars the meet-worker bridge reads via
@@ -141,16 +142,14 @@ def agent_orchestrator_enabled(environ: Mapping[str, str] | None = None) -> bool
     """Whether the LiveKit ``AgentSession`` path is enabled for new sessions.
 
     Reads ``JOHNNY_ORCHESTRATOR`` (default :data:`DEFAULT_ORCHESTRATOR` =
-    ``legacy``); only the exact value ``agentsession`` turns the agent worker on.
-    This is the minimal gate Johnny-9eh needs so the agent-worker lifecycle is
-    *off by default* (the legacy Docker meet-worker is unchanged) yet can be
-    enabled for the dispatch/lifecycle acceptance test with one env var. Johnny-wz5
-    grows this into the full per-session engine selector + the meet-worker→bridge
-    switch; this is the single rollback switch it builds on.
+    ``agentsession`` since Johnny-n22); the agent worker is *on by default* and
+    only the exact value ``legacy`` opts a session out (running the in-worker S2S
+    pipeline instead). A typo'd / unrecognised value fails safe to the proven
+    agent path. The single ``legacy`` env flip is the rollback.
     """
     src = environ if environ is not None else os.environ
     value = (src.get(ENV_ORCHESTRATOR, "") or DEFAULT_ORCHESTRATOR).strip().lower()
-    return value == ORCHESTRATOR_AGENTSESSION
+    return value != ORCHESTRATOR_LEGACY
 
 
 def bridge_launch_environment(

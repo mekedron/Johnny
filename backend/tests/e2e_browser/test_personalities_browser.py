@@ -92,7 +92,7 @@ MCP against the live dev Compose stack). Artifacts under
      ``select_personality`` + ``apply_personality`` on the real DB row →
      ``resolution.personality_prompt == "[personality: Sarah CBT oly8]\n<desc>"``
      (sentinel present); feeding that into a real ``PipelineConfig`` and calling
-     ``VoicePipeline._router_messages`` / ``_answer_messages`` put the sentinel
+     the legacy split pipeline / ``_answer_messages`` put the sentinel
      in BOTH system messages, with the persona rendered ABOVE "Meeting
      instructions:" (IDENTITY before JOB). This is the deterministic backend
      proof behind ``tests/voice_pipeline/test_pipeline.py``'s

@@ -114,9 +114,10 @@ def test_load_bootstrap_config_headless_truthy(value: str, expected: bool) -> No
 # --- orchestrator selection (Johnny-wz5) -----------------------------------
 
 
-def test_load_bootstrap_config_orchestrator_default_legacy() -> None:
+def test_load_bootstrap_config_orchestrator_default_agentsession() -> None:
+    # Default flipped to agentsession in Johnny-n22.
     cfg = load_bootstrap_config(_valid_env())
-    assert cfg.orchestrator == "legacy"
+    assert cfg.orchestrator == "agentsession"
 
 
 @pytest.mark.parametrize("raw", ["agentsession", "AgentSession", "  AGENTSESSION "])
@@ -125,10 +126,10 @@ def test_load_bootstrap_config_orchestrator_agentsession(raw: str) -> None:
     assert cfg.orchestrator == "agentsession"
 
 
-def test_load_bootstrap_config_orchestrator_unknown_falls_back_legacy() -> None:
-    # A typo / unknown value degrades to the proven in-worker pipeline.
+def test_load_bootstrap_config_orchestrator_unknown_falls_back_agentsession() -> None:
+    # A typo / unknown value fails safe to the proven agent path (Johnny-n22).
     cfg = load_bootstrap_config(_valid_env(JOHNNY_ORCHESTRATOR="experimental"))
-    assert cfg.orchestrator == "legacy"
+    assert cfg.orchestrator == "agentsession"
 
 
 # --- event bus selection ---------------------------------------------------
@@ -326,6 +327,7 @@ def test_run_returns_zero_when_signal_arrives(monkeypatch: pytest.MonkeyPatch) -
         join_timeout_s=1.0,
         headless=True,
         skip_selfcheck=True,
+        orchestrator="legacy",
     )
 
     code = asyncio.run(bootstrap.run(config))
@@ -365,6 +367,7 @@ def test_run_returns_six_when_browser_disconnects(monkeypatch: pytest.MonkeyPatc
         join_timeout_s=1.0,
         headless=True,
         skip_selfcheck=True,
+        orchestrator="legacy",
     )
 
     code = asyncio.run(bootstrap.run(config))

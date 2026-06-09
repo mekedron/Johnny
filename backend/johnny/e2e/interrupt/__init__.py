@@ -6,7 +6,7 @@ the latency-budget contract that voice-interrupt must satisfy. Two
 pipeline shapes are exercised:
 
 * **Split pipeline** (the original) — three independent providers
-  (STT + LLM + TTS) wired through :class:`VoicePipeline`. Each
+  (STT + LLM + TTS) wired through the legacy split pipeline. Each
   scenario briefs the providers with deterministic decisions per call.
   Assertions: speaker speech mid-bot-utterance reaches
   ``transcript_chunks`` (Johnny-har); TTS is cut within ~500 ms of

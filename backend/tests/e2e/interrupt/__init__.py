@@ -2,7 +2,7 @@
 
 These tests exercise the harness *itself* — its frame synthesis, scripted
 providers, transport pacing, and assertion evaluation — using the real
-:class:`johnny.voice_pipeline.VoicePipeline`. They prove the harness wires
+:class:`johnny.voice_pipeline.the legacy split pipeline`. They prove the harness wires
 up correctly so the CLI (``python -m johnny.e2e.interrupt``) can be
 trusted as a regression check for the interrupt feature.
 

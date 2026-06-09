@@ -184,7 +184,7 @@ def test_mode_vocabularies_match_canonical_pipeline_constants() -> None:
     """
     try:
         from johnny.meet_worker.pipeline_runner import SPLIT_MODE, UNIFIED_MODE
-        from johnny.voice_pipeline.pipeline import (
+        from johnny.voice_pipeline.reasoning import (
             APPROVAL_REQUIRED_MODE,
             AUTONOMOUS_MODE,
             LIMITED_AUTO_SPEAK_MODE,
