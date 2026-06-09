@@ -30,7 +30,6 @@ import pytest
 from app.providers.base import (
     LLMProvider,
     LLMResponse,
-    ProviderConfig,
     ProviderKind,
     STTProvider,
     TranscriptEvent,
@@ -60,7 +59,6 @@ from johnny.voice_pipeline import (
     UnifiedVoicePipeline,
     VoicePipeline,
 )
-
 
 # --- Shared fake adapters --------------------------------------------------
 
@@ -155,11 +153,14 @@ def _browser_spec(
     )
 
 
-def test_browser_split_mode_returns_voicepipeline() -> None:
+def test_browser_split_mode_runs_on_agent_engine_not_here() -> None:
+    """Split browser sessions run on the in-process AgentSession engine (Johnny-7g5.1),
+    so assemble_browser_pipeline (unified-only) rejects them rather than building a
+    VoicePipeline."""
     transport = BrowserAudioTransport()
     spec = _browser_spec(pipeline_mode=SPLIT_MODE)
-    pipeline = assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
-    assert isinstance(pipeline, VoicePipeline)
+    with pytest.raises(BrowserPipelineSetupError, match="AgentSession engine"):
+        assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
 
 
 def test_browser_unified_mode_returns_unifiedvoicepipeline() -> None:
@@ -184,7 +185,7 @@ def test_browser_unknown_pipeline_mode_fails() -> None:
 
 
 def test_browser_default_pipeline_mode_is_split() -> None:
-    """A spec built without pipeline_mode defaults to split mode."""
+    """A spec built without pipeline_mode defaults to split mode (→ agent engine)."""
     spec = BrowserPipelineSpec(
         session_id="default",
         bot_session_id=1,
@@ -200,8 +201,9 @@ def test_browser_default_pipeline_mode_is_split() -> None:
     )
     assert spec.pipeline_mode == SPLIT_MODE
     transport = BrowserAudioTransport()
-    pipeline = assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
-    assert isinstance(pipeline, VoicePipeline)
+    # Split now runs on the AgentSession engine, not assemble_browser_pipeline.
+    with pytest.raises(BrowserPipelineSetupError, match="AgentSession engine"):
+        assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
 
 
 def test_browser_unified_voice_id_propagates_from_payload() -> None:

@@ -61,16 +61,23 @@ construction sites:
 
 - **Meet sessions** — `johnny/meet_worker/pipeline_runner.py::build_and_run_pipeline`
   reads `JOHNNY_PIPELINE_MODE` (default `split`; unknown → WARN + `split`).
-- **Browser / playground sessions** — `app/services/browser_pipeline_runner.py::assemble_browser_pipeline`
-  reads `spec.pipeline_mode` (unknown → raises `BrowserPipelineSetupError`, no
-  silent fallback).
+- **Browser / playground sessions** — `app/services/browser_pipeline_runner.py::run_browser_pipeline`
+  reads `spec.pipeline_mode` (unknown → `BrowserRunOutcome("failed", …)`, no silent
+  fallback). **`split` runs on the LiveKit `AgentSession` engine** in-process
+  (`johnny/agent/browser_session.py::BrowserAgentSession`, Johnny-7g5.1); `unified`
+  stays on `UnifiedVoicePipeline`. `assemble_browser_pipeline` now only builds the
+  unified pipeline (split → the agent engine).
 
 > **Migration note (epic Johnny-7g5).** The LiveKit `AgentSession` migration moves
 > the **Meet** path off this in-process engine behind `JOHNNY_ORCHESTRATOR=agentsession`
 > (a Meet-only flag — `session_scheduler` + `meet_worker/bootstrap`). The **browser /
-> playground** path intentionally stays on `VoicePipeline` **regardless of that flag**,
-> so cutover cannot silently break the playground; its migration is deferred
-> (Johnny-a1w → follow-up Johnny-7g5.1). Rationale + the two migration designs:
+> playground** path's **split** mode was migrated onto the `AgentSession` engine
+> (Johnny-7g5.1) — run *in-process and roomless* via custom `AudioInput`/`AudioOutput`
+> over `BrowserAudioTransport` (`johnny/agent/browser_audio_io.py`), with
+> `feed_text → router gate → session.generate_reply()`. It does **not** read
+> `JOHNNY_ORCHESTRATOR` and does **not** dispatch a remote agent worker (the engine
+> runs in the API process). So the browser path no longer constructs `VoicePipeline`
+> (`unified` keeps its own `UnifiedVoicePipeline`). History:
 > [playground-orchestration-deferral.md](playground-orchestration-deferral.md).
 
 ---

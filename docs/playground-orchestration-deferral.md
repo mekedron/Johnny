@@ -1,5 +1,22 @@
 # In-browser playground stays on the legacy pipeline (deferral)
 
+> **RESOLVED by Johnny-7g5.1 (2026-06-09).** The deferral below is now lifted:
+> the in-browser playground's **split** path runs on the LiveKit Agents
+> `AgentSession` engine, in-process and roomless, and `feed_text` maps to the
+> router gate + `session.generate_reply()`. The implementation took **Option A**
+> (the recommended one) — a custom `AudioInput`/`AudioOutput` over
+> `BrowserAudioTransport` (`johnny/agent/browser_audio_io.py`) plus an in-process
+> `BrowserAgentSession` (`johnny/agent/browser_session.py`) started with
+> `turn_detection="vad"` (the multilingual turn detector needs a live
+> `get_job_context()`, absent in the API process — and VAD endpointing matches the
+> legacy browser pipeline anyway). `app/services/browser_pipeline_runner.py`
+> dispatches `split → BrowserAgentSession`, `unified → UnifiedVoicePipeline` (the
+> agent engine is split-only; unified stays on its own pipeline, which is *not*
+> `VoicePipeline`). The browser path no longer constructs `VoicePipeline`. Verified
+> end-to-end via chrome-devtools MCP (typed input + a real-speech voice round-trip)
+> with INV-1 + decision↔utterance parity persisted. The rest of this record is kept
+> for the original rationale + the design it pointed at.
+
 Decision record for **Johnny-a1w** (Phase 3, epic Johnny-7g5 — migrate voice
 orchestration to LiveKit Agents `AgentSession`).
 

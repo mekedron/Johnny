@@ -5,6 +5,47 @@ after each iteration and it's included in prompts for context.
 
 ## Codebase Patterns (Study These First)
 
+### Roomless in-process AgentSession over a custom transport (Johnny-7g5.1)
+- **`AgentSession.start(agent=...)` runs WITHOUT a room** (verified livekit-agents 1.5.17):
+  `start` only builds a `RoomIO` when `is_given(room)`. Set `session.input.audio` /
+  `session.output.audio` BEFORE `start` and omit `room` → it forwards your input frames to the
+  activity (`_forward_audio_task`) and drains your output sink. No job context is needed on the
+  AgentActivity path — the ONLY hard `get_job_context()` dependency is `MultilingualModel`
+  (`turn_detector/base.py:211` resolves its inference executor from the job ctx). So pass
+  `turn_detection="vad"` to run roomless in the API process (Silero VAD endpointing needs no job
+  ctx — and matches the legacy browser `VoicePipeline`, which never used a semantic EOU model).
+- **Custom audio I/O contract** (`johnny/agent/browser_audio_io.py`): `AudioInput` is an async
+  iterator of `rtc.AudioFrame` (`rtc.AudioFrame(data, sample_rate, num_channels, samples_per_channel)`,
+  `samples_per_channel = len(pcm)//(2*channels)` for S16LE). `AudioOutput` must fire
+  `on_playback_finished` EXACTLY ONCE per captured segment or the reply `SpeechHandle` never
+  completes → the gate's INV-1 terminal never emits. The forwarding contract
+  (`generation._audio_forwarding_task` finally): `capture_frame`* → `flush()` always → `clear_buffer()`
+  ONLY if cancelled. A "blind" sink (browser gives no playout feedback) ESTIMATES playout: sleep the
+  captured audio's real-time duration, then `on_playback_finished`; `clear_buffer` (barge-in) cuts it
+  short with `interrupted=True`. Model it on `voice/avatar/_queue_io.py::QueueAudioOutput`.
+- **Reuse the worker's assembler.** `build_agent_runtime(SessionJobConfig, vad=, event_bus=,
+  session_started_at=)` builds EVERY Phase-2 seam (adapters/gate/observability/barge-in/JohnnyAgent);
+  only `build_agent_session` + the approval coordinator are job-context-bound, so the in-process
+  runner (`browser_session.py::BrowserAgentSession`) builds those itself — exactly like
+  `worker.entrypoint`, minus the room. A `BrowserPipelineSpec` maps field-for-field onto a
+  `SessionJobConfig` (`_job_config_from_spec`); `room_name` is derived-but-unused in-process.
+- **Typed input keeps INV-1 + decision↔utterance parity by routing through the gate, NOT a bare
+  generate_reply.** `session.generate_reply(user_input=)` calls `activity._generate_reply` directly —
+  it NEVER fires `on_user_turn_completed`, so a bare call bypasses the router gate and `bind_reply`
+  ignores it (empty `_pending_speak_turns`) → no decision, no terminal. So `feed_text` = publish the
+  user `TranscriptFinalized` → `gate.run_turn(session.history, LKChatMessage(role="user",...))`
+  (StopResponse on decline; pushes a pending SPEAK turn otherwise) → `generate_reply` on SPEAK (the
+  on_enter `speech_created` listener auto-binds it to the gated turn). Voice turns drive the gate
+  naturally via STT→VAD→`on_user_turn_completed`.
+- **GOTCHA — agent observability emits EPOCH ms where the status subscriber expects a session-relative
+  offset.** `transcript_chunks.start_offset_ms` + `session_timings.started_at_ms` are 4-byte INTEGER;
+  the legacy `VoicePipeline._now_ms` = `loop.time()-session_started_at` (small). The agent engine's
+  `JohnnyAgent` transcript stamp (`_now_ms`→epoch) + `MetricsTranslator` (when `session_started_at<=0`)
+  emit raw epoch-ms (~1.78e12) → `psycopg NumericValueOutOfRange` on Postgres. The d5z unit tests used
+  SQLite (8-byte INTEGER) so it never surfaced. Fix: `JohnnyAgent._relative_ms()` (monotonic-from-
+  construction) for transcripts + pass `session_started_at=time.time()` to `build_agent_runtime` (the
+  browser runner AND `worker.py`). When validating agent persistence, assert against POSTGRES, not SQLite.
+
 ### A migration epic's second orchestration consumer can be SAFELY deferred when it's flag-isolated (Johnny-a1w)
 - **The in-browser playground is a separate orchestration consumer from the Meet path** and stays on
   the legacy in-process `VoicePipeline` (migration deferred to Johnny-7g5.1, which blocks the
@@ -1298,5 +1339,53 @@ decision record + `PIPELINE.md` (the orchestration doc the epic plan pairs with 
 
 **Learnings:** captured as a new pattern at the top ("A migration epic's second orchestration
 consumer …").
+
+---
+
+## 2026-06-09 - Johnny-7g5.1
+
+Migrated the in-browser playground's **split** path off the legacy in-process
+`VoicePipeline` onto the LiveKit Agents `AgentSession` engine, run **in-process and
+roomless** in the API (Option A from the deferral doc). `feed_text` now maps to the
+router gate + `session.generate_reply()`. Unified (S2S) stays on `UnifiedVoicePipeline`
+(the agent engine is split-only; that's not `VoicePipeline`, so the retirement criterion
+holds). The deferral (Johnny-a1w) is lifted; this unblocks the pipeline.py-retirement
+chore Johnny-n22.
+
+**Files changed:**
+- NEW `backend/johnny/agent/browser_audio_io.py` — `BrowserAudioInput` / `BrowserAudioOutput`
+  (LiveKit audio I/O over `BrowserAudioTransport`; estimated playout).
+- NEW `backend/johnny/agent/browser_session.py` — `BrowserAgentSession` (assembles the runtime +
+  roomless session + audio I/O; `feed_text` routes through the gate; `interrupt`; `aclose`).
+- `backend/johnny/agent/session.py` — `build_agent_session(turn_detection=…)` param (browser passes
+  `"vad"`); transcript timestamps now session-relative (`_relative_ms`), removed dead `_now_ms`.
+- `backend/johnny/agent/worker.py` — pass `session_started_at=time.time()` (fixes Meet timing overflow too).
+- `backend/app/services/browser_pipeline_runner.py` — REWRITE: split → `BrowserAgentSession`,
+  unified → `UnifiedVoicePipeline`; `assemble_browser_pipeline` is unified-only; new
+  `_job_config_from_spec`. Removed `_assemble_split` + VoicePipeline construction.
+- `backend/app/api/browser_sessions.py` — doc-only (the engine-agnostic `feed_text`/`interrupt` path
+  was already polymorphic; the captured `pipeline` is now `BrowserAgentSession` | `UnifiedVoicePipeline`).
+- Tests: rewrote `test_browser_pipeline_runner.py` (job-config + unified-only + no-dispatch guard),
+  updated `test_pipeline_mode_dispatch.py` (split → agent engine), repurposed `test_browser_pipeline_e2e.py`
+  (split dispatch graceful-failure), NEW `tests/agent/test_browser_audio_io.py` + `tests/agent/test_browser_session.py`.
+- Docs: `docs/playground-orchestration-deferral.md` (RESOLVED banner) + `docs/PIPELINE.md` (migration note).
+
+**Validated (chrome-devtools MCP + in-process smokes under `.validation/Johnny-7g5.1/`):**
+- Typed input → router SPEAK → spoken reply in the real browser (status "Speaking"; transcript shows
+  both turns); router correctly DECLINED a trivial "2+2" question (gate works, not always-reply).
+- Voice round-trip (16k speech fixture): mic PCM → STT (`"please describe the meeting bot architecture."`)
+  → gate SPEAK → ~14s TTS audio + `AgentSpoke` + one `TurnTerminal(replied)`.
+- DB (Postgres, real Redis subscriber): `agent_decisions` (turn1 suppressed/no_reply, turn2 spoken/replied),
+  `agent_utterances` (1), `transcript_chunks` (2, sane offsets), `session_timings` (4, sane offsets) — INV-1
+  + decision↔utterance parity hold; NO `out of range` errors after the timestamp fix.
+
+**Quality gates:** 35 new/updated tests pass; 612 agent tests pass (no regressions); ruff + mypy clean.
+
+**Learnings:** see new top pattern "Roomless in-process AgentSession over a custom transport". Two
+gotchas worth re-flagging: (1) the agent observability epoch-ms → INTEGER-column overflow (hidden by
+SQLite-based unit tests, surfaced only on Postgres) affected BOTH browser + Meet; (2) the operator's
+DB-active LLM `model='qwen2.5:7b-instruct'` is NOT pulled in their ollama (only `…-q4_K_M` is) — the
+playground/Meet router 404s on it. Validation temporarily pointed at the q4 tag, then RESTORED the
+operator's original — flagged to the operator to pull the model or switch the config.
 
 ---

@@ -230,11 +230,6 @@ def load_vad() -> VAD:
     return silero.VAD.load()
 
 
-def _now_ms() -> int:
-    """Wall-clock milliseconds for stamping ``TranscriptFiltered`` events (Johnny-cmd)."""
-    return int(time.time() * 1000)
-
-
 def _speech_alt_duration_ms(alt: SpeechData | None) -> int | None:
     """Segment duration (ms) of an STT alternative, or ``None`` when unknown.
 
@@ -262,6 +257,7 @@ def build_agent_session(
     preemptive_generation: bool = False,
     enable_barge_in: bool = True,
     min_interruption_duration_s: float | None = None,
+    turn_detection: Any = None,
 ) -> AgentSession[Any]:
     """Construct Johnny's ``AgentSession`` from provider adapter instances.
 
@@ -270,6 +266,17 @@ def build_agent_session(
     providers by the adapter factory (Johnny-zb3). Turn-taking uses LiveKit's
     multilingual turn detector plus Silero VAD per the locked decision;
     ``vad`` defaults to a freshly loaded Silero model when not supplied.
+
+    ``turn_detection`` overrides the turn-detection strategy. It defaults to the
+    :class:`~livekit.plugins.turn_detector.multilingual.MultilingualModel` (the
+    Meet path's locked decision), but that model resolves its inference executor
+    from the live LiveKit ``get_job_context()`` and so cannot run outside a
+    dispatched job. The in-browser playground (Johnny-7g5.1) runs the session
+    *in the API process* with no job context, so it passes ``"vad"`` — Silero
+    VAD endpointing, which needs no job context and matches the legacy browser
+    ``VoicePipeline``'s own VAD-based turn-taking (it never used a semantic EOU
+    model). Any value LiveKit accepts (a model, ``"vad"`` / ``"stt"`` / …) is
+    forwarded verbatim.
 
     ``preemptive_generation`` defaults to ``False`` because Johnny gates every
     turn through the router "should-speak" decision in
@@ -295,7 +302,7 @@ def build_agent_session(
     the legacy fast-trigger value).
     """
     turn_handling: TurnHandlingOptions = {
-        "turn_detection": MultilingualModel(),
+        "turn_detection": turn_detection if turn_detection is not None else MultilingualModel(),
         "preemptive_generation": {"enabled": preemptive_generation},
         "interruption": build_interruption_options(
             enable_barge_in=enable_barge_in,
@@ -418,6 +425,14 @@ class JohnnyAgent(Agent):
         self._transcript_finalized_sink = transcript_finalized_sink
         self._metrics_listener = metrics_listener
         self._session_id = session_id
+        # Session-start reference for transcript ``timestamp_ms`` (Johnny-7g5.1).
+        # The status subscriber writes ``timestamp_ms`` into
+        # ``transcript_chunks.start_offset_ms`` (a 4-byte INTEGER) as an
+        # offset-from-start, mirroring the legacy ``VoicePipeline._now_ms``
+        # (``loop.time() - session_started_at``). Emitting raw epoch-ms here
+        # overflows that column on Postgres, so transcript timestamps are
+        # session-relative from agent construction.
+        self._session_started_at = time.monotonic()
 
     async def on_enter(self) -> None:
         """Wire the reply→turn correlation + metrics translation once active.
@@ -507,6 +522,16 @@ class JohnnyAgent(Agent):
             target_turn_id=turn_id,
             current_speech=lambda: self.session.current_speech,
         )
+
+    def _relative_ms(self) -> int:
+        """Session-relative timestamp (ms) for transcript events (Johnny-7g5.1).
+
+        The offset-from-start the status subscriber writes into the INTEGER
+        ``transcript_chunks.start_offset_ms`` column (parity with the legacy
+        ``VoicePipeline._now_ms``), so a transcript can never overflow it with a
+        raw epoch-ms value.
+        """
+        return max(0, int((time.monotonic() - self._session_started_at) * 1000))
 
     # ------------------------------------------------------------------ #
     # STT noise gate (Johnny-cmd)                                         #
@@ -628,7 +653,7 @@ class JohnnyAgent(Agent):
             return None
         return TranscriptFiltered(
             text=text,
-            timestamp_ms=_now_ms(),
+            timestamp_ms=self._relative_ms(),
             reason=reason,
             speaker=speaker,
             confidence=confidence,
@@ -684,7 +709,7 @@ class JohnnyAgent(Agent):
             return
         finalized = TranscriptFinalized(
             text=text,
-            timestamp_ms=_now_ms(),
+            timestamp_ms=self._relative_ms(),
             speaker=alt.speaker_id if alt is not None else None,
             confidence=alt.confidence if alt is not None else None,
             session_id=self._session_id,

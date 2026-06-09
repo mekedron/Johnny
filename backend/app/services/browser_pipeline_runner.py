@@ -1,38 +1,31 @@
-"""In-process pipeline runner for browser-sourced sessions (Johnny-ckz.6).
+"""In-process session runner for browser-sourced sessions (Johnny-ckz.6).
 
-The meet-worker container model assembles + runs the voice pipeline in
-its own process. For the in-browser surface there is no container —
-audio flows directly between the browser and the API process over a
-WebSocket, and the pipeline runs in-process here in the API.
+The meet-worker container model assembles + runs the voice session in its own
+process. For the in-browser surface there is no container — audio flows directly
+between the browser and the API process over a WebSocket, and the session runs
+in-process here in the API.
 
-This module is the in-process counterpart of
-:mod:`johnny.meet_worker.pipeline_runner`. It takes:
+Per Johnny-ckz.17 the runner consults the persisted ``pipeline_mode`` (``split``
+vs ``unified``) and dispatches to the appropriate engine. Per Johnny-7g5.1 the
+**split** path now runs on the LiveKit Agents ``AgentSession`` engine — the same
+engine the Meet path uses — bound to the browser transport in-process and roomless
+(:class:`johnny.agent.browser_session.BrowserAgentSession`), so the legacy
+in-process :class:`~johnny.voice_pipeline.pipeline.VoicePipeline` is no longer
+constructed for the browser:
 
-* A :class:`BrowserAudioTransport` that the WebSocket endpoint feeds.
-* A provider-config payload (mirror of the env-var payload the meet-worker
-  receives) — globally active providers merged with any per-session
-  overrides from ``bot_sessions.playground_overrides``.
-* A :class:`PipelineConfig` carrying the session id + mode + instructions.
+* ``split`` → :class:`~johnny.agent.browser_session.BrowserAgentSession` over the
+  STT/LLM/TTS adapter trio (router gate, observability, barge-in, noise gate, the
+  answer-path nodes — every Phase-2 seam, identical to a real meeting);
+* ``unified`` → :class:`~johnny.voice_pipeline.unified_pipeline.UnifiedVoicePipeline`
+  over an :class:`~app.providers.s2s_base.S2SProvider` (the agent engine is
+  split-only; unified stays on its own in-process pipeline, which is *not*
+  ``VoicePipeline``).
 
-…and runs the pipeline against the transport until either the transport
-closes (browser disconnect) or the caller flags shutdown via the
-``stop_event``.
-
-Per Johnny-ckz.17, the runner consults the persisted ``pipeline_mode``
-(``split`` vs ``unified``) and dispatches to the appropriate orchestrator:
-
-* ``split`` → :class:`VoicePipeline` over the STT/LLM/TTS trio.
-* ``unified`` → :class:`UnifiedVoicePipeline` over an :class:`S2SProvider`.
-
-There is no codepath that runs the split pipeline directly without
-consulting the router. The router lives inside
-:func:`assemble_browser_pipeline` so every browser session call site is
-covered by the same dispatch.
-
-Persistence (transcripts, decisions, utterances) goes through the same
-SQLAlchemy sinks as a real meeting; the Redis event bus + WebSocket
-fan-out is shared too, so the live session view (US-032) works for
-browser sessions with no extra wiring.
+Persistence (transcripts, decisions, utterances) goes through the same Redis
+event bus + ``session_status_subscriber`` the Meet path writes through (the split
+agent path emits the same ``PipelineEvent``\\s, Johnny-d5z), and the unified path
+keeps its SQLAlchemy sinks; the WebSocket fan-out is shared too, so the live
+session view (US-032) works for browser sessions with no extra wiring.
 """
 
 from __future__ import annotations
@@ -41,36 +34,32 @@ import asyncio
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import app.providers  # noqa: F401 — registers adapters at import time
 from app.providers.base import (
-    LLMProvider,
     ProviderConfig,
     ProviderKind,
-    STTProvider,
-    TTSProvider,
     get_registry,
 )
 from app.providers.s2s_base import S2SProvider
+from johnny.agent.job_config import (
+    DEFAULT_MODE,
+    SUPPORTED_MODES,
+    SessionJobConfig,
+    room_name_for_session,
+)
 from johnny.voice_pipeline import (
-    SPEAKING_MODES,
-    SUGGEST_ONLY_MODE,
     BrowserAudioTransport,
-    EnergyVAD,
     EventBus,
-    PipelineConfig,
-    SileroVAD,
     UnifiedPipelineConfig,
     UnifiedVoicePipeline,
-    VADAnalyzer,
-    VoicePipeline,
 )
 
-logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    pass
 
-VAD_ENERGY_THRESHOLD = 0.02
-"""Energy VAD threshold — copied from :mod:`johnny.meet_worker.pipeline_runner`."""
+logger = logging.getLogger(__name__)
 
 SPLIT_MODE = "split"
 UNIFIED_MODE = "unified"
@@ -84,7 +73,7 @@ SQLAlchemy-tied via the ORM model) into the pipeline package.
 
 
 class BrowserPipelineSetupError(RuntimeError):
-    """Raised when the in-process pipeline can't be assembled.
+    """Raised when the in-process session can't be assembled.
 
     The API endpoint translates this to a 4xx so the user knows the
     session couldn't start (e.g. no STT provider configured).
@@ -93,14 +82,13 @@ class BrowserPipelineSetupError(RuntimeError):
 
 @dataclass(frozen=True)
 class BrowserRunOutcome:
-    """Terminal outcome of one browser pipeline run.
+    """Terminal outcome of one browser session run.
 
     ``status`` is the lifecycle status to persist + broadcast on exit:
     ``"ended"`` for a clean stop (stop_event fired, or the transport hit
-    EOF) and ``"failed"`` for an assembly error or a pipeline crash.
-    ``error_reason`` is populated only for failures so the playground can
-    surface *why* the session died (e.g. "no active STT provider")
-    instead of going silently dark.
+    EOF) and ``"failed"`` for an assembly error or a crash. ``error_reason``
+    is populated only for failures so the playground can surface *why* the
+    session died (e.g. "no active STT provider") instead of going silently dark.
     """
 
     status: str
@@ -157,19 +145,19 @@ class BrowserPipelineSpec:
     :attr:`~app.services.personality_resolver.PersonalityResolution.personality_prompt`
     (the resolved personality's ``description`` wrapped as
     ``[personality: <name>]\\n<description>``). Mapped onto the split
-    :class:`PipelineConfig` and the unified :class:`UnifiedPipelineConfig`
+    :class:`SessionJobConfig` and the unified :class:`UnifiedPipelineConfig`
     so the persona reaches the model in either pipeline shape. Empty for a
     session that resolved no personality.
     """
 
 
-def _build_provider(
-    kind: ProviderKind, entry: Mapping[str, Any] | None
-) -> Any | None:
+def _build_provider(kind: ProviderKind, entry: Mapping[str, Any] | None) -> Any | None:
     """Instantiate one provider from a payload entry; ``None`` on miss.
 
     Mirrors :func:`johnny.meet_worker.pipeline_runner._build_provider`
     so the assembly contract stays identical between the two runners.
+    Used by the unified (S2S) path; the split path builds its adapters
+    from the same payload shape inside the agent factory.
     """
     if not isinstance(entry, Mapping):
         return None
@@ -180,119 +168,71 @@ def _build_provider(
         kind=kind,
         provider_name=provider_name,
         display_name=str(entry.get("display_name", provider_name)),
-        credentials={
-            str(k): str(v) for k, v in (entry.get("credentials") or {}).items()
-        },
+        credentials={str(k): str(v) for k, v in (entry.get("credentials") or {}).items()},
         options=dict(entry.get("options") or {}),
     )
     return get_registry().instantiate(config)
 
 
-def _build_vad() -> VADAnalyzer:
-    """Pick the best VAD available; degrade to EnergyVAD on Silero failure."""
-    try:
-        return SileroVAD()
-    except Exception as exc:  # noqa: BLE001 — fall back, don't fail
-        logger.warning(
-            "SileroVAD unavailable (%s); falling back to EnergyVAD", exc
-        )
-        return EnergyVAD(threshold=VAD_ENERGY_THRESHOLD)
+def _job_config_from_spec(spec: BrowserPipelineSpec, *, redis_url: str | None) -> SessionJobConfig:
+    """Map a :class:`BrowserPipelineSpec` onto the agent :class:`SessionJobConfig`.
 
-
-def assemble_browser_pipeline(
-    transport: BrowserAudioTransport,
-    spec: BrowserPipelineSpec,
-    *,
-    vad: VADAnalyzer | None = None,
-) -> VoicePipeline | UnifiedVoicePipeline:
-    """Build a pipeline (split or unified) wired to ``transport``.
-
-    Returns the assembled pipeline. Raises
-    :class:`BrowserPipelineSetupError` on missing/invalid providers.
-    The return type is the union of the two pipeline classes; callers
-    that only care about a common interface (``run`` / shutdown) should
-    treat the return value polymorphically — both classes expose a
-    ``run`` coroutine.
-
-    Tests can inject a fake VAD via the ``vad`` kwarg (split mode only —
-    unified mode delegates VAD to the S2S provider).
+    The split agent engine is driven by the same per-session contract the Meet
+    dispatch uses (Johnny-7we/9eh): the two carry the same provider payload +
+    prompt assembly + mode, just sourced differently (admin/meeting config here
+    vs. the dispatch metadata for Meet). ``room_name`` is required by the
+    contract but unused in-process (there is no room); it is derived for
+    correlation only. ``redis_url`` is threaded so ``approval_required`` mode can
+    reach the Redis approval gate (every other mode is Redis-via-event-bus only).
+    A blank/unknown ``mode`` coerces to ``listen_only`` (the contract's own
+    leniency).
     """
-    pipeline_mode = (spec.pipeline_mode or SPLIT_MODE).strip().lower()
-    if pipeline_mode not in SUPPORTED_PIPELINE_MODES:
-        raise BrowserPipelineSetupError(
-            f"unknown pipeline_mode={pipeline_mode!r} — expected one of "
-            f"{sorted(SUPPORTED_PIPELINE_MODES)}"
-        )
-    if pipeline_mode == UNIFIED_MODE:
-        return _assemble_unified(transport, spec)
-    return _assemble_split(transport, spec, vad=vad)
-
-
-def _assemble_split(
-    transport: BrowserAudioTransport,
-    spec: BrowserPipelineSpec,
-    *,
-    vad: VADAnalyzer | None = None,
-) -> VoicePipeline:
-    """Build the legacy split pipeline (STT → LLM → TTS)."""
-    stt_entry = spec.provider_payload.get(ProviderKind.STT.value)
-    llm_entry = spec.provider_payload.get(ProviderKind.LLM.value)
-    tts_entry = spec.provider_payload.get(ProviderKind.TTS.value)
-
-    stt = _build_provider(ProviderKind.STT, stt_entry)
-    llm = _build_provider(ProviderKind.LLM, llm_entry)
-    tts = _build_provider(ProviderKind.TTS, tts_entry)
-
-    if stt is None:
-        raise BrowserPipelineSetupError(
-            "no active STT provider — browser sessions need an STT row"
-        )
-    if llm is None:
-        raise BrowserPipelineSetupError(
-            "no active LLM provider — router decisions need an LLM row"
-        )
-
-    mode = spec.mode or "listen_only"
-    effective_mode = mode
-    if tts is None and mode in SPEAKING_MODES:
-        # Same degradation as the meet-worker — keep the router running
-        # even when the TTS row is missing so the UI shows what the
-        # bot would have said.
-        logger.warning(
-            "browser session %s: mode=%s but no TTS — degrading to suggest_only",
-            spec.session_id,
-            mode,
-        )
-        effective_mode = SUGGEST_ONLY_MODE
-
-    config = PipelineConfig(
-        session_id=spec.session_id,
+    mode = (spec.mode or "").strip() or DEFAULT_MODE
+    if mode not in SUPPORTED_MODES:
+        mode = DEFAULT_MODE
+    return SessionJobConfig(
         bot_session_id=spec.bot_session_id,
-        mode=effective_mode,
+        room_name=room_name_for_session(spec.bot_session_id),
+        mode=mode,
+        pipeline_mode=SPLIT_MODE,
         instructions=spec.instructions,
         personality_prompt=spec.personality_prompt,
         context=spec.context,
         calendar_context=spec.calendar_context,
         calendar_attachments_text=spec.calendar_attachments_text,
         prior_session_context=spec.prior_session_context,
+        provider_config=dict(spec.provider_payload),
+        redis_url=redis_url,
     )
 
-    if vad is None:
-        vad = _build_vad()
 
-    return VoicePipeline(
-        transport=transport,
-        vad=vad,
-        stt=_as_stt(stt),
-        router_llm=_as_llm(llm),
-        answer_llm=_as_llm(llm),
-        # VoicePipeline's signature declares ``tts: TTSProvider`` but
-        # at runtime ``None`` is accepted in non-speaking modes — mirrors
-        # the meet-worker pipeline_runner pattern. Cast to silence
-        # mypy without weakening the public ABC.
-        tts=cast(TTSProvider, _as_tts_or_none(tts)),
-        event_bus=spec.event_bus,
-        config=config,
+def assemble_browser_pipeline(
+    transport: BrowserAudioTransport,
+    spec: BrowserPipelineSpec,
+    *,
+    vad: Any = None,  # noqa: ARG001 — kept for signature compat (split used it)
+) -> UnifiedVoicePipeline:
+    """Build the **unified** S2S pipeline wired to ``transport``.
+
+    Split mode no longer assembles here — it runs on the LiveKit Agents engine
+    (:class:`~johnny.agent.browser_session.BrowserAgentSession`), driven through
+    :func:`run_browser_pipeline`. This helper now only builds the unified
+    pipeline; calling it for a split spec raises
+    :class:`BrowserPipelineSetupError` so a stale split caller fails loud rather
+    than silently building the wrong engine.
+    """
+    pipeline_mode = (spec.pipeline_mode or SPLIT_MODE).strip().lower()
+    if pipeline_mode == UNIFIED_MODE:
+        return _assemble_unified(transport, spec)
+    if pipeline_mode == SPLIT_MODE:
+        raise BrowserPipelineSetupError(
+            "split browser sessions run on the AgentSession engine "
+            "(johnny.agent.browser_session.BrowserAgentSession), not "
+            "assemble_browser_pipeline — drive them through run_browser_pipeline"
+        )
+    raise BrowserPipelineSetupError(
+        f"unknown pipeline_mode={pipeline_mode!r} — expected one of "
+        f"{sorted(SUPPORTED_PIPELINE_MODES)}"
     )
 
 
@@ -352,43 +292,130 @@ async def run_browser_pipeline(
     spec: BrowserPipelineSpec,
     *,
     stop_event: asyncio.Event,
-    vad: VADAnalyzer | None = None,
+    vad: Any = None,
     on_assembled: Any = None,
 ) -> BrowserRunOutcome:
-    """Assemble and run the pipeline until ``stop_event`` fires.
+    """Assemble and run the session until ``stop_event`` fires.
 
-    ``on_assembled`` is an optional callback that receives the assembled
-    pipeline BEFORE :meth:`run` is awaited. Callers use this to capture a
-    reference for out-of-band injection (e.g. the text-input endpoint
-    that calls ``pipeline.feed_text`` — Johnny-ckz.11). The callback is
-    invoked for BOTH pipeline shapes; callers that only handle the split
-    pipeline should ``isinstance`` check before reading split-only
-    attributes.
+    Dispatches on ``spec.pipeline_mode``: ``split`` runs the LiveKit Agents
+    :class:`~johnny.agent.browser_session.BrowserAgentSession` engine in-process;
+    ``unified`` runs the legacy :class:`UnifiedVoicePipeline`.
 
-    All exceptions are caught and logged; the run never bubbles up so
-    a transient provider error doesn't kill the API process. The
-    transport is told to close on the way out so the WebSocket endpoint
-    can flush remaining playback frames and disconnect cleanly.
+    ``on_assembled`` is an optional callback that receives the assembled engine
+    BEFORE the run loop begins. Callers use it to capture a reference for
+    out-of-band injection (the text-input endpoint that calls ``feed_text``, the
+    stop control that calls ``interrupt`` — Johnny-ckz.11/ckz.13). Both engines
+    expose the same ``feed_text`` / ``interrupt`` surface, so the endpoint wiring
+    is engine-agnostic.
 
-    Returns a :class:`BrowserRunOutcome` describing how the run ended so
-    the caller can persist + broadcast the right lifecycle status: a
-    setup error or a pipeline crash yields ``status="failed"`` with the
-    reason attached; any clean exit yields ``status="ended"``.
+    All exceptions are caught and logged; the run never bubbles up so a transient
+    provider error doesn't kill the API process. The transport is told to close
+    on the way out so the WebSocket endpoint can flush remaining playback frames
+    and disconnect cleanly. Returns a :class:`BrowserRunOutcome` describing how
+    the run ended.
     """
-    try:
-        pipeline = assemble_browser_pipeline(transport, spec, vad=vad)
-    except BrowserPipelineSetupError as exc:
-        logger.exception(
-            "browser pipeline assembly failed for session=%s", spec.session_id
+    pipeline_mode = (spec.pipeline_mode or SPLIT_MODE).strip().lower()
+    if pipeline_mode == UNIFIED_MODE:
+        return await _run_unified(transport, spec, stop_event=stop_event, on_assembled=on_assembled)
+    if pipeline_mode != SPLIT_MODE:
+        logger.error(
+            "browser session %s: unknown pipeline_mode=%s — refusing to start",
+            spec.session_id,
+            pipeline_mode,
         )
+        await transport.stop()
+        transport.close_playback()
+        return BrowserRunOutcome("failed", f"unknown pipeline_mode={pipeline_mode!r}")
+    return await _run_agent_session(
+        transport, spec, stop_event=stop_event, vad=vad, on_assembled=on_assembled
+    )
+
+
+async def _run_agent_session(
+    transport: BrowserAudioTransport,
+    spec: BrowserPipelineSpec,
+    *,
+    stop_event: asyncio.Event,
+    vad: Any = None,
+    on_assembled: Any = None,
+) -> BrowserRunOutcome:
+    """Run the split path on the in-process roomless ``AgentSession`` engine."""
+    from app.config import get_settings
+    from johnny.agent.adapters.factory import AgentSessionSetupError
+    from johnny.agent.browser_session import BrowserAgentSession
+
+    try:
+        redis_url = get_settings().redis_url
+    except Exception:
+        redis_url = None
+    config = _job_config_from_spec(spec, redis_url=redis_url)
+
+    try:
+        agent_session = await BrowserAgentSession.build(
+            transport, config, event_bus=spec.event_bus, vad=vad
+        )
+    except AgentSessionSetupError as exc:
+        logger.exception("browser agent assembly failed for session=%s", spec.session_id)
         await transport.stop()
         transport.close_playback()
         return BrowserRunOutcome("failed", str(exc))
     except Exception as exc:  # noqa: BLE001 — last-resort surface
-        logger.exception(
-            "browser pipeline unexpected setup error for session=%s",
-            spec.session_id,
-        )
+        logger.exception("browser agent unexpected setup error for session=%s", spec.session_id)
+        await transport.stop()
+        transport.close_playback()
+        return BrowserRunOutcome("failed", f"agent setup error: {exc}")
+
+    if on_assembled is not None:
+        try:
+            on_assembled(agent_session)
+        except Exception:  # noqa: BLE001 — best-effort hook
+            logger.exception("on_assembled hook raised for session=%s", spec.session_id)
+
+    logger.info(
+        "browser agent session assembled for session=%s mode=%s",
+        spec.session_id,
+        spec.mode,
+    )
+    await transport.start()
+    try:
+        await agent_session.start()
+    except Exception as exc:  # noqa: BLE001 — surface as a clean failure
+        logger.exception("browser agent session start failed for session=%s", spec.session_id)
+        await agent_session.aclose()
+        await transport.stop()
+        transport.close_playback()
+        return BrowserRunOutcome("failed", f"agent session start error: {exc}")
+
+    outcome = BrowserRunOutcome("ended", None)
+    try:
+        await stop_event.wait()
+    except Exception as exc:  # noqa: BLE001 — defensive
+        logger.exception("browser agent run error for session=%s", spec.session_id)
+        outcome = BrowserRunOutcome("failed", f"agent run error: {exc}")
+    finally:
+        await transport.stop()
+        transport.close_playback()
+        await agent_session.aclose()
+    return outcome
+
+
+async def _run_unified(
+    transport: BrowserAudioTransport,
+    spec: BrowserPipelineSpec,
+    *,
+    stop_event: asyncio.Event,
+    on_assembled: Any = None,
+) -> BrowserRunOutcome:
+    """Run the unified S2S path on the legacy :class:`UnifiedVoicePipeline`."""
+    try:
+        pipeline = _assemble_unified(transport, spec)
+    except BrowserPipelineSetupError as exc:
+        logger.exception("browser unified assembly failed for session=%s", spec.session_id)
+        await transport.stop()
+        transport.close_playback()
+        return BrowserRunOutcome("failed", str(exc))
+    except Exception as exc:  # noqa: BLE001 — last-resort surface
+        logger.exception("browser unified unexpected setup error for session=%s", spec.session_id)
         await transport.stop()
         transport.close_playback()
         return BrowserRunOutcome("failed", f"pipeline setup error: {exc}")
@@ -397,16 +424,9 @@ async def run_browser_pipeline(
         try:
             on_assembled(pipeline)
         except Exception:  # noqa: BLE001 — best-effort hook
-            logger.exception(
-                "on_assembled hook raised for session=%s", spec.session_id
-            )
+            logger.exception("on_assembled hook raised for session=%s", spec.session_id)
 
-    logger.info(
-        "browser pipeline assembled for session=%s mode=%s pipeline_mode=%s",
-        spec.session_id,
-        spec.mode,
-        spec.pipeline_mode,
-    )
+    logger.info("browser unified pipeline assembled for session=%s", spec.session_id)
     await transport.start()
     run_task = asyncio.create_task(pipeline.run())
     stop_task = asyncio.create_task(stop_event.wait())
@@ -417,18 +437,13 @@ async def run_browser_pipeline(
             return_when=asyncio.FIRST_COMPLETED,
         )
         if stop_task in done and not run_task.done():
-            # Caller asked us to stop — close the transport so the
-            # pipeline's transcribe loop exits via the EOF sentinel.
             await transport.stop()
-            if isinstance(pipeline, UnifiedVoicePipeline):
-                await pipeline.shutdown()
+            await pipeline.shutdown()
         if run_task in done:
             try:
                 run_task.result()
             except Exception as exc:  # noqa: BLE001 — pipeline crash is loggable
-                logger.exception(
-                    "browser pipeline crashed for session=%s", spec.session_id
-                )
+                logger.exception("browser unified pipeline crashed for session=%s", spec.session_id)
                 outcome = BrowserRunOutcome("failed", f"pipeline crashed: {exc}")
     finally:
         if not run_task.done():
@@ -441,32 +456,7 @@ async def run_browser_pipeline(
             stop_task.cancel()
         await transport.stop()
         transport.close_playback()
-        # Approval-gate cleanup only applies to the split pipeline —
-        # the unified pipeline doesn't run an approval round (the S2S
-        # provider answers immediately).
-        if isinstance(pipeline, VoicePipeline):
-            try:
-                await pipeline.approval_gate.close()
-            except Exception:  # noqa: BLE001 — best-effort cleanup
-                logger.exception(
-                    "approval gate close failed for session=%s", spec.session_id
-                )
     return outcome
-
-
-# --- Type hints (mirror of pipeline_runner) -------------------------------
-
-
-def _as_stt(provider: Any) -> STTProvider:
-    return cast(STTProvider, provider)
-
-
-def _as_llm(provider: Any) -> LLMProvider:
-    return cast(LLMProvider, provider)
-
-
-def _as_tts_or_none(provider: Any) -> TTSProvider | None:
-    return cast("TTSProvider | None", provider)
 
 
 def _as_s2s(provider: Any) -> S2SProvider:

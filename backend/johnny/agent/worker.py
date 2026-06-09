@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import TYPE_CHECKING, Any
 
 from livekit.agents import JobContext, JobProcess, WorkerOptions, cli
@@ -85,7 +86,16 @@ async def entrypoint(ctx: JobContext) -> None:
 
     vad = _prewarmed_vad(ctx)
     try:
-        runtime = await build_agent_runtime(config, vad=vad, db_session_factory=SessionLocal)
+        runtime = await build_agent_runtime(
+            config,
+            vad=vad,
+            db_session_factory=SessionLocal,
+            # Epoch-seconds reference so the metrics translator emits a
+            # session-relative ``started_at_ms`` instead of a raw epoch-ms value
+            # that overflows the INTEGER ``session_timings.started_at_ms`` column
+            # on Postgres (Johnny-7g5.1).
+            session_started_at=time.time(),
+        )
     except AgentSessionSetupError:
         logger.exception(
             "agent worker: cannot assemble a split AgentSession for session=%s — "

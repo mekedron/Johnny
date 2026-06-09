@@ -1,9 +1,10 @@
 """Tests for :mod:`app.services.browser_pipeline_runner`.
 
-The runner assembles + drives the in-process pipeline for browser
-sessions. These tests cover the assembly-time decisions (provider
-validation, TTS degradation, VAD fallback) without spinning up real
-audio or real providers — those are integration-level concerns.
+The runner dispatches a browser session to the right engine: ``split`` runs on the
+in-process LiveKit ``AgentSession`` engine (Johnny-7g5.1), ``unified`` on the legacy
+``UnifiedVoicePipeline``. These tests cover the spec → :class:`SessionJobConfig`
+mapping that feeds the split agent engine, the unified assembly, and the guard that
+the browser surface still never *dispatches* the agent (it runs it in-process).
 """
 
 from __future__ import annotations
@@ -12,258 +13,133 @@ from typing import Any
 
 import pytest
 
-from app.providers.base import LLMProvider, STTProvider, TTSProvider
 from app.services.browser_pipeline_runner import (
+    SPLIT_MODE,
+    UNIFIED_MODE,
     BrowserPipelineSetupError,
     BrowserPipelineSpec,
+    _job_config_from_spec,
     assemble_browser_pipeline,
 )
+from johnny.agent.job_config import DEFAULT_MODE, room_name_for_session
 from johnny.voice_pipeline import (
-    SUGGEST_ONLY_MODE,
     BrowserAudioTransport,
-    EnergyVAD,
     InMemoryEventBus,
-    VoicePipeline,
+    UnifiedVoicePipeline,
 )
 
 
-class _FakeSTT(STTProvider):
-    @property
-    def name(self) -> str:
-        return "fake-stt"
-
-    async def transcribe_stream(self, audio_iter: Any) -> Any:
-        async for _ in audio_iter:
-            yield None
-
-
-class _FakeLLM(LLMProvider):
-    @property
-    def name(self) -> str:
-        return "fake-llm"
-
-    async def chat(self, *_args: Any, **_kwargs: Any) -> Any:
-        return None
-
-
-class _FakeTTS(TTSProvider):
-    @property
-    def name(self) -> str:
-        return "fake-tts"
-
-    async def synthesize_stream(self, *_args: Any, **_kwargs: Any) -> Any:
-        if False:  # generator dummy
-            yield b""
-
-
-def _register_fakes() -> None:
-    """Re-register fake providers in the global registry for these tests."""
-    from app.providers.base import ProviderConfig, ProviderKind, get_registry
-
-    registry = get_registry()
-
-    def _stt_factory(cfg: ProviderConfig) -> _FakeSTT:
-        return _FakeSTT()
-
-    def _llm_factory(cfg: ProviderConfig) -> _FakeLLM:
-        return _FakeLLM()
-
-    def _tts_factory(cfg: ProviderConfig) -> _FakeTTS:
-        return _FakeTTS()
-
-    # Tolerate re-registration across multiple test runs.
-    for kind, name, factory in (
-        (ProviderKind.STT, "fake-stt", _stt_factory),
-        (ProviderKind.LLM, "fake-llm", _llm_factory),
-        (ProviderKind.TTS, "fake-tts", _tts_factory),
-    ):
-        try:
-            registry.register(kind, name, factory)
-        except Exception:  # noqa: BLE001 — already registered
-            pass
-
-
-@pytest.fixture(autouse=True)
-def _registry_fixture() -> None:
-    _register_fakes()
-
-
-def _spec(provider_payload: dict[str, Any], mode: str = "listen_only") -> BrowserPipelineSpec:
+def _spec(
+    provider_payload: dict[str, Any],
+    *,
+    mode: str = "autonomous",
+    pipeline_mode: str = SPLIT_MODE,
+) -> BrowserPipelineSpec:
     return BrowserPipelineSpec(
         session_id="42",
         bot_session_id=42,
         mode=mode,
         instructions="Be brief.",
-        context="",
-        calendar_context="",
+        context="ctx",
+        calendar_context="cal",
         provider_payload=provider_payload,
         event_bus=InMemoryEventBus(),
+        pipeline_mode=pipeline_mode,
+        personality_prompt="[personality: X]",
+        prior_session_context="last week",
     )
 
 
-def test_assemble_fails_without_stt() -> None:
-    transport = BrowserAudioTransport()
+# --- spec -> SessionJobConfig (the split agent engine contract) ------------
+
+
+def test_job_config_from_spec_maps_every_field() -> None:
     spec = _spec(
-        provider_payload={
-            "llm": {"provider_name": "fake-llm", "credentials": {}, "options": {}},
+        {
+            "stt": {"provider_name": "fake-stt"},
+            "llm": {"provider_name": "fake-llm"},
+            "tts": {"provider_name": "fake-tts"},
         }
     )
-    with pytest.raises(BrowserPipelineSetupError, match="STT"):
-        assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
+    config = _job_config_from_spec(spec, redis_url="redis://x:6379/0")
+    assert config.bot_session_id == 42
+    assert config.room_name == room_name_for_session(42)
+    assert config.mode == "autonomous"
+    assert config.pipeline_mode == SPLIT_MODE
+    assert config.instructions == "Be brief."
+    assert config.personality_prompt == "[personality: X]"
+    assert config.context == "ctx"
+    assert config.calendar_context == "cal"
+    assert config.prior_session_context == "last week"
+    assert config.provider_config["llm"]["provider_name"] == "fake-llm"
+    assert config.redis_url == "redis://x:6379/0"
 
 
-def test_assemble_fails_without_llm() -> None:
+def test_job_config_blank_mode_coerces_to_listen_only() -> None:
+    spec = _spec({"llm": {"provider_name": "fake-llm"}}, mode="")
+    config = _job_config_from_spec(spec, redis_url=None)
+    assert config.mode == DEFAULT_MODE  # listen_only
+    assert config.redis_url is None
+
+
+def test_job_config_unknown_mode_coerces_to_listen_only() -> None:
+    spec = _spec({"llm": {"provider_name": "fake-llm"}}, mode="banana")
+    config = _job_config_from_spec(spec, redis_url=None)
+    assert config.mode == DEFAULT_MODE
+
+
+@pytest.mark.parametrize("mode", ["autonomous", "listen_only", "approval_required"])
+def test_job_config_preserves_valid_modes(mode: str) -> None:
+    spec = _spec({"llm": {"provider_name": "fake-llm"}}, mode=mode)
+    config = _job_config_from_spec(spec, redis_url=None)
+    assert config.mode == mode
+
+
+# --- assemble_browser_pipeline is unified-only now -------------------------
+
+
+def test_assemble_rejects_split_directs_to_agent_engine() -> None:
+    transport = BrowserAudioTransport()
+    spec = _spec({"stt": {"provider_name": "x"}}, pipeline_mode=SPLIT_MODE)
+    with pytest.raises(BrowserPipelineSetupError, match="AgentSession engine"):
+        assemble_browser_pipeline(transport, spec)
+
+
+def test_assemble_unknown_pipeline_mode_raises() -> None:
+    transport = BrowserAudioTransport()
+    spec = _spec({"stt": {"provider_name": "x"}}, pipeline_mode="banana")
+    with pytest.raises(BrowserPipelineSetupError, match="unknown pipeline_mode"):
+        assemble_browser_pipeline(transport, spec)
+
+
+def test_assemble_unified_requires_s2s_row() -> None:
+    transport = BrowserAudioTransport()
+    spec = _spec({"stt": {"provider_name": "x"}}, pipeline_mode=UNIFIED_MODE)
+    with pytest.raises(BrowserPipelineSetupError, match="S2S"):
+        assemble_browser_pipeline(transport, spec)
+
+
+def test_assemble_unified_builds_unified_pipeline() -> None:
+    from app.providers.stub_s2s import PROVIDER_NAME as STUB_S2S_NAME
+
     transport = BrowserAudioTransport()
     spec = _spec(
-        provider_payload={
-            "stt": {"provider_name": "fake-stt", "credentials": {}, "options": {}},
-        }
+        {"s2s": {"provider_name": STUB_S2S_NAME, "credentials": {}, "options": {}}},
+        pipeline_mode=UNIFIED_MODE,
     )
-    with pytest.raises(BrowserPipelineSetupError, match="LLM"):
-        assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
+    pipeline = assemble_browser_pipeline(transport, spec)
+    assert isinstance(pipeline, UnifiedVoicePipeline)
 
 
-def test_assemble_succeeds_with_stt_and_llm() -> None:
-    transport = BrowserAudioTransport()
-    spec = _spec(
-        provider_payload={
-            "stt": {"provider_name": "fake-stt", "credentials": {}, "options": {}},
-            "llm": {"provider_name": "fake-llm", "credentials": {}, "options": {}},
-        }
-    )
-    pipeline = assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
-    assert pipeline.config.mode == "listen_only"
-    assert pipeline.tts is None
-
-
-def test_assemble_with_tts_keeps_speaking_mode() -> None:
-    transport = BrowserAudioTransport()
-    spec = _spec(
-        provider_payload={
-            "stt": {"provider_name": "fake-stt", "credentials": {}, "options": {}},
-            "llm": {"provider_name": "fake-llm", "credentials": {}, "options": {}},
-            "tts": {"provider_name": "fake-tts", "credentials": {}, "options": {}},
-        },
-        mode="autonomous",
-    )
-    pipeline = assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
-    assert pipeline.config.mode == "autonomous"
-    assert pipeline.tts is not None
-
-
-def test_speaking_mode_degrades_to_suggest_only_when_tts_missing() -> None:
-    """A speaking mode without TTS must degrade rather than crash."""
-    transport = BrowserAudioTransport()
-    spec = _spec(
-        provider_payload={
-            "stt": {"provider_name": "fake-stt", "credentials": {}, "options": {}},
-            "llm": {"provider_name": "fake-llm", "credentials": {}, "options": {}},
-        },
-        mode="autonomous",
-    )
-    pipeline = assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
-    assert pipeline.config.mode == SUGGEST_ONLY_MODE
-
-
-def test_provider_entry_missing_name_treated_as_missing() -> None:
-    transport = BrowserAudioTransport()
-    spec = _spec(
-        provider_payload={
-            "stt": {"provider_name": "", "credentials": {}, "options": {}},
-            "llm": {"provider_name": "fake-llm", "credentials": {}, "options": {}},
-        }
-    )
-    with pytest.raises(BrowserPipelineSetupError, match="STT"):
-        assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
-
-
-def test_session_id_propagates_to_pipeline_config() -> None:
-    transport = BrowserAudioTransport()
-    spec = _spec(
-        provider_payload={
-            "stt": {"provider_name": "fake-stt", "credentials": {}, "options": {}},
-            "llm": {"provider_name": "fake-llm", "credentials": {}, "options": {}},
-        }
-    )
-    pipeline = assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
-    assert pipeline.config.session_id == "42"
-    assert pipeline.config.bot_session_id == 42
-
-
-def test_prior_session_context_propagates_to_pipeline_config() -> None:
-    """Johnny-dsy: BrowserPipelineSpec.prior_session_context → PipelineConfig."""
-    transport = BrowserAudioTransport()
-    spec = BrowserPipelineSpec(
-        session_id="42",
-        bot_session_id=42,
-        mode="listen_only",
-        instructions="",
-        context="",
-        calendar_context="",
-        prior_session_context="Last week: agreed on Friday ship.",
-        provider_payload={
-            "stt": {"provider_name": "fake-stt", "credentials": {}, "options": {}},
-            "llm": {"provider_name": "fake-llm", "credentials": {}, "options": {}},
-        },
-        event_bus=InMemoryEventBus(),
-    )
-    pipeline = assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
-    assert pipeline.config.prior_session_context == (
-        "Last week: agreed on Friday ship."
-    )
-
-
-def test_prior_session_context_defaults_empty() -> None:
-    """Field defaults to empty so existing callsites don't need updates."""
-    transport = BrowserAudioTransport()
-    spec = _spec(
-        provider_payload={
-            "stt": {"provider_name": "fake-stt", "credentials": {}, "options": {}},
-            "llm": {"provider_name": "fake-llm", "credentials": {}, "options": {}},
-        }
-    )
-    pipeline = assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
-    assert pipeline.config.prior_session_context == ""
-
-
-# --- Orchestrator-cutover independence (Johnny-a1w deferral) ---------------
+# --- Cutover guard: the browser surface never DISPATCHES the agent ---------
 #
-# The in-browser playground stays on the legacy in-process VoicePipeline; the
-# LiveKit AgentSession migration is deferred (follow-up Johnny-7g5.1, decision
-# record docs/playground-orchestration-deferral.md). The deferral is only safe
-# because flipping JOHNNY_ORCHESTRATOR=agentsession at cutover re-routes Meet
-# sessions ONLY and never touches the browser surface. These guards fail loudly
-# if a future change wires the cutover flag — or the agent engine — into the
-# browser path.
-
-
-def test_browser_pipeline_is_orchestrator_flag_independent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """JOHNNY_ORCHESTRATOR=agentsession must NOT change what the playground builds."""
-    monkeypatch.setenv("JOHNNY_ORCHESTRATOR", "agentsession")
-    transport = BrowserAudioTransport()
-    spec = _spec(
-        provider_payload={
-            "stt": {"provider_name": "fake-stt", "credentials": {}, "options": {}},
-            "llm": {"provider_name": "fake-llm", "credentials": {}, "options": {}},
-            "tts": {"provider_name": "fake-tts", "credentials": {}, "options": {}},
-        },
-        mode="autonomous",
-    )
-    pipeline = assemble_browser_pipeline(transport, spec, vad=EnergyVAD())
-    # Still the legacy in-process engine, not anything from johnny.agent.
-    assert isinstance(pipeline, VoicePipeline)
-    assert type(pipeline).__module__ == "johnny.voice_pipeline.pipeline"
+# Johnny-7g5.1 moved the split playground onto the AgentSession engine, but runs
+# it *in-process* (BrowserAgentSession) — it never dispatches a LiveKit agent
+# worker and never consults JOHNNY_ORCHESTRATOR (a Meet-only flag). This guard
+# fails loudly if a future change wires the Meet dispatch path into the browser.
 
 
 def test_browser_surface_not_wired_to_agent_dispatch() -> None:
-    """The browser runner + endpoint must not read the cutover flag or dispatch.
-
-    A source-level guard: the only thing that protects the playground at cutover
-    is that these modules never consult JOHNNY_ORCHESTRATOR and never trigger the
-    agent dispatch. If someone adds that wiring, this test is the tripwire.
-    """
     from pathlib import Path
 
     import app.api.browser_sessions as endpoint_mod
@@ -272,5 +148,5 @@ def test_browser_surface_not_wired_to_agent_dispatch() -> None:
     for mod in (runner_mod, endpoint_mod):
         src = Path(mod.__file__).read_text()
         assert "JOHNNY_ORCHESTRATOR" not in src, f"{mod.__name__} reads the cutover flag"
-        assert "dispatch_agent" not in src, f"{mod.__name__} triggers agent dispatch"
-        assert "maybe_dispatch" not in src, f"{mod.__name__} triggers agent dispatch"
+        assert "dispatch_agent" not in src, f"{mod.__name__} dispatches a remote agent"
+        assert "maybe_dispatch" not in src, f"{mod.__name__} dispatches a remote agent"

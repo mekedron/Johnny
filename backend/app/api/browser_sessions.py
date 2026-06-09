@@ -252,11 +252,15 @@ class BrowserSessionRunner:
     disconnect_timer: asyncio.TimerHandle | None = None
     silent_drain_task: asyncio.Task[None] | None = None
     pipeline: Any = None
-    """The assembled :class:`VoicePipeline` for this run.
+    """The assembled engine for this run.
 
-    Captured via ``on_assembled`` callback so the text-input endpoint
-    can call :meth:`VoicePipeline.feed_text` and drive the full
-    router → answer → TTS path from typed input (Johnny-ckz.11)."""
+    A :class:`~johnny.agent.browser_session.BrowserAgentSession` (split, the
+    AgentSession engine — Johnny-7g5.1) or a
+    :class:`~johnny.voice_pipeline.unified_pipeline.UnifiedVoicePipeline`
+    (unified S2S). Captured via the ``on_assembled`` callback so the text-input
+    endpoint can call ``feed_text`` (drives the router → answer → TTS path from
+    typed input) and the stop control can call ``interrupt`` — both engines
+    expose the same surface (Johnny-ckz.11/ckz.13)."""
     event_bus: EventBus | None = None
     """The session's event bus (shared with the assembled pipeline).
 
