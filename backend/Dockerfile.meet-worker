@@ -41,6 +41,15 @@ WORKDIR /workspace
 # (US-016, subprocess invocation). FastAPI and SQLAlchemy are still
 # deliberately absent — the pipeline depends only on the pure-Python
 # provider ABCs in `app/providers/base.py`.
+#
+# `livekit` (the realtime `livekit.rtc` SDK, NOT the heavy `livekit-agents`
+# framework) is the room-side endpoint of the Phase-3 meet↔room bridge
+# (Johnny-6nm): the meet-worker publishes Meet audio into the self-hosted
+# LiveKit room and subscribes to the agent's TTS track. Pinned to 1.1.8 to
+# match the version `livekit-agents==1.5.17` resolves in the api/agent image
+# (backend/uv.lock), so bridge and agent speak the same wire protocol. The
+# AgentSession pipeline runs in the separate agent-worker image; the
+# meet-worker only needs `livekit.rtc`.
 RUN pip install --no-cache-dir \
         playwright==1.49.0 \
         redis==8.0.0 \
@@ -48,7 +57,8 @@ RUN pip install --no-cache-dir \
         websockets==14.1 \
         requests==2.32.3 \
         faster-whisper==1.0.3 \
-        piper-tts==1.4.2
+        piper-tts==1.4.2 \
+        livekit==1.1.8
 
 # Audio system libs used by NeMo's transitive deps when the operator
 # installs Parakeet at runtime (Johnny-stt.1). `libsndfile1` is

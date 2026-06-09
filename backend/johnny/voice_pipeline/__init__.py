@@ -61,6 +61,8 @@ from johnny.voice_pipeline.events import (
 )
 from johnny.voice_pipeline.livekit_transport import (
     LiveKitTransport,
+    MeetRoomBridge,
+    create_meet_room_bridge_from_env,
     livekit_config_from_env,
 )
 from johnny.voice_pipeline.pipeline import (
@@ -185,6 +187,8 @@ __all__ = [
     "JohnnyTransport",
     "LiveKitTransport",
     "LocalAudioTransport",
+    "MeetRoomBridge",
+    "create_meet_room_bridge_from_env",
     "NoopApprovalGate",
     "NoopDecisionSink",
     "NoReplyReason",

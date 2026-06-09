@@ -230,6 +230,46 @@ after each iteration and it's included in prompts for context.
   shapes persist with decision↔utterance↔terminal parity using the actual production
   persistence code, not a re-implementation (the "replay harness" acceptance).
 
+### Meet↔room bridge: cross-wire MeetAudioBridge ↔ LiveKitTransport (Johnny-6nm)
+- **The Phase-3 meet-worker is a pure audio bridge, NOT a pipeline host.** In the
+  AgentSession architecture the STT→LLM→TTS pipeline runs in the dispatched
+  agent-worker (Johnny-9eh); the meet-worker only shuttles audio between the Meet
+  tab (PulseAudio) and the room. `MeetRoomBridge` (`voice_pipeline/livekit_transport.py`)
+  cross-wires the two existing endpoints — both expose the SAME
+  `sample_rate`/`start`/`stop`/`capture_frames`/`play_frames` contract (an
+  `_AudioEndpoint` Protocol both satisfy structurally): **uplink** =
+  `room.play_frames(meet.capture_frames())` (Meet monitor → room track, agent
+  hears humans); **downlink** = `meet.play_frames(room.capture_frames())` (agent
+  track → virtual mic, humans hear bot). Each endpoint's capture feeds the other's
+  playback — that's the whole bridge.
+- **Echo/self-transcription is correct-BY-CONSTRUCTION, not a config knob.** The
+  Johnny-4em #3 rule ("never re-publish the agent track into the room") falls out
+  for free: the room track is sourced ONLY from `meet.capture_frames()` and the
+  agent track is sunk ONLY into `meet.play_frames()`, so the agent's audio can't
+  loop back into `room.play_frames()`. Combined with SFU self-exclusion (measured)
+  + the two independent PulseAudio null sinks, the bot can't hear itself. The
+  `subscribed_identities` list on `LiveKitTransport` (recorded per
+  `track_subscribed`) is the runtime echo guard — in the 2-party room it must
+  contain the agent identity, never the bridge's own (asserted in the smoke).
+- **Reuse `LiveKitTransport` as the room endpoint — it's the proven 4em topology.**
+  The spike already drove two real `LiveKitTransport` participants over the SFU;
+  the bridge is just that, with the production `MeetRoomBridge` orchestrator on top
+  + a `MeetAudioBridge` on the meet side. Added `track_name=` (publish the meeting
+  uplink as `"meet-audio"`, distinct from the agent's TTS track → supports the 4em
+  #2 RoomInputOptions restriction when >2 parties) and the identity recorder; both
+  are additive (US-025 default behaviour unchanged).
+- **Run seam mirrors `build_and_run_pipeline`:** `MeetRoomBridge.run(stop_event)`
+  starts both halves, waits until shutdown OR a pump exits (Meet capture EOF =
+  call ended), then tears down — so Johnny-9eh wires it into bootstrap the exact
+  way the legacy pipeline is wired. `create_meet_room_bridge_from_env()` reads the
+  same `LIVEKIT_URL/TOKEN/ROOM/IDENTITY` the launcher sets; `LIVEKIT_TOKEN` is the
+  per-room **bridge** token (`mint_bridge_token`, `agent=False`, Johnny-y4j).
+- **`livekit` (rtc) is now in the meet-worker image**, pinned `==1.1.8` to match
+  what `livekit-agents==1.5.17` resolves in api/agent (`uv.lock`) so bridge+agent
+  share a wire protocol. It's the lean `livekit.rtc` SDK only — the heavy
+  `livekit-agents` framework stays in the agent-worker image. `./run.sh` builds the
+  meet-worker image (`run.sh:68`), so the dep is clean-install reproducible.
+
 ---
 
 ## 2026-06-09 - Johnny-y4j [SPIKE] Per-room JWT auth + agent dispatch contract
@@ -572,3 +612,76 @@ test technique).
 
 ---
 
+
+## 2026-06-09 - Johnny-6nm [BUILD] Phase 3: Repurpose livekit_transport.py as the meet↔room bridge
+
+Built the Phase-3 meet-worker↔room audio bridge: the meet-worker now has a way
+to shuttle Meet audio into the self-hosted LiveKit room and the agent's TTS back
+into the Meet virtual mic, without running the voice pipeline itself (the pipeline
+moves to the agent-worker, Johnny-9eh).
+
+**Implemented:**
+- `backend/johnny/voice_pipeline/livekit_transport.py`:
+  - `MeetRoomBridge` — orchestrator that cross-wires a `MeetAudioBridge`
+    (PulseAudio) and a `LiveKitTransport` (room): uplink
+    `room.play_frames(meet.capture_frames())`, downlink
+    `meet.play_frames(room.capture_frames())`. `start`/`stop`/`run(stop_event)`/
+    async-ctx lifecycle; `run()` mirrors `build_and_run_pipeline` so Johnny-9eh
+    wires it into bootstrap identically.
+  - `create_meet_room_bridge_from_env()` — builds the bridge from
+    `LIVEKIT_URL/TOKEN/ROOM/IDENTITY`; `LIVEKIT_TOKEN` is the per-room bridge token
+    (`mint_bridge_token`, Johnny-y4j). Publishes the meeting uplink under track
+    name `meet-audio` (`DEFAULT_MEET_TRACK_NAME`).
+  - `LiveKitTransport` additive enhancements: `track_name=` param (+ property) so
+    the meeting track is named distinctly from the agent's TTS track; and
+    `subscribed_identities` (recorded per `track_subscribed`) as the runtime echo
+    guard. US-025 defaults unchanged.
+  - `_AudioEndpoint` Protocol capturing the shared capture/playback contract both
+    endpoints satisfy.
+- `backend/johnny/voice_pipeline/__init__.py` — re-export `MeetRoomBridge` +
+  `create_meet_room_bridge_from_env`.
+- `backend/Dockerfile.meet-worker` — add `livekit==1.1.8` (the lean `livekit.rtc`
+  SDK, matching the version `livekit-agents==1.5.17` resolves in api/agent), so the
+  bridge can run in the meet-worker image. `livekit-agents` framework stays out.
+- Tests: `tests/voice_pipeline/test_meet_room_bridge.py` (cross-wiring, the
+  agent-never-republished echo-discipline assertion, lifecycle, env factory) +
+  `test_meet_room_bridge_smoke.py` (`livekit_smoke` — real-SFU room round-trip
+  through the production `MeetRoomBridge` + real token minting) + extended
+  `test_livekit_transport.py` (track_name, subscribed_identities, a fake-`rtc`
+  `_connect` publish-name test).
+
+**AEC/loopback (Johnny-4em) applied:** the bridge structurally cannot re-publish
+the agent track (uplink is sourced only from the meeting; the agent track sinks
+only into the virtual mic) — requirement #3 falls out for free. The `meet-audio`
+track name + the echo guard support requirements #1/#2. Documented the full
+checklist→bridge mapping in the `MeetRoomBridge` docstring + Codebase Patterns.
+
+**Quality gates:** ruff check + format clean; mypy --strict clean (4 files);
+`tests/voice_pipeline/` = 378 passed (3 livekit_smoke deselected), no regressions.
+The bridge **smoke passed against the real in-compose LiveKit SFU** (5.71s): the
+second participant heard the bridge's published meeting audio, the bridge routed
+the echo into the virtual-mic endpoint, and `subscribed_identities` held the agent
+identity but NOT the bridge's own (echo guard).
+
+**Clean-install:** the only new runtime dep is `livekit==1.1.8` in the meet-worker
+image. `./run.sh` builds that image (`run.sh:68`, `--profile meet-worker build
+meet-worker`). Verified: `docker compose --profile meet-worker build meet-worker`
+succeeds and inside the image `import livekit.rtc` + `MeetRoomBridge` +
+`MeetAudioBridge` all import (SQLAlchemy-free path). No `pip install` hot-patch.
+
+**Browser validation: deferred (stated explicitly).** The bridge is a pure-backend
+component with NO UI surface. The acceptance's live-Meet mouth-to-ear E2E ("a human
+is heard/answered by the bot AND the bot is audible") needs an agent IN the room to
+answer — that is the agent-worker service + dispatch (Johnny-9eh, still open) plus
+the bootstrap rewiring (Johnny-9eh/wz5). Until 9eh exists the bridge would publish
+into an empty room, so a live Meet run is not a meaningful E2E yet. Johnny-4em
+already flagged this deferral. The real-SFU room round-trip smoke is the available
+validation for the room half this bead owns; the full live-Meet e2e is tracked by
+Johnny-52b (Phase-4 e2e + clean-install pass).
+
+**Learnings:** captured in the Codebase Patterns section at the top (bridge =
+cross-wire two symmetric endpoints; echo discipline is correct-by-construction;
+reuse the proven 4em `LiveKitTransport` topology; the run/factory seams; the
+meet-worker `livekit==1.1.8` dep).
+
+---

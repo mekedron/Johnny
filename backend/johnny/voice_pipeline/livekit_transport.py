@@ -43,7 +43,7 @@ from collections.abc import AsyncIterable, AsyncIterator, Iterable
 from importlib import import_module
 from typing import Any, Protocol, runtime_checkable
 
-from johnny.meet_worker.audio_bridge import resample_pcm16
+from johnny.meet_worker.audio_bridge import MeetAudioBridge, resample_pcm16
 from johnny.voice_pipeline.transport import JohnnyTransport
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,11 @@ DEFAULT_FRAME_DURATION_MS = 20
 DEFAULT_QUEUE_MAX_FRAMES = 100
 DEFAULT_PARTICIPANT_IDENTITY = "johnny-bot"
 DEFAULT_TRACK_NAME = "johnny-mic"
+# The bridge publishes the Meet participants' audio under this track name so
+# the agent (and any debugging) can tell the meeting uplink apart from the
+# agent's own TTS track. It carries ONLY meeting audio — never the agent
+# track (Johnny-4em echo-discipline requirement #3).
+DEFAULT_MEET_TRACK_NAME = "meet-audio"
 
 
 @runtime_checkable
@@ -113,6 +118,7 @@ class LiveKitTransport(JohnnyTransport):
         token: str,
         room_name: str | None = None,
         identity: str = DEFAULT_PARTICIPANT_IDENTITY,
+        track_name: str = DEFAULT_TRACK_NAME,
         sample_rate: int = DEFAULT_SAMPLE_RATE,
         num_channels: int = DEFAULT_NUM_CHANNELS,
         frame_duration_ms: int = DEFAULT_FRAME_DURATION_MS,
@@ -132,6 +138,7 @@ class LiveKitTransport(JohnnyTransport):
         self._token = token
         self._room_name = room_name
         self._identity = identity
+        self._track_name = track_name
         self._sample_rate = sample_rate
         self._num_channels = num_channels
         self._frame_duration_ms = frame_duration_ms
@@ -145,6 +152,11 @@ class LiveKitTransport(JohnnyTransport):
         self._room: _Room | None = None
         self._audio_source: _AudioSource | None = None
         self._stream_tasks: list[asyncio.Task[None]] = []
+        # Identities of remote participants whose audio we subscribed to. The
+        # SFU never returns a participant its own track (measured in the
+        # Johnny-4em spike), so this must never contain our own identity — the
+        # bridge logs it as the runtime self-transcription / echo guard.
+        self._subscribed_identities: list[str] = []
         self._running = False
 
     # ------------------------------------------------------------------
@@ -161,6 +173,20 @@ class LiveKitTransport(JohnnyTransport):
     @property
     def room_name(self) -> str | None:
         return self._room_name
+
+    @property
+    def track_name(self) -> str:
+        return self._track_name
+
+    @property
+    def subscribed_identities(self) -> list[str]:
+        """Identities of remote participants we subscribed audio from.
+
+        Read by :class:`MeetRoomBridge` to log the echo guard: in the
+        two-participant bridge+agent room this should be exactly the agent,
+        never our own bridge identity.
+        """
+        return list(self._subscribed_identities)
 
     async def start(self) -> None:
         if self._running:
@@ -244,7 +270,7 @@ class LiveKitTransport(JohnnyTransport):
     # ------------------------------------------------------------------
     # Capture pump (started for each remote audio track)
 
-    def _on_track_subscribed(self, track: Any, _publication: Any, _participant: Any) -> None:
+    def _on_track_subscribed(self, track: Any, _publication: Any, participant: Any) -> None:
         """Forward every subscribed remote audio track to the capture queue.
 
         Synchronous because the LiveKit SDK's ``on(...)`` decorator calls
@@ -255,6 +281,9 @@ class LiveKitTransport(JohnnyTransport):
         kind = getattr(track, "kind", None)
         if not self._is_audio_kind(kind):
             return
+        identity = getattr(participant, "identity", None)
+        if identity is not None:
+            self._subscribed_identities.append(str(identity))
         stream = self._build_audio_stream(track)
         task = asyncio.create_task(self._drain_stream(stream))
         self._stream_tasks.append(task)
@@ -305,7 +334,7 @@ class LiveKitTransport(JohnnyTransport):
             sample_rate=self._sample_rate,
             num_channels=self._num_channels,
         )
-        track = rtc.LocalAudioTrack.create_audio_track(DEFAULT_TRACK_NAME, source)
+        track = rtc.LocalAudioTrack.create_audio_track(self._track_name, source)
         options = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
         try:
             await room.local_participant.publish_track(track, options)
@@ -436,20 +465,14 @@ def livekit_config_from_env() -> dict[str, str]:
     url = os.environ.get("LIVEKIT_URL", "").strip()
     token = os.environ.get("LIVEKIT_TOKEN", "").strip()
     room_name = os.environ.get("LIVEKIT_ROOM", "").strip() or None
-    identity = (
-        os.environ.get("LIVEKIT_IDENTITY", "").strip() or DEFAULT_PARTICIPANT_IDENTITY
-    )
+    identity = os.environ.get("LIVEKIT_IDENTITY", "").strip() or DEFAULT_PARTICIPANT_IDENTITY
     missing: list[str] = []
     if not url:
         missing.append("LIVEKIT_URL")
     if not token:
         missing.append("LIVEKIT_TOKEN")
     if missing:
-        raise ValueError(
-            "JOHNNY_TRANSPORT=livekit requires "
-            + ", ".join(missing)
-            + " to be set"
-        )
+        raise ValueError("JOHNNY_TRANSPORT=livekit requires " + ", ".join(missing) + " to be set")
     return {
         "url": url,
         "token": token,
@@ -458,13 +481,256 @@ def livekit_config_from_env() -> dict[str, str]:
     }
 
 
+@runtime_checkable
+class _AudioEndpoint(Protocol):
+    """The capture/playback contract shared by the bridge's two sides.
+
+    Both :class:`MeetAudioBridge` (PulseAudio) and :class:`LiveKitTransport`
+    (room) satisfy this structurally, so :class:`MeetRoomBridge` can
+    cross-wire them without depending on either concrete type — and tests
+    can inject trivial fakes.
+    """
+
+    @property
+    def sample_rate(self) -> int: ...
+    async def start(self) -> None: ...
+    async def stop(self) -> None: ...
+    def capture_frames(self) -> AsyncIterator[bytes]: ...
+    async def play_frames(
+        self,
+        frames: Iterable[bytes] | AsyncIterable[bytes],
+        source_rate: int | None = ...,
+    ) -> None: ...
+
+
+class MeetRoomBridge:
+    """Bridge Meet (PulseAudio) ↔ a LiveKit room (Johnny-6nm, Phase 3).
+
+    In the AgentSession architecture the meet-worker no longer runs the
+    voice pipeline itself; the pipeline lives in a separately-dispatched
+    agent worker (Johnny-9eh) that joins the same room. The meet-worker's
+    only job is to shuttle audio between the Google Meet tab and the room:
+
+    * **uplink** — Meet participants' audio (captured from
+      ``johnny_speaker.monitor`` by :class:`MeetAudioBridge`) is published
+      as the bridge's room track, so the agent's STT hears the humans.
+    * **downlink** — the agent's room track is played into the Meet virtual
+      mic (``johnny_mic`` via :class:`MeetAudioBridge`), so the humans hear
+      the bot.
+
+    The two flows are just the two endpoints' ``capture_frames()`` /
+    ``play_frames()`` cross-wired: each endpoint's capture feeds the other's
+    playback. This is the exact topology measured GO in the Johnny-4em
+    spike (two real :class:`LiveKitTransport` participants over the SFU).
+
+    **Echo / self-transcription discipline (Johnny-4em).** The room track is
+    sourced *only* from ``meet.capture_frames()`` (the meeting), and the
+    agent track is sunk *only* into ``meet.play_frames()`` (the virtual
+    mic) — it is never fed back into ``room.play_frames()``. So the bridge
+    structurally cannot re-publish the agent's audio into the room, which is
+    requirement #3 of the spike's config checklist. Combined with the SFU's
+    self-exclusion (a participant never receives its own track) and the two
+    independent PulseAudio null sinks, the bot cannot hear itself.
+    """
+
+    def __init__(
+        self,
+        *,
+        meet: _AudioEndpoint,
+        room: _AudioEndpoint,
+        identity: str | None = None,
+        room_name: str | None = None,
+    ) -> None:
+        self._meet = meet
+        self._room = room
+        self._identity = identity
+        self._room_name = room_name
+        self._pump_tasks: list[asyncio.Task[None]] = []
+        self._running = False
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    async def start(self) -> None:
+        """Connect the room, open the PulseAudio bridge, and start pumping.
+
+        Idempotent — a second call while running is a no-op. The room is
+        connected before the meeting capture starts so the published track
+        exists by the time meeting audio begins flowing.
+        """
+        if self._running:
+            return
+        await self._room.start()
+        await self._meet.start()
+        uplink = asyncio.create_task(self._pump_meet_to_room())
+        downlink = asyncio.create_task(self._pump_room_to_meet())
+        self._pump_tasks = [uplink, downlink]
+        self._running = True
+        logger.info(
+            "meet↔room bridge started: identity=%s room=%s "
+            "(uplink: meeting audio → room track; "
+            "downlink: agent track → virtual mic; agent track NEVER re-published)",
+            self._identity,
+            self._room_name,
+        )
+
+    async def _pump_meet_to_room(self) -> None:
+        """Uplink: publish the meeting audio into the room.
+
+        Runs until the meeting capture reaches EOF (Meet call ended /
+        :meth:`stop`) or the room's publish sink closes.
+        """
+        await self._room.play_frames(
+            self._meet.capture_frames(), source_rate=self._meet.sample_rate
+        )
+
+    async def _pump_room_to_meet(self) -> None:
+        """Downlink: play the agent's room track into the virtual mic.
+
+        Runs until the room subscription ends (agent left / :meth:`stop`)
+        or the PulseAudio playback pipe closes.
+        """
+        await self._meet.play_frames(
+            self._room.capture_frames(), source_rate=self._room.sample_rate
+        )
+
+    async def run(self, stop_event: asyncio.Event) -> None:
+        """Start the bridge and run until ``stop_event`` or a pump exits.
+
+        Mirrors :func:`johnny.meet_worker.pipeline_runner.build_and_run_pipeline`
+        so the bootstrap (Johnny-9eh) can drive the bridge the same way it
+        drives the legacy pipeline: a single coroutine that returns once the
+        meeting ends or shutdown is requested.
+        """
+        await self.start()
+        stop_task = asyncio.create_task(stop_event.wait())
+        try:
+            await asyncio.wait(
+                {stop_task, *self._pump_tasks},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            if not stop_task.done():
+                stop_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await stop_task
+            await self.stop()
+
+    async def stop(self) -> None:
+        """Tear down both endpoints and the pumps. Idempotent."""
+        if not self._running:
+            return
+        self._running = False
+        # Stop both endpoints first: each injects an EOS sentinel into its
+        # capture queue and drops its playback sink, so both pump coroutines
+        # observe end-of-stream and return on their own.
+        for endpoint_stop in (self._room.stop, self._meet.stop):
+            try:
+                await endpoint_stop()
+            except Exception:
+                logger.exception("meet↔room bridge endpoint stop failed")
+        # Backstop: cancel + await any pump that didn't already finish.
+        for task in self._pump_tasks:
+            task.cancel()
+        for task in self._pump_tasks:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        self._pump_tasks.clear()
+        logger.info(
+            "meet↔room bridge stopped: identity=%s room=%s subscribed_to=%s",
+            self._identity,
+            self._room_name,
+            getattr(self._room, "subscribed_identities", []),
+        )
+
+    async def __aenter__(self) -> MeetRoomBridge:
+        await self.start()
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.stop()
+
+
+def create_meet_room_bridge_from_env(
+    *,
+    env: dict[str, str] | None = None,
+    room_factory: Any = None,
+    meet_factory: Any = None,
+) -> MeetRoomBridge:
+    """Build a :class:`MeetRoomBridge` from the meet-worker's environment.
+
+    Reads the same LiveKit connection vars the launcher already sets for the
+    bridge (``LIVEKIT_URL`` / ``LIVEKIT_TOKEN`` / ``LIVEKIT_ROOM`` /
+    ``LIVEKIT_IDENTITY``). ``LIVEKIT_TOKEN`` is the **per-room bridge token**
+    minted by :func:`johnny.agent.room_auth.mint_bridge_token` (publish +
+    subscribe, ``agent=False``, pinned to the one session room) — Johnny-y4j.
+    The PulseAudio side (:class:`MeetAudioBridge`) reads its own
+    ``JOHNNY_SINK_NAME`` / ``JOHNNY_SOURCE_NAME`` from the environment.
+
+    ``room_factory`` / ``meet_factory`` are test seams; production passes
+    ``None`` and gets the real endpoints. Raises :class:`ValueError` (via
+    :func:`livekit_config_from_env`) listing every missing variable so a
+    misconfigured launch fails loudly at construction time.
+    """
+    env_map = env if env is not None else dict(os.environ)
+    cfg = _resolve_bridge_room_config(env_map)
+
+    if room_factory is not None:
+        room: _AudioEndpoint = room_factory(cfg)
+    else:
+        room = LiveKitTransport(
+            url=cfg["url"],
+            token=cfg["token"],
+            room_name=cfg["room_name"] or None,
+            identity=cfg["identity"],
+            track_name=DEFAULT_MEET_TRACK_NAME,
+        )
+
+    meet: _AudioEndpoint = meet_factory() if meet_factory is not None else MeetAudioBridge()
+
+    return MeetRoomBridge(
+        meet=meet,
+        room=room,
+        identity=cfg["identity"],
+        room_name=cfg["room_name"] or None,
+    )
+
+
+def _resolve_bridge_room_config(env_map: dict[str, str]) -> dict[str, str]:
+    """Resolve the bridge's LiveKit room config from ``env_map``.
+
+    Uses :func:`livekit_config_from_env` (which reads :data:`os.environ`)
+    when ``env_map`` is the real environment, otherwise reads the
+    test-injected map directly — same override discipline as
+    :func:`johnny.voice_pipeline.transport._resolve_livekit_config`.
+    """
+    if env_map is os.environ or env_map == dict(os.environ):
+        return livekit_config_from_env()
+    url = env_map.get("LIVEKIT_URL", "").strip()
+    token = env_map.get("LIVEKIT_TOKEN", "").strip()
+    room_name = env_map.get("LIVEKIT_ROOM", "").strip()
+    identity = env_map.get("LIVEKIT_IDENTITY", "").strip() or DEFAULT_PARTICIPANT_IDENTITY
+    missing: list[str] = []
+    if not url:
+        missing.append("LIVEKIT_URL")
+    if not token:
+        missing.append("LIVEKIT_TOKEN")
+    if missing:
+        raise ValueError("the meet↔room bridge requires " + ", ".join(missing) + " to be set")
+    return {"url": url, "token": token, "room_name": room_name, "identity": identity}
+
+
 __all__ = [
     "DEFAULT_FRAME_DURATION_MS",
+    "DEFAULT_MEET_TRACK_NAME",
     "DEFAULT_NUM_CHANNELS",
     "DEFAULT_PARTICIPANT_IDENTITY",
     "DEFAULT_QUEUE_MAX_FRAMES",
     "DEFAULT_SAMPLE_RATE",
     "DEFAULT_TRACK_NAME",
     "LiveKitTransport",
+    "MeetRoomBridge",
+    "create_meet_room_bridge_from_env",
     "livekit_config_from_env",
 ]

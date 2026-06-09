@@ -141,11 +141,18 @@ class _FakeRoom:
     async def disconnect(self) -> None:
         self.disconnected = True
 
-    def dispatch_track_subscribed(self, track: Any) -> None:
+    def dispatch_track_subscribed(self, track: Any, participant: Any = None) -> None:
         cb = self._handlers.get("track_subscribed")
         if cb is None:
             raise AssertionError("track_subscribed handler was never registered")
-        cb(track, None, None)
+        cb(track, None, participant)
+
+
+class _FakeParticipant:
+    """Mirrors ``rtc.RemoteParticipant``: carries an ``identity``."""
+
+    def __init__(self, identity: str) -> None:
+        self.identity = identity
 
 
 class _RecordingTransport(LiveKitTransport):
@@ -244,6 +251,18 @@ def test_constructor_exposes_sample_rate_identity_room() -> None:
 def test_constructor_default_identity() -> None:
     t = LiveKitTransport(url="ws://x", token="t")
     assert t.identity == DEFAULT_PARTICIPANT_IDENTITY
+
+
+def test_constructor_default_track_name() -> None:
+    from johnny.voice_pipeline.livekit_transport import DEFAULT_TRACK_NAME
+
+    t = LiveKitTransport(url="ws://x", token="t")
+    assert t.track_name == DEFAULT_TRACK_NAME
+
+
+def test_constructor_custom_track_name() -> None:
+    t = LiveKitTransport(url="ws://x", token="t", track_name="meet-audio")
+    assert t.track_name == "meet-audio"
 
 
 # --- lifecycle -------------------------------------------------------------
@@ -653,3 +672,137 @@ def test_is_audio_kind_video_rejected() -> None:
 
 def test_is_audio_kind_none() -> None:
     assert LiveKitTransport._is_audio_kind(None) is False
+
+
+# --- subscribed-identity echo guard ----------------------------------------
+
+
+async def test_records_subscribed_participant_identity() -> None:
+    """The bridge's echo guard: who did we subscribe audio from?"""
+    stream = _FakeAudioStream([b"\x00\x01" * 320])
+    room = _FakeRoom()
+    t = _RecordingTransport(room=room, stream_factory=lambda _t: stream)
+    await t.start()
+    room.dispatch_track_subscribed(_FakeTrack(), participant=_FakeParticipant("johnny-agent-42"))
+    await asyncio.sleep(0)
+    await t.stop()
+    assert t.subscribed_identities == ["johnny-agent-42"]
+
+
+async def test_subscribed_identities_ignores_non_audio_tracks() -> None:
+    class _VideoKind:
+        name = "KIND_VIDEO"
+        value = 2
+
+    class _VideoTrack:
+        kind = _VideoKind()
+
+    room = _FakeRoom()
+    t = _RecordingTransport(room=room, stream_factory=lambda _t: _FakeAudioStream([]))
+    await t.start()
+    room.dispatch_track_subscribed(_VideoTrack(), participant=_FakeParticipant("someone"))
+    await asyncio.sleep(0)
+    await t.stop()
+    assert t.subscribed_identities == []
+
+
+async def test_subscribed_identities_tolerates_missing_participant() -> None:
+    stream = _FakeAudioStream([b"\x00\x01" * 320])
+    room = _FakeRoom()
+    t = _RecordingTransport(room=room, stream_factory=lambda _t: stream)
+    await t.start()
+    # Participant is None (older SDK shape / our default dispatch) — recorded
+    # as nothing, no crash.
+    room.dispatch_track_subscribed(_FakeTrack(), participant=None)
+    await asyncio.sleep(0)
+    await t.stop()
+    assert t.subscribed_identities == []
+
+
+# --- real _connect publish path (fake rtc module) --------------------------
+
+
+class _FakeRtcAudioSource:
+    def __init__(self, sample_rate: int, num_channels: int) -> None:
+        self.sample_rate = sample_rate
+        self.num_channels = num_channels
+
+    async def capture_frame(self, frame: Any) -> None:  # pragma: no cover
+        pass
+
+
+class _FakeRtcLocalAudioTrack:
+    created: list[tuple[str, Any]] = []
+
+    @classmethod
+    def create_audio_track(cls, name: str, source: Any) -> Any:
+        cls.created.append((name, source))
+        return object()
+
+
+class _FakeRtcTrackSource:
+    SOURCE_MICROPHONE = "source-microphone"
+
+
+class _FakeRtcTrackPublishOptions:
+    def __init__(self, source: Any = None) -> None:
+        self.source = source
+
+
+class _FakeRtcModule:
+    """The subset of ``livekit.rtc`` that ``_connect`` touches."""
+
+    def __init__(self, room: _FakeRoom) -> None:
+        self._room = room
+        self.AudioSource = _FakeRtcAudioSource
+        self.LocalAudioTrack = _FakeRtcLocalAudioTrack
+        self.TrackSource = _FakeRtcTrackSource
+        self.TrackPublishOptions = _FakeRtcTrackPublishOptions
+
+    def Room(self) -> _FakeRoom:  # noqa: N802 — mirrors rtc.Room()
+        return self._room
+
+
+class _RealConnectTransport(LiveKitTransport):
+    """Exercises the real ``_connect`` against a fake ``rtc`` module."""
+
+    def __init__(self, *, room: _FakeRoom, **kwargs: Any) -> None:
+        super().__init__(url="ws://fake.invalid", token="tok", **kwargs)
+        self._fake_rtc = _FakeRtcModule(room)
+
+    def _get_rtc_module(self) -> Any:
+        return self._fake_rtc
+
+
+async def test_connect_publishes_track_with_configured_name() -> None:
+    _FakeRtcLocalAudioTrack.created.clear()
+    room = _FakeRoom()
+    t = _RealConnectTransport(room=room, track_name="meet-audio")
+    await t.start()
+    try:
+        # The published track carries the configured name (the meeting
+        # uplink track, distinct from the agent's TTS track).
+        names = [name for name, _src in _FakeRtcLocalAudioTrack.created]
+        assert names == ["meet-audio"]
+        # Published as a microphone-source track and the room is connected.
+        assert room.connected is True
+        assert room.connect_args == ("ws://fake.invalid", "tok")
+        assert len(room.local_participant.published) == 1
+        _track, options = room.local_participant.published[0]
+        assert options.source == _FakeRtcTrackSource.SOURCE_MICROPHONE
+    finally:
+        await t.stop()
+
+
+async def test_connect_defaults_to_johnny_mic_track_name() -> None:
+    from johnny.voice_pipeline.livekit_transport import DEFAULT_TRACK_NAME
+
+    _FakeRtcLocalAudioTrack.created.clear()
+    room = _FakeRoom()
+    t = _RealConnectTransport(room=room)
+    await t.start()
+    try:
+        names = [name for name, _src in _FakeRtcLocalAudioTrack.created]
+        assert names == [DEFAULT_TRACK_NAME]
+    finally:
+        await t.stop()
