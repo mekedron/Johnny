@@ -61,10 +61,12 @@ from livekit.agents.llm.chat_context import (  # noqa: E402
 from livekit.agents.stt import StreamAdapter  # noqa: E402
 from livekit.agents.vad import VAD, VADCapabilities, VADStream  # noqa: E402
 
+from app.providers.base import UnknownProviderError  # noqa: E402
 from johnny.agent.adapters.factory import (  # noqa: E402
     AgentSessionSetupError,
     SessionAdapters,
     build_session_adapters,
+    build_session_adapters_from_payload,
 )
 from johnny.agent.adapters.johnny_llm import JohnnyLLM  # noqa: E402
 from johnny.agent.adapters.johnny_stt import JohnnySTT  # noqa: E402
@@ -580,3 +582,196 @@ def test_providers_public_surface_unchanged() -> None:
         "get_registry",
     ):
         assert name in base.__all__
+
+
+# --- build_session_adapters_from_payload (Johnny-7we) -----------------------
+# The DB-free sibling: the dispatched agent worker rebuilds the same three
+# adapters from the ``provider_config`` payload (the personality-resolved
+# ``{kind: {provider_name, display_name, credentials, options}}`` dict the API
+# serialised into the job metadata) instead of querying the DB. These mirror the
+# DB-path tests above against the payload entry point.
+
+
+def _entry(
+    *,
+    provider_name: str,
+    credentials: dict[str, Any] | None = None,
+    options: dict[str, Any] | None = None,
+    display_name: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "provider_name": provider_name,
+        "display_name": display_name or provider_name,
+        "credentials": credentials or {"api_key": "k"},
+        "options": options or {},
+    }
+
+
+def _split_payload(
+    *,
+    stt: str = "deepgram",
+    llm: str = "openai",
+    tts: str = "cartesia",
+) -> dict[str, Any]:
+    return {
+        "stt": _entry(provider_name=stt),
+        "llm": _entry(provider_name=llm),
+        "tts": _entry(provider_name=tts),
+    }
+
+
+def test_payload_builds_the_three_adapters() -> None:
+    payload = {
+        "stt": _entry(
+            provider_name="deepgram",
+            credentials={"api_key": "sk-stt"},
+            options={"model": "nova-3", "language": "en-US"},
+        ),
+        "llm": _entry(
+            provider_name="openai",
+            credentials={"api_key": "sk-llm"},
+            options={"model": "gpt-4o"},
+        ),
+        "tts": _entry(
+            provider_name="cartesia",
+            credentials={"api_key": "sk-tts"},
+            options={"voice_id": "sonic", "model_id": "sonic-2024"},
+        ),
+    }
+
+    adapters = build_session_adapters_from_payload(payload, registry=_registry())
+
+    assert isinstance(adapters, SessionAdapters)
+    stt_adapter = adapters.stt
+    assert isinstance(stt_adapter, JohnnySTT)  # deepgram streams -> bare JohnnySTT
+    assert isinstance(adapters.llm, JohnnyLLM)
+    assert isinstance(adapters.tts, JohnnyTTS)
+
+    # Right provider wrapped in each adapter...
+    assert stt_adapter.provider == "deepgram"
+    assert adapters.llm.provider == "openai"
+    assert adapters.tts.provider == "cartesia"
+
+    # ...credentials + options carried straight from the payload entry...
+    stt_provider = stt_adapter._provider
+    assert isinstance(stt_provider, _FakeSTT)
+    assert stt_provider.config.credentials == {"api_key": "sk-stt"}
+    assert stt_provider.config.options == {"model": "nova-3", "language": "en-US"}
+    llm_provider = adapters.llm._provider
+    assert isinstance(llm_provider, _FakeLLM)
+    assert llm_provider.config.credentials == {"api_key": "sk-llm"}
+
+    # ...and the operator's voice/model/language selections reach the adapters.
+    assert stt_adapter.model == "nova-3"
+    assert stt_adapter._language == "en-US"
+    assert adapters.llm.model == "gpt-4o"
+    assert adapters.tts._voice == "sonic"
+    assert adapters.tts.model == "sonic-2024"
+
+
+def test_payload_personality_override_drives_the_llm_adapter() -> None:
+    # The whole point of building from the payload (not the DB): a personality
+    # that overrode the LLM provider yields *that* provider in the adapter, even
+    # though the DB's globally-active LLM row is a different one. apply_personality
+    # has already swapped the "llm" entry on the API side, so the worker honours it.
+    reg = _registry()
+    reg.register(ProviderKind.LLM, "anthropic", _FakeLLM)
+    payload = _split_payload()
+    payload["llm"] = _entry(
+        provider_name="anthropic",
+        credentials={"api_key": "persona-key"},
+        options={"model": "claude"},
+    )
+
+    adapters = build_session_adapters_from_payload(payload, registry=reg)
+
+    assert adapters.llm.provider == "anthropic"
+    assert adapters.llm.model == "claude"
+    llm_provider = adapters.llm._provider
+    assert isinstance(llm_provider, _FakeLLM)
+    assert llm_provider.config.credentials == {"api_key": "persona-key"}
+
+
+def test_payload_batch_stt_is_vad_wrapped() -> None:
+    reg = _registry()
+    reg.register(ProviderKind.STT, "faster-whisper", _FakeSTT)
+    payload = _split_payload(stt="faster-whisper")
+
+    adapters = build_session_adapters_from_payload(payload, registry=reg, vad=_NullVAD())
+
+    assert isinstance(adapters.stt, StreamAdapter)
+    assert isinstance(adapters.stt.wrapped_stt, JohnnySTT)
+    assert adapters.stt.provider == "faster-whisper"
+
+
+def test_payload_streaming_stt_is_not_wrapped() -> None:
+    adapters = build_session_adapters_from_payload(
+        _split_payload(stt="deepgram"), registry=_registry(), vad=_NullVAD()
+    )
+    assert isinstance(adapters.stt, JohnnySTT)
+    assert not isinstance(adapters.stt, StreamAdapter)
+
+
+@pytest.mark.parametrize("omit", ["stt", "llm", "tts"])
+def test_payload_missing_required_kind_fails_fast(omit: str) -> None:
+    payload = _split_payload()
+    del payload[omit]
+
+    with pytest.raises(AgentSessionSetupError) as excinfo:
+        build_session_adapters_from_payload(payload, registry=_registry())
+    assert omit in str(excinfo.value)
+
+
+def test_payload_blank_provider_name_fails_fast() -> None:
+    payload = _split_payload()
+    payload["tts"] = {"provider_name": "  ", "credentials": {}, "options": {}}
+
+    with pytest.raises(AgentSessionSetupError) as excinfo:
+        build_session_adapters_from_payload(payload, registry=_registry())
+    assert "tts" in str(excinfo.value)
+    assert "provider_name" in str(excinfo.value)
+
+
+def test_payload_empty_fails_fast() -> None:
+    with pytest.raises(AgentSessionSetupError) as excinfo:
+        build_session_adapters_from_payload({}, registry=_registry())
+    assert "stt" in str(excinfo.value)
+
+
+def test_payload_s2s_only_is_not_enough() -> None:
+    # A unified payload carries only the s2s entry; the split factory must still
+    # fail fast on the missing STT rather than reach for s2s.
+    payload = {"s2s": _entry(provider_name="openai_realtime")}
+
+    with pytest.raises(AgentSessionSetupError) as excinfo:
+        build_session_adapters_from_payload(payload, registry=_registry())
+    assert "stt" in str(excinfo.value)
+
+
+def test_payload_unknown_provider_raises_registry_error() -> None:
+    # An entry naming a provider the registry doesn't know fails the same way the
+    # DB path does — the registry's UnknownProviderError (a ProviderError).
+    payload = _split_payload(llm="not-registered")
+
+    with pytest.raises(UnknownProviderError):
+        build_session_adapters_from_payload(payload, registry=_registry())
+
+
+def test_payload_wrong_kind_factory_raises() -> None:
+    reg = _registry()
+    reg.register(ProviderKind.STT, "broken", _FakeLLM, replace=True)
+    payload = _split_payload(stt="broken")
+
+    with pytest.raises(AgentSessionSetupError) as excinfo:
+        build_session_adapters_from_payload(payload, registry=reg)
+    assert "STTProvider" in str(excinfo.value)
+
+
+def test_payload_factory_is_lazy_exported_through_package() -> None:
+    import johnny.agent.adapters as adapters
+    from johnny.agent.adapters import factory
+
+    assert (
+        adapters.build_session_adapters_from_payload
+        is factory.build_session_adapters_from_payload
+    )

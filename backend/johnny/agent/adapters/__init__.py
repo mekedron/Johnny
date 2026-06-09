@@ -34,6 +34,7 @@ if TYPE_CHECKING:
         AgentSessionSetupError,
         SessionAdapters,
         build_session_adapters,
+        build_session_adapters_from_payload,
     )
     from johnny.agent.adapters.johnny_llm import JohnnyLLM
     from johnny.agent.adapters.johnny_stt import JohnnySTT, build_stt_adapter
@@ -46,11 +47,17 @@ __all__ = [
     "JohnnyTTS",
     "SessionAdapters",
     "build_session_adapters",
+    "build_session_adapters_from_payload",
     "build_stt_adapter",
 ]
 
 _FACTORY_EXPORTS = frozenset(
-    {"AgentSessionSetupError", "SessionAdapters", "build_session_adapters"}
+    {
+        "AgentSessionSetupError",
+        "SessionAdapters",
+        "build_session_adapters",
+        "build_session_adapters_from_payload",
+    }
 )
 
 

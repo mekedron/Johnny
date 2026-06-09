@@ -31,6 +31,7 @@ packages — it is lazy-exported through the adapters' :pep:`562` ``__getattr__`
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -39,11 +40,13 @@ from sqlalchemy import select
 from app.db.models import ProviderCredential
 from app.providers.base import (
     LLMProvider,
+    ProviderConfig,
     ProviderError,
     ProviderInstance,
     ProviderKind,
     STTProvider,
     TTSProvider,
+    get_registry,
 )
 from app.providers.loader import load_active_providers
 from johnny.agent.adapters.johnny_llm import JohnnyLLM
@@ -51,8 +54,6 @@ from johnny.agent.adapters.johnny_stt import build_stt_adapter
 from johnny.agent.adapters.johnny_tts import JohnnyTTS
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from livekit.agents.stt import STT
     from livekit.agents.vad import VAD
     from sqlalchemy.orm import Session
@@ -191,6 +192,50 @@ def _selected(options: dict[str, Any], keys: tuple[str, ...]) -> str | None:
     return None
 
 
+def _assemble_split_adapters(
+    *,
+    stt: ProviderInstance,
+    llm: ProviderInstance,
+    tts: ProviderInstance,
+    stt_options: dict[str, Any],
+    llm_options: dict[str, Any],
+    tts_options: dict[str, Any],
+    vad: VAD | None,
+) -> SessionAdapters:
+    """Wrap three resolved providers (+ their option dicts) in LiveKit adapters.
+
+    The shared tail of both factory paths — the DB-backed
+    :func:`build_session_adapters` and the payload-backed
+    :func:`build_session_adapters_from_payload` resolve the three providers from
+    different sources (admin rows vs. the dispatched ``provider_config``) but
+    converge here: narrow each to its ABC (a registry misconfiguration that
+    produced the wrong kind fails fast as :class:`AgentSessionSetupError`) and
+    thread the operator's voice / model / language selections from the matching
+    option dict into the adapters (Johnny-88n) so the session uses — and reports —
+    exactly them.
+    """
+    if not isinstance(stt, STTProvider):
+        raise AgentSessionSetupError(_wrong_type(ProviderKind.STT, stt, "STTProvider"))
+    if not isinstance(llm, LLMProvider):
+        raise AgentSessionSetupError(_wrong_type(ProviderKind.LLM, llm, "LLMProvider"))
+    if not isinstance(tts, TTSProvider):
+        raise AgentSessionSetupError(_wrong_type(ProviderKind.TTS, tts, "TTSProvider"))
+    return SessionAdapters(
+        stt=build_stt_adapter(
+            stt,
+            vad=vad,
+            language=_selected(stt_options, _STT_LANGUAGE_KEYS),
+            model=_selected(stt_options, _STT_MODEL_KEYS),
+        ),
+        llm=JohnnyLLM(llm, model=_selected(llm_options, _LLM_MODEL_KEYS)),
+        tts=JohnnyTTS(
+            tts,
+            voice=_selected(tts_options, _VOICE_KEYS),
+            model=_selected(tts_options, _TTS_MODEL_KEYS),
+        ),
+    )
+
+
 def build_session_adapters(
     session: Session,
     *,
@@ -244,31 +289,109 @@ def build_session_adapters(
         kinds=_SPLIT_KINDS,
     )
     options = _active_options(session, _SPLIT_KINDS)
-    stt = _require(active, ProviderKind.STT)
-    if not isinstance(stt, STTProvider):
-        raise AgentSessionSetupError(_wrong_type(ProviderKind.STT, stt, "STTProvider"))
-    llm = _require(active, ProviderKind.LLM)
-    if not isinstance(llm, LLMProvider):
-        raise AgentSessionSetupError(_wrong_type(ProviderKind.LLM, llm, "LLMProvider"))
-    tts = _require(active, ProviderKind.TTS)
-    if not isinstance(tts, TTSProvider):
-        raise AgentSessionSetupError(_wrong_type(ProviderKind.TTS, tts, "TTSProvider"))
-    stt_opts = options.get(ProviderKind.STT, {})
-    llm_opts = options.get(ProviderKind.LLM, {})
-    tts_opts = options.get(ProviderKind.TTS, {})
-    return SessionAdapters(
-        stt=build_stt_adapter(
-            stt,
-            vad=vad,
-            language=_selected(stt_opts, _STT_LANGUAGE_KEYS),
-            model=_selected(stt_opts, _STT_MODEL_KEYS),
-        ),
-        llm=JohnnyLLM(llm, model=_selected(llm_opts, _LLM_MODEL_KEYS)),
-        tts=JohnnyTTS(
-            tts,
-            voice=_selected(tts_opts, _VOICE_KEYS),
-            model=_selected(tts_opts, _TTS_MODEL_KEYS),
-        ),
+    return _assemble_split_adapters(
+        stt=_require(active, ProviderKind.STT),
+        llm=_require(active, ProviderKind.LLM),
+        tts=_require(active, ProviderKind.TTS),
+        stt_options=options.get(ProviderKind.STT, {}),
+        llm_options=options.get(ProviderKind.LLM, {}),
+        tts_options=options.get(ProviderKind.TTS, {}),
+        vad=vad,
+    )
+
+
+def _provider_from_payload_entry(
+    registry: ProviderRegistry,
+    kind: ProviderKind,
+    provider_config: Mapping[str, Any],
+) -> tuple[ProviderInstance, dict[str, Any]]:
+    """Instantiate the ``kind`` provider from a dispatched ``provider_config`` entry.
+
+    The DB-free analogue of one :func:`~app.providers.loader.load_active_providers`
+    row: read the ``{provider_name, display_name, credentials, options}`` entry the
+    API serialised (the exact shape
+    :func:`app.services.provider_payload.build_provider_payload` produces, *after*
+    the personality LLM/TTS override is layered on by
+    :func:`app.services.personality_resolver.apply_personality`), rebuild a
+    :class:`~app.providers.base.ProviderConfig`, and instantiate through the same
+    registry the meet-worker uses (``johnny.meet_worker.pipeline_runner._build_provider``).
+    Returns the live provider plus its option dict (for the voice/model/language
+    pass-through).
+
+    A missing entry (or a blank ``provider_name``) is a fail-fast
+    :class:`AgentSessionSetupError` — a split AgentSession needs all three of
+    STT/LLM/TTS, so an under-configured payload must not half-build a session.
+    An entry naming an unregistered provider raises the registry's
+    :class:`~app.providers.base.UnknownProviderError` (also a
+    :class:`~app.providers.base.ProviderError`), mirroring the DB path.
+    """
+    entry = provider_config.get(kind.value)
+    if not isinstance(entry, Mapping):
+        raise AgentSessionSetupError(
+            f"no active {kind.value} provider in the dispatched job payload — a "
+            f"split AgentSession needs a {kind.value!r} entry in provider_config "
+            "(the API builds it from the active rows + personality override; an "
+            "empty/partial payload means listen-only or S2S, which does not use "
+            "this factory)"
+        )
+    provider_name = str(entry.get("provider_name") or "").strip()
+    if not provider_name:
+        raise AgentSessionSetupError(
+            f"the {kind.value!r} entry in the dispatched job payload has no provider_name"
+        )
+    options = dict(entry.get("options") or {})
+    config = ProviderConfig(
+        kind=kind,
+        provider_name=provider_name,
+        display_name=str(entry.get("display_name") or provider_name),
+        credentials={str(k): str(v) for k, v in (entry.get("credentials") or {}).items()},
+        options=options,
+    )
+    return registry.instantiate(config), options
+
+
+def build_session_adapters_from_payload(
+    provider_config: Mapping[str, Any],
+    *,
+    registry: ProviderRegistry | None = None,
+    vad: VAD | None = None,
+) -> SessionAdapters:
+    """Build the LiveKit STT/LLM/TTS plugin set from a dispatched ``provider_config``.
+
+    The DB-free sibling of :func:`build_session_adapters` (Johnny-7we): the
+    dispatched agent worker (Johnny-9eh) receives the session's providers as the
+    ``provider_config`` carried in its :class:`~johnny.agent.job_config.SessionJobConfig`
+    job metadata, not from a DB query. That payload is the **personality-resolved**
+    one — :func:`app.services.personality_resolver.apply_personality` has already
+    swapped in the personality's LLM/TTS provider on the API side — so building the
+    adapters *from the payload* (rather than re-reading the admin-active rows) is
+    what makes the worker honour the session's personality override. Each entry is
+    rebuilt with the same registry + :class:`~app.providers.base.ProviderConfig`
+    path the meet-worker uses, then wrapped via the shared
+    :func:`_assemble_split_adapters` tail (so the voice/model/language selections in
+    each entry's ``options`` reach the adapters identically to the DB path).
+
+    ``registry`` defaults to the process registry
+    (:func:`~app.providers.base.get_registry`); tests inject a fake one. ``vad`` is
+    forwarded to :func:`~johnny.agent.adapters.johnny_stt.build_stt_adapter` for the
+    batch-only STT wrapping, exactly as in :func:`build_session_adapters`.
+
+    Raises :class:`AgentSessionSetupError` if any of STT / LLM / TTS is absent from
+    the payload, so a misconfigured dispatch fails fast at session start instead of
+    mid-meeting.
+    """
+    reg = registry if registry is not None else get_registry()
+    stt, stt_options = _provider_from_payload_entry(reg, ProviderKind.STT, provider_config)
+    llm, llm_options = _provider_from_payload_entry(reg, ProviderKind.LLM, provider_config)
+    tts, tts_options = _provider_from_payload_entry(reg, ProviderKind.TTS, provider_config)
+    return _assemble_split_adapters(
+        stt=stt,
+        llm=llm,
+        tts=tts,
+        stt_options=stt_options,
+        llm_options=llm_options,
+        tts_options=tts_options,
+        vad=vad,
     )
 
 
@@ -276,4 +399,5 @@ __all__ = [
     "AgentSessionSetupError",
     "SessionAdapters",
     "build_session_adapters",
+    "build_session_adapters_from_payload",
 ]

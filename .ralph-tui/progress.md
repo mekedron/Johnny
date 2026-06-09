@@ -270,6 +270,47 @@ after each iteration and it's included in prompts for context.
   `livekit-agents` framework stays in the agent-worker image. `./run.sh` builds the
   meet-worker image (`run.sh:68`), so the dep is clean-install reproducible.
 
+### Session-config threading: API LaunchContext → SessionJobConfig → worker (Johnny-7we)
+- **Two seams, mirror images, no behaviour change on the live path.** The bead threads
+  one session's whole config (providers/personality/mode/instructions/approval) from the
+  API into the dispatched agent job, WITHOUT touching `start_session_for_meeting` — the
+  live dispatch is gated behind the agent-worker service (Johnny-9eh) and the
+  `JOHNNY_ORCHESTRATOR` flag (Johnny-wz5). 7we ships the producer + consumer + the
+  round-trip proof; 9eh/wz5 decide *when* it fires.
+- **Producer** = `app/services/agent_dispatch.py` (`session_job_config_from_launch_context`
+  + `dispatch_session_agent`). The `LaunchContext`→`SessionJobConfig` map is near
+  field-for-field (the two carry the same per-session config, just bound for different
+  transports: `JOHNNY_*` env vs dispatch metadata); two bridges — `room_name =
+  room_name_for_session(bot_session_id)` (one room per session, derived not passed) and
+  `identity_account_id`→`account_id`; `redis_url` lives on the launcher (not the ctx) so
+  it's a param. Blank `mode`/`pipeline_mode` coerce to `listen_only`/`split` (same
+  leniency as `from_env`). **Stays livekit-free at import** (`dispatch_agent` is lazily
+  imported inside `dispatch_session_agent`) so the API can import it cheaply.
+- **Consumer** = `johnny/agent/job_runtime.py` (`instructions_config_from_job` →
+  `AgentInstructionsConfig`, `answer_config_from_job` → `AnswerConfig(mode=…)`,
+  `build_session_adapters_for_job` → `SessionAdapters`). The worker-only seam 9eh's
+  entrypoint calls after `SessionJobConfig.from_metadata(ctx.job.metadata)`. It is
+  TRANSLATION ONLY — it deliberately does NOT assemble the running AgentSession (router
+  gate / approval / observability / barge-in + the dispatch lifecycle are 9eh's job).
+- **Adapters MUST be built from the payload, not the DB** (`build_session_adapters_from_payload`
+  in `factory.py`). The personality LLM/TTS override is applied API-side in
+  `apply_personality`, which rewrites the `provider_config["llm"]`/`["tts"]` entries; the
+  DB's globally-active rows do NOT carry it. So the new DB-free factory rebuilds each
+  provider from the payload entry (mirrors `meet_worker.pipeline_runner._build_provider`:
+  `ProviderConfig(**entry)` → `registry.instantiate`), then reuses the shared
+  `_assemble_split_adapters` tail (isinstance-guard + voice/model/language pass-through)
+  the DB path also calls. Split-only, fail-fast `AgentSessionSetupError` on a missing
+  STT/LLM/TTS entry (unified/S2S still runs on the legacy `UnifiedVoicePipeline`).
+- **`allowed_replies` is NOT in the contract** (the legacy `JOHNNY_*` env carried none
+  either — verified: no `allowed_repl` in `johnny/meet_worker/`), so
+  `answer_config_from_job` leaves it empty; threading an allow-list would be a
+  contract extension, a separate bead.
+- **Strong test = real assembly both ends.** `tests/agent/test_job_runtime.py` drives the
+  REAL `build_provider_payload` + `apply_personality` → REAL producer → REAL
+  `to_metadata`/`from_metadata` → REAL consumer, asserting providers + personality prompt
+  + mode survive end-to-end (the d5z "replay through the real code" technique, applied to
+  the dispatch round trip).
+
 ---
 
 ## 2026-06-09 - Johnny-y4j [SPIKE] Per-room JWT auth + agent dispatch contract
@@ -683,5 +724,76 @@ Johnny-52b (Phase-4 e2e + clean-install pass).
 cross-wire two symmetric endpoints; echo discipline is correct-by-construction;
 reuse the proven 4em `LiveKitTransport` topology; the run/factory seams; the
 meet-worker `livekit==1.1.8` dep).
+
+---
+
+## 2026-06-09 - Johnny-7we [BUILD] Phase 3: Thread session config (providers/personality/mode) into the agent job
+
+Threaded one Meet session's whole config from the API/DB into the dispatched
+agent job and back out inside the worker, closing the API → SessionJobConfig
+metadata → worker loop. Producer + consumer + the round-trip proof; the live
+dispatch wiring stays gated behind Johnny-9eh (agent-worker service) / Johnny-wz5
+(JOHNNY_ORCHESTRATOR flag), so no behaviour change ships on the current launch path.
+
+**Implemented:**
+- `backend/app/services/agent_dispatch.py` (new, livekit-free at import) — the
+  PRODUCER: `session_job_config_from_launch_context` (`LaunchContext` →
+  `SessionJobConfig`; near field-for-field, derives `room_name`, maps
+  `identity_account_id`→`account_id`, blank-mode/pipeline-mode leniency,
+  `redis_url` param) + `dispatch_session_agent` (builds config + lazily calls
+  `johnny.agent.dispatch.dispatch_agent` with room + metadata).
+- `backend/johnny/agent/job_runtime.py` (new, worker-only) — the CONSUMER seam
+  Johnny-9eh calls after `SessionJobConfig.from_metadata`:
+  `instructions_config_from_job` → `AgentInstructionsConfig`,
+  `answer_config_from_job` → `AnswerConfig(mode=…)`, `build_session_adapters_for_job`
+  → `SessionAdapters` (split-only; unified/S2S fails fast). Translation only — it
+  does not assemble the running AgentSession (9eh owns gate/approval/observability/
+  barge-in + lifecycle).
+- `backend/johnny/agent/adapters/factory.py` — `build_session_adapters_from_payload`
+  (DB-free sibling of `build_session_adapters`): rebuilds each provider from the
+  dispatched `provider_config` entry (`ProviderConfig(**entry)` → `registry.instantiate`,
+  mirroring `meet_worker.pipeline_runner._build_provider`) so the **personality
+  LLM/TTS override** (applied API-side by `apply_personality`) is honoured — the DB's
+  globally-active rows don't carry it. Extracted the shared `_assemble_split_adapters`
+  tail (isinstance-guard + voice/model/language pass-through) the DB path now also calls.
+  Lazy-exported through `adapters/__init__.py`.
+- Tests:
+  - `tests/agent/test_adapter_factory.py` (+12) — the payload factory: builds 3
+    adapters, personality-override drives the LLM adapter, batch-vs-streaming STT,
+    missing/blank/empty/s2s-only fail-fast, unknown-provider → `UnknownProviderError`,
+    wrong-kind factory, lazy export.
+  - `tests/agent/test_job_runtime.py` (new) — consumer mappers + the **acceptance
+    round trip**: REAL `build_provider_payload` + `apply_personality` → REAL producer
+    → REAL `to_metadata`/`from_metadata` → REAL consumer; asserts providers +
+    personality prompt + mode + redis survive end-to-end inside the "worker".
+  - `tests/services/test_agent_dispatch.py` (new) — producer field map, room
+    derivation, blank-mode leniency, provider_config copy, and `dispatch_session_agent`
+    handing the right room + metadata to a stubbed `dispatch_agent`.
+
+**Quality gates:** ruff check + format clean (all new/changed files); mypy `--strict`
+clean (3 source files: factory.py, job_runtime.py, agent_dispatch.py); `tests/agent` +
+`tests/services/test_agent_dispatch` = **591 passed** (incl. the 2 live-SFU smoke), no
+regressions from the `_assemble_split_adapters` refactor. Import-safety probes pass:
+`import johnny.agent` pulls neither livekit nor sqlalchemy; `import
+app.services.agent_dispatch` stays livekit-free (dispatch is lazy).
+
+**Clean-install:** source-only — no new runtime deps or assets, so `COPY johnny ./johnny`
++ `COPY app ./app` bake them; clean-install reproducible with no extra steps.
+
+**Browser validation: N/A (stated explicitly, CLAUDE.md pure-backend exception).** No
+running worker constructs the new agent path yet (no caller of `dispatch_session_agent` /
+`job_runtime` outside tests; Johnny-9eh + wz5 still open), and `start_session_for_meeting`
+is unchanged — the legacy meet-worker still serves the live UI untouched, so no UI/behaviour
+change ships. The acceptance's live "switch personality → bot adopts new identity" check
+needs an agent IN the room to answer (Johnny-9eh service + dispatch lifecycle) plus the
+flag flip (wz5); until then dispatching would target an agentless room with no observable
+effect. The REAL-assembly round-trip integration test is the available validation that the
+config threads to the right adapters/instructions (same technique as Johnny-d5z's
+replay-through-the-real-subscriber).
+
+**Learnings:** captured in the Codebase Patterns section at the top (the two-seam
+producer/consumer threading; adapters-from-payload-not-DB for personality-override parity;
+the shared `_assemble_split_adapters` tail; `allowed_replies` is out of contract; the
+real-assembly-both-ends test technique).
 
 ---
