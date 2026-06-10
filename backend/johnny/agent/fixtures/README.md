@@ -47,14 +47,19 @@ see repeat declines.
   `docker compose run --rm -T --no-deps -v "$PWD/backend:/workspace" api
   python - < <script>`).
 - **Contract: each fixture must read as ONE Silero VAD utterance** (exactly one
-  START/END pair) — the harness pushes one fixture per turn and waits for that
-  turn's terminal, so a fixture the VAD splits becomes two engine turns and the
-  second one barges into the first one's reply. This is why every internal
-  sentence boundary is comma-ized: piper inserts its sentence pause at sentence
-  punctuation, and Silero treats that pause (which the model scores as
-  non-speech well beyond the energy-quiet stretch) as a > 0.55 s end-of-speech;
-  a two-sentence variant read as two pairs even with internal quiet squeezed to
-  0.30 s. Verified in-image 2026-06-10 (`livekit-agents==1.5.17`): all 24
-  fixtures → exactly one START/END pair each.
+  START/END pair) **at the browser session's 0.40 s silence floor**
+  (`BROWSER_VAD_MIN_SILENCE_DURATION_S`, Johnny-trt.5 — the harness's default
+  VAD since then; it was Silero's 0.55 s default before) — the harness pushes
+  one fixture per turn and waits for that turn's terminal, so a fixture the VAD
+  splits becomes two engine turns and the second one barges into the first
+  one's reply. This is why every internal sentence boundary is comma-ized:
+  piper inserts its sentence pause at sentence punctuation, and Silero treats
+  that pause (which the model scores as non-speech well beyond the energy-quiet
+  stretch) as a > 0.55 s end-of-speech; a two-sentence variant read as two
+  pairs even with internal quiet squeezed to 0.30 s. Verified in-image
+  2026-06-10 (`livekit-agents==1.5.17`): all 24 fixtures → exactly one
+  START/END pair each, at the 0.55 s default **and** at the 0.40 s browser
+  floor (`.validation/Johnny-trt.5/verify_fixtures_at_floor.py` — gate any new
+  fixture at 0.40).
 - Piper TTS speech reliably trips Silero VAD + real STT (verified in
   Johnny-cxu), unlike DSP synthetics — see the sdk_smoke_speech.pcm note above.

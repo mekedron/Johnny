@@ -151,3 +151,24 @@ def test_prewarm_flag_lands_in_report_and_json(harness_result: HarnessResult) ->
     warmed = HarnessResult(providers_mode="local", turns_requested=1, prewarmed=True)
     assert "prewarm=on" in render_report(warmed)
     assert result_to_json(warmed)["prewarm"] is True
+
+
+def test_vad_selection_lands_in_report_and_json(harness_result: HarnessResult) -> None:
+    """Johnny-trt.5: runs self-describe which Silero silence floor they measured.
+
+    The shared fixture injects its own VAD instance ("caller-supplied"); the
+    label mapping for the --vad-min-silence-s knob and the browser default is
+    pinned on synthetic results (loading two more real Silero models here
+    would only re-test load_vad's passthrough, covered in
+    test_session_endpointing.py).
+    """
+    assert harness_result.vad_label == "caller-supplied"
+    assert "vad=caller-supplied" in render_report(harness_result)
+    assert result_to_json(harness_result)["vad"] == "caller-supplied"
+
+    browser_default = HarnessResult(providers_mode="stub", turns_requested=1)
+    assert "vad=browser-default" in render_report(browser_default)
+
+    pinned = HarnessResult(providers_mode="stub", turns_requested=1, vad_label="min_silence=0.55s")
+    assert "vad=min_silence=0.55s" in render_report(pinned)
+    assert result_to_json(pinned)["vad"] == "min_silence=0.55s"

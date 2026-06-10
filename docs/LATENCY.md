@@ -72,6 +72,21 @@ Don't try to optimise it away — the user-felt budget is **from**
 speech-end, not from when the last voiced frame arrived. What we have
 to optimise is everything **after** the VAD says "done".
 
+Two knobs set that padding on the agent engine (Johnny-trt.5), and they
+**overlap rather than stack**: Silero's `min_silence_duration` (when the
+VAD calls end-of-speech — batch STT starts transcribing here) and the
+engine's endpointing `min_delay` (anchored at the *last detected speech*,
+not at VAD-end; the turn commits at
+`max(min_silence, min_delay, STT-final)` after the user stops). Browser
+sessions load Silero at a **0.40 s** floor
+(`BROWSER_VAD_MIN_SILENCE_DURATION_S`, single-speaker surface — see the
+shipped section below); the Meet/room path keeps Silero's 0.55 s default
+(multi-party padding, Johnny-arh). The endpointing dict itself is
+forwardable per session via `build_agent_session(endpointing=...)` —
+nothing overrides it today (LiveKit's `min_delay` 0.5 / `max_delay` 3.0
+stand), the knob exists for the Phase-1/2 turn-detection work
+(Johnny-trt.6).
+
 ## How to measure on this machine
 
 ### Quick sniff test (no instrumentation)
@@ -153,6 +168,12 @@ docker compose exec api python -m johnny.agent.latency_harness \
 # the same warm-up concurrently with session start).
 docker compose exec api python -m johnny.agent.latency_harness \
     --turns 6 --providers local --prewarm
+
+# A/B a Silero end-of-speech floor (Johnny-trt.5): by default the harness
+# runs the browser session's own VAD (0.40 s min-silence); --vad-min-silence-s
+# loads a different floor (0.55 reproduces the pre-trt.5 Silero default).
+docker compose exec api python -m johnny.agent.latency_harness \
+    --turns 24 --vad-min-silence-s 0.55
 ```
 
 Output: per-stage p50/p95/min/max — `vad_end_ms` (speech-end → VAD commit,

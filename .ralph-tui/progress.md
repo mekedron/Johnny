@@ -43,6 +43,31 @@ after each iteration and it's included in prompts for context.
   files. Verify cleanliness of a change by `git stash` → baseline run →
   `git stash pop` → diff the violation sets; whole-file reformats of
   pre-existing drift just bloat the diff.
+- **Synthetic mic input for playground browser tests**: patch
+  `navigator.mediaDevices.getUserMedia` (via evaluate_script before Start, or
+  navigate_page initScript across reloads) to return an
+  oscillator→gain→MediaStreamDestination stream — gain G gives exact
+  rms=G/√2, peak=G for level-gate assertions, and Silero does NOT classify
+  the sine tone as speech, so server-side VAD stays quiet while client-side
+  level gates exercise (clean isolation of the two barge-in paths). Create
+  the AudioContext lazily inside the patched gUM (post-click) so autoplay
+  policy can't leave it suspended.
+- **Frontend quality gates without flipping to dev mode**: the frontend
+  analog of the compose-run pattern is `docker compose run --rm -T --no-deps
+  -v "$PWD/frontend/src:/workspace/src" frontend pnpm test` (mount ONLY
+  src/ + config files over the image's /workspace — mounting the whole
+  frontend/ dir shadows the image's node_modules). Works for test /
+  typecheck / lint; eslint has 1 pre-existing HEAD error
+  (settings/+page.svelte PermissionName) — gate per-touched-file via
+  git stash round-trip like the ruff gate.
+- **The playground live-state badge can freeze on a stale value**: the
+  controller's `liveState` getter depends on `Date.now()` grace windows,
+  which Svelte reactivity never re-evaluates unless some $state changes;
+  with a silent mic, `micLevel` stays identically 0 so `data-state` can
+  show "speaking" minutes after audio stopped. Don't trust
+  `[data-testid="live-state"]` as an audio-stopped assertion in browser
+  tests — nudge reactivity (e.g. change mic level) or use a console
+  breadcrumb instead.
 - **Piper chunk_bytes is NOT a TTFB knob — measure before chasing
   buffer-size latency wins**: the piper CLI bursts essentially all PCM
   after spawn+ONNX-load (`piper.synth` total−ttfa ≈ 4 ms), so the
@@ -233,4 +258,49 @@ after each iteration and it's included in prompts for context.
     the premise rather than forcing the number; the active piper DB row
     stores an explicit chunk_bytes=4096, so the configured stack's behavior
     is unchanged by design (explicit values win over the new default).
+---
+
+## 2026-06-10 - Johnny-trt.9
+- Client-side auto barge-in in the playground. `browserAudio.ts` grew a pure
+  consecutive-frame speech gate (`createBargeInGate`: RMS >= 0.02 AND
+  peak >= 0.08 for 2+ consecutive 20 ms frames, any miss resets;
+  `pcm16FrameLevels` computes normalized rms/peak per S16LE frame; both
+  exported for vitest). The capture-worklet onmessage runs the gate on every
+  frame while `autoBargeIn && speaking`; a fire logs a `[barge-in]`
+  console.info breadcrumb and calls `requestInterrupt()` — synchronous local
+  cut + `{"type":"stop"}` to the server, vs ~300-500 ms for the server-side
+  path alone. Gate resets on speaking transitions, mic-mute toggles, and
+  enable/disable so no stale frame-run carries over. New
+  `autoBargeIn` option + `setAutoBargeIn`/`getAutoBargeIn` on the handle.
+  Controller: `autoBargeIn` $state seeded from localStorage in the FIELD
+  INITIALIZER (not loadMetadata — reattach can wire audio before metadata
+  loads), `toggleAutoBargeIn()` persists + propagates live. LiveSession:
+  "Voice barge-in" checkbox in the voice-controls grid, default on,
+  data-testid=toggle-auto-barge-in.
+- Verified: vitest 95/95 (17 new gate/levels tests incl. a 3000-frame
+  sub-threshold soak), svelte-check 0/0, eslint clean on touched files
+  (stash-verified). Live chrome-devtools run on the rebuilt prod image
+  (session 81): fake-mic oscillator; fire at 58.5 ms / 63.4 ms from voice
+  onset (measured rms 0.351/0.353 ≈ theoretical 0.354 for the 0.5-amp
+  sine); server kill confirmed by absent agent_spoke/utterance row + Phase C
+  proving Silero ignores the sine tone (so the kill came via the client
+  stop); 60+ s open-mic bot speech incl. ~30 s rms-above/peak-below noise →
+  zero self-interrupts; toggle off → zero client fires + full reply;
+  persistence across reloads both ways. Artifacts: .validation/Johnny-trt.9/.
+- Files changed: frontend/src/lib/browserAudio.ts,
+  frontend/src/lib/browserAudio.test.ts (new),
+  frontend/src/lib/playground/playgroundSession.svelte.ts,
+  frontend/src/lib/components/playground/LiveSession.svelte.
+- **Learnings:**
+  - Patterns discovered: see Codebase Patterns above (synthetic-mic gUM
+    patch with exact-level oscillator + Silero-blind sine isolation;
+    frontend compose-run gate with src-only mount; stale live-state badge).
+  - Gotchas: `app.api.browser_sessions`' "client stop control received"
+    INFO never reaches docker logs (the known module-local-handler gap), so
+    server-side stop evidence must come from behavior (no agent_spoke / no
+    utterance row / no further synth) — or add the handler idiom if a later
+    bead needs the log line; `liveState` shows 'speaking' ~1.5 s past the
+    cut by design (lastSpokenAt grace), so the <=60 ms acceptance is
+    asserted via the console-breadcrumb timestamp + synchronous-cut code
+    path, not the badge.
 ---

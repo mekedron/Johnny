@@ -529,6 +529,7 @@ class HarnessResult:
     providers_mode: str
     turns_requested: int
     prewarmed: bool = False
+    vad_label: str = "browser-default"
     turns: list[TurnTimings] = field(default_factory=list)
 
     @property
@@ -708,6 +709,7 @@ async def run_latency_harness(
     inter_turn_silence_s: float = 1.5,
     settle_s: float = 0.4,
     vad: VAD | None = None,
+    vad_min_silence_s: float | None = None,
     bot_session_id: int = 0,
     prewarm: bool = False,
 ) -> HarnessResult:
@@ -729,8 +731,19 @@ async def run_latency_harness(
     awaits it so turn 1 measures the warmed steady state rather than a race
     against the loads — compare a ``prewarm=False`` run's cold turn against a
     ``prewarm=True`` run's to size the prewarm win.
+
+    VAD selection (Johnny-trt.5): by default the session resolves the browser
+    engine's own Silero model
+    (:func:`~johnny.agent.browser_session.load_browser_vad`, 0.40 s
+    min-silence floor) — the harness measures the playground as configured.
+    ``vad_min_silence_s`` loads a Silero with that floor instead (the A/B
+    knob: ``0.55`` reproduces the pre-trt.5 default); an explicit ``vad``
+    instance wins over both.
     """
-    from johnny.agent.browser_session import BrowserAgentSession
+    from johnny.agent.browser_session import (
+        BROWSER_VAD_MIN_SILENCE_DURATION_S,
+        BrowserAgentSession,
+    )
     from johnny.agent.session import load_vad
 
     if provider_config is None:
@@ -754,8 +767,14 @@ async def run_latency_harness(
     os.environ.pop("JOHNNY_SESSION_AUDIO_DIR", None)
 
     fixtures = _load_fixtures(fixture_paths)
-    if vad is None:
-        vad = load_vad()
+    if vad is not None:
+        vad_label = "caller-supplied"
+    elif vad_min_silence_s is not None:
+        vad = load_vad(min_silence_duration=vad_min_silence_s)
+        vad_label = f"min_silence={vad_min_silence_s:g}s"
+    else:
+        # None → BrowserAgentSession.build resolves the browser default.
+        vad_label = f"browser-default (min_silence={BROWSER_VAD_MIN_SILENCE_DURATION_S:g}s)"
 
     config = SessionJobConfig(
         bot_session_id=bot_session_id,
@@ -794,7 +813,12 @@ async def run_latency_harness(
 
     mic = FakeMic(transport)
     playback = PlaybackMonitor(transport)
-    result = HarnessResult(providers_mode=providers_mode, turns_requested=turns, prewarmed=prewarm)
+    result = HarnessResult(
+        providers_mode=providers_mode,
+        turns_requested=turns,
+        prewarmed=prewarm,
+        vad_label=vad_label,
+    )
 
     try:
         await agent_session.start()
@@ -885,6 +909,7 @@ def render_report(result: HarnessResult) -> str:
     lines.append(
         f"latency harness: providers={result.providers_mode} "
         f"prewarm={'on' if result.prewarmed else 'off'} "
+        f"vad={result.vad_label} "
         f"turns={len(result.turns)}/{result.turns_requested} "
         f"completed={len(completed)} replied={len(replied)} "
         f"no_reply={len(completed) - len(replied)} "
@@ -929,6 +954,7 @@ def result_to_json(result: HarnessResult) -> dict[str, Any]:
     return {
         "providers_mode": result.providers_mode,
         "prewarm": result.prewarmed,
+        "vad": result.vad_label,
         "turns_requested": result.turns_requested,
         "turns_run": len(result.turns),
         "completed": len(result.completed),
@@ -1000,6 +1026,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         ),
     )
     parser.add_argument(
+        "--vad-min-silence-s",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "load the Silero VAD with this end-of-speech silence floor instead of "
+            "the browser session's default (0.40 s; Johnny-trt.5). The A/B knob: "
+            "0.55 reproduces the pre-trt.5 Silero default"
+        ),
+    )
+    parser.add_argument(
         "--turn-timeout-s",
         type=float,
         default=120.0,
@@ -1033,6 +1070,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 turn_timeout_s=args.turn_timeout_s,
                 inter_turn_silence_s=args.inter_turn_silence_s,
                 prewarm=args.prewarm,
+                vad_min_silence_s=args.vad_min_silence_s,
             )
         )
     except Exception:

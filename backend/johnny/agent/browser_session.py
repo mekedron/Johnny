@@ -69,12 +69,32 @@ logger = logging.getLogger(__name__)
 # across all jobs on its process.
 _SHARED_VAD: VAD | None = None
 
+# Browser-scoped Silero end-of-speech silence floor (Johnny-trt.5). The
+# playground is a single-speaker surface, so the multi-party turn-taking
+# padding that justifies Silero's 0.55 s default on the Meet/room path
+# (Johnny-arh) doesn't apply; 0.40 s commits the turn ~150 ms earlier on the
+# felt path (harness A/B in docs/LATENCY.md) while still riding out natural
+# mid-sentence hesitations (~0.2–0.35 s). Browser sessions ONLY — the worker's
+# prewarm keeps :func:`~johnny.agent.session.load_vad` defaults.
+BROWSER_VAD_MIN_SILENCE_DURATION_S = 0.40
+
+
+def load_browser_vad() -> VAD:
+    """Load Silero tuned for the single-speaker browser playground (Johnny-trt.5).
+
+    One instance serves both jobs a browser session has for it — the batch-STT
+    ``StreamAdapter`` segmentation and the session's ``turn_detection="vad"``
+    endpointing — because :meth:`BrowserAgentSession.build` threads the same
+    handle through ``build_agent_runtime`` and ``build_agent_session``.
+    """
+    return load_vad(min_silence_duration=BROWSER_VAD_MIN_SILENCE_DURATION_S)
+
 
 def _shared_vad() -> VAD:
-    """Return the process-shared Silero VAD, loading it once on first use."""
+    """Return the process-shared browser Silero VAD, loading it once on first use."""
     global _SHARED_VAD
     if _SHARED_VAD is None:
-        _SHARED_VAD = load_vad()
+        _SHARED_VAD = load_browser_vad()
     return _SHARED_VAD
 
 
@@ -318,7 +338,12 @@ class BrowserAgentSession:
             )
 
 
-__all__ = ["BrowserAgentSession", "build_browser_agent_session"]
+__all__ = [
+    "BROWSER_VAD_MIN_SILENCE_DURATION_S",
+    "BrowserAgentSession",
+    "build_browser_agent_session",
+    "load_browser_vad",
+]
 
 
 async def build_browser_agent_session(

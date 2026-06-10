@@ -206,3 +206,46 @@ async def test_warm_up_delegates_to_the_runtime() -> None:
     )
     await sess.warm_up()
     assert calls == ["warm_up"]
+
+
+def test_browser_vad_loads_with_the_040_silence_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Johnny-trt.5: browser sessions get Silero with min_silence_duration=0.40.
+
+    Browser-session-scoped ONLY — the Meet/room path's ``load_vad()`` default
+    is pinned separately (test_session_endpointing.py).
+    """
+    from johnny.agent import browser_session
+    from johnny.agent import session as session_mod
+
+    assert browser_session.BROWSER_VAD_MIN_SILENCE_DURATION_S == 0.40
+
+    calls: list[dict[str, Any]] = []
+
+    def _fake_load(**kwargs: Any) -> object:
+        calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(session_mod.silero.VAD, "load", _fake_load)
+    browser_session.load_browser_vad()
+    assert calls == [{"min_silence_duration": 0.40}]
+
+
+def test_shared_vad_caches_the_browser_vad(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_shared_vad loads the browser-tuned model once and reuses the handle."""
+    from johnny.agent import browser_session
+
+    created: list[object] = []
+
+    def _fake_browser_load() -> object:
+        handle = object()
+        created.append(handle)
+        return handle
+
+    monkeypatch.setattr(browser_session, "load_browser_vad", _fake_browser_load)
+    monkeypatch.setattr(browser_session, "_SHARED_VAD", None)
+    first = browser_session._shared_vad()
+    second = browser_session._shared_vad()
+    assert first is second
+    assert created == [first]

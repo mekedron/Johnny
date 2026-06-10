@@ -34,6 +34,88 @@ const FRAME_DURATION_MS = 20;
 const SAMPLE_RATE = 16_000;
 const SAMPLES_PER_FRAME = (SAMPLE_RATE * FRAME_DURATION_MS) / 1000;
 
+/**
+ * Client-side auto barge-in (Johnny-trt.9).
+ *
+ * The server-side barge-in (Johnny-ckz.13) only cuts the bot after the
+ * user's audio has crossed the wire, survived VAD min-duration, and the
+ * interrupt control has round-tripped back — ~300-500 ms of overlapped
+ * bot speech. This gate runs on the capture worklet's 20 ms frames in
+ * the browser while the bot is speaking: two consecutive frames above
+ * both thresholds cut local playback immediately and send the server
+ * `{"type":"stop"}` in the same tick. Thresholds sit above
+ * AEC-residual / room-noise levels (echoCancellation is on for the
+ * capture track) so bot speech leaking into the mic doesn't
+ * self-interrupt.
+ */
+export const BARGE_IN_RMS_THRESHOLD = 0.02;
+export const BARGE_IN_PEAK_THRESHOLD = 0.08;
+export const BARGE_IN_TRIGGER_FRAMES = 2;
+
+export interface BargeInGateOptions {
+	/** Minimum frame RMS (0..1) to count as speech. Default 0.02. */
+	rmsThreshold?: number;
+	/** Minimum frame absolute peak (0..1) to count as speech. Default 0.08. */
+	peakThreshold?: number;
+	/** Consecutive qualifying frames required to fire. Default 2. */
+	triggerFrames?: number;
+}
+
+export interface BargeInGate {
+	/**
+	 * Feed one frame's levels. Returns true exactly on the frame where the
+	 * gate fires; the consecutive count resets so the next fire needs a
+	 * fresh run of qualifying frames.
+	 */
+	push(rms: number, peak: number): boolean;
+	/** Drop accumulated consecutive-frame progress. */
+	reset(): void;
+}
+
+/**
+ * Pure consecutive-frame speech gate — a frame counts only when BOTH the
+ * RMS and peak thresholds are met; any non-qualifying frame resets the
+ * run. Exported for unit tests.
+ */
+export function createBargeInGate(options: BargeInGateOptions = {}): BargeInGate {
+	const rmsThreshold = options.rmsThreshold ?? BARGE_IN_RMS_THRESHOLD;
+	const peakThreshold = options.peakThreshold ?? BARGE_IN_PEAK_THRESHOLD;
+	const triggerFrames = Math.max(1, options.triggerFrames ?? BARGE_IN_TRIGGER_FRAMES);
+	let consecutive = 0;
+	return {
+		push(rms: number, peak: number): boolean {
+			if (rms >= rmsThreshold && peak >= peakThreshold) {
+				consecutive += 1;
+				if (consecutive >= triggerFrames) {
+					consecutive = 0;
+					return true;
+				}
+			} else {
+				consecutive = 0;
+			}
+			return false;
+		},
+		reset(): void {
+			consecutive = 0;
+		}
+	};
+}
+
+/** RMS + absolute peak of one S16LE PCM frame, normalized to 0..1. */
+export function pcm16FrameLevels(pcm: Int16Array): { rms: number; peak: number } {
+	if (pcm.length === 0) return { rms: 0, peak: 0 };
+	let sumSquares = 0;
+	let peak = 0;
+	for (let i = 0; i < pcm.length; i++) {
+		const v = pcm[i];
+		const f = v < 0 ? v / 0x8000 : v / 0x7fff;
+		const a = Math.abs(f);
+		if (a > peak) peak = a;
+		sumSquares += f * f;
+	}
+	return { rms: Math.sqrt(sumSquares / pcm.length), peak };
+}
+
 export interface BrowserAudioSessionOptions {
 	wsUrl: string;
 	onReady?: (info: { sample_rate: number }) => void;
@@ -46,6 +128,11 @@ export interface BrowserAudioSessionOptions {
 	onMicLevel?: (level: number) => void;
 	/** Initial output volume (0..1). Default 1 (full). */
 	initialVolume?: number;
+	/**
+	 * Client-side auto barge-in (Johnny-trt.9): cut bot audio locally the
+	 * moment the user speaks over it. Default on.
+	 */
+	autoBargeIn?: boolean;
 }
 
 export interface BrowserAudioSession {
@@ -83,6 +170,10 @@ export interface BrowserAudioSession {
 	requestInterrupt: () => void;
 	/** How many interrupts have been processed (local or server-driven). */
 	getInterruptCount: () => number;
+	/** Enable/disable the client-side auto barge-in gate (Johnny-trt.9). */
+	setAutoBargeIn: (enabled: boolean) => void;
+	/** Current auto barge-in state. */
+	getAutoBargeIn: () => boolean;
 }
 
 const PCM_WORKLET_SOURCE = `
@@ -180,11 +271,16 @@ export async function startBrowserAudioSession(
 	let micLevelInterval: ReturnType<typeof setInterval> | null = null;
 	let micAnalyser: AnalyserNode | null = null;
 	let interruptCount = 0;
+	let autoBargeIn = options.autoBargeIn ?? true;
+	const bargeInGate = createBargeInGate();
 	const activeOutputs = new Set<AudioBufferSourceNode>();
 
 	const setSpeakingState = (next: boolean) => {
 		if (speaking === next) return;
 		speaking = next;
+		// Each bot utterance gets a fresh gate — consecutive-frame progress
+		// must not carry across speaking transitions.
+		bargeInGate.reset();
 		try {
 			options.onSpeakingChange?.(next);
 		} catch {
@@ -311,7 +407,9 @@ export async function startBrowserAudioSession(
 			getMicMuted: () => micMuted,
 			isSpeaking: () => false,
 			requestInterrupt: () => undefined,
-			getInterruptCount: () => 0
+			getInterruptCount: () => 0,
+			setAutoBargeIn: () => undefined,
+			getAutoBargeIn: () => autoBargeIn
 		};
 	}
 
@@ -360,6 +458,20 @@ export async function startBrowserAudioSession(
 			socket?.send(buf);
 		} catch {
 			// dropped frame; cleanup will handle final teardown
+		}
+		// Client-side auto barge-in (Johnny-trt.9): while the bot is
+		// speaking, fire the local interrupt as soon as the user's voice
+		// crosses the gate — without waiting for the server round-trip.
+		if (autoBargeIn && speaking) {
+			const { rms, peak } = pcm16FrameLevels(new Int16Array(buf));
+			if (bargeInGate.push(rms, peak)) {
+				// Fires at most once per bot utterance (the interrupt flips
+				// `speaking` off), so info-level is operator-friendly.
+				console.info(
+					`[barge-in] client speech gate fired (rms=${rms.toFixed(3)}, peak=${peak.toFixed(3)}) — cutting bot audio locally`
+				);
+				requestInterrupt();
+			}
 		}
 	};
 
@@ -491,6 +603,9 @@ export async function startBrowserAudioSession(
 
 	const setMicMuted = (next: boolean) => {
 		micMuted = next;
+		// Muted frames never reach the gate (the worklet handler returns
+		// early), so drop any half-accumulated run from before the toggle.
+		bargeInGate.reset();
 		if (stream) {
 			for (const track of stream.getAudioTracks()) {
 				track.enabled = !next;
@@ -503,6 +618,12 @@ export async function startBrowserAudioSession(
 				// swallow
 			}
 		}
+	};
+
+	const setAutoBargeIn = (next: boolean) => {
+		if (autoBargeIn === next) return;
+		autoBargeIn = next;
+		bargeInGate.reset();
 	};
 
 	const requestInterrupt = () => {
@@ -536,6 +657,8 @@ export async function startBrowserAudioSession(
 		getMicMuted: () => micMuted,
 		isSpeaking: () => speaking,
 		requestInterrupt,
-		getInterruptCount: () => interruptCount
+		getInterruptCount: () => interruptCount,
+		setAutoBargeIn,
+		getAutoBargeIn: () => autoBargeIn
 	};
 }

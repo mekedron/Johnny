@@ -3,10 +3,10 @@
   "sessionId": "737b71bc-61ae-4acf-99c6-31d37006b423",
   "status": "running",
   "startedAt": "2026-06-10T17:39:21.674Z",
-  "updatedAt": "2026-06-10T19:12:37.582Z",
-  "currentIteration": 3,
+  "updatedAt": "2026-06-10T19:59:09.097Z",
+  "currentIteration": 5,
   "maxIterations": 0,
-  "tasksCompleted": 3,
+  "tasksCompleted": 4,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -69,8 +69,8 @@
       {
         "id": "Johnny-trt.7",
         "title": "[BUILD] Phase 1: Piper chunk_bytes default 4096→1024",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.8",
@@ -272,10 +272,32 @@
       "durationMs": 2044703,
       "startedAt": "2026-06-10T18:14:42.123Z",
       "endedAt": "2026-06-10T18:48:46.826Z"
+    },
+    {
+      "iteration": 4,
+      "status": "completed",
+      "taskId": "Johnny-trt.7",
+      "taskTitle": "[BUILD] Phase 1: Piper chunk_bytes default 4096→1024",
+      "taskCompleted": true,
+      "durationMs": 1408618,
+      "startedAt": "2026-06-10T18:49:07.714Z",
+      "endedAt": "2026-06-10T19:12:36.332Z"
+    },
+    {
+      "iteration": 5,
+      "status": "completed",
+      "taskId": "Johnny-trt.5",
+      "taskTitle": "[BUILD] Phase 1: Endpointing knobs — endpointing passthrough + browser-scoped Silero min_silence 0.55→0.40s",
+      "taskCompleted": false,
+      "durationMs": 1357628,
+      "startedAt": "2026-06-10T19:12:57.861Z",
+      "endedAt": "2026-06-10T19:35:35.489Z"
     }
   ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
-  "activeTaskIds": [],
+  "activeTaskIds": [
+    "Johnny-trt.5"
+  ],
   "subagentPanelVisible": false
 }

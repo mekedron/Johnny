@@ -48,6 +48,7 @@ from livekit.agents import (
     NOT_GIVEN,
     Agent,
     AgentSession,
+    EndpointingOptions,
     InterruptionOptions,
     TurnHandlingOptions,
 )
@@ -221,14 +222,23 @@ def transcripts_to_chat_ctx(history: Sequence[TranscriptFinalized]) -> ChatConte
     return ctx
 
 
-def load_vad() -> VAD:
+def load_vad(*, min_silence_duration: float | None = None) -> VAD:
     """Load the Silero VAD model (baked into the image at build time).
 
     Mirrors the starter's ``prewarm`` step. Kept as a module-level function
     so a worker can warm the model once per process and hand the same handle
     to every :func:`build_agent_session` call.
+
+    ``min_silence_duration`` overrides Silero's end-of-speech silence floor
+    (Johnny-trt.5); ``None`` loads with Silero's own defaults (0.55 s floor),
+    which is what the Meet/room path always does — its padding is multi-party
+    turn-taking headroom (Johnny-arh). The browser playground loads its
+    tighter floor through
+    :func:`johnny.agent.browser_session.load_browser_vad`.
     """
-    return silero.VAD.load()
+    if min_silence_duration is None:
+        return silero.VAD.load()
+    return silero.VAD.load(min_silence_duration=min_silence_duration)
 
 
 def _speech_alt_duration_ms(alt: SpeechData | None) -> int | None:
@@ -259,6 +269,7 @@ def build_agent_session(
     enable_barge_in: bool = True,
     min_interruption_duration_s: float | None = None,
     turn_detection: Any = None,
+    endpointing: EndpointingOptions | None = None,
 ) -> AgentSession[Any]:
     """Construct Johnny's ``AgentSession`` from provider adapter instances.
 
@@ -309,6 +320,50 @@ def build_agent_session(
     default (0.5 s) in place (see
     :data:`~johnny.agent.barge_in.DEFAULT_NATIVE_INTERRUPTION_MIN_DURATION_S` for
     the legacy fast-trigger value).
+
+    ``endpointing`` (Johnny-trt.5) overrides the engine's end-of-turn
+    endpointing dict (``TurnHandlingOptions["endpointing"]``, e.g.
+    ``{"min_delay": 0.4}``; missing keys inherit the SDK defaults). ``None``
+    leaves the key unset entirely, so LiveKit's own defaults apply
+    (``min_delay`` 0.5 s / ``max_delay`` 3.0 s) — the Meet/room path
+    (:mod:`johnny.agent.worker`) passes nothing and keeps the pre-trt.5
+    semantics. Note the ``min_delay`` wait is anchored to the *last detected
+    speech*, so it overlaps the VAD's own ``min_silence_duration`` wait
+    rather than stacking on top of it: the effective turn-commit floor is
+    ``max(vad min_silence, endpointing min_delay)`` after the user stops.
+    """
+    return AgentSession(
+        stt=stt,
+        llm=llm,
+        tts=tts if tts is not None else NOT_GIVEN,
+        vad=vad if vad is not None else load_vad(),
+        turn_handling=build_turn_handling(
+            turn_detection=turn_detection,
+            preemptive_generation=preemptive_generation,
+            enable_barge_in=enable_barge_in,
+            min_interruption_duration_s=min_interruption_duration_s,
+            endpointing=endpointing,
+        ),
+    )
+
+
+def build_turn_handling(
+    *,
+    turn_detection: Any = None,
+    preemptive_generation: bool = False,
+    enable_barge_in: bool = True,
+    min_interruption_duration_s: float | None = None,
+    endpointing: EndpointingOptions | None = None,
+) -> TurnHandlingOptions:
+    """Build the session's ``turn_handling`` options dict (Johnny-trt.5).
+
+    Factored out of :func:`build_agent_session` for the same reason as
+    :func:`build_interruption_options`: the kwarg→options mapping is
+    unit-testable without a job context — pass ``turn_detection="vad"`` in
+    tests, because the default constructs the job-context-bound
+    :class:`MultilingualModel`. ``endpointing=None`` omits the key so LiveKit
+    applies its own defaults (``min_delay`` 0.5 / ``max_delay`` 3.0); a given
+    dict is forwarded verbatim.
     """
     turn_handling: TurnHandlingOptions = {
         "turn_detection": turn_detection if turn_detection is not None else MultilingualModel(),
@@ -318,13 +373,9 @@ def build_agent_session(
             min_interruption_duration_s=min_interruption_duration_s,
         ),
     }
-    return AgentSession(
-        stt=stt,
-        llm=llm,
-        tts=tts if tts is not None else NOT_GIVEN,
-        vad=vad if vad is not None else load_vad(),
-        turn_handling=turn_handling,
-    )
+    if endpointing is not None:
+        turn_handling["endpointing"] = endpointing
+    return turn_handling
 
 
 def build_interruption_options(
@@ -905,6 +956,7 @@ __all__ = [
     "build_agent_session",
     "build_interruption_options",
     "build_johnny_agent",
+    "build_turn_handling",
     "load_vad",
     "transcripts_to_chat_ctx",
 ]

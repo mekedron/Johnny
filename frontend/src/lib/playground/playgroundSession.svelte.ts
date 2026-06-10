@@ -189,6 +189,12 @@ export class PlaygroundController {
 	isSpeaking = $state(false);
 	textInput = $state('');
 	textPending = $state(false);
+	// Johnny-trt.9: client-side auto barge-in — speaking over the bot cuts
+	// its audio locally without waiting for the server round-trip. Sticky in
+	// localStorage; default on. Seeded in the initializer (not loadMetadata)
+	// so a reattach that wires audio before metadata loads still gets the
+	// stored value.
+	autoBargeIn = $state(PlaygroundController.readStoredAutoBargeIn());
 
 	// --- Dictation ---------------------------------------------------------
 	dictationState = $state<DictationState>('idle');
@@ -375,6 +381,36 @@ export class PlaygroundController {
 			return undefined;
 		}
 	}
+
+	// --- auto barge-in sticky toggle (Johnny-trt.9) -------------------------
+
+	private static readonly AUTO_BARGE_IN_KEY = 'johnny:playground:autoBargeIn';
+
+	/** Anything but a stored '0' (including nothing stored / SSR) is on. */
+	private static readStoredAutoBargeIn(): boolean {
+		try {
+			if (typeof localStorage === 'undefined') return true;
+			return localStorage.getItem(PlaygroundController.AUTO_BARGE_IN_KEY) !== '0';
+		} catch {
+			return true;
+		}
+	}
+
+	/** Flip the toggle, apply to the live audio session, persist. */
+	toggleAutoBargeIn = (): void => {
+		this.autoBargeIn = !this.autoBargeIn;
+		this.audioSession?.setAutoBargeIn(this.autoBargeIn);
+		try {
+			if (typeof localStorage === 'undefined') return;
+			localStorage.setItem(
+				PlaygroundController.AUTO_BARGE_IN_KEY,
+				this.autoBargeIn ? '1' : '0'
+			);
+		} catch {
+			// localStorage can throw (private mode / quota); a non-sticky
+			// toggle is acceptable degradation.
+		}
+	};
 
 	private buildPayload(): StartBrowserSessionPayload {
 		const overrides: Record<string, BrowserProviderOverride> = {};
@@ -588,6 +624,7 @@ export class PlaygroundController {
 		const audio = await startBrowserAudioSession({
 			wsUrl: audioWebSocketUrl(session),
 			initialVolume: this.volume,
+			autoBargeIn: this.autoBargeIn,
 			onReady: () => {
 				this.audioReady = true;
 			},
@@ -621,6 +658,7 @@ export class PlaygroundController {
 		audio.setVolume(this.volume);
 		audio.setSpeakerMuted(this.speakerMuted);
 		audio.setMicMuted(this.micMuted);
+		audio.setAutoBargeIn(this.autoBargeIn);
 		this.audioSession = audio;
 	}
 

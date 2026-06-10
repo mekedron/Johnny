@@ -295,6 +295,21 @@
 					</span>
 				</div>
 			</div>
+
+			<label
+				class="flex items-center gap-2 text-xs text-muted-foreground sm:col-span-2"
+				title="While the bot is speaking, talking over it cuts its audio immediately in the browser and tells the server to stop — no need to wait for it to finish"
+			>
+				<input
+					type="checkbox"
+					class="size-3.5 rounded-sm border border-border-strong bg-surface-3 [accent-color:var(--color-foreground)]"
+					checked={controller.autoBargeIn}
+					onchange={() => controller.toggleAutoBargeIn()}
+					data-testid="toggle-auto-barge-in"
+				/>
+				<span class="font-medium text-foreground">Voice barge-in</span>
+				<span>speaking over the bot cuts it off instantly</span>
+			</label>
 		</div>
 
 		<!-- Transcript -->
