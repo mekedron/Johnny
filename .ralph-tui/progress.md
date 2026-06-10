@@ -35,6 +35,28 @@ after each iteration and it's included in prompts for context.
   (viable, filed Johnny-1qr). `EOUModelBase.__init__` already accepts
   `inference_executor=`; runner IO is JSON bytes in/out. Numbers:
   `.validation/Johnny-trt.6/00-spike-note.md`.
+- **Streaming-STT turn semantics (trt.12)**: with the mlx-sidecar Parakeet
+  streaming path, the user-final exists BEFORE Silero END_OF_SPEECH
+  (sidecar endpoints at 0.36 s < the 0.40/0.50 s session floors), so
+  turn-commit is VAD-bound and pauses in [0.40, ~0.52) s now COMMIT turns
+  that batch STT's ~120 ms final tail used to re-glue accidentally.
+  Multiple STT-segment finals can accumulate inside one turn; judge turn
+  integrity by `agent_decisions` (INV-1), not by transcript_chunks row
+  counts (a row per final, not per turn). `JOHNNY_PARAKEET_FORCE_BATCH=1`
+  pins the old batch path (per-runtime `batch_only` property otherwise).
+- **parakeet-mlx streaming quality levers**: `depth=2` is what buys
+  batch-parity WER across chunk boundaries (d1 ≈ 0.09–0.14 WER); FEWER
+  decode boundaries beat more (480 ms chunks clean, 400 ms produced word
+  slips); a fresh streaming context fed pure silence HALLUCINATES ('Yeah.'
+  from 500 ms of zeros) — never decode leading silence, drop trailing
+  silence past a pre-flush point. `StreamingParakeet.__enter__/__exit__`
+  flips the encoder attention mode process-wide → hold a model-mode lock
+  for the segment lifetime vs any batch transcribe on the same model.
+- **zsh + docker compose exec env vars**: `ENV="-e FOO=1"; docker compose
+  exec $ENV ...` silently sets a var named " FOO" (zsh doesn't word-split
+  unquoted vars) — compose accepts it and your flag never lands. Spell
+  `-e FOO=1` inline and verify with `os.environ.get` before trusting an
+  A/B arm.
 - **Local-provider harness runs have a ±100–150 ms p50 LLM-noise floor**:
   router/llm p50 drifts that much between *identical-config* 24-turn runs
   (Ollama run noise + replied-count-driven context growth — runs that
@@ -176,4 +198,60 @@ after each iteration and it's included in prompts for context.
     the playground "counting" prompt yields only ~30 s of speech per reply
     with the concise persona — accumulate speaking time across replies for
     a 60 s false-positive soak instead of fighting the persona.
+---
+
+## 2026-06-11 - Johnny-trt.12
+- Parakeet cache-aware streaming shipped on the MLX sidecar runtime (the
+  spike picked it over in-container NeMo: parakeet-mlx 0.5.2 has a native
+  StreamingParakeet API; the NeMo TDT checkpoint is offline-only and
+  CPU-bound — documented as follow-up, coreml likewise). Sidecar grew
+  `WS /transcribe_stream` (server-side RMS endpointer: 240 ms pre-roll,
+  480 ms decode cadence, 200 ms pre-flush, 360 ms finalize + per-segment
+  context reset, 30 s force-final; model-mode lock vs batch), provider
+  grew `_transcribe_streaming_via_sidecar` (config→PCM→finalize over WS,
+  interim+final TranscriptEvents, STREAMING_* constants as source of
+  truth) + `batch_only` property + `JOHNNY_PARAKEET_FORCE_BATCH` env +
+  internal `options["streaming"]` knob (stt_stream.py dictation pins it
+  False — its replay loop would go quadratic; native streaming there is
+  trt.13). "parakeet" removed from BATCH_ONLY_STT_PROVIDER_NAMES
+  (per-runtime self-declaration via the existing batch_only attribute);
+  drift-guard + classification tests updated. Harness grew
+  `stt_final_after_vad_end_ms` (user_input_transcribed wall stamp vs VAD
+  edge) for the Phase-2 acceptance metric.
+- Verified: 3509 backend tests pass in-image (the 3 failures are
+  pre-existing env issues: invalid OPENAI_API_KEY live tests + wizard
+  image checks, reproduced on clean HEAD); 11 sidecar endpointer tests;
+  ruff lint+format clean. Real-model: final excess after earliest trip
+  p50 4 ms / max 10 ms; WER vs batch 0.035 (punctuation + clip-edge only,
+  complete clauses word-identical); harness A/B (BABA, 12-turn runs)
+  stt_final_after_vad_end p50 **+140 ms batch → −99 ms streaming** — every
+  streaming final preceded the VAD commit, turn-commit now VAD-bound.
+  chrome-devtools session 86 (fake-mic trt.5 WAV): full conversation on
+  streaming Parakeet+Ollama+Piper, transcripts correct over two loop
+  passes, 18 decisions INV-1 clean, console clean. Artifacts:
+  .validation/Johnny-trt.12/ (00-decision-note.md, spike scripts, 3 WS
+  validation runs, 5 harness JSONs, screenshot, DB dump).
+- Files changed: sidecars/parakeet-mlx/server.py (+test_endpointer.py,
+  README.md), backend/app/providers/parakeet_stt.py,
+  backend/app/api/stt_stream.py,
+  backend/johnny/agent/adapters/johnny_stt.py,
+  backend/johnny/agent/latency_harness.py,
+  backend/tests/providers/test_parakeet_stt.py,
+  backend/tests/agent/test_stt_stream_adapter.py, docs/LATENCY.md,
+  .ralph-tui/progress.md.
+- **Learnings:**
+  - Patterns discovered: streaming-STT turn semantics ([0.40, 0.52) s
+    pauses now commit turns — batch slowness was an accidental re-glue),
+    parakeet-mlx quality levers (depth=2, fewer boundaries, never decode
+    leading silence), zsh compose-exec env-var trap — all added to
+    Codebase Patterns above.
+  - Gotchas: LiveKit emits NO stt PipelineTiming row for direct streaming
+    STTs (usage-only metrics) — wall-clock `user_input_transcribed` is the
+    measurable seam; an abandoned inner async generator only closes at GC
+    (outer `transcribe_stream` must aclose() it explicitly or the WS
+    lingers past barge-in teardown); a session keeps ONE RecognizeStream
+    alive across turns in VAD mode (one WS per session, not per turn);
+    `_instantiate_preview` filters options through split_values so
+    non-schema knobs can't leak in from the UI — inject post-split where
+    needed.
 ---

@@ -36,15 +36,27 @@ the per-instance reference but **does not** evict the process cache —
 call :meth:`ParakeetSTT.evict_process_cache` explicitly for that.
 
 The adapter expects 16 kHz mono S16LE PCM frames in ``audio_iter`` —
-the format produced by the meet-worker audio bridge. PCM bytes are
-concatenated into a single utterance buffer and passed to the runtime
-in one call. The pipeline (the legacy split pipeline) segments
-audio into VAD-bounded chunks before handing them to STT, so the
-adapter treats each ``transcribe_stream`` invocation as one complete
-utterance. A v1 batch implementation that emits one final
-:class:`TranscriptEvent` per utterance ships here; Johnny-stt.3 will
-wire up Parakeet's Cache-Aware Streaming inference so partial deltas
-flow to the live chat surface.
+the format produced by the meet-worker audio bridge.
+
+**Streaming vs batch (Johnny-trt.12).** The ``mlx-sidecar`` runtime is
+truly streaming: ``transcribe_stream`` relays the PCM over a WebSocket
+(``/transcribe_stream``) to the sidecar's cache-aware streaming decoder
+and re-emits its events — interim :class:`TranscriptEvent`\\ s while the
+speaker talks plus a fast final per utterance, endpointed sidecar-side
+(RMS silence tracking tuned below Johnny's session-VAD floors so the
+final exists before LiveKit commits the turn). Because the provider
+self-endpoints, the agent adapter layer drives it directly (no
+VAD-buffered StreamAdapter): :attr:`ParakeetSTT.batch_only` is ``False``
+for this runtime. Set ``JOHNNY_PARAKEET_FORCE_BATCH=1`` to pin the old
+batch behaviour as an escape hatch.
+
+The ``in-container`` and ``coreml-sidecar`` runtimes remain
+**batch-only**: PCM bytes are concatenated into a single utterance
+buffer and passed to the runtime in one call (the VAD-segmented
+StreamAdapter hands them one utterance per ``transcribe_stream``
+invocation). Streaming for those runtimes is follow-up work — NeMo's
+offline TDT checkpoint would need hand-rolled buffered chunking on CPU,
+and the FluidAudio Swift sidecar would need its own streaming endpoint.
 
 **License**: the upstream NeMo toolkit ships under the Apache 2.0
 license. The default model checkpoint ``nvidia/parakeet-tdt-0.6b-v3``
@@ -58,6 +70,8 @@ from __future__ import annotations
 
 import array
 import asyncio
+import contextlib
+import json
 import logging
 import os
 import threading
@@ -67,6 +81,8 @@ from importlib import import_module
 from typing import Any, Protocol, runtime_checkable
 
 import httpx
+import websockets
+import websockets.asyncio.client
 
 from app.providers.base import (
     PCM_SAMPLE_RATE_HZ,
@@ -98,9 +114,7 @@ logger.setLevel(logging.INFO)
 if not any(getattr(h, "_johnny_parakeet", False) for h in logger.handlers):
     _h = logging.StreamHandler()
     _h.setLevel(logging.INFO)
-    _h.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
-    )
+    _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
     _h._johnny_parakeet = True  # type: ignore[attr-defined]
     logger.addHandler(_h)
     # Don't double-emit if the root logger picks up a handler later.
@@ -138,9 +152,7 @@ RUNTIME_IN_CONTAINER = "in-container"
 RUNTIME_MLX_SIDECAR = "mlx-sidecar"
 RUNTIME_COREML_SIDECAR = "coreml-sidecar"
 DEFAULT_RUNTIME = RUNTIME_IN_CONTAINER
-ALLOWED_RUNTIMES = frozenset(
-    {RUNTIME_IN_CONTAINER, RUNTIME_MLX_SIDECAR, RUNTIME_COREML_SIDECAR}
-)
+ALLOWED_RUNTIMES = frozenset({RUNTIME_IN_CONTAINER, RUNTIME_MLX_SIDECAR, RUNTIME_COREML_SIDECAR})
 # Default per-runtime URLs. ``host.docker.internal`` resolves to the host's
 # loopback interface from inside Docker Desktop on macOS — no extra wiring
 # needed. Ports 8765 / 8766 are chosen so both sidecars can run side-by-side
@@ -155,6 +167,43 @@ DEFAULT_SIDECAR_URL = SIDECAR_DEFAULT_URLS[RUNTIME_MLX_SIDECAR]
 # spend a few seconds loading the model. Anything past 60 s is a hung
 # sidecar and the user should see a clear error.
 SIDECAR_HTTP_TIMEOUT_SECONDS = 60.0
+
+# --- Streaming over the MLX sidecar (Johnny-trt.12) -------------------------
+#
+# WS endpoint served by sidecars/parakeet-mlx/server.py. The provider sends
+# a JSON config message, then raw PCM frames as they arrive from the agent
+# session, and relays the sidecar's interim/final events. The sidecar
+# endpoints utterances itself; these knobs are forwarded in the config
+# message so the backend stays the single source of truth for the values.
+# ``endpoint_silence_ms`` must stay BELOW the session-VAD min-silence floors
+# (0.40 s browser / 0.50 s rooms — johnny.agent.browser_session) so the
+# final transcript exists by the time LiveKit's END_OF_SPEECH fires, and
+# ABOVE the longest natural intra-utterance hesitation in the trt.5 fixture
+# set (0.35 s) so pauses don't split the decode context.
+STREAMING_WS_PATH = "/transcribe_stream"
+# 480 ms decode chunks = interim-update opportunities at ~2.1 Hz while
+# speaking (the >= 2 Hz AC bar); ~170 ms p50 per incremental decode on an
+# M-series host. 400 ms was trialled for extra cadence margin but
+# produced word-level slips on the hesitation fixture that 480 ms did
+# not ("do ye know" / "violin have") — more encode boundaries per
+# segment measurably hurt; see .validation/Johnny-trt.12/02-*.txt.
+STREAMING_DECODE_CHUNK_MS = 480
+STREAMING_PREFLUSH_SILENCE_MS = 200
+STREAMING_ENDPOINT_SILENCE_MS = 360
+STREAMING_SILENCE_RMS = 300
+STREAMING_MAX_SEGMENT_S = 30.0
+# Cold sidecar model load is ~1 s; 10 s covers a just-started sidecar
+# without leaving a dead one undiagnosed for long.
+STREAMING_WS_OPEN_TIMEOUT_SECONDS = 10.0
+# Escape hatch: pin the mlx-sidecar runtime back to the VAD-buffered batch
+# path (StreamAdapter) without touching provider config. Any non-empty
+# value other than "0"/"false" forces batch.
+FORCE_BATCH_ENV_VAR = "JOHNNY_PARAKEET_FORCE_BATCH"
+
+
+def _force_batch_env() -> bool:
+    raw = os.environ.get(FORCE_BATCH_ENV_VAR, "").strip().lower()
+    return raw not in ("", "0", "false")
 
 
 # --- Process-wide model cache --------------------------------------------
@@ -265,25 +314,30 @@ class ParakeetSTT(STTProvider):
     * ``beam_size`` — transducer beam search width (default 1 / greedy).
       In-container only.
     * ``language`` — force a language code (default ``en``). Sent to the
-      sidecar as an ``X-Language`` header when non-empty.
+      sidecar as an ``X-Language`` header when non-empty (batch) or in
+      the WS config message (streaming).
+    * ``streaming`` — internal, not in the field schema. ``False`` (or
+      ``"false"``/``"0"``/``"no"``) pins the batch path on the
+      ``mlx-sidecar`` runtime; used by one-shot consumers that replay a
+      buffered clip (the playground dictation endpoint). Ignored on the
+      batch-only runtimes, which never stream regardless.
 
-    The adapter is **batch-oriented** in v1: it buffers the whole
-    utterance from ``audio_iter`` and runs a single transcribe call,
-    emitting one final :class:`TranscriptEvent` per non-empty
-    hypothesis. Johnny-stt.3 will wire up streaming inference.
+    The ``mlx-sidecar`` runtime is **streaming** (Johnny-trt.12): audio
+    is relayed over the sidecar's ``/transcribe_stream`` WebSocket and
+    interim + final events flow back while the speaker talks (see
+    :attr:`batch_only` and :data:`FORCE_BATCH_ENV_VAR`). The other two
+    runtimes are batch-oriented: they buffer the whole utterance from
+    ``audio_iter`` and run a single transcribe call, emitting one final
+    :class:`TranscriptEvent` per non-empty hypothesis.
     """
 
     def __init__(self, config: ProviderConfig) -> None:
         if config.kind is not ProviderKind.STT:
-            raise ValueError(
-                f"ParakeetSTT requires ProviderKind.STT; got {config.kind.value}"
-            )
+            raise ValueError(f"ParakeetSTT requires ProviderKind.STT; got {config.kind.value}")
         opts = config.options
         runtime = str(opts.get("runtime") or DEFAULT_RUNTIME)
         if runtime not in ALLOWED_RUNTIMES:
-            raise ValueError(
-                f"runtime {runtime!r} must be one of {sorted(ALLOWED_RUNTIMES)}"
-            )
+            raise ValueError(f"runtime {runtime!r} must be one of {sorted(ALLOWED_RUNTIMES)}")
         self._runtime = runtime
         # Sidecar URL: explicit value wins; otherwise pick the per-runtime
         # default. In-container runtime keeps an empty string — it's
@@ -298,9 +352,7 @@ class ParakeetSTT(STTProvider):
 
         model_id = str(opts.get("model_id") or DEFAULT_MODEL_ID)
         if model_id not in ALLOWED_MODEL_IDS:
-            raise ValueError(
-                f"model_id {model_id!r} must be one of {sorted(ALLOWED_MODEL_IDS)}"
-            )
+            raise ValueError(f"model_id {model_id!r} must be one of {sorted(ALLOWED_MODEL_IDS)}")
         self._model_id = model_id
         self._model_dir = str(
             opts.get("model_dir")
@@ -309,9 +361,7 @@ class ParakeetSTT(STTProvider):
         )
         device = str(opts.get("device") or DEFAULT_DEVICE)
         if device not in ALLOWED_DEVICES:
-            raise ValueError(
-                f"device {device!r} must be one of {sorted(ALLOWED_DEVICES)}"
-            )
+            raise ValueError(f"device {device!r} must be one of {sorted(ALLOWED_DEVICES)}")
         self._device = device
         beam_size_opt = opts.get("beam_size")
         beam_size = int(beam_size_opt) if beam_size_opt is not None else DEFAULT_BEAM_SIZE
@@ -319,9 +369,7 @@ class ParakeetSTT(STTProvider):
             raise ValueError(f"beam_size must be positive; got {beam_size}")
         self._beam_size = beam_size
         language = opts.get("language")
-        self._language: str | None = (
-            str(language) if language not in (None, "") else None
-        )
+        self._language: str | None = str(language) if language not in (None, "") else None
         # Per-instance reference — points at the cached process-wide model
         # once :meth:`_ensure_model` resolves it. ``close()`` drops this
         # reference but does not evict the cache.
@@ -329,6 +377,26 @@ class ParakeetSTT(STTProvider):
         # Lazy httpx client for the sidecar runtimes. Reused across calls
         # on the same instance so the TCP connection stays warm.
         self._sidecar_client: httpx.AsyncClient | None = None
+        # Streaming applies to the MLX sidecar runtime only (Johnny-trt.12).
+        # ``options["streaming"]`` is an internal (non-schema) knob: one-shot
+        # consumers that re-run transcribe_stream over a buffered clip — the
+        # playground dictation endpoint (app.api.stt_stream) — pin it False
+        # to keep the cheap single-POST batch semantics. The env escape
+        # hatch pins batch globally. Evaluated once at construction so one
+        # provider instance behaves consistently for its lifetime.
+        streaming_opt = opts.get("streaming")
+        streaming_opt_off = (
+            str(streaming_opt).strip().lower()
+            in (
+                "0",
+                "false",
+                "no",
+            )
+            or streaming_opt is False
+        )
+        self._streaming_enabled = (
+            runtime == RUNTIME_MLX_SIDECAR and not _force_batch_env() and not streaming_opt_off
+        )
 
     @property
     def name(self) -> str:
@@ -369,10 +437,13 @@ class ParakeetSTT(STTProvider):
                         "Which Parakeet runtime to use. In-container is "
                         "the simplest (no sidecar to manage) but slowest. "
                         "MLX uses Apple's Metal GPU via the parakeet-mlx "
-                        "sidecar (~2-3× faster). CoreML uses the Neural "
-                        "Engine via the FluidAudio Swift sidecar (matches "
-                        "VoiceInk's speed). Sidecars must be started "
-                        "separately — see ./scripts/start-parakeet-sidecar.sh."
+                        "sidecar (~2-3× faster) and is the only runtime "
+                        "with true streaming transcription (interim "
+                        "transcripts while you speak, fast finals). CoreML "
+                        "uses the Neural Engine via the FluidAudio Swift "
+                        "sidecar (matches VoiceInk's speed; batch-only). "
+                        "Sidecars must be started separately — see "
+                        "./scripts/start-parakeet-sidecar.sh."
                     ),
                     group=FieldGroup.MODEL,
                 ),
@@ -403,9 +474,7 @@ class ParakeetSTT(STTProvider):
                         "Sidecar runtimes always use v3 regardless of this "
                         "setting."
                     ),
-                    options=tuple(
-                        FieldOption(value=m, label=m) for m in sorted(ALLOWED_MODEL_IDS)
-                    ),
+                    options=tuple(FieldOption(value=m, label=m) for m in sorted(ALLOWED_MODEL_IDS)),
                     group=FieldGroup.MODEL,
                 ),
                 FieldDef(
@@ -559,6 +628,18 @@ class ParakeetSTT(STTProvider):
         return self._sidecar_url
 
     @property
+    def batch_only(self) -> bool:
+        """``True`` when ``transcribe_stream`` only emits after input ends.
+
+        Consumed by :func:`johnny.agent.adapters.johnny_stt.build_stt_adapter`:
+        batch-only providers get wrapped in the VAD-segmented StreamAdapter,
+        streaming ones are driven directly. The ``mlx-sidecar`` runtime
+        streams (unless :data:`FORCE_BATCH_ENV_VAR` pins it back); the
+        ``in-container`` and ``coreml-sidecar`` runtimes are batch-only.
+        """
+        return not self._streaming_enabled
+
+    @property
     def _cache_key(self) -> CacheKey:
         return (
             self._model_id,
@@ -572,18 +653,33 @@ class ParakeetSTT(STTProvider):
         self,
         audio_iter: AsyncIterator[bytes],
     ) -> AsyncIterator[TranscriptEvent]:
-        """Consume PCM utterance from ``audio_iter`` and yield TranscriptEvents.
+        """Stream :class:`TranscriptEvent`\\ s from PCM input.
 
-        Treats the input iterator as one logical utterance — the pipeline
-        already chops audio into VAD-bounded segments before handing it
-        to STT, so the adapter concatenates whatever arrives and runs a
-        single transcribe call. The current implementation emits a
-        single final event per utterance; partial deltas land in
-        Johnny-stt.3 via NeMo Cache-Aware Streaming inference.
+        **Streaming path** (``mlx-sidecar`` runtime, the default for it):
+        relays ``audio_iter`` over the sidecar's ``/transcribe_stream``
+        WebSocket as audio arrives and yields its interim + final events
+        incrementally — ``audio_iter`` is the session-long continuous
+        stream and utterance boundaries are detected sidecar-side.
 
-        Dispatches to the in-container NeMo path or one of the two
-        sidecar HTTP paths based on ``self._runtime``.
+        **Batch path** (``in-container``, ``coreml-sidecar``, or the
+        :data:`FORCE_BATCH_ENV_VAR` escape hatch): treats the input
+        iterator as one VAD-bounded utterance — concatenates whatever
+        arrives and runs a single transcribe call once it ends, emitting
+        one final event per non-empty hypothesis.
         """
+        if self._streaming_enabled:
+            inner = self._transcribe_streaming_via_sidecar(audio_iter)
+            try:
+                async for event in inner:
+                    yield event
+            finally:
+                # aclose() on THIS generator (barge-in / turn teardown) must
+                # tear the WS down synchronously — an abandoned inner
+                # generator would only be finalized by GC, leaving the
+                # socket open for a while.
+                await inner.aclose()
+            return
+
         buffer = bytearray()
         async for chunk in audio_iter:
             if chunk:
@@ -605,6 +701,125 @@ class ParakeetSTT(STTProvider):
             async for event in self._transcribe_via_sidecar(pcm_bytes, audio_ms):
                 yield event
 
+    # --- Streaming path (Johnny-trt.12) ------------------------------------
+
+    def _streaming_ws_url(self) -> str:
+        """Derive the sidecar's WS endpoint from the configured HTTP URL."""
+        base = self._sidecar_url
+        if base.startswith("https://"):
+            base = "wss://" + base[len("https://") :]
+        elif base.startswith("http://"):
+            base = "ws://" + base[len("http://") :]
+        return f"{base}{STREAMING_WS_PATH}"
+
+    def _streaming_config_message(self) -> str:
+        """The JSON config message opening every streaming WS session."""
+        config: dict[str, Any] = {
+            "type": "config",
+            "sample_rate": PCM_SAMPLE_RATE_HZ,
+            "decode_chunk_ms": STREAMING_DECODE_CHUNK_MS,
+            "preflush_silence_ms": STREAMING_PREFLUSH_SILENCE_MS,
+            "endpoint_silence_ms": STREAMING_ENDPOINT_SILENCE_MS,
+            "silence_rms": STREAMING_SILENCE_RMS,
+            "max_segment_s": STREAMING_MAX_SEGMENT_S,
+        }
+        if self._language:
+            config["language"] = self._language
+        return json.dumps(config)
+
+    async def _open_ws(self, url: str) -> Any:
+        """Open the streaming WebSocket; overridable hook for tests."""
+        return await websockets.asyncio.client.connect(
+            url, open_timeout=STREAMING_WS_OPEN_TIMEOUT_SECONDS
+        )
+
+    async def _transcribe_streaming_via_sidecar(
+        self,
+        audio_iter: AsyncIterator[bytes],
+    ) -> AsyncIterator[TranscriptEvent]:
+        """Relay ``audio_iter`` over the sidecar WS; re-emit its events.
+
+        A writer task pumps PCM into the socket as the session produces it
+        and sends ``finalize`` when the iterator ends (stream teardown);
+        the generator body relays sidecar events until ``done``. Teardown
+        (``aclose()`` on barge-in / turn reset) cancels the writer and
+        closes the socket, which the sidecar handles as a disconnect.
+        """
+        url = self._streaming_ws_url()
+        try:
+            ws = await self._open_ws(url)
+        except STTError:
+            raise
+        except Exception as exc:
+            raise STTError(
+                f"parakeet streaming sidecar at {url} unreachable: {exc}. "
+                "Start (or update + restart) it with "
+                "./scripts/start-parakeet-sidecar.sh restart mlx — older "
+                "sidecar builds lack /transcribe_stream. Set "
+                f"{FORCE_BATCH_ENV_VAR}=1 to pin the batch path instead."
+            ) from exc
+
+        async def _pump_audio() -> None:
+            try:
+                async for chunk in audio_iter:
+                    if chunk:
+                        await ws.send(chunk)
+                await ws.send(json.dumps({"type": "finalize"}))
+            except websockets.exceptions.ConnectionClosed:
+                # The reader loop surfaces the close reason; just stop.
+                return
+
+        writer: asyncio.Task[None] | None = None
+        got_done = False
+        try:
+            # Config must land before the first audio frame, so send it
+            # before the writer task can race a send() in.
+            await ws.send(self._streaming_config_message())
+            writer = asyncio.create_task(_pump_audio())
+            async for raw in ws:
+                if isinstance(raw, (bytes, bytearray)):
+                    continue  # server never sends binary; ignore
+                payload = json.loads(raw)
+                kind = payload.get("type")
+                if kind in ("interim", "final"):
+                    text = str(payload.get("text") or "").strip()
+                    if not text:
+                        continue
+                    try:
+                        timestamp_ms = int(payload.get("t_ms") or 0)
+                    except (TypeError, ValueError):
+                        timestamp_ms = 0
+                    yield TranscriptEvent(
+                        text=text,
+                        is_final=kind == "final",
+                        timestamp_ms=timestamp_ms,
+                        confidence=None,
+                    )
+                elif kind == "done":
+                    got_done = True
+                    break
+                elif kind == "error":
+                    raise STTError(
+                        f"parakeet streaming sidecar error: {payload.get('error') or 'unknown'}"
+                    )
+            if not got_done and writer.done() and not writer.cancelled():
+                # Socket closed after we finalized but before ``done`` —
+                # the sidecar went away mid-flush. Retryable.
+                raise STTError(
+                    f"parakeet streaming sidecar at {url} closed before acknowledging finalize"
+                )
+        except websockets.exceptions.ConnectionClosed as exc:
+            raise STTError(f"parakeet streaming sidecar connection lost: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise STTError(f"parakeet streaming sidecar sent invalid JSON: {exc}") from exc
+        finally:
+            if writer is not None:
+                writer.cancel()
+                with contextlib.suppress(BaseException):
+                    await writer
+            with contextlib.suppress(Exception):
+                await ws.close()
+
     async def _transcribe_in_container(
         self,
         pcm_bytes: bytes,
@@ -615,9 +830,7 @@ class ParakeetSTT(STTProvider):
         try:
             model = await self._ensure_model()
             start = time.perf_counter()
-            hypotheses = await asyncio.to_thread(
-                self._run_transcribe, model, waveform
-            )
+            hypotheses = await asyncio.to_thread(self._run_transcribe, model, waveform)
             forward_ms = int((time.perf_counter() - start) * 1000)
         except STTError:
             raise
@@ -646,8 +859,7 @@ class ParakeetSTT(STTProvider):
 
         if not emitted:
             logger.debug(
-                "parakeet produced no usable hypotheses for %d ms utterance "
-                "(%d-byte buffer)",
+                "parakeet produced no usable hypotheses for %d ms utterance (%d-byte buffer)",
                 audio_ms,
                 len(pcm_bytes),
             )
@@ -659,9 +871,7 @@ class ParakeetSTT(STTProvider):
     ) -> AsyncIterator[TranscriptEvent]:
         """Sidecar HTTP path. Posts PCM bytes and yields one final event."""
         if not self._sidecar_url:
-            raise STTError(
-                f"parakeet runtime={self._runtime} requires sidecar_url"
-            )
+            raise STTError(f"parakeet runtime={self._runtime} requires sidecar_url")
         client = self._sidecar_client_or_open()
         url = f"{self._sidecar_url}/transcribe"
         headers = {
@@ -697,9 +907,7 @@ class ParakeetSTT(STTProvider):
         try:
             payload = response.json()
         except ValueError as exc:
-            raise STTError(
-                f"parakeet sidecar {self._runtime} returned non-JSON body"
-            ) from exc
+            raise STTError(f"parakeet sidecar {self._runtime} returned non-JSON body") from exc
 
         logger.info(
             "parakeet.transcribe: runtime=%s audio_ms=%d forward_ms=%d",
@@ -953,6 +1161,7 @@ def _hypothesis_confidence(hypothesis: Any) -> float | None:
     # faster-whisper adapter's avg_logprob → exp() mapping.
     try:
         import math
+
         exp_value = math.exp(value)
     except (OverflowError, ValueError):
         return None
@@ -975,9 +1184,7 @@ def _maybe_move_to_device(model: Any, device: str) -> None:
     try:
         move(device)
     except Exception as exc:  # noqa: BLE001 — device move is best effort
-        logger.warning(
-            "parakeet: could not move model to device %r: %s", device, exc
-        )
+        logger.warning("parakeet: could not move model to device %r: %s", device, exc)
 
 
 def _maybe_set_beam_size(model: Any, beam_size: int) -> None:
@@ -1016,9 +1223,7 @@ def register(*, replace: bool = False) -> None:
     :meth:`ParakeetSTT._load_model`. Misconfigured deployments fail
     loudly when the model is actually needed, not at package import.
     """
-    get_registry().register(
-        ProviderKind.STT, PROVIDER_NAME, ParakeetSTT, replace=replace
-    )
+    get_registry().register(ProviderKind.STT, PROVIDER_NAME, ParakeetSTT, replace=replace)
 
 
 __all__ = [
@@ -1032,12 +1237,18 @@ __all__ = [
     "DEFAULT_MODEL_ID",
     "DEFAULT_RUNTIME",
     "DEFAULT_SIDECAR_URL",
+    "FORCE_BATCH_ENV_VAR",
     "PROVIDER_NAME",
     "RUNTIME_COREML_SIDECAR",
     "RUNTIME_IN_CONTAINER",
     "RUNTIME_MLX_SIDECAR",
     "SIDECAR_DEFAULT_URLS",
     "SIDECAR_HTTP_TIMEOUT_SECONDS",
+    "STREAMING_DECODE_CHUNK_MS",
+    "STREAMING_ENDPOINT_SILENCE_MS",
+    "STREAMING_PREFLUSH_SILENCE_MS",
+    "STREAMING_SILENCE_RMS",
+    "STREAMING_WS_PATH",
     "ParakeetSTT",
     "register",
 ]

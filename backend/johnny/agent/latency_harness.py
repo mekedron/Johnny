@@ -154,9 +154,14 @@ _HARNESS_INSTRUCTIONS = (
 )
 
 # The report's stage metrics, in render order. Keys match TurnTimings fields.
+# ``stt_final_after_vad_end_ms`` is the Phase-2 acceptance metric
+# (Johnny-trt.12/.15): wall-clock gap between the VAD end-of-speech commit
+# and the user transcript's FINAL event — negative when a streaming STT
+# finalizes before the VAD floor elapses, ~+forward-time for batch STT.
 REPORT_METRICS: tuple[str, ...] = (
     "vad_end_ms",
     "stt_ms",
+    "stt_final_after_vad_end_ms",
     "router_ms",
     "llm_ttft_ms",
     "llm_total_ms",
@@ -495,6 +500,7 @@ class TurnTimings:
     decision: str = ""
     vad_end_ms: float | None = None
     stt_ms: float | None = None
+    stt_final_after_vad_end_ms: float | None = None
     router_ms: float | None = None
     llm_ttft_ms: float | None = None
     llm_total_ms: float | None = None
@@ -628,6 +634,7 @@ def _derive_turn(
     speech_end_t: float,
     vad_end_t: float | None,
     first_audio_t: float | None,
+    stt_final_t: float | None = None,
 ) -> TurnTimings:
     """Reduce one turn's event window + wall-clock marks to stage timings.
 
@@ -670,6 +677,10 @@ def _derive_turn(
 
     if vad_end_t is not None:
         timings.vad_end_ms = (vad_end_t - speech_end_t) * 1000
+        if stt_final_t is not None:
+            # Negative = the (streaming) STT finalized before the VAD
+            # min-silence floor elapsed; the turn commit is then VAD-bound.
+            timings.stt_final_after_vad_end_ms = (stt_final_t - vad_end_t) * 1000
     if first_audio_t is not None:
         timings.first_audio_wall_ms = (first_audio_t - speech_end_t) * 1000
 
@@ -829,6 +840,17 @@ async def run_latency_harness(
 
     agent_session._session.on("user_state_changed", _on_user_state)  # noqa: SLF001
 
+    # Wall-clock stamps of user FINAL transcripts — the seam for the
+    # Phase-2 ``stt_final_after_vad_end_ms`` metric (streaming STT emits
+    # its final near/before the VAD commit; batch STT only after it).
+    user_final_ts: list[float] = []
+
+    def _on_user_transcribed(ev: Any) -> None:
+        if getattr(ev, "is_final", False):
+            user_final_ts.append(time.monotonic())
+
+    agent_session._session.on("user_input_transcribed", _on_user_transcribed)  # noqa: SLF001
+
     mic = FakeMic(transport)
     playback = PlaybackMonitor(transport)
     result = HarnessResult(
@@ -860,6 +882,7 @@ async def run_latency_harness(
                 ),
                 None,
             )
+            stt_final_t = next((t for t in user_final_ts if t >= speech_end_t), None)
             timings = _derive_turn(
                 turn_number=turn_number,
                 fixture_name=fixture_name,
@@ -868,6 +891,7 @@ async def run_latency_harness(
                 speech_end_t=speech_end_t,
                 vad_end_t=vad_end_t,
                 first_audio_t=playback.first_arrival_after(speech_end_t),
+                stt_final_t=stt_final_t,
             )
             result.turns.append(timings)
             logger.info(

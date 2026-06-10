@@ -17,12 +17,15 @@ from __future__ import annotations
 
 import array
 import asyncio
+import json
 import math
+import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import httpx
 import pytest
+import websockets.exceptions
 
 from app.providers.base import (
     ProviderConfig,
@@ -42,11 +45,17 @@ from app.providers.parakeet_stt import (
     DEFAULT_MODEL_ID,
     DEFAULT_RUNTIME,
     DEFAULT_SIDECAR_URL,
+    FORCE_BATCH_ENV_VAR,
     PROVIDER_NAME,
     RUNTIME_COREML_SIDECAR,
     RUNTIME_IN_CONTAINER,
     RUNTIME_MLX_SIDECAR,
     SIDECAR_DEFAULT_URLS,
+    STREAMING_DECODE_CHUNK_MS,
+    STREAMING_ENDPOINT_SILENCE_MS,
+    STREAMING_PREFLUSH_SILENCE_MS,
+    STREAMING_SILENCE_RMS,
+    STREAMING_WS_PATH,
     ParakeetSTT,
     _hypothesis_confidence,
     _hypothesis_text,
@@ -57,6 +66,12 @@ from tests.providers._stt_contract import (
     assert_transcribe_respects_vad_boundaries,
     assert_transcribe_yields_events,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_force_batch_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Streaming/batch dispatch must not depend on the dev shell's env."""
+    monkeypatch.delenv(FORCE_BATCH_ENV_VAR, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -72,6 +87,7 @@ def _reset_parakeet_process_cache() -> Any:
     ParakeetSTT.evict_process_cache()
     yield
     ParakeetSTT.evict_process_cache()
+
 
 # --- Helpers ---------------------------------------------------------------
 
@@ -338,9 +354,7 @@ def test_pcm16_bytes_to_float32_roundtrip_via_array_fallback(
     def _no_numpy(_name: str) -> Any:
         raise ImportError("numpy unavailable for test")
 
-    monkeypatch.setattr(
-        "app.providers.parakeet_stt.import_module", _no_numpy
-    )
+    monkeypatch.setattr("app.providers.parakeet_stt.import_module", _no_numpy)
     pcm = _pcm([0, 16384, -16384, 32767, -32768])
     out = _pcm16_bytes_to_float32(pcm)
     assert isinstance(out, array.array)
@@ -410,9 +424,7 @@ async def test_transcribe_skips_empty_chunks() -> None:
         _config(),
         hypotheses=[_FakeHypothesis("hi")],
     )
-    events = [
-        e async for e in adapter.transcribe_stream(_iter([b"", b"", b""]))
-    ]
+    events = [e async for e in adapter.transcribe_stream(_iter([b"", b"", b""]))]
     assert events == []
     assert adapter.load_calls == 0
 
@@ -468,9 +480,7 @@ async def test_transcribe_emits_one_event_per_hypothesis() -> None:
             _FakeHypothesis("world", score=-0.2),
         ],
     )
-    events = [
-        e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))
-    ]
+    events = [e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))]
     assert [e.text for e in events] == ["hello", "world"]
     assert all(e.is_final for e in events)
     # No per-hypothesis timestamps from NeMo — they all stamp at 0.
@@ -487,9 +497,7 @@ async def test_transcribe_skips_blank_hypotheses() -> None:
             _FakeHypothesis(""),
         ],
     )
-    events = [
-        e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))
-    ]
+    events = [e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))]
     assert [e.text for e in events] == ["real"]
 
 
@@ -499,9 +507,7 @@ async def test_transcribe_accepts_raw_string_hypotheses() -> None:
         _config(),
         hypotheses=["hello from old nemo"],
     )
-    events = [
-        e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))
-    ]
+    events = [e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))]
     assert len(events) == 1
     assert events[0].text == "hello from old nemo"
 
@@ -511,9 +517,7 @@ async def test_transcribe_emits_no_events_when_all_hypotheses_blank() -> None:
         _config(),
         hypotheses=[_FakeHypothesis(""), _FakeHypothesis("   ")],
     )
-    events = [
-        e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))
-    ]
+    events = [e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))]
     assert events == []
 
 
@@ -586,9 +590,7 @@ async def test_cache_key_change_evicts_previous() -> None:
     assert first.load_calls == 1
 
     # beam_size is part of the cache key — different key, fresh load.
-    second = _FakeParakeetSTT(
-        _config(beam_size=4), hypotheses=[_FakeHypothesis("b")]
-    )
+    second = _FakeParakeetSTT(_config(beam_size=4), hypotheses=[_FakeHypothesis("b")])
     [_ async for _ in second.transcribe_stream(_iter([_pcm([0] * 16)]))]
     assert second.load_calls == 1
 
@@ -600,15 +602,11 @@ async def test_language_is_part_of_cache_key() -> None:
     but Johnny-stt.3 will plumb it through. If language isn't in the key
     today, that future PR can silently serve the wrong-language model.
     """
-    first = _FakeParakeetSTT(
-        _config(language="en"), hypotheses=[_FakeHypothesis("a")]
-    )
+    first = _FakeParakeetSTT(_config(language="en"), hypotheses=[_FakeHypothesis("a")])
     [_ async for _ in first.transcribe_stream(_iter([_pcm([0] * 16)]))]
     assert first.load_calls == 1
 
-    second = _FakeParakeetSTT(
-        _config(language="fi"), hypotheses=[_FakeHypothesis("b")]
-    )
+    second = _FakeParakeetSTT(_config(language="fi"), hypotheses=[_FakeHypothesis("b")])
     [_ async for _ in second.transcribe_stream(_iter([_pcm([0] * 16)]))]
     assert second.load_calls == 1
 
@@ -629,9 +627,7 @@ async def test_load_failure_does_not_poison_cache() -> None:
         _config(),
         hypotheses=[_FakeHypothesis("now ok")],
     )
-    events = [
-        e async for e in recovering.transcribe_stream(_iter([_pcm([0] * 16)]))
-    ]
+    events = [e async for e in recovering.transcribe_stream(_iter([_pcm([0] * 16)]))]
     assert recovering.load_calls == 1
     assert [e.text for e in events] == ["now ok"]
 
@@ -666,9 +662,7 @@ async def test_concurrent_first_load_coalesces() -> None:
     second = _SlowLoadParakeetSTT(_config(), hypotheses=[_FakeHypothesis("b")])
 
     async def _run(adapter: _SlowLoadParakeetSTT) -> list[Any]:
-        return [
-            e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))
-        ]
+        return [e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))]
 
     t1 = asyncio.create_task(_run(first))
     # Wait until the first load is actually running before kicking off
@@ -717,7 +711,12 @@ async def test_transcribe_passes_through_stt_error_from_load() -> None:
             pass
 
 
-# --- transcribe_stream: sidecar HTTP path ----------------------------------
+# --- transcribe_stream: sidecar HTTP path (batch) ---------------------------
+#
+# The HTTP POST path is shared by both sidecar runtimes' batch flow. Since
+# Johnny-trt.12 the mlx-sidecar runtime streams over WS by default, so these
+# batch tests run on the coreml-sidecar runtime (batch by design) plus one
+# explicit mlx + JOHNNY_PARAKEET_FORCE_BATCH escape-hatch case.
 
 
 def _mock_transport(handler: Callable[[httpx.Request], httpx.Response]) -> Any:
@@ -757,7 +756,7 @@ class _SidecarFakeParakeetSTT(ParakeetSTT):
 
 
 async def test_sidecar_runtime_posts_pcm_and_yields_event() -> None:
-    """The MLX runtime POSTs the raw PCM bytes and emits one final event."""
+    """A batch sidecar runtime POSTs the raw PCM bytes and emits one final."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
@@ -768,17 +767,15 @@ async def test_sidecar_runtime_posts_pcm_and_yields_event() -> None:
         assert request.headers["X-Audio-Format"] == "pcm-s16le"
         # PCM bytes round-trip 1:1.
         assert request.content == _pcm([0, 100, 200, 300])
-        return httpx.Response(200, json={"text": "hello via mlx", "confidence": 0.87})
+        return httpx.Response(200, json={"text": "hello via coreml", "confidence": 0.87})
 
     adapter = _SidecarFakeParakeetSTT(
-        _config(runtime=RUNTIME_MLX_SIDECAR),
+        _config(runtime=RUNTIME_COREML_SIDECAR),
         handler=handler,
     )
-    events = [
-        e async for e in adapter.transcribe_stream(_iter([_pcm([0, 100, 200, 300])]))
-    ]
+    events = [e async for e in adapter.transcribe_stream(_iter([_pcm([0, 100, 200, 300])]))]
     assert len(events) == 1
-    assert events[0].text == "hello via mlx"
+    assert events[0].text == "hello via coreml"
     assert events[0].is_final is True
     assert events[0].confidence == pytest.approx(0.87)
     assert len(adapter.requests) == 1
@@ -795,9 +792,7 @@ async def test_sidecar_runtime_sends_language_header_when_set() -> None:
         _config(runtime=RUNTIME_COREML_SIDECAR, language="fi"),
         handler=handler,
     )
-    events = [
-        e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))
-    ]
+    events = [e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))]
     assert [e.text for e in events] == ["moi"]
 
 
@@ -809,7 +804,7 @@ async def test_sidecar_runtime_omits_language_header_when_blank() -> None:
         return httpx.Response(200, json={"text": "ok"})
 
     adapter = _SidecarFakeParakeetSTT(
-        _config(runtime=RUNTIME_MLX_SIDECAR, language=""),
+        _config(runtime=RUNTIME_COREML_SIDECAR, language=""),
         handler=handler,
     )
     [_ async for _ in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))]
@@ -822,7 +817,7 @@ async def test_sidecar_runtime_unreachable_raises_helpful_stt_error() -> None:
         raise httpx.ConnectError("Connection refused")
 
     adapter = _SidecarFakeParakeetSTT(
-        _config(runtime=RUNTIME_MLX_SIDECAR),
+        _config(runtime=RUNTIME_COREML_SIDECAR),
         handler=handler,
     )
     with pytest.raises(STTError, match="unreachable") as exc_info:
@@ -831,7 +826,7 @@ async def test_sidecar_runtime_unreachable_raises_helpful_stt_error() -> None:
     # Surfaces the runtime, URL, and the start script so the user knows
     # what to do.
     msg = str(exc_info.value)
-    assert RUNTIME_MLX_SIDECAR in msg
+    assert RUNTIME_COREML_SIDECAR in msg
     assert "start-parakeet-sidecar.sh" in msg
 
 
@@ -842,7 +837,7 @@ async def test_sidecar_runtime_non_200_raises_stt_error() -> None:
         return httpx.Response(503, text="model is still loading")
 
     adapter = _SidecarFakeParakeetSTT(
-        _config(runtime=RUNTIME_MLX_SIDECAR),
+        _config(runtime=RUNTIME_COREML_SIDECAR),
         handler=handler,
     )
     with pytest.raises(STTError, match="HTTP 503"):
@@ -857,12 +852,10 @@ async def test_sidecar_runtime_empty_transcript_yields_no_events() -> None:
         return httpx.Response(200, json={"text": "", "confidence": 1.0})
 
     adapter = _SidecarFakeParakeetSTT(
-        _config(runtime=RUNTIME_MLX_SIDECAR),
+        _config(runtime=RUNTIME_COREML_SIDECAR),
         handler=handler,
     )
-    events = [
-        e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))
-    ]
+    events = [e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))]
     assert events == []
 
 
@@ -873,12 +866,10 @@ async def test_sidecar_runtime_clamps_confidence() -> None:
         return httpx.Response(200, json={"text": "x", "confidence": 1.5})
 
     adapter = _SidecarFakeParakeetSTT(
-        _config(runtime=RUNTIME_MLX_SIDECAR),
+        _config(runtime=RUNTIME_COREML_SIDECAR),
         handler=handler,
     )
-    events = [
-        e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))
-    ]
+    events = [e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))]
     assert len(events) == 1
     assert events[0].confidence == 1.0
 
@@ -902,13 +893,328 @@ async def test_sidecar_runtime_does_not_load_nemo() -> None:
             raise AssertionError("sidecar runtime must not load a local model")
 
     adapter = _NoLoadParakeetSTT(
+        _config(runtime=RUNTIME_COREML_SIDECAR),
+        handler=handler,
+    )
+    events = [e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))]
+    assert [e.text for e in events] == ["ok"]
+
+
+# --- transcribe_stream: streaming WS path (Johnny-trt.12) -------------------
+#
+# The mlx-sidecar runtime streams: PCM is relayed over the sidecar's
+# /transcribe_stream WebSocket and interim/final events come back while
+# audio still flows. These tests fake the socket (scripted duplex object
+# injected via the ``_open_ws`` hook) — real-model cadence/latency/WER
+# numbers come from the host-side validation run recorded under
+# .validation/Johnny-trt.12/.
+
+
+_WS_EOS = object()
+
+
+class _FakeSidecarWS:
+    """Scripted duplex fake of the sidecar's /transcribe_stream socket.
+
+    ``on_send`` is invoked for every client->server message and may call
+    :meth:`push` / :meth:`end` to script the server side. Iteration yields
+    pushed messages; :meth:`end` terminates it (server closed the socket);
+    a pushed exception is raised from ``__anext__`` (transport failure).
+    """
+
+    def __init__(
+        self,
+        on_send: Callable[[_FakeSidecarWS, Any], None] | None = None,
+    ) -> None:
+        self.sent: list[Any] = []
+        self.closed = False
+        self._rx: asyncio.Queue[Any] = asyncio.Queue()
+        self._on_send = on_send
+
+    def push(self, payload: dict[str, Any] | str | BaseException) -> None:
+        item = json.dumps(payload) if isinstance(payload, dict) else payload
+        self._rx.put_nowait(item)
+
+    def end(self) -> None:
+        self._rx.put_nowait(_WS_EOS)
+
+    async def send(self, data: Any) -> None:
+        self.sent.append(data)
+        if self._on_send is not None:
+            self._on_send(self, data)
+
+    def __aiter__(self) -> _FakeSidecarWS:
+        return self
+
+    async def __anext__(self) -> Any:
+        item = await self._rx.get()
+        if item is _WS_EOS:
+            raise StopAsyncIteration
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def _is_finalize(message: Any) -> bool:
+    if not isinstance(message, str):
+        return False
+    try:
+        return json.loads(message).get("type") == "finalize"
+    except ValueError:
+        return False
+
+
+class _StreamingFakeParakeetSTT(ParakeetSTT):
+    """mlx-runtime adapter with an injected fake WS (``_open_ws`` hook)."""
+
+    def __init__(
+        self,
+        config: ProviderConfig,
+        *,
+        ws: _FakeSidecarWS | None = None,
+        connect_error: Exception | None = None,
+    ) -> None:
+        super().__init__(config)
+        self.fake_ws = ws
+        self._connect_error = connect_error
+        self.open_calls: list[str] = []
+
+    async def _open_ws(self, url: str) -> Any:
+        self.open_calls.append(url)
+        if self._connect_error is not None:
+            raise self._connect_error
+        assert self.fake_ws is not None
+        return self.fake_ws
+
+    def _load_model(self) -> Any:
+        raise AssertionError("streaming path must not load a local model")
+
+
+def _echo_sidecar(events_after_finalize: list[dict[str, Any]]) -> _FakeSidecarWS:
+    """A fake sidecar that replies to ``finalize`` with scripted events."""
+
+    def on_send(ws: _FakeSidecarWS, message: Any) -> None:
+        if _is_finalize(message):
+            for event in events_after_finalize:
+                ws.push(event)
+            ws.push({"type": "done"})
+
+    return _FakeSidecarWS(on_send)
+
+
+def test_streaming_ws_url_derivation() -> None:
+    http_adapter = ParakeetSTT(_config(runtime=RUNTIME_MLX_SIDECAR, sidecar_url="http://host:8765"))
+    assert http_adapter._streaming_ws_url() == f"ws://host:8765{STREAMING_WS_PATH}"
+    https_adapter = ParakeetSTT(
+        _config(runtime=RUNTIME_MLX_SIDECAR, sidecar_url="https://host:8765/")
+    )
+    assert https_adapter._streaming_ws_url() == f"wss://host:8765{STREAMING_WS_PATH}"
+
+
+def test_batch_only_property_per_runtime() -> None:
+    assert ParakeetSTT(_config(runtime=RUNTIME_MLX_SIDECAR)).batch_only is False
+    assert ParakeetSTT(_config(runtime=RUNTIME_IN_CONTAINER)).batch_only is True
+    assert ParakeetSTT(_config(runtime=RUNTIME_COREML_SIDECAR)).batch_only is True
+    assert ParakeetSTT(_config()).batch_only is True  # default in-container
+
+
+def test_force_batch_env_pins_batch_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(FORCE_BATCH_ENV_VAR, "1")
+    assert ParakeetSTT(_config(runtime=RUNTIME_MLX_SIDECAR)).batch_only is True
+    monkeypatch.setenv(FORCE_BATCH_ENV_VAR, "0")
+    assert ParakeetSTT(_config(runtime=RUNTIME_MLX_SIDECAR)).batch_only is False
+
+
+def test_streaming_option_false_pins_batch_only() -> None:
+    """The internal options knob the dictation endpoint sets (stt_stream)."""
+    assert ParakeetSTT(_config(runtime=RUNTIME_MLX_SIDECAR, streaming=False)).batch_only is True
+    assert ParakeetSTT(_config(runtime=RUNTIME_MLX_SIDECAR, streaming="false")).batch_only is True
+    assert ParakeetSTT(_config(runtime=RUNTIME_MLX_SIDECAR, streaming=True)).batch_only is False
+
+
+async def test_force_batch_env_routes_to_http_post(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The escape hatch keeps the whole HTTP batch flow working on mlx."""
+    monkeypatch.setenv(FORCE_BATCH_ENV_VAR, "1")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/transcribe"
+        return httpx.Response(200, json={"text": "batch via mlx"})
+
+    adapter = _SidecarFakeParakeetSTT(
         _config(runtime=RUNTIME_MLX_SIDECAR),
         handler=handler,
     )
-    events = [
-        e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))
+    events = [e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))]
+    assert [e.text for e in events] == ["batch via mlx"]
+
+
+async def test_streaming_config_then_audio_then_finalize() -> None:
+    """Wire order: JSON config first, then PCM frames, then finalize."""
+    ws = _echo_sidecar([])
+    adapter = _StreamingFakeParakeetSTT(_config(runtime=RUNTIME_MLX_SIDECAR, language="fi"), ws=ws)
+    pcm = _pcm([1, 2, 3, 4])
+
+    events = [e async for e in adapter.transcribe_stream(_iter([pcm, pcm]))]
+
+    assert events == []
+    assert adapter.open_calls == [adapter._streaming_ws_url()]
+    config = json.loads(ws.sent[0])
+    assert config == {
+        "type": "config",
+        "sample_rate": 16_000,
+        "decode_chunk_ms": STREAMING_DECODE_CHUNK_MS,
+        "preflush_silence_ms": STREAMING_PREFLUSH_SILENCE_MS,
+        "endpoint_silence_ms": STREAMING_ENDPOINT_SILENCE_MS,
+        "silence_rms": STREAMING_SILENCE_RMS,
+        "max_segment_s": 30.0,
+        "language": "fi",
+    }
+    assert ws.sent[1] == pcm
+    assert ws.sent[2] == pcm
+    assert _is_finalize(ws.sent[3])
+    assert ws.closed
+
+
+async def test_streaming_relays_interim_and_final_events() -> None:
+    """Events scripted after finalize map onto TranscriptEvents in order."""
+    ws = _echo_sidecar(
+        [
+            {"type": "interim", "text": "hel", "segment": 0, "t_ms": 120},
+            {"type": "final", "text": "hello world", "segment": 0, "t_ms": 120},
+            {"type": "interim", "text": "", "segment": 1, "t_ms": 900},
+            {"type": "final", "text": "  ", "segment": 1, "t_ms": 900},
+        ]
+    )
+    adapter = _StreamingFakeParakeetSTT(_config(runtime=RUNTIME_MLX_SIDECAR), ws=ws)
+
+    events = [e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 16)]))]
+
+    # Blank texts are skipped; the rest preserve order / flags / offsets.
+    assert [(e.text, e.is_final, e.timestamp_ms) for e in events] == [
+        ("hel", False, 120),
+        ("hello world", True, 120),
     ]
-    assert [e.text for e in events] == ["ok"]
+    assert all(e.confidence is None for e in events)
+
+
+async def test_streaming_yields_events_while_audio_still_flowing() -> None:
+    """The defining streaming property: events surface BEFORE the input
+    iterator ends (the batch path would buffer forever instead)."""
+    ws = _FakeSidecarWS()
+    adapter = _StreamingFakeParakeetSTT(_config(runtime=RUNTIME_MLX_SIDECAR), ws=ws)
+
+    feed: asyncio.Queue[bytes | None] = asyncio.Queue()
+
+    async def _live_audio() -> AsyncIterator[bytes]:
+        while True:
+            chunk = await feed.get()
+            if chunk is None:
+                return
+            yield chunk
+
+    stream = adapter.transcribe_stream(_live_audio())
+    await feed.put(_pcm([5] * 320))
+    ws.push({"type": "interim", "text": "partial", "segment": 0, "t_ms": 0})
+
+    first = await asyncio.wait_for(stream.__anext__(), timeout=2.0)
+    assert (first.text, first.is_final) == ("partial", False)
+
+    # Mid-utterance final (sidecar endpointing) also lands while live.
+    ws.push({"type": "final", "text": "sentence one", "segment": 0, "t_ms": 0})
+    second = await asyncio.wait_for(stream.__anext__(), timeout=2.0)
+    assert (second.text, second.is_final) == ("sentence one", True)
+
+    # End the input; the provider finalizes and drains to done.
+    ws._on_send = lambda sock, msg: sock.push({"type": "done"}) if _is_finalize(msg) else None
+    await feed.put(None)
+    remaining = [e async for e in stream]
+    assert remaining == []
+    assert ws.closed
+
+
+async def test_streaming_final_prompt_after_input_ends() -> None:
+    """Once the input iterator ends, the finalize/final/done handshake is
+    pure plumbing — it must complete promptly (the real-model tail decode
+    budget is measured in the .validation/ run, not here)."""
+    ws = _echo_sidecar([{"type": "final", "text": "tail", "segment": 0, "t_ms": 0}])
+    adapter = _StreamingFakeParakeetSTT(_config(runtime=RUNTIME_MLX_SIDECAR), ws=ws)
+    started = time.monotonic()
+    events = [e async for e in adapter.transcribe_stream(_iter([_pcm([0] * 320)]))]
+    elapsed = time.monotonic() - started
+    assert [e.text for e in events] == ["tail"]
+    assert events[0].is_final
+    assert elapsed < 1.0
+
+
+async def test_streaming_error_event_raises_stterror() -> None:
+    ws = _FakeSidecarWS()
+    ws.push({"type": "error", "error": "model is still loading"})
+    adapter = _StreamingFakeParakeetSTT(_config(runtime=RUNTIME_MLX_SIDECAR), ws=ws)
+    with pytest.raises(STTError, match="model is still loading"):
+        async for _ in adapter.transcribe_stream(_iter([_pcm([0] * 16)])):
+            pass
+    assert ws.closed
+
+
+async def test_streaming_connect_failure_raises_helpful_stterror() -> None:
+    adapter = _StreamingFakeParakeetSTT(
+        _config(runtime=RUNTIME_MLX_SIDECAR),
+        connect_error=OSError("connection refused"),
+    )
+    with pytest.raises(STTError, match="unreachable") as exc_info:
+        async for _ in adapter.transcribe_stream(_iter([_pcm([0] * 16)])):
+            pass
+    msg = str(exc_info.value)
+    assert "start-parakeet-sidecar.sh" in msg
+    assert FORCE_BATCH_ENV_VAR in msg
+
+
+async def test_streaming_connection_lost_mid_stream_raises_stterror() -> None:
+    ws = _FakeSidecarWS()
+    ws.push(websockets.exceptions.ConnectionClosedError(None, None))
+    adapter = _StreamingFakeParakeetSTT(_config(runtime=RUNTIME_MLX_SIDECAR), ws=ws)
+    with pytest.raises(STTError, match="connection lost"):
+        async for _ in adapter.transcribe_stream(_iter([_pcm([0] * 16)])):
+            pass
+
+
+async def test_streaming_close_before_done_raises_stterror() -> None:
+    """Server closing cleanly without acking finalize is still a failure."""
+
+    def on_send(ws: _FakeSidecarWS, message: Any) -> None:
+        if _is_finalize(message):
+            ws.end()  # close instead of done
+
+    ws = _FakeSidecarWS(on_send)
+    adapter = _StreamingFakeParakeetSTT(_config(runtime=RUNTIME_MLX_SIDECAR), ws=ws)
+    with pytest.raises(STTError, match="closed before acknowledging"):
+        async for _ in adapter.transcribe_stream(_iter([_pcm([0] * 16)])):
+            pass
+
+
+async def test_streaming_teardown_closes_socket() -> None:
+    """aclose() mid-stream (barge-in / turn reset) cancels the writer and
+    closes the socket without surfacing an error."""
+    ws = _FakeSidecarWS()
+    adapter = _StreamingFakeParakeetSTT(_config(runtime=RUNTIME_MLX_SIDECAR), ws=ws)
+
+    async def _endless_audio() -> AsyncIterator[bytes]:
+        while True:
+            await asyncio.sleep(0.01)
+            yield _pcm([7] * 160)
+
+    stream = adapter.transcribe_stream(_endless_audio())
+    ws.push({"type": "interim", "text": "x", "segment": 0, "t_ms": 0})
+    first = await asyncio.wait_for(stream.__anext__(), timeout=2.0)
+    assert first.text == "x"
+
+    await stream.aclose()
+    assert ws.closed
 
 
 # --- Lazy load behavior on the real adapter --------------------------------
@@ -922,9 +1228,7 @@ async def test_real_adapter_raises_stt_error_without_nemo(
     def _fail_import(name: str) -> Any:
         raise ImportError(f"no module {name}")
 
-    monkeypatch.setattr(
-        "app.providers.parakeet_stt.import_module", _fail_import
-    )
+    monkeypatch.setattr("app.providers.parakeet_stt.import_module", _fail_import)
     adapter = ParakeetSTT(_config())
     with pytest.raises(STTError, match="NeMo not importable"):
         async for _ in adapter.transcribe_stream(_iter([_pcm([0] * 16)])):

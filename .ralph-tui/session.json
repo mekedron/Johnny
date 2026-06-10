@@ -3,10 +3,10 @@
   "sessionId": "82402e4d-e4aa-4e51-a95b-90cc16d67f3b",
   "status": "running",
   "startedAt": "2026-06-10T20:20:17.654Z",
-  "updatedAt": "2026-06-10T21:46:59.168Z",
-  "currentIteration": 2,
+  "updatedAt": "2026-06-10T23:04:12.399Z",
+  "currentIteration": 3,
   "maxIterations": 0,
-  "tasksCompleted": 2,
+  "tasksCompleted": 3,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -93,8 +93,8 @@
       {
         "id": "Johnny-trt.11",
         "title": "[CHORE] Phase 1 capstone: re-measure + varied-pause regression",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.12",
@@ -286,6 +286,16 @@
       "durationMs": 2133602,
       "startedAt": "2026-06-10T20:34:25.230Z",
       "endedAt": "2026-06-10T21:09:58.832Z"
+    },
+    {
+      "iteration": 3,
+      "status": "completed",
+      "taskId": "Johnny-trt.11",
+      "taskTitle": "[CHORE] Phase 1 capstone: re-measure + varied-pause regression",
+      "taskCompleted": true,
+      "durationMs": 2196552,
+      "startedAt": "2026-06-10T21:10:21.633Z",
+      "endedAt": "2026-06-10T21:46:58.185Z"
     }
   ],
   "skippedTaskIds": [],

@@ -14,7 +14,13 @@ This bypasses the in-container PyTorch/NeMo path that's pinned to CPU because Ap
 
 ## Wire protocol
 
-`POST /transcribe` — raw S16LE PCM body in, JSON `{"text", "confidence"}` out. `GET /health` returns `{"ready", "model_id", "backend"}`. See `server.py` for the full spec.
+`POST /transcribe` — raw S16LE PCM body in, JSON `{"text", "confidence"}` out. `GET /health` returns `{"ready", "model_id", "backend", "streaming"}`. See `server.py` for the full spec.
+
+`WS /transcribe_stream` (Johnny-trt.12) — cache-aware streaming. Client sends an optional JSON `{"type": "config", ...}` first, then raw PCM binary frames, then `{"type": "finalize"}`; the server pushes `{"type": "interim"|"final", "text", "segment", "t_ms"}` events while you speak and `{"type": "done"}` after finalize. Utterances are endpointed **server-side** (RMS silence tracking: segments open on speech, pre-flush decode at 200 ms of trailing silence, final + per-segment cache reset at 360 ms — below Johnny's 0.40/0.50 s session-VAD floors so finals land before the turn commits). Decode runs `parakeet-mlx` `transcribe_stream(context_size=(256,256), depth=2)` over 480 ms chunks — measured word-level parity with batch and ~170 ms p50 per incremental decode on an M-series host.
+
+A streaming segment and a batch `/transcribe` call never overlap on the shared model (the streaming context swaps the encoder attention mode): a model-mode lock is held per segment, and batch calls queue behind a live utterance (≤ `max_segment_s`, default 30 s) before 503ing.
+
+Endpointer logic is unit-tested without the model: `.venv/bin/python -m pytest test_endpointer.py` (install pytest into the venv once with `uv pip install pytest --python .venv/bin/python`).
 
 ## Configure the Parakeet provider to use it
 

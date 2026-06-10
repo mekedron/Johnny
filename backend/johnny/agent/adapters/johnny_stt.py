@@ -75,17 +75,15 @@ if TYPE_CHECKING:
     from livekit.agents.vad import VAD
 
 
-BATCH_ONLY_STT_PROVIDER_NAMES: frozenset[str] = frozenset(
-    {"faster-whisper", "parakeet", "elevenlabs"}
-)
+BATCH_ONLY_STT_PROVIDER_NAMES: frozenset[str] = frozenset({"faster-whisper", "elevenlabs"})
 """Johnny STT providers whose ``transcribe_stream`` is batch-only (Johnny-4fn).
 
 These adapters drain the entire ``audio_iter`` and emit ``FINAL_TRANSCRIPT``\\ s
-only once it is exhausted: faster-whisper and Parakeet buffer the whole
-utterance and run a single transcribe call; ElevenLabs Scribe POSTs the whole
-clip to its batch ``/v1/speech-to-text`` endpoint. Under LiveKit's
-continuously-fed :class:`RecognizeStream` the ``audio_iter`` only ends at
-teardown, so without VAD segmentation these would never emit mid-call — hence
+only once it is exhausted: faster-whisper buffers the whole utterance and runs
+a single transcribe call; ElevenLabs Scribe POSTs the whole clip to its batch
+``/v1/speech-to-text`` endpoint. Under LiveKit's continuously-fed
+:class:`RecognizeStream` the ``audio_iter`` only ends at teardown, so without
+VAD segmentation these would never emit mid-call — hence
 :func:`build_stt_adapter` wraps exactly these in a VAD-buffered
 :class:`~livekit.agents.stt.StreamAdapter`.
 
@@ -95,6 +93,14 @@ endpointing fires finals), so it is driven directly through :class:`JohnnySTT`.
 OpenAI Realtime is also absent: its split-STT path (manual ``commit`` on
 ``audio_iter`` exhaustion, ``turn_detection: null``) is superseded by the
 dedicated S2S / RealtimeModel adapter work (Johnny-20h), not this batch wrapper.
+
+Parakeet is absent from the set because batch-ness is **per-runtime** there
+(Johnny-trt.12): the ``mlx-sidecar`` runtime streams cache-aware over the
+sidecar's ``/transcribe_stream`` WebSocket (self-endpointed, Deepgram-style),
+while the ``in-container`` and ``coreml-sidecar`` runtimes are still batch.
+:class:`~app.providers.parakeet_stt.ParakeetSTT` self-declares via its
+``batch_only`` property — the same opt-in attribute any provider outside this
+set can use (see :func:`build_stt_adapter`).
 
 Keyed by provider ``name`` (the registry / DB identifier, == each adapter's
 ``PROVIDER_NAME``); a drift-guard test pins this set to those constants.
@@ -132,9 +138,7 @@ def transcript_to_speech_event(
     ``confidence`` defaults to ``0.0`` (the :class:`SpeechData` default).
     """
     speech_type = (
-        SpeechEventType.FINAL_TRANSCRIPT
-        if event.is_final
-        else SpeechEventType.INTERIM_TRANSCRIPT
+        SpeechEventType.FINAL_TRANSCRIPT if event.is_final else SpeechEventType.INTERIM_TRANSCRIPT
     )
     offset_s = event.timestamp_ms / 1000.0
     return SpeechEvent(
@@ -181,9 +185,7 @@ class JohnnySTTStream(RecognizeStream):
         # sample_rate pins the base resampler to 16 kHz: LiveKit room audio is
         # often 48 kHz, but Johnny providers expect the 16 kHz mono bridge
         # format, so push_frame() resamples before _run() ever sees a frame.
-        super().__init__(
-            stt=stt, conn_options=conn_options, sample_rate=PCM_SAMPLE_RATE_HZ
-        )
+        super().__init__(stt=stt, conn_options=conn_options, sample_rate=PCM_SAMPLE_RATE_HZ)
         self._provider = provider
         self._language = language
         self._request_id = utils.shortuuid("johnny_stt_")
@@ -255,9 +257,7 @@ class JohnnySTT(STT[Any]):
         language: str | None = None,
         model: str | None = None,
     ) -> None:
-        super().__init__(
-            capabilities=STTCapabilities(streaming=True, interim_results=True)
-        )
+        super().__init__(capabilities=STTCapabilities(streaming=True, interim_results=True))
         self._provider = provider
         self._language = language
         self._model = model
@@ -362,13 +362,14 @@ def build_stt_adapter(
 ) -> STT[Any]:
     """Wrap a Johnny :class:`STTProvider` as the LiveKit STT plugin for a session.
 
-    Truly-streaming providers (Deepgram) emit interim + final transcripts
-    incrementally as audio flows, so they are driven directly through
-    :class:`JohnnySTT`: ``AgentSession`` feeds the recognition stream
-    continuously and the provider's own endpointing fires the finals.
+    Truly-streaming providers (Deepgram; Parakeet on its ``mlx-sidecar``
+    runtime, Johnny-trt.12) emit interim + final transcripts incrementally as
+    audio flows, so they are driven directly through :class:`JohnnySTT`:
+    ``AgentSession`` feeds the recognition stream continuously and the
+    provider's own endpointing fires the finals.
 
     Batch-only providers (:data:`BATCH_ONLY_STT_PROVIDER_NAMES`: faster-whisper,
-    Parakeet, ElevenLabs Scribe) buffer the whole input and only emit once it is
+    ElevenLabs Scribe) buffer the whole input and only emit once it is
     exhausted, so under a continuously-fed :class:`RecognizeStream` they would
     never emit until teardown. They are wrapped in LiveKit's
     :class:`~livekit.agents.stt.StreamAdapter`, which uses Silero ``vad`` to
@@ -386,7 +387,9 @@ def build_stt_adapter(
     A provider outside the pinned name set can also opt into the batch wrap by
     exposing a truthy ``batch_only`` attribute — the self-declared equivalent of
     membership (used by the latency harness's stub STT, Johnny-trt.1, so it runs
-    the exact VAD-segmented recognize path the local batch providers run).
+    the exact VAD-segmented recognize path the local batch providers run, and by
+    Parakeet's batch runtimes — ``in-container`` / ``coreml-sidecar`` — plus its
+    ``JOHNNY_PARAKEET_FORCE_BATCH=1`` escape hatch).
     """
     johnny_stt = JohnnySTT(provider, language=language, model=model)
     batch_only = provider.name in BATCH_ONLY_STT_PROVIDER_NAMES or bool(
@@ -394,9 +397,7 @@ def build_stt_adapter(
     )
     if not batch_only:
         return johnny_stt
-    return StreamAdapter(
-        stt=johnny_stt, vad=vad if vad is not None else _load_default_vad()
-    )
+    return StreamAdapter(stt=johnny_stt, vad=vad if vad is not None else _load_default_vad())
 
 
 __all__ = [

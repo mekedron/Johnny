@@ -96,9 +96,7 @@ PARTIAL_INTERVAL_SEC = 0.4
 # to noise tokens ("the", "...") on most ASR models. Matches the
 # Johnny-ckz.14 noise-gate's "wait for some real audio" principle on
 # the live pipeline.
-MIN_BYTES_FOR_PARTIAL = int(
-    PCM_SAMPLE_RATE_HZ * PCM_SAMPLE_WIDTH_BYTES * 0.2
-)
+MIN_BYTES_FOR_PARTIAL = int(PCM_SAMPLE_RATE_HZ * PCM_SAMPLE_WIDTH_BYTES * 0.2)
 
 # Cap the per-connection audio buffer so a runaway client can't make the
 # server allocate unbounded memory. 5 minutes of 16 kHz S16LE = 9.6 MiB;
@@ -169,27 +167,31 @@ def _build_provider(row: ProviderCredential) -> STTProvider:
         creds = decrypt_json(get_crypto(), row.credentials_encrypted)
     except (CryptoError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError(f"failed to decrypt credentials: {exc}") from exc
+    options = dict(row.config or {})
+    # This endpoint re-runs transcribe_stream over the growing buffer for
+    # partials (see module docstring), so it needs the cheap one-POST batch
+    # semantics — pin Parakeet's mlx runtime out of its WS streaming path
+    # (Johnny-trt.12). Driving the streaming path natively here (one
+    # long-lived provider stream instead of N replays) is the Johnny-trt.13
+    # live-captions follow-up.
+    options["streaming"] = False
     config = ProviderConfig(
         kind=row.kind,
         provider_name=row.provider_name,
         display_name=row.display_name,
         credentials=creds,
-        options=dict(row.config or {}),
+        options=options,
     )
     try:
         instance = registry.instantiate(config)
     except UnknownProviderError as exc:
         raise ValueError(str(exc)) from exc
     if not isinstance(instance, STTProvider):
-        raise ValueError(
-            f"row {row.id} is not an STT provider (kind={row.kind})"
-        )
+        raise ValueError(f"row {row.id} is not an STT provider (kind={row.kind})")
     return instance
 
 
-async def _run_transcribe_once(
-    provider: STTProvider, pcm: bytes
-) -> str:
+async def _run_transcribe_once(provider: STTProvider, pcm: bytes) -> str:
     """Run ``transcribe_stream`` over ``pcm`` and return joined final text.
 
     Treats the whole buffer as one chunk — the same pattern the catalog
@@ -260,9 +262,7 @@ async def stt_stream(
             websocket,
             {
                 "type": "error",
-                "message": (
-                    f"provider id={row.id} is kind={row.kind.value}, not stt"
-                ),
+                "message": (f"provider id={row.id} is kind={row.kind.value}, not stt"),
             },
         )
         await websocket.close(code=1008)
@@ -271,9 +271,7 @@ async def stt_stream(
     try:
         provider = _build_provider(row)
     except ValueError as exc:
-        await _send_json(
-            websocket, {"type": "error", "message": str(exc)}
-        )
+        await _send_json(websocket, {"type": "error", "message": str(exc)})
         await websocket.close(code=1011)
         return
 
@@ -317,8 +315,7 @@ async def stt_stream(
                             {
                                 "type": "error",
                                 "message": (
-                                    f"audio buffer exceeded "
-                                    f"{MAX_BUFFER_BYTES} bytes; stopping"
+                                    f"audio buffer exceeded {MAX_BUFFER_BYTES} bytes; stopping"
                                 ),
                             },
                         )
@@ -361,9 +358,7 @@ async def stt_stream(
                     asyncio.create_task(abort_requested.wait()),
                     asyncio.create_task(disconnect_event.wait()),
                 ]
-                done, pending = await asyncio.wait(
-                    wait_tasks, return_when=asyncio.FIRST_COMPLETED
-                )
+                done, pending = await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
                 for task in pending:
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -445,9 +440,7 @@ async def stt_stream(
                 {"type": "error", "message": f"final transcribe failed: {exc}"},
             )
         else:
-            await _send_json(
-                websocket, {"type": "final", "text": final_text}
-            )
+            await _send_json(websocket, {"type": "final", "text": final_text})
 
     with contextlib.suppress(Exception):
         await provider.close()

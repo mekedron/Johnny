@@ -541,6 +541,58 @@ felt-latency owners on the local stack are the router and answer LLM —
 Phase 2 (streaming STT) and Phase 3 (router triage) pick up from here,
 with Johnny-dny (answer streaming) still the measured #1.
 
+## Phase 2 — Parakeet cache-aware streaming STT (Johnny-trt.12, 2026-06-11)
+
+The MLX sidecar's batch POST is gone from the hot path: the Parakeet
+provider on the `mlx-sidecar` runtime now relays session audio over the
+sidecar's `WS /transcribe_stream` and re-emits its events — interim
+transcripts while the speaker talks (480 ms incremental decodes,
+`parakeet-mlx transcribe_stream(context_size=(256,256), depth=2)`, ~170 ms
+p50 per decode) plus a final per utterance, endpointed **sidecar-side** at
+360 ms of trailing silence (RMS tracking + a 200 ms pre-flush decode so
+the final is just a result-read, measured 11–98 ms `final_ms` live).
+Because 360 ms sits below the session-VAD floors (0.40 s browser / 0.50 s
+rooms), the final transcript already exists when Silero's END_OF_SPEECH
+fires — the turn-commit `max(VAD floor, endpointing min_delay, STT-final)`
+is now VAD-bound instead of STT-bound. The adapter layer drives this
+runtime directly (no VAD-buffered StreamAdapter); `in-container` /
+`coreml-sidecar` stay batch via the provider's `batch_only` property, and
+`JOHNNY_PARAKEET_FORCE_BATCH=1` pins the old batch path as an escape
+hatch.
+
+**Harness A/B (local stack: Parakeet MLX + Ollama llama3.2:3b + Piper;
+12-turn runs, counterbalanced, `ollama stop` between runs; new
+`stt_final_after_vad_end_ms` wall metric = user FINAL transcript arrival
+minus the VAD speaking→listening edge):**
+
+| arm | n (turns) | stt_final_after_vad_end p50 | p95 | range |
+| --- | --- | --- | --- | --- |
+| batch (forced)  | 24 | **+140 ms** | +200 ms | +106 … +270 ms |
+| streaming       | 36 | **−99 ms**  | −64 ms  | −147 … −43 ms |
+
+Every streaming final landed *before* the VAD commit (negative delta) —
+the Phase-2 acceptance bar "STT-final ≤ 100 ms after VAD end" is met
+with ~200 ms to spare, and ~140 ms of serial STT tail is removed from
+every local turn. Felt first-audio on this stack is router/LLM-bound
+(±100–150 ms p50 run noise — see the Phase-1 attribution), so the felt
+re-measure belongs to the trt.15 capstone.
+
+**Quality (real-model, real-time-paced 75 s of the trt.5 hesitation
+fixture over the live WS):** word-level parity with batch — all complete
+clauses identical; the 0.035 token-WER vs batch is segment-boundary
+punctuation plus a clip-edge truncation artifact. Interim cadence: 3–6
+interims per 1.5–2.2 s utterance (~2 Hz while speaking; interims emit
+only when text *changes*, so hesitation gaps produce no spurious events).
+400 ms decode chunks were trialled for cadence margin and rejected: more
+encode boundaries produced word slips ("do ye know") that 480 ms runs
+did not. Artifacts: `.validation/Johnny-trt.12/` (spike matrix, three WS
+validation runs, A/B harness JSONs).
+
+Live verification: playground session 86 (chrome-devtools, fake-mic
+fixture) ran the streaming path end-to-end — one long-lived WS per
+session, per-utterance `stream.segment` lines in the sidecar log,
+transcripts committed per turn, trt.9 client barge-in unaffected.
+
 ## Optimization candidates — in priority order (re-ranked from the 2026-06-10 baseline)
 
 1. **True answer-LLM token streaming** (Johnny-dny) — the measured #1.
