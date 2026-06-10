@@ -1,219 +1,243 @@
 {
   "version": 1,
-  "sessionId": "2666b8b0-612b-4f66-a03c-0a0a2ce4247c",
+  "sessionId": "589addaf-9a6f-4aaf-b0dd-abdc627fd828",
   "status": "running",
-  "startedAt": "2026-06-09T08:40:13.109Z",
-  "updatedAt": "2026-06-09T08:41:04.560Z",
+  "startedAt": "2026-06-10T15:37:11.002Z",
+  "updatedAt": "2026-06-10T15:58:59.077Z",
   "currentIteration": 0,
   "maxIterations": 0,
   "tasksCompleted": 0,
   "isPaused": false,
   "agentPlugin": "claude",
-  "model": "claude-opus-4-8",
+  "model": "fable",
   "trackerState": {
     "plugin": "beads-bv",
-    "epicId": "Johnny-7g5",
+    "epicId": "Johnny-trt",
     "epicIds": [
-      "Johnny-7g5"
+      "Johnny-trt"
     ],
     "executionScopes": [
       {
-        "id": "Johnny-7g5",
-        "title": "Migrate voice orchestration to LiveKit Agents AgentSession (keep all admin providers + reasoning gate; self-hosted room)",
+        "id": "Johnny-trt",
+        "title": "Fast conversational core: streaming hot path + async task orchestration (Meet-first)",
         "type": "epic",
-        "description": "Architecture vision: replace the hand-rolled ~137KB `backend/johnny/voice_pipeline/pipeline.py` orchestration with LiveKit Agents `AgentSession(stt,llm,tts,vad,turn_detection)`, while preserving every admin-configurable provider and the bot's custom reasoning. Locked decisions: (1) transport = real self-hosted LiveKit room (meet-worker bridges Meet audio into a room, agent worker joins the same room with default RoomIO); (2) router LLM = should-respond GATE via Agent.on_user_turn_completed + StopResponse, LiveKit MultilingualModel + Silero for end-of-utterance; (3) S2S/realtime providers deferred to a follow-up epic; (4) full phased migration ending in cutover behind a flag then retire the old engine. PRESERVED UNCHANGED: backend/app/providers/ (ABCs, registry, load_active_providers(), FieldDef/ProviderSchema admin schema, Fernet secrets, admin REST+UI); the event model (voice_pipeline/events.py) + Redis EventBus + DB sinks (agent_decisions, agent_utterances, transcript_chunks, session_timings); and the invariants INV-1 (exactly one terminal outcome per turn) and decision-utterance parity. Full plan: ~/.claude/plans/i-have-cloned-this-melodic-hejlsberg.md",
+        "description": "# Fast conversational core: streaming hot path + async task orchestration (Meet-first)\n\n## Why\n\nJohnny's voice conversation was compared against openclaw's \"Start Talk\" feature, which responds near-instantly. Two code-verified deep dives (openclaw + Johnny) found the gap and the operator set direction: keep the split STT→router→LLM→TTS pipeline (no cloud speech-to-speech replacement) but refactor it — the router is slow and the pipeline underperforms. Google Meet (multi-participant) is the primary surface.\n\n## Vision\n\nAdopt openclaw's \"Start Talk\" lessons inside Johnny's split pipeline:\n\n1. **Stream everything before the LLM** — STT runs DURING speech (interim + fast final), endpointing commits early when the utterance is confidently complete, providers are prewarmed, TTS head-of-line shrinks, the client cuts bot audio locally on barge-in.\n2. **Router stays but becomes fast triage** — outcome set {silent | speak | delegate | status}. Simple asks answered immediately; complex asks get an instant verbal ack (\"let me check on that\") and are delegated.\n3. **Async task threads** (openclaw's \"forced consult\" pattern, Johnny-shaped) — an operational controller (task registry, status, progress queries: \"are you still working on that?\") and an executional layer (tool calls: Calendar first, Gmail later; webhook/callback re-entry). LangGraph evaluated as the engine for multi-step kinds (operator-requested).\n4. **Speech queue with conversational re-entry** — pending utterances (ack > requested-status > unsolicited-result > notice) delivered only at turn boundaries/silence, with expiry; never cuts a participant off.\n\n## Preserved unchanged (invariants)\n\n- INV-1 (\"exactly one terminal per turn\", TurnLedger) and INV-2 — hard constraints; a delegated turn's terminal is its ack utterance; async results are session-scoped speech (approval-reply precedent), never turn terminals.\n- Replay-harness verdict parity: router schema changes are additive; old model outputs parse byte-for-byte identically.\n- Meet/room turn-taking semantics untouched by Phase-1 endpointing work (browser-session-scoped knobs only).\n- agentsession orchestrator (no legacy engine work); S2S/unified path out of scope (Johnny-20h stays deferred).\n- Docker-only runtime; clean-install reproducibility (all new deps in pyproject); chrome-devtools browser validation for every UI-visible change.\n\n## Replaced / built\n\n- Plain VAD endpointing on the browser session → tuned endpointing + roomless semantic turn detector (in-process InferenceExecutor shim).\n- Batch-only Parakeet → cache-aware streaming `transcribe_stream`.\n- Router as monolithic should-speak gate → triage with delegate/status actions + task catalog + ~8 s budget.\n- Nothing → agent_tasks table, TaskCoordinator, worker executor pass, ToolRegistry (calendar.upcoming_events first), task events, speech queue, webhook entry, Gmail scope, session-page tasks panel.\n\n## Anchors\n\n- Latency targets (docs/LATENCY.md, speech-end → first audible byte): p50/p95 = 300/500 ms all-local, 250/450 mixed, 200/400 all-cloud. Re-measured at every phase capstone via the Phase-0 harness.\n- Live-Meet E2E scenario: complex ask → ack ≤ ~2 s → conversation continues → status query answered → result delivered at a conversational boundary.\n\n## Phases (capstone-gated)\n\n- Phase 0 — Baseline & foundations: Johnny-cxu baseline (absorbed as child), scripted latency harness, livekit-agents 1.5.17 surface verification (say()/user_state_changed), replay parity fixtures.\n- Phase 1 — Hot-path latency quick wins: endpointing knobs, roomless semantic turn detector, Piper chunk_bytes 1024, provider prewarm, client-side auto barge-in, Meet bridge audit.\n- Phase 2 — Streaming STT in the voice pipeline: Parakeet cache-aware streaming, live interim captions, Deepgram verification + all-cloud numbers.\n- Phase 3 — Router triage refactor: parity-safe schema extension, gate branching + ack terminal, agent_tasks + TaskCoordinator + stub executor, triage budget/observability (+ deferred speculative-parallel spike).\n- Phase 4 — Async execution: LangGraph evaluation spike, ToolRegistry + calendar tool, worker executor pass, task event plumbing.\n- Phase 5 — Speech queue & re-entry: pure queue core, wiring + TaskEventListener + delivery timing, real status query, live-Meet validation.\n- Phase 6 — Entry points & cutover: webhook callback endpoint, Gmail scope + tool, session-page tasks panel, docs + final acceptance.\n\nRelated (not duplicated): Johnny-20h (deferred S2S epic — explicitly out of scope here), Johnny-stt (Parakeet streaming provider work references it), Johnny-ckz.7 (shipped per-turn timing instrument this epic's measurements ride on), Johnny-1ge (shipped persistent TTS).\n\nFull approved plan: /Users/nikita/.claude/plans/project-projects-openclaw-has-a-soft-barto.md (2026-06-10).\n",
         "metadata": {
           "dependencyCount": 0,
           "dependentCount": 0
         }
       }
     ],
-    "totalTasks": 31,
+    "totalTasks": 35,
     "tasks": [
       {
-        "id": "Johnny-4em",
-        "title": "[SPIKE] Phase 0: Audio topology + double-hop/echo e2e in a real Meet call",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-4k3",
-        "title": "[BUILD] Phase 4: Port replay/eval harness + tts-smoke to new engine (cutover gate)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-52b",
-        "title": "[CHORE] Phase 4: Real-browser e2e validation + clean-install reproducibility pass",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-6nl",
-        "title": "[BUILD] Phase 1: JohnnyLLM(llm.LLM) adapter over LLMProvider.chat/stream_chat",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-6nm",
-        "title": "[BUILD] Phase 3: Repurpose livekit_transport.py as the meet-worker↔room bridge",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-6wx",
-        "title": "[BUILD] Phase 0: Self-hosted LiveKit server in docker-compose (clean-install)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-7a3",
-        "title": "[BUILD] Phase 1: JohnnyTTS(tts.TTS) adapter over TTSProvider.synthesize_stream",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-7we",
-        "title": "[BUILD] Phase 3: Thread session config (providers/personality/mode) into the agent job",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-9eh",
-        "title": "[BUILD] Phase 3: Agent-worker service in docker-compose + dispatch lifecycle (one room per session)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-9k2",
-        "title": "[SPIKE] Phase 2: Blocking router-gate timeout + cancellation semantics",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-c81",
-        "title": "[BUILD] Phase 1: JohnnySTT(stt.STT) adapter over STTProvider.transcribe_stream",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-d5z",
-        "title": "[BUILD] Phase 2: Event/observability parity (PipelineEvents → EventBus → DB sinks; metrics translation)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-jue",
-        "title": "[BUILD] Phase 0: Add livekit-agents deps + Dockerfile + johnny/agent package + model bake",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-k8t",
-        "title": "[BUILD] Phase 2: Barge-in — fast native interrupt + slow LLM classifier (generation guard on turn id)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-o3z",
-        "title": "[SPIKE] Phase 2: INV-1 single terminal-outcome choke-point under LiveKit turn lifecycle",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-qzj",
-        "title": "[BUILD] Phase 2: Approval-required mode (ApprovalPending/Resolved + terminal outcomes)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-re2",
-        "title": "[BUILD] Phase 2: JohnnyAgent(Agent) — instructions/personality injection + transcript rehydration",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-wz5",
-        "title": "[BUILD] Phase 4: JOHNNY_ORCHESTRATOR feature flag (agentsession|legacy)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-xpa",
-        "title": "[BUILD] Phase 2: Router should-speak gate in on_user_turn_completed + StopResponse",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-y4j",
-        "title": "[SPIKE] Phase 0: Per-room JWT auth + agent dispatch contract (job payload)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-z97",
-        "title": "[SPIKE] Phase 2: Approval-required mapping (out-of-band generate_reply vs in-gate block)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-zb3",
-        "title": "[BUILD] Phase 1: Adapter factory built from load_active_providers() at session start",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-7g5.1",
-        "title": "[BUILD] Phase 3: Migrate in-browser playground to AgentSession (roomless in-process or room bridge)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-4fn",
-        "title": "[BUILD] Phase 1: StreamAdapter + Silero wrapper for non-streaming STT providers",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-5ag",
-        "title": "[BUILD] Phase 2: Allowed-reply coercion + per-sentence streaming + suggest_only/listen_only + TTS-missing degrade",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-88n",
-        "title": "[BUILD] Phase 1: Voice/model/tool selection parity into the adapters",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-a1w",
-        "title": "[BUILD] Phase 3: In-browser playground migration (browser_transport + feed_text → generate_reply)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-cmd",
-        "title": "[BUILD] Phase 2: Noise filtering parity (stoplist/min-chars/confidence) → TranscriptFiltered",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-n22",
-        "title": "[CHORE] Phase 4: Retire legacy pipeline.py orchestration + update docs",
+        "id": "Johnny-trt.1",
+        "title": "[BUILD] Phase 0: Scripted latency harness — synthetic-audio turns with per-stage p50/p95",
         "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-un2",
-        "title": "[BUILD] Phase 3: Graceful no-provider-configured degrade parity",
-        "status": "completed",
+        "id": "Johnny-trt.2",
+        "title": "[SPIKE] Phase 0: Verify livekit-agents 1.5.17 session surface (say, user_state_changed) in-image",
+        "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-y6e",
-        "title": "[BUILD] Phase 0: Console-mode AgentSession smoke harness with a stub provider",
-        "status": "completed",
+        "id": "Johnny-trt.3",
+        "title": "[BUILD] Phase 0: Replay fixtures for delegation-shaped utterances (verdict-parity baseline)",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.4",
+        "title": "[CHORE] Phase 0 capstone: baseline + SDK findings documented",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.5",
+        "title": "[BUILD] Phase 1: Endpointing knobs — endpointing passthrough + browser-scoped Silero min_silence 0.55→0.40s",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.6",
+        "title": "[BUILD] Phase 1: Semantic turn detector on the roomless browser session (early commit when confident)",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.7",
+        "title": "[BUILD] Phase 1: Piper chunk_bytes default 4096→1024",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.8",
+        "title": "[BUILD] Phase 1: Provider prewarm at session start",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.9",
+        "title": "[BUILD] Phase 1: Client-side auto barge-in in the playground",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.10",
+        "title": "[CHORE] Phase 1: Meet audio-bridge buffering audit",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.11",
+        "title": "[CHORE] Phase 1 capstone: re-measure + varied-pause regression",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.12",
+        "title": "[BUILD] Phase 2: Parakeet cache-aware streaming transcribe_stream",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.13",
+        "title": "[BUILD] Phase 2: Live interim captions in the playground",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.14",
+        "title": "[CHORE] Phase 2: Verify Deepgram direct-streaming voice path + all-cloud measurement",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.15",
+        "title": "[CHORE] Phase 2 capstone: re-measure with streaming STT active",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.16",
+        "title": "[BUILD] Phase 3: Router schema/parser extension — action + task fields (parity-safe)",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.17",
+        "title": "[BUILD] Phase 3: Gate branching + ack terminal (delegate / status actions)",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.18",
+        "title": "[BUILD] Phase 3: agent_tasks table + TaskSink + TaskCoordinator.begin + stub executor",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.19",
+        "title": "[BUILD] Phase 3: Triage budget + observability + task catalog in router prompt",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.20",
+        "title": "[SPIKE] Phase 3 (deferred, non-gating): speculative-parallel router for meeting modes",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.21",
+        "title": "[CHORE] Phase 3 capstone: parity + INV-1 + delegated-turn validation",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.22",
+        "title": "[SPIKE] Phase 4: LangGraph evaluation — execution engine for multi-step task kinds",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.23",
+        "title": "[BUILD] Phase 4: ToolRegistry + calendar.upcoming_events tool",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.24",
+        "title": "[BUILD] Phase 4: Worker executor pass — claim/run/complete + redis wake",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.25",
+        "title": "[BUILD] Phase 4: Task event plumbing — events, subscriber, WS fan-out",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.26",
+        "title": "[CHORE] Phase 4 capstone: end-to-end calendar task in the playground",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.27",
+        "title": "[BUILD] Phase 5: Speech queue pure core",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.28",
+        "title": "[BUILD] Phase 5: Queue wiring + TaskEventListener + delivery timing",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.29",
+        "title": "[BUILD] Phase 5: Real status query from the task registry",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-cxu",
+        "title": "Real 20-turn p50/p95 latency capture on configured local providers (depends on Johnny-ckz.7)",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.30",
+        "title": "[CHORE] Phase 5 capstone: live Meet validation of the full loop",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.31",
+        "title": "[BUILD] Phase 6: Webhook callback endpoint for external task completion",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.32",
+        "title": "[BUILD] Phase 6: Gmail scope + gmail.search tool",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.33",
+        "title": "[BUILD] Phase 6: Session-page tasks panel",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.34",
+        "title": "[CHORE] Phase 6 capstone: docs + cutover validation",
+        "status": "open",
         "completedInSession": false
       }
     ]

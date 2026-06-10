@@ -1,20 +1,20 @@
 {
-  "id": "2666b8b0-612b-4f66-a03c-0a0a2ce4247c",
-  "status": "interrupted",
-  "startedAt": "2026-06-09T08:40:02.197Z",
-  "updatedAt": "2026-06-09T08:41:04.567Z",
+  "id": "589addaf-9a6f-4aaf-b0dd-abdc627fd828",
+  "status": "running",
+  "startedAt": "2026-06-10T15:36:52.602Z",
+  "updatedAt": "2026-06-10T15:36:52.602Z",
   "agentPlugin": "claude",
   "trackerPlugin": "beads-bv",
-  "epicId": "Johnny-7g5",
+  "epicId": "Johnny-trt",
   "epicIds": [
-    "Johnny-7g5"
+    "Johnny-trt"
   ],
   "executionScopes": [
     {
-      "id": "Johnny-7g5",
-      "title": "Migrate voice orchestration to LiveKit Agents AgentSession (keep all admin providers + reasoning gate; self-hosted room)",
+      "id": "Johnny-trt",
+      "title": "Fast conversational core: streaming hot path + async task orchestration (Meet-first)",
       "type": "epic",
-      "description": "Architecture vision: replace the hand-rolled ~137KB `backend/johnny/voice_pipeline/pipeline.py` orchestration with LiveKit Agents `AgentSession(stt,llm,tts,vad,turn_detection)`, while preserving every admin-configurable provider and the bot's custom reasoning. Locked decisions: (1) transport = real self-hosted LiveKit room (meet-worker bridges Meet audio into a room, agent worker joins the same room with default RoomIO); (2) router LLM = should-respond GATE via Agent.on_user_turn_completed + StopResponse, LiveKit MultilingualModel + Silero for end-of-utterance; (3) S2S/realtime providers deferred to a follow-up epic; (4) full phased migration ending in cutover behind a flag then retire the old engine. PRESERVED UNCHANGED: backend/app/providers/ (ABCs, registry, load_active_providers(), FieldDef/ProviderSchema admin schema, Fernet secrets, admin REST+UI); the event model (voice_pipeline/events.py) + Redis EventBus + DB sinks (agent_decisions, agent_utterances, transcript_chunks, session_timings); and the invariants INV-1 (exactly one terminal outcome per turn) and decision-utterance parity. Full plan: ~/.claude/plans/i-have-cloned-this-melodic-hejlsberg.md",
+      "description": "# Fast conversational core: streaming hot path + async task orchestration (Meet-first)\n\n## Why\n\nJohnny's voice conversation was compared against openclaw's \"Start Talk\" feature, which responds near-instantly. Two code-verified deep dives (openclaw + Johnny) found the gap and the operator set direction: keep the split STT→router→LLM→TTS pipeline (no cloud speech-to-speech replacement) but refactor it — the router is slow and the pipeline underperforms. Google Meet (multi-participant) is the primary surface.\n\n## Vision\n\nAdopt openclaw's \"Start Talk\" lessons inside Johnny's split pipeline:\n\n1. **Stream everything before the LLM** — STT runs DURING speech (interim + fast final), endpointing commits early when the utterance is confidently complete, providers are prewarmed, TTS head-of-line shrinks, the client cuts bot audio locally on barge-in.\n2. **Router stays but becomes fast triage** — outcome set {silent | speak | delegate | status}. Simple asks answered immediately; complex asks get an instant verbal ack (\"let me check on that\") and are delegated.\n3. **Async task threads** (openclaw's \"forced consult\" pattern, Johnny-shaped) — an operational controller (task registry, status, progress queries: \"are you still working on that?\") and an executional layer (tool calls: Calendar first, Gmail later; webhook/callback re-entry). LangGraph evaluated as the engine for multi-step kinds (operator-requested).\n4. **Speech queue with conversational re-entry** — pending utterances (ack > requested-status > unsolicited-result > notice) delivered only at turn boundaries/silence, with expiry; never cuts a participant off.\n\n## Preserved unchanged (invariants)\n\n- INV-1 (\"exactly one terminal per turn\", TurnLedger) and INV-2 — hard constraints; a delegated turn's terminal is its ack utterance; async results are session-scoped speech (approval-reply precedent), never turn terminals.\n- Replay-harness verdict parity: router schema changes are additive; old model outputs parse byte-for-byte identically.\n- Meet/room turn-taking semantics untouched by Phase-1 endpointing work (browser-session-scoped knobs only).\n- agentsession orchestrator (no legacy engine work); S2S/unified path out of scope (Johnny-20h stays deferred).\n- Docker-only runtime; clean-install reproducibility (all new deps in pyproject); chrome-devtools browser validation for every UI-visible change.\n\n## Replaced / built\n\n- Plain VAD endpointing on the browser session → tuned endpointing + roomless semantic turn detector (in-process InferenceExecutor shim).\n- Batch-only Parakeet → cache-aware streaming `transcribe_stream`.\n- Router as monolithic should-speak gate → triage with delegate/status actions + task catalog + ~8 s budget.\n- Nothing → agent_tasks table, TaskCoordinator, worker executor pass, ToolRegistry (calendar.upcoming_events first), task events, speech queue, webhook entry, Gmail scope, session-page tasks panel.\n\n## Anchors\n\n- Latency targets (docs/LATENCY.md, speech-end → first audible byte): p50/p95 = 300/500 ms all-local, 250/450 mixed, 200/400 all-cloud. Re-measured at every phase capstone via the Phase-0 harness.\n- Live-Meet E2E scenario: complex ask → ack ≤ ~2 s → conversation continues → status query answered → result delivered at a conversational boundary.\n\n## Phases (capstone-gated)\n\n- Phase 0 — Baseline & foundations: Johnny-cxu baseline (absorbed as child), scripted latency harness, livekit-agents 1.5.17 surface verification (say()/user_state_changed), replay parity fixtures.\n- Phase 1 — Hot-path latency quick wins: endpointing knobs, roomless semantic turn detector, Piper chunk_bytes 1024, provider prewarm, client-side auto barge-in, Meet bridge audit.\n- Phase 2 — Streaming STT in the voice pipeline: Parakeet cache-aware streaming, live interim captions, Deepgram verification + all-cloud numbers.\n- Phase 3 — Router triage refactor: parity-safe schema extension, gate branching + ack terminal, agent_tasks + TaskCoordinator + stub executor, triage budget/observability (+ deferred speculative-parallel spike).\n- Phase 4 — Async execution: LangGraph evaluation spike, ToolRegistry + calendar tool, worker executor pass, task event plumbing.\n- Phase 5 — Speech queue & re-entry: pure queue core, wiring + TaskEventListener + delivery timing, real status query, live-Meet validation.\n- Phase 6 — Entry points & cutover: webhook callback endpoint, Gmail scope + tool, session-page tasks panel, docs + final acceptance.\n\nRelated (not duplicated): Johnny-20h (deferred S2S epic — explicitly out of scope here), Johnny-stt (Parakeet streaming provider work references it), Johnny-ckz.7 (shipped per-turn timing instrument this epic's measurements ride on), Johnny-1ge (shipped persistent TTS).\n\nFull approved plan: /Users/nikita/.claude/plans/project-projects-openclaw-has-a-soft-barto.md (2026-06-10).\n",
       "metadata": {
         "dependencyCount": 0,
         "dependentCount": 0
@@ -25,6 +25,5 @@
   "maxIterations": 0,
   "totalTasks": 0,
   "tasksCompleted": 0,
-  "cwd": "/Users/nikita/Projects/Johnny",
-  "endedAt": "2026-06-09T08:41:04.567Z"
+  "cwd": "/Users/nikita/Projects/Johnny"
 }

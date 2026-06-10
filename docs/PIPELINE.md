@@ -46,6 +46,7 @@ like the README. Dense, concrete, worked examples over prose.
 6. [Storage](#6-storage) — tables, ER diagram, write timing
 7. [Failure modes documented in code today](#7-failure-modes-documented-in-code-today)
 8. [Cross-references](#8-cross-references)
+9. [Verified livekit-agents 1.5.17 session surface](#9-verified-livekit-agents-1517-session-surface) — `say()` / `SpeechHandle`, roomless `user_state_changed`
 
 ---
 
@@ -831,3 +832,86 @@ lives today (file + function; grep the issue id in comments to find the site):
 - **Tail the pipeline:** `docker compose logs -f worker` — look for `pipeline.turn.terminal:` (one per turn), `decision.override:` (divergence), `fast barge-in fired`, and noise-gate drops.
 - **Run tests** (dev-mounted, ORM-bearing): `docker compose run --rm --no-deps -v /Users/nikita/Projects/Johnny/backend:/workspace api uv run pytest tests/voice_pipeline tests/services/test_session_status_subscriber.py`.
 - **Latency targets + tuning:** [LATENCY.md](LATENCY.md). **TTS runtimes:** [TTS_RUNTIMES.md](TTS_RUNTIMES.md).
+
+---
+
+## 9. Verified livekit-agents 1.5.17 session surface
+
+Phase 3 (delegated-turn ack terminal) and Phase 5 (speech-queue delivery
+gating) of the fast-core epic (Johnny-trt) rest on two SDK behaviours that were
+documented upstream but unverified on our pinned `livekit-agents==1.5.17`
+inside the api image. Both are now **verified empirically in-image**
+(Johnny-trt.2, 2026-06-10) by a roomless smoke that is a sibling of the console
+smoke:
+
+```bash
+docker compose exec api python -m johnny.agent.sdk_surface_smoke   # 12 checks, exit 0
+# same checks as pytest: tests/agent/test_sdk_surface_smoke.py
+```
+
+The smoke uses the real `build_agent_session` harness + real Silero VAD with
+stub providers, a queue-fed `AudioInput` as a synthetic mic, and a blind-sink
+`AudioOutput` implementing `BrowserAudioOutput`'s estimated-playout contract —
+i.e. the exact roomless seams the playground (and the Meet bridge analogue)
+ride. No room, no creds, no network.
+
+### 9.1 `AgentSession.say()` → `SpeechHandle` (Phase 3 ack terminal)
+
+| Behaviour | Verified result |
+|---|---|
+| `say()` before `start()` | raises `RuntimeError: AgentSession isn't running` |
+| Return value | a `SpeechHandle` immediately (`done() == False` at return); speech is scheduled, not played, at that point |
+| Done-callback, played out | fires **exactly once**, after the audio sink reports `on_playback_finished` — `await handle` returned at 1.60 s for 1.6 s of stub audio (playout-gated, real-time) |
+| Done-callback, barged in | `handle.interrupt()` returns the same handle; the handle resolves ~immediately; `interrupted == True`; the done-callback **still fires** (the terminal is never lost on barge-in); the sink receives `clear_buffer()` and reports `playback_finished(interrupted=True, position=played-so-far)` |
+| Late `add_done_callback` | registering on an already-done handle still fires the callback (`call_soon`) — late registration is safe |
+| `allow_interruptions=False` | `interrupt()` raises `RuntimeError`; `interrupt(force=True)` still cancels it (`done=True, interrupted=True`) |
+| No audio sink attached | `say()` **completes anyway** (does not hang) — the ack terminal survives a detached `output.audio` |
+| `chat_items` | carries the spoken text as an assistant `ChatMessage` (default `add_to_chat_ctx=True`) |
+
+**Phase-3 mapping:** a delegated turn's ack utterance can be issued with
+`session.say(...)` and its `SpeechHandle` done-callback used as the turn's
+INV-1 terminal: both outcomes (played out / barged in) reach the callback, and
+`handle.interrupted` distinguishes them — the same contract `RouterGate`
+already relies on for `generate_reply` handles (`router_gate.bind_reply`).
+
+### 9.2 Roomless `user_state_changed` (Phase 5 delivery gating)
+
+`user_state_changed` **fires on a roomless session** (no room, no `RoomIO`)
+whenever `input.audio` is attached: Silero VAD onsets/offsets drive it via the
+activity's `on_start_of_speech` / `on_end_of_speech` hooks. **No transcript is
+needed** — the smoke's stub STT yields nothing and the events still fire, so
+delivery gating may rely on them even when STT lags or fails.
+
+Payload: `UserStateChangedEvent { type: "user_state_changed", old_state,
+new_state, created_at }`, states `speaking | listening | away`. Observed
+sequence from the scripted timeline (silence → 2 s real-speech fixture →
+silence; away timeout shortened to 2.0 s):
+
+| Transition | Observed at | Semantics |
+|---|---|---|
+| `listening → away` | 2.00 s | away timer arms **at session start** (user and agent both `listening`) and fires after `user_away_timeout` |
+| `away → speaking` | 3.60 s (speech pushed at 3.50 s) | VAD start-of-speech; `away` exits directly to `speaking` |
+| `speaking → listening` | 5.76 s (fixture ends 5.47 s) | VAD end-of-speech = 0.55 s (Silero default min-silence) after speech *energy* stops — the fixture carries ~0.3 s internal trailing silence |
+| `listening → away` | 7.77 s | the away timer **re-arms on every `listening` edge** |
+
+Caveats verified/established along the way:
+
+- `user_away_timeout` is an `AgentSession` constructor knob (default **15.0 s**,
+  `None` disables); `build_agent_session` does not expose it — Phase 5 must add
+  the passthrough if it wants a non-default value. The SDK also resets
+  `away → listening` when a *final transcript* arrives while away (guard
+  against VAD miss-detections).
+- **Silero VAD does not detect DSP-synthetic audio** (white noise, formant-
+  shaped harmonic "vowels" with syllable-rate AM all yield zero events); only
+  real speech triggers it. Smokes/harnesses that need the real VAD to fire must
+  push a real-speech sample — the smoke ships one in-image
+  (`johnny/agent/fixtures/sdk_smoke_speech.pcm`, provenance in
+  `fixtures/README.md`), because `tests/` is excluded from the prod image.
+- Outputs with `pause=False` capabilities (the blind sink, and
+  `BrowserAudioOutput` alike) log
+  `resume_false_interruption is enabled but audio output does not support
+  pause, it will be ignored` at session start — benign, the SDK ignores the
+  feature.
+- The acceptance fallback (gate entry/exit + `speech_created` done-events as a
+  coarse floor tracker) is **not required**: the primary signal fires roomless.
+  It remains available if Phase 5 ever needs a VAD-independent floor.
