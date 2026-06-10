@@ -446,10 +446,26 @@ OLLAMA_KEEP_ALIVE=24h ollama serve
    Ollama host so the model is not evicted again after 5 idle minutes
    (mid-session idle gaps re-pay 1–5 s of GGUF load where the prewarm
    can't help).
-6. **Audio bridge buffering** — verify the meet-worker bridge does
-   not buffer TTS chunks before forwarding. The pipeline yields
-   frames as they arrive; the bridge must too. Audit, then file
-   if there is a real buffer (Johnny-trt Phase 1 Meet-bridge audit).
+6. **Audio bridge buffering** — ✅ audited (Johnny-trt.10) and a
+   **real buffer found**: the Python layers forward frame-at-a-time
+   (LiveKit downlink queue → `MeetRoomBridge` pump → per-frame
+   write+flush into pacat, `bufsize=0`), but the **pacat/PulseAudio
+   stage buffers seconds** — `_spawn_playback_process` passes no
+   `--latency` flags, so the stream gets PA default attrs
+   (prebuf ≈ tlength ≈ 2 s at 16 kHz mono) and the null sink runs at
+   ~1.94 s sink latency. Measured in the meet-worker image with the
+   real `MeetAudioBridge` (harness under `.validation/Johnny-trt.10/`):
+   utterance onset **3.9 s** after the bridge writes it (bursty shape;
+   prebuf re-arms after every silent gap, and a 300 ms utterance never
+   plays until more audio arrives), **3.7–3.8 s standing** when the
+   downlink stream is continuous. With
+   `--latency-msec=50 --process-time-msec=10`: **57 ms** onsets in the
+   bursty shape (sink latency 1.94 s → 11.6 ms); the continuous shape
+   still locks in a 0.5–1.0 s start transient, so the fix pairs the
+   flags with bridge-side silence-gating of downlink writes. This is
+   the dominant Meet-surface latency cost → fix bead **Johnny-dkj**
+   (P1). Applies to the legacy unified S2S in-worker path too (same
+   bridge).
 
 ## What this work shipped (Johnny-ckz.8 iteration + Johnny-cxu baseline)
 

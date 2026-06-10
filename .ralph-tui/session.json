@@ -3,10 +3,10 @@
   "sessionId": "737b71bc-61ae-4acf-99c6-31d37006b423",
   "status": "running",
   "startedAt": "2026-06-10T17:39:21.674Z",
-  "updatedAt": "2026-06-10T19:59:09.097Z",
-  "currentIteration": 5,
+  "updatedAt": "2026-06-10T20:18:22.205Z",
+  "currentIteration": 6,
   "maxIterations": 0,
-  "tasksCompleted": 4,
+  "tasksCompleted": 5,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -81,8 +81,8 @@
       {
         "id": "Johnny-trt.9",
         "title": "[BUILD] Phase 1: Client-side auto barge-in in the playground",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.10",
@@ -292,6 +292,16 @@
       "durationMs": 1357628,
       "startedAt": "2026-06-10T19:12:57.861Z",
       "endedAt": "2026-06-10T19:35:35.489Z"
+    },
+    {
+      "iteration": 6,
+      "status": "completed",
+      "taskId": "Johnny-trt.9",
+      "taskTitle": "[BUILD] Phase 1: Client-side auto barge-in in the playground",
+      "taskCompleted": true,
+      "durationMs": 1400095,
+      "startedAt": "2026-06-10T19:35:47.566Z",
+      "endedAt": "2026-06-10T19:59:07.661Z"
     }
   ],
   "skippedTaskIds": [],

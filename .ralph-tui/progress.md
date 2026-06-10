@@ -5,6 +5,20 @@ after each iteration and it's included in prompts for context.
 
 ## Codebase Patterns (Study These First)
 
+- **pacat/parec default PulseAudio buffer attrs cost SECONDS — never spawn
+  them without latency flags on a latency-sensitive path**: with no
+  `--latency-msec`, a playback stream gets prebuf ≈ tlength ≈ 2 s AND the
+  null sink runs at ~1.94 s sink latency (no ADJUST_LATENCY client), so
+  audio is heard ~3.9 s after the write; sub-prebuf utterances (<~2 s)
+  don't play until more audio arrives. `--latency-msec=50
+  --process-time-msec=10` → ~57 ms. Two stream-shape dynamics: bursty
+  writers self-heal during gaps (backlog drains), continuous real-time
+  writers lock the start transient in as permanent standing latency
+  (in-rate == out-rate forever) — bounding latency needs flags + a
+  silence-gate on the writer. Measure with the harness pattern in
+  `.validation/Johnny-trt.10/` (one-off `docker run` of
+  johnny-meet-worker:latest; entrypoint provides the production sink
+  topology; tone-onset detection via a parec monitor thread).
 - **Run backend pytest / one-off scripts against the prod-shape stack without
   flipping to dev mode**: `docker compose run --rm -T --no-deps -v
   "$PWD/backend:/workspace" api <cmd>`. The prod image excludes `tests/` via
@@ -303,4 +317,45 @@ after each iteration and it's included in prompts for context.
     cut by design (lastSpokenAt grace), so the <=60 ms acceptance is
     asserted via the console-breadcrumb timestamp + synchronous-cut code
     path, not the badge.
+---
+
+## 2026-06-10 - Johnny-trt.10
+- Meet audio-bridge buffering audit (docs/LATENCY.md candidate #6, TTS
+  direction). Code audit: every Python hop forwards frame-at-a-time —
+  LiveKitTransport downlink queue (drop-oldest, livekit_transport.py:300),
+  MeetRoomBridge._pump_room_to_meet (:588), MeetAudioBridge._write_frame
+  (per-frame write+flush, Popen bufsize=0). No batching in the bridge code.
+- Empirical audit in johnny-meet-worker:latest driving the REAL
+  MeetAudioBridge: a real buffer exists in the pacat/PulseAudio stage
+  (`_spawn_playback_process` passes no --latency flags). Bursty shape:
+  onset 3943.8/3947.3 ms (start / after 3 s gap — prebuf re-arms), 300 ms
+  utterance never plays within 8 s, tail drain ~2.87 s. Continuous shape:
+  3.7-3.8 s standing on every utterance. Fix variant
+  (--latency-msec=50 --process-time-msec=10): 56.8 ms onsets bursty, sink
+  latency 1.94 s → 11.6 ms, continuous still locks in 0.5-1.0 s start
+  transient → fix = flags + downlink silence-gating. Capture-direction
+  poking: 0.95-1.5 s under synthetic pacat writers, parec flags changed
+  nothing, raw monitor ≈ remap source — NOT production-representative
+  (real writer is Chromium, a low-latency PA client); re-measure against
+  the browser only if Meet turn latency stays high after the fix.
+- Filed fix bead Johnny-dkj (P1, depends on Johnny-trt.10): latency flags
+  + silence-gate + harness re-verify + real-Meet before/after. Updated
+  docs/LATENCY.md candidate #6 with the measured verdict.
+- Files changed: docs/LATENCY.md (candidate #6 audit result). Audit
+  harness + raw results under gitignored .validation/Johnny-trt.10/
+  (00-audit-summary.md, 5 measurement scripts, 01-06 transcripts,
+  results*.json). No runtime code changed; no UI surface → browser
+  validation not applicable (stated per CLAUDE.md exemption).
+- **Learnings:**
+  - Patterns discovered: pacat/parec PA default buffering + the
+    continuous-stream standing-latency trap (new Codebase Patterns
+    bullet); one-off `docker run` of the meet-worker image gives the
+    full production PulseAudio topology for audio measurements.
+  - Gotchas: pacat writes never block (PA maxlength ≈ 4 MB), so the
+    bridge's asyncio queue stays empty and the multi-second backlog is
+    invisible to Python-side instrumentation — you MUST measure on the
+    sink monitor; ADJUST_LATENCY convergence makes the continuous-shape
+    standing latency vary run-to-run (0.5-1.5 s) with sink state, so
+    A/B only steady-state numbers; LATENCY.md candidate numbering
+    drifted (bead says #5, doc says #6).
 ---
