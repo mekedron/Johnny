@@ -806,6 +806,20 @@ class PiperTTS(TTSProvider):
             ),
             tips=(
                 ProviderTip(
+                    topic="Measured on this machine (2026-06-10)",
+                    body=(
+                        "Per-turn first-audio in real playground turns "
+                        "(Johnny-cxu baseline, en_GB-northern_english_male-"
+                        "medium, chunk_bytes 4096, M-series Mac): "
+                        "persistent-subprocess 60 ms p50 / 106 ms p95 warm "
+                        "vs subprocess 855 ms p50 / 914 ms p95 — the "
+                        "persistent runtime is ~795 ms faster on every "
+                        "single turn, paying one ~550 ms voice load on the "
+                        "first synth after activation. TTS is now <1% of "
+                        "the felt turn latency. Full table: docs/LATENCY.md."
+                    ),
+                ),
+                ProviderTip(
                     topic="Voice tier — low vs medium vs high",
                     body=(
                         "Low voices output 16 kHz and synthesise fastest "
@@ -834,8 +848,9 @@ class PiperTTS(TTSProvider):
                     body=(
                         "The Runtime selector at the top trades latency "
                         "for isolation. Subprocess spawns a fresh piper "
-                        "per call — ~200-400 ms of ONNX cold-start every "
-                        "turn — and is the safe single-step-debug default. "
+                        "per call — measured 855 ms p50 to first audio "
+                        "every turn — and is the safe single-step-debug "
+                        "default. "
                         "Persistent loads the voice once and keeps the "
                         "ONNX session warm in-process, so the second and "
                         "later calls return first audio in ~40-60 ms on "

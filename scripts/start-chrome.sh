@@ -11,6 +11,16 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE_DIR="${PROJECT_ROOT}/.chrome-profile"
 DEBUG_PORT="${CHROME_DEBUG_PORT:-9222}"
 CHROME_BIN="${CHROME_BIN:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
+# Optional extra Chrome flags, e.g. fake-media flags for scripted voice runs
+# (docs/LATENCY.md methodology):
+#   CHROME_EXTRA_FLAGS="--use-fake-device-for-media-stream --use-fake-ui-for-media-stream --use-file-for-fake-audio-capture=/path/to.wav --disable-features=AudioServiceSandbox" $0
+# AudioServiceSandbox must be disabled on macOS or the sandboxed audio service
+# silently fails to read the capture WAV and the fake mic stays silent
+# (verified 2026-06-10). The WAV restarts (and loops) per getUserMedia stream.
+# Note: flags only apply at launch — if Chrome is already running, pkill it
+# first (see the locked-profile hint below), then re-run with the env set.
+# Restore by pkill + re-running with the env unset.
+CHROME_EXTRA_FLAGS="${CHROME_EXTRA_FLAGS:-}"
 
 port_up=false
 profile_in_use=false
@@ -72,12 +82,14 @@ if [[ ! -x "${CHROME_BIN}" ]]; then
   exit 1
 fi
 
+# shellcheck disable=SC2086 — CHROME_EXTRA_FLAGS is intentionally word-split.
 nohup "${CHROME_BIN}" \
   --user-data-dir="${PROFILE_DIR}" \
   --remote-debugging-port="${DEBUG_PORT}" \
   --remote-debugging-address=127.0.0.1 \
   --no-first-run \
   --no-default-browser-check \
+  ${CHROME_EXTRA_FLAGS} \
   >/dev/null 2>&1 &
 
 disown

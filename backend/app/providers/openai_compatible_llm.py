@@ -325,6 +325,21 @@ class OpenAICompatibleLLM(LLMProvider):
             ),
             tips=(
                 ProviderTip(
+                    topic="Measured on this machine (2026-06-10)",
+                    body=(
+                        "Ollama llama3.2:3b, M-series Mac, 28+-turn "
+                        "playground runs (Johnny-cxu): answer first token "
+                        "3.0 s p50 / 4.1 s p95 — and first token EQUALS "
+                        "total generation because this adapter has no true "
+                        "token streaming yet (Johnny-dny). The router-gate "
+                        "side call adds another 2.4-3.4 s p50, growing with "
+                        "session context (1.2 s on turn 2 to 4.8 s by turn "
+                        "30). Together the two LLM calls own ~95% of the "
+                        "felt latency on the local stack. docs/LATENCY.md "
+                        "has the full breakdown."
+                    ),
+                ),
+                ProviderTip(
                     topic="Model size dominates first-token latency",
                     body=(
                         "On Ollama / vLLM, first-token latency scales with "

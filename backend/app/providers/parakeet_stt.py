@@ -171,7 +171,7 @@ CacheKey = tuple[str, str, str, int, str | None]
 # still hold a reference to the old model via ``self._model``, so it stays
 # alive until GC'd. The peak memory beat is bounded by the
 # ``_GLOBAL_LOAD_GATE`` below.
-_LAST: tuple[CacheKey, "_ASRModel"] | None = None
+_LAST: tuple[CacheKey, _ASRModel] | None = None
 # Per-key asyncio.Lock so concurrent first-load requests for the same key
 # coalesce into one load. Cleared by :func:`_evict_process_cache`.
 _LOAD_LOCKS: dict[CacheKey, asyncio.Lock] = {}
@@ -464,6 +464,18 @@ class ParakeetSTT(STTProvider):
                 ),
             ),
             tips=(
+                ProviderTip(
+                    topic="Measured on this machine (2026-06-10)",
+                    body=(
+                        "MLX sidecar, 0.6B TDT v3, M-series Mac: 116-123 ms "
+                        "p50 / 251-350 ms p95 per utterance final across two "
+                        "28+-turn playground runs (3-5 s utterances; "
+                        "Johnny-cxu baseline). STT is ~2% of the felt turn "
+                        "latency on the local stack — the budget goes to the "
+                        "router + answer LLM. Method + full table: "
+                        "docs/LATENCY.md."
+                    ),
+                ),
                 ProviderTip(
                     topic="Sidecars beat the in-container path on Apple Silicon",
                     body=(

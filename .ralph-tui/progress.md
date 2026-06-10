@@ -36,6 +36,19 @@ after each iteration and it's included in prompts for context.
   via the §8.3 one-off (`docker compose run --rm --no-deps -v $PWD/backend:/workspace api ...`).
   Gotcha: `diff_against_recorded` only compares keys PRESENT in `recorded` — parity fixtures need
   the key-completeness guard (see `test_parity_baseline_fixtures_committed`).
+- **Scripted real-voice playground runs (fake-mic method, Johnny-cxu)**: synthesize bot-addressed
+  utterances with the in-image piper CLI (TTS speech DOES trip Silero VAD + Parakeet, unlike DSP
+  synthetics), assemble one 48 kHz WAV (5 s head, 10 s gaps), relaunch the shared Chrome with
+  `CHROME_EXTRA_FLAGS="--use-fake-device-for-media-stream --use-fake-ui-for-media-stream
+  --use-file-for-fake-audio-capture=<wav> --disable-features=AudioServiceSandbox"
+  ./scripts/start-chrome.sh` — **AudioServiceSandbox off is mandatory on macOS** or the fake mic
+  reads no file and stays silent. WAV restarts per getUserMedia and loops at EOF. Then read
+  `session_timings` per turn (stage start = `started_at_ms - duration_ms`; LiveKit stamps metric
+  `timestamp` at stage END — verified in 1.5.17 source). Two instrument gotchas: STT rows attach
+  to the PREVIOUS turn_id (no speech_id → `turn_index.last()` fires pre-registration, Johnny-5vb)
+  — pair STT to replies by timestamp; and answer_llm ttft==total because openai_compatible has no
+  real `stream_chat` (base-class buffers full chat(), Johnny-dny). Method + analyzer preserved in
+  `.validation/Johnny-cxu/` and docs/LATENCY.md §"Scripted 20+-turn capture".
 
 ---
 
@@ -116,4 +129,51 @@ after each iteration and it's included in prompts for context.
     retired with Johnny-n22); `tests/` is excluded from the prod image, so in-container replay
     MUST use the PIPELINE.md §8.3 one-off: `docker compose run --rm --no-deps -v
     $PWD/backend:/workspace api sh -c "cd /workspace && johnny-replay --all --mode invariants"`.
+---
+
+## 2026-06-10 - Johnny-cxu
+- Real 20+-turn p50/p95 latency baseline on the configured local stack (Parakeet MLX sidecar +
+  Ollama llama3.2:3b + Local Piper), captured through the real /playground in the real browser
+  via Chrome fake-mic WAV injection. Two runs with the identical 24-utterance sequence:
+  session 72 (Piper `subprocess`, 28 turns) and session 73 (`persistent-subprocess`, 29 turns).
+  - Headline numbers (p50/p95 ms): STT 116-123/251-350 · router+gate gap 2420-3385/4458-4726 ·
+    answer-LLM ttft==total 3002-3068/4090-4099 · TTS first byte 855/914 (subprocess) vs
+    **60/106 (persistent)** · e2e speech-end→first-audio ≈ 6.8 s p50 (target: 0.3 s).
+  - Bottleneck attributed with code-level evidence: the two LLM calls own ~95% of felt latency;
+    answer ttft==total because `openai_compatible_llm` never overrides `stream_chat` (base-class
+    fallback buffers full chat()) → filed **Johnny-dny (P1)**. Router gap grows 1.2→4.8 s within
+    one session (context accumulation) — felt latency tripled turn 2→33.
+  - Before/after persistent piper: −795 ms TTS first byte per turn (−93%); matched early turns
+    −930 ms e2e median; one-time ~550 ms voice load on first synth.
+  - Instrument bug found + filed: STT timing rows attach to the previous turn_id (**Johnny-5vb**);
+    analyzer re-pairs by timestamp. Derived e2e cross-checked against wall-clock api logs (±30 ms).
+  - Second-order finding: ten consecutive two-sentence turns in session 73 produced ZERO audio —
+    router+LLM exceeded the inter-fragment pause so native barge-in cancelled every reply
+    pre-TTS (suppressed/barge_in, INV-1 terminals clean). The Johnny-trt premise observed live.
+- Files changed:
+  - `docs/LATENCY.md` (measured-baseline section replacing the "measured informally" note;
+    scripted fake-mic methodology; re-ranked optimization candidates; stage-map refresh)
+  - `backend/app/providers/{parakeet_stt,openai_compatible_llm,piper_tts}.py` ("Measured on this
+    machine (2026-06-10)" ProviderTip first in each tips tuple; piper runtime tip aligned to
+    measured numbers; one pre-existing ruff UP037 fix in parakeet_stt)
+  - `scripts/start-chrome.sh` (opt-in `CHROME_EXTRA_FLAGS` passthrough + fake-mic doc comment)
+  - `.validation/Johnny-cxu/` (gen_fake_mic.py, analyze_cxu.py, raw rows CSVs, run analyses,
+    6 chrome-devtools screenshots incl. the three provider-modal tips + activity panel)
+- Verification: ruff check + mypy clean on the three adapters; 210 provider tests pass;
+  `docker compose build api && up -d api` rebaked the tips and the three modals were
+  browser-validated from the baked image (screenshots 03-05). Provider config and Chrome flags
+  restored to pre-run state (ElevenLabs active TTS; piper inactive `persistent-subprocess`).
+  NOTE: `ruff format --check` fails on these provider files ON HEAD (pre-existing tool-version
+  drift, whole-file rewrites) — not introduced and deliberately not reformatted here.
+- **Learnings:**
+  - Chrome's `--use-file-for-fake-audio-capture` silently produces silence on macOS unless
+    `--disable-features=AudioServiceSandbox` is set (sandboxed audio service can't read the WAV).
+  - LiveKit 1.5.17 metrics stamp `timestamp` at stage END (recognize/LLM-stream/TTS-stream
+    completion) with `duration` covering the stage — session-relative stage starts are exactly
+    `started_at_ms - duration_ms`, and cross-stage gaps reconstruct router cost without any
+    extra instrumentation.
+  - Identical fixture sequences make A/B runs turn-for-turn comparable — but session-wide
+    percentiles are NOT comparable when run lengths differ, because per-session context growth
+    dominates (run B's router p50 was ~1 s worse purely from running ~2 WAV loops). Match
+    early turns for honest deltas.
 ---

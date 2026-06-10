@@ -3,10 +3,10 @@
   "sessionId": "589addaf-9a6f-4aaf-b0dd-abdc627fd828",
   "status": "running",
   "startedAt": "2026-06-10T15:37:11.002Z",
-  "updatedAt": "2026-06-10T16:11:03.814Z",
-  "currentIteration": 1,
+  "updatedAt": "2026-06-10T16:56:48.201Z",
+  "currentIteration": 2,
   "maxIterations": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 2,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -45,8 +45,8 @@
       {
         "id": "Johnny-trt.3",
         "title": "[BUILD] Phase 0: Replay fixtures for delegation-shaped utterances (verdict-parity baseline)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.4",
@@ -252,6 +252,16 @@
       "durationMs": 1272943,
       "startedAt": "2026-06-10T15:37:45.248Z",
       "endedAt": "2026-06-10T15:58:58.191Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "Johnny-trt.3",
+      "taskTitle": "[BUILD] Phase 0: Replay fixtures for delegation-shaped utterances (verdict-parity baseline)",
+      "taskCompleted": true,
+      "durationMs": 702256,
+      "startedAt": "2026-06-10T15:59:20.312Z",
+      "endedAt": "2026-06-10T16:11:02.568Z"
     }
   ],
   "skippedTaskIds": [],
