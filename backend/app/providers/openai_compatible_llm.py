@@ -527,6 +527,36 @@ class OpenAICompatibleLLM(LLMProvider):
             )
         return self._parse_response(payload, response_format=response_format)
 
+    async def warm_up(self) -> None:
+        """1-token ping so the server loads the model before the first turn.
+
+        Local OpenAI-compatible servers (Ollama, LM Studio, vLLM) load the
+        model lazily on first request — for Ollama that is the GGUF load,
+        1–5 s after idle eviction (see ``OLLAMA_KEEP_ALIVE`` in
+        docs/LATENCY.md). The session prewarm (Johnny-trt.8) calls this
+        concurrently with session start so the first real turn's router
+        call hits a loaded model. A deliberate raw body — not
+        :meth:`chat` — so the ping is hard-capped at ``max_tokens: 1``
+        regardless of the configured response cap.
+        """
+        body: dict[str, Any] = {
+            "model": self._model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+        }
+        headers: dict[str, str] = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        url = f"{self._base_url}/chat/completions"
+        try:
+            response = await self._client.post(url, json=body, headers=headers)
+        except httpx.HTTPError as exc:
+            raise LLMError(f"openai-compatible LLM warm-up ping failed: {exc}") from exc
+        self._raise_for_status(response)
+
     async def close(self) -> None:
         with contextlib.suppress(Exception):
             await self._client.aclose()

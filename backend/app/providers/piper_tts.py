@@ -1269,6 +1269,31 @@ class PiperTTS(TTSProvider):
             )
         return self._sidecar_client
 
+    async def warm_up(self) -> None:
+        """Tiny synth so the first reply skips the voice load (Johnny-trt.8).
+
+        Persistent runtime only: a throwaway synthesis of the configured
+        default voice pays the ~700 ms ``PiperVoice`` ONNX load into the
+        module-level warm cache (and first-runs the ORT kernels), so the
+        session's first reply gets the warm ~40-60 ms time-to-first-audio.
+        Idempotent — a warm cache makes this a sub-100 ms re-synth.
+
+        The other runtimes have nothing a warm-up could keep warm:
+        ``subprocess`` spawns a fresh piper per call (the cold start is
+        structural), and ``http-sidecar``'s voice cache lives in the
+        sidecar process, which warms itself at launch. No configured
+        default voice → no-op (the adapter may still synthesise with an
+        explicit per-call ``voice_id``; warming a guessed voice would just
+        load the wrong model).
+        """
+        if self._runtime != RUNTIME_PERSISTENT or not self._default_voice_id:
+            return
+        async with contextlib.aclosing(
+            self.synthesize_stream("Ok.", self._default_voice_id)
+        ) as frames:
+            async for _ in frames:
+                pass
+
     async def close(self) -> None:
         """Close the per-instance sidecar HTTP client.
 

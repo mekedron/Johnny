@@ -468,3 +468,18 @@ async def test_fetch_model_catalog_honors_custom_base_url() -> None:
     )
     await client.aclose()
     assert captured == ["https://proxy.example/v1/models"]
+
+
+# --- warm_up (Johnny-trt.8) --------------------------------------------------
+
+
+async def test_warm_up_is_a_no_op_for_the_hosted_api() -> None:
+    """Hosted OpenAI keeps models resident — no ping, no quota burn.
+
+    The inherited OpenAICompatibleLLM ping exists for local servers with a
+    lazy model load (Ollama); the hosted override must not issue any HTTP
+    (the reasoning models would also reject the ping's ``max_tokens``).
+    """
+    llm = _FakeOpenAILLM(_config(), handler=_ok_handler(_chat_completion()))
+    await llm.warm_up()
+    assert llm.requests == []

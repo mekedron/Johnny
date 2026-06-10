@@ -81,6 +81,28 @@ class BrowserPipelineSetupError(RuntimeError):
     """
 
 
+# Strong references to in-flight provider warm-up tasks (Johnny-trt.8).
+# asyncio holds tasks weakly; without this a warm-up still loading whisper
+# weights when its spawning coroutine returns (e.g. session start failed)
+# could be garbage-collected mid-flight. Tasks discard themselves on
+# completion via the done callback.
+_WARM_UP_TASKS: set[asyncio.Task[None]] = set()
+
+
+def _spawn_provider_warm_up(agent_session: Any, session_id: str) -> None:
+    """Fire the session's provider warm-up as a fire-and-forget task.
+
+    Deliberately NOT awaited by the runner: the warm-up overlaps session
+    start (the ready signal must not wait on a whisper/Piper/LLM load), and
+    the warm-up itself logs per-provider failures without raising. Letting
+    the task outlive a short session is intentional — the warmed state lives
+    in process-level caches, so the next session still benefits.
+    """
+    task = asyncio.create_task(agent_session.warm_up(), name=f"provider-warm-up-{session_id}")
+    _WARM_UP_TASKS.add(task)
+    task.add_done_callback(_WARM_UP_TASKS.discard)
+
+
 @dataclass(frozen=True)
 class BrowserRunOutcome:
     """Terminal outcome of one browser session run.
@@ -369,6 +391,11 @@ async def _run_agent_session(
         await transport.stop()
         transport.close_playback()
         return BrowserRunOutcome("failed", f"agent setup error: {exc}")
+
+    # Provider prewarm (Johnny-trt.8): pre-load lazy provider state (whisper
+    # weights, the Piper voice ONNX, a local LLM server's model) concurrently
+    # with session start so the first turn doesn't pay it.
+    _spawn_provider_warm_up(agent_session, spec.session_id)
 
     if on_assembled is not None:
         try:

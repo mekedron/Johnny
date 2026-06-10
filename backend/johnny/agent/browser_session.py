@@ -189,6 +189,18 @@ class BrowserAgentSession:
             session_id=session_id,
         )
 
+    async def warm_up(self) -> None:
+        """Pre-load the session providers' lazy heavy state (Johnny-trt.8).
+
+        Delegates to :meth:`~johnny.agent.job_session.AgentRuntime.warm_up`
+        (whisper weights, Piper voice ONNX, local-LLM model load — each
+        provider's own ``warm_up()`` hook). The browser runner fires this as
+        a background task right after :meth:`build`, concurrently with
+        :meth:`start` — the session's ready signal never waits on it. Never
+        raises; per-provider failures are logged inside.
+        """
+        await self._runtime.warm_up()
+
     async def start(self) -> None:
         """Bind the browser audio seams and start the session roomless.
 

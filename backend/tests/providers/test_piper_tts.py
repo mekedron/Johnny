@@ -1398,3 +1398,78 @@ async def test_fetch_voice_catalog_against_real_huggingface(
     assert any(v.key == "en_US-amy-medium" for v in voices), (
         "en_US-amy-medium missing from upstream catalog — schema may have changed"
     )
+
+
+# --- warm_up (Johnny-trt.8) --------------------------------------------------
+
+
+async def test_warm_up_persistent_loads_voice_and_runs_tiny_synth() -> None:
+    """The prewarm hook pays the voice ONNX load (and a tiny synth) up front."""
+    tts = _FakePersistentPiperTTS(
+        _config(runtime=RUNTIME_PERSISTENT, voice_id="vx", model_dir="/m"),
+        chunks=[_FakeAudioChunk(_pcm([1, 2, 3, 4]), 16_000)],
+    )
+    assert tts.load_calls == 0
+
+    await tts.warm_up()
+
+    assert tts.load_calls == 1
+    assert tts.loaded_voices[0].synthesize_calls == 1  # the tiny synth ran
+
+
+async def test_warm_up_persistent_reuses_the_warm_cache() -> None:
+    """Idempotent: a second warm-up re-synths on the cached voice, no reload."""
+    tts = _FakePersistentPiperTTS(
+        _config(runtime=RUNTIME_PERSISTENT, voice_id="vx", model_dir="/m"),
+        chunks=[_FakeAudioChunk(_pcm([1, 2, 3, 4]), 16_000)],
+    )
+    await tts.warm_up()
+    await tts.warm_up()
+
+    assert tts.load_calls == 1
+    assert tts.loaded_voices[0].synthesize_calls == 2
+
+
+async def test_warm_up_persistent_warms_what_synthesize_uses() -> None:
+    """A real synth after warm-up hits the cache — no second voice load."""
+    tts = _FakePersistentPiperTTS(
+        _config(runtime=RUNTIME_PERSISTENT, voice_id="vx", model_dir="/m"),
+        chunks=[_FakeAudioChunk(_pcm([1, 2, 3, 4]), 16_000)],
+    )
+    await tts.warm_up()
+
+    frames = [f async for f in tts.synthesize_stream("Hello there")]
+    assert frames
+    assert tts.load_calls == 1
+
+
+async def test_warm_up_subprocess_runtime_is_a_no_op() -> None:
+    """A fresh piper per call has nothing to keep warm — no process spawned."""
+    tts = _FakePiperTTS(
+        _config(runtime=RUNTIME_SUBPROCESS, voice_id="vx", model_dir="/m"),
+        stdout_data=_pcm([1, 2, 3, 4]),
+    )
+    await tts.warm_up()
+    assert tts.spawned_with == []
+
+
+async def test_warm_up_http_sidecar_runtime_is_a_no_op() -> None:
+    """The sidecar warms its own voice cache at launch — no POST issued."""
+    import httpx
+
+    def handler(_request: Any) -> Any:
+        return httpx.Response(200, content=_pcm([1, 2]))
+
+    tts = _SidecarFakePiperTTS(
+        _config(runtime=RUNTIME_HTTP_SIDECAR, voice_id="vx", model_dir="/m"),
+        handler=handler,
+    )
+    await tts.warm_up()
+    assert tts.requests == []
+
+
+async def test_warm_up_without_default_voice_is_a_no_op() -> None:
+    """No configured voice -> nothing to warm (no guessed voice load)."""
+    tts = _FakePersistentPiperTTS(_config(runtime=RUNTIME_PERSISTENT, model_dir="/m"))
+    await tts.warm_up()
+    assert tts.load_calls == 0

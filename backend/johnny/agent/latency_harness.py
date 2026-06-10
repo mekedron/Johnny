@@ -528,6 +528,7 @@ class HarnessResult:
 
     providers_mode: str
     turns_requested: int
+    prewarmed: bool = False
     turns: list[TurnTimings] = field(default_factory=list)
 
     @property
@@ -708,6 +709,7 @@ async def run_latency_harness(
     settle_s: float = 0.4,
     vad: VAD | None = None,
     bot_session_id: int = 0,
+    prewarm: bool = False,
 ) -> HarnessResult:
     """Run ``turns`` scripted voice turns and return per-turn stage timings.
 
@@ -719,6 +721,14 @@ async def run_latency_harness(
     timings from that window. Turns run strictly sequentially — the next
     utterance starts only after the previous reply's terminal — so no turn can
     barge into another (the Johnny-cxu run-B failure mode).
+
+    ``prewarm=True`` (Johnny-trt.8) awaits the session's provider warm-up
+    (:meth:`BrowserAgentSession.warm_up` — whisper weights, Piper voice ONNX,
+    local-LLM ping) to *completion* before the first utterance. Production
+    fires the same warm-up concurrently with session start; the harness
+    awaits it so turn 1 measures the warmed steady state rather than a race
+    against the loads — compare a ``prewarm=False`` run's cold turn against a
+    ``prewarm=True`` run's to size the prewarm win.
     """
     from johnny.agent.browser_session import BrowserAgentSession
     from johnny.agent.session import load_vad
@@ -764,6 +774,14 @@ async def run_latency_harness(
         transport, config, event_bus=bus, vad=vad
     )
 
+    if prewarm:
+        prewarm_start = time.perf_counter()
+        await agent_session.warm_up()
+        logger.info(
+            "provider prewarm completed in %d ms (turn 1 measures warmed state)",
+            int((time.perf_counter() - prewarm_start) * 1000),
+        )
+
     # VAD end-of-speech commits surface as speaking→listening user-state edges;
     # the harness reads them wall-clock. Private seam (the sibling smokes use
     # the same kind of access); a production consumer would get a passthrough.
@@ -776,7 +794,7 @@ async def run_latency_harness(
 
     mic = FakeMic(transport)
     playback = PlaybackMonitor(transport)
-    result = HarnessResult(providers_mode=providers_mode, turns_requested=turns)
+    result = HarnessResult(providers_mode=providers_mode, turns_requested=turns, prewarmed=prewarm)
 
     try:
         await agent_session.start()
@@ -866,6 +884,7 @@ def render_report(result: HarnessResult) -> str:
     replied = result.replied
     lines.append(
         f"latency harness: providers={result.providers_mode} "
+        f"prewarm={'on' if result.prewarmed else 'off'} "
         f"turns={len(result.turns)}/{result.turns_requested} "
         f"completed={len(completed)} replied={len(replied)} "
         f"no_reply={len(completed) - len(replied)} "
@@ -909,6 +928,7 @@ def result_to_json(result: HarnessResult) -> dict[str, Any]:
     cold = result.cold_turn
     return {
         "providers_mode": result.providers_mode,
+        "prewarm": result.prewarmed,
         "turns_requested": result.turns_requested,
         "turns_run": len(result.turns),
         "completed": len(result.completed),
@@ -972,6 +992,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         ),
     )
     parser.add_argument(
+        "--prewarm",
+        action="store_true",
+        help=(
+            "await the session's provider warm_up() before turn 1 (Johnny-trt.8) "
+            "so the cold turn measures the warmed steady state"
+        ),
+    )
+    parser.add_argument(
         "--turn-timeout-s",
         type=float,
         default=120.0,
@@ -1004,6 +1032,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 fixture_paths=args.fixtures,
                 turn_timeout_s=args.turn_timeout_s,
                 inter_turn_silence_s=args.inter_turn_silence_s,
+                prewarm=args.prewarm,
             )
         )
     except Exception:

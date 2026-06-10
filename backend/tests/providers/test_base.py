@@ -655,3 +655,19 @@ def test_load_active_providers_uses_global_registry_by_default(session: Session)
         assert isinstance(result[ProviderKind.STT], _StubSTT)
     finally:
         reg.unregister(ProviderKind.STT, "stub-global")
+
+
+async def test_warm_up_default_is_a_no_op_on_every_abc() -> None:
+    """``warm_up()`` (Johnny-trt.8) ships as an awaitable no-op on the shared base.
+
+    The session prewarm calls it on every assembled provider, so adapters with
+    no lazy state to pre-load (cloud APIs) must not need an override — only
+    providers with a real cold cost (faster-whisper, Piper persistent, local
+    OpenAI-compatible servers) opt in.
+    """
+    stt = _StubSTT(_config(ProviderKind.STT))
+    llm = _StubLLM(_config(ProviderKind.LLM))
+    tts = _StubTTS(_config(ProviderKind.TTS))
+    await stt.warm_up()
+    await llm.warm_up()
+    await tts.warm_up()

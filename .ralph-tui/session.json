@@ -3,10 +3,10 @@
   "sessionId": "737b71bc-61ae-4acf-99c6-31d37006b423",
   "status": "running",
   "startedAt": "2026-06-10T17:39:21.674Z",
-  "updatedAt": "2026-06-10T18:14:22.529Z",
-  "currentIteration": 1,
+  "updatedAt": "2026-06-10T18:48:48.119Z",
+  "currentIteration": 2,
   "maxIterations": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 2,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -51,8 +51,8 @@
       {
         "id": "Johnny-trt.4",
         "title": "[CHORE] Phase 0 capstone: baseline + SDK findings documented",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.5",
@@ -252,6 +252,16 @@
       "durationMs": 1757854,
       "startedAt": "2026-06-10T17:39:43.921Z",
       "endedAt": "2026-06-10T18:09:01.775Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "Johnny-trt.4",
+      "taskTitle": "[CHORE] Phase 0 capstone: baseline + SDK findings documented",
+      "taskCompleted": true,
+      "durationMs": 299775,
+      "startedAt": "2026-06-10T18:09:21.855Z",
+      "endedAt": "2026-06-10T18:14:21.630Z"
     }
   ],
   "skippedTaskIds": [],

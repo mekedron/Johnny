@@ -34,6 +34,9 @@ packages — it is lazy-exported through the adapters' :pep:`562` ``__getattr__`
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -64,6 +67,22 @@ if TYPE_CHECKING:
 
     from app.providers.base import ProviderRegistry
     from app.providers.loader import CredentialDecryptor
+
+logger = logging.getLogger(__name__)
+# Surface the per-provider ``provider warm_up done/failed`` breadcrumbs in
+# ``docker logs api`` (Johnny-trt.8) — without this the root logger defaults to
+# WARNING and the prewarm timing lines get dropped, hiding a regression to
+# cold first turns. Mirrors the piper_tts / parakeet_stt handler idiom; attach
+# only when the chain has none of our own so a future project-wide logging
+# setup is not shadowed.
+logger.setLevel(logging.INFO)
+if not any(getattr(h, "_johnny_warm_up", False) for h in logger.handlers):
+    _h = logging.StreamHandler()
+    _h.setLevel(logging.INFO)
+    _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    _h._johnny_warm_up = True  # type: ignore[attr-defined]
+    logger.addHandler(_h)
+    logger.propagate = False
 
 # The three split-pipeline kinds a LiveKit AgentSession drives. Passing these
 # to the loader scopes its query to the split stack; an active S2S row (unified
@@ -127,11 +146,22 @@ class SessionAdapters:
     are required, but TTS is optional — :func:`~johnny.agent.session.build_agent_session`
     binds no TTS to the session and the worker degrades a speaking mode to
     ``suggest_only`` (parity with the meet-worker's graceful TTS-missing degrade).
+
+    ``stt_provider`` / ``llm_provider`` / ``tts_provider`` are the raw Johnny
+    providers the LiveKit adapters wrap, carried for the session prewarm
+    (Johnny-trt.8): :func:`warm_up_session_providers` fires each one's
+    ``warm_up()`` hook without reaching into adapter privates (the STT may
+    even be buried inside a LiveKit ``StreamAdapter``). Default ``None`` so
+    tests that hand-build a :class:`SessionAdapters` from adapter fakes keep
+    working — warm-up simply skips absent entries.
     """
 
     stt: STT[Any]
     llm: JohnnyLLM
     tts: JohnnyTTS | None
+    stt_provider: STTProvider | None = None
+    llm_provider: LLMProvider | None = None
+    tts_provider: TTSProvider | None = None
 
 
 def _require(
@@ -234,6 +264,7 @@ def _assemble_split_adapters(
     if not isinstance(llm, LLMProvider):
         raise AgentSessionSetupError(_wrong_type(ProviderKind.LLM, llm, "LLMProvider"))
     tts_adapter: JohnnyTTS | None = None
+    tts_provider: TTSProvider | None = None
     if tts is not None:
         if not isinstance(tts, TTSProvider):
             raise AgentSessionSetupError(_wrong_type(ProviderKind.TTS, tts, "TTSProvider"))
@@ -243,6 +274,7 @@ def _assemble_split_adapters(
             model=_selected(tts_options, _TTS_MODEL_KEYS),
             recorder=tts_recorder,
         )
+        tts_provider = tts
     return SessionAdapters(
         stt=build_stt_adapter(
             stt,
@@ -252,6 +284,9 @@ def _assemble_split_adapters(
         ),
         llm=JohnnyLLM(llm, model=_selected(llm_options, _LLM_MODEL_KEYS)),
         tts=tts_adapter,
+        stt_provider=stt,
+        llm_provider=llm,
+        tts_provider=tts_provider,
     )
 
 
@@ -456,9 +491,66 @@ def build_session_adapters_from_payload(
     )
 
 
+async def warm_up_session_providers(
+    adapters: SessionAdapters,
+    *,
+    session_id: str,
+) -> None:
+    """Fire every raw provider's ``warm_up()`` hook concurrently (Johnny-trt.8).
+
+    Pre-loads the lazy heavy state the first turn would otherwise pay —
+    faster-whisper's weights, Piper's voice ONNX, a local LLM server's model
+    (each provider's :meth:`~app.providers.base._ProviderBase.warm_up`
+    documents its own cost; the default is a no-op). Meant to run as a
+    background task right after session assembly, concurrently with session
+    start — callers must NOT gate the session's ready signal on it.
+
+    Never raises: a provider whose warm-up fails is logged and skipped, so
+    its first real call pays the lazy load exactly as it did before prewarm
+    existed. Skips ``None`` entries (no TTS configured, or a hand-built
+    :class:`SessionAdapters` that carries no raw providers).
+    """
+    targets = [
+        (kind, provider)
+        for kind, provider in (
+            ("stt", adapters.stt_provider),
+            ("llm", adapters.llm_provider),
+            ("tts", adapters.tts_provider),
+        )
+        if provider is not None
+    ]
+    if not targets:
+        return
+
+    async def _warm(kind: str, provider: ProviderInstance) -> None:
+        start = time.perf_counter()
+        try:
+            await provider.warm_up()
+        except Exception:
+            logger.warning(
+                "provider warm_up failed for %s (%s) on session=%s — "
+                "the first turn pays the lazy load instead",
+                kind,
+                provider.name,
+                session_id,
+                exc_info=True,
+            )
+            return
+        logger.info(
+            "provider warm_up done for %s (%s) on session=%s in %d ms",
+            kind,
+            provider.name,
+            session_id,
+            int((time.perf_counter() - start) * 1000),
+        )
+
+    await asyncio.gather(*(_warm(kind, provider) for kind, provider in targets))
+
+
 __all__ = [
     "AgentSessionSetupError",
     "SessionAdapters",
     "build_session_adapters",
     "build_session_adapters_from_payload",
+    "warm_up_session_providers",
 ]

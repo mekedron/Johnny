@@ -1036,3 +1036,59 @@ async def test_fetch_model_catalog_raises_when_data_missing() -> None:
             "http://localhost:11434/v1", client=client
         )
     await client.aclose()
+
+
+# --- warm_up (Johnny-trt.8) --------------------------------------------------
+
+
+async def test_warm_up_pings_chat_completions_with_one_token() -> None:
+    """The prewarm ping forces the server's lazy model load (Ollama GGUF)."""
+    llm = _FakeOpenAICompatibleLLM(_config(), handler=_ok_handler(_chat_completion()))
+
+    await llm.warm_up()
+
+    assert len(llm.requests) == 1
+    request = llm.requests[0]
+    assert str(request.url) == "http://localhost:11434/v1/chat/completions"
+    body = json.loads(request.content)
+    assert body["model"] == "qwen2.5"
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+    assert body["max_tokens"] == 1
+
+
+async def test_warm_up_caps_one_token_regardless_of_configured_max_tokens() -> None:
+    """The ping ignores the response cap — it must never generate a real reply."""
+    llm = _FakeOpenAICompatibleLLM(
+        _config(max_tokens=512), handler=_ok_handler(_chat_completion())
+    )
+    await llm.warm_up()
+    body = json.loads(llm.requests[0].content)
+    assert body["max_tokens"] == 1
+
+
+async def test_warm_up_sends_bearer_when_api_key_set() -> None:
+    llm = _FakeOpenAICompatibleLLM(
+        _config(api_key="sk-local"), handler=_ok_handler(_chat_completion())
+    )
+    await llm.warm_up()
+    assert llm.requests[0].headers["authorization"] == "Bearer sk-local"
+
+
+async def test_warm_up_maps_transport_error_to_llm_error() -> None:
+    """The session prewarm logs failures; the hook itself must raise cleanly."""
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    llm = _FakeOpenAICompatibleLLM(_config(), handler=refuse)
+    with pytest.raises(LLMError, match="warm-up ping failed"):
+        await llm.warm_up()
+
+
+async def test_warm_up_raises_llm_error_on_http_error_status() -> None:
+    def server_error(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, content=b"model exploded")
+
+    llm = _FakeOpenAICompatibleLLM(_config(), handler=server_error)
+    with pytest.raises(LLMError):
+        await llm.warm_up()

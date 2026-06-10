@@ -9,6 +9,7 @@ the browser surface still never *dispatches* the agent (it runs it in-process).
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -20,6 +21,7 @@ from app.services.browser_pipeline_runner import (
     BrowserPipelineSpec,
     _job_config_from_spec,
     assemble_browser_pipeline,
+    run_browser_pipeline,
 )
 from johnny.agent.job_config import DEFAULT_MODE, room_name_for_session
 from johnny.voice_pipeline import (
@@ -129,6 +131,73 @@ def test_assemble_unified_builds_unified_pipeline() -> None:
     )
     pipeline = assemble_browser_pipeline(transport, spec)
     assert isinstance(pipeline, UnifiedVoicePipeline)
+
+
+# --- Provider prewarm (Johnny-trt.8) ----------------------------------------
+
+
+async def test_split_run_fires_provider_warm_up_without_gating_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runner spawns ``warm_up()`` as a background task right after build.
+
+    The session's ready signal (``start()``) must NOT wait for the warm-up:
+    here the warm-up is held open until after the run is asked to stop, and
+    the session still starts and ends cleanly while it is in flight.
+    """
+    pytest.importorskip("livekit.agents")
+    import johnny.agent.browser_session as browser_session_mod
+
+    warm_up_started = asyncio.Event()
+    release_warm_up = asyncio.Event()
+    events: list[str] = []
+
+    class _FakeAgentSession:
+        @classmethod
+        async def build(
+            cls, transport: Any, config: Any, *, event_bus: Any, vad: Any = None
+        ) -> _FakeAgentSession:
+            return cls()
+
+        async def warm_up(self) -> None:
+            warm_up_started.set()
+            await release_warm_up.wait()
+            events.append("warm_up:end")
+
+        async def start(self) -> None:
+            events.append("start")
+
+        async def aclose(self) -> None:
+            events.append("aclose")
+
+    monkeypatch.setattr(browser_session_mod, "BrowserAgentSession", _FakeAgentSession)
+
+    transport = BrowserAudioTransport()
+    stop_event = asyncio.Event()
+    spec = _spec(
+        {"stt": {"provider_name": "x"}, "llm": {"provider_name": "y"}},
+        pipeline_mode=SPLIT_MODE,
+    )
+
+    async def _drive() -> None:
+        await asyncio.wait_for(warm_up_started.wait(), timeout=5.0)
+        stop_event.set()  # stop the session while warm-up is still running
+        release_warm_up.set()
+
+    driver = asyncio.create_task(_drive())
+    outcome = await run_browser_pipeline(transport, spec, stop_event=stop_event)
+    await driver
+    # The runner deliberately does not await the warm-up; drain it here so the
+    # ordering assertion below sees its completion event.
+    from app.services.browser_pipeline_runner import _WARM_UP_TASKS
+
+    await asyncio.gather(*list(_WARM_UP_TASKS))
+
+    assert outcome.status == "ended"
+    assert "start" in events
+    # The session started (and even finished its whole run) before the
+    # held-open warm-up completed — proof start never gated on it.
+    assert events.index("start") < events.index("warm_up:end")
 
 
 # --- Cutover guard: the browser surface never DISPATCHES the agent ---------

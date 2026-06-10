@@ -31,6 +31,18 @@ after each iteration and it's included in prompts for context.
   llama3.2:3b (harness in-run trend router 758→1763 ms, answer 220→902 ms in
   24 turns — same curve docs/LATENCY.md documents for the manual baseline).
   Compare latency runs only at matched turn counts.
+- **Operator-visible INFO breadcrumbs need a module-local handler**: there is
+  no app-wide logging config, so `logger.info` from `johnny.*` / most
+  `app.*` modules is silently dropped in `docker logs api` (root logger
+  defaults WARNING). Follow the piper_tts/parakeet_stt idiom — setLevel(INFO)
+  + tagged StreamHandler + propagate=False, attached only when absent (see
+  `johnny/agent/adapters/factory.py` for the latest copy). Without it a new
+  timing/diagnostic line "works" in pytest but never reaches the operator.
+- **Ruff gate is per-touched-file, not repo-wide**: HEAD carries ~32
+  pre-existing `ruff check` errors and several never-formatted provider
+  files. Verify cleanliness of a change by `git stash` → baseline run →
+  `git stash pop` → diff the violation sets; whole-file reformats of
+  pre-existing drift just bloat the diff.
 
 ---
 
@@ -113,4 +125,57 @@ after each iteration and it's included in prompts for context.
   - All four Phase-0 suites run in a single compose-run container in ~38 s —
     cheap enough to be the standard pre-capstone gate for every later phase
     (the epic requires re-measurement + green gates at each capstone).
+---
+
+## 2026-06-10 - Johnny-trt.8
+- Provider prewarm at session start. Added `async warm_up()` to
+  `_ProviderBase` (default no-op, contract: idempotent, raise-on-failure for
+  the caller to log). Implemented: faster-whisper (`_ensure_model` weight
+  load), Piper persistent runtime (tiny "Ok." synth pays the ~650 ms voice
+  ONNX load into the process cache; subprocess/http-sidecar runtimes stay
+  no-ops — cold start is structural / sidecar warms itself), openai-compatible
+  LLM (raw 1-token `max_tokens: 1` ping → Ollama GGUF load; hosted `OpenAILLM`
+  overrides back to no-op: nothing to load + reasoning models reject
+  `max_tokens`). `SessionAdapters` now carries the raw providers
+  (`stt_provider`/`llm_provider`/`tts_provider`, default None);
+  `warm_up_session_providers` (factory.py) gathers hooks concurrently with
+  per-provider timing logs, never raises; `AgentRuntime.warm_up` +
+  `BrowserAgentSession.warm_up` delegate; the browser runner fires it as a
+  fire-and-forget task (module-level strong-ref set) right after
+  `BrowserAgentSession.build` — the ready signal never waits (pinned by a
+  held-open-warm-up test). Harness: `--prewarm` awaits warm-up before turn 1;
+  `prewarm` in report header + JSON.
+- Measured (6-turn `--providers local` runs, Ollama force-unloaded before
+  each, artifacts `.validation/Johnny-trt.8/`): cold-turn e2e_vad_commit
+  3903 ms → 1007 ms (router 2953→606, tts_ttfb 576→57); prewarmed turn 1 is
+  the fastest turn (warm p50 1546) — acceptance "within 100 ms of steady
+  state" met on the favorable side. Warm-up wall cost 1453 ms, all concurrent
+  (Ollama 1452 ∥ piper 652 ∥ parakeet no-op 0). Browser-validated on the
+  rebuilt prod image (session 75): three warm_up log lines at start, first
+  typed turn replied with warm piper ttfa 273 ms, console clean, screenshots.
+- Files changed: backend/app/providers/{base,faster_whisper_stt,piper_tts,
+  openai_compatible_llm,openai_llm}.py, backend/app/services/
+  browser_pipeline_runner.py, backend/johnny/agent/adapters/{factory,__init__}.py,
+  backend/johnny/agent/{job_session,browser_session,latency_harness}.py,
+  docs/LATENCY.md (prewarm section + measured table + OLLAMA_KEEP_ALIVE),
+  .env.example (host-side OLLAMA_KEEP_ALIVE note), tests: providers
+  {base,faster_whisper,piper,openai_compatible,openai_llm}, agent
+  {adapter_factory,browser_session,latency_harness}, services
+  {browser_pipeline_runner}.
+- **Learnings:**
+  - INFO logs from `johnny.*` / most `app.*` loggers are dropped in
+    `docker logs api` (no app-wide logging config; root defaults WARNING).
+    The established idiom for operator-visible breadcrumbs is the
+    piper_tts/parakeet_stt module-local StreamHandler attach — new
+    operator-facing timing lines need it or they silently vanish.
+  - `OpenAILLM` subclasses `OpenAICompatibleLLM`: any behavior added to the
+    compatible adapter leaks to hosted OpenAI unless overridden (the warm-up
+    ping would burn quota and trip reasoning models' `max_completion_tokens`
+    requirement).
+  - Ollama keep_alive default (5 m) makes "cold" measurement runs
+    reproducible via `curl /api/generate -d '{"model":X,"keep_alive":0}'`
+    to force-unload between runs; `/api/ps` confirms residency.
+  - The repo is not globally ruff-clean (32 pre-existing errors on HEAD);
+    the realistic gate is lint/format-clean on touched files, with
+    `git stash` round-trip to attribute drift to HEAD vs the change.
 ---

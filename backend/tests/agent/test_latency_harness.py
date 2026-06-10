@@ -134,3 +134,20 @@ def test_result_json_shape(harness_result: HarnessResult) -> None:
     assert len(payload["per_turn"]) == _TURNS
     for row in payload["per_turn"]:
         assert set(REPORT_METRICS) <= set(row)
+
+
+def test_prewarm_flag_lands_in_report_and_json(harness_result: HarnessResult) -> None:
+    """Johnny-trt.8: the prewarm mode is visible in the report header + JSON.
+
+    The shared fixture runs prewarm-off (the historical default, so its cold
+    turn stays a real cold turn); the flag's on-rendering is asserted on a
+    synthetic result — the prewarm *behaviour* (provider warm_up hooks) is
+    unit-tested per provider and in test_adapter_factory.py.
+    """
+    assert harness_result.prewarmed is False
+    assert "prewarm=off" in render_report(harness_result)
+    assert result_to_json(harness_result)["prewarm"] is False
+
+    warmed = HarnessResult(providers_mode="local", turns_requested=1, prewarmed=True)
+    assert "prewarm=on" in render_report(warmed)
+    assert result_to_json(warmed)["prewarm"] is True

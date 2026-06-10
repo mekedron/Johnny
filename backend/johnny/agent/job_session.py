@@ -49,7 +49,11 @@ from app.providers.base import (
     ProviderKind,
     get_registry,
 )
-from johnny.agent.adapters.factory import AgentSessionSetupError, SessionAdapters
+from johnny.agent.adapters.factory import (
+    AgentSessionSetupError,
+    SessionAdapters,
+    warm_up_session_providers,
+)
 from johnny.agent.answer import degrade_speaking_mode_if_no_tts
 from johnny.agent.barge_in import BargeInClassifier, BargeInClassifierConfig
 from johnny.agent.gate import TurnIndex, TurnLedger
@@ -186,6 +190,18 @@ class AgentRuntime:
     decision_sink: Any = None
     _db_session: Session | None = None
     _owns_event_bus: bool = True
+
+    async def warm_up(self) -> None:
+        """Pre-load the session providers' lazy heavy state (Johnny-trt.8).
+
+        Delegates to :func:`~johnny.agent.adapters.factory.warm_up_session_providers`
+        over :attr:`adapters`' raw providers (whisper weights, Piper voice ONNX,
+        local-LLM model load). Run it as a background task right after assembly —
+        concurrently with session start, never gating the ready signal. Never
+        raises; per-provider failures are logged and mean only that the first
+        turn pays the lazy load as before.
+        """
+        await warm_up_session_providers(self.adapters, session_id=self.session_id)
 
     @property
     def needs_approval_wiring(self) -> bool:

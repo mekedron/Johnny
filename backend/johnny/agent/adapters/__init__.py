@@ -35,6 +35,7 @@ if TYPE_CHECKING:
         SessionAdapters,
         build_session_adapters,
         build_session_adapters_from_payload,
+        warm_up_session_providers,
     )
     from johnny.agent.adapters.johnny_llm import JohnnyLLM
     from johnny.agent.adapters.johnny_stt import JohnnySTT, build_stt_adapter
@@ -49,6 +50,7 @@ __all__ = [
     "build_session_adapters",
     "build_session_adapters_from_payload",
     "build_stt_adapter",
+    "warm_up_session_providers",
 ]
 
 _FACTORY_EXPORTS = frozenset(
@@ -57,6 +59,7 @@ _FACTORY_EXPORTS = frozenset(
         "SessionAdapters",
         "build_session_adapters",
         "build_session_adapters_from_payload",
+        "warm_up_session_providers",
     }
 )
 

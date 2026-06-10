@@ -186,3 +186,23 @@ async def test_feed_text_blank_is_rejected() -> None:
     assert await sess.feed_text("   ") is False
     assert transcripts == []
     assert fake_session.generate_reply_calls == []
+
+
+async def test_warm_up_delegates_to_the_runtime() -> None:
+    """Johnny-trt.8: the browser session's warm_up is the runtime's prewarm."""
+    calls: list[str] = []
+
+    class _Runtime:
+        async def warm_up(self) -> None:
+            calls.append("warm_up")
+
+    sess = BrowserAgentSession(
+        runtime=cast(Any, _Runtime()),
+        session=cast(Any, None),
+        transport=cast(Any, None),
+        audio_out=cast(Any, None),
+        transcript_sink=cast(Any, None),
+        session_id="7",
+    )
+    await sess.warm_up()
+    assert calls == ["warm_up"]

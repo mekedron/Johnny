@@ -817,3 +817,115 @@ def test_payload_factory_is_lazy_exported_through_package() -> None:
         adapters.build_session_adapters_from_payload
         is factory.build_session_adapters_from_payload
     )
+
+
+# --- Raw-provider carry + session prewarm (Johnny-trt.8) ---------------------
+#
+# SessionAdapters carries the raw Johnny providers the LiveKit adapters wrap so
+# warm_up_session_providers can fire each one's warm_up() hook without reaching
+# into adapter privates (the STT may be buried inside a LiveKit StreamAdapter).
+
+
+class _WarmRecordingSTT(_FakeSTT):
+    def __init__(self, config: ProviderConfig) -> None:
+        super().__init__(config)
+        self.warm_calls = 0
+
+    async def warm_up(self) -> None:
+        self.warm_calls += 1
+
+
+class _WarmRecordingTTS(_FakeTTS):
+    def __init__(self, config: ProviderConfig) -> None:
+        super().__init__(config)
+        self.warm_calls = 0
+
+    async def warm_up(self) -> None:
+        self.warm_calls += 1
+
+
+class _WarmBoomLLM(_FakeLLM):
+    def __init__(self, config: ProviderConfig) -> None:
+        super().__init__(config)
+        self.warm_calls = 0
+
+    async def warm_up(self) -> None:
+        self.warm_calls += 1
+        raise RuntimeError("simulated warm-up failure")
+
+
+def _provider_config(kind: ProviderKind, name: str) -> ProviderConfig:
+    return ProviderConfig(kind=kind, provider_name=name, display_name=name)
+
+
+def test_db_built_adapters_carry_the_raw_providers(session: Session) -> None:
+    _seed_split(session)
+
+    adapters = build_session_adapters(session, registry=_registry())
+
+    # The carried raw providers are the SAME instances the adapters wrap —
+    # warming them warms exactly what the session will drive.
+    assert isinstance(adapters.stt_provider, _FakeSTT)
+    assert adapters.llm_provider is adapters.llm._provider
+    assert adapters.tts is not None
+    assert adapters.tts_provider is adapters.tts._provider
+
+
+def test_payload_built_adapters_carry_the_raw_providers() -> None:
+    adapters = build_session_adapters_from_payload(_split_payload(), registry=_registry())
+
+    assert isinstance(adapters.stt_provider, _FakeSTT)
+    assert isinstance(adapters.llm_provider, _FakeLLM)
+    assert adapters.tts is not None
+    assert adapters.tts_provider is adapters.tts._provider
+
+
+def test_missing_tts_carries_no_raw_tts(session: Session) -> None:
+    _insert(session, kind=ProviderKind.STT, provider_name="deepgram", credentials={"api_key": "s"})
+    _insert(session, kind=ProviderKind.LLM, provider_name="openai", credentials={"api_key": "l"})
+
+    adapters = build_session_adapters(session, registry=_registry())
+
+    assert adapters.tts is None
+    assert adapters.tts_provider is None
+
+
+async def test_warm_up_fires_every_hook_and_swallows_failures() -> None:
+    """One failing warm_up must not stop the others, and never raises out."""
+    from johnny.agent.adapters.factory import warm_up_session_providers
+
+    stt = _WarmRecordingSTT(_provider_config(ProviderKind.STT, "deepgram"))
+    llm = _WarmBoomLLM(_provider_config(ProviderKind.LLM, "openai"))
+    tts = _WarmRecordingTTS(_provider_config(ProviderKind.TTS, "cartesia"))
+    adapters = SessionAdapters(
+        stt=JohnnySTT(stt),
+        llm=JohnnyLLM(llm),
+        tts=JohnnyTTS(tts),
+        stt_provider=stt,
+        llm_provider=llm,
+        tts_provider=tts,
+    )
+
+    await warm_up_session_providers(adapters, session_id="warm-test")
+
+    assert stt.warm_calls == 1
+    assert llm.warm_calls == 1  # ran (and raised) without killing the gather
+    assert tts.warm_calls == 1
+
+
+async def test_warm_up_skips_absent_raw_providers() -> None:
+    """A hand-built SessionAdapters without raw providers is a clean no-op."""
+    from johnny.agent.adapters.factory import warm_up_session_providers
+
+    stt = _FakeSTT(_provider_config(ProviderKind.STT, "deepgram"))
+    llm = _FakeLLM(_provider_config(ProviderKind.LLM, "openai"))
+    adapters = SessionAdapters(stt=JohnnySTT(stt), llm=JohnnyLLM(llm), tts=None)
+
+    await warm_up_session_providers(adapters, session_id="warm-test")
+
+
+def test_warm_up_helper_is_lazy_exported_through_package() -> None:
+    import johnny.agent.adapters as adapters_pkg
+    from johnny.agent.adapters import factory
+
+    assert adapters_pkg.warm_up_session_providers is factory.warm_up_session_providers

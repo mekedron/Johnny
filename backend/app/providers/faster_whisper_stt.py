@@ -511,6 +511,18 @@ class FasterWhisperSTT(STTProvider):
                 len(buffer),
             )
 
+    async def warm_up(self) -> None:
+        """Pre-load the Whisper weights so the first utterance skips them.
+
+        The first ``transcribe_stream`` call otherwise pays the lazy
+        :meth:`_ensure_model` load (CTranslate2 weights off the model
+        volume — seconds for the larger sizes, and a one-time download on
+        a fresh volume). Idempotent: once ``self._model`` is set this is a
+        lock-bounce. Errors propagate as :class:`STTError` for the caller
+        to log (session prewarm treats them as non-fatal, Johnny-trt.8).
+        """
+        await self._ensure_model()
+
     async def close(self) -> None:
         """Release the underlying model handle."""
         self._model = None

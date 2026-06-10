@@ -99,6 +99,17 @@ class OpenAILLM(OpenAICompatibleLLM):
     def name(self) -> str:
         return PROVIDER_NAME
 
+    async def warm_up(self) -> None:
+        """No-op: the hosted API has no model cold-load to warm (Johnny-trt.8).
+
+        The inherited 1-token ping exists for local OpenAI-compatible
+        servers that lazily load the model (Ollama's GGUF load). Hosted
+        OpenAI keeps models resident — a per-session ping would only burn
+        quota, and the reasoning models reject the ping's ``max_tokens``
+        field outright (they require ``max_completion_tokens``), turning
+        every session start into a logged warm-up failure.
+        """
+
     @classmethod
     def field_schema(cls) -> ProviderSchema:
         return ProviderSchema(

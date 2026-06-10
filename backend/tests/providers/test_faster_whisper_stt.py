@@ -695,3 +695,32 @@ def test_register_is_idempotent_with_replace() -> None:
 
 def test_faster_whisper_registered_on_package_import() -> None:
     assert get_registry().has(ProviderKind.STT, PROVIDER_NAME)
+
+
+# --- warm_up (Johnny-trt.8) --------------------------------------------------
+
+
+async def test_warm_up_loads_the_model() -> None:
+    """The prewarm hook pays the lazy weight load so the first turn doesn't."""
+    adapter = _FakeFasterWhisperSTT(_config())
+    assert adapter.load_calls == 0
+    await adapter.warm_up()
+    assert adapter.load_calls == 1
+
+
+async def test_warm_up_is_idempotent_and_transcribe_reuses_the_model() -> None:
+    adapter = _FakeFasterWhisperSTT(_config(), segments=[_FakeSegment("hello")])
+    await adapter.warm_up()
+    await adapter.warm_up()
+    assert adapter.load_calls == 1
+
+    events = [e async for e in adapter.transcribe_stream(_iter([_pcm([1, 2, 3, 4])]))]
+    assert [e.text for e in events] == ["hello"]
+    assert adapter.load_calls == 1  # the first utterance reused the warm model
+
+
+async def test_warm_up_surfaces_load_failure_as_stt_error() -> None:
+    """The session prewarm logs failures; the hook itself must raise cleanly."""
+    adapter = _FakeFasterWhisperSTT(_config(), load_error=STTError("weights missing"))
+    with pytest.raises(STTError, match="weights missing"):
+        await adapter.warm_up()

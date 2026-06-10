@@ -146,6 +146,13 @@ docker compose exec api python -m johnny.agent.latency_harness --turns 20
 # the configured local providers (whatever /providers has active):
 docker compose exec api python -m johnny.agent.latency_harness \
     --turns 24 --providers local --json-out /tmp/latency.json
+
+# size the session-start prewarm win (Johnny-trt.8): one run without and one
+# with --prewarm, comparing each run's cold turn against its own warm turns.
+# --prewarm awaits the providers' warm_up() before turn 1 (production fires
+# the same warm-up concurrently with session start).
+docker compose exec api python -m johnny.agent.latency_harness \
+    --turns 6 --providers local --prewarm
 ```
 
 Output: per-stage p50/p95/min/max — `vad_end_ms` (speech-end → VAD commit,
@@ -315,6 +322,65 @@ edit `tips=(...)` in the adapter's `field_schema()` classmethod and
 rebuild the api image (the api is COPY-baked; see the codebase
 patterns in `.ralph-tui/progress.md`).
 
+## Provider prewarm at session start — ✅ SHIPPED (Johnny-trt.8, 2026-06-10)
+
+Before this change the FIRST turn of every browser session paid the
+providers' lazy one-time loads on top of its normal stage costs:
+faster-whisper's weight load (`_ensure_model`), Piper's ~700 ms voice ONNX
+load, and — dominant on the local stack — Ollama's GGUF model load when the
+model wasn't resident.
+
+Every provider now has an optional `async warm_up()` hook
+(`app/providers/base.py`, default no-op). Right after
+`BrowserAgentSession.build(...)` the browser runner
+(`app/services/browser_pipeline_runner.py`) fires every assembled provider's
+hook **concurrently, as a background task** — session start never waits on
+it, and a failed warm-up is logged and non-fatal (the first turn just pays
+the lazy load as before). Implemented hooks:
+
+- **faster-whisper** — loads the Whisper weights (`_ensure_model`).
+- **Piper, persistent runtime** — a throwaway tiny synth of the configured
+  voice pays the ONNX load into the process-wide warm cache. `subprocess`
+  (cold start is structural) and `http-sidecar` (the sidecar warms itself
+  at launch) stay no-ops, as does batch STT via the Parakeet sidecars.
+- **openai-compatible LLM** — a 1-token `max_tokens: 1` ping so the server
+  (Ollama, LM Studio, vLLM) loads the model. Hosted-API adapters (OpenAI,
+  Anthropic, Gemini) keep the no-op: nothing to load, and a per-session
+  ping would only burn quota.
+
+Measured (2026-06-10, the baseline trio — Parakeet MLX + Ollama
+`llama3.2:3b` unloaded before each run + Piper persistent
+`en_GB-northern_english_male-medium`; 6-turn harness runs, artifacts under
+`.validation/Johnny-trt.8/`):
+
+| 6-turn local run            | turn-1 router | turn-1 tts_ttfb | turn-1 e2e (VAD commit → first byte) | same-run warm e2e p50 |
+| --------------------------- | ------------- | --------------- | ------------------------------------ | --------------------- |
+| without prewarm             | 2953 ms       | 576 ms          | **3903 ms**                          | 2130 ms               |
+| with prewarm                | 606 ms        | 57 ms           | **1007 ms**                          | 1546 ms               |
+
+The warm-up itself took 1453 ms wall (Ollama ping 1452 ms ∥ Piper voice
+575 ms ∥ Parakeet no-op 0 ms) — paid while the session is still being set
+up, not by the first speaker. With prewarm the first turn is no longer the
+slowest turn but the *fastest* (smallest chat context), i.e. comfortably
+within the ≤ 100 ms-of-steady-state acceptance bar. Reproduce with the
+`--prewarm` harness flag (above); the harness awaits the warm-up before
+turn 1 so the cold turn measures warmed state deterministically.
+
+**Keep Ollama resident between sessions: `OLLAMA_KEEP_ALIVE=24h`.** The
+ping loads the model *at session start*; Ollama's default `keep_alive`
+(5 min) then evicts it again after idle, so a session that goes quiet —
+or the gap between two sessions — re-pays the 1–5 s GGUF load (mid-session:
+on the next router call, where the prewarm can't help). Set it on the
+**host's** Ollama server (it is not a Johnny/compose variable — see the
+note in `.env.example`):
+
+```bash
+# macOS app install (persists across restarts):
+launchctl setenv OLLAMA_KEEP_ALIVE 24h   # then restart the Ollama app
+# or for a manually-run server:
+OLLAMA_KEEP_ALIVE=24h ollama serve
+```
+
 ## Optimization candidates — in priority order (re-ranked from the 2026-06-10 baseline)
 
 1. **True answer-LLM token streaming** (Johnny-dny) — the measured #1.
@@ -338,9 +404,14 @@ patterns in `.ralph-tui/progress.md`).
    is ~93 ms of head-of-line delay baked into every warm TTFB; 1024
    cuts it to ~23 ms at the cost of more syscalls (Johnny-trt Phase 1
    has the knob task).
-5. **Keep Ollama warm** — set `OLLAMA_KEEP_ALIVE=24h` on the Ollama
-   host so the first call after idle doesn't pay 1–5 s of GGUF load
-   (the baseline runs re-warmed explicitly before each session).
+5. **Keep Ollama warm** — ✅ the session-start half **SHIPPED**
+   (Johnny-trt.8, the provider-prewarm section above): every session
+   start now pings the LLM (and pre-loads whisper/Piper) concurrently
+   with setup, taking the measured first-turn e2e from 3903 ms to
+   1007 ms. Still on the operator: set `OLLAMA_KEEP_ALIVE=24h` on the
+   Ollama host so the model is not evicted again after 5 idle minutes
+   (mid-session idle gaps re-pay 1–5 s of GGUF load where the prewarm
+   can't help).
 6. **Audio bridge buffering** — verify the meet-worker bridge does
    not buffer TTS chunks before forwarding. The pipeline yields
    frames as they arrive; the bridge must too. Audit, then file

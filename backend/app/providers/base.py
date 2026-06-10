@@ -314,6 +314,22 @@ class _ProviderBase(ABC):
         Default is a no-op so simple stateless adapters need not override.
         """
 
+    async def warm_up(self) -> None:  # noqa: B027 — intentional non-abstract hook
+        """Pre-load lazy heavy state ahead of the first real call (Johnny-trt.8).
+
+        The session runner fires this concurrently for every assembled
+        provider right after session assembly, so the first turn does not
+        pay lazy one-time costs (faster-whisper weights, the Piper voice
+        ONNX load, a local LLM server's model load). Default is a no-op:
+        cloud adapters with no local state to warm need not override.
+
+        Contract for implementations: idempotent (callers may invoke it on
+        every session start; warm state must be reused, not rebuilt), and
+        cheap once warm. Callers treat any exception as non-fatal — a
+        failed warm-up only means the first turn pays the lazy load, so
+        implementations should raise rather than retry internally.
+        """
+
 
 class STTProvider(_ProviderBase):
     """Streaming speech-to-text adapter contract."""
