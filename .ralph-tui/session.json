@@ -3,10 +3,10 @@
   "sessionId": "737b71bc-61ae-4acf-99c6-31d37006b423",
   "status": "running",
   "startedAt": "2026-06-10T17:39:21.674Z",
-  "updatedAt": "2026-06-10T18:09:02.671Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-10T18:14:22.529Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -33,8 +33,8 @@
       {
         "id": "Johnny-trt.1",
         "title": "[BUILD] Phase 0: Scripted latency harness — synthetic-audio turns with per-stage p50/p95",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.2",
@@ -242,7 +242,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-trt.1",
+      "taskTitle": "[BUILD] Phase 0: Scripted latency harness — synthetic-audio turns with per-stage p50/p95",
+      "taskCompleted": true,
+      "durationMs": 1757854,
+      "startedAt": "2026-06-10T17:39:43.921Z",
+      "endedAt": "2026-06-10T18:09:01.775Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

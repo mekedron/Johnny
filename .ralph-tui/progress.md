@@ -79,3 +79,38 @@ after each iteration and it's included in prompts for context.
     the two prewarm targets (Ollama cold prompt cache → router 2253 ms, piper
     voice spawn → tts_ttfb 559 ms) — exactly the Phase-1 prewarm split.
 ---
+
+## 2026-06-10 - Johnny-trt.4
+- Phase-0 capstone: pure verification pass, no code/doc changes needed — the
+  siblings had already folded everything in. Verified all three acceptance
+  criteria: (1) docs/LATENCY.md carries the Johnny-cxu 28+-turn p50/p95
+  baseline table + bottleneck attribution (two LLM calls own ~95 % of felt
+  latency; zero "measured informally" text remains) plus the trt.1 harness
+  section with its sanity-gate numbers; (2) docs/PIPELINE.md §9 carries the
+  livekit-agents 1.5.17 findings (say()/SpeechHandle done-callback semantics
+  incl. barge-in, roomless user_state_changed with observed transition
+  timeline + caveats); (3) all four siblings closed (Johnny-cxu, trt.1,
+  trt.2, trt.3 — bd show verified). Parity-fixture status documented in
+  docs/REPLAY_HARNESS.md + backend/tests/fixtures/sessions/README.md
+  (delegation-calendar / delegation-smalltalk marked as the Phase-3
+  verdict-parity baseline with the do-not-regenerate warning).
+- Re-ran all Phase-0 gating suites in the prod-shape api image via the
+  compose-run bind mount (one invocation, ~38 s): test_latency_harness.py +
+  test_sdk_surface_smoke.py + test_replay_harness.py +
+  test_replay_harness_agent.py → 28 passed, 4 skipped. Confirmed all
+  doc-referenced artifacts exist (latency_harness.py, sdk_surface_smoke.py,
+  24 latency_turn fixtures, sdk_smoke_speech.pcm) and doc-referenced beads
+  (Johnny-trt.14, Johnny-dny, Johnny-5vb) are open as the docs claim.
+- Files changed: none (verification-only capstone; bead closed with full
+  verification trace in the close reason).
+- Phase 1 is now unblocked: Johnny-trt.5, trt.7, trt.8, trt.9, trt.10 all
+  show in bd ready.
+- **Learnings:**
+  - The 4 pytest skips in test_replay_harness.py are intentional, not silent
+    gaps: split fixtures (14/, 3/, delegation-*) skip there because
+    test_replay_harness_agent.py replays them on the agent engine — check
+    skips with `-rs` before treating a replay run as green.
+  - All four Phase-0 suites run in a single compose-run container in ~38 s —
+    cheap enough to be the standard pre-capstone gate for every later phase
+    (the epic requires re-measurement + green gates at each capstone).
+---
