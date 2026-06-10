@@ -382,9 +382,17 @@ def build_stt_adapter(
     batch-only provider is active and ``vad`` is ``None``, a default Silero VAD
     is loaded lazily. ``vad`` is ignored for streaming providers. ``language`` /
     ``model`` are forwarded to :class:`JohnnySTT` (voice/model parity: Johnny-88n).
+
+    A provider outside the pinned name set can also opt into the batch wrap by
+    exposing a truthy ``batch_only`` attribute — the self-declared equivalent of
+    membership (used by the latency harness's stub STT, Johnny-trt.1, so it runs
+    the exact VAD-segmented recognize path the local batch providers run).
     """
     johnny_stt = JohnnySTT(provider, language=language, model=model)
-    if provider.name not in BATCH_ONLY_STT_PROVIDER_NAMES:
+    batch_only = provider.name in BATCH_ONLY_STT_PROVIDER_NAMES or bool(
+        getattr(provider, "batch_only", False)
+    )
+    if not batch_only:
         return johnny_stt
     return StreamAdapter(
         stt=johnny_stt, vad=vad if vad is not None else _load_default_vad()

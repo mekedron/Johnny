@@ -125,7 +125,64 @@ real `/playground` path (real browser, real WebSocket, real providers):
 
 Derived e2e was cross-checked against wall-clock `parakeet.transcribe` /
 `piper.synth` api-log timestamps: agreement within ~30 ms.
-Johnny-trt.1 turns this method into a one-command harness.
+
+### One-command scripted harness (Johnny-trt.1 — use this for re-measurement)
+
+`johnny.agent.latency_harness` packages the Johnny-cxu method into a single
+in-container command — no browser, no Chrome flags, no SQL: it drives a real
+roomless `BrowserAgentSession` (the playground engine, every Phase-2 seam)
+through a fake `BrowserAudioTransport`, pushing the bundled piper-synthesized
+bot-addressed fixtures (`johnny/agent/fixtures/latency_turn_*.pcm` — the full
+Johnny-cxu 24-utterance set, so a default-length local run repeats no question
+and the real router has no repeat to decline) as real-time-paced
+16 kHz / 20 ms PCM frames, and derives the same per-stage stats from the
+Johnny-ckz.7 `PipelineTiming` rows collected on an in-process bus (same emit
+half as `session_timings`; nothing is written to the DB).
+
+```bash
+# stub providers (CI-shaped, no network): ~3 min for 20 turns
+docker compose exec api python -m johnny.agent.latency_harness --turns 20
+
+# the configured local providers (whatever /providers has active):
+docker compose exec api python -m johnny.agent.latency_harness \
+    --turns 24 --providers local --json-out /tmp/latency.json
+```
+
+Output: per-stage p50/p95/min/max — `vad_end_ms` (speech-end → VAD commit,
+wall-clock), `stt_ms`, `router_ms`, `llm_ttft_ms`, `llm_total_ms`,
+`sentence_gap_ms`, `tts_ttfb_ms`, `first_audio_wall_ms` (speech-end → first
+PCM frame on the transport, wall-clock — the felt e2e) and
+`e2e_vad_commit_ms` (the baseline-comparable derived e2e: VAD commit → TTS
+first byte). Turn 1 is always reported separately as the **cold start** (the
+session is built fresh per run), with warm percentiles over turns 2..N — the
+split the Phase-1 prewarm work measures against. Turns run strictly
+sequentially (next utterance only after the previous reply's terminal), so
+runs are barge-in-free by construction; per-session context still accumulates
+turn over turn, exactly like a real session — match turn counts when
+comparing runs. The pytest integration
+(`tests/agent/test_latency_harness.py`) runs the stub mode end-to-end.
+
+**Sanity gate vs the manual baseline (2026-06-10, same provider trio:
+Parakeet MLX sidecar + Ollama `llama3.2:3b` + Piper persistent).** A 24-turn
+`--providers local` run (19 replied, 5 router-declined, 0 timeouts; warm
+percentiles over 18 turns) landed: STT 119/156 ms vs baseline 116/251
+(p50 +3 %), TTS first byte 78/185 vs 60/106, VAD-commit wait ~563 ms p50 —
+the hardware-bound stages match the baseline. The LLM-bound stages sit well
+*below* the whole-session baseline percentiles (router 910/1513 vs
+3385/4726; answer 562/821 vs 3068/4099; felt e2e 2356/3186 vs 6792/8664):
+the baseline percentiles accumulated 29 replied turns over ~2 WAV loops of
+chat context, while a fresh 24-turn harness session sits at the left edge of
+the very context-growth curve the baseline documented — the harness's own
+in-run trend reproduces it (router 758 → 1763 ms, answer 220 → 902 ms, e2e
+1805 → 3340 ms across the session; same ordering, same dominant bottleneck:
+the two LLM calls own ~85–90 % of the post-VAD budget). Matched-index turns
+(turn 2: 1805 ms vs 3087 ms) leave a ~40 % environmental residual: the
+manual baseline ran under a live Chrome/playground stack with the
+reply-audio recorder on, the harness is headless with the recorder off. The
+cold turn shows exactly what Phase-1 prewarm targets: router 2253 ms (cold
+Ollama prompt cache) + TTS first byte 559 ms (piper voice spawn). Use the
+harness for phase-over-phase deltas at matched turn counts — not to
+reproduce the manual baseline's absolute numbers.
 
 ### Targeted measurement with chrome-devtools MCP
 
@@ -307,8 +364,9 @@ patterns in `.ralph-tui/progress.md`).
 
 ## Still open — tracked separately
 
-- One-command scripted latency harness replacing the manual fake-mic
-  drive — Johnny-trt.1 (sanity-gated against this baseline).
+- ✅ One-command scripted latency harness replacing the manual fake-mic
+  drive — **SHIPPED** (Johnny-trt.1, sanity-gated against this baseline;
+  see "One-command scripted harness" above).
 - True answer-LLM token streaming for openai-compatible — Johnny-dny
   (the measured #1 bottleneck).
 - STT timing-row turn attribution off-by-one — Johnny-5vb.

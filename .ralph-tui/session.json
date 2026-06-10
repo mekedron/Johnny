@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "sessionId": "589addaf-9a6f-4aaf-b0dd-abdc627fd828",
+  "sessionId": "737b71bc-61ae-4acf-99c6-31d37006b423",
   "status": "running",
-  "startedAt": "2026-06-10T15:37:11.002Z",
-  "updatedAt": "2026-06-10T16:56:48.201Z",
-  "currentIteration": 2,
+  "startedAt": "2026-06-10T17:39:21.674Z",
+  "updatedAt": "2026-06-10T18:09:02.671Z",
+  "currentIteration": 0,
   "maxIterations": 0,
-  "tasksCompleted": 2,
+  "tasksCompleted": 0,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -40,13 +40,13 @@
         "id": "Johnny-trt.2",
         "title": "[SPIKE] Phase 0: Verify livekit-agents 1.5.17 session surface (say, user_state_changed) in-image",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.3",
         "title": "[BUILD] Phase 0: Replay fixtures for delegation-shaped utterances (verdict-parity baseline)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.4",
@@ -207,7 +207,7 @@
       {
         "id": "Johnny-cxu",
         "title": "Real 20-turn p50/p95 latency capture on configured local providers (depends on Johnny-ckz.7)",
-        "status": "open",
+        "status": "completed",
         "completedInSession": false
       },
       {
@@ -242,28 +242,7 @@
       }
     ]
   },
-  "iterations": [
-    {
-      "iteration": 1,
-      "status": "completed",
-      "taskId": "Johnny-trt.2",
-      "taskTitle": "[SPIKE] Phase 0: Verify livekit-agents 1.5.17 session surface (say, user_state_changed) in-image",
-      "taskCompleted": true,
-      "durationMs": 1272943,
-      "startedAt": "2026-06-10T15:37:45.248Z",
-      "endedAt": "2026-06-10T15:58:58.191Z"
-    },
-    {
-      "iteration": 2,
-      "status": "completed",
-      "taskId": "Johnny-trt.3",
-      "taskTitle": "[BUILD] Phase 0: Replay fixtures for delegation-shaped utterances (verdict-parity baseline)",
-      "taskCompleted": true,
-      "durationMs": 702256,
-      "startedAt": "2026-06-10T15:59:20.312Z",
-      "endedAt": "2026-06-10T16:11:02.568Z"
-    }
-  ],
+  "iterations": [],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],
