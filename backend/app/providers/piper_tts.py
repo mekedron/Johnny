@@ -97,7 +97,11 @@ PROVIDER_NAME = "piper"
 DEFAULT_BINARY = "piper"
 DEFAULT_MODEL_DIR = "/var/lib/johnny/piper-models"
 DEFAULT_NATIVE_SAMPLE_RATE_HZ = 22_050
-DEFAULT_CHUNK_BYTES = 4_096
+# 1024 B at 22 050 Hz / 16-bit is ~23 ms of audio per subprocess-runtime
+# stdout read (4096 was ~93 ms; measured TTFB delta ≈ nil — piper bursts
+# its PCM after startup, see docs/LATENCY.md). Rows saved with an explicit
+# chunk_bytes keep their stored value.
+DEFAULT_CHUNK_BYTES = 1_024
 DEFAULT_WAIT_TIMEOUT_S = 30.0
 DEFAULT_TERMINATE_TIMEOUT_S = 2.0
 
@@ -644,7 +648,7 @@ class PiperTTS(TTSProvider):
     * ``native_sample_rate`` — model's native output rate in Hz so this
       adapter knows how to resample to 16 kHz. Default 22 050 — correct
       for most "medium" Piper voices; "low" voices output 16 000 Hz.
-    * ``chunk_bytes`` — output streaming chunk size (default 4096).
+    * ``chunk_bytes`` — output streaming chunk size (default 1024).
       Must be a multiple of the 2-byte S16 sample width.
     """
 
@@ -864,14 +868,20 @@ class PiperTTS(TTSProvider):
                     ),
                 ),
                 ProviderTip(
-                    topic="chunk_bytes shapes head-of-line delay",
+                    topic="chunk_bytes sets frame granularity",
                     body=(
-                        "At 22050 Hz / 16-bit the default 4096 bytes is "
-                        "~93 ms of audio — the first frame can't leave "
-                        "until that much has buffered. Drop to 1024 if "
-                        "you want first audio out the door inside 25 ms "
-                        "at the cost of more reads. Must be a multiple "
-                        "of 2."
+                        "Each yielded frame is one Subprocess-runtime "
+                        "stdout read of this many bytes: at 22050 Hz / "
+                        "16-bit, 4096 is ~93 ms of audio per frame; the "
+                        "default is now 1024 (~23 ms) at the cost of 4x "
+                        "the reads/syscalls — noise next to synthesis "
+                        "cost. Measured TTFB effect on this machine: "
+                        "none (piper bursts its PCM after startup, and "
+                        "the Persistent runtime streams the library's "
+                        "own chunks instead). Providers saved with an "
+                        "explicit 4096 keep that stored value — lower "
+                        "it to adopt the new default. Must be a "
+                        "multiple of 2."
                     ),
                 ),
                 ProviderTip(

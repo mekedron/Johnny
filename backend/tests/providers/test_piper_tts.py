@@ -327,6 +327,19 @@ def test_init_rejects_odd_chunk_bytes() -> None:
         PiperTTS(_config(chunk_bytes=4097))
 
 
+def test_default_chunk_bytes_is_1024() -> None:
+    # 1024 B at 22 050 Hz / 16-bit is ~23 ms of head-of-line audio buffering
+    # on the subprocess runtime; the pre-trt.7 4096 default was ~93 ms.
+    assert DEFAULT_CHUNK_BYTES == 1_024
+
+
+def test_init_explicit_chunk_bytes_honored_over_new_default() -> None:
+    # Rows saved before the default change carry an explicit 4096; the stored
+    # value must win over DEFAULT_CHUNK_BYTES.
+    adapter = PiperTTS(_config(chunk_bytes=4_096))
+    assert adapter.chunk_bytes == 4_096
+
+
 # --- Runtime selector config -----------------------------------------------
 
 
@@ -631,7 +644,13 @@ async def test_piper_satisfies_tts_contract() -> None:
         stdout_data=samples,
     )
     audio = await assert_synthesize_yields_pcm_audio(adapter)
-    expected_samples = round(4_410 * PCM_SAMPLE_RATE_HZ / 22_050)
+    # The subprocess runtime resamples each chunk_bytes read independently,
+    # so the expected total is the per-read rounded sum (a couple of samples
+    # off a single whole-buffer round), not one global round.
+    chunk_samples = DEFAULT_CHUNK_BYTES // PCM_SAMPLE_WIDTH_BYTES
+    full_reads, tail = divmod(4_410, chunk_samples)
+    per_read = round(chunk_samples * PCM_SAMPLE_RATE_HZ / 22_050)
+    expected_samples = full_reads * per_read + round(tail * PCM_SAMPLE_RATE_HZ / 22_050)
     assert len(audio) == expected_samples * PCM_SAMPLE_WIDTH_BYTES
 
 
@@ -662,6 +681,13 @@ def test_field_schema_sidecar_url_default() -> None:
     sidecar_field = schema.field("sidecar_url")
     assert sidecar_field is not None
     assert sidecar_field.default == DEFAULT_SIDECAR_URL
+
+
+def test_field_schema_chunk_bytes_default_is_1024() -> None:
+    schema = PiperTTS.field_schema()
+    chunk_field = schema.field("chunk_bytes")
+    assert chunk_field is not None
+    assert chunk_field.default == 1_024
 
 
 # --- synthesize_stream: persistent (warm in-process voice) runtime ---------

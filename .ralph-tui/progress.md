@@ -43,6 +43,18 @@ after each iteration and it's included in prompts for context.
   files. Verify cleanliness of a change by `git stash` → baseline run →
   `git stash pop` → diff the violation sets; whole-file reformats of
   pre-existing drift just bloat the diff.
+- **Piper chunk_bytes is NOT a TTFB knob — measure before chasing
+  buffer-size latency wins**: the piper CLI bursts essentially all PCM
+  after spawn+ONNX-load (`piper.synth` total−ttfa ≈ 4 ms), so the
+  subprocess runtime's `stdout.read(chunk_bytes)` never gates the first
+  byte (measured 4096 vs 1024: Δp50 2.3 ms over 10 interleaved spawns);
+  the persistent runtime never consults chunk_bytes on its first-byte
+  path (`_synth_persistent` streams the lib's own chunks) and the
+  http-sidecar slices an already-complete response. chunk_bytes only
+  sets downstream frame granularity. Also: per-chunk `resample_pcm16`
+  rounds each read independently, so total output length is the
+  per-read rounded sum — tests asserting whole-buffer rounding break
+  when the chunk size changes (see test_piper_satisfies_tts_contract).
 
 ---
 
@@ -178,4 +190,47 @@ after each iteration and it's included in prompts for context.
   - The repo is not globally ruff-clean (32 pre-existing errors on HEAD);
     the realistic gate is lint/format-clean on touched files, with
     `git stash` round-trip to attribute drift to HEAD vs the change.
+---
+
+## 2026-06-10 - Johnny-trt.7
+- Piper `DEFAULT_CHUNK_BYTES` 4096 → 1024: constant (+ constraint comment),
+  class docstring, schema default (flows from the constant at FieldDef
+  `default=DEFAULT_CHUNK_BYTES`), and the providers-modal tip rewritten as
+  "chunk_bytes sets frame granularity" — documents the new default, the 4x
+  syscall trade-off, the measured-no-TTFB-effect finding, and that rows
+  saved with an explicit 4096 keep their stored value.
+- Measured the candidate before believing it: subprocess-runtime TTFB A/B
+  (10 interleaved spawns, real voice, in-image) gave Δp50 = **2.3 ms**, not
+  the predicted ~70 ms — piper CLI delivers all PCM in one burst after
+  spawn+load (total−ttfa ≈ 4 ms), so read size never gates first byte. An
+  8-turn `--providers local` harness A/B (DB row temporarily flipped to
+  runtime=subprocess 4096 vs 1024, then restored byte-identically from
+  snapshot) agreed: tts_ttfb p50 807 vs 822 ms (spawn jitter). Persistent
+  runtime (the configured stack) never consults chunk_bytes on its
+  first-byte path. docs/LATENCY.md updated in both spots (warm-first-byte
+  attribution + candidate #4 marked shipped-and-falsified with numbers).
+  What the change does ship: first-frame granularity 2972 → 744 B at
+  16 kHz (~93 → ~23 ms of audio per frame) for downstream pacing.
+- Tests: pinned default==1024, schema default==1024, explicit 4096 honored;
+  fixed test_piper_satisfies_tts_contract to the per-read resample-rounding
+  expectation (old exact equality was a 4096-chunk rounding coincidence).
+  99 piper + 123 providers-API tests green in-image; ruff check clean,
+  format drift on both files is pre-existing HEAD drift (stash-verified).
+- Browser-validated on the rebuilt prod api image (chrome-devtools):
+  existing Local Piper modal shows stored 4096 honored + the new tip;
+  Add provider → TTS → Local Piper shows default 1024; console clean.
+  Artifacts: .validation/Johnny-trt.7/ (00 row backup, 01 micro-bench
+  results, 02/03 harness JSONs, 04–06 screenshots, ttfb_microbench.py).
+- Files changed: backend/app/providers/piper_tts.py,
+  backend/tests/providers/test_piper_tts.py, docs/LATENCY.md.
+- **Learnings:**
+  - Patterns discovered: piper chunk_bytes is not a TTFB knob (see new
+    Codebase Patterns bullet — CLI bursts PCM; persistent path ignores it;
+    per-chunk resample rounding makes exact-length tests chunk-dependent).
+  - Gotchas: the acceptance's "~70 ms faster" came from LATENCY.md's
+    candidate math, which the harness/micro-bench falsified — when a bead
+    bakes in a predicted number, measure first and update the docs to kill
+    the premise rather than forcing the number; the active piper DB row
+    stores an explicit chunk_bytes=4096, so the configured stack's behavior
+    is unchanged by design (explicit values win over the new default).
 ---

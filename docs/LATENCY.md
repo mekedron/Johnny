@@ -276,9 +276,12 @@ same questions — turns 2–8, short questions, fresh session):
 | e2e, matched early turns      | 4 007–6 331 ms | 3 087–4 159 ms | **≈ −930 ms median** |
 | One-time cost | — | ~550 ms voice load on the first synth after activation | |
 
-The ~60 ms warm first byte ≈ the ~93 ms `chunk_bytes` buffer at
-4096 B / 22 050 Hz partially overlapped with synthesis — dropping
-`chunk_bytes` to 1024 is the next TTS nibble (Johnny-trt Phase 1).
+The ~60 ms warm first byte is the ONNX synth time of the first
+library chunk, **not** the `chunk_bytes` read buffer: the persistent
+runtime streams the piper library's own chunks and never consults
+`chunk_bytes` on its first-byte path (Johnny-trt.7 measured the
+earlier "~93 ms buffer" attribution and falsified it — see the
+chunk_bytes candidate below).
 The session-wide e2e p50 (table above) does *not* show the −930 ms
 because the longer run's router growth ate it; the matched-turn
 comparison is the honest read on what the runtime is worth.
@@ -400,10 +403,20 @@ OLLAMA_KEEP_ALIVE=24h ollama serve
    `PiperVoice` cache rather than a literal long-lived child process —
    same net effect. Pick it in Settings → Providers → Local Piper →
    Runtime. See [TTS_RUNTIMES.md](TTS_RUNTIMES.md).
-4. **Smaller piper chunk_bytes** — at 22050 Hz the default 4096 bytes
-   is ~93 ms of head-of-line delay baked into every warm TTFB; 1024
-   cuts it to ~23 ms at the cost of more syscalls (Johnny-trt Phase 1
-   has the knob task).
+4. **Smaller piper chunk_bytes** — ✅ default changed 4096 → 1024
+   (Johnny-trt.7), and the measurement **falsified the premise**: no
+   TTFB effect on this stack. Subprocess runtime: the piper CLI
+   delivers its PCM in one burst after spawn + ONNX load + synth
+   (`total − ttfa` ≈ 4 ms), so the read size never gates the first
+   byte — isolated A/B TTFB p50 884.4 ms (4096) vs 882.1 ms (1024),
+   delta 2.3 ms over 10 interleaved spawns; an 8-turn harness A/B
+   agrees (tts_ttfb p50 807 vs 822 ms — run noise; artifacts under
+   `.validation/Johnny-trt.7/`). Persistent runtime: `chunk_bytes` is
+   not on its first-byte path at all (the library's own chunks stream
+   through). The smaller default still ships finer first-frame
+   granularity (2 972 B → 744 B at 16 kHz, ~93 → ~23 ms of audio per
+   frame) for downstream pacing; rows saved with an explicit 4096
+   keep their stored value.
 5. **Keep Ollama warm** — ✅ the session-start half **SHIPPED**
    (Johnny-trt.8, the provider-prewarm section above): every session
    start now pings the LLM (and pre-loads whisper/Piper) concurrently
