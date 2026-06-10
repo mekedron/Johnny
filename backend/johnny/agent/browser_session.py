@@ -13,7 +13,11 @@ replaces did the same). This module is the in-process counterpart of the worker:
   :class:`~johnny.agent.job_config.SessionJobConfig`;
 * it builds the :class:`~livekit.agents.AgentSession` with **VAD turn detection**
   (not the job-context-bound ``MultilingualModel``) so it runs with no job
-  context — matching the legacy browser pipeline's own VAD-based turn-taking;
+  context — matching the legacy browser pipeline's own VAD-based turn-taking.
+  Hosting the semantic EOU model in-process instead was investigated and
+  wontfixed (Johnny-trt.6): the multilingual ONNX model costs ~884 MB RSS in
+  the API process, over the bead's ~500 MB line. The session compensates with
+  tuned VAD-only endpointing (:data:`BROWSER_ENDPOINTING_MIN_DELAY_S`);
 * it binds the session to the browser via
   :class:`~johnny.agent.browser_audio_io.BrowserAudioInput` /
   :class:`~johnny.agent.browser_audio_io.BrowserAudioOutput` instead of
@@ -52,7 +56,7 @@ from johnny.agent.session import build_agent_session, load_vad
 from johnny.voice_pipeline.events import TranscriptFinalized
 
 if TYPE_CHECKING:
-    from livekit.agents import AgentSession
+    from livekit.agents import AgentSession, EndpointingOptions
     from livekit.agents.vad import VAD
 
     from johnny.agent.observability import TranscriptFinalizedSink
@@ -77,6 +81,36 @@ _SHARED_VAD: VAD | None = None
 # mid-sentence hesitations (~0.2–0.35 s). Browser sessions ONLY — the worker's
 # prewarm keeps :func:`~johnny.agent.session.load_vad` defaults.
 BROWSER_VAD_MIN_SILENCE_DURATION_S = 0.40
+
+
+# Engine endpointing floor for the browser session (Johnny-trt.6). The bead's
+# in-process semantic turn detector was dropped per its own spike criterion —
+# the multilingual EOU model costs ~884 MB RSS inside the API process (ONNX is
+# 396 MB on disk; the >~500 MB abort line; full numbers in docs/LATENCY.md) —
+# so the browser session stays on VAD endpointing and instead retunes the
+# engine's ``min_delay`` padding down to the VAD floor. ``min_delay`` is
+# anchored at the *last detected speech*, so it overlaps (not stacks on)
+# Silero's 0.40 s ``min_silence_duration`` wait: 0.40 commits the turn the
+# moment the VAD floor is crossed instead of padding it to LiveKit's 0.5 s
+# default. Hesitation tolerance is the VAD floor itself — pauses < 0.40 s
+# never fire END_OF_SPEECH (the trt.5 varied-pause envelope, 0.20–0.35 s,
+# is untouched). On today's batch-STT path the commit is STT-final-bound
+# (~0.52 s with Parakeet's ~123 ms finals) so this is felt-neutral; it
+# removes the engine's 0.5 s floor so streaming/cloud STT (Phase 2) commits
+# at the VAD floor. ``max_delay`` stays unset: with ``turn_detection="vad"``
+# no semantic model ever escalates to it.
+BROWSER_ENDPOINTING_MIN_DELAY_S = 0.40
+
+
+def browser_endpointing() -> EndpointingOptions:
+    """Endpointing options for the browser session (Johnny-trt.6 VAD-only retune).
+
+    ``min_delay`` only — missing keys inherit the SDK defaults (see
+    :func:`johnny.agent.session.build_turn_handling`). Browser sessions ONLY;
+    the Meet/room path passes no ``endpointing`` and keeps LiveKit's 0.5 s /
+    3.0 s defaults (multi-party padding rationale, Johnny-arh).
+    """
+    return {"min_delay": BROWSER_ENDPOINTING_MIN_DELAY_S}
 
 
 def load_browser_vad() -> VAD:
@@ -140,6 +174,7 @@ class BrowserAgentSession:
         event_bus: EventBus,
         vad: VAD | None = None,
         transcript_history_loader: TranscriptHistoryLoader | None = None,
+        endpointing: EndpointingOptions | None = None,
     ) -> BrowserAgentSession:
         """Assemble the runtime + roomless session + audio I/O for one session.
 
@@ -151,6 +186,11 @@ class BrowserAgentSession:
         ``generate_reply``). Raises
         :class:`~johnny.agent.adapters.factory.AgentSessionSetupError` for a
         non-split / under-configured payload, exactly like the worker.
+
+        ``endpointing`` overrides the browser default
+        (:func:`browser_endpointing`, ``min_delay`` 0.40 s — Johnny-trt.6);
+        the latency harness passes e.g. ``{"min_delay": 0.5}`` to reproduce
+        the pre-trt.6 engine padding for A/B runs.
         """
         from app.db.session import SessionLocal
 
@@ -178,11 +218,14 @@ class BrowserAgentSession:
             vad=vad,
             enable_barge_in=runtime.enable_barge_in,
             min_interruption_duration_s=runtime.min_interruption_duration_s,
-            # VAD endpointing, not MultilingualModel: the multilingual turn
+            # VAD endpointing, not a semantic EOU model: the multilingual turn
             # detector resolves its inference executor from get_job_context(),
-            # which does not exist in the API process. Matches the legacy
+            # which does not exist in the API process — and hosting it
+            # in-process was wontfixed at ~884 MB RSS (Johnny-trt.6 spike;
+            # see BROWSER_ENDPOINTING_MIN_DELAY_S above). Matches the legacy
             # browser pipeline (VAD-based turn-taking).
             turn_detection="vad",
+            endpointing=endpointing if endpointing is not None else browser_endpointing(),
         )
 
         if runtime.needs_approval_wiring and runtime.approval_gate is not None:
@@ -339,8 +382,10 @@ class BrowserAgentSession:
 
 
 __all__ = [
+    "BROWSER_ENDPOINTING_MIN_DELAY_S",
     "BROWSER_VAD_MIN_SILENCE_DURATION_S",
     "BrowserAgentSession",
+    "browser_endpointing",
     "build_browser_agent_session",
     "load_browser_vad",
 ]
@@ -353,6 +398,7 @@ async def build_browser_agent_session(
     event_bus: EventBus,
     vad: VAD | None = None,
     transcript_history_loader: TranscriptHistoryLoader | None = None,
+    endpointing: EndpointingOptions | None = None,
 ) -> BrowserAgentSession:
     """Functional alias for :meth:`BrowserAgentSession.build` (call-site clarity)."""
     return await BrowserAgentSession.build(
@@ -361,4 +407,5 @@ async def build_browser_agent_session(
         event_bus=event_bus,
         vad=vad,
         transcript_history_loader=transcript_history_loader,
+        endpointing=endpointing,
     )

@@ -3,10 +3,10 @@
   "sessionId": "82402e4d-e4aa-4e51-a95b-90cc16d67f3b",
   "status": "running",
   "startedAt": "2026-06-10T20:20:17.654Z",
-  "updatedAt": "2026-06-10T20:34:02.584Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-10T21:09:59.788Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -57,8 +57,8 @@
       {
         "id": "Johnny-trt.5",
         "title": "[BUILD] Phase 1: Endpointing knobs — endpointing passthrough + browser-scoped Silero min_silence 0.55→0.40s",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.6",
@@ -266,7 +266,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-trt.5",
+      "taskTitle": "[BUILD] Phase 1: Endpointing knobs — endpointing passthrough + browser-scoped Silero min_silence 0.55→0.40s",
+      "taskCompleted": true,
+      "durationMs": 761328,
+      "startedAt": "2026-06-10T20:21:20.209Z",
+      "endedAt": "2026-06-10T20:34:01.537Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

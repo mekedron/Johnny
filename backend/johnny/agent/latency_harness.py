@@ -107,6 +107,7 @@ from johnny.voice_pipeline.events import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
+    from livekit.agents import EndpointingOptions
     from livekit.agents.vad import VAD
     from livekit.agents.voice.events import UserStateChangedEvent
 
@@ -530,6 +531,7 @@ class HarnessResult:
     turns_requested: int
     prewarmed: bool = False
     vad_label: str = "browser-default"
+    endpointing_label: str = "browser-default"
     turns: list[TurnTimings] = field(default_factory=list)
 
     @property
@@ -710,6 +712,7 @@ async def run_latency_harness(
     settle_s: float = 0.4,
     vad: VAD | None = None,
     vad_min_silence_s: float | None = None,
+    endpointing_min_delay_s: float | None = None,
     bot_session_id: int = 0,
     prewarm: bool = False,
 ) -> HarnessResult:
@@ -739,8 +742,15 @@ async def run_latency_harness(
     ``vad_min_silence_s`` loads a Silero with that floor instead (the A/B
     knob: ``0.55`` reproduces the pre-trt.5 default); an explicit ``vad``
     instance wins over both.
+
+    Endpointing (Johnny-trt.6): by default the session resolves the browser
+    engine's own endpointing
+    (:func:`~johnny.agent.browser_session.browser_endpointing`,
+    ``min_delay`` 0.40 s). ``endpointing_min_delay_s`` overrides it — the A/B
+    knob: ``0.5`` reproduces the pre-trt.6 LiveKit engine default.
     """
     from johnny.agent.browser_session import (
+        BROWSER_ENDPOINTING_MIN_DELAY_S,
         BROWSER_VAD_MIN_SILENCE_DURATION_S,
         BrowserAgentSession,
     )
@@ -776,6 +786,14 @@ async def run_latency_harness(
         # None → BrowserAgentSession.build resolves the browser default.
         vad_label = f"browser-default (min_silence={BROWSER_VAD_MIN_SILENCE_DURATION_S:g}s)"
 
+    if endpointing_min_delay_s is not None:
+        endpointing: EndpointingOptions | None = {"min_delay": endpointing_min_delay_s}
+        endpointing_label = f"min_delay={endpointing_min_delay_s:g}s"
+    else:
+        # None → BrowserAgentSession.build resolves the browser default.
+        endpointing = None
+        endpointing_label = f"browser-default (min_delay={BROWSER_ENDPOINTING_MIN_DELAY_S:g}s)"
+
     config = SessionJobConfig(
         bot_session_id=bot_session_id,
         room_name=f"latency-harness-{bot_session_id}",
@@ -790,7 +808,7 @@ async def run_latency_harness(
     await transport.start()
 
     agent_session: BrowserAgentSession = await BrowserAgentSession.build(
-        transport, config, event_bus=bus, vad=vad
+        transport, config, event_bus=bus, vad=vad, endpointing=endpointing
     )
 
     if prewarm:
@@ -818,6 +836,7 @@ async def run_latency_harness(
         turns_requested=turns,
         prewarmed=prewarm,
         vad_label=vad_label,
+        endpointing_label=endpointing_label,
     )
 
     try:
@@ -910,6 +929,7 @@ def render_report(result: HarnessResult) -> str:
         f"latency harness: providers={result.providers_mode} "
         f"prewarm={'on' if result.prewarmed else 'off'} "
         f"vad={result.vad_label} "
+        f"endpointing={result.endpointing_label} "
         f"turns={len(result.turns)}/{result.turns_requested} "
         f"completed={len(completed)} replied={len(replied)} "
         f"no_reply={len(completed) - len(replied)} "
@@ -955,6 +975,7 @@ def result_to_json(result: HarnessResult) -> dict[str, Any]:
         "providers_mode": result.providers_mode,
         "prewarm": result.prewarmed,
         "vad": result.vad_label,
+        "endpointing": result.endpointing_label,
         "turns_requested": result.turns_requested,
         "turns_run": len(result.turns),
         "completed": len(result.completed),
@@ -1037,6 +1058,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         ),
     )
     parser.add_argument(
+        "--endpointing-min-delay-s",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "run the session with this engine endpointing min_delay instead of "
+            "the browser session's default (0.40 s; Johnny-trt.6). The A/B knob: "
+            "0.5 reproduces the pre-trt.6 LiveKit engine default"
+        ),
+    )
+    parser.add_argument(
         "--turn-timeout-s",
         type=float,
         default=120.0,
@@ -1071,6 +1103,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 inter_turn_silence_s=args.inter_turn_silence_s,
                 prewarm=args.prewarm,
                 vad_min_silence_s=args.vad_min_silence_s,
+                endpointing_min_delay_s=args.endpointing_min_delay_s,
             )
         )
     except Exception:

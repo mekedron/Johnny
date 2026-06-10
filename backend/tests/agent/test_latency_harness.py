@@ -172,3 +172,22 @@ def test_vad_selection_lands_in_report_and_json(harness_result: HarnessResult) -
     pinned = HarnessResult(providers_mode="stub", turns_requested=1, vad_label="min_silence=0.55s")
     assert "vad=min_silence=0.55s" in render_report(pinned)
     assert result_to_json(pinned)["vad"] == "min_silence=0.55s"
+
+
+def test_endpointing_selection_lands_in_report_and_json(harness_result: HarnessResult) -> None:
+    """Johnny-trt.6: runs self-describe which engine endpointing they measured.
+
+    The shared fixture passes no override, so it resolves the browser
+    session's own endpointing (min_delay 0.40 s — the trt.6 VAD-only retune);
+    the --endpointing-min-delay-s label mapping is pinned on a synthetic
+    result, mirroring the VAD-label test above.
+    """
+    assert harness_result.endpointing_label == "browser-default (min_delay=0.4s)"
+    assert "endpointing=browser-default (min_delay=0.4s)" in render_report(harness_result)
+    assert result_to_json(harness_result)["endpointing"] == "browser-default (min_delay=0.4s)"
+
+    pinned = HarnessResult(
+        providers_mode="stub", turns_requested=1, endpointing_label="min_delay=0.5s"
+    )
+    assert "endpointing=min_delay=0.5s" in render_report(pinned)
+    assert result_to_json(pinned)["endpointing"] == "min_delay=0.5s"

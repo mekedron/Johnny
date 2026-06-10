@@ -20,6 +20,21 @@ after each iteration and it's included in prompts for context.
   (`terminal_state`, `no_reply_reason` columns)** — docker logs swallow the
   gate's INFO breadcrumbs (the known module-local-handler gap), so query
   the table for per-turn verdict/terminal forensics.
+- **Turn-commit timing mechanics (livekit-agents 1.5.17)**: the commit is
+  `max(VAD min_silence, endpointing min_delay anchored at last-speech,
+  STT-final)` — the EOU/endpointing bounce task only STARTS once a final
+  transcript exists and VAD END_OF_SPEECH fired, so (a) a semantic EOU
+  model can never commit BELOW the Silero floor, and (b) endpointing
+  `min_delay` cuts felt latency only when STT finals land faster than
+  `min_delay - vad_floor` after VAD fire (batch Parakeet ~123 ms finals →
+  STT-bound; stub 80 ms → ~37 ms win measured). `max_delay` is inert with
+  `turn_detection="vad"` (only a turn-detector verdict escalates to it).
+- **In-process EOU model RSS (trt.6 spike)**: multilingual ONNX = 396 MB
+  disk / +884 MB RSS in-process (wontfixed, > ~500 MB line; no Finnish
+  support either); en-only = 66 MB disk / +406 MB RSS / 1.4 ms inference
+  (viable, filed Johnny-1qr). `EOUModelBase.__init__` already accepts
+  `inference_executor=`; runner IO is JSON bytes in/out. Numbers:
+  `.validation/Johnny-trt.6/00-spike-note.md`.
 
 ---
 
@@ -60,4 +75,54 @@ after each iteration and it's included in prompts for context.
     exit conditions on exact substrings of expected transcripts; the
     engine had folded this bead's code into the trt.9 commit, so always
     check `git log -S` for the symbols before re-implementing a bead.
+---
+
+## 2026-06-11 - Johnny-trt.6
+- Semantic turn detector on the browser session: spike ran FIRST per the
+  bead and hit its own abort line — in-process `_EUORunnerMultilingual`
+  costs +884 MB RSS in the api container (ONNX 396 MB on disk; arena-off
+  still ~1.05 GB total; warm inference 12 ms so CPU was never the issue).
+  Closed the semantic path as wontfix-with-findings and shipped the
+  codified fallback: **retuned VAD-only endpointing**. Bonus findings:
+  the multilingual revision (v0.4.1-intl) has NO Finnish among its 14
+  languages (per-turn `supports_language` would skip it for fi configs),
+  and the en-only model fits the line (+406 MB / 1.4 ms) — filed as
+  opt-in proposal Johnny-1qr under the epic.
+- Retune shipped: `BROWSER_ENDPOINTING_MIN_DELAY_S = 0.40` +
+  `browser_endpointing()` in browser_session.py, forwarded by
+  `BrowserAgentSession.build` (new `endpointing=` override kwarg, browser
+  default when None); harness grew `--endpointing-min-delay-s` /
+  `endpointing_min_delay_s` + `endpointing_label` in result/report/JSON.
+  Meet/room path untouched (still passes no endpointing; pins keep 0.5/3.0
+  SDK defaults).
+- Verified: 704/704 in-image tests (4 new: endpointing pin equal to VAD
+  floor, build default + explicit-override forwarding, harness label);
+  ruff lint+format clean. Harness A/B 24-turn stub (warm p50):
+  first_audio_wall 838.9 → 801 ms, router 102 → 66 ms (~37 ms felt; the
+  remaining headroom is STT-final-bound — local Parakeet ~123 ms finals
+  make the retune felt-neutral today, the win lands with Phase-2
+  streaming STT). Live chrome-devtools playground run (session 83, dev
+  stack, Parakeet+Ollama+Piper, trt.5 fake-mic WAV with 0.20–0.35 s
+  hesitations): 8 utterances → exactly 8 user transcript rows, zero
+  premature commits/splits; all 8 decisions should_speak=true,
+  terminalized no_reply(barge_in) by design (next utterance cut each
+  reply — judged by transcript_chunks per the pattern note). Console
+  clean. Artifacts under .validation/Johnny-trt.6/ (00-spike-note.md,
+  01/02 A/B reports + JSONs, 03 screenshot, 04 DB rows).
+- Files changed: backend/johnny/agent/browser_session.py,
+  backend/johnny/agent/latency_harness.py,
+  backend/tests/agent/test_browser_session.py,
+  backend/tests/agent/test_latency_harness.py, docs/LATENCY.md,
+  .ralph-tui/progress.md.
+- **Learnings:**
+  - Patterns discovered: turn-commit = max(VAD floor, min_delay,
+    STT-final) and the EOU-can't-beat-the-VAD-floor consequence (added to
+    Codebase Patterns); EOU model RSS table (added to Codebase Patterns).
+  - Gotchas: `--use-file-for-fake-audio-capture` keeps feeding the looped
+    WAV into the still-open gUM stream after the last utterance — mute
+    must land before head-silence + first-utterance replay or the replay
+    barge-ins the final reply (judge by transcript rows, not reply
+    completion); `ruff format` collapses multi-line assignments — run it
+    before claiming format-clean; the harness label tests pin exact
+    f-string output ("min_delay=0.4s" via %g), keep new labels %g-formatted.
 ---

@@ -87,11 +87,40 @@ warm percentiles, 2026-06-10): `vad_end` p50 562 → 401 ms / p95 600 →
 20-turn varied-pause script (mid-sentence hesitations of 0.20–0.35 s,
 several at the 0.35 s edge) still reads as exactly one VAD utterance per
 turn (zero premature commits; artifacts under `.validation/Johnny-trt.5/`).
-The endpointing dict itself is
-forwardable per session via `build_agent_session(endpointing=...)` —
-nothing overrides it today (LiveKit's `min_delay` 0.5 / `max_delay` 3.0
-stand), the knob exists for the Phase-1/2 turn-detection work
-(Johnny-trt.6).
+The browser session also sets the
+engine endpointing to `{"min_delay": 0.40}`
+(`BROWSER_ENDPOINTING_MIN_DELAY_S`, Johnny-trt.6) — equal to its VAD
+floor, so the engine adds zero padding on top of Silero and the turn
+commits at `max(VAD floor, STT-final)`. Measured (24-turn stub harness
+A/B, warm percentiles, 2026-06-11): `first_audio_wall` p50 839 → 801 ms /
+`router` p50 102 → 66 ms — ~37 ms felt with the stub's 80 ms STT finals.
+On the local Parakeet path (~123 ms finals) the commit is
+STT-final-bound, so the retune is felt-neutral today; what it buys is
+removing the engine's 0.5 s floor so streaming STT (Phase 2) and fast
+cloud finals commit right at the VAD floor. `max_delay` stays at the SDK
+default — with `turn_detection="vad"` nothing ever escalates to it. The
+Meet/room path still passes no endpointing (0.5 / 3.0 defaults,
+multi-party padding).
+
+**Semantic turn detector: investigated and wontfixed (Johnny-trt.6).**
+The plan was LiveKit's multilingual EOU model in-process on the roomless
+browser session (an `InferenceExecutor` shim around the registered
+`_EUORunnerMultilingual`) paired with `{"min_delay": 0.2, "max_delay":
+1.5}` — commit early when the model calls the utterance complete, hold
+hesitant speech to 1.5 s. The spike killed it on the bead's own abort
+line (RSS > ~500 MB): the multilingual ONNX is 396 MB on disk and
+`initialize()` costs **+884 MB RSS** in the api process (~1.0 GB total
+with imports; `enable_cpu_mem_arena=False` doesn't help — still ~1.05 GB
+total). Warm inference is ~12 ms, so CPU was never the issue. Two extra
+findings: the multilingual revision (v0.4.1-intl) supports 14 languages
+**not including Finnish** (the per-turn `supports_language` gate would
+skip it for fi configs anyway), and the EOU bounce task only runs after
+VAD END_OF_SPEECH — the model cannot commit *below* the Silero floor, so
+"commit at ~0.2 s" additionally requires dropping the VAD floor, which
+re-segments the batch-STT StreamAdapter. The **English-only** model fits
+the line (+406 MB RSS, 1.4 ms inference) and is filed as an opt-in
+follow-up (Johnny-1qr). Full spike numbers:
+`.validation/Johnny-trt.6/00-spike-note.md`.
 
 ## How to measure on this machine
 
@@ -180,6 +209,13 @@ docker compose exec api python -m johnny.agent.latency_harness \
 # loads a different floor (0.55 reproduces the pre-trt.5 Silero default).
 docker compose exec api python -m johnny.agent.latency_harness \
     --turns 24 --vad-min-silence-s 0.55
+
+# A/B the engine endpointing min_delay (Johnny-trt.6): by default the harness
+# runs the browser session's own endpointing (min_delay 0.40 s);
+# --endpointing-min-delay-s overrides it (0.5 reproduces the pre-trt.6
+# LiveKit engine default).
+docker compose exec api python -m johnny.agent.latency_harness \
+    --turns 24 --endpointing-min-delay-s 0.5
 ```
 
 Output: per-stage p50/p95/min/max — `vad_end_ms` (speech-end → VAD commit,

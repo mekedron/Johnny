@@ -249,3 +249,88 @@ def test_shared_vad_caches_the_browser_vad(monkeypatch: pytest.MonkeyPatch) -> N
     second = browser_session._shared_vad()
     assert first is second
     assert created == [first]
+
+
+def test_browser_endpointing_pins_the_vad_floor_min_delay() -> None:
+    """Johnny-trt.6: browser endpointing min_delay == the 0.40 s VAD floor.
+
+    The two values are deliberately equal — min_delay overlaps (not stacks on)
+    Silero's min_silence wait, so 0.40 commits the turn the moment the VAD
+    floor is crossed with zero engine padding on top. max_delay must stay
+    unset: with turn_detection="vad" no semantic model ever escalates to it.
+    """
+    from johnny.agent import browser_session
+
+    assert browser_session.BROWSER_ENDPOINTING_MIN_DELAY_S == 0.40
+    assert (
+        browser_session.BROWSER_ENDPOINTING_MIN_DELAY_S
+        == browser_session.BROWSER_VAD_MIN_SILENCE_DURATION_S
+    )
+    assert browser_session.browser_endpointing() == {"min_delay": 0.40}
+
+
+def _patch_build_seams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict[str, Any]]:
+    """Fake the heavy seams of BrowserAgentSession.build; capture session kwargs."""
+    from types import SimpleNamespace
+
+    from johnny.agent import browser_session
+
+    captured: list[dict[str, Any]] = []
+
+    async def _fake_runtime(config: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            adapters=SimpleNamespace(stt=object(), llm=object(), tts=None),
+            enable_barge_in=True,
+            min_interruption_duration_s=None,
+            needs_approval_wiring=False,
+            approval_gate=None,
+        )
+
+    def _fake_session(**kwargs: Any) -> object:
+        captured.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(browser_session, "build_agent_runtime", _fake_runtime)
+    monkeypatch.setattr(browser_session, "build_agent_session", _fake_session)
+    monkeypatch.setattr(browser_session, "_shared_vad", lambda: object())
+    return captured
+
+
+async def test_build_applies_browser_endpointing_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Johnny-trt.6: build() endpoints the session at the browser min_delay."""
+    from types import SimpleNamespace
+
+    from johnny.agent.browser_session import BrowserAgentSession
+
+    captured = _patch_build_seams(monkeypatch)
+    await BrowserAgentSession.build(
+        SimpleNamespace(sample_rate=48000),  # type: ignore[arg-type]
+        SimpleNamespace(bot_session_id=7),  # type: ignore[arg-type]
+        event_bus=SimpleNamespace(),  # type: ignore[arg-type]
+    )
+    assert len(captured) == 1
+    assert captured[0]["turn_detection"] == "vad"
+    assert captured[0]["endpointing"] == {"min_delay": 0.40}
+
+
+async def test_build_forwards_an_explicit_endpointing_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The harness's A/B seam: an explicit endpointing dict wins verbatim."""
+    from types import SimpleNamespace
+
+    from johnny.agent.browser_session import BrowserAgentSession
+
+    captured = _patch_build_seams(monkeypatch)
+    await BrowserAgentSession.build(
+        SimpleNamespace(sample_rate=48000),  # type: ignore[arg-type]
+        SimpleNamespace(bot_session_id=7),  # type: ignore[arg-type]
+        event_bus=SimpleNamespace(),  # type: ignore[arg-type]
+        endpointing={"min_delay": 0.5},
+    )
+    assert len(captured) == 1
+    assert captured[0]["endpointing"] == {"min_delay": 0.5}
