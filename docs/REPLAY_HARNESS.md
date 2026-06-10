@@ -103,14 +103,26 @@ closed the gap.
 
 ## Fixtures
 
-Committed fixtures live at `backend/tests/fixtures/sessions/<id>/fixture.json`.
-The harness ships three, covering both runtimes:
+Committed fixtures live at `backend/tests/fixtures/sessions/<id>/fixture.json`
+(see the [fixture README](../backend/tests/fixtures/sessions/README.md) for the
+per-fixture contract). The harness ships five, covering both runtimes:
 
 | Fixture | Runtime | What it proves |
 | --- | --- | --- |
 | `14/` | split | The flagship session-14 silent drop. Turn 4's router hangs (`"simulate": "timeout"`); with the timeout fix in place the turn now terminates cleanly. Reconstructed from the [.28.1 forensic analysis](../tasks/prd-pipeline-decision-revision.md). |
 | `3/` | split | A real known-good browser session captured from the DB — proves the harness reproduces a real session's decisions + utterances and the invariants hold on real data. |
 | `unified-demo/` | unified | A hand-authored unified-S2S conversation (no real unified session existed in the DB) — proves the unified pipeline never drops an assistant utterance. |
+| `delegation-calendar/` | split | **Phase-3 verdict-parity baseline** (Johnny-trt.3): delegation- and status-shaped asks addressed to the bot ("can you check our calendar for upcoming meetings?", "are you still working on that?") with small-talk pivots. Must replay with **zero** divergence from its recorded verdicts. |
+| `delegation-smalltalk/` | split | The negative half of the parity baseline: the same delegation/status *phrasing* addressed to humans (router declines), plain small talk, and a retracted ask suppressed by the confidence threshold (`no_reply/low_confidence`). |
+
+The two `delegation-*` fixtures were added **before** the Phase-3 router triage
+refactor (epic Johnny-trt) extends the router schema with `action`/`task`
+fields: their router payloads are deliberately old-format, and
+`test_replay_harness_agent.py::test_delegation_baseline_zero_verdict_drift`
+asserts a zero-diff replay — the drift guard that proves old model outputs
+keep parsing identically across the schema change. Do not regenerate their
+`recorded` blocks to make a failing run pass; a diff there is the regression
+the gate exists to catch.
 
 ### The fixture format
 
@@ -179,17 +191,20 @@ CI parametrised test picks it up automatically.
 
 ## CI wiring
 
-`backend/tests/smoketest/test_replay_harness.py` runs as part of the normal test
-suite and:
+`backend/tests/smoketest/test_replay_harness.py` (unified fixtures on
+`UnifiedVoicePipeline`) and `test_replay_harness_agent.py` (split fixtures on
+the LiveKit-Agents engine) run as part of the normal test suite and:
 
-- replays **every** committed fixture through `--mode invariants` and fails the
-  build on any violation, and
-- proves the invariant checker has teeth — hand-crafted event streams that
+- replay **every** committed fixture through `--mode invariants` and fail the
+  build on any violation,
+- assert a **zero-divergence** regression diff for the `delegation-*`
+  verdict-parity fixtures (the Phase-3 drift guard), and
+- prove the invariant checker has teeth — hand-crafted event streams that
   violate INV-1 / INV-2 / INV-U are asserted to be flagged, so a checker that
   always returned "no violations" could never pass silently.
 
 ```bash
-docker compose exec api pytest tests/smoketest/test_replay_harness.py
+docker compose exec api pytest tests/smoketest/test_replay_harness.py tests/smoketest/test_replay_harness_agent.py
 ```
 
 ---

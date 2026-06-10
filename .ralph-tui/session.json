@@ -3,10 +3,10 @@
   "sessionId": "589addaf-9a6f-4aaf-b0dd-abdc627fd828",
   "status": "running",
   "startedAt": "2026-06-10T15:37:11.002Z",
-  "updatedAt": "2026-06-10T15:58:59.077Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-10T16:11:03.814Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -39,8 +39,8 @@
       {
         "id": "Johnny-trt.2",
         "title": "[SPIKE] Phase 0: Verify livekit-agents 1.5.17 session surface (say, user_state_changed) in-image",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.3",
@@ -242,7 +242,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-trt.2",
+      "taskTitle": "[SPIKE] Phase 0: Verify livekit-agents 1.5.17 session surface (say, user_state_changed) in-image",
+      "taskCompleted": true,
+      "durationMs": 1272943,
+      "startedAt": "2026-06-10T15:37:45.248Z",
+      "endedAt": "2026-06-10T15:58:58.191Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

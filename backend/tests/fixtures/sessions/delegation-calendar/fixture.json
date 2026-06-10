@@ -1,0 +1,136 @@
+{
+  "session_id": "delegation-calendar",
+  "label": "delegation-calendar-parity-baseline",
+  "runtime": "split",
+  "mode": "autonomous",
+  "confidence_threshold": 0.7,
+  "allowed_replies": [],
+  "instructions": "You are Johnny, the team's meeting assistant. Help with calendar and email questions when asked. Respond directly without any speaker label, bot name, role prefix, or text before the actual message.",
+  "turns": [
+    {
+      "text": "Hey Johnny, can you check our calendar for upcoming meetings?",
+      "confidence": 0.9,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.93,
+        "reason": "The speaker directly addressed Johnny with a request to check the calendar for upcoming meetings — a clear task the bot should respond to.",
+        "reply_type": "string",
+        "suggested_reply": "Sure — let me pull up the calendar and check what's coming up."
+      },
+      "answer": "Sure — let me check the calendar. You have the design review tomorrow at ten, a one-on-one with Maria on Thursday, and the sprint demo on Friday afternoon.",
+      "recorded": {
+        "should_speak": true,
+        "terminal_state": "replied",
+        "outcome": "spoken",
+        "spoke_text": "Sure — let me check the calendar. You have the design review tomorrow at ten, a one-on-one with Maria on Thursday, and the sprint demo on Friday afternoon."
+      }
+    },
+    {
+      "text": "Could you also go through the inbox and see if the vendor replied about the contract?",
+      "confidence": 0.9,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.9,
+        "reason": "A follow-up task request addressed to the bot — checking the inbox for the vendor's reply. The bot should acknowledge and act on it.",
+        "reply_type": "string",
+        "suggested_reply": "Of course — I'll look through the inbox for the vendor's reply."
+      },
+      "answer": "Of course — I'll look through the inbox for the vendor's reply and let you know what I find.",
+      "recorded": {
+        "should_speak": true,
+        "terminal_state": "replied",
+        "outcome": "spoken",
+        "spoke_text": "Of course — I'll look through the inbox for the vendor's reply and let you know what I find."
+      }
+    },
+    {
+      "text": "Thanks. So, how was everyone's weekend?",
+      "confidence": 0.9,
+      "router": {
+        "should_speak": false,
+        "confidence": 0.85,
+        "reason": "The speaker pivoted to small talk addressed to the other participants, not to the bot. Responding would intrude on the social exchange.",
+        "reply_type": "null",
+        "suggested_reply": null
+      },
+      "answer": null,
+      "recorded": {
+        "should_speak": false,
+        "terminal_state": "no_reply",
+        "outcome": "suppressed",
+        "spoke_text": null
+      }
+    },
+    {
+      "text": "Pretty good — we finally got the summer cottage opened up.",
+      "confidence": 0.9,
+      "router": {
+        "should_speak": false,
+        "confidence": 0.9,
+        "reason": "A participant answering another participant's small-talk question. The bot is not involved in this exchange.",
+        "reply_type": null,
+        "suggested_reply": null
+      },
+      "answer": null,
+      "recorded": {
+        "should_speak": false,
+        "terminal_state": "no_reply",
+        "outcome": "suppressed",
+        "spoke_text": null
+      }
+    },
+    {
+      "text": "Johnny, are you still working on that?",
+      "confidence": 0.9,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.88,
+        "reason": "A direct status query addressed to the bot about the task it was given earlier. The bot should report its progress.",
+        "reply_type": "string",
+        "suggested_reply": "Yes — I'm still going through the inbox; I'll have an answer for you shortly."
+      },
+      "answer": "Yes — still on it. The calendar summary is done and I'm partway through the inbox; I'll have the vendor answer in a couple of minutes.",
+      "recorded": {
+        "should_speak": true,
+        "terminal_state": "replied",
+        "outcome": "spoken",
+        "spoke_text": "Yes — still on it. The calendar summary is done and I'm partway through the inbox; I'll have the vendor answer in a couple of minutes."
+      }
+    },
+    {
+      "text": "Okay, just give us the highlights when you're done.",
+      "confidence": 0.9,
+      "router": {
+        "should_speak": false,
+        "confidence": 0.8,
+        "reason": "An acknowledgment and an instruction for later — no reply is needed now; the bot should report when the task completes.",
+        "reply_type": "null",
+        "suggested_reply": null
+      },
+      "answer": null,
+      "recorded": {
+        "should_speak": false,
+        "terminal_state": "no_reply",
+        "outcome": "suppressed",
+        "spoke_text": null
+      }
+    },
+    {
+      "text": "Any update on the vendor email?",
+      "confidence": 0.9,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.86,
+        "reason": "A status query about the in-flight inbox task, continuing the earlier request — the bot should answer with what it found."
+      },
+      "answer": "Yes — the vendor replied this morning: they've accepted the revised terms and will send the signed contract by Friday.",
+      "recorded": {
+        "should_speak": true,
+        "terminal_state": "replied",
+        "outcome": "spoken",
+        "spoke_text": "Yes — the vendor replied this morning: they've accepted the revised terms and will send the signed contract by Friday."
+      }
+    }
+  ],
+  "_provenance": "Hand-authored for Johnny-trt.3 (Phase 0 of the fast-core epic Johnny-trt): the Phase-3 VERDICT-PARITY BASELINE for delegation-/status-shaped utterances addressed to the bot ('can you check our calendar for upcoming meetings', 'are you still working on that?') with small-talk pivots in between. Router outputs are deliberately OLD-format (should_speak/confidence/reason/reply_type/suggested_reply — no action/task fields; turn 7 omits the optional fields entirely to pin the parser defaults). The recorded blocks pin the agent-engine outcome on current main, verified by a zero-divergence replay (tests/smoketest/test_replay_harness_agent.py). When Johnny-trt.16 extends the router schema, these outputs must keep parsing byte-for-byte identically — do NOT regenerate the recorded blocks to make a failure pass."
+}

@@ -1,0 +1,164 @@
+{
+  "session_id": "delegation-smalltalk",
+  "label": "delegation-smalltalk-parity-baseline",
+  "runtime": "split",
+  "mode": "autonomous",
+  "confidence_threshold": 0.7,
+  "allowed_replies": [],
+  "instructions": "You are Johnny, the team's meeting assistant. Help with calendar and email questions when asked. Respond directly without any speaker label, bot name, role prefix, or text before the actual message.",
+  "turns": [
+    {
+      "text": "Morning everyone — grab your coffee, we'll give it a minute before we start.",
+      "confidence": 0.9,
+      "speaker": "maria",
+      "router": {
+        "should_speak": false,
+        "confidence": 0.92,
+        "reason": "Meeting-opening small talk addressed to the participants; nothing is asked of the bot.",
+        "reply_type": "null",
+        "suggested_reply": null
+      },
+      "answer": null,
+      "recorded": {
+        "should_speak": false,
+        "terminal_state": "no_reply",
+        "outcome": "suppressed",
+        "spoke_text": null
+      }
+    },
+    {
+      "text": "Did anyone catch the hockey game last night? That overtime was unreal.",
+      "confidence": 0.9,
+      "speaker": "bob",
+      "router": {
+        "should_speak": false,
+        "confidence": 0.9,
+        "reason": "Casual small talk between participants — the bot has no role in this exchange.",
+        "reply_type": "null",
+        "suggested_reply": null
+      },
+      "answer": null,
+      "recorded": {
+        "should_speak": false,
+        "terminal_state": "no_reply",
+        "outcome": "suppressed",
+        "spoke_text": null
+      }
+    },
+    {
+      "text": "Bob, can you check the calendar for when the sprint review is?",
+      "confidence": 0.9,
+      "speaker": "maria",
+      "router": {
+        "should_speak": false,
+        "confidence": 0.88,
+        "reason": "Although this is a calendar-check request, it is explicitly addressed to Bob, a human participant — not to the bot. The bot should stay silent.",
+        "reply_type": "null",
+        "suggested_reply": null
+      },
+      "answer": null,
+      "recorded": {
+        "should_speak": false,
+        "terminal_state": "no_reply",
+        "outcome": "suppressed",
+        "spoke_text": null
+      }
+    },
+    {
+      "text": "Sure, I'll pull it up after this call.",
+      "confidence": 0.9,
+      "speaker": "bob",
+      "router": {
+        "should_speak": false,
+        "confidence": 0.91,
+        "reason": "Bob accepting Maria's request — a human-to-human exchange the bot is not part of.",
+        "reply_type": null,
+        "suggested_reply": null
+      },
+      "answer": null,
+      "recorded": {
+        "should_speak": false,
+        "terminal_state": "no_reply",
+        "outcome": "suppressed",
+        "spoke_text": null
+      }
+    },
+    {
+      "text": "Johnny, what does our calendar look like tomorrow afternoon?",
+      "confidence": 0.9,
+      "speaker": "maria",
+      "router": {
+        "should_speak": true,
+        "confidence": 0.94,
+        "reason": "A calendar question directly addressed to the bot by name — the bot should answer.",
+        "reply_type": "string",
+        "suggested_reply": "Tomorrow afternoon you have the architecture sync at two and the customer demo prep at four."
+      },
+      "answer": "Tomorrow afternoon you have two meetings: the architecture sync at two and the customer demo prep at four.",
+      "recorded": {
+        "should_speak": true,
+        "terminal_state": "replied",
+        "outcome": "spoken",
+        "spoke_text": "Tomorrow afternoon you have two meetings: the architecture sync at two and the customer demo prep at four."
+      }
+    },
+    {
+      "text": "Thanks. Are you guys still working on the migration ticket?",
+      "confidence": 0.9,
+      "speaker": "maria",
+      "router": {
+        "should_speak": false,
+        "confidence": 0.87,
+        "reason": "A status question, but 'you guys' addresses the human teammates about their ticket — it is not a query about the bot's own work.",
+        "reply_type": null,
+        "suggested_reply": null
+      },
+      "answer": null,
+      "recorded": {
+        "should_speak": false,
+        "terminal_state": "no_reply",
+        "outcome": "suppressed",
+        "spoke_text": null
+      }
+    },
+    {
+      "text": "Yeah, almost done — should land tomorrow.",
+      "confidence": 0.9,
+      "speaker": "sami",
+      "router": {
+        "should_speak": false,
+        "confidence": 0.9,
+        "reason": "A participant answering the status question about their own work; no bot involvement.",
+        "reply_type": "null",
+        "suggested_reply": null
+      },
+      "answer": null,
+      "recorded": {
+        "should_speak": false,
+        "terminal_state": "no_reply",
+        "outcome": "suppressed",
+        "spoke_text": null
+      }
+    },
+    {
+      "text": "Johnny, maybe you could check the inbox too? Actually — never mind, we'll do it after standup.",
+      "confidence": 0.9,
+      "speaker": "bob",
+      "router": {
+        "should_speak": true,
+        "confidence": 0.55,
+        "reason": "The participant addressed the bot with an inbox request but immediately retracted it, so a reply is probably unwanted.",
+        "reply_type": "string",
+        "suggested_reply": "Sure — I can check the inbox after standup if you'd like."
+      },
+      "answer": null,
+      "recorded": {
+        "should_speak": true,
+        "terminal_state": "no_reply",
+        "outcome": "suppressed",
+        "spoke_text": null
+      }
+    }
+  ],
+  "_provenance": "Hand-authored for Johnny-trt.3 (Phase 0 of the fast-core epic Johnny-trt): the NEGATIVE half of the Phase-3 verdict-parity baseline — mixed small-talk where delegation-/status-SHAPED utterances are addressed to humans ('Bob, can you check the calendar…', 'are you guys still working on…') and the router correctly declines, plus one retracted ask the router approves at 0.55 that the gate's 0.7 confidence threshold suppresses (no_reply/low_confidence). Router outputs are deliberately OLD-format (no action/task fields). The recorded blocks pin the agent-engine outcome on current main, verified by a zero-divergence replay (tests/smoketest/test_replay_harness_agent.py). When Johnny-trt.16 extends the router schema, a delegation-shaped utterance addressed to a human must NOT start triggering the bot — do NOT regenerate the recorded blocks to make a failure pass."
+}

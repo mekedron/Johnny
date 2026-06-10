@@ -51,9 +51,10 @@ def _split_ids() -> list[str]:
 
 
 def test_split_fixtures_exist() -> None:
-    """The cutover gate needs at least the two committed split fixtures (3, 14)."""
+    """The gate needs the two cutover fixtures (3, 14) plus the Phase-0 parity
+    baseline pair (delegation-calendar, delegation-smalltalk; Johnny-trt.3)."""
     dirs = _split_fixture_dirs()
-    assert len(dirs) >= 2, f"expected >= 2 split fixtures, found {len(dirs)} under {FIXTURES_DIR}"
+    assert len(dirs) >= 4, f"expected >= 4 split fixtures, found {len(dirs)} under {FIXTURES_DIR}"
 
 
 @pytest.mark.parametrize("fixture_dir", _split_fixture_dirs(), ids=_split_ids())
@@ -86,6 +87,73 @@ async def test_session_14_silent_drop_terminates_on_agent_engine() -> None:
     assert any(
         d.turn_id == 4 and d.field == "terminal_state" and d.replayed == "no_reply" for d in diffs
     ), f"expected turn-4 terminal_state divergence on the agent engine, got {diffs}"
+
+
+# --- Phase-0 verdict-parity baseline for the Phase-3 router extension --------
+
+# Delegation-/status-shaped fixtures (Johnny-trt.3): the utterance shapes the
+# Phase-3 triage refactor (Johnny-trt.16) will start routing as delegate/status
+# actions — "can you check our calendar for upcoming meetings", "are you still
+# working on that?" — plus the negative shapes (the same phrasing addressed to a
+# human, plain small talk, a low-confidence retracted ask). Their ``recorded``
+# blocks pin the CURRENT engine's verdicts with old-format router payloads (no
+# ``action``/``task`` fields); the schema extension must replay them with zero
+# divergence — any diff here is the verdict drift the epic's parity invariant
+# forbids. See tests/fixtures/sessions/README.md.
+PARITY_BASELINE_IDS = ("delegation-calendar", "delegation-smalltalk")
+
+
+def test_parity_baseline_fixtures_committed() -> None:
+    """Renaming or gutting a parity fixture must fail loudly, not skip silently."""
+    for fixture_id in PARITY_BASELINE_IDS:
+        path = FIXTURES_DIR / fixture_id
+        assert (path / "fixture.json").exists(), (
+            f"Phase-3 parity-baseline fixture {fixture_id!r} missing under {FIXTURES_DIR}"
+        )
+        fixture = load_fixture(path)
+        assert fixture.runtime == "split", f"{fixture_id} must be split-runtime"
+        assert all("should_speak" in t.router for t in fixture.turns), (
+            f"{fixture_id}: every turn must carry an old-format recorded router verdict"
+        )
+        # diff_against_recorded only compares keys PRESENT in the recorded block,
+        # so a missing/typo'd key would silently exempt that field from the drift
+        # guard — require the full compared set on every turn.
+        for i, turn in enumerate(fixture.turns, start=1):
+            missing = {"should_speak", "terminal_state", "outcome", "spoke_text"} - set(
+                turn.recorded
+            )
+            assert not missing, (
+                f"{fixture_id} turn {i}: recorded block missing {sorted(missing)} — "
+                "the parity baseline must pin all diffed fields"
+            )
+
+
+@pytest.mark.parametrize("fixture_id", PARITY_BASELINE_IDS)
+async def test_delegation_baseline_zero_verdict_drift(fixture_id: str) -> None:
+    """The hard Phase-3 regression gate: replaying a delegation fixture must
+    reproduce its recorded speak/no-speak verdicts EXACTLY — unlike the
+    session-14 fixture (whose divergence is the fix showing up), zero diffs."""
+    fixture = load_fixture(FIXTURES_DIR / fixture_id)
+    result = await run_agent_replay(fixture)
+    violations = check_invariants(result.events, fixture.runtime)
+    assert not violations, f"{fixture.label} invariant violations: {violations}"
+    diffs = diff_against_recorded(fixture, result.records)
+    assert not diffs, (
+        f"{fixture.label}: replayed verdicts drifted from the Phase-0 parity baseline: "
+        f"{[(d.turn_id, d.field, d.recorded, d.replayed) for d in diffs]}"
+    )
+
+
+async def test_delegation_smalltalk_pins_suppression_reasons() -> None:
+    """The two distinct no-speak paths stay distinct: a delegation-shaped ask
+    addressed to a human is suppressed by the ROUTER (router_declined), while a
+    retracted ask the router approves at 0.55 is suppressed by the gate's 0.7
+    confidence threshold (low_confidence). Phase 3 must not blur them."""
+    fixture = load_fixture(FIXTURES_DIR / "delegation-smalltalk")
+    result = await run_agent_replay(fixture)
+    terminals = {t.turn_id: t for t in result.events if isinstance(t, TurnTerminal)}
+    assert terminals[3].no_reply_reason == "router_declined", terminals[3]
+    assert terminals[8].no_reply_reason == "low_confidence", terminals[8]
 
 
 async def test_unified_fixture_rejected_by_agent_engine() -> None:
