@@ -35,6 +35,16 @@ after each iteration and it's included in prompts for context.
   (viable, filed Johnny-1qr). `EOUModelBase.__init__` already accepts
   `inference_executor=`; runner IO is JSON bytes in/out. Numbers:
   `.validation/Johnny-trt.6/00-spike-note.md`.
+- **Local-provider harness runs have a ±100–150 ms p50 LLM-noise floor**:
+  router/llm p50 drifts that much between *identical-config* 24-turn runs
+  (Ollama run noise + replied-count-driven context growth — runs that
+  reply more carry more chat history at every later turn), so felt-e2e
+  phase deltas below that floor are unresolvable on the local stack. Use
+  the stub harness for controlled felt deltas (its run-to-run noise is
+  ~4 ms — cross-day cells agreed 834.8 vs 838.9) plus per-stage
+  deterministic metrics (e.g. vad_end) on local runs; counterbalance run
+  order (ABBA) and `ollama stop` before each run when comparing local
+  arms. Worked example: `.validation/Johnny-trt.11/00-capstone-notes.md`.
 
 ---
 
@@ -125,4 +135,45 @@ after each iteration and it's included in prompts for context.
     completion); `ruff format` collapses multi-line assignments — run it
     before claiming format-clean; the harness label tests pin exact
     f-string output ("min_delay=0.4s" via %g), keep new labels %g-formatted.
+---
+
+## 2026-06-11 - Johnny-trt.11
+- Phase-1 capstone gate: re-measured the harness with all Phase-1 changes
+  active and ran the varied-pause + barge-in regressions; LATENCY.md got a
+  "Phase-1 capstone" section with the phase-over-phase deltas. Headline:
+  controlled stub felt p50 958.6 → 801.0 ms (**−157.6 ms, −16 %**, meets
+  the ≥100 ms bar); local stack turn-commit (vad_end) p50 563 → 404 ms
+  (**−159.4 ms deterministic**, pooled n=31/36 over four
+  ABBA-counterbalanced 24-turn runs); cold turn 4413/3619 → 1661/1725 ms
+  (**−2.3 s**, prewarm — first turn is now the fastest). Warm felt total on
+  local providers is statistically flat (+58 ms) because router+llm run
+  noise (±100–150 ms p50 on identical code) exceeds the knob effect —
+  documented attribution in LATENCY.md (Phase-2/3 territory).
+- Varied-pause regression: 20/20 hesitation fixtures + 24/24 bundled
+  fixtures = exactly one Silero utterance each at the 0.40 s floor (zero
+  premature turn-cuts). Client barge-in false-positive check (live session
+  84, oscillator fake mic): 67.6 s of bot speech with sub-threshold noise
+  (rms 0.028 above the rms threshold, peak below) → zero gate fires, both
+  long replies completed; positive control fired +34 ms (decision 400
+  suppressed/barge_in, INV-1 clean); prewarm verified live (0/612/660 ms
+  concurrent); console clean. All Phase-1 siblings were already closed
+  (trt.10 with a real-buffer finding → Johnny-dkj, allowed by the AC).
+- Files changed: docs/LATENCY.md, .ralph-tui/progress.md (docs-only — no
+  code, so no test/lint gates apply). Artifacts:
+  .validation/Johnny-trt.11/ (4 harness runs + JSONs, fixture
+  verifications, screenshots, decision dump, compare_runs.py,
+  fake_mic_oscillator.js, 00-capstone-notes.md).
+- **Learnings:**
+  - Patterns discovered: the local-harness LLM-noise floor + ABBA
+    counterbalancing + stub-harness-for-felt-deltas (added to Codebase
+    Patterns above).
+  - Gotchas: pooled warm percentiles across runs are confounded by
+    replied-turn-set composition (router declines differ run to run), and
+    matched-fixture comparisons are still biased by context-growth when
+    reply counts differ — pair them with a deterministic per-stage metric
+    before drawing conclusions; `bd list --label phase-1` only shows OPEN
+    issues (closed siblings vanish — verify via dependencies/`bd show`);
+    the playground "counting" prompt yields only ~30 s of speech per reply
+    with the concise persona — accumulate speaking time across replies for
+    a 60 s false-positive soak instead of fighting the persona.
 ---

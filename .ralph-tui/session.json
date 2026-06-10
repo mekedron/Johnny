@@ -3,10 +3,10 @@
   "sessionId": "82402e4d-e4aa-4e51-a95b-90cc16d67f3b",
   "status": "running",
   "startedAt": "2026-06-10T20:20:17.654Z",
-  "updatedAt": "2026-06-10T21:09:59.788Z",
-  "currentIteration": 1,
+  "updatedAt": "2026-06-10T21:46:59.168Z",
+  "currentIteration": 2,
   "maxIterations": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 2,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -63,8 +63,8 @@
       {
         "id": "Johnny-trt.6",
         "title": "[BUILD] Phase 1: Semantic turn detector on the roomless browser session (early commit when confident)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.7",
@@ -276,6 +276,16 @@
       "durationMs": 761328,
       "startedAt": "2026-06-10T20:21:20.209Z",
       "endedAt": "2026-06-10T20:34:01.537Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "Johnny-trt.6",
+      "taskTitle": "[BUILD] Phase 1: Semantic turn detector on the roomless browser session (early commit when confident)",
+      "taskCompleted": true,
+      "durationMs": 2133602,
+      "startedAt": "2026-06-10T20:34:25.230Z",
+      "endedAt": "2026-06-10T21:09:58.832Z"
     }
   ],
   "skippedTaskIds": [],

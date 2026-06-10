@@ -447,6 +447,100 @@ launchctl setenv OLLAMA_KEEP_ALIVE 24h   # then restart the Ollama app
 OLLAMA_KEEP_ALIVE=24h ollama serve
 ```
 
+## Phase-1 capstone — re-measured (Johnny-trt.11, 2026-06-11)
+
+Phase 1 of the Johnny-trt epic shipped five hot-path changes: browser
+Silero floor 0.55 → 0.40 s (trt.5), browser engine endpointing
+`min_delay` 0.5 → 0.40 s (trt.6; the semantic detector itself was
+wontfixed on RSS), Piper `chunk_bytes` default 4096 → 1024 (trt.7 —
+measured TTFB-neutral), provider prewarm at session start (trt.8),
+client-side auto barge-in (trt.9 — a client-side cut, by design not
+visible to the server-side harness), and the Meet bridge audit (trt.10 —
+found the ~2 s pacat buffer, fix bead Johnny-dkj). This section is the
+phase gate: the re-measured phase-over-phase deltas. All artifacts under
+`.validation/Johnny-trt.11/`.
+
+**Controlled felt delta — stub harness (deterministic LLM/TTS).** With
+provider noise stubbed out, the felt p50 effect of the Phase-1 knobs is
+clean. 24-turn stub runs, warm percentiles, `first_audio_wall_ms`
+(speech-end → first PCM frame):
+
+| config                                    | warm felt p50 | vs Phase-0 |
+| ----------------------------------------- | ------------- | ---------- |
+| Phase-0 shape (floor 0.55, endpointing 0.5) | 958.6 ms    | —          |
+| floor 0.40 only (endpointing 0.5)          | 834.8 / 838.9 ms † | −121 ms |
+| Phase-1 shape (floor 0.40, endpointing 0.40) | 801.0 ms   | **−157.6 ms (−16 %)** |
+
+† measured independently on two days (trt.5's A/B and trt.6's A/B) —
+agreement within 4 ms, which is the instrument's run-to-run noise with
+stub providers. **The Phase-1 acceptance bar (felt p50 ≥ 100 ms better
+than Phase-0) is met on the controlled measurement: −157.6 ms.**
+
+**Local stack — four 24-turn `--providers local` runs, ABBA-counter-
+balanced (A = Phase-0 shape `--vad-min-silence-s 0.55
+--endpointing-min-delay-s 0.5`, no prewarm; B = Phase-1 defaults +
+`--prewarm`), Ollama unloaded before every run.** Same trio as the
+Phase-0 baseline (Parakeet MLX + Ollama `llama3.2:3b` + Piper
+persistent; stored `chunk_bytes` 4096 held constant; one drift — the
+configured voice is now `en_US-hfc_male-medium`, constant across all
+four runs). Pooled warm per-turn samples (A n=31, B n=36):
+
+| stage (warm p50/p95, ms)  | Phase-0 shape | Phase-1 active | delta |
+| ------------------------- | ------------- | -------------- | ----- |
+| vad_end (turn commit)     | 563 / 604     | 404 / 423      | **−159 / −181, deterministic** |
+| stt                       | 152 / 210     | 153 / 206      | flat  |
+| router                    | 970 / 1402    | 1103 / 1563    | +133 / +162 (run noise, identical code) |
+| llm_ttft                  | 524 / 679     | 593 / 777      | +69 / +98 (run noise) |
+| tts_ttfb                  | 74 / 244      | 93 / 206       | +19 / −38 |
+| first_audio_wall (felt)   | 2218 / 2800   | 2276 / 2902    | +58 / +103 (masked, see below) |
+| **cold turn 1 (felt e2e, per run)** | **4413 / 3619** | **1661 / 1725** | **−2.3 s mean (prewarm)** |
+
+The turn-commit win is deterministic — every Phase-1 run, every turn,
+−160 ms with a few-ms spread — and the prewarm takes the cold turn from
+the slowest turn of a session (router 2558/2043 ms, tts 610/632 ms) to
+the *fastest* (router ~850 ms, tts ~70 ms). The warm felt total is
+statistically flat despite the −159 ms commit shift because the two
+LLM stages (~1.6 s, ~75 % of the felt budget) drift more between
+*identical-config* runs than the entire knob effect: matched-fixture
+router+llm medians moved +330 ms between pair-1 arms on identical code
+(run-to-run Ollama noise + context-growth differences from stochastic
+router declines — B-arm runs replied more turns, so they carried more
+chat history at every matched fixture). That noise floor is exactly the
+documented Phase-2/3 territory (streaming STT, router triage, history
+windowing); Phase 1 was never going to move router/llm. For comparison
+against the recorded Phase-0 sanity run (warm felt p50 2356.2): the two
+Phase-1 runs landed 2257.1 and 2320.4 (−99/−36 ms), while the same-day
+Phase-0-shape controls landed 2173.2 and 2295.4 — same spread, same
+conclusion: on the local stack the felt number is LLM-noise-bound and
+the harness resolves Phase-1's effect in the stages it touched, not in
+the pooled felt total.
+
+**Varied-pause regression — zero premature turn-cuts.** All 20
+hesitation fixtures (mid-sentence gaps 0.20–0.35 s, several at the
+0.35 s edge) and all 24 bundled latency fixtures read as exactly one
+Silero utterance each at the production 0.40 s browser floor
+(`verify_fixtures_at_floor.py`, real engine VAD, real frame pacing).
+
+**Client barge-in false-positive check — clean (live session 84,
+chrome-devtools).** With the trt.9 oscillator fake-mic held at
+sub-threshold "room noise" (rms 0.028 ≥ the 0.02 rms threshold, peak
+0.04 < the 0.08 peak threshold — the AND-gate's job): **67.6 s of
+accumulated bot speech with the mic open produced zero gate fires**, and
+both long replies ran to completion (`agent_decisions` 398/399 =
+`spoken/replied`). Positive control on the next reply: full voice
+(gain 0.5) fired the gate **34 ms** after onset (`rms=0.357,
+peak=0.500`), cut local playback, and the server stop terminalized the
+turn as `no_reply(barge_in)` (decision 400, INV-1 clean). Console: the
+single intentional `[barge-in]` breadcrumb and nothing else.
+
+**Phase-1 verdict.** Hot-path knobs: shipped and measured (−157.6 ms
+controlled felt p50; −159 ms deterministic commit shift on the local
+stack). Cold start: solved (−2.3 s, first turn now the fastest).
+Turn integrity and barge-in safety: regression-clean. The remaining
+felt-latency owners on the local stack are the router and answer LLM —
+Phase 2 (streaming STT) and Phase 3 (router triage) pick up from here,
+with Johnny-dny (answer streaming) still the measured #1.
+
 ## Optimization candidates — in priority order (re-ranked from the 2026-06-10 baseline)
 
 1. **True answer-LLM token streaming** (Johnny-dny) — the measured #1.
