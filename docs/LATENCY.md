@@ -81,7 +81,13 @@ not at VAD-end; the turn commits at
 sessions load Silero at a **0.40 s** floor
 (`BROWSER_VAD_MIN_SILENCE_DURATION_S`, single-speaker surface — see the
 shipped section below); the Meet/room path keeps Silero's 0.55 s default
-(multi-party padding, Johnny-arh). The endpointing dict itself is
+(multi-party padding, Johnny-arh). Measured (24-turn stub harness A/B,
+warm percentiles, 2026-06-10): `vad_end` p50 562 → 401 ms / p95 600 →
+443 ms — the 0.40 s floor commits the turn **~161 ms earlier**, and a
+20-turn varied-pause script (mid-sentence hesitations of 0.20–0.35 s,
+several at the 0.35 s edge) still reads as exactly one VAD utterance per
+turn (zero premature commits; artifacts under `.validation/Johnny-trt.5/`).
+The endpointing dict itself is
 forwardable per session via `build_agent_session(endpointing=...)` —
 nothing overrides it today (LiveKit's `min_delay` 0.5 / `max_delay` 3.0
 stand), the knob exists for the Phase-1/2 turn-detection work
