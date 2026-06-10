@@ -29,17 +29,17 @@ from app.main import app
 
 def test_to_wire_type_maps_known_internal_names() -> None:
     assert to_wire_type("transcript_finalized") == "transcript_final"
+    assert to_wire_type("transcript_interim") == "transcript_partial"
     assert to_wire_type("router_decision_made") == "router_decision"
     assert to_wire_type("session_status_changed") == "session_status_change"
 
 
 def test_to_wire_type_passes_through_unmapped() -> None:
-    # Future event types (calendar_event_changed, transcript_partial,
-    # approval_pending, agent_spoke, agent_suggested) pass through unchanged.
+    # Future event types (calendar_event_changed, approval_pending,
+    # agent_spoke, agent_suggested) pass through unchanged.
     assert to_wire_type("agent_spoke") == "agent_spoke"
     assert to_wire_type("agent_suggested") == "agent_suggested"
     assert to_wire_type("calendar_event_changed") == "calendar_event_changed"
-    assert to_wire_type("transcript_partial") == "transcript_partial"
     assert to_wire_type("approval_pending") == "approval_pending"
     assert to_wire_type("custom_event") == "custom_event"
 
@@ -47,7 +47,12 @@ def test_to_wire_type_passes_through_unmapped() -> None:
 def test_wire_type_map_covers_renamed_pipeline_events() -> None:
     # Guard against accidental removal of any of the AC-listed event types
     # whose internal names differ from the wire names.
-    for internal in ("transcript_finalized", "router_decision_made", "session_status_changed"):
+    for internal in (
+        "transcript_finalized",
+        "transcript_interim",
+        "router_decision_made",
+        "session_status_changed",
+    ):
         assert internal in WIRE_TYPE_MAP
 
 

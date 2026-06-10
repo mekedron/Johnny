@@ -74,6 +74,7 @@ from johnny.voice_pipeline.events import (
     PipelineTimingStage,
     RouterDecisionMade,
     TranscriptFinalized,
+    TranscriptInterim,
     TurnTerminal,
 )
 from johnny.voice_pipeline.reasoning import FREE_FORM_MODES, RouterDecision
@@ -358,6 +359,86 @@ def build_transcript_finalized_emitter(
     return _record
 
 
+class InterimTranscriptForwarder:
+    """Bridge ``user_input_transcribed`` events to ``TranscriptInterim`` (Johnny-trt.13).
+
+    ``AgentSession.on("user_input_transcribed", cb)`` fires a *synchronous*
+    callback with a ``UserInputTranscribedEvent(transcript, is_final, ...)``
+    for every transcript the SDK's audio recognition sees — interims included
+    (streaming STT only; the batch ``StreamAdapter`` path emits finals only).
+    This forwarder is the live-caption emit seam: each non-final hypothesis is
+    published as a :class:`~johnny.voice_pipeline.events.TranscriptInterim`
+    so the playground can render it while the user is still speaking. It owns
+    the same sync→async bridge as :class:`MetricsTranslator` (fire-and-forget
+    publish tasks held by strong refs, drained at :meth:`aclose`).
+
+    Finals are *skipped* — the durable ``TranscriptFinalized`` is emitted by
+    the agent's ``stt_node`` gate (:func:`build_transcript_finalized_emitter`),
+    and noise-gated interims never reach the SDK at all, so the caption stream
+    inherits the noise filter for free. Empty hypotheses and consecutive
+    duplicates (some providers re-send an unchanged interim) are dropped to
+    keep the wire quiet; the duplicate guard resets on every final so the next
+    turn's first caption always goes out even when textually identical.
+
+    ``clock`` returns the session-relative ``timestamp_ms`` (the same shape
+    its sibling ``TranscriptFinalized`` carries — never persisted, but kept
+    consistent for subscribers that order by it).
+    """
+
+    def __init__(
+        self,
+        event_bus: EventBus,
+        *,
+        clock: Callable[[], int],
+        session_id: str | None = None,
+    ) -> None:
+        self._event_bus = event_bus
+        self._clock = clock
+        self._session_id = session_id
+        self._last_text: str | None = None
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    def on_user_input_transcribed(self, ev: Any) -> None:
+        """Sync ``user_input_transcribed`` listener — build + schedule the publish."""
+        if bool(getattr(ev, "is_final", False)):
+            # The stt_node gate owns the final's durable event; just re-arm the
+            # duplicate guard for the next turn's captions.
+            self._last_text = None
+            return
+        text = getattr(ev, "transcript", None)
+        if not isinstance(text, str) or not text.strip():
+            return
+        if text == self._last_text:
+            return
+        self._last_text = text
+        speaker = getattr(ev, "speaker_id", None)
+        event = TranscriptInterim(
+            text=text,
+            timestamp_ms=self._clock(),
+            speaker=speaker if isinstance(speaker, str) and speaker else None,
+            session_id=self._session_id,
+        )
+        task = asyncio.ensure_future(self._publish(event))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _publish(self, event: TranscriptInterim) -> None:
+        try:
+            await self._event_bus.publish(event)
+        except Exception:
+            logger.debug(
+                "interim transcript emit failed for session=%s",
+                self._session_id,
+                exc_info=True,
+            )
+
+    async def aclose(self) -> None:
+        """Await any in-flight publishes so teardown doesn't leak pending tasks."""
+        if not self._tasks:
+            return
+        await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
+
+
 # --- LiveKit metrics → PipelineTiming translation -------------------------- #
 
 # LiveKit ``MetricsCollectedEvent.metrics.type`` → our ``PipelineTimingStage``.
@@ -600,6 +681,7 @@ def build_observability(
 
 
 __all__ = [
+    "InterimTranscriptForwarder",
     "MetricsTranslator",
     "Observability",
     "RecordDecision",

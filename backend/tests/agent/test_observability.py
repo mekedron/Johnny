@@ -60,6 +60,7 @@ from app.services.session_status_subscriber import (  # noqa: E402
 )
 from johnny.agent.gate import GateTerminal, TurnIndex  # noqa: E402
 from johnny.agent.observability import (  # noqa: E402
+    InterimTranscriptForwarder,
     MetricsTranslator,
     build_decision_emitter,
     build_observability,
@@ -552,6 +553,83 @@ async def test_metrics_translator_drops_non_stage_metric() -> None:
     )
     await translator.aclose()
     assert bus.snapshot() == []
+
+
+# --------------------------------------------------------------------------- #
+# InterimTranscriptForwarder (live captions, Johnny-trt.13)                    #
+# --------------------------------------------------------------------------- #
+
+
+def _interim_forwarder(
+    bus: InMemoryEventBus, *, session_id: str = "1"
+) -> InterimTranscriptForwarder:
+    return InterimTranscriptForwarder(bus, clock=lambda: 42, session_id=session_id)
+
+
+def _transcribed(text: str, *, is_final: bool = False, speaker_id: str | None = None) -> Any:
+    """Shape of the SDK's ``UserInputTranscribedEvent`` (transcript/is_final/speaker_id)."""
+    return SimpleNamespace(transcript=text, is_final=is_final, speaker_id=speaker_id)
+
+
+async def test_interim_forwarder_publishes_transcript_interim() -> None:
+    bus = InMemoryEventBus()
+    forwarder = _interim_forwarder(bus)
+    forwarder.on_user_input_transcribed(_transcribed("hello th", speaker_id="spk-1"))
+    await forwarder.aclose()
+
+    (event,) = bus.snapshot()
+    assert event.type == "transcript_interim"
+    assert event.text == "hello th"
+    assert event.timestamp_ms == 42
+    assert event.speaker == "spk-1"
+    assert event.session_id == "1"
+
+
+async def test_interim_forwarder_skips_finals_and_empty_hypotheses() -> None:
+    bus = InMemoryEventBus()
+    forwarder = _interim_forwarder(bus)
+    forwarder.on_user_input_transcribed(_transcribed("the final text", is_final=True))
+    forwarder.on_user_input_transcribed(_transcribed(""))
+    forwarder.on_user_input_transcribed(_transcribed("   "))
+    await forwarder.aclose()
+    assert bus.snapshot() == []
+
+
+async def test_interim_forwarder_drops_consecutive_duplicates() -> None:
+    bus = InMemoryEventBus()
+    forwarder = _interim_forwarder(bus)
+    forwarder.on_user_input_transcribed(_transcribed("hello"))
+    forwarder.on_user_input_transcribed(_transcribed("hello"))
+    forwarder.on_user_input_transcribed(_transcribed("hello there"))
+    await forwarder.aclose()
+    assert [e.text for e in bus.snapshot()] == ["hello", "hello there"]
+
+
+async def test_interim_forwarder_final_resets_the_duplicate_guard() -> None:
+    # Two consecutive turns may produce the textually identical hypothesis
+    # ("yes" → final → "yes"); the second turn's caption must still go out.
+    bus = InMemoryEventBus()
+    forwarder = _interim_forwarder(bus)
+    forwarder.on_user_input_transcribed(_transcribed("yes"))
+    forwarder.on_user_input_transcribed(_transcribed("yes", is_final=True))
+    forwarder.on_user_input_transcribed(_transcribed("yes"))
+    await forwarder.aclose()
+    assert [e.text for e in bus.snapshot()] == ["yes", "yes"]
+
+
+async def test_interim_forwarder_speaker_defaults_to_none() -> None:
+    bus = InMemoryEventBus()
+    forwarder = _interim_forwarder(bus)
+    forwarder.on_user_input_transcribed(_transcribed("hi", speaker_id=""))
+    await forwarder.aclose()
+    (event,) = bus.snapshot()
+    assert event.speaker is None
+
+
+async def test_interim_forwarder_swallows_bus_failure() -> None:
+    forwarder = InterimTranscriptForwarder(_FlakyBus(), clock=lambda: 0, session_id="1")
+    forwarder.on_user_input_transcribed(_transcribed("hello"))
+    await forwarder.aclose()  # must not raise
 
 
 # --------------------------------------------------------------------------- #

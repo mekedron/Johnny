@@ -31,6 +31,7 @@ const MAX_RECONNECT_DELAY_MS = 30_000;
 export type SessionEventType =
 	| 'transcript_partial'
 	| 'transcript_final'
+	| 'transcript_filtered'
 	| 'router_decision'
 	| 'approval_pending'
 	| 'approval_resolved'
@@ -63,6 +64,21 @@ export interface TranscriptFinalEvent extends BaseEnvelope {
 	timestamp_ms: number;
 	speaker?: string | null;
 	confidence?: number | null;
+}
+
+/**
+ * The noise gate dropped a candidate turn before the router (Johnny-ckz.14).
+ * The playground uses it to clear a live caption whose turn produced no
+ * `transcript_final` (the dropped final is the only signal the turn ended).
+ */
+export interface TranscriptFilteredEvent extends BaseEnvelope {
+	type: 'transcript_filtered';
+	text: string;
+	timestamp_ms: number;
+	reason: string;
+	speaker?: string | null;
+	confidence?: number | null;
+	audio_duration_ms?: number | null;
 }
 
 export interface RouterDecisionEvent extends BaseEnvelope {
@@ -210,6 +226,7 @@ export interface CalendarEventChangedEvent extends BaseEnvelope {
 export type SessionEvent =
 	| TranscriptPartialEvent
 	| TranscriptFinalEvent
+	| TranscriptFilteredEvent
 	| RouterDecisionEvent
 	| ApprovalPendingEvent
 	| ApprovalResolvedEvent

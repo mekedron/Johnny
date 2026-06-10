@@ -75,10 +75,10 @@ GLOBAL_CHANNEL_PREFIX = "johnny.global."
 # descriptive names (``transcript_finalized``); the WebSocket exposes
 # the AC's shorter wire names. Unmapped types pass through unchanged so
 # new event types added later (e.g. ``calendar_event_changed``,
-# ``transcript_partial``, ``approval_pending``) just work without
-# touching this dict.
+# ``approval_pending``) just work without touching this dict.
 WIRE_TYPE_MAP: dict[str, str] = {
     "transcript_finalized": "transcript_final",
+    "transcript_interim": "transcript_partial",
     "router_decision_made": "router_decision",
     "session_status_changed": "session_status_change",
 }

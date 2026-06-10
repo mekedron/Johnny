@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 TranscriptEventType = Literal["transcript_finalized"]
+TranscriptInterimEventType = Literal["transcript_interim"]
 TranscriptFilteredEventType = Literal["transcript_filtered"]
 RouterEventType = Literal["router_decision_made"]
 AgentEventType = Literal["agent_spoke"]
@@ -176,6 +177,28 @@ class TranscriptFinalized:
     confidence: float | None = None
     session_id: str | None = None
     type: TranscriptEventType = "transcript_finalized"
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptInterim:
+    """An in-flight (non-final) STT hypothesis for the current user turn (Johnny-trt.13).
+
+    Live-caption feedback only: streaming STT providers (Deepgram, the
+    Parakeet sidecar streaming path) emit interim transcripts while the
+    user is still speaking, and the playground renders them as a live
+    caption that the turn's :class:`TranscriptFinalized` replaces. Interims
+    are **ephemeral** — the status subscriber deliberately ignores this
+    type (no ``transcript_chunks`` row; the final is the durable record),
+    so consumers must never treat one as authoritative transcript content.
+    Batch STT (the ``StreamAdapter`` path) produces no interims, so this
+    event simply never fires there.
+    """
+
+    text: str
+    timestamp_ms: int
+    speaker: str | None = None
+    session_id: str | None = None
+    type: TranscriptInterimEventType = "transcript_interim"
 
 
 @dataclass(frozen=True, slots=True)
@@ -500,6 +523,7 @@ class PipelineTiming:
 
 PipelineEvent = (
     TranscriptFinalized
+    | TranscriptInterim
     | TranscriptFiltered
     | RouterDecisionMade
     | AgentSpoke
@@ -547,6 +571,7 @@ __all__ = [
     "TranscriptFiltered",
     "TranscriptFilteredReason",
     "TranscriptFinalized",
+    "TranscriptInterim",
     "TurnTerminal",
     "event_to_dict",
 ]

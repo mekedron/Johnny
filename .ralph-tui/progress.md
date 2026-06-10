@@ -57,6 +57,29 @@ after each iteration and it's included in prompts for context.
   unquoted vars) — compose accepts it and your flag never lands. Spell
   `-e FOO=1` inline and verify with `os.environ.get` before trusting an
   A/B arm.
+- **chrome-devtools MCP after a Chrome restart: pass `pageId` explicitly** —
+  after pkill + `start-chrome.sh` re-launch, `evaluate_script` fails with
+  "No page found" on the implicit selected page while list_pages/snapshot/
+  click still work; `select_page` + an explicit `pageId` on every
+  `evaluate_script` call fixes it.
+- **Screenshotting a live caption (or any sub-second UI state)**: the
+  agent-loop roundtrip between tool calls is ~10 s, far slower than the
+  state's lifetime — do the wait AND the freeze inside ONE evaluate_script.
+  For captions: in-page click the mic-mute toggle the moment the caption
+  appears — mute stops mic frames entirely (browserAudio pump returns
+  without sending, not silence), so the streaming endpointer never sees the
+  silence needed to finalize and the caption stays rendered until unmute.
+  Judge correctness by an untampered DOM-sampling trace (state-change log at
+  ~120 ms cadence); use the freeze only for the visual.
+- **Interim live captions (trt.13)**: streaming-STT interims reach the UI via
+  `session.on("user_input_transcribed")` → `TranscriptInterim`
+  (`transcript_interim`, ephemeral — subscriber ignores it, no DB row) → ws
+  wire name `transcript_partial`. Batch/StreamAdapter STT produces no
+  interims, so the caption simply never appears there. Noise-gated interims
+  never reach the SDK (stt_node drops them) so captions inherit the noise
+  filter. Client must clear the caption on user final AND
+  `transcript_filtered` (a noise-dropped turn emits no final) AND teardown,
+  and treat an empty hypothesis as a clear.
 - **Local-provider harness runs have a ±100–150 ms p50 LLM-noise floor**:
   router/llm p50 drifts that much between *identical-config* 24-turn runs
   (Ollama run noise + replied-count-driven context growth — runs that
@@ -254,4 +277,64 @@ after each iteration and it's included in prompts for context.
     `_instantiate_preview` filters options through split_values so
     non-schema knobs can't leak in from the UI — inject post-split where
     needed.
+---
+
+## 2026-06-11 - Johnny-trt.13
+- Live interim captions in the playground shipped end-to-end:
+  `TranscriptInterim` event type (`transcript_interim`, ephemeral — the
+  status subscriber deliberately ignores it) added to the voice-pipeline
+  union; `InterimTranscriptForwarder` in observability.py bridges the
+  session's sync `user_input_transcribed` events to async bus publishes
+  (MetricsTranslator pattern: ensure_future + strong task refs + aclose
+  drain), skipping finals (they re-arm the dup guard), empty hypotheses and
+  consecutive duplicates; `BrowserAgentSession` builds it in `build()`,
+  registers it in `start()` (browser sessions ONLY — Meet/room path
+  untouched), drains it in `aclose()`; ws.py maps the wire name to
+  `transcript_partial`, which the playground + session-detail UIs already
+  render (dashed "· partial" caption).
+- Client caption lifecycle fixed (the partial handler existed but nothing
+  ever cleared it): caption cleared on user `transcript_final` (streaming
+  STT can emit several finals per turn — each clears, later interims
+  reopen), on `transcript_filtered` (noise-dropped turn emits no final —
+  added the event to sessionEvents.ts types), on teardown/endSession, and an
+  empty hypothesis clears instead of rendering an empty line. Transcript-line
+  transitions extracted to pure `transcriptLines.ts` (the controller's
+  `$state` runes don't compile under this repo's vitest — pure module +
+  delegation instead); same filtered/empty clears added to the session
+  detail page's partial slot.
+- Verified: 124 tests in touched backend files + full suite 3603 passed
+  (9 failures pre-existing env-dependent live-API/wizard tests, reasons
+  checked); frontend svelte-check 0/0, vitest 102/102 (8 new), eslint clean
+  on touched files; ruff lint clean, additions format-clean. Live
+  chrome-devtools run (session 88, dev stack, streaming Parakeet + Ollama
+  llama3.2:3b + Piper, trt.5 fake-mic WAV): untampered 120 ms DOM trace
+  shows the caption opening, growing in place at the ~480 ms sidecar decode
+  cadence, and being removed in the same render its segment final appends —
+  across multiple segments and a mic-mute freeze/unmute cycle (frozen
+  caption finalized byte-identical in 244 ms); screenshot with the visible
+  "You · partial" badge; 28 transcript_chunks rows all complete finals (zero
+  interim pollution); decisions INV-1 clean for all normal turns; console
+  clean. Artifacts: .validation/Johnny-trt.13/.
+- Files changed: backend/johnny/voice_pipeline/events.py,
+  backend/johnny/agent/observability.py,
+  backend/johnny/agent/browser_session.py, backend/app/api/ws.py,
+  backend/tests/{voice_pipeline/test_events.py,agent/test_observability.py,
+  agent/test_browser_session.py,api/test_ws.py},
+  frontend/src/lib/playground/{playgroundSession.svelte.ts,
+  transcriptLines.ts (new),playgroundSession.test.ts (new)},
+  frontend/src/lib/sessionEvents.ts,
+  frontend/src/routes/sessions/[id]/+page.svelte, .ralph-tui/progress.md.
+- **Learnings:**
+  - Patterns discovered: chrome-devtools pageId-after-restart gotcha, the
+    mic-mute caption-freeze screenshot method, and the interim-caption event
+    semantics — all added to Codebase Patterns above.
+  - Gotchas: ALL pipeline providers were inactive at session start (the
+    playground "Session failed: no active stt provider" toast) — activate
+    via POST /providers/{id}/activate and check the Ollama MODEL TAG the
+    provider row pins (llama3.2:3b existed; the gpt-oss row pointed at an
+    empty Docker Model Runner on :12434); 5 backend files were already
+    non-format-clean at HEAD — verify with `git show HEAD:<f> | ruff format
+    --check -` before blaming (or "fixing") your own diff; hard End-session
+    mid-turn can double-write the turn's decision row (terminal-first
+    ordering race, pre-existing — filed Johnny-9p4).
 ---

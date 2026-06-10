@@ -511,6 +511,11 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 				return handlePartial(event);
 			case 'transcript_final':
 				return handleFinal(event);
+			case 'transcript_filtered':
+				// Noise gate dropped this turn's final — no transcript_final
+				// will come, so clear the live caption here.
+				partial = null;
+				return;
 			case 'router_decision':
 				return handleDecision(event);
 			case 'approval_pending':
@@ -529,6 +534,12 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 	}
 
 	function handlePartial(ev: TranscriptPartialEvent) {
+		// An empty hypothesis clears the caption instead of rendering an
+		// empty partial row (the backend skips empties; defence-in-depth).
+		if (!ev.text.trim()) {
+			partial = null;
+			return;
+		}
 		partial = {
 			key: `partial-${ev.seq}`,
 			text: ev.text,

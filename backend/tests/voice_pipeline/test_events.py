@@ -16,6 +16,7 @@ from johnny.voice_pipeline.events import (
     SessionStatusChanged,
     TranscriptFiltered,
     TranscriptFinalized,
+    TranscriptInterim,
     event_to_dict,
 )
 
@@ -47,6 +48,32 @@ def test_transcript_finalized_is_frozen() -> None:
     ev = TranscriptFinalized(text="x", timestamp_ms=0)
     with pytest.raises(FrozenInstanceError):
         ev.text = "mutated"  # type: ignore[misc]
+
+
+def test_transcript_interim_defaults() -> None:
+    ev = TranscriptInterim(text="hello th", timestamp_ms=900)
+    assert ev.text == "hello th"
+    assert ev.timestamp_ms == 900
+    assert ev.speaker is None
+    assert ev.session_id is None
+    assert ev.type == "transcript_interim"
+
+
+def test_transcript_interim_is_frozen() -> None:
+    ev = TranscriptInterim(text="x", timestamp_ms=0)
+    with pytest.raises(FrozenInstanceError):
+        ev.text = "mutated"  # type: ignore[misc]
+
+
+def test_event_to_dict_transcript_interim() -> None:
+    ev = TranscriptInterim(text="hello th", timestamp_ms=900, speaker="user", session_id="s")
+    assert event_to_dict(ev) == {
+        "text": "hello th",
+        "timestamp_ms": 900,
+        "speaker": "user",
+        "session_id": "s",
+        "type": "transcript_interim",
+    }
 
 
 def test_router_decision_made_minimum() -> None:

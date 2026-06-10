@@ -208,6 +208,93 @@ async def test_warm_up_delegates_to_the_runtime() -> None:
     assert calls == ["warm_up"]
 
 
+# --------------------------------------------------------------------------- #
+# Live-caption listener (Johnny-trt.13)                                        #
+# --------------------------------------------------------------------------- #
+
+
+class _IOSlot:
+    """Settable ``.audio`` attribute, like ``AgentSession.input`` / ``.output``."""
+
+    def __init__(self) -> None:
+        self.audio: Any = None
+
+
+class _FakeStartableSession:
+    """Stand-in AgentSession exposing what :meth:`BrowserAgentSession.start` touches."""
+
+    def __init__(self) -> None:
+        self.input = _IOSlot()
+        self.output = _IOSlot()
+        self.listeners: dict[str, Any] = {}
+        self.started = False
+
+    def on(self, name: str, cb: Any) -> None:
+        self.listeners[name] = cb
+
+    async def start(self, *, agent: Any) -> None:
+        self.started = True
+
+
+class _FakeTransport:
+    def capture_frames(self) -> Any:
+        return object()  # never iterated in these tests
+
+
+async def test_start_registers_the_interim_caption_listener() -> None:
+    """Johnny-trt.13: start() hangs the user_input_transcribed listener off the
+    session, and a non-final hypothesis flows to the bus as TranscriptInterim."""
+    from types import SimpleNamespace
+
+    from johnny.agent.observability import InterimTranscriptForwarder
+    from johnny.voice_pipeline.event_bus import InMemoryEventBus
+
+    bus = InMemoryEventBus()
+    forwarder = InterimTranscriptForwarder(bus, clock=lambda: 5, session_id="7")
+    fake_session = _FakeStartableSession()
+    sess = BrowserAgentSession(
+        runtime=cast(Any, type("R", (), {"agent": object()})()),
+        session=cast(Any, fake_session),
+        transport=cast(Any, _FakeTransport()),
+        audio_out=cast(Any, object()),
+        transcript_sink=cast(Any, None),
+        session_id="7",
+        interim_forwarder=forwarder,
+    )
+    await sess.start()
+    assert fake_session.started is True
+
+    listener = fake_session.listeners.get("user_input_transcribed")
+    assert listener is not None
+
+    # The SDK fires interims (is_final=False) for streaming STT; finals are
+    # skipped here (the stt_node gate owns the durable TranscriptFinalized).
+    listener(SimpleNamespace(transcript="hello th", is_final=False, speaker_id=None))
+    listener(SimpleNamespace(transcript="hello there", is_final=True, speaker_id=None))
+    await forwarder.aclose()
+
+    (event,) = bus.snapshot()
+    assert event.type == "transcript_interim"
+    assert event.text == "hello th"
+    assert event.session_id == "7"
+
+
+async def test_start_without_forwarder_registers_no_listener() -> None:
+    """Direct constructions (tests, legacy callers) keep the pre-trt.13 shape."""
+    fake_session = _FakeStartableSession()
+    sess = BrowserAgentSession(
+        runtime=cast(Any, type("R", (), {"agent": object()})()),
+        session=cast(Any, fake_session),
+        transport=cast(Any, _FakeTransport()),
+        audio_out=cast(Any, object()),
+        transcript_sink=cast(Any, None),
+        session_id="7",
+    )
+    await sess.start()
+    assert fake_session.started is True
+    assert fake_session.listeners == {}
+
+
 def test_browser_vad_loads_with_the_040_silence_floor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -334,3 +421,35 @@ async def test_build_forwards_an_explicit_endpointing_override(
     )
     assert len(captured) == 1
     assert captured[0]["endpointing"] == {"min_delay": 0.5}
+
+
+async def test_build_wires_the_interim_caption_forwarder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Johnny-trt.13: build() attaches an InterimTranscriptForwarder on the
+    session's event bus so start() can register the live-caption listener."""
+    from types import SimpleNamespace
+
+    from johnny.agent.browser_session import BrowserAgentSession
+    from johnny.agent.observability import InterimTranscriptForwarder
+    from johnny.voice_pipeline.event_bus import InMemoryEventBus
+
+    _patch_build_seams(monkeypatch)
+    bus = InMemoryEventBus()
+    sess = await BrowserAgentSession.build(
+        SimpleNamespace(sample_rate=48000),  # type: ignore[arg-type]
+        SimpleNamespace(bot_session_id=7),  # type: ignore[arg-type]
+        event_bus=bus,
+    )
+    forwarder = sess._interim_forwarder  # noqa: SLF001
+    assert isinstance(forwarder, InterimTranscriptForwarder)
+
+    forwarder.on_user_input_transcribed(
+        SimpleNamespace(transcript="live caption", is_final=False, speaker_id=None)
+    )
+    await forwarder.aclose()
+    (event,) = bus.snapshot()
+    assert event.type == "transcript_interim"
+    assert event.session_id == "7"
+    assert event.timestamp_ms >= 0  # session-relative clock, never epoch-sized
+    assert event.timestamp_ms < 10_000_000

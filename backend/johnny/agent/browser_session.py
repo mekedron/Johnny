@@ -51,7 +51,10 @@ from livekit.agents.llm.chat_context import ChatMessage as LKChatMessage
 from johnny.agent.browser_audio_io import BrowserAudioInput, BrowserAudioOutput
 from johnny.agent.job_config import SessionJobConfig
 from johnny.agent.job_session import AgentRuntime, build_agent_runtime
-from johnny.agent.observability import build_transcript_finalized_emitter
+from johnny.agent.observability import (
+    InterimTranscriptForwarder,
+    build_transcript_finalized_emitter,
+)
 from johnny.agent.session import build_agent_session, load_vad
 from johnny.voice_pipeline.events import TranscriptFinalized
 
@@ -153,6 +156,7 @@ class BrowserAgentSession:
         audio_out: BrowserAudioOutput,
         transcript_sink: TranscriptFinalizedSink,
         session_id: str,
+        interim_forwarder: InterimTranscriptForwarder | None = None,
     ) -> None:
         self._runtime = runtime
         self._session = session
@@ -160,6 +164,7 @@ class BrowserAgentSession:
         self._audio_out = audio_out
         self._transcript_sink = transcript_sink
         self._session_id = session_id
+        self._interim_forwarder = interim_forwarder
         # Session-start reference for the typed-input transcript offset (so it
         # lands in the INTEGER transcript_chunks.start_offset_ms as an
         # offset-from-start, never a raw epoch-ms value — Johnny-7g5.1).
@@ -243,6 +248,15 @@ class BrowserAgentSession:
 
         audio_out = BrowserAudioOutput(transport)
         transcript_sink = build_transcript_finalized_emitter(event_bus, session_id=session_id)
+        # Live-caption seam (Johnny-trt.13): non-final hypotheses from streaming
+        # STT flow out as TranscriptInterim. Session-relative clock like the
+        # finals; registered on the session in :meth:`start`.
+        interim_zero = time.monotonic()
+        interim_forwarder = InterimTranscriptForwarder(
+            event_bus,
+            clock=lambda: max(0, int((time.monotonic() - interim_zero) * 1000)),
+            session_id=session_id,
+        )
         return cls(
             runtime=runtime,
             session=session,
@@ -250,6 +264,7 @@ class BrowserAgentSession:
             audio_out=audio_out,
             transcript_sink=transcript_sink,
             session_id=session_id,
+            interim_forwarder=interim_forwarder,
         )
 
     async def warm_up(self) -> None:
@@ -270,9 +285,20 @@ class BrowserAgentSession:
         Setting ``input.audio`` / ``output.audio`` *before* ``start`` makes the
         SDK skip ``RoomIO`` (it only builds one when a ``room`` is given) and
         instead forward our input frames to the activity + drain our output sink.
+
+        Also hangs the live-caption listener (Johnny-trt.13) off the session:
+        every ``user_input_transcribed`` interim the SDK surfaces is forwarded
+        to the EventBus as a ``TranscriptInterim`` so the playground can show
+        the in-flight hypothesis while the user is still speaking. Browser
+        sessions only — the Meet/room path registers no such listener.
         """
         self._session.input.audio = BrowserAudioInput(self._transport)
         self._session.output.audio = self._audio_out
+        if self._interim_forwarder is not None:
+            self._session.on(
+                "user_input_transcribed",
+                self._interim_forwarder.on_user_input_transcribed,
+            )
         await self._session.start(agent=self._runtime.agent)
         logger.info("browser agent session started for session=%s (roomless)", self._session_id)
 
@@ -355,6 +381,13 @@ class BrowserAgentSession:
             await self._session.aclose()
         except Exception:
             logger.exception("browser agent session aclose failed for session=%s", self._session_id)
+        if self._interim_forwarder is not None:
+            try:
+                await self._interim_forwarder.aclose()
+            except Exception:
+                logger.exception(
+                    "interim transcript forwarder aclose failed for session=%s", self._session_id
+                )
         try:
             await self._audio_out.aclose()
         except Exception:

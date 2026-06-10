@@ -60,19 +60,20 @@ import {
 	type TranscriptPartialEvent
 } from '$lib/sessionEvents';
 
+import {
+	appendLine,
+	clearPartialLine,
+	upsertPartialLine,
+	type TranscriptLine
+} from '$lib/playground/transcriptLines';
+
 export type LiveState = 'idle' | 'listening' | 'thinking' | 'speaking';
 
 export type DictationState = 'idle' | 'starting' | 'recording' | 'stopping';
 
-export interface TranscriptLine {
-	key: string;
-	text: string;
-	speaker: 'user' | 'bot' | 'speaker';
-	isFinal: boolean;
-	timestamp: number;
-	// Captured reply WAV for bot lines (Johnny-od1) — renders a play button.
-	audioFile?: string | null;
-}
+// Re-exported from the pure transitions module (Johnny-trt.13) so existing
+// `$lib/playground/playgroundSession.svelte` importers keep working.
+export type { TranscriptLine };
 
 /** Connection health of the live session's event stream. */
 export type ConnectionState = 'connecting' | 'open' | 'reconnecting';
@@ -762,6 +763,10 @@ export class PlaygroundController {
 			}
 			case 'transcript_final': {
 				const e = event as TranscriptFinalEvent;
+				// The final replaces the live caption (Johnny-trt.13). With
+				// streaming STT several finals can land within one turn —
+				// each clears the caption; later interims reopen it.
+				this.clearPartial();
 				this.appendTranscript({
 					key: `final-${e.seq}`,
 					text: e.text,
@@ -769,6 +774,13 @@ export class PlaygroundController {
 					isFinal: true,
 					timestamp: ts
 				});
+				break;
+			}
+			case 'transcript_filtered': {
+				// Noise gate dropped the turn's final — there will be no
+				// transcript_final, so clear the caption here instead of
+				// leaving it stranded.
+				this.clearPartial();
 				break;
 			}
 			case 'router_decision': {
@@ -854,26 +866,16 @@ export class PlaygroundController {
 	}
 
 	private upsertPartial(text: string, ts: number): void {
-		const idx = this.transcript.findIndex(
-			(l) => !l.isFinal && l.speaker === 'user' && l.key.startsWith('partial-')
-		);
-		if (idx >= 0) {
-			const next = [...this.transcript];
-			next[idx] = { key: next[idx].key, text, speaker: 'user', isFinal: false, timestamp: ts };
-			this.transcript = next;
-		} else {
-			this.appendTranscript({
-				key: `partial-${ts}`,
-				text,
-				speaker: 'user',
-				isFinal: false,
-				timestamp: ts
-			});
-		}
+		this.transcript = upsertPartialLine(this.transcript, text, ts);
+	}
+
+	/** Drop the live caption line (turn finalized / filtered / session over). */
+	private clearPartial(): void {
+		this.transcript = clearPartialLine(this.transcript);
 	}
 
 	private appendTranscript(line: TranscriptLine): void {
-		this.transcript = [...this.transcript.filter((l) => l.key !== line.key), line];
+		this.transcript = appendLine(this.transcript, line);
 	}
 
 	// --- Teardown / end ----------------------------------------------------
@@ -890,6 +892,7 @@ export class PlaygroundController {
 		this.liveSession = null;
 		this.subscription?.close();
 		this.subscription = null;
+		this.clearPartial();
 		this.connection = 'connecting';
 		if (this.connDropTimer !== null) {
 			clearTimeout(this.connDropTimer);
@@ -930,6 +933,7 @@ export class PlaygroundController {
 			this.liveSession = null;
 			this.subscription?.close();
 			this.subscription = null;
+			this.clearPartial();
 			this.connection = 'connecting';
 			this.stopping = false;
 			this.clearDiagnostic('tts');
