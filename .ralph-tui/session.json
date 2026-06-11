@@ -3,10 +3,10 @@
   "sessionId": "d4e0eaf8-2f04-47a7-b280-1ca8b39424b6",
   "status": "running",
   "startedAt": "2026-06-11T21:01:32.322Z",
-  "updatedAt": "2026-06-11T21:36:08.061Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-11T21:52:10.184Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -183,8 +183,8 @@
       {
         "id": "Johnny-trt.26",
         "title": "[CHORE] Phase 4 capstone: end-to-end calendar task in the playground",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.27",
@@ -422,7 +422,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-trt.26",
+      "taskTitle": "[CHORE] Phase 4 capstone: end-to-end calendar task in the playground",
+      "taskCompleted": true,
+      "durationMs": 2032921,
+      "startedAt": "2026-06-11T21:02:14.140Z",
+      "endedAt": "2026-06-11T21:36:07.061Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

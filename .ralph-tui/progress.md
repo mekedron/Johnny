@@ -61,3 +61,38 @@ after each iteration and it's included in prompts for context.
   - gog auth list works on the first call after keyring restore but check.sh
     can transiently exit 2 once — always re-run before trusting the state.
 ---
+
+## 2026-06-12 - Johnny-trt.27
+- Phase-5 speech-queue pure core shipped: backend/johnny/agent/speech_queue.py
+  (stdlib-only, fully synchronous — not even asyncio; every timestamp injected
+  as monotonic `now`). SpeechPriority ACK > STATUS_REQUESTED >
+  RESULT_UNSOLICITED > NOTICE with FIFO-in-class via queue-assigned seq; direct
+  answers documented as bypassing the queue. Lazy expiry (sweep inside
+  pop_ready): ACK 5s / RESULT 120s pinned by plan, STATUS 20s / NOTICE 60s as
+  documented judgment calls; drop reasons match TaskResultExpired's documented
+  copy ("undelivered for 120s", "interrupted twice"). Silence-grace gating as a
+  two-state machine (note_speech_onset/note_silence_onset, 1.2s default,
+  duplicate-silence keeps the original anchor). Single in-flight item ("one
+  mouth"); mark_interrupted re-queues once at original seq + original deadline,
+  then drops; mark_spoken also consumes still-QUEUED items (the trt.28
+  hallucination-race seam). Exactly-once terminals through one _settle
+  chokepoint (TurnLedger discipline) — the ack item's callbacks will carry the
+  delegating turn's ledger terminal in trt.28. enqueue-after-close settles
+  dropped immediately so teardown can't strand an ack terminal.
+- Files changed: backend/johnny/agent/speech_queue.py (new),
+  backend/tests/agent/test_speech_queue.py (new, 40 tests). Quality: agent pkg
+  1004 passed, mypy strict + ruff clean, fresh-interpreter import pulls zero
+  livekit/sqlalchemy/asyncio modules. No UI surface — browser validation N/A
+  (wiring + playground validation land with trt.28).
+- **Learnings:**
+  - ACK's 5s TTL bites tests: items enqueued at t≈1 are already expired by a
+    pop at t=10 — pick pop timestamps inside the shortest TTL (or pass ttl_s)
+    when testing ordering/gating, not expiry.
+  - Float-boundary asserts like `pop_ready(anchor + grace)` are
+    representation-lucky (11.2-10.0 < 1.2 but 101.2-100.0 >= 1.2) — always add
+    a small epsilon when crossing a grace/TTL boundary deliberately.
+  - mypy strict keeps attribute narrowing across method calls: asserting
+    `item.state is ItemState.QUEUED` then later `is ItemState.DROPPED` after a
+    mutating call → comparison-overlap error; read the state into a local
+    before the first assert.
+---
