@@ -273,6 +273,22 @@ class SessionTimingsResponse(BaseModel):
     timings: list[SessionTimingRead]
 
 
+class MeetingBotParticipationRead(BaseModel):
+    """Meeting-level bot participation state for a session's meeting (trt.56).
+
+    Lets the session page render the dismissal banner and the "End for this
+    meeting" action without a second round-trip. ``calendar_event_id`` is
+    what the dismissal endpoints are keyed by. ``None`` on the detail
+    response for sessions with no meeting (playground).
+    """
+
+    calendar_event_id: int
+    bot_state: str
+    dismissed_at: datetime | None = None
+    dismissed_by: str | None = None
+    dismissed_until: datetime | None = None
+
+
 class SessionDetailResponse(BaseModel):
     """Full detail for a single bot session.
 
@@ -289,6 +305,7 @@ class SessionDetailResponse(BaseModel):
     utterances: list[AgentUtteranceRead]
     pending_decisions: list[AgentDecisionRead]
     tasks: list[AgentTaskRead] = []
+    meeting_bot_state: MeetingBotParticipationRead | None = None
 
 
 class ReplayInvariantView(BaseModel):
@@ -445,6 +462,33 @@ def get_session_detail(
     )
     pending = [d for d in decisions if d.outcome == DecisionOutcome.PENDING]
 
+    # Meeting-level participation state (Johnny-trt.56) so the page can
+    # render the dismissal banner + "End for this meeting" without another
+    # round-trip. Playground sessions have no meeting → None.
+    meeting_state: MeetingBotParticipationRead | None = None
+    if row.meeting_config_id is not None:
+        meeting = session.get(MeetingConfig, row.meeting_config_id)
+        if meeting is not None:
+            from app.services.meeting_lifecycle import (
+                derive_bot_state,
+                has_active_session,
+            )
+
+            meeting_state = MeetingBotParticipationRead(
+                calendar_event_id=meeting.calendar_event_id,
+                bot_state=derive_bot_state(
+                    meeting,
+                    active_session=has_active_session(session, meeting.id),
+                ).value,
+                dismissed_at=meeting.bot_dismissed_at,
+                dismissed_by=(
+                    meeting.bot_dismissed_by.value
+                    if meeting.bot_dismissed_by is not None
+                    else None
+                ),
+                dismissed_until=meeting.bot_dismissed_until,
+            )
+
     return SessionDetailResponse(
         session=_to_read(row),
         transcripts=[TranscriptChunkRead.model_validate(t) for t in transcripts],
@@ -452,6 +496,7 @@ def get_session_detail(
         utterances=[AgentUtteranceRead.model_validate(u) for u in utterances],
         pending_decisions=[AgentDecisionRead.model_validate(d) for d in pending],
         tasks=[AgentTaskRead.model_validate(t) for t in tasks],
+        meeting_bot_state=meeting_state,
     )
 
 
@@ -625,8 +670,21 @@ async def start_now(
 
     Returns 409 if the meeting already has an active session — the UI
     can refresh the active list to show what's already running.
+
+    A manual join on a dismissed meeting clears the dismissal first
+    (Johnny-trt.56): the operator explicitly asked for the bot back, and
+    leaving the dismissal in place would have the scheduler treat the very
+    session it just watched the operator start as never-rejoinable state.
     """
     meeting = _meeting_for_event_or_404(session, payload.event_id)
+
+    from app.services.meeting_lifecycle import (
+        dismissal_in_force,
+        undismiss_bot_for_meeting,
+    )
+
+    if dismissal_in_force(meeting):
+        await undismiss_bot_for_meeting(session, meeting=meeting)
 
     existing = session.scalar(
         select(BotSession).where(
@@ -690,6 +748,7 @@ __all__ = [
     "AgentTaskRead",
     "AgentUtteranceRead",
     "BotSessionRead",
+    "MeetingBotParticipationRead",
     "SessionDetailResponse",
     "SessionTimingRead",
     "SessionTimingsResponse",

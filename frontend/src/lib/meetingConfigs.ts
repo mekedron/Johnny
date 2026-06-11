@@ -8,6 +8,17 @@
 
 import type { BotMode } from './templates';
 
+/**
+ * Derived bot-participation state for one meeting occurrence (Johnny-trt.56).
+ * `active` = a non-terminal bot session exists; `dismissed` = "End for this
+ * meeting" is in force for the current occurrence; `ended` = the occurrence
+ * is over; `scheduled` otherwise.
+ */
+export type MeetingBotState = 'scheduled' | 'active' | 'dismissed' | 'ended';
+
+/** Who dismissed the bot: the UI action, a voice request, or a policy. */
+export type BotDismissActor = 'ui' | 'voice' | 'schedule';
+
 export interface MeetingConfig {
 	id: number;
 	calendar_event_id: number;
@@ -21,6 +32,11 @@ export interface MeetingConfig {
 	allowed_replies: string[] | null;
 	confidence_threshold: number | null;
 	enabled: boolean;
+	/** Derived per request — never persisted (Johnny-trt.56). */
+	bot_state: MeetingBotState;
+	bot_dismissed_at: string | null;
+	bot_dismissed_by: BotDismissActor | null;
+	bot_dismissed_until: string | null;
 	created_at: string;
 	updated_at: string;
 }
@@ -127,6 +143,42 @@ export function deleteMeetingConfig(eventId: number): Promise<void> {
 	return request<void>(`/calendar/events/${eventId}/meeting-config`, {
 		method: 'DELETE'
 	}).then(() => undefined);
+}
+
+/**
+ * "End for this meeting" (Johnny-trt.56): stop any active session and keep
+ * the scheduler from re-dispatching for the current occurrence. Distinct
+ * from disabling the meeting — recurring meetings rejoin next occurrence.
+ */
+export function dismissBot(
+	eventId: number,
+	dismissedBy: BotDismissActor = 'ui'
+): Promise<MeetingConfig> {
+	return request<MeetingConfig>(
+		`/calendar/events/${eventId}/meeting-config/bot-dismissal`,
+		{
+			method: 'POST',
+			body: JSON.stringify({ dismissed_by: dismissedBy })
+		}
+	).then((value) => {
+		if (value === null) {
+			throw new Error('unexpected empty response');
+		}
+		return value;
+	});
+}
+
+/** Remove a dismissal so the bot may rejoin the current occurrence. */
+export function undismissBot(eventId: number): Promise<MeetingConfig> {
+	return request<MeetingConfig>(
+		`/calendar/events/${eventId}/meeting-config/bot-dismissal`,
+		{ method: 'DELETE' }
+	).then((value) => {
+		if (value === null) {
+			throw new Error('unexpected empty response');
+		}
+		return value;
+	});
 }
 
 /**

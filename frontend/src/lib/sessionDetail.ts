@@ -162,6 +162,18 @@ export interface SessionTimingsResponse {
 	timings: SessionTimingRecord[];
 }
 
+/**
+ * Meeting-level bot participation state for a session's meeting
+ * (Johnny-trt.56). `calendar_event_id` keys the dismissal endpoints.
+ */
+export interface MeetingBotParticipation {
+	calendar_event_id: number;
+	bot_state: 'scheduled' | 'active' | 'dismissed' | 'ended';
+	dismissed_at: string | null;
+	dismissed_by: 'ui' | 'voice' | 'schedule' | null;
+	dismissed_until: string | null;
+}
+
 export interface SessionDetail {
 	session: BotSession;
 	transcripts: TranscriptChunk[];
@@ -171,6 +183,9 @@ export interface SessionDetail {
 	// Delegated agent_tasks rows for the turn-chain linkage (Johnny-trt.54).
 	// Optional so a cached/older API response without the field still parses.
 	tasks?: AgentTaskRecord[];
+	// Bot-participation state of the session's meeting; null/absent for
+	// playground sessions (Johnny-trt.56).
+	meeting_bot_state?: MeetingBotParticipation | null;
 }
 
 export const DECISION_OUTCOME_LABEL: Record<DecisionOutcome, string> = {

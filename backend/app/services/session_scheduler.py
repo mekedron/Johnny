@@ -266,8 +266,12 @@ def select_due_meetings(
     "Soon" = ``start_time <= now + join_window_seconds`` and
     ``end_time > now`` (we don't try to join a meeting that already ended).
     The meeting must be ``enabled``, its event must have a Meet link,
-    and there must be no bot_session row in scheduled/joining/joined
-    status for it.
+    there must be no bot_session row in scheduled/joining/joined
+    status for it, and the bot must not be dismissed for the current
+    occurrence (Johnny-trt.56): a dismissal is in force while the event's
+    current ``start_time`` still falls inside the window captured at
+    dismissal time (``start_time <= bot_dismissed_until``) — see
+    :mod:`app.services.meeting_lifecycle` for the occurrence-scoping rule.
     """
     moment = now or _now()
     horizon = moment + timedelta(seconds=join_window_seconds)
@@ -288,6 +292,15 @@ def select_due_meetings(
         .where(CalendarEvent.meet_link.is_not(None))
         .where(CalendarEvent.start_time <= horizon)
         .where(CalendarEvent.end_time > moment)
+        # Dismissed-for-this-occurrence rows don't dispatch. An event moved
+        # entirely past the dismissed window (start > dismissed_until) is a
+        # new occurrence, so the dismissal lapses by design.
+        .where(
+            or_(
+                MeetingConfig.bot_dismissed_until.is_(None),
+                CalendarEvent.start_time > MeetingConfig.bot_dismissed_until,
+            )
+        )
         .where(MeetingConfig.id.not_in(select(active_subq)))
         .order_by(CalendarEvent.start_time, MeetingConfig.id)
     )

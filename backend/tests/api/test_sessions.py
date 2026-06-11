@@ -803,3 +803,74 @@ def test_get_session_audio_cannot_cross_sessions(
     _seed_wav(audio_root, 6, "utt-2000-1.wav")
     # Session 5 has no dir — session 6's file must not be reachable via id 5.
     assert client.get("/sessions/5/audio/utt-2000-1.wav").status_code == 404
+
+
+# --- Manual start vs dismissal (Johnny-trt.56) ------------------------------
+
+
+def test_start_clears_in_force_dismissal(
+    client: TestClient,
+    db_session: Session,
+    launcher: NoopContainerLauncher,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Join now on a dismissed meeting un-dismisses first, then starts.
+
+    The operator explicitly asked for the bot back; leaving the dismissal in
+    place would let the scheduler treat the freshly-started session's meeting
+    as never-rejoinable state.
+    """
+    from datetime import UTC, datetime
+
+    from app.db.models import BotDismissActor
+
+    async def _no_publish(channel: str, payload: dict) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "app.services.meeting_lifecycle._publish_via_redis", _no_publish
+    )
+
+    event, cfg = _seed_meeting(db_session)
+    cfg.bot_dismissed_at = datetime.now(UTC)
+    cfg.bot_dismissed_by = BotDismissActor.UI
+    cfg.bot_dismissed_until = event.end_time
+    db_session.commit()
+
+    res = client.post("/sessions/start", json={"event_id": event.id})
+    assert res.status_code == 201, res.text
+    db_session.refresh(cfg)
+    assert cfg.bot_dismissed_at is None
+    assert cfg.bot_dismissed_by is None
+    assert cfg.bot_dismissed_until is None
+    assert len(launcher.started) == 1
+
+
+def test_start_leaves_lapsed_dismissal_untouched(
+    client: TestClient,
+    db_session: Session,
+    launcher: NoopContainerLauncher,
+) -> None:
+    """A dismissal from a PAST occurrence window isn't cleared by Join now.
+
+    The event was rescheduled past the dismissed window, so the dismissal
+    already lapsed (it no longer blocks dispatch); Join now must not rewrite
+    history by clearing the stale audit stamp of who dismissed that earlier
+    occurrence.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from app.db.models import BotDismissActor
+
+    event, cfg = _seed_meeting(db_session)
+    stale_until = datetime.now(UTC) - timedelta(days=1)
+    cfg.bot_dismissed_at = stale_until - timedelta(hours=1)
+    cfg.bot_dismissed_by = BotDismissActor.VOICE
+    cfg.bot_dismissed_until = stale_until
+    db_session.commit()
+
+    res = client.post("/sessions/start", json={"event_id": event.id})
+    assert res.status_code == 201, res.text
+    db_session.refresh(cfg)
+    assert cfg.bot_dismissed_by is BotDismissActor.VOICE
+    assert len(launcher.started) == 1

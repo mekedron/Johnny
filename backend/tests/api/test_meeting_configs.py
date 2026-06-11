@@ -16,6 +16,7 @@ from app.db import Base
 from app.db.models import (
     BotMode,
     BotSession,
+    BotSessionStatus,
     CalendarEvent,
     GoogleAccount,
     MeetingConfig,
@@ -655,3 +656,194 @@ def test_delete_idempotent(
 def test_delete_missing_event_returns_404(client: TestClient) -> None:
     resp = client.delete("/calendar/events/9999/meeting-config")
     assert resp.status_code == 404
+
+
+# --- Bot dismissal endpoints (Johnny-trt.56) --------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _quiet_state_publisher(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict]]:
+    """Replace the one-off Redis publish with a recorder for every test here."""
+    published: list[tuple[str, dict]] = []
+
+    async def _record(channel: str, payload: dict) -> None:
+        published.append((channel, payload))
+
+    monkeypatch.setattr(
+        "app.services.meeting_lifecycle._publish_via_redis", _record
+    )
+    return published
+
+
+def _create_config(
+    client: TestClient,
+    event: CalendarEvent,
+    template: ProfileTemplate,
+    account: GoogleAccount,
+) -> dict:
+    payload = _upsert_payload(
+        profile_template_id=template.id,
+        identity_account_id=account.id,
+    )
+    resp = client.put(f"/calendar/events/{event.id}/meeting-config", json=payload)
+    assert resp.status_code == 200, resp.json()
+    return resp.json()
+
+
+def test_fresh_config_reads_scheduled_state(
+    client: TestClient,
+    seed_event: CalendarEvent,
+    seed_template_listen: ProfileTemplate,
+    seed_account: GoogleAccount,
+) -> None:
+    body = _create_config(client, seed_event, seed_template_listen, seed_account)
+    assert body["bot_state"] == "scheduled"
+    assert body["bot_dismissed_at"] is None
+    assert body["bot_dismissed_by"] is None
+    assert body["bot_dismissed_until"] is None
+
+
+def test_dismiss_sets_state_and_stops_active_session(
+    client: TestClient,
+    db_session: Session,
+    seed_event: CalendarEvent,
+    seed_template_listen: ProfileTemplate,
+    seed_account: GoogleAccount,
+) -> None:
+    body = _create_config(client, seed_event, seed_template_listen, seed_account)
+    live = BotSession(
+        meeting_config_id=body["id"],
+        status=BotSessionStatus.JOINED,
+    )
+    db_session.add(live)
+    db_session.commit()
+
+    resp = client.post(
+        f"/calendar/events/{seed_event.id}/meeting-config/bot-dismissal",
+        json={"dismissed_by": "ui"},
+    )
+    assert resp.status_code == 200, resp.json()
+    out = resp.json()
+    assert out["bot_state"] == "dismissed"
+    assert out["bot_dismissed_by"] == "ui"
+    assert out["bot_dismissed_at"] is not None
+    assert out["bot_dismissed_until"] is not None
+
+    db_session.refresh(live)
+    assert live.status is BotSessionStatus.ENDED
+
+
+def test_dismiss_defaults_actor_to_ui_with_empty_body(
+    client: TestClient,
+    seed_event: CalendarEvent,
+    seed_template_listen: ProfileTemplate,
+    seed_account: GoogleAccount,
+) -> None:
+    _create_config(client, seed_event, seed_template_listen, seed_account)
+    resp = client.post(
+        f"/calendar/events/{seed_event.id}/meeting-config/bot-dismissal"
+    )
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["bot_dismissed_by"] == "ui"
+
+
+def test_dismiss_accepts_voice_actor(
+    client: TestClient,
+    seed_event: CalendarEvent,
+    seed_template_listen: ProfileTemplate,
+    seed_account: GoogleAccount,
+) -> None:
+    _create_config(client, seed_event, seed_template_listen, seed_account)
+    resp = client.post(
+        f"/calendar/events/{seed_event.id}/meeting-config/bot-dismissal",
+        json={"dismissed_by": "voice"},
+    )
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["bot_dismissed_by"] == "voice"
+
+
+def test_dismiss_publishes_state_change_event(
+    client: TestClient,
+    seed_event: CalendarEvent,
+    seed_template_listen: ProfileTemplate,
+    seed_account: GoogleAccount,
+    _quiet_state_publisher: list[tuple[str, dict]],
+) -> None:
+    _create_config(client, seed_event, seed_template_listen, seed_account)
+    resp = client.post(
+        f"/calendar/events/{seed_event.id}/meeting-config/bot-dismissal"
+    )
+    assert resp.status_code == 200
+    channels = [c for c, _ in _quiet_state_publisher]
+    assert channels == ["johnny.global.calendar"]
+    assert _quiet_state_publisher[0][1]["type"] == "meeting_bot_state_changed"
+    assert _quiet_state_publisher[0][1]["bot_state"] == "dismissed"
+
+
+def test_dismiss_404_without_config(
+    client: TestClient, seed_event: CalendarEvent
+) -> None:
+    resp = client.post(
+        f"/calendar/events/{seed_event.id}/meeting-config/bot-dismissal"
+    )
+    assert resp.status_code == 404
+
+
+def test_dismiss_404_unknown_event(client: TestClient) -> None:
+    resp = client.post("/calendar/events/9999/meeting-config/bot-dismissal")
+    assert resp.status_code == 404
+
+
+def test_get_reflects_dismissed_state(
+    client: TestClient,
+    seed_event: CalendarEvent,
+    seed_template_listen: ProfileTemplate,
+    seed_account: GoogleAccount,
+) -> None:
+    _create_config(client, seed_event, seed_template_listen, seed_account)
+    client.post(f"/calendar/events/{seed_event.id}/meeting-config/bot-dismissal")
+    fetched = client.get(f"/calendar/events/{seed_event.id}/meeting-config").json()
+    assert fetched["bot_state"] == "dismissed"
+    assert fetched["bot_dismissed_by"] == "ui"
+
+
+def test_undismiss_clears_state(
+    client: TestClient,
+    seed_event: CalendarEvent,
+    seed_template_listen: ProfileTemplate,
+    seed_account: GoogleAccount,
+    _quiet_state_publisher: list[tuple[str, dict]],
+) -> None:
+    _create_config(client, seed_event, seed_template_listen, seed_account)
+    client.post(f"/calendar/events/{seed_event.id}/meeting-config/bot-dismissal")
+
+    resp = client.delete(
+        f"/calendar/events/{seed_event.id}/meeting-config/bot-dismissal"
+    )
+    assert resp.status_code == 200, resp.json()
+    out = resp.json()
+    assert out["bot_state"] == "scheduled"
+    assert out["bot_dismissed_at"] is None
+    assert out["bot_dismissed_by"] is None
+    assert out["bot_dismissed_until"] is None
+    # dismiss + undismiss both announced.
+    assert [p["bot_state"] for _, p in _quiet_state_publisher] == [
+        "dismissed",
+        "scheduled",
+    ]
+
+
+def test_undismiss_idempotent_when_not_dismissed(
+    client: TestClient,
+    seed_event: CalendarEvent,
+    seed_template_listen: ProfileTemplate,
+    seed_account: GoogleAccount,
+    _quiet_state_publisher: list[tuple[str, dict]],
+) -> None:
+    _create_config(client, seed_event, seed_template_listen, seed_account)
+    resp = client.delete(
+        f"/calendar/events/{seed_event.id}/meeting-config/bot-dismissal"
+    )
+    assert resp.status_code == 200
+    assert resp.json()["bot_state"] == "scheduled"
+    assert _quiet_state_publisher == []

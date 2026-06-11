@@ -42,9 +42,13 @@ export type SessionEventType =
 	| 'agent_tts_failed'
 	| 'pipeline_stage_failed'
 	| 'turn_terminal'
-	| 'session_status_change';
+	| 'session_status_change'
+	| 'meeting_bot_state_changed';
 
-export type GlobalEventType = 'session_status_change' | 'calendar_event_changed';
+export type GlobalEventType =
+	| 'session_status_change'
+	| 'calendar_event_changed'
+	| 'meeting_bot_state_changed';
 
 export interface BaseEnvelope {
 	seq: number;
@@ -258,6 +262,25 @@ export interface CalendarEventChangedEvent extends BaseEnvelope {
 	timestamp_ms: number;
 }
 
+/**
+ * Meeting-level bot participation changed (Johnny-trt.56): the bot was
+ * dismissed for the current occurrence ("End for this meeting") or the
+ * dismissal was removed. Published on the global calendar channel always,
+ * and on each stopped session's channel when the dismissal ended a live
+ * session — so both the calendar surfaces and an open session page react.
+ */
+export interface MeetingBotStateChangedEvent extends BaseEnvelope {
+	type: 'meeting_bot_state_changed';
+	meeting_config_id: number;
+	calendar_event_id: number;
+	bot_state: 'scheduled' | 'active' | 'dismissed' | 'ended';
+	dismissed_at: string | null;
+	dismissed_by: 'ui' | 'voice' | 'schedule' | null;
+	dismissed_until: string | null;
+	stopped_session_ids: number[];
+	timestamp_ms: number;
+}
+
 export type SessionEvent =
 	| TranscriptPartialEvent
 	| TranscriptFinalEvent
@@ -272,9 +295,13 @@ export type SessionEvent =
 	| AgentTTSFailedEvent
 	| PipelineStageFailedEvent
 	| TurnTerminalEvent
-	| SessionStatusChangeEvent;
+	| SessionStatusChangeEvent
+	| MeetingBotStateChangedEvent;
 
-export type GlobalEvent = SessionStatusChangeEvent | CalendarEventChangedEvent;
+export type GlobalEvent =
+	| SessionStatusChangeEvent
+	| CalendarEventChangedEvent
+	| MeetingBotStateChangedEvent;
 
 // --- Subscription options + return -----------------------------------------
 

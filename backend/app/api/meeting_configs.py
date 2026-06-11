@@ -34,7 +34,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -42,12 +42,20 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_session
 from app.db.models import (
+    BotDismissActor,
     BotMode,
     CalendarEvent,
     GoogleAccount,
     MeetingConfig,
     Personality,
     ProfileTemplate,
+)
+from app.services.meeting_lifecycle import (
+    MeetingBotState,
+    derive_bot_state,
+    dismiss_bot_for_meeting,
+    has_active_session,
+    undismiss_bot_for_meeting,
 )
 
 router = APIRouter(prefix="/calendar/events", tags=["meeting-configs"])
@@ -89,7 +97,14 @@ class MeetingConfigUpsert(BaseModel):
 
 
 class MeetingConfigRead(BaseModel):
-    """Public view of a :class:`MeetingConfig` row."""
+    """Public view of a :class:`MeetingConfig` row.
+
+    ``bot_state`` is DERIVED per request (Johnny-trt.56): ``active`` when a
+    non-terminal bot_session exists, else ``dismissed`` while an in-force
+    dismissal covers the current occurrence, else ``ended`` once the
+    occurrence is over, else ``scheduled``. The three ``bot_dismissed_*``
+    fields mirror the columns so the UI can show who ended it and when.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -104,8 +119,23 @@ class MeetingConfigRead(BaseModel):
     allowed_replies: list[str] | None
     confidence_threshold: float | None
     enabled: bool
+    bot_state: MeetingBotState = MeetingBotState.SCHEDULED
+    bot_dismissed_at: datetime | None = None
+    bot_dismissed_by: BotDismissActor | None = None
+    bot_dismissed_until: datetime | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class BotDismissPayload(BaseModel):
+    """Body of ``POST .../meeting-config/bot-dismissal``.
+
+    ``dismissed_by`` defaults to ``ui`` — the HTTP surface is the operator's;
+    the voice tool (Johnny-trt.57) calls the service function directly with
+    ``voice``.
+    """
+
+    dismissed_by: BotDismissActor = BotDismissActor.UI
 
 
 # --- Helpers ---------------------------------------------------------------
@@ -213,6 +243,18 @@ def _get_config_for_event(
     )
 
 
+def _read_with_state(session: Session, row: MeetingConfig) -> MeetingConfigRead:
+    """Validate the row and stamp the derived ``bot_state`` (Johnny-trt.56)."""
+    view = MeetingConfigRead.model_validate(row)
+    return view.model_copy(
+        update={
+            "bot_state": derive_bot_state(
+                row, active_session=has_active_session(session, row.id)
+            )
+        }
+    )
+
+
 # --- Endpoints -------------------------------------------------------------
 
 
@@ -229,7 +271,7 @@ def get_meeting_config(event_id: int, session: SessionDep) -> MeetingConfigRead:
     row = _get_config_for_event(session, event_id)
     if row is None:
         raise HTTPException(status_code=404, detail="meeting config not set")
-    return MeetingConfigRead.model_validate(row)
+    return _read_with_state(session, row)
 
 
 @router.put(
@@ -302,7 +344,7 @@ def upsert_meeting_config(
             detail="meeting config save failed",
         ) from exc
     session.refresh(row)
-    return MeetingConfigRead.model_validate(row)
+    return _read_with_state(session, row)
 
 
 @router.delete(
@@ -322,7 +364,76 @@ def delete_meeting_config(event_id: int, session: SessionDep) -> None:
     session.delete(row)
 
 
+# --- Bot dismissal (Johnny-trt.56) ------------------------------------------
+
+
+def _get_config_or_404(session: Session, event_id: int) -> MeetingConfig:
+    _get_event_or_404(session, event_id)
+    row = _get_config_for_event(session, event_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="meeting config not set")
+    return row
+
+
+@router.post(
+    "/{event_id}/meeting-config/bot-dismissal",
+    response_model=MeetingConfigRead,
+)
+async def dismiss_bot(
+    event_id: int,
+    session: SessionDep,
+    payload: Annotated[BotDismissPayload | None, Body()] = None,
+) -> MeetingConfigRead:
+    """End the bot's participation in this occurrence ("End for this meeting").
+
+    Distinct from the meeting ``enabled`` toggle: dismissal is scoped to the
+    current occurrence window (recurring meetings rejoin next occurrence by
+    design — see :mod:`app.services.meeting_lifecycle`). Stops any active
+    session for the meeting and keeps the scheduler from re-dispatching
+    until the dismissal lapses or is removed. Idempotent — re-dismissing
+    refreshes the stamp.
+    """
+    from app.api.sessions import get_launcher
+
+    row = _get_config_or_404(session, event_id)
+    result = await dismiss_bot_for_meeting(
+        session,
+        meeting=row,
+        actor=(payload.dismissed_by if payload is not None else BotDismissActor.UI),
+        launcher=get_launcher(),
+    )
+    # A stop failure doesn't undo the dismissal (the durable state is the
+    # point) but the operator should hear about a container that may still
+    # be alive — surface it as a 502 only when NOTHING could be stopped.
+    if result.stop_errors and not result.stopped_session_ids:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "bot dismissed, but stopping the active session failed: "
+                + "; ".join(result.stop_errors)
+            ),
+        )
+    return _read_with_state(session, row)
+
+
+@router.delete(
+    "/{event_id}/meeting-config/bot-dismissal",
+    response_model=MeetingConfigRead,
+)
+async def undismiss_bot(event_id: int, session: SessionDep) -> MeetingConfigRead:
+    """Remove a dismissal so the bot may rejoin this occurrence.
+
+    Idempotent — un-dismissing a meeting that isn't dismissed is a no-op.
+    The scheduler picks the meeting up again on its next poll while the
+    occurrence window is still open.
+    """
+    row = _get_config_or_404(session, event_id)
+    await undismiss_bot_for_meeting(session, meeting=row)
+    return _read_with_state(session, row)
+
+
 __all__ = [
+    "BotDismissPayload",
     "MeetingConfigRead",
     "MeetingConfigUpsert",
     "router",

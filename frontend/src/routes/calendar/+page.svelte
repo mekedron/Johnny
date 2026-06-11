@@ -36,9 +36,11 @@
 	} from '$lib/templates';
 	import {
 		deleteMeetingConfig,
+		dismissBot,
 		formatAllowedRepliesText,
 		getMeetingConfig,
 		parseAllowedRepliesText,
+		undismissBot,
 		upsertMeetingConfig,
 		type MeetingConfig,
 		type MeetingConfigUpsertPayload
@@ -105,6 +107,8 @@
 	let joinNowSessionId = $state<number | null>(null);
 	let tryBotBusy = $state(false);
 	let tryBotMessage = $state<string | null>(null);
+	let dismissBusy = $state(false);
+	let dismissMessage = $state<string | null>(null);
 
 	const groupedDays = $derived(
 		summary ? groupEventsByDay(summary.events) : []
@@ -212,6 +216,7 @@
 		joinNowMessage = null;
 		joinNowSessionId = null;
 		tryBotMessage = null;
+		dismissMessage = null;
 	}
 
 	async function openConfigPanel(event: CalendarEvent) {
@@ -222,6 +227,7 @@
 		joinNowMessage = null;
 		joinNowSessionId = null;
 		tryBotMessage = null;
+		dismissMessage = null;
 		try {
 			await Promise.all([
 				ensureTemplatesLoaded(),
@@ -399,11 +405,56 @@
 			const session = await startSession(selectedEvent.id);
 			joinNowSessionId = session.id;
 			joinNowMessage = `Johnny is joining — session #${session.id}.`;
+			// A manual join clears an in-force dismissal server-side; refresh
+			// the panel state so the dismissed notice disappears (trt.56).
+			if (existingConfig.bot_state === 'dismissed') {
+				existingConfig = await getMeetingConfig(selectedEvent.id);
+			}
 		} catch (e) {
 			joinNowMessage = e instanceof Error ? e.message : String(e);
 		} finally {
 			joinNowBusy = false;
 		}
+	}
+
+	async function handleDismissBot() {
+		if (!selectedEvent || !existingConfig) return;
+		dismissBusy = true;
+		dismissMessage = null;
+		try {
+			existingConfig = await dismissBot(selectedEvent.id);
+			dismissMessage = null;
+		} catch (e) {
+			dismissMessage = e instanceof Error ? e.message : String(e);
+		} finally {
+			dismissBusy = false;
+		}
+	}
+
+	async function handleUndismissBot() {
+		if (!selectedEvent || !existingConfig) return;
+		dismissBusy = true;
+		dismissMessage = null;
+		try {
+			existingConfig = await undismissBot(selectedEvent.id);
+		} catch (e) {
+			dismissMessage = e instanceof Error ? e.message : String(e);
+		} finally {
+			dismissBusy = false;
+		}
+	}
+
+	function formatDismissalStamp(config: MeetingConfig): string {
+		const when = config.bot_dismissed_at
+			? new Date(config.bot_dismissed_at).toLocaleString()
+			: '';
+		const actor =
+			config.bot_dismissed_by === 'voice'
+				? 'by voice request'
+				: config.bot_dismissed_by === 'schedule'
+					? 'by schedule policy'
+					: 'from the UI';
+		return when ? `${actor} · ${when}` : actor;
 	}
 
 	async function handleTryWithBot() {
@@ -860,18 +911,41 @@
 							>
 								Start session
 							</h3>
-							<span class="text-[0.65rem] text-ink-subtle">
+							<span
+								class="text-[0.65rem] text-ink-subtle"
+								data-testid="bot-state-chip"
+							>
 								Configured · {BOT_MODE_LABEL[existingConfig.mode]}
+								{existingConfig.bot_state === 'dismissed'
+									? ' · Ended for this meeting'
+									: existingConfig.bot_state === 'active'
+										? ' · In meeting'
+										: ''}
 							</span>
 						</div>
+						{#if existingConfig.bot_state === 'dismissed'}
+							<div
+								class="border-warning/40 bg-warning/10 mb-2 rounded-md border px-3 py-2"
+								data-testid="bot-dismissed-notice"
+							>
+								<p class="text-warning m-0 text-xs leading-snug">
+									Ended for this meeting {formatDismissalStamp(
+										existingConfig
+									)}. Johnny won't auto-rejoin this occurrence;
+									recurring meetings resume at the next one.
+								</p>
+							</div>
+						{/if}
 						<div class="flex flex-wrap items-center gap-2">
 							<Button
 								variant={hasPendingChanges ? 'outline' : 'default'}
 								onclick={handleJoinNow}
-								disabled={joinNowBusy || tryBotBusy}
+								disabled={joinNowBusy || tryBotBusy || dismissBusy}
 								title={hasPendingChanges
 									? 'Save your changes first.'
-									: undefined}
+									: existingConfig.bot_state === 'dismissed'
+										? 'Joins immediately and clears the "ended for this meeting" state.'
+										: undefined}
 								data-testid="join-now-button"
 							>
 								<PlayIcon />
@@ -880,14 +954,46 @@
 							<Button
 								variant="outline"
 								onclick={handleTryWithBot}
-								disabled={tryBotBusy || joinNowBusy}
+								disabled={tryBotBusy || joinNowBusy || dismissBusy}
 								title="Open an in-browser voice chat with Johnny using this meeting's context — no Google Meet needed."
 								data-testid="try-bot-button"
 							>
 								<MonitorPlayIcon />
 								{tryBotBusy ? 'Opening…' : 'Try in browser'}
 							</Button>
+							{#if existingConfig.bot_state === 'dismissed'}
+								<Button
+									variant="outline"
+									onclick={handleUndismissBot}
+									disabled={dismissBusy || joinNowBusy || tryBotBusy}
+									title="Let the scheduler rejoin this occurrence on its next poll."
+									data-testid="undismiss-bot-button"
+								>
+									<RefreshCwIcon />
+									{dismissBusy ? 'Allowing…' : 'Allow auto-rejoin'}
+								</Button>
+							{:else if existingConfig.bot_state !== 'ended'}
+								<Button
+									variant="outline"
+									onclick={handleDismissBot}
+									disabled={dismissBusy || joinNowBusy || tryBotBusy}
+									title="Stop the bot for this occurrence and keep it from auto-rejoining. Distinct from disabling the meeting — recurring meetings rejoin at the next occurrence."
+									data-testid="dismiss-bot-button"
+								>
+									<CalendarOffIcon />
+									{dismissBusy ? 'Ending…' : 'End for this meeting'}
+								</Button>
+							{/if}
 						</div>
+						{#if dismissMessage}
+							<p
+								class="text-destructive mt-2 text-xs"
+								role="status"
+								data-testid="dismiss-error"
+							>
+								{dismissMessage}
+							</p>
+						{/if}
 						{#if joinNowMessage}
 							<p
 								class="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground"

@@ -85,6 +85,20 @@ class BotSessionSource(enum.StrEnum):
     BROWSER = "browser"
 
 
+class BotDismissActor(enum.StrEnum):
+    """Who dismissed the bot from a meeting occurrence (Johnny-trt.56).
+
+    ``UI`` — the operator clicked "End for this meeting"; ``VOICE`` — the
+    in-meeting ``meeting.leave`` tool (Johnny-trt.57) honoured a spoken
+    request; ``SCHEDULE`` — reserved for automated policies (e.g. a future
+    "leave when alone" sweep).
+    """
+
+    UI = "ui"
+    VOICE = "voice"
+    SCHEDULE = "schedule"
+
+
 class PipelineMode(enum.StrEnum):
     """Which voice pipeline shape a session runs (Johnny-ckz.17).
 
@@ -361,6 +375,30 @@ class MeetingConfig(TimestampMixin, Base):
     allowed_replies: Mapped[list[str] | None] = mapped_column(_json_column(), nullable=True)
     confidence_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Johnny-trt.56: bot-participation dismissal, scoped to the current
+    # occurrence. The three columns are set / cleared together; dismissal is
+    # in force while ``calendar_event.start_time <= bot_dismissed_until``
+    # (see app.services.meeting_lifecycle for the occurrence-scoping rule).
+    # The coarse bot_state (scheduled|active|dismissed|ended) is DERIVED at
+    # read time — never persisted — so the scheduler has no state machine to
+    # keep in sync. FORWARD-COMPAT: the trt.45 agents-pivot reshape of this
+    # table must carry these columns through verbatim.
+    bot_dismissed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    bot_dismissed_by: Mapped[BotDismissActor | None] = mapped_column(
+        SAEnum(
+            BotDismissActor,
+            name="bot_dismiss_actor",
+            native_enum=False,
+            length=16,
+            values_callable=_str_enum_values,
+        ),
+        nullable=True,
+    )
+    bot_dismissed_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     calendar_event: Mapped[CalendarEvent] = relationship(back_populates="meeting_config")
     profile_template: Mapped[ProfileTemplate] = relationship(back_populates="meeting_configs")

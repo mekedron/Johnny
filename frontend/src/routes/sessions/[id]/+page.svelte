@@ -2,6 +2,7 @@
 	import { onDestroy, onMount, tick } from 'svelte';
 	import { page } from '$app/state';
 	import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
+	import CalendarOffIcon from '@lucide/svelte/icons/calendar-off';
 	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
 	import SquareIcon from '@lucide/svelte/icons/square';
 	import BotIcon from '@lucide/svelte/icons/bot';
@@ -31,12 +32,14 @@
 		type AgentTaskRecord,
 		type AgentUtteranceRecord,
 		type DecisionOutcome,
+		type MeetingBotParticipation,
 		type NoReplyReason,
 		type SessionDetail,
 		type SessionTimingRecord,
 		type TerminalState,
 		type TranscriptChunk
 	} from '$lib/sessionDetail';
+	import { dismissBot, undismissBot } from '$lib/meetingConfigs';
 	import UtteranceAudioButton from '$lib/components/UtteranceAudioButton.svelte';
 	import {
 		subscribeToSession,
@@ -45,6 +48,7 @@
 		type AgentSuggestedEvent,
 		type ApprovalPendingEvent,
 		type ApprovalResolvedEvent,
+		type MeetingBotStateChangedEvent,
 		type RouterDecisionEvent,
 		type SessionEvent,
 		type SessionStatusChangeEvent,
@@ -138,6 +142,11 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 	let loadError = $state<string | null>(null);
 	let stopping = $state(false);
 	let stopError = $state<string | null>(null);
+	// Meeting-level bot participation (Johnny-trt.56); null for playground
+	// sessions. Drives the "End for this meeting" action + dismissed banner.
+	let meetingBotState = $state<MeetingBotParticipation | null>(null);
+	let dismissingMeeting = $state(false);
+	let dismissError = $state<string | null>(null);
 
 	let transcripts = $state<TranscriptLine[]>([]);
 	let partial = $state<TranscriptLine | null>(null);
@@ -286,6 +295,7 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 	// so re-pulling the detail never resets a live approval countdown.
 	function applyCoreDetail(detail: SessionDetail) {
 		session = detail.session;
+		meetingBotState = detail.meeting_bot_state ?? null;
 		const transcriptLines = detail.transcripts.map(transcriptToLine);
 		const utteranceLines = detail.utterances.map(utteranceToLine);
 		// INV-1 (Johnny-ckz.28.3): surface every no_reply turn inline in the
@@ -584,7 +594,22 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 				return handleTurnTerminal(event);
 			case 'session_status_change':
 				return handleStatus(event);
+			case 'meeting_bot_state_changed':
+				return handleMeetingBotState(event);
 		}
+	}
+
+	function handleMeetingBotState(ev: MeetingBotStateChangedEvent) {
+		// Arrives on this session's channel when a dismissal stopped it
+		// (Johnny-trt.56) — e.g. the voice meeting.leave tool or the calendar
+		// page acting while this page is open.
+		meetingBotState = {
+			calendar_event_id: ev.calendar_event_id,
+			bot_state: ev.bot_state,
+			dismissed_at: ev.dismissed_at,
+			dismissed_by: ev.dismissed_by,
+			dismissed_until: ev.dismissed_until
+		};
 	}
 
 	function handlePartial(ev: TranscriptPartialEvent) {
@@ -985,6 +1010,58 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 		}
 	}
 
+	async function handleEndForMeeting() {
+		// "End for this meeting" (Johnny-trt.56): stops the session AND keeps
+		// the scheduler from re-dispatching for this occurrence — unlike
+		// "End session", after which the bot may auto-rejoin within the window.
+		if (meetingBotState === null) return;
+		dismissingMeeting = true;
+		dismissError = null;
+		try {
+			const cfg = await dismissBot(meetingBotState.calendar_event_id);
+			meetingBotState = {
+				calendar_event_id: cfg.calendar_event_id,
+				bot_state: cfg.bot_state,
+				dismissed_at: cfg.bot_dismissed_at,
+				dismissed_by: cfg.bot_dismissed_by,
+				dismissed_until: cfg.bot_dismissed_until
+			};
+			// The dismissal stopped this session server-side; reflect it
+			// without waiting for the status event.
+			await loadInitialDetail();
+		} catch (err) {
+			dismissError = err instanceof Error ? err.message : String(err);
+		} finally {
+			dismissingMeeting = false;
+		}
+	}
+
+	async function handleAllowRejoin() {
+		if (meetingBotState === null) return;
+		dismissingMeeting = true;
+		dismissError = null;
+		try {
+			const cfg = await undismissBot(meetingBotState.calendar_event_id);
+			meetingBotState = {
+				calendar_event_id: cfg.calendar_event_id,
+				bot_state: cfg.bot_state,
+				dismissed_at: cfg.bot_dismissed_at,
+				dismissed_by: cfg.bot_dismissed_by,
+				dismissed_until: cfg.bot_dismissed_until
+			};
+		} catch (err) {
+			dismissError = err instanceof Error ? err.message : String(err);
+		} finally {
+			dismissingMeeting = false;
+		}
+	}
+
+	function dismissalActorLabel(actor: string | null): string {
+		if (actor === 'voice') return 'by voice request';
+		if (actor === 'schedule') return 'by schedule policy';
+		return 'from the UI';
+	}
+
 	async function autoScrollTranscript() {
 		await tick();
 		if (transcriptEl !== null) {
@@ -1136,11 +1213,28 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 				</Button>
 			{/if}
 			{#if !isTerminal}
+				{#if meetingBotState !== null && meetingBotState.bot_state !== 'dismissed'}
+					<Button
+						variant="outline"
+						size="sm"
+						onclick={handleEndForMeeting}
+						disabled={dismissingMeeting || stopping}
+						title="Stop the bot for this occurrence and keep it from auto-rejoining. Recurring meetings rejoin at the next occurrence."
+						data-testid="end-for-meeting-button"
+					>
+						<CalendarOffIcon />
+						{dismissingMeeting ? 'Ending…' : 'End for this meeting'}
+					</Button>
+				{/if}
 				<Button
 					variant="destructive"
 					size="sm"
 					onclick={handleEndSession}
 					disabled={stopping}
+					title={meetingBotState !== null &&
+					meetingBotState.bot_state !== 'dismissed'
+						? 'Stops this session only — the scheduler may rejoin while the meeting window is open.'
+						: undefined}
 					data-testid="end-session-button"
 				>
 					<SquareIcon /> {stopping ? 'Ending…' : 'End session'}
@@ -1148,6 +1242,49 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 			{/if}
 		{/snippet}
 	</PageHeader>
+
+	{#if meetingBotState !== null && meetingBotState.bot_state === 'dismissed'}
+		<div
+			class="border-warning/40 bg-warning/10 rounded-md border px-4 py-3 text-sm"
+			role="status"
+			data-testid="meeting-dismissed-banner"
+		>
+			<div class="flex flex-wrap items-center justify-between gap-2">
+				<div class="flex items-start gap-3">
+					<CalendarOffIcon class="text-warning mt-0.5 size-4 shrink-0" />
+					<div>
+						<p class="text-foreground m-0 font-semibold">
+							Ended for this meeting
+						</p>
+						<p class="text-muted-foreground m-0 text-xs">
+							{dismissalActorLabel(meetingBotState.dismissed_by)}
+							{#if meetingBotState.dismissed_at}
+								· {new Date(meetingBotState.dismissed_at).toLocaleString()}
+							{/if}
+							— Johnny won't auto-rejoin this occurrence; recurring
+							meetings resume at the next one.
+						</p>
+					</div>
+				</div>
+				<Button
+					variant="outline"
+					size="sm"
+					onclick={handleAllowRejoin}
+					disabled={dismissingMeeting}
+					data-testid="allow-rejoin-button"
+				>
+					{dismissingMeeting ? 'Allowing…' : 'Allow auto-rejoin'}
+				</Button>
+			</div>
+		</div>
+	{/if}
+	{#if dismissError}
+		<Alert.Root variant="destructive" data-testid="dismiss-error">
+			<CircleAlertIcon />
+			<Alert.Title>Could not change meeting participation</Alert.Title>
+			<Alert.Description>{dismissError}</Alert.Description>
+		</Alert.Root>
+	{/if}
 
 	{#if sessionPersonality && sessionPersonality.fallbacks.length > 0}
 		<div class="flex flex-col gap-1.5" data-testid="session-fallbacks">
