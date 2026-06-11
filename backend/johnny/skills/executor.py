@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 
+from johnny.agent.internal_tools import is_internal_kind
 from johnny.agent.tasks import QueuedTask, TaskExecutor, TaskResult, stub_executor
 from johnny.skills.registry import SkillRegistry
 from johnny.skills.tools import SandboxExecTool, ToolOutcome
@@ -75,6 +76,29 @@ def build_skill_task_executor(
 
     async def _execute(task: QueuedTask) -> TaskResult:
         kind = task.spec.kind
+        if is_internal_kind(kind):
+            # Locality guard (Johnny-trt.57): internal kinds run in the live
+            # agent process only — session-local actions like meeting.leave /
+            # session.end must never reach the sandbox (or a future external
+            # worker pass reusing this executor, Johnny-trt.24). In-session
+            # they never get here (the internal executor resolves first);
+            # this refuses stale-catalog or hand-queued rows honestly.
+            logger.error(
+                "skill executor: refusing internal kind %r — internal tools "
+                "run only in the live agent process (locality guard)",
+                kind,
+            )
+            return TaskResult(
+                status="failed",
+                result_text=(
+                    f"The {kind} action can only run inside the live session, "
+                    "not in the background worker."
+                ),
+                error=(
+                    f"locality guard: internal kind {kind!r} must run in the "
+                    "agent process (Johnny-trt.57); sandbox/worker execution refused"
+                ),
+            )
         skill = registry.get(kind)
         if skill is None:
             return await fallback(task)

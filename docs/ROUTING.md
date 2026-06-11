@@ -178,11 +178,20 @@ image, but the router prompt never talks to the sandbox:
   gap 2026-06-11: parser and gate previously accepted any kind; "when did WW2 start" →
   "let me check on that" was the symptom.) Knowledge questions are never delegated —
   the restraint guidance carries an explicit general-knowledge negative example.
-- **Internal tools (trt.57)**: first-party in-app actions (`meeting.leave`,
-  `session.end`) are catalog kinds like any other, surface-scoped by the availability
-  predicate, but execute **session-locally in the agent process** — never the worker,
-  never the sandbox. Asking "can you leave the meeting?" yields a farewell, the
-  trt.56 dismissed state (so the scheduler doesn't auto-rejoin), and a clean teardown.
+- **Internal tools (trt.57, shipped)**: first-party in-app actions (`meeting.leave`,
+  `session.end`) are catalog kinds like any other but execute **session-locally in
+  the agent process** — never the worker, never the sandbox (the skill executor
+  carries a locality guard refusing them). Surface scoping v1 is gating-by-omission
+  until trt.55's predicate lands: `meeting.leave` enters the catalog only when the
+  job is Meet-backed (`calendar_event_id` present), so a playground ask gets an
+  honest inline answer; a hallucinated internal kind off-surface settles `failed`
+  with actionable speech via the trt.53 correction. Asking "can you leave the
+  meeting?" yields the router-authored ack as the farewell (played to completion
+  via `RouterGate.wait_recent_say_done` before the plug is pulled), the trt.56
+  dismissed state with `actor=voice` (no auto-rejoin), and a clean teardown through
+  the SAME api endpoints the UI buttons call — Johnny-ajc stop verification
+  included, and a bounded `TaskCoordinator.aclose` drain grace lets the
+  self-terminating task settle `done` instead of teardown-raced `cancelled`.
 
 ## 3. Per-agent model roles
 
@@ -354,8 +363,8 @@ separately replay-gated:
 | Tool layer + skill registry + calendar-via-gog skill | Johnny-trt.23 | **shipped** (2026-06-11) — `johnny/skills/`: openclaw-compatible SKILL.md loader (frontmatter, `requires.bins`/`anyBins`/os gated INSIDE the sandbox via one batched `/bins` probe; baseline implicitly satisfied; ineligible skills listed with reasons), exec bin policy v1 (baseline + eligible-declared, one `compute_allowed_bins` seam for trt.38), `sandbox.exec` tool (`ToolDefinition` reuse, denial-before-HTTP), deterministic v1 runner (`metadata.johnny.run`: exit 0 → done + stdout as speech, non-zero → failed + script-authored spoken copy; engine-run skills land with trt.22/24). **The catalog source IS the loader now** — `STUB_TASK_CATALOG` retired from assembly; no eligible skills ⇒ no catalog ⇒ no delegation. First skill `skills/google-calendar` (gog; graceful not-authed copy), seeded to the volume by run.sh |
 | Executor engine, worker pass, task events | Johnny-trt.22/24/25/26 | planned (Phase 4) |
 | Capability-aware catalog (availability + honest declines) | Johnny-trt.55 | planned (Phase 4) |
-| Meeting lifecycle states (dismissible bot, no auto-rejoin) | Johnny-trt.56 | planned (Phase 4) |
-| Internal tools (`meeting.leave`, `session.end` by voice) | Johnny-trt.57 | planned (Phase 4) |
+| Meeting lifecycle states (dismissible bot, no auto-rejoin) | Johnny-trt.56 | **shipped** (2026-06-11) — three dismissal stamp columns on `meeting_configs` (+`bot_dismissed_by` ui\|voice\|schedule), derived `bot_state`, occurrence-scoped in-force rule, scheduler dispatch filter, dismiss/undismiss endpoints + UI, `meeting_bot_state_changed` events |
+| Internal tools (`meeting.leave`, `session.end` by voice) | Johnny-trt.57 | **shipped** (2026-06-11) — `johnny/agent/internal_tools.py`: in-process registry + executor heading the chain (internal → skills → stub); catalog entries surface-scoped (`meeting.leave` only when the job carries a `calendar_event_id`); farewell-ack completes before teardown (`RouterGate.wait_recent_say_done`); actions post the SAME api endpoints the UI buttons call (voice dismissal `actor=voice` / `/sessions/{id}/stop`) so Johnny-ajc stop verification rides along — non-2xx → `failed` settle → spoken trt.53 correction; skill executor refuses internal kinds (locality guard); `TaskCoordinator.aclose` gained a bounded drain grace so the self-terminating settle lands `done`, not `cancelled` |
 | Speech queue + re-entry + status query | Johnny-trt.27–30 | planned (Phase 5) |
 | Per-agent model role slots (schema) | Johnny-trt.41 | planned (Phase 6) |
 | Role-based provider resolution + runtime fallback | Johnny-trt.42 | planned (Phase 6) |

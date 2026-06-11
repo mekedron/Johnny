@@ -375,7 +375,7 @@ async def test_cancelled_settle_reports_nothing() -> None:
     )
     assert await coordinator.begin(_spec()) is not None
     await asyncio.wait_for(started.wait(), timeout=2)
-    await coordinator.aclose()
+    await coordinator.aclose(drain_grace_s=0)
     assert reporter.reported == []
 
 
@@ -419,7 +419,7 @@ async def test_aclose_cancels_in_flight_runner_and_marks_cancelled() -> None:
     assert queued is not None
     await asyncio.wait_for(started.wait(), timeout=2)
 
-    await coordinator.aclose()
+    await coordinator.aclose(drain_grace_s=0)
 
     record = sink.get(queued.task_id)
     assert record is not None
@@ -433,6 +433,62 @@ async def test_aclose_is_idempotent_and_safe_when_idle() -> None:
     coordinator = TaskCoordinator(InMemoryTaskSink(), executor=stub_executor)
     await coordinator.aclose()
     await coordinator.aclose()
+
+
+async def test_aclose_drain_grace_lets_an_inflight_settle_finish(  # Johnny-trt.57
+) -> None:
+    """A resolver that completes within the grace settles ``done``, not ``cancelled``.
+
+    The shape of an internal teardown task (meeting.leave / session.end):
+    its control call triggers the very teardown that calls ``aclose`` while
+    the resolver is still finishing — the bounded drain lets the honest
+    terminal land instead of recording a misleading ``cancelled``.
+    """
+    sink = InMemoryTaskSink()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def almost_done_executor(queued: QueuedTask) -> TaskResult:
+        started.set()
+        await release.wait()
+        return TaskResult(status="done", result_text="left the meeting")
+
+    coordinator = TaskCoordinator(sink, executor=almost_done_executor)
+    queued = await coordinator.begin(_spec(kind="meeting.leave"))
+    assert queued is not None
+    await asyncio.wait_for(started.wait(), timeout=2)
+
+    closer = asyncio.ensure_future(coordinator.aclose(drain_grace_s=5.0))
+    await asyncio.sleep(0)  # the drain is now waiting on the resolver
+    release.set()
+    await asyncio.wait_for(closer, timeout=2)
+
+    record = sink.get(queued.task_id)
+    assert record is not None
+    assert record.status == "done"
+    assert record.result_text == "left the meeting"
+
+
+async def test_aclose_drain_grace_expiry_still_cancels() -> None:
+    """A genuinely hung executor is cancelled once the grace expires."""
+    sink = InMemoryTaskSink()
+    started = asyncio.Event()
+
+    async def hanging_executor(queued: QueuedTask) -> TaskResult:
+        started.set()
+        await asyncio.sleep(60)
+        return TaskResult(status="done")
+
+    coordinator = TaskCoordinator(sink, executor=hanging_executor)
+    queued = await coordinator.begin(_spec())
+    assert queued is not None
+    await asyncio.wait_for(started.wait(), timeout=2)
+
+    await asyncio.wait_for(coordinator.aclose(drain_grace_s=0.05), timeout=2)
+
+    record = sink.get(queued.task_id)
+    assert record is not None
+    assert record.status == "cancelled"
 
 
 async def test_join_waits_for_completion_without_cancelling() -> None:

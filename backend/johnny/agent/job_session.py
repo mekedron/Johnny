@@ -57,6 +57,12 @@ from johnny.agent.adapters.factory import (
 from johnny.agent.answer import degrade_speaking_mode_if_no_tts
 from johnny.agent.barge_in import BargeInClassifier, BargeInClassifierConfig
 from johnny.agent.gate import TurnIndex, TurnLedger
+from johnny.agent.internal_tools import (
+    InternalToolContext,
+    build_internal_task_executor,
+    internal_catalog_entries,
+    merge_task_catalog,
+)
 from johnny.agent.job_config import (
     APPROVAL_REQUIRED_MODE,
     AUTONOMOUS_MODE,
@@ -81,7 +87,7 @@ from johnny.agent.observability import (
 )
 from johnny.agent.router_gate import RouterGate, RouterGateConfig
 from johnny.agent.session import JohnnyAgent, build_johnny_agent
-from johnny.agent.tasks import TaskCoordinator
+from johnny.agent.tasks import TaskCoordinator, stub_executor
 from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder, build_recorder_from_env
 from johnny.voice_pipeline.event_bus import (
     DEFAULT_CHANNEL_PREFIX,
@@ -225,6 +231,10 @@ class AgentRuntime:
     # ``sandbox.exec`` tool talks to the skills-sandbox through. ``None``
     # whenever the runtime has no task pieces.
     skill_registry: SkillRegistry | None = None
+    # Internal-tool seams (Johnny-trt.57): the session-local context the
+    # in-process meeting.leave / session.end runners act through. ``None``
+    # whenever the runtime has no task pieces.
+    internal_tools: InternalToolContext | None = None
     _sandbox_client: SandboxClient | None = None
     _task_wake: Any = None
     _db_session: Session | None = None
@@ -292,6 +302,14 @@ class AgentRuntime:
                 await self._sandbox_client.aclose()
             except Exception:
                 logger.exception("agent runtime: sandbox client close failed for %s", sid)
+        # Same ordering rationale for the internal-tool control client
+        # (Johnny-trt.57): an in-flight meeting.leave / session.end resolver
+        # may be mid-POST until the coordinator drain settles it.
+        if self.internal_tools is not None:
+            try:
+                await self.internal_tools.aclose()
+            except Exception:
+                logger.exception("agent runtime: internal tools close failed for %s", sid)
         if self._task_wake is not None:
             try:
                 await self._task_wake.close()
@@ -576,11 +594,26 @@ async def build_agent_runtime(
     task_coordinator = None
     task_wake = None
     executor = None
+    internal_tools = None
     if task_sink is not None:
         skill_registry, sandbox_client, executor = await _build_skill_pieces(
             session_id,
             skill_registry=skill_registry,
             sandbox_client=sandbox_client,
+        )
+        # Internal tools (Johnny-trt.57) head the executor chain — the
+        # documented resolution order internal → skills → fail-fast stub.
+        # The session-local context carries the Meet linkage (the surface
+        # predicate for meeting.leave) and the api base for the in-app
+        # control calls; the farewell-wait seam attaches after the gate is
+        # built below (the attach_say ordering pattern).
+        internal_tools = InternalToolContext(
+            bot_session_id=config.bot_session_id,
+            calendar_event_id=config.calendar_event_id,
+        )
+        executor = build_internal_task_executor(
+            internal_tools,
+            fallback=executor if executor is not None else stub_executor,
         )
         from johnny.agent.task_wiring import build_task_coordinator
 
@@ -606,13 +639,20 @@ async def build_agent_runtime(
         # Task catalog (Johnny-trt.19): teach the router the delegate
         # vocabulary only when a coordinator exists to honour it — a gate
         # without task wiring stage_errors delegate verdicts, so advertising
-        # kinds there would invite turns that can only fail. The source is
-        # the skill loader (Johnny-trt.23): eligible SKILL.md packages on the
-        # skills volume. No eligible skills (or no volume) renders no
-        # catalog, so the router never learns kinds nothing can honour.
+        # kinds there would invite turns that can only fail. Sources, in
+        # resolution order (Johnny-trt.57): the internal tools available on
+        # THIS surface (meeting.leave only when the session is Meet-backed —
+        # capability gating by omission, so the playground router never
+        # promises a meeting it isn't in), then the skill loader
+        # (Johnny-trt.23): eligible SKILL.md packages on the skills volume.
         task_catalog=(
-            skill_registry.catalog_entries()
-            if task_coordinator is not None and skill_registry is not None
+            merge_task_catalog(
+                internal_catalog_entries(
+                    meeting_backed=config.calendar_event_id is not None
+                ),
+                skill_registry.catalog_entries() if skill_registry is not None else (),
+            )
+            if task_coordinator is not None
             else ()
         ),
     )
@@ -666,6 +706,13 @@ async def build_agent_runtime(
         tasks=task_coordinator,
         resolve_turn_id=turn_index.resolve,
     )
+
+    # Internal teardown tools wait for the farewell ack to finish playing
+    # before disconnecting (Johnny-trt.57). The gate owns say(), so the seam
+    # can only attach once the gate exists — same ordering reason as
+    # attach_say / attach_approval.
+    if internal_tools is not None:
+        internal_tools.attach_farewell_wait(gate.wait_recent_say_done)
 
     # The metrics translator resolves a LiveKit metric's speech_id (the reply
     # SpeechHandle.id, on LLM/TTS metrics) to the durable int turn id via the gate's
@@ -754,6 +801,7 @@ async def build_agent_runtime(
         task_sink=task_sink,
         task_coordinator=task_coordinator,
         skill_registry=skill_registry,
+        internal_tools=internal_tools,
         _sandbox_client=sandbox_client,
         _task_wake=task_wake,
         _db_session=db_session,

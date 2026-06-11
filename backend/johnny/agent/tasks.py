@@ -56,6 +56,16 @@ EXECUTOR_RESULT_STATUSES: frozenset[str] = frozenset({"done", "failed"})
 """The only statuses an executor may settle a task to. ``cancelled`` is the
 coordinator's (teardown), ``expired`` the future sweep's."""
 
+DEFAULT_ACLOSE_DRAIN_GRACE_S = 10.0
+"""How long :meth:`TaskCoordinator.aclose` lets in-flight resolvers finish
+before cancelling them (Johnny-trt.57). Exists for self-terminating internal
+tasks: ``meeting.leave`` / ``session.end`` trigger the very teardown that
+calls ``aclose`` while their resolver is still awaiting the control call's
+response + the terminal row write — an immediate cancel would record a
+misleading ``cancelled`` row for an action that *succeeded*. The grace also
+lets any nearly-done skill task settle honestly instead of being cut at the
+finish line; a genuinely hung executor is still cancelled when it expires."""
+
 
 @dataclass(frozen=True, slots=True)
 class TaskSpec:
@@ -358,13 +368,21 @@ class TaskCoordinator:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def aclose(self) -> None:
-        """Cancel and drain any in-flight resolvers (best-effort teardown).
+    async def aclose(self, *, drain_grace_s: float = DEFAULT_ACLOSE_DRAIN_GRACE_S) -> None:
+        """Drain in-flight resolvers briefly, then cancel the rest (teardown).
 
-        A cancelled resolver marks its row ``cancelled`` on the way out (see
-        :meth:`_run`), so a session teardown never strands tasks in
-        ``running``. Safe to call more than once.
+        The bounded drain (Johnny-trt.57) lets a resolver already past its
+        executor — or one whose internal teardown action triggered this very
+        ``aclose`` — finish its terminal row write, so the history shows the
+        honest ``done``/``failed`` instead of a teardown-raced ``cancelled``.
+        Anything still running after ``drain_grace_s`` is cancelled and marks
+        its row ``cancelled`` on the way out (see :meth:`_run`), so a session
+        teardown never strands tasks in ``running``. ``drain_grace_s=0``
+        restores the immediate-cancel behaviour. Safe to call more than once.
         """
+        pending = [task for task in self._tasks if not task.done()]
+        if pending and drain_grace_s > 0:
+            await asyncio.wait(pending, timeout=drain_grace_s)
         tasks = list(self._tasks)
         for task in tasks:
             task.cancel()
@@ -485,6 +503,7 @@ class TaskCoordinator:
 
 
 __all__ = [
+    "DEFAULT_ACLOSE_DRAIN_GRACE_S",
     "EXECUTOR_RESULT_STATUSES",
     "TERMINAL_TASK_STATUSES",
     "InMemoryTaskSink",

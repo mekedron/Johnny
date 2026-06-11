@@ -425,12 +425,20 @@ async def test_delegation_capable_modes_wire_task_sink_and_coordinator(
     # and stamps agent_tasks rows with the shared TurnIndex's int turn id.
     assert runtime.gate._tasks is runtime.task_coordinator
     assert runtime.gate._resolve_turn_id is not None
-    # Task catalog (Johnny-trt.19/trt.23): the source is the skill loader.
-    # The isolated (empty) skills volume loads a registry with no skills, so
-    # the router is taught nothing — no eligible skill, no advertised kind.
+    # Task catalog (Johnny-trt.19/trt.23/trt.57): internal tools head the
+    # catalog; the skill loader follows. The isolated (empty) skills volume
+    # loads a registry with no skills, so only the internal kinds available
+    # on this surface remain — session.end everywhere, meeting.leave absent
+    # because this job has no calendar_event_id (not Meet-backed).
     assert runtime.skill_registry is not None
     assert runtime.skill_registry.skills == ()
-    assert runtime.gate._config.task_catalog == ()
+    assert [entry.kind for entry in runtime.gate._config.task_catalog] == ["session.end"]
+    # The internal-tool context is wired with the session linkage + the
+    # gate's farewell-wait seam (Johnny-trt.57).
+    assert runtime.internal_tools is not None
+    assert runtime.internal_tools.bot_session_id == 7
+    assert runtime.internal_tools.calendar_event_id is None
+    assert runtime.internal_tools.wait_for_farewell == runtime.gate.wait_recent_say_done
 
     await runtime.aclose()
     assert db.closed is True
@@ -462,8 +470,37 @@ async def test_delegation_capable_runtime_catalogs_injected_skills(tmp_path: Pat
     )
 
     assert runtime.skill_registry is registry_obj
-    assert runtime.gate._config.task_catalog == registry_obj.catalog_entries()
-    assert [entry.kind for entry in runtime.gate._config.task_catalog] == ["fetch-news"]
+    # Internal kinds first (resolution order, Johnny-trt.57), then the
+    # skill loader's entries (Johnny-trt.23) — session.end only, since this
+    # job has no Meet linkage.
+    assert [entry.kind for entry in runtime.gate._config.task_catalog] == [
+        "session.end",
+        "fetch-news",
+    ]
+    assert runtime.gate._config.task_catalog[1:] == registry_obj.catalog_entries()
+    await runtime.aclose()
+    assert db.closed is True
+
+
+async def test_meet_backed_runtime_advertises_meeting_leave() -> None:
+    """Surface scoping (Johnny-trt.57): a job with a calendar_event_id is a
+    Meet-backed session — meeting.leave joins the catalog ahead of
+    session.end, and the internal context carries the event linkage the
+    voice dismissal posts against."""
+    db = _FakeDbSession()
+    runtime = await build_agent_runtime(
+        _job(mode=AUTONOMOUS_MODE, calendar_event_id=31, meeting_config_id=5),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: db,
+    )
+    assert [entry.kind for entry in runtime.gate._config.task_catalog] == [
+        "meeting.leave",
+        "session.end",
+    ]
+    assert runtime.internal_tools is not None
+    assert runtime.internal_tools.calendar_event_id == 31
+    assert runtime.internal_tools.meeting_backed is True
     await runtime.aclose()
     assert db.closed is True
 
@@ -519,8 +556,9 @@ async def test_delegation_mode_without_db_factory_gets_no_task_pieces() -> None:
     # no_reply(stage_error) instead of promising unrecordable work (trt.17).
     assert runtime.gate._tasks is None
     # And no catalog (trt.19): the router is never taught kinds that could
-    # only stage_error here.
+    # only stage_error here — internal kinds included (trt.57).
     assert runtime.gate._config.task_catalog == ()
+    assert runtime.internal_tools is None
 
 
 async def test_speaking_mode_without_tts_degrade_drops_task_wiring() -> None:

@@ -184,6 +184,29 @@ async def test_unknown_kind_falls_through_to_stub(tmp_path: Path) -> None:
     assert "don't know how to run no-such-kind" in result.result_text
 
 
+async def test_internal_kinds_refused_by_locality_guard(tmp_path: Path) -> None:
+    """Internal kinds never enter the sandbox.exec path (Johnny-trt.57).
+
+    Even a skill package that *claims* an internal kind on the volume must
+    not run for it: the guard fires before the registry lookup, the exec
+    request list stays empty, and the stub fallback is never consulted.
+    """
+    from johnny.agent.internal_tools import MEETING_LEAVE_KIND, SESSION_END_KIND
+
+    registry = await _registry_with_runner(tmp_path)
+    bodies: list[dict[str, Any]] = []
+    executor = build_skill_task_executor(
+        registry, _tool(registry, dict(_BASE_REPLY), bodies)
+    )
+    for kind in (MEETING_LEAVE_KIND, SESSION_END_KIND):
+        result = await executor(_task(kind))
+        assert result.status == "failed"
+        assert "only run inside the live session" in result.result_text
+        assert "locality guard" in result.error
+        assert "Johnny-trt.57" in result.error
+    assert bodies == []  # nothing reached the sandbox
+
+
 async def test_openclaw_skill_without_runner_fails_honestly(tmp_path: Path) -> None:
     registry = await _registry_with_runner(tmp_path, with_run=False)
     executor = build_skill_task_executor(registry, _tool(registry, dict(_BASE_REPLY)))

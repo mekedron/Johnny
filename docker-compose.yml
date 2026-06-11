@@ -90,6 +90,11 @@ x-backend-env: &backend-env
   # skill directory needs no per-container path translation.
   JOHNNY_SKILLS_SANDBOX_URL: ${JOHNNY_SKILLS_SANDBOX_URL:-http://skills-sandbox:8088}
   JOHNNY_SKILLS_DIR: ${JOHNNY_SKILLS_DIR:-/skills}
+  # Internal tools (Johnny-trt.57): where the agent process (api for the
+  # playground, agent-worker for Meet) reaches Johnny's own api for
+  # first-party actions — meeting.leave posts the bot-dismissal endpoint,
+  # session.end posts /sessions/{id}/stop. Same endpoints the UI buttons hit.
+  JOHNNY_API_BASE_URL: ${JOHNNY_API_BASE_URL:-http://api:8000}
 
 services:
   postgres:

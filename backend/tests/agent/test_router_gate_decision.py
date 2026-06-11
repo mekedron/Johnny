@@ -2084,3 +2084,68 @@ async def test_shadow_scorer_failure_never_breaks_the_turn(
     assert len(obs.decisions) == 1
     decision, _turn = obs.decisions[0]
     assert SHADOW_KEY not in decision.raw
+
+
+# --------------------------------------------------------------------------- #
+# wait_recent_say_done — the internal-tool farewell seam (Johnny-trt.57)      #
+# --------------------------------------------------------------------------- #
+
+
+class _PlayoutHandle:
+    """A say handle whose ``wait_for_playout`` behaviour is scripted."""
+
+    def __init__(self, *, hang: bool = False, raises: bool = False) -> None:
+        self.waited = 0
+        self._hang = hang
+        self._raises = raises
+
+    async def wait_for_playout(self) -> None:
+        self.waited += 1
+        if self._raises:
+            raise RuntimeError("playout machinery gone")
+        if self._hang:
+            await asyncio.sleep(60)
+
+
+async def test_wait_recent_say_done_returns_when_nothing_was_said() -> None:
+    gate, _emitter, _router = _make_gate()
+    await asyncio.wait_for(gate.wait_recent_say_done(), timeout=1)
+
+
+async def test_delegate_ack_stashes_the_farewell_handle() -> None:
+    """The internal teardown runners wait on the most recent say — for a
+    delegate turn that is the ack/farewell, stashed synchronously before the
+    task resolver can run (the ordering the leave sequencing relies on)."""
+    h = _TaskGateHarness([_delegate_decision(kind="meeting.leave", ack="Bye, everyone!")])
+    msg = _user_msg("Johnny, please leave the meeting")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    assert h.gate._last_say_handle is h.say.handles[0]
+    # Settle the turn + drain so the correction (stub executor fails fast)
+    # lands too: corrections also count as "still talking" for the wait.
+    h.say.handles[0].fire_done()
+    await h.drain()
+    assert len(h.say.handles) == 2
+    assert h.gate._last_say_handle is h.say.handles[1]
+
+
+async def test_wait_recent_say_done_awaits_the_playout() -> None:
+    gate, _emitter, _router = _make_gate()
+    handle = _PlayoutHandle()
+    gate._last_say_handle = cast(SpeechHandle, handle)
+    await asyncio.wait_for(gate.wait_recent_say_done(), timeout=1)
+    assert handle.waited == 1
+
+
+async def test_wait_recent_say_done_is_bounded_by_the_timeout() -> None:
+    gate, _emitter, _router = _make_gate()
+    gate._last_say_handle = cast(SpeechHandle, _PlayoutHandle(hang=True))
+    await asyncio.wait_for(gate.wait_recent_say_done(timeout_s=0.05), timeout=1)
+
+
+async def test_wait_recent_say_done_contains_playout_errors() -> None:
+    gate, _emitter, _router = _make_gate()
+    gate._last_say_handle = cast(SpeechHandle, _PlayoutHandle(raises=True))
+    await asyncio.wait_for(gate.wait_recent_say_done(), timeout=1)

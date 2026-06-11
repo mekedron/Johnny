@@ -496,6 +496,14 @@ CATALOG_KEYWORD_TRANSLATIONS: dict[str, tuple[str, ...]] = {
     "inbox": ("входящи", "saapuneet", "postilaatik"),
     "message from": ("сообщение от", "письмо от", "viesti"),
     "unread": ("непрочитанн", "lukematt"),
+    # meeting.leave (Johnny-trt.57 internal tool)
+    "leave": ("покин", "уход", "poistu", "lähde"),
+    "disconnect": ("отключ", "katkais"),
+    "goodbye": ("до свидани", "näkemiin"),
+    # session.end (Johnny-trt.57 internal tool)
+    "end the session": ("заверши сесси", "закончи сесси", "lopeta istunto", "lopeta sessio"),
+    "stop the session": ("останови сесси", "pysäytä istunto"),
+    "shut down": ("выключ", "sammuta"),
 }
 """RU/FI stems for the *English* keywords catalog entries carry (the
 task_catalog contract keeps entry keywords English; the scorer owns the

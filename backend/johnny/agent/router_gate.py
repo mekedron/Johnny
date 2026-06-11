@@ -329,6 +329,11 @@ class RouterGate:
         # The say() seam for delegate acks / status stubs (Johnny-trt.17),
         # attached by JohnnyAgent.on_enter once the session exists.
         self._say: SaySpeech | None = None
+        # The most recent say() SpeechHandle (ack / status / correction),
+        # kept so the internal-tool teardown runners (Johnny-trt.57) can wait
+        # for the farewell ack to finish playing before disconnecting — see
+        # :meth:`wait_recent_say_done`.
+        self._last_say_handle: SpeechHandle | None = None
         # Caption sentences of the speech playing now (Johnny-trt.58), fed by
         # the assembly's tts_node sink tee via :meth:`note_speech_caption`.
         # When a barge-in cuts a speech, the done-callback takes this buffer
@@ -940,6 +945,9 @@ class RouterGate:
                 queued.spec.kind,
             )
             return
+        # Corrections count as "the bot is still talking" for the internal
+        # teardown wait (Johnny-trt.57) just like acks do.
+        self._last_say_handle = handle
 
         def _on_done(done_handle: SpeechHandle) -> None:
             task = asyncio.ensure_future(self._on_correction_done(done_handle, text))
@@ -1035,6 +1043,11 @@ class RouterGate:
                 detail=f"say() failed: {type(exc).__name__}: {exc}",
             )
             return
+        # Stashed synchronously, before the loop can run anything else — a
+        # delegate turn's task resolver (queued in begin(), scheduled but not
+        # yet started) therefore always finds the farewell ack here when it
+        # calls wait_recent_say_done() as its first act (Johnny-trt.57).
+        self._last_say_handle = handle
 
         def _on_done(done_handle: SpeechHandle) -> None:
             task = asyncio.ensure_future(
@@ -1320,6 +1333,35 @@ class RouterGate:
         rather than queueing work whose ack cannot be spoken.
         """
         self._say = say
+
+    async def wait_recent_say_done(self, timeout_s: float = 30.0) -> None:
+        """Wait for the most recent say() speech to finish playing (Johnny-trt.57).
+
+        The internal-tool teardown runners (``meeting.leave`` /
+        ``session.end``) call this before disconnecting, so the farewell —
+        the delegate turn's router-authored ack, spoken via
+        :meth:`_say_with_terminal` and stashed synchronously before the task
+        resolver can run — finishes playing before the plug is pulled. An
+        interrupted speech counts as done (``wait_for_playout`` returns on
+        interruption); no say yet / a dead handle / a wedged playout all
+        degrade to returning (bounded by ``timeout_s``) — a farewell may
+        delay a leave, never block it. Never raises.
+        """
+        handle = self._last_say_handle
+        if handle is None:
+            return
+        try:
+            await asyncio.wait_for(handle.wait_for_playout(), timeout=timeout_s)
+        except TimeoutError:
+            logger.warning(
+                "agent.router.gate: wait_recent_say_done timed out after %.0fs — "
+                "proceeding",
+                timeout_s,
+            )
+        except Exception:
+            logger.exception(
+                "agent.router.gate: wait_recent_say_done failed — proceeding"
+            )
 
     def note_speech_caption(self, text: str, sequence: int) -> None:
         """Record one caption sentence of the speech playing now (Johnny-trt.58).
