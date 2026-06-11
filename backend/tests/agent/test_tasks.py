@@ -685,3 +685,300 @@ async def test_in_memory_sink_update_unknown_id_is_noop() -> None:
     # No record with id 99 — must not raise (mirrors the SQL sink's warn+return).
     await sink.update_status(99, "done")
     assert len(sink.snapshot()) == 0
+
+
+# --- locality routing + the worker-owned-task watcher (Johnny-trt.24) ----------
+
+
+def _external_coordinator(
+    sink: InMemoryTaskSink,
+    *,
+    local_kinds: frozenset[str] = frozenset({"local.kind"}),
+    **kwargs: Any,
+) -> TaskCoordinator:
+    """Coordinator routing everything outside ``local_kinds`` to the watcher,
+    with test-speed watch cadence."""
+    kwargs.setdefault("executor", stub_executor)
+    kwargs.setdefault("watch_poll_interval_s", 0.01)
+    kwargs.setdefault("watch_timeout_s", 2.0)
+    return TaskCoordinator(
+        sink, runs_in_session=lambda kind: kind in local_kinds, **kwargs
+    )
+
+
+async def test_runs_in_session_none_keeps_everything_in_process() -> None:
+    """Default predicate (None) = the Phase-3 shape: the executor runs."""
+    sink = InMemoryTaskSink()
+    coordinator = TaskCoordinator(sink, executor=stub_executor)
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    await coordinator.join()
+    record = sink.get(queued.task_id)
+    assert record is not None and record.status == "failed"  # stub ran in-process
+
+
+async def test_local_kind_routes_to_in_process_resolver() -> None:
+    sink = InMemoryTaskSink()
+    ran: list[str] = []
+
+    async def executor(task: QueuedTask) -> TaskResult:
+        ran.append(task.spec.kind)
+        return TaskResult(status="done", result_text="ok")
+
+    coordinator = _external_coordinator(sink, executor=executor)
+    queued = await coordinator.begin(_spec(kind="local.kind"))
+    assert queued is not None
+    await coordinator.join()
+    assert ran == ["local.kind"]
+    record = sink.get(queued.task_id)
+    assert record is not None and record.status == "done"
+
+
+async def test_external_kind_never_runs_the_session_executor() -> None:
+    """Worker-owned kinds stay queued: no resolver, no executor call, no
+    running stamp — the worker claims the row, not the session."""
+    sink = InMemoryTaskSink()
+    ran: list[str] = []
+
+    async def executor(task: QueuedTask) -> TaskResult:
+        ran.append(task.spec.kind)
+        return TaskResult(status="done")
+
+    coordinator = _external_coordinator(sink, executor=executor)
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    await asyncio.sleep(0.05)  # several watch polls
+    assert ran == []
+    record = sink.get(queued.task_id)
+    assert record is not None and record.status == "queued"
+    await coordinator.aclose()
+
+
+async def test_external_failed_settle_fires_failure_report() -> None:
+    """The trt.53 bridge: the worker settles failed out of process; the
+    watcher reads the row and reports it with the row's speech-ready text."""
+    sink = InMemoryTaskSink()
+    reported: list[tuple[int, str, str, str]] = []
+
+    async def report(queued: QueuedTask, result: TaskResult) -> None:
+        reported.append(
+            (queued.task_id, result.status, result.result_text, result.error)
+        )
+
+    coordinator = _external_coordinator(sink, report_failed=report)
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    # Simulate the worker: running, then a failed settle with spoken copy.
+    await sink.update_status(queued.task_id, "running", attempts=1)
+    await asyncio.sleep(0.03)
+    assert reported == []  # nothing reported while in flight
+    await sink.update_status(
+        queued.task_id,
+        "failed",
+        result_text="No Google account is connected.",
+        error="gog: not authenticated",
+    )
+    await coordinator.join()
+    assert reported == [
+        (
+            queued.task_id,
+            "failed",
+            "No Google account is connected.",
+            "gog: not authenticated",
+        )
+    ]
+    # The watcher never writes the row — the worker's words stand.
+    record = sink.get(queued.task_id)
+    assert record is not None
+    assert record.status == "failed"
+    assert record.result_text == "No Google account is connected."
+
+
+async def test_external_failed_settle_without_text_reports_generic_speech() -> None:
+    sink = InMemoryTaskSink()
+    reported: list[TaskResult] = []
+
+    async def report(queued: QueuedTask, result: TaskResult) -> None:
+        reported.append(result)
+
+    coordinator = _external_coordinator(sink, report_failed=report)
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    await sink.update_status(queued.task_id, "failed")
+    await coordinator.join()
+    assert len(reported) == 1
+    assert reported[0].result_text == executor_error_text("web_search")
+
+
+async def test_external_done_settle_reports_nothing() -> None:
+    """done is Phase-5 re-entry territory — the watcher exits silently."""
+    sink = InMemoryTaskSink()
+    reported: list[TaskResult] = []
+
+    async def report(queued: QueuedTask, result: TaskResult) -> None:
+        reported.append(result)
+
+    coordinator = _external_coordinator(sink, report_failed=report)
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    await sink.update_status(queued.task_id, "done", result_text="3 events this week")
+    await coordinator.join()
+    assert reported == []
+
+
+async def test_external_cancelled_or_expired_settle_reports_nothing() -> None:
+    sink = InMemoryTaskSink()
+    reported: list[TaskResult] = []
+
+    async def report(queued: QueuedTask, result: TaskResult) -> None:
+        reported.append(result)
+
+    coordinator = _external_coordinator(sink, report_failed=report)
+    first = await coordinator.begin(_spec(kind="web_search"))
+    second = await coordinator.begin(_spec(kind="gmail.search"))
+    assert first is not None and second is not None
+    await sink.update_status(first.task_id, "cancelled")
+    await sink.update_status(second.task_id, "expired")
+    await coordinator.join()
+    assert reported == []
+
+
+async def test_external_completed_event_not_published_by_session() -> None:
+    """The settler announces (trt.25): the worker owns TaskCompleted for
+    worker-owned kinds — the session's publish_completed must stay silent."""
+    sink = InMemoryTaskSink()
+    completed: list[int] = []
+
+    async def publish_completed(queued: QueuedTask, status: Any, result: TaskResult) -> None:
+        completed.append(queued.task_id)
+
+    coordinator = _external_coordinator(sink, publish_completed=publish_completed)
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    await sink.update_status(queued.task_id, "failed", result_text="nope")
+    await coordinator.join()
+    assert completed == []
+
+
+async def test_aclose_cancels_watcher_immediately_without_touching_row() -> None:
+    """Watchers are exempt from the trt.57 drain grace (they settle nothing)
+    and must never write the worker-owned row on the way out."""
+    sink = InMemoryTaskSink()
+    coordinator = _external_coordinator(sink)
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    await coordinator.aclose(drain_grace_s=30.0)
+    assert loop.time() - started < 5.0  # no 30s drain spent on the watcher
+    record = sink.get(queued.task_id)
+    assert record is not None
+    assert record.status == "queued"  # untouched — the worker still owns it
+
+
+async def test_watcher_gives_up_when_sink_cannot_fetch() -> None:
+    """A sink without fetch support (default returns None) ends the watch
+    after a few polls — logged, contained, row untouched."""
+
+    class _NoFetchSink(InMemoryTaskSink):
+        async def fetch_status(self, task_id: int) -> Any:
+            return None
+
+    sink = _NoFetchSink()
+    reported: list[TaskResult] = []
+
+    async def report(queued: QueuedTask, result: TaskResult) -> None:
+        reported.append(result)
+
+    coordinator = _external_coordinator(sink, report_failed=report)
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    await coordinator.join()  # watcher exits via the fetch-failure budget
+    assert reported == []
+    record = sink.get(queued.task_id)
+    assert record is not None and record.status == "queued"
+
+
+async def test_watcher_times_out_quietly_on_a_never_terminal_row() -> None:
+    sink = InMemoryTaskSink()
+    reported: list[TaskResult] = []
+
+    async def report(queued: QueuedTask, result: TaskResult) -> None:
+        reported.append(result)
+
+    coordinator = _external_coordinator(
+        sink, report_failed=report, watch_timeout_s=0.05
+    )
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    await coordinator.join()
+    assert reported == []
+    record = sink.get(queued.task_id)
+    assert record is not None and record.status == "queued"
+
+
+async def test_watcher_tolerates_transient_fetch_errors() -> None:
+    """A couple of raising polls don't end the watch — the budget resets on
+    the first successful read and the failed settle still gets reported."""
+    sink = InMemoryTaskSink()
+    calls = {"n": 0}
+    real_fetch = sink.fetch_status
+
+    async def flaky_fetch(task_id: int) -> Any:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise RuntimeError("transient")
+        return await real_fetch(task_id)
+
+    sink.fetch_status = flaky_fetch  # type: ignore[method-assign]
+    reported: list[TaskResult] = []
+
+    async def report(queued: QueuedTask, result: TaskResult) -> None:
+        reported.append(result)
+
+    coordinator = _external_coordinator(sink, report_failed=report)
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    await sink.update_status(queued.task_id, "failed", result_text="broke")
+    await coordinator.join()
+    assert len(reported) == 1 and reported[0].result_text == "broke"
+
+
+async def test_external_kind_still_pings_wake_and_publishes_queued() -> None:
+    """Row-before-announce holds for worker-owned kinds too: TaskQueued and
+    the wake ping (the worker's nudge) both fire from begin()."""
+    events: list[str] = []
+    sink = _RecordingSink(events)
+
+    async def publish_queued(queued: QueuedTask) -> None:
+        events.append(f"publish:{queued.task_id}")
+
+    async def wake(queued: QueuedTask) -> None:
+        events.append(f"wake:{queued.task_id}")
+
+    coordinator = _external_coordinator(
+        sink, publish_queued=publish_queued, wake=wake
+    )
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    assert events == [
+        f"record_queued:{queued.task_id}",
+        f"publish:{queued.task_id}",
+        f"wake:{queued.task_id}",
+    ]
+    await coordinator.aclose()
+
+
+async def test_in_memory_sink_fetch_status_reads_current_row() -> None:
+    sink = InMemoryTaskSink()
+    task_id = await sink.record_queued(_spec())
+    assert task_id is not None
+    snapshot = await sink.fetch_status(task_id)
+    assert snapshot is not None and snapshot.status == "queued"
+    await sink.update_status(task_id, "failed", result_text="say this", error="why")
+    snapshot = await sink.fetch_status(task_id)
+    assert snapshot is not None
+    assert snapshot.status == "failed"
+    assert snapshot.result_text == "say this"
+    assert snapshot.error == "why"
+    assert await sink.fetch_status(9999) is None

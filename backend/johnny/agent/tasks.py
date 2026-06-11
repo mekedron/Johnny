@@ -20,19 +20,28 @@ is a promise, and this module is what keeps it honest:
    terminal row write, Johnny-trt.25). Announcement failures are logged,
    never raised — a flaky bus must not break a turn whose row already
    exists.
-3. **Execution** is an injected :data:`TaskExecutor`. Phase 3 ships only
-   :func:`stub_executor`, which fails every kind *fast* with a speech-ready
-   error stored on the row — an ack must never be a dead promise, so until
-   real executors land (Phase 4) the bot can immediately report "that didn't
-   work" instead of leaving tasks queued forever.
+3. **Execution** is an injected :data:`TaskExecutor` — but only for kinds the
+   session itself runs. Since Johnny-trt.24 ownership is split by locality
+   through the injected :data:`RunsInSession` predicate: kinds it accepts
+   (the trt.57 internal tools in production) get the in-process resolver and
+   executor exactly as in Phase 3; every other kind is **worker-owned** — the
+   row stays ``queued`` for the Phase-4 worker executor pass
+   (:mod:`app.services.task_worker`, woken by the ping from step 2) and the
+   coordinator spawns a read-only *watcher* instead of a resolver. The
+   watcher polls the row until it settles so a ``failed`` settle still fires
+   the Johnny-trt.53 no-dead-promises correction (the gate's spoken
+   walk-back) even though another process owns the execution; it never
+   writes the row. The Phase-5 task-event listener (Johnny-trt.28) replaces
+   the watcher with a push subscription on ``johnny.tasks.<session>``.
 
 Like :mod:`johnny.agent.gate` and :mod:`johnny.agent.approval`, this module is
 deliberately ``livekit``-free, ``sqlalchemy``-free and ``redis``-free (stdlib
-only): persistence, event publishing, the wake ping, and execution are all
-injected, so ``import johnny.agent.tasks`` stays cheap and the unit tests run
-without the ``agent`` extra. :mod:`johnny.agent.task_wiring` supplies the real
-seams (the SQLAlchemy sink from ``app.services.agent_tasks``, the EventBus
-publisher, the Redis wake publisher).
+only): persistence, event publishing, the wake ping, locality, and execution
+are all injected, so ``import johnny.agent.tasks`` stays cheap and the unit
+tests run without the ``agent`` extra. :mod:`johnny.agent.task_wiring`
+supplies the real seams (the SQLAlchemy sink from ``app.services.agent_tasks``,
+the EventBus publisher, the Redis wake publisher, the internal-kind locality
+predicate).
 """
 
 from __future__ import annotations
@@ -66,8 +75,25 @@ tasks: ``meeting.leave`` / ``session.end`` trigger the very teardown that
 calls ``aclose`` while their resolver is still awaiting the control call's
 response + the terminal row write — an immediate cancel would record a
 misleading ``cancelled`` row for an action that *succeeded*. The grace also
-lets any nearly-done skill task settle honestly instead of being cut at the
-finish line; a genuinely hung executor is still cancelled when it expires."""
+lets any nearly-done in-session task settle honestly instead of being cut at
+the finish line; a genuinely hung executor is still cancelled when it
+expires. Watchers for worker-owned tasks (Johnny-trt.24) are *not* drained —
+they hold no row to settle, so teardown cancels them immediately."""
+
+WATCH_POLL_INTERVAL_S = 1.0
+"""How often the worker-owned-task watcher re-reads the row (Johnny-trt.24).
+Background tasks are seconds-long; a 1 s cadence keeps the trt.53 spoken
+correction conversational without measurable DB load."""
+
+WATCH_TIMEOUT_S = 900.0
+"""When the watcher gives up (Johnny-trt.24). Generous on purpose: a
+worker-owned task may sit out crash-requeue TTL cycles (Johnny-trt.24's
+sweep) before its final settle; past this the correction would be stale
+conversationally anyway. The row itself stays worker-owned and durable."""
+
+_WATCH_MAX_FETCH_FAILURES = 5
+"""Consecutive ``fetch_status`` failures the watcher tolerates before
+concluding the sink cannot serve reads and exiting quietly."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +146,21 @@ class TaskResult:
     error: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class TaskSnapshot:
+    """A point-in-time read of one task row (Johnny-trt.24).
+
+    What :meth:`TaskSink.fetch_status` returns to the worker-owned-task
+    watcher: just enough to recognise a terminal status and hand the
+    speech-ready failure text to the Johnny-trt.53 correction. Deliberately
+    not a full row — the watcher must never gain write-shaped state.
+    """
+
+    status: TaskStatus
+    result_text: str | None = None
+    error: str | None = None
+
+
 class TaskSink(ABC):
     """Durable persistence for delegated tasks (the ``agent_tasks`` table).
 
@@ -155,6 +196,16 @@ class TaskSink(ABC):
         ``running`` stamp does not blank a prior error and a terminal stamp
         can set text/error/attempts in one write.
         """
+
+    async def fetch_status(self, task_id: int) -> TaskSnapshot | None:
+        """Read one task's current status (Johnny-trt.24, watcher support).
+
+        Default returns ``None`` — "this sink cannot serve reads" — so
+        custom test sinks keep working; the watcher then logs once and
+        stops watching (the durable row still tells the truth, there is
+        just no in-session correction for it).
+        """
+        return None
 
     async def close(self) -> None:  # noqa: B027 — intentional default no-op
         """Release any held connections. Default is a no-op."""
@@ -213,6 +264,17 @@ class InMemoryTaskSink(TaskSink):
                     record.attempts = attempts
                 return
 
+    async def fetch_status(self, task_id: int) -> TaskSnapshot | None:
+        async with self._lock:
+            for record in self._records:
+                if record.task_id == task_id:
+                    return TaskSnapshot(
+                        status=record.status,
+                        result_text=record.result_text,
+                        error=record.error,
+                    )
+        return None
+
     def snapshot(self) -> list[TaskRecord]:
         """Non-async snapshot for synchronous test assertions."""
         return [replace(record) for record in self._records]
@@ -255,7 +317,20 @@ ReportTaskFailed = Callable[[QueuedTask, TaskResult], Awaitable[None]]
 the turn loop, so the consumer (the gate's honest spoken correction via
 ``say()``) only ever reports durable state. Best-effort and contained like
 the announce seams; never invoked for ``done`` (Phase-5 re-entry territory)
-or ``cancelled`` (the session is tearing down — nobody is listening)."""
+or ``cancelled`` (the session is tearing down — nobody is listening). For
+worker-owned kinds (Johnny-trt.24) the watcher fires it from the polled row
+once the worker's terminal write lands — same contract, different settler."""
+
+RunsInSession = Callable[[str], bool]
+"""Locality predicate (Johnny-trt.24): does this *kind* execute inside the
+session process? ``True`` → the classic resolver runs the injected executor
+(production: the trt.57 internal tools — ``meeting.leave``, ``session.end``);
+``False`` → the row is left ``queued`` for the worker executor pass, which
+claims every non-internal kind, and the coordinator only watches. ``None``
+on the coordinator means *everything* runs in-session — the Phase-3 shape
+that unit harnesses keep; :func:`johnny.agent.task_wiring.build_task_coordinator`
+defaults production assemblies to the internal-kind predicate so the split
+cannot be forgotten."""
 
 
 def unsupported_kind_text(kind: str) -> str:
@@ -310,6 +385,9 @@ class TaskCoordinator:
         publish_completed: PublishCompleted | None = None,
         wake: WakePing | None = None,
         report_failed: ReportTaskFailed | None = None,
+        runs_in_session: RunsInSession | None = None,
+        watch_poll_interval_s: float = WATCH_POLL_INTERVAL_S,
+        watch_timeout_s: float = WATCH_TIMEOUT_S,
     ) -> None:
         self._sink = sink
         self._executor = executor
@@ -321,10 +399,19 @@ class TaskCoordinator:
         # *after* the coordinator in the runtime assembly, the attach_say
         # ordering pattern); the constructor arg serves directly-wired tests.
         self._report_failed = report_failed
+        # Locality split (Johnny-trt.24). None keeps the Phase-3 behaviour:
+        # every kind resolved in-session by the injected executor.
+        self._runs_in_session = runs_in_session
+        self._watch_poll_interval_s = watch_poll_interval_s
+        self._watch_timeout_s = watch_timeout_s
         # Strong refs to in-flight resolver tasks so they aren't GC'd mid-run
         # (and to avoid "task exception never retrieved" warnings); also lets
         # aclose() drain them at teardown.
         self._tasks: set[asyncio.Task[None]] = set()
+        # Watchers for worker-owned tasks (Johnny-trt.24) live apart from the
+        # resolvers: they own no row, so aclose() must not spend its trt.57
+        # drain grace on them — they are cancelled immediately at teardown.
+        self._watchers: set[asyncio.Task[None]] = set()
 
     def attach_failure_reporter(self, report: ReportTaskFailed) -> None:
         """Attach the failed-task report seam after construction (Johnny-trt.53).
@@ -353,6 +440,12 @@ class TaskCoordinator:
 
         The ``TaskQueued`` publish and the wake ping are best-effort: the
         durable row is the contract, a flaky bus only costs liveness.
+
+        Locality (Johnny-trt.24): kinds the :data:`RunsInSession` predicate
+        accepts get the in-process resolver; everything else stays ``queued``
+        for the worker executor pass (the wake ping is its nudge) and only a
+        read-only watcher is spawned, keeping the trt.53 failure correction
+        alive until the Phase-5 listener replaces it.
         """
         try:
             task_id = await self._sink.record_queued(spec)
@@ -373,14 +466,25 @@ class TaskCoordinator:
         await self._safe_publish_queued(queued)
         await self._safe_wake(queued)
 
-        runner = asyncio.ensure_future(self._run(queued))
-        self._tasks.add(runner)
-        runner.add_done_callback(self._tasks.discard)
+        if self._runs_in_session is None or self._runs_in_session(spec.kind):
+            runner = asyncio.ensure_future(self._run(queued))
+            self._tasks.add(runner)
+            runner.add_done_callback(self._tasks.discard)
+        else:
+            watcher = asyncio.ensure_future(self._watch(queued))
+            self._watchers.add(watcher)
+            watcher.add_done_callback(self._watchers.discard)
         return queued
 
     async def join(self) -> None:
-        """Await every in-flight resolver without cancelling (tests / drain)."""
-        tasks = [task for task in self._tasks if not task.done()]
+        """Await every in-flight resolver *and watcher* without cancelling
+        (tests / drain). A watcher returns once its row is terminal — callers
+        joining on a still-running worker-owned task will wait with it."""
+        tasks = [
+            task
+            for task in (*self._tasks, *self._watchers)
+            if not task.done()
+        ]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -395,11 +499,16 @@ class TaskCoordinator:
         its row ``cancelled`` on the way out (see :meth:`_run`), so a session
         teardown never strands tasks in ``running``. ``drain_grace_s=0``
         restores the immediate-cancel behaviour. Safe to call more than once.
+
+        Watchers for worker-owned tasks (Johnny-trt.24) are cancelled without
+        any drain: they hold nothing to settle (the worker owns the row and
+        keeps running after the session ends), and waiting on one would just
+        delay teardown by the full grace for every in-flight external task.
         """
         pending = [task for task in self._tasks if not task.done()]
         if pending and drain_grace_s > 0:
             await asyncio.wait(pending, timeout=drain_grace_s)
-        tasks = list(self._tasks)
+        tasks = list(self._tasks) + list(self._watchers)
         for task in tasks:
             task.cancel()
         for task in tasks:
@@ -486,6 +595,66 @@ class TaskCoordinator:
             await self._safe_report_failed(queued, result)
 
     # ------------------------------------------------------------------ #
+    # The worker-owned-task watcher (Johnny-trt.24)                       #
+    # ------------------------------------------------------------------ #
+
+    async def _watch(self, queued: QueuedTask) -> None:
+        """Follow a worker-owned task to its terminal status — read-only.
+
+        The worker executor pass owns the row (claim, run, settle, announce);
+        this watcher exists solely so the session still *speaks* about a
+        ``failed`` settle through the trt.53 :data:`ReportTaskFailed` seam —
+        polled from the durable row, the only state the worker and the
+        session share today. ``done`` / ``cancelled`` / ``expired`` end the
+        watch silently (result delivery is the Phase-5 queue's job). The
+        watcher NEVER writes the row — including on cancellation at session
+        teardown, when the worker simply keeps running without us. Replaced
+        by the Johnny-trt.28 push listener on ``johnny.tasks.<session>``.
+        """
+        deadline = asyncio.get_running_loop().time() + self._watch_timeout_s
+        fetch_failures = 0
+        while True:
+            try:
+                snapshot = await self._sink.fetch_status(queued.task_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                snapshot = None
+            if snapshot is None:
+                fetch_failures += 1
+                if fetch_failures >= _WATCH_MAX_FETCH_FAILURES:
+                    logger.warning(
+                        "tasks.watch: sink cannot read task_id=%s (kind=%s) — "
+                        "stopping watch; the row stays worker-owned and durable",
+                        queued.task_id,
+                        queued.spec.kind,
+                    )
+                    return
+            else:
+                fetch_failures = 0
+                if snapshot.status == "failed":
+                    result = TaskResult(
+                        status="failed",
+                        result_text=snapshot.result_text
+                        or executor_error_text(queued.spec.kind),
+                        error=snapshot.error or "",
+                    )
+                    await self._safe_report_failed(queued, result)
+                    return
+                if snapshot.status in TERMINAL_TASK_STATUSES:
+                    return
+            if asyncio.get_running_loop().time() >= deadline:
+                logger.warning(
+                    "tasks.watch: task_id=%s (kind=%s) not terminal after %.0fs — "
+                    "stopping watch; the row stays worker-owned and durable",
+                    queued.task_id,
+                    queued.spec.kind,
+                    self._watch_timeout_s,
+                )
+                return
+            await asyncio.sleep(self._watch_poll_interval_s)
+
+    # ------------------------------------------------------------------ #
     # Contained I/O (a failing seam never crashes the round)              #
     # ------------------------------------------------------------------ #
 
@@ -542,16 +711,20 @@ __all__ = [
     "DEFAULT_ACLOSE_DRAIN_GRACE_S",
     "EXECUTOR_RESULT_STATUSES",
     "TERMINAL_TASK_STATUSES",
+    "WATCH_POLL_INTERVAL_S",
+    "WATCH_TIMEOUT_S",
     "InMemoryTaskSink",
     "PublishCompleted",
     "PublishQueued",
     "QueuedTask",
     "ReportTaskFailed",
+    "RunsInSession",
     "TaskCoordinator",
     "TaskExecutor",
     "TaskRecord",
     "TaskResult",
     "TaskSink",
+    "TaskSnapshot",
     "TaskSpec",
     "TaskStatus",
     "WakePing",

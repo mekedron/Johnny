@@ -427,26 +427,28 @@ async def _build_skill_pieces(
     *,
     skill_registry: SkillRegistry | None,
     sandbox_client: SandboxClient | None,
-) -> tuple[SkillRegistry, SandboxClient | None, Any]:
-    """Load the skill registry + build the sandbox-backed executor (Johnny-trt.23).
+) -> tuple[SkillRegistry, SandboxClient | None]:
+    """Load the skill registry for the session's task catalog (Johnny-trt.23/.55).
 
     Called only for delegation-capable assemblies (a task sink exists). One
     volume scan + the batched sandbox probes (``/bins``, the trt.55 env
     probe, and the declared availability checks) per session assembly —
     session start is not the per-turn hot path, and the resulting
     availability snapshot stays frozen for the session (the documented
-    trt.55 lifecycle; claim-time revalidation in the executor covers
-    mid-session breaks). Defensive throughout: any failure degrades to an
-    empty registry + the Phase-3 fail-fast stub executor (``executor=None``
-    keeps :func:`~johnny.agent.task_wiring.build_task_coordinator`'s
-    default), so session assembly never breaks on a broken volume or a down
+    trt.55 lifecycle). Defensive throughout: any failure degrades to an
+    empty registry (⇒ empty catalog ⇒ the router never learns undeliverable
+    kinds), so session assembly never breaks on a broken volume or a down
     sandbox.
 
-    Returns ``(registry, sandbox_client, executor)``; the caller stores the
-    client on the runtime for teardown.
+    The session no longer builds a skill *executor* (Johnny-trt.24): skill
+    kinds are worker-owned — claimed, run against the sandbox, and settled by
+    :mod:`app.services.task_worker`, which re-runs the availability check at
+    claim time (the trt.55 recheck) before the run argv. The registry here
+    feeds only the router's catalog and the answer model's capability notes.
+
+    Returns ``(registry, sandbox_client)``; the caller stores the client on
+    the runtime for teardown (the loader's probes are its only use now).
     """
-    from johnny.skills.executor import build_skill_task_executor
-    from johnny.skills.policy import ExecBinPolicy
     from johnny.skills.registry import (
         EMPTY_SKILL_REGISTRY,
         build_sandbox_availability_runner,
@@ -454,7 +456,6 @@ async def _build_skill_pieces(
     )
     from johnny.skills.sandbox import SandboxClient as _SandboxClient
     from johnny.skills.sandbox import skills_dir_from_env
-    from johnny.skills.tools import SandboxExecTool
 
     if sandbox_client is None:
         sandbox_client = _SandboxClient()
@@ -472,19 +473,12 @@ async def _build_skill_pieces(
                 session_id,
             )
             skill_registry = EMPTY_SKILL_REGISTRY
-
-    executor = None
-    if skill_registry.eligible():
-        exec_tool = SandboxExecTool(
-            sandbox_client, policy=ExecBinPolicy(allowed=skill_registry.allowed_bins)
-        )
-        executor = build_skill_task_executor(skill_registry, exec_tool)
-        logger.info(
-            "agent runtime: skill executor wired for %s (%s)",
-            session_id,
-            skill_registry.summary(),
-        )
-    return skill_registry, sandbox_client, executor
+    logger.info(
+        "agent runtime: skill catalog loaded for %s (%s)",
+        session_id,
+        skill_registry.summary(),
+    )
+    return skill_registry, sandbox_client
 
 
 async def build_agent_runtime(
@@ -598,23 +592,26 @@ async def build_agent_runtime(
     # carried on the runtime for the gate's delegate branch (Johnny-trt.17).
     # The skill registry (Johnny-trt.23) is loaded first — one volume scan +
     # at most one sandbox /bins probe per assembly, never on the turn loop —
-    # because it feeds BOTH the executor (skill-backed kinds run their
-    # declared command in the sandbox; everything else falls through to the
-    # Phase-3 fail-fast stub, so an ack can never become a dead promise) and
-    # the router's task catalog below.
+    # to feed the router's task catalog below. Execution is split by
+    # locality (Johnny-trt.24): the session executor runs ONLY the internal
+    # tools (trt.57 — session-local by definition); every other kind stays
+    # queued for the worker executor pass, with the coordinator's default
+    # internal-kind predicate doing the routing and a read-only watcher
+    # keeping the trt.53 failure correction alive.
     task_coordinator = None
     task_wake = None
-    executor = None
     internal_tools = None
     if task_sink is not None:
-        skill_registry, sandbox_client, executor = await _build_skill_pieces(
+        skill_registry, sandbox_client = await _build_skill_pieces(
             session_id,
             skill_registry=skill_registry,
             sandbox_client=sandbox_client,
         )
-        # Internal tools (Johnny-trt.57) head the executor chain — the
-        # documented resolution order internal → skills → fail-fast stub.
-        # The session-local context carries the Meet linkage (the surface
+        # Internal tools (Johnny-trt.57) — the only kinds the session itself
+        # executes since Johnny-trt.24. The fail-fast stub stays as the
+        # fallback for defence (an in-session-routed kind missing from the
+        # internal registry settles honestly instead of hanging). The
+        # session-local context carries the Meet linkage (the surface
         # predicate for meeting.leave) and the api base for the in-app
         # control calls; the farewell-wait seam attaches after the gate is
         # built below (the attach_say ordering pattern).
@@ -622,10 +619,7 @@ async def build_agent_runtime(
             bot_session_id=config.bot_session_id,
             calendar_event_id=config.calendar_event_id,
         )
-        executor = build_internal_task_executor(
-            internal_tools,
-            fallback=executor if executor is not None else stub_executor,
-        )
+        executor = build_internal_task_executor(internal_tools, fallback=stub_executor)
         from johnny.agent.task_wiring import build_task_coordinator
 
         task_coordinator, task_wake = build_task_coordinator(

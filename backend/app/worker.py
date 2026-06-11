@@ -1,6 +1,6 @@
 """Background worker process.
 
-Six responsibilities at runtime:
+Responsibilities at runtime:
 
 * Liveness — write a heartbeat file consumed by the container healthcheck.
 * Calendar polling — every ``JOHNNY_CALENDAR_POLL_INTERVAL_SECONDS``
@@ -27,6 +27,14 @@ Six responsibilities at runtime:
   per-session reply-audio dirs whose ``bot_sessions`` row no longer exists
   (Johnny-od1) — e.g. after a ``./stop.sh`` DB reset that left the host
   bind mount behind.
+* Delegated-task executor pass (Johnny-trt.24) — a persistent asyncio loop
+  in its own daemon thread (:mod:`app.services.task_worker`): subscribes
+  ``johnny.tasks.wake``, claims queued ``agent_tasks`` rows (internal kinds
+  excluded — those are session-local, Johnny-trt.57), runs them through the
+  skills-sandbox executor with bounded concurrency, settles ``done`` /
+  ``failed`` with speech-ready ``result_text``, announces on the session +
+  task channels, and TTL-requeues rows stranded by a crash. Its own thread
+  + loop means a slow tool can never delay the passes below.
 
 A real task queue (Celery / Dramatiq) is still pending; until then this
 in-process loop is the scheduler. The job functions themselves
@@ -352,6 +360,36 @@ def _start_status_subscriber_thread(redis_url: str) -> threading.Thread:
     return thread
 
 
+def _start_task_executor_thread(redis_url: str) -> threading.Thread | None:
+    """Run the delegated-task executor pass in a daemon thread (Johnny-trt.24).
+
+    Same shape as the status subscriber: a dedicated thread owning a
+    persistent event loop (the wake subscription + bounded concurrent
+    executions need one), so the synchronous periodic passes — and the
+    heartbeat — are structurally isolated from any slow tool. Returns
+    ``None`` when ``JOHNNY_TASK_EXECUTOR_ENABLED`` disables the pass.
+    """
+    from app.services.task_worker import run_task_executor_loop, task_executor_enabled
+
+    if not task_executor_enabled():
+        logger.warning(
+            "JOHNNY_TASK_EXECUTOR_ENABLED is off — delegated agent_tasks rows "
+            "will stay queued"
+        )
+        return None
+
+    def _run() -> None:
+        try:
+            asyncio.run(run_task_executor_loop(redis_url=redis_url))
+        except Exception:
+            logger.exception("task executor pass crashed")
+
+    thread = threading.Thread(target=_run, name="task-executor", daemon=True)
+    thread.start()
+    logger.info("task executor pass started in background thread")
+    return thread
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -376,6 +414,7 @@ def main() -> None:
     launcher = _build_launcher()
     bot_signin_launcher = _build_bot_signin_launcher()
     _start_status_subscriber_thread(settings.redis_url)
+    _start_task_executor_thread(settings.redis_url)
     logger.info(
         "worker starting; database_url=%s redis_url=%s embedding_interval=%ds "
         "calendar_poll_interval=%ds scheduler_interval=%ds "

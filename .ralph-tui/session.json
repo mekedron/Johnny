@@ -3,10 +3,10 @@
   "sessionId": "b8829633-95f0-4e1b-a1c5-e08500de3d70",
   "status": "running",
   "startedAt": "2026-06-11T05:16:05.966Z",
-  "updatedAt": "2026-06-11T14:57:01.482Z",
-  "currentIteration": 13,
+  "updatedAt": "2026-06-11T15:53:21.290Z",
+  "currentIteration": 14,
   "maxIterations": 0,
-  "tasksCompleted": 13,
+  "tasksCompleted": 14,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -177,8 +177,8 @@
       {
         "id": "Johnny-trt.25",
         "title": "[BUILD] Phase 4: Task event plumbing — events, subscriber, WS fan-out",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.26",
@@ -486,6 +486,16 @@
       "durationMs": 4148252,
       "startedAt": "2026-06-11T13:20:30.805Z",
       "endedAt": "2026-06-11T14:29:39.057Z"
+    },
+    {
+      "iteration": 14,
+      "status": "completed",
+      "taskId": "Johnny-trt.25",
+      "taskTitle": "[BUILD] Phase 4: Task event plumbing — events, subscriber, WS fan-out",
+      "taskCompleted": true,
+      "durationMs": 1602511,
+      "startedAt": "2026-06-11T14:30:17.509Z",
+      "endedAt": "2026-06-11T14:57:00.020Z"
     }
   ],
   "skippedTaskIds": [],

@@ -205,3 +205,59 @@ async def test_stub_delegation_end_to_end_queued_then_failed(db_session: Session
     assert row.error is not None and "summarize_meeting" in row.error
     assert row.attempts == 1
     await coordinator.aclose()
+
+
+# --- fetch_status (Johnny-trt.24 watcher reads) ---------------------------------
+
+
+async def test_fetch_status_returns_current_snapshot(db_session: Session) -> None:
+    sink = SqlAlchemyTaskSink(db_session, bot_session_id=99)
+    task_id = await sink.record_queued(_spec())
+    assert task_id is not None
+
+    snapshot = await sink.fetch_status(task_id)
+    assert snapshot is not None
+    assert snapshot.status == "queued"
+    assert snapshot.result_text is None and snapshot.error is None
+
+    await sink.update_status(
+        task_id, "failed", result_text="No account linked.", error="gog: unauthed"
+    )
+    snapshot = await sink.fetch_status(task_id)
+    assert snapshot is not None
+    assert snapshot.status == "failed"
+    assert snapshot.result_text == "No account linked."
+    assert snapshot.error == "gog: unauthed"
+
+
+async def test_fetch_status_missing_row_returns_none(db_session: Session) -> None:
+    sink = SqlAlchemyTaskSink(db_session, bot_session_id=99)
+    assert await sink.fetch_status(424242) is None
+
+
+async def test_fetch_status_sees_other_session_commits(engine: sa.Engine) -> None:
+    """The watcher's freshness contract: a settle committed through a
+    DIFFERENT session (the worker process, in production) is visible to the
+    sink's polling reads despite the identity map."""
+    reader = Session(engine)
+    writer = Session(engine)
+    try:
+        sink = SqlAlchemyTaskSink(reader, bot_session_id=99)
+        task_id = await sink.record_queued(_spec())
+        assert task_id is not None
+        first = await sink.fetch_status(task_id)
+        assert first is not None and first.status == "queued"
+
+        row = writer.get(AgentTask, task_id)
+        assert row is not None
+        row.status = AgentTaskStatus.FAILED
+        row.result_text = "worker says no"
+        writer.commit()
+
+        snapshot = await sink.fetch_status(task_id)
+        assert snapshot is not None
+        assert snapshot.status == "failed"
+        assert snapshot.result_text == "worker says no"
+    finally:
+        reader.close()
+        writer.close()

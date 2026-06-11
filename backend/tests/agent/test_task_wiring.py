@@ -10,6 +10,7 @@ job-session delegation-mode set.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, get_args
 
@@ -179,6 +180,11 @@ async def test_wake_close_releases_client_and_is_safe_when_never_connected() -> 
 
 
 async def test_build_task_coordinator_defaults_to_stub_executor() -> None:
+    """An in-session kind with no real executor still fails fast in-process.
+
+    Since Johnny-trt.24 the production default routes only internal kinds to
+    the in-process resolver — ``session.end`` exercises that leg (the stub
+    settles it, proving the default executor wiring)."""
     sink = InMemoryTaskSink()
     bus = InMemoryEventBus()
     coordinator, wake = build_task_coordinator(
@@ -186,7 +192,7 @@ async def test_build_task_coordinator_defaults_to_stub_executor() -> None:
     )
     assert wake is None  # no redis -> no wake ping, everything else still works
 
-    queued = await coordinator.begin(TaskSpec(kind="book_flight"))
+    queued = await coordinator.begin(TaskSpec(kind="session.end"))
     assert queued is not None
     # Row exists (queued) the moment begin returns — before any ack would play.
     record = sink.get(queued.task_id)
@@ -200,15 +206,71 @@ async def test_build_task_coordinator_defaults_to_stub_executor() -> None:
     record = sink.get(queued.task_id)
     assert record is not None
     assert record.status == "failed"
-    assert record.result_text == unsupported_kind_text("book_flight")
+    assert record.result_text == unsupported_kind_text("session.end")
     # The settle announced a TaskCompleted on the same bus (Johnny-trt.25),
     # mirroring the row state the resolver had already written.
     events = bus.snapshot()
     assert len(events) == 2 and isinstance(events[1], TaskCompleted)
     assert events[1].task_id == queued.task_id
     assert events[1].status == "failed"
-    assert events[1].result_text == unsupported_kind_text("book_flight")
+    assert events[1].result_text == unsupported_kind_text("session.end")
     assert events[1].session_id == "7"
+    await coordinator.aclose()
+
+
+async def test_build_task_coordinator_routes_skill_kinds_to_the_worker() -> None:
+    """The Johnny-trt.24 default split: a non-internal kind stays queued
+    (worker-owned — no in-process execution, no session TaskCompleted), and
+    the watcher reports a worker-side failed settle through the trt.53 seam."""
+    sink = InMemoryTaskSink()
+    bus = InMemoryEventBus()
+    coordinator, _wake = build_task_coordinator(
+        task_sink=sink, event_bus=bus, session_id="7", redis_url=None
+    )
+    coordinator._watch_poll_interval_s = 0.01  # test-speed polling
+    reported: list[str] = []
+
+    async def report(queued, result) -> None:  # noqa: ANN001 — seam shape
+        reported.append(result.result_text)
+
+    coordinator.attach_failure_reporter(report)
+
+    queued = await coordinator.begin(TaskSpec(kind="calendar.upcoming_events"))
+    assert queued is not None
+    await asyncio.sleep(0.05)
+    record = sink.get(queued.task_id)
+    assert record is not None and record.status == "queued"  # nobody ran it here
+
+    # Simulate the worker pass settling the row failed out of process.
+    await sink.update_status(
+        queued.task_id, "failed", result_text="The sandbox is unreachable."
+    )
+    await coordinator.join()
+    assert reported == ["The sandbox is unreachable."]
+    # Only the TaskQueued event came from the session — TaskCompleted is the
+    # worker's announce (trt.25: whoever settles, announces).
+    events = bus.snapshot()
+    assert len(events) == 1 and isinstance(events[0], TaskQueued)
+    await coordinator.aclose()
+
+
+async def test_build_task_coordinator_accepts_runs_in_session_override() -> None:
+    """Harnesses that deliberately run everything in-process keep working."""
+    sink = InMemoryTaskSink()
+    coordinator, _wake = build_task_coordinator(
+        task_sink=sink,
+        event_bus=InMemoryEventBus(),
+        session_id="7",
+        redis_url=None,
+        runs_in_session=lambda kind: True,
+    )
+    queued = await coordinator.begin(TaskSpec(kind="book_flight"))
+    assert queued is not None
+    await coordinator.join()
+    record = sink.get(queued.task_id)
+    assert record is not None
+    assert record.status == "failed"  # the stub ran in-process
+    assert record.result_text == unsupported_kind_text("book_flight")
     await coordinator.aclose()
 
 
@@ -229,7 +291,8 @@ async def test_build_task_coordinator_wires_wake_when_redis_url_set() -> None:
     queued = await coordinator.begin(TaskSpec(kind="web_search"))
     assert queued is not None
     assert client.published and client.published[0][0] == TASKS_WAKE_CHANNEL
-    await coordinator.join()
+    # web_search is worker-owned (trt.24): no join — the row never settles in
+    # this test, so aclose() simply cancels the read-only watcher.
     await coordinator.aclose()
     await wake.close()
     assert client.closed is True

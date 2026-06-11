@@ -95,6 +95,17 @@ x-backend-env: &backend-env
   # first-party actions — meeting.leave posts the bot-dismissal endpoint,
   # session.end posts /sessions/{id}/stop. Same endpoints the UI buttons hit.
   JOHNNY_API_BASE_URL: ${JOHNNY_API_BASE_URL:-http://api:8000}
+  # Delegated-task executor pass (Johnny-trt.24): the worker claims queued
+  # agent_tasks rows (woken by johnny.tasks.wake, polled as fallback), runs
+  # them via the skills-sandbox with bounded concurrency, and TTL-requeues
+  # rows stranded by a crash. Defaults live in app/services/task_worker.py;
+  # these pass operator overrides through.
+  JOHNNY_TASK_EXECUTOR_ENABLED: ${JOHNNY_TASK_EXECUTOR_ENABLED:-true}
+  JOHNNY_TASK_POLL_INTERVAL_SECONDS: ${JOHNNY_TASK_POLL_INTERVAL_SECONDS:-5}
+  JOHNNY_TASK_CONCURRENCY: ${JOHNNY_TASK_CONCURRENCY:-4}
+  JOHNNY_TASK_RUNNING_TTL_SECONDS: ${JOHNNY_TASK_RUNNING_TTL_SECONDS:-300}
+  JOHNNY_TASK_MAX_ATTEMPTS: ${JOHNNY_TASK_MAX_ATTEMPTS:-3}
+  JOHNNY_TASK_EXEC_TIMEOUT_SECONDS: ${JOHNNY_TASK_EXEC_TIMEOUT_SECONDS:-240}
 
 services:
   postgres:

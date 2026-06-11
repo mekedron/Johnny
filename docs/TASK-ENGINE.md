@@ -117,6 +117,15 @@ call → tool calls} until done) is a **linear** loop, not a DAG.
 
 ## 5. Integration sketch for Johnny-trt.24 (hand-rolled)
 
+> **Status: shipped** (Johnny-trt.24, 2026-06-11) as
+> `backend/app/services/task_worker.py` — exactly this sketch, plus the
+> ownership split it implied: the session coordinator now routes only
+> internal kinds (trt.57) to its in-process resolver and leaves every other
+> kind `queued` for the worker (a read-only row watcher bridges the trt.53
+> failure correction until the Phase-5 listener). Settles are fenced on the
+> claim's `attempts` value so a TTL-requeued task's straggling first runner
+> can never double-write or double-announce.
+
 - **One persistent asyncio loop** for the executor pass (replacing
   per-pass `asyncio.run` for this responsibility; the other passes can stay
   as they are): runs the claim loop + the `johnny.tasks.wake` redis

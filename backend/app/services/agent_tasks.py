@@ -19,7 +19,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from app.db.models import AgentTask, AgentTaskStatus
-from johnny.agent.tasks import TaskSink, TaskSpec, TaskStatus
+from johnny.agent.tasks import TaskSink, TaskSnapshot, TaskSpec, TaskStatus
 
 if TYPE_CHECKING:
     from typing import Any
@@ -107,6 +107,31 @@ class SqlAlchemyTaskSink(TaskSink):
         if attempts is not None:
             row.attempts = attempts
         self._session.commit()
+
+    async def fetch_status(self, task_id: int) -> TaskSnapshot | None:
+        """Fresh read of one row for the worker-owned-task watcher (Johnny-trt.24).
+
+        The settler is the *worker process*, so the identity-map copy on this
+        shared session is stale by definition — ``refresh()`` forces a
+        re-SELECT (each statement sees the latest committed data under READ
+        COMMITTED). The ``rollback()`` in ``finally`` closes the read
+        transaction so a watcher polling every second never leaves this
+        session idle-in-transaction between polls; it can never lose writes
+        because every sink write commits synchronously inside its own method
+        (there is no await between ``add``/mutate and ``commit``).
+        """
+        try:
+            row = self._session.get(AgentTask, task_id)
+            if row is None:
+                return None
+            self._session.refresh(row)
+            return TaskSnapshot(
+                status=row.status.value,
+                result_text=row.result_text,
+                error=row.error,
+            )
+        finally:
+            self._session.rollback()
 
 
 __all__ = [

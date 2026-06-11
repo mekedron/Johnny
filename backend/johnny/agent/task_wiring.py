@@ -42,6 +42,7 @@ from johnny.agent.tasks import (
     PublishCompleted,
     PublishQueued,
     QueuedTask,
+    RunsInSession,
     TaskCoordinator,
     TaskExecutor,
     TaskResult,
@@ -58,11 +59,22 @@ TASKS_WAKE_CHANNEL = "johnny.tasks.wake"
 """Redis pub/sub channel queued-task wake pings go out on.
 
 Shared across sessions (unlike the per-session ``johnny.session.{id}`` /
-``johnny.approval.{id}`` channels): a future Phase-4 task worker subscribes
-once and learns about new work from every session. The payload is a small
-JSON object — ``{"task_id": N, "kind": ..., "session_id": ...}`` — a *nudge*,
-not the work itself; the durable queue is the ``agent_tasks`` table.
+``johnny.approval.{id}`` channels): the Phase-4 task worker
+(:mod:`app.services.task_worker`, Johnny-trt.24) subscribes once and learns
+about new work from every session. The payload is a small JSON object —
+``{"task_id": N, "kind": ..., "session_id": ...}`` — a *nudge*, not the work
+itself; the durable queue is the ``agent_tasks`` table. Pinged for every
+queued task, internal kinds included (the worker's claim excludes those by
+kind, so the extra nudge is harmless).
 """
+
+TASKS_CHANNEL_PREFIX = "johnny.tasks"
+"""Channel prefix for the per-session *agent* task channel (Johnny-trt.24):
+the worker publishes ``TaskProgress`` / ``TaskCompleted`` on
+``johnny.tasks.<bot_session_id>`` in addition to the UI session channel, so
+the Phase-5 in-session listener (Johnny-trt.28) can subscribe to exactly its
+own tasks. ``.wake`` shares the prefix but is a reserved (non-numeric)
+suffix, never a session id."""
 
 
 def _default_clock_ms() -> int:
@@ -194,6 +206,7 @@ def build_task_coordinator(
     redis_url: str | None = None,
     executor: TaskExecutor | None = None,
     clock: Callable[[], int] = _default_clock_ms,
+    runs_in_session: RunsInSession | None = None,
 ) -> tuple[TaskCoordinator, RedisTaskWake | None]:
     """Assemble the production :class:`TaskCoordinator` for one session.
 
@@ -203,7 +216,19 @@ def build_task_coordinator(
     ``TaskQueued`` event still flow. Returns ``(coordinator, wake)``; the
     caller owns both teardowns (:meth:`TaskCoordinator.aclose` drains in-flight
     resolvers, :meth:`RedisTaskWake.close` releases the Redis client).
+
+    ``runs_in_session`` defaults to the internal-kind predicate
+    (Johnny-trt.24): in every production assembly only the trt.57 internal
+    tools execute in-process; all other kinds stay ``queued`` for the worker
+    executor pass, which claims exactly the non-internal kinds — the split is
+    structural, so a session and the worker can never both run one task.
+    Pass an explicit predicate (e.g. ``lambda kind: True``) only in harnesses
+    that deliberately run everything in-process.
     """
+    if runs_in_session is None:
+        from johnny.agent.internal_tools import is_internal_kind
+
+        runs_in_session = is_internal_kind
     wake = RedisTaskWake(redis_url=redis_url, session_id=session_id) if redis_url else None
     coordinator = TaskCoordinator(
         task_sink,
@@ -213,11 +238,13 @@ def build_task_coordinator(
             event_bus, session_id=session_id, clock=clock
         ),
         wake=wake,
+        runs_in_session=runs_in_session,
     )
     return coordinator, wake
 
 
 __all__ = [
+    "TASKS_CHANNEL_PREFIX",
     "TASKS_WAKE_CHANNEL",
     "RedisTaskWake",
     "build_publish_task_completed",
