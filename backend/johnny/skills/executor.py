@@ -23,6 +23,13 @@ Kinds with no matching skill fall through to ``fallback`` (the Phase-3
 honestly until the LLM execution engine lands (Johnny-trt.22 decides it,
 Johnny-trt.24 wires it) — an ack must never become a dead promise.
 
+Claim-time revalidation (Johnny-trt.55): before running the argv, a skill
+that declares ``metadata.johnny.availability.check`` gets that probe re-run
+in the sandbox — the session catalog is a start-of-session snapshot and
+links can break between ack and claim. A failing recheck settles ``failed``
+with the skill-authored spoken reason (the same copy the catalog decline
+carries), which the Johnny-trt.53 correction then speaks.
+
 Task args are not interpreted in v1; they ride to the script as
 ``JOHNNY_TASK_ARGS_JSON`` (+ ``JOHNNY_TASK_KIND``) so skills can start
 honouring them without an executor change.
@@ -35,7 +42,11 @@ import logging
 
 from johnny.agent.internal_tools import is_internal_kind
 from johnny.agent.tasks import QueuedTask, TaskExecutor, TaskResult, stub_executor
-from johnny.skills.registry import SkillRegistry
+from johnny.skills.registry import (
+    DEFAULT_AVAILABILITY_CHECK_TIMEOUT_S,
+    LoadedSkill,
+    SkillRegistry,
+)
 from johnny.skills.tools import SandboxExecTool, ToolOutcome
 
 logger = logging.getLogger(__name__)
@@ -64,6 +75,73 @@ def _result_json(kind: str, outcome: ToolOutcome) -> dict[str, object]:
         "timed_out": outcome.data.get("timed_out", False),
         "truncated": outcome.data.get("truncated", False),
     }
+
+
+async def _revalidate_availability(
+    skill: LoadedSkill, exec_tool: SandboxExecTool
+) -> TaskResult | None:
+    """Re-run the skill's declared availability check at claim time (Johnny-trt.55).
+
+    The session catalog is a start-of-session snapshot; links can break
+    between the ack and the claim. Skills declaring
+    ``metadata.johnny.availability.check`` get the same in-sandbox probe the
+    loader ran: exit 0 → ``None`` (proceed to the run argv); any other exit →
+    a ``failed`` result whose ``result_text`` is the check's stdout (the
+    skill-authored spoken copy — the SAME actionable reason the catalog
+    decline carries) so the trt.53 correction walks the ack back honestly.
+    A probe that could not run (sandbox unreachable / denied / timed out)
+    fails with could-not-verify speech rather than asserting a credential
+    gap. Skills without a check pay nothing here — their run script owns the
+    graceful failure leg (the trt.23 contract).
+    """
+    availability = skill.document.availability
+    if availability is None or availability.check is None:
+        return None
+    check = availability.check
+    kind = skill.name
+    outcome = await exec_tool.run(
+        {
+            "argv": list(check.argv),
+            "timeout_s": check.timeout_s or DEFAULT_AVAILABILITY_CHECK_TIMEOUT_S,
+        }
+    )
+    if outcome.ok:
+        return None
+    if (
+        outcome.data.get("unreachable")
+        or outcome.data.get("denied")
+        or outcome.data.get("timed_out")
+        or outcome.data.get("exit_code") is None
+    ):
+        logger.info(
+            "skill executor: kind=%s availability recheck could not run (%s)",
+            kind,
+            outcome.error or "no detail",
+        )
+        return TaskResult(
+            status="failed",
+            result_text=(
+                f"I couldn't verify the {kind} task can run right now, so I didn't start it."
+            ),
+            result_json=_result_json(kind, outcome),
+            error=f"availability recheck did not run: {outcome.error or 'no detail'}",
+        )
+    spoken = (
+        _cap_speech(outcome.output)
+        or availability.unavailable_reason
+        or f"The {kind} capability isn't connected right now."
+    )
+    logger.info(
+        "skill executor: kind=%s availability recheck failed (exit %s) — task not run",
+        kind,
+        outcome.data.get("exit_code"),
+    )
+    return TaskResult(
+        status="failed",
+        result_text=spoken,
+        result_json=_result_json(kind, outcome),
+        error=f"availability recheck failed: {outcome.error or 'non-zero exit'}",
+    )
 
 
 def build_skill_task_executor(
@@ -113,6 +191,23 @@ def build_skill_task_executor(
                 result_text=f"The {kind} skill isn't usable right now — {reason}.",
                 error=f"skill ineligible: {'; '.join(skill.reasons)}",
             )
+
+        if not skill.available:
+            # Defensive (Johnny-trt.55): the catalog carries this kind as
+            # unavailable and the gate degrades delegate verdicts targeting
+            # it, so reaching here means a hand-queued row or a bypassed
+            # gate — settle with the same spoken-form reason the decline
+            # uses.
+            return TaskResult(
+                status="failed",
+                result_text=skill.unavailable_reason
+                or f"The {kind} skill isn't available in this session right now.",
+                error=f"skill unavailable at session snapshot: {skill.unavailable_reason}",
+            )
+
+        recheck = await _revalidate_availability(skill, exec_tool)
+        if recheck is not None:
+            return recheck
 
         run = skill.document.run
         if run is None:

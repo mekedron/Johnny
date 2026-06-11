@@ -189,6 +189,14 @@ export interface AckFallbackInfo {
 	reason: string;
 }
 
+/** The trt.55 unavailable-capability degrade marker stashed by the gate. */
+export interface CapabilityGapInfo {
+	fromAction: string;
+	toAction: string;
+	kind: string;
+	reason: string;
+}
+
 /** The router's literal action verdict (`silent`/`speak`/`delegate`/`status`); null pre-trt.16 rows / live turns. */
 export function routerAction(rawOutput: Record<string, unknown> | null): string | null {
 	const action = rawOutput?.action;
@@ -196,11 +204,15 @@ export function routerAction(rawOutput: Record<string, unknown> | null): string 
 }
 
 /**
- * The action the gate actually executed: an ackless delegate verdict is
- * degraded to a plain speak before the branch (Johnny-trt.53), so when the
- * `ack_fallback` marker is present the effective action is its `to_action`.
+ * The action the gate actually executed: a delegate verdict targeting an
+ * unavailable capability is degraded to the spoken decline (Johnny-trt.55,
+ * checked first — the gate's own order), an ackless delegate verdict to a
+ * plain speak (Johnny-trt.53) — in both cases the marker's `to_action` is
+ * what the turn actually did.
  */
 export function effectiveRouterAction(rawOutput: Record<string, unknown> | null): string | null {
+	const gap = capabilityGap(rawOutput);
+	if (gap) return gap.toAction;
 	const fallback = ackFallback(rawOutput);
 	if (fallback) return fallback.toAction;
 	return routerAction(rawOutput);
@@ -237,6 +249,20 @@ export function ackFallback(rawOutput: Record<string, unknown> | null): AckFallb
 	};
 }
 
+export function capabilityGap(
+	rawOutput: Record<string, unknown> | null
+): CapabilityGapInfo | null {
+	const raw = rawOutput?.capability_gap;
+	if (!raw || typeof raw !== 'object') return null;
+	const gap = raw as Record<string, unknown>;
+	return {
+		fromAction: String(gap.from_action ?? 'delegate'),
+		toAction: String(gap.to_action ?? 'status'),
+		kind: String(gap.kind ?? ''),
+		reason: String(gap.reason ?? '')
+	};
+}
+
 /** The router-authored delegate ack from the raw verdict (`task.ack`). */
 function delegateAckFromRaw(rawOutput: Record<string, unknown> | null): string | null {
 	const task = rawOutput?.task;
@@ -270,6 +296,13 @@ export function classifyTurn(src: TurnSource): TurnClassification {
 			label: 'Not addressed to the bot',
 			tone: 'declined',
 			structured: 'router · should_speak=false'
+		};
+	}
+	if (capabilityGap(src.rawOutput)) {
+		return {
+			label: 'Declined — capability unavailable',
+			tone: 'speak',
+			structured: 'raw_output.capability_gap'
 		};
 	}
 	const action = effectiveRouterAction(src.rawOutput);
@@ -484,6 +517,7 @@ function buildSteps(src: TurnSource): TurnStep[] {
 	const action = effectiveRouterAction(src.rawOutput);
 	const sayPath = action === 'delegate' || action === 'status';
 	const fallback = ackFallback(src.rawOutput);
+	const gap = capabilityGap(src.rawOutput);
 
 	const steps: TurnStep[] = [];
 
@@ -538,9 +572,11 @@ function buildSteps(src: TurnSource): TurnStep[] {
 	steps.push({
 		key: 'classified',
 		index: 0,
-		title: actionLabel
-			? `Decided to: ${actionLabel}`
-			: `Understood this as: ${classification.label}`,
+		title: gap
+			? 'Decided to: Decline — capability unavailable'
+			: actionLabel
+				? `Decided to: ${actionLabel}`
+				: `Understood this as: ${classification.label}`,
 		structuredName: 'router_decision_made',
 		status: src.reason ? 'done' : 'missing',
 		tone: classification.tone === 'error' ? 'error' : 'default',
@@ -698,6 +734,16 @@ function buildSteps(src: TurnSource): TurnStep[] {
 			label: `Blocked the reply because: ${noReplyReasonLabel(src.noReplyReason)}`,
 			structured: `no_reply_reason · ${src.noReplyReason}`,
 			tone: 'no_reply'
+		});
+	}
+	if (gap) {
+		guards.push({
+			label:
+				`Router picked delegate (${gap.kind || 'unknown kind'}) but that capability ` +
+				`isn't available in this session — declined honestly instead` +
+				(gap.reason ? `: ${gap.reason}` : ''),
+			structured: 'raw_output.capability_gap',
+			tone: 'divergence'
 		});
 	}
 	if (fallback) {

@@ -9,7 +9,11 @@ spellings, the legacy ``clawdbot`` manifest key, and Johnny's additive
 
 from __future__ import annotations
 
-from johnny.skills.frontmatter import SkillRunSpec, parse_skill_markdown
+from johnny.skills.frontmatter import (
+    SkillAvailabilitySpec,
+    SkillRunSpec,
+    parse_skill_markdown,
+)
 
 OPENCLAW_STYLE = """---
 name: himalaya
@@ -193,3 +197,59 @@ def test_env_and_config_requirements_carried_for_trt55() -> None:
     assert doc.requires.env == ("API_KEY",)
     assert doc.requires.config == ("~/.x",)
     assert doc.problems == ()
+
+
+def test_availability_spec_parsed_with_check_and_reason() -> None:
+    doc = parse_skill_markdown(
+        "---\nname: x\ndescription: d\n"
+        'metadata: {"johnny": {"availability": {'
+        '"check": {"argv": ["bash", "/skills/x/check.sh"], "timeout_s": 10}, '
+        '"unavailable_reason": "no account is connected — link one."}}}\n'
+        "---\n"
+    )
+    assert doc.availability == SkillAvailabilitySpec(
+        check=SkillRunSpec(argv=("bash", "/skills/x/check.sh"), timeout_s=10.0),
+        unavailable_reason="no account is connected — link one.",
+    )
+    assert doc.problems == ()
+
+
+def test_availability_absent_is_none() -> None:
+    doc = parse_skill_markdown("---\nname: x\ndescription: d\n---\n")
+    assert doc.availability is None
+
+
+def test_availability_reason_only_no_check() -> None:
+    doc = parse_skill_markdown(
+        "---\nname: x\ndescription: d\n"
+        'metadata: {"johnny": {"availability": {"unavailableReason": "not linked."}}}\n'
+        "---\n"
+    )
+    assert doc.availability == SkillAvailabilitySpec(
+        check=None, unavailable_reason="not linked."
+    )
+
+
+def test_availability_validation_matrix() -> None:
+    not_mapping = parse_skill_markdown(
+        "---\nname: x\ndescription: d\n"
+        'metadata: {"johnny": {"availability": "yes"}}\n---\n'
+    )
+    assert not_mapping.availability is None
+    assert any("johnny.availability must be a mapping" in p for p in not_mapping.problems)
+
+    bad_check = parse_skill_markdown(
+        "---\nname: x\ndescription: d\n"
+        'metadata: {"johnny": {"availability": {"check": {"argv": []}}}}\n---\n'
+    )
+    assert bad_check.availability is not None
+    assert bad_check.availability.check is None
+    assert any("johnny.availability.check.argv" in p for p in bad_check.problems)
+
+    bad_reason = parse_skill_markdown(
+        "---\nname: x\ndescription: d\n"
+        'metadata: {"johnny": {"availability": {"unavailable_reason": 3}}}\n---\n'
+    )
+    assert bad_reason.availability is not None
+    assert bad_reason.availability.unavailable_reason == ""
+    assert any("unavailable_reason must be a string" in p for p in bad_reason.problems)

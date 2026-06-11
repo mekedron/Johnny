@@ -141,6 +141,36 @@ class SandboxClient:
             raise SandboxUnavailableError("sandbox /bins returned no 'bins' object")
         return {str(name): bool(present) for name, present in bins.items()}
 
+    async def check_env(self, names: list[str]) -> dict[str, bool]:
+        """Resolve which env vars are set inside the sandbox, batched.
+
+        The availability-predicate analogue of :meth:`check_bins`
+        (Johnny-trt.55): one ``POST /exec`` covers every ``requires.env``
+        name any skill declares — never per skill, never on the turn hot
+        path. ``printenv -- "$v"`` keeps arbitrary names safe (no shell
+        interpolation of the values); set-but-empty counts as set.
+        """
+        if not names:
+            return {}
+        script = (
+            'for v in "$@"; do '
+            'if printenv -- "$v" >/dev/null 2>&1; then echo "$v=1"; else echo "$v=0"; fi; '
+            "done"
+        )
+        result = await self.exec(
+            argv=["sh", "-c", script, "envprobe", *names], timeout_s=10.0
+        )
+        if result.exit_code != 0:
+            raise SandboxUnavailableError(
+                f"sandbox env probe exited {result.exit_code}: {result.stderr[:200]}"
+            )
+        present: dict[str, bool] = {name: False for name in names}
+        for line in result.stdout.splitlines():
+            name, _, flag = line.rpartition("=")
+            if name in present:
+                present[name] = flag.strip() == "1"
+        return present
+
     async def exec(
         self,
         *,

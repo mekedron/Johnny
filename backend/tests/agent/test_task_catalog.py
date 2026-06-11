@@ -13,6 +13,7 @@ from __future__ import annotations
 from johnny.agent.task_catalog import (
     STUB_TASK_CATALOG,
     TaskCatalogEntry,
+    render_capability_notes,
     render_task_catalog,
 )
 
@@ -77,6 +78,124 @@ def test_render_never_leaks_keywords() -> None:
     rendered = render_task_catalog(entries)
     assert "agenda" not in rendered
     assert "keywords" not in rendered
+
+
+# --- availability rendering (Johnny-trt.55) ------------------------------------
+
+
+def test_all_available_renders_byte_identical_to_pre_trt55() -> None:
+    """Replay parity by construction: entries defaulting available=True render
+    exactly the pre-trt.55 block (the snapshot test above pins the bytes; this
+    pins that explicit available=True changes nothing either)."""
+    legacy = (TaskCatalogEntry(kind="a.b", one_liner="Do a thing."),)
+    explicit = (
+        TaskCatalogEntry(kind="a.b", one_liner="Do a thing.", available=True),
+    )
+    assert render_task_catalog(legacy) == render_task_catalog(explicit)
+    assert "NOT available" not in render_task_catalog(legacy)
+
+
+def test_mixed_availability_renders_two_blocks() -> None:
+    entries = (
+        TaskCatalogEntry(kind="session.end", one_liner="End the session."),
+        TaskCatalogEntry(
+            kind="google-calendar",
+            one_liner="Look up events.",
+            available=False,
+            unavailable_reason="no Google account is connected — link one in settings.",
+        ),
+    )
+
+    rendered = render_task_catalog(entries)
+
+    # Available block first, unchanged shape.
+    assert "- session.end: End the session." in rendered
+    # Unavailable block teaches the honest decline with the reason verbatim.
+    assert "Capabilities NOT available in this session" in rendered
+    assert "- google-calendar: no Google account is connected — link one in settings." in rendered
+    assert "Never pretend to check" in rendered
+    # The unavailable one-liner is NOT rendered (the reason replaces it).
+    assert "Look up events." not in rendered
+    # Two blocks, joined like the gate joins prompt sections.
+    assert "\n\n" in rendered
+
+
+def test_only_unavailable_entries_render_explicit_no_delegation_rule() -> None:
+    entries = (
+        TaskCatalogEntry(
+            kind="google-calendar",
+            one_liner="Look up events.",
+            available=False,
+            unavailable_reason="no Google account is connected.",
+        ),
+    )
+    rendered = render_task_catalog(entries)
+    assert rendered.startswith("There are NO delegatable task kinds in this session")
+    assert "never choose action='delegate'" in rendered
+    assert "- google-calendar: no Google account is connected." in rendered
+    # The available-kinds header must be absent (nothing is delegatable).
+    assert "The kinds:" not in rendered
+
+
+def test_unavailable_block_is_capped_against_prompt_bloat() -> None:
+    """Render cap (trt.55): at most 5 reason-carrying rows; the rest collapse
+    into one count line; reasons are clipped to 160 chars."""
+    entries = tuple(
+        TaskCatalogEntry(
+            kind=f"kind.{i:02d}",
+            one_liner="x",
+            available=False,
+            unavailable_reason=f"reason {i:02d} " + "verbose " * 40,
+        )
+        for i in range(12)
+    )
+
+    rendered = render_task_catalog(entries)
+    lines = rendered.splitlines()
+
+    reason_rows = [line for line in lines if line.startswith("- kind.")]
+    assert len(reason_rows) == 5  # capped
+    assert "…and 7 more unavailable kinds" in rendered
+    for row in reason_rows:
+        _, _, reason = row.partition(": ")
+        assert len(reason) <= 160
+        assert reason.endswith("…")
+    # The whole block stays bounded well under the ~2K budget.
+    assert len(rendered) < 2000
+
+
+def test_unavailable_blank_reason_gets_generic_copy() -> None:
+    entries = (
+        TaskCatalogEntry(kind="x.y", one_liner="x", available=False),
+    )
+    rendered = render_task_catalog(entries)
+    assert "- x.y: not available in this session right now" in rendered
+
+
+def test_capability_notes_empty_when_everything_available() -> None:
+    """The answer prompt stays byte-identical when the session has no gaps."""
+    assert render_capability_notes(()) == ""
+    assert render_capability_notes(STUB_TASK_CATALOG) == ""
+
+
+def test_capability_notes_carry_reasons_without_router_vocabulary() -> None:
+    """The answer-side block speaks the same reasons but knows nothing about
+    router actions — 'delegate' is triage vocabulary, not answer vocabulary."""
+    entries = (
+        TaskCatalogEntry(kind="session.end", one_liner="End the session."),
+        TaskCatalogEntry(
+            kind="google-calendar",
+            one_liner="Look up events.",
+            available=False,
+            unavailable_reason="no Google account is connected — link one in settings.",
+        ),
+    )
+    notes = render_capability_notes(entries)
+    assert "CANNOT do in this session" in notes
+    assert "- google-calendar: no Google account is connected — link one in settings." in notes
+    assert "Never pretend to check" in notes
+    assert "delegate" not in notes
+    assert "session.end" not in notes  # available kinds are not the answer model's business
 
 
 def test_stub_catalog_entries_are_prompt_and_scorer_ready() -> None:

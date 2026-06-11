@@ -251,3 +251,150 @@ async def test_result_text_capped_for_speech(tmp_path: Path) -> None:
     assert result.status == "done"
     assert len(result.result_text) <= RESULT_TEXT_CAP_CHARS
     assert result.result_text.endswith("…")
+
+
+# --- claim-time availability revalidation (Johnny-trt.55) ----------------------
+
+
+async def _registry_with_check(
+    tmp_path: Path, *, available_at_load: bool = True
+) -> SkillRegistry:
+    """A calendar-style skill declaring both a runner and an availability check."""
+    metadata = {
+        "openclaw": {"requires": {"bins": ["grep"]}},
+        "johnny": {
+            "run": {"argv": ["bash", "/skills/cal/run.sh"], "timeout_s": 45},
+            "availability": {
+                "check": {"argv": ["bash", "/skills/cal/check.sh"], "timeout_s": 10},
+                "unavailable_reason": "no account linked — connect one first.",
+            },
+        },
+    }
+    directory = tmp_path / "cal"
+    directory.mkdir()
+    (directory / "SKILL.md").write_text(
+        "---\nname: cal\ndescription: \"Calendar.\"\n"
+        f"metadata: '{json.dumps(metadata)}'\n---\n\nInstructions.\n",
+        encoding="utf-8",
+    )
+
+    async def all_present(names: list[str]) -> dict[str, bool]:
+        return {name: True for name in names}
+
+    from johnny.skills.registry import AvailabilityProbeOutcome
+
+    async def load_check(_spec: Any) -> AvailabilityProbeOutcome:
+        if available_at_load:
+            return AvailabilityProbeOutcome(ran=True, exit_code=0)
+        return AvailabilityProbeOutcome(
+            ran=True, exit_code=2, stdout="no account linked — connect one first."
+        )
+
+    return await load_skill_registry(
+        tmp_path, check_bins=all_present, run_check=load_check
+    )
+
+
+def _sequenced_tool(
+    registry: SkillRegistry,
+    replies: list[dict[str, Any]],
+    bodies: list[dict[str, Any]],
+) -> SandboxExecTool:
+    """Each /exec request consumes the next reply — check first, then run."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content.decode()))
+        return httpx.Response(200, json=replies[len(bodies) - 1])
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="http://s")
+    client = SandboxClient("http://s", http_client=http)
+    return SandboxExecTool(client, policy=ExecBinPolicy(allowed=registry.allowed_bins))
+
+
+async def test_recheck_passes_then_run_executes(tmp_path: Path) -> None:
+    """Happy path: the claim-time check (exit 0) precedes the run argv."""
+    registry = await _registry_with_check(tmp_path)
+    bodies: list[dict[str, Any]] = []
+    tool = _sequenced_tool(
+        registry,
+        [dict(_BASE_REPLY), dict(_BASE_REPLY, stdout="Two events tomorrow.\n")],
+        bodies,
+    )
+    result = await build_skill_task_executor(registry, tool)(_task("cal"))
+
+    assert result.status == "done"
+    assert result.result_text == "Two events tomorrow."
+    assert [body["argv"] for body in bodies] == [
+        ["bash", "/skills/cal/check.sh"],
+        ["bash", "/skills/cal/run.sh"],
+    ]
+    assert bodies[0]["timeout"] == 10  # the check's own budget, not the run's
+
+
+async def test_recheck_failure_blocks_run_and_speaks_the_same_reason(
+    tmp_path: Path,
+) -> None:
+    """The link broke between ack and claim (trt.55 acceptance): the recheck
+    fails with the skill-authored copy, the run argv never executes, and the
+    failed settle carries the SAME actionable reason the catalog decline uses
+    (the trt.53 correction then speaks it)."""
+    registry = await _registry_with_check(tmp_path)
+    bodies: list[dict[str, Any]] = []
+    tool = _sequenced_tool(
+        registry,
+        [dict(_BASE_REPLY, exit_code=2, stdout="no account linked — connect one first.\n")],
+        bodies,
+    )
+    result = await build_skill_task_executor(registry, tool)(_task("cal"))
+
+    assert result.status == "failed"
+    assert result.result_text == "no account linked — connect one first."
+    assert "availability recheck failed" in result.error
+    assert len(bodies) == 1  # the run argv never reached the sandbox
+
+
+async def test_recheck_unreachable_speaks_could_not_verify(tmp_path: Path) -> None:
+    """A sandbox blip at claim time must NOT assert the credential gap — the
+    honest copy is could-not-verify, and nothing runs."""
+    registry = await _registry_with_check(tmp_path)
+
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(boom), base_url="http://s")
+    tool = SandboxExecTool(
+        SandboxClient("http://s", http_client=http),
+        policy=ExecBinPolicy(allowed=registry.allowed_bins),
+    )
+    result = await build_skill_task_executor(registry, tool)(_task("cal"))
+
+    assert result.status == "failed"
+    assert "couldn't verify" in result.result_text
+    assert "didn't start it" in result.result_text
+    assert "no account linked" not in result.result_text
+
+
+async def test_snapshot_unavailable_skill_settles_without_any_exec(tmp_path: Path) -> None:
+    """Defense in depth: a skill the session snapshot already holds unavailable
+    settles failed with the same spoken reason — no sandbox call at all."""
+    registry = await _registry_with_check(tmp_path, available_at_load=False)
+    bodies: list[dict[str, Any]] = []
+    tool = _sequenced_tool(registry, [dict(_BASE_REPLY)], bodies)
+    result = await build_skill_task_executor(registry, tool)(_task("cal"))
+
+    assert result.status == "failed"
+    assert result.result_text == "no account linked — connect one first."
+    assert "unavailable at session snapshot" in result.error
+    assert bodies == []  # nothing reached the sandbox
+
+
+async def test_skill_without_check_pays_no_recheck_exec(tmp_path: Path) -> None:
+    """No declared check ⇒ exactly one exec (the run) — the trt.23 path
+    byte-for-byte; the run script owns its own graceful failure leg."""
+    registry = await _registry_with_runner(tmp_path)
+    bodies: list[dict[str, Any]] = []
+    reply = dict(_BASE_REPLY, stdout="ok\n")
+    executor = build_skill_task_executor(registry, _tool(registry, reply, bodies))
+    result = await executor(_task("fetch-news"))
+    assert result.status == "done"
+    assert [body["argv"] for body in bodies] == [["bash", "/skills/fetch-news/run.sh"]]

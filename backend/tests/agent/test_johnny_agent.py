@@ -203,6 +203,32 @@ def test_explicit_instructions_override_prompt_config() -> None:
     assert agent.instructions == "VERBATIM"
 
 
+def test_capability_notes_render_between_personality_and_instructions() -> None:
+    """Johnny-trt.55: the answer model sees the unavailable-capability honesty
+    block — after the personality (so no-pretend-check outranks roleplay),
+    before the operator instructions (so those refine, not contradict)."""
+    notes = (
+        "Things you CANNOT do in this session right now. If asked for one of "
+        "these, say so plainly:\n- google-calendar: no Google account is connected."
+    )
+    config = AgentInstructionsConfig(
+        personality_prompt="You are a cyberpunk concierge.",
+        instructions="Be brief.",
+        capability_notes=notes,
+    )
+    rendered = build_agent_instructions(config)
+    assert notes in rendered
+    assert rendered.index("cyberpunk") < rendered.index("CANNOT do")
+    assert rendered.index("CANNOT do") < rendered.index("Meeting instructions: Be brief.")
+
+
+def test_empty_capability_notes_leave_prompt_byte_identical() -> None:
+    base = AgentInstructionsConfig(instructions="Be brief.")
+    with_empty = AgentInstructionsConfig(instructions="Be brief.", capability_notes="")
+    assert build_agent_instructions(base) == build_agent_instructions(with_empty)
+    assert "CANNOT" not in build_agent_instructions(base)
+
+
 def test_chat_history_seeds_chat_ctx() -> None:
     agent = JohnnyAgent(
         chat_history=[

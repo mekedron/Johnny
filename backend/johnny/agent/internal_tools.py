@@ -9,7 +9,8 @@ contract): in-process callables that act on Johnny itself, so the bot can obey
 * ``meeting.leave`` — speak the farewell (the router-authored delegate ack),
   mark the meeting dismissed with ``actor=voice`` (the Johnny-trt.56 state, so
   the scheduler does NOT re-join this occurrence), and disconnect. Available
-  only in Meet-backed sessions (surface scoping).
+  only in Meet-backed sessions (surface scoping; off-surface it is an
+  unavailable catalog entry the router declines honestly, Johnny-trt.55).
 * ``session.end`` — same minus the meeting state: farewell, then a clean
   session stop. Available on every surface (playground + Meet).
 
@@ -108,21 +109,33 @@ def is_internal_kind(kind: str) -> bool:
 class InternalToolSpec:
     """One internal tool: catalog face + surface scope.
 
-    ``meeting_only`` is the v1 surface predicate (Johnny-trt.55 refinement 5):
-    ``True`` means the tool exists only in Meet-backed sessions — in the
-    playground the entry is *absent* from the catalog, so the router never
-    promises it (capability gating by omission, the Johnny-trt.19 stance) and
-    an ask gets an honest inline answer instead of a dead promise.
+    ``meeting_only`` is the surface predicate: ``True`` means the tool works
+    only in Meet-backed sessions. Internal tools join Johnny-trt.55's
+    availability model — off its surface the tool renders as an
+    *unavailable* catalog entry carrying ``unavailable_reason`` (spoken-form,
+    actionable), so the router declines honestly ("there's no meeting to
+    leave") instead of improvising, and the gate's delegate backstop can
+    never act on it. Unavailable entries carry no keywords (the trt.50
+    delegate prior must not fire for impossible work).
     """
 
     kind: str
     one_liner: str
     keywords: tuple[str, ...] = ()
     meeting_only: bool = False
+    unavailable_reason: str = ""
 
-    def catalog_entry(self) -> TaskCatalogEntry:
+    def catalog_entry(self, *, available: bool = True) -> TaskCatalogEntry:
+        if available:
+            return TaskCatalogEntry(
+                kind=self.kind, one_liner=self.one_liner, keywords=self.keywords
+            )
         return TaskCatalogEntry(
-            kind=self.kind, one_liner=self.one_liner, keywords=self.keywords
+            kind=self.kind,
+            one_liner=self.one_liner,
+            keywords=(),
+            available=False,
+            unavailable_reason=self.unavailable_reason,
         )
 
 
@@ -144,6 +157,10 @@ INTERNAL_TOOLS: tuple[InternalToolSpec, ...] = (
             "dismissed",
         ),
         meeting_only=True,
+        unavailable_reason=(
+            "this session isn't connected to a meeting, so there's no meeting "
+            "to leave — ask me to end the session if you want to stop here."
+        ),
     ),
     InternalToolSpec(
         kind=SESSION_END_KIND,
@@ -169,18 +186,19 @@ from :data:`INTERNAL_TOOL_KINDS` / this tuple automatically."""
 
 
 def internal_catalog_entries(*, meeting_backed: bool) -> tuple[TaskCatalogEntry, ...]:
-    """The internal kinds this session may advertise to the router.
+    """The internal kinds as this session's catalog entries, availability-scoped.
 
     ``meeting_backed`` is the surface predicate the assembly derives from the
     job payload (``calendar_event_id`` set ⇒ a Meet session linked to a
-    calendar occurrence). ``meeting_only`` tools drop out elsewhere, so an
-    unavailable kind is never taught — the honest decline comes from the
-    router answering inline instead of delegating.
+    calendar occurrence). Off its surface a ``meeting_only`` tool renders as
+    an *unavailable* entry (Johnny-trt.55) rather than dropping out: the
+    router learns the kind exists, that delegating it is impossible here,
+    and the spoken-form reason to decline with — and the gate backstop
+    degrades any delegate verdict that targets it anyway.
     """
     return tuple(
-        spec.catalog_entry()
+        spec.catalog_entry(available=meeting_backed or not spec.meeting_only)
         for spec in INTERNAL_TOOLS
-        if meeting_backed or not spec.meeting_only
     )
 
 
@@ -291,9 +309,11 @@ def build_internal_task_executor(
             return await _run_session_end(context, task)
         if kind == MEETING_LEAVE_KIND:
             if not context.meeting_backed:
-                # Backstop only: the catalog never advertises meeting.leave off
-                # the Meet surface, so reaching here means a hallucinated kind
-                # or a hand-queued row — settle honestly (trt.55 semantics).
+                # Backstop only: off the Meet surface the catalog carries
+                # meeting.leave as unavailable and the gate degrades delegate
+                # verdicts targeting it (Johnny-trt.55), so reaching here
+                # means a hallucinated kind or a hand-queued row — settle
+                # honestly.
                 return TaskResult(
                     status="failed",
                     result_text=(

@@ -45,11 +45,13 @@ from app.providers.base import (  # noqa: E402
 from johnny.agent.gate import GateTerminal, TurnIndex, TurnLedger  # noqa: E402
 from johnny.agent.router_gate import (  # noqa: E402
     ACK_FALLBACK_KEY,
+    CAPABILITY_GAP_KEY,
     DEFAULT_DELEGATE_ACK,
     ROUTER_DECISION_SCHEMA,
     STATUS_STUB_REPLY,
     RouterGate,
     RouterGateConfig,
+    capability_decline_speech,
     delegate_failure_correction,
 )
 from johnny.agent.tasks import (  # noqa: E402
@@ -735,11 +737,19 @@ class _RecordingTriageTiming:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, float, float, str]] = []
+        self.prompt_chars: list[int | None] = []
 
     async def __call__(
-        self, turn_id: str, started_at: float, ended_at: float, action: str
+        self,
+        turn_id: str,
+        started_at: float,
+        ended_at: float,
+        action: str,
+        *,
+        prompt_chars: int | None = None,
     ) -> None:
         self.calls.append((turn_id, started_at, ended_at, action))
+        self.prompt_chars.append(prompt_chars)
 
 
 def _timed_gate(
@@ -835,6 +845,25 @@ async def test_triage_timing_carries_effective_action_after_ack_degrade() -> Non
     await gate.run_turn(ChatContext.empty(), _user_msg("book it"))  # SPEAK — no raise
 
     assert [c[3] for c in timing.calls] == ["speak"]
+
+
+async def test_triage_timing_carries_router_prompt_chars() -> None:
+    """Johnny-trt.55: the timing emit carries the built router prompt's size —
+    the catalog-growth metric — measured off the exact messages sent."""
+    gate, timing = _timed_gate(
+        [{"should_speak": True, "confidence": 0.95, "reason": "q"}],
+        config=RouterGateConfig(instructions="Stay on agenda."),
+    )
+    await gate.run_turn(ChatContext.empty(), _user_msg("Johnny?"))
+
+    assert len(timing.prompt_chars) == 1
+    chars = timing.prompt_chars[0]
+    assert chars is not None
+    # The exact value is the sum over the prompt messages the fake recorded.
+    gate_router = gate._router_llm
+    expected = sum(len(m.content or "") for m in gate_router.calls[0])  # type: ignore[attr-defined]
+    assert chars == expected
+    assert chars > 0
 
 
 async def test_triage_timing_not_emitted_on_timeout() -> None:
@@ -1397,6 +1426,158 @@ async def test_delegate_with_ack_carries_no_fallback_marker() -> None:
     decision, _turn = h.obs.decisions[0]
     assert decision.action == "delegate"
     assert ACK_FALLBACK_KEY not in decision.raw
+
+
+# --- capability-gap backstop (Johnny-trt.55) ---------------------------------
+
+
+_UNAVAILABLE_REASON = (
+    "I can't see the Google calendar yet — no Google account is connected to "
+    "my tools. Connect one with 'gog auth add' in the skills sandbox, then "
+    "ask me again."
+)
+
+
+def _capability_catalog() -> tuple[Any, ...]:
+    from johnny.agent.task_catalog import TaskCatalogEntry
+
+    return (
+        TaskCatalogEntry(kind="session.end", one_liner="End this voice session."),
+        TaskCatalogEntry(
+            kind="google-calendar",
+            one_liner="Look up upcoming events on the connected Google calendar.",
+            available=False,
+            unavailable_reason=_UNAVAILABLE_REASON,
+        ),
+    )
+
+
+async def test_delegate_targeting_unavailable_kind_speaks_decline() -> None:
+    """THE trt.55 backstop: a delegate verdict for an unavailable catalog kind
+    queues NOTHING and speaks the honest decline (the catalog's spoken-form
+    reason) — never the answer pipeline, never a task row, with the
+    capability-gap marker riding the decision row's raw_output."""
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="google-calendar")],
+        config=RouterGateConfig(task_catalog=_capability_catalog()),
+    )
+    msg = _user_msg("check what's on our google calendar")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    # The decline is the unavailable reason, spoken verbatim via say().
+    assert h.say.texts == [_UNAVAILABLE_REASON]
+    # No row, no promise: the task sink never saw a queue attempt.
+    assert h.sink.snapshot() == []
+    # Marker rode decision.raw into the decision emit (trt.50 ride-along).
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "status"  # the effective say()-path action
+    assert decision.task_request is None
+    marker = decision.raw[CAPABILITY_GAP_KEY]
+    assert marker == {
+        "from_action": "delegate",
+        "to_action": "status",
+        "kind": "google-calendar",
+        "reason": _UNAVAILABLE_REASON,
+    }
+    json.dumps(marker)  # JSON-safe as persisted by the subscriber
+
+    # The decline's completion owns the turn's single terminal (INV-1) and
+    # the AgentSpoke carries the exact spoken text as a status-kind speech.
+    h.say.handles[0].fire_done()
+    await h.drain()
+    assert h.emitter.states == ["replied"]
+    assert "declined unavailable capability" in h.emitter.records[0][1].detail
+    assert h.obs.spoke_calls == [(_UNAVAILABLE_REASON, msg.id, "status")]
+
+
+async def test_delegate_on_available_kind_ignores_other_entries_gaps() -> None:
+    """An available kind delegates normally even when the catalog carries
+    unavailable siblings — the gap check is per-targeted-kind."""
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="session.end")],
+        config=RouterGateConfig(task_catalog=_capability_catalog()),
+    )
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("end the session"))
+
+    assert len(h.sink.snapshot()) == 1  # queued — the normal delegate path
+    assert h.say.texts == ["On it — give me a minute."]
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "delegate"
+    assert CAPABILITY_GAP_KEY not in decision.raw
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_delegate_unknown_kind_keeps_the_executor_fail_fast_path() -> None:
+    """A kind absent from the catalog entirely (hallucinated) is NOT degraded —
+    it rides the trt.57 path: queued, failed fast by the stub executor, walked
+    back by the trt.53 spoken correction."""
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="made.up")],
+        config=RouterGateConfig(task_catalog=_capability_catalog()),
+    )
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("do the made-up thing"))
+
+    assert len(h.sink.snapshot()) == 1  # queued — executor owns the honesty
+    decision, _turn = h.obs.decisions[0]
+    assert CAPABILITY_GAP_KEY not in decision.raw
+    h.say.handles[0].fire_done()
+    await h.drain()
+    assert h.sink.snapshot()[0].status == "failed"
+
+
+async def test_ackless_delegate_on_unavailable_kind_declines_not_speaks() -> None:
+    """Degrade precedence (trt.55 before trt.53): an ackless delegate verdict
+    targeting an unavailable kind speaks the decline — it must never fall
+    through to the answer pipeline, which could invent a pretend-check."""
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="google-calendar", ack=None)],
+        config=RouterGateConfig(task_catalog=_capability_catalog()),
+    )
+    msg = _user_msg("check the calendar")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    assert h.say.texts == [_UNAVAILABLE_REASON]
+    assert h.sink.snapshot() == []
+    assert msg.id not in h.gate._pending_speak_turns  # no SPEAK fallthrough
+    decision, _turn = h.obs.decisions[0]
+    assert CAPABILITY_GAP_KEY in decision.raw
+    assert ACK_FALLBACK_KEY not in decision.raw  # the gap degrade won
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_triage_timing_carries_status_after_capability_degrade() -> None:
+    """The timing row carries the *effective* action for a gap-degraded turn
+    (the trt.53 effective-action precedent applied to trt.55)."""
+    timing = _RecordingTriageTiming()
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="google-calendar")],
+        config=RouterGateConfig(task_catalog=_capability_catalog()),
+    )
+    h.gate._record_triage_timing = timing  # the harness has no timing seam arg
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("calendar?"))
+
+    assert [c[3] for c in timing.calls] == ["status"]
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+def test_capability_decline_speech_falls_back_when_reason_blank() -> None:
+    assert capability_decline_speech("x.y", "  do this  ") == "do this"
+    generic = capability_decline_speech("x.y", "")
+    assert "x.y" in generic
+    assert "isn't available" in generic
 
 
 async def test_default_ack_survives_only_as_instrumented_last_resort(

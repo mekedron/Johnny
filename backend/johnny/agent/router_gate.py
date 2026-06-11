@@ -181,6 +181,29 @@ per-session fallback-ack rate is rows carrying this key over rows whose
 ``raw_output->>'action'`` is ``'delegate'``; the delegate rate is those rows
 over all decision rows."""
 
+CAPABILITY_GAP_KEY = "capability_gap"
+"""``decision.raw`` key marking a delegate verdict that targeted an
+*unavailable* catalog kind (Johnny-trt.55) — the defense-in-depth backstop:
+the model can never act on a capability the session lacks. Stashed before
+the decision emit (the same trt.50 ride-along as :data:`ACK_FALLBACK_KEY`)
+with ``{from_action, to_action, kind, reason}``, so the decision row records
+the capability-gap reason; the turn then speaks the honest decline
+deterministically via say() — never the answer pipeline, which could invent
+a pretend-check."""
+
+
+def capability_decline_speech(kind: str, reason: str) -> str:
+    """Compose the spoken decline for an unavailable-capability ask (Johnny-trt.55).
+
+    ``reason`` is the catalog entry's ``unavailable_reason`` — spoken-form
+    and actionable by contract (it names what is missing and the fix), so it
+    is spoken verbatim. The generic tail covers a blank reason defensively.
+    """
+    spoken = (reason or "").strip()
+    if spoken:
+        return spoken
+    return f"I can't do that in this session — the {kind} capability isn't available right now."
+
 STATUS_STUB_REPLY = "I don't have any tasks in flight right now."
 """The Phase-3 ``status`` verdict stub — there is no delegated-task registry to
 query until the Phase-5 real status query lands, so the gate speaks this fixed
@@ -373,6 +396,12 @@ class RouterGate:
         # Flagged via :meth:`note_coercion_no_match` (keyed off the active reply's
         # turn id) and consumed when that reply's done-callback fires.
         self._coercion_no_match_turns: set[str] = set()
+        # Char count of the most recent router prompt (Johnny-trt.55): set by
+        # _decide right after the prompt build, read by run_turn's triage
+        # timing emit so session_timings shows catalog growth (the render-cap
+        # enforcement metric). Turns run serially through the blocking hook,
+        # so a single slot cannot race.
+        self._last_prompt_chars: int | None = None
 
     # ------------------------------------------------------------------ #
     # The blocking gate                                                  #
@@ -449,6 +478,7 @@ class RouterGate:
         # router_llm timing row stays comparable to the pre-shadow baseline.
         # Observability only: nothing branches on it.
         shadow = self._complexity_shadow(new_message, turn_id)
+        self._last_prompt_chars = None  # set by _decide once the prompt is built
         triage_started = time.time()
         action, decision = await run_gate(
             lambda: self._decide(turn_ctx, new_message),
@@ -480,11 +510,14 @@ class RouterGate:
         if shadow is not None:
             decision.raw[SHADOW_KEY] = shadow
 
-        # Delegate-ack rule (Johnny-trt.53): an ackless delegate verdict is
-        # degraded to a plain SPEAK before anything reads the action — the
-        # timing row below carries the *effective* action, and the raw marker
-        # (stashed inside the helper, before the decision emit) keeps the
-        # model's original verdict measurable.
+        # Capability backstop (Johnny-trt.55) FIRST, then the ack rule: a
+        # delegate verdict targeting an unavailable catalog kind is degraded
+        # to the deterministic spoken decline — before the ackless degrade,
+        # because an unavailable ask must never ride the answer pipeline
+        # (which could invent a pretend-check). Both helpers stash their raw
+        # markers before the emits below, so the timing row carries the
+        # *effective* action and the decision row records the gap/fallback.
+        decision = self._degrade_unavailable_delegate(decision, turn_id)
         decision = self._degrade_ackless_delegate(decision, turn_id)
 
         # Triage-stage timing (Johnny-trt.19): one ``router_llm`` row per turn
@@ -494,9 +527,16 @@ class RouterGate:
         # wall cost every verdict pays before anything else can happen. Emitted
         # for every mode (a timing row, not a decision row, so the
         # approval-mode double-write concern below does not apply).
+        # ``prompt_chars`` (Johnny-trt.55) is the router prompt size _decide
+        # measured — the catalog-growth metric that keeps the render cap
+        # enforceable.
         if self._record_triage_timing is not None:
             await self._record_triage_timing(
-                turn_id, triage_started, triage_ended, decision.action
+                turn_id,
+                triage_started,
+                triage_ended,
+                decision.action,
+                prompt_chars=self._last_prompt_chars,
             )
 
         # Observability parity (Johnny-d5z): publish this turn's RouterDecisionMade
@@ -567,6 +607,15 @@ class RouterGate:
             # A delegate/status action parks like any approved decision — the
             # Phase-3 triage branches below are inline-speaking-mode only.
             await self._begin_approval(tracker, turn_id, decision)
+            raise StopResponse()
+
+        capability_gap = decision.raw.get(CAPABILITY_GAP_KEY)
+        if isinstance(capability_gap, dict):
+            # The trt.55 backstop's speech leg: the delegate verdict targeted
+            # an unavailable kind, so speak the honest decline (the catalog
+            # entry's spoken-form reason) through the say() machinery — no
+            # answer-LLM hop that could pretend-check, no task row at all.
+            await self._handle_capability_decline(tracker, turn_id, capability_gap)
             raise StopResponse()
 
         if decision.action == DELEGATE_ACTION and decision.task_request is not None:
@@ -673,6 +722,89 @@ class RouterGate:
             task_request.kind,
         )
         return replace(decision, action=SPEAK_ACTION, task_request=None)
+
+    def _degrade_unavailable_delegate(
+        self, decision: RouterDecision, turn_id: str
+    ) -> RouterDecision:
+        """Rewrite a delegate verdict targeting an unavailable kind to the decline (Johnny-trt.55).
+
+        Defense in depth behind the prompt's unavailable block: whatever the
+        model says, a capability this session lacks can never be acted on.
+        The marker is stashed in ``decision.raw`` *before* :meth:`run_turn`'s
+        emits (the trt.50 ride-along), so the decision row records the
+        capability-gap reason; the action is rewritten to ``status`` — the
+        effective shape of the turn (deterministic say()-path speech, no
+        answer hop, no task row) — and ``task_request`` is cleared so nothing
+        downstream can queue it. Kinds absent from the catalog entirely are
+        left alone: they ride the normal delegate path into the executor's
+        fail-fast legs (the trt.57 hallucinated-kind stance).
+        """
+        task_request = decision.task_request
+        if decision.action != DELEGATE_ACTION or task_request is None:
+            return decision
+        entry = next(
+            (e for e in self._config.task_catalog if e.kind == task_request.kind), None
+        )
+        if entry is None or entry.available:
+            return decision
+        decision.raw[CAPABILITY_GAP_KEY] = {
+            "from_action": DELEGATE_ACTION,
+            "to_action": STATUS_ACTION,
+            "kind": task_request.kind,
+            "reason": entry.unavailable_reason,
+        }
+        logger.warning(
+            "agent.router.gate: turn=%s delegate verdict targets UNAVAILABLE "
+            "kind=%r — degrading to the spoken decline (Johnny-trt.55: %s)",
+            turn_id,
+            task_request.kind,
+            entry.unavailable_reason or "no reason recorded",
+        )
+        return replace(decision, action=STATUS_ACTION, task_request=None)
+
+    async def _handle_capability_decline(
+        self, tracker: TerminalTracker, turn_id: str, gap: dict[str, object]
+    ) -> None:
+        """Speak the honest unavailable-capability decline; its completion owns the terminal.
+
+        The say()-path leg of the trt.55 backstop, shaped like
+        :meth:`_handle_status`: deterministic text
+        (:func:`capability_decline_speech` over the catalog's spoken-form
+        reason — naming what is missing and the fix), spoken via
+        :meth:`_say_with_terminal` with ``kind="status"`` (a self-state
+        report, the closest trt.54 speech kind). No coordinator involvement —
+        nothing is queued, so there is no row and no promise. Without say()
+        the turn terminalizes ``no_reply(stage_error)`` like the other
+        say()-path verdicts.
+        """
+        kind = str(gap.get("kind", ""))
+        if self._say is None:
+            await tracker.emit(
+                terminal_state="no_reply",
+                no_reply_reason="stage_error",
+                detail=(
+                    f"capability decline for kind={kind!r} but say() is not "
+                    "attached — cannot speak"
+                ),
+            )
+            return
+        text = capability_decline_speech(kind, str(gap.get("reason", "")))
+        logger.info(
+            "agent.router.gate: turn=%s DECLINE unavailable kind=%s reason=%r",
+            turn_id,
+            kind,
+            text,
+        )
+        await self._say_with_terminal(
+            tracker,
+            turn_id,
+            text,
+            kind="status",
+            replied_detail=f"declined unavailable capability {kind!r}; spoke the reason",
+            interrupted_detail=(
+                f"capability decline for {kind!r} interrupted before completion"
+            ),
+        )
 
     async def _begin_approval(
         self, tracker: TerminalTracker, turn_id: str, decision: RouterDecision
@@ -1131,6 +1263,10 @@ class RouterGate:
         decision schema, and reuses the legacy parser for verdict parity.
         """
         messages = self._router_messages(turn_ctx, new_message)
+        # Router prompt size (Johnny-trt.55): the catalog-growth metric the
+        # triage timing row persists (details.prompt_chars) — measured here so
+        # it reflects exactly what was sent, render caps included.
+        self._last_prompt_chars = sum(len(message.content or "") for message in messages)
         response = await self._router_llm.chat(messages, response_format=ROUTER_DECISION_SCHEMA)
         return _reasoning._parse_router_response(response)
 
@@ -1553,11 +1689,13 @@ class RouterGate:
 
 __all__ = [
     "ACK_FALLBACK_KEY",
+    "CAPABILITY_GAP_KEY",
     "DEFAULT_DELEGATE_ACK",
     "STATUS_STUB_REPLY",
     "PersistPendingDecision",
     "RouterGate",
     "RouterGateConfig",
     "SaySpeech",
+    "capability_decline_speech",
     "delegate_failure_correction",
 ]

@@ -87,6 +87,7 @@ from johnny.agent.observability import (
 )
 from johnny.agent.router_gate import RouterGate, RouterGateConfig
 from johnny.agent.session import JohnnyAgent, build_johnny_agent
+from johnny.agent.task_catalog import render_capability_notes
 from johnny.agent.tasks import TaskCoordinator, stub_executor
 from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder, build_recorder_from_env
 from johnny.voice_pipeline.event_bus import (
@@ -430,20 +431,27 @@ async def _build_skill_pieces(
     """Load the skill registry + build the sandbox-backed executor (Johnny-trt.23).
 
     Called only for delegation-capable assemblies (a task sink exists). One
-    volume scan + at most one batched sandbox ``/bins`` probe per session
-    assembly — session start is not the per-turn hot path; the boot-time
-    capability snapshot service replaces this in Johnny-trt.55. Defensive
-    throughout: any failure degrades to an empty registry + the Phase-3
-    fail-fast stub executor (``executor=None`` keeps
-    :func:`~johnny.agent.task_wiring.build_task_coordinator`'s default), so
-    session assembly never breaks on a broken volume or a down sandbox.
+    volume scan + the batched sandbox probes (``/bins``, the trt.55 env
+    probe, and the declared availability checks) per session assembly —
+    session start is not the per-turn hot path, and the resulting
+    availability snapshot stays frozen for the session (the documented
+    trt.55 lifecycle; claim-time revalidation in the executor covers
+    mid-session breaks). Defensive throughout: any failure degrades to an
+    empty registry + the Phase-3 fail-fast stub executor (``executor=None``
+    keeps :func:`~johnny.agent.task_wiring.build_task_coordinator`'s
+    default), so session assembly never breaks on a broken volume or a down
+    sandbox.
 
     Returns ``(registry, sandbox_client, executor)``; the caller stores the
     client on the runtime for teardown.
     """
     from johnny.skills.executor import build_skill_task_executor
     from johnny.skills.policy import ExecBinPolicy
-    from johnny.skills.registry import EMPTY_SKILL_REGISTRY, load_skill_registry
+    from johnny.skills.registry import (
+        EMPTY_SKILL_REGISTRY,
+        build_sandbox_availability_runner,
+        load_skill_registry,
+    )
     from johnny.skills.sandbox import SandboxClient as _SandboxClient
     from johnny.skills.sandbox import skills_dir_from_env
     from johnny.skills.tools import SandboxExecTool
@@ -453,7 +461,10 @@ async def _build_skill_pieces(
     if skill_registry is None:
         try:
             skill_registry = await load_skill_registry(
-                skills_dir_from_env(), check_bins=sandbox_client.check_bins
+                skills_dir_from_env(),
+                check_bins=sandbox_client.check_bins,
+                check_env=sandbox_client.check_env,
+                run_check=build_sandbox_availability_runner(sandbox_client),
             )
         except Exception:
             logger.exception(
@@ -628,6 +639,29 @@ async def build_agent_runtime(
         skill_registry = None
         sandbox_client = None
 
+    # Task catalog (Johnny-trt.19): teach the router the delegate
+    # vocabulary only when a coordinator exists to honour it — a gate
+    # without task wiring stage_errors delegate verdicts, so advertising
+    # kinds there would invite turns that can only fail. Sources, in
+    # resolution order (Johnny-trt.57): the internal tools scoped to
+    # THIS surface (meeting.leave renders unavailable off the Meet
+    # surface, Johnny-trt.55, so the playground router declines it
+    # honestly instead of promising a meeting it isn't in), then the
+    # skill loader (Johnny-trt.23): eligible SKILL.md packages on the
+    # skills volume, each carrying its trt.55 availability verdict
+    # (credentials/env evaluated at this assembly — the session's
+    # frozen snapshot).
+    task_catalog = (
+        merge_task_catalog(
+            internal_catalog_entries(
+                meeting_backed=config.calendar_event_id is not None
+            ),
+            skill_registry.catalog_entries() if skill_registry is not None else (),
+        )
+        if task_coordinator is not None
+        else ()
+    )
+
     gate_config = RouterGateConfig(
         mode=config.mode,
         personality_prompt=config.personality_prompt,
@@ -636,25 +670,7 @@ async def build_agent_runtime(
         calendar_context=config.calendar_context,
         calendar_attachments_text=config.calendar_attachments_text,
         prior_session_context=config.prior_session_context,
-        # Task catalog (Johnny-trt.19): teach the router the delegate
-        # vocabulary only when a coordinator exists to honour it — a gate
-        # without task wiring stage_errors delegate verdicts, so advertising
-        # kinds there would invite turns that can only fail. Sources, in
-        # resolution order (Johnny-trt.57): the internal tools available on
-        # THIS surface (meeting.leave only when the session is Meet-backed —
-        # capability gating by omission, so the playground router never
-        # promises a meeting it isn't in), then the skill loader
-        # (Johnny-trt.23): eligible SKILL.md packages on the skills volume.
-        task_catalog=(
-            merge_task_catalog(
-                internal_catalog_entries(
-                    meeting_backed=config.calendar_event_id is not None
-                ),
-                skill_registry.catalog_entries() if skill_registry is not None else (),
-            )
-            if task_coordinator is not None
-            else ()
-        ),
+        task_catalog=task_catalog,
     )
     gate = RouterGate(
         router_llm,
@@ -767,8 +783,18 @@ async def build_agent_runtime(
     async def _publish_transcript_filtered(event: TranscriptFiltered) -> None:
         await bus.publish(event)
 
+    # Capability honesty for the ANSWER side (Johnny-trt.55): the router's
+    # unavailable block stops bad delegations, but an unavailable ask routed
+    # to speak is answered by the answer model — which must see the same
+    # gaps + reasons or it improvises a pretend-check. Empty when nothing is
+    # unavailable, leaving the prompt byte-identical.
+    prompt_config = replace(
+        instructions_config_from_job(config),
+        capability_notes=render_capability_notes(task_catalog),
+    )
+
     agent = await build_johnny_agent(
-        prompt_config=instructions_config_from_job(config),
+        prompt_config=prompt_config,
         transcript_history_loader=transcript_history_loader,
         session_id=session_id,
         bot_session_id=config.bot_session_id,

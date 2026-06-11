@@ -77,11 +77,22 @@ def test_catalog_meeting_backed_has_both_kinds_internal_first() -> None:
     for entry in entries:
         assert entry.one_liner
         assert entry.keywords
+        assert entry.available is True
 
 
-def test_catalog_playground_omits_meeting_leave() -> None:
+def test_catalog_playground_carries_meeting_leave_as_unavailable() -> None:
+    """Off the Meet surface meeting.leave joins the trt.55 availability model:
+    an unavailable entry with the spoken reason (the router declines honestly)
+    instead of the old omission — and no keywords, so the trt.50 delegate
+    prior cannot fire for it."""
     entries = internal_catalog_entries(meeting_backed=False)
-    assert [entry.kind for entry in entries] == [SESSION_END_KIND]
+    assert [entry.kind for entry in entries] == [MEETING_LEAVE_KIND, SESSION_END_KIND]
+    leave, end = entries
+    assert leave.available is False
+    assert "no meeting to leave" in leave.unavailable_reason
+    assert leave.keywords == ()
+    assert end.available is True
+    assert end.keywords
 
 
 def test_merge_puts_internal_first_and_drops_shadowing_skill_kinds() -> None:

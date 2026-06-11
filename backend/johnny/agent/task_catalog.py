@@ -40,11 +40,22 @@ class TaskCatalogEntry:
     ``keywords`` are trigger words for Johnny-trt.50's heuristic
     catalog-keyword dimension (the delegate prior); they never reach the
     prompt. English here — the scorer owns its own multilingual sets.
+
+    ``available`` / ``unavailable_reason`` (Johnny-trt.55): a kind whose
+    capability THIS session lacks (no credentials, missing configuration, the
+    wrong surface) is carried ``available=False`` with a short, spoken-form,
+    actionable reason — rendered so the router can decline honestly and name
+    the fix, and read by the gate's delegate backstop. Catalog ASSEMBLY must
+    give unavailable entries ``keywords=()`` so the trt.50 delegate prior
+    never fires for work the session cannot do (the scorer reads entries
+    verbatim and deliberately does not re-check this flag).
     """
 
     kind: str
     one_liner: str
     keywords: tuple[str, ...] = field(default=())
+    available: bool = True
+    unavailable_reason: str = ""
 
 
 STUB_TASK_CATALOG: tuple[TaskCatalogEntry, ...] = (
@@ -90,6 +101,17 @@ workable"), never a dead promise.
 """
 
 
+_UNAVAILABLE_RENDER_CAP = 5
+"""Most unavailable entries rendered with their reason (Johnny-trt.55). The
+rest collapse into one summary count line so a long tail of broken
+integrations cannot bloat the router prompt — the openclaw 150-skill
+precedent applied to the unavailable block."""
+
+_UNAVAILABLE_REASON_CAP = 160
+"""Per-entry cap on the rendered reason — the loader's one-liner discipline
+applied to the spoken-form gap copy."""
+
+
 def render_task_catalog(entries: tuple[TaskCatalogEntry, ...]) -> str:
     """Render the catalog block for the router system prompt.
 
@@ -106,30 +128,114 @@ def render_task_catalog(entries: tuple[TaskCatalogEntry, ...]) -> str:
     from context, delegate only the listed kinds, and author the ``task.ack``
     fresh per turn in the user's language — no canned filler example anywhere
     near the model.
+
+    Unavailable entries (Johnny-trt.55) render in a *second* block teaching
+    the honest decline: never delegate these, answer with the reason and the
+    fix instead. The block is bounded (:data:`_UNAVAILABLE_RENDER_CAP`
+    entries with reasons, the rest summarized as a count;
+    :data:`_UNAVAILABLE_REASON_CAP` chars per reason) so capability gaps can
+    never bloat the prompt. A catalog whose entries are ALL available renders
+    byte-identical to the pre-trt.55 build — replay parity by construction.
     """
     if not entries:
         return ""
-    lines = [
-        (
-            "Delegatable task kinds — the ONLY kinds you may delegate. "
-            "Choose action='delegate' only when the request needs real work "
-            "in an external system (looking something up, taking an action) "
-            "that matches one of the kinds below. If the request can be "
-            "answered from the conversation, your own knowledge, or the "
-            "context you were given, choose action='speak' instead — even "
-            "when these topics come up. When unsure between speak and "
-            "delegate, choose speak. With action='delegate', task.ack is "
-            "required: write the acknowledgment yourself in the language the "
-            "user spoke, naming the specific work you are starting and why "
-            "it needs a moment — never a generic filler phrase. The kinds:"
+    available = tuple(entry for entry in entries if entry.available)
+    unavailable = tuple(entry for entry in entries if not entry.available)
+    blocks: list[str] = []
+    if available:
+        lines = [
+            (
+                "Delegatable task kinds — the ONLY kinds you may delegate. "
+                "Choose action='delegate' only when the request needs real work "
+                "in an external system (looking something up, taking an action) "
+                "that matches one of the kinds below. If the request can be "
+                "answered from the conversation, your own knowledge, or the "
+                "context you were given, choose action='speak' instead — even "
+                "when these topics come up. When unsure between speak and "
+                "delegate, choose speak. With action='delegate', task.ack is "
+                "required: write the acknowledgment yourself in the language the "
+                "user spoke, naming the specific work you are starting and why "
+                "it needs a moment — never a generic filler phrase. The kinds:"
+            )
+        ]
+        lines.extend(f"- {entry.kind}: {entry.one_liner}" for entry in available)
+        blocks.append("\n".join(lines))
+    if unavailable:
+        blocks.append(_render_unavailable(unavailable, none_available=not available))
+    return "\n\n".join(blocks)
+
+
+def _unavailable_rows(unavailable: tuple[TaskCatalogEntry, ...]) -> list[str]:
+    """The capped ``- kind: reason`` rows shared by both unavailable renderers."""
+    lines: list[str] = []
+    for entry in unavailable[:_UNAVAILABLE_RENDER_CAP]:
+        reason = entry.unavailable_reason.strip() or "not available in this session right now"
+        if len(reason) > _UNAVAILABLE_REASON_CAP:
+            reason = reason[: _UNAVAILABLE_REASON_CAP - 1].rstrip() + "…"
+        lines.append(f"- {entry.kind}: {reason}")
+    overflow = len(unavailable) - _UNAVAILABLE_RENDER_CAP
+    if overflow > 0:
+        lines.append(
+            f"- …and {overflow} more unavailable kinds — decline those the same way."
         )
-    ]
-    lines.extend(f"- {entry.kind}: {entry.one_liner}" for entry in entries)
-    return "\n".join(lines)
+    return lines
+
+
+def _render_unavailable(
+    unavailable: tuple[TaskCatalogEntry, ...], *, none_available: bool
+) -> str:
+    """The capability-gap block (Johnny-trt.55): decline honestly, name the fix.
+
+    ``none_available`` prepends the explicit no-delegation sentence for a
+    session whose every catalog kind is unavailable — without it the model
+    would see reasons but no rule about ``action='delegate'`` being off the
+    table entirely.
+    """
+    header = (
+        "Capabilities NOT available in this session — delegating these is "
+        "impossible, so never choose them for action='delegate'. If the user "
+        "asks for one, choose action='speak' and decline honestly in the "
+        "user's language: say plainly that you cannot do it right now, give "
+        "the reason listed below, and tell them the fix it names. Never "
+        "pretend to check, never promise to try later:"
+    )
+    if none_available:
+        header = (
+            "There are NO delegatable task kinds in this session — never "
+            "choose action='delegate'. " + header
+        )
+    return "\n".join([header, *_unavailable_rows(unavailable)])
+
+
+def render_capability_notes(entries: tuple[TaskCatalogEntry, ...]) -> str:
+    """The ANSWER-prompt honesty block for unavailable capabilities (Johnny-trt.55).
+
+    The router's unavailable block (:func:`render_task_catalog`) keeps the
+    triage model from delegating an impossible kind — but an unavailable ask
+    the router (correctly) routes to ``speak`` is then answered by the
+    *answer* model, which never sees the catalog. Without this note the
+    answer model improvises a pretend-check ("let me look — give me a sec"),
+    the exact failure the bead removes. Rendered into the agent's persistent
+    system prompt by :func:`johnny.agent.session.build_agent_instructions`;
+    returns ``""`` when every entry is available so the no-gaps prompt stays
+    byte-identical (the replay-parity stance). Same rows and caps as the
+    router block — one source of truth for the spoken reasons.
+    """
+    unavailable = tuple(entry for entry in entries if not entry.available)
+    if not unavailable:
+        return ""
+    header = (
+        "Things you CANNOT do in this session right now. If asked for one of "
+        "these, say so plainly in the user's language — give the reason below "
+        "and tell them the fix it names. Never pretend to check, never "
+        "promise to do it later, never invent results:"
+    )
+    return "\n".join([header, *_unavailable_rows(unavailable)])
 
 
 __all__ = [
     "STUB_TASK_CATALOG",
     "TaskCatalogEntry",
+    "render_capability_notes",
     "render_task_catalog",
 ]

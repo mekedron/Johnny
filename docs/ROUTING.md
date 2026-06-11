@@ -141,51 +141,89 @@ understand the bot's decision.* Concretely:
   with an "interrupted" marker; speech cut before any flush still records nothing
   (nothing was heard).
 
-**Capability awareness (trt.55, Phase 4).** Operator rule (2026-06-11): *the
-decision-making must know what it is actually capable of.* "Check our Google
+**Capability awareness (trt.55, shipped 2026-06-11).** Operator rule (2026-06-11):
+*the decision-making must know what it is actually capable of.* "Check our Google
 Calendar" → with access, delegate and check; without, an honest actionable decline in
-the same turn ("I don't have access to your calendar — link a Google account in
-settings"). Mechanism: the **catalog is the capability source of truth**, assembled
-per session through an availability predicate — skill bins present in the sandbox
-(trt.23) ∧ credentials/accounts linked (e.g. gog authed) ∧ frontmatter prerequisites,
-with per-agent policy (trt.38) and MCP health (trt.36) joining the same predicate
-later. Unavailable kinds render compactly *as unavailable with the reason* so the
-router can decline and name the fix; the gate degrades any delegate verdict targeting
-an unavailable kind to speak-with-decline (defense in depth); unavailable keywords
-are excluded from the scorer's delegate prior; the executor revalidates at claim time
-(links can break mid-session → trt.53 correction). Never a pretend-check, never
-delegate-into-failure.
+the same turn ("I can't see the Google calendar yet — no Google account is connected
+to my tools…"). Mechanism: the **catalog is the capability source of truth**,
+assembled per session through the availability predicate
+(`evaluate_skill_availability`, composed with trt.23's `evaluate_skill_eligibility`)
+— skill bins present in the sandbox (trt.23) ∧ `requires.env` set in the sandbox (one
+batched probe) ∧ the skill-declared credential check passing
+(`metadata.johnny.availability.check`, run in-sandbox: e.g. google-calendar's
+`check.sh` = "is gog authed"), with per-agent policy (trt.38) and MCP health (trt.36)
+joining the same predicate later. Probe failures hold a skill back as
+*could-not-verify* — unknown is never assumed available. Concretely, per the bead's
+build list:
+
+- **Contract**: `TaskCatalogEntry` carries `available: bool` +
+  `unavailable_reason` (short, spoken-form, actionable — authored by the skill's
+  check stdout, its declared fallback copy, or the loader's env/verify copy).
+- **Rendering**: available kinds render exactly as before (an all-available catalog
+  is byte-identical — replay parity); unavailable kinds render in a second block
+  teaching the honest decline (speak, give the reason, name the fix, never
+  pretend-check), capped at 5 reason-carrying rows + an overflow count line and 160
+  chars per reason so capability gaps cannot bloat the prompt. The built prompt's
+  size is recorded per turn as `details.prompt_chars` on the `router_llm` timing row,
+  so catalog growth stays measurable and the cap enforceable.
+- **Gate backstop** (defense in depth): a delegate verdict targeting a
+  catalog-listed unavailable kind is degraded by the gate — marker
+  `capability_gap` (`{from_action, to_action, kind, reason}`) rides `decision.raw`
+  into `agent_decisions.raw_output` (the trt.50 ride-along, so the decision row
+  records the gap), then the turn speaks the reason **deterministically via say()**
+  (`kind="status"`, no answer-LLM hop that could invent a pretend-check, no
+  `agent_tasks` row). Kinds absent from the catalog entirely keep the trt.57
+  stance: they ride to the executor's fail-fast legs and the trt.53 spoken
+  correction.
+- **Scorer feed**: catalog assembly gives unavailable entries `keywords=()`, so the
+  trt.50 delegate prior never fires for impossible work (no scorer change).
+- **Claim-time revalidation**: the skill executor re-runs the declared availability
+  check before the run argv — a link broken between ack and claim settles `failed`
+  with the same spoken-form reason, walked back by the trt.53 correction.
+- **Lifecycle (documented stance)**: availability is snapshotted **once per session
+  assembly** and frozen — no mid-session refresh (no cheap event source exists for
+  sandbox credential state). The staleness window is bounded by claim-time
+  revalidation and by the next session's own assembly.
+
+Never a pretend-check, never delegate-into-failure.
 
 **How capabilities reach the prompt — snapshot + progressive disclosure (trt.23,
 trt.55; openclaw-verified pattern).** The capabilities live in a separate sandbox
 image, but the router prompt never talks to the sandbox:
 
-- **Capability snapshot, off the hot path**: the api/worker builds a cached, versioned
-  snapshot via one batched `GET /bins` probe against the sandbox (trt.35's exec API) at
-  stack boot and on change events (skills-volume change, integration link/unlink,
-  sandbox restart). Session start *reads the cache* — zero sandbox round-trips; the
-  session's catalog is frozen at start (openclaw equivalent: chokidar watcher + version
-  bump + coalesced `system.which`, caps at 150 skills / 18 K chars).
+- **Capability snapshot, off the hot path**: session *assembly* (never the turn
+  loop) runs one volume scan + the batched sandbox probes — `GET /bins` (trt.23),
+  the trt.55 env probe (one `POST /exec` covering every declared `requires.env`
+  name), and the declared availability checks (concurrent `POST /exec`s, ≤10 s
+  each) — and the session's catalog is frozen from that snapshot (openclaw
+  equivalent: chokidar watcher + version bump + coalesced `system.which`, caps at
+  150 skills / 18 K chars). A boot-time cached snapshot with change-event
+  invalidation remains a later optimization; per-assembly probing is the shipped
+  v1 (a session start is rare and ~3 short execs cover today's volume).
 - **Progressive disclosure**: the router prompt carries only `kind: one-liner` rows
   (plus capped unavailable-reasons) — today ~1.2 K chars total, rebuilt per turn. Full
   SKILL.md instructions are read **only by the executor's reasoning model at execution
   time**. The router prompt stays near-constant as capabilities grow; the catalog block
   is capped (~2 K chars, overflow summarized) and its size is recorded in the triage
   timing details.
-- **Kind-validation backstop (trt.53)**: the gate validates `task.kind` against the
-  catalog *before* persisting or acking — a hallucinated kind degrades to `speak`
-  instead of becoming a spoken promise that the stub executor then breaks. (Code-verified
-  gap 2026-06-11: parser and gate previously accepted any kind; "when did WW2 start" →
-  "let me check on that" was the symptom.) Knowledge questions are never delegated —
-  the restraint guidance carries an explicit general-knowledge negative example.
+- **Kind backstops (trt.55 / trt.57)**: a delegate verdict targeting a
+  catalog-listed *unavailable* kind never acts — the gate degrades it to the spoken
+  decline before anything persists (marker in the decision row, see capability
+  awareness above). A kind absent from the catalog entirely (hallucinated) still
+  queues and fails fast in the executor with the trt.53 spoken correction — honest
+  for both "answerable inline" asks and asks for capabilities that simply don't
+  exist here, at the cost of one walk-back. Knowledge questions are steered away
+  from delegation by the catalog header's restraint guidance
+  ("answered from … your own knowledge ⇒ speak").
 - **Internal tools (trt.57, shipped)**: first-party in-app actions (`meeting.leave`,
   `session.end`) are catalog kinds like any other but execute **session-locally in
   the agent process** — never the worker, never the sandbox (the skill executor
-  carries a locality guard refusing them). Surface scoping v1 is gating-by-omission
-  until trt.55's predicate lands: `meeting.leave` enters the catalog only when the
-  job is Meet-backed (`calendar_event_id` present), so a playground ask gets an
-  honest inline answer; a hallucinated internal kind off-surface settles `failed`
-  with actionable speech via the trt.53 correction. Asking "can you leave the
+  carries a locality guard refusing them). Surface scoping joins the trt.55
+  availability model: `meeting.leave` is an *available* entry only when the job is
+  Meet-backed (`calendar_event_id` present); off-surface it renders as unavailable
+  ("this session isn't connected to a meeting…"), so a playground ask gets the
+  honest decline — and the executor backstop still settles a hand-queued or
+  hallucinated row `failed` with actionable speech via the trt.53 correction. Asking "can you leave the
   meeting?" yields the router-authored ack as the farewell (played to completion
   via `RouterGate.wait_recent_say_done` before the plug is pulled), the trt.56
   dismissed state with `actor=voice` (no auto-rejoin), and a clean teardown through
@@ -362,7 +400,7 @@ separately replay-gated:
 | Skills-sandbox container (exec API, baseline toolset) | Johnny-trt.35 | **shipped** (2026-06-11) — internal-only `skills-sandbox` compose service; `POST /exec` (timeout kill, output caps) + `GET /bins`; guaranteed baseline toolset pinned by `tests/integration/test_skills_sandbox.py`; gog preinstalled; skills volume + sandbox-home host binds |
 | Tool layer + skill registry + calendar-via-gog skill | Johnny-trt.23 | **shipped** (2026-06-11) — `johnny/skills/`: openclaw-compatible SKILL.md loader (frontmatter, `requires.bins`/`anyBins`/os gated INSIDE the sandbox via one batched `/bins` probe; baseline implicitly satisfied; ineligible skills listed with reasons), exec bin policy v1 (baseline + eligible-declared, one `compute_allowed_bins` seam for trt.38), `sandbox.exec` tool (`ToolDefinition` reuse, denial-before-HTTP), deterministic v1 runner (`metadata.johnny.run`: exit 0 → done + stdout as speech, non-zero → failed + script-authored spoken copy; engine-run skills land with trt.22/24). **The catalog source IS the loader now** — `STUB_TASK_CATALOG` retired from assembly; no eligible skills ⇒ no catalog ⇒ no delegation. First skill `skills/google-calendar` (gog; graceful not-authed copy), seeded to the volume by run.sh |
 | Executor engine, worker pass, task events | Johnny-trt.22/24/25/26 | planned (Phase 4) |
-| Capability-aware catalog (availability + honest declines) | Johnny-trt.55 | planned (Phase 4) |
+| Capability-aware catalog (availability + honest declines) | Johnny-trt.55 | **shipped** (2026-06-11) — `TaskCatalogEntry.available` + `unavailable_reason` (spoken-form, actionable); availability predicate `evaluate_skill_availability` per session assembly (`requires.env` via one batched sandbox env probe + skill-declared `metadata.johnny.availability.check` run in-sandbox, e.g. google-calendar's `check.sh` = gog authed; probe failure ⇒ could-not-verify, never assumed available; trt.38 policy + trt.36 MCP health join the same function); unavailable kinds render as a capped decline-honestly block (5 rows + overflow line, 160-char reasons; all-available renders byte-identical — replay parity); gate backstop degrades delegate-on-unavailable to the deterministic say() decline with the `capability_gap` marker in `raw_output`; unavailable entries feed `keywords=()` to the trt.50 scorer; executor re-runs the check at claim time (broken link ⇒ `failed` with the same words ⇒ trt.53 correction); `meeting.leave` off-surface joined as an unavailable entry; router prompt size persisted per turn (`details.prompt_chars` on the `router_llm` timing row) |
 | Meeting lifecycle states (dismissible bot, no auto-rejoin) | Johnny-trt.56 | **shipped** (2026-06-11) — three dismissal stamp columns on `meeting_configs` (+`bot_dismissed_by` ui\|voice\|schedule), derived `bot_state`, occurrence-scoped in-force rule, scheduler dispatch filter, dismiss/undismiss endpoints + UI, `meeting_bot_state_changed` events |
 | Internal tools (`meeting.leave`, `session.end` by voice) | Johnny-trt.57 | **shipped** (2026-06-11) — `johnny/agent/internal_tools.py`: in-process registry + executor heading the chain (internal → skills → stub); catalog entries surface-scoped (`meeting.leave` only when the job carries a `calendar_event_id`); farewell-ack completes before teardown (`RouterGate.wait_recent_say_done`); actions post the SAME api endpoints the UI buttons call (voice dismissal `actor=voice` / `/sessions/{id}/stop`) so Johnny-ajc stop verification rides along — non-2xx → `failed` settle → spoken trt.53 correction; skill executor refuses internal kinds (locality guard); `TaskCoordinator.aclose` gained a bounded drain grace so the self-terminating settle lands `done`, not `cancelled` |
 | Speech queue + re-entry + status query | Johnny-trt.27–30 | planned (Phase 5) |

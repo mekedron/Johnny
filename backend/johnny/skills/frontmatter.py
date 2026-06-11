@@ -27,6 +27,12 @@ skills volume unchanged:
     copy). Skills without a ``run`` spec are still discovered, gated, and
     cataloged — they become runnable when the LLM execution engine lands
     (Johnny-trt.22 decides it, Johnny-trt.24 wires it).
+  - ``availability`` — the Johnny-trt.55 capability probe:
+    ``{"check": {"argv": [...], "timeout_s": 10}, "unavailable_reason": "…"}``.
+    The check runs in-sandbox at catalog assembly and again at claim time;
+    exit 0 means the capability is usable now, any other exit marks the
+    catalog entry unavailable with stdout (or ``unavailable_reason``) as the
+    spoken-form actionable reason the router declines with.
   - ``keywords`` — English trigger words for the heuristic scorer's
     delegate-prior dimension (Johnny-trt.50). Never rendered into prompts.
 
@@ -82,6 +88,23 @@ class SkillRunSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class SkillAvailabilitySpec:
+    """The skill-declared availability probe (``metadata.johnny.availability``).
+
+    The credential/integration dimension of Johnny-trt.55's availability
+    predicate, owned by the skill exactly like the run contract: ``check``
+    runs in-sandbox at catalog assembly (and again at claim time) — exit 0
+    means the capability is usable now; any other exit means unavailable,
+    with stdout as the skill-authored spoken-form reason (actionable: name
+    what is missing and the fix). ``unavailable_reason`` is the fallback
+    spoken copy when a failing check prints nothing.
+    """
+
+    check: SkillRunSpec | None = None
+    unavailable_reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class SkillDocument:
     """One parsed SKILL.md — fields plus every problem found on the way.
 
@@ -98,6 +121,7 @@ class SkillDocument:
     os: tuple[str, ...] = ()
     requires: SkillRequirements = field(default_factory=SkillRequirements)
     run: SkillRunSpec | None = None
+    availability: SkillAvailabilitySpec | None = None
     keywords: tuple[str, ...] = ()
     body: str = ""
     manifest: dict[str, Any] = field(default_factory=dict)
@@ -184,12 +208,12 @@ def _parse_requires(manifest: dict[str, Any], problems: list[str]) -> SkillRequi
     )
 
 
-def _parse_run(johnny: dict[str, Any], problems: list[str]) -> SkillRunSpec | None:
-    raw = johnny.get("run")
+def _parse_run_spec(raw: Any, *, label: str, problems: list[str]) -> SkillRunSpec | None:
+    """Parse one ``{"argv": [...], "timeout_s": N}`` command spec (run / check)."""
     if raw is None:
         return None
     if not isinstance(raw, dict):
-        problems.append(f"johnny.run must be a mapping (got {type(raw).__name__})")
+        problems.append(f"{label} must be a mapping (got {type(raw).__name__})")
         return None
     argv_raw = raw.get("argv")
     if (
@@ -197,7 +221,7 @@ def _parse_run(johnny: dict[str, Any], problems: list[str]) -> SkillRunSpec | No
         or not argv_raw
         or not all(isinstance(a, str) and a.strip() for a in argv_raw)
     ):
-        problems.append("johnny.run.argv must be a non-empty list of strings")
+        problems.append(f"{label}.argv must be a non-empty list of strings")
         return None
     timeout_raw = raw.get("timeout_s")
     timeout: float | None = None
@@ -206,8 +230,31 @@ def _parse_run(johnny: dict[str, Any], problems: list[str]) -> SkillRunSpec | No
         if valid_number and timeout_raw > 0:
             timeout = float(timeout_raw)
         else:
-            problems.append("johnny.run.timeout_s must be a positive number")
+            problems.append(f"{label}.timeout_s must be a positive number")
     return SkillRunSpec(argv=tuple(argv_raw), timeout_s=timeout)
+
+
+def _parse_run(johnny: dict[str, Any], problems: list[str]) -> SkillRunSpec | None:
+    return _parse_run_spec(johnny.get("run"), label="johnny.run", problems=problems)
+
+
+def _parse_availability(
+    johnny: dict[str, Any], problems: list[str]
+) -> SkillAvailabilitySpec | None:
+    raw = johnny.get("availability")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        problems.append(f"johnny.availability must be a mapping (got {type(raw).__name__})")
+        return None
+    check = _parse_run_spec(
+        raw.get("check"), label="johnny.availability.check", problems=problems
+    )
+    reason_raw = raw.get("unavailable_reason", raw.get("unavailableReason"))
+    reason = reason_raw.strip() if isinstance(reason_raw, str) else ""
+    if reason_raw is not None and not isinstance(reason_raw, str):
+        problems.append("johnny.availability.unavailable_reason must be a string")
+    return SkillAvailabilitySpec(check=check, unavailable_reason=reason)
 
 
 def parse_skill_markdown(text: str) -> SkillDocument:
@@ -269,6 +316,7 @@ def parse_skill_markdown(text: str) -> SkillDocument:
         ),
         requires=_parse_requires(manifest, problems),
         run=_parse_run(johnny, problems),
+        availability=_parse_availability(johnny, problems),
         keywords=_string_tuple(johnny.get("keywords"), label="johnny.keywords", problems=problems),
         body=body,
         manifest=manifest,
@@ -280,6 +328,7 @@ def parse_skill_markdown(text: str) -> SkillDocument:
 __all__ = [
     "JOHNNY_METADATA_KEY",
     "MANIFEST_KEYS",
+    "SkillAvailabilitySpec",
     "SkillDocument",
     "SkillRequirements",
     "SkillRunSpec",

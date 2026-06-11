@@ -478,6 +478,47 @@ describe('the Phase-3 chain (Johnny-trt.54)', () => {
 		);
 	});
 
+	it('a capability-gap degrade reads as an honest decline (trt.55)', () => {
+		const reason =
+			"I can't see the Google calendar yet — no Google account is connected to my tools.";
+		const view = buildTurnView(
+			makeSource({
+				replyType: null,
+				suggestedReply: null,
+				recommendedText: null,
+				finalText: reason,
+				answerPrompt: null,
+				rawOutput: {
+					action: 'delegate',
+					task: { kind: 'google-calendar', args: {}, ack: 'On it.' },
+					capability_gap: {
+						from_action: 'delegate',
+						to_action: 'status',
+						kind: 'google-calendar',
+						reason
+					}
+				}
+			}),
+			undefined
+		);
+		// Effective action is the say-path decline: no task step, answer hop skipped.
+		assert.equal(view.classification.label, 'Declined — capability unavailable');
+		assert.equal(view.classification.structured, 'raw_output.capability_gap');
+		assert.equal(view.steps.find((s) => s.key === 'task'), undefined);
+		assert.equal(view.steps.find((s) => s.key === 'asked')?.status, 'skipped');
+		const classified = view.steps.find((s) => s.key === 'classified');
+		assert.equal(classified?.title, 'Decided to: Decline — capability unavailable');
+		const guards = view.steps.find((s) => s.key === 'guards');
+		const gapGuard = guards?.guards.find(
+			(g) => g.structured === 'raw_output.capability_gap'
+		);
+		assert.ok(gapGuard && gapGuard.tone === 'divergence');
+		assert.match(gapGuard.label, /google-calendar/);
+		assert.match(gapGuard.label, /no Google account/);
+		const spoke = view.steps.find((s) => s.key === 'spoke');
+		assert.equal(spoke?.body, reason);
+	});
+
 	it('a replied turn whose final_text never landed flags the INV-2 gap', () => {
 		const view = buildTurnView(
 			makeSource({ finalText: null, recommendedText: null, suggestedReply: null }),

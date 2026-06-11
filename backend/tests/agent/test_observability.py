@@ -616,6 +616,21 @@ async def test_triage_timing_emitter_without_session_start_uses_epoch_ms() -> No
     assert event.duration_ms == 250
 
 
+async def test_triage_timing_emitter_carries_prompt_chars_detail() -> None:
+    """Johnny-trt.55: the router prompt size lands in details, next to the
+    action, so catalog growth is visible per turn; None is simply omitted
+    (the pre-trt.55 row shape)."""
+    bus = InMemoryEventBus()
+    emit = build_triage_timing_emitter(bus, TurnIndex(), session_id="7")
+
+    await emit("item_a", 1.0, 2.0, "speak", prompt_chars=1843)
+    await emit("item_b", 3.0, 4.0, "speak")
+
+    with_chars, without = bus.snapshot()
+    assert with_chars.details == {"action": "speak", "prompt_chars": 1843}
+    assert without.details == {"action": "speak"}
+
+
 async def test_triage_timing_emitter_swallows_bus_failure() -> None:
     """A failing bus loses the timing row, never crashes the gate."""
     emit = build_triage_timing_emitter(_FlakyBus(), TurnIndex(), session_id="7")

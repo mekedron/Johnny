@@ -427,12 +427,23 @@ async def test_delegation_capable_modes_wire_task_sink_and_coordinator(
     assert runtime.gate._resolve_turn_id is not None
     # Task catalog (Johnny-trt.19/trt.23/trt.57): internal tools head the
     # catalog; the skill loader follows. The isolated (empty) skills volume
-    # loads a registry with no skills, so only the internal kinds available
-    # on this surface remain — session.end everywhere, meeting.leave absent
-    # because this job has no calendar_event_id (not Meet-backed).
+    # loads a registry with no skills, so only the internal kinds remain —
+    # meeting.leave rendered UNAVAILABLE (Johnny-trt.55 surface scoping,
+    # this job has no calendar_event_id) so the router declines it honestly,
+    # and session.end available everywhere.
     assert runtime.skill_registry is not None
     assert runtime.skill_registry.skills == ()
-    assert [entry.kind for entry in runtime.gate._config.task_catalog] == ["session.end"]
+    catalog = runtime.gate._config.task_catalog
+    assert [(entry.kind, entry.available) for entry in catalog] == [
+        ("meeting.leave", False),
+        ("session.end", True),
+    ]
+    assert "no meeting to leave" in catalog[0].unavailable_reason
+    assert catalog[0].keywords == ()  # unavailable kinds feed the scorer nothing
+    # The ANSWER prompt carries the same gap honestly (Johnny-trt.55): the
+    # agent's persistent instructions teach the no-pretend-check decline.
+    assert "no meeting to leave" in runtime.agent.instructions
+    assert "Never pretend to check" in runtime.agent.instructions
     # The internal-tool context is wired with the session linkage + the
     # gate's farewell-wait seam (Johnny-trt.57).
     assert runtime.internal_tools is not None
@@ -471,13 +482,19 @@ async def test_delegation_capable_runtime_catalogs_injected_skills(tmp_path: Pat
 
     assert runtime.skill_registry is registry_obj
     # Internal kinds first (resolution order, Johnny-trt.57), then the
-    # skill loader's entries (Johnny-trt.23) — session.end only, since this
-    # job has no Meet linkage.
+    # skill loader's entries (Johnny-trt.23). No Meet linkage, so
+    # meeting.leave rides along as the trt.55 unavailable entry.
     assert [entry.kind for entry in runtime.gate._config.task_catalog] == [
+        "meeting.leave",
         "session.end",
         "fetch-news",
     ]
-    assert runtime.gate._config.task_catalog[1:] == registry_obj.catalog_entries()
+    assert [entry.available for entry in runtime.gate._config.task_catalog] == [
+        False,
+        True,
+        True,
+    ]
+    assert runtime.gate._config.task_catalog[2:] == registry_obj.catalog_entries()
     await runtime.aclose()
     assert db.closed is True
 

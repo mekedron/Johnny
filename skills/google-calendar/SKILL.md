@@ -12,6 +12,15 @@ metadata:
             "argv": ["bash", "/skills/google-calendar/run.sh"],
             "timeout_s": 60,
           },
+        "availability":
+          {
+            "check":
+              {
+                "argv": ["bash", "/skills/google-calendar/check.sh"],
+                "timeout_s": 10,
+              },
+            "unavailable_reason": "I can't see the Google calendar yet — no Google account is connected to my tools. Connect one with 'gog auth add' in the skills sandbox, then ask me again.",
+          },
         "keywords":
           [
             "calendar",
@@ -63,3 +72,13 @@ reused: `gog calendar events list --json … | python3 format_events.py --days 7
 
 Task arguments (`JOHNNY_TASK_ARGS_JSON`) are not interpreted yet: the runner
 always reports the next 7 days.
+
+## Availability check
+
+`check.sh` is the `metadata.johnny.availability.check` probe (Johnny-trt.55):
+exit 0 when a Google account is connected to `gog`, non-zero with the
+spoken-form reason on stdout when not. Johnny runs it at session assembly —
+so without a connected account the router carries this skill as *unavailable*
+and declines calendar asks honestly, naming the fix instead of pretending to
+check — and again at claim time, so an account unlinked mid-session walks the
+ack back with the same words.

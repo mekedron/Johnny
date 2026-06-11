@@ -155,18 +155,34 @@ class RecordSpoke(Protocol):
         interrupted: bool = False,
     ) -> Awaitable[None]: ...
 
-RecordTriageTiming = Callable[[str, float, float, str], Awaitable[None]]
-"""Publish one turn's triage-stage ``PipelineTiming`` (Johnny-trt.19).
+class RecordTriageTiming(Protocol):
+    """Publish one turn's triage-stage ``PipelineTiming`` (Johnny-trt.19).
 
-Args: the LiveKit ``str`` turn id, the triage call's epoch-seconds start and
-end (``time.time()``), and the decided action (``silent`` / ``speak`` /
-``delegate`` / ``status`` — carried in ``details`` so the activity log can
-read the verdict off the timing row). The router LLM runs as a *side*
-``LLMProvider`` call, never through the session ``llm_node``, so LiveKit
-emits no metric for it — without this seam the triage cost is invisible in
-``session_timings`` (the pre-trt.19 state: the cost could only be inferred
-from the STT-final → answer-LLM-start gap, which does not even exist for
-delegate/status turns that pay no answer hop)."""
+    Args: the LiveKit ``str`` turn id, the triage call's epoch-seconds start
+    and end (``time.time()``), and the decided action (``silent`` / ``speak``
+    / ``delegate`` / ``status`` — carried in ``details`` so the activity log
+    can read the verdict off the timing row). The router LLM runs as a *side*
+    ``LLMProvider`` call, never through the session ``llm_node``, so LiveKit
+    emits no metric for it — without this seam the triage cost is invisible
+    in ``session_timings`` (the pre-trt.19 state: the cost could only be
+    inferred from the STT-final → answer-LLM-start gap, which does not even
+    exist for delegate/status turns that pay no answer hop).
+
+    ``prompt_chars`` (Johnny-trt.55) is the built router prompt's size in
+    characters — persisted into ``details`` so task-catalog growth (and the
+    unavailable-block render cap) stays measurable per turn; ``None`` (the
+    prompt was never measured) is simply omitted from the row.
+    """
+
+    def __call__(
+        self,
+        turn_id: str,
+        started_at: float,
+        ended_at: float,
+        action: str,
+        *,
+        prompt_chars: int | None = None,
+    ) -> Awaitable[None]: ...
 
 TranscriptFinalizedSink = Callable[[TranscriptFinalized], Awaitable[None]]
 """Publish a kept STT final's ``TranscriptFinalized`` (mirror of
@@ -482,18 +498,30 @@ def build_triage_timing_emitter(
     into the gate.
     """
 
-    async def _record(turn_id: str, started_at: float, ended_at: float, action: str) -> None:
+    async def _record(
+        turn_id: str,
+        started_at: float,
+        ended_at: float,
+        action: str,
+        *,
+        prompt_chars: int | None = None,
+    ) -> None:
         if session_started_at > 0:
             started_at_ms = round((started_at - session_started_at) * 1000)
         else:
             started_at_ms = round(started_at * 1000)
+        details: dict[str, Any] = {"action": action}
+        if prompt_chars is not None:
+            # Router prompt size (Johnny-trt.55): catalog growth visible per
+            # turn, so the unavailable-block render cap stays enforceable.
+            details["prompt_chars"] = prompt_chars
         event = PipelineTiming(
             turn_id=turn_index.resolve(turn_id),
             stage="router_llm",
             started_at_ms=max(0, started_at_ms),
             duration_ms=max(0, round((ended_at - started_at) * 1000)),
             provider_name=provider_name or None,
-            details={"action": action},
+            details=details,
             session_id=session_id,
         )
         try:

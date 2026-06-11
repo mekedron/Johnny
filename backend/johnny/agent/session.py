@@ -143,6 +143,12 @@ class AgentInstructionsConfig:
 
     Every field defaults to ``""`` and an empty field renders nothing, so an
     unconfigured session degrades to the base framing alone (regression guard).
+
+    ``capability_notes`` (Johnny-trt.55) is the unavailable-capabilities
+    honesty block (:func:`johnny.agent.task_catalog.render_capability_notes`),
+    filled by the runtime assembly from the session's task catalog — the
+    answer model must decline an impossible ask with the reason and the fix
+    rather than improvising a pretend-check.
     """
 
     instructions: str = ""
@@ -151,6 +157,7 @@ class AgentInstructionsConfig:
     calendar_context: str = ""
     calendar_attachments_text: str = ""
     prior_session_context: str = ""
+    capability_notes: str = ""
 
 
 def build_agent_instructions(config: AgentInstructionsConfig) -> str:
@@ -159,6 +166,8 @@ def build_agent_instructions(config: AgentInstructionsConfig) -> str:
     Reuses the legacy answer-stage assembly order from
     the legacy split pipeline: base framing → personality (FIRST, so
     the model adopts the character before it reads the job) → history note →
+    capability notes (Johnny-trt.55 — unavailable-capability honesty, absent
+    when the session has no gaps so the prompt stays byte-identical) →
     meeting instructions → context → calendar description → calendar
     attachments → last-session summary. Per-turn-only pieces from the legacy
     builder (the router hint, ``allowed_replies``) are NOT part of the static
@@ -168,6 +177,12 @@ def build_agent_instructions(config: AgentInstructionsConfig) -> str:
     if config.personality_prompt:
         system += f"\n\n{config.personality_prompt}"
     system += f"\n\n{_HISTORY_NOTE}"
+    if config.capability_notes:
+        # Capability honesty (Johnny-trt.55): rendered AFTER the personality so
+        # the no-pretend-check rule outranks roleplay habits, and before the
+        # operator's instructions so those can refine rather than be
+        # contradicted (the router prompt's catalog-ordering rationale).
+        system += f"\n\n{config.capability_notes}"
     if config.instructions:
         system += f"\n\nMeeting instructions: {config.instructions}"
     if config.context:
