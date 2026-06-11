@@ -1,9 +1,9 @@
-"""Production wiring for delegated tasks (Johnny-trt.18).
+"""Production wiring for delegated tasks (Johnny-trt.18, events Johnny-trt.25).
 
 Covers the real seams :mod:`johnny.agent.task_wiring` supplies to the
-stdlib-only coordinator: the ``TaskQueued`` publish on the session EventBus
-channel, the Redis wake ping on ``johnny.tasks.wake``, the
-:func:`build_task_coordinator` assembly (stub executor default, no-redis
+stdlib-only coordinator: the ``TaskQueued`` / ``TaskCompleted`` publishes on
+the session EventBus channel, the Redis wake ping on ``johnny.tasks.wake``,
+the :func:`build_task_coordinator` assembly (stub executor default, no-redis
 degrade), and the status-vocabulary drift guards against the DB enum and the
 job-session delegation-mode set.
 """
@@ -16,18 +16,20 @@ from typing import Any, get_args
 from johnny.agent.task_wiring import (
     TASKS_WAKE_CHANNEL,
     RedisTaskWake,
+    build_publish_task_completed,
     build_publish_task_queued,
     build_task_coordinator,
 )
 from johnny.agent.tasks import (
     InMemoryTaskSink,
     QueuedTask,
+    TaskResult,
     TaskSpec,
     TaskStatus,
     unsupported_kind_text,
 )
 from johnny.voice_pipeline.event_bus import InMemoryEventBus
-from johnny.voice_pipeline.events import TaskQueued
+from johnny.voice_pipeline.events import TaskCompleted, TaskQueued
 
 # --- helpers -----------------------------------------------------------------
 
@@ -92,6 +94,60 @@ async def test_publish_task_queued_none_correlation_fields() -> None:
     assert event.session_id is None
 
 
+# --- build_publish_task_completed (Johnny-trt.25) ------------------------------
+
+
+async def test_publish_task_completed_emits_event_on_bus() -> None:
+    bus = InMemoryEventBus()
+    publish = build_publish_task_completed(bus, session_id="7", clock=lambda: 5678)
+
+    await publish(
+        _queued(),
+        "done",
+        TaskResult(status="done", result_text="3 events this week", error=""),
+    )
+
+    events = bus.snapshot()
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, TaskCompleted)
+    assert event.type == "task_completed"
+    assert event.task_id == 42
+    assert event.kind == "web_search"
+    assert event.status == "done"
+    assert event.result_text == "3 events this week"
+    assert event.error == ""
+    assert event.turn_id == 4
+    assert event.session_id == "7"
+    assert event.timestamp_ms == 5678
+
+
+async def test_publish_task_completed_failed_carries_error_detail() -> None:
+    bus = InMemoryEventBus()
+    publish = build_publish_task_completed(bus, clock=lambda: 1)
+    await publish(
+        _queued(turn_id=None),
+        "failed",
+        TaskResult(status="failed", result_text="that didn't work", error="boom"),
+    )
+    event = bus.snapshot()[0]
+    assert isinstance(event, TaskCompleted)
+    assert event.status == "failed"
+    assert event.result_text == "that didn't work"
+    assert event.error == "boom"
+    assert event.turn_id is None
+    assert event.session_id is None
+
+
+async def test_publish_task_completed_refuses_non_settle_statuses() -> None:
+    """Defensive: the PublishCompleted contract is done/failed only — anything
+    else is dropped with a log, never published as a malformed event."""
+    bus = InMemoryEventBus()
+    publish = build_publish_task_completed(bus, clock=lambda: 1)
+    await publish(_queued(), "cancelled", TaskResult(status="failed"))
+    assert bus.snapshot() == []
+
+
 # --- RedisTaskWake ---------------------------------------------------------------
 
 
@@ -145,6 +201,14 @@ async def test_build_task_coordinator_defaults_to_stub_executor() -> None:
     assert record is not None
     assert record.status == "failed"
     assert record.result_text == unsupported_kind_text("book_flight")
+    # The settle announced a TaskCompleted on the same bus (Johnny-trt.25),
+    # mirroring the row state the resolver had already written.
+    events = bus.snapshot()
+    assert len(events) == 2 and isinstance(events[1], TaskCompleted)
+    assert events[1].task_id == queued.task_id
+    assert events[1].status == "failed"
+    assert events[1].result_text == unsupported_kind_text("book_flight")
+    assert events[1].session_id == "7"
     await coordinator.aclose()
 
 

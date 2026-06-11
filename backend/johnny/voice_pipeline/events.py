@@ -31,6 +31,19 @@ PipelineTimingEventType = Literal["pipeline_timing"]
 PipelineStageFailedEventType = Literal["pipeline_stage_failed"]
 TurnTerminalEventType = Literal["turn_terminal"]
 TaskQueuedEventType = Literal["task_queued"]
+TaskProgressEventType = Literal["task_progress"]
+TaskCompletedEventType = Literal["task_completed"]
+TaskResultExpiredEventType = Literal["task_result_expired"]
+
+TaskCompletedStatus = Literal["done", "failed"]
+"""How a delegated task settled (Johnny-trt.25, Phase 4).
+
+Mirrors :data:`johnny.agent.tasks.EXECUTOR_RESULT_STATUSES` — an executor
+may only settle ``done`` or ``failed``. ``cancelled`` (session teardown)
+and ``expired`` (future staleness sweep) never emit a
+:class:`TaskCompleted`: the session is tearing down / nobody promised the
+result anymore, so there is no live UI moment to announce.
+"""
 
 TerminalState = Literal["replied", "pending_approval", "no_reply"]
 """The single state a transcribed user turn resolves to (INV-1, Johnny-ckz.28.3).
@@ -573,6 +586,96 @@ class TaskQueued:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskProgress:
+    """A delegated task reported interim progress (Johnny-trt.25, Phase 4).
+
+    Emitted by whichever executor is driving the task — the Phase-4 worker
+    pass (Johnny-trt.24) on claim and at multi-step milestones — on the
+    session channel (live UI) and on ``johnny.tasks.<bot_session_id>`` (the
+    Phase-5 agent listener, Johnny-trt.28). Ephemeral like
+    :class:`TaskQueued`: the executor that emits it owns the ``agent_tasks``
+    row (durable progress goes in ``result_json`` per docs/TASK-ENGINE.md),
+    so the status subscriber deliberately persists nothing for this type —
+    a subscriber write would double-write executor-owned state.
+
+    * ``task_id`` — the ``agent_tasks`` row id consumers correlate on.
+    * ``kind`` — the task-kind identifier, denormalised for display.
+    * ``progress_text`` — short human-readable note ("Searching your
+      calendar…", "step 2 of 3"); may be empty for a bare claim signal.
+    * ``turn_id`` — the delegating turn's durable int id (echoed from the
+      row); ``None`` for tasks queued outside a turn.
+    """
+
+    task_id: int
+    kind: str
+    timestamp_ms: int
+    progress_text: str = ""
+    turn_id: int | None = None
+    session_id: str | None = None
+    type: TaskProgressEventType = "task_progress"
+
+
+@dataclass(frozen=True, slots=True)
+class TaskCompleted:
+    """A delegated task settled ``done`` or ``failed`` (Johnny-trt.25, Phase 4).
+
+    Emitted *after* the terminal ``agent_tasks`` row write by whichever
+    executor settled the task (the in-process coordinator resolver today,
+    the Johnny-trt.24 worker pass for claimed kinds) — the row-before-event
+    discipline, so by the time a consumer sees this the result is queryable.
+    Consumers: the per-session WS (live task chip / timeline refresh), the
+    Phase-5 listener on ``johnny.tasks.<bot_session_id>`` (queues the spoken
+    RESULT delivery, Johnny-trt.27/28). Ephemeral — the row is the durable
+    record; the status subscriber persists nothing for this type.
+
+    * ``status`` — :data:`TaskCompletedStatus` (``done`` / ``failed``).
+    * ``result_text`` — the speech-ready summary stored on the row, for
+      successes and failures alike (a failure's text is the skill-authored
+      spoken copy, Johnny-trt.23).
+    * ``error`` — diagnostic detail for the operator / logs; never spoken.
+    * ``turn_id`` — the delegating turn's durable int id; ``None`` for
+      tasks queued outside a turn.
+    """
+
+    task_id: int
+    kind: str
+    status: TaskCompletedStatus
+    timestamp_ms: int
+    result_text: str = ""
+    error: str = ""
+    turn_id: int | None = None
+    session_id: str | None = None
+    type: TaskCompletedEventType = "task_completed"
+
+
+@dataclass(frozen=True, slots=True)
+class TaskResultExpired:
+    """A completed task's spoken delivery was dropped undelivered (Johnny-trt.25).
+
+    Reserved for the Phase-5 speech queue (Johnny-trt.27/28): a RESULT
+    speech item that sits queued past its expiry (~120 s) or exhausts its
+    interrupt re-queue budget is dropped, and this event tells the UI the
+    result will **not** be spoken aloud — the task row itself stays in its
+    terminal status (usually ``done``) and the result remains readable in
+    the session detail, so nothing is persisted for this type either.
+
+    * ``reason`` — short free-text drop cause for the operator (e.g.
+      ``"undelivered for 120s"``, ``"interrupted twice"``); the queue owns
+      the vocabulary, kept untyped so Phase 5 can refine it additively.
+    * ``turn_id`` — the delegating turn's durable int id; ``None`` for
+      tasks queued outside a turn.
+    """
+
+    task_id: int
+    kind: str
+    timestamp_ms: int
+    reason: str = ""
+    turn_id: int | None = None
+    session_id: str | None = None
+    type: TaskResultExpiredEventType = "task_result_expired"
+
+
+@dataclass(frozen=True, slots=True)
 class PipelineTiming:
     """One measured stage timing for the per-turn activity log (Johnny-ckz.7).
 
@@ -626,6 +729,9 @@ PipelineEvent = (
     | ApprovalResolved
     | PipelineTiming
     | TaskQueued
+    | TaskProgress
+    | TaskCompleted
+    | TaskResultExpired
     | TurnTerminal
 )
 """Union of every event the pipeline emits."""
@@ -660,7 +766,11 @@ __all__ = [
     "RouterDecisionMade",
     "SessionStatus",
     "SessionStatusChanged",
+    "TaskCompleted",
+    "TaskCompletedStatus",
+    "TaskProgress",
     "TaskQueued",
+    "TaskResultExpired",
     "TerminalState",
     "TranscriptFiltered",
     "TranscriptFilteredReason",

@@ -15,8 +15,11 @@ is a promise, and this module is what keeps it honest:
    channel plus a wake ping on the shared ``johnny.tasks.wake`` channel for
    future external workers) and spawns a resolver task that drives the row's
    lifecycle: ``queued`` → ``running`` → ``done`` / ``failed`` (``cancelled``
-   on session teardown). Announcement failures are logged, never raised — a
-   flaky bus must not break a turn whose row already exists.
+   on session teardown). A ``done``/``failed`` settle is announced the same
+   way (a :class:`~johnny.voice_pipeline.events.TaskCompleted` after the
+   terminal row write, Johnny-trt.25). Announcement failures are logged,
+   never raised — a flaky bus must not break a turn whose row already
+   exists.
 3. **Execution** is an injected :data:`TaskExecutor`. Phase 3 ships only
    :func:`stub_executor`, which fails every kind *fast* with a speech-ready
    error stored on the row — an ack must never be a dead promise, so until
@@ -231,6 +234,17 @@ TaskExecutor = Callable[[QueuedTask], Awaitable[TaskResult]]
 PublishQueued = Callable[[QueuedTask], Awaitable[None]]
 """Publish ``TaskQueued`` on the session EventBus channel (live-UI surface)."""
 
+PublishCompleted = Callable[[QueuedTask, TaskStatus, TaskResult], Awaitable[None]]
+"""Publish ``TaskCompleted`` on the session EventBus channel (Johnny-trt.25).
+
+Called by the resolver *after* the terminal row update (the row-before-event
+discipline ``begin`` applies to ``TaskQueued``), only for ``done``/``failed``
+settles — ``cancelled`` means the session is tearing down (nobody is
+listening, and the bus is closing with it). The status argument is the
+*normalized* terminal actually written to the row (an executor returning an
+illegal status is clamped to ``failed`` before this fires). Best-effort and
+contained like the other announce seams."""
+
 WakePing = Callable[[QueuedTask], Awaitable[None]]
 """Nudge the shared ``johnny.tasks.wake`` channel so an external worker
 (Phase 4) picks queued work up without polling."""
@@ -293,12 +307,14 @@ class TaskCoordinator:
         *,
         executor: TaskExecutor,
         publish_queued: PublishQueued | None = None,
+        publish_completed: PublishCompleted | None = None,
         wake: WakePing | None = None,
         report_failed: ReportTaskFailed | None = None,
     ) -> None:
         self._sink = sink
         self._executor = executor
         self._publish_queued = publish_queued
+        self._publish_completed = publish_completed
         self._wake = wake
         # The no-dead-promises seam (Johnny-trt.53). Usually attached after
         # construction via :meth:`attach_failure_reporter` (the gate is built
@@ -407,6 +423,12 @@ class TaskCoordinator:
         the spoken correction only ever describes durable state, the
         row-before-ack discipline applied to the walk-back). ``cancelled``
         (session teardown) and ``done`` (Phase-5 re-entry) report nothing.
+
+        Both ``done`` and ``failed`` settles additionally announce a
+        :class:`~johnny.voice_pipeline.events.TaskCompleted` through
+        :data:`PublishCompleted` after the row update and before any failure
+        report (Johnny-trt.25) — the live-UI signal that the durable result
+        is queryable. ``cancelled`` announces nothing.
         """
         await self._safe_update(queued.task_id, "running", attempts=1)
         try:
@@ -438,6 +460,7 @@ class TaskCoordinator:
                 result_text=result.result_text,
                 error=result.error,
             )
+            await self._safe_publish_completed(queued, "failed", result)
             await self._safe_report_failed(queued, result)
             return
 
@@ -458,6 +481,7 @@ class TaskCoordinator:
             result_json=result.result_json,
             error=result.error or None,
         )
+        await self._safe_publish_completed(queued, status, result)
         if status == "failed":
             await self._safe_report_failed(queued, result)
 
@@ -489,6 +513,18 @@ class TaskCoordinator:
         except Exception:
             logger.exception("tasks.begin: wake ping failed for task_id=%s", queued.task_id)
 
+    async def _safe_publish_completed(
+        self, queued: QueuedTask, status: TaskStatus, result: TaskResult
+    ) -> None:
+        if self._publish_completed is None:
+            return
+        try:
+            await self._publish_completed(queued, status, result)
+        except Exception:
+            logger.exception(
+                "tasks.run: TaskCompleted publish failed for task_id=%s", queued.task_id
+            )
+
     async def _safe_report_failed(self, queued: QueuedTask, result: TaskResult) -> None:
         if self._report_failed is None:
             return
@@ -507,6 +543,7 @@ __all__ = [
     "EXECUTOR_RESULT_STATUSES",
     "TERMINAL_TASK_STATUSES",
     "InMemoryTaskSink",
+    "PublishCompleted",
     "PublishQueued",
     "QueuedTask",
     "ReportTaskFailed",

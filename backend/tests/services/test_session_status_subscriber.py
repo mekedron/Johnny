@@ -1827,3 +1827,190 @@ def test_replay_session_14_leaves_no_unaccounted_turns(db_session: Session) -> N
     assert by_turn[4].terminal_state == TerminalState.NO_REPLY
     assert by_turn[4].no_reply_reason == NoReplyReason.STAGE_ERROR
     assert by_turn[3].terminal_state == TerminalState.REPLIED
+
+
+# --- task lifecycle event routing (Johnny-trt.25) ---------------------------
+
+
+def _task_event_payloads(session_id: Any) -> list[dict[str, Any]]:
+    """One payload per task event type, shaped like the real wire dicts."""
+    return [
+        {
+            "type": "task_queued",
+            "task_id": 42,
+            "kind": "calendar.upcoming_events",
+            "timestamp_ms": 10,
+            "turn_id": 4,
+            "decision_id": 17,
+            "ack_text": "on it",
+            "session_id": session_id,
+        },
+        {
+            "type": "task_progress",
+            "task_id": 42,
+            "kind": "calendar.upcoming_events",
+            "timestamp_ms": 20,
+            "progress_text": "searching",
+            "turn_id": 4,
+            "session_id": session_id,
+        },
+        {
+            "type": "task_completed",
+            "task_id": 42,
+            "kind": "calendar.upcoming_events",
+            "status": "done",
+            "timestamp_ms": 30,
+            "result_text": "You have 3 events this week.",
+            "error": "",
+            "turn_id": 4,
+            "session_id": session_id,
+        },
+        {
+            "type": "task_result_expired",
+            "task_id": 42,
+            "kind": "calendar.upcoming_events",
+            "timestamp_ms": 150_030,
+            "reason": "undelivered for 120s",
+            "turn_id": 4,
+            "session_id": session_id,
+        },
+    ]
+
+
+def test_task_event_types_constant_covers_all_four_wire_names() -> None:
+    """Drift pin: the subscriber's ignore-set ≡ the events module vocabulary."""
+    from johnny.voice_pipeline.events import (
+        TaskCompleted,
+        TaskProgress,
+        TaskQueued,
+        TaskResultExpired,
+    )
+
+    wire_names = {
+        TaskQueued(task_id=1, kind="k", timestamp_ms=0).type,
+        TaskProgress(task_id=1, kind="k", timestamp_ms=0).type,
+        TaskCompleted(task_id=1, kind="k", status="done", timestamp_ms=0).type,
+        TaskResultExpired(task_id=1, kind="k", timestamp_ms=0).type,
+    }
+    assert session_status_subscriber.TASK_EVENT_TYPES == wire_names
+
+
+@pytest.mark.asyncio
+async def test_task_events_route_without_touching_the_db(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Routing matrix: every task event type returns early, opening NO DB session.
+
+    The agent_tasks row is executor-owned (the in-process coordinator today,
+    the trt.24 worker pass later) — a subscriber write would double-write it.
+    The early return must fire before ``session_scope`` so chatty progress
+    events never cost a DB session either.
+    """
+
+    def exploding_scope() -> Any:
+        raise AssertionError(
+            "session_scope must not be opened for task lifecycle events"
+        )
+
+    monkeypatch.setattr(
+        session_status_subscriber, "session_scope", exploding_scope
+    )
+
+    for payload in _task_event_payloads(session_id=7):
+        applied = await session_status_subscriber._apply_in_transaction(payload)
+        assert applied is False, payload["type"]
+
+
+@pytest.mark.asyncio
+async def test_task_events_do_not_break_the_loop_for_later_events(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: task events interleaved with a status change — the status
+    still persists (the loop routes past the ephemeral types unharmed)."""
+    row = _seed(db_session)
+    db_session.commit()
+    engine = db_session.bind
+    assert engine is not None
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_scope() -> Iterator[Session]:
+        sess = Session(engine)
+        try:
+            yield sess
+            sess.commit()
+        except BaseException:
+            sess.rollback()
+            raise
+        finally:
+            sess.close()
+
+    monkeypatch.setattr(
+        session_status_subscriber, "session_scope", fake_scope
+    )
+
+    payloads = [
+        *_task_event_payloads(session_id=row.id),
+        _payload(session_id=row.id, status="joined"),
+    ]
+
+    async def factory(_url: str) -> AsyncIterator[dict[str, Any]]:
+        for p in payloads:
+            yield p
+
+    await run_subscriber("redis://ignored", message_stream_factory=factory)
+
+    refreshed_session = Session(engine)
+    try:
+        refreshed = refreshed_session.get(BotSession, row.id)
+        assert refreshed is not None
+        assert refreshed.status == BotSessionStatus.JOINED
+    finally:
+        refreshed_session.close()
+
+
+@pytest.mark.asyncio
+async def test_task_events_leave_persisted_tables_untouched(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No-double-writes proof: running every task event through the subscriber
+    adds zero rows to any subscriber-owned table."""
+    row = _seed(db_session)
+    db_session.commit()
+    engine = db_session.bind
+    assert engine is not None
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_scope() -> Iterator[Session]:
+        sess = Session(engine)
+        try:
+            yield sess
+            sess.commit()
+        except BaseException:
+            sess.rollback()
+            raise
+        finally:
+            sess.close()
+
+    monkeypatch.setattr(
+        session_status_subscriber, "session_scope", fake_scope
+    )
+
+    def _counts() -> dict[str, int]:
+        with Session(engine) as s:
+            return {
+                "decisions": len(s.scalars(sa.select(AgentDecision)).all()),
+                "utterances": len(s.scalars(sa.select(AgentUtterance)).all()),
+                "timings": len(s.scalars(sa.select(SessionTiming)).all()),
+            }
+
+    before = _counts()
+    for payload in _task_event_payloads(session_id=row.id):
+        applied = await session_status_subscriber._apply_in_transaction(payload)
+        assert applied is False
+    assert _counts() == before

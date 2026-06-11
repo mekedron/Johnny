@@ -66,6 +66,28 @@ AGENT_SPOKE_EVENT_TYPE = "agent_spoke"
 PIPELINE_TIMING_EVENT_TYPE = "pipeline_timing"
 TURN_TERMINAL_EVENT_TYPE = "turn_terminal"
 TRANSCRIPT_FILTERED_EVENT_TYPE = "transcript_filtered"
+TASK_QUEUED_EVENT_TYPE = "task_queued"
+TASK_PROGRESS_EVENT_TYPE = "task_progress"
+TASK_COMPLETED_EVENT_TYPE = "task_completed"
+TASK_RESULT_EXPIRED_EVENT_TYPE = "task_result_expired"
+
+# Task lifecycle events the subscriber recognises but deliberately does NOT
+# persist (Johnny-trt.25). The durable record is the ``agent_tasks`` row,
+# owned end-to-end by whichever executor settles the task — the in-process
+# coordinator resolver (queued/terminal writes around these events) or the
+# Phase-4 worker pass (Johnny-trt.24). The subscriber persists only events
+# originating in components that cannot write their own rows; a task-event
+# write here would double-write executor-owned state. The WS fan-out still
+# delivers every one of these to the live UI (app/api/ws.py reads the same
+# Redis channel directly).
+TASK_EVENT_TYPES = frozenset(
+    {
+        TASK_QUEUED_EVENT_TYPE,
+        TASK_PROGRESS_EVENT_TYPE,
+        TASK_COMPLETED_EVENT_TYPE,
+        TASK_RESULT_EXPIRED_EVENT_TYPE,
+    }
+)
 
 # Whitelist of stages persisted to ``session_timings`` (Johnny-ckz.7). The
 # pipeline may emit additional stages in the future; an unknown value is
@@ -840,8 +862,22 @@ async def _apply_in_transaction(
     so a Redis hiccup never rolls back a successful insert. A
     ``waiting_for_relogin`` status change is handled the same way via
     :class:`_ReloginEvent` / ``relogin_publisher`` (Johnny-ebf).
+
+    Task lifecycle events (:data:`TASK_EVENT_TYPES`) return early without
+    opening a DB session at all (Johnny-trt.25): the executor that emitted
+    them owns the ``agent_tasks`` row, so there is nothing for the
+    subscriber to write — see the constant's comment for the full contract.
     """
     event_type = payload.get("type")
+    if event_type in TASK_EVENT_TYPES:
+        logger.debug(
+            "status-sub: task event type=%s task_id=%s session_id=%s — "
+            "ephemeral, agent_tasks row is executor-owned; not persisting",
+            event_type,
+            payload.get("task_id"),
+            payload.get("session_id"),
+        )
+        return False
     pending_event: _PendingApprovalEvent | None = None
     relogin_event: _ReloginEvent | None = None
     applied = False
@@ -1109,6 +1145,11 @@ __all__ = [
     "ROUTER_DECISION_EVENT_TYPE",
     "SESSION_CHANNEL_PATTERN",
     "SESSION_STATUS_EVENT_TYPE",
+    "TASK_COMPLETED_EVENT_TYPE",
+    "TASK_EVENT_TYPES",
+    "TASK_PROGRESS_EVENT_TYPE",
+    "TASK_QUEUED_EVENT_TYPE",
+    "TASK_RESULT_EXPIRED_EVENT_TYPE",
     "TRANSCRIPT_EVENT_TYPE",
     "TRANSCRIPT_FILTERED_EVENT_TYPE",
     "TURN_BOUND_SPOKEN_KINDS",

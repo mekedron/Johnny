@@ -5,8 +5,12 @@ Two endpoints:
 * ``WS /ws/sessions/{session_id}`` — streams every pipeline event for a
   given bot session: ``transcript_partial``, ``transcript_final``,
   ``router_decision``, ``approval_pending``, ``approval_resolved``,
-  ``agent_spoke``, ``session_status_change``. The voice pipeline
-  publishes these to the Redis channel ``johnny.session.{session_id}``
+  ``agent_spoke``, ``session_status_change``, plus the task lifecycle
+  events (``task_queued``, ``task_progress``, ``task_completed``,
+  ``task_result_expired`` — Johnny-trt.25; wire types pass through
+  unchanged, the ``agent_tasks`` row stays the durable record). The voice
+  pipeline publishes these to the Redis channel
+  ``johnny.session.{session_id}``
   via :class:`johnny.voice_pipeline.event_bus.RedisEventBus`; the WS
   endpoint subscribes and fans them out to the connected browser.
 

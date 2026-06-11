@@ -287,6 +287,110 @@ def test_session_ws_handles_agent_suggested_passthrough(
     assert envelope["decision_id"] == 7
 
 
+def test_session_ws_streams_task_lifecycle_events_passthrough(
+    client: TestClient, stream: InMemoryEventStream
+) -> None:
+    """All four task event types reach the session WS with their wire type
+    unchanged and every payload field flattened into the envelope
+    (Johnny-trt.25). The frames arrive in publish order with increasing seq."""
+    with client.websocket_connect("/ws/sessions/sess-1") as ws:
+        _push(
+            stream,
+            f"{SESSION_CHANNEL_PREFIX}sess-1",
+            {
+                "type": "task_queued",
+                "task_id": 42,
+                "kind": "calendar.upcoming_events",
+                "ack_text": "on it",
+                "turn_id": 4,
+                "timestamp_ms": 10,
+                "session_id": "sess-1",
+            },
+        )
+        e1 = ws.receive_json()
+        _push(
+            stream,
+            f"{SESSION_CHANNEL_PREFIX}sess-1",
+            {
+                "type": "task_progress",
+                "task_id": 42,
+                "kind": "calendar.upcoming_events",
+                "progress_text": "searching",
+                "timestamp_ms": 20,
+                "session_id": "sess-1",
+            },
+        )
+        e2 = ws.receive_json()
+        _push(
+            stream,
+            f"{SESSION_CHANNEL_PREFIX}sess-1",
+            {
+                "type": "task_completed",
+                "task_id": 42,
+                "kind": "calendar.upcoming_events",
+                "status": "done",
+                "result_text": "You have 3 events this week.",
+                "error": "",
+                "timestamp_ms": 30,
+                "session_id": "sess-1",
+            },
+        )
+        e3 = ws.receive_json()
+        _push(
+            stream,
+            f"{SESSION_CHANNEL_PREFIX}sess-1",
+            {
+                "type": "task_result_expired",
+                "task_id": 42,
+                "kind": "calendar.upcoming_events",
+                "reason": "undelivered for 120s",
+                "timestamp_ms": 150_030,
+                "session_id": "sess-1",
+            },
+        )
+        e4 = ws.receive_json()
+
+    assert (e1["seq"], e2["seq"], e3["seq"], e4["seq"]) == (1, 2, 3, 4)
+    assert e1["type"] == "task_queued"
+    assert e1["task_id"] == 42
+    assert e1["ack_text"] == "on it"
+    assert e2["type"] == "task_progress"
+    assert e2["progress_text"] == "searching"
+    assert e3["type"] == "task_completed"
+    assert e3["status"] == "done"
+    assert e3["result_text"] == "You have 3 events this week."
+    assert e4["type"] == "task_result_expired"
+    assert e4["reason"] == "undelivered for 120s"
+
+
+def test_to_wire_type_task_events_pass_through_unmapped() -> None:
+    assert to_wire_type("task_queued") == "task_queued"
+    assert to_wire_type("task_progress") == "task_progress"
+    assert to_wire_type("task_completed") == "task_completed"
+    assert to_wire_type("task_result_expired") == "task_result_expired"
+
+
+def test_global_ws_skips_task_events(
+    client: TestClient, stream: InMemoryEventStream
+) -> None:
+    """Task lifecycle events are session-scoped — the per-session WS is the
+    right feed; the global WS keeps forwarding only session_status_change."""
+    with client.websocket_connect("/ws/global") as ws:
+        _push(
+            stream,
+            f"{SESSION_CHANNEL_PREFIX}sess-1",
+            {"type": "task_completed", "task_id": 1, "kind": "k", "status": "done"},
+        )
+        _push(
+            stream,
+            f"{SESSION_CHANNEL_PREFIX}sess-1",
+            {"type": "session_status_changed", "status": "ended"},
+        )
+        envelope = ws.receive_json()
+    assert envelope["type"] == "session_status_change"
+    assert envelope["seq"] == 1
+
+
 def test_global_ws_forwards_calendar_changes(
     client: TestClient, stream: InMemoryEventStream
 ) -> None:

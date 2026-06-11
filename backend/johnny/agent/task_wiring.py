@@ -6,11 +6,13 @@ and unit tests run without the ``agent`` extra (the
 :mod:`johnny.agent.approval` / :mod:`johnny.agent.approval_wiring` split). This
 module supplies the **real** seams for a running session:
 
-* :func:`build_publish_task_queued` — publish
-  :class:`~johnny.voice_pipeline.events.TaskQueued` on the session
+* :func:`build_publish_task_queued` / :func:`build_publish_task_completed` —
+  publish :class:`~johnny.voice_pipeline.events.TaskQueued` /
+  :class:`~johnny.voice_pipeline.events.TaskCompleted` on the session
   :class:`~johnny.voice_pipeline.event_bus.EventBus` channel (the live-UI /
-  WS surface; the status subscriber ignores the type — the durable record is
-  the ``agent_tasks`` row the sink already wrote);
+  WS surface; the status subscriber ignores both types — the durable record
+  is the ``agent_tasks`` row the coordinator's sink writes before either
+  event fires, Johnny-trt.25);
 * :class:`RedisTaskWake` — publish a wake ping on the shared
   :data:`TASKS_WAKE_CHANNEL` Redis channel so a future external task worker
   (Phase 4) picks queued work up without polling. Publish-only and lazily
@@ -37,15 +39,18 @@ from collections.abc import Callable
 from typing import Any
 
 from johnny.agent.tasks import (
+    PublishCompleted,
     PublishQueued,
     QueuedTask,
     TaskCoordinator,
     TaskExecutor,
+    TaskResult,
     TaskSink,
+    TaskStatus,
     stub_executor,
 )
 from johnny.voice_pipeline.event_bus import EventBus
-from johnny.voice_pipeline.events import TaskQueued
+from johnny.voice_pipeline.events import TaskCompleted, TaskQueued
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +92,46 @@ def build_publish_task_queued(
                 turn_id=queued.spec.turn_id,
                 decision_id=queued.spec.decision_id,
                 ack_text=queued.spec.ack_text,
+                session_id=session_id,
+            )
+        )
+
+    return _publish
+
+
+def build_publish_task_completed(
+    event_bus: EventBus,
+    *,
+    session_id: str | None = None,
+    clock: Callable[[], int] = _default_clock_ms,
+) -> PublishCompleted:
+    """Publish :class:`TaskCompleted` for a freshly settled task (Johnny-trt.25).
+
+    The resolver invokes this *after* the terminal ``agent_tasks`` row write
+    and only for ``done``/``failed`` settles (see
+    :data:`~johnny.agent.tasks.PublishCompleted`), so the event always
+    describes durable, queryable state. ``status`` arrives pre-normalized
+    ("done"/"failed"); the cast to the event's narrower Literal is safe by
+    that contract.
+    """
+
+    async def _publish(queued: QueuedTask, status: TaskStatus, result: TaskResult) -> None:
+        if status not in ("done", "failed"):  # defensive: contract is executor settles only
+            logger.error(
+                "task events: refusing TaskCompleted publish with status=%r for task_id=%s",
+                status,
+                queued.task_id,
+            )
+            return
+        await event_bus.publish(
+            TaskCompleted(
+                task_id=queued.task_id,
+                kind=queued.spec.kind,
+                status=status,
+                timestamp_ms=clock(),
+                result_text=result.result_text,
+                error=result.error,
+                turn_id=queued.spec.turn_id,
                 session_id=session_id,
             )
         )
@@ -164,6 +209,9 @@ def build_task_coordinator(
         task_sink,
         executor=executor if executor is not None else stub_executor,
         publish_queued=build_publish_task_queued(event_bus, session_id=session_id, clock=clock),
+        publish_completed=build_publish_task_completed(
+            event_bus, session_id=session_id, clock=clock
+        ),
         wake=wake,
     )
     return coordinator, wake
@@ -172,6 +220,7 @@ def build_task_coordinator(
 __all__ = [
     "TASKS_WAKE_CHANNEL",
     "RedisTaskWake",
+    "build_publish_task_completed",
     "build_publish_task_queued",
     "build_task_coordinator",
 ]

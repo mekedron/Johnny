@@ -15,7 +15,10 @@ from johnny.voice_pipeline.events import (
     ApprovalResolved,
     RouterDecisionMade,
     SessionStatusChanged,
+    TaskCompleted,
+    TaskProgress,
     TaskQueued,
+    TaskResultExpired,
     TranscriptFiltered,
     TranscriptFinalized,
     TranscriptInterim,
@@ -150,6 +153,198 @@ def test_event_to_dict_task_queued() -> None:
         "session_id": "s",
         "type": "task_queued",
     }
+
+
+# --- TaskProgress / TaskCompleted / TaskResultExpired (Johnny-trt.25) -------
+
+
+def test_task_progress_defaults() -> None:
+    ev = TaskProgress(task_id=42, kind="calendar.upcoming_events", timestamp_ms=1_000)
+    assert ev.task_id == 42
+    assert ev.kind == "calendar.upcoming_events"
+    assert ev.timestamp_ms == 1_000
+    assert ev.progress_text == ""
+    assert ev.turn_id is None
+    assert ev.session_id is None
+    assert ev.type == "task_progress"
+
+
+def test_task_progress_is_frozen() -> None:
+    ev = TaskProgress(task_id=1, kind="k", timestamp_ms=0)
+    with pytest.raises(FrozenInstanceError):
+        ev.progress_text = "mutated"  # type: ignore[misc]
+
+
+def test_event_to_dict_task_progress() -> None:
+    ev = TaskProgress(
+        task_id=42,
+        kind="calendar.upcoming_events",
+        timestamp_ms=1_000,
+        progress_text="step 2 of 3",
+        turn_id=4,
+        session_id="s",
+    )
+    assert event_to_dict(ev) == {
+        "task_id": 42,
+        "kind": "calendar.upcoming_events",
+        "timestamp_ms": 1_000,
+        "progress_text": "step 2 of 3",
+        "turn_id": 4,
+        "session_id": "s",
+        "type": "task_progress",
+    }
+
+
+def test_task_completed_defaults() -> None:
+    ev = TaskCompleted(
+        task_id=42, kind="calendar.upcoming_events", status="done", timestamp_ms=1_000
+    )
+    assert ev.task_id == 42
+    assert ev.status == "done"
+    assert ev.result_text == ""
+    assert ev.error == ""
+    assert ev.turn_id is None
+    assert ev.session_id is None
+    assert ev.type == "task_completed"
+
+
+def test_task_completed_is_frozen() -> None:
+    ev = TaskCompleted(task_id=1, kind="k", status="failed", timestamp_ms=0)
+    with pytest.raises(FrozenInstanceError):
+        ev.status = "done"  # type: ignore[misc]
+
+
+def test_event_to_dict_task_completed() -> None:
+    ev = TaskCompleted(
+        task_id=42,
+        kind="calendar.upcoming_events",
+        status="failed",
+        timestamp_ms=2_000,
+        result_text="I couldn't reach your calendar.",
+        error="gog: not authenticated",
+        turn_id=4,
+        session_id="s",
+    )
+    assert event_to_dict(ev) == {
+        "task_id": 42,
+        "kind": "calendar.upcoming_events",
+        "status": "failed",
+        "timestamp_ms": 2_000,
+        "result_text": "I couldn't reach your calendar.",
+        "error": "gog: not authenticated",
+        "turn_id": 4,
+        "session_id": "s",
+        "type": "task_completed",
+    }
+
+
+def test_task_completed_status_supports_executor_settle_statuses_only() -> None:
+    """Pins the Literal contract to the executor settle vocabulary."""
+    from typing import get_args
+
+    from johnny.voice_pipeline.events import TaskCompletedStatus
+
+    assert set(get_args(TaskCompletedStatus)) == {"done", "failed"}
+
+
+def test_task_completed_status_mirrors_executor_result_statuses() -> None:
+    """Drift guard: the event vocabulary ≡ tasks.EXECUTOR_RESULT_STATUSES."""
+    from typing import get_args
+
+    from johnny.agent.tasks import EXECUTOR_RESULT_STATUSES
+    from johnny.voice_pipeline.events import TaskCompletedStatus
+
+    assert set(get_args(TaskCompletedStatus)) == set(EXECUTOR_RESULT_STATUSES)
+
+
+def test_task_result_expired_defaults() -> None:
+    ev = TaskResultExpired(task_id=42, kind="calendar.upcoming_events", timestamp_ms=9_000)
+    assert ev.task_id == 42
+    assert ev.kind == "calendar.upcoming_events"
+    assert ev.reason == ""
+    assert ev.turn_id is None
+    assert ev.session_id is None
+    assert ev.type == "task_result_expired"
+
+
+def test_task_result_expired_is_frozen() -> None:
+    ev = TaskResultExpired(task_id=1, kind="k", timestamp_ms=0)
+    with pytest.raises(FrozenInstanceError):
+        ev.reason = "mutated"  # type: ignore[misc]
+
+
+def test_event_to_dict_task_result_expired() -> None:
+    ev = TaskResultExpired(
+        task_id=42,
+        kind="calendar.upcoming_events",
+        timestamp_ms=9_000,
+        reason="undelivered for 120s",
+        turn_id=4,
+        session_id="s",
+    )
+    assert event_to_dict(ev) == {
+        "task_id": 42,
+        "kind": "calendar.upcoming_events",
+        "timestamp_ms": 9_000,
+        "reason": "undelivered for 120s",
+        "turn_id": 4,
+        "session_id": "s",
+        "type": "task_result_expired",
+    }
+
+
+def test_task_events_round_trip_through_json() -> None:
+    """Serialize → JSON wire → deserialize reconstructs an equal event.
+
+    This is the exact path a task event travels: ``event_to_dict`` →
+    ``json.dumps`` (RedisEventBus) → ``json.loads`` (subscriber / WS) →
+    keyword reconstruction. Frozen dataclasses compare by value, so equality
+    proves the full field set survives the wire (Johnny-trt.25 AC).
+    """
+    import json
+
+    events = [
+        TaskQueued(
+            task_id=1,
+            kind="calendar.upcoming_events",
+            timestamp_ms=10,
+            turn_id=4,
+            decision_id=17,
+            ack_text="on it",
+            session_id="s",
+        ),
+        TaskProgress(
+            task_id=1,
+            kind="calendar.upcoming_events",
+            timestamp_ms=20,
+            progress_text="searching",
+            turn_id=4,
+            session_id="s",
+        ),
+        TaskCompleted(
+            task_id=1,
+            kind="calendar.upcoming_events",
+            status="done",
+            timestamp_ms=30,
+            result_text="You have 3 events this week.",
+            error="",
+            turn_id=4,
+            session_id="s",
+        ),
+        TaskResultExpired(
+            task_id=1,
+            kind="calendar.upcoming_events",
+            timestamp_ms=150_030,
+            reason="undelivered for 120s",
+            turn_id=4,
+            session_id="s",
+        ),
+    ]
+    for event in events:
+        wire = json.loads(json.dumps(event_to_dict(event)))
+        rebuilt = type(event)(**wire)
+        assert rebuilt == event
+        assert rebuilt.type == wire["type"]
 
 
 def test_router_decision_made_minimum() -> None:

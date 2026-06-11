@@ -402,6 +402,171 @@ async def test_failed_settle_without_reporter_is_noop() -> None:
     await coordinator.join()  # must not raise
 
 
+# --- the completed-settle publish seam (Johnny-trt.25) ----------------------------
+
+
+class _RecordingCompletedPublisher:
+    """Captures every (QueuedTask, status, TaskResult) the resolver announces."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[QueuedTask, str, TaskResult]] = []
+
+    async def __call__(self, queued: QueuedTask, status: Any, result: TaskResult) -> None:
+        self.published.append((queued, status, result))
+
+
+async def test_done_settle_publishes_completed_after_row_update() -> None:
+    """A successful settle announces TaskCompleted with the row already done."""
+    sink = InMemoryTaskSink()
+    row_status_at_publish: list[Any] = []
+
+    async def executor(queued: QueuedTask) -> TaskResult:
+        return TaskResult(status="done", result_text="3 events this week", result_json={"n": 3})
+
+    publisher = _RecordingCompletedPublisher()
+
+    async def status_capturing_publisher(
+        queued: QueuedTask, status: Any, result: TaskResult
+    ) -> None:
+        record = sink.get(queued.task_id)
+        row_status_at_publish.append(record.status if record is not None else None)
+        await publisher(queued, status, result)
+
+    coordinator = TaskCoordinator(
+        sink, executor=executor, publish_completed=status_capturing_publisher
+    )
+    queued = await coordinator.begin(_spec())
+    assert queued is not None
+    await coordinator.join()
+
+    assert len(publisher.published) == 1
+    published_queued, status, result = publisher.published[0]
+    assert published_queued.task_id == queued.task_id
+    assert status == "done"
+    assert result.result_text == "3 events this week"
+    # The terminal row write strictly precedes the announce (row-before-event).
+    assert row_status_at_publish == ["done"]
+
+
+async def test_failed_settle_publishes_completed_before_failure_report() -> None:
+    """An honest failed settle announces completion, then walks the promise back."""
+    order: list[str] = []
+    publisher = _RecordingCompletedPublisher()
+
+    async def ordering_publisher(queued: QueuedTask, status: Any, result: TaskResult) -> None:
+        order.append("publish_completed")
+        await publisher(queued, status, result)
+
+    async def reporter(queued: QueuedTask, result: TaskResult) -> None:
+        order.append("report_failed")
+
+    coordinator = TaskCoordinator(
+        InMemoryTaskSink(),
+        executor=stub_executor,
+        publish_completed=ordering_publisher,
+        report_failed=reporter,
+    )
+    assert await coordinator.begin(_spec(kind="book_flight")) is not None
+    await coordinator.join()
+
+    assert order == ["publish_completed", "report_failed"]
+    assert len(publisher.published) == 1
+    _, status, result = publisher.published[0]
+    assert status == "failed"
+    assert result.result_text == unsupported_kind_text("book_flight")
+
+
+async def test_executor_exception_publishes_completed_failed() -> None:
+    publisher = _RecordingCompletedPublisher()
+
+    async def executor(queued: QueuedTask) -> TaskResult:
+        raise ValueError("boom")
+
+    coordinator = TaskCoordinator(
+        InMemoryTaskSink(), executor=executor, publish_completed=publisher
+    )
+    assert await coordinator.begin(_spec()) is not None
+    await coordinator.join()
+
+    assert len(publisher.published) == 1
+    _, status, result = publisher.published[0]
+    assert status == "failed"
+    assert result.result_text == executor_error_text("web_search")
+
+
+async def test_illegal_executor_status_publishes_normalized_failed() -> None:
+    """The announce carries the clamped row status, never the illegal one."""
+    publisher = _RecordingCompletedPublisher()
+
+    async def executor(queued: QueuedTask) -> TaskResult:
+        return TaskResult(status="queued")  # type: ignore[arg-type]
+
+    coordinator = TaskCoordinator(
+        InMemoryTaskSink(), executor=executor, publish_completed=publisher
+    )
+    assert await coordinator.begin(_spec()) is not None
+    await coordinator.join()
+    assert len(publisher.published) == 1
+    assert publisher.published[0][1] == "failed"
+
+
+async def test_cancelled_settle_publishes_nothing() -> None:
+    """Teardown cancellation announces no completion — nobody is listening."""
+    publisher = _RecordingCompletedPublisher()
+    started = asyncio.Event()
+
+    async def hanging_executor(queued: QueuedTask) -> TaskResult:
+        started.set()
+        await asyncio.sleep(60)
+        return TaskResult(status="done")
+
+    coordinator = TaskCoordinator(
+        InMemoryTaskSink(), executor=hanging_executor, publish_completed=publisher
+    )
+    assert await coordinator.begin(_spec()) is not None
+    await asyncio.wait_for(started.wait(), timeout=2)
+    await coordinator.aclose(drain_grace_s=0)
+    assert publisher.published == []
+
+
+async def test_completed_publisher_raising_is_contained() -> None:
+    """A blowing-up announce never crashes the resolver or eats the report."""
+    sink = InMemoryTaskSink()
+    reporter = _RecordingReporter()
+
+    async def bad_publisher(queued: QueuedTask, status: Any, result: TaskResult) -> None:
+        raise RuntimeError("bus down")
+
+    coordinator = TaskCoordinator(
+        sink,
+        executor=stub_executor,
+        publish_completed=bad_publisher,
+        report_failed=reporter,
+    )
+    queued = await coordinator.begin(_spec())
+    assert queued is not None
+    await coordinator.join()  # must not raise
+    record = sink.get(queued.task_id)
+    assert record is not None and record.status == "failed"
+    # The failure report still ran despite the dead bus.
+    assert len(reporter.reported) == 1
+
+
+async def test_settle_without_completed_publisher_is_noop() -> None:
+    """No publisher attached (bare test harnesses) — settles exactly as before."""
+    sink = InMemoryTaskSink()
+
+    async def executor(queued: QueuedTask) -> TaskResult:
+        return TaskResult(status="done", result_text="ok")
+
+    coordinator = TaskCoordinator(sink, executor=executor)
+    queued = await coordinator.begin(_spec())
+    assert queued is not None
+    await coordinator.join()
+    record = sink.get(queued.task_id)
+    assert record is not None and record.status == "done"
+
+
 # --- teardown -------------------------------------------------------------------
 
 
