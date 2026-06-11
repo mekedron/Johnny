@@ -69,18 +69,28 @@ purpose is observability + catching utterances the fast path missed —
 nothing in the user-facing 500 ms barge-in budget depends on it) but
 long enough that a sensibly-sized router model returns under load.
 """
-DEFAULT_ROUTER_LLM_TIMEOUT_S = 30.0
-"""Wall-clock cap on the main router LLM call (INV-1, Johnny-ckz.28.3).
+DEFAULT_ROUTER_LLM_TIMEOUT_S = 8.0
+"""Wall-clock budget on the main router (triage) LLM call (Johnny-trt.19).
 
-Session 14 turn 4 hung here for ~60 s — the router ``chat`` call had no
-bound, so a provider read-timeout stall turned a user question into a
-dead minute and the turn was dropped silently. We bound it with
-``asyncio.wait_for`` exactly the way the barge-in classifier already is
-(Johnny-wyd). On timeout the call raises, the turn terminates in a
-``no_reply`` row with ``no_reply_reason=stage_error`` instead of
-vanishing, and the session stays alive for the next turn. Generous
-enough not to trip a sensibly-sized local model under load; a value
-``<= 0`` disables the bound.
+Two regimes in one bound:
+
+* **Hang guard** (the original 30 s, INV-1, Johnny-ckz.28.3): session 14
+  turn 4 hung ~60 s — the router ``chat`` call had no bound, so a provider
+  read-timeout stall turned a user question into a dead minute and the
+  turn was dropped silently. On timeout the call raises, the turn
+  terminates in a ``no_reply(stage_error)`` row instead of vanishing, and
+  the session stays alive for the next turn.
+* **Triage budget** (Phase 3, Johnny-trt.19): the router is now the
+  per-turn triage — EVERY verdict (silent / speak / delegate / status)
+  pays this call before anything else happens, and the gate blocks all
+  later turns while it runs (the SDK await-chains the hook). A triage
+  model that needs more than ~8 s is the wrong model for the job (see the
+  small-router-model provider tips); letting it run to 30 s just trades a
+  dropped turn for a half-minute conversational freeze. Measured local
+  reference: llama3.2:3b answers the triage schema in 1.2–4.8 s across a
+  30-turn session (docs/LATENCY.md).
+
+A value ``<= 0`` disables the bound (the abandon race stays active).
 """
 DEFAULT_BARGE_IN_MIN_SPEECH_MS = 160
 """Confirmed speech duration that triggers a fast (VAD-driven) barge-in (Johnny-ze3).

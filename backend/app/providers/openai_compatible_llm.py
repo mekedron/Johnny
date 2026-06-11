@@ -353,6 +353,23 @@ class OpenAICompatibleLLM(LLMProvider):
                     ),
                 ),
                 ProviderTip(
+                    topic="Triage budget: the router gets ~8 s, period",
+                    body=(
+                        "Johnny bounds the per-turn triage (router) call at "
+                        "8 s by default — a slower verdict drops that turn "
+                        "with a stage_error row instead of freezing the "
+                        "conversation (the hook blocks every later turn "
+                        "while it runs). Small instruct models handle the "
+                        "triage JSON schema fine: llama3.2:3b returns "
+                        "speak/delegate/status verdicts reliably in "
+                        "1.2-4.8 s on an M-series Mac (measured 2026-06-11, "
+                        "growing with session length). If the activity log "
+                        "shows no_reply stage_error rows mentioning the "
+                        "'gate bound', the router model is too big for the "
+                        "slot — go smaller, keep the big model for answers."
+                    ),
+                ),
+                ProviderTip(
                     topic="Disable thinking for the router model",
                     body=(
                         "Reasoning / chain-of-thought models (Qwen3, "

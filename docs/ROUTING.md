@@ -191,7 +191,10 @@ separately replay-gated:
   parse byte-for-byte identically (`johnny-replay --mode invariants` is a CI gate).
   The shadow scorer and the default-off addressing gate are parity-safe by
   construction; behaviors in §6 each require a deliberate, noted fixture refresh.
-- **Budgets** — triage call hard budget ~8 s (hang-guard, not target; trt.19); felt
+- **Budgets** — triage call hard budget 8 s (shipped, trt.19:
+  `DEFAULT_ROUTER_LLM_TIMEOUT_S` — a ceiling that drops the turn with
+  `no_reply(stage_error)`, not a latency target; the triage cost is visible per turn
+  as the `router_llm` row in `session_timings` / `triage_ms` in the harness); felt
   latency targets live in [LATENCY.md](LATENCY.md) (speech-end → first audible byte,
   p50/p95: 300/500 ms all-local, 250/450 mixed, 200/400 all-cloud). A delegated
   turn's felt latency = triage call + ack TTS only.
@@ -203,7 +206,7 @@ separately replay-gated:
 | Router schema: `action` + `task` (parity-safe) | Johnny-trt.16 | **shipped** (2026-06-11) — `ROUTER_ACTIONS` enum + nullable `task {kind, args, ack}` in `_ROUTER_SCHEMA`; `RouterDecision.action`/`task_request` (`task_request` non-None iff `action='delegate'`); old outputs parse identically, malformed tasks degrade to speak/silent |
 | Gate branching + ack terminal | Johnny-trt.17 | **shipped** (2026-06-11) — `RouterGate.run_turn` branches on `decision.action` after the mode checks (suggest_only/approval_required/listen_only and the rate limiter unchanged): `delegate` → `TaskCoordinator.begin` (row-before-ack) + `session.say(ack)` whose SpeechHandle completion owns the turn terminal (`replied` / `no_reply(barge_in)`; coordinator/persist/say failure → nothing spoken + `no_reply(stage_error)`); `status` → fixed Phase-3 stub line via the same say machinery. No answer-LLM hop on either; `AgentSpoke` carries the ack text (INV-2); task results are session-scoped speech later, never turn terminals (INV-1) |
 | `agent_tasks` + TaskCoordinator + stub executor | Johnny-trt.18 | **shipped** (2026-06-11) — `agent_tasks` table + migration 0023; `SqlAlchemyTaskSink`; stdlib `TaskCoordinator` (row durable at `begin` return, best-effort `TaskQueued` + `johnny.tasks.wake` ping, aclose marks `cancelled`); Phase-3 `stub_executor` fails every kind fast with speech-ready text; wired for all SPEAKING_MODES via `_build_sync_persistence` |
-| Triage budget + task catalog + observability | Johnny-trt.19 | planned (Phase 3) |
+| Triage budget + task catalog + observability | Johnny-trt.19 | **shipped** (2026-06-11) — `DEFAULT_ROUTER_LLM_TIMEOUT_S` 30 → 8 s (budget framing; gate mirror + drift-guard/value tests); `TaskCatalogEntry (kind, one_liner, keywords[])` in `johnny/agent/task_catalog.py` with Phase-3 stubs (`calendar.upcoming_events`, `gmail.search`) rendered into the router prompt **only when a TaskCoordinator is wired** (keywords stay scorer-only, feeding trt.50); gate emits a per-decided-turn `router_llm` PipelineTiming (`details.action`) → `session_timings`; latency harness reports it directly as `triage_ms` (the derived `router_ms` gap stays for baseline comparability); small-router-model + 8 s budget tip on the OpenAI-compatible provider. Phase 4 (trt.23) swaps the catalog *source* to the skill loader; the entry shape is the contract |
 | Heuristic complexity scorer (shadow) | Johnny-trt.50 | planned (Phase 3) |
 | Phase 3 capstone (parity + INV-1 + delegated turn) | Johnny-trt.21 | planned (Phase 3) |
 | Executor, tools/skills, task events | Johnny-trt.22–26, .35 | planned (Phase 4) |

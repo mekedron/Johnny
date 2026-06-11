@@ -356,3 +356,11 @@ def test_default_timeout_matches_legacy_router_bound() -> None:
     from johnny.voice_pipeline.reasoning import DEFAULT_ROUTER_LLM_TIMEOUT_S
 
     assert DEFAULT_ROUTER_GATE_TIMEOUT_S == DEFAULT_ROUTER_LLM_TIMEOUT_S
+
+
+def test_default_timeout_is_the_phase3_triage_budget() -> None:
+    """Johnny-trt.19: ~8 s is a *budget* (every verdict pays the triage call
+    while the hook blocks later turns), not the legacy 30 s hang-guard. A
+    deliberate change here should re-justify the number in both docstrings
+    (gate.py + reasoning.py) and the small-router-model provider tip."""
+    assert DEFAULT_ROUTER_GATE_TIMEOUT_S == 8.0

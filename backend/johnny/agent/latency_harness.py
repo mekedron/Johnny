@@ -163,6 +163,7 @@ REPORT_METRICS: tuple[str, ...] = (
     "vad_end_ms",
     "stt_ms",
     "stt_final_after_vad_end_ms",
+    "triage_ms",
     "router_ms",
     "llm_ttft_ms",
     "llm_total_ms",
@@ -171,6 +172,11 @@ REPORT_METRICS: tuple[str, ...] = (
     "first_audio_wall_ms",
     "e2e_vad_commit_ms",
 )
+# ``triage_ms`` (Johnny-trt.19) is the gate's own ``router_llm`` timing row —
+# the direct triage LLM cost, present for every decided turn including
+# delegate/status turns that have no answer stage at all. ``router_ms`` stays
+# the legacy *derived* STT-final → answer-LLM-start gap (triage + scheduling
+# overhead) for phase-over-phase comparability with the Johnny-cxu baseline.
 
 
 # ---------------------------------------------------------------------------
@@ -502,6 +508,7 @@ class TurnTimings:
     vad_end_ms: float | None = None
     stt_ms: float | None = None
     stt_final_after_vad_end_ms: float | None = None
+    triage_ms: float | None = None
     router_ms: float | None = None
     llm_ttft_ms: float | None = None
     llm_total_ms: float | None = None
@@ -660,6 +667,7 @@ def _derive_turn(
         timings.outcome = "no_reply"
 
     stt_rows: list[PipelineTiming] = []
+    triage_rows: list[PipelineTiming] = []
     llm_rows: list[PipelineTiming] = []
     tts_rows: list[PipelineTiming] = []
     for event in events:
@@ -672,6 +680,8 @@ def _derive_turn(
         elif isinstance(event, PipelineTiming):
             if event.stage == "stt":
                 stt_rows.append(event)
+            elif event.stage == "router_llm":
+                triage_rows.append(event)
             elif event.stage == "answer_llm":
                 llm_rows.append(event)
             elif event.stage == "tts":
@@ -687,12 +697,18 @@ def _derive_turn(
         timings.first_audio_wall_ms = (first_audio_t - speech_end_t) * 1000
 
     stt = min(stt_rows, key=lambda r: r.started_at_ms) if stt_rows else None
+    triage = min(triage_rows, key=lambda r: r.started_at_ms) if triage_rows else None
     llm = min(llm_rows, key=lambda r: r.started_at_ms) if llm_rows else None
     tts = min(tts_rows, key=lambda r: r.started_at_ms) if tts_rows else None
     timings.tts_segments = len(tts_rows)
 
     if stt is not None:
         timings.stt_ms = float(stt.duration_ms)
+    if triage is not None:
+        # The gate's own router_llm row (Johnny-trt.19): duration is the direct
+        # triage cost; started_at_ms is the call START (gate-emitted rows keep
+        # the documented field semantic — no end-stamp compensation needed).
+        timings.triage_ms = float(triage.duration_ms)
     if llm is not None:
         timings.llm_total_ms = float(llm.duration_ms)
         ttft = llm.details.get("time_to_first_token_ms")

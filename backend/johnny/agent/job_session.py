@@ -77,9 +77,11 @@ from johnny.agent.observability import (
     build_spoke_emitter,
     build_suggested_emitter,
     build_transcript_finalized_emitter,
+    build_triage_timing_emitter,
 )
 from johnny.agent.router_gate import RouterGate, RouterGateConfig
 from johnny.agent.session import JohnnyAgent, build_johnny_agent
+from johnny.agent.task_catalog import STUB_TASK_CATALOG
 from johnny.agent.tasks import TaskCoordinator
 from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder, build_recorder_from_env
 from johnny.voice_pipeline.event_bus import (
@@ -509,6 +511,12 @@ async def build_agent_runtime(
         calendar_context=config.calendar_context,
         calendar_attachments_text=config.calendar_attachments_text,
         prior_session_context=config.prior_session_context,
+        # Task catalog (Johnny-trt.19): teach the router the delegate
+        # vocabulary only when a coordinator exists to honour it — a gate
+        # without task wiring stage_errors delegate verdicts, so advertising
+        # kinds there would invite turns that can only fail. Phase-3 stub
+        # entries; the Phase-4 skill loader (trt.23) becomes the source.
+        task_catalog=(STUB_TASK_CATALOG if task_coordinator is not None else ()),
     )
     gate = RouterGate(
         router_llm,
@@ -528,6 +536,17 @@ async def build_agent_runtime(
             bus, mode=config.mode, session_id=session_id, recorder=recorder
         ),
         record_suggested=build_suggested_emitter(bus, session_id=session_id),
+        # Triage-stage timing (Johnny-trt.19): the router LLM is a side call
+        # LiveKit emits no metric for, so the gate publishes its own
+        # ``router_llm`` PipelineTiming per decided turn — same session-start
+        # reference as the MetricsTranslator below.
+        record_triage_timing=build_triage_timing_emitter(
+            bus,
+            turn_index,
+            provider_name=router_llm.name,
+            session_started_at=session_started_at,
+            session_id=session_id,
+        ),
         reply_audio=recorder,
         # Delegate branch seams (Johnny-trt.17): the coordinator queues the
         # async task row-before-ack; the resolver stamps the agent_tasks row

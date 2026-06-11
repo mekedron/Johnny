@@ -80,6 +80,22 @@ def test_every_expected_stage_timing_emitted(harness_result: HarnessResult) -> N
         assert turn.tts_segments >= 1
 
 
+def test_triage_timing_read_directly_from_gate_row(harness_result: HarnessResult) -> None:
+    """Johnny-trt.19: per-turn triage cost comes straight off the gate's
+    ``router_llm`` PipelineTiming row (not derived from stage gaps)."""
+    for turn in harness_result.turns:
+        triage = turn.metric("triage_ms")
+        assert triage is not None
+        # The stub router sleeps 60 ms; the row carries that plus prompt-build /
+        # parse overhead — same order of magnitude, never zero-by-accident.
+        assert 40 <= triage <= 5000, triage
+        # The legacy derived gap (STT-final → answer-LLM-start) contains the
+        # direct triage span (generous slack — different clock stamps).
+        router_gap = turn.metric("router_ms")
+        assert router_gap is not None
+        assert triage <= router_gap + 250, (triage, router_gap)
+
+
 def test_wall_clock_stages_are_sane(harness_result: HarnessResult) -> None:
     """VAD-end / first-audio wall measurements sit in physically plausible ranges."""
     for turn in harness_result.turns:

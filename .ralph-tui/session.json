@@ -3,10 +3,10 @@
   "sessionId": "b8829633-95f0-4e1b-a1c5-e08500de3d70",
   "status": "running",
   "startedAt": "2026-06-11T05:16:05.966Z",
-  "updatedAt": "2026-06-11T05:31:55.008Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-11T06:06:04.734Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -129,8 +129,8 @@
       {
         "id": "Johnny-trt.17",
         "title": "[BUILD] Phase 3: Gate branching + ack terminal (delegate / status actions)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.18",
@@ -356,7 +356,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-trt.17",
+      "taskTitle": "[BUILD] Phase 3: Gate branching + ack terminal (delegate / status actions)",
+      "taskCompleted": true,
+      "durationMs": 899168,
+      "startedAt": "2026-06-11T05:16:54.883Z",
+      "endedAt": "2026-06-11T05:31:54.051Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

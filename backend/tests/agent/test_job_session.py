@@ -181,6 +181,9 @@ async def test_build_runtime_wires_full_session() -> None:
     assert runtime.gate._record_decision is not None
     assert runtime.gate._record_spoke is not None
     assert runtime.gate._record_suggested is not None
+    # Triage timing (Johnny-trt.19): wired unconditionally — the router_llm
+    # PipelineTiming is how session_timings sees the triage cost.
+    assert runtime.gate._record_triage_timing is not None
     assert runtime.gate._persist_pending_decision is None
     assert isinstance(runtime.ledger, TurnLedger)
 
@@ -399,6 +402,11 @@ async def test_delegation_capable_modes_wire_task_sink_and_coordinator(
     # and stamps agent_tasks rows with the shared TurnIndex's int turn id.
     assert runtime.gate._tasks is runtime.task_coordinator
     assert runtime.gate._resolve_turn_id is not None
+    # Task catalog (Johnny-trt.19): a delegation-capable runtime teaches the
+    # router the Phase-3 stub kinds through the gate config.
+    from johnny.agent.task_catalog import STUB_TASK_CATALOG
+
+    assert runtime.gate._config.task_catalog == STUB_TASK_CATALOG
 
     await runtime.aclose()
     assert db.closed is True
@@ -416,6 +424,7 @@ async def test_non_speaking_modes_get_no_task_pieces(mode: str) -> None:
     assert runtime.task_coordinator is None
     assert runtime._task_wake is None
     assert runtime._db_session is None  # nothing needed the sync DB session
+    assert runtime.gate._config.task_catalog == ()  # no delegation, no catalog
 
 
 async def test_approval_without_redis_still_wires_tasks() -> None:
@@ -452,6 +461,9 @@ async def test_delegation_mode_without_db_factory_gets_no_task_pieces() -> None:
     # No coordinator on the gate either — its delegate branch terminalizes
     # no_reply(stage_error) instead of promising unrecordable work (trt.17).
     assert runtime.gate._tasks is None
+    # And no catalog (trt.19): the router is never taught kinds that could
+    # only stage_error here.
+    assert runtime.gate._config.task_catalog == ()
 
 
 async def test_speaking_mode_without_tts_degrade_drops_task_wiring() -> None:

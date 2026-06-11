@@ -606,6 +606,65 @@ async def test_router_prompt_includes_framing_mode_threshold_and_transcript() ->
     assert "Latest transcript: And the budget?" in user
 
 
+async def test_router_prompt_renders_task_catalog_block() -> None:
+    """Task catalog (Johnny-trt.19): kinds + one-liners land in the system prompt."""
+    from johnny.agent.task_catalog import TaskCatalogEntry, render_task_catalog
+
+    catalog = (
+        TaskCatalogEntry(
+            kind="calendar.upcoming_events",
+            one_liner="Look up upcoming events on the connected calendar.",
+            keywords=("calendar", "agenda"),
+        ),
+        TaskCatalogEntry(kind="gmail.search", one_liner="Search the connected mailbox."),
+    )
+    gate, _, router = _make_gate(
+        [{"should_speak": True, "confidence": 1.0, "reason": "x"}],
+        config=RouterGateConfig(instructions="Stay on agenda.", task_catalog=catalog),
+    )
+    await gate.run_turn(ChatContext.empty(), _user_msg("check my calendar"))
+
+    system = router.calls[0][0].content or ""
+    # The whole rendered block is present verbatim (the snapshot contract the
+    # task_catalog module tests pin), placed before the operator instructions
+    # so those can refine the delegation guidance.
+    block = render_task_catalog(catalog)
+    assert block in system
+    assert "- calendar.upcoming_events: Look up upcoming events" in system
+    assert "- gmail.search: Search the connected mailbox." in system
+    assert system.index(block) < system.index("Meeting instructions: Stay on agenda.")
+    # Scorer-only data never reaches the model (trt.50 keywords stay out).
+    assert "keywords" not in system
+
+
+async def test_router_prompt_without_catalog_is_byte_identical_to_pre_trt19() -> None:
+    """Empty catalog ⇒ no catalog text at all — the replay-parity stance."""
+    decisions = [{"should_speak": True, "confidence": 1.0, "reason": "x"}]
+    cfg_kwargs: dict[str, Any] = {
+        "mode": "autonomous",
+        "confidence_threshold": 0.55,
+        "personality_prompt": "[personality: Sage]",
+        "instructions": "Stay on agenda.",
+    }
+    gate_default, _, router_default = _make_gate(
+        decisions, config=RouterGateConfig(**cfg_kwargs)
+    )
+    gate_empty, _, router_empty = _make_gate(
+        decisions, config=RouterGateConfig(**cfg_kwargs, task_catalog=())
+    )
+    ctx_turns: tuple[tuple[_Role, str], ...] = (("user", "Alice: hello?"),)
+
+    await gate_default.run_turn(_ctx_with_history(*ctx_turns), _user_msg("And the budget?"))
+    await gate_empty.run_turn(_ctx_with_history(*ctx_turns), _user_msg("And the budget?"))
+
+    assert "Delegatable task kinds" not in (router_default.calls[0][0].content or "")
+    # The default config (no catalog) and an explicitly-empty catalog build the
+    # exact same prompt — the catalog is purely additive context.
+    assert [m.content for m in router_default.calls[0]] == [
+        m.content for m in router_empty.calls[0]
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # Replay harness — verdict parity with the legacy decision logic              #
 # --------------------------------------------------------------------------- #
@@ -661,6 +720,143 @@ async def test_replay_fixtures_reproduce_legacy_verdict(
             await gate.run_turn(ChatContext.empty(), msg)
         assert len(emitter.records) == 1
         assert emitter.records[0][1].no_reply_reason == expected
+
+
+# --------------------------------------------------------------------------- #
+# Triage-stage timing seam (Johnny-trt.19)                                     #
+# --------------------------------------------------------------------------- #
+
+
+class _RecordingTriageTiming:
+    """Captures the gate's ``record_triage_timing`` calls."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, float, float, str]] = []
+
+    async def __call__(
+        self, turn_id: str, started_at: float, ended_at: float, action: str
+    ) -> None:
+        self.calls.append((turn_id, started_at, ended_at, action))
+
+
+def _timed_gate(
+    decisions: list[dict[str, Any]],
+    *,
+    config: RouterGateConfig | None = None,
+) -> tuple[RouterGate, _RecordingTriageTiming]:
+    timing = _RecordingTriageTiming()
+    gate = RouterGate(
+        _FakeRouterLLM(decisions),
+        config=config or RouterGateConfig(),
+        ledger=TurnLedger(_RecordingEmitter()),
+        record_triage_timing=timing,
+    )
+    return gate, timing
+
+
+@pytest.mark.parametrize(
+    ("decision", "expected_action", "raises"),
+    [
+        ({"should_speak": True, "confidence": 0.95, "reason": "q"}, "speak", False),
+        ({"should_speak": False, "confidence": 0.9, "reason": "chatter"}, "silent", True),
+        (
+            {
+                "should_speak": True,
+                "confidence": 0.95,
+                "reason": "progress ask",
+                "action": "status",
+            },
+            "status",
+            True,
+        ),
+    ],
+)
+async def test_triage_timing_emitted_for_every_decided_turn(
+    decision: dict[str, Any], expected_action: str, raises: bool
+) -> None:
+    """Every turn the router decided gets one timing call carrying the action."""
+    gate, timing = _timed_gate([decision])
+    msg = _user_msg("Johnny?")
+
+    if raises:
+        with pytest.raises(StopResponse):
+            await gate.run_turn(ChatContext.empty(), msg)
+    else:
+        await gate.run_turn(ChatContext.empty(), msg)
+
+    assert len(timing.calls) == 1
+    turn_id, started_at, ended_at, action = timing.calls[0]
+    assert turn_id == msg.id
+    assert started_at <= ended_at  # a real span around run_gate
+    assert action == expected_action
+
+
+async def test_triage_timing_delegate_action_carried() -> None:
+    """A delegate verdict's timing row says so (no coordinator needed — the
+    stage_error leg still decided)."""
+    gate, timing = _timed_gate(
+        [
+            {
+                "should_speak": True,
+                "confidence": 0.95,
+                "reason": "complex",
+                "action": "delegate",
+                "task": {"kind": "calendar.upcoming_events"},
+            }
+        ]
+    )
+    with pytest.raises(StopResponse):
+        await gate.run_turn(ChatContext.empty(), _user_msg("book it"))
+
+    assert [c[3] for c in timing.calls] == ["delegate"]
+
+
+async def test_triage_timing_not_emitted_on_timeout() -> None:
+    """A timed-out gate never completed the stage — terminal only, no timing row."""
+
+    async def _hang() -> LLMResponse:
+        await asyncio.sleep(3600)
+        raise AssertionError("unreachable")
+
+    class _Hanging(LLMProvider):
+        @property
+        def name(self) -> str:
+            return "hanging"
+
+        async def chat(
+            self,
+            messages: Sequence[ChatMessage],
+            tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
+            response_format: dict[str, Any] | None = None,  # noqa: ARG002
+        ) -> LLMResponse:
+            return await _hang()
+
+    timing = _RecordingTriageTiming()
+    gate = RouterGate(
+        _Hanging(),
+        config=RouterGateConfig(router_llm_timeout_s=0.05),
+        ledger=TurnLedger(_RecordingEmitter()),
+        record_triage_timing=timing,
+    )
+
+    with pytest.raises(StopResponse):
+        await gate.run_turn(ChatContext.empty(), _user_msg("slow router"))
+
+    assert timing.calls == []
+
+
+async def test_triage_timing_not_emitted_for_listen_only() -> None:
+    """listen_only skips the router entirely — nothing to time."""
+    from johnny.voice_pipeline.reasoning import LISTEN_ONLY_MODE
+
+    gate, timing = _timed_gate(
+        [{"should_speak": True, "confidence": 1.0, "reason": "x"}],
+        config=RouterGateConfig(mode=LISTEN_ONLY_MODE),
+    )
+    with pytest.raises(StopResponse):
+        await gate.run_turn(ChatContext.empty(), _user_msg("anything"))
+
+    assert timing.calls == []
 
 
 # --------------------------------------------------------------------------- #

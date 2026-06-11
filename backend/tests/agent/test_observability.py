@@ -69,6 +69,7 @@ from johnny.agent.observability import (  # noqa: E402
     build_spoke_emitter,
     build_suggested_emitter,
     build_transcript_finalized_emitter,
+    build_triage_timing_emitter,
     metric_to_timing,
     terminal_outcome,
 )
@@ -423,6 +424,71 @@ async def test_transcript_finalized_emitter_publishes() -> None:
 async def test_transcript_finalized_emitter_swallows_failure() -> None:
     sink = build_transcript_finalized_emitter(_FlakyBus(), session_id="2")
     await sink(TranscriptFinalized(text="x", timestamp_ms=0, session_id="2"))  # no raise
+
+
+# --------------------------------------------------------------------------- #
+# build_triage_timing_emitter (Johnny-trt.19)                                 #
+# --------------------------------------------------------------------------- #
+
+
+async def test_triage_timing_emitter_publishes_router_llm_stage() -> None:
+    bus = InMemoryEventBus()
+    index = TurnIndex()
+    emit = build_triage_timing_emitter(
+        bus,
+        index,
+        provider_name="openai_compatible",
+        session_started_at=1000.0,
+        session_id="7",
+    )
+
+    # 2.5 s into the session, a 1.5 s triage call that decided "delegate".
+    await emit("item_abc", 1002.5, 1004.0, "delegate")
+
+    (event,) = bus.snapshot()
+    assert event.type == "pipeline_timing"
+    assert event.stage == "router_llm"
+    assert event.turn_id == 1  # str → int via the shared index
+    assert event.started_at_ms == 2500  # session-relative call START
+    assert event.duration_ms == 1500
+    assert event.provider_name == "openai_compatible"
+    assert event.details == {"action": "delegate"}
+    assert event.session_id == "7"
+
+
+async def test_triage_timing_emitter_shares_turn_index_with_terminals() -> None:
+    """The timing row groups with the same turn's decision/terminal rows."""
+    bus = InMemoryEventBus()
+    index = TurnIndex()
+    terminal_emit = build_session_terminal_emitter(bus, index, session_id="7")
+    timing_emit = build_triage_timing_emitter(bus, index, session_id="7")
+
+    await timing_emit("item_t1", 10.0, 10.2, "speak")
+    await terminal_emit(
+        "item_t1",
+        GateTerminal(terminal_state="replied", no_reply_reason=None, detail="bot spoke"),
+    )
+
+    timing, terminal = bus.snapshot()
+    assert timing.turn_id == terminal.turn_id == 1
+
+
+async def test_triage_timing_emitter_without_session_start_uses_epoch_ms() -> None:
+    """session_started_at <= 0 falls back to raw epoch ms (translator parity)."""
+    bus = InMemoryEventBus()
+    emit = build_triage_timing_emitter(bus, TurnIndex(), session_id="7")
+
+    await emit("item_x", 12.0, 12.25, "silent")
+
+    (event,) = bus.snapshot()
+    assert event.started_at_ms == 12_000
+    assert event.duration_ms == 250
+
+
+async def test_triage_timing_emitter_swallows_bus_failure() -> None:
+    """A failing bus loses the timing row, never crashes the gate."""
+    emit = build_triage_timing_emitter(_FlakyBus(), TurnIndex(), session_id="7")
+    await emit("item_x", 1.0, 2.0, "speak")  # no raise
 
 
 # --------------------------------------------------------------------------- #

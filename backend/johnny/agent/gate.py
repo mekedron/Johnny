@@ -86,11 +86,14 @@ from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
-# Ported verbatim from the legacy split engine.
-# Session 14 turn 4 hung ~60 s with no bound; 30 s is generous for a sensibly
-# sized local model under load yet kills the dead-minute stall. ``<= 0`` (or a
-# ``None`` timeout) disables the wall-clock bound but keeps the abandon race.
-DEFAULT_ROUTER_GATE_TIMEOUT_S = 30.0
+# Mirror of ``reasoning.DEFAULT_ROUTER_LLM_TIMEOUT_S`` (kept stdlib-only here;
+# a drift-guard test asserts equality). Lowered 30 → 8 s by Johnny-trt.19: the
+# router is the Phase-3 triage, every turn pays this call while the hook blocks
+# all later turns, so the bound is a *budget*, not just the Session-14 hang
+# guard — a triage model needing >8 s is the wrong model for the slot. ``<= 0``
+# (or a ``None`` timeout) disables the wall-clock bound but keeps the abandon
+# race.
+DEFAULT_ROUTER_GATE_TIMEOUT_S = 8.0
 
 # Local mirrors of voice_pipeline.events.{TerminalState,NoReplyReason}. Kept
 # stdlib-only on purpose (see module docstring); a drift-guard test asserts

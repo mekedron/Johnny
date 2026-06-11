@@ -40,6 +40,9 @@ persists"):
 * kept STT final → ``TranscriptFinalized`` → ``transcript_chunks``.
 * turn terminal → ``TurnTerminal`` → stamps the decision row (INV-1).
 * LiveKit ``MetricsCollectedEvent`` → ``PipelineTiming`` → ``session_timings``.
+* gate triage span (Johnny-trt.19) → ``PipelineTiming(stage="router_llm")`` →
+  ``session_timings`` — the router LLM is a side call the SDK emits no metric
+  for, so the gate publishes its own per-decided-turn timing.
 
 ``ApprovalPending`` / ``ApprovalResolved`` are already wired by
 :mod:`johnny.agent.approval_wiring`; they are out of scope here.
@@ -109,6 +112,19 @@ RecordSpoke = Callable[[str], Awaitable[None]]
 """Publish a spoken reply's ``AgentSpoke``. Arg: the text the bot spoke (extracted
 from the reply ``SpeechHandle``'s chat items). The builder fills the rest
 (mode, matched-allowed-reply heuristic, session id)."""
+
+RecordTriageTiming = Callable[[str, float, float, str], Awaitable[None]]
+"""Publish one turn's triage-stage ``PipelineTiming`` (Johnny-trt.19).
+
+Args: the LiveKit ``str`` turn id, the triage call's epoch-seconds start and
+end (``time.time()``), and the decided action (``silent`` / ``speak`` /
+``delegate`` / ``status`` — carried in ``details`` so the activity log can
+read the verdict off the timing row). The router LLM runs as a *side*
+``LLMProvider`` call, never through the session ``llm_node``, so LiveKit
+emits no metric for it — without this seam the triage cost is invisible in
+``session_timings`` (the pre-trt.19 state: the cost could only be inferred
+from the STT-final → answer-LLM-start gap, which does not even exist for
+delegate/status turns that pay no answer hop)."""
 
 TranscriptFinalizedSink = Callable[[TranscriptFinalized], Awaitable[None]]
 """Publish a kept STT final's ``TranscriptFinalized`` (mirror of
@@ -340,6 +356,58 @@ def build_spoke_emitter(
             await event_bus.publish(event)
         except Exception:
             logger.exception("failed to publish agent_spoke for session=%s", session_id)
+
+    return _record
+
+
+def build_triage_timing_emitter(
+    event_bus: EventBus,
+    turn_index: TurnIndex,
+    *,
+    provider_name: str | None = None,
+    session_started_at: float = 0.0,
+    session_id: str | None = None,
+) -> RecordTriageTiming:
+    """Build the gate's per-turn triage ``PipelineTiming`` emitter (Johnny-trt.19).
+
+    Publishes a ``stage="router_llm"`` timing the subscriber persists to
+    ``session_timings`` (the stage is already in its whitelist — the legacy
+    pipeline used it for the same call). ``turn_id`` resolves through the
+    shared :class:`~johnny.agent.gate.TurnIndex` so the row groups with the
+    turn's decision / terminal rows.
+
+    ``started_at_ms`` is the session-relative offset of the call *start* (the
+    documented ``PipelineTiming`` field semantic — note this differs from the
+    LiveKit-metric rows :class:`MetricsTranslator` emits, whose 1.5.17
+    ``timestamp`` is stamped at stage END; consumers of THIS row need no
+    ``- duration_ms`` compensation). ``session_started_at`` is the same epoch
+    reference the translator gets; ``<= 0`` falls back to raw epoch ms.
+    Defensive like every emitter here: a failing bus is logged, never raised
+    into the gate.
+    """
+
+    async def _record(turn_id: str, started_at: float, ended_at: float, action: str) -> None:
+        if session_started_at > 0:
+            started_at_ms = round((started_at - session_started_at) * 1000)
+        else:
+            started_at_ms = round(started_at * 1000)
+        event = PipelineTiming(
+            turn_id=turn_index.resolve(turn_id),
+            stage="router_llm",
+            started_at_ms=max(0, started_at_ms),
+            duration_ms=max(0, round((ended_at - started_at) * 1000)),
+            provider_name=provider_name or None,
+            details={"action": action},
+            session_id=session_id,
+        )
+        try:
+            await event_bus.publish(event)
+        except Exception:
+            logger.exception(
+                "failed to publish triage timing for session=%s turn=%s",
+                session_id,
+                turn_id,
+            )
 
     return _record
 
@@ -777,6 +845,7 @@ __all__ = [
     "RecordDecision",
     "RecordSpoke",
     "RecordSuggested",
+    "RecordTriageTiming",
     "ResolveTurnId",
     "SpeechInterimSink",
     "TranscriptFinalizedSink",
@@ -786,6 +855,7 @@ __all__ = [
     "build_spoke_emitter",
     "build_suggested_emitter",
     "build_transcript_finalized_emitter",
+    "build_triage_timing_emitter",
     "metric_to_timing",
     "terminal_outcome",
 ]

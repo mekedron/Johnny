@@ -71,7 +71,13 @@ from johnny.agent.gate import (
     TurnLedger,
     run_gate,
 )
-from johnny.agent.observability import RecordDecision, RecordSpoke, RecordSuggested
+from johnny.agent.observability import (
+    RecordDecision,
+    RecordSpoke,
+    RecordSuggested,
+    RecordTriageTiming,
+)
+from johnny.agent.task_catalog import TaskCatalogEntry, render_task_catalog
 from johnny.agent.tasks import TaskCoordinator, TaskSpec
 from johnny.voice_pipeline import reasoning as _reasoning
 from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
@@ -179,6 +185,12 @@ class RouterGateConfig:
     rate_limit_window_ms: int = DEFAULT_RATE_LIMIT_WINDOW_MS
     router_llm_timeout_s: float = DEFAULT_ROUTER_LLM_TIMEOUT_S
     approval_timeout_seconds: float = DEFAULT_APPROVAL_TIMEOUT_SECONDS
+    # Delegatable task kinds rendered into the router prompt (Johnny-trt.19).
+    # Empty = no catalog block at all (the prompt stays byte-identical to the
+    # pre-catalog build). The runtime assembly only fills this when a
+    # TaskCoordinator is actually wired, so the router is never taught to
+    # delegate work the gate would have to stage_error.
+    task_catalog: tuple[TaskCatalogEntry, ...] = ()
 
 
 class RouterGate:
@@ -215,6 +227,7 @@ class RouterGate:
         record_decision: RecordDecision | None = None,
         record_spoke: RecordSpoke | None = None,
         record_suggested: RecordSuggested | None = None,
+        record_triage_timing: RecordTriageTiming | None = None,
         reply_audio: SpokenAudioRecorder | None = None,
         tasks: TaskCoordinator | None = None,
         resolve_turn_id: Callable[[str], int] | None = None,
@@ -235,6 +248,11 @@ class RouterGate:
         self._record_decision = record_decision
         self._record_spoke = record_spoke
         self._record_suggested = record_suggested
+        # The triage-stage PipelineTiming emit (Johnny-trt.19): the router LLM
+        # runs as a side call (never through the session llm_node), so LiveKit
+        # emits no metric for it — the gate publishes its own ``router_llm``
+        # timing per decided turn so session_timings shows the triage cost.
+        self._record_triage_timing = record_triage_timing
         # The session's reply-audio recorder (Johnny-od1). The gate only does
         # buffer hygiene: reset at every speech bind so stale segments (an
         # approval reply, a say(), an interrupted reply) never leak into the
@@ -342,12 +360,14 @@ class RouterGate:
             # skip_reply paths documented on :meth:`TurnLedger.open`). Stay silent.
             raise StopResponse()
         tracker = self._ledger.gate_tracker(turn_id)  # opens the turn (INV-1)
+        triage_started = time.time()
         action, decision = await run_gate(
             lambda: self._decide(turn_ctx, new_message),
             tracker=tracker,
             timeout_s=self._config.router_llm_timeout_s,
             abandon=self._abandon,
         )
+        triage_ended = time.time()
 
         if action is GateAction.STAY_SILENT:
             # run_gate already emitted the terminal (stage_error / barge_in).
@@ -361,6 +381,18 @@ class RouterGate:
                 detail="router returned no decision",
             )
             raise StopResponse()
+
+        # Triage-stage timing (Johnny-trt.19): one ``router_llm`` row per turn
+        # the router actually decided (timed-out / barged / errored gates leave
+        # only their terminal — the stage never completed). Spans run_gate, so
+        # it is the prompt build + LLM call + parse + harness overhead — the
+        # wall cost every verdict pays before anything else can happen. Emitted
+        # for every mode (a timing row, not a decision row, so the
+        # approval-mode double-write concern below does not apply).
+        if self._record_triage_timing is not None:
+            await self._record_triage_timing(
+                turn_id, triage_started, triage_ended, decision.action
+            )
 
         # Observability parity (Johnny-d5z): publish this turn's RouterDecisionMade
         # so the subscriber writes its agent_decisions row (outcome derived from the
@@ -969,7 +1001,8 @@ class RouterGate:
         """Build the router prompt, mirroring the legacy split pipeline.
 
         System message: the gating-router framing + personality + mode +
-        confidence threshold + meeting/calendar context + allowed replies. User
+        confidence threshold + task catalog (Johnny-trt.19, only when
+        delegation is wired) + meeting/calendar context + allowed replies. User
         message: the rolling conversation (rendered from ``turn_ctx``) plus the
         latest transcript (``new_message``). ``new_message`` is *not* yet in
         ``turn_ctx`` (the SDK copies the chat ctx before appending it), so the
@@ -992,6 +1025,13 @@ class RouterGate:
         )
         system += f"\n\nMode: {cfg.mode}"
         system += f"\nConfidence threshold for speaking: {cfg.confidence_threshold:.2f}"
+        if cfg.task_catalog:
+            # Task catalog (Johnny-trt.19): the delegate-action vocabulary.
+            # Rendered before the operator's meeting instructions so those can
+            # refine ("never delegate during standup") rather than be
+            # contradicted. Empty catalog ⇒ this block is absent and the
+            # prompt is byte-identical to the pre-catalog build.
+            system += f"\n\n{render_task_catalog(cfg.task_catalog)}"
         if cfg.instructions:
             system += f"\n\nMeeting instructions: {cfg.instructions}"
         if cfg.context:
