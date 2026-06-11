@@ -663,3 +663,64 @@ async def test_stt_gate_drop_without_sink_is_safe() -> None:
     out = await _drain(agent._gate_stt_events(_source(_final("um"), _final("Hi there."))))
 
     assert [e.alternatives[0].text for e in out] == ["Hi there."]
+
+
+# --- on_enter wiring: say() attach for delegate acks (Johnny-trt.17) --------
+
+
+class _OnEnterFakeSession:
+    """Minimal AgentSession stand-in for ``on_enter``: ``on()`` + ``say``."""
+
+    def __init__(self) -> None:
+        self.listeners: list[tuple[str, Any]] = []
+
+    def on(self, event: str, cb: Any) -> None:
+        self.listeners.append((event, cb))
+
+    def say(self, text: str) -> Any:  # pragma: no cover - never invoked here
+        raise AssertionError(f"on_enter must only attach say, not call it ({text!r})")
+
+
+class _NoopRouterLLM(LLMProvider):
+    @property
+    def name(self) -> str:
+        return "noop"
+
+    async def chat(
+        self,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[ToolDefinition] | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> LLMResponse:  # pragma: no cover - on_enter never chats
+        raise AssertionError("router LLM must not be called by on_enter")
+
+
+async def test_on_enter_attaches_say_and_speech_created_listener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """on_enter hands session.say to the gate (delegate/status acks, trt.17).
+
+    The real ``Agent.session`` property needs a running activity, so the
+    property is shadowed with a fake carrying just ``on()`` + ``say``. The
+    gate must receive the bound ``say`` itself — never a call — and the
+    ``generate_reply`` FIFO listener must still be registered alongside.
+    """
+    from johnny.agent.gate import TurnLedger
+    from johnny.agent.router_gate import RouterGate, RouterGateConfig
+
+    async def _emit(_turn_id: str, _terminal: Any) -> None:
+        return None
+
+    gate = RouterGate(
+        _NoopRouterLLM(),
+        config=RouterGateConfig(),
+        ledger=TurnLedger(_emit),
+    )
+    agent = JohnnyAgent(router_gate=gate)
+    fake_session = _OnEnterFakeSession()
+    monkeypatch.setattr(JohnnyAgent, "session", property(lambda self: fake_session))
+
+    await agent.on_enter()
+
+    assert gate._say == fake_session.say  # the bound method, attached not called
+    assert [name for name, _ in fake_session.listeners] == ["speech_created"]

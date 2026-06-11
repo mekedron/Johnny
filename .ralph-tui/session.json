@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "sessionId": "82402e4d-e4aa-4e51-a95b-90cc16d67f3b",
+  "sessionId": "b8829633-95f0-4e1b-a1c5-e08500de3d70",
   "status": "running",
-  "startedAt": "2026-06-10T20:20:17.654Z",
-  "updatedAt": "2026-06-11T04:12:07.335Z",
-  "currentIteration": 11,
+  "startedAt": "2026-06-11T05:16:05.966Z",
+  "updatedAt": "2026-06-11T05:31:55.008Z",
+  "currentIteration": 0,
   "maxIterations": 0,
-  "tasksCompleted": 11,
+  "tasksCompleted": 0,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -28,7 +28,7 @@
         }
       }
     ],
-    "totalTasks": 39,
+    "totalTasks": 54,
     "tasks": [
       {
         "id": "Johnny-trt.1",
@@ -58,13 +58,13 @@
         "id": "Johnny-trt.5",
         "title": "[BUILD] Phase 1: Endpointing knobs — endpointing passthrough + browser-scoped Silero min_silence 0.55→0.40s",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.6",
         "title": "[BUILD] Phase 1: Semantic turn detector on the roomless browser session (early commit when confident)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.7",
@@ -94,37 +94,37 @@
         "id": "Johnny-trt.11",
         "title": "[CHORE] Phase 1 capstone: re-measure + varied-pause regression",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.12",
         "title": "[BUILD] Phase 2: Parakeet cache-aware streaming transcribe_stream",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.13",
         "title": "[BUILD] Phase 2: Live interim captions in the playground",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.14",
         "title": "[CHORE] Phase 2: Verify Deepgram direct-streaming voice path + all-cloud measurement",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.15",
         "title": "[CHORE] Phase 2 capstone: re-measure with streaming STT active",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.16",
         "title": "[BUILD] Phase 3: Router schema/parser extension — action + task fields (parity-safe)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.17",
@@ -135,7 +135,7 @@
       {
         "id": "Johnny-trt.18",
         "title": "[BUILD] Phase 3: agent_tasks table + TaskSink + TaskCoordinator.begin + stub executor",
-        "status": "open",
+        "status": "completed",
         "completedInSession": false
       },
       {
@@ -229,12 +229,6 @@
         "completedInSession": false
       },
       {
-        "id": "Johnny-cxu",
-        "title": "Real 20-turn p50/p95 latency capture on configured local providers (depends on Johnny-ckz.7)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
         "id": "Johnny-trt.34",
         "title": "[CHORE] Phase 6 capstone: docs + cutover validation",
         "status": "open",
@@ -263,121 +257,106 @@
         "title": "[BUILD] Phase 6: Configurable capability policies — layered allow/deny + editable safe-bins",
         "status": "open",
         "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.39",
+        "title": "[BUILD] Phase 2: Live bot-reply captions — stream Johnny's spoken text as he talks",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.40",
+        "title": "[BUILD] Phase 2: Playground chat shows previous session's history after restart (stale state reset)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.41",
+        "title": "[BUILD] Phase 6: Agent entity — wipe templates/personalities, clean rebuild",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.42",
+        "title": "[BUILD] Phase 6: Agent provider resolution — voice finally applied, pipeline-mode aware",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.43",
+        "title": "[BUILD] Phase 6: Remove S2S/unified pipeline from the product surface (re-introduction deferred to a future epic)",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.44",
+        "title": "[BUILD] Phase 6: Agent edit page — sectioned admin UI",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.45",
+        "title": "[BUILD] Phase 6: Meeting + playground assignment — agents replace parameter soup",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.46",
+        "title": "[BUILD] Phase 6: Multi-agent foundation — speech floor + peer awareness + per-assignment identity",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-cxu",
+        "title": "Real 20-turn p50/p95 latency capture on configured local providers (depends on Johnny-ckz.7)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.47",
+        "title": "[BUILD] Phase 6: Multi-agent turn arbitration — turn claims + router peer selectivity",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-1qr",
+        "title": "[BUILD] Optional: en-only in-process semantic turn detector on the browser session",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.48",
+        "title": "[BUILD] Phase 6: Multi-agent playground — browser test pipeline for agent ensembles",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.49",
+        "title": "[BUILD] Phase 6: Conversation-dynamics observability — interruptions, floor, claims persisted to history",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.50",
+        "title": "[BUILD] Phase 3: Heuristic complexity pre-scorer (shadow mode) — ClawRouter pattern port",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.51",
+        "title": "[SPIKE] Phase 3 (deferred, non-gating): heuristic-informed routing behaviors — fast-path, prompt prior, micro-reply gate",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.52",
+        "title": "[BUILD] Phase 6: Name-addressing gate — per-agent 'respond only when addressed' + name-mention scoring",
+        "status": "open",
+        "completedInSession": false
       }
     ]
   },
-  "iterations": [
-    {
-      "iteration": 1,
-      "status": "completed",
-      "taskId": "Johnny-trt.5",
-      "taskTitle": "[BUILD] Phase 1: Endpointing knobs — endpointing passthrough + browser-scoped Silero min_silence 0.55→0.40s",
-      "taskCompleted": true,
-      "durationMs": 761328,
-      "startedAt": "2026-06-10T20:21:20.209Z",
-      "endedAt": "2026-06-10T20:34:01.537Z"
-    },
-    {
-      "iteration": 2,
-      "status": "completed",
-      "taskId": "Johnny-trt.6",
-      "taskTitle": "[BUILD] Phase 1: Semantic turn detector on the roomless browser session (early commit when confident)",
-      "taskCompleted": true,
-      "durationMs": 2133602,
-      "startedAt": "2026-06-10T20:34:25.230Z",
-      "endedAt": "2026-06-10T21:09:58.832Z"
-    },
-    {
-      "iteration": 3,
-      "status": "completed",
-      "taskId": "Johnny-trt.11",
-      "taskTitle": "[CHORE] Phase 1 capstone: re-measure + varied-pause regression",
-      "taskCompleted": true,
-      "durationMs": 2196552,
-      "startedAt": "2026-06-10T21:10:21.633Z",
-      "endedAt": "2026-06-10T21:46:58.185Z"
-    },
-    {
-      "iteration": 4,
-      "status": "completed",
-      "taskId": "Johnny-trt.12",
-      "taskTitle": "[BUILD] Phase 2: Parakeet cache-aware streaming transcribe_stream",
-      "taskCompleted": true,
-      "durationMs": 4610711,
-      "startedAt": "2026-06-10T21:47:20.749Z",
-      "endedAt": "2026-06-10T23:04:11.460Z"
-    },
-    {
-      "iteration": 5,
-      "status": "completed",
-      "taskId": "Johnny-trt.13",
-      "taskTitle": "[BUILD] Phase 2: Live interim captions in the playground",
-      "taskCompleted": true,
-      "durationMs": 2203805,
-      "startedAt": "2026-06-10T23:04:34.033Z",
-      "endedAt": "2026-06-10T23:41:17.838Z"
-    },
-    {
-      "iteration": 6,
-      "status": "completed",
-      "taskId": "Johnny-1qr",
-      "taskTitle": "[BUILD] Optional: en-only in-process semantic turn detector on the browser session",
-      "taskCompleted": true,
-      "durationMs": 4948874,
-      "startedAt": "2026-06-10T23:41:40.525Z",
-      "endedAt": "2026-06-11T01:04:09.399Z"
-    },
-    {
-      "iteration": 7,
-      "status": "completed",
-      "taskId": "Johnny-trt.39",
-      "taskTitle": "[BUILD] Phase 2: Live bot-reply captions — stream Johnny's spoken text as he talks",
-      "taskCompleted": true,
-      "durationMs": 2018502,
-      "startedAt": "2026-06-11T01:04:38.066Z",
-      "endedAt": "2026-06-11T01:38:16.568Z"
-    },
-    {
-      "iteration": 8,
-      "status": "completed",
-      "taskId": "Johnny-trt.40",
-      "taskTitle": "[BUILD] Phase 2: Playground chat shows previous session's history after restart (stale state reset)",
-      "taskCompleted": true,
-      "durationMs": 1067571,
-      "startedAt": "2026-06-11T01:38:46.598Z",
-      "endedAt": "2026-06-11T01:56:34.169Z"
-    },
-    {
-      "iteration": 9,
-      "status": "completed",
-      "taskId": "Johnny-trt.14",
-      "taskTitle": "[CHORE] Phase 2: Verify Deepgram direct-streaming voice path + all-cloud measurement",
-      "taskCompleted": true,
-      "durationMs": 1918315,
-      "startedAt": "2026-06-11T01:57:05.590Z",
-      "endedAt": "2026-06-11T02:29:03.905Z"
-    },
-    {
-      "iteration": 10,
-      "status": "completed",
-      "taskId": "Johnny-trt.15",
-      "taskTitle": "[CHORE] Phase 2 capstone: re-measure with streaming STT active",
-      "taskCompleted": true,
-      "durationMs": 2030469,
-      "startedAt": "2026-06-11T02:29:35.689Z",
-      "endedAt": "2026-06-11T03:03:26.158Z"
-    },
-    {
-      "iteration": 11,
-      "status": "completed",
-      "taskId": "Johnny-trt.16",
-      "taskTitle": "[BUILD] Phase 3: Router schema/parser extension — action + task fields (parity-safe)",
-      "taskCompleted": true,
-      "durationMs": 1612492,
-      "startedAt": "2026-06-11T03:03:56.625Z",
-      "endedAt": "2026-06-11T03:30:49.117Z"
-    }
-  ],
+  "iterations": [],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

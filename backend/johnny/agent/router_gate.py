@@ -21,6 +21,17 @@ downstream):
   from ``johnny.voice_pipeline.reasoning`` so the verdicts replay identically
   (the replay-harness acceptance).
 
+Phase-3 triage (Johnny-trt.16/.17) extends the approved-and-confident leg in
+inline-speaking modes with two more actions before the speak fallthrough:
+``delegate`` queues an async task through the session
+:class:`~johnny.agent.tasks.TaskCoordinator` (the durable ``agent_tasks`` row
+exists before any audio — row-before-ack) and speaks a short ack via
+``session.say()`` whose completion owns the turn's terminal; ``status`` speaks
+the fixed Phase-3 stub the same way. Neither pays an answer-LLM hop. Task
+*results* arrive later as session-scoped speech (the approval-reply
+precedent), never as turn terminals, so INV-1 keeps exactly one terminal per
+turn.
+
 INV-1 ("exactly one terminal per turn") is enforced by the session-scoped
 :class:`~johnny.agent.gate.TurnLedger` (spike Johnny-o3z): :meth:`run_turn`
 drives the bounded :func:`~johnny.agent.gate.run_gate` harness (timeout +
@@ -61,6 +72,7 @@ from johnny.agent.gate import (
     run_gate,
 )
 from johnny.agent.observability import RecordDecision, RecordSpoke, RecordSuggested
+from johnny.agent.tasks import TaskCoordinator, TaskSpec
 from johnny.voice_pipeline import reasoning as _reasoning
 from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
 from johnny.voice_pipeline.reasoning import (
@@ -72,9 +84,12 @@ from johnny.voice_pipeline.reasoning import (
     DEFAULT_RATE_LIMIT_MAX_UTTERANCES,
     DEFAULT_RATE_LIMIT_WINDOW_MS,
     DEFAULT_ROUTER_LLM_TIMEOUT_S,
+    DELEGATE_ACTION,
     LISTEN_ONLY_MODE,
+    STATUS_ACTION,
     SUGGEST_ONLY_MODE,
     RouterDecision,
+    TaskRequest,
 )
 from johnny.voice_pipeline.transcript_history import BOT_SPEAKER_LABEL
 
@@ -119,6 +134,26 @@ parsed :class:`RouterDecision` and the LiveKit ``turn_id``. The returned
 ``decision_id`` is what the live UI / browser push correlate on and what the
 :class:`~johnny.agent.approval.ApprovalRound` carries to the coordinator — so it
 must be persisted *before* the turn is parked (the round needs it)."""
+
+SaySpeech = Callable[[str], SpeechHandle]
+"""Speak a fixed line out of band via ``AgentSession.say`` (Johnny-trt.17).
+
+Attached by :meth:`JohnnyAgent.on_enter` through :meth:`RouterGate.attach_say`
+(the session only exists once the agent is active, so it cannot be a
+constructor argument). ``say()``'s ``speech_created`` fires with
+``source="say"``, so the ``generate_reply`` FIFO (:meth:`RouterGate.bind_reply`)
+never sees these speeches — the gate attaches the turn's terminal done-callback
+to the returned :class:`SpeechHandle` directly."""
+
+DEFAULT_DELEGATE_ACK = "Let me check on that — I'll get back to you."
+"""Spoken when a ``delegate`` verdict carries no usable ``ack`` phrase of its
+own (:class:`~johnny.voice_pipeline.reasoning.TaskRequest` documents the empty
+``ack`` as "the gate falls back to its own wording")."""
+
+STATUS_STUB_REPLY = "I don't have any tasks in flight right now."
+"""The Phase-3 ``status`` verdict stub — there is no delegated-task registry to
+query until the Phase-5 real status query lands, so the gate speaks this fixed
+line instead of paying an answer-LLM hop."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +216,8 @@ class RouterGate:
         record_spoke: RecordSpoke | None = None,
         record_suggested: RecordSuggested | None = None,
         reply_audio: SpokenAudioRecorder | None = None,
+        tasks: TaskCoordinator | None = None,
+        resolve_turn_id: Callable[[str], int] | None = None,
         abandon: asyncio.Event | None = None,
         clock: Callable[[], int] = _default_clock,
     ) -> None:
@@ -204,6 +241,19 @@ class RouterGate:
         # next reply's file, and discard on the non-spoke terminals. The spoke
         # emitter owns the flush-to-WAV.
         self._reply_audio = reply_audio
+        # Delegated-task pieces (Johnny-trt.17/.18). ``tasks`` is the session's
+        # TaskCoordinator the delegate branch drives (row-before-ack: ``begin``
+        # is awaited and the ack is only spoken on a non-None QueuedTask);
+        # ``resolve_turn_id`` maps the LiveKit str turn id to the durable int
+        # (the shared TurnIndex) so the agent_tasks row correlates with the
+        # turn's decision/terminal rows. Both optional: a gate without them
+        # terminalizes delegate verdicts ``no_reply(stage_error)`` instead of
+        # promising work nothing can record.
+        self._tasks = tasks
+        self._resolve_turn_id = resolve_turn_id
+        # The say() seam for delegate acks / status stubs (Johnny-trt.17),
+        # attached by JohnnyAgent.on_enter once the session exists.
+        self._say: SaySpeech | None = None
         self._abandon = abandon
         self._clock = clock
         # SpeechHandle ids the approval coordinator owns (it created them via its
@@ -255,6 +305,21 @@ class RouterGate:
         * ``confidence < threshold`` → ``no_reply(low_confidence)``;
         * ``suggest_only`` (after the router approves) → ``no_reply(suggest_only)``;
         * rate-limited → ``no_reply(rate_limited)``.
+
+        Phase-3 triage (Johnny-trt.17): an approved-and-confident turn in an
+        inline-speaking mode branches on ``decision.action`` before the SPEAK
+        fallthrough. ``delegate`` queues the async task (row-before-ack via
+        :meth:`TaskCoordinator.begin`) and speaks the short ack via ``say()``
+        — no answer-LLM hop — with the ack :class:`SpeechHandle`'s completion
+        owning the turn's terminal (``replied`` / ``no_reply(barge_in)``); a
+        missing coordinator / failed persist / unattached ``say`` speaks
+        nothing and terminalizes ``no_reply(stage_error)``. ``status`` speaks
+        the fixed :data:`STATUS_STUB_REPLY` through the same machinery (the
+        real status query is Phase 5). Both raise ``StopResponse`` so the SDK
+        generates no reply; both run *after* the mode branches above, so
+        ``suggest_only`` / ``approval_required`` / ``listen_only`` sessions and
+        the rate limiter treat a delegate/status verdict exactly like a speak
+        verdict (unchanged behaviour).
 
         In ``approval_required`` mode an approved-to-speak turn is **parked** for
         out-of-band human approval (Johnny-z97): the gate hands it to the
@@ -355,7 +420,26 @@ class RouterGate:
             # the approved reply is spoken out of band via generate_reply. The
             # turn is deliberately NOT pushed onto _pending_speak_turns (its reply
             # is coordinator-owned, not a gated-SPEAK reply; Johnny-z97 §7.2).
+            # A delegate/status action parks like any approved decision — the
+            # Phase-3 triage branches below are inline-speaking-mode only.
             await self._begin_approval(tracker, turn_id, decision)
+            raise StopResponse()
+
+        if decision.action == DELEGATE_ACTION and decision.task_request is not None:
+            # delegate (Johnny-trt.17): queue the async task and speak the short
+            # ack — the felt latency of the turn is the triage call plus say()'s
+            # first audio, with no answer-LLM hop. The trt.16 parser guarantees
+            # task_request is set for a delegate action; the None guard means a
+            # hand-built decision that violates the pair degrades to SPEAK below
+            # (the parser's own malformed-task degrade) rather than crashing.
+            await self._begin_delegated_task(tracker, turn_id, decision.task_request)
+            raise StopResponse()
+
+        if decision.action == STATUS_ACTION:
+            # status (Johnny-trt.17): no delegated-task registry to query until
+            # Phase 5, so speak the fixed stub through the same say() machinery
+            # (deterministic, no answer-LLM hop).
+            await self._handle_status(tracker, turn_id)
             raise StopResponse()
 
         # SPEAK: no terminal here — the reply-completion path owns it. Record
@@ -459,6 +543,212 @@ class RouterGate:
         )
         if self._record_suggested is not None:
             await self._record_suggested(decision, turn_id)
+
+    # ------------------------------------------------------------------ #
+    # Phase-3 triage actions: delegate / status (Johnny-trt.17)           #
+    # ------------------------------------------------------------------ #
+
+    async def _begin_delegated_task(
+        self, tracker: TerminalTracker, turn_id: str, task_request: TaskRequest
+    ) -> None:
+        """Queue the delegated task, then speak the ack whose completion owns the terminal.
+
+        The row-before-ack ordering (Johnny-trt.18) is the contract: the durable
+        ``agent_tasks`` row exists when :meth:`TaskCoordinator.begin` returns, so
+        the ack is only ever spoken for work that is actually recorded. Every
+        failure leg speaks **nothing** and terminalizes the still-open turn
+        ``no_reply(stage_error)``:
+
+        * no coordinator wired (non-delegation runtime, missing DB factory);
+        * ``say()`` not attached (the session never reached ``on_enter``) —
+          checked *before* ``begin`` because an unspeakable ack must queue
+          nothing (the trt.18 "unspeakable ack ⇒ no queue" rule);
+        * ``begin`` returned ``None`` (persist failed / produced no id).
+
+        On success the ack (the router's phrase, or :data:`DEFAULT_DELEGATE_ACK`
+        when it offered none) is spoken via :meth:`_say_with_terminal`; the task
+        resolver runs off the turn loop and its eventual result is session-scoped
+        speech later (the approval-reply precedent) — never this turn's terminal,
+        so INV-1 stays exactly one terminal per turn.
+        """
+        kind = task_request.kind
+        if self._tasks is None:
+            await tracker.emit(
+                terminal_state="no_reply",
+                no_reply_reason="stage_error",
+                detail=f"delegate verdict for kind={kind!r} but no task coordinator wired",
+            )
+            return
+        if self._say is None:
+            await tracker.emit(
+                terminal_state="no_reply",
+                no_reply_reason="stage_error",
+                detail=(
+                    f"delegate verdict for kind={kind!r} but say() is not attached — "
+                    "cannot speak the ack, so nothing was queued"
+                ),
+            )
+            return
+
+        ack = task_request.ack.strip() or DEFAULT_DELEGATE_ACK
+        spec = TaskSpec(
+            kind=kind,
+            args=dict(task_request.args),
+            ack_text=ack,
+            turn_id=(self._resolve_turn_id(turn_id) if self._resolve_turn_id is not None else None),
+            # The non-approval decision row is written asynchronously by the
+            # status subscriber, so no synchronous id exists to carry here.
+            decision_id=None,
+        )
+        queued = await self._tasks.begin(spec)
+        if queued is None:
+            await tracker.emit(
+                terminal_state="no_reply",
+                no_reply_reason="stage_error",
+                detail=f"task persist failed for kind={kind!r} — ack not spoken",
+            )
+            return
+
+        logger.info(
+            "agent.router.gate: turn=%s DELEGATE kind=%s task_id=%s ack=%r",
+            turn_id,
+            kind,
+            queued.task_id,
+            ack,
+        )
+        await self._say_with_terminal(
+            tracker,
+            turn_id,
+            ack,
+            replied_detail=f"delegated {kind} task #{queued.task_id}; spoke ack",
+            interrupted_detail=(
+                f"delegate ack interrupted before completion "
+                f"(task #{queued.task_id} {kind} continues)"
+            ),
+        )
+
+    async def _handle_status(self, tracker: TerminalTracker, turn_id: str) -> None:
+        """Speak the Phase-3 status stub; its completion owns the turn's terminal.
+
+        No coordinator is needed — with no delegated-task registry to query yet,
+        :data:`STATUS_STUB_REPLY` is the honest answer (Phase 5 replaces this
+        with the real per-session task lookup). Only ``say()`` is required;
+        without it the turn terminalizes ``no_reply(stage_error)`` like the
+        delegate failure legs.
+        """
+        if self._say is None:
+            await tracker.emit(
+                terminal_state="no_reply",
+                no_reply_reason="stage_error",
+                detail="status verdict but say() is not attached — cannot speak",
+            )
+            return
+        logger.info("agent.router.gate: turn=%s STATUS (stub reply)", turn_id)
+        await self._say_with_terminal(
+            tracker,
+            turn_id,
+            STATUS_STUB_REPLY,
+            replied_detail="status stub spoken (no delegated-task registry until Phase 5)",
+            interrupted_detail="status reply interrupted before completion",
+        )
+
+    async def _say_with_terminal(
+        self,
+        tracker: TerminalTracker,
+        turn_id: str,
+        text: str,
+        *,
+        replied_detail: str,
+        interrupted_detail: str,
+    ) -> None:
+        """``say(text)`` and attach the turn's terminal to the speech's completion.
+
+        ``say()``'s ``speech_created`` fires with ``source="say"``, so the
+        ``generate_reply`` FIFO (:meth:`bind_reply`) never sees it — the
+        done-callback is attached to the returned :class:`SpeechHandle`
+        directly, mirroring the reply path's :meth:`_on_reply_done` task
+        pattern (strong refs in ``_reply_tasks``). A ``say()`` that raises
+        (session draining / no activity) terminalizes the still-open turn
+        ``no_reply(stage_error)`` so it is never left for the close sweep.
+        """
+        say = self._say
+        if say is None:  # defensive: both callers check before invoking
+            await tracker.emit(
+                terminal_state="no_reply",
+                no_reply_reason="stage_error",
+                detail="say() is not attached — cannot speak",
+            )
+            return
+        # Buffer hygiene, mirroring bind_reply (Johnny-od1): a new speech is
+        # starting, so segments left over from a previous speech must not leak
+        # into this ack's flushed WAV when the spoke emitter takes it.
+        if self._reply_audio is not None:
+            self._reply_audio.discard_reply()
+        try:
+            handle = say(text)
+        except Exception as exc:
+            logger.exception(
+                "agent.router.gate: say() failed for turn=%s — nothing spoken", turn_id
+            )
+            await tracker.emit(
+                terminal_state="no_reply",
+                no_reply_reason="stage_error",
+                detail=f"say() failed: {type(exc).__name__}: {exc}",
+            )
+            return
+
+        def _on_done(done_handle: SpeechHandle) -> None:
+            task = asyncio.ensure_future(
+                self._on_say_done(
+                    turn_id,
+                    done_handle,
+                    text,
+                    replied_detail=replied_detail,
+                    interrupted_detail=interrupted_detail,
+                )
+            )
+            self._reply_tasks.add(task)
+            task.add_done_callback(self._reply_tasks.discard)
+
+        handle.add_done_callback(_on_done)
+
+    async def _on_say_done(
+        self,
+        turn_id: str,
+        handle: SpeechHandle,
+        text: str,
+        *,
+        replied_detail: str,
+        interrupted_detail: str,
+    ) -> None:
+        """Emit a say-spoken turn's single terminal once the speech completes.
+
+        The say-path analogue of :meth:`_on_reply_done`: ``interrupted`` →
+        ``no_reply(barge_in)`` (audio discarded, no ``AgentSpoke`` — the
+        trt.39 interrupted-reply contract); otherwise ``replied`` (counting
+        toward the over-talk cap) followed by the ``AgentSpoke`` carrying the
+        exact spoken text (INV-2), in the terminal-before-spoke wire order the
+        UI relies on. No empty-output branch — the text was supplied, not
+        model-generated. First-wins via the ledger, so a duplicate
+        done-callback can never double-emit.
+        """
+        if handle.interrupted:
+            if self._reply_audio is not None:
+                self._reply_audio.discard_reply()
+            await self._ledger.emit(
+                turn_id,
+                terminal_state="no_reply",
+                no_reply_reason="barge_in",
+                detail=interrupted_detail,
+            )
+            return
+        if not await self._ledger.emit(turn_id, terminal_state="replied", detail=replied_detail):
+            # A duplicate done-callback lost the first-wins race — the winner
+            # already counted the utterance and published the AgentSpoke.
+            return
+        self._recent_utterance_times.append(self._clock())
+        if self._record_spoke is not None:
+            await self._record_spoke(text)
 
     async def _decide(self, turn_ctx: ChatContext, new_message: LKChatMessage) -> RouterDecision:
         """Call the router LLM and parse its structured decision.
@@ -629,6 +919,18 @@ class RouterGate:
         """
         self._approval_reply_handles.add(handle_id)
 
+    def attach_say(self, say: SaySpeech) -> None:
+        """Attach the ``session.say`` seam for delegate acks / status stubs (Johnny-trt.17).
+
+        Called by :meth:`JohnnyAgent.on_enter` once the agent is active — the
+        :class:`~livekit.agents.AgentSession` does not exist when the gate is
+        constructed (the :func:`~johnny.agent.job_session.build_agent_runtime`
+        assembly order), the same reason :meth:`attach_approval` exists. Until
+        attached, delegate/status verdicts terminalize ``no_reply(stage_error)``
+        rather than queueing work whose ack cannot be spoken.
+        """
+        self._say = say
+
     async def aclose(self) -> None:
         """Tear down the gate at session end (Johnny-z97 §7.4).
 
@@ -749,7 +1051,10 @@ class RouterGate:
 
 
 __all__ = [
+    "DEFAULT_DELEGATE_ACK",
+    "STATUS_STUB_REPLY",
     "PersistPendingDecision",
     "RouterGate",
     "RouterGateConfig",
+    "SaySpeech",
 ]

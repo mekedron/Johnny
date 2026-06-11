@@ -201,8 +201,8 @@ separately replay-gated:
 | Piece | Bead | Status (2026-06-11) |
 |---|---|---|
 | Router schema: `action` + `task` (parity-safe) | Johnny-trt.16 | **shipped** (2026-06-11) — `ROUTER_ACTIONS` enum + nullable `task {kind, args, ack}` in `_ROUTER_SCHEMA`; `RouterDecision.action`/`task_request` (`task_request` non-None iff `action='delegate'`); old outputs parse identically, malformed tasks degrade to speak/silent |
-| Gate branching + ack terminal | Johnny-trt.17 | planned (Phase 3) |
-| `agent_tasks` + TaskCoordinator + stub executor | Johnny-trt.18 | planned (Phase 3) |
+| Gate branching + ack terminal | Johnny-trt.17 | **shipped** (2026-06-11) — `RouterGate.run_turn` branches on `decision.action` after the mode checks (suggest_only/approval_required/listen_only and the rate limiter unchanged): `delegate` → `TaskCoordinator.begin` (row-before-ack) + `session.say(ack)` whose SpeechHandle completion owns the turn terminal (`replied` / `no_reply(barge_in)`; coordinator/persist/say failure → nothing spoken + `no_reply(stage_error)`); `status` → fixed Phase-3 stub line via the same say machinery. No answer-LLM hop on either; `AgentSpoke` carries the ack text (INV-2); task results are session-scoped speech later, never turn terminals (INV-1) |
+| `agent_tasks` + TaskCoordinator + stub executor | Johnny-trt.18 | **shipped** (2026-06-11) — `agent_tasks` table + migration 0023; `SqlAlchemyTaskSink`; stdlib `TaskCoordinator` (row durable at `begin` return, best-effort `TaskQueued` + `johnny.tasks.wake` ping, aclose marks `cancelled`); Phase-3 `stub_executor` fails every kind fast with speech-ready text; wired for all SPEAKING_MODES via `_build_sync_persistence` |
 | Triage budget + task catalog + observability | Johnny-trt.19 | planned (Phase 3) |
 | Heuristic complexity scorer (shadow) | Johnny-trt.50 | planned (Phase 3) |
 | Phase 3 capstone (parity + INV-1 + delegated turn) | Johnny-trt.21 | planned (Phase 3) |

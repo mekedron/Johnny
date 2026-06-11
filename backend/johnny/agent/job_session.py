@@ -529,6 +529,13 @@ async def build_agent_runtime(
         ),
         record_suggested=build_suggested_emitter(bus, session_id=session_id),
         reply_audio=recorder,
+        # Delegate branch seams (Johnny-trt.17): the coordinator queues the
+        # async task row-before-ack; the resolver stamps the agent_tasks row
+        # with the same durable int turn id the turn's decision/terminal carry.
+        # The say() seam arrives later via JohnnyAgent.on_enter (the session
+        # does not exist yet here).
+        tasks=task_coordinator,
+        resolve_turn_id=turn_index.resolve,
     )
 
     # The metrics translator resolves a LiveKit metric's speech_id (the reply

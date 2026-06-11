@@ -41,11 +41,20 @@ from app.providers.base import (  # noqa: E402
     LLMResponse,
     ToolDefinition,
 )
-from johnny.agent.gate import GateTerminal, TurnLedger  # noqa: E402
+from johnny.agent.gate import GateTerminal, TurnIndex, TurnLedger  # noqa: E402
 from johnny.agent.router_gate import (  # noqa: E402
+    DEFAULT_DELEGATE_ACK,
     ROUTER_DECISION_SCHEMA,
+    STATUS_STUB_REPLY,
     RouterGate,
     RouterGateConfig,
+)
+from johnny.agent.tasks import (  # noqa: E402
+    InMemoryTaskSink,
+    TaskCoordinator,
+    TaskSpec,
+    stub_executor,
+    unsupported_kind_text,
 )
 
 # pytest is configured with ``asyncio_mode = "auto"`` — async tests need no mark.
@@ -863,3 +872,454 @@ async def test_replied_path_leaves_audio_for_the_spoke_emitter(
     await asyncio.gather(*gate._reply_tasks)
 
     assert recorder.take_reply() is not None
+
+
+# --------------------------------------------------------------------------- #
+# Phase-3 triage actions — delegate / status (Johnny-trt.17)                  #
+# --------------------------------------------------------------------------- #
+
+
+class _FakeSay:
+    """A :data:`~johnny.agent.router_gate.SaySpeech` stand-in.
+
+    Records every spoken text and hands back a :class:`_FakeSpeechHandle` the
+    test fires done (clean or interrupted). ``raises`` simulates a draining
+    session whose ``say()`` raises; ``on_call`` lets ordering tests snapshot
+    state at the exact moment the ack is spoken (row-before-ack).
+    """
+
+    def __init__(self, *, raises: BaseException | None = None) -> None:
+        self.texts: list[str] = []
+        self.handles: list[_FakeSpeechHandle] = []
+        self.on_call: Any = None
+        self._raises = raises
+
+    def __call__(self, text: str) -> SpeechHandle:
+        if self.on_call is not None:
+            self.on_call()
+        if self._raises is not None:
+            raise self._raises
+        handle = _FakeSpeechHandle(handle_id=f"item_say_{len(self.handles)}")
+        self.texts.append(text)
+        self.handles.append(handle)
+        return cast(SpeechHandle, handle)
+
+
+class _NoIdTaskSink(InMemoryTaskSink):
+    """A sink that persists nothing — ``record_queued`` yields no row id."""
+
+    async def record_queued(self, spec: TaskSpec) -> int | None:  # noqa: ARG002
+        return None
+
+
+class _RaisingTaskSink(InMemoryTaskSink):
+    """A sink whose insert blows up (DB down mid-turn)."""
+
+    async def record_queued(self, spec: TaskSpec) -> int | None:  # noqa: ARG002
+        raise RuntimeError("db down")
+
+
+class _TaskGateHarness:
+    """One delegate/status-capable gate with every seam recorded.
+
+    Mirrors the production wiring shape (Johnny-trt.17/.18): a real
+    :class:`TaskCoordinator` over an :class:`InMemoryTaskSink` + the Phase-3
+    :func:`stub_executor`, the shared :class:`TurnIndex` as ``resolve_turn_id``,
+    and a :class:`_FakeSay` attached the way ``JohnnyAgent.on_enter`` attaches
+    ``session.say``.
+    """
+
+    def __init__(
+        self,
+        decisions: list[dict[str, Any]] | None = None,
+        *,
+        config: RouterGateConfig | None = None,
+        sink: InMemoryTaskSink | None = None,
+        wire_coordinator: bool = True,
+        attach_say: bool = True,
+        say_raises: BaseException | None = None,
+        recorder: Any = None,
+    ) -> None:
+        self.emitter = _RecordingEmitter()
+        self.obs = _RecordingObservability()
+        self.sink = sink if sink is not None else InMemoryTaskSink()
+        self.coordinator = (
+            TaskCoordinator(self.sink, executor=stub_executor) if wire_coordinator else None
+        )
+        self.turn_index = TurnIndex()
+        self.say = _FakeSay(raises=say_raises)
+        self.gate = RouterGate(
+            _FakeRouterLLM(decisions),
+            config=config or RouterGateConfig(),
+            ledger=TurnLedger(self.emitter),
+            record_decision=self.obs.record_decision,
+            record_spoke=self.obs.record_spoke,
+            record_suggested=self.obs.record_suggested,
+            reply_audio=recorder,
+            tasks=self.coordinator,
+            resolve_turn_id=self.turn_index.resolve,
+        )
+        if attach_say:
+            self.gate.attach_say(self.say)
+
+    async def drain(self) -> None:
+        """Await the say done-callback emit tasks + in-flight task resolvers."""
+        if self.gate._reply_tasks:
+            await asyncio.gather(*self.gate._reply_tasks)
+        if self.coordinator is not None:
+            await self.coordinator.join()
+
+
+def _delegate_decision(
+    kind: str = "calendar.check",
+    *,
+    ack: str | None = "On it — give me a minute.",
+    args: dict[str, Any] | None = None,
+    confidence: float = 0.95,
+) -> dict[str, Any]:
+    task: dict[str, Any] = {"kind": kind}
+    if args is not None:
+        task["args"] = args
+    if ack is not None:
+        task["ack"] = ack
+    return {
+        "should_speak": True,
+        "confidence": confidence,
+        "reason": "complex ask",
+        "action": "delegate",
+        "task": task,
+    }
+
+
+def _status_decision() -> dict[str, Any]:
+    return {
+        "should_speak": True,
+        "confidence": 0.9,
+        "reason": "asked for progress",
+        "action": "status",
+    }
+
+
+async def test_delegate_queues_row_before_ack_then_replied_terminal() -> None:
+    """Happy path: row durable before say(), ack spoken, one replied terminal."""
+    h = _TaskGateHarness([_delegate_decision(args={"q": "free slots tomorrow"})])
+    rows_at_say: list[int] = []
+    h.say.on_call = lambda: rows_at_say.append(len(h.sink.snapshot()))
+    msg = _user_msg("Johnny, can you check my calendar for tomorrow?")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    # Row-before-ack: the agent_tasks row existed at the moment say() fired.
+    assert rows_at_say == [1]
+    assert h.say.texts == ["On it — give me a minute."]
+    record = h.sink.snapshot()[0]
+    assert record.spec.kind == "calendar.check"
+    assert record.spec.args == {"q": "free slots tomorrow"}
+    assert record.spec.ack_text == "On it — give me a minute."
+    # The row carries the same durable int the turn's decision/terminal use.
+    assert record.spec.turn_id == h.turn_index.get(msg.id)
+    assert record.spec.decision_id is None
+    # The RouterDecisionMade was emitted before the branch, like every path.
+    assert len(h.obs.decisions) == 1
+    # No terminal yet — the ack speech owns it.
+    assert h.emitter.records == []
+    assert h.gate._ledger.open_turns == (msg.id,)
+
+    # The ack completes → exactly one replied terminal + the AgentSpoke (INV-2).
+    h.say.handles[0].fire_done()
+    await h.drain()
+    assert h.emitter.states == ["replied"]
+    turn_id, term = h.emitter.records[0]
+    assert turn_id == msg.id
+    assert "delegated calendar.check task #1" in term.detail
+    assert h.obs.spoke == ["On it — give me a minute."]
+    # The spoken ack counts toward the over-talk cap, like any utterance.
+    assert len(h.gate._recent_utterance_times) == 1
+    # The stub executor settled the row failed OFF the turn loop — a task
+    # result is session-scoped speech later, never a second terminal (INV-1).
+    settled = h.sink.snapshot()[0]
+    assert settled.status == "failed"
+    assert settled.result_text == unsupported_kind_text("calendar.check")
+    assert h.emitter.states == ["replied"]
+
+
+@pytest.mark.parametrize("ack", [None, ""])
+async def test_delegate_falls_back_to_default_ack(ack: str | None) -> None:
+    """A delegate verdict with no usable ack speaks the gate's own wording."""
+    h = _TaskGateHarness([_delegate_decision(ack=ack)])
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("check the calendar"))
+
+    assert h.say.texts == [DEFAULT_DELEGATE_ACK]
+    assert h.sink.snapshot()[0].spec.ack_text == DEFAULT_DELEGATE_ACK
+
+
+async def test_delegate_ack_barged_in_emits_barge_in_and_no_spoke() -> None:
+    h = _TaskGateHarness([_delegate_decision()])
+    msg = _user_msg("Johnny, dig into that")
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    handle = h.say.handles[0]
+    handle.interrupted = True
+    handle.fire_done()
+    await h.drain()
+
+    assert h.emitter.reasons == ["barge_in"]
+    assert h.emitter.states == ["no_reply"]
+    assert "continues" in h.emitter.records[0][1].detail  # the task is not undone
+    assert h.obs.spoke == []  # an interrupted speech emits no AgentSpoke
+    assert h.gate._recent_utterance_times == []
+
+
+@pytest.mark.parametrize("sink_cls", [_NoIdTaskSink, _RaisingTaskSink])
+async def test_delegate_persist_failure_speaks_nothing_and_stage_errors(
+    sink_cls: type[InMemoryTaskSink],
+) -> None:
+    """No durable row → no promise: nothing spoken, no_reply(stage_error)."""
+    h = _TaskGateHarness([_delegate_decision()], sink=sink_cls())
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("go research that"))
+
+    assert h.say.texts == []
+    assert h.emitter.reasons == ["stage_error"]
+    assert "task persist failed" in h.emitter.records[0][1].detail
+    assert h.obs.spoke == []
+
+
+async def test_delegate_without_coordinator_stage_errors() -> None:
+    h = _TaskGateHarness([_delegate_decision()], wire_coordinator=False)
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("delegate this"))
+
+    assert h.emitter.reasons == ["stage_error"]
+    assert "no task coordinator wired" in h.emitter.records[0][1].detail
+    assert h.say.texts == []
+
+
+async def test_delegate_without_say_queues_nothing() -> None:
+    """Unspeakable ack ⇒ no queue: begin() is never called without say()."""
+    h = _TaskGateHarness([_delegate_decision()], attach_say=False)
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("delegate this"))
+
+    assert h.emitter.reasons == ["stage_error"]
+    assert "say() is not attached" in h.emitter.records[0][1].detail
+    assert h.sink.snapshot() == []  # the row was never queued
+
+
+async def test_delegate_say_raising_stage_errors_with_row_kept() -> None:
+    """say() raising (session draining) terminalizes; the queued row stands."""
+    h = _TaskGateHarness([_delegate_decision()], say_raises=RuntimeError("closing"))
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("delegate this"))
+    await h.drain()
+
+    assert h.emitter.reasons == ["stage_error"]
+    assert "say() failed: RuntimeError: closing" in h.emitter.records[0][1].detail
+    assert h.obs.spoke == []
+    assert len(h.sink.snapshot()) == 1  # row-before-ack already held
+
+
+async def test_delegate_rate_limited_queues_nothing() -> None:
+    """The over-talk cap precedes the triage branch — no ack, no row."""
+    from johnny.voice_pipeline.reasoning import AUTONOMOUS_MODE
+
+    h = _TaskGateHarness(
+        [_delegate_decision()],
+        config=RouterGateConfig(
+            mode=AUTONOMOUS_MODE,
+            rate_limit_max_utterances=1,
+            rate_limit_window_ms=300_000,
+        ),
+    )
+    h.gate._recent_utterance_times = [h.gate._clock()]
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("also check this"))
+
+    assert h.emitter.reasons == ["rate_limited"]
+    assert h.say.texts == []
+    assert h.sink.snapshot() == []
+
+
+async def test_delegate_in_suggest_only_mode_is_unchanged() -> None:
+    """suggest_only still owns the turn — no ack, no row, suggest_only terminal."""
+    from johnny.voice_pipeline.reasoning import SUGGEST_ONLY_MODE
+
+    h = _TaskGateHarness(
+        [_delegate_decision()],
+        config=RouterGateConfig(mode=SUGGEST_ONLY_MODE),
+    )
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("check the calendar"))
+
+    assert h.emitter.reasons == ["suggest_only"]
+    assert h.say.texts == []
+    assert h.sink.snapshot() == []
+    assert len(h.obs.suggested) == 1
+
+
+async def test_delegate_in_approval_required_mode_is_unchanged() -> None:
+    """approval_required parks/rejects like any approved decision — no task."""
+    from johnny.voice_pipeline.reasoning import APPROVAL_REQUIRED_MODE
+
+    h = _TaskGateHarness(
+        [_delegate_decision()],
+        config=RouterGateConfig(mode=APPROVAL_REQUIRED_MODE),
+    )
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("check the calendar"))
+
+    # No approval coordinator wired in this harness → the existing misconfig
+    # branch rejects; the point is the delegate branch never ran.
+    assert h.emitter.reasons == ["approval_rejected"]
+    assert h.say.texts == []
+    assert h.sink.snapshot() == []
+
+
+async def test_delegate_with_malformed_task_degrades_to_speak_path() -> None:
+    """Parser degrade (trt.16): delegate + junk task → plain SPEAK, no say()."""
+    decision = {
+        "should_speak": True,
+        "confidence": 0.95,
+        "reason": "complex ask",
+        "action": "delegate",
+        "task": "garbage",
+    }
+    h = _TaskGateHarness([decision])
+    msg = _user_msg("Johnny, can you look into it?")
+
+    await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK — no raise
+
+    assert h.say.texts == []
+    assert h.sink.snapshot() == []
+    assert h.emitter.records == []
+    assert h.gate._ledger.open_turns == (msg.id,)
+    assert msg.id in h.gate._pending_speak_turns
+
+
+async def test_explicit_speak_action_keeps_speak_path_identical() -> None:
+    """An explicit action='speak' rides the unchanged SPEAK fallthrough."""
+    decision = {
+        "should_speak": True,
+        "confidence": 0.95,
+        "reason": "simple ask",
+        "action": "speak",
+    }
+    h = _TaskGateHarness([decision])
+    msg = _user_msg("Johnny, what day is it?")
+
+    await h.gate.run_turn(ChatContext.empty(), msg)
+
+    assert h.say.texts == []
+    assert h.emitter.records == []
+    assert msg.id in h.gate._pending_speak_turns
+
+
+async def test_delegate_say_done_callback_double_fire_single_terminal() -> None:
+    """INV-1: a say done-callback firing twice can never double-emit."""
+    h = _TaskGateHarness([_delegate_decision()])
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("check it"))
+
+    handle = h.say.handles[0]
+    handle.fire_done()
+    handle.fire_done()
+    await h.drain()
+
+    assert h.emitter.states == ["replied"]
+    assert h.obs.spoke == ["On it — give me a minute."]
+
+
+async def test_status_speaks_stub_and_terminalizes_replied() -> None:
+    """status: fixed nothing-in-flight stub, no coordinator needed (Phase 3)."""
+    h = _TaskGateHarness([_status_decision()], wire_coordinator=False)
+    msg = _user_msg("Johnny, are you still working on that?")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    assert h.say.texts == [STATUS_STUB_REPLY]
+    assert h.emitter.records == []  # terminal owned by the speech
+
+    h.say.handles[0].fire_done()
+    await h.drain()
+    assert h.emitter.states == ["replied"]
+    assert "status stub" in h.emitter.records[0][1].detail
+    assert h.obs.spoke == [STATUS_STUB_REPLY]
+    assert len(h.obs.decisions) == 1
+
+
+async def test_status_barged_in_emits_barge_in() -> None:
+    h = _TaskGateHarness([_status_decision()])
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("status?"))
+
+    handle = h.say.handles[0]
+    handle.interrupted = True
+    handle.fire_done()
+    await h.drain()
+
+    assert h.emitter.reasons == ["barge_in"]
+    assert h.obs.spoke == []
+
+
+async def test_status_without_say_stage_errors() -> None:
+    h = _TaskGateHarness([_status_decision()], attach_say=False)
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("status?"))
+
+    assert h.emitter.reasons == ["stage_error"]
+    assert "say() is not attached" in h.emitter.records[0][1].detail
+
+
+async def test_say_path_reply_audio_hygiene(tmp_path: Any) -> None:
+    """Stale buffered audio is discarded before the ack synthesises (Johnny-od1)."""
+    from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
+
+    recorder = SpokenAudioRecorder(tmp_path, 1)
+    h = _TaskGateHarness([_delegate_decision()], recorder=recorder)
+    recorder.feed_segment(b"\x00\x01" * 64)  # stale segments from a prior speech
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("check it"))
+
+    assert recorder.take_reply() is None  # discarded at say time
+
+
+async def test_interrupted_ack_discards_audio_replied_ack_keeps_it(
+    tmp_path: Any,
+) -> None:
+    from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
+
+    # Interrupted ack → segments dropped (no utterance row to attach to).
+    recorder = SpokenAudioRecorder(tmp_path, 1)
+    h = _TaskGateHarness([_delegate_decision()], recorder=recorder)
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("check it"))
+    recorder.feed_segment(b"\x00\x01" * 64)  # the ack's TTS segments
+    handle = h.say.handles[0]
+    handle.interrupted = True
+    handle.fire_done()
+    await h.drain()
+    assert recorder.take_reply() is None
+
+    # Completed ack → segments left for the spoke emitter's flush.
+    recorder2 = SpokenAudioRecorder(tmp_path, 2)
+    h2 = _TaskGateHarness([_delegate_decision()], recorder=recorder2)
+    with pytest.raises(StopResponse):
+        await h2.gate.run_turn(ChatContext.empty(), _user_msg("check it"))
+    recorder2.feed_segment(b"\x00\x01" * 64)
+    h2.say.handles[0].fire_done()
+    await h2.drain()
+    assert recorder2.take_reply() is not None

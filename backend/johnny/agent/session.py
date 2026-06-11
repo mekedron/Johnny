@@ -511,6 +511,13 @@ class JohnnyAgent(Agent):
         the turn's terminal (the speak path's INV-1 record). Each is independent —
         the metrics listener runs with no gate; the ``speech_created`` binding
         no-ops without one.
+
+        Also attaches ``session.say`` to the gate (Johnny-trt.17) so its
+        delegate/status branches can speak acks out of band: the session only
+        exists once the agent is active, and ``say()``'s ``speech_created``
+        fires with ``source="say"``, so the ``generate_reply`` FIFO below never
+        sees those speeches — the gate owns their terminals via the returned
+        ``SpeechHandle`` directly.
         """
         listener = self._metrics_listener
         if listener is not None:
@@ -519,6 +526,7 @@ class JohnnyAgent(Agent):
         gate = self._router_gate
         if gate is None:
             return
+        gate.attach_say(self.session.say)
 
         def _on_speech_created(ev: SpeechCreatedEvent) -> None:
             if ev.source == "generate_reply":

@@ -395,6 +395,10 @@ async def test_delegation_capable_modes_wire_task_sink_and_coordinator(
     assert runtime.task_sink.bot_session_id == 7
     assert isinstance(runtime.task_coordinator, TaskCoordinator)
     assert runtime._task_wake is not None  # redis_url present -> wake ping wired
+    # The gate's delegate branch (Johnny-trt.17) drives this same coordinator
+    # and stamps agent_tasks rows with the shared TurnIndex's int turn id.
+    assert runtime.gate._tasks is runtime.task_coordinator
+    assert runtime.gate._resolve_turn_id is not None
 
     await runtime.aclose()
     assert db.closed is True
@@ -445,6 +449,9 @@ async def test_delegation_mode_without_db_factory_gets_no_task_pieces() -> None:
     )
     assert runtime.task_sink is None
     assert runtime.task_coordinator is None
+    # No coordinator on the gate either — its delegate branch terminalizes
+    # no_reply(stage_error) instead of promising unrecordable work (trt.17).
+    assert runtime.gate._tasks is None
 
 
 async def test_speaking_mode_without_tts_degrade_drops_task_wiring() -> None:

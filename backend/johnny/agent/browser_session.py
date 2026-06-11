@@ -500,8 +500,11 @@ class BrowserAgentSession:
         try:
             await self._runtime.gate.run_turn(self._session.history, new_message)
         except StopResponse:
-            # Router declined / suggest-only / listen-only — the gate already
-            # emitted this turn's terminal; nothing to speak.
+            # The gate accounted for this turn without an answer-LLM reply:
+            # declined / suggest-only / listen-only (terminal already emitted),
+            # or a delegate/status verdict (Johnny-trt.17) whose ack the gate
+            # scheduled via session.say() — that speech's completion owns the
+            # turn's terminal. Either way, nothing to generate here.
             return True
         except Exception:
             logger.exception(
