@@ -110,6 +110,34 @@ are excluded from the scorer's delegate prior; the executor revalidates at claim
 (links can break mid-session → trt.53 correction). Never a pretend-check, never
 delegate-into-failure.
 
+**How capabilities reach the prompt — snapshot + progressive disclosure (trt.23,
+trt.55; openclaw-verified pattern).** The capabilities live in a separate sandbox
+image, but the router prompt never talks to the sandbox:
+
+- **Capability snapshot, off the hot path**: the api/worker builds a cached, versioned
+  snapshot via one batched `GET /bins` probe against the sandbox (trt.35's exec API) at
+  stack boot and on change events (skills-volume change, integration link/unlink,
+  sandbox restart). Session start *reads the cache* — zero sandbox round-trips; the
+  session's catalog is frozen at start (openclaw equivalent: chokidar watcher + version
+  bump + coalesced `system.which`, caps at 150 skills / 18 K chars).
+- **Progressive disclosure**: the router prompt carries only `kind: one-liner` rows
+  (plus capped unavailable-reasons) — today ~1.2 K chars total, rebuilt per turn. Full
+  SKILL.md instructions are read **only by the executor's reasoning model at execution
+  time**. The router prompt stays near-constant as capabilities grow; the catalog block
+  is capped (~2 K chars, overflow summarized) and its size is recorded in the triage
+  timing details.
+- **Kind-validation backstop (trt.53)**: the gate validates `task.kind` against the
+  catalog *before* persisting or acking — a hallucinated kind degrades to `speak`
+  instead of becoming a spoken promise that the stub executor then breaks. (Code-verified
+  gap 2026-06-11: parser and gate previously accepted any kind; "when did WW2 start" →
+  "let me check on that" was the symptom.) Knowledge questions are never delegated —
+  the restraint guidance carries an explicit general-knowledge negative example.
+- **Internal tools (trt.57)**: first-party in-app actions (`meeting.leave`,
+  `session.end`) are catalog kinds like any other, surface-scoped by the availability
+  predicate, but execute **session-locally in the agent process** — never the worker,
+  never the sandbox. Asking "can you leave the meeting?" yields a farewell, the
+  trt.56 dismissed state (so the scheduler doesn't auto-rejoin), and a clean teardown.
+
 ## 3. Per-agent model roles
 
 Agents (Phase 6, trt.41) pin a model per pipeline level — so a light local model can
@@ -277,6 +305,8 @@ separately replay-gated:
 | Phase 3 capstone (parity + INV-1 + delegated turn) | Johnny-trt.21 | planned (Phase 3) |
 | Executor, tools/skills, task events | Johnny-trt.22–26, .35 | planned (Phase 4) |
 | Capability-aware catalog (availability + honest declines) | Johnny-trt.55 | planned (Phase 4) |
+| Meeting lifecycle states (dismissible bot, no auto-rejoin) | Johnny-trt.56 | planned (Phase 4) |
+| Internal tools (`meeting.leave`, `session.end` by voice) | Johnny-trt.57 | planned (Phase 4) |
 | Speech queue + re-entry + status query | Johnny-trt.27–30 | planned (Phase 5) |
 | Per-agent model role slots (schema) | Johnny-trt.41 | planned (Phase 6) |
 | Role-based provider resolution + runtime fallback | Johnny-trt.42 | planned (Phase 6) |
@@ -287,5 +317,5 @@ separately replay-gated:
 | Deferred: speculative-parallel router | Johnny-trt.20 | deferred spike |
 
 Keeping this file current is acceptance criteria on trt.50, trt.51, trt.52, trt.53,
-trt.54, trt.55 and part of the trt.34 docs capstone (cross-link with PIPELINE.md,
-flip statuses to shipped).
+trt.54, trt.55, trt.57 and part of the trt.34 docs capstone (cross-link with
+PIPELINE.md, flip statuses to shipped).
