@@ -416,6 +416,49 @@ async def test_chat_disable_thinking_does_not_mutate_messages_when_off() -> None
     assert "chat_template_kwargs" not in body
 
 
+async def test_chat_explicit_reasoning_effort_sent_verbatim() -> None:
+    adapter = _FakeOpenAICompatibleLLM(
+        _config(reasoning_effort="high"),
+        handler=_ok_handler(_chat_completion()),
+    )
+    await adapter.chat([ChatMessage(role="user", content="hi")])
+    body = json.loads(adapter.requests[0].content)
+    assert body["reasoning_effort"] == "high"
+    # Explicit effort alone must not drag in the disable-thinking knobs.
+    assert "think" not in body
+    assert "chat_template_kwargs" not in body
+
+
+async def test_chat_explicit_reasoning_effort_overrides_disable_thinking() -> None:
+    adapter = _FakeOpenAICompatibleLLM(
+        _config(disable_thinking=True, reasoning_effort="low"),
+        handler=_ok_handler(_chat_completion()),
+    )
+    await adapter.chat([ChatMessage(role="user", content="hi")])
+    body = json.loads(adapter.requests[0].content)
+    assert body["reasoning_effort"] == "low"
+
+
+async def test_chat_blank_reasoning_effort_omitted_and_input_normalized() -> None:
+    # Blank → field absent; non-blank input is trimmed + lowercased so
+    # 'NONE ' typed in the UI still matches the API's lowercase tiers.
+    adapter = _FakeOpenAICompatibleLLM(
+        _config(reasoning_effort="  "),
+        handler=_ok_handler(_chat_completion()),
+    )
+    await adapter.chat([ChatMessage(role="user", content="hi")])
+    body = json.loads(adapter.requests[0].content)
+    assert "reasoning_effort" not in body
+
+    adapter2 = _FakeOpenAICompatibleLLM(
+        _config(reasoning_effort=" NONE "),
+        handler=_ok_handler(_chat_completion()),
+    )
+    await adapter2.chat([ChatMessage(role="user", content="hi")])
+    body2 = json.loads(adapter2.requests[0].content)
+    assert body2["reasoning_effort"] == "none"
+
+
 async def test_chat_forwards_response_format() -> None:
     schema = {"type": "json_schema", "json_schema": {"name": "x", "schema": {}}}
     adapter = _FakeOpenAICompatibleLLM(

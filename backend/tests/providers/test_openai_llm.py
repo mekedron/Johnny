@@ -234,13 +234,15 @@ async def test_chat_disable_thinking_does_not_prepend_no_think_for_openai() -> N
 
 
 async def test_chat_disable_thinking_sets_reasoning_effort_for_o_series() -> None:
+    # o-series has no 'minimal'/'none' tier — 'low' is its floor; anything
+    # below it is rejected with HTTP 400 by the hosted API.
     adapter = _FakeOpenAILLM(
         _config(model="o3-mini", disable_thinking=True),
         handler=_ok_handler(_chat_completion()),
     )
     await adapter.chat([ChatMessage(role="user", content="hi")])
     body = json.loads(adapter.requests[0].content)
-    assert body["reasoning_effort"] == "minimal"
+    assert body["reasoning_effort"] == "low"
 
 
 async def test_chat_disable_thinking_sets_reasoning_effort_for_gpt5() -> None:
@@ -251,6 +253,31 @@ async def test_chat_disable_thinking_sets_reasoning_effort_for_gpt5() -> None:
     await adapter.chat([ChatMessage(role="user", content="hi")])
     body = json.loads(adapter.requests[0].content)
     assert body["reasoning_effort"] == "minimal"
+
+
+async def test_chat_disable_thinking_sets_reasoning_effort_none_for_gpt51_plus() -> None:
+    # gpt-5.1 replaced 'minimal' with 'none'; sending 'minimal' to those
+    # models is an HTTP 400 ("Supported values are: 'none', 'low', ...").
+    for model in ("gpt-5.1", "gpt-5.2-mini"):
+        adapter = _FakeOpenAILLM(
+            _config(model=model, disable_thinking=True),
+            handler=_ok_handler(_chat_completion()),
+        )
+        await adapter.chat([ChatMessage(role="user", content="hi")])
+        body = json.loads(adapter.requests[0].content)
+        assert body["reasoning_effort"] == "none", model
+
+
+async def test_chat_explicit_reasoning_effort_overrides_disable_thinking_floor() -> None:
+    # An operator-typed reasoning_effort wins over the per-family floor
+    # the disable-thinking checkbox would pick.
+    adapter = _FakeOpenAILLM(
+        _config(model="gpt-5.5", disable_thinking=True, reasoning_effort="high"),
+        handler=_ok_handler(_chat_completion()),
+    )
+    await adapter.chat([ChatMessage(role="user", content="hi")])
+    body = json.loads(adapter.requests[0].content)
+    assert body["reasoning_effort"] == "high"
 
 
 async def test_chat_disable_thinking_skips_reasoning_effort_for_gpt4o() -> None:

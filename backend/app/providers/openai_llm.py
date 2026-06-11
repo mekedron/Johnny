@@ -37,6 +37,22 @@ DEFAULT_MODEL = "gpt-4o-mini"
 DEFAULT_CATALOG_TIMEOUT_S = 15.0
 _REASONING_MODEL_PREFIXES = ("o1", "o3", "o4", "gpt-5")
 
+
+def _lowest_reasoning_effort(model_id: str) -> str:
+    """The cheapest ``reasoning_effort`` value the model family accepts.
+
+    The knob's floor moved across generations: o-series accepts only
+    ``low``/``medium``/``high``, the original gpt-5 family added
+    ``minimal``, and gpt-5.1+ replaced ``minimal`` with ``none``.
+    Sending a value below the family's floor is an HTTP 400, not a
+    graceful downgrade.
+    """
+    if model_id.startswith("gpt-5."):
+        return "none"
+    if model_id.startswith("gpt-5"):
+        return "minimal"
+    return "low"
+
 # Heuristic for "is this a chat-completion model?". The catalog endpoint
 # returns every model the account has access to, including embeddings,
 # moderation, audio, and image generation models that the chat-completion
@@ -202,9 +218,25 @@ class OpenAILLM(OpenAICompatibleLLM):
                     default=False,
                     help_text=(
                         "For reasoning models (o1 / o3 / o4 / gpt-5), set "
-                        "'reasoning_effort: minimal' so the model spends as "
-                        "little time as possible on internal reasoning. "
-                        "No effect on gpt-4o / gpt-4.1."
+                        "the lowest reasoning_effort the model supports "
+                        "('none' on gpt-5.1+, 'minimal' on gpt-5, 'low' on "
+                        "o-series) so it spends as little time as possible "
+                        "on internal reasoning. No effect on gpt-4o / gpt-4.1."
+                    ),
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="reasoning_effort",
+                    label="Reasoning effort",
+                    type=FieldType.TEXT,
+                    placeholder="(model default)",
+                    help_text=(
+                        "Sent verbatim as reasoning_effort. What the model "
+                        "accepts varies by family: gpt-5.1+ take none / low "
+                        "/ medium / high (some xhigh), gpt-5 takes minimal "
+                        "/ low / medium / high, o-series low / medium / "
+                        "high. Leave blank for the model default. Overrides "
+                        "'Disable thinking' when set."
                     ),
                     group=FieldGroup.ADVANCED,
                 ),
@@ -242,8 +274,8 @@ class OpenAILLM(OpenAICompatibleLLM):
                         "before they answer — there's no visible "
                         "streaming during that period. For a spoken "
                         "router this looks like the bot just froze. "
-                        "Either flip 'Disable thinking' on (sets "
-                        "reasoning_effort=minimal) or stay on 4o-mini "
+                        "Either flip 'Disable thinking' on (sets the "
+                        "lowest reasoning_effort it supports) or stay on 4o-mini "
                         "for any stage where the user is waiting to "
                         "hear sound."
                     ),
@@ -265,16 +297,17 @@ class OpenAILLM(OpenAICompatibleLLM):
     def _apply_disable_thinking_to_body(self, body: dict[str, Any]) -> None:
         """Use OpenAI's native ``reasoning_effort`` knob on reasoning models.
 
-        For o-series and gpt-5 family models the API accepts
-        ``reasoning_effort: "minimal"`` which steers the model to the
-        shortest possible reasoning trace. Non-reasoning models would
-        reject the field, so it is only added when the configured model
-        looks like a reasoning model. The Ollama-specific ``think`` knob
-        from the parent class is deliberately *not* sent here — OpenAI's
-        endpoint can reject unknown body keys depending on flags.
+        For o-series and gpt-5 family models the API accepts a
+        ``reasoning_effort`` value steering the model to the shortest
+        possible reasoning trace; the floor value differs per family
+        (see :func:`_lowest_reasoning_effort`). Non-reasoning models
+        would reject the field, so it is only added when the configured
+        model looks like a reasoning model. The Ollama-specific ``think``
+        knob from the parent class is deliberately *not* sent here —
+        OpenAI's endpoint can reject unknown body keys depending on flags.
         """
         if self._model.startswith(_REASONING_MODEL_PREFIXES):
-            body["reasoning_effort"] = "minimal"
+            body["reasoning_effort"] = _lowest_reasoning_effort(self._model)
 
     def _disable_thinking_system_prefix(self) -> str | None:
         """OpenAI models do not recognise ``/no_think``; skip the prefix."""

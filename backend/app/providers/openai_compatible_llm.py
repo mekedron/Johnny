@@ -160,6 +160,8 @@ class OpenAICompatibleLLM(LLMProvider):
         seed = opts.get("seed")
         self._seed: int | None = int(seed) if seed is not None else None
         self._disable_thinking = bool(opts.get("disable_thinking", False))
+        reasoning_effort = str(opts.get("reasoning_effort") or "").strip().lower()
+        self._reasoning_effort: str | None = reasoning_effort or None
         self._timeout_s = float(opts.get("timeout_s") or DEFAULT_TIMEOUT_S)
         self._client = self._create_client()
 
@@ -305,6 +307,22 @@ class OpenAICompatibleLLM(LLMProvider):
                         "bare '{{ .Prompt }}' chat template (e.g. the "
                         "uncensored remixes) ignore all of these — install a "
                         "proper Qwen3 Modelfile or switch builds."
+                    ),
+                    group=FieldGroup.ADVANCED,
+                ),
+                FieldDef(
+                    name="reasoning_effort",
+                    label="Reasoning effort",
+                    type=FieldType.TEXT,
+                    placeholder="(model default)",
+                    help_text=(
+                        "Free-form reasoning_effort sent verbatim, e.g. "
+                        "none / low / medium / high. Server support varies: "
+                        "recent Ollama builds map it onto think levels, "
+                        "vLLM / OpenRouter pass it to the model, older "
+                        "servers ignore or reject it. Leave blank for the "
+                        "model default. Overrides 'Disable thinking' "
+                        "when set."
                     ),
                     group=FieldGroup.ADVANCED,
                 ),
@@ -510,6 +528,11 @@ class OpenAICompatibleLLM(LLMProvider):
             body["seed"] = self._seed
         if self._disable_thinking:
             self._apply_disable_thinking_to_body(body)
+        if self._reasoning_effort is not None:
+            # Explicit operator choice wins over the disable-thinking
+            # heuristics — sent verbatim so new tiers (e.g. 'xhigh')
+            # work without a code change.
+            body["reasoning_effort"] = self._reasoning_effort
         if tools and self._tool_format == "openai":
             body["tools"] = [_tool_to_dict(t) for t in tools]
         if response_format is not None:
