@@ -95,6 +95,21 @@ decision.* Concretely:
   (recommended vs final, divergence flagged) → linked task row → terminal + stage
   timings. No turn may leave "what did it say, and why?" unanswerable from the UI.
 
+**Capability awareness (trt.55, Phase 4).** Operator rule (2026-06-11): *the
+decision-making must know what it is actually capable of.* "Check our Google
+Calendar" → with access, delegate and check; without, an honest actionable decline in
+the same turn ("I don't have access to your calendar — link a Google account in
+settings"). Mechanism: the **catalog is the capability source of truth**, assembled
+per session through an availability predicate — skill bins present in the sandbox
+(trt.23) ∧ credentials/accounts linked (e.g. gog authed) ∧ frontmatter prerequisites,
+with per-agent policy (trt.38) and MCP health (trt.36) joining the same predicate
+later. Unavailable kinds render compactly *as unavailable with the reason* so the
+router can decline and name the fix; the gate degrades any delegate verdict targeting
+an unavailable kind to speak-with-decline (defense in depth); unavailable keywords
+are excluded from the scorer's delegate prior; the executor revalidates at claim time
+(links can break mid-session → trt.53 correction). Never a pretend-check, never
+delegate-into-failure.
+
 ## 3. Per-agent model roles
 
 Agents (Phase 6, trt.41) pin a model per pipeline level — so a light local model can
@@ -141,20 +156,46 @@ nearest tier boundary; strong reasoning markers override directly.
 | **task/skill-catalog keywords** (dynamic, from the trt.19 catalog interface) | the *delegate* prior — "calendar", "email" etc. come from installed skills, not a hardcoded list |
 | simple indicators ("what is", "define", greetings) | scored **negatively** |
 | token estimate | very short → simple; very long → complex |
-| output-format markers ("json", "table") | structured-output prior |
+| output-format markers ("as a list", "summarize", "таблицей", "ranskalaiset viivat") | structured-output prior |
 
-Starting calibration, taken from ClawRouter and re-fit on Johnny data: tier boundaries
+Shipped calibration (2026-06-11, trt.50): tier boundaries
 `SIMPLE < 0.0 ≤ MEDIUM < 0.3 ≤ COMPLEX < 0.5 ≤ REASONING`, sigmoid steepness 12,
-ambiguity threshold 0.7, ambiguous → safe default tier. Keyword sets are multilingual
-— **EN + RU + FI** minimum.
+ambiguity threshold 0.7, ambiguous → safe default tier **MEDIUM** (all ClawRouter
+config.ts values; provenance documented per constant in the module). Voice-turn
+adaptations: token thresholds 50/500 → **12/60** spoken tokens (`words × 1.3`);
+agentic ladder 4/3/1 → **3/2/1** matches; keywords match as **left word-boundary
+prefixes** (`\b<stem>`, free suffix) so RU/FI stems survive inflection ("провер" →
+проверь/проверка, "tarkist" → tarkista/tarkistaisitko) without mid-word noise
+("etsi" never fires inside "metsissä"). Keyword sets are multilingual — **EN + RU +
+FI**; the catalog dimension matches entry keywords (English, per the task_catalog
+contract) expanded through the scorer-owned `CATALOG_KEYWORD_TRANSLATIONS` RU/FI
+stem map. Weights (sum 1.0): reasoning .22, catalog .18, multi-step .16, agentic
+.14, simple .12, token .10, format .08.
+
+**First agreement matrix** (2026-06-11, 86 turns = 34 replay-fixture + 52 real DB
+turns incl. 12 live-shadow rows from playground session #18 — full report:
+`.validation/Johnny-trt.50/05-agreement-matrix.md`, regenerate with
+`agreement_matrix_trt50.py` next to it): the catalog dimension fired on **32% of
+actually-delegated turns vs 4% of silent ones** (8× lift; the miss-rate is mostly
+llama3.2:3b *over*-delegating greetings/reasoning asks that genuinely carry no
+catalog vocabulary — the disagreement is the finding). Heuristic-SIMPLE turns split
+16 silent / 14 speak / 12 delegate / 1 status across the live router → the trt.51
+fast-path go condition (≥ ~98% SIMPLE agreement) is **not met** on the current
+3B triage model; fast-path stays no-go. 25/86 turns ambiguous (the safe-default
+band absorbs mid-length keyword-less turns); COMPLEX is unpopulated (no long
+multi-clause asks in the dataset yet). All 12 session-18 live payloads byte-match
+the offline recompute — the persisted rows are an offline-reproducible dataset.
 
 **Shadow contract.** The scorer runs synchronously in `RouterGate` before the triage
-LLM is awaited (zero added latency) and its verdict
-`{score, tier, confidence, top_signals}` is persisted inside the existing
-`agent_decisions` JSON columns — **no behavioral effect, no migration, replay parity
-untouched by construction**. The deliverable is an *agreement matrix* (heuristic tier
-× router action over harness fixtures + ≥50 real turns) — the labeled dataset that
-gates every behavioral use (§6).
+LLM is awaited (zero added latency; computed outside the `router_llm` timing span so
+the trt.19 timing rows stay baseline-comparable) and its verdict
+`{score, tier, confidence, top_signals}` is persisted under the
+`complexity_shadow` key inside `agent_decisions.raw_output`, next to the router's
+own `action` — **no behavioral effect, no migration, replay parity untouched by
+construction** (the replay diff reads only verdict fields, never `raw_output`).
+A scorer failure logs and skips the key; the turn is untouched. The deliverable is
+an *agreement matrix* (heuristic tier × router action over harness fixtures + ≥50
+real turns) — the labeled dataset that gates every behavioral use (§6).
 
 **ClawRouter evaluation summary** (why pattern-port, not dependency): ClawRouter is an
 MIT TypeScript OpenAI-compatible proxy whose model dispatch is welded to BlockRun's
@@ -230,11 +271,12 @@ separately replay-gated:
 | Gate branching + ack terminal | Johnny-trt.17 | **shipped** (2026-06-11) — `RouterGate.run_turn` branches on `decision.action` after the mode checks (suggest_only/approval_required/listen_only and the rate limiter unchanged): `delegate` → `TaskCoordinator.begin` (row-before-ack) + `session.say(ack)` whose SpeechHandle completion owns the turn terminal (`replied` / `no_reply(barge_in)`; coordinator/persist/say failure → nothing spoken + `no_reply(stage_error)`); `status` → fixed Phase-3 stub line via the same say machinery. No answer-LLM hop on either; `AgentSpoke` carries the ack text (INV-2); task results are session-scoped speech later, never turn terminals (INV-1) |
 | `agent_tasks` + TaskCoordinator + stub executor | Johnny-trt.18 | **shipped** (2026-06-11) — `agent_tasks` table + migration 0023; `SqlAlchemyTaskSink`; stdlib `TaskCoordinator` (row durable at `begin` return, best-effort `TaskQueued` + `johnny.tasks.wake` ping, aclose marks `cancelled`); Phase-3 `stub_executor` fails every kind fast with speech-ready text; wired for all SPEAKING_MODES via `_build_sync_persistence` |
 | Triage budget + task catalog + observability | Johnny-trt.19 | **shipped** (2026-06-11) — `DEFAULT_ROUTER_LLM_TIMEOUT_S` 30 → 8 s (budget framing; gate mirror + drift-guard/value tests); `TaskCatalogEntry (kind, one_liner, keywords[])` in `johnny/agent/task_catalog.py` with Phase-3 stubs (`calendar.upcoming_events`, `gmail.search`) rendered into the router prompt **only when a TaskCoordinator is wired** (keywords stay scorer-only, feeding trt.50); gate emits a per-decided-turn `router_llm` PipelineTiming (`details.action`) → `session_timings`; latency harness reports it directly as `triage_ms` (the derived `router_ms` gap stays for baseline comparability); small-router-model + 8 s budget tip on the OpenAI-compatible provider. Phase 4 (trt.23) swaps the catalog *source* to the skill loader; the entry shape is the contract |
-| Heuristic complexity scorer (shadow) | Johnny-trt.50 | in progress (Phase 3) |
+| Heuristic complexity scorer (shadow) | Johnny-trt.50 | **shipped** (2026-06-11) — pure-stdlib `johnny/agent/complexity.py` (ClawRouter pattern port, MIT attribution + per-constant provenance; 7 voice dimensions incl. the dynamic catalog delegate-prior; EN+RU+FI stem sets, left-boundary prefix matching); `RouterGate.run_turn` scores before the triage await and stashes the 4-key verdict under `raw_output.complexity_shadow` (one debug log line; scorer failure → key absent, turn untouched); first 86-turn agreement matrix in `.validation/Johnny-trt.50/05-agreement-matrix.md` (summary in §4) — catalog dim fired 32% on delegated vs 4% on silent turns, trt.51 fast-path **no-go** on the 3B router; the SIMPLE×delegate cell (12 turns, greetings delegated) is trt.53's quantified evidence |
 | Delegate restraint + contextual LLM-authored acks | Johnny-trt.53 | planned (Phase 3, bug — live over-delegation + canned `DEFAULT_DELEGATE_ACK`) |
 | Decision-pipeline observability (full chain incl. spoken text) | Johnny-trt.54 | planned (Phase 3, bug — say-path `final_text`/history gap) |
 | Phase 3 capstone (parity + INV-1 + delegated turn) | Johnny-trt.21 | planned (Phase 3) |
 | Executor, tools/skills, task events | Johnny-trt.22–26, .35 | planned (Phase 4) |
+| Capability-aware catalog (availability + honest declines) | Johnny-trt.55 | planned (Phase 4) |
 | Speech queue + re-entry + status query | Johnny-trt.27–30 | planned (Phase 5) |
 | Per-agent model role slots (schema) | Johnny-trt.41 | planned (Phase 6) |
 | Role-based provider resolution + runtime fallback | Johnny-trt.42 | planned (Phase 6) |
@@ -245,5 +287,5 @@ separately replay-gated:
 | Deferred: speculative-parallel router | Johnny-trt.20 | deferred spike |
 
 Keeping this file current is acceptance criteria on trt.50, trt.51, trt.52, trt.53,
-trt.54 and part of the trt.34 docs capstone (cross-link with PIPELINE.md, flip
-statuses to shipped).
+trt.54, trt.55 and part of the trt.34 docs capstone (cross-link with PIPELINE.md,
+flip statuses to shipped).
