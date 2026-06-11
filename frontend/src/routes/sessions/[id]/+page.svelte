@@ -753,10 +753,11 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 			typeof ev.matched_allowed_reply === 'string'
 				? ev.matched_allowed_reply
 				: null;
-		// A correction (the trt.53 failed-task walk-back) is session-scoped
-		// speech bound to NO turn — it must not stamp any decision's final text
-		// (Johnny-trt.54); it only lands in the chat below.
-		if (kind !== 'correction') {
+		// A correction (the trt.53 failed-task walk-back) and a task_result
+		// (the trt.28 spoken result delivery) are session-scoped speech bound
+		// to NO turn — they must not stamp any decision's final text
+		// (Johnny-trt.54); they only land in the chat below.
+		if (kind !== 'correction' && kind !== 'task_result') {
 			// Prefer the exact turn the event names (Johnny-trt.54); fall back to
 			// the oldest still-pending decision for events without a turn id.
 			const turnId = typeof ev.turn_id === 'number' ? ev.turn_id : null;
@@ -822,8 +823,10 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 		void autoScrollTranscript();
 		void loadTimings();
 		// A delegate ack means a fresh agent_tasks row exists (row-before-ack);
-		// refresh the detail so the turn chain links it (Johnny-trt.54).
-		if (kind === 'ack' || kind === 'correction') {
+		// refresh the detail so the turn chain links it (Johnny-trt.54). Task
+		// speech (correction / spoken result, Johnny-trt.28) refreshes too so
+		// the tasks panel + utterance list pick up the settled/delivered row.
+		if (kind === 'ack' || kind === 'correction' || kind === 'task_result') {
 			refreshDetailQuietly();
 		}
 	}

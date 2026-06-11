@@ -162,9 +162,10 @@ export interface AgentSpokeEvent extends BaseEnvelope {
 	// GET /sessions/{id}/audio/{audio_file}; absent/null when capture is off.
 	audio_file?: string | null;
 	// Which speech path produced the utterance (Johnny-trt.54): 'reply'
-	// (generated answer), 'ack' (delegate ack), 'status' (status stub), or
-	// 'correction' (the trt.53 failed-task walk-back — bound to NO turn; the
-	// UI must not stamp any decision's final text with it). Absent on events
+	// (generated answer), 'ack' (delegate ack), 'status' (status stub),
+	// 'correction' (the trt.53 failed-task walk-back), or 'task_result' (the
+	// trt.28 spoken result delivery). The last two are bound to NO turn; the
+	// UI must not stamp any decision's final text with them. Absent on events
 	// from emitters that predate the field — treat as 'reply'.
 	kind?: string;
 	// Durable int turn id of the turn that owns this speech (same value the

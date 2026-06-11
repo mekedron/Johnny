@@ -457,9 +457,10 @@ def _delegate_ack_from_raw(raw_output: dict[str, Any]) -> str | None:
 
 
 # ``AgentSpoke.kind`` values whose utterance is bound to a turn and stamps the
-# decision row's ``final_text`` (INV-2). ``correction`` is deliberately absent:
-# the trt.53 failed-task walk-back is session-scoped speech bound to no turn —
-# it gets an ``agent_utterances`` row (so the chat history shows it exactly as
+# decision row's ``final_text`` (INV-2). ``correction`` (the trt.53 failed-task
+# walk-back) and ``task_result`` (the trt.28 spoken result delivery) are
+# deliberately absent: both are session-scoped speech bound to no turn — they
+# get an ``agent_utterances`` row (so the chat history shows them exactly as
 # spoken, Johnny-trt.54) but must never rewrite any turn's canonical text.
 TURN_BOUND_SPOKEN_KINDS = frozenset({"reply", "ack", "status"})
 

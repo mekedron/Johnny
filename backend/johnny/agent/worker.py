@@ -46,6 +46,7 @@ from johnny.agent.dispatch import AGENT_NAME
 from johnny.agent.job_config import SessionJobConfig
 from johnny.agent.job_session import build_agent_runtime
 from johnny.agent.session import build_agent_session, load_vad
+from johnny.agent.task_wiring import attach_task_speech_wiring
 
 if TYPE_CHECKING:
     from livekit import rtc
@@ -134,6 +135,12 @@ async def entrypoint(ctx: JobContext) -> None:
 
     await ctx.connect()
     await session.start(agent=runtime.agent, room=ctx.room)
+    # Phase-5 speech wiring (Johnny-trt.28): the task-event listener + gated
+    # result delivery need the live session (say / current_speech /
+    # user_state_changed), so they attach right after start — the
+    # approval-coordinator placement. No-op for non-delegating runtimes;
+    # torn down by runtime.aclose via the shutdown callback above.
+    attach_task_speech_wiring(runtime, session)
     _install_empty_room_shutdown(ctx, session_id)
     logger.info(
         "agent worker: session=%s started; agent joined room=%s",

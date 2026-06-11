@@ -295,14 +295,16 @@ class AgentSpoke:
 
     ``kind`` names which speech path produced the utterance (Johnny-trt.54):
     ``"reply"`` (the answer pipeline's generated reply), ``"ack"`` (a delegate
-    turn's say()-path ack), ``"status"`` (the status say()-path reply), or
-    ``"correction"`` (the trt.53 out-of-band failed-task walk-back — bound to
-    **no** turn, so the subscriber must not stamp any decision row's
-    ``final_text`` with it). ``turn_id`` is the durable int turn id (the same
-    value the turn's :class:`TurnTerminal` / :class:`RouterDecisionMade`
-    carry) so the subscriber stamps the *exact* turn's decision row instead
-    of a most-recent scan; ``None`` for unbound speech (corrections) and for
-    emitters that predate the field (subscriber falls back to the scan).
+    turn's say()-path ack), ``"status"`` (the status say()-path reply),
+    ``"correction"`` (the trt.53 out-of-band failed-task walk-back), or
+    ``"task_result"`` (the trt.28 out-of-band spoken result delivery). The
+    last two are bound to **no** turn, so the subscriber must not stamp any
+    decision row's ``final_text`` with them. ``turn_id`` is the durable int
+    turn id (the same value the turn's :class:`TurnTerminal` /
+    :class:`RouterDecisionMade` carry) so the subscriber stamps the *exact*
+    turn's decision row instead of a most-recent scan; ``None`` for unbound
+    speech (corrections, task results) and for emitters that predate the
+    field (subscriber falls back to the scan).
 
     ``interrupted`` (Johnny-trt.58) marks speech a barge-in cut mid-utterance:
     ``text`` then carries the *partial* actually delivered — the caption

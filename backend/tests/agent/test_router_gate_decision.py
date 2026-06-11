@@ -2528,3 +2528,127 @@ async def test_wait_recent_say_done_contains_playout_errors() -> None:
     gate, _emitter, _router = _make_gate()
     gate._last_say_handle = cast(SpeechHandle, _PlayoutHandle(raises=True))
     await asyncio.wait_for(gate.wait_recent_say_done(), timeout=1)
+
+
+# --------------------------------------------------------------------------- #
+# RouterGate.idle — the Phase-5 delivery gating signal (Johnny-trt.28)        #
+# --------------------------------------------------------------------------- #
+
+
+async def test_idle_true_on_a_fresh_gate() -> None:
+    gate, _emitter, _router = _make_gate(
+        [{"should_speak": False, "confidence": 0.9, "reason": "quiet"}]
+    )
+    assert gate.idle is True
+
+
+async def test_idle_false_while_the_router_is_deciding() -> None:
+    """The turn opens synchronously at gate entry, so mid-decision reads busy."""
+    sampled: list[bool] = []
+
+    class _SamplingRouter(_FakeRouterLLM):
+        async def chat(self, *args: Any, **kwargs: Any) -> Any:
+            sampled.append(gate.idle)
+            return await super().chat(*args, **kwargs)
+
+    emitter = _RecordingEmitter()
+    ledger = TurnLedger(emitter)
+    router = _SamplingRouter([{"should_speak": False, "confidence": 0.9, "reason": "quiet"}])
+    gate = RouterGate(router, config=RouterGateConfig(), ledger=ledger)
+    with pytest.raises(StopResponse):
+        await gate.run_turn(ChatContext.empty(), _user_msg("anyone there?"))
+    assert sampled == [False]
+    # The declined turn terminalized inline — quiescent again.
+    assert gate.idle is True
+
+
+async def test_idle_tracks_speak_turn_until_reply_done() -> None:
+    gate, _emitter, _router = _make_gate(
+        [{"should_speak": True, "confidence": 0.9, "reason": "addressed"}]
+    )
+    await gate.run_turn(ChatContext.empty(), _user_msg("Johnny, hello?"))
+    assert gate.idle is False  # decided SPEAK; the reply speech is pending
+    handle = _handle(chat_items=["assistant item"])
+    gate.bind_reply(handle)
+    assert gate.idle is False  # reply playing
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+    assert gate.idle is True
+
+
+async def test_idle_tracks_delegate_ack_until_say_done() -> None:
+    h = _TaskGateHarness([_delegate_decision()])
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("Johnny, check my calendar"))
+    assert h.gate.idle is False  # the ack's playout owns the turn's terminal
+    h.say.handles[0].fire_done()
+    await h.drain()
+    assert h.gate.idle is True
+
+
+async def test_idle_false_while_a_turn_is_parked_for_approval() -> None:
+    emitter = _RecordingEmitter()
+    ledger = TurnLedger(emitter)
+    gate = RouterGate(_FakeRouterLLM([]), config=RouterGateConfig(), ledger=ledger)
+    ledger.gate_tracker("t-parked")
+    assert gate.idle is False  # open turn
+    assert ledger.park("t-parked") is True
+    assert gate.idle is False  # parked: the human wait still owns the floor
+    assert await ledger.resolve(
+        "t-parked", terminal_state="no_reply", no_reply_reason="approval_rejected"
+    )
+    assert gate.idle is True
+
+
+# --------------------------------------------------------------------------- #
+# speak_task_result — Phase-5 out-of-band result delivery (Johnny-trt.28)     #
+# --------------------------------------------------------------------------- #
+
+
+async def test_speak_task_result_says_verbatim_and_records_task_result_kind() -> None:
+    h = _TaskGateHarness([])
+    handle = h.gate.speak_task_result("You have 3 events this week.")
+    assert handle is not None
+    assert h.say.texts == ["You have 3 events this week."]
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await h.drain()
+    assert h.obs.spoke_calls == [("You have 3 events this week.", None, "task_result")]
+    assert h.obs.spoke_interrupted == [False]
+    # No terminal: this speech owns no turn (the delegating turn's ack
+    # settled INV-1 long ago).
+    assert h.emitter.records == []
+
+
+async def test_speak_task_result_interrupted_keeps_caption_partial() -> None:
+    h = _TaskGateHarness([])
+    handle = h.gate.speak_task_result("First sentence. Second sentence.")
+    assert handle is not None
+    h.gate.note_speech_caption("First sentence.", 0)
+    fake = cast(_FakeSpeechHandle, handle)
+    fake.interrupted = True
+    fake.fire_done()
+    await h.drain()
+    assert h.obs.spoke_calls == [("First sentence.", None, "task_result")]
+    assert h.obs.spoke_interrupted == [True]
+    assert h.emitter.records == []
+
+
+async def test_speak_task_result_interrupted_without_captions_records_nothing() -> None:
+    h = _TaskGateHarness([])
+    handle = h.gate.speak_task_result("Never heard aloud.")
+    assert handle is not None
+    fake = cast(_FakeSpeechHandle, handle)
+    fake.interrupted = True
+    fake.fire_done()
+    await h.drain()
+    assert h.obs.spoke_calls == []
+
+
+async def test_speak_task_result_without_say_returns_none() -> None:
+    h = _TaskGateHarness([], attach_say=False)
+    assert h.gate.speak_task_result("text") is None
+
+
+async def test_speak_task_result_say_raising_returns_none() -> None:
+    h = _TaskGateHarness([], say_raises=RuntimeError("session draining"))
+    assert h.gate.speak_task_result("text") is None

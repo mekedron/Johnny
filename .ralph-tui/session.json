@@ -3,10 +3,10 @@
   "sessionId": "d4e0eaf8-2f04-47a7-b280-1ca8b39424b6",
   "status": "running",
   "startedAt": "2026-06-11T21:01:32.322Z",
-  "updatedAt": "2026-06-11T21:52:10.184Z",
-  "currentIteration": 1,
+  "updatedAt": "2026-06-11T22:52:26.569Z",
+  "currentIteration": 2,
   "maxIterations": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 2,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -189,8 +189,8 @@
       {
         "id": "Johnny-trt.27",
         "title": "[BUILD] Phase 5: Speech queue pure core",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.28",
@@ -432,6 +432,16 @@
       "durationMs": 2032921,
       "startedAt": "2026-06-11T21:02:14.140Z",
       "endedAt": "2026-06-11T21:36:07.061Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "Johnny-trt.27",
+      "taskTitle": "[BUILD] Phase 5: Speech queue pure core",
+      "taskCompleted": true,
+      "durationMs": 923440,
+      "startedAt": "2026-06-11T21:36:45.757Z",
+      "endedAt": "2026-06-11T21:52:09.197Z"
     }
   ],
   "skippedTaskIds": [],

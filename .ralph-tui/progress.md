@@ -24,7 +24,20 @@ after each iteration and it's included in prompts for context.
   delegate rate can run 0/8; an explicit in-conversation instruction naming the
   task kind flips it reliably. Check `agent_decisions.raw_output` before
   suspecting the gate/catalog (gate degrades stamp markers next to
-  CAPABILITY_GAP_KEY; their absence = the model's own verdict).
+  CAPABILITY_GAP_KEY; their absence = the model's own verdict). Refinement
+  (trt.28): the explicit phrasing delegates ~4/4 on the FIRST turn of a fresh
+  session and ~0/5 on later turns once fabricated replies pollute the context —
+  for delegate-path validation, restart the session instead of retrying in it.
+- **Sub-second browser choreography (interrupt-while-speaking etc.) must run
+  in-page, not via MCP uid clicks** (proven trt.28): after a re-render,
+  `mcp__chrome-devtools__click` on a snapshot uid can report success while the
+  real handler never fires (session 49: two "successful" Interrupt clicks, zero
+  `/stop` POSTs). Write one `evaluate_script` that polls `window.__allFrames`
+  for the trigger frame, finds the live button by
+  `[...document.querySelectorAll('button')].find(b => b.textContent.trim() === '...')`,
+  clicks it, and waits for the consequence frame — millisecond-accurate and
+  stale-proof. Same for typing: set `textarea.value` via the prototype setter +
+  `dispatchEvent(new Event('input', {bubbles:true}))`, then click Send.
 
 ---
 
@@ -95,4 +108,62 @@ after each iteration and it's included in prompts for context.
     `item.state is ItemState.QUEUED` then later `is ItemState.DROPPED` after a
     mutating call → comparison-overlap error; read the state into a local
     before the first assert.
+---
+
+## 2026-06-12 - Johnny-trt.28
+- Phase-5 queue wiring shipped — the session-4 silence gap is closed live: a
+  delegated task's speech-ready result is now SPOKEN at a conversational
+  boundary. Three new pieces in task_wiring.py (ApprovalCoordinator wiring
+  pattern): TaskEventListener (per-session push consumer of
+  johnny.tasks.<bot_session_id>; subscribe → coordinator.attach_remote_listener
+  → reconcile_in_flight → frame loop; drop = detach + loud log + backoff
+  resubscribe, so a Redis-only outage falls back to the Phase-4 poll watcher
+  for NEW begins and reconciles missed settles on reconnect),
+  TaskSpeechDeliverer (0.15s tick loop; instantaneous predicate =
+  current_speech None ∧ user not speaking (user_state_changed) ∧ RouterGate.idle;
+  time predicate = the queue's 1.2s silence grace fed by sampled speech edges;
+  delivery via gate.speak_task_result; own delivery reported as a speech onset
+  so back-to-back results space out; per-tick sweep so gated-out expiries fire
+  TaskResultExpired promptly), and attach_task_speech_wiring (one factory, both
+  surfaces: worker.py after session.start, browser_session.start; stored on
+  AgentRuntime.task_speech, closed FIRST in aclose). TaskCoordinator grew the
+  in-memory registry trt.29 renders: TaskRegistryEntry seeded by begin(),
+  note_task_running/note_task_settled (first-observer-wins chokepoint — the
+  resolver, the watcher, the listener, and reconcile all route through it, so
+  the trt.53 correction/RESULT enqueue fire exactly once), mark_result_delivered
+  (the on_spoken hook, incl. the trt.29 consumed-into-answer path),
+  report_remote_failure (listener-path trt.53). RouterGate gained the read-only
+  idle property (ledger open+parked turns + active/pending replies) and
+  speak_task_result (say + AgentSpoke kind="task_result" turn_id=None with the
+  trt.58 interrupted-partial discipline). New AgentSpoke kind "task_result"
+  excluded from final_text stamping (subscriber allowlist untouched; frontend
+  sessions/[id] exclusion + refresh).
+- Files changed: backend/johnny/agent/{tasks,task_wiring,router_gate,
+  job_session,worker,browser_session,observability}.py,
+  backend/johnny/voice_pipeline/events.py,
+  backend/app/services/session_status_subscriber.py (comment),
+  frontend/src/lib/sessionEvents.ts, frontend/src/routes/sessions/[id]/+page.svelte,
+  backend/tests/agent/{test_tasks,test_task_wiring,test_router_gate_decision}.py.
+  Quality: 1047 passed (agent pkg + WS integration), scoped mypy strict + ruff
+  clean, svelte-check 0/0, vitest 135, task_wiring import pulls zero livekit.
+  Browser validation .validation/Johnny-trt.28/ (3 live runs, sessions 47-50).
+- **Learnings:**
+  - Live timing proof: the result was ready 2.47s BEFORE the ack finished and
+    was held; delivery started 1.255s/1.252s/1.223s after the falling edge
+    across three runs (grace 1.2s + ≤1 tick) — the predicate matrix behaves
+    identically in the real stack and the unit harness.
+  - session.say() speeches surface as agent_speech_partial captions (the
+    tts_node tee) — the WS frame stream is enough to choreograph and assert
+    delivery/interrupt behavior without any audio inspection.
+  - redis-cli PUBSUB CHANNELS "johnny.tasks.*" is the cheapest live probe for
+    listener attach/teardown (johnny.tasks.<id> appears on start, gone after
+    End session).
+  - The watcher-vs-listener race needed a registry-level first-wins chokepoint,
+    not begin-time suppression alone: tasks begun BEFORE the listener attaches
+    have watchers, and the listener sees their settles too — both observers
+    route through note_task_settled so only one fires side effects.
+  - attach_task_speech_wiring reads the runtime via getattr (the
+    resolve_browser_turn_detector duck-typing discipline) — the worker/browser
+    test fakes model only the fields they exercise and crashed on a direct
+    attribute read.
 ---

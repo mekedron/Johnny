@@ -1215,6 +1215,89 @@ class RouterGate:
         if self._record_spoke is not None:
             await self._record_spoke(text, turn_id=None, kind="correction")
 
+    def speak_task_result(self, text: str) -> SpeechHandle | None:
+        """Speak one delivered task result out of band (Johnny-trt.28).
+
+        The Phase-5 delivery loop's say() seam: pre-composed ``result_text``
+        verbatim, no LLM hop, and **no** :meth:`bind_reply` interaction
+        (``say()``'s ``speech_created`` fires with ``source="say"``, which the
+        on_enter listener never routes here). Session-scoped speech exactly
+        like the trt.53 correction: the delegating turn's terminal was its ack
+        long ago, so this speech owns no terminal and binds to no turn — but
+        it IS recorded (Johnny-trt.54/trt.60): the done-callback publishes an
+        ``AgentSpoke(kind="task_result", turn_id=None)`` so the spoken result
+        lands in ``agent_utterances`` and the chat history exactly as spoken
+        (the INV-2 analogue for results: spoken == row's ``result_text`` ==
+        history), with the interrupted-partial discipline of the other speech
+        paths (Johnny-trt.58).
+
+        Returns the :class:`SpeechHandle` so the delivery loop can await the
+        playout and observe ``interrupted`` (the requeue-once budget lives in
+        the queue, not here). ``None`` — logged — when ``say()`` is missing or
+        raises; the caller degrades to UI-only delivery, never raises into the
+        loop. No pre-say buffer discard, same reason as the correction: this
+        speech queues behind whatever is playing and must not eat its
+        segments.
+        """
+        say = self._say
+        if say is None:
+            logger.warning(
+                "agent.router.gate: task result ready but say() is not attached — "
+                "not spoken (UI-only)"
+            )
+            return None
+        try:
+            handle = say(text)
+        except Exception:
+            logger.exception(
+                "agent.router.gate: say() failed for a task result — not spoken (UI-only)"
+            )
+            return None
+        # Results count as "the bot is still talking" for the internal
+        # teardown wait (Johnny-trt.57) just like acks and corrections do.
+        self._last_say_handle = handle
+
+        def _on_done(done_handle: SpeechHandle) -> None:
+            task = asyncio.ensure_future(self._on_task_result_done(done_handle, text))
+            self._reply_tasks.add(task)
+            task.add_done_callback(self._reply_tasks.discard)
+
+        handle.add_done_callback(_on_done)
+        return handle
+
+    async def _on_task_result_done(self, handle: SpeechHandle, text: str) -> None:
+        """Record a delivered task result into history (Johnny-trt.28/trt.54).
+
+        The result-delivery analogue of :meth:`_on_correction_done`: no turn,
+        no terminal, no over-talk accounting — just the ``AgentSpoke`` that
+        makes the spoken result auditable. An interrupted delivery that
+        streamed captions keeps its partial (Johnny-trt.58):
+        ``AgentSpoke(kind="task_result", interrupted=True, turn_id=None)`` —
+        stamping no decision row; cut before the first flush → audio
+        discarded, nothing recorded (the re-queued retry will record the real
+        delivery).
+        """
+        partial = self._captions.take()
+        if handle.interrupted:
+            if partial and self._record_spoke is not None:
+                logger.info(
+                    "agent.router.gate: task result delivery interrupted — partial kept %r",
+                    partial,
+                )
+                await self._record_spoke(
+                    partial, turn_id=None, kind="task_result", interrupted=True
+                )
+                return
+            if self._reply_audio is not None:
+                self._reply_audio.discard_reply()
+            logger.info(
+                "agent.router.gate: task result delivery interrupted before any "
+                "caption flushed — not recorded"
+            )
+            return
+        if self._record_spoke is not None:
+            await self._record_spoke(text, turn_id=None, kind="task_result")
+
     async def _say_with_terminal(
         self,
         tracker: TerminalTracker,
@@ -1429,6 +1512,30 @@ class RouterGate:
         "is it still playing" check is the session's ``current_speech``.
         """
         return self._active_reply
+
+    @property
+    def idle(self) -> bool:
+        """No turn anywhere between gate entry and its terminal (Johnny-trt.28).
+
+        The read-only conversational-quiescence signal the Phase-5 speech
+        delivery loop gates on: a queued task result must not be spoken while
+        the router is still deciding a turn, a decided SPEAK turn awaits its
+        reply speech, a reply/ack is playing, or a turn sits parked for human
+        approval — in every one of those states the floor is spoken for even
+        when no audio is audible *right now*. Derived from the ledger (a turn
+        is opened synchronously at gate entry and stays open until its single
+        terminal, so ``open_turns`` + ``parked_turns`` span exactly that
+        window) plus the reply-binding state as belt-and-suspenders. Speech
+        bound to **no** turn (a trt.53 correction, a delivered result) keeps
+        the gate idle by design — the wiring's ``session.current_speech``
+        check covers audibility.
+        """
+        return (
+            self._active_reply is None
+            and not self._pending_speak_turns
+            and not self._ledger.open_turns
+            and not self._ledger.parked_turns
+        )
 
     def note_coercion_no_match(self) -> None:
         """Flag the active reply's turn as an allowed-reply coercion no-match (Johnny-5ag).

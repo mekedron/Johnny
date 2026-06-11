@@ -237,6 +237,14 @@ class AgentRuntime:
     # in-process meeting.leave / session.end runners act through. ``None``
     # whenever the runtime has no task pieces.
     internal_tools: InternalToolContext | None = None
+    # Phase-5 speech-queue wiring (Johnny-trt.28): the task-event listener +
+    # gated delivery loop + queue, attached by the session surface (worker /
+    # browser session) right after ``session.start`` via
+    # :func:`johnny.agent.task_wiring.attach_task_speech_wiring` — it needs
+    # the live ``AgentSession``, the same reason the approval coordinator
+    # attaches late. ``None`` until attached (and forever on non-delegating
+    # runtimes); torn down first in :meth:`aclose`.
+    task_speech: Any = None
     _sandbox_client: SandboxClient | None = None
     _task_wake: Any = None
     _db_session: Session | None = None
@@ -290,6 +298,16 @@ class AgentRuntime:
                 await self.speech_interim_forwarder.aclose()
             except Exception:
                 logger.exception("agent runtime: speech interim forwarder close failed for %s", sid)
+        # Phase-5 speech wiring first (Johnny-trt.28): stop the task-event
+        # listener + delivery loop and settle every undelivered speech item
+        # exactly once BEFORE the coordinator (whose registry the callbacks
+        # touch) and the event bus (whose publish the non-teardown drops use)
+        # go away.
+        if self.task_speech is not None:
+            try:
+                await self.task_speech.aclose()
+            except Exception:
+                logger.exception("agent runtime: task speech wiring close failed for %s", sid)
         # Drain in-flight task resolvers BEFORE the DB session closes below —
         # a cancelled resolver marks its row ``cancelled`` through the sink.
         if self.task_coordinator is not None:

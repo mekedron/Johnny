@@ -125,9 +125,11 @@ RecordSuggested = Callable[[RouterDecision, str], Awaitable[None]]
 :class:`RecordDecision`'s positional pair; the ``suggested`` decision row is the
 ``RouterDecisionMade`` the gate already emitted, so no decision id is needed here."""
 
-SpokenKind = Literal["reply", "ack", "status", "correction"]
+SpokenKind = Literal["reply", "ack", "status", "correction", "task_result"]
 """Which speech path produced an utterance (Johnny-trt.54) — see
-:class:`~johnny.voice_pipeline.events.AgentSpoke.kind`."""
+:class:`~johnny.voice_pipeline.events.AgentSpoke.kind`. ``task_result`` is the
+Phase-5 out-of-band result delivery (Johnny-trt.28): bound to no turn, exactly
+like ``correction``."""
 
 
 class RecordSpoke(Protocol):

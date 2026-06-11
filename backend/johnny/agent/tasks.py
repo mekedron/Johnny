@@ -31,8 +31,13 @@ is a promise, and this module is what keeps it honest:
    watcher polls the row until it settles so a ``failed`` settle still fires
    the Johnny-trt.53 no-dead-promises correction (the gate's spoken
    walk-back) even though another process owns the execution; it never
-   writes the row. The Phase-5 task-event listener (Johnny-trt.28) replaces
-   the watcher with a push subscription on ``johnny.tasks.<session>``.
+   writes the row. With the Phase-5 task-event listener attached
+   (Johnny-trt.28, :meth:`TaskCoordinator.attach_remote_listener`) the
+   watcher is not spawned at all — the listener observes settles push-shaped
+   on ``johnny.tasks.<session>``; the poll watcher remains the fallback for
+   assemblies without a live subscription (no redis). Every observation
+   funnels through the in-memory **task registry** (Johnny-trt.28) whose
+   first-observer-wins settle chokepoint keeps side effects exactly-once.
 
 Like :mod:`johnny.agent.gate` and :mod:`johnny.agent.approval`, this module is
 deliberately ``livekit``-free, ``sqlalchemy``-free and ``redis``-free (stdlib
@@ -48,6 +53,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
@@ -159,6 +165,53 @@ class TaskSnapshot:
     status: TaskStatus
     result_text: str | None = None
     error: str | None = None
+
+
+TaskOrigin = Literal["session", "worker"]
+"""Which process executes a task (the Johnny-trt.24 locality split): the
+session's in-process resolver (internal tools) or the worker executor pass."""
+
+
+@dataclass(slots=True)
+class TaskRegistryEntry:
+    """One task's live in-memory view for this session (Johnny-trt.28).
+
+    Seeded by :meth:`TaskCoordinator.begin` the moment the durable row exists
+    and updated as settles are *observed*: by the in-process resolver for
+    session-local kinds, and by the Phase-5 task-event listener (push on
+    ``johnny.tasks.<session>``) or the Phase-4 watcher (poll) for worker-owned
+    kinds. This is the no-DB-read registry the status query renders
+    (Johnny-trt.29) and the speech-delivery wiring consults; the
+    ``agent_tasks`` row stays the durable truth — the registry only mirrors
+    what this session has *seen*, which is exactly what it can speak about.
+
+    ``queued_at`` / ``settled_at`` are ``time.monotonic()``-domain floats (the
+    coordinator's injected clock) so the status query can say "about 20
+    seconds in" without epoch math. ``delivered`` flips once the result was
+    spoken aloud — or consumed into a direct answer (the session-4
+    hallucination seam, trt.28/29) — so a completed-but-undelivered result is
+    recognisable: the state where a follow-up ask must be answered from this
+    entry instead of letting the answer model improvise. Queue-owned
+    bookkeeping like :class:`~johnny.agent.speech_queue.SpeechItem`: callers
+    read entries, only the coordinator writes them.
+    """
+
+    task_id: int
+    kind: str
+    origin: TaskOrigin
+    queued_at: float
+    ack_text: str = ""
+    turn_id: int | None = None
+    status: TaskStatus = "queued"
+    result_text: str = ""
+    error: str = ""
+    settled_at: float | None = None
+    delivered: bool = False
+
+    @property
+    def terminal(self) -> bool:
+        """True once the task reached a status it never leaves."""
+        return self.status in TERMINAL_TASK_STATUSES
 
 
 class TaskSink(ABC):
@@ -388,6 +441,7 @@ class TaskCoordinator:
         runs_in_session: RunsInSession | None = None,
         watch_poll_interval_s: float = WATCH_POLL_INTERVAL_S,
         watch_timeout_s: float = WATCH_TIMEOUT_S,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._sink = sink
         self._executor = executor
@@ -412,6 +466,20 @@ class TaskCoordinator:
         # resolvers: they own no row, so aclose() must not spend its trt.57
         # drain grace on them — they are cancelled immediately at teardown.
         self._watchers: set[asyncio.Task[None]] = set()
+        # The in-memory task registry (Johnny-trt.28): one entry per task this
+        # session has begun (or heard about over the push channel), in insert
+        # order. Seeded by begin(), updated through the note_task_* chokepoints
+        # by whichever observer notices first — resolver, watcher, or the
+        # Phase-5 task-event listener. The trt.29 status query renders it; the
+        # speech-delivery wiring marks results delivered on it. ``monotonic``
+        # is injectable so registry-timing tests run deterministic.
+        self._monotonic = monotonic
+        self._registry: dict[int, TaskRegistryEntry] = {}
+        # Set while the Phase-5 push listener (Johnny-trt.28) holds a live
+        # subscription on ``johnny.tasks.<session>``: begin() then spawns no
+        # poll watcher for worker-owned kinds — the listener observes settles
+        # push-shaped, and its resubscribe reconcile covers dropped frames.
+        self._remote_listener_active = False
 
     def attach_failure_reporter(self, report: ReportTaskFailed) -> None:
         """Attach the failed-task report seam after construction (Johnny-trt.53).
@@ -463,13 +531,34 @@ class TaskCoordinator:
             return None
 
         queued = QueuedTask(task_id=task_id, spec=spec)
+        in_session = self._runs_in_session is None or self._runs_in_session(spec.kind)
+        # Registry seed (Johnny-trt.28): the in-memory view exists from the
+        # same moment the durable row does, so a status ask landing right
+        # after the ack still finds the task.
+        self._registry[task_id] = TaskRegistryEntry(
+            task_id=task_id,
+            kind=spec.kind,
+            origin="session" if in_session else "worker",
+            queued_at=self._monotonic(),
+            ack_text=spec.ack_text,
+            turn_id=spec.turn_id,
+        )
         await self._safe_publish_queued(queued)
         await self._safe_wake(queued)
 
-        if self._runs_in_session is None or self._runs_in_session(spec.kind):
+        if in_session:
             runner = asyncio.ensure_future(self._run(queued))
             self._tasks.add(runner)
             runner.add_done_callback(self._tasks.discard)
+        elif self._remote_listener_active:
+            # The Phase-5 push listener (Johnny-trt.28) observes worker-owned
+            # settles on ``johnny.tasks.<session>`` — no poll watcher needed.
+            logger.debug(
+                "tasks.begin: task_id=%s kind=%s is worker-owned — push listener "
+                "active, skipping the poll watcher (Johnny-trt.28)",
+                task_id,
+                spec.kind,
+            )
         else:
             watcher = asyncio.ensure_future(self._watch(queued))
             self._watchers.add(watcher)
@@ -520,6 +609,213 @@ class TaskCoordinator:
                 logger.exception("task resolver failed during aclose")
 
     # ------------------------------------------------------------------ #
+    # The in-memory task registry (Johnny-trt.28)                         #
+    # ------------------------------------------------------------------ #
+
+    def attach_remote_listener(self) -> None:
+        """The Phase-5 push listener holds a live subscription (Johnny-trt.28).
+
+        Called by :class:`~johnny.agent.task_wiring.TaskEventListener` once its
+        ``johnny.tasks.<session>`` subscribe succeeded. From here on
+        :meth:`begin` spawns no poll watcher for worker-owned kinds — the
+        listener observes their settles push-shaped (and reconciles from the
+        sink on every resubscribe, so a dropped connection cannot strand an
+        in-flight entry). Idempotent.
+        """
+        self._remote_listener_active = True
+
+    def detach_remote_listener(self) -> None:
+        """The push listener is gone for good (teardown / never recovered).
+
+        Future :meth:`begin` calls fall back to the Phase-4 poll watcher so
+        the trt.53 failure correction stays alive. Tasks begun while the
+        listener was attached keep relying on it (their watchers were never
+        spawned) — that is the documented trt.28 degradation: results stay
+        visible in the UI, turns keep working.
+        """
+        self._remote_listener_active = False
+
+    @property
+    def remote_listener_active(self) -> bool:
+        return self._remote_listener_active
+
+    def registry_snapshot(self) -> tuple[TaskRegistryEntry, ...]:
+        """Every registry entry in begin/first-seen order (Johnny-trt.28/29).
+
+        The trt.29 status query renders this (no DB read on the hot path);
+        the delivery wiring scans it for completed-undelivered results.
+        Entries are live coordinator-owned objects — read, never write.
+        """
+        return tuple(self._registry.values())
+
+    def registry_entry(self, task_id: int) -> TaskRegistryEntry | None:
+        """One registry entry by id (``None`` when this session never saw it)."""
+        return self._registry.get(task_id)
+
+    def note_task_running(
+        self, task_id: int, *, kind: str = "", turn_id: int | None = None
+    ) -> None:
+        """An executor claimed the task (a ``TaskProgress`` frame / poll read).
+
+        Creates a worker-origin entry when the id is unknown (a claim frame
+        for a task this coordinator never began — e.g. an agent process
+        restarted into an existing session) so the registry still tells the
+        truth about what is in flight. A late frame for an already-terminal
+        entry is ignored: a settle never reopens.
+        """
+        entry = self._registry.get(task_id)
+        if entry is None:
+            logger.info(
+                "tasks.registry: claim observed for unknown task_id=%s (kind=%s) — seeding",
+                task_id,
+                kind,
+            )
+            entry = TaskRegistryEntry(
+                task_id=task_id,
+                kind=kind,
+                origin="worker",
+                queued_at=self._monotonic(),
+                turn_id=turn_id,
+            )
+            self._registry[task_id] = entry
+        if entry.terminal:
+            return
+        entry.status = "running"
+
+    def note_task_settled(
+        self,
+        task_id: int,
+        *,
+        status: TaskStatus,
+        kind: str = "",
+        result_text: str = "",
+        error: str = "",
+        turn_id: int | None = None,
+    ) -> TaskRegistryEntry | None:
+        """Record a terminal observation — **first observer wins** (Johnny-trt.28).
+
+        The single chokepoint every settle observation routes through: the
+        in-process resolver, the Phase-4 poll watcher, the Phase-5 push
+        listener, and the listener's resubscribe reconcile. Returns the entry
+        iff *this* call moved it to a terminal status — the caller that wins
+        owns the one-shot side effects (RESULT enqueue for ``done``, the
+        trt.53 correction for ``failed``); a ``None`` means someone else got
+        there first (or ``status`` is not terminal: logged, refused) and the
+        caller must do nothing. The :class:`~johnny.agent.gate.TurnLedger`
+        first-wins discipline applied to task settles, so a watcher racing
+        the listener can never double-speak.
+        """
+        if status not in TERMINAL_TASK_STATUSES:
+            logger.error(
+                "tasks.registry: refusing non-terminal settle %r for task_id=%s",
+                status,
+                task_id,
+            )
+            return None
+        entry = self._registry.get(task_id)
+        if entry is None:
+            logger.info(
+                "tasks.registry: settle observed for unknown task_id=%s (kind=%s) — seeding",
+                task_id,
+                kind,
+            )
+            entry = TaskRegistryEntry(
+                task_id=task_id,
+                kind=kind,
+                origin="worker",
+                queued_at=self._monotonic(),
+                turn_id=turn_id,
+            )
+            self._registry[task_id] = entry
+        if entry.terminal:
+            return None
+        entry.status = status
+        if result_text:
+            entry.result_text = result_text
+        if error:
+            entry.error = error
+        entry.settled_at = self._monotonic()
+        return entry
+
+    def mark_result_delivered(self, task_id: int) -> bool:
+        """The task's result was spoken aloud — or consumed into a direct answer.
+
+        Flipped by the trt.28 delivery wiring from the speech item's
+        ``on_spoken`` callback (which also fires for the trt.29
+        consumed-by-another-path settle, :meth:`SpeechQueue.mark_spoken` on a
+        queued item), so "completed but undelivered" stays a readable registry
+        state. Returns ``False`` for an unknown id (logged).
+        """
+        entry = self._registry.get(task_id)
+        if entry is None:
+            logger.warning(
+                "tasks.registry: mark_result_delivered for unknown task_id=%s", task_id
+            )
+            return False
+        entry.delivered = True
+        return True
+
+    async def report_remote_failure(self, entry: TaskRegistryEntry) -> None:
+        """Speak the trt.53 correction for a remotely-observed ``failed`` settle.
+
+        The push-listener path to the same :data:`ReportTaskFailed` seam the
+        resolver and the watcher use (the gate's honest spoken walk-back):
+        rebuilds the seam's ``QueuedTask``/:class:`TaskResult` shape from the
+        registry entry. Call only with an entry :meth:`note_task_settled`
+        returned — first-wins already guaranteed exactly-once.
+        """
+        queued = QueuedTask(
+            task_id=entry.task_id,
+            spec=TaskSpec(kind=entry.kind, ack_text=entry.ack_text, turn_id=entry.turn_id),
+        )
+        result = TaskResult(
+            status="failed",
+            result_text=entry.result_text or executor_error_text(entry.kind),
+            error=entry.error,
+        )
+        await self._safe_report_failed(queued, result)
+
+    async def reconcile_in_flight(self) -> list[TaskRegistryEntry]:
+        """Re-read every non-terminal worker-owned entry from the sink.
+
+        The push listener calls this after every (re)subscribe: pub/sub has
+        no replay, so a settle published while the connection was down is
+        gone — but the durable row is not. Each terminal row observed here
+        routes through :meth:`note_task_settled`; the returned entries are
+        the ones *this* reconcile settled (the caller delivers them exactly
+        like fresh frames). Sink read failures skip the entry (the next
+        reconcile retries); session-origin entries are skipped outright —
+        their in-process resolver is the same-process authority.
+        """
+        settled: list[TaskRegistryEntry] = []
+        for entry in [
+            e for e in self._registry.values() if e.origin == "worker" and not e.terminal
+        ]:
+            try:
+                snapshot = await self._sink.fetch_status(entry.task_id)
+            except Exception:
+                logger.exception(
+                    "tasks.reconcile: fetch_status failed for task_id=%s", entry.task_id
+                )
+                continue
+            if snapshot is None:
+                continue
+            if snapshot.status == "running":
+                self.note_task_running(entry.task_id, kind=entry.kind)
+                continue
+            if snapshot.status in TERMINAL_TASK_STATUSES:
+                won = self.note_task_settled(
+                    entry.task_id,
+                    status=snapshot.status,
+                    kind=entry.kind,
+                    result_text=snapshot.result_text or "",
+                    error=snapshot.error or "",
+                )
+                if won is not None:
+                    settled.append(won)
+        return settled
+
+    # ------------------------------------------------------------------ #
     # The out-of-band resolver                                            #
     # ------------------------------------------------------------------ #
 
@@ -540,6 +836,7 @@ class TaskCoordinator:
         is queryable. ``cancelled`` announces nothing.
         """
         await self._safe_update(queued.task_id, "running", attempts=1)
+        self.note_task_running(queued.task_id, kind=queued.spec.kind)
         try:
             result = await self._executor(queued)
         except asyncio.CancelledError:
@@ -549,6 +846,12 @@ class TaskCoordinator:
                 queued.task_id,
                 "cancelled",
                 result_text=f"The {queued.spec.kind} task was cancelled when the session ended.",
+                error="cancelled before completion (session teardown)",
+            )
+            self.note_task_settled(
+                queued.task_id,
+                status="cancelled",
+                kind=queued.spec.kind,
                 error="cancelled before completion (session teardown)",
             )
             raise
@@ -566,6 +869,13 @@ class TaskCoordinator:
             await self._safe_update(
                 queued.task_id,
                 "failed",
+                result_text=result.result_text,
+                error=result.error,
+            )
+            self.note_task_settled(
+                queued.task_id,
+                status="failed",
+                kind=queued.spec.kind,
                 result_text=result.result_text,
                 error=result.error,
             )
@@ -590,6 +900,13 @@ class TaskCoordinator:
             result_json=result.result_json,
             error=result.error or None,
         )
+        self.note_task_settled(
+            queued.task_id,
+            status=status,
+            kind=queued.spec.kind,
+            result_text=result.result_text,
+            error=result.error,
+        )
         await self._safe_publish_completed(queued, status, result)
         if status == "failed":
             await self._safe_report_failed(queued, result)
@@ -608,8 +925,11 @@ class TaskCoordinator:
         session share today. ``done`` / ``cancelled`` / ``expired`` end the
         watch silently (result delivery is the Phase-5 queue's job). The
         watcher NEVER writes the row — including on cancellation at session
-        teardown, when the worker simply keeps running without us. Replaced
-        by the Johnny-trt.28 push listener on ``johnny.tasks.<session>``.
+        teardown, when the worker simply keeps running without us. Since
+        Johnny-trt.28 it is spawned only when no push listener is attached
+        (see :meth:`attach_remote_listener`), and every terminal it observes
+        funnels through :meth:`note_task_settled` so a watcher racing a
+        late-attached listener can never double-fire the correction.
         """
         deadline = asyncio.get_running_loop().time() + self._watch_timeout_s
         fetch_failures = 0
@@ -632,16 +952,29 @@ class TaskCoordinator:
                     return
             else:
                 fetch_failures = 0
-                if snapshot.status == "failed":
-                    result = TaskResult(
-                        status="failed",
-                        result_text=snapshot.result_text
-                        or executor_error_text(queued.spec.kind),
-                        error=snapshot.error or "",
-                    )
-                    await self._safe_report_failed(queued, result)
-                    return
+                if snapshot.status == "running":
+                    self.note_task_running(queued.task_id, kind=queued.spec.kind)
                 if snapshot.status in TERMINAL_TASK_STATUSES:
+                    # First-observer-wins through the registry (Johnny-trt.28):
+                    # when the push listener already settled this entry, the
+                    # watcher owes no side effect — the correction must not
+                    # speak twice.
+                    entry = self.note_task_settled(
+                        queued.task_id,
+                        status=snapshot.status,
+                        kind=queued.spec.kind,
+                        result_text=snapshot.result_text or "",
+                        error=snapshot.error or "",
+                        turn_id=queued.spec.turn_id,
+                    )
+                    if entry is not None and snapshot.status == "failed":
+                        result = TaskResult(
+                            status="failed",
+                            result_text=snapshot.result_text
+                            or executor_error_text(queued.spec.kind),
+                            error=snapshot.error or "",
+                        )
+                        await self._safe_report_failed(queued, result)
                     return
             if asyncio.get_running_loop().time() >= deadline:
                 logger.warning(
@@ -721,7 +1054,9 @@ __all__ = [
     "RunsInSession",
     "TaskCoordinator",
     "TaskExecutor",
+    "TaskOrigin",
     "TaskRecord",
+    "TaskRegistryEntry",
     "TaskResult",
     "TaskSink",
     "TaskSnapshot",

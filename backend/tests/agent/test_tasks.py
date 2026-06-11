@@ -982,3 +982,247 @@ async def test_in_memory_sink_fetch_status_reads_current_row() -> None:
     assert snapshot.result_text == "say this"
     assert snapshot.error == "why"
     assert await sink.fetch_status(9999) is None
+
+
+# --- the in-memory task registry (Johnny-trt.28) -------------------------------
+
+
+def _registry_coordinator(
+    sink: InMemoryTaskSink | None = None,
+    *,
+    now: list[float] | None = None,
+    **kwargs: Any,
+) -> tuple[TaskCoordinator, InMemoryTaskSink]:
+    """An external-kind coordinator with an injectable monotonic clock.
+
+    ``now`` is a single-element list the test mutates to advance time.
+    """
+    sink = sink if sink is not None else InMemoryTaskSink()
+    clock = now if now is not None else [100.0]
+    kwargs.setdefault("monotonic", lambda: clock[0])
+    coordinator = _external_coordinator(sink, **kwargs)
+    return coordinator, sink
+
+
+async def test_begin_seeds_registry_entry_with_origin_and_clock() -> None:
+    now = [50.0]
+    coordinator, _sink = _registry_coordinator(now=now)
+    queued = await coordinator.begin(_spec(kind="web_search", ack_text="on it", turn_id=9))
+    assert queued is not None
+    entry = coordinator.registry_entry(queued.task_id)
+    assert entry is not None
+    assert entry.kind == "web_search"
+    assert entry.origin == "worker"  # not in local_kinds
+    assert entry.status == "queued"
+    assert entry.queued_at == 50.0
+    assert entry.ack_text == "on it"
+    assert entry.turn_id == 9
+    assert entry.delivered is False
+    assert entry.terminal is False
+    await coordinator.aclose()
+
+
+async def test_in_session_resolver_updates_registry_to_done() -> None:
+    sink = InMemoryTaskSink()
+
+    async def executor(task: QueuedTask) -> TaskResult:
+        return TaskResult(status="done", result_text="3 events this week")
+
+    coordinator, _ = _registry_coordinator(sink, executor=executor)
+    queued = await coordinator.begin(_spec(kind="local.kind"))
+    assert queued is not None
+    entry = coordinator.registry_entry(queued.task_id)
+    assert entry is not None and entry.origin == "session"
+    await coordinator.join()
+    assert entry.status == "done"
+    assert entry.result_text == "3 events this week"
+    assert entry.settled_at is not None
+    await coordinator.aclose()
+
+
+async def test_note_task_settled_first_observer_wins() -> None:
+    coordinator, _ = _registry_coordinator()
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    first = coordinator.note_task_settled(
+        queued.task_id, status="done", result_text="the answer"
+    )
+    assert first is not None and first.status == "done"
+    # The losing observer gets None and must trigger no side effects.
+    second = coordinator.note_task_settled(
+        queued.task_id, status="failed", result_text="other", error="boom"
+    )
+    assert second is None
+    entry = coordinator.registry_entry(queued.task_id)
+    assert entry is not None
+    assert entry.status == "done"
+    assert entry.result_text == "the answer"
+    await coordinator.aclose()
+
+
+async def test_note_task_settled_refuses_non_terminal_status() -> None:
+    coordinator, _ = _registry_coordinator()
+    queued = await coordinator.begin(_spec())
+    assert queued is not None
+    assert coordinator.note_task_settled(queued.task_id, status="running") is None
+    entry = coordinator.registry_entry(queued.task_id)
+    assert entry is not None and entry.status == "queued"
+    await coordinator.aclose()
+
+
+async def test_note_task_running_and_settled_seed_unknown_ids() -> None:
+    """Frames for tasks this process never began still keep the registry honest."""
+    coordinator, _ = _registry_coordinator()
+    coordinator.note_task_running(777, kind="calendar.check", turn_id=3)
+    entry = coordinator.registry_entry(777)
+    assert entry is not None
+    assert entry.origin == "worker" and entry.status == "running"
+    settled = coordinator.note_task_settled(
+        888, status="done", kind="calendar.check", result_text="done text"
+    )
+    assert settled is not None and settled.task_id == 888
+    await coordinator.aclose()
+
+
+async def test_late_progress_frame_never_reopens_a_settled_task() -> None:
+    coordinator, _ = _registry_coordinator()
+    queued = await coordinator.begin(_spec())
+    assert queued is not None
+    assert coordinator.note_task_settled(queued.task_id, status="done") is not None
+    coordinator.note_task_running(queued.task_id)
+    entry = coordinator.registry_entry(queued.task_id)
+    assert entry is not None and entry.status == "done"
+    await coordinator.aclose()
+
+
+async def test_mark_result_delivered_flips_flag_and_handles_unknown() -> None:
+    coordinator, _ = _registry_coordinator()
+    queued = await coordinator.begin(_spec())
+    assert queued is not None
+    assert coordinator.mark_result_delivered(queued.task_id) is True
+    entry = coordinator.registry_entry(queued.task_id)
+    assert entry is not None and entry.delivered is True
+    assert coordinator.mark_result_delivered(31337) is False
+    await coordinator.aclose()
+
+
+async def test_registry_snapshot_keeps_begin_order() -> None:
+    coordinator, _ = _registry_coordinator()
+    first = await coordinator.begin(_spec(kind="web_search"))
+    second = await coordinator.begin(_spec(kind="calendar.check"))
+    assert first is not None and second is not None
+    snapshot = coordinator.registry_snapshot()
+    assert [e.task_id for e in snapshot] == [first.task_id, second.task_id]
+    await coordinator.aclose()
+
+
+async def test_attach_remote_listener_suppresses_the_watcher() -> None:
+    """With a live push listener, worker-owned begins spawn no poll watcher."""
+    sink = InMemoryTaskSink()
+    coordinator, _ = _registry_coordinator(sink)
+    coordinator.attach_remote_listener()
+    assert coordinator.remote_listener_active is True
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    assert not coordinator._watchers  # no watcher task spawned
+    # join() returns immediately — nothing in flight.
+    await asyncio.wait_for(coordinator.join(), timeout=0.5)
+    # Detach restores the Phase-4 fallback for future begins.
+    coordinator.detach_remote_listener()
+    queued2 = await coordinator.begin(_spec(kind="web_search"))
+    assert queued2 is not None
+    assert len(coordinator._watchers) == 1
+    await coordinator.aclose()
+
+
+async def test_watcher_observed_settle_routes_through_registry_exactly_once() -> None:
+    """The watcher's failed report fires only when IT settles the entry."""
+    sink = InMemoryTaskSink()
+    reporter = _RecordingReporter()
+    coordinator, _ = _registry_coordinator(sink, report_failed=reporter)
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    # The push listener observes the settle first (simulated).
+    assert (
+        coordinator.note_task_settled(queued.task_id, status="failed", error="x")
+        is not None
+    )
+    # Now the worker writes the row; the watcher polls it terminal.
+    await sink.update_status(queued.task_id, "failed", result_text="sorry", error="x")
+    await asyncio.wait_for(coordinator.join(), timeout=2.0)
+    # The watcher lost the registry race — no second report.
+    assert reporter.reported == []
+    await coordinator.aclose()
+
+
+async def test_watcher_failed_settle_still_reports_when_first() -> None:
+    """No listener: the watcher remains the trt.53 correction's settler."""
+    sink = InMemoryTaskSink()
+    reporter = _RecordingReporter()
+    coordinator, _ = _registry_coordinator(sink, report_failed=reporter)
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    await sink.update_status(queued.task_id, "failed", result_text="sorry", error="x")
+    await asyncio.wait_for(coordinator.join(), timeout=2.0)
+    assert len(reporter.reported) == 1
+    entry = coordinator.registry_entry(queued.task_id)
+    assert entry is not None and entry.status == "failed"
+    await coordinator.aclose()
+
+
+async def test_report_remote_failure_routes_the_attached_seam() -> None:
+    coordinator, _ = _registry_coordinator()
+    reporter = _RecordingReporter()
+    coordinator.attach_failure_reporter(reporter)
+    queued = await coordinator.begin(
+        _spec(kind="calendar.check", ack_text="on it", turn_id=5)
+    )
+    assert queued is not None
+    entry = coordinator.note_task_settled(
+        queued.task_id, status="failed", result_text="couldn't reach the calendar", error="dns"
+    )
+    assert entry is not None
+    await coordinator.report_remote_failure(entry)
+    assert len(reporter.reported) == 1
+    reported_queued, reported_result = reporter.reported[0]
+    assert reported_queued.task_id == queued.task_id
+    assert reported_queued.spec.kind == "calendar.check"
+    assert reported_queued.spec.turn_id == 5
+    assert reported_result.status == "failed"
+    assert reported_result.result_text == "couldn't reach the calendar"
+    await coordinator.aclose()
+
+
+async def test_reconcile_in_flight_settles_from_the_sink() -> None:
+    """A settle missed by the push channel is recovered from the durable row."""
+    sink = InMemoryTaskSink()
+    coordinator, _ = _registry_coordinator(sink)
+    coordinator.attach_remote_listener()  # no watcher — the listener owns settles
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    # The worker settled the row while the subscription was down.
+    await sink.update_status(queued.task_id, "done", result_text="found 3 events")
+    settled = await coordinator.reconcile_in_flight()
+    assert [e.task_id for e in settled] == [queued.task_id]
+    assert settled[0].status == "done"
+    assert settled[0].result_text == "found 3 events"
+    # A second reconcile finds nothing new (first-wins held).
+    assert await coordinator.reconcile_in_flight() == []
+    await coordinator.aclose()
+
+
+async def test_reconcile_skips_session_origin_and_non_terminal_rows() -> None:
+    sink = InMemoryTaskSink()
+
+    async def executor(task: QueuedTask) -> TaskResult:
+        await asyncio.Event().wait()  # in-flight forever (cancelled by aclose)
+        return TaskResult(status="done")  # pragma: no cover
+
+    coordinator, _ = _registry_coordinator(sink, executor=executor)
+    coordinator.attach_remote_listener()
+    local = await coordinator.begin(_spec(kind="local.kind"))
+    remote = await coordinator.begin(_spec(kind="web_search"))
+    assert local is not None and remote is not None
+    # local: row still queued/running (resolver owns it); remote: row queued.
+    assert await coordinator.reconcile_in_flight() == []
+    await coordinator.aclose(drain_grace_s=0)

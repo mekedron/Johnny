@@ -475,6 +475,13 @@ class BrowserAgentSession:
                 self._interim_forwarder.on_user_input_transcribed,
             )
         await self._session.start(agent=self._runtime.agent)
+        # Phase-5 speech wiring (Johnny-trt.28): same placement as the agent
+        # worker — the task-event listener + gated result delivery need the
+        # live session, which only exists from here. No-op without a task
+        # coordinator; torn down by runtime.aclose inside our aclose.
+        from johnny.agent.task_wiring import attach_task_speech_wiring
+
+        attach_task_speech_wiring(self._runtime, self._session)
         logger.info("browser agent session started for session=%s (roomless)", self._session_id)
 
     async def feed_text(self, text: str) -> bool:

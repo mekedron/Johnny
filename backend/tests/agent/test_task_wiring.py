@@ -12,11 +12,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from types import SimpleNamespace
 from typing import Any, get_args
 
+from johnny.agent.speech_queue import ItemState, SpeechQueue
 from johnny.agent.task_wiring import (
     TASKS_WAKE_CHANNEL,
     RedisTaskWake,
+    TaskEventListener,
+    TaskSpeechDeliverer,
+    TaskSpeechWiring,
+    attach_task_speech_wiring,
     build_publish_task_completed,
     build_publish_task_queued,
     build_task_coordinator,
@@ -24,13 +31,16 @@ from johnny.agent.task_wiring import (
 from johnny.agent.tasks import (
     InMemoryTaskSink,
     QueuedTask,
+    TaskCoordinator,
+    TaskRegistryEntry,
     TaskResult,
     TaskSpec,
     TaskStatus,
+    stub_executor,
     unsupported_kind_text,
 )
 from johnny.voice_pipeline.event_bus import InMemoryEventBus
-from johnny.voice_pipeline.events import TaskCompleted, TaskQueued
+from johnny.voice_pipeline.events import TaskCompleted, TaskQueued, TaskResultExpired
 
 # --- helpers -----------------------------------------------------------------
 
@@ -230,7 +240,8 @@ async def test_build_task_coordinator_routes_skill_kinds_to_the_worker() -> None
     coordinator._watch_poll_interval_s = 0.01  # test-speed polling
     reported: list[str] = []
 
-    async def report(queued, result) -> None:  # noqa: ANN001 — seam shape
+    async def report(queued: QueuedTask, result: TaskResult) -> None:
+        del queued
         reported.append(result.result_text)
 
     coordinator.attach_failure_reporter(report)
@@ -326,3 +337,698 @@ def test_wake_channel_is_global_not_session_scoped() -> None:
     # the payload carries the session id instead.
     assert "{" not in TASKS_WAKE_CHANNEL
     assert TASKS_WAKE_CHANNEL.startswith("johnny.tasks.")
+
+
+# --- Phase-5 speech wiring (Johnny-trt.28) -------------------------------------
+#
+# TaskEventListener: the per-session push consumer of johnny.tasks.<id> —
+# registry updates, exactly-once settle effects, reconcile on (re)subscribe,
+# loud degrade on connection loss. TaskSpeechDeliverer: the gating predicate
+# matrix and the deliver/interrupt/expiry flows over a real SpeechQueue with a
+# fake session/gate. attach_task_speech_wiring: the assembly contract.
+
+
+async def _wait_until(predicate: Any, timeout: float = 2.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() > deadline:
+            raise AssertionError("condition not reached in time")
+        await asyncio.sleep(0.01)
+
+
+def _external_coordinator(
+    sink: InMemoryTaskSink | None = None, **kwargs: Any
+) -> tuple[TaskCoordinator, InMemoryTaskSink]:
+    sink = sink if sink is not None else InMemoryTaskSink()
+    kwargs.setdefault("executor", stub_executor)
+    kwargs.setdefault("runs_in_session", lambda kind: False)
+    kwargs.setdefault("watch_poll_interval_s", 0.01)
+    kwargs.setdefault("watch_timeout_s", 2.0)
+    return TaskCoordinator(sink, **kwargs), sink
+
+
+def _entry(task_id: int = 42, **overrides: Any) -> TaskRegistryEntry:
+    fields: dict[str, Any] = {
+        "task_id": task_id,
+        "kind": "calendar.check",
+        "origin": "worker",
+        "queued_at": 0.0,
+        "ack_text": "on it",
+        "turn_id": 7,
+        "status": "done",
+        "result_text": "You have 3 events this week.",
+    }
+    fields.update(overrides)
+    status = fields.pop("status")
+    result_text = fields.pop("result_text")
+    entry = TaskRegistryEntry(**fields)
+    entry.status = status
+    entry.result_text = result_text
+    return entry
+
+
+# ---- TaskEventListener fakes ---------------------------------------------------
+
+
+class _FakePubSub:
+    def __init__(self, frames: asyncio.Queue[dict[str, Any]]) -> None:
+        self._frames = frames
+        self.subscribed: list[str] = []
+
+    async def subscribe(self, channel: str) -> None:
+        self.subscribed.append(channel)
+
+    async def get_message(
+        self, *, ignore_subscribe_messages: bool = True, timeout: float = 1.0
+    ) -> dict[str, Any] | None:
+        del ignore_subscribe_messages
+        try:
+            return await asyncio.wait_for(self._frames.get(), timeout=min(timeout, 0.05))
+        except TimeoutError:
+            return None
+
+
+class _FakeListenerClient:
+    def __init__(self, frames: asyncio.Queue[dict[str, Any]]) -> None:
+        self._frames = frames
+        self.closed = False
+        self.pubsubs: list[_FakePubSub] = []
+
+    def pubsub(self, ignore_subscribe_messages: bool = True) -> _FakePubSub:
+        del ignore_subscribe_messages
+        ps = _FakePubSub(self._frames)
+        self.pubsubs.append(ps)
+        return ps
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _BoomClient:
+    """A client whose subscription drops immediately (connect-level failure)."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def pubsub(self, ignore_subscribe_messages: bool = True) -> Any:
+        del ignore_subscribe_messages
+        raise RuntimeError("redis down")
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def _frame(payload: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "message", "data": json.dumps(payload).encode()}
+
+
+def _completed_payload(task_id: int, **overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "type": "task_completed",
+        "task_id": task_id,
+        "kind": "calendar.check",
+        "status": "done",
+        "timestamp_ms": 1,
+        "result_text": "You have 3 events this week.",
+        "error": "",
+        "turn_id": 7,
+        "session_id": "7",
+    }
+    payload.update(overrides)
+    return payload
+
+
+class _SettleRecorder:
+    def __init__(self) -> None:
+        self.entries: list[TaskRegistryEntry] = []
+
+    async def __call__(self, entry: TaskRegistryEntry) -> None:
+        self.entries.append(entry)
+
+
+def _listener(
+    coordinator: TaskCoordinator,
+    on_settled: Any,
+    *,
+    frames: asyncio.Queue[dict[str, Any]] | None = None,
+    factory: Any = None,
+) -> tuple[TaskEventListener, asyncio.Queue[dict[str, Any]]]:
+    frames = frames if frames is not None else asyncio.Queue()
+    clients: list[_FakeListenerClient] = []
+
+    def _default_factory() -> _FakeListenerClient:
+        client = _FakeListenerClient(frames)
+        clients.append(client)
+        return client
+
+    listener = TaskEventListener(
+        redis_url="redis://unused",
+        session_id="7",
+        coordinator=coordinator,
+        on_settled=on_settled,
+        client_factory=factory if factory is not None else _default_factory,
+        reconnect_backoff_s=0.01,
+    )
+    return listener, frames
+
+
+async def test_listener_subscribes_attaches_and_settles_done_frames() -> None:
+    coordinator, _sink = _external_coordinator()
+    queued = await coordinator.begin(TaskSpec(kind="calendar.check", ack_text="on it"))
+    assert queued is not None
+    recorder = _SettleRecorder()
+    listener, frames = _listener(coordinator, recorder)
+    listener.start()
+    await _wait_until(lambda: coordinator.remote_listener_active)
+    await frames.put(_frame(_completed_payload(queued.task_id)))
+    await _wait_until(lambda: len(recorder.entries) == 1)
+    entry = recorder.entries[0]
+    assert entry.task_id == queued.task_id
+    assert entry.status == "done"
+    assert entry.result_text == "You have 3 events this week."
+    registry = coordinator.registry_entry(queued.task_id)
+    assert registry is not None and registry.terminal
+    # A duplicate frame loses the first-wins race: no second settle effect.
+    await frames.put(_frame(_completed_payload(queued.task_id)))
+    await asyncio.sleep(0.1)
+    assert len(recorder.entries) == 1
+    await listener.aclose()
+    assert coordinator.remote_listener_active is False
+    await coordinator.aclose()
+
+
+async def test_listener_progress_frame_marks_running_and_malformed_is_survived() -> None:
+    coordinator, _sink = _external_coordinator()
+    queued = await coordinator.begin(TaskSpec(kind="calendar.check"))
+    assert queued is not None
+    recorder = _SettleRecorder()
+    listener, frames = _listener(coordinator, recorder)
+    listener.start()
+    await _wait_until(lambda: coordinator.remote_listener_active)
+    await frames.put({"type": "message", "data": b"not json"})
+    await frames.put(_frame({"type": "task_completed", "task_id": "NaN"}))
+    await frames.put(_frame({"type": "something_else", "task_id": 1}))
+    await frames.put(_frame(_completed_payload(queued.task_id, status="weird")))
+    await frames.put(
+        _frame(
+            {
+                "type": "task_progress",
+                "task_id": queued.task_id,
+                "kind": "calendar.check",
+                "timestamp_ms": 1,
+                "progress_text": "",
+                "turn_id": 7,
+                "session_id": "7",
+            }
+        )
+    )
+    await _wait_until(
+        lambda: (coordinator.registry_entry(queued.task_id) or _entry()).status == "running"
+    )
+    assert recorder.entries == []  # nothing settled by garbage
+    await listener.aclose()
+    await coordinator.aclose()
+
+
+async def test_listener_failed_frame_hands_failed_entry_to_hook() -> None:
+    coordinator, _sink = _external_coordinator()
+    queued = await coordinator.begin(TaskSpec(kind="calendar.check"))
+    assert queued is not None
+    recorder = _SettleRecorder()
+    listener, frames = _listener(coordinator, recorder)
+    listener.start()
+    await _wait_until(lambda: coordinator.remote_listener_active)
+    await frames.put(
+        _frame(
+            _completed_payload(
+                queued.task_id,
+                status="failed",
+                result_text="I couldn't reach the calendar.",
+                error="dns",
+            )
+        )
+    )
+    await _wait_until(lambda: len(recorder.entries) == 1)
+    assert recorder.entries[0].status == "failed"
+    assert recorder.entries[0].error == "dns"
+    await listener.aclose()
+    await coordinator.aclose()
+
+
+async def test_listener_reconciles_missed_settles_on_subscribe() -> None:
+    """A settle published while the subscription was down is recovered.
+
+    Models the real outage: the listener was live when the task began (so no
+    poll watcher exists), the connection then dropped, and the worker settled
+    the row while nobody was subscribed. The (re)subscribe reconcile re-reads
+    the durable row and delivers the missed settle exactly once.
+    """
+    coordinator, sink = _external_coordinator()
+    coordinator.attach_remote_listener()  # task begins under a live listener
+    queued = await coordinator.begin(TaskSpec(kind="calendar.check"))
+    assert queued is not None
+    # The settle lands while no subscription is live (the outage window).
+    await sink.update_status(
+        queued.task_id, "done", result_text="found it", error=None
+    )
+    recorder = _SettleRecorder()
+    listener, _frames = _listener(coordinator, recorder)
+    listener.start()
+    await _wait_until(lambda: len(recorder.entries) >= 1)
+    assert recorder.entries[0].task_id == queued.task_id
+    assert recorder.entries[0].result_text == "found it"
+    # Re-running the reconcile finds nothing new (first-wins held).
+    assert await coordinator.reconcile_in_flight() == []
+    await listener.aclose()
+    await coordinator.aclose()
+
+
+async def test_listener_drop_detaches_then_resubscribe_reattaches() -> None:
+    coordinator, _sink = _external_coordinator()
+    recorder = _SettleRecorder()
+    frames: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    good = _FakeListenerClient(frames)
+    handed: list[Any] = [_BoomClient(), good]
+
+    def factory() -> Any:
+        return handed.pop(0) if handed else good
+
+    listener, _ = _listener(coordinator, recorder, frames=frames, factory=factory)
+    listener.start()
+    # First client boomed → detached; second subscribes → attached again.
+    await _wait_until(lambda: coordinator.remote_listener_active)
+    assert good.pubsubs and good.pubsubs[0].subscribed == ["johnny.tasks.7"]
+    await listener.aclose()
+    await coordinator.aclose()
+
+
+# ---- TaskSpeechDeliverer fakes --------------------------------------------------
+
+
+class _FakeDeliveryHandle:
+    """An awaitable say() handle the test completes (clean or interrupted)."""
+
+    def __init__(self) -> None:
+        self._done = asyncio.Event()
+        self.interrupted = False
+        self._cbs: list[Any] = []
+
+    def add_done_callback(self, cb: Any) -> None:
+        self._cbs.append(cb)
+
+    def done(self) -> bool:
+        return self._done.is_set()
+
+    def finish(self, *, interrupted: bool = False) -> None:
+        self.interrupted = interrupted
+        self._done.set()
+        for cb in list(self._cbs):
+            cb(self)
+
+    def __await__(self) -> Any:
+        async def _wait() -> _FakeDeliveryHandle:
+            await self._done.wait()
+            return self
+
+        return _wait().__await__()
+
+
+class _FakeGate:
+    """Duck-typed RouterGate: an ``idle`` flag + recording speak_task_result."""
+
+    def __init__(self) -> None:
+        self.idle = True
+        self.say_available = True
+        self.spoken: list[str] = []
+        self.handles: list[_FakeDeliveryHandle] = []
+
+    def speak_task_result(self, text: str) -> _FakeDeliveryHandle | None:
+        if not self.say_available:
+            return None
+        handle = _FakeDeliveryHandle()
+        self.spoken.append(text)
+        self.handles.append(handle)
+        return handle
+
+
+class _FakeDeliverySession:
+    """Duck-typed AgentSession: current_speech + on/off event registration."""
+
+    def __init__(self) -> None:
+        self.current_speech: Any = None
+        self.listeners: dict[str, list[Any]] = {}
+
+    def on(self, event: str, cb: Any) -> None:
+        self.listeners.setdefault(event, []).append(cb)
+
+    def off(self, event: str, cb: Any) -> None:
+        self.listeners.get(event, []).remove(cb)
+
+    def emit_user_state(self, new_state: str) -> None:
+        for cb in list(self.listeners.get("user_state_changed", [])):
+            cb(SimpleNamespace(new_state=new_state))
+
+
+def _deliverer(
+    *,
+    grace_s: float = 0.05,
+    tick_s: float = 0.01,
+    coordinator: TaskCoordinator | None = None,
+) -> tuple[
+    TaskSpeechDeliverer,
+    SpeechQueue,
+    _FakeGate,
+    _FakeDeliverySession,
+    InMemoryEventBus,
+    TaskCoordinator,
+]:
+    if coordinator is None:
+        coordinator, _ = _external_coordinator()
+    queue = SpeechQueue(time.monotonic(), grace_s=grace_s)
+    gate = _FakeGate()
+    session = _FakeDeliverySession()
+    bus = InMemoryEventBus()
+    deliverer = TaskSpeechDeliverer(
+        session=session,  # type: ignore[arg-type]
+        gate=gate,  # type: ignore[arg-type]
+        queue=queue,
+        coordinator=coordinator,
+        event_bus=bus,
+        session_id="7",
+        clock_ms=lambda: 99,
+        tick_s=tick_s,
+    )
+    return deliverer, queue, gate, session, bus, coordinator
+
+
+def _expired_events(bus: InMemoryEventBus) -> list[TaskResultExpired]:
+    return [e for e in bus.snapshot() if isinstance(e, TaskResultExpired)]
+
+
+# ---- the gating predicate matrix -------------------------------------------------
+
+
+async def test_delivery_blocked_reason_matrix() -> None:
+    deliverer, _queue, gate, session, _bus, coordinator = _deliverer()
+    # All clear.
+    assert deliverer.delivery_blocked_reason() is None
+    # User speaking blocks (event-tracked).
+    session.on("user_state_changed", lambda ev: None)  # unrelated listener is fine
+    deliverer._on_user_state(SimpleNamespace(new_state="speaking"))
+    assert deliverer.delivery_blocked_reason() == "user speaking"
+    deliverer._on_user_state(SimpleNamespace(new_state="listening"))
+    assert deliverer.delivery_blocked_reason() is None
+    deliverer._on_user_state(SimpleNamespace(new_state="away"))
+    assert deliverer.delivery_blocked_reason() is None
+    # Bot speaking blocks while the handle is live, clears once done.
+    handle = _FakeDeliveryHandle()
+    session.current_speech = handle
+    assert deliverer.delivery_blocked_reason() == "bot speaking"
+    handle.finish()
+    assert deliverer.delivery_blocked_reason() is None
+    session.current_speech = None
+    # Gate busy blocks (mid-decision turn / pending reply / parked approval).
+    gate.idle = False
+    assert deliverer.delivery_blocked_reason() == "gate busy"
+    gate.idle = True
+    assert deliverer.delivery_blocked_reason() is None
+    await coordinator.aclose()
+
+
+async def test_result_delivered_only_after_silence_grace() -> None:
+    deliverer, _queue, gate, session, _bus, coordinator = _deliverer(grace_s=0.08)
+    queued = await coordinator.begin(TaskSpec(kind="calendar.check"))
+    assert queued is not None
+    entry = coordinator.note_task_settled(
+        queued.task_id, status="done", result_text="Three events this week."
+    )
+    assert entry is not None
+    deliverer.start()
+    try:
+        # The user is mid-monologue: nothing may be spoken.
+        session.emit_user_state("speaking")
+        deliverer.enqueue_result(entry)
+        await asyncio.sleep(0.3)
+        assert gate.spoken == []
+        # Silence: the grace runs, then the result is delivered.
+        session.emit_user_state("listening")
+        await _wait_until(lambda: gate.spoken == ["Three events this week."])
+        gate.handles[0].finish()
+        await _wait_until(
+            lambda: (coordinator.registry_entry(queued.task_id) or entry).delivered
+        )
+    finally:
+        await deliverer.aclose()
+        await coordinator.aclose()
+
+
+async def test_gate_busy_blocks_delivery_until_idle() -> None:
+    deliverer, _queue, gate, _session, _bus, coordinator = _deliverer()
+    queued = await coordinator.begin(TaskSpec(kind="calendar.check"))
+    assert queued is not None
+    entry = coordinator.note_task_settled(
+        queued.task_id, status="done", result_text="The result."
+    )
+    assert entry is not None
+    gate.idle = False
+    deliverer.start()
+    try:
+        deliverer.enqueue_result(entry)
+        await asyncio.sleep(0.25)
+        assert gate.spoken == []
+        gate.idle = True
+        await _wait_until(lambda: gate.spoken == ["The result."])
+        gate.handles[0].finish()
+    finally:
+        await deliverer.aclose()
+        await coordinator.aclose()
+
+
+async def test_interrupted_result_requeues_once_then_drops_with_expired_event() -> None:
+    deliverer, queue, gate, _session, bus, coordinator = _deliverer()
+    queued = await coordinator.begin(TaskSpec(kind="calendar.check", turn_id=7))
+    assert queued is not None
+    entry = coordinator.note_task_settled(
+        queued.task_id, status="done", result_text="The result.", turn_id=7
+    )
+    assert entry is not None
+    deliverer.start()
+    try:
+        item = deliverer.enqueue_result(entry)
+        assert item is not None
+        # First delivery: barge-in → re-queued at original seat.
+        await _wait_until(lambda: len(gate.handles) == 1)
+        gate.handles[0].finish(interrupted=True)
+        await _wait_until(lambda: item.state is ItemState.QUEUED)
+        assert _expired_events(bus) == []
+        # Second delivery (after the bot's own falling edge restarts the
+        # grace): interrupted again → dropped, TaskResultExpired published.
+        await _wait_until(lambda: len(gate.handles) == 2)
+        assert gate.spoken == ["The result.", "The result."]
+        gate.handles[1].finish(interrupted=True)
+        await _wait_until(lambda: item.state is ItemState.DROPPED)
+        await _wait_until(lambda: len(_expired_events(bus)) == 1)
+        event = _expired_events(bus)[0]
+        assert event.task_id == queued.task_id
+        assert event.kind == "calendar.check"
+        assert event.reason == "interrupted twice"
+        assert event.turn_id == 7
+        assert event.session_id == "7"
+        assert event.timestamp_ms == 99
+        # The registry keeps delivered=False — the UI row is the surface.
+        registry = coordinator.registry_entry(queued.task_id)
+        assert registry is not None and registry.delivered is False
+    finally:
+        await deliverer.aclose()
+        await coordinator.aclose()
+
+
+async def test_result_expiring_while_blocked_fires_expired_event_promptly() -> None:
+    """The per-tick sweep settles a gated-out RESULT mid-monologue, not later."""
+    deliverer, _queue, gate, session, bus, coordinator = _deliverer()
+    queued = await coordinator.begin(TaskSpec(kind="calendar.check"))
+    assert queued is not None
+    entry = coordinator.note_task_settled(
+        queued.task_id, status="done", result_text="Stale soon."
+    )
+    assert entry is not None
+    deliverer.start()
+    try:
+        session.emit_user_state("speaking")  # blocked the whole time
+        item = deliverer.enqueue_result(entry)
+        assert item is not None
+        # Tighten the 120 s class TTL to test speed (queue-owned field, but a
+        # test may compress time).
+        item.expires_at = time.monotonic() + 0.05
+        await _wait_until(lambda: item.state is ItemState.DROPPED)
+        await _wait_until(lambda: len(_expired_events(bus)) == 1)
+        assert _expired_events(bus)[0].reason.startswith("undelivered for")
+        assert gate.spoken == []  # it never reached the mouth
+    finally:
+        await deliverer.aclose()
+        await coordinator.aclose()
+
+
+async def test_say_unavailable_degrades_to_ui_only_with_expired_event() -> None:
+    deliverer, _queue, gate, _session, bus, coordinator = _deliverer()
+    queued = await coordinator.begin(TaskSpec(kind="calendar.check"))
+    assert queued is not None
+    entry = coordinator.note_task_settled(
+        queued.task_id, status="done", result_text="The result."
+    )
+    assert entry is not None
+    gate.say_available = False
+    deliverer.start()
+    try:
+        item = deliverer.enqueue_result(entry)
+        assert item is not None
+        await _wait_until(lambda: item.state is ItemState.DROPPED)
+        assert item.drop_reason == "say() unavailable"
+        await _wait_until(lambda: len(_expired_events(bus)) == 1)
+        assert _expired_events(bus)[0].reason == "say() unavailable"
+    finally:
+        await deliverer.aclose()
+        await coordinator.aclose()
+
+
+async def test_blank_result_text_is_ui_only_and_never_enqueued() -> None:
+    deliverer, queue, _gate, _session, _bus, coordinator = _deliverer()
+    queued = await coordinator.begin(TaskSpec(kind="calendar.check"))
+    assert queued is not None
+    entry = coordinator.note_task_settled(queued.task_id, status="done", result_text="  ")
+    assert entry is not None
+    assert deliverer.enqueue_result(entry) is None
+    assert len(queue) == 0
+    await coordinator.aclose()
+
+
+async def test_wiring_aclose_drops_undelivered_without_expired_events() -> None:
+    deliverer, queue, _gate, session, bus, coordinator = _deliverer()
+    queued = await coordinator.begin(TaskSpec(kind="calendar.check"))
+    assert queued is not None
+    entry = coordinator.note_task_settled(
+        queued.task_id, status="done", result_text="Never spoken."
+    )
+    assert entry is not None
+    deliverer.start()
+    session.emit_user_state("speaking")  # keep it queued
+    item = deliverer.enqueue_result(entry)
+    assert item is not None
+    wiring = TaskSpeechWiring(queue=queue, deliverer=deliverer, listener=None)
+    await wiring.aclose()
+    assert item.state is ItemState.DROPPED
+    assert item.drop_reason == "queue closed"
+    # Teardown drops publish no TaskResultExpired (the trt.25 contract).
+    assert _expired_events(bus) == []
+    assert queue.closed
+    # Idempotent.
+    await wiring.aclose()
+    await coordinator.aclose()
+
+
+# ---- attach_task_speech_wiring ---------------------------------------------------
+
+
+def _runtime_stub(coordinator: TaskCoordinator | None, *, redis_url: str | None) -> Any:
+    return SimpleNamespace(
+        task_coordinator=coordinator,
+        gate=_FakeGate(),
+        event_bus=InMemoryEventBus(),
+        session_id="7",
+        config=SimpleNamespace(redis_url=redis_url),
+        task_speech=None,
+    )
+
+
+async def test_attach_returns_none_without_a_coordinator() -> None:
+    runtime = _runtime_stub(None, redis_url="redis://x")
+    assert attach_task_speech_wiring(runtime, _FakeDeliverySession()) is None  # type: ignore[arg-type]
+    assert runtime.task_speech is None
+
+
+async def test_attach_without_redis_runs_listenerless_and_stores_wiring() -> None:
+    coordinator, _ = _external_coordinator()
+    runtime = _runtime_stub(coordinator, redis_url=None)
+    session = _FakeDeliverySession()
+    wiring = attach_task_speech_wiring(runtime, session)  # type: ignore[arg-type]
+    assert wiring is not None
+    assert wiring.listener is None
+    assert runtime.task_speech is wiring
+    assert coordinator.remote_listener_active is False  # watcher fallback intact
+    assert session.listeners.get("user_state_changed")  # deliverer registered
+    await wiring.aclose()
+    assert session.listeners.get("user_state_changed") == []
+    await coordinator.aclose()
+
+
+async def test_attach_end_to_end_frame_to_spoken_result() -> None:
+    """The acceptance integration: a worker frame becomes a gated spoken result."""
+    coordinator, _sink = _external_coordinator()
+    queued = await coordinator.begin(TaskSpec(kind="calendar.check", turn_id=4))
+    assert queued is not None
+    runtime = _runtime_stub(coordinator, redis_url="redis://stack")
+    session = _FakeDeliverySession()
+    frames: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    wiring = attach_task_speech_wiring(
+        runtime,
+        session,  # type: ignore[arg-type]
+        grace_s=0.05,
+        tick_s=0.01,
+        listener_client_factory=lambda: _FakeListenerClient(frames),
+    )
+    assert wiring is not None and wiring.listener is not None
+    try:
+        await _wait_until(lambda: coordinator.remote_listener_active)
+        await frames.put(_frame(_completed_payload(queued.task_id)))
+        gate = runtime.gate
+        await _wait_until(lambda: gate.spoken == ["You have 3 events this week."])
+        gate.handles[0].finish()
+        await _wait_until(
+            lambda: (coordinator.registry_entry(queued.task_id) or _entry()).delivered
+        )
+    finally:
+        await wiring.aclose()
+        await coordinator.aclose()
+
+
+async def test_attach_end_to_end_failed_frame_routes_correction_seam() -> None:
+    coordinator, _sink = _external_coordinator()
+    reported: list[tuple[QueuedTask, TaskResult]] = []
+
+    async def reporter(q: QueuedTask, r: TaskResult) -> None:
+        reported.append((q, r))
+
+    coordinator.attach_failure_reporter(reporter)
+    queued = await coordinator.begin(TaskSpec(kind="calendar.check"))
+    assert queued is not None
+    runtime = _runtime_stub(coordinator, redis_url="redis://stack")
+    session = _FakeDeliverySession()
+    frames: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    wiring = attach_task_speech_wiring(
+        runtime,
+        session,  # type: ignore[arg-type]
+        listener_client_factory=lambda: _FakeListenerClient(frames),
+    )
+    assert wiring is not None
+    try:
+        await _wait_until(lambda: coordinator.remote_listener_active)
+        await frames.put(
+            _frame(
+                _completed_payload(
+                    queued.task_id,
+                    status="failed",
+                    result_text="The calendar tool is unavailable.",
+                    error="exit 2",
+                )
+            )
+        )
+        await _wait_until(lambda: len(reported) == 1)
+        assert reported[0][1].result_text == "The calendar tool is unavailable."
+        # Failed settles never enter the speech queue.
+        assert runtime.gate.spoken == []
+        assert len(wiring.queue) == 0
+    finally:
+        await wiring.aclose()
+        await coordinator.aclose()
