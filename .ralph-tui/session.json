@@ -3,10 +3,10 @@
   "sessionId": "b8829633-95f0-4e1b-a1c5-e08500de3d70",
   "status": "running",
   "startedAt": "2026-06-11T05:16:05.966Z",
-  "updatedAt": "2026-06-11T15:53:21.290Z",
-  "currentIteration": 14,
+  "updatedAt": "2026-06-11T16:06:01.472Z",
+  "currentIteration": 15,
   "maxIterations": 0,
-  "tasksCompleted": 14,
+  "tasksCompleted": 15,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -171,8 +171,8 @@
       {
         "id": "Johnny-trt.24",
         "title": "[BUILD] Phase 4: Worker executor pass — claim/run/complete + redis wake",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.25",
@@ -496,6 +496,16 @@
       "durationMs": 1602511,
       "startedAt": "2026-06-11T14:30:17.509Z",
       "endedAt": "2026-06-11T14:57:00.020Z"
+    },
+    {
+      "iteration": 15,
+      "status": "completed",
+      "taskId": "Johnny-trt.24",
+      "taskTitle": "[BUILD] Phase 4: Worker executor pass — claim/run/complete + redis wake",
+      "taskCompleted": true,
+      "durationMs": 3343111,
+      "startedAt": "2026-06-11T14:57:37.201Z",
+      "endedAt": "2026-06-11T15:53:20.312Z"
     }
   ],
   "skippedTaskIds": [],

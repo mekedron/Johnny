@@ -27,7 +27,10 @@ import pytest
 from johnny.agent.tasks import QueuedTask, TaskSpec
 from johnny.skills.executor import build_skill_task_executor
 from johnny.skills.policy import ExecBinPolicy, build_policy
-from johnny.skills.registry import load_skill_registry
+from johnny.skills.registry import (
+    build_sandbox_availability_runner,
+    load_skill_registry,
+)
 from johnny.skills.sandbox import (
     SandboxClient,
     sandbox_url_from_env,
@@ -113,14 +116,24 @@ async def test_fixture_skill_dropped_into_volume_appears_in_catalog() -> None:
 async def test_google_calendar_skill_end_to_end_through_executor() -> None:
     """The first skill, against the real gog in the real sandbox.
 
-    Both auth states are valid acceptance legs: authed gog settles ``done``
-    with a speech-ready calendar summary; unauthed gog settles ``failed``
-    with the skill-authored graceful spoken copy (never a dead promise, no
-    raw diagnostics in the speech).
+    All auth states are valid acceptance legs (Johnny-trt.55 added the
+    availability snapshot, so the registry is loaded with the full
+    production seam set — ``check_env`` + the declared-check runner, same
+    as both production assemblies): an AVAILABLE skill runs — authed gog
+    settles ``done`` with a speech-ready calendar summary, a mid-run auth
+    break settles ``failed`` with the skill-authored graceful copy; an
+    UNAVAILABLE-at-snapshot skill (gog not linked) never runs and settles
+    ``failed`` with the same spoken-form reason the catalog declined with.
+    Never a dead promise, no raw diagnostics in the speech.
     """
     client = SandboxClient()
     try:
-        registry = await load_skill_registry(SKILLS_DIR, check_bins=client.check_bins)
+        registry = await load_skill_registry(
+            SKILLS_DIR,
+            check_bins=client.check_bins,
+            check_env=client.check_env,
+            run_check=build_sandbox_availability_runner(client),
+        )
         skill = registry.get("google-calendar")
         assert skill is not None, (
             f"google-calendar skill not on the volume ({SKILLS_DIR}) — "
@@ -137,16 +150,28 @@ async def test_google_calendar_skill_end_to_end_through_executor() -> None:
 
         assert result.status in {"done", "failed"}
         assert result.result_text, "result_text must always be speech-ready"
+        assert "Traceback" not in result.result_text
+        if not skill.available:
+            # Unauthed at snapshot (gog not linked): the executor refuses the
+            # run and settles with the spoken-form unavailable reason — no
+            # result_json because no run happened.
+            assert result.status == "failed"
+            assert result.result_text == (
+                skill.unavailable_reason
+                or "The google-calendar skill isn't available in this session right now."
+            )
+            assert result.result_json is None
+            return
         assert result.result_json is not None
         assert result.result_json.get("kind") == "google-calendar"
         if result.status == "done":
             # Authed: a real summary ("You have N events..." / "clear").
             assert "calendar" in result.result_text.lower() or "event" in result.result_text.lower()
         else:
-            # Unauthed (or misconfigured): the graceful skill-authored copy —
-            # spoken-form words, never a stack trace or raw stderr.
+            # Auth broke between snapshot and run (or misconfigured): the
+            # graceful skill-authored copy — spoken-form words, never a
+            # stack trace or raw stderr.
             assert "gog" in result.result_text or "Google" in result.result_text
-            assert "Traceback" not in result.result_text
     finally:
         await client.aclose()
 

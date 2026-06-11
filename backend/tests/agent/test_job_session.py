@@ -52,11 +52,16 @@ from johnny.agent.job_session import (  # noqa: E402
     AgentRuntime,
     build_agent_runtime,
     build_event_bus,
+    resolve_session_sandbox_url,
 )
 from johnny.agent.router_gate import RouterGate  # noqa: E402
 from johnny.agent.session import JohnnyAgent  # noqa: E402
 from johnny.agent.tasks import TaskCoordinator  # noqa: E402
-from johnny.skills.sandbox import SKILLS_DIR_ENV  # noqa: E402
+from johnny.skills.sandbox import (  # noqa: E402
+    DEFAULT_SANDBOX_URL,
+    SANDBOX_URL_ENV,
+    SKILLS_DIR_ENV,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -518,6 +523,45 @@ async def test_meet_backed_runtime_advertises_meeting_leave() -> None:
     assert runtime.internal_tools is not None
     assert runtime.internal_tools.calendar_event_id == 31
     assert runtime.internal_tools.meeting_backed is True
+    await runtime.aclose()
+    assert db.closed is True
+
+
+# --- sandbox endpoint resolution (Johnny-trt.63, the Phase-7 seam) -----------
+
+
+def test_session_sandbox_resolver_returns_the_global_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Today every session resolves to the one global skills-sandbox; the
+    function exists so Phase 7's per-agent sandboxes change it and nothing
+    else (the snapshot + catalog already derive from the resolved client)."""
+    monkeypatch.delenv(SANDBOX_URL_ENV, raising=False)
+    assert resolve_session_sandbox_url(_job(mode=AUTONOMOUS_MODE)) == DEFAULT_SANDBOX_URL
+    monkeypatch.setenv(SANDBOX_URL_ENV, "http://sandbox-trt63:9999/")
+    assert (
+        resolve_session_sandbox_url(_job(mode=AUTONOMOUS_MODE))
+        == "http://sandbox-trt63:9999"
+    )
+
+
+async def test_default_sandbox_client_is_built_on_the_resolved_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delegation-capable assembly with no injected client builds it on
+    :func:`resolve_session_sandbox_url`'s verdict — never on a hardcoded
+    endpoint — so re-keying sandbox identity per agent (Phase 7) is one
+    function away."""
+    monkeypatch.setenv(SANDBOX_URL_ENV, "http://sandbox-trt63:9999")
+    db = _FakeDbSession()
+    runtime = await build_agent_runtime(
+        _job(mode=AUTONOMOUS_MODE),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: db,
+    )
+    assert runtime._sandbox_client is not None
+    assert runtime._sandbox_client.base_url == "http://sandbox-trt63:9999"
     await runtime.aclose()
     assert db.closed is True
 

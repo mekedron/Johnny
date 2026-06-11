@@ -422,8 +422,28 @@ def _build_sync_persistence(
     return approval_gate, decision_sink, task_sink, db_session
 
 
+def resolve_session_sandbox_url(config: SessionJobConfig) -> str:
+    """Which sandbox serves this session's capability probes — the Phase-7 seam.
+
+    The session-assembly twin of
+    :func:`app.services.task_worker.resolve_sandbox_url` (Johnny-trt.63):
+    ONE function on purpose. Today: constant — every session probes the
+    global skills-sandbox from ``JOHNNY_SKILLS_SANDBOX_URL``. Per-agent
+    sandboxes (operator direction, Phase 7: ``agent.sandbox_mode =
+    global | personal``) will key this off the session's agent; nothing
+    downstream needs to change, because the availability snapshot and the
+    task catalog are already derived per session from whatever client this
+    resolves — there is no cross-session snapshot cache on the session
+    side to re-key (the worker's URL-keyed cache lives in
+    :class:`app.services.task_worker.SandboxExecutorProvider`).
+    """
+    from johnny.skills.sandbox import sandbox_url_from_env
+
+    return sandbox_url_from_env()
+
+
 async def _build_skill_pieces(
-    session_id: str,
+    config: SessionJobConfig,
     *,
     skill_registry: SkillRegistry | None,
     sandbox_client: SandboxClient | None,
@@ -448,6 +468,11 @@ async def _build_skill_pieces(
 
     Returns ``(registry, sandbox_client)``; the caller stores the client on
     the runtime for teardown (the loader's probes are its only use now).
+
+    The sandbox endpoint comes from :func:`resolve_session_sandbox_url`
+    (Johnny-trt.63) — the single place a session's sandbox identity is
+    decided, so Phase 7's per-agent sandboxes change that function and
+    nothing here.
     """
     from johnny.skills.registry import (
         EMPTY_SKILL_REGISTRY,
@@ -457,8 +482,9 @@ async def _build_skill_pieces(
     from johnny.skills.sandbox import SandboxClient as _SandboxClient
     from johnny.skills.sandbox import skills_dir_from_env
 
+    session_id = str(config.bot_session_id)
     if sandbox_client is None:
-        sandbox_client = _SandboxClient()
+        sandbox_client = _SandboxClient(base_url=resolve_session_sandbox_url(config))
     if skill_registry is None:
         try:
             skill_registry = await load_skill_registry(
@@ -603,7 +629,7 @@ async def build_agent_runtime(
     internal_tools = None
     if task_sink is not None:
         skill_registry, sandbox_client = await _build_skill_pieces(
-            session_id,
+            config,
             skill_registry=skill_registry,
             sandbox_client=sandbox_client,
         )
@@ -833,4 +859,5 @@ __all__ = [
     "AgentRuntime",
     "build_agent_runtime",
     "build_event_bus",
+    "resolve_session_sandbox_url",
 ]

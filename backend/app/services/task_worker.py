@@ -459,6 +459,10 @@ def resolve_sandbox_url(claimed: ClaimedTask) -> str:
     ``JOHNNY_SKILLS_SANDBOX_URL``. Per-agent sandboxes (operator direction,
     Phase 7: ``agent.sandbox_mode = global | personal``) will key this off
     the task's agent; the claim/run/settle loop must never need to change.
+    The session-assembly twin is
+    :func:`johnny.agent.job_session.resolve_session_sandbox_url`
+    (Johnny-trt.63) — re-keying sandbox identity means changing exactly
+    these two functions.
     """
     from johnny.skills.sandbox import sandbox_url_from_env
 
