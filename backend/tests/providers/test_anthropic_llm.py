@@ -610,6 +610,93 @@ async def test_chat_structured_output_none_when_text_not_json() -> None:
     assert response.structured_output is None
 
 
+_ROUTER_LIKE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "should_speak": {"type": "boolean"},
+        "confidence": {"type": "number"},
+        "reason": {"type": "string"},
+    },
+    "required": ["should_speak", "confidence", "reason"],
+}
+
+
+async def test_chat_parses_markdown_fenced_structured_output() -> None:
+    # Claude models habitually fence JSON despite instructions (Johnny-trt.14:
+    # this exact shape made the router gate decline every turn).
+    fenced = '```json\n{"should_speak": true, "confidence": 0.9, "reason": "ok"}\n```'
+    completion = _messages_response(text=fenced)
+    adapter = _FakeAnthropicLLM(_config(), handler=_ok_handler(completion))
+    response = await adapter.chat(
+        [ChatMessage(role="user", content="hi")],
+        response_format=_ROUTER_LIKE_SCHEMA,
+    )
+    assert response.structured_output == {
+        "should_speak": True,
+        "confidence": 0.9,
+        "reason": "ok",
+    }
+
+
+async def test_chat_parses_structured_output_with_surrounding_prose() -> None:
+    decision = '{"should_speak": false, "confidence": 0.2, "reason": "chatter"}'
+    completion = _messages_response(text=f"Here is my decision: {decision} Hope that helps.")
+    adapter = _FakeAnthropicLLM(_config(), handler=_ok_handler(completion))
+    response = await adapter.chat(
+        [ChatMessage(role="user", content="hi")],
+        response_format=_ROUTER_LIKE_SCHEMA,
+    )
+    assert response.structured_output == {
+        "should_speak": False,
+        "confidence": 0.2,
+        "reason": "chatter",
+    }
+
+
+async def test_chat_response_format_injects_schema_into_system() -> None:
+    completion = _messages_response(text='{"should_speak": true, "confidence": 1.0, "reason": "x"}')
+    adapter = _FakeAnthropicLLM(_config(), handler=_ok_handler(completion))
+    await adapter.chat(
+        [
+            ChatMessage(role="system", content="You are the gating router."),
+            ChatMessage(role="user", content="hi"),
+        ],
+        response_format=_ROUTER_LIKE_SCHEMA,
+    )
+    body = json.loads(adapter.requests[0].content)
+    system = body["system"]
+    assert system.startswith("You are the gating router.")
+    assert "single JSON object" in system
+    assert "no markdown" in system
+    assert '"should_speak"' in system  # the schema itself rides the prompt
+
+
+async def test_chat_response_format_creates_system_when_absent() -> None:
+    completion = _messages_response(text='{"answer": "hi"}')
+    adapter = _FakeAnthropicLLM(_config(), handler=_ok_handler(completion))
+    await adapter.chat(
+        [ChatMessage(role="user", content="hi")],
+        response_format={"type": "json_object"},
+    )
+    body = json.loads(adapter.requests[0].content)
+    assert "single JSON object" in body["system"]
+    # Marker-only form carries no schema — instruction only, no schema dump.
+    assert "JSON Schema" not in body["system"]
+
+
+async def test_chat_no_response_format_leaves_system_untouched() -> None:
+    completion = _messages_response(text="hi there")
+    adapter = _FakeAnthropicLLM(_config(), handler=_ok_handler(completion))
+    await adapter.chat(
+        [
+            ChatMessage(role="system", content="Just chat."),
+            ChatMessage(role="user", content="hi"),
+        ]
+    )
+    body = json.loads(adapter.requests[0].content)
+    assert body["system"] == "Just chat."
+
+
 # --- Error handling --------------------------------------------------------
 
 

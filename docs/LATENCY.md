@@ -53,9 +53,10 @@ VAD end-of-speech  ──┐
                      │  endpointing delay (LiveKit agent engine:
                      │  min_endpointing_delay 0.5 s default; bakes in
                      │  the wait for natural mid-sentence pauses)
-STT first-partial  ──┤  N/A on the batch Parakeet path (streaming STT
-                     │  is Johnny-trt Phase 2)
-STT final          ──┤  Parakeet MLX sidecar: ~123 ms p50 measured
+STT first-partial  ──┤  streaming paths only (Parakeet mlx-sidecar,
+                     │  Deepgram); N/A on batch paths
+STT final          ──┤  Parakeet MLX sidecar: ~123 ms p50 measured;
+                     │  Deepgram: ~170 ms p50 after VAD commit (trt.14)
 LLM first-token    ──┤  Router LLM (side call) + answer LLM. Hot path.
 LLM total          ──┤  Answer LLM. ttft == total until Johnny-dny.
 TTS first-byte     ──┤  Local default (Piper persistent): 60 ms p50
@@ -385,8 +386,94 @@ comparisons (incl. Kokoro / KittenTTS / http-sidecar cells) live in
 On the **all-cloud** stack, latency is dominated by network RTT plus
 first-byte time of each provider. EU/US round-trips of 30–80 ms
 make a meaningful difference; pick the closest region you can.
-All-cloud p50/p95 gets measured when the Phase-2 Deepgram verification
-lands (Johnny-trt.14).
+Measured all-cloud p50/p95: see the dedicated baseline section below
+(Johnny-trt.14, 2026-06-11).
+
+## Measured all-cloud baseline — 2026-06-11 (Johnny-trt.14)
+
+Captured with the trt.1 scripted harness (24 turns, `--providers local
+--prewarm`) on the cloud trio: **Deepgram nova-2** STT (en-US, server
+endpointing 300 ms, interims on) + **Anthropic `claude-haiku-4-5`** LLM +
+**ElevenLabs Flash v2.5** TTS (`pcm_16000`). The LLM slot of the target
+row says "OpenAI", but the configured `OPENAI_API_KEY` was dead (401), so
+Haiku — the same speed class — stands in; the target is about the stack
+*shape* (every leg a cloud round trip), not the vendor. Semantic EOU was
+engaged (`semantic-eou(en)` — Deepgram's `en-US` normalizes to `en`),
+endpointing 0.40/1.5 s, VAD floor 0.40 s: the production browser-session
+defaults. 24/24 turns completed, 16 replied; the 8 `no_reply`s are 5
+*reasoned* router declines on Deepgram-split fragments (see the
+split-turn note below) plus replies barge-in-cut by the next fixture. All
+numbers ms, warm = replied turns 2..24 (n=15).
+
+| Stage (warm)                                   | p50   | p95   |
+| ---------------------------------------------- | ----- | ----- |
+| Speech-end → VAD commit (0.40 s floor)         | 404   | 433   |
+| VAD commit → Deepgram final                    | 170   | 235   |
+| Commit wait (speech-end → turn commit)         | 590   | 635   |
+| Router + gate residual (derived, see note)     | 1 533 | 2 030 |
+| Answer LLM (Haiku; TTFT == total, buffered)    | 727   | 1 121 |
+| TTS first byte (ElevenLabs Flash)              | 177   | 187   |
+| **Felt e2e: speech-end → first audio frame**   | **3 121** | **3 814** |
+| Post-commit pipeline (turn commit → first audio) | 2 494 | 3 193 |
+
+Cold turn (prewarmed session, first cloud connections): 4 126 ms felt —
+the ~1 s premium over warm p50 is TLS/connection establishment across the
+three providers.
+
+**Verdict vs the 200/400 ms target: missed by ~8×, and the miss is
+entirely the two LLM round trips.** Router (≈1.5 s incl. gate overhead)
+plus answer (≈0.7 s) own ~90 % of the post-commit budget — the same
+structure as the local baseline, just smaller absolute numbers. The
+stages the cloud stack was supposed to prove are in fact at-floor:
+Deepgram's final lands only ~170 ms after the VAD commit (its 300 ms
+server endpointing overlaps the 0.40 s VAD floor almost entirely) and
+ElevenLabs Flash first byte is a rock-steady 177/187 — both inside the
+200/400 envelope on their own. The target is unreachable while a router
+LLM round trip sits in the hot path and the answer adapter buffers the
+full completion (the Anthropic adapter has no `stream_chat` either —
+TTFT == total, the Johnny-dny gap applies to it too). Phase 3 router
+triage + Johnny-dny answer streaming are the levers; re-measure this
+stack after both.
+
+Measurement notes specific to the cloud path:
+
+- **No LiveKit STT metric rows exist on the Deepgram direct-streaming
+  path** (it bypasses the StreamAdapter, and streaming finals emit no
+  `STTMetrics` the way the batch `recognize()` path does), so the
+  harness's `stt_ms` / `router_ms` / `e2e_vad_commit_ms` columns are
+  null. The wall-clock `stt_final_after_vad_end_ms` instrument still
+  works, and the router+gate row above is derived per turn as
+  `first_audio_wall − (vad_end + stt_final_after_vad_end) − llm_total −
+  tts_ttfb` (it therefore folds in EOU predict + reply scheduling
+  overhead alongside the router LLM round trip).
+- **Deepgram split-turn semantics** mirror the trt.12 mlx-sidecar
+  finding: the server's 300 ms endpointing fires finals at intra-utterance
+  pauses well below the fixtures' clause gaps, so multi-clause fixtures
+  split at the 0.40 s VAD floor and the orphaned fragments ("Johnny," …)
+  get reasoned router declines. Real conversation tolerates this better
+  than scripted fixtures (a fragment decline is usually correct), but
+  floor-drop experiments must account for it.
+- The run only worked after the **Anthropic structured-output fix**
+  shipped with this bead (`app/providers/anthropic_llm.py`): the adapter
+  used to drop `response_format` entirely — the model never saw the
+  router's decision schema and fenced its JSON in markdown, which the
+  strict parser rejected, so **every** turn terminalized
+  `no_reply(router_declined, 'router returned no structured output')`.
+  The adapter now injects the schema + a JSON-only instruction into the
+  request `system` text and parses fence-/prose-tolerantly.
+
+**Deepgram interim verification (the other half of trt.14):** a live
+playground voice session (chrome-devtools MCP, session #104, fake-mic
+WAV) on the same trio showed the trt.13 live caption growing through
+multiple distinct Deepgram hypotheses per utterance ("John," →
+"Johnny," → "Johnny, what day comes" → "Johnny, what day comes after
+Friday?"), clearing on each final, with replies flowing and
+`transcript_chunks` persisting finals only (9 rows, interims ephemeral
+by design). One cosmetic nuance: Deepgram finals carry a speaker id, so
+the transcript pane labels them "Speaker" (`speaker-line`) rather than
+"You" (`user-line`) — flow is identical. Raw artifacts:
+`.validation/Johnny-trt.14/` (harness log + JSON, DOM trace,
+frozen-caption screenshot).
 
 ## In-UI tips on every provider settings page
 

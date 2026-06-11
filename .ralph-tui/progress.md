@@ -155,6 +155,32 @@ after each iteration and it's included in prompts for context.
   unmuted laptop mic + speakers, the bot's own audio echoes into STT
   and trt.9 client barge-in cuts replies ~1 s in — mute the mic for any
   scripted full-reply validation.
+- **Anthropic adapter structured output is prompt-and-parse — and BOTH
+  halves needed completing (trt.14)**: the adapter never sends
+  `response_format` to the API (no JSON-mode flag exists); before the fix
+  it also never showed the schema to the model ("Reply as JSON matching
+  the supplied schema" with no schema visible) and `json.loads`-ed the
+  raw text strictly — Claude models fence JSON in markdown, so EVERY
+  router turn terminalized `no_reply(router_declined, 'router returned
+  no structured output')`. Fixed in `anthropic_llm.py`: the schema +
+  JSON-only instruction now ride the request `system` text
+  (`_structured_output_instruction`; accepts bare-schema AND
+  OpenAI-nested response_format shapes) and `_parse_structured_text`
+  tolerates fences/prose (first-fence contents, then outermost-braces
+  slice). Symptom-to-check if a cloud LLM declines every turn: query
+  `agent_decisions` for that exact reason string.
+- **Deepgram direct-streaming voice path (trt.14)**: interims flow
+  in-session end-to-end (live caption grows through multiple
+  hypotheses, clears on final) — but finals carry a Deepgram speaker id
+  so the playground renders them as `speaker-line` ("Speaker"), NOT
+  `user-line` ("You") — don't assert on user-line testids with Deepgram
+  active. No LiveKit STT metric rows exist on this path (StreamAdapter
+  bypassed, streaming finals emit no STTMetrics): harness `stt_ms` /
+  `router_ms` / `e2e_vad_commit_ms` come back null — use
+  `stt_final_after_vad_end_ms` + per-turn derived residuals instead.
+  Deepgram's 300 ms server endpointing + the 0.40 s VAD floor split
+  multi-clause utterances exactly like the trt.12 mlx-sidecar path
+  (fragments get reasoned router declines).
 
 ---
 
@@ -579,4 +605,69 @@ after each iteration and it's included in prompts for context.
     via its asserts-signature (use `.length`); `npx prettier` pulls an
     unpinned version and false-flags files — this frontend has NO prettier,
     `pnpm lint` is just `eslint .`.
+---
+
+## 2026-06-11 - Johnny-trt.14
+- Verified the Deepgram direct-streaming VOICE path and captured the
+  all-cloud baseline into docs/LATENCY.md — and fixed the blocker found on
+  the way: the Anthropic adapter's structured output was broken (dropped
+  `response_format` entirely; model never saw the router schema, fenced its
+  JSON, strict parse failed → EVERY turn `no_reply(router_declined)`).
+  First harness attempt: 24/24 turns declined. After the fix: live repro
+  returns a parsed RouterDecision (SPEAK 0.95) and runs reply normally.
+- Adapter fix (backend/app/providers/anthropic_llm.py): when
+  `response_format` is supplied, `_structured_output_instruction` injects a
+  JSON-only instruction + the extracted schema (bare-schema and
+  OpenAI-nested shapes via `_extract_response_schema`) into the request
+  `system` text; `_parse_structured_text` parses fence-/prose-tolerantly
+  (whole text → first fenced block → outermost-braces slice). 6 new tests
+  (fenced parse, prose parse, schema-into-system, marker-only form,
+  no-format untouched) in test_anthropic_llm.py.
+- All-cloud measurement (Deepgram nova-2 + Anthropic Haiku 4.5 + ElevenLabs
+  Flash v2.5; .env OPENAI_API_KEY is dead/401 so Haiku stood in for the
+  target row's "OpenAI" slot): 24-turn harness `--providers local
+  --prewarm`, 16 replied, semantic-eou(en) engaged. Warm (n=15): felt e2e
+  3121/3814 ms p50/p95 vs the 200/400 target — miss is entirely the two LLM
+  round trips (router+gate residual 1533/2030 + answer 727/1121 own ~90 %
+  of post-commit); the cloud legs themselves are AT target floor (Deepgram
+  final ~170 ms after VAD commit, ElevenLabs Flash TTFB 177/187). Cold turn
+  4126 ms (~1 s connection-establishment premium). New
+  "Measured all-cloud baseline" section in docs/LATENCY.md documents the
+  table, the derived-residual methodology (no LiveKit STT metrics on the
+  direct-streaming path), Deepgram split-turn semantics, and the verdict:
+  unreachable until Phase-3 router triage + Johnny-dny streaming (the
+  Anthropic adapter buffers too — ttft==total).
+- Browser leg (chrome-devtools MCP, session #104, fake-mic WAV, all-cloud
+  trio active): untampered 38-row DOM trace @ ~110 ms shows the trt.13
+  caption growing through multiple distinct Deepgram hypotheses per
+  utterance ("John," → "Johnny," → "Johnny, what day comes" → "...after
+  Friday?"), clearing on each final; trt.39 bot bubble + replies working;
+  turns 3-7 were *reasoned* Haiku declines (sassy "third trivial question
+  in a row" — structured output live-proven); transcript_chunks = 9 finals,
+  0 interims; console clean. Frozen-caption screenshot via the mic-mute
+  trick. Artifacts: .validation/Johnny-trt.14/ (00-providers-before.json,
+  01-harness log, 02-json, 03-screenshot, 04-evidence notes).
+- Provider state: created Deepgram (id 49) / Anthropic Haiku (52) /
+  ElevenLabs Flash (51) rows via the providers API (keys from .env), left
+  them INACTIVE after restoring the local trio (Parakeet 1 / Ollama 2 /
+  Piper 3 active again); deleted the dead-key OpenAI row (50).
+- Quality: tests/providers 1093 passed (+6 new), 2 PRE-EXISTING failures in
+  openai-realtime S2S *live* tests (they run because OPENAI_API_KEY is set
+  but the key is 401-dead — same env issue the harness hit, unrelated);
+  router_gate + latency_harness suites 27 passed; ruff clean on my
+  additions (1 pre-existing E501 at HEAD untouched); both touched files
+  were already format-dirty at HEAD, my regions format-clean.
+- Files changed: backend/app/providers/anthropic_llm.py,
+  backend/tests/providers/test_anthropic_llm.py, docs/LATENCY.md,
+  .ralph-tui/progress.md.
+- **Learnings:**
+  - Patterns discovered: Anthropic prompt-and-parse completion mechanics +
+    Deepgram voice-path semantics (speaker-line finals, null STT metric
+    rows, split turns) — added to Codebase Patterns above.
+  - Gotchas: a dead-but-set OPENAI_API_KEY makes the gated live S2S tests
+    RUN and fail (skipif only checks set-ness); TaskStop on a `docker
+    compose exec` bash leaves the in-container python alive — kill it via
+    /proc scan (no pgrep/pkill in the api image); the providers API
+    /activate atomically deactivates the kind's sibling rows, so restoring
+    a stack is just three activate calls in sequence.
 ---

@@ -14,10 +14,16 @@ Anthropic's wire shape differs from OpenAI's in three important ways:
   ``tool_use`` / ``tool_result`` blocks rather than separate
   ``tool_calls`` / ``tool_call_id`` fields.
 
-Structured output works via prompt-and-parse: when ``response_format``
-is supplied, the adapter attempts ``json.loads`` on the assistant's text
-content. Users should phrase their prompt to request JSON explicitly
-(Anthropic's API does not have a native JSON-mode flag).
+Structured output works via prompt-and-parse (Anthropic's API has no
+native JSON-mode flag): when ``response_format`` is supplied, the adapter
+appends a JSON-only instruction — embedding the JSON schema when one can
+be extracted from the OpenAI-style nesting or the pipeline's bare-schema
+form — to the request's ``system`` text, then best-effort-parses the
+assistant's text content (tolerating markdown code fences and
+surrounding prose) into ``structured_output``. Johnny-trt.14: without
+the injected instruction Claude models fence the JSON and the router
+gate's strict parse saw ``None`` for every turn (each one terminalized
+``no_reply(router_declined)``).
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re
 from collections.abc import Sequence
 from typing import Any
 
@@ -321,6 +328,11 @@ class AnthropicLLM(LLMProvider):
         response_format: dict[str, Any] | None = None,
     ) -> LLMResponse:
         system_text, request_messages = _split_messages(messages)
+        if response_format is not None:
+            # Prompt-and-parse (module docstring): the JSON-only instruction +
+            # schema ride the system text since the API has no JSON-mode flag.
+            instruction = _structured_output_instruction(response_format)
+            system_text = f"{system_text}\n\n{instruction}" if system_text else instruction
         body: dict[str, Any] = {
             "model": self._model,
             "max_tokens": self._max_tokens,
@@ -401,8 +413,7 @@ class AnthropicLLM(LLMProvider):
 
         structured: Any = None
         if response_format is not None and text:
-            with contextlib.suppress(json.JSONDecodeError):
-                structured = json.loads(text)
+            structured = _parse_structured_text(text)
 
         return LLMResponse(
             text=text,
@@ -518,6 +529,71 @@ def _parse_tool_use_block(block: dict[str, Any]) -> ToolCall:
         name=name,
         arguments=arguments,
     )
+
+
+def _extract_response_schema(response_format: dict[str, Any]) -> Any:
+    """Pull the JSON schema out of a ``response_format`` dict, if any.
+
+    Accepts the OpenAI-style nesting (``{"type": "json_schema",
+    "json_schema": {"schema": ...}}``), a flat ``{"schema": ...}``, and the
+    pipeline's bare-JSON-schema form (``{"type": "object", "properties":
+    ...}`` — what the router gate passes). Marker-only forms
+    (``{"type": "json_object"}`` / ``{"type": "text"}``) carry no schema and
+    return ``None`` — the caller still injects the JSON-only instruction.
+    """
+    js = response_format.get("json_schema")
+    if isinstance(js, dict) and "schema" in js:
+        return js["schema"]
+    if "schema" in response_format:
+        return response_format["schema"]
+    if response_format.get("type") == "object" or "properties" in response_format:
+        return response_format
+    return None
+
+
+def _structured_output_instruction(response_format: dict[str, Any]) -> str:
+    """System-prompt suffix that makes prompt-and-parse actually hold.
+
+    Anthropic has no native JSON-mode flag, so the contract is enforced in
+    the prompt: demand a bare JSON object (Claude models fence JSON in
+    markdown by default, which the strict downstream parsers reject) and
+    show the schema — callers like the router gate say "matching the
+    supplied schema" in their own prompt and rely on the adapter to supply
+    it (the openai-compatible / gemini adapters pass it natively).
+    """
+    instruction = (
+        "Respond with a single JSON object and nothing else — no markdown "
+        "code fences, no prose before or after the object."
+    )
+    schema = _extract_response_schema(response_format)
+    if schema is not None:
+        instruction += " The object must conform to this JSON Schema:\n" + json.dumps(
+            schema, ensure_ascii=False
+        )
+    return instruction
+
+
+def _parse_structured_text(text: str) -> Any:
+    """Best-effort JSON extraction from assistant text (prompt-and-parse).
+
+    Tries, in order: the whole text; the first markdown-fenced block's
+    contents (Claude models habitually wrap JSON in ``` fences despite
+    instructions); the outermost ``{...}`` slice (tolerates stray prose
+    around the object). Returns ``None`` when nothing parses — the
+    downstream parsers treat ``None`` as "no structured output".
+    """
+    candidates = [text]
+    fence_match = re.search(r"```(?:[\w-]+)?\s*\n?(.*?)```", text, flags=re.DOTALL)
+    if fence_match:
+        candidates.append(fence_match.group(1))
+    brace_start = text.find("{")
+    brace_end = text.rfind("}")
+    if brace_start != -1 and brace_end > brace_start:
+        candidates.append(text[brace_start : brace_end + 1])
+    for candidate in candidates:
+        with contextlib.suppress(json.JSONDecodeError):
+            return json.loads(candidate.strip())
+    return None
 
 
 async def fetch_model_catalog(

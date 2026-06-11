@@ -3,10 +3,10 @@
   "sessionId": "82402e4d-e4aa-4e51-a95b-90cc16d67f3b",
   "status": "running",
   "startedAt": "2026-06-10T20:20:17.654Z",
-  "updatedAt": "2026-06-11T01:56:35.297Z",
-  "currentIteration": 7,
+  "updatedAt": "2026-06-11T02:29:04.873Z",
+  "currentIteration": 8,
   "maxIterations": 0,
-  "tasksCompleted": 7,
+  "tasksCompleted": 8,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -336,6 +336,16 @@
       "durationMs": 2018502,
       "startedAt": "2026-06-11T01:04:38.066Z",
       "endedAt": "2026-06-11T01:38:16.568Z"
+    },
+    {
+      "iteration": 8,
+      "status": "completed",
+      "taskId": "Johnny-trt.40",
+      "taskTitle": "[BUILD] Phase 2: Playground chat shows previous session's history after restart (stale state reset)",
+      "taskCompleted": true,
+      "durationMs": 1067571,
+      "startedAt": "2026-06-11T01:38:46.598Z",
+      "endedAt": "2026-06-11T01:56:34.169Z"
     }
   ],
   "skippedTaskIds": [],
