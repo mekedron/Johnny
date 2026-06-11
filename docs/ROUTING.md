@@ -74,6 +74,27 @@ Built by: trt.16 (schema/action vocabulary), trt.17 (gate branching + ack termin
 trt.18 (agent_tasks + TaskCoordinator), trt.19 (budget + catalog + observability),
 Phases 4–5 (executor, events, speech queue).
 
+**Ack contract & decision transparency (trt.53, trt.54).** Operator principle
+(2026-06-11, from live use of the freshly-landed delegate path): *the conversation
+must feel smooth and natural, and participants must always understand the bot's
+decision.* Concretely:
+
+- **Acks are LLM-authored, per turn, in the user's language** — they name the
+  specific work and why it needs time ("I'll look through the connected calendar for
+  tomorrow's events — give me a minute"). The canned `DEFAULT_DELEGATE_ACK` ("Let me
+  check on that — I'll get back to you") is an **instrumented last resort**, never the
+  norm; every fallback occurrence is marked in the decision row.
+- **Delegate restraint**: answerable-from-context → `speak`, even when catalog
+  keywords appear; only catalog-listed kinds are delegatable; when unsure between
+  speak and delegate, **speak** — a real answer beats a hollow promise.
+- **No dead promises**: until the Phase-5 re-entry queue exists, a delegated task
+  that fails fast produces a short honest spoken correction ("Actually — I can't do
+  that yet: …") via the same `say()` path, session-scoped speech, not a terminal.
+- **The whole chain is visible in history** (trt.54): final transcript → heuristic
+  shadow verdict → router action + confidence + stated reason → spoken text
+  (recommended vs final, divergence flagged) → linked task row → terminal + stage
+  timings. No turn may leave "what did it say, and why?" unanswerable from the UI.
+
 ## 3. Per-agent model roles
 
 Agents (Phase 6, trt.41) pin a model per pipeline level — so a light local model can
@@ -186,7 +207,9 @@ separately replay-gated:
   **ack**; async results re-enter as session-scoped speech (approval-reply
   precedent), never as turn terminals. The `not_addressed` hard gate emits its own
   terminal. **INV-2** — what was spoken is what was recorded (`AgentSpoke` with the
-  ack text).
+  ack text); trt.54 extends the `final_text` stamp + history entry to **all**
+  `say()`-path speech (ack, status, correction) so the decisions panel and the chat
+  can never silently diverge.
 - **Replay verdict parity** — router schema changes are additive; old model outputs
   parse byte-for-byte identically (`johnny-replay --mode invariants` is a CI gate).
   The shadow scorer and the default-off addressing gate are parity-safe by
@@ -207,7 +230,9 @@ separately replay-gated:
 | Gate branching + ack terminal | Johnny-trt.17 | **shipped** (2026-06-11) — `RouterGate.run_turn` branches on `decision.action` after the mode checks (suggest_only/approval_required/listen_only and the rate limiter unchanged): `delegate` → `TaskCoordinator.begin` (row-before-ack) + `session.say(ack)` whose SpeechHandle completion owns the turn terminal (`replied` / `no_reply(barge_in)`; coordinator/persist/say failure → nothing spoken + `no_reply(stage_error)`); `status` → fixed Phase-3 stub line via the same say machinery. No answer-LLM hop on either; `AgentSpoke` carries the ack text (INV-2); task results are session-scoped speech later, never turn terminals (INV-1) |
 | `agent_tasks` + TaskCoordinator + stub executor | Johnny-trt.18 | **shipped** (2026-06-11) — `agent_tasks` table + migration 0023; `SqlAlchemyTaskSink`; stdlib `TaskCoordinator` (row durable at `begin` return, best-effort `TaskQueued` + `johnny.tasks.wake` ping, aclose marks `cancelled`); Phase-3 `stub_executor` fails every kind fast with speech-ready text; wired for all SPEAKING_MODES via `_build_sync_persistence` |
 | Triage budget + task catalog + observability | Johnny-trt.19 | **shipped** (2026-06-11) — `DEFAULT_ROUTER_LLM_TIMEOUT_S` 30 → 8 s (budget framing; gate mirror + drift-guard/value tests); `TaskCatalogEntry (kind, one_liner, keywords[])` in `johnny/agent/task_catalog.py` with Phase-3 stubs (`calendar.upcoming_events`, `gmail.search`) rendered into the router prompt **only when a TaskCoordinator is wired** (keywords stay scorer-only, feeding trt.50); gate emits a per-decided-turn `router_llm` PipelineTiming (`details.action`) → `session_timings`; latency harness reports it directly as `triage_ms` (the derived `router_ms` gap stays for baseline comparability); small-router-model + 8 s budget tip on the OpenAI-compatible provider. Phase 4 (trt.23) swaps the catalog *source* to the skill loader; the entry shape is the contract |
-| Heuristic complexity scorer (shadow) | Johnny-trt.50 | planned (Phase 3) |
+| Heuristic complexity scorer (shadow) | Johnny-trt.50 | in progress (Phase 3) |
+| Delegate restraint + contextual LLM-authored acks | Johnny-trt.53 | planned (Phase 3, bug — live over-delegation + canned `DEFAULT_DELEGATE_ACK`) |
+| Decision-pipeline observability (full chain incl. spoken text) | Johnny-trt.54 | planned (Phase 3, bug — say-path `final_text`/history gap) |
 | Phase 3 capstone (parity + INV-1 + delegated turn) | Johnny-trt.21 | planned (Phase 3) |
 | Executor, tools/skills, task events | Johnny-trt.22–26, .35 | planned (Phase 4) |
 | Speech queue + re-entry + status query | Johnny-trt.27–30 | planned (Phase 5) |
@@ -219,5 +244,6 @@ separately replay-gated:
 | Deferred: fast-path / prompt prior / micro-reply | Johnny-trt.51 | deferred spike |
 | Deferred: speculative-parallel router | Johnny-trt.20 | deferred spike |
 
-Keeping this file current is acceptance criteria on trt.50, trt.51, trt.52 and part
-of the trt.34 docs capstone (cross-link with PIPELINE.md, flip statuses to shipped).
+Keeping this file current is acceptance criteria on trt.50, trt.51, trt.52, trt.53,
+trt.54 and part of the trt.34 docs capstone (cross-link with PIPELINE.md, flip
+statuses to shipped).
