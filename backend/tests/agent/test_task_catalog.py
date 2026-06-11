@@ -31,15 +31,38 @@ def test_render_snapshot_two_entries() -> None:
     rendered = render_task_catalog(entries)
 
     expected = (
-        "Delegatable task kinds — when the request needs real work done "
-        "(looking something up in an external system, taking an action) "
-        "rather than a conversational answer from context, choose "
-        "action='delegate' and set task.kind to one of these, with a "
-        "short spoken acknowledgment in task.ack:"
+        "Delegatable task kinds — the ONLY kinds you may delegate. "
+        "Choose action='delegate' only when the request needs real work "
+        "in an external system (looking something up, taking an action) "
+        "that matches one of the kinds below. If the request can be "
+        "answered from the conversation, your own knowledge, or the "
+        "context you were given, choose action='speak' instead — even "
+        "when these topics come up. When unsure between speak and "
+        "delegate, choose speak. With action='delegate', task.ack is "
+        "required: write the acknowledgment yourself in the language the "
+        "user spoke, naming the specific work you are starting and why "
+        "it needs a moment — never a generic filler phrase. The kinds:"
         "\n- calendar.upcoming_events: Look up events."
         "\n- gmail.search: Search the mailbox."
     )
     assert rendered == expected
+
+
+def test_render_header_carries_restraint_and_ack_contract() -> None:
+    """Johnny-trt.53: the header must steer the model away from over-delegating
+    (answerable-from-context ⇒ speak, unsure ⇒ speak, catalog kinds only) and
+    demand a per-request, user-language ack — with no canned example to copy."""
+    entries = (TaskCatalogEntry(kind="calendar.upcoming_events", one_liner="Look up events."),)
+
+    rendered = render_task_catalog(entries)
+
+    assert "ONLY kinds you may delegate" in rendered
+    assert "choose action='speak' instead" in rendered
+    assert "When unsure between speak and delegate, choose speak." in rendered
+    assert "task.ack is required" in rendered
+    assert "language the user spoke" in rendered
+    # No filler phrase anywhere near the model (the trt.53 copy-priming bug).
+    assert "Let me check" not in rendered
 
 
 def test_render_never_leaks_keywords() -> None:

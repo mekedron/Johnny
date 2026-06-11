@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Sequence
 from typing import Any, Literal, cast
 
@@ -43,11 +44,13 @@ from app.providers.base import (  # noqa: E402
 )
 from johnny.agent.gate import GateTerminal, TurnIndex, TurnLedger  # noqa: E402
 from johnny.agent.router_gate import (  # noqa: E402
+    ACK_FALLBACK_KEY,
     DEFAULT_DELEGATE_ACK,
     ROUTER_DECISION_SCHEMA,
     STATUS_STUB_REPLY,
     RouterGate,
     RouterGateConfig,
+    delegate_failure_correction,
 )
 from johnny.agent.tasks import (  # noqa: E402
     InMemoryTaskSink,
@@ -801,7 +804,10 @@ async def test_triage_timing_delegate_action_carried() -> None:
                 "confidence": 0.95,
                 "reason": "complex",
                 "action": "delegate",
-                "task": {"kind": "calendar.upcoming_events"},
+                "task": {
+                    "kind": "calendar.upcoming_events",
+                    "ack": "I'll look at the calendar — one moment.",
+                },
             }
         ]
     )
@@ -809,6 +815,26 @@ async def test_triage_timing_delegate_action_carried() -> None:
         await gate.run_turn(ChatContext.empty(), _user_msg("book it"))
 
     assert [c[3] for c in timing.calls] == ["delegate"]
+
+
+async def test_triage_timing_carries_effective_action_after_ack_degrade() -> None:
+    """An ackless delegate degrades to SPEAK *before* the timing emit
+    (Johnny-trt.53) — the row carries the action the turn actually took; the
+    model's original verdict survives in the decision row's raw marker."""
+    gate, timing = _timed_gate(
+        [
+            {
+                "should_speak": True,
+                "confidence": 0.95,
+                "reason": "complex",
+                "action": "delegate",
+                "task": {"kind": "calendar.upcoming_events"},
+            }
+        ]
+    )
+    await gate.run_turn(ChatContext.empty(), _user_msg("book it"))  # SPEAK — no raise
+
+    assert [c[3] for c in timing.calls] == ["speak"]
 
 
 async def test_triage_timing_not_emitted_on_timeout() -> None:
@@ -1229,7 +1255,6 @@ async def test_delegate_queues_row_before_ack_then_replied_terminal() -> None:
     turn_id, term = h.emitter.records[0]
     assert turn_id == msg.id
     assert "delegated calendar.check task #1" in term.detail
-    assert h.obs.spoke == ["On it — give me a minute."]
     # The spoken ack counts toward the over-talk cap, like any utterance.
     assert len(h.gate._recent_utterance_times) == 1
     # The stub executor settled the row failed OFF the turn loop — a task
@@ -1238,18 +1263,81 @@ async def test_delegate_queues_row_before_ack_then_replied_terminal() -> None:
     assert settled.status == "failed"
     assert settled.result_text == unsupported_kind_text("calendar.check")
     assert h.emitter.states == ["replied"]
+    # No dead promises (Johnny-trt.53): the fast fail re-entered immediately
+    # as the honest spoken correction — say()-path session-scoped speech with
+    # no second terminal and no AgentSpoke (recording it is trt.54's scope).
+    assert h.say.texts == [
+        "On it — give me a minute.",
+        delegate_failure_correction(unsupported_kind_text("calendar.check")),
+    ]
+    assert h.obs.spoke == ["On it — give me a minute."]
 
 
-@pytest.mark.parametrize("ack", [None, ""])
-async def test_delegate_falls_back_to_default_ack(ack: str | None) -> None:
-    """A delegate verdict with no usable ack speaks the gate's own wording."""
+@pytest.mark.parametrize("ack", [None, "", "   "])
+async def test_ackless_delegate_degrades_to_speak(ack: str | None) -> None:
+    """THE trt.53 ack rule: a delegate verdict with no usable ack never
+    delegates — the turn rides the plain SPEAK path (a real contextual answer
+    beats the hollow canned promise that was the live bug), instrumented in
+    the decision raw before the emit."""
     h = _TaskGateHarness([_delegate_decision(ack=ack)])
+    msg = _user_msg("check the calendar")
+
+    await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK — no raise
+
+    assert h.say.texts == []  # the canned DEFAULT_DELEGATE_ACK is never spoken
+    assert h.sink.snapshot() == []  # nothing queued — no promise at all
+    assert h.emitter.records == []  # the upcoming reply owns the terminal
+    assert msg.id in h.gate._pending_speak_turns
+    # Instrumented: the marker rode decision.raw into the decision emit (the
+    # trt.50 ride-along pattern), so agent_decisions.raw_output carries it.
+    assert len(h.obs.decisions) == 1
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "speak"
+    assert decision.task_request is None
+    marker = decision.raw[ACK_FALLBACK_KEY]
+    assert marker == {
+        "from_action": "delegate",
+        "to_action": "speak",
+        "kind": "calendar.check",
+        "reason": "delegate verdict carried no ack",
+    }
+    json.dumps(marker)  # JSON-safe as persisted by the subscriber
+
+
+async def test_delegate_with_ack_carries_no_fallback_marker() -> None:
+    """The marker exists only on degraded turns — a clean delegate stays clean
+    (the fallback-ack rate must read zero on a well-behaved session)."""
+    h = _TaskGateHarness([_delegate_decision()])
 
     with pytest.raises(StopResponse):
         await h.gate.run_turn(ChatContext.empty(), _user_msg("check the calendar"))
 
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "delegate"
+    assert ACK_FALLBACK_KEY not in decision.raw
+
+
+async def test_default_ack_survives_only_as_instrumented_last_resort(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A hand-built ackless delegate that bypasses run_turn's degrade still
+    speaks the canned line rather than nothing — and logs a warning, because
+    every DEFAULT_DELEGATE_ACK utterance is the exact trt.53 bug signal."""
+    from johnny.voice_pipeline.reasoning import TaskRequest
+
+    h = _TaskGateHarness()
+    msg = _user_msg("hand-built decision")
+    tracker = h.gate._ledger.gate_tracker(msg.id)
+
+    with caplog.at_level(logging.WARNING, logger="johnny.agent.router_gate"):
+        await h.gate._begin_delegated_task(
+            tracker, msg.id, TaskRequest(kind="calendar.check", ack="")
+        )
+
     assert h.say.texts == [DEFAULT_DELEGATE_ACK]
     assert h.sink.snapshot()[0].spec.ack_text == DEFAULT_DELEGATE_ACK
+    assert "defensive last resort" in caplog.text
+    await h.drain()  # let the stub resolver settle so no task outlives the loop
 
 
 async def test_delegate_ack_barged_in_emits_barge_in_and_no_spoke() -> None:
@@ -1434,6 +1522,85 @@ async def test_delegate_say_done_callback_double_fire_single_terminal() -> None:
 
     assert h.emitter.states == ["replied"]
     assert h.obs.spoke == ["On it — give me a minute."]
+
+
+# --------------------------------------------------------------------------- #
+# No dead promises — the fast-fail spoken correction (Johnny-trt.53)           #
+# --------------------------------------------------------------------------- #
+
+
+async def test_failed_task_speaks_honest_correction_without_terminal() -> None:
+    """The Phase-3 stopgap: a delegated task the stub executor fails fast
+    re-enters the conversation as the honest say()-path correction —
+    session-scoped speech (the approval-reply precedent), never a second
+    terminal (INV-1) and no AgentSpoke (recording it is trt.54's scope)."""
+    h = _TaskGateHarness([_delegate_decision(kind="gmail.search", ack="Searching the inbox now.")])
+    msg = _user_msg("find the vendor email")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+    correction = delegate_failure_correction(unsupported_kind_text("gmail.search"))
+    assert correction == (
+        "Actually — I can't do that yet: I don't know how to run gmail.search tasks yet."
+    )
+    assert h.say.texts == ["Searching the inbox now.", correction]
+    # INV-1: the delegating turn still owns exactly one terminal (the ack's).
+    assert h.emitter.states == ["replied"]
+    # The correction registers no done-callback — it owns no terminal at all.
+    assert h.say.handles[1]._cbs == []
+    # Only the ack hit AgentSpoke; the correction is unrecorded until trt.54.
+    assert h.obs.spoke == ["Searching the inbox now."]
+    # And it never counts toward the over-talk cap (no replied terminal).
+    assert len(h.gate._recent_utterance_times) == 1
+
+
+def test_delegate_failure_correction_blank_text_stays_honest() -> None:
+    """A failure with no speech-ready text still gets an honest generic tail."""
+    assert delegate_failure_correction("") == (
+        "Actually — I can't do that yet: that task didn't go through."
+    )
+    assert delegate_failure_correction("   ") == (
+        "Actually — I can't do that yet: that task didn't go through."
+    )
+
+
+async def test_gate_constructor_attaches_failure_reporter_to_coordinator() -> None:
+    """Pairing a gate with a coordinator wires the correction path by
+    construction — every assembly (job_session, the playground, this harness)
+    gets the no-dead-promises seam without an extra wiring step."""
+    h = _TaskGateHarness()
+    assert h.coordinator is not None
+    assert h.coordinator._report_failed == h.gate.report_task_failure
+
+
+async def test_report_task_failure_without_say_is_contained() -> None:
+    """A failure settling before on_enter attached say() (or after teardown)
+    is logged, not raised — the durable row already tells the truth."""
+    from johnny.agent.tasks import QueuedTask, TaskResult
+
+    h = _TaskGateHarness(attach_say=False)
+    queued = QueuedTask(task_id=7, spec=TaskSpec(kind="gmail.search"))
+    result = TaskResult(status="failed", result_text="nope")
+
+    await h.gate.report_task_failure(queued, result)  # must not raise
+
+    assert h.say.texts == []
+
+
+async def test_report_task_failure_say_raising_is_contained() -> None:
+    """say() raising mid-drain (session closing) never escapes the reporter."""
+    from johnny.agent.tasks import QueuedTask, TaskResult
+
+    h = _TaskGateHarness(say_raises=RuntimeError("session draining"))
+    queued = QueuedTask(task_id=7, spec=TaskSpec(kind="gmail.search"))
+    result = TaskResult(status="failed", result_text="nope")
+
+    await h.gate.report_task_failure(queued, result)  # must not raise
+
+    assert h.say.texts == []
 
 
 async def test_status_speaks_stub_and_terminalizes_replied() -> None:

@@ -225,10 +225,23 @@ WakePing = Callable[[QueuedTask], Awaitable[None]]
 """Nudge the shared ``johnny.tasks.wake`` channel so an external worker
 (Phase 4) picks queued work up without polling."""
 
+ReportTaskFailed = Callable[[QueuedTask, TaskResult], Awaitable[None]]
+"""Tell the session a task settled ``failed`` — the no-dead-promises seam
+(Johnny-trt.53). Called by the resolver *after* the terminal row update, off
+the turn loop, so the consumer (the gate's honest spoken correction via
+``say()``) only ever reports durable state. Best-effort and contained like
+the announce seams; never invoked for ``done`` (Phase-5 re-entry territory)
+or ``cancelled`` (the session is tearing down — nobody is listening)."""
+
 
 def unsupported_kind_text(kind: str) -> str:
-    """Speech-ready failure phrase for a task kind nothing can run yet."""
-    return f"I couldn't do that — I don't know how to run {kind} tasks yet."
+    """Speech-ready failure phrase for a task kind nothing can run yet.
+
+    Composes under the gate's correction prefix (Johnny-trt.53:
+    ``"Actually — I can't do that yet: <this>"``), so it carries no
+    "I couldn't do that" framing of its own.
+    """
+    return f"I don't know how to run {kind} tasks yet."
 
 
 def executor_error_text(kind: str) -> str:
@@ -271,15 +284,32 @@ class TaskCoordinator:
         executor: TaskExecutor,
         publish_queued: PublishQueued | None = None,
         wake: WakePing | None = None,
+        report_failed: ReportTaskFailed | None = None,
     ) -> None:
         self._sink = sink
         self._executor = executor
         self._publish_queued = publish_queued
         self._wake = wake
+        # The no-dead-promises seam (Johnny-trt.53). Usually attached after
+        # construction via :meth:`attach_failure_reporter` (the gate is built
+        # *after* the coordinator in the runtime assembly, the attach_say
+        # ordering pattern); the constructor arg serves directly-wired tests.
+        self._report_failed = report_failed
         # Strong refs to in-flight resolver tasks so they aren't GC'd mid-run
         # (and to avoid "task exception never retrieved" warnings); also lets
         # aclose() drain them at teardown.
         self._tasks: set[asyncio.Task[None]] = set()
+
+    def attach_failure_reporter(self, report: ReportTaskFailed) -> None:
+        """Attach the failed-task report seam after construction (Johnny-trt.53).
+
+        Called by :class:`~johnny.agent.router_gate.RouterGate` when it is
+        constructed with this coordinator (the gate owns ``say()``, so it owns
+        the spoken correction) — the coordinator exists first in the runtime
+        assembly, so the seam cannot be a constructor argument there. Until
+        attached, failed settles are recorded but reported nowhere.
+        """
+        self._report_failed = report
 
     # ------------------------------------------------------------------ #
     # The entry point (called from the gate's delegate branch)            #
@@ -351,7 +381,15 @@ class TaskCoordinator:
     # ------------------------------------------------------------------ #
 
     async def _run(self, queued: QueuedTask) -> None:
-        """Carry one queued task to its terminal status, off the turn loop."""
+        """Carry one queued task to its terminal status, off the turn loop.
+
+        Every ``failed`` settle — executor exception, illegal executor status,
+        or an honest ``failed`` result — is reported through the attached
+        :data:`ReportTaskFailed` seam *after* the row update (Johnny-trt.53:
+        the spoken correction only ever describes durable state, the
+        row-before-ack discipline applied to the walk-back). ``cancelled``
+        (session teardown) and ``done`` (Phase-5 re-entry) report nothing.
+        """
         await self._safe_update(queued.task_id, "running", attempts=1)
         try:
             result = await self._executor(queued)
@@ -371,12 +409,18 @@ class TaskCoordinator:
                 queued.task_id,
                 queued.spec.kind,
             )
-            await self._safe_update(
-                queued.task_id,
-                "failed",
+            result = TaskResult(
+                status="failed",
                 result_text=executor_error_text(queued.spec.kind),
                 error=f"executor error: {type(exc).__name__}: {exc}",
             )
+            await self._safe_update(
+                queued.task_id,
+                "failed",
+                result_text=result.result_text,
+                error=result.error,
+            )
+            await self._safe_report_failed(queued, result)
             return
 
         status: TaskStatus
@@ -396,6 +440,8 @@ class TaskCoordinator:
             result_json=result.result_json,
             error=result.error or None,
         )
+        if status == "failed":
+            await self._safe_report_failed(queued, result)
 
     # ------------------------------------------------------------------ #
     # Contained I/O (a failing seam never crashes the round)              #
@@ -425,6 +471,18 @@ class TaskCoordinator:
         except Exception:
             logger.exception("tasks.begin: wake ping failed for task_id=%s", queued.task_id)
 
+    async def _safe_report_failed(self, queued: QueuedTask, result: TaskResult) -> None:
+        if self._report_failed is None:
+            return
+        try:
+            await self._report_failed(queued, result)
+        except Exception:
+            logger.exception(
+                "tasks.run: failure report raised for task_id=%s kind=%s",
+                queued.task_id,
+                queued.spec.kind,
+            )
+
 
 __all__ = [
     "EXECUTOR_RESULT_STATUSES",
@@ -432,6 +490,7 @@ __all__ = [
     "InMemoryTaskSink",
     "PublishQueued",
     "QueuedTask",
+    "ReportTaskFailed",
     "TaskCoordinator",
     "TaskExecutor",
     "TaskRecord",

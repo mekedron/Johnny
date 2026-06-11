@@ -25,12 +25,17 @@ Phase-3 triage (Johnny-trt.16/.17) extends the approved-and-confident leg in
 inline-speaking modes with two more actions before the speak fallthrough:
 ``delegate`` queues an async task through the session
 :class:`~johnny.agent.tasks.TaskCoordinator` (the durable ``agent_tasks`` row
-exists before any audio — row-before-ack) and speaks a short ack via
-``session.say()`` whose completion owns the turn's terminal; ``status`` speaks
-the fixed Phase-3 stub the same way. Neither pays an answer-LLM hop. Task
-*results* arrive later as session-scoped speech (the approval-reply
-precedent), never as turn terminals, so INV-1 keeps exactly one terminal per
-turn.
+exists before any audio — row-before-ack) and speaks the model-authored ack
+via ``session.say()`` whose completion owns the turn's terminal; ``status``
+speaks the fixed Phase-3 stub the same way. Neither pays an answer-LLM hop.
+An ackless delegate verdict is degraded to a plain SPEAK instead
+(Johnny-trt.53, instrumented under :data:`ACK_FALLBACK_KEY`) — a real answer
+beats the canned :data:`DEFAULT_DELEGATE_ACK`. Task *results* arrive later as
+session-scoped speech (the approval-reply precedent), never as turn
+terminals, so INV-1 keeps exactly one terminal per turn; until the Phase-5
+re-entry queue exists, a task that settles ``failed`` re-enters immediately
+as the honest spoken correction (:meth:`RouterGate.report_task_failure` — no
+dead promises).
 
 INV-1 ("exactly one terminal per turn") is enforced by the session-scoped
 :class:`~johnny.agent.gate.TurnLedger` (spike Johnny-o3z): :meth:`run_turn`
@@ -57,7 +62,7 @@ import logging
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from livekit.agents.llm import ChatContext, StopResponse
 from livekit.agents.llm.chat_context import ChatMessage as LKChatMessage
@@ -79,7 +84,7 @@ from johnny.agent.observability import (
     RecordTriageTiming,
 )
 from johnny.agent.task_catalog import TaskCatalogEntry, render_task_catalog
-from johnny.agent.tasks import TaskCoordinator, TaskSpec
+from johnny.agent.tasks import QueuedTask, TaskCoordinator, TaskResult, TaskSpec
 from johnny.voice_pipeline import reasoning as _reasoning
 from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
 from johnny.voice_pipeline.reasoning import (
@@ -93,6 +98,7 @@ from johnny.voice_pipeline.reasoning import (
     DEFAULT_ROUTER_LLM_TIMEOUT_S,
     DELEGATE_ACTION,
     LISTEN_ONLY_MODE,
+    SPEAK_ACTION,
     STATUS_ACTION,
     SUGGEST_ONLY_MODE,
     RouterDecision,
@@ -153,14 +159,46 @@ never sees these speeches — the gate attaches the turn's terminal done-callbac
 to the returned :class:`SpeechHandle` directly."""
 
 DEFAULT_DELEGATE_ACK = "Let me check on that — I'll get back to you."
-"""Spoken when a ``delegate`` verdict carries no usable ``ack`` phrase of its
-own (:class:`~johnny.voice_pipeline.reasoning.TaskRequest` documents the empty
-``ack`` as "the gate falls back to its own wording")."""
+"""The canned ack — kept ONLY as a defensive last resort (Johnny-trt.53).
+
+THE RULE (chosen over speaking this default, documented in
+``docs/ROUTING.md`` §2): a ``delegate`` verdict that carries no usable
+``ack`` is **degraded to SPEAK** in :meth:`RouterGate.run_turn` — the answer
+pipeline produces a real, contextual reply instead of a hollow canned
+promise. That degrade runs before the delegate branch, so this constant is
+unreachable through the normal turn flow; it survives solely for hand-built
+decisions that bypass :meth:`run_turn`, and any occurrence is logged as a
+warning (live use of this string was the trt.53 bug)."""
+
+ACK_FALLBACK_KEY = "ack_fallback"
+"""``decision.raw`` key marking an ackless delegate verdict the gate degraded
+to SPEAK (Johnny-trt.53). Stashed *before* the ``RouterDecisionMade`` emit so
+the marker lands inside ``agent_decisions.raw_output`` (the trt.50
+``decision.raw`` ride-along pattern — no event field, no migration). The
+per-session fallback-ack rate is rows carrying this key over rows whose
+``raw_output->>'action'`` is ``'delegate'``; the delegate rate is those rows
+over all decision rows."""
 
 STATUS_STUB_REPLY = "I don't have any tasks in flight right now."
 """The Phase-3 ``status`` verdict stub — there is no delegated-task registry to
 query until the Phase-5 real status query lands, so the gate speaks this fixed
 line instead of paying an answer-LLM hop."""
+
+
+def delegate_failure_correction(result_text: str) -> str:
+    """Compose the honest spoken walk-back for a fast-failed delegated task.
+
+    The Phase-3 no-dead-promises stopgap (Johnny-trt.53): the ack promised
+    work, the stub executor (or a Phase-4 crash) settled the row ``failed``,
+    and nothing else would re-enter the conversation until the Phase-5 speech
+    queue (Johnny-trt.29) — so the gate says so, out loud, immediately.
+    ``result_text`` is the row's speech-ready failure phrase
+    (:func:`~johnny.agent.tasks.unsupported_kind_text` /
+    :func:`~johnny.agent.tasks.executor_error_text`); a blank one gets a
+    generic but still honest tail.
+    """
+    spoken = (result_text or "").strip() or "that task didn't go through."
+    return f"Actually — I can't do that yet: {spoken}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +308,14 @@ class RouterGate:
         # promising work nothing can record.
         self._tasks = tasks
         self._resolve_turn_id = resolve_turn_id
+        # No dead promises (Johnny-trt.53): the gate owns say(), so it owns the
+        # honest spoken walk-back when a delegated task fails fast — attach the
+        # coordinator's failure-report seam right here so every assembly that
+        # pairs a gate with a coordinator (job_session, the test harnesses)
+        # gets the correction wiring for free. 1:1 per session, so the attach
+        # cannot clobber another consumer.
+        if tasks is not None:
+            tasks.attach_failure_reporter(self.report_task_failure)
         # The say() seam for delegate acks / status stubs (Johnny-trt.17),
         # attached by JohnnyAgent.on_enter once the session exists.
         self._say: SaySpeech | None = None
@@ -328,14 +374,19 @@ class RouterGate:
         Phase-3 triage (Johnny-trt.17): an approved-and-confident turn in an
         inline-speaking mode branches on ``decision.action`` before the SPEAK
         fallthrough. ``delegate`` queues the async task (row-before-ack via
-        :meth:`TaskCoordinator.begin`) and speaks the short ack via ``say()``
-        — no answer-LLM hop — with the ack :class:`SpeechHandle`'s completion
-        owning the turn's terminal (``replied`` / ``no_reply(barge_in)``); a
-        missing coordinator / failed persist / unattached ``say`` speaks
-        nothing and terminalizes ``no_reply(stage_error)``. ``status`` speaks
-        the fixed :data:`STATUS_STUB_REPLY` through the same machinery (the
-        real status query is Phase 5). Both raise ``StopResponse`` so the SDK
-        generates no reply; both run *after* the mode branches above, so
+        :meth:`TaskCoordinator.begin`) and speaks the model-authored ack via
+        ``say()`` — no answer-LLM hop — with the ack :class:`SpeechHandle`'s
+        completion owning the turn's terminal (``replied`` /
+        ``no_reply(barge_in)``); a missing coordinator / failed persist /
+        unattached ``say`` speaks nothing and terminalizes
+        ``no_reply(stage_error)``. A delegate verdict with **no usable ack**
+        never reaches that branch: :meth:`_degrade_ackless_delegate`
+        (Johnny-trt.53) rewrites it to a plain SPEAK — marked in
+        ``decision.raw`` under :data:`ACK_FALLBACK_KEY` before the decision
+        emit — because a real answer beats a hollow canned promise. ``status``
+        speaks the fixed :data:`STATUS_STUB_REPLY` through the same machinery
+        (the real status query is Phase 5). Both raise ``StopResponse`` so the
+        SDK generates no reply; both run *after* the mode branches above, so
         ``suggest_only`` / ``approval_required`` / ``listen_only`` sessions and
         the rate limiter treat a delegate/status verdict exactly like a speak
         verdict (unchanged behaviour).
@@ -405,6 +456,13 @@ class RouterGate:
         # back; it exists for the offline heuristic-vs-LLM-action dataset.
         if shadow is not None:
             decision.raw[SHADOW_KEY] = shadow
+
+        # Delegate-ack rule (Johnny-trt.53): an ackless delegate verdict is
+        # degraded to a plain SPEAK before anything reads the action — the
+        # timing row below carries the *effective* action, and the raw marker
+        # (stashed inside the helper, before the decision emit) keeps the
+        # model's original verdict measurable.
+        decision = self._degrade_ackless_delegate(decision, turn_id)
 
         # Triage-stage timing (Johnny-trt.19): one ``router_llm`` row per turn
         # the router actually decided (timed-out / barged / errored gates leave
@@ -545,6 +603,47 @@ class RouterGate:
         )
         return verdict.shadow_payload()
 
+    def _degrade_ackless_delegate(
+        self, decision: RouterDecision, turn_id: str
+    ) -> RouterDecision:
+        """Rewrite a delegate verdict with no usable ack to a plain SPEAK (Johnny-trt.53).
+
+        THE RULE, chosen over speaking :data:`DEFAULT_DELEGATE_ACK` and
+        documented in ``docs/ROUTING.md`` §2: when the router picks
+        ``delegate`` but skips the required model-authored ack, the turn falls
+        through to the answer pipeline — a real, contextual reply beats a
+        hollow canned promise (and in Phase 3 the task could only fail fast in
+        the stub executor anyway). Verdicts with a non-blank ack pass through
+        untouched.
+
+        Instrumented both ways the bead demands: the
+        :data:`ACK_FALLBACK_KEY` marker is stashed in ``decision.raw``
+        *before* :meth:`run_turn`'s decision emit (so it persists inside
+        ``agent_decisions.raw_output``, where the per-session fallback-ack
+        rate is derived from), and a warning names the dropped kind. The
+        returned decision keeps ``should_speak=True`` (delegate implied it)
+        and clears ``task_request`` so the action/task pair stays consistent.
+        """
+        task_request = decision.task_request
+        if decision.action != DELEGATE_ACTION or task_request is None:
+            return decision
+        if task_request.ack.strip():
+            return decision
+        decision.raw[ACK_FALLBACK_KEY] = {
+            "from_action": DELEGATE_ACTION,
+            "to_action": SPEAK_ACTION,
+            "kind": task_request.kind,
+            "reason": "delegate verdict carried no ack",
+        }
+        logger.warning(
+            "agent.router.gate: turn=%s delegate verdict for kind=%r carried no "
+            "ack — degrading to SPEAK (Johnny-trt.53: a real answer beats a "
+            "hollow promise)",
+            turn_id,
+            task_request.kind,
+        )
+        return replace(decision, action=SPEAK_ACTION, task_request=None)
+
     async def _begin_approval(
         self, tracker: TerminalTracker, turn_id: str, decision: RouterDecision
     ) -> None:
@@ -658,11 +757,15 @@ class RouterGate:
           nothing (the trt.18 "unspeakable ack ⇒ no queue" rule);
         * ``begin`` returned ``None`` (persist failed / produced no id).
 
-        On success the ack (the router's phrase, or :data:`DEFAULT_DELEGATE_ACK`
-        when it offered none) is spoken via :meth:`_say_with_terminal`; the task
-        resolver runs off the turn loop and its eventual result is session-scoped
-        speech later (the approval-reply precedent) — never this turn's terminal,
-        so INV-1 stays exactly one terminal per turn.
+        On success the router's own ack phrase is spoken via
+        :meth:`_say_with_terminal` — guaranteed non-blank by :meth:`run_turn`'s
+        ackless-delegate degrade (Johnny-trt.53); :data:`DEFAULT_DELEGATE_ACK`
+        survives only as an instrumented defensive last resort for hand-built
+        decisions that bypass the degrade. The task resolver runs off the turn
+        loop; a fast ``failed`` settle re-enters as the spoken correction
+        (:meth:`report_task_failure`) and an eventual real result is
+        session-scoped speech later (the approval-reply precedent) — never this
+        turn's terminal, so INV-1 stays exactly one terminal per turn.
         """
         kind = task_request.kind
         if self._tasks is None:
@@ -683,7 +786,20 @@ class RouterGate:
             )
             return
 
-        ack = task_request.ack.strip() or DEFAULT_DELEGATE_ACK
+        ack = task_request.ack.strip()
+        if not ack:
+            # Unreachable via run_turn (the trt.53 degrade rewrites ackless
+            # delegates to SPEAK first) — a hand-built decision bypassed it.
+            # Instrumented because every canned-ack utterance is the exact
+            # robotic-deflection bug trt.53 fixed.
+            logger.warning(
+                "agent.router.gate: turn=%s delegate kind=%r reached the branch "
+                "with no ack — speaking DEFAULT_DELEGATE_ACK (defensive last "
+                "resort; the run_turn degrade should have caught this)",
+                turn_id,
+                kind,
+            )
+            ack = DEFAULT_DELEGATE_ACK
         spec = TaskSpec(
             kind=kind,
             args=dict(task_request.args),
@@ -743,6 +859,52 @@ class RouterGate:
             STATUS_STUB_REPLY,
             replied_detail="status stub spoken (no delegated-task registry until Phase 5)",
             interrupted_detail="status reply interrupted before completion",
+        )
+
+    async def report_task_failure(self, queued: QueuedTask, result: TaskResult) -> None:
+        """Speak the honest correction for a delegated task that settled ``failed``.
+
+        The Phase-3 no-dead-promises stopgap (Johnny-trt.53), attached to the
+        session :class:`TaskCoordinator` at construction and invoked by its
+        resolver *after* the ``agent_tasks`` row settled — so the walk-back
+        only ever describes durable state. Session-scoped speech per the
+        approval-reply precedent: the delegating turn's terminal (the ack)
+        already settled INV-1, so this speech owns **no** terminal, binds to
+        no turn, and registers no done-callback — ``say()``'s
+        ``speech_created`` fires with ``source="say"``, so :meth:`bind_reply`
+        never sees it either. Recording it into ``final_text`` / history is
+        Johnny-trt.54's scope; until then the log line is the trace. Replaced
+        wholesale by the Phase-5 re-entry queue (Johnny-trt.29).
+
+        Never raises into the resolver: no ``say()`` (session never entered /
+        already torn down) or a raising ``say()`` (session draining) is
+        logged and swallowed — the durable row already tells the truth.
+        """
+        say = self._say
+        if say is None:
+            logger.warning(
+                "agent.router.gate: task #%s (%s) failed but say() is not "
+                "attached — correction not spoken",
+                queued.task_id,
+                queued.spec.kind,
+            )
+            return
+        text = delegate_failure_correction(result.result_text)
+        try:
+            say(text)
+        except Exception:
+            logger.exception(
+                "agent.router.gate: say() failed for task #%s (%s) correction — "
+                "nothing spoken",
+                queued.task_id,
+                queued.spec.kind,
+            )
+            return
+        logger.info(
+            "agent.router.gate: task #%s (%s) failed fast — spoke correction %r",
+            queued.task_id,
+            queued.spec.kind,
+            text,
         )
 
     async def _say_with_terminal(
@@ -1152,10 +1314,12 @@ class RouterGate:
 
 
 __all__ = [
+    "ACK_FALLBACK_KEY",
     "DEFAULT_DELEGATE_ACK",
     "STATUS_STUB_REPLY",
     "PersistPendingDecision",
     "RouterGate",
     "RouterGateConfig",
     "SaySpeech",
+    "delegate_failure_correction",
 ]

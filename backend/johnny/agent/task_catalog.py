@@ -93,23 +93,35 @@ workable"), never a dead promise.
 def render_task_catalog(entries: tuple[TaskCatalogEntry, ...]) -> str:
     """Render the catalog block for the router system prompt.
 
-    One header line framing *when* to delegate, then ``- kind: one-liner``
+    One header paragraph framing *when* to delegate, then ``- kind: one-liner``
     rows. Returns ``""`` for an empty catalog so callers can append the
     result unconditionally — an empty catalog leaves the prompt
     byte-identical to the pre-trt.19 build (the replay-parity stance: the
     catalog is additive prompt context, off when nothing is delegatable).
     Keywords are deliberately not rendered (they feed the trt.50 scorer
     only).
+
+    The header carries the Johnny-trt.53 restraint + ack contract (the live
+    over-delegation fix): prefer ``speak`` whenever the request is answerable
+    from context, delegate only the listed kinds, and author the ``task.ack``
+    fresh per turn in the user's language — no canned filler example anywhere
+    near the model.
     """
     if not entries:
         return ""
     lines = [
         (
-            "Delegatable task kinds — when the request needs real work done "
-            "(looking something up in an external system, taking an action) "
-            "rather than a conversational answer from context, choose "
-            "action='delegate' and set task.kind to one of these, with a "
-            "short spoken acknowledgment in task.ack:"
+            "Delegatable task kinds — the ONLY kinds you may delegate. "
+            "Choose action='delegate' only when the request needs real work "
+            "in an external system (looking something up, taking an action) "
+            "that matches one of the kinds below. If the request can be "
+            "answered from the conversation, your own knowledge, or the "
+            "context you were given, choose action='speak' instead — even "
+            "when these topics come up. When unsure between speak and "
+            "delegate, choose speak. With action='delegate', task.ack is "
+            "required: write the acknowledgment yourself in the language the "
+            "user spoke, naming the specific work you are starting and why "
+            "it needs a moment — never a generic filler phrase. The kinds:"
         )
     ]
     lines.extend(f"- {entry.kind}: {entry.one_liner}" for entry in entries)

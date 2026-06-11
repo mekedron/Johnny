@@ -268,6 +268,140 @@ async def test_update_failure_does_not_crash_resolver() -> None:
     await coordinator.join()  # must not raise
 
 
+# --- the failed-settle report seam (Johnny-trt.53) -------------------------------
+
+
+class _RecordingReporter:
+    """Captures every (QueuedTask, TaskResult) the coordinator reports."""
+
+    def __init__(self) -> None:
+        self.reported: list[tuple[QueuedTask, TaskResult]] = []
+
+    async def __call__(self, queued: QueuedTask, result: TaskResult) -> None:
+        self.reported.append((queued, result))
+
+
+async def test_failed_settle_reports_after_row_update() -> None:
+    """The stub executor's fast fail reaches the reporter — with the row
+    already settled (the walk-back only ever describes durable state)."""
+    sink = InMemoryTaskSink()
+    reporter = _RecordingReporter()
+    row_status_at_report: list[Any] = []
+
+    async def status_capturing_reporter(queued: QueuedTask, result: TaskResult) -> None:
+        record = sink.get(queued.task_id)
+        row_status_at_report.append(record.status if record is not None else None)
+        await reporter(queued, result)
+
+    coordinator = TaskCoordinator(sink, executor=stub_executor)
+    coordinator.attach_failure_reporter(status_capturing_reporter)
+
+    queued = await coordinator.begin(_spec(kind="book_flight"))
+    assert queued is not None
+
+    await coordinator.join()
+
+    assert len(reporter.reported) == 1
+    reported_queued, reported_result = reporter.reported[0]
+    assert reported_queued.task_id == queued.task_id
+    assert reported_result.status == "failed"
+    assert reported_result.result_text == unsupported_kind_text("book_flight")
+    # The terminal row update strictly precedes the report — the row already
+    # read ``failed`` at the moment the reporter ran.
+    assert row_status_at_report == ["failed"]
+
+
+async def test_executor_exception_reports_failure_with_spoken_text() -> None:
+    reporter = _RecordingReporter()
+
+    async def executor(queued: QueuedTask) -> TaskResult:
+        raise ValueError("boom")
+
+    coordinator = TaskCoordinator(
+        InMemoryTaskSink(), executor=executor, report_failed=reporter
+    )
+    queued = await coordinator.begin(_spec())
+    assert queued is not None
+    await coordinator.join()
+
+    assert len(reporter.reported) == 1
+    _, result = reporter.reported[0]
+    assert result.status == "failed"
+    assert result.result_text == executor_error_text("web_search")
+
+
+async def test_illegal_executor_status_reports_failure() -> None:
+    reporter = _RecordingReporter()
+
+    async def executor(queued: QueuedTask) -> TaskResult:
+        return TaskResult(status="queued")  # type: ignore[arg-type]
+
+    coordinator = TaskCoordinator(
+        InMemoryTaskSink(), executor=executor, report_failed=reporter
+    )
+    queued = await coordinator.begin(_spec())
+    assert queued is not None
+    await coordinator.join()
+    assert len(reporter.reported) == 1
+
+
+async def test_done_settle_reports_nothing() -> None:
+    """Successful results re-enter via the Phase-5 queue — never this seam."""
+    reporter = _RecordingReporter()
+
+    async def executor(queued: QueuedTask) -> TaskResult:
+        return TaskResult(status="done", result_text="all good")
+
+    coordinator = TaskCoordinator(
+        InMemoryTaskSink(), executor=executor, report_failed=reporter
+    )
+    assert await coordinator.begin(_spec()) is not None
+    await coordinator.join()
+    assert reporter.reported == []
+
+
+async def test_cancelled_settle_reports_nothing() -> None:
+    """Session teardown cancels resolvers — nobody is listening, no report."""
+    reporter = _RecordingReporter()
+    started = asyncio.Event()
+
+    async def hanging_executor(queued: QueuedTask) -> TaskResult:
+        started.set()
+        await asyncio.sleep(60)
+        return TaskResult(status="done")
+
+    coordinator = TaskCoordinator(
+        InMemoryTaskSink(), executor=hanging_executor, report_failed=reporter
+    )
+    assert await coordinator.begin(_spec()) is not None
+    await asyncio.wait_for(started.wait(), timeout=2)
+    await coordinator.aclose()
+    assert reporter.reported == []
+
+
+async def test_reporter_raising_is_contained() -> None:
+    """A blowing-up reporter never crashes the resolver (the say() seam may
+    raise while the session drains) — and the row is already settled."""
+    sink = InMemoryTaskSink()
+
+    async def bad_reporter(queued: QueuedTask, result: TaskResult) -> None:
+        raise RuntimeError("session draining")
+
+    coordinator = TaskCoordinator(sink, executor=stub_executor, report_failed=bad_reporter)
+    queued = await coordinator.begin(_spec())
+    assert queued is not None
+    await coordinator.join()  # must not raise
+    record = sink.get(queued.task_id)
+    assert record is not None and record.status == "failed"
+
+
+async def test_failed_settle_without_reporter_is_noop() -> None:
+    """No attached reporter (non-gate consumers, pre-trt.53 shape) — unchanged."""
+    coordinator = TaskCoordinator(InMemoryTaskSink(), executor=stub_executor)
+    assert await coordinator.begin(_spec()) is not None
+    await coordinator.join()  # must not raise
+
+
 # --- teardown -------------------------------------------------------------------
 
 

@@ -3,10 +3,10 @@
   "sessionId": "b8829633-95f0-4e1b-a1c5-e08500de3d70",
   "status": "running",
   "startedAt": "2026-06-11T05:16:05.966Z",
-  "updatedAt": "2026-06-11T06:49:42.475Z",
-  "currentIteration": 2,
+  "updatedAt": "2026-06-11T07:35:28.321Z",
+  "currentIteration": 3,
   "maxIterations": 0,
-  "tasksCompleted": 2,
+  "tasksCompleted": 3,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -339,8 +339,8 @@
       {
         "id": "Johnny-trt.50",
         "title": "[BUILD] Phase 3: Heuristic complexity pre-scorer (shadow mode) — ClawRouter pattern port",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.51",
@@ -376,6 +376,16 @@
       "durationMs": 2018499,
       "startedAt": "2026-06-11T05:32:24.710Z",
       "endedAt": "2026-06-11T06:06:03.209Z"
+    },
+    {
+      "iteration": 3,
+      "status": "completed",
+      "taskId": "Johnny-trt.50",
+      "taskTitle": "[BUILD] Phase 3: Heuristic complexity pre-scorer (shadow mode) — ClawRouter pattern port",
+      "taskCompleted": true,
+      "durationMs": 2585627,
+      "startedAt": "2026-06-11T06:06:35.484Z",
+      "endedAt": "2026-06-11T06:49:41.111Z"
     }
   ],
   "skippedTaskIds": [],

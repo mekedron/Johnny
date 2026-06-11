@@ -378,9 +378,11 @@ class TaskRequest:
     Parsed from the router's ``task`` object (``{kind, args, ack}``) by
     :func:`_parse_task_request`, which is strict on shape — a verdict only
     carries a ``TaskRequest`` the downstream coordinator can actually run.
-    ``ack`` is the short phrase the bot speaks immediately ("let me check on
-    that") while the task executes asynchronously; empty means the gate
-    falls back to its own ack wording.
+    ``ack`` is the model-authored sentence the bot speaks immediately, in the
+    user's language, naming the work and why it takes time, while the task
+    executes asynchronously; empty means the model skipped the required field
+    and the gate degrades the verdict to a plain SPEAK (Johnny-trt.53 — a
+    real answer beats a hollow canned promise).
     """
 
     kind: str
@@ -437,9 +439,13 @@ _ROUTER_SCHEMA: dict[str, Any] = {
             "enum": list(ROUTER_ACTIONS),
             "description": (
                 "What the bot should do: 'silent' = say nothing; 'speak' = "
-                "answer directly now; 'delegate' = acknowledge out loud and "
-                "hand the request off as an async task (fill in 'task'); "
-                "'status' = report progress on previously delegated work."
+                "answer directly now — the default whenever the request can "
+                "be answered from the conversation, your own knowledge, or "
+                "the provided context; 'delegate' = hand the request off as "
+                "an async task (fill in 'task') — only for real work in an "
+                "external system matching a listed delegatable task kind; "
+                "'status' = report progress on previously delegated work. "
+                "When unsure between speak and delegate, choose speak."
             ),
         },
         "task": {
@@ -459,12 +465,20 @@ _ROUTER_SCHEMA: dict[str, Any] = {
                 "ack": {
                     "type": "string",
                     "description": (
-                        "Short acknowledgment the bot speaks immediately, "
-                        "e.g. 'Let me check on that.'"
+                        "The sentence the bot speaks right now, written fresh "
+                        "for this request in the language the user spoke: name "
+                        "the specific work you are starting and why it needs a "
+                        "moment. Never a generic one-size-fits-all filler "
+                        "phrase."
                     ),
                 },
             },
-            "required": ["kind"],
+            # ``ack`` joined ``kind`` as required (Johnny-trt.53) so
+            # schema-constrained providers force the model to author the
+            # spoken acknowledgment with every delegate verdict. The parser
+            # stays lenient (a missing ack still parses to "" — old outputs
+            # are unaffected); the gate degrades an ackless delegate to SPEAK.
+            "required": ["kind", "ack"],
         },
     },
     "required": ["should_speak", "confidence", "reason", "action"],

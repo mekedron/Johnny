@@ -74,26 +74,49 @@ Built by: trt.16 (schema/action vocabulary), trt.17 (gate branching + ack termin
 trt.18 (agent_tasks + TaskCoordinator), trt.19 (budget + catalog + observability),
 Phases 4–5 (executor, events, speech queue).
 
-**Ack contract & decision transparency (trt.53, trt.54).** Operator principle
-(2026-06-11, from live use of the freshly-landed delegate path): *the conversation
-must feel smooth and natural, and participants must always understand the bot's
-decision.* Concretely:
+**Ack contract & decision transparency (trt.53 shipped 2026-06-11, trt.54).**
+Operator principle (2026-06-11, from live use of the freshly-landed delegate path):
+*the conversation must feel smooth and natural, and participants must always
+understand the bot's decision.* Concretely:
 
 - **Acks are LLM-authored, per turn, in the user's language** — they name the
   specific work and why it needs time ("I'll look through the connected calendar for
-  tomorrow's events — give me a minute"). The canned `DEFAULT_DELEGATE_ACK` ("Let me
-  check on that — I'll get back to you") is an **instrumented last resort**, never the
-  norm; every fallback occurrence is marked in the decision row.
-- **Delegate restraint**: answerable-from-context → `speak`, even when catalog
-  keywords appear; only catalog-listed kinds are delegatable; when unsure between
-  speak and delegate, **speak** — a real answer beats a hollow promise.
-- **No dead promises**: until the Phase-5 re-entry queue exists, a delegated task
-  that fails fast produces a short honest spoken correction ("Actually — I can't do
-  that yet: …") via the same `say()` path, session-scoped speech, not a terminal.
+  tomorrow's events — give me a minute"). Enforced three ways (trt.53): `task.ack`
+  is **schema-required** next to `kind` (constrained decoders must emit it; the
+  parser stays lenient, so old recorded outputs parse identically), the schema
+  description demands per-request authorship in the user's language (the canned
+  example the live 3B model copied verbatim is gone), and the catalog header
+  repeats the contract.
+- **The ackless-delegate rule** (trt.53 — the rule chosen and shipped, of the two
+  the bead allowed): a delegate verdict with no usable ack **degrades to `speak`**
+  — the answer pipeline produces a real contextual reply instead of a hollow
+  canned promise. Instrumented: an `ack_fallback` marker
+  (`{from_action, to_action, kind, reason}`) lands in
+  `agent_decisions.raw_output` before the decision emit, plus a warning log. The
+  canned `DEFAULT_DELEGATE_ACK` ("Let me check on that — I'll get back to you")
+  survives only as a logged defensive last resort for hand-built decisions that
+  bypass `run_turn`; it is unreachable through the normal flow. Per-session
+  **delegate rate** = decision rows with `raw_output->>'action' = 'delegate'` over
+  all decision rows; **fallback-ack rate** = rows with `raw_output ? 'ack_fallback'`
+  over the delegate-intent rows — the trt.21 capstone reads both.
+- **Delegate restraint** (trt.53, in the catalog header + the `action` schema
+  description): answerable-from-context → `speak`, even when catalog keywords
+  appear; only catalog-listed kinds are delegatable; when unsure between speak and
+  delegate, **speak** — a real answer beats a hollow promise.
+- **No dead promises** (trt.53 stopgap until the Phase-5 re-entry queue): a
+  delegated task that settles `failed` (stub executor today, executor crash later)
+  re-enters immediately as a short honest spoken correction — "Actually — I can't
+  do that yet: <speech-ready failure text>" — via
+  `RouterGate.report_task_failure`, attached to the `TaskCoordinator` failure-report
+  seam at gate construction and invoked only *after* the row settles. Session-scoped
+  `say()` speech per the approval-reply precedent: no turn terminal (the ack already
+  settled INV-1), no done-callback; `done` / `cancelled` settles report nothing.
+  Replaced wholesale by trt.29.
 - **The whole chain is visible in history** (trt.54): final transcript → heuristic
   shadow verdict → router action + confidence + stated reason → spoken text
   (recommended vs final, divergence flagged) → linked task row → terminal + stage
   timings. No turn may leave "what did it say, and why?" unanswerable from the UI.
+  Until trt.54 lands, the trt.53 correction's trace is its INFO log line.
 
 **Capability awareness (trt.55, Phase 4).** Operator rule (2026-06-11): *the
 decision-making must know what it is actually capable of.* "Check our Google
@@ -300,7 +323,7 @@ separately replay-gated:
 | `agent_tasks` + TaskCoordinator + stub executor | Johnny-trt.18 | **shipped** (2026-06-11) — `agent_tasks` table + migration 0023; `SqlAlchemyTaskSink`; stdlib `TaskCoordinator` (row durable at `begin` return, best-effort `TaskQueued` + `johnny.tasks.wake` ping, aclose marks `cancelled`); Phase-3 `stub_executor` fails every kind fast with speech-ready text; wired for all SPEAKING_MODES via `_build_sync_persistence` |
 | Triage budget + task catalog + observability | Johnny-trt.19 | **shipped** (2026-06-11) — `DEFAULT_ROUTER_LLM_TIMEOUT_S` 30 → 8 s (budget framing; gate mirror + drift-guard/value tests); `TaskCatalogEntry (kind, one_liner, keywords[])` in `johnny/agent/task_catalog.py` with Phase-3 stubs (`calendar.upcoming_events`, `gmail.search`) rendered into the router prompt **only when a TaskCoordinator is wired** (keywords stay scorer-only, feeding trt.50); gate emits a per-decided-turn `router_llm` PipelineTiming (`details.action`) → `session_timings`; latency harness reports it directly as `triage_ms` (the derived `router_ms` gap stays for baseline comparability); small-router-model + 8 s budget tip on the OpenAI-compatible provider. Phase 4 (trt.23) swaps the catalog *source* to the skill loader; the entry shape is the contract |
 | Heuristic complexity scorer (shadow) | Johnny-trt.50 | **shipped** (2026-06-11) — pure-stdlib `johnny/agent/complexity.py` (ClawRouter pattern port, MIT attribution + per-constant provenance; 7 voice dimensions incl. the dynamic catalog delegate-prior; EN+RU+FI stem sets, left-boundary prefix matching); `RouterGate.run_turn` scores before the triage await and stashes the 4-key verdict under `raw_output.complexity_shadow` (one debug log line; scorer failure → key absent, turn untouched); first 86-turn agreement matrix in `.validation/Johnny-trt.50/05-agreement-matrix.md` (summary in §4) — catalog dim fired 32% on delegated vs 4% on silent turns, trt.51 fast-path **no-go** on the 3B router; the SIMPLE×delegate cell (12 turns, greetings delegated) is trt.53's quantified evidence |
-| Delegate restraint + contextual LLM-authored acks | Johnny-trt.53 | planned (Phase 3, bug — live over-delegation + canned `DEFAULT_DELEGATE_ACK`) |
+| Delegate restraint + contextual LLM-authored acks | Johnny-trt.53 | **shipped** (2026-06-11) — schema: `task.ack` required + canned example removed + restraint in the `action` description (parser untouched, old outputs parse identically); catalog header rewritten (only listed kinds, answerable-from-context ⇒ speak, unsure ⇒ speak, ack authored per turn in the user's language); gate: ackless delegate degrades to SPEAK with the `ack_fallback` marker in `raw_output` + warning (`DEFAULT_DELEGATE_ACK` now a logged defensive last resort); no dead promises: failed task settles re-enter as the spoken `say()` correction via the coordinator's failure-report seam (auto-attached at gate construction; after-row, no terminal, no AgentSpoke until trt.54); delegate/fallback-ack rates derivable from decision rows (§2). Replay fixtures untouched (all old-format, no `action` fields) |
 | Decision-pipeline observability (full chain incl. spoken text) | Johnny-trt.54 | planned (Phase 3, bug — say-path `final_text`/history gap) |
 | Phase 3 capstone (parity + INV-1 + delegated turn) | Johnny-trt.21 | planned (Phase 3) |
 | Executor, tools/skills, task events | Johnny-trt.22–26, .35 | planned (Phase 4) |

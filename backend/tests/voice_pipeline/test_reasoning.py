@@ -431,14 +431,31 @@ def test_router_schema_requires_core_fields() -> None:
 def test_router_schema_action_and_task_shape() -> None:
     """The Phase-3 schema extension is additive and closed (Johnny-trt.16):
     a tight action enum plus a nullable task object — one LLM call, no
-    second hop."""
+    second hop. ``ack`` joined ``kind`` as required (Johnny-trt.53) so
+    constrained decoders force the model to author the spoken ack; the
+    parser stays lenient, so old outputs without it parse identically."""
     assert ROUTER_ACTIONS == ("silent", "speak", "delegate", "status")
     action = _ROUTER_SCHEMA["properties"]["action"]
     assert action["enum"] == list(ROUTER_ACTIONS)
     task = _ROUTER_SCHEMA["properties"]["task"]
     assert task["type"] == ["object", "null"]
     assert set(task["properties"]) == {"kind", "args", "ack"}
-    assert task["required"] == ["kind"]
+    assert task["required"] == ["kind", "ack"]
     # The legacy properties are untouched (additive extension).
     for legacy in ("should_speak", "confidence", "reason", "reply_type", "suggested_reply"):
         assert legacy in _ROUTER_SCHEMA["properties"]
+
+
+def test_router_schema_never_primes_a_canned_ack() -> None:
+    """Johnny-trt.53: the live router copied the schema's ack example verbatim
+    on every delegate — no description anywhere in the schema may exemplify a
+    filler phrase, and the ack contract must demand per-request authorship."""
+    import json as _json
+
+    assert "Let me check" not in _json.dumps(_ROUTER_SCHEMA)
+    ack_desc = _ROUTER_SCHEMA["properties"]["task"]["properties"]["ack"]["description"]
+    assert "language the user spoke" in ack_desc
+    assert "specific work" in ack_desc
+    # The action description carries the restraint rule (prefer speak).
+    action_desc = _ROUTER_SCHEMA["properties"]["action"]["description"]
+    assert "choose speak" in action_desc
