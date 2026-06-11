@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "sessionId": "b8829633-95f0-4e1b-a1c5-e08500de3d70",
+  "sessionId": "d4e0eaf8-2f04-47a7-b280-1ca8b39424b6",
   "status": "running",
-  "startedAt": "2026-06-11T05:16:05.966Z",
-  "updatedAt": "2026-06-11T17:54:45.297Z",
-  "currentIteration": 20,
+  "startedAt": "2026-06-11T21:01:32.322Z",
+  "updatedAt": "2026-06-11T21:36:08.061Z",
+  "currentIteration": 0,
   "maxIterations": 0,
-  "tasksCompleted": 18,
+  "tasksCompleted": 0,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -28,7 +28,7 @@
         }
       }
     ],
-    "totalTasks": 54,
+    "totalTasks": 65,
     "tasks": [
       {
         "id": "Johnny-trt.1",
@@ -130,7 +130,7 @@
         "id": "Johnny-trt.17",
         "title": "[BUILD] Phase 3: Gate branching + ack terminal (delegate / status actions)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.18",
@@ -142,43 +142,43 @@
         "id": "Johnny-trt.19",
         "title": "[BUILD] Phase 3: Triage budget + observability + task catalog in router prompt",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.20",
         "title": "[SPIKE] Phase 3 (deferred, non-gating): speculative-parallel router for meeting modes",
-        "status": "open",
+        "status": "completed",
         "completedInSession": false
       },
       {
         "id": "Johnny-trt.21",
         "title": "[CHORE] Phase 3 capstone: parity + INV-1 + delegated-turn validation",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.22",
         "title": "[SPIKE] Phase 4: LangGraph evaluation — execution engine for multi-step task kinds",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.23",
         "title": "[BUILD] Phase 4: Tool layer + skill registry (openclaw-compatible SKILL.md) + first skill: calendar via gog",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.24",
         "title": "[BUILD] Phase 4: Worker executor pass — claim/run/complete + redis wake",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.25",
         "title": "[BUILD] Phase 4: Task event plumbing — events, subscriber, WS fan-out",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.26",
@@ -238,7 +238,7 @@
         "id": "Johnny-trt.35",
         "title": "[BUILD] Phase 4: Skills-sandbox container — customizable CLI execution environment",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.36",
@@ -307,21 +307,9 @@
         "completedInSession": false
       },
       {
-        "id": "Johnny-cxu",
-        "title": "Real 20-turn p50/p95 latency capture on configured local providers (depends on Johnny-ckz.7)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
         "id": "Johnny-trt.47",
         "title": "[BUILD] Phase 6: Multi-agent turn arbitration — turn claims + router peer selectivity",
         "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-1qr",
-        "title": "[BUILD] Optional: en-only in-process semantic turn detector on the browser session",
-        "status": "completed",
         "completedInSession": false
       },
       {
@@ -340,229 +328,103 @@
         "id": "Johnny-trt.50",
         "title": "[BUILD] Phase 3: Heuristic complexity pre-scorer (shadow mode) — ClawRouter pattern port",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.51",
         "title": "[SPIKE] Phase 3 (deferred, non-gating): heuristic-informed routing behaviors — fast-path, prompt prior, micro-reply gate",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.52",
         "title": "[BUILD] Phase 6: Name-addressing gate — per-agent 'respond only when addressed' + name-mention scoring",
         "status": "open",
         "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.53",
+        "title": "[BUILD] Phase 3: Delegate restraint + contextual LLM-authored acks — no canned deflections, no dead promises",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.54",
+        "title": "[BUILD] Phase 3: Decision-pipeline observability rework — full per-turn chain in history, incl. what the bot actually said",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.55",
+        "title": "[BUILD] Phase 4: Capability-aware task catalog — the router only promises what this session can actually do",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.56",
+        "title": "[BUILD] Phase 4: Meeting lifecycle states — dismissible bot, no auto-rejoin after being finished",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-cxu",
+        "title": "Real 20-turn p50/p95 latency capture on configured local providers (depends on Johnny-ckz.7)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.57",
+        "title": "[BUILD] Phase 4: Internal tools — first-party in-app actions (meeting.leave, session.end) callable by voice",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.58",
+        "title": "[BUILD] Phase 3: Interrupted bot replies keep their partial text — marked interrupted, never vanishing from chat/history",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-1qr",
+        "title": "[BUILD] Optional: en-only in-process semantic turn detector on the browser session",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.59",
+        "title": "[MEASURE] Phase-3 router schema costs +568ms p50 triage on the 3B local router — slim the payload or accept as the trt.51/41/42 price",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.60",
+        "title": "[CHORE] Phase 5: Final tool-correctness verification — calendar answers match ground truth end-to-end (ask → ack → execute → spoken result)",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.61",
+        "title": "[BUILD] Phase 6: Playground session liveness — bounded reconnect grace, auto-end abandoned sessions",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.62",
+        "title": "[BUILD] Phase 4: Pre-ack kind validation — unknown task kinds degrade to speak, validated against executor-known kinds",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.63",
+        "title": "[CHORE] Phase 4: Sandbox-identity seams after trt.55 — verify/refactor to sandbox-keyed snapshot + single endpoint resolver (Phase-7 prep)",
+        "status": "completed",
+        "completedInSession": false
       }
     ]
   },
-  "iterations": [
-    {
-      "iteration": 1,
-      "status": "completed",
-      "taskId": "Johnny-trt.17",
-      "taskTitle": "[BUILD] Phase 3: Gate branching + ack terminal (delegate / status actions)",
-      "taskCompleted": true,
-      "durationMs": 899168,
-      "startedAt": "2026-06-11T05:16:54.883Z",
-      "endedAt": "2026-06-11T05:31:54.051Z"
-    },
-    {
-      "iteration": 2,
-      "status": "completed",
-      "taskId": "Johnny-trt.19",
-      "taskTitle": "[BUILD] Phase 3: Triage budget + observability + task catalog in router prompt",
-      "taskCompleted": true,
-      "durationMs": 2018499,
-      "startedAt": "2026-06-11T05:32:24.710Z",
-      "endedAt": "2026-06-11T06:06:03.209Z"
-    },
-    {
-      "iteration": 3,
-      "status": "completed",
-      "taskId": "Johnny-trt.50",
-      "taskTitle": "[BUILD] Phase 3: Heuristic complexity pre-scorer (shadow mode) — ClawRouter pattern port",
-      "taskCompleted": true,
-      "durationMs": 2585627,
-      "startedAt": "2026-06-11T06:06:35.484Z",
-      "endedAt": "2026-06-11T06:49:41.111Z"
-    },
-    {
-      "iteration": 4,
-      "status": "completed",
-      "taskId": "Johnny-trt.53",
-      "taskTitle": "[BUILD] Phase 3: Delegate restraint + contextual LLM-authored acks — no canned deflections, no dead promises",
-      "taskCompleted": true,
-      "durationMs": 2712845,
-      "startedAt": "2026-06-11T06:50:14.525Z",
-      "endedAt": "2026-06-11T07:35:27.370Z"
-    },
-    {
-      "iteration": 5,
-      "status": "completed",
-      "taskId": "Johnny-trt.54",
-      "taskTitle": "[BUILD] Phase 3: Decision-pipeline observability rework — full per-turn chain in history, incl. what the bot actually said",
-      "taskCompleted": true,
-      "durationMs": 3846225,
-      "startedAt": "2026-06-11T07:36:02.175Z",
-      "endedAt": "2026-06-11T08:40:08.400Z"
-    },
-    {
-      "iteration": 6,
-      "status": "completed",
-      "taskId": "Johnny-trt.58",
-      "taskTitle": "[BUILD] Phase 3: Interrupted bot replies keep their partial text — marked interrupted, never vanishing from chat/history",
-      "taskCompleted": true,
-      "durationMs": 3421362,
-      "startedAt": "2026-06-11T08:40:46.281Z",
-      "endedAt": "2026-06-11T09:37:47.643Z"
-    },
-    {
-      "iteration": 7,
-      "status": "completed",
-      "taskId": "Johnny-trt.21",
-      "taskTitle": "[CHORE] Phase 3 capstone: parity + INV-1 + delegated-turn validation",
-      "taskCompleted": true,
-      "durationMs": 2407437,
-      "startedAt": "2026-06-11T09:38:21.861Z",
-      "endedAt": "2026-06-11T10:18:29.298Z"
-    },
-    {
-      "iteration": 8,
-      "status": "completed",
-      "taskId": "Johnny-trt.35",
-      "taskTitle": "[BUILD] Phase 4: Skills-sandbox container — customizable CLI execution environment",
-      "taskCompleted": true,
-      "durationMs": 1319949,
-      "startedAt": "2026-06-11T10:19:04.635Z",
-      "endedAt": "2026-06-11T10:41:04.584Z"
-    },
-    {
-      "iteration": 9,
-      "status": "completed",
-      "taskId": "Johnny-trt.23",
-      "taskTitle": "[BUILD] Phase 4: Tool layer + skill registry (openclaw-compatible SKILL.md) + first skill: calendar via gog",
-      "taskCompleted": true,
-      "durationMs": 2721204,
-      "startedAt": "2026-06-11T10:41:38.361Z",
-      "endedAt": "2026-06-11T11:26:59.565Z"
-    },
-    {
-      "iteration": 10,
-      "status": "completed",
-      "taskId": "Johnny-trt.22",
-      "taskTitle": "[SPIKE] Phase 4: LangGraph evaluation — execution engine for multi-step task kinds",
-      "taskCompleted": true,
-      "durationMs": 679934,
-      "startedAt": "2026-06-11T11:27:33.341Z",
-      "endedAt": "2026-06-11T11:38:53.275Z"
-    },
-    {
-      "iteration": 11,
-      "status": "completed",
-      "taskId": "Johnny-trt.56",
-      "taskTitle": "[BUILD] Phase 4: Meeting lifecycle states — dismissible bot, no auto-rejoin after being finished",
-      "taskCompleted": true,
-      "durationMs": 2708342,
-      "startedAt": "2026-06-11T11:39:29.249Z",
-      "endedAt": "2026-06-11T12:24:37.591Z"
-    },
-    {
-      "iteration": 12,
-      "status": "completed",
-      "taskId": "Johnny-trt.57",
-      "taskTitle": "[BUILD] Phase 4: Internal tools — first-party in-app actions (meeting.leave, session.end) callable by voice",
-      "taskCompleted": true,
-      "durationMs": 3279267,
-      "startedAt": "2026-06-11T12:25:13.205Z",
-      "endedAt": "2026-06-11T13:19:52.472Z"
-    },
-    {
-      "iteration": 13,
-      "status": "completed",
-      "taskId": "Johnny-trt.55",
-      "taskTitle": "[BUILD] Phase 4: Capability-aware task catalog — the router only promises what this session can actually do",
-      "taskCompleted": true,
-      "durationMs": 4148252,
-      "startedAt": "2026-06-11T13:20:30.805Z",
-      "endedAt": "2026-06-11T14:29:39.057Z"
-    },
-    {
-      "iteration": 14,
-      "status": "completed",
-      "taskId": "Johnny-trt.25",
-      "taskTitle": "[BUILD] Phase 4: Task event plumbing — events, subscriber, WS fan-out",
-      "taskCompleted": true,
-      "durationMs": 1602511,
-      "startedAt": "2026-06-11T14:30:17.509Z",
-      "endedAt": "2026-06-11T14:57:00.020Z"
-    },
-    {
-      "iteration": 15,
-      "status": "completed",
-      "taskId": "Johnny-trt.24",
-      "taskTitle": "[BUILD] Phase 4: Worker executor pass — claim/run/complete + redis wake",
-      "taskCompleted": true,
-      "durationMs": 3343111,
-      "startedAt": "2026-06-11T14:57:37.201Z",
-      "endedAt": "2026-06-11T15:53:20.312Z"
-    },
-    {
-      "iteration": 16,
-      "status": "completed",
-      "taskId": "Johnny-trt.63",
-      "taskTitle": "[CHORE] Phase 4: Sandbox-identity seams after trt.55 — verify/refactor to sandbox-keyed snapshot + single endpoint resolver (Phase-7 prep)",
-      "taskCompleted": true,
-      "durationMs": 722497,
-      "startedAt": "2026-06-11T15:53:57.620Z",
-      "endedAt": "2026-06-11T16:06:00.117Z"
-    },
-    {
-      "iteration": 17,
-      "status": "completed",
-      "taskId": "Johnny-trt.62",
-      "taskTitle": "[BUILD] Phase 4: Pre-ack kind validation — unknown task kinds degrade to speak, validated against executor-known kinds",
-      "taskCompleted": true,
-      "durationMs": 2042922,
-      "startedAt": "2026-06-11T16:06:36.849Z",
-      "endedAt": "2026-06-11T16:40:39.771Z"
-    },
-    {
-      "iteration": 18,
-      "status": "failed",
-      "taskId": "Johnny-trt.26",
-      "taskTitle": "[CHORE] Phase 4 capstone: end-to-end calendar task in the playground",
-      "taskCompleted": false,
-      "durationMs": 418898,
-      "startedAt": "2026-06-11T16:41:17.747Z",
-      "endedAt": "2026-06-11T16:48:16.645Z"
-    },
-    {
-      "iteration": 19,
-      "status": "completed",
-      "taskId": "Johnny-trt.59",
-      "taskTitle": "[MEASURE] Phase-3 router schema costs +568ms p50 triage on the 3B local router — slim the payload or accept as the trt.51/41/42 price",
-      "taskCompleted": false,
-      "durationMs": 2094097,
-      "startedAt": "2026-06-11T16:48:38.544Z",
-      "endedAt": "2026-06-11T17:23:32.641Z"
-    },
-    {
-      "iteration": 20,
-      "status": "completed",
-      "taskId": "Johnny-trt.51",
-      "taskTitle": "[SPIKE] Phase 3 (deferred, non-gating): heuristic-informed routing behaviors — fast-path, prompt prior, micro-reply gate",
-      "taskCompleted": true,
-      "durationMs": 849705,
-      "startedAt": "2026-06-11T17:23:55.183Z",
-      "endedAt": "2026-06-11T17:38:04.888Z"
-    }
-  ],
+  "iterations": [],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
-  "activeTaskIds": [
-    "Johnny-trt.26",
-    "Johnny-trt.59"
-  ],
+  "activeTaskIds": [],
   "subagentPanelVisible": false
 }
