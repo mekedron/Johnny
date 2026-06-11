@@ -396,12 +396,17 @@ services:
       context: ./sandbox
     expose:
       - "8088"
+    ports:
+      # gog OAuth callback — published so the host browser can complete
+      # `gog auth add --listen-addr=0.0.0.0:8089`; harmless when not authing.
+      - "127.0.0.1:8089:8089"
     environment:
       SANDBOX_EXEC_PORT: "8088"
       SANDBOX_EXEC_TIMEOUT_DEFAULT_S: ${SANDBOX_EXEC_TIMEOUT_DEFAULT_S:-30}
       SANDBOX_EXEC_TIMEOUT_MAX_S: ${SANDBOX_EXEC_TIMEOUT_MAX_S:-300}
       SANDBOX_EXEC_OUTPUT_CAP_BYTES: ${SANDBOX_EXEC_OUTPUT_CAP_BYTES:-262144}
       SANDBOX_EXEC_BODY_CAP_BYTES: ${SANDBOX_EXEC_BODY_CAP_BYTES:-262144}
+      GOG_KEYRING_PASSWORD: ${GOG_KEYRING_PASSWORD:-}
     volumes:
       # Skill packages — same host dir as api/worker, same /skills container
       # path (no path translation); read-only so a runaway command cannot

@@ -113,14 +113,43 @@ apt-get install ...`) — it vanishes on the next rebuild.
 
 ## gog auth (one-time)
 
-gog needs OAuth credentials before calendar / gmail skills can use it:
+gog needs OAuth credentials before calendar / gmail skills can use it.
+
+**1. Switch to the file keyring backend** (headless container — no system keyring daemon):
 
 ```bash
-docker compose exec -it skills-sandbox gog auth credentials   # follow the prompts
-docker compose exec -it skills-sandbox gog auth add           # add an account
+docker compose exec skills-sandbox gog auth keyring file
 ```
 
-The container is headless: if the keyring backend gives trouble, prefer the
-file backend (`gog auth --help` shows the keyring flags; state lands under
-`/home/sandbox`, i.e. `~/.johnny/sandbox-home`, either way). Auth persists
-across rebuilds and factory resets via that bind mount.
+**2. Set `GOG_KEYRING_PASSWORD`** in your `.env` (pick any non-empty string; keep it
+consistent across all gog invocations):
+
+```
+GOG_KEYRING_PASSWORD=yourpassword
+```
+
+**3. Store your OAuth `credentials.json`** (downloaded from Google Cloud Console):
+
+```bash
+docker compose exec skills-sandbox gog auth credentials set --insecure \
+  /home/sandbox/.config/gogcli/credentials.json
+```
+
+The file must be reachable inside the container. The easiest path: copy it to
+`~/.johnny/sandbox-home/.config/gogcli/` on the host (that directory is
+bind-mounted to `/home/sandbox/.config/gogcli/` in the container).
+
+**4. Add your Google account:**
+
+```bash
+docker compose exec -it skills-sandbox \
+  gog auth add --listen-addr=0.0.0.0:8089 your@email.com
+```
+
+Port `8089` is published to `127.0.0.1:8089` on the host (see `docker-compose.yml`),
+so when Google redirects to `http://127.0.0.1:8089/oauth2/callback?...` your
+browser reaches the callback server inside the container directly — no manual
+curl step needed.
+
+Auth state persists across rebuilds and `./stop.sh` factory resets via the
+`~/.johnny/sandbox-home` bind mount.
