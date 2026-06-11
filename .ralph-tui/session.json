@@ -3,10 +3,10 @@
   "sessionId": "b8829633-95f0-4e1b-a1c5-e08500de3d70",
   "status": "running",
   "startedAt": "2026-06-11T05:16:05.966Z",
-  "updatedAt": "2026-06-11T10:18:30.279Z",
-  "currentIteration": 6,
+  "updatedAt": "2026-06-11T10:41:05.668Z",
+  "currentIteration": 7,
   "maxIterations": 0,
-  "tasksCompleted": 6,
+  "tasksCompleted": 7,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -153,8 +153,8 @@
       {
         "id": "Johnny-trt.21",
         "title": "[CHORE] Phase 3 capstone: parity + INV-1 + delegated-turn validation",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.22",
@@ -416,6 +416,16 @@
       "durationMs": 3421362,
       "startedAt": "2026-06-11T08:40:46.281Z",
       "endedAt": "2026-06-11T09:37:47.643Z"
+    },
+    {
+      "iteration": 7,
+      "status": "completed",
+      "taskId": "Johnny-trt.21",
+      "taskTitle": "[CHORE] Phase 3 capstone: parity + INV-1 + delegated-turn validation",
+      "taskCompleted": true,
+      "durationMs": 2407437,
+      "startedAt": "2026-06-11T09:38:21.861Z",
+      "endedAt": "2026-06-11T10:18:29.298Z"
     }
   ],
   "skippedTaskIds": [],

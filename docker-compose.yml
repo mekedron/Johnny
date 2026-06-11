@@ -83,6 +83,13 @@ x-backend-env: &backend-env
   # this fallback matches .env.example so a clean install works without a
   # .env override. Set JOHNNY_ORCHESTRATOR=legacy to roll back.
   JOHNNY_ORCHESTRATOR: ${JOHNNY_ORCHESTRATOR:-agentsession}
+  # Skills sandbox (Johnny-trt.35): internal-only exec API the tool layer
+  # (Johnny-trt.23) calls to run CLI / skill commands, and the path where
+  # skill packages (<name>/SKILL.md) are discovered. The /skills mount uses
+  # the SAME container path in api/worker/skills-sandbox on purpose, so a
+  # skill directory needs no per-container path translation.
+  JOHNNY_SKILLS_SANDBOX_URL: ${JOHNNY_SKILLS_SANDBOX_URL:-http://skills-sandbox:8088}
+  JOHNNY_SKILLS_DIR: ${JOHNNY_SKILLS_DIR:-/skills}
 
 services:
   postgres:
@@ -238,6 +245,14 @@ services:
       # optional — the seeder silently skips when the directory is
       # absent so a fresh checkout without a ./config dir still boots.
       - ./config:/config:ro
+      # Skill packages (Johnny-trt.35): host dir shared with the worker and
+      # the skills-sandbox so the skill loader (Johnny-trt.23) discovers
+      # <name>/SKILL.md here. Mounted at /skills (not /var/lib/johnny/...)
+      # deliberately — identical container path in every service means skill
+      # dirs need no path translation between discovery (api/worker) and
+      # execution (sandbox). Read-write here for the future skill-install
+      # flow (Johnny-trt.32); the sandbox mounts it read-only.
+      - ${HOME}/.johnny/skills:/skills
     healthcheck:
       test:
         - "CMD"
@@ -288,6 +303,9 @@ services:
       # sweep cleans up per-session directories left behind when a
       # supervisor crashes mid-flow.
       - bot_signin_pending:/var/lib/johnny/bot-signin-pending
+      # Skill packages (Johnny-trt.35) — same path as api/skills-sandbox;
+      # the worker executor pass (Johnny-trt.24) reads SKILL.md from here.
+      - ${HOME}/.johnny/skills:/skills
     healthcheck:
       test:
         - "CMD"
@@ -353,6 +371,55 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+
+  # Skills sandbox (Johnny-trt.35) — the execution boundary for all skill /
+  # CLI tool work. A separate, operator-customizable container where CLI
+  # tools are installed and skills live; the tool layer (Johnny-trt.23)
+  # POSTs to its exec API instead of running commands in api/worker.
+  #
+  # INTERNAL ONLY: no ``ports:`` mapping, so the (deliberately unauthed)
+  # exec API at http://skills-sandbox:8088 is reachable only from other
+  # containers on ``johnny_default`` — never from the host. ``expose`` is
+  # metadata; container-to-container reachability needs no published port.
+  #
+  # Security: non-root user (Dockerfile USER sandbox), per-exec timeout +
+  # output caps (execd.py), and the compose resource limits below. Only two
+  # mounts — skill packages (read-only) and the sandbox home — no docker
+  # socket, no source tree. Network egress stays allowed: tools need it.
+  skills-sandbox:
+    build:
+      context: ./sandbox
+    expose:
+      - "8088"
+    environment:
+      SANDBOX_EXEC_PORT: "8088"
+      SANDBOX_EXEC_TIMEOUT_DEFAULT_S: ${SANDBOX_EXEC_TIMEOUT_DEFAULT_S:-30}
+      SANDBOX_EXEC_TIMEOUT_MAX_S: ${SANDBOX_EXEC_TIMEOUT_MAX_S:-300}
+      SANDBOX_EXEC_OUTPUT_CAP_BYTES: ${SANDBOX_EXEC_OUTPUT_CAP_BYTES:-262144}
+      SANDBOX_EXEC_BODY_CAP_BYTES: ${SANDBOX_EXEC_BODY_CAP_BYTES:-262144}
+    volumes:
+      # Skill packages — same host dir as api/worker, same /skills container
+      # path (no path translation); read-only so a runaway command cannot
+      # corrupt skill definitions. run.sh creates the host dir idempotently.
+      - ${HOME}/.johnny/skills:/skills:ro
+      # The sandbox user's home: gog credentials + tool dotfiles. A HOST
+      # bind mount (not a named volume) so auth done once survives image
+      # rebuilds AND ./stop.sh factory resets — same reasoning as the
+      # ~/.johnny model caches. Linux hosts: chown to uid 1000.
+      - ${HOME}/.johnny/sandbox-home:/home/sandbox
+    cpus: ${JOHNNY_SANDBOX_CPUS:-2}
+    mem_limit: ${JOHNNY_SANDBOX_MEM_LIMIT:-1g}
+    pids_limit: 256
+    healthcheck:
+      test:
+        - "CMD"
+        - "python3"
+        - "-c"
+        - "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8088/health').status == 200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   # Base image for per-session meet-worker containers (Playwright +
   # Chromium + Xvfb + PulseAudio). The "meet-worker" profile keeps the

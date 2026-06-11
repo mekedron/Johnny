@@ -12,6 +12,9 @@ fi
 # manually, and not lose them across `docker compose down -v` resets.
 # session-audio holds Johnny's captured reply WAVs (one dir per session)
 # for History / live playback — same survive-a-reset reasoning.
+# skills holds skill packages (<name>/SKILL.md) and sandbox-home the
+# skills-sandbox user's home (gog auth state) — both Johnny-trt.35,
+# same survive-a-reset reasoning.
 # Create idempotently on first boot so the very first run does not
 # fail mounting a missing directory.
 mkdir -p \
@@ -21,7 +24,9 @@ mkdir -p \
   "${HOME}/.johnny/parakeet-packages" \
   "${HOME}/.johnny/kokoro-models" \
   "${HOME}/.johnny/kitten-models" \
-  "${HOME}/.johnny/session-audio"
+  "${HOME}/.johnny/session-audio" \
+  "${HOME}/.johnny/skills" \
+  "${HOME}/.johnny/sandbox-home"
 
 # Legacy migration hint: older installs kept the models in named Docker
 # volumes (johnny_piper_models / johnny_whisper_models). Detect them and

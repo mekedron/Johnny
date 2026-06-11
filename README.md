@@ -126,6 +126,19 @@ Verify the A/V environment standalone:
 docker run --rm johnny-meet-worker:latest    # prints "self-check OK"
 ```
 
+### Skills sandbox
+
+All skill / CLI tool work executes in the `skills-sandbox` service — a
+separate, operator-customizable container with a guaranteed baseline toolset
+(coreutils, grep/sed/awk, ripgrep, curl, jq, git, python3, and `gog`, the
+reference Google CLI) plus an internal-only exec API; the api/worker never
+run skill commands themselves. Skill packages live in `~/.johnny/skills`
+(mounted at `/skills` everywhere), and gog auth state persists in
+`~/.johnny/sandbox-home` across rebuilds and factory resets. To add your own
+CLI tools, edit the marked layer in `sandbox/Dockerfile` or drop a script
+into `sandbox/setup.d/`, then rerun `./run-dev.sh`. Full guide:
+[`sandbox/README.md`](sandbox/README.md).
+
 ## Cloud LLM providers
 
 Dedicated adapters for the hosted APIs. Configure each via the Providers
