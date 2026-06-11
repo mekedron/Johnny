@@ -157,6 +157,16 @@ export interface AgentSpokeEvent extends BaseEnvelope {
 	// Bare WAV filename of the captured reply audio (Johnny-od1), playable via
 	// GET /sessions/{id}/audio/{audio_file}; absent/null when capture is off.
 	audio_file?: string | null;
+	// Which speech path produced the utterance (Johnny-trt.54): 'reply'
+	// (generated answer), 'ack' (delegate ack), 'status' (status stub), or
+	// 'correction' (the trt.53 failed-task walk-back — bound to NO turn; the
+	// UI must not stamp any decision's final text with it). Absent on events
+	// from emitters that predate the field — treat as 'reply'.
+	kind?: string;
+	// Durable int turn id of the turn that owns this speech (same value the
+	// router_decision / turn_terminal events carry); null/absent for unbound
+	// speech (corrections) and legacy emitters.
+	turn_id?: number | null;
 }
 
 export interface AgentSuggestedEvent extends BaseEnvelope {

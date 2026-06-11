@@ -729,6 +729,174 @@ def test_apply_agent_spoke_event_no_divergence_when_text_matches(
     assert decision.override_actor is None
 
 
+# --- say-path / correction speech recording (Johnny-trt.54) ----------------
+
+
+def test_apply_agent_spoke_event_binds_exact_turn_by_turn_id(
+    db_session: Session,
+) -> None:
+    """An event carrying ``turn_id`` stamps THAT turn's decision row, even when
+    a newer should_speak row exists — the most-recent scan is only the
+    fallback for emitters that predate the field (Johnny-trt.54)."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    older = _router_decision_payload(
+        session_id=bot_session.id,
+        mode="autonomous",
+        should_speak=True,
+        suggested_reply="ack one",
+    )
+    older["turn_id"] = 1
+    apply_router_decision_event(db_session, older)
+    newer = _router_decision_payload(
+        session_id=bot_session.id,
+        mode="autonomous",
+        should_speak=True,
+        suggested_reply="ack two",
+    )
+    newer["turn_id"] = 2
+    apply_router_decision_event(db_session, newer)
+    db_session.flush()
+
+    payload = _agent_spoke_payload(session_id=bot_session.id, text="ack one")
+    payload["kind"] = "ack"
+    payload["turn_id"] = 1
+    apply_agent_spoke_event(db_session, payload)
+    db_session.flush()
+
+    turn_one = db_session.scalars(
+        sa.select(AgentDecision).where(AgentDecision.turn_id == 1)
+    ).one()
+    turn_two = db_session.scalars(
+        sa.select(AgentDecision).where(AgentDecision.turn_id == 2)
+    ).one()
+    assert turn_one.final_text == "ack one"
+    assert turn_two.final_text is None
+    utterance = db_session.scalars(sa.select(AgentUtterance)).one()
+    assert utterance.agent_decision_id == turn_one.id
+
+
+def test_apply_agent_spoke_event_correction_is_unlinked_and_stamps_nothing(
+    db_session: Session,
+) -> None:
+    """The trt.53 walk-back lands in history exactly as spoken but is bound to
+    no turn: an unlinked utterance row, and NO decision row's final_text moves
+    (the delegating turn's canonical text stays its ack) — Johnny-trt.54."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    decision_payload = _router_decision_payload(
+        session_id=bot_session.id,
+        mode="autonomous",
+        should_speak=True,
+        suggested_reply="On it — checking your calendar.",
+    )
+    decision_payload["turn_id"] = 1
+    apply_router_decision_event(db_session, decision_payload)
+    db_session.flush()
+    ack = _agent_spoke_payload(
+        session_id=bot_session.id, text="On it — checking your calendar."
+    )
+    ack["kind"] = "ack"
+    ack["turn_id"] = 1
+    apply_agent_spoke_event(db_session, ack)
+    db_session.flush()
+
+    correction = _agent_spoke_payload(
+        session_id=bot_session.id,
+        text="Actually — I can't do that yet: I don't know how to run calendar tasks yet.",
+    )
+    correction["kind"] = "correction"
+    correction["turn_id"] = None
+    assert apply_agent_spoke_event(db_session, correction) is True
+    db_session.flush()
+
+    decision = db_session.scalars(sa.select(AgentDecision)).one()
+    assert decision.final_text == "On it — checking your calendar."  # untouched
+    rows = db_session.scalars(
+        sa.select(AgentUtterance).order_by(AgentUtterance.id)
+    ).all()
+    assert len(rows) == 2
+    assert rows[1].output_text.startswith("Actually — I can't do that yet")
+    assert rows[1].agent_decision_id is None
+
+
+def test_apply_agent_spoke_event_ack_fallback_divergence_names_router_gate(
+    db_session: Session,
+) -> None:
+    """A say-path utterance differing from the recommendation is audited as a
+    router_gate override (no answer LLM ran on that path) — Johnny-trt.54."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    decision_payload = _router_decision_payload(
+        session_id=bot_session.id,
+        mode="autonomous",
+        should_speak=True,
+        suggested_reply="Pulling up your calendar now.",
+    )
+    decision_payload["turn_id"] = 1
+    apply_router_decision_event(db_session, decision_payload)
+    db_session.flush()
+
+    payload = _agent_spoke_payload(
+        session_id=bot_session.id,
+        text="Let me check on that — I'll get back to you.",
+    )
+    payload["kind"] = "ack"
+    payload["turn_id"] = 1
+    apply_agent_spoke_event(db_session, payload)
+    db_session.flush()
+
+    decision = db_session.scalars(sa.select(AgentDecision)).one()
+    assert decision.final_text == "Let me check on that — I'll get back to you."
+    assert decision.override_actor == "router_gate"
+    assert decision.divergence_reason is not None
+
+
+def test_apply_router_decision_event_snapshots_delegate_ack_as_recommended(
+    db_session: Session,
+) -> None:
+    """A delegate verdict authors its spoken text in raw task.ack, not
+    suggested_reply — the recommendation snapshot reads it from there so the
+    recommended-vs-final comparison covers ack turns (Johnny-trt.54)."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    payload = _router_decision_payload(
+        session_id=bot_session.id,
+        mode="autonomous",
+        should_speak=True,
+        suggested_reply="",
+    )
+    payload["suggested_reply"] = None
+    payload["raw_output"] = {
+        "action": "delegate",
+        "task": {
+            "kind": "calendar.upcoming_events",
+            "args": {},
+            "ack": "Checking your calendar for tomorrow.",
+        },
+    }
+    applied, _ = apply_router_decision_event(db_session, payload)
+    assert applied is True
+    db_session.flush()
+    decision = db_session.scalars(sa.select(AgentDecision)).one()
+    assert decision.decision_recommended_text == "Checking your calendar for tomorrow."
+    assert decision.suggested_reply is None  # the literal model field is untouched
+
+    # A non-delegate verdict (or an ackless delegate) snapshots nothing.
+    other = _router_decision_payload(
+        session_id=bot_session.id, mode="autonomous", should_speak=True
+    )
+    other["suggested_reply"] = None
+    other["raw_output"] = {"action": "speak"}
+    apply_router_decision_event(db_session, other)
+    db_session.flush()
+    latest = db_session.scalars(
+        sa.select(AgentDecision).order_by(AgentDecision.id.desc())
+    ).first()
+    assert latest is not None
+    assert latest.decision_recommended_text is None
+
+
 # --- run_subscriber loop end-to-end --------------------------------------
 
 

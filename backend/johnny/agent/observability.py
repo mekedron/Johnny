@@ -59,7 +59,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from johnny.agent.gate import (
     GateTerminal,
@@ -98,20 +98,58 @@ def _default_clock_ms() -> int:
 # (not a bundle interface) so the gate stays decoupled and a smoke/bare agent
 # omits them entirely (``None`` → no emission), exactly like the approval seams.
 
-RecordDecision = Callable[[RouterDecision, str], Awaitable[None]]
-"""Publish a turn's ``RouterDecisionMade``. Args: the parsed decision and the
-LiveKit ``str`` turn id (translated to the durable ``int`` via the shared
-:class:`~johnny.agent.gate.TurnIndex`)."""
+class RecordDecision(Protocol):
+    """Publish a turn's ``RouterDecisionMade``.
+
+    Args: the parsed decision and the LiveKit ``str`` turn id (translated to
+    the durable ``int`` via the shared :class:`~johnny.agent.gate.TurnIndex`).
+    ``transcript_window`` (Johnny-trt.54) is the rolling conversation the gate
+    decided over — ``{text, speaker, confidence, is_current, timestamp_ms}``
+    entries, the trigger transcript marked ``is_current`` — merged into the
+    event's ``input_window`` so the decision row records what was heard (the
+    session-detail "Heard you" step and the per-session replay both read it;
+    without it an agent-path turn has no reconstructable transcript).
+    """
+
+    def __call__(
+        self,
+        decision: RouterDecision,
+        turn_id: str,
+        *,
+        transcript_window: list[dict[str, Any]] | None = None,
+    ) -> Awaitable[None]: ...
+
 
 RecordSuggested = Callable[[RouterDecision, str], Awaitable[None]]
-"""Publish a suggest-only turn's ``AgentSuggested``. Same args as
-:data:`RecordDecision`; the ``suggested`` decision row is the ``RouterDecisionMade``
-the gate already emitted, so no decision id is needed here."""
+"""Publish a suggest-only turn's ``AgentSuggested``. Args mirror
+:class:`RecordDecision`'s positional pair; the ``suggested`` decision row is the
+``RouterDecisionMade`` the gate already emitted, so no decision id is needed here."""
 
-RecordSpoke = Callable[[str], Awaitable[None]]
-"""Publish a spoken reply's ``AgentSpoke``. Arg: the text the bot spoke (extracted
-from the reply ``SpeechHandle``'s chat items). The builder fills the rest
-(mode, matched-allowed-reply heuristic, session id)."""
+SpokenKind = Literal["reply", "ack", "status", "correction"]
+"""Which speech path produced an utterance (Johnny-trt.54) — see
+:class:`~johnny.voice_pipeline.events.AgentSpoke.kind`."""
+
+
+class RecordSpoke(Protocol):
+    """Publish a spoken utterance's ``AgentSpoke``.
+
+    ``text`` is what the bot actually spoke (the reply ``SpeechHandle``'s chat
+    items, or the say()-path line verbatim). ``turn_id`` is the LiveKit ``str``
+    turn id of the turn that owns the speech — resolved to the durable int by
+    the builder so the subscriber stamps the exact decision row (INV-2);
+    ``None`` for speech bound to no turn (the trt.53 correction). ``kind``
+    labels the speech path (:data:`SpokenKind`); the subscriber refuses to
+    stamp any ``final_text`` for ``"correction"``. The builder fills the rest
+    (mode, matched-allowed-reply heuristic, session id, reply audio).
+    """
+
+    def __call__(
+        self,
+        text: str,
+        *,
+        turn_id: str | None = None,
+        kind: SpokenKind = "reply",
+    ) -> Awaitable[None]: ...
 
 RecordTriageTiming = Callable[[str, float, float, str], Awaitable[None]]
 """Publish one turn's triage-stage ``PipelineTiming`` (Johnny-trt.19).
@@ -221,6 +259,9 @@ def build_decision_emitter(
     *,
     mode: str,
     approval_timeout_seconds: float | None = None,
+    instructions: str = "",
+    confidence_threshold: float | None = None,
+    allowed_replies: tuple[str, ...] = (),
     session_id: str | None = None,
     clock: Callable[[], int] = _default_clock_ms,
 ) -> RecordDecision:
@@ -233,12 +274,35 @@ def build_decision_emitter(
     (``suggested`` / ``spoken`` / ``suppressed``). ``approval_timeout_seconds`` is
     included for shape parity (the subscriber reads it for approval rounds) though
     the gate skips this emitter in ``approval_required`` mode.
+
+    Johnny-trt.54 widened ``input_window`` toward the legacy pipeline's shape so
+    the decision row is self-describing again: the static run config
+    (``instructions`` / ``confidence_threshold`` / ``allowed_replies``, only when
+    set) plus the per-turn ``transcript_window`` the gate passes — the rolling
+    conversation with the trigger transcript marked ``is_current``. The
+    session-detail timeline's "Heard you" / "Looked at the context" steps and the
+    per-session replay fixture (``load_replay_fixture``) all read these keys;
+    before this an agent-path session had **zero** reconstructable turns.
     """
     input_window: dict[str, Any] = {"mode": mode}
     if approval_timeout_seconds is not None:
         input_window["approval_timeout_seconds"] = approval_timeout_seconds
+    if instructions:
+        input_window["instructions"] = instructions
+    if confidence_threshold is not None:
+        input_window["confidence_threshold"] = confidence_threshold
+    if allowed_replies:
+        input_window["allowed_replies"] = list(allowed_replies)
 
-    async def _record(decision: RouterDecision, turn_id: str) -> None:
+    async def _record(
+        decision: RouterDecision,
+        turn_id: str,
+        *,
+        transcript_window: list[dict[str, Any]] | None = None,
+    ) -> None:
+        window = dict(input_window)
+        if transcript_window:
+            window["transcript_window"] = list(transcript_window)
         event = RouterDecisionMade(
             should_speak=decision.should_speak,
             confidence=decision.confidence,
@@ -247,7 +311,7 @@ def build_decision_emitter(
             suggested_reply=decision.suggested_reply,
             timestamp_ms=clock(),
             session_id=session_id,
-            input_window=dict(input_window),
+            input_window=window,
             raw_output=dict(decision.raw),
             turn_id=turn_index.resolve(turn_id),
         )
@@ -305,19 +369,31 @@ def build_spoke_emitter(
     session_id: str | None = None,
     clock: Callable[[], int] = _default_clock_ms,
     recorder: SpokenAudioRecorder | None = None,
+    turn_index: TurnIndex | None = None,
 ) -> RecordSpoke:
-    """Build the speak-path ``AgentSpoke`` emitter.
+    """Build the ``AgentSpoke`` emitter for every spoken utterance.
 
     Port of the legacy split pipeline's publish: emitted once when a
-    reply completes with assistant output. The subscriber inserts the
+    reply completes with assistant output — and, since Johnny-trt.54, once per
+    completed say()-path speech too (delegate ack, status stub, the trt.53
+    failed-task correction), so *every* spoken utterance lands in
+    ``agent_utterances`` and the chat history. The subscriber inserts the
     ``agent_utterances`` row and writes the spoken text back onto the turn's
-    decision row (INV-2). ``matched_allowed_reply`` is inferred from the active
-    mode + allow-list (an exact, case-insensitive match means the answer stage
-    spoke a verbatim allow-listed reply, so the subscriber attributes the
+    decision row (INV-2) — except for ``kind="correction"``, which is bound to
+    no turn and stamps nothing. ``matched_allowed_reply`` is inferred from the
+    active mode + allow-list (an exact, case-insensitive match means the answer
+    stage spoke a verbatim allow-listed reply, so the subscriber attributes the
     divergence to ``allowlist`` rather than ``answer_llm``); ``prompt`` is empty
     (the per-turn answer prompt is internal to the LiveKit reply pipeline). Both
     are accepted ``None``/``0``/empty by the subscriber and the utterance audit
     view.
+
+    ``turn_index`` is the session's shared str→int index: the gate passes the
+    LiveKit ``str`` turn id and the event carries the durable ``int`` (the same
+    value the turn's ``RouterDecisionMade`` / ``TurnTerminal`` carry), so the
+    subscriber stamps the *exact* decision row instead of a most-recent scan.
+    Without it (or for ``turn_id=None`` speech) the event ships ``turn_id=None``
+    and the subscriber falls back to the legacy scan.
 
     ``recorder`` is the session's :class:`SpokenAudioRecorder` (Johnny-od1): the
     TTS adapter fed it every synthesized segment of this reply, and flushing it
@@ -331,7 +407,12 @@ def build_spoke_emitter(
     uses_allowlist = bool(allowed_replies) and mode not in FREE_FORM_MODES
     lowered = {r.casefold(): r for r in allowed_replies}
 
-    async def _record(text: str) -> None:
+    async def _record(
+        text: str,
+        *,
+        turn_id: str | None = None,
+        kind: SpokenKind = "reply",
+    ) -> None:
         matched: str | None = None
         if uses_allowlist:
             matched = lowered.get(text.strip().casefold())
@@ -351,6 +432,12 @@ def build_spoke_emitter(
             session_id=session_id,
             prompt="",
             audio_file=reply_audio.filename if reply_audio is not None else None,
+            kind=kind,
+            turn_id=(
+                turn_index.resolve(turn_id)
+                if turn_index is not None and turn_id is not None
+                else None
+            ),
         )
         try:
             await event_bus.publish(event)
@@ -790,6 +877,8 @@ def build_observability(
     mode: str,
     allowed_replies: tuple[str, ...] = (),
     approval_timeout_seconds: float | None = None,
+    instructions: str = "",
+    confidence_threshold: float | None = None,
     resolve_turn_id: ResolveTurnId,
     session_started_at: float = 0.0,
     session_id: str | None = None,
@@ -813,6 +902,9 @@ def build_observability(
             turn_index,
             mode=mode,
             approval_timeout_seconds=approval_timeout_seconds,
+            instructions=instructions,
+            confidence_threshold=confidence_threshold,
+            allowed_replies=allowed_replies,
             session_id=session_id,
             clock=clock,
         ),
@@ -823,6 +915,7 @@ def build_observability(
             session_id=session_id,
             clock=clock,
             recorder=recorder,
+            turn_index=turn_index,
         ),
         record_suggested=build_suggested_emitter(event_bus, session_id=session_id, clock=clock),
         transcript_finalized_sink=build_transcript_finalized_emitter(
@@ -848,6 +941,7 @@ __all__ = [
     "RecordTriageTiming",
     "ResolveTurnId",
     "SpeechInterimSink",
+    "SpokenKind",
     "TranscriptFinalizedSink",
     "build_decision_emitter",
     "build_observability",

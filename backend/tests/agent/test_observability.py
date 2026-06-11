@@ -300,6 +300,63 @@ async def test_decision_and_terminal_share_int_turn_id() -> None:
     assert decision_ev.turn_id == terminal_ev.turn_id == 1
 
 
+async def test_decision_emitter_merges_transcript_window(
+
+) -> None:
+    """The per-turn transcript window rides into input_window (Johnny-trt.54) —
+    the timeline's "Heard you" step and the session replay reconstruct from it."""
+    bus = InMemoryEventBus()
+    record = build_decision_emitter(
+        bus, TurnIndex(), mode="autonomous", session_id="9"
+    )
+    window = [
+        {"text": "earlier line", "speaker": None, "confidence": None,
+         "is_current": False, "timestamp_ms": 1},
+        {"text": "Johnny, check my calendar", "speaker": None, "confidence": None,
+         "is_current": True, "timestamp_ms": 2},
+    ]
+
+    await record(_decision(), "item_w", transcript_window=window)
+
+    (event,) = bus.snapshot()
+    assert event.input_window["mode"] == "autonomous"
+    assert event.input_window["transcript_window"] == window
+    # The event holds its own copy — a caller mutating the list afterwards
+    # cannot rewrite the published payload.
+    window.append({"text": "late mutation"})
+    assert len(event.input_window["transcript_window"]) == 2
+
+
+async def test_decision_emitter_snapshots_run_config_keys() -> None:
+    """instructions / confidence_threshold / allowed_replies land in every
+    input_window when set (Johnny-trt.54), and are absent when unset — the
+    replay's ``_session_run_config`` reads exactly these keys."""
+    bus = InMemoryEventBus()
+    record = build_decision_emitter(
+        bus,
+        TurnIndex(),
+        mode="autonomous",
+        instructions="never delegate during standup",
+        confidence_threshold=0.7,
+        allowed_replies=("Yes", "No"),
+        session_id="9",
+    )
+    await record(_decision(), "item_cfg")
+    (event,) = bus.snapshot()
+    assert event.input_window["instructions"] == "never delegate during standup"
+    assert event.input_window["confidence_threshold"] == 0.7
+    assert event.input_window["allowed_replies"] == ["Yes", "No"]
+
+    bare_bus = InMemoryEventBus()
+    bare = build_decision_emitter(bare_bus, TurnIndex(), mode="autonomous", session_id="9")
+    await bare(_decision(), "item_bare")
+    (bare_event,) = bare_bus.snapshot()
+    assert "instructions" not in bare_event.input_window
+    assert "confidence_threshold" not in bare_event.input_window
+    assert "allowed_replies" not in bare_event.input_window
+    assert "transcript_window" not in bare_event.input_window
+
+
 # --------------------------------------------------------------------------- #
 # build_suggested_emitter                                                     #
 # --------------------------------------------------------------------------- #
@@ -403,6 +460,36 @@ async def test_spoke_emitter_empty_recorder_keeps_legacy_shape(tmp_path) -> None
     (event,) = bus.snapshot()
     assert event.audio_file is None
     assert event.audio_duration_ms == 0
+
+
+async def test_spoke_emitter_defaults_are_unbound_reply(tmp_path) -> None:
+    """A bare call keeps the legacy shape: kind="reply", no turn id (Johnny-trt.54)."""
+    bus = InMemoryEventBus()
+    record = build_spoke_emitter(bus, mode="autonomous", session_id="4")
+    await record("Here is the summary.")
+    (event,) = bus.snapshot()
+    assert event.kind == "reply"
+    assert event.turn_id is None
+
+
+async def test_spoke_emitter_resolves_turn_id_and_carries_kind() -> None:
+    """The AgentSpoke carries the durable int turn id (shared TurnIndex) and the
+    speech kind, so the subscriber stamps the exact decision row (Johnny-trt.54)."""
+    bus = InMemoryEventBus()
+    index = TurnIndex()
+    decide = build_decision_emitter(bus, index, mode="autonomous", session_id="4")
+    spoke = build_spoke_emitter(bus, mode="autonomous", session_id="4", turn_index=index)
+
+    await decide(_decision(), "item_a")
+    await spoke("On it.", turn_id="item_a", kind="ack")
+    # Unbound speech resolves to None even with an index wired.
+    await spoke("Actually — I can't do that yet.", kind="correction")
+
+    decision_ev, ack_ev, correction_ev = bus.snapshot()
+    assert ack_ev.kind == "ack"
+    assert ack_ev.turn_id == decision_ev.turn_id == 1
+    assert correction_ev.kind == "correction"
+    assert correction_ev.turn_id is None
 
 
 # --------------------------------------------------------------------------- #

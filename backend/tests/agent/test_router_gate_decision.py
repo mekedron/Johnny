@@ -891,18 +891,35 @@ async def test_triage_timing_not_emitted_for_listen_only() -> None:
 
 
 class _RecordingObservability:
-    """Captures the gate's ``record_decision`` / ``record_spoke`` / ``record_suggested``."""
+    """Captures the gate's ``record_decision`` / ``record_spoke`` / ``record_suggested``.
+
+    ``spoke`` keeps the legacy text-only list (most assertions only care what
+    was said); ``spoke_calls`` captures the full (text, turn_id, kind) triple
+    the trt.54 seam emits, and ``transcript_windows`` the per-decision window.
+    """
 
     def __init__(self) -> None:
         self.decisions: list[tuple[Any, str]] = []
+        self.transcript_windows: list[list[dict[str, Any]] | None] = []
         self.spoke: list[str] = []
+        self.spoke_calls: list[tuple[str, str | None, str]] = []
         self.suggested: list[tuple[Any, str]] = []
 
-    async def record_decision(self, decision: Any, turn_id: str) -> None:
+    async def record_decision(
+        self,
+        decision: Any,
+        turn_id: str,
+        *,
+        transcript_window: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.decisions.append((decision, turn_id))
+        self.transcript_windows.append(transcript_window)
 
-    async def record_spoke(self, text: str) -> None:
+    async def record_spoke(
+        self, text: str, *, turn_id: str | None = None, kind: str = "reply"
+    ) -> None:
         self.spoke.append(text)
+        self.spoke_calls.append((text, turn_id, kind))
 
     async def record_suggested(self, decision: Any, turn_id: str) -> None:
         self.suggested.append((decision, turn_id))
@@ -941,12 +958,69 @@ async def test_gate_emits_decision_and_spoke_on_speak_path() -> None:
     assert decision.should_speak is True
     assert obs.spoke == []
 
-    # Reply completes with assistant text → AgentSpoke carries that text.
+    # Reply completes with assistant text → AgentSpoke carries that text,
+    # turn-bound with kind="reply" (Johnny-trt.54).
     handle = _handle(chat_items=[LKChatMessage(role="assistant", content=["the status is green"])])
     gate.bind_reply(handle)
     cast(_FakeSpeechHandle, handle).fire_done()
     await asyncio.gather(*gate._reply_tasks)
     assert obs.spoke == ["the status is green"]
+    assert obs.spoke_calls == [("the status is green", msg.id, "reply")]
+
+
+async def test_decision_emit_carries_transcript_window() -> None:
+    """The decision emit receives the rolling conversation with the trigger
+    transcript marked is_current (Johnny-trt.54) — what the "Heard you" step
+    and the session replay reconstruct the turn from."""
+    gate, _emitter, obs = _make_observed_gate(
+        [{"should_speak": True, "confidence": 0.95, "reason": "addressed"}]
+    )
+    ctx = _ctx_with_history(
+        ("user", "let's review the roadmap"),
+        ("assistant", "Sounds good — where do we start?"),
+    )
+    msg = _user_msg("Johnny, check my calendar")
+    await gate.run_turn(ctx, msg)
+
+    assert len(obs.transcript_windows) == 1
+    window = obs.transcript_windows[0]
+    assert window is not None
+    assert [e["text"] for e in window] == [
+        "let's review the roadmap",
+        "Sounds good — where do we start?",
+        "Johnny, check my calendar",
+    ]
+    # Only the trigger entry is current; the bot's own line is labelled.
+    assert [e["is_current"] for e in window] == [False, False, True]
+    assert window[1]["speaker"] is not None  # the assistant line
+    assert window[0]["speaker"] is None
+    assert window[2]["speaker"] is None
+
+
+async def test_decision_emit_transcript_window_caps_prior_entries() -> None:
+    """Prior context is capped at TRANSCRIPT_WINDOW_LIMIT so a long meeting does
+    not grow every agent_decisions row without bound; the current entry always
+    rides on top."""
+    from johnny.agent.router_gate import TRANSCRIPT_WINDOW_LIMIT
+
+    gate, _emitter, obs = _make_observed_gate(
+        [{"should_speak": False, "confidence": 0.9, "reason": "chatter"}]
+    )
+    turns = tuple(("user", f"line {i}") for i in range(TRANSCRIPT_WINDOW_LIMIT + 5))
+    with pytest.raises(StopResponse):
+        await gate.run_turn(_ctx_with_history(*turns), _user_msg("latest"))
+
+    window = obs.transcript_windows[0]
+    assert window is not None
+    assert len(window) == TRANSCRIPT_WINDOW_LIMIT + 1
+    assert window[0]["text"] == "line 5"  # oldest entries dropped
+    assert window[-1] == {
+        "text": "latest",
+        "speaker": None,
+        "confidence": None,
+        "is_current": True,
+        "timestamp_ms": window[-1]["timestamp_ms"],
+    }
 
 
 async def test_gate_emits_decision_but_not_spoke_when_declined() -> None:
@@ -1533,7 +1607,9 @@ async def test_failed_task_speaks_honest_correction_without_terminal() -> None:
     """The Phase-3 stopgap: a delegated task the stub executor fails fast
     re-enters the conversation as the honest say()-path correction —
     session-scoped speech (the approval-reply precedent), never a second
-    terminal (INV-1) and no AgentSpoke (recording it is trt.54's scope)."""
+    terminal (INV-1). Since Johnny-trt.54 the completed correction IS
+    recorded: an AgentSpoke with ``kind="correction"`` and no turn id, so it
+    lands in history without stamping any decision row's final_text."""
     h = _TaskGateHarness([_delegate_decision(kind="gmail.search", ack="Searching the inbox now.")])
     msg = _user_msg("find the vendor email")
 
@@ -1547,14 +1623,45 @@ async def test_failed_task_speaks_honest_correction_without_terminal() -> None:
         "Actually — I can't do that yet: I don't know how to run gmail.search tasks yet."
     )
     assert h.say.texts == ["Searching the inbox now.", correction]
-    # INV-1: the delegating turn still owns exactly one terminal (the ack's).
+    # INV-1: the delegating turn still owns exactly one terminal (the ack's),
+    # even before the correction's own speech completes.
     assert h.emitter.states == ["replied"]
-    # The correction registers no done-callback — it owns no terminal at all.
-    assert h.say.handles[1]._cbs == []
-    # Only the ack hit AgentSpoke; the correction is unrecorded until trt.54.
-    assert h.obs.spoke == ["Searching the inbox now."]
+    # The ack's AgentSpoke is turn-bound; the correction has not completed yet.
+    assert h.obs.spoke_calls == [("Searching the inbox now.", msg.id, "ack")]
+
+    # The correction's completion records it — kind="correction", NO turn id —
+    # and still emits no terminal (INV-1 holds).
+    h.say.handles[1].fire_done()
+    await h.drain()
+    assert h.emitter.states == ["replied"]
+    assert h.obs.spoke_calls == [
+        ("Searching the inbox now.", msg.id, "ack"),
+        (correction, None, "correction"),
+    ]
     # And it never counts toward the over-talk cap (no replied terminal).
     assert len(h.gate._recent_utterance_times) == 1
+
+
+async def test_interrupted_correction_is_not_recorded() -> None:
+    """A barged-in correction records nothing (Johnny-trt.54) — preserving the
+    interrupted partial text is Johnny-trt.58's branch on this same seam."""
+    h = _TaskGateHarness([_delegate_decision(kind="gmail.search", ack="Searching the inbox now.")])
+    msg = _user_msg("find the vendor email")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+    correction_handle = h.say.handles[1]
+    correction_handle.interrupted = True
+    correction_handle.fire_done()
+    await h.drain()
+
+    # Only the ack was recorded; the interrupted correction left no AgentSpoke
+    # and (still) no terminal.
+    assert [kind for _, _, kind in h.obs.spoke_calls] == ["ack"]
+    assert h.emitter.states == ["replied"]
 
 
 def test_delegate_failure_correction_blank_text_stays_honest() -> None:
@@ -1618,7 +1725,9 @@ async def test_status_speaks_stub_and_terminalizes_replied() -> None:
     await h.drain()
     assert h.emitter.states == ["replied"]
     assert "status stub" in h.emitter.records[0][1].detail
-    assert h.obs.spoke == [STATUS_STUB_REPLY]
+    # Turn-bound with kind="status" so the subscriber stamps this exact turn's
+    # final_text (Johnny-trt.54).
+    assert h.obs.spoke_calls == [(STATUS_STUB_REPLY, msg.id, "status")]
     assert len(h.obs.decisions) == 1
 
 

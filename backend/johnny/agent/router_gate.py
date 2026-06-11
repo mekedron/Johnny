@@ -82,6 +82,7 @@ from johnny.agent.observability import (
     RecordSpoke,
     RecordSuggested,
     RecordTriageTiming,
+    SpokenKind,
 )
 from johnny.agent.task_catalog import TaskCatalogEntry, render_task_catalog
 from johnny.agent.tasks import QueuedTask, TaskCoordinator, TaskResult, TaskSpec
@@ -183,6 +184,14 @@ STATUS_STUB_REPLY = "I don't have any tasks in flight right now."
 """The Phase-3 ``status`` verdict stub — there is no delegated-task registry to
 query until the Phase-5 real status query lands, so the gate speaks this fixed
 line instead of paying an answer-LLM hop."""
+
+TRANSCRIPT_WINDOW_LIMIT = 12
+"""Most recent prior conversation entries carried in the decision event's
+``input_window.transcript_window`` (Johnny-trt.54). The router prompt itself
+keeps the full rolling context; this only bounds what is *persisted* per
+``agent_decisions`` row for the timeline / replay, so a long meeting doesn't
+grow every row without bound. The ``is_current`` trigger entry is always
+appended on top of the cap."""
 
 
 def delegate_failure_correction(result_text: str) -> str:
@@ -483,9 +492,16 @@ class RouterGate:
         # legacy ``_respond_to_transcript_inner`` published the decision event right
         # after the router returned, then branched. ``approval_required`` persists
         # its own pending row via ``persist_pending_decision`` (Johnny-qzj); emitting
-        # here too would double-write, so that mode is skipped.
+        # here too would double-write, so that mode is skipped. The transcript
+        # window (Johnny-trt.54) rides the event into ``input_window`` so the
+        # decision row records what the turn heard — the timeline's "Heard you"
+        # step and the per-session replay reconstruct from it.
         if self._record_decision is not None and self._config.mode != APPROVAL_REQUIRED_MODE:
-            await self._record_decision(decision, turn_id)
+            await self._record_decision(
+                decision,
+                turn_id,
+                transcript_window=self._transcript_window(turn_ctx, new_message),
+            )
 
         if not decision.should_speak:
             await tracker.emit(
@@ -829,6 +845,7 @@ class RouterGate:
             tracker,
             turn_id,
             ack,
+            kind="ack",
             replied_detail=f"delegated {kind} task #{queued.task_id}; spoke ack",
             interrupted_detail=(
                 f"delegate ack interrupted before completion "
@@ -857,6 +874,7 @@ class RouterGate:
             tracker,
             turn_id,
             STATUS_STUB_REPLY,
+            kind="status",
             replied_detail="status stub spoken (no delegated-task registry until Phase 5)",
             interrupted_detail="status reply interrupted before completion",
         )
@@ -869,12 +887,20 @@ class RouterGate:
         resolver *after* the ``agent_tasks`` row settled — so the walk-back
         only ever describes durable state. Session-scoped speech per the
         approval-reply precedent: the delegating turn's terminal (the ack)
-        already settled INV-1, so this speech owns **no** terminal, binds to
-        no turn, and registers no done-callback — ``say()``'s
-        ``speech_created`` fires with ``source="say"``, so :meth:`bind_reply`
-        never sees it either. Recording it into ``final_text`` / history is
-        Johnny-trt.54's scope; until then the log line is the trace. Replaced
-        wholesale by the Phase-5 re-entry queue (Johnny-trt.29).
+        already settled INV-1, so this speech owns **no** terminal and binds
+        to no turn — ``say()``'s ``speech_created`` fires with
+        ``source="say"``, so :meth:`bind_reply` never sees it either.
+
+        It IS recorded (Johnny-trt.54): a done-callback on the say handle
+        publishes an ``AgentSpoke(kind="correction", turn_id=None)`` once the
+        speech completes uninterrupted, so the walk-back lands in
+        ``agent_utterances`` and the chat history exactly as spoken — while
+        the ``turn_id=None`` / ``kind`` pair tells the subscriber to stamp
+        **no** decision row's ``final_text`` (the delegating turn's canonical
+        text stays its ack). An interrupted correction records nothing here —
+        preserving interrupted partials is Johnny-trt.58's branch on this
+        same seam. Replaced wholesale by the Phase-5 re-entry queue
+        (Johnny-trt.29).
 
         Never raises into the resolver: no ``say()`` (session never entered /
         already torn down) or a raising ``say()`` (session draining) is
@@ -890,8 +916,14 @@ class RouterGate:
             )
             return
         text = delegate_failure_correction(result.result_text)
+        # No pre-say buffer discard here (unlike _say_with_terminal): the
+        # resolver fires while the delegating turn's ack may still be playing,
+        # and ``say()`` QUEUES the correction behind it — an eager discard
+        # would eat the ack's in-flight segments before its own completion
+        # flush. The ack flushes its buffer at done; the correction's segments
+        # accumulate after and are flushed by _on_correction_done.
         try:
-            say(text)
+            handle = say(text)
         except Exception:
             logger.exception(
                 "agent.router.gate: say() failed for task #%s (%s) correction — "
@@ -900,6 +932,13 @@ class RouterGate:
                 queued.spec.kind,
             )
             return
+
+        def _on_done(done_handle: SpeechHandle) -> None:
+            task = asyncio.ensure_future(self._on_correction_done(done_handle, text))
+            self._reply_tasks.add(task)
+            task.add_done_callback(self._reply_tasks.discard)
+
+        handle.add_done_callback(_on_done)
         logger.info(
             "agent.router.gate: task #%s (%s) failed fast — spoke correction %r",
             queued.task_id,
@@ -907,12 +946,34 @@ class RouterGate:
             text,
         )
 
+    async def _on_correction_done(self, handle: SpeechHandle, text: str) -> None:
+        """Record a completed failed-task correction into history (Johnny-trt.54).
+
+        The unbound-speech analogue of :meth:`_on_say_done`: no turn, no
+        terminal, no over-talk accounting — just the ``AgentSpoke`` that makes
+        the walk-back visible in ``agent_utterances`` and the chat.
+        Interrupted → audio discarded, nothing recorded (the trt.39
+        interrupted-speech contract; partial-text preservation is
+        Johnny-trt.58's branch on this seam).
+        """
+        if handle.interrupted:
+            if self._reply_audio is not None:
+                self._reply_audio.discard_reply()
+            logger.info(
+                "agent.router.gate: correction interrupted before completion — "
+                "not recorded (partial-text capture is Johnny-trt.58)"
+            )
+            return
+        if self._record_spoke is not None:
+            await self._record_spoke(text, turn_id=None, kind="correction")
+
     async def _say_with_terminal(
         self,
         tracker: TerminalTracker,
         turn_id: str,
         text: str,
         *,
+        kind: SpokenKind,
         replied_detail: str,
         interrupted_detail: str,
     ) -> None:
@@ -925,6 +986,8 @@ class RouterGate:
         pattern (strong refs in ``_reply_tasks``). A ``say()`` that raises
         (session draining / no activity) terminalizes the still-open turn
         ``no_reply(stage_error)`` so it is never left for the close sweep.
+        ``kind`` labels the speech path on the AgentSpoke (``"ack"`` /
+        ``"status"``, Johnny-trt.54).
         """
         say = self._say
         if say is None:  # defensive: both callers check before invoking
@@ -958,6 +1021,7 @@ class RouterGate:
                     turn_id,
                     done_handle,
                     text,
+                    kind=kind,
                     replied_detail=replied_detail,
                     interrupted_detail=interrupted_detail,
                 )
@@ -973,6 +1037,7 @@ class RouterGate:
         handle: SpeechHandle,
         text: str,
         *,
+        kind: SpokenKind,
         replied_detail: str,
         interrupted_detail: str,
     ) -> None:
@@ -982,8 +1047,10 @@ class RouterGate:
         ``no_reply(barge_in)`` (audio discarded, no ``AgentSpoke`` — the
         trt.39 interrupted-reply contract); otherwise ``replied`` (counting
         toward the over-talk cap) followed by the ``AgentSpoke`` carrying the
-        exact spoken text (INV-2), in the terminal-before-spoke wire order the
-        UI relies on. No empty-output branch — the text was supplied, not
+        exact spoken text plus the turn id and speech kind (INV-2,
+        Johnny-trt.54 — the subscriber stamps this exact turn's
+        ``final_text``), in the terminal-before-spoke wire order the UI relies
+        on. No empty-output branch — the text was supplied, not
         model-generated. First-wins via the ledger, so a duplicate
         done-callback can never double-emit.
         """
@@ -1003,7 +1070,7 @@ class RouterGate:
             return
         self._recent_utterance_times.append(self._clock())
         if self._record_spoke is not None:
-            await self._record_spoke(text)
+            await self._record_spoke(text, turn_id=turn_id, kind=kind)
 
     async def _decide(self, turn_ctx: ChatContext, new_message: LKChatMessage) -> RouterDecision:
         """Call the router LLM and parse its structured decision.
@@ -1142,11 +1209,11 @@ class RouterGate:
         await self._ledger.emit(turn_id, terminal_state="replied", detail="bot spoke")
         # Observability parity (Johnny-d5z): the bot actually spoke, so publish the
         # AgentSpoke the subscriber turns into the agent_utterances row (and writes
-        # the spoken text back onto the turn's decision row, INV-2). The text comes
-        # off the reply's chat items — the same items the empty-reply check above
-        # read, so it is non-empty here.
+        # the spoken text back onto the turn's decision row, INV-2 — by the exact
+        # turn id since Johnny-trt.54). The text comes off the reply's chat items —
+        # the same items the empty-reply check above read, so it is non-empty here.
         if self._record_spoke is not None:
-            await self._record_spoke(_extract_spoken_text(handle))
+            await self._record_spoke(_extract_spoken_text(handle), turn_id=turn_id, kind="reply")
 
     # ------------------------------------------------------------------ #
     # Approval-required wiring (Johnny-z97 / qzj)                         #
@@ -1311,6 +1378,54 @@ class RouterGate:
             else:
                 lines.append(f"- {text}")
         return lines
+
+    def _transcript_window(
+        self, turn_ctx: ChatContext, new_message: LKChatMessage
+    ) -> list[dict[str, object]]:
+        """The conversation this decision was made over, for ``input_window`` (Johnny-trt.54).
+
+        The decision-event analogue of the legacy pipeline's
+        ``transcript_window``: the same ``turn_ctx`` items :meth:`_router_messages`
+        renders into the router prompt, as ``{text, speaker, confidence,
+        is_current, timestamp_ms}`` entries with the trigger transcript last and
+        marked ``is_current`` — the shape the session-detail timeline's "Heard
+        you" / "Looked at the context" steps and the per-session replay
+        (``_heard_from_input_window``) already consume for legacy rows. Prior
+        entries are capped at the most recent :data:`TRANSCRIPT_WINDOW_LIMIT` so
+        a long meeting doesn't bloat every ``agent_decisions`` row; ``confidence``
+        is ``None`` (the gate has no per-final STT confidence on this path) and
+        ``timestamp_ms`` is the emit-time wall clock.
+        """
+        now_ms = int(time.time() * 1000)
+        entries: list[dict[str, object]] = []
+        for item in turn_ctx.items:
+            if not isinstance(item, LKChatMessage):
+                continue
+            if item.role not in ("user", "assistant"):
+                continue
+            text = (item.text_content or "").strip()
+            if not text:
+                continue
+            entries.append(
+                {
+                    "text": text,
+                    "speaker": BOT_SPEAKER_LABEL if item.role == "assistant" else None,
+                    "confidence": None,
+                    "is_current": False,
+                    "timestamp_ms": now_ms,
+                }
+            )
+        entries = entries[-TRANSCRIPT_WINDOW_LIMIT:]
+        entries.append(
+            {
+                "text": (new_message.text_content or "").strip(),
+                "speaker": None,
+                "confidence": None,
+                "is_current": True,
+                "timestamp_ms": now_ms,
+            }
+        )
+        return entries
 
 
 __all__ = [

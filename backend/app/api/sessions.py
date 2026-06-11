@@ -37,6 +37,8 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_session
 from app.db.models import (
     AgentDecision,
+    AgentTask,
+    AgentTaskStatus,
     AgentUtterance,
     BotMode,
     BotSession,
@@ -213,6 +215,32 @@ class AgentUtteranceRead(BaseModel):
     created_at: datetime
 
 
+class AgentTaskRead(BaseModel):
+    """One delegated async task row for the per-turn chain (Johnny-trt.54).
+
+    The decision-pipeline view links a delegate turn to its ``agent_tasks``
+    row by ``turn_id`` (the same durable per-session counter the turn's
+    decision/terminal/timing rows carry) so the operator sees what work the
+    ack promised and how it settled — kind, status, the spoken ack, and the
+    speech-ready ``result_text``. The full tasks panel is Johnny-trt.33
+    (Phase 6); this read model carries only what the turn chain renders.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    bot_session_id: int
+    agent_decision_id: int | None
+    turn_id: int | None
+    kind: str
+    status: AgentTaskStatus
+    ack_text: str | None
+    result_text: str | None
+    error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class SessionTimingRead(BaseModel):
     """One persisted activity-log timing row (Johnny-ckz.7).
 
@@ -245,9 +273,11 @@ class SessionTimingsResponse(BaseModel):
 class SessionDetailResponse(BaseModel):
     """Full detail for a single bot session.
 
-    The three lists carry recent history so the live view has context
-    on first paint; new events arrive over the WebSocket and are merged
-    client-side.
+    The lists carry recent history so the live view has context on first
+    paint; new events arrive over the WebSocket and are merged client-side.
+    ``tasks`` (Johnny-trt.54) carries the session's delegated ``agent_tasks``
+    rows so the decision-pipeline view links each delegate turn to the work
+    its ack promised.
     """
 
     session: BotSessionRead
@@ -255,6 +285,7 @@ class SessionDetailResponse(BaseModel):
     decisions: list[AgentDecisionRead]
     utterances: list[AgentUtteranceRead]
     pending_decisions: list[AgentDecisionRead]
+    tasks: list[AgentTaskRead] = []
 
 
 class ReplayInvariantView(BaseModel):
@@ -401,6 +432,14 @@ def get_session_detail(
             .limit(limit)
         ).all()
     )
+    tasks = list(
+        session.scalars(
+            select(AgentTask)
+            .where(AgentTask.bot_session_id == row.id)
+            .order_by(AgentTask.id.asc())
+            .limit(limit)
+        ).all()
+    )
     pending = [d for d in decisions if d.outcome == DecisionOutcome.PENDING]
 
     return SessionDetailResponse(
@@ -409,6 +448,7 @@ def get_session_detail(
         decisions=[AgentDecisionRead.model_validate(d) for d in decisions],
         utterances=[AgentUtteranceRead.model_validate(u) for u in utterances],
         pending_decisions=[AgentDecisionRead.model_validate(d) for d in pending],
+        tasks=[AgentTaskRead.model_validate(t) for t in tasks],
     )
 
 
@@ -644,6 +684,7 @@ async def stop_now(
 __all__ = [
     "ActiveSessionsResponse",
     "AgentDecisionRead",
+    "AgentTaskRead",
     "AgentUtteranceRead",
     "BotSessionRead",
     "SessionDetailResponse",

@@ -110,13 +110,21 @@ understand the bot's decision.* Concretely:
   `RouterGate.report_task_failure`, attached to the `TaskCoordinator` failure-report
   seam at gate construction and invoked only *after* the row settles. Session-scoped
   `say()` speech per the approval-reply precedent: no turn terminal (the ack already
-  settled INV-1), no done-callback; `done` / `cancelled` settles report nothing.
+  settled INV-1); `done` / `cancelled` settles report nothing. Since trt.54 the
+  completed correction IS recorded — `AgentSpoke(kind="correction", turn_id=None)`
+  from its say-handle done-callback — so it lands in `agent_utterances` and the
+  chat/history exactly as spoken while stamping **no** decision row's `final_text`
+  (an interrupted correction records nothing; partial capture is trt.58's branch).
   Replaced wholesale by trt.29.
-- **The whole chain is visible in history** (trt.54): final transcript → heuristic
-  shadow verdict → router action + confidence + stated reason → spoken text
-  (recommended vs final, divergence flagged) → linked task row → terminal + stage
-  timings. No turn may leave "what did it say, and why?" unanswerable from the UI.
-  Until trt.54 lands, the trt.53 correction's trace is its INFO log line.
+- **The whole chain is visible in history** (trt.54, shipped 2026-06-11): final
+  transcript (`input_window.transcript_window`, `is_current` entry — also what makes
+  agent sessions replayable) → heuristic shadow verdict → router action + confidence
+  + stated reason → spoken text (recommended vs final, divergence flagged; a
+  delegate verdict's `task.ack` is the recommendation) → linked `agent_tasks` row
+  (kind/status/result) → terminal + stage timings. Every `AgentSpoke` carries
+  `kind` (`reply|ack|status|correction`) + the durable int `turn_id`, so
+  `final_text` stamps the exact turn. No turn may leave "what did it say, and
+  why?" unanswerable from the UI.
 
 **Capability awareness (trt.55, Phase 4).** Operator rule (2026-06-11): *the
 decision-making must know what it is actually capable of.* "Check our Google
@@ -324,7 +332,7 @@ separately replay-gated:
 | Triage budget + task catalog + observability | Johnny-trt.19 | **shipped** (2026-06-11) — `DEFAULT_ROUTER_LLM_TIMEOUT_S` 30 → 8 s (budget framing; gate mirror + drift-guard/value tests); `TaskCatalogEntry (kind, one_liner, keywords[])` in `johnny/agent/task_catalog.py` with Phase-3 stubs (`calendar.upcoming_events`, `gmail.search`) rendered into the router prompt **only when a TaskCoordinator is wired** (keywords stay scorer-only, feeding trt.50); gate emits a per-decided-turn `router_llm` PipelineTiming (`details.action`) → `session_timings`; latency harness reports it directly as `triage_ms` (the derived `router_ms` gap stays for baseline comparability); small-router-model + 8 s budget tip on the OpenAI-compatible provider. Phase 4 (trt.23) swaps the catalog *source* to the skill loader; the entry shape is the contract |
 | Heuristic complexity scorer (shadow) | Johnny-trt.50 | **shipped** (2026-06-11) — pure-stdlib `johnny/agent/complexity.py` (ClawRouter pattern port, MIT attribution + per-constant provenance; 7 voice dimensions incl. the dynamic catalog delegate-prior; EN+RU+FI stem sets, left-boundary prefix matching); `RouterGate.run_turn` scores before the triage await and stashes the 4-key verdict under `raw_output.complexity_shadow` (one debug log line; scorer failure → key absent, turn untouched); first 86-turn agreement matrix in `.validation/Johnny-trt.50/05-agreement-matrix.md` (summary in §4) — catalog dim fired 32% on delegated vs 4% on silent turns, trt.51 fast-path **no-go** on the 3B router; the SIMPLE×delegate cell (12 turns, greetings delegated) is trt.53's quantified evidence |
 | Delegate restraint + contextual LLM-authored acks | Johnny-trt.53 | **shipped** (2026-06-11) — schema: `task.ack` required + canned example removed + restraint in the `action` description (parser untouched, old outputs parse identically); catalog header rewritten (only listed kinds, answerable-from-context ⇒ speak, unsure ⇒ speak, ack authored per turn in the user's language); gate: ackless delegate degrades to SPEAK with the `ack_fallback` marker in `raw_output` + warning (`DEFAULT_DELEGATE_ACK` now a logged defensive last resort); no dead promises: failed task settles re-enter as the spoken `say()` correction via the coordinator's failure-report seam (auto-attached at gate construction; after-row, no terminal, no AgentSpoke until trt.54); delegate/fallback-ack rates derivable from decision rows (§2). Replay fixtures untouched (all old-format, no `action` fields) |
-| Decision-pipeline observability (full chain incl. spoken text) | Johnny-trt.54 | planned (Phase 3, bug — say-path `final_text`/history gap) |
+| Decision-pipeline observability (full chain incl. spoken text) | Johnny-trt.54 | **shipped** (2026-06-11) — `AgentSpoke` carries `kind` (`reply\|ack\|status\|correction`) + durable int `turn_id`: the subscriber stamps `final_text` on the exact turn's decision row (recency scan kept only as the legacy fallback) and a `correction` inserts an **unlinked** utterance row (the trt.53 walk-back lands in chat/history verbatim, stamps nothing); a delegate verdict's `task.ack` snapshots into `decision_recommended_text` (say-path divergences audit as `override_actor=router_gate`); the decision event's `input_window` gains `transcript_window` (+ instructions/threshold) so the timeline's "Heard you" works on reload AND `/sessions/{id}/replay` reconstructs agent sessions (was 0 replayable turns); session-page timeline reworked to the full chain — heard → shadow verdict (trt.50) → decided action + reason + `router_llm` timing → context → answer-model (say-path turns say "no answer hop") → router-authored ack → linked `agent_tasks` row → guards (incl. `ack_fallback` chip) → final (recommended vs final) → spoke (exact text + audio; missing `final_text` on a replied turn flags the INV-2 gap); session detail API exposes `tasks` |
 | Phase 3 capstone (parity + INV-1 + delegated turn) | Johnny-trt.21 | planned (Phase 3) |
 | Executor, tools/skills, task events | Johnny-trt.22–26, .35 | planned (Phase 4) |
 | Capability-aware catalog (availability + honest declines) | Johnny-trt.55 | planned (Phase 4) |

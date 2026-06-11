@@ -279,6 +279,17 @@ class AgentSpoke:
     (Johnny-od1); ``None`` when recording is disabled or the write failed.
     Never a path — the api resolves it under the configured root when
     serving playback.
+
+    ``kind`` names which speech path produced the utterance (Johnny-trt.54):
+    ``"reply"`` (the answer pipeline's generated reply), ``"ack"`` (a delegate
+    turn's say()-path ack), ``"status"`` (the status say()-path reply), or
+    ``"correction"`` (the trt.53 out-of-band failed-task walk-back — bound to
+    **no** turn, so the subscriber must not stamp any decision row's
+    ``final_text`` with it). ``turn_id`` is the durable int turn id (the same
+    value the turn's :class:`TurnTerminal` / :class:`RouterDecisionMade`
+    carry) so the subscriber stamps the *exact* turn's decision row instead
+    of a most-recent scan; ``None`` for unbound speech (corrections) and for
+    emitters that predate the field (subscriber falls back to the scan).
     """
 
     text: str
@@ -288,6 +299,8 @@ class AgentSpoke:
     session_id: str | None = None
     prompt: str = ""
     audio_file: str | None = None
+    kind: str = "reply"
+    turn_id: int | None = None
     type: AgentEventType = "agent_spoke"
 
 

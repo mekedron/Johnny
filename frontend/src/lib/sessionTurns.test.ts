@@ -67,8 +67,42 @@ function makeSource(overrides: Partial<TurnSource> = {}): TurnSource {
 			{ role: 'user', content: 'What is the status?' }
 		]),
 		audioDurationMs: 4200,
+		task: null,
 		...overrides
 	};
+}
+
+/** A delegate-turn source: router action verdict + linked task row (Johnny-trt.54). */
+function makeDelegateSource(overrides: Partial<TurnSource> = {}): TurnSource {
+	return makeSource({
+		replyType: null,
+		suggestedReply: null,
+		recommendedText: 'Checking your calendar for tomorrow.',
+		finalText: 'Checking your calendar for tomorrow.',
+		answerPrompt: null,
+		rawOutput: {
+			action: 'delegate',
+			task: {
+				kind: 'calendar.upcoming_events',
+				args: {},
+				ack: 'Checking your calendar for tomorrow.'
+			},
+			complexity_shadow: {
+				tier: 'MEDIUM',
+				score: 0.222,
+				confidence: 0.7183,
+				top_signals: ['catalog (calendar.upcoming_events: calendar)', 'agentic-light (check)']
+			}
+		},
+		task: {
+			id: 33,
+			kind: 'calendar.upcoming_events',
+			status: 'failed',
+			ackText: 'Checking your calendar for tomorrow.',
+			resultText: "I don't know how to run calendar.upcoming_events tasks yet."
+		},
+		...overrides
+	});
 }
 
 function timing(events: Partial<SessionTimingRecord>[]): TurnTiming {
@@ -160,16 +194,39 @@ describe('summarizeTurn', () => {
 });
 
 describe('buildTurnView', () => {
-	it('produces exactly eight steps in order', () => {
+	it('produces the nine chain steps in order for a plain speak turn', () => {
 		const view = buildTurnView(makeSource(), undefined);
-		assert.equal(view.steps.length, 8);
+		assert.equal(view.steps.length, 9);
 		assert.deepEqual(
 			view.steps.map((s) => s.index),
-			[1, 2, 3, 4, 5, 6, 7, 8]
+			[1, 2, 3, 4, 5, 6, 7, 8, 9]
 		);
 		assert.deepEqual(
 			view.steps.map((s) => s.key),
-			['heard', 'classified', 'context', 'asked', 'model_said', 'guards', 'final', 'spoke']
+			['heard', 'sized', 'classified', 'context', 'asked', 'model_said', 'guards', 'final', 'spoke']
+		);
+	});
+
+	it('a delegate turn gains the task step and the chain stays contiguous', () => {
+		const view = buildTurnView(makeDelegateSource(), undefined);
+		assert.deepEqual(
+			view.steps.map((s) => s.key),
+			[
+				'heard',
+				'sized',
+				'classified',
+				'context',
+				'asked',
+				'model_said',
+				'task',
+				'guards',
+				'final',
+				'spoke'
+			]
+		);
+		assert.deepEqual(
+			view.steps.map((s) => s.index),
+			[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 		);
 	});
 
@@ -229,6 +286,139 @@ describe('buildTurnView', () => {
 	it('marks Heard as missing when there is no transcript (a real upstream gap)', () => {
 		const view = buildTurnView(makeSource({ heardText: null, inputWindow: {} }), undefined);
 		assert.equal(view.steps.find((s) => s.key === 'heard')?.status, 'missing');
+	});
+
+	it('a noise-filtered turn falls back to input_window.text for Heard', () => {
+		const view = buildTurnView(
+			makeSource({
+				heardText: null,
+				shouldSpeak: false,
+				terminalState: 'no_reply',
+				noReplyReason: 'noise_filtered',
+				outcome: 'suppressed',
+				finalText: null,
+				answerPrompt: null,
+				inputWindow: { noise_reason: 'too_short', text: 'uh hm' },
+				rawOutput: {}
+			}),
+			undefined
+		);
+		assert.equal(view.heardText, 'uh hm');
+		assert.equal(view.steps.find((s) => s.key === 'heard')?.body, 'uh hm');
+		assert.equal(view.classification.label, 'Noise');
+	});
+});
+
+describe('the Phase-3 chain (Johnny-trt.54)', () => {
+	it('renders the heuristic shadow verdict as the sized step (trt.50 data)', () => {
+		const view = buildTurnView(makeDelegateSource(), undefined);
+		const sized = view.steps.find((s) => s.key === 'sized');
+		assert.equal(sized?.status, 'done');
+		assert.match(sized?.title ?? '', /medium/);
+		assert.match(sized?.body ?? '', /MEDIUM/);
+		assert.match(sized?.body ?? '', /0\.22/);
+		assert.match(sized?.detail ?? '', /catalog/);
+		assert.equal(sized?.confidence, 0.7183);
+	});
+
+	it('sized is missing on a live turn (no rawOutput yet), skipped when the scorer did not run', () => {
+		const live = buildTurnView(makeSource({ rawOutput: null }), undefined);
+		assert.equal(live.steps.find((s) => s.key === 'sized')?.status, 'missing');
+		const noShadow = buildTurnView(makeSource({ rawOutput: { action: 'speak' } }), undefined);
+		assert.equal(noShadow.steps.find((s) => s.key === 'sized')?.status, 'skipped');
+	});
+
+	it('classifies a delegate verdict and titles the decision with the action', () => {
+		const view = buildTurnView(makeDelegateSource(), undefined);
+		assert.equal(view.classification.label, 'Hand off as a background task');
+		assert.equal(view.classification.structured, 'router · action=delegate');
+		const classified = view.steps.find((s) => s.key === 'classified');
+		assert.match(classified?.title ?? '', /Hand off as a background task/);
+		// The router's stated reason stays the visible chain-of-thought.
+		assert.equal(classified?.body, 'The participant asked a question.');
+	});
+
+	it('a delegate turn skips the answer model with an explicit no-answer-hop note', () => {
+		const view = buildTurnView(makeDelegateSource(), undefined);
+		const asked = view.steps.find((s) => s.key === 'asked');
+		assert.equal(asked?.status, 'skipped');
+		assert.match(asked?.body ?? '', /no answer hop/);
+		// And the model step carries the router-authored ack, not raw JSON.
+		const model = view.steps.find((s) => s.key === 'model_said');
+		assert.match(model?.title ?? '', /authored the ack/);
+		assert.equal(model?.body, 'Checking your calendar for tomorrow.');
+	});
+
+	it('links the agent_tasks row: kind, settled status, and the result text', () => {
+		const view = buildTurnView(makeDelegateSource(), undefined);
+		const task = view.steps.find((s) => s.key === 'task');
+		assert.equal(task?.status, 'done');
+		assert.equal(task?.tone, 'error'); // failed task
+		assert.equal(task?.body, 'calendar.upcoming_events → failed');
+		assert.match(task?.detail ?? '', /don't know how to run/);
+	});
+
+	it('a replied delegate turn with no captured task row marks the step missing', () => {
+		const view = buildTurnView(makeDelegateSource({ task: null }), undefined);
+		const task = view.steps.find((s) => s.key === 'task');
+		assert.equal(task?.status, 'missing');
+	});
+
+	it('a status verdict reads as a status check with the say-path skip note', () => {
+		const view = buildTurnView(
+			makeSource({
+				replyType: null,
+				suggestedReply: null,
+				recommendedText: null,
+				finalText: "I don't have any tasks in flight right now.",
+				answerPrompt: null,
+				rawOutput: { action: 'status' }
+			}),
+			undefined
+		);
+		assert.equal(view.classification.structured, 'router · action=status');
+		assert.equal(view.steps.find((s) => s.key === 'asked')?.status, 'skipped');
+		// No task step for a status turn — nothing was queued.
+		assert.equal(view.steps.find((s) => s.key === 'task'), undefined);
+		const spoke = view.steps.find((s) => s.key === 'spoke');
+		assert.equal(spoke?.body, "I don't have any tasks in flight right now.");
+	});
+
+	it('an ackless-delegate degrade surfaces the ack_fallback guard and the effective action', () => {
+		const view = buildTurnView(
+			makeSource({
+				rawOutput: {
+					action: 'delegate',
+					task: { kind: 'gmail.search', args: {}, ack: '' },
+					ack_fallback: {
+						from_action: 'delegate',
+						to_action: 'speak',
+						kind: 'gmail.search',
+						reason: 'delegate verdict carried no ack'
+					}
+				}
+			}),
+			undefined
+		);
+		// Effective action is speak — no task step, normal answer path.
+		assert.equal(view.steps.find((s) => s.key === 'task'), undefined);
+		assert.equal(view.classification.label, 'Worth replying to');
+		const guards = view.steps.find((s) => s.key === 'guards');
+		assert.ok(
+			guards?.guards.some(
+				(g) => g.structured === 'raw_output.ack_fallback' && g.tone === 'divergence'
+			)
+		);
+	});
+
+	it('a replied turn whose final_text never landed flags the INV-2 gap', () => {
+		const view = buildTurnView(
+			makeSource({ finalText: null, recommendedText: null, suggestedReply: null }),
+			undefined
+		);
+		const spoke = view.steps.find((s) => s.key === 'spoke');
+		assert.equal(spoke?.status, 'missing');
+		assert.match(spoke?.detail ?? '', /INV-2/);
 	});
 });
 

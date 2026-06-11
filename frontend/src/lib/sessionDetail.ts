@@ -108,6 +108,29 @@ export interface AgentUtteranceRecord {
 	created_at: string;
 }
 
+export type AgentTaskStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'expired';
+
+/**
+ * One delegated async task row (Johnny-trt.54). The decision-pipeline view
+ * links a delegate turn to its task by `turn_id` (the same durable per-session
+ * counter the decision/terminal/timing rows carry) so the chain shows what
+ * work the ack promised and how it settled. The full tasks panel is
+ * Johnny-trt.33 (Phase 6); this carries only what the turn chain renders.
+ */
+export interface AgentTaskRecord {
+	id: number;
+	bot_session_id: number;
+	agent_decision_id: number | null;
+	turn_id: number | null;
+	kind: string;
+	status: AgentTaskStatus;
+	ack_text: string | null;
+	result_text: string | null;
+	error: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
 export type SessionTimingStage =
 	| 'stt'
 	| 'router_llm'
@@ -141,6 +164,9 @@ export interface SessionDetail {
 	decisions: AgentDecisionRecord[];
 	utterances: AgentUtteranceRecord[];
 	pending_decisions: AgentDecisionRecord[];
+	// Delegated agent_tasks rows for the turn-chain linkage (Johnny-trt.54).
+	// Optional so a cached/older API response without the field still parses.
+	tasks?: AgentTaskRecord[];
 }
 
 export const DECISION_OUTCOME_LABEL: Record<DecisionOutcome, string> = {

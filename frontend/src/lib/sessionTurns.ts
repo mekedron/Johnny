@@ -29,6 +29,19 @@ import type {
 } from '$lib/sessionDetail';
 import { noReplyReasonLabel } from '$lib/sessionDetail';
 
+/**
+ * The linked `agent_tasks` row of a delegate turn (Johnny-trt.54) — what work
+ * the spoken ack promised and how it settled. Matched to the turn by the
+ * shared durable `turn_id`.
+ */
+export interface TurnTaskInfo {
+	id: number;
+	kind: string;
+	status: string;
+	ackText: string | null;
+	resultText: string | null;
+}
+
 /** The enriched per-turn record the timeline consumes (the page's `DecisionEntry`). */
 export interface TurnSource {
 	key: string;
@@ -58,6 +71,9 @@ export interface TurnSource {
 	rawOutput: Record<string, unknown> | null;
 	answerPrompt: string | null;
 	audioDurationMs: number | null;
+	// The delegate turn's linked agent_tasks row (Johnny-trt.54); null for
+	// non-delegate turns and on live turns until the next detail refresh.
+	task: TurnTaskInfo | null;
 }
 
 export type TurnStepStatus = 'done' | 'skipped' | 'missing';
@@ -155,11 +171,92 @@ export function terminalLabel(state: TerminalState | null): string {
 	return TERMINAL_LABEL[state] ?? 'In progress';
 }
 
+// --- raw_output readers (the Phase-3 chain, Johnny-trt.54) -------------------
+
+/** The heuristic complexity pre-scorer's shadow verdict (Johnny-trt.50). */
+export interface ComplexityShadow {
+	tier: string;
+	score: number;
+	confidence: number;
+	topSignals: string[];
+}
+
+/** The trt.53 ackless-delegate degrade marker stashed by the gate. */
+export interface AckFallbackInfo {
+	fromAction: string;
+	toAction: string;
+	kind: string;
+	reason: string;
+}
+
+/** The router's literal action verdict (`silent`/`speak`/`delegate`/`status`); null pre-trt.16 rows / live turns. */
+export function routerAction(rawOutput: Record<string, unknown> | null): string | null {
+	const action = rawOutput?.action;
+	return typeof action === 'string' && action.trim().length > 0 ? action : null;
+}
+
+/**
+ * The action the gate actually executed: an ackless delegate verdict is
+ * degraded to a plain speak before the branch (Johnny-trt.53), so when the
+ * `ack_fallback` marker is present the effective action is its `to_action`.
+ */
+export function effectiveRouterAction(rawOutput: Record<string, unknown> | null): string | null {
+	const fallback = ackFallback(rawOutput);
+	if (fallback) return fallback.toAction;
+	return routerAction(rawOutput);
+}
+
+export function complexityShadow(
+	rawOutput: Record<string, unknown> | null
+): ComplexityShadow | null {
+	const raw = rawOutput?.complexity_shadow;
+	if (!raw || typeof raw !== 'object') return null;
+	const shadow = raw as Record<string, unknown>;
+	const tier = shadow.tier;
+	if (typeof tier !== 'string') return null;
+	const signals = Array.isArray(shadow.top_signals)
+		? shadow.top_signals.filter((s): s is string => typeof s === 'string')
+		: [];
+	return {
+		tier,
+		score: typeof shadow.score === 'number' ? shadow.score : 0,
+		confidence: typeof shadow.confidence === 'number' ? shadow.confidence : 0,
+		topSignals: signals
+	};
+}
+
+export function ackFallback(rawOutput: Record<string, unknown> | null): AckFallbackInfo | null {
+	const raw = rawOutput?.ack_fallback;
+	if (!raw || typeof raw !== 'object') return null;
+	const fb = raw as Record<string, unknown>;
+	return {
+		fromAction: String(fb.from_action ?? 'delegate'),
+		toAction: String(fb.to_action ?? 'speak'),
+		kind: String(fb.kind ?? ''),
+		reason: String(fb.reason ?? '')
+	};
+}
+
+/** The router-authored delegate ack from the raw verdict (`task.ack`). */
+function delegateAckFromRaw(rawOutput: Record<string, unknown> | null): string | null {
+	const task = rawOutput?.task;
+	if (!task || typeof task !== 'object') return null;
+	return nonEmptyString((task as Record<string, unknown>).ack);
+}
+
+const ACTION_LABEL: Record<string, string> = {
+	silent: 'Stay silent',
+	speak: 'Answer directly',
+	delegate: 'Hand off as a background task',
+	status: 'Report on background tasks'
+};
+
 /**
  * Derive a short, plain-language classification of the user's turn from the
- * router output. The router does not emit a single classification word, so we
- * map the available signals (terminal state, suppressor, should_speak,
- * reply_type) to one — the raw fields stay reachable via `structured`.
+ * router output. Suppressors (noise, errors, declines) win; then the router's
+ * Phase-3 action verdict (delegate / status — the *effective* action after the
+ * trt.53 ackless-delegate degrade); then the legacy should_speak/reply_type
+ * signals. The raw fields stay reachable via `structured`.
  */
 export function classifyTurn(src: TurnSource): TurnClassification {
 	if (src.noReplyReason === 'noise_filtered') {
@@ -174,6 +271,17 @@ export function classifyTurn(src: TurnSource): TurnClassification {
 			tone: 'declined',
 			structured: 'router · should_speak=false'
 		};
+	}
+	const action = effectiveRouterAction(src.rawOutput);
+	if (action === 'delegate') {
+		return {
+			label: ACTION_LABEL.delegate,
+			tone: 'speak',
+			structured: 'router · action=delegate'
+		};
+	}
+	if (action === 'status') {
+		return { label: ACTION_LABEL.status, tone: 'speak', structured: 'router · action=status' };
 	}
 	const replyType = (src.replyType ?? '').trim().toLowerCase();
 	if (replyType && replyType !== 'string' && replyType !== 'answer') {
@@ -341,18 +449,28 @@ function reachedModel(src: TurnSource): boolean {
 
 function buildSteps(src: TurnSource): TurnStep[] {
 	const heard = extractHeard(src.inputWindow);
-	const heardText = src.heardText ?? heard?.text ?? null;
+	// Noise-gated turns store their dropped transcript flat in
+	// input_window.text (no transcript_window) — fall back to it so a filtered
+	// turn still shows what was heard (Johnny-trt.54).
+	const heardText =
+		src.heardText ?? heard?.text ?? nonEmptyString(src.inputWindow?.text) ?? null;
 	const heardConfidence = src.heardConfidence ?? heard?.confidence ?? null;
 	const willReachModel = reachedModel(src);
 	const replied = repliedPath(src);
 	const diverged = !!src.divergenceReason;
+	// The Phase-3 action verdict (Johnny-trt.54): delegate/status turns speak a
+	// say()-path line and never invoke the answer model — the chain must say
+	// so instead of flagging the missing answer prompt as a gap.
+	const action = effectiveRouterAction(src.rawOutput);
+	const sayPath = action === 'delegate' || action === 'status';
+	const fallback = ackFallback(src.rawOutput);
 
 	const steps: TurnStep[] = [];
 
-	// 1. Heard --------------------------------------------------------------
+	// Heard ------------------------------------------------------------------
 	steps.push({
 		key: 'heard',
-		index: 1,
+		index: 0,
 		title: 'Heard you',
 		structuredName: 'transcript_finalized',
 		status: heardText ? 'done' : 'missing',
@@ -366,15 +484,47 @@ function buildSteps(src: TurnSource): TurnStep[] {
 		guards: []
 	});
 
-	// 2. Classified as ------------------------------------------------------
+	// Sized it up — the heuristic shadow verdict (Johnny-trt.50) -------------
+	const shadow = complexityShadow(src.rawOutput);
+	steps.push({
+		key: 'sized',
+		index: 0,
+		title: shadow ? `Sized it up: ${shadow.tier.toLowerCase()}` : 'Sized it up',
+		structuredName: 'agent_decisions.raw_output.complexity_shadow',
+		status: shadow ? 'done' : src.rawOutput === null ? 'missing' : 'skipped',
+		tone: 'default',
+		body: shadow
+			? `Heuristic pre-scorer rated this ${shadow.tier} (score ${shadow.score.toFixed(2)}).`
+			: src.rawOutput === null
+				? null
+				: 'The heuristic pre-scorer did not run for this turn.',
+		detail: shadow
+			? shadow.topSignals.length > 0
+				? `signals: ${shadow.topSignals.join(' · ')}`
+				: null
+			: src.rawOutput === null
+				? 'Shadow verdict not captured yet (live turns fill this in on refresh).'
+				: null,
+		confidence: shadow ? shadow.confidence : null,
+		durationMs: null,
+		elapsedMs: null,
+		disclosures: [],
+		guards: []
+	});
+
+	// Classified / decided ----------------------------------------------------
 	const classification = classifyTurn(src);
+	const actionLabel = action ? (ACTION_LABEL[action] ?? action) : null;
 	steps.push({
 		key: 'classified',
-		index: 2,
-		title: `Understood this as: ${classification.label}`,
+		index: 0,
+		title: actionLabel
+			? `Decided to: ${actionLabel}`
+			: `Understood this as: ${classification.label}`,
 		structuredName: 'router_decision_made',
 		status: src.reason ? 'done' : 'missing',
 		tone: classification.tone === 'error' ? 'error' : 'default',
+		// The router's stated reason IS the visible chain-of-thought.
 		body: src.reason || null,
 		detail: src.reason ? null : 'The router produced no rationale for this turn.',
 		confidence: src.confidence,
@@ -384,11 +534,11 @@ function buildSteps(src: TurnSource): TurnStep[] {
 		guards: []
 	});
 
-	// 3. Context selected ---------------------------------------------------
+	// Context selected ---------------------------------------------------
 	// The router prompt (input_window) IS the context the router was given, so
-	// both the readable summary and the raw router prompt live here — step 4 is
-	// reserved for the *answer* model so a declined turn (router-only) is not
-	// mislabelled as having asked the answer model.
+	// both the readable summary and the raw router prompt live here — the
+	// answer-model step below is reserved for the *answer* LLM so a declined
+	// turn (router-only) is not mislabelled as having asked the answer model.
 	const ctx = summarizeContext(src.inputWindow);
 	const ctxDisclosures: TurnDisclosure[] = [];
 	if (ctx && ctx.disclosure.trim().length > 0) {
@@ -399,7 +549,7 @@ function buildSteps(src: TurnSource): TurnStep[] {
 	}
 	steps.push({
 		key: 'context',
-		index: 3,
+		index: 0,
 		title: 'Looked at the context',
 		structuredName: 'agent_decisions.input_window',
 		status: ctx ? 'done' : src.inputWindow === null ? 'missing' : 'skipped',
@@ -416,7 +566,7 @@ function buildSteps(src: TurnSource): TurnStep[] {
 		guards: []
 	});
 
-	// 4. Asked the model (the answer LLM) -----------------------------------
+	// Asked the model (the answer LLM) -----------------------------------
 	const messages = parsePromptMessages(src.answerPrompt);
 	const askedDisclosures: TurnDisclosure[] = [];
 	if (messages) {
@@ -425,19 +575,30 @@ function buildSteps(src: TurnSource): TurnStep[] {
 	}
 	steps.push({
 		key: 'asked',
-		index: 4,
+		index: 0,
 		title: 'Asked the answer model',
 		structuredName: 'agent_utterances.prompt',
-		status: askedDisclosures.length > 0 ? 'done' : willReachModel ? 'missing' : 'skipped',
+		status:
+			sayPath && askedDisclosures.length === 0
+				? 'skipped'
+				: askedDisclosures.length > 0
+					? 'done'
+					: willReachModel
+						? 'missing'
+						: 'skipped',
 		tone: 'default',
 		body:
 			askedDisclosures.length > 0
 				? 'Sent the prompt below to the answer model.'
-				: willReachModel
-					? null
-					: 'Skipped — the bot decided not to answer, so it never asked the answer model.',
+				: sayPath
+					? action === 'delegate'
+						? 'Skipped — no answer hop: the router-authored ack was spoken directly.'
+						: 'Skipped — no answer hop: the fixed status reply was spoken directly.'
+					: willReachModel
+						? null
+						: 'Skipped — the bot decided not to answer, so it never asked the answer model.',
 		detail:
-			askedDisclosures.length === 0 && willReachModel
+			askedDisclosures.length === 0 && willReachModel && !sayPath
 				? 'The answer prompt was not captured (live turns fill this in on refresh).'
 				: null,
 		confidence: null,
@@ -447,13 +608,14 @@ function buildSteps(src: TurnSource): TurnStep[] {
 		guards: []
 	});
 
-	// 5. Model said ---------------------------------------------------------
+	// Model said ---------------------------------------------------------
 	const structured =
 		src.rawOutput && typeof src.rawOutput.structured === 'object'
 			? (src.rawOutput.structured as Record<string, unknown>)
 			: null;
 	const modelText =
 		nonEmptyString(structured?.suggested_reply) ??
+		delegateAckFromRaw(src.rawOutput) ??
 		src.recommendedText ??
 		nonEmptyString(src.rawOutput?.text);
 	const finish = nonEmptyString(src.rawOutput?.finish_reason);
@@ -463,8 +625,9 @@ function buildSteps(src: TurnSource): TurnStep[] {
 	}
 	steps.push({
 		key: 'model_said',
-		index: 5,
-		title: 'The model answered',
+		index: 0,
+		title:
+			action === 'delegate' ? 'The router authored the ack' : 'The model answered',
 		structuredName: 'agent_decisions.raw_output',
 		status: modelText || modelDisclosures.length > 0 ? 'done' : willReachModel ? 'missing' : 'skipped',
 		tone: 'default',
@@ -477,13 +640,53 @@ function buildSteps(src: TurnSource): TurnStep[] {
 		guards: []
 	});
 
-	// 6. Guards / filters ---------------------------------------------------
+	// Queued the background task (delegate turns, Johnny-trt.54) -------------
+	// Rendered only when the turn delegated (or a task row exists) — a plain
+	// speak/silent turn has no task stage to be visible.
+	if (src.task !== null || action === 'delegate') {
+		const task = src.task;
+		const failed = task?.status === 'failed';
+		steps.push({
+			key: 'task',
+			index: 0,
+			title: 'Queued the background task',
+			structuredName: 'agent_tasks',
+			status: task ? 'done' : replied ? 'missing' : 'skipped',
+			tone: failed ? 'error' : 'default',
+			body: task
+				? `${task.kind} → ${TASK_STATUS_LABEL[task.status] ?? task.status}`
+				: replied
+					? null
+					: 'No task was queued — the turn ended before the hand-off completed.',
+			detail: task
+				? (task.resultText ?? null)
+				: replied
+					? 'The task row was not captured (live turns fill this in on refresh).'
+					: null,
+			confidence: null,
+			durationMs: null,
+			elapsedMs: null,
+			disclosures: [],
+			guards: []
+		});
+	}
+
+	// Guards / filters ---------------------------------------------------
 	const guards: TurnGuard[] = [];
 	if (src.terminalState === 'no_reply' && src.noReplyReason) {
 		guards.push({
 			label: `Blocked the reply because: ${noReplyReasonLabel(src.noReplyReason)}`,
 			structured: `no_reply_reason · ${src.noReplyReason}`,
 			tone: 'no_reply'
+		});
+	}
+	if (fallback) {
+		guards.push({
+			label:
+				`Router picked delegate (${fallback.kind || 'unknown kind'}) without an ack — ` +
+				'degraded to a normal spoken answer',
+			structured: 'raw_output.ack_fallback',
+			tone: 'divergence'
 		});
 	}
 	if (diverged) {
@@ -502,7 +705,7 @@ function buildSteps(src: TurnSource): TurnStep[] {
 	}
 	steps.push({
 		key: 'guards',
-		index: 6,
+		index: 0,
 		title: 'Filters & overrides',
 		structuredName: 'turn_terminal / decision override',
 		status: 'done',
@@ -516,10 +719,10 @@ function buildSteps(src: TurnSource): TurnStep[] {
 		guards
 	});
 
-	// 7. Final decision -----------------------------------------------------
+	// Final decision -----------------------------------------------------
 	steps.push({
 		key: 'final',
-		index: 7,
+		index: 0,
 		title: 'Final decision',
 		structuredName: 'agent_decisions (decision_recommended_text / final_text)',
 		status: src.recommendedText || src.finalText ? 'done' : 'skipped',
@@ -541,12 +744,12 @@ function buildSteps(src: TurnSource): TurnStep[] {
 		guards: []
 	});
 
-	// 8. Spoke --------------------------------------------------------------
+	// Spoke --------------------------------------------------------------
 	const audioS =
 		src.audioDurationMs != null ? `${(src.audioDurationMs / 1000).toFixed(1)}s of audio` : null;
 	steps.push({
 		key: 'spoke',
-		index: 8,
+		index: 0,
 		title: replied ? 'Spoke' : 'Stayed silent',
 		structuredName: 'agent_spoke',
 		status: replied ? (src.finalText ? 'done' : 'missing') : 'skipped',
@@ -554,7 +757,11 @@ function buildSteps(src: TurnSource): TurnStep[] {
 		body: replied
 			? (src.finalText ?? src.recommendedText)
 			: `Did not speak — ${noReplyReasonLabel(src.noReplyReason)}`,
-		detail: replied ? audioS : null,
+		detail: replied
+			? src.finalText
+				? audioS
+				: 'The spoken text was not recorded — a final_text stamping gap (INV-2).'
+			: null,
 		confidence: null,
 		durationMs: null,
 		elapsedMs: null,
@@ -562,8 +769,22 @@ function buildSteps(src: TurnSource): TurnStep[] {
 		guards: []
 	});
 
+	// Number the steps positionally — the task step is conditional, so fixed
+	// indices would leave holes.
+	steps.forEach((step, i) => {
+		step.index = i + 1;
+	});
 	return steps;
 }
+
+const TASK_STATUS_LABEL: Record<string, string> = {
+	queued: 'queued',
+	running: 'running',
+	done: 'completed',
+	failed: 'failed',
+	cancelled: 'cancelled',
+	expired: 'expired'
+};
 
 /**
  * Attach each measured pipeline stage's cost to its step, and the offset from
@@ -604,7 +825,7 @@ export function buildTurnView(src: TurnSource, timing: TurnTiming | undefined): 
 		turnId: src.turnId,
 		timestampMs: src.timestampMs,
 		mode,
-		heardText: src.heardText ?? heard?.text ?? null,
+		heardText: src.heardText ?? heard?.text ?? nonEmptyString(src.inputWindow?.text) ?? null,
 		classification,
 		terminalState: src.terminalState,
 		terminalLabel: terminalLabel(src.terminalState),

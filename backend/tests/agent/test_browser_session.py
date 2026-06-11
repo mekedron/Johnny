@@ -106,7 +106,9 @@ def _make_session(
     ledger = TurnLedger(emitter)
     decisions: list[Any] = []
 
-    async def _record_decision(d: Any, turn_id: str) -> None:
+    async def _record_decision(
+        d: Any, turn_id: str, *, transcript_window: Any = None
+    ) -> None:
         decisions.append((turn_id, d))
 
     gate = RouterGate(

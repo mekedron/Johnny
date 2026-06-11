@@ -530,10 +530,22 @@ async def build_agent_runtime(
             approval_timeout_seconds=(
                 gate_config.approval_timeout_seconds if is_approval else None
             ),
+            # Run-config snapshot keys (Johnny-trt.54): persisted into every
+            # decision row's input_window so the session replay and the
+            # timeline's context step reconstruct what the router saw.
+            instructions=config.instructions,
+            confidence_threshold=gate_config.confidence_threshold,
             session_id=session_id,
         ),
         record_spoke=build_spoke_emitter(
-            bus, mode=config.mode, session_id=session_id, recorder=recorder
+            bus,
+            mode=config.mode,
+            session_id=session_id,
+            recorder=recorder,
+            # Exact-turn final_text stamping (Johnny-trt.54): the AgentSpoke
+            # carries the durable int turn id resolved through the same shared
+            # index as the decision/terminal events.
+            turn_index=turn_index,
         ),
         record_suggested=build_suggested_emitter(bus, session_id=session_id),
         # Triage-stage timing (Johnny-trt.19): the router LLM is a side call

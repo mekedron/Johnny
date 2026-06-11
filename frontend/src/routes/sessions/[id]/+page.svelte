@@ -28,6 +28,7 @@
 		SESSION_TIMING_STAGE_LABEL,
 		sessionAudioUrl,
 		type AgentDecisionRecord,
+		type AgentTaskRecord,
 		type AgentUtteranceRecord,
 		type DecisionOutcome,
 		type NoReplyReason,
@@ -59,6 +60,7 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 		assembleTurns,
 		extractHeard,
 		type TurnSource,
+		type TurnTaskInfo,
 		type TurnTiming
 	} from '$lib/sessionTurns';
 
@@ -108,6 +110,9 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 		rawOutput: Record<string, unknown> | null;
 		answerPrompt: string | null;
 		audioDurationMs: number | null;
+		// The delegate turn's linked agent_tasks row (Johnny-trt.54); null for
+		// non-delegate turns and live turns until the next detail refresh.
+		task: TurnTaskInfo | null;
 	}
 
 	interface PendingApproval {
@@ -259,6 +264,21 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 	}
 
 	function applySessionDetail(detail: SessionDetail) {
+		applyCoreDetail(detail);
+		pendingApprovals = detail.pending_decisions.map((d) => ({
+			decisionId: d.id,
+			suggestedReply: d.suggested_reply ?? '',
+			reason: d.reason,
+			replyType: d.reply_type,
+			expiresAt: 0,
+			now: Date.now()
+		}));
+	}
+
+	// The DB-backed lists (transcripts / decisions / task linkage) without the
+	// approval cards — reused by the quiet mid-session refresh (Johnny-trt.54)
+	// so re-pulling the detail never resets a live approval countdown.
+	function applyCoreDetail(detail: SessionDetail) {
 		session = detail.session;
 		const transcriptLines = detail.transcripts.map(transcriptToLine);
 		const utteranceLines = detail.utterances.map(utteranceToLine);
@@ -277,17 +297,21 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 				utteranceMap.set(u.agent_decision_id, u);
 			}
 		}
+		// Delegate-turn task linkage (Johnny-trt.54): agent_tasks rows share the
+		// turn's durable turn_id with the decision row.
+		const taskByTurn = new Map<number, AgentTaskRecord>();
+		for (const t of detail.tasks ?? []) {
+			if (t.turn_id !== null) {
+				taskByTurn.set(t.turn_id, t);
+			}
+		}
 		decisions = detail.decisions.map((d) =>
-			decisionRecordToEntry(d, utteranceMap.get(d.id) ?? null)
+			decisionRecordToEntry(
+				d,
+				utteranceMap.get(d.id) ?? null,
+				d.turn_id !== null ? (taskByTurn.get(d.turn_id) ?? null) : null
+			)
 		);
-		pendingApprovals = detail.pending_decisions.map((d) => ({
-			decisionId: d.id,
-			suggestedReply: d.suggested_reply ?? '',
-			reason: d.reason,
-			replyType: d.reply_type,
-			expiresAt: 0,
-			now: Date.now()
-		}));
 	}
 
 	function transcriptToLine(t: TranscriptChunk): TranscriptLine {
@@ -331,7 +355,8 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 
 	function decisionRecordToEntry(
 		d: AgentDecisionRecord,
-		matchedUtterance: AgentUtteranceRecord | null
+		matchedUtterance: AgentUtteranceRecord | null,
+		matchedTask: AgentTaskRecord | null = null
 	): DecisionEntry {
 		const heard = extractHeard(d.input_window);
 		return {
@@ -358,7 +383,16 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 			inputWindow: d.input_window,
 			rawOutput: d.raw_output,
 			answerPrompt: matchedUtterance?.prompt ?? null,
-			audioDurationMs: matchedUtterance?.audio_duration_ms ?? null
+			audioDurationMs: matchedUtterance?.audio_duration_ms ?? null,
+			task: matchedTask
+				? {
+						id: matchedTask.id,
+						kind: matchedTask.kind,
+						status: matchedTask.status,
+						ackText: matchedTask.ack_text,
+						resultText: matchedTask.result_text
+					}
+				: null
 		};
 	}
 
@@ -602,7 +636,8 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 			inputWindow: null,
 			rawOutput: null,
 			answerPrompt: null,
-			audioDurationMs: null
+			audioDurationMs: null,
+			task: null
 		};
 		decisions = [entry, ...decisions];
 	}
@@ -676,34 +711,49 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 		// The authoritative spoken text replaces the provisional bubble
 		// (Johnny-trt.39) — what was actually spoken wins.
 		botPartial = null;
+		const kind = typeof ev.kind === 'string' && ev.kind ? ev.kind : 'reply';
 		const matched =
 			typeof ev.matched_allowed_reply === 'string'
 				? ev.matched_allowed_reply
 				: null;
-		const idx = decisions.findIndex((d) => d.outcome === 'pending');
-		if (idx >= 0) {
-			const next = [...decisions];
-			const d = next[idx];
-			const recommended = d.recommendedText ?? d.suggestedReply;
-			const diverged =
-				recommended != null &&
-				normalizeSpoken(recommended) !== normalizeSpoken(ev.text);
-			next[idx] = {
-				...d,
-				outcome: 'spoken',
-				matchedReply: matched,
-				finalText: ev.text,
-				divergenceReason: diverged
-					? "answer LLM rephrased the router's recommended reply"
-					: d.divergenceReason,
-				overrideActor: diverged ? 'answer_llm' : d.overrideActor,
-				answerPrompt: typeof ev.prompt === 'string' ? ev.prompt : d.answerPrompt,
-				audioDurationMs:
-					typeof ev.audio_duration_ms === 'number'
-						? ev.audio_duration_ms
-						: d.audioDurationMs
-			};
-			decisions = next;
+		// A correction (the trt.53 failed-task walk-back) is session-scoped
+		// speech bound to NO turn — it must not stamp any decision's final text
+		// (Johnny-trt.54); it only lands in the chat below.
+		if (kind !== 'correction') {
+			// Prefer the exact turn the event names (Johnny-trt.54); fall back to
+			// the oldest still-pending decision for events without a turn id.
+			const turnId = typeof ev.turn_id === 'number' ? ev.turn_id : null;
+			let idx = turnId !== null ? decisions.findIndex((d) => d.turnId === turnId) : -1;
+			if (idx < 0) {
+				idx = decisions.findIndex((d) => d.outcome === 'pending');
+			}
+			if (idx >= 0) {
+				const next = [...decisions];
+				const d = next[idx];
+				const recommended = d.recommendedText ?? d.suggestedReply;
+				const diverged =
+					recommended != null &&
+					normalizeSpoken(recommended) !== normalizeSpoken(ev.text);
+				const liveActor = kind === 'reply' ? 'answer_llm' : 'router_gate';
+				const liveReason =
+					kind === 'reply'
+						? "answer LLM rephrased the router's recommended reply"
+						: 'gate spoke a fallback line instead of the router-authored text';
+				next[idx] = {
+					...d,
+					outcome: 'spoken',
+					matchedReply: matched,
+					finalText: ev.text,
+					divergenceReason: diverged ? liveReason : d.divergenceReason,
+					overrideActor: diverged ? liveActor : d.overrideActor,
+					answerPrompt: typeof ev.prompt === 'string' ? ev.prompt : d.answerPrompt,
+					audioDurationMs:
+						typeof ev.audio_duration_ms === 'number'
+							? ev.audio_duration_ms
+							: d.audioDurationMs
+				};
+				decisions = next;
+			}
 		}
 		const botLine: TranscriptLine = {
 			key: `live-spoke-${ev.seq}`,
@@ -717,6 +767,30 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 		transcripts = [...transcripts, botLine];
 		void autoScrollTranscript();
 		void loadTimings();
+		// A delegate ack means a fresh agent_tasks row exists (row-before-ack);
+		// refresh the detail so the turn chain links it (Johnny-trt.54).
+		if (kind === 'ack' || kind === 'correction') {
+			refreshDetailQuietly();
+		}
+	}
+
+	// Re-pull the DB-backed lists without flipping the page into its loading
+	// state or touching live approval countdowns — used after task-related
+	// speech so the turn chain picks up the new agent_tasks row / final_text
+	// stamps (Johnny-trt.54). Slightly delayed: the WS frame and the DB write
+	// come from the same Redis message consumed by two independent readers, so
+	// give the persisting subscriber a beat to commit before re-reading.
+	let detailRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+	function refreshDetailQuietly() {
+		if (detailRefreshTimer !== null) clearTimeout(detailRefreshTimer);
+		detailRefreshTimer = setTimeout(() => {
+			detailRefreshTimer = null;
+			getSessionDetail(sessionId)
+				.then((detail) => applyCoreDetail(detail))
+				.catch(() => {
+					// Non-fatal: the next full load shows it.
+				});
+		}, 800);
 	}
 
 	function handleAgentSuggested(ev: AgentSuggestedEvent) {
@@ -933,6 +1007,10 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 		if (durationTimer !== null) {
 			clearInterval(durationTimer);
 			durationTimer = null;
+		}
+		if (detailRefreshTimer !== null) {
+			clearTimeout(detailRefreshTimer);
+			detailRefreshTimer = null;
 		}
 	});
 </script>

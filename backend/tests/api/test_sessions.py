@@ -15,6 +15,7 @@ from app.api.sessions import set_launcher
 from app.db import Base
 from app.db.models import (
     AgentDecision,
+    AgentTask,
     AgentUtterance,
     BotMode,
     BotSession,
@@ -55,6 +56,7 @@ def engine() -> sa.Engine:
             TranscriptChunk.__table__,  # type: ignore[list-item]
             AgentDecision.__table__,  # type: ignore[list-item]
             AgentUtterance.__table__,  # type: ignore[list-item]
+            AgentTask.__table__,  # type: ignore[list-item]
             SessionTiming.__table__,  # type: ignore[list-item]
         ],
     )

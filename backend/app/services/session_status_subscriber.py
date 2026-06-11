@@ -336,6 +336,14 @@ def apply_router_decision_event(
     mode = ""
     if isinstance(input_window, dict):
         mode = str(input_window.get("mode") or "").strip()
+    # The recommended text (INV-2 left side). A delegate verdict authors its
+    # spoken text in task.ack rather than suggested_reply (Johnny-trt.53), so
+    # snapshot the ack as the recommendation when suggested_reply is empty —
+    # the timeline's recommended-vs-final comparison then covers ack turns
+    # (Johnny-trt.54) and a gate fallback ack registers as a real divergence.
+    recommended_text = suggested_reply if isinstance(suggested_reply, str) else None
+    if not (recommended_text or "").strip():
+        recommended_text = _delegate_ack_from_raw(raw_output)
     if not should_speak:
         outcome = DecisionOutcome.SUPPRESSED
     elif mode == "approval_required":
@@ -358,12 +366,11 @@ def apply_router_decision_event(
             str(suggested_reply) if isinstance(suggested_reply, str) else None
         ),
         # Snapshot the recommended text onto the canonical record at decision
-        # time (INV-2). ``final_text`` stays NULL until the utterance is
-        # confirmed in ``apply_agent_spoke_event``; the parity guard only
-        # fires once both are set and differ.
-        decision_recommended_text=(
-            str(suggested_reply) if isinstance(suggested_reply, str) else None
-        ),
+        # time (INV-2): the router's suggested_reply, or a delegate verdict's
+        # task.ack (Johnny-trt.54). ``final_text`` stays NULL until the
+        # utterance is confirmed in ``apply_agent_spoke_event``; the parity
+        # guard only fires once both are set and differ.
+        decision_recommended_text=recommended_text,
         outcome=outcome,
         # Bind the row to its turn so the later TurnTerminal event stamps the
         # right record (INV-1, Johnny-ckz.28.3). ``terminal_state`` stays NULL
@@ -408,18 +415,50 @@ def apply_router_decision_event(
     return True, pending_event
 
 
+def _delegate_ack_from_raw(raw_output: dict[str, Any]) -> str | None:
+    """The router-authored ack of a delegate verdict, from the decision's raw output.
+
+    ``raw_output`` is the parsed router JSON (Johnny-trt.16 schema): a delegate
+    verdict carries ``{"action": "delegate", "task": {"kind", "args", "ack"}}``.
+    Returns the non-blank ack, else ``None`` (non-delegate verdicts, ackless
+    delegates — those degrade to SPEAK in the gate, Johnny-trt.53).
+    """
+    if str(raw_output.get("action") or "") != "delegate":
+        return None
+    task = raw_output.get("task")
+    if not isinstance(task, dict):
+        return None
+    ack = task.get("ack")
+    if isinstance(ack, str) and ack.strip():
+        return ack
+    return None
+
+
+# ``AgentSpoke.kind`` values whose utterance is bound to a turn and stamps the
+# decision row's ``final_text`` (INV-2). ``correction`` is deliberately absent:
+# the trt.53 failed-task walk-back is session-scoped speech bound to no turn —
+# it gets an ``agent_utterances`` row (so the chat history shows it exactly as
+# spoken, Johnny-trt.54) but must never rewrite any turn's canonical text.
+TURN_BOUND_SPOKEN_KINDS = frozenset({"reply", "ack", "status"})
+
+
 def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
     """Insert one agent_utterances row from an ``agent_spoke`` event.
 
-    Two writers, one row applies here (Johnny-awh): the meet-worker
-    pipeline can't link to the decision id (no SQLAlchemy), so the
-    subscriber resolves the link by finding the most recent
-    ``should_speak=True`` decision for the bot session and binding the
-    utterance to it. The same path flips a PENDING decision to SPOKEN —
-    in production the pipeline's ``decision_sink.update_outcome`` call
-    is short-circuited by :class:`NoopDecisionSink`, so without this the
-    audit row would stay PENDING forever even though the bot actually
-    spoke.
+    Two writers, one row applies here (Johnny-awh): the emitting pipeline
+    can't link to the decision id (no SQLAlchemy), so the subscriber resolves
+    the link itself — by the event's ``turn_id`` when it carries one
+    (Johnny-trt.54: the exact turn's decision row), falling back to the most
+    recent ``should_speak=True`` decision for emitters that predate the field.
+    The same path flips a PENDING decision to SPOKEN — in production the
+    pipeline's ``decision_sink.update_outcome`` call is short-circuited by
+    :class:`NoopDecisionSink`, so without this the audit row would stay
+    PENDING forever even though the bot actually spoke.
+
+    ``kind`` routes the stamping (Johnny-trt.54): turn-bound speech (a reply,
+    a delegate ack, the status stub) writes ``final_text`` onto the linked
+    decision row; a ``correction`` (the trt.53 walk-back) inserts only the
+    utterance row, unlinked — it belongs to the session, not to any turn.
     """
     if payload.get("type") != AGENT_SPOKE_EVENT_TYPE:
         return False
@@ -430,6 +469,8 @@ def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
     duration = payload.get("audio_duration_ms")
     matched = payload.get("matched_allowed_reply")
     prompt = str(payload.get("prompt") or "")
+    kind = str(payload.get("kind") or "reply")
+    turn_id = _coerce_int_id(payload.get("turn_id"))
     # Mode is taken from the bot session row at insert time so the
     # utterance audit row mirrors the meeting's bot mode.
     session_row = db.get(BotSession, session_id)
@@ -438,15 +479,30 @@ def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
         meeting = getattr(session_row, "meeting_config", None)
         if meeting is not None and getattr(meeting, "mode", None) is not None:
             mode = meeting.mode
-    linked_decision = db.scalar(
-        select(AgentDecision)
-        .where(
-            AgentDecision.bot_session_id == session_id,
-            AgentDecision.should_speak.is_(True),
-        )
-        .order_by(AgentDecision.id.desc())
-        .limit(1)
-    )
+    linked_decision: AgentDecision | None = None
+    if kind in TURN_BOUND_SPOKEN_KINDS:
+        if turn_id is not None:
+            # Exact binding (Johnny-trt.54): the event names its turn, so stamp
+            # that turn's row — no recency heuristic to race.
+            linked_decision = db.scalar(
+                select(AgentDecision)
+                .where(
+                    AgentDecision.bot_session_id == session_id,
+                    AgentDecision.turn_id == turn_id,
+                )
+                .order_by(AgentDecision.id.desc())
+                .limit(1)
+            )
+        if linked_decision is None:
+            linked_decision = db.scalar(
+                select(AgentDecision)
+                .where(
+                    AgentDecision.bot_session_id == session_id,
+                    AgentDecision.should_speak.is_(True),
+                )
+                .order_by(AgentDecision.id.desc())
+                .limit(1)
+            )
     decision_id: int | None = None
     if linked_decision is not None:
         decision_id = linked_decision.id
@@ -461,17 +517,24 @@ def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
         linked_decision.final_text = text
         recommended = linked_decision.decision_recommended_text
         if decision_texts_diverge(recommended, text):
-            actor = (
-                "allowlist"
-                if (matched is not None and str(matched) == text)
-                else "answer_llm"
-            )
-            reason = (
-                "spoke an allow-listed reply that differs from the router's "
-                "recommended text"
-                if actor == "allowlist"
-                else "answer LLM rephrased the router's recommended reply"
-            )
+            if kind in ("ack", "status"):
+                # say()-path speech (Johnny-trt.54): no answer LLM ran. A
+                # divergence here means the gate spoke something other than the
+                # router-authored text (e.g. the DEFAULT_DELEGATE_ACK defensive
+                # last resort, Johnny-trt.53).
+                actor = "router_gate"
+                reason = (
+                    "gate spoke a fallback line instead of the router-authored text"
+                )
+            elif matched is not None and str(matched) == text:
+                actor = "allowlist"
+                reason = (
+                    "spoke an allow-listed reply that differs from the router's "
+                    "recommended text"
+                )
+            else:
+                actor = "answer_llm"
+                reason = "answer LLM rephrased the router's recommended reply"
             linked_decision.override_actor = actor
             linked_decision.divergence_reason = reason
             logger.info(
@@ -1028,6 +1091,7 @@ __all__ = [
     "SESSION_STATUS_EVENT_TYPE",
     "TRANSCRIPT_EVENT_TYPE",
     "TRANSCRIPT_FILTERED_EVENT_TYPE",
+    "TURN_BOUND_SPOKEN_KINDS",
     "TURN_TERMINAL_EVENT_TYPE",
     "apply_agent_spoke_event",
     "apply_pipeline_timing_event",
