@@ -3,10 +3,10 @@
   "sessionId": "b8829633-95f0-4e1b-a1c5-e08500de3d70",
   "status": "running",
   "startedAt": "2026-06-11T05:16:05.966Z",
-  "updatedAt": "2026-06-11T17:38:06.298Z",
-  "currentIteration": 19,
+  "updatedAt": "2026-06-11T17:54:45.297Z",
+  "currentIteration": 20,
   "maxIterations": 0,
-  "tasksCompleted": 17,
+  "tasksCompleted": 18,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -345,8 +345,8 @@
       {
         "id": "Johnny-trt.51",
         "title": "[SPIKE] Phase 3 (deferred, non-gating): heuristic-informed routing behaviors — fast-path, prompt prior, micro-reply gate",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.52",
@@ -546,6 +546,16 @@
       "durationMs": 2094097,
       "startedAt": "2026-06-11T16:48:38.544Z",
       "endedAt": "2026-06-11T17:23:32.641Z"
+    },
+    {
+      "iteration": 20,
+      "status": "completed",
+      "taskId": "Johnny-trt.51",
+      "taskTitle": "[SPIKE] Phase 3 (deferred, non-gating): heuristic-informed routing behaviors — fast-path, prompt prior, micro-reply gate",
+      "taskCompleted": true,
+      "durationMs": 849705,
+      "startedAt": "2026-06-11T17:23:55.183Z",
+      "endedAt": "2026-06-11T17:38:04.888Z"
     }
   ],
   "skippedTaskIds": [],
