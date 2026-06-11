@@ -39,7 +39,11 @@ def test_render_snapshot_two_entries() -> None:
         "answered from the conversation, your own knowledge, or the "
         "context you were given, choose action='speak' instead — even "
         "when these topics come up. When unsure between speak and "
-        "delegate, choose speak. With action='delegate', task.ack is "
+        "delegate, choose speak. If they ask about work already "
+        "underway or what it found ('are you still working on it?', "
+        "'what did the check turn up?'), choose action='status' — the "
+        "real task registry is read out; never invent the result. "
+        "With action='delegate', task.ack is "
         "required: write the acknowledgment yourself in the language the "
         "user spoke, naming the specific work you are starting and why "
         "it needs a moment — never a generic filler phrase. The kinds:"
@@ -62,6 +66,10 @@ def test_render_header_carries_restraint_and_ack_contract() -> None:
     assert "When unsure between speak and delegate, choose speak." in rendered
     assert "task.ack is required" in rendered
     assert "language the user spoke" in rendered
+    # The trt.29 status rule: asks about started work / its outcome route to
+    # the registry render, never to an improvised answer.
+    assert "choose action='status'" in rendered
+    assert "never invent the result" in rendered
     # No filler phrase anywhere near the model (the trt.53 copy-priming bug).
     assert "Let me check" not in rendered
 

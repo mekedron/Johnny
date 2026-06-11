@@ -127,7 +127,10 @@ def render_task_catalog(entries: tuple[TaskCatalogEntry, ...]) -> str:
     over-delegation fix): prefer ``speak`` whenever the request is answerable
     from context, delegate only the listed kinds, and author the ``task.ack``
     fresh per turn in the user's language — no canned filler example anywhere
-    near the model.
+    near the model. It also teaches ``status`` for asks about already-started
+    work or its outcome (Johnny-trt.29): the gate answers those from the real
+    task registry, which beats letting the answer model improvise a result it
+    never saw (the live session-4 hallucination).
 
     Unavailable entries (Johnny-trt.55) render in a *second* block teaching
     the honest decline: never delegate these, answer with the reason and the
@@ -152,7 +155,11 @@ def render_task_catalog(entries: tuple[TaskCatalogEntry, ...]) -> str:
                 "answered from the conversation, your own knowledge, or the "
                 "context you were given, choose action='speak' instead — even "
                 "when these topics come up. When unsure between speak and "
-                "delegate, choose speak. With action='delegate', task.ack is "
+                "delegate, choose speak. If they ask about work already "
+                "underway or what it found ('are you still working on it?', "
+                "'what did the check turn up?'), choose action='status' — the "
+                "real task registry is read out; never invent the result. "
+                "With action='delegate', task.ack is "
                 "required: write the acknowledgment yourself in the language the "
                 "user spoke, naming the specific work you are starting and why "
                 "it needs a moment — never a generic filler phrase. The kinds:"

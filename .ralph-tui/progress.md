@@ -38,6 +38,16 @@ after each iteration and it's included in prompts for context.
   clicks it, and waits for the consequence frame — millisecond-accurate and
   stale-proof. Same for typing: set `textarea.value` via the prototype setter +
   `dispatchEvent(new Event('input', {bubbles:true}))`, then click Send.
+- **The e2e provider-lifecycle suite (tests/e2e/providers_ui/) mutates the LIVE
+  provider rows** (hit in trt.29): running the full backend suite against the
+  dev stack deactivates every provider row (and the OpenAI ones also fail on
+  the operator's stale OPENAI_API_KEY — 401, pre-existing). Next playground
+  session then dies with "no active stt provider in the dispatched job
+  payload". Fix before browser validation: `curl -X POST
+  http://localhost:8000/providers/{id}/activate` for the canonical trio
+  (stt=1 Parakeet, llm=4 ollama llama3.2:3b, tts=3 Piper) and probe
+  `127.0.0.1:8765/health` (parakeet sidecar) + `127.0.0.1:11434/api/tags`
+  (ollama) before starting a session.
 
 ---
 
@@ -166,4 +176,55 @@ after each iteration and it's included in prompts for context.
     resolve_browser_turn_detector duck-typing discipline) — the worker/browser
     test fakes model only the fields they exercise and crashed on a direct
     attribute read.
+---
+
+## 2026-06-12 - Johnny-trt.29
+- Phase-5 real status query shipped — `status` verdicts now answer from the
+  task registry instead of the Phase-3 stub. `TaskCoordinator.status_summary()`
+  (pure in-memory read, no DB/LLM): renders completed-but-undelivered results
+  with their actual result_text whatever their age (the session-4 hallucination
+  seam; returned as `StatusSummary.carried_results`), in-flight tasks with
+  speech-rounded elapsed time ("Still working on the google calendar task,
+  about 20 seconds in" — queued+running alike), recent failures (≤120 s,
+  `STATUS_RECENT_SETTLE_S`), aware already-shared/nothing-to-report tails, and
+  the graceful `STATUS_NOTHING_IN_FLIGHT` (same line the stub spoke). Gate:
+  `_handle_status` speaks the summary via `_say_with_terminal` (exactly one
+  `replied` terminal; `kind="status"` AgentSpoke stamps final_text per trt.54);
+  new `on_replied` hook fires inside the first-wins terminal branch →
+  `_settle_carried_results` consumes each carried result's queued RESULT copy
+  through `SpeechQueue.mark_spoken` (the trt.27 out-of-band seam; on_spoken
+  flips registry delivered) or flips `mark_result_delivered` directly when no
+  copy is queued (expired / listenerless); a barged-in status reply consumes
+  NOTHING (the copy redelivers at the next boundary). New gate seam
+  `attach_speech_queue(queue, clock=…)` wired by `attach_task_speech_wiring`
+  via getattr duck-typing. Router taught to choose status: catalog header line
+  + `action` schema "progress or results". docs/ROUTING.md updated (status
+  table trt.27–29 shipped; "no dead promises" is the lasting failed-path, not
+  a stopgap).
+- Files changed: backend/johnny/agent/{tasks,router_gate,task_wiring,
+  task_catalog}.py, backend/johnny/voice_pipeline/reasoning.py,
+  backend/tests/agent/{test_tasks,test_router_gate_decision,test_task_wiring,
+  test_task_catalog}.py, docs/ROUTING.md. Quality: agent+voice_pipeline 1331
+  passed; mypy strict + ruff clean on all touched files; full suite 4239
+  passed with 6 pre-existing environmental failures (OpenAI 401 key ×4,
+  no-docker-CLI-in-container wizard ×2 — none in my blast radius). Browser
+  validation .validation/Johnny-trt.29/ (sessions 53–54): natural-phrasing
+  status → "I don't have any tasks in flight right now." un-coached; delegate
+  → real gog run done +5.0 s → follow-up typed 1 ms after the settle → status
+  verdict spoke the registry result VERBATIM, terminal detail
+  "(delivered result(s) [54])", 20 s post-watch: zero task_result spokes, zero
+  expirations, result spoken exactly once.
+- **Learnings:**
+  - The 3B router picks `status` readily with natural phrasing (2/2 across
+    both runs, incl. second-turn) — far more reliable than its delegate rate;
+    the new catalog-header status line + outcome-ask examples likely help.
+  - Live in-flight status capture is physically impossible on this stack (task
+    settles ~1.2 s after begin; status triage alone ~2.5 s) — the in-flight
+    render is unit-pinned only; trt.30 (live Meet) should reuse Run B's
+    settle-then-ask choreography for its mid-flight status leg with a longer
+    conversation gap instead.
+  - e2e provider tests deactivate live provider rows (pattern added above).
+  - mypy strict won't narrow `queue: X | None` across an `item` derived inside
+    the None-guard — restructure so the call sits inside the guarded block
+    (`continue` out) instead of re-testing item afterwards.
 ---

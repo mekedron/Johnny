@@ -109,7 +109,7 @@ understand the bot's decision.* Concretely:
   schema descriptions at all, so since trt.59 the schema descriptions are terse
   pointers (the pinned phrases survive) and the full contract rides the prompt,
   which renders on every call that uses the full schema.
-- **No dead promises** (trt.53 stopgap until the Phase-5 re-entry queue): a
+- **No dead promises** (trt.53): a
   delegated task that settles `failed` (since trt.23: a skill run that fails in
   the sandbox — e.g. gog not authed — or a kind no skill backs; the speech-ready
   text is skill-authored where the skill printed one)
@@ -123,7 +123,11 @@ understand the bot's decision.* Concretely:
   from its say-handle done-callback — so it lands in `agent_utterances` and the
   chat/history exactly as spoken while stamping **no** decision row's `final_text`
   (an interrupted correction keeps its caption partial the same way — trt.58 below).
-  Replaced wholesale by trt.29.
+  Planned as a stopgap, kept as the lasting failed-path delivery: the Phase-5
+  wiring (trt.28) routes push-observed `failed` settles to this same seam
+  (immediately — a walk-back must not wait for a pause), while `done` results
+  re-enter through the boundary-gated speech queue and `status` asks answer
+  from the registry (trt.29).
 - **The whole chain is visible in history** (trt.54, shipped 2026-06-11): final
   transcript (`input_window.transcript_window`, `is_current` entry — also what makes
   agent sessions replayable) → heuristic shadow verdict → router action + confidence
@@ -136,7 +140,7 @@ understand the bot's decision.* Concretely:
 - **Interrupted speech keeps its partial** (trt.58, shipped 2026-06-11): a barge-in
   used to make the in-flight phrase vanish (the streamed caption bubble was
   discarded, no `AgentSpoke`, no row). Now every speech path — streamed reply,
-  delegate ack, status stub, the failed-task correction — that already flushed at
+  delegate ack, status reply, the failed-task correction — that already flushed at
   least one caption sentence emits `AgentSpoke(interrupted=true)` with the caption
   text at cut time (the gate's `SpeechCaptionBuffer`, fed by a `tts_node` sink tee;
   an honest *approximation* of what was audibly heard, since a sentence flushes to
@@ -513,7 +517,7 @@ re-prices the fast-path.
 | Capability-aware catalog (availability + honest declines) | Johnny-trt.55 | **shipped** (2026-06-11) — `TaskCatalogEntry.available` + `unavailable_reason` (spoken-form, actionable); availability predicate `evaluate_skill_availability` per session assembly (`requires.env` via one batched sandbox env probe + skill-declared `metadata.johnny.availability.check` run in-sandbox, e.g. google-calendar's `check.sh` = gog authed; probe failure ⇒ could-not-verify, never assumed available; trt.38 policy + trt.36 MCP health join the same function); unavailable kinds render as a capped decline-honestly block (5 rows + overflow line, 160-char reasons; all-available renders byte-identical — replay parity); gate backstop degrades delegate-on-unavailable to the deterministic say() decline with the `capability_gap` marker in `raw_output`; unavailable entries feed `keywords=()` to the trt.50 scorer; executor re-runs the check at claim time (broken link ⇒ `failed` with the same words ⇒ trt.53 correction); `meeting.leave` off-surface joined as an unavailable entry; router prompt size persisted per turn (`details.prompt_chars` on the `router_llm` timing row) |
 | Meeting lifecycle states (dismissible bot, no auto-rejoin) | Johnny-trt.56 | **shipped** (2026-06-11) — three dismissal stamp columns on `meeting_configs` (+`bot_dismissed_by` ui\|voice\|schedule), derived `bot_state`, occurrence-scoped in-force rule, scheduler dispatch filter, dismiss/undismiss endpoints + UI, `meeting_bot_state_changed` events |
 | Internal tools (`meeting.leave`, `session.end` by voice) | Johnny-trt.57 | **shipped** (2026-06-11) — `johnny/agent/internal_tools.py`: in-process registry + executor heading the chain (internal → skills → stub); catalog entries surface-scoped (`meeting.leave` only when the job carries a `calendar_event_id`); farewell-ack completes before teardown (`RouterGate.wait_recent_say_done`); actions post the SAME api endpoints the UI buttons call (voice dismissal `actor=voice` / `/sessions/{id}/stop`) so Johnny-ajc stop verification rides along — non-2xx → `failed` settle → spoken trt.53 correction; skill executor refuses internal kinds (locality guard); `TaskCoordinator.aclose` gained a bounded drain grace so the self-terminating settle lands `done`, not `cancelled` |
-| Speech queue + re-entry + status query | Johnny-trt.27–30 | planned (Phase 5) |
+| Speech queue + re-entry + status query | Johnny-trt.27–30 | **shipped** trt.27/28/29 (2026-06-12) — pure `SpeechQueue` core (trt.27: priorities ACK>STATUS>RESULT>NOTICE, per-class TTLs, ~1.2 s silence-grace gating, requeue-once-then-drop, exactly-once terminals); Phase-5 wiring (trt.28: `TaskEventListener` push consumer of `johnny.tasks.<id>` with resubscribe reconcile; `TaskSpeechDeliverer` boundary-gated delivery — `current_speech` None ∧ user silent ∧ `RouterGate.idle` ∧ grace — via `speak_task_result`, recorded as `AgentSpoke kind="task_result"`); **real status query** (trt.29: `status` verdicts speak `TaskCoordinator.status_summary()` — the in-memory registry rendered as in-flight progress with elapsed time, completed-but-undelivered results delivered with their actual `result_text` whatever their age (the session-4 hallucination seam) while the queued RESULT copy is consumed on uninterrupted completion (`SpeechQueue.mark_spoken` — never spoken twice; a barged-in status reply consumes nothing so the result still delivers at the next boundary), recent failures, and the graceful nothing-in-flight line; catalog header + `action` schema teach `status` for asks about started work or its outcome). Live-Meet capstone trt.30 pending |
 | Per-agent model role slots (schema) | Johnny-trt.41 | planned (Phase 6) |
 | Role-based provider resolution + runtime fallback | Johnny-trt.42 | planned (Phase 6) |
 | Agent edit page (Triage/Answer/Reasoning pickers) | Johnny-trt.44 | planned (Phase 6) |

@@ -386,6 +386,68 @@ defaults production assemblies to the internal-kind predicate so the split
 cannot be forgotten."""
 
 
+STATUS_NOTHING_IN_FLIGHT = "I don't have any tasks in flight right now."
+"""The graceful empty-registry ``status`` reply (Johnny-trt.29) — also what a
+gate without a coordinator speaks (nothing can ever be delegated there, so the
+fixed line is the honest answer; it was the whole Phase-3 status stub)."""
+
+STATUS_RECENT_SETTLE_S = 120.0
+"""How long a settled task stays worth *mentioning* in a status reply
+(Johnny-trt.29). Mirrors the speech queue's RESULT TTL (120 s — "past that the
+moment is gone"): a failure or an already-delivered result older than this is
+no longer conversationally alive, so the summary stops bringing it up.
+Deliberately NOT applied to completed-but-undelivered results — those are
+spoken whenever asked, however old (the session-4 hallucination seam: the
+registry copy is the only true answer the session holds)."""
+
+
+def _spoken_kind(kind: str) -> str:
+    """Humanize a task kind for speech: separators become spaces.
+
+    ``"google-calendar"`` → ``"google calendar"``, ``"calendar.upcoming_events"``
+    → ``"calendar upcoming events"`` — TTS reads neither dots nor underscores
+    gracefully. Blank in, ``"background"`` out (defensive)."""
+    spoken = " ".join(kind.replace(".", " ").replace("_", " ").replace("-", " ").split())
+    return spoken or "background"
+
+
+def _spoken_duration(seconds: float) -> str:
+    """``"about 20 seconds in"`` — how far along an in-flight task is.
+
+    Rounded for speech, not telemetry: under 10 s the number is noise ("just a
+    few seconds in"), under 90 s the nearest 5 s, past that whole minutes.
+    """
+    if seconds < 10.0:
+        return "just a few seconds in"
+    if seconds < 90.0:
+        return f"about {5 * round(seconds / 5)} seconds in"
+    minutes = max(1, round(seconds / 60.0))
+    return f"about {minutes} minute{'' if minutes == 1 else 's'} in"
+
+
+def _ensure_sentence(text: str) -> str:
+    """Append a period unless the text already ends a sentence (join hygiene)."""
+    return text if text.endswith((".", "!", "?", "…")) else text + "."
+
+
+@dataclass(frozen=True, slots=True)
+class StatusSummary:
+    """What a ``status`` turn speaks (Johnny-trt.29).
+
+    ``text`` is the speech-ready registry render
+    (:meth:`TaskCoordinator.status_summary`). ``carried_results`` are the
+    completed-but-undelivered ``done`` entries whose ``result_text`` rides
+    inside ``text`` verbatim — once the status reply completes, the gate
+    settles each one (consume the queued RESULT copy via
+    :meth:`~johnny.agent.speech_queue.SpeechQueue.mark_spoken`, or flip
+    :meth:`TaskCoordinator.mark_result_delivered` directly when no copy is
+    queued) so the trt.28 deliverer can never speak it a second time.
+    """
+
+    text: str
+    carried_results: tuple[TaskRegistryEntry, ...] = ()
+
+
 def unsupported_kind_text(kind: str) -> str:
     """Speech-ready failure phrase for a task kind nothing can run yet.
 
@@ -651,6 +713,85 @@ class TaskCoordinator:
     def registry_entry(self, task_id: int) -> TaskRegistryEntry | None:
         """One registry entry by id (``None`` when this session never saw it)."""
         return self._registry.get(task_id)
+
+    def status_summary(self, *, now: float | None = None) -> StatusSummary:
+        """Render the registry into one speech-ready status reply (Johnny-trt.29).
+
+        The real ``status`` query: a pure in-memory read (no DB on the hot
+        path — the registry mirrors everything this session has observed),
+        composed most-valuable-first:
+
+        1. **Completed-but-undelivered results** — spoken with their full
+           ``result_text``, whatever their age (the session-4 hallucination
+           seam: the user is asking about work whose answer only the registry
+           holds, so deliver it now). These come back in
+           :attr:`StatusSummary.carried_results` for the caller's
+           consume-the-queued-copy bookkeeping.
+        2. **In-flight tasks** ("Still working on the calendar check task,
+           about 20 seconds in") — ``queued`` and ``running`` alike; the user
+           does not care about claim mechanics.
+        3. **Recent failures** (within :data:`STATUS_RECENT_SETTLE_S`) — the
+           trt.53 correction already spoke once, but "are you still on it?"
+           after a failure deserves the honest outcome again, not silence.
+
+        With none of those: a recently finished, already-shared task gets an
+        aware "nothing in flight — I already shared the result" tail;
+        otherwise the plain :data:`STATUS_NOTHING_IN_FLIGHT`. ``cancelled`` /
+        ``expired`` entries and stale settles are never mentioned. ``now``
+        defaults to the coordinator's clock (injectable for tests).
+        """
+        ts = self._monotonic() if now is None else now
+        active: list[TaskRegistryEntry] = []
+        undelivered: list[TaskRegistryEntry] = []
+        failed_recent: list[TaskRegistryEntry] = []
+        finished_recent: list[TaskRegistryEntry] = []
+        for entry in self._registry.values():
+            if not entry.terminal:
+                active.append(entry)
+            elif entry.status == "done" and not entry.delivered and entry.result_text.strip():
+                undelivered.append(entry)
+            elif entry.settled_at is None or (ts - entry.settled_at) > STATUS_RECENT_SETTLE_S:
+                continue  # stale settle — no longer conversationally alive
+            elif entry.status == "failed":
+                failed_recent.append(entry)
+            elif entry.status == "done":
+                # Delivered already, or done with nothing speakable (blank
+                # result_text, the UI-only contract) — a tail mention at most.
+                finished_recent.append(entry)
+
+        sentences: list[str] = []
+        for entry in undelivered:
+            sentences.append(
+                f"The {_spoken_kind(entry.kind)} task is done: "
+                f"{_ensure_sentence(entry.result_text.strip())}"
+            )
+        for index, entry in enumerate(active):
+            lead = "Still working on" if index == 0 else "Also still on"
+            sentences.append(
+                f"{lead} the {_spoken_kind(entry.kind)} task, "
+                f"{_spoken_duration(ts - entry.queued_at)}."
+            )
+        for entry in failed_recent:
+            failure = entry.result_text.strip() or executor_error_text(entry.kind)
+            sentences.append(
+                f"The {_spoken_kind(entry.kind)} task didn't work out: "
+                f"{_ensure_sentence(failure)}"
+            )
+        if not sentences:
+            if finished_recent:
+                last = finished_recent[-1]
+                tail = (
+                    "I already shared the result"
+                    if last.delivered
+                    else "there was nothing to report back"
+                )
+                sentences.append(
+                    f"Nothing in flight right now — the {_spoken_kind(last.kind)} "
+                    f"task finished and {tail}."
+                )
+            else:
+                sentences.append(STATUS_NOTHING_IN_FLIGHT)
+        return StatusSummary(text=" ".join(sentences), carried_results=tuple(undelivered))
 
     def note_task_running(
         self, task_id: int, *, kind: str = "", turn_id: int | None = None
@@ -1043,6 +1184,8 @@ class TaskCoordinator:
 __all__ = [
     "DEFAULT_ACLOSE_DRAIN_GRACE_S",
     "EXECUTOR_RESULT_STATUSES",
+    "STATUS_NOTHING_IN_FLIGHT",
+    "STATUS_RECENT_SETTLE_S",
     "TERMINAL_TASK_STATUSES",
     "WATCH_POLL_INTERVAL_S",
     "WATCH_TIMEOUT_S",
@@ -1052,6 +1195,7 @@ __all__ = [
     "QueuedTask",
     "ReportTaskFailed",
     "RunsInSession",
+    "StatusSummary",
     "TaskCoordinator",
     "TaskExecutor",
     "TaskOrigin",

@@ -14,6 +14,8 @@ from typing import Any
 
 from johnny.agent.tasks import (
     EXECUTOR_RESULT_STATUSES,
+    STATUS_NOTHING_IN_FLIGHT,
+    STATUS_RECENT_SETTLE_S,
     TERMINAL_TASK_STATUSES,
     InMemoryTaskSink,
     QueuedTask,
@@ -1226,3 +1228,216 @@ async def test_reconcile_skips_session_origin_and_non_terminal_rows() -> None:
     # local: row still queued/running (resolver owns it); remote: row queued.
     assert await coordinator.reconcile_in_flight() == []
     await coordinator.aclose(drain_grace_s=0)
+
+
+# --- the status query render (Johnny-trt.29) ------------------------------------
+
+
+def _status_coordinator(now: list[float]) -> TaskCoordinator:
+    """A listener-attached coordinator (no watchers) with a mutable clock —
+    the status render is a pure registry read, so no sink/executor activity
+    is wanted in these tests."""
+    coordinator, _ = _registry_coordinator(now=now)
+    coordinator.attach_remote_listener()
+    return coordinator
+
+
+async def test_status_summary_empty_registry() -> None:
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    summary = coordinator.status_summary()
+    assert summary.text == STATUS_NOTHING_IN_FLIGHT
+    assert summary.carried_results == ()
+    await coordinator.aclose()
+
+
+async def test_status_summary_single_in_flight_with_duration() -> None:
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    queued = await coordinator.begin(_spec(kind="google-calendar"))
+    assert queued is not None
+    coordinator.note_task_running(queued.task_id)
+    now[0] = 121.0  # 21 s since begin
+    summary = coordinator.status_summary()
+    assert summary.text == (
+        "Still working on the google calendar task, about 20 seconds in."
+    )
+    assert summary.carried_results == ()
+    await coordinator.aclose()
+
+
+async def test_status_summary_duration_phrasing_bands() -> None:
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    queued = await coordinator.begin(_spec(kind="gmail.search"))
+    assert queued is not None
+    now[0] = 103.0  # 3 s — below the number-is-noise floor
+    assert "just a few seconds in" in coordinator.status_summary().text
+    now[0] = 287.0  # 187 s — minutes band
+    assert "about 3 minutes in" in coordinator.status_summary().text
+    now[0] = 161.0  # 61 s — rounds to the nearest 5
+    assert "about 60 seconds in" in coordinator.status_summary().text
+    await coordinator.aclose()
+
+
+async def test_status_summary_multiple_in_flight() -> None:
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    first = await coordinator.begin(_spec(kind="google-calendar"))
+    now[0] = 115.0
+    second = await coordinator.begin(_spec(kind="gmail.search"))
+    assert first is not None and second is not None
+    now[0] = 120.0
+    text = coordinator.status_summary().text
+    assert "Still working on the google calendar task, about 20 seconds in." in text
+    assert "Also still on the gmail search task, just a few seconds in." in text
+    await coordinator.aclose()
+
+
+async def test_status_summary_undelivered_result_carried_verbatim() -> None:
+    """The session-4 seam: a done-but-unspoken result is delivered inside the
+    status text whatever its age, and returned in carried_results."""
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    queued = await coordinator.begin(_spec(kind="google-calendar"))
+    assert queued is not None
+    entry = coordinator.note_task_settled(
+        queued.task_id, status="done", result_text="You have 3 events this week."
+    )
+    assert entry is not None
+    # Far past the recent-settle window — undelivered results never go stale.
+    now[0] = 100.0 + STATUS_RECENT_SETTLE_S * 10
+    summary = coordinator.status_summary()
+    assert summary.text == (
+        "The google calendar task is done: You have 3 events this week."
+    )
+    assert summary.carried_results == (entry,)
+    await coordinator.aclose()
+
+
+async def test_status_summary_result_text_gets_sentence_punctuation() -> None:
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    queued = await coordinator.begin(_spec(kind="google-calendar"))
+    assert queued is not None
+    coordinator.note_task_settled(
+        queued.task_id, status="done", result_text="3 events this week"
+    )
+    assert coordinator.status_summary().text == (
+        "The google calendar task is done: 3 events this week."
+    )
+    await coordinator.aclose()
+
+
+async def test_status_summary_recent_failure_spoken_with_result_text() -> None:
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    queued = await coordinator.begin(_spec(kind="google-calendar"))
+    assert queued is not None
+    coordinator.note_task_settled(
+        queued.task_id,
+        status="failed",
+        result_text="The calendar account isn't linked.",
+    )
+    now[0] = 130.0
+    summary = coordinator.status_summary()
+    assert summary.text == (
+        "The google calendar task didn't work out: The calendar account isn't linked."
+    )
+    assert summary.carried_results == ()  # failures are never queue-carried
+    await coordinator.aclose()
+
+
+async def test_status_summary_failure_without_text_gets_generic_speech() -> None:
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    coordinator.note_task_settled(queued.task_id, status="failed", error="exit 2")
+    text = coordinator.status_summary().text
+    assert executor_error_text("web_search") in text
+    await coordinator.aclose()
+
+
+async def test_status_summary_stale_failure_not_mentioned() -> None:
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    coordinator.note_task_settled(queued.task_id, status="failed", result_text="nope")
+    now[0] = 100.0 + STATUS_RECENT_SETTLE_S + 1.0
+    assert coordinator.status_summary().text == STATUS_NOTHING_IN_FLIGHT
+    await coordinator.aclose()
+
+
+async def test_status_summary_delivered_result_gets_aware_tail() -> None:
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    queued = await coordinator.begin(_spec(kind="google-calendar"))
+    assert queued is not None
+    coordinator.note_task_settled(
+        queued.task_id, status="done", result_text="You have 3 events this week."
+    )
+    coordinator.mark_result_delivered(queued.task_id)
+    now[0] = 110.0
+    summary = coordinator.status_summary()
+    assert summary.text == (
+        "Nothing in flight right now — the google calendar task finished "
+        "and I already shared the result."
+    )
+    assert summary.carried_results == ()
+    # …and past the window it is no longer brought up at all.
+    now[0] = 100.0 + STATUS_RECENT_SETTLE_S + 1.0
+    assert coordinator.status_summary().text == STATUS_NOTHING_IN_FLIGHT
+    await coordinator.aclose()
+
+
+async def test_status_summary_blank_result_done_is_not_carried() -> None:
+    """A done task with nothing speakable (UI-only) must not promise a result."""
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    coordinator.note_task_settled(queued.task_id, status="done", result_text="   ")
+    summary = coordinator.status_summary()
+    assert summary.carried_results == ()
+    assert summary.text == (
+        "Nothing in flight right now — the web search task finished "
+        "and there was nothing to report back."
+    )
+    await coordinator.aclose()
+
+
+async def test_status_summary_cancelled_and_expired_never_mentioned() -> None:
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    first = await coordinator.begin(_spec(kind="web_search"))
+    second = await coordinator.begin(_spec(kind="gmail.search"))
+    assert first is not None and second is not None
+    coordinator.note_task_settled(first.task_id, status="cancelled")
+    coordinator.note_task_settled(second.task_id, status="expired")
+    assert coordinator.status_summary().text == STATUS_NOTHING_IN_FLIGHT
+    await coordinator.aclose()
+
+
+async def test_status_summary_composes_result_then_active_then_failure() -> None:
+    """Most-valuable-first composition: undelivered result, in-flight, failure."""
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    done = await coordinator.begin(_spec(kind="google-calendar"))
+    running = await coordinator.begin(_spec(kind="gmail.search"))
+    failed = await coordinator.begin(_spec(kind="web_search"))
+    assert done is not None and running is not None and failed is not None
+    coordinator.note_task_settled(
+        done.task_id, status="done", result_text="You have 3 events this week."
+    )
+    coordinator.note_task_settled(failed.task_id, status="failed", result_text="No luck.")
+    now[0] = 121.0
+    summary = coordinator.status_summary()
+    assert summary.text == (
+        "The google calendar task is done: You have 3 events this week. "
+        "Still working on the gmail search task, about 20 seconds in. "
+        "The web search task didn't work out: No luck."
+    )
+    assert [entry.task_id for entry in summary.carried_results] == [done.task_id]
+    await coordinator.aclose()

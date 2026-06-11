@@ -446,8 +446,8 @@ _ROUTER_SCHEMA: dict[str, Any] = {
             "description": (
                 "silent = say nothing; speak = answer now; delegate = queue "
                 "a listed task kind (fill 'task'); status = report progress "
-                "on delegated work. When unsure between speak and delegate, "
-                "choose speak."
+                "or results of delegated work. When unsure between speak and "
+                "delegate, choose speak."
             ),
         },
         "task": {

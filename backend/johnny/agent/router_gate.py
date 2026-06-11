@@ -27,15 +27,18 @@ inline-speaking modes with two more actions before the speak fallthrough:
 :class:`~johnny.agent.tasks.TaskCoordinator` (the durable ``agent_tasks`` row
 exists before any audio — row-before-ack) and speaks the model-authored ack
 via ``session.say()`` whose completion owns the turn's terminal; ``status``
-speaks the fixed Phase-3 stub the same way. Neither pays an answer-LLM hop.
-An ackless delegate verdict is degraded to a plain SPEAK instead
-(Johnny-trt.53, instrumented under :data:`ACK_FALLBACK_KEY`) — a real answer
-beats the canned :data:`DEFAULT_DELEGATE_ACK`. Task *results* arrive later as
-session-scoped speech (the approval-reply precedent), never as turn
-terminals, so INV-1 keeps exactly one terminal per turn; until the Phase-5
-re-entry queue exists, a task that settles ``failed`` re-enters immediately
-as the honest spoken correction (:meth:`RouterGate.report_task_failure` — no
-dead promises).
+speaks the coordinator's registry-rendered
+:class:`~johnny.agent.tasks.StatusSummary` the same way (Johnny-trt.29 —
+in-flight progress, undelivered results delivered verbatim with their queued
+copies consumed, recent failures, or the graceful nothing-in-flight line).
+Neither pays an answer-LLM hop. An ackless delegate verdict is degraded to a
+plain SPEAK instead (Johnny-trt.53, instrumented under
+:data:`ACK_FALLBACK_KEY`) — a real answer beats the canned
+:data:`DEFAULT_DELEGATE_ACK`. Task *results* arrive later as session-scoped
+speech (the approval-reply precedent), never as turn terminals, so INV-1
+keeps exactly one terminal per turn; a task that settles ``failed`` re-enters
+immediately as the honest spoken correction
+(:meth:`RouterGate.report_task_failure` — no dead promises).
 
 INV-1 ("exactly one terminal per turn") is enforced by the session-scoped
 :class:`~johnny.agent.gate.TurnLedger` (spike Johnny-o3z): :meth:`run_turn`
@@ -85,8 +88,17 @@ from johnny.agent.observability import (
     SpeechCaptionBuffer,
     SpokenKind,
 )
+from johnny.agent.speech_queue import SpeechItem, SpeechPriority, SpeechQueue
 from johnny.agent.task_catalog import TaskCatalogEntry, render_task_catalog
-from johnny.agent.tasks import QueuedTask, TaskCoordinator, TaskResult, TaskSpec
+from johnny.agent.tasks import (
+    STATUS_NOTHING_IN_FLIGHT,
+    QueuedTask,
+    StatusSummary,
+    TaskCoordinator,
+    TaskRegistryEntry,
+    TaskResult,
+    TaskSpec,
+)
 from johnny.voice_pipeline import reasoning as _reasoning
 from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
 from johnny.voice_pipeline.reasoning import (
@@ -228,10 +240,11 @@ def capability_decline_speech(kind: str, reason: str) -> str:
         return spoken
     return f"I can't do that in this session — the {kind} capability isn't available right now."
 
-STATUS_STUB_REPLY = "I don't have any tasks in flight right now."
-"""The Phase-3 ``status`` verdict stub — there is no delegated-task registry to
-query until the Phase-5 real status query lands, so the gate speaks this fixed
-line instead of paying an answer-LLM hop."""
+# The Phase-3 STATUS_STUB_REPLY constant is gone (Johnny-trt.29): the status
+# verdict now renders the coordinator's in-memory task registry
+# (:meth:`TaskCoordinator.status_summary`); the no-coordinator / empty-registry
+# reply is :data:`johnny.agent.tasks.STATUS_NOTHING_IN_FLIGHT` (same spoken
+# line the stub used, so a no-tasks session sounds unchanged).
 
 TRANSCRIPT_WINDOW_LIMIT = 12
 """Most recent prior conversation entries carried in the decision event's
@@ -382,9 +395,17 @@ class RouterGate:
         # cannot clobber another consumer.
         if tasks is not None:
             tasks.attach_failure_reporter(self.report_task_failure)
-        # The say() seam for delegate acks / status stubs (Johnny-trt.17),
+        # The say() seam for delegate acks / status replies (Johnny-trt.17),
         # attached by JohnnyAgent.on_enter once the session exists.
         self._say: SaySpeech | None = None
+        # The session's out-of-band speech queue (Johnny-trt.29), attached by
+        # attach_task_speech_wiring once the Phase-5 stack exists — the status
+        # path's consumption seam: a result carried in a status reply settles
+        # its queued RESULT copy so the trt.28 deliverer never speaks it a
+        # second time. ``_speech_queue_clock`` is the queue's own monotonic
+        # time domain (the deliverer's clock), attached alongside.
+        self._speech_queue: SpeechQueue | None = None
+        self._speech_queue_clock: Callable[[], float] = time.monotonic
         # The most recent say() SpeechHandle (ack / status / correction),
         # kept so the internal-tool teardown runners (Johnny-trt.57) can wait
         # for the farewell ack to finish playing before disconnecting — see
@@ -469,8 +490,8 @@ class RouterGate:
         (Johnny-trt.53) rewrites it to a plain SPEAK — marked in
         ``decision.raw`` under :data:`ACK_FALLBACK_KEY` before the decision
         emit — because a real answer beats a hollow canned promise. ``status``
-        speaks the fixed :data:`STATUS_STUB_REPLY` through the same machinery
-        (the real status query is Phase 5). Both raise ``StopResponse`` so the
+        speaks the coordinator's registry-rendered summary through the same
+        machinery (Johnny-trt.29). Both raise ``StopResponse`` so the
         SDK generates no reply; both run *after* the mode branches above, so
         ``suggest_only`` / ``approval_required`` / ``listen_only`` sessions and
         the rate limiter treat a delegate/status verdict exactly like a speak
@@ -667,9 +688,9 @@ class RouterGate:
             raise StopResponse()
 
         if decision.action == STATUS_ACTION:
-            # status (Johnny-trt.17): no delegated-task registry to query until
-            # Phase 5, so speak the fixed stub through the same say() machinery
-            # (deterministic, no answer-LLM hop).
+            # status (Johnny-trt.17/.29): render the coordinator's in-memory
+            # task registry and speak it through the same say() machinery
+            # (deterministic, no answer-LLM hop, no DB read).
             await self._handle_status(tracker, turn_id)
             raise StopResponse()
 
@@ -1089,13 +1110,30 @@ class RouterGate:
         )
 
     async def _handle_status(self, tracker: TerminalTracker, turn_id: str) -> None:
-        """Speak the Phase-3 status stub; its completion owns the turn's terminal.
+        """Speak the real registry-rendered status; its completion owns the terminal.
 
-        No coordinator is needed — with no delegated-task registry to query yet,
-        :data:`STATUS_STUB_REPLY` is the honest answer (Phase 5 replaces this
-        with the real per-session task lookup). Only ``say()`` is required;
-        without it the turn terminalizes ``no_reply(stage_error)`` like the
-        delegate failure legs.
+        The Phase-5 status query (Johnny-trt.29):
+        :meth:`TaskCoordinator.status_summary` renders the in-memory task
+        registry — in-flight progress ("Still working on the calendar check
+        task, about 20 seconds in"), completed-but-undelivered results spoken
+        with their actual ``result_text`` (the session-4 hallucination seam:
+        never let the answer model improvise a result the registry holds),
+        recent failures, or the graceful nothing-in-flight line. No DB read,
+        no LLM hop — deterministic text through the same ``say()`` machinery
+        as the ack, terminal ``replied`` on completion (exactly one, INV-1).
+
+        A summary that carries undelivered results settles them **only once
+        the speech completes uninterrupted** (the ``on_replied`` hook →
+        :meth:`_settle_carried_results`): the queued RESULT copy is consumed
+        via the queue's out-of-band seam so the trt.28 deliverer cannot speak
+        it a second time, and the registry flips ``delivered``. An interrupted
+        status reply deliberately consumes nothing — the queued copy stays and
+        delivers at the next boundary, so a barge-in can never disappear a
+        result. A gate without a coordinator speaks the fixed
+        :data:`~johnny.agent.tasks.STATUS_NOTHING_IN_FLIGHT` (nothing can ever
+        be delegated there — the honest Phase-3 stub stance). Only ``say()``
+        is required; without it the turn terminalizes ``no_reply(stage_error)``
+        like the delegate failure legs.
         """
         if self._say is None:
             await tracker.emit(
@@ -1104,15 +1142,75 @@ class RouterGate:
                 detail="status verdict but say() is not attached — cannot speak",
             )
             return
-        logger.info("agent.router.gate: turn=%s STATUS (stub reply)", turn_id)
+        if self._tasks is None:
+            summary = StatusSummary(text=STATUS_NOTHING_IN_FLIGHT)
+        else:
+            summary = self._tasks.status_summary()
+        carried = summary.carried_results
+        logger.info(
+            "agent.router.gate: turn=%s STATUS registry-rendered (carried_results=%s) %r",
+            turn_id,
+            [entry.task_id for entry in carried],
+            summary.text,
+        )
         await self._say_with_terminal(
             tracker,
             turn_id,
-            STATUS_STUB_REPLY,
+            summary.text,
             kind="status",
-            replied_detail="status stub spoken (no delegated-task registry until Phase 5)",
+            replied_detail=(
+                "status summary spoken from the task registry"
+                + (
+                    f" (delivered result(s) {[entry.task_id for entry in carried]})"
+                    if carried
+                    else ""
+                )
+            ),
             interrupted_detail="status reply interrupted before completion",
+            on_replied=(
+                (lambda: self._settle_carried_results(carried)) if carried else None
+            ),
         )
+
+    def _settle_carried_results(self, carried: tuple[TaskRegistryEntry, ...]) -> None:
+        """A completed status reply just delivered these results — settle them.
+
+        The trt.29 consumption bookkeeping, fired from the status speech's
+        ``on_replied`` hook (uninterrupted completion only). For each carried
+        entry: a matching RESULT item in the attached speech queue — queued
+        *or* in flight (the deliverer may have started it just before the
+        user's status turn barged in) — is settled through
+        :meth:`SpeechQueue.mark_spoken`, whose ``on_spoken`` callback (set by
+        the trt.28 deliverer at enqueue) flips the registry's ``delivered``;
+        with no queued copy (expired, never enqueued — no listener — or no
+        queue attached) the registry is flipped directly. Either way the
+        deliverer can never speak a result the status reply already carried.
+        """
+        tasks = self._tasks
+        if tasks is None:  # defensive: carried results imply a coordinator
+            return
+        queue = self._speech_queue
+        for entry in carried:
+            if queue is not None:
+                candidates = list(queue.items())
+                if queue.in_flight is not None:
+                    candidates.append(queue.in_flight)
+                item: SpeechItem | None = next(
+                    (
+                        candidate
+                        for candidate in candidates
+                        if candidate.task_id == entry.task_id
+                        and candidate.priority is SpeechPriority.RESULT_UNSOLICITED
+                    ),
+                    None,
+                )
+                if item is not None:
+                    # on_spoken marks the registry delivered (and logs the
+                    # delivery latency) — the same exactly-once path a normal
+                    # queue delivery takes.
+                    queue.mark_spoken(item, self._speech_queue_clock())
+                    continue
+            tasks.mark_result_delivered(entry.task_id)
 
     async def report_task_failure(self, queued: QueuedTask, result: TaskResult) -> None:
         """Speak the honest correction for a delegated task that settled ``failed``.
@@ -1307,6 +1405,7 @@ class RouterGate:
         kind: SpokenKind,
         replied_detail: str,
         interrupted_detail: str,
+        on_replied: Callable[[], None] | None = None,
     ) -> None:
         """``say(text)`` and attach the turn's terminal to the speech's completion.
 
@@ -1318,7 +1417,10 @@ class RouterGate:
         (session draining / no activity) terminalizes the still-open turn
         ``no_reply(stage_error)`` so it is never left for the close sweep.
         ``kind`` labels the speech path on the AgentSpoke (``"ack"`` /
-        ``"status"``, Johnny-trt.54).
+        ``"status"``, Johnny-trt.54). ``on_replied`` (Johnny-trt.29) fires
+        exactly when the speech completes uninterrupted **and** this
+        done-callback won the terminal — the status path's
+        consume-carried-results hook; sync, contained, never on barge-in.
         """
         say = self._say
         if say is None:  # defensive: both callers check before invoking
@@ -1362,6 +1464,7 @@ class RouterGate:
                     kind=kind,
                     replied_detail=replied_detail,
                     interrupted_detail=interrupted_detail,
+                    on_replied=on_replied,
                 )
             )
             self._reply_tasks.add(task)
@@ -1378,6 +1481,7 @@ class RouterGate:
         kind: SpokenKind,
         replied_detail: str,
         interrupted_detail: str,
+        on_replied: Callable[[], None] | None = None,
     ) -> None:
         """Emit a say-spoken turn's single terminal once the speech completes.
 
@@ -1422,6 +1526,16 @@ class RouterGate:
             # A duplicate done-callback lost the first-wins race — the winner
             # already counted the utterance and published the AgentSpoke.
             return
+        if on_replied is not None:
+            # Inside the first-wins branch, so exactly-once with the terminal
+            # (Johnny-trt.29: the status path settles carried results here).
+            # Contained: bookkeeping must never break the spoke emit below.
+            try:
+                on_replied()
+            except Exception:
+                logger.exception(
+                    "agent.router.gate: on_replied hook failed for turn=%s", turn_id
+                )
         self._recent_utterance_times.append(self._clock())
         if self._record_spoke is not None:
             await self._record_spoke(text, turn_id=turn_id, kind=kind)
@@ -1675,6 +1789,25 @@ class RouterGate:
         """
         self._say = say
 
+    def attach_speech_queue(
+        self, queue: SpeechQueue, *, clock: Callable[[], float] = time.monotonic
+    ) -> None:
+        """Attach the session's out-of-band speech queue (Johnny-trt.29).
+
+        Called by :func:`~johnny.agent.task_wiring.attach_task_speech_wiring`
+        once the Phase-5 delivery stack exists (after ``session.start``, the
+        same post-construction timing as :meth:`attach_say`). The status path
+        reads it to *consume* a queued RESULT copy whose text just went out
+        inside a status reply — :meth:`SpeechQueue.mark_spoken` on a
+        still-queued item, the documented out-of-band consumption seam — so
+        the trt.28 deliverer can never speak the same result twice. ``clock``
+        is the queue's monotonic time domain (the deliverer's clock); without
+        an attached queue the status path still answers from the registry and
+        marks carried results delivered directly.
+        """
+        self._speech_queue = queue
+        self._speech_queue_clock = clock
+
     async def wait_recent_say_done(self, timeout_s: float = 30.0) -> None:
         """Wait for the most recent say() speech to finish playing (Johnny-trt.57).
 
@@ -1897,7 +2030,6 @@ __all__ = [
     "CAPABILITY_GAP_KEY",
     "UNKNOWN_KIND_KEY",
     "DEFAULT_DELEGATE_ACK",
-    "STATUS_STUB_REPLY",
     "PersistPendingDecision",
     "RouterGate",
     "RouterGateConfig",

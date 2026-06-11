@@ -662,6 +662,7 @@ class _FakeGate:
         self.say_available = True
         self.spoken: list[str] = []
         self.handles: list[_FakeDeliveryHandle] = []
+        self.attached_queues: list[SpeechQueue] = []
 
     def speak_task_result(self, text: str) -> _FakeDeliveryHandle | None:
         if not self.say_available:
@@ -670,6 +671,11 @@ class _FakeGate:
         self.spoken.append(text)
         self.handles.append(handle)
         return handle
+
+    def attach_speech_queue(self, queue: SpeechQueue, *, clock: Any) -> None:
+        """Records the trt.29 consumption-seam attach (real-gate signature)."""
+        del clock
+        self.attached_queues.append(queue)
 
 
 class _FakeDeliverySession:
@@ -957,8 +963,23 @@ async def test_attach_without_redis_runs_listenerless_and_stores_wiring() -> Non
     assert runtime.task_speech is wiring
     assert coordinator.remote_listener_active is False  # watcher fallback intact
     assert session.listeners.get("user_state_changed")  # deliverer registered
+    # The trt.29 consumption seam: the gate sees the same queue the deliverer
+    # drains, so a status reply can consume a queued RESULT copy.
+    assert runtime.gate.attached_queues == [wiring.queue]
     await wiring.aclose()
     assert session.listeners.get("user_state_changed") == []
+    await coordinator.aclose()
+
+
+async def test_attach_tolerates_a_gate_without_the_queue_seam() -> None:
+    """The getattr duck-typing discipline: a harness gate modelling only
+    idle/speak_task_result must not crash the attach (trt.29 seam optional)."""
+    coordinator, _ = _external_coordinator()
+    runtime = _runtime_stub(coordinator, redis_url=None)
+    runtime.gate = SimpleNamespace(idle=True, speak_task_result=lambda text: None)
+    wiring = attach_task_speech_wiring(runtime, _FakeDeliverySession())  # type: ignore[arg-type]
+    assert wiring is not None
+    await wiring.aclose()
     await coordinator.aclose()
 
 

@@ -49,14 +49,19 @@ from johnny.agent.router_gate import (  # noqa: E402
     DEFAULT_DELEGATE_ACK,
     ROUTER_DECISION_SCHEMA,
     ROUTER_DECISION_SCHEMA_NO_CATALOG,
-    STATUS_STUB_REPLY,
     UNKNOWN_KIND_KEY,
     RouterGate,
     RouterGateConfig,
     capability_decline_speech,
     delegate_failure_correction,
 )
+from johnny.agent.speech_queue import (  # noqa: E402
+    ItemState,
+    SpeechPriority,
+    SpeechQueue,
+)
 from johnny.agent.tasks import (  # noqa: E402
+    STATUS_NOTHING_IN_FLIGHT,
     InMemoryTaskSink,
     TaskCoordinator,
     TaskSpec,
@@ -2097,25 +2102,164 @@ async def test_report_task_failure_say_raising_is_contained() -> None:
     assert h.say.texts == []
 
 
-async def test_status_speaks_stub_and_terminalizes_replied() -> None:
-    """status: fixed nothing-in-flight stub, no coordinator needed (Phase 3)."""
+async def test_status_without_coordinator_speaks_nothing_in_flight() -> None:
+    """status, no coordinator: nothing can ever be delegated — the honest
+    fixed line (the old Phase-3 stub stance), one replied terminal."""
     h = _TaskGateHarness([_status_decision()], wire_coordinator=False)
     msg = _user_msg("Johnny, are you still working on that?")
 
     with pytest.raises(StopResponse):
         await h.gate.run_turn(ChatContext.empty(), msg)
 
-    assert h.say.texts == [STATUS_STUB_REPLY]
+    assert h.say.texts == [STATUS_NOTHING_IN_FLIGHT]
     assert h.emitter.records == []  # terminal owned by the speech
 
     h.say.handles[0].fire_done()
     await h.drain()
     assert h.emitter.states == ["replied"]
-    assert "status stub" in h.emitter.records[0][1].detail
+    assert "status summary" in h.emitter.records[0][1].detail
     # Turn-bound with kind="status" so the subscriber stamps this exact turn's
     # final_text (Johnny-trt.54).
-    assert h.obs.spoke_calls == [(STATUS_STUB_REPLY, msg.id, "status")]
+    assert h.obs.spoke_calls == [(STATUS_NOTHING_IN_FLIGHT, msg.id, "status")]
     assert len(h.obs.decisions) == 1
+
+
+async def test_status_with_empty_registry_speaks_nothing_in_flight() -> None:
+    """status, coordinator wired but no tasks ever begun: the graceful reply."""
+    h = _TaskGateHarness([_status_decision()])
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("still on it?"))
+
+    assert h.say.texts == [STATUS_NOTHING_IN_FLIGHT]
+    h.say.handles[0].fire_done()
+    await h.drain()
+    assert h.emitter.states == ["replied"]
+
+
+async def test_status_renders_in_flight_task_from_registry() -> None:
+    """status with work in flight: the registry-rendered progress line
+    (Johnny-trt.29), one replied terminal owned by the speech."""
+    h = _TaskGateHarness([_status_decision()])
+    assert h.coordinator is not None
+    # A worker-owned claim observed over the push channel — exactly how a
+    # mid-flight task looks to the registry (no begin() needed; the seed path
+    # is the listener's note_task_running).
+    h.coordinator.note_task_running(31, kind="google-calendar")
+    msg = _user_msg("are you still working on that?")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    assert len(h.say.texts) == 1
+    spoken = h.say.texts[0]
+    assert "Still working on the google calendar task" in spoken
+    assert "in." in spoken  # the duration tail ("just a few seconds in.")
+    h.say.handles[0].fire_done()
+    await h.drain()
+    assert h.emitter.states == ["replied"]
+    assert h.obs.spoke_calls == [(spoken, msg.id, "status")]
+
+
+async def test_status_delivers_undelivered_result_and_consumes_queued_copy() -> None:
+    """The session-4 hallucination seam (Johnny-trt.29): a status ask while a
+    done result sits undelivered speaks the REAL result_text, and completing
+    the reply consumes the queued RESULT copy so the trt.28 deliverer can
+    never speak it a second time."""
+    h = _TaskGateHarness([_status_decision()])
+    coordinator = h.coordinator
+    assert coordinator is not None
+    entry = coordinator.note_task_settled(
+        7, status="done", kind="google-calendar", result_text="You have 3 events this week."
+    )
+    assert entry is not None
+    # The trt.28 wiring's queue state: the RESULT enqueued, awaiting a boundary.
+    queue = SpeechQueue(0.0)
+    h.gate.attach_speech_queue(queue, clock=lambda: 50.0)
+    item = queue.enqueue(
+        entry.result_text,
+        SpeechPriority.RESULT_UNSOLICITED,
+        now=1.0,
+        on_spoken=lambda _item: coordinator.mark_result_delivered(7),
+        task_id=7,
+        kind="google-calendar",
+    )
+    msg = _user_msg("so what's in the calendar?")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    spoken = h.say.texts[0]
+    assert "You have 3 events this week." in spoken
+    assert "google calendar task is done" in spoken
+    # Not consumed until the speech actually completes (a barge-in must not
+    # disappear the result).
+    assert item.state is ItemState.QUEUED
+    assert entry.delivered is False
+
+    h.say.handles[0].fire_done()
+    await h.drain()
+    assert h.emitter.states == ["replied"]
+    assert item.state is ItemState.SPOKEN  # consumed through the queue seam
+    assert entry.delivered is True
+    assert queue.pop_ready(100.0) is None  # nothing left for the deliverer
+    # A follow-up status ask now reports the result as already shared.
+    assert "already shared the result" in coordinator.status_summary(now=60.0).text
+
+
+async def test_status_interrupted_keeps_queued_copy_for_redelivery() -> None:
+    """A barged-in status reply consumes nothing: the queued RESULT survives
+    (it will deliver at the next boundary) and the registry stays undelivered."""
+    h = _TaskGateHarness([_status_decision()])
+    coordinator = h.coordinator
+    assert coordinator is not None
+    entry = coordinator.note_task_settled(
+        7, status="done", kind="google-calendar", result_text="You have 3 events this week."
+    )
+    assert entry is not None
+    queue = SpeechQueue(0.0)
+    h.gate.attach_speech_queue(queue, clock=lambda: 50.0)
+    item = queue.enqueue(
+        entry.result_text,
+        SpeechPriority.RESULT_UNSOLICITED,
+        now=1.0,
+        on_spoken=lambda _item: coordinator.mark_result_delivered(7),
+        task_id=7,
+        kind="google-calendar",
+    )
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("status?"))
+
+    handle = h.say.handles[0]
+    handle.interrupted = True
+    handle.fire_done()
+    await h.drain()
+
+    assert h.emitter.reasons == ["barge_in"]
+    assert item.state is ItemState.QUEUED
+    assert entry.delivered is False
+
+
+async def test_status_without_queue_marks_result_delivered_directly() -> None:
+    """No speech queue attached (no listener / copy expired): the carried
+    result still flips the registry delivered on completion — the deliverer
+    has nothing queued, and a repeat status ask must not re-read the result."""
+    h = _TaskGateHarness([_status_decision()])
+    coordinator = h.coordinator
+    assert coordinator is not None
+    entry = coordinator.note_task_settled(
+        7, status="done", kind="google-calendar", result_text="You have 3 events this week."
+    )
+    assert entry is not None
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("status?"))
+
+    h.say.handles[0].fire_done()
+    await h.drain()
+    assert h.emitter.states == ["replied"]
+    assert entry.delivered is True
 
 
 async def test_status_barged_in_emits_barge_in() -> None:

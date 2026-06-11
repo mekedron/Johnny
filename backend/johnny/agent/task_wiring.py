@@ -809,6 +809,13 @@ def attach_task_speech_wiring(
         clock_ms=clock_ms,
         tick_s=tick_s,
     )
+    # The trt.29 consumption seam: the gate's status path reads this queue to
+    # consume a RESULT copy whose text it just spoke inside a status reply.
+    # getattr per the duck-typing discipline above — a real RouterGate always
+    # has it; harness fakes that model only idle/speak_task_result skip it.
+    attach_queue = getattr(runtime.gate, "attach_speech_queue", None)
+    if attach_queue is not None:
+        attach_queue(queue, clock=clock)
 
     async def _on_settled(entry: TaskRegistryEntry) -> None:
         # The exactly-once side effects of a first-observed remote settle:
