@@ -7,6 +7,7 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from johnny.voice_pipeline.events import (
+    AgentSpeechInterim,
     AgentSpoke,
     AgentSuggested,
     AgentTTSFailed,
@@ -73,6 +74,40 @@ def test_event_to_dict_transcript_interim() -> None:
         "speaker": "user",
         "session_id": "s",
         "type": "transcript_interim",
+    }
+
+
+def test_agent_speech_interim_defaults() -> None:
+    ev = AgentSpeechInterim(text="Sure thing.", sequence=0, timestamp_ms=1_200)
+    assert ev.text == "Sure thing."
+    assert ev.sequence == 0
+    assert ev.timestamp_ms == 1_200
+    assert ev.turn_id is None
+    assert ev.session_id is None
+    assert ev.type == "agent_speech_interim"
+
+
+def test_agent_speech_interim_is_frozen() -> None:
+    ev = AgentSpeechInterim(text="x", sequence=0, timestamp_ms=0)
+    with pytest.raises(FrozenInstanceError):
+        ev.text = "mutated"  # type: ignore[misc]
+
+
+def test_event_to_dict_agent_speech_interim() -> None:
+    ev = AgentSpeechInterim(
+        text="Here is the plan.",
+        sequence=2,
+        timestamp_ms=3_400,
+        turn_id=7,
+        session_id="s",
+    )
+    assert event_to_dict(ev) == {
+        "text": "Here is the plan.",
+        "sequence": 2,
+        "timestamp_ms": 3_400,
+        "turn_id": 7,
+        "session_id": "s",
+        "type": "agent_speech_interim",
     }
 
 

@@ -30,6 +30,7 @@ from app.main import app
 def test_to_wire_type_maps_known_internal_names() -> None:
     assert to_wire_type("transcript_finalized") == "transcript_final"
     assert to_wire_type("transcript_interim") == "transcript_partial"
+    assert to_wire_type("agent_speech_interim") == "agent_speech_partial"
     assert to_wire_type("router_decision_made") == "router_decision"
     assert to_wire_type("session_status_changed") == "session_status_change"
 
@@ -50,6 +51,7 @@ def test_wire_type_map_covers_renamed_pipeline_events() -> None:
     for internal in (
         "transcript_finalized",
         "transcript_interim",
+        "agent_speech_interim",
         "router_decision_made",
         "session_status_changed",
     ):

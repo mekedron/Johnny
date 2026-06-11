@@ -79,6 +79,7 @@ GLOBAL_CHANNEL_PREFIX = "johnny.global."
 WIRE_TYPE_MAP: dict[str, str] = {
     "transcript_finalized": "transcript_final",
     "transcript_interim": "transcript_partial",
+    "agent_speech_interim": "agent_speech_partial",
     "router_decision_made": "router_decision",
     "session_status_changed": "session_status_change",
 }

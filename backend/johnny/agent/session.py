@@ -97,7 +97,7 @@ if TYPE_CHECKING:
 
     from app.providers.base import LLMProvider
     from johnny.agent.barge_in import BargeInClassifier
-    from johnny.agent.observability import TranscriptFinalizedSink
+    from johnny.agent.observability import SpeechInterimSink, TranscriptFinalizedSink
     from johnny.agent.router_gate import RouterGate
 
     MetricsListener = Callable[[MetricsCollectedEvent], None]
@@ -441,6 +441,7 @@ class JohnnyAgent(Agent):
         noise_filter: NoiseFilterConfig | None = None,
         transcript_filtered_sink: TranscriptFilteredSink | None = None,
         transcript_finalized_sink: TranscriptFinalizedSink | None = None,
+        speech_interim_sink: SpeechInterimSink | None = None,
         metrics_listener: MetricsListener | None = None,
         session_id: str | None = None,
     ) -> None:
@@ -484,6 +485,11 @@ class JohnnyAgent(Agent):
         # provider metrics to ``PipelineTiming`` events. Both ``None`` on a
         # bare/smoke agent (no emission).
         self._transcript_finalized_sink = transcript_finalized_sink
+        # Live bot-reply captions (Johnny-trt.39). ``speech_interim_sink``
+        # publishes an ephemeral ``AgentSpeechInterim`` per sentence ``tts_node``
+        # flushes into TTS — sync + fire-and-forget so the audio hot path never
+        # waits on the bus. ``None`` on a bare/smoke agent (no emission).
+        self._speech_interim_sink = speech_interim_sink
         self._metrics_listener = metrics_listener
         self._session_id = session_id
         # Session-start reference for transcript ``timestamp_ms`` (Johnny-7g5.1).
@@ -849,17 +855,47 @@ class JohnnyAgent(Agent):
           text so the upstream generation completes cleanly and emits **no audio**,
           instead of the default node's ``RuntimeError`` — the bot keeps thinking
           rather than crashing the turn.
+
+        Each flushed sentence is also published as an ephemeral
+        :class:`~johnny.voice_pipeline.events.AgentSpeechInterim` (Johnny-trt.39)
+        through the injected sink — sequence-numbered per reply so the
+        playground can grow a provisional bot bubble while the audio plays.
+        The degrade path emits none (nothing is spoken there), and the turn's
+        terminal ``AgentSpoke`` remains the authoritative text.
         """
         tts = self._session_tts()
         if tts is None or not self._tts_available:
             async for _ in text:
                 pass
             return
+        sequence = 0
         async for sentence in iter_sentences(text):
+            self._emit_speech_interim(sentence, sequence)
+            sequence += 1
             stream = tts.synthesize(sentence)
             async with stream:
                 async for ev in stream:
                     yield ev.frame
+
+    def _emit_speech_interim(self, sentence: str, sequence: int) -> None:
+        """Hand one flushed sentence to the interim sink, defensively (Johnny-trt.39).
+
+        The sink is sync fire-and-forget (the forwarder schedules the actual
+        bus publish), but it is still wrapped so a sink failure can never
+        break the synthesis loop — a lost caption beats a crashed reply, the
+        same swallow-and-continue contract as :meth:`_emit_transcript_filtered`.
+        """
+        sink = self._speech_interim_sink
+        if sink is None:
+            return
+        try:
+            sink(sentence, sequence)
+        except Exception:
+            logger.exception(
+                "failed to emit agent_speech_interim for session=%s sequence=%d",
+                self._session_id,
+                sequence,
+            )
 
     def _session_tts(self) -> TTS[Any] | None:
         """The session's TTS plugin, or ``None`` when none is bound.
@@ -891,6 +927,7 @@ async def build_johnny_agent(
     noise_filter: NoiseFilterConfig | None = None,
     transcript_filtered_sink: TranscriptFilteredSink | None = None,
     transcript_finalized_sink: TranscriptFinalizedSink | None = None,
+    speech_interim_sink: SpeechInterimSink | None = None,
     metrics_listener: MetricsListener | None = None,
 ) -> JohnnyAgent:
     """Build a :class:`JohnnyAgent`, rehydrating prior transcripts if available.
@@ -942,6 +979,7 @@ async def build_johnny_agent(
         noise_filter=noise_filter,
         transcript_filtered_sink=transcript_filtered_sink,
         transcript_finalized_sink=transcript_finalized_sink,
+        speech_interim_sink=speech_interim_sink,
         metrics_listener=metrics_listener,
         session_id=session_id,
     )

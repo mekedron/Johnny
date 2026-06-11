@@ -68,6 +68,7 @@ from johnny.agent.gate import (
 from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
 from johnny.voice_pipeline.event_bus import EventBus
 from johnny.voice_pipeline.events import (
+    AgentSpeechInterim,
     AgentSpoke,
     AgentSuggested,
     PipelineTiming,
@@ -112,6 +113,14 @@ from the reply ``SpeechHandle``'s chat items). The builder fills the rest
 TranscriptFinalizedSink = Callable[[TranscriptFinalized], Awaitable[None]]
 """Publish a kept STT final's ``TranscriptFinalized`` (mirror of
 :data:`~johnny.agent.noise_filter.TranscriptFilteredSink` for the non-noise path)."""
+
+SpeechInterimSink = Callable[[str, int], None]
+"""Publish one flushed reply sentence as an ``AgentSpeechInterim`` (Johnny-trt.39).
+
+Args: the sentence text and its 0-based ``sequence`` within the reply. Sync
+and fire-and-forget — :meth:`JohnnyAgent.tts_node` calls it on the audio hot
+path right before synthesising the sentence, so it must never await or raise
+into the node (the forwarder schedules the publish as a task)."""
 
 
 def terminal_outcome(
@@ -439,6 +448,86 @@ class InterimTranscriptForwarder:
         await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
 
 
+class AgentSpeechInterimForwarder:
+    """Bridge per-sentence TTS flushes to ``AgentSpeechInterim`` events (Johnny-trt.39).
+
+    The bot-side mirror of :class:`InterimTranscriptForwarder`:
+    :meth:`on_sentence_flushed` is the :data:`SpeechInterimSink` the agent's
+    ``tts_node`` calls for each sentence ``iter_sentences`` hands to TTS, so
+    the playground can render Johnny's reply text while the audio is still
+    being synthesised. Same sync→async bridge (fire-and-forget publish tasks
+    held by strong refs, drained at :meth:`aclose`) — the TTS hot path must
+    never wait on Redis.
+
+    ``resolve_turn`` returns the durable int turn id of the gated reply now
+    being spoken (``None`` for an ungated speech — a ``say()`` / approval
+    reply). It is resolved once per reply at ``sequence == 0`` and reused for
+    the reply's later sentences: the gate's ``active_reply`` is "most recently
+    *bound*" rather than "now playing", so a rapid next turn binding mid-reply
+    must not re-attribute the tail sentences of the current one.
+    """
+
+    def __init__(
+        self,
+        event_bus: EventBus,
+        *,
+        resolve_turn: Callable[[], int | None],
+        clock: Callable[[], int] = _default_clock_ms,
+        session_id: str | None = None,
+    ) -> None:
+        self._event_bus = event_bus
+        self._resolve_turn = resolve_turn
+        self._clock = clock
+        self._session_id = session_id
+        self._turn_id: int | None = None
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    def on_sentence_flushed(self, text: str, sequence: int) -> None:
+        """Sync :data:`SpeechInterimSink` — build + schedule the publish."""
+        if not text.strip():
+            return
+        if sequence == 0:
+            self._turn_id = self._safe_resolve_turn()
+        event = AgentSpeechInterim(
+            text=text,
+            sequence=sequence,
+            timestamp_ms=self._clock(),
+            turn_id=self._turn_id,
+            session_id=self._session_id,
+        )
+        task = asyncio.ensure_future(self._publish(event))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    def _safe_resolve_turn(self) -> int | None:
+        """Resolve the active reply's turn id; an uncorrelated reply is ``None``."""
+        try:
+            return self._resolve_turn()
+        except Exception:
+            logger.debug(
+                "speech interim turn resolution failed for session=%s",
+                self._session_id,
+                exc_info=True,
+            )
+            return None
+
+    async def _publish(self, event: AgentSpeechInterim) -> None:
+        try:
+            await self._event_bus.publish(event)
+        except Exception:
+            logger.debug(
+                "speech interim emit failed for session=%s",
+                self._session_id,
+                exc_info=True,
+            )
+
+    async def aclose(self) -> None:
+        """Await any in-flight publishes so teardown doesn't leak pending tasks."""
+        if not self._tasks:
+            return
+        await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
+
+
 # --- LiveKit metrics → PipelineTiming translation -------------------------- #
 
 # LiveKit ``MetricsCollectedEvent.metrics.type`` → our ``PipelineTimingStage``.
@@ -681,6 +770,7 @@ def build_observability(
 
 
 __all__ = [
+    "AgentSpeechInterimForwarder",
     "InterimTranscriptForwarder",
     "MetricsTranslator",
     "Observability",
@@ -688,6 +778,7 @@ __all__ = [
     "RecordSpoke",
     "RecordSuggested",
     "ResolveTurnId",
+    "SpeechInterimSink",
     "TranscriptFinalizedSink",
     "build_decision_emitter",
     "build_observability",

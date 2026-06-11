@@ -443,6 +443,56 @@ async def test_tts_node_degrades_when_tts_unavailable_flag_set() -> None:
     assert provider.texts == []  # synthesize never called
 
 
+# --- tts_node: per-sentence speech interims (Johnny-trt.39) -----------------
+
+
+async def test_tts_node_emits_speech_interim_per_sentence() -> None:
+    provider = _RecordingTTSProvider([b"\x01\x02" * 1_600])
+    flushed: list[tuple[str, int]] = []
+    agent = JohnnyAgent(speech_interim_sink=lambda text, seq: flushed.append((text, seq)))
+    agent._activity = cast(Any, _FakeActivity(JohnnyTTS(provider)))
+
+    frames = [
+        fr
+        async for fr in agent.tts_node(_astream("Hello world. ", "How are you?\n"), ModelSettings())
+    ]
+
+    # One interim per flushed sentence, sequence-numbered from 0 per reply,
+    # emitted for exactly the sentences that reached TTS.
+    assert flushed == [("Hello world.", 0), ("How are you?", 1)]
+    assert provider.texts == ["Hello world.", "How are you?"]
+    assert frames
+
+
+async def test_tts_node_no_interims_on_tts_degrade() -> None:
+    # Nothing is spoken on the degrade path, so no provisional text either —
+    # a bubble with no audio behind it would be ghost text by construction.
+    flushed: list[tuple[str, int]] = []
+    agent = JohnnyAgent(speech_interim_sink=lambda text, seq: flushed.append((text, seq)))
+    agent._activity = None
+
+    frames = [fr async for fr in agent.tts_node(_astream("Hello. ", "World."), ModelSettings())]
+
+    assert frames == []
+    assert flushed == []
+
+
+async def test_tts_node_sink_failure_does_not_break_synthesis() -> None:
+    provider = _RecordingTTSProvider([b"\x01\x02" * 1_600])
+
+    def _boom(text: str, seq: int) -> None:
+        raise RuntimeError("sink down")
+
+    agent = JohnnyAgent(speech_interim_sink=_boom)
+    agent._activity = cast(Any, _FakeActivity(JohnnyTTS(provider)))
+
+    frames = [fr async for fr in agent.tts_node(_astream("Hi there. ", "Bye."), ModelSettings())]
+
+    # A lost caption beats a crashed reply: every sentence still synthesised.
+    assert provider.texts == ["Hi there.", "Bye."]
+    assert frames
+
+
 # --- stt_node: noise gate (Johnny-cmd) -------------------------------------
 
 

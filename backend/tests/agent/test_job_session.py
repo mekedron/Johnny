@@ -196,6 +196,13 @@ async def test_build_runtime_wires_full_session() -> None:
     assert runtime.agent._metrics_listener is not None
     assert runtime.agent._session_id == "7"
 
+    # Live bot-reply captions (Johnny-trt.39): the runtime carries the
+    # forwarder (drained at aclose) and the agent's tts_node feeds it.
+    assert runtime.speech_interim_forwarder is not None
+    assert (
+        runtime.agent._speech_interim_sink == runtime.speech_interim_forwarder.on_sentence_flushed
+    )
+
     # Barge-in enabled; no approval wiring; injected bus is not owned.
     assert runtime.enable_barge_in is True
     assert runtime.needs_approval_wiring is False

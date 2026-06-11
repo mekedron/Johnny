@@ -3,10 +3,10 @@
   "sessionId": "82402e4d-e4aa-4e51-a95b-90cc16d67f3b",
   "status": "running",
   "startedAt": "2026-06-10T20:20:17.654Z",
-  "updatedAt": "2026-06-11T01:04:10.327Z",
-  "currentIteration": 5,
+  "updatedAt": "2026-06-11T01:38:17.667Z",
+  "currentIteration": 6,
   "maxIterations": 0,
-  "tasksCompleted": 5,
+  "tasksCompleted": 6,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -316,6 +316,16 @@
       "durationMs": 2203805,
       "startedAt": "2026-06-10T23:04:34.033Z",
       "endedAt": "2026-06-10T23:41:17.838Z"
+    },
+    {
+      "iteration": 6,
+      "status": "completed",
+      "taskId": "Johnny-1qr",
+      "taskTitle": "[BUILD] Optional: en-only in-process semantic turn detector on the browser session",
+      "taskCompleted": true,
+      "durationMs": 4948874,
+      "startedAt": "2026-06-10T23:41:40.525Z",
+      "endedAt": "2026-06-11T01:04:09.399Z"
     }
   ],
   "skippedTaskIds": [],

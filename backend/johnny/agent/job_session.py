@@ -65,6 +65,7 @@ from johnny.agent.job_runtime import (
 )
 from johnny.agent.noise_filter import NoiseFilterConfig
 from johnny.agent.observability import (
+    AgentSpeechInterimForwarder,
     MetricsTranslator,
     build_decision_emitter,
     build_session_terminal_emitter,
@@ -186,6 +187,10 @@ class AgentRuntime:
     event_bus: EventBus
     enable_barge_in: bool
     min_interruption_duration_s: float | None
+    # Live bot-reply caption emitter (Johnny-trt.39): the agent's tts_node
+    # feeds it one sentence per flush; drained at aclose like the metrics
+    # translator. ``None`` only on hand-built test runtimes.
+    speech_interim_forwarder: AgentSpeechInterimForwarder | None = None
     approval_gate: ApprovalGate | None = None
     decision_sink: Any = None
     _db_session: Session | None = None
@@ -234,6 +239,11 @@ class AgentRuntime:
             await self.metrics_translator.aclose()
         except Exception:
             logger.exception("agent runtime: metrics translator close failed for %s", sid)
+        if self.speech_interim_forwarder is not None:
+            try:
+                await self.speech_interim_forwarder.aclose()
+            except Exception:
+                logger.exception("agent runtime: speech interim forwarder close failed for %s", sid)
         if self.approval_gate is not None:
             try:
                 await self.approval_gate.close()
@@ -440,6 +450,23 @@ async def build_agent_runtime(
         session_id=session_id,
     )
 
+    # Live bot-reply captions (Johnny-trt.39): each sentence the agent's
+    # tts_node flushes into TTS goes out as an ephemeral AgentSpeechInterim.
+    # The turn id mirrors the metrics resolver's gate binding, minus the
+    # last-turn fallback — an ungated speech (say(), an approval reply) emits
+    # turn_id=None rather than mis-attributing to the most recent gated turn.
+    def _resolve_speech_turn() -> int | None:
+        active = gate.active_reply
+        if active is None:
+            return None
+        return turn_index.resolve(active[0])
+
+    speech_interim_forwarder = AgentSpeechInterimForwarder(
+        bus,
+        resolve_turn=_resolve_speech_turn,
+        session_id=session_id,
+    )
+
     barge_in = BargeInClassifier(
         router_llm,
         config=BargeInClassifierConfig(enable_barge_in=True, instructions=config.instructions),
@@ -461,6 +488,7 @@ async def build_agent_runtime(
         noise_filter=NoiseFilterConfig(),
         transcript_filtered_sink=_publish_transcript_filtered,
         transcript_finalized_sink=build_transcript_finalized_emitter(bus, session_id=session_id),
+        speech_interim_sink=speech_interim_forwarder.on_sentence_flushed,
         metrics_listener=metrics_translator.on_metrics_collected,
     )
 
@@ -472,6 +500,7 @@ async def build_agent_runtime(
         ledger=ledger,
         gate=gate,
         metrics_translator=metrics_translator,
+        speech_interim_forwarder=speech_interim_forwarder,
         event_bus=bus,
         enable_barge_in=barge_in.enabled,
         min_interruption_duration_s=None,

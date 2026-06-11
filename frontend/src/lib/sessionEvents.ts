@@ -36,6 +36,7 @@ export type SessionEventType =
 	| 'approval_pending'
 	| 'approval_resolved'
 	| 'account_relogin_needed'
+	| 'agent_speech_partial'
 	| 'agent_spoke'
 	| 'agent_suggested'
 	| 'agent_tts_failed'
@@ -125,6 +126,24 @@ export interface AccountReloginNeededEvent extends BaseEnvelope {
 	meet_link: string;
 	message: string;
 	timestamp_ms: number;
+	session_id?: string | null;
+}
+
+/**
+ * One sentence of the reply Johnny is speaking right now (Johnny-trt.39).
+ * The bot-side mirror of `transcript_partial`: emitted per sentence flushed
+ * into TTS, sequence-numbered per reply (a fresh reply restarts at 0), so the
+ * UI grows a provisional bot bubble while the audio plays. Ephemeral — the
+ * turn's terminal `agent_spoke` text replaces the bubble (and a non-replied
+ * `turn_terminal`, e.g. barge-in, clears it: no ghost sentences). `turn_id`
+ * matches the turn's `turn_terminal`; null for an ungated speech.
+ */
+export interface AgentSpeechPartialEvent extends BaseEnvelope {
+	type: 'agent_speech_partial';
+	text: string;
+	sequence: number;
+	timestamp_ms: number;
+	turn_id?: number | null;
 	session_id?: string | null;
 }
 
@@ -231,6 +250,7 @@ export type SessionEvent =
 	| ApprovalPendingEvent
 	| ApprovalResolvedEvent
 	| AccountReloginNeededEvent
+	| AgentSpeechPartialEvent
 	| AgentSpokeEvent
 	| AgentSuggestedEvent
 	| AgentTTSFailedEvent

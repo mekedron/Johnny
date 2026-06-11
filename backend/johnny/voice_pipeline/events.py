@@ -21,6 +21,7 @@ TranscriptInterimEventType = Literal["transcript_interim"]
 TranscriptFilteredEventType = Literal["transcript_filtered"]
 RouterEventType = Literal["router_decision_made"]
 AgentEventType = Literal["agent_spoke"]
+AgentSpeechInterimEventType = Literal["agent_speech_interim"]
 AgentSuggestedEventType = Literal["agent_suggested"]
 AgentTTSFailedEventType = Literal["agent_tts_failed"]
 SessionStatusEventType = Literal["session_status_changed"]
@@ -290,6 +291,39 @@ class AgentSpoke:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentSpeechInterim:
+    """A sentence flushed into TTS for the reply Johnny is speaking now (Johnny-trt.39).
+
+    The bot-side mirror of :class:`TranscriptInterim`: the answer text is
+    known ahead of the audio (``iter_sentences`` hands each complete sentence
+    to the TTS node before it is synthesised), so one of these is emitted per
+    flushed sentence and the playground renders a growing provisional bot
+    bubble while Johnny talks. Interims are **ephemeral** — the status
+    subscriber deliberately ignores this type (no ``agent_utterances`` row);
+    the turn's terminal :class:`AgentSpoke` is the authoritative text that
+    replaces the provisional bubble, which is how barge-in truncation
+    reconciles (a sentence flushed to TTS but cut by an interrupt must not
+    survive as ghost text — an interrupted reply emits no ``AgentSpoke`` and
+    its ``turn_terminal`` clears the bubble instead).
+
+    * ``sequence`` — 0-based index of this sentence within its reply, so
+      consumers can grow the bubble in order and drop replayed duplicates;
+      a fresh reply always restarts at ``0``.
+    * ``turn_id`` — the durable int turn id (same value the turn's
+      :class:`TurnTerminal` carries) so the UI clears the right bubble on a
+      non-replied terminal; ``None`` when the speech has no gated turn
+      (an explicit ``say()`` / an approval reply).
+    """
+
+    text: str
+    sequence: int
+    timestamp_ms: int
+    turn_id: int | None = None
+    session_id: str | None = None
+    type: AgentSpeechInterimEventType = "agent_speech_interim"
+
+
+@dataclass(frozen=True, slots=True)
 class AgentSuggested:
     """Router approved a reply but the bot is in suggest-only mode.
 
@@ -527,6 +561,7 @@ PipelineEvent = (
     | TranscriptFiltered
     | RouterDecisionMade
     | AgentSpoke
+    | AgentSpeechInterim
     | AgentSuggested
     | AgentTTSFailed
     | PipelineStageFailed
@@ -550,6 +585,7 @@ def event_to_dict(event: PipelineEvent) -> dict[str, Any]:
 
 
 __all__ = [
+    "AgentSpeechInterim",
     "AgentSpoke",
     "AgentSuggested",
     "AgentTTSFailed",

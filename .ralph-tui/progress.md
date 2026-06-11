@@ -112,6 +112,25 @@ after each iteration and it's included in prompts for context.
   deterministic metrics (e.g. vad_end) on local runs; counterbalance run
   order (ABBA) and `ollama stop` before each run when comparing local
   arms. Worked example: `.validation/Johnny-trt.11/00-capstone-notes.md`.
+- **Live bot-reply captions (trt.39)**: `tts_node` emits an ephemeral
+  `AgentSpeechInterim` per `iter_sentences` flush (wire
+  `agent_speech_partial`, sequence-numbered per reply from 0; subscriber
+  ignores it). Turn id resolves from `gate.active_reply` ONCE at
+  sequence 0 and is cached for the reply's tail — `active_reply` is
+  "most recently BOUND", not "now playing", so a rapid next-turn bind
+  mid-reply would otherwise re-attribute tail sentences; ungated
+  speeches (say()/approval) carry `turn_id=None`. UI contract: seq 0
+  replaces any stale bubble; `agent_spoke` clears + appends the
+  authoritative line; a NON-replied `turn_terminal` clears only a
+  turn-matched (or unpinned) bubble. Wire ORDER for a replied turn is
+  `turn_terminal` BEFORE `agent_spoke` (`_on_reply_done` emits the
+  ledger terminal, then does take_reply file I/O, then publishes
+  AgentSpoke) — so never clear the bubble on a `replied` terminal or it
+  flickers. An interrupted reply emits NO AgentSpoke at all; its
+  `no_reply(barge_in)` terminal is what removes ghost text. With an
+  unmuted laptop mic + speakers, the bot's own audio echoes into STT
+  and trt.9 client barge-in cuts replies ~1 s in — mute the mic for any
+  scripted full-reply validation.
 
 ---
 
@@ -422,4 +441,68 @@ after each iteration and it's included in prompts for context.
     the stub STT maps ANY segment to a fixed complete-question transcript,
     so semantic+low-floor stub runs split at fixture-internal pauses by
     design — use shorts-only there.
+---
+
+## 2026-06-11 - Johnny-trt.39
+- Live bot-reply captions shipped: Johnny's reply text now streams into the
+  playground chat + session live view sentence-by-sentence WHILE he speaks,
+  reconciling to the authoritative AgentSpoke text on the turn terminal
+  (trt.13 TranscriptInterim pattern mirrored on the bot side).
+- Backend: new `AgentSpeechInterim` event (`text`, per-reply 0-based
+  `sequence`, `turn_id` = same int the turn's TurnTerminal carries, None for
+  ungated speeches) in the voice-pipeline union;
+  `AgentSpeechInterimForwarder` in observability.py (sync fire-and-forget
+  publish tasks + aclose drain, MetricsTranslator bridge pattern; resolves
+  the turn from `gate.active_reply` once per reply at sequence 0);
+  `JohnnyAgent.tts_node` calls the injected `speech_interim_sink` per
+  flushed sentence (defensive wrapper; no emission on the no-TTS degrade
+  path); `build_agent_runtime` wires forwarder→agent and carries it on
+  `AgentRuntime` (drained in aclose) — both browser and Meet/room paths get
+  it; ws.py maps wire name `agent_speech_partial`. Subscriber untouched
+  (unknown types already pass through un-persisted).
+- Frontend: `AgentSpeechPartialEvent` in sessionEvents.ts; pure bubble
+  transitions in transcriptLines.ts (`upsertBotPartialLine` — seq-0 opens/
+  replaces, tail appends with dup-drop, turnId pinned by first sentence;
+  `clearBotPartialLine`; `clearBotPartialLineForTurn` — turn-matched or
+  unpinned only); playground controller grows the bubble on
+  `agent_speech_partial`, clears on `agent_spoke` (before appending the
+  final) and on non-replied `turn_terminal`, clears both captions at
+  teardown; LiveSession.svelte bot partial gets testid `bot-partial-line`;
+  session detail page renders a "Johnny … speaking…" provisional row with
+  the same lifecycle (+ clears on ended/failed status).
+- Verified: backend 1970 passed/3 skipped (tests/agent+voice_pipeline+api+
+  services; 14 new across events/observability/johnny_agent/job_session/
+  ws); ruff lint clean, my files format-clean (5 touched files were already
+  dirty-at-HEAD, additions clean); frontend vitest 113/113 (11 new bubble
+  tests), svelte-check 0/0, eslint clean. Live chrome-devtools run (session
+  101, dev stack, Parakeet+Ollama+Piper): 120 ms DOM traces show the bubble
+  opening ~3.9 s after submit and growing in 5 per-sentence steps with text
+  ~36 s ahead of the audio, the agent_spoke reconciliation replacing bubble
+  with final in one sample, a mid-audio Stop clearing 780 ch of flushed
+  sentences in ~101 ms with ZERO ghost lines (turn 17 = no_reply/barge_in,
+  no utterance row), and the same lifecycle on /sessions/101; 6 utterance
+  rows = 6 completed replies (final text only); 0 turns missing terminals;
+  console clean. Artifacts: .validation/Johnny-trt.39/ (00-notes.md maps
+  them).
+- Files changed: backend/johnny/voice_pipeline/events.py,
+  backend/johnny/agent/{observability.py,session.py,job_session.py},
+  backend/app/api/ws.py, backend/tests/voice_pipeline/test_events.py,
+  backend/tests/api/test_ws.py, backend/tests/agent/{test_observability.py,
+  test_johnny_agent.py,test_job_session.py}, frontend/src/lib/
+  sessionEvents.ts, frontend/src/lib/playground/{transcriptLines.ts,
+  playgroundSession.svelte.ts,playgroundSession.test.ts},
+  frontend/src/lib/components/playground/LiveSession.svelte,
+  frontend/src/routes/sessions/[id]/+page.svelte, .ralph-tui/progress.md.
+- **Learnings:**
+  - Patterns discovered: the bot-interim event semantics (sequence-0 turn
+    resolution, turn_terminal-BEFORE-agent_spoke wire order, interrupted
+    replies emit no AgentSpoke) + the unmuted-mic speaker-echo barge-in
+    trap — added to Codebase Patterns above.
+  - Gotchas: `gate.active_reply` is set at speech BIND (speech_created),
+    not playout start, and `_on_reply_done` only clears it if the ids still
+    match — so "active" can already be the NEXT queued reply while the
+    current one is still synthesizing; resolve correlation once at the
+    reply's first flush, never per-sentence. zsh: `echo "==="` in a
+    compound command errors ("== not found") — quote or avoid bare `===`
+    separators in Bash tool calls.
 ---

@@ -338,7 +338,9 @@
 						class:border-dashed={!line.isFinal}
 						class:italic={!line.isFinal}
 						data-testid={isBot
-							? 'bot-line'
+							? line.isFinal
+								? 'bot-line'
+								: 'bot-partial-line'
 							: isUser
 								? line.isFinal
 									? 'user-line'

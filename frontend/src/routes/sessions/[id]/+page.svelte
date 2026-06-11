@@ -39,6 +39,7 @@
 	import UtteranceAudioButton from '$lib/components/UtteranceAudioButton.svelte';
 	import {
 		subscribeToSession,
+		type AgentSpeechPartialEvent,
 		type AgentSpokeEvent,
 		type AgentSuggestedEvent,
 		type ApprovalPendingEvent,
@@ -129,6 +130,12 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 
 	let transcripts = $state<TranscriptLine[]>([]);
 	let partial = $state<TranscriptLine | null>(null);
+	// Provisional bot bubble (Johnny-trt.39): grows one sentence per
+	// agent_speech_partial while Johnny talks; the authoritative agent_spoke
+	// replaces it and a non-replied turn_terminal (barge-in) clears it.
+	let botPartial = $state<{ text: string; turnId: number | null; lastSequence: number } | null>(
+		null
+	);
 	let decisions = $state<DecisionEntry[]>([]);
 	// Most recent finalised USER transcript — used to seed a live decision's
 	// "Heard" step before the detail refresh fills in the full input_window
@@ -522,6 +529,8 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 				return handleApprovalPending(event);
 			case 'approval_resolved':
 				return handleApprovalResolved(event);
+			case 'agent_speech_partial':
+				return handleBotPartial(event);
 			case 'agent_spoke':
 				return handleAgentSpoke(event);
 			case 'agent_suggested':
@@ -642,7 +651,31 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 		);
 	}
 
+	function handleBotPartial(ev: AgentSpeechPartialEvent) {
+		// One reply sentence flushed to TTS (Johnny-trt.39). sequence 0 opens a
+		// fresh bubble (replacing a stale one); later sentences append in order,
+		// replayed duplicates are dropped. The turn id is pinned by the first
+		// sentence so handleTurnTerminal can match it.
+		const text = ev.text.trim();
+		if (!text) return;
+		const turnId = typeof ev.turn_id === 'number' ? ev.turn_id : null;
+		if (botPartial === null || ev.sequence === 0) {
+			botPartial = { text, turnId, lastSequence: ev.sequence };
+		} else {
+			if (ev.sequence <= botPartial.lastSequence) return;
+			botPartial = {
+				text: `${botPartial.text} ${text}`,
+				turnId: botPartial.turnId ?? turnId,
+				lastSequence: ev.sequence
+			};
+		}
+		void autoScrollTranscript();
+	}
+
 	function handleAgentSpoke(ev: AgentSpokeEvent) {
+		// The authoritative spoken text replaces the provisional bubble
+		// (Johnny-trt.39) — what was actually spoken wins.
+		botPartial = null;
 		const matched =
 			typeof ev.matched_allowed_reply === 'string'
 				? ev.matched_allowed_reply
@@ -724,6 +757,19 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 				decisions = next;
 			}
 		}
+		// A turn that resolved WITHOUT speech clears its provisional bubble —
+		// sentences already flushed to TTS must not survive a barge-in as
+		// ghost text (Johnny-trt.39). A 'replied' terminal keeps the bubble:
+		// the authoritative agent_spoke lands right after and replaces it. A
+		// bubble pinned to a DIFFERENT turn keeps growing; an unpinned one
+		// clears conservatively.
+		if (
+			ev.terminal_state !== 'replied' &&
+			botPartial !== null &&
+			(botPartial.turnId === null || botPartial.turnId === ev.turn_id)
+		) {
+			botPartial = null;
+		}
 		// INV-1: a suppressed turn becomes a muted inline chat row the instant
 		// it resolves — the affordance the operator lacked in session 14.
 		if (ev.terminal_state === 'no_reply') {
@@ -745,6 +791,11 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 	function handleStatus(ev: SessionStatusChangeEvent) {
 		if (session !== null) {
 			session = { ...session, status: ev.status };
+		}
+		// Session over — nothing more will be spoken; drop the live captions.
+		if (ev.status === 'ended' || ev.status === 'failed') {
+			partial = null;
+			botPartial = null;
 		}
 	}
 
@@ -1185,7 +1236,7 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 					bind:this={transcriptEl}
 					data-testid="transcript-scroll"
 				>
-					{#if transcripts.length === 0 && partial === null}
+					{#if transcripts.length === 0 && partial === null && botPartial === null}
 						<p class="text-sm text-muted-foreground italic">
 							Waiting for first speaker…
 						</p>
@@ -1269,6 +1320,29 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 										class="m-0 text-sm leading-relaxed whitespace-pre-wrap text-muted-foreground italic"
 									>
 										{partial.text}
+									</p>
+								</li>
+							{/if}
+							{#if botPartial !== null}
+								<li
+									class="rounded-md border border-dashed border-border bg-muted px-3 py-2"
+									data-testid="bot-transcript-partial"
+								>
+									<div
+										class="mb-1 flex items-baseline justify-between gap-3 text-xs"
+									>
+										<span
+											class="inline-flex items-center gap-1.5 font-mono font-semibold text-foreground"
+										>
+											<BotIcon class="size-3" />
+											Johnny
+										</span>
+										<span class="font-mono text-warning">speaking…</span>
+									</div>
+									<p
+										class="m-0 text-sm leading-relaxed whitespace-pre-wrap text-muted-foreground italic"
+									>
+										{botPartial.text}
 									</p>
 								</li>
 							{/if}

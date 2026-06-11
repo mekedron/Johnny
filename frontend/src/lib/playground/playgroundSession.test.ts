@@ -1,11 +1,11 @@
 /**
- * Unit tests for the playground live-caption lifecycle (Johnny-trt.13): the
- * pure transcript-line transitions behind the `transcript_partial` →
- * `transcript_final` / `transcript_filtered` flow. Streaming STT emits
- * in-flight hypotheses as `transcript_partial` wire events; the controller
- * delegates to these transitions so exactly one caption line exists, updates
- * in place, and disappears the moment the turn's final (or its noise-gate
- * verdict) lands.
+ * Unit tests for the playground live-caption lifecycles: the pure
+ * transcript-line transitions behind the user caption (`transcript_partial`
+ * → `transcript_final` / `transcript_filtered`, Johnny-trt.13) and the bot
+ * reply bubble (`agent_speech_partial` grows → `agent_spoke` / non-replied
+ * `turn_terminal` clears, Johnny-trt.39). The controller delegates to these
+ * transitions so exactly one caption/bubble of each kind exists, updates in
+ * place, and disappears the moment its authoritative event lands.
  *
  * Run via `pnpm test` (vitest). The transitions are tested rune-free here;
  * the controller wiring + live wire are covered by the real-browser
@@ -16,7 +16,10 @@ import { describe, it } from 'vitest';
 import assert from 'node:assert/strict';
 import {
 	appendLine,
+	clearBotPartialLine,
+	clearBotPartialLineForTurn,
 	clearPartialLine,
+	upsertBotPartialLine,
 	upsertPartialLine,
 	type TranscriptLine
 } from '$lib/playground/transcriptLines';
@@ -105,5 +108,115 @@ describe('playground live captions (transcript-line transitions)', () => {
 			lines.map((l) => l.text),
 			['one (edited)']
 		);
+	});
+});
+
+function botPartials(lines: TranscriptLine[]): TranscriptLine[] {
+	return lines.filter((l) => !l.isFinal && l.speaker === 'bot');
+}
+
+describe('playground live bot-reply bubble (Johnny-trt.39)', () => {
+	it('grows one bubble sentence-by-sentence in sequence order', () => {
+		let lines: TranscriptLine[] = [];
+		lines = upsertBotPartialLine(lines, 'Sure.', 0, 7, 100);
+		lines = upsertBotPartialLine(lines, 'Here is the plan.', 1, 7, 200);
+
+		assert.equal(lines.length, 1);
+		const [bubble] = botPartials(lines);
+		assert.equal(bubble.text, 'Sure. Here is the plan.');
+		assert.equal(bubble.turnId, 7);
+		assert.equal(bubble.lastSequence, 1);
+		assert.equal(bubble.isFinal, false);
+	});
+
+	it('drops replayed/duplicate sequences', () => {
+		let lines: TranscriptLine[] = [];
+		lines = upsertBotPartialLine(lines, 'One.', 0, 7, 100);
+		lines = upsertBotPartialLine(lines, 'Two.', 1, 7, 200);
+		lines = upsertBotPartialLine(lines, 'Two.', 1, 7, 300); // duplicate
+
+		const [bubble] = botPartials(lines);
+		assert.equal(bubble.text, 'One. Two.');
+	});
+
+	it('sequence 0 starts a fresh bubble, replacing a stale unreconciled one', () => {
+		let lines: TranscriptLine[] = [];
+		lines = upsertBotPartialLine(lines, 'Old reply tail.', 2, 4, 100);
+		lines = upsertBotPartialLine(lines, 'New reply.', 0, 9, 200);
+
+		assert.equal(botPartials(lines).length, 1);
+		const [bubble] = botPartials(lines);
+		assert.equal(bubble.text, 'New reply.');
+		assert.equal(bubble.turnId, 9);
+	});
+
+	it('agent_spoke reconciliation: clear the bubble, keep the authoritative line', () => {
+		let lines: TranscriptLine[] = [];
+		lines = upsertBotPartialLine(lines, 'Sure.', 0, 7, 100);
+		lines = upsertBotPartialLine(lines, 'Here is the plan.', 1, 7, 200);
+		lines = clearBotPartialLine(lines);
+		lines = appendLine(lines, final('spoke-9', 'Sure. Here is the plan.', 'bot'));
+
+		assert.equal(botPartials(lines).length, 0);
+		assert.deepEqual(
+			lines.map((l) => [l.text, l.isFinal]),
+			[['Sure. Here is the plan.', true]]
+		);
+	});
+
+	it('barge-in: a non-replied terminal for the bubble turn clears ghost text', () => {
+		let lines: TranscriptLine[] = [];
+		lines = upsertBotPartialLine(lines, 'Let me explain everything.', 0, 7, 100);
+		lines = clearBotPartialLineForTurn(lines, 7);
+		assert.equal(botPartials(lines).length, 0);
+	});
+
+	it("a terminal for a DIFFERENT turn does not clear the growing bubble", () => {
+		let lines: TranscriptLine[] = [];
+		lines = upsertBotPartialLine(lines, 'Still talking.', 0, 7, 100);
+		lines = clearBotPartialLineForTurn(lines, 8); // unrelated queued turn declined
+		const [bubble] = botPartials(lines);
+		assert.equal(bubble.text, 'Still talking.');
+	});
+
+	it('an unpinned bubble (ungated speech) clears conservatively on any terminal', () => {
+		let lines: TranscriptLine[] = [];
+		lines = upsertBotPartialLine(lines, 'Heads up.', 0, null, 100);
+		lines = clearBotPartialLineForTurn(lines, 12);
+		assert.equal(botPartials(lines).length, 0);
+	});
+
+	it('coexists with the user caption; clears do not cross over', () => {
+		let lines: TranscriptLine[] = [];
+		lines = upsertPartialLine(lines, 'and what about', 100);
+		lines = upsertBotPartialLine(lines, 'As I was saying.', 0, 7, 200);
+
+		assert.equal(lines.length, 2);
+		lines = clearPartialLine(lines);
+		assert.equal(botPartials(lines).length, 1); // bot bubble survives
+		lines = upsertPartialLine(lines, 'and what about this', 300);
+		lines = clearBotPartialLine(lines);
+		assert.equal(botPartials(lines).length, 0);
+		assert.equal(lines.filter((l) => !l.isFinal && l.speaker === 'user').length, 1);
+	});
+
+	it('blank sentences are ignored, not rendered as an empty bubble', () => {
+		let lines: TranscriptLine[] = [];
+		lines = upsertBotPartialLine(lines, '   ', 0, 7, 100);
+		assert.equal(lines.length, 0);
+	});
+
+	it('clear helpers are no-ops (same array) when no bubble exists', () => {
+		const lines = [final('final-1', 'Hi.', 'speaker')];
+		assert.equal(clearBotPartialLine(lines), lines);
+		assert.equal(clearBotPartialLineForTurn(lines, 3), lines);
+	});
+
+	it('a mid-reply join (first seen sequence > 0) still opens a bubble', () => {
+		let lines: TranscriptLine[] = [];
+		lines = upsertBotPartialLine(lines, 'tail sentence.', 3, 7, 100);
+		const [bubble] = botPartials(lines);
+		assert.equal(bubble.text, 'tail sentence.');
+		assert.equal(bubble.lastSequence, 3);
 	});
 });

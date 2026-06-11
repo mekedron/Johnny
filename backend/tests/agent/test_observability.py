@@ -60,6 +60,7 @@ from app.services.session_status_subscriber import (  # noqa: E402
 )
 from johnny.agent.gate import GateTerminal, TurnIndex  # noqa: E402
 from johnny.agent.observability import (  # noqa: E402
+    AgentSpeechInterimForwarder,
     InterimTranscriptForwarder,
     MetricsTranslator,
     build_decision_emitter,
@@ -629,6 +630,91 @@ async def test_interim_forwarder_speaker_defaults_to_none() -> None:
 async def test_interim_forwarder_swallows_bus_failure() -> None:
     forwarder = InterimTranscriptForwarder(_FlakyBus(), clock=lambda: 0, session_id="1")
     forwarder.on_user_input_transcribed(_transcribed("hello"))
+    await forwarder.aclose()  # must not raise
+
+
+# --------------------------------------------------------------------------- #
+# AgentSpeechInterimForwarder (live bot-reply captions, Johnny-trt.39)        #
+# --------------------------------------------------------------------------- #
+
+
+def _speech_forwarder(
+    bus: InMemoryEventBus,
+    *,
+    resolve_turn: Any = lambda: 7,
+    session_id: str = "1",
+) -> AgentSpeechInterimForwarder:
+    return AgentSpeechInterimForwarder(
+        bus, resolve_turn=resolve_turn, clock=lambda: 42, session_id=session_id
+    )
+
+
+async def test_speech_forwarder_publishes_agent_speech_interim() -> None:
+    bus = InMemoryEventBus()
+    forwarder = _speech_forwarder(bus)
+    forwarder.on_sentence_flushed("Sure thing.", 0)
+    forwarder.on_sentence_flushed("Here is the plan.", 1)
+    await forwarder.aclose()
+
+    first, second = bus.snapshot()
+    assert first.type == "agent_speech_interim"
+    assert (first.text, first.sequence, first.turn_id) == ("Sure thing.", 0, 7)
+    assert first.timestamp_ms == 42
+    assert first.session_id == "1"
+    assert (second.text, second.sequence, second.turn_id) == ("Here is the plan.", 1, 7)
+
+
+async def test_speech_forwarder_resolves_turn_once_per_reply() -> None:
+    # The turn is captured at sequence 0 and reused for the reply's later
+    # sentences: a rapid next turn binding mid-reply (active_reply is "most
+    # recently bound", not "now playing") must not re-attribute the tail.
+    bus = InMemoryEventBus()
+    turns = iter([3, 99])
+    forwarder = _speech_forwarder(bus, resolve_turn=lambda: next(turns))
+    forwarder.on_sentence_flushed("One.", 0)
+    forwarder.on_sentence_flushed("Two.", 1)
+    forwarder.on_sentence_flushed("Next reply.", 0)  # re-resolves
+    await forwarder.aclose()
+
+    assert [(e.sequence, e.turn_id) for e in bus.snapshot()] == [(0, 3), (1, 3), (0, 99)]
+
+
+async def test_speech_forwarder_uncorrelated_reply_carries_none() -> None:
+    bus = InMemoryEventBus()
+    forwarder = _speech_forwarder(bus, resolve_turn=lambda: None)
+    forwarder.on_sentence_flushed("Heads up.", 0)
+    await forwarder.aclose()
+    (event,) = bus.snapshot()
+    assert event.turn_id is None
+
+
+async def test_speech_forwarder_skips_blank_sentences() -> None:
+    bus = InMemoryEventBus()
+    forwarder = _speech_forwarder(bus)
+    forwarder.on_sentence_flushed("", 0)
+    forwarder.on_sentence_flushed("   ", 1)
+    await forwarder.aclose()
+    assert bus.snapshot() == []
+
+
+async def test_speech_forwarder_swallows_resolver_failure() -> None:
+    def _boom() -> int:
+        raise RuntimeError("gate gone")
+
+    bus = InMemoryEventBus()
+    forwarder = _speech_forwarder(bus, resolve_turn=_boom)
+    forwarder.on_sentence_flushed("Still spoken.", 0)
+    await forwarder.aclose()
+    (event,) = bus.snapshot()
+    assert event.turn_id is None
+    assert event.text == "Still spoken."
+
+
+async def test_speech_forwarder_swallows_bus_failure() -> None:
+    forwarder = AgentSpeechInterimForwarder(
+        _FlakyBus(), resolve_turn=lambda: 1, clock=lambda: 0, session_id="1"
+    )
+    forwarder.on_sentence_flushed("hello", 0)
     await forwarder.aclose()  # must not raise
 
 

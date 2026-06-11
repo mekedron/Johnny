@@ -48,6 +48,7 @@ import {
 import { getSessionDetail, type SessionDetail } from '$lib/sessionDetail';
 import {
 	subscribeToSession,
+	type AgentSpeechPartialEvent,
 	type AgentSpokeEvent,
 	type AgentSuggestedEvent,
 	type AgentTTSFailedEvent,
@@ -57,12 +58,16 @@ import {
 	type SessionStatusChangeEvent,
 	type Subscription,
 	type TranscriptFinalEvent,
-	type TranscriptPartialEvent
+	type TranscriptPartialEvent,
+	type TurnTerminalEvent
 } from '$lib/sessionEvents';
 
 import {
 	appendLine,
+	clearBotPartialLine,
+	clearBotPartialLineForTurn,
 	clearPartialLine,
+	upsertBotPartialLine,
 	upsertPartialLine,
 	type TranscriptLine
 } from '$lib/playground/transcriptLines';
@@ -799,8 +804,24 @@ export class PlaygroundController {
 				this.lastDecisionAt = ts;
 				break;
 			}
+			case 'agent_speech_partial': {
+				// One reply sentence flushed to TTS (Johnny-trt.39) — grow the
+				// provisional bot bubble while the audio plays.
+				const e = event as AgentSpeechPartialEvent;
+				this.transcript = upsertBotPartialLine(
+					this.transcript,
+					e.text,
+					e.sequence,
+					typeof e.turn_id === 'number' ? e.turn_id : null,
+					ts
+				);
+				break;
+			}
 			case 'agent_spoke': {
 				const e = event as AgentSpokeEvent;
+				// The authoritative spoken text replaces the provisional bubble
+				// (Johnny-trt.39) — what was actually spoken wins.
+				this.transcript = clearBotPartialLine(this.transcript);
 				this.appendTranscript({
 					key: `spoke-${e.seq}`,
 					text: e.text,
@@ -814,6 +835,18 @@ export class PlaygroundController {
 				this.clearDiagnostic('router_llm');
 				this.clearDiagnostic('answer_llm');
 				this.clearDiagnostic('tts');
+				break;
+			}
+			case 'turn_terminal': {
+				// A turn that resolved WITHOUT speech (barge-in cut the reply,
+				// empty output) clears its bubble — sentences already flushed
+				// to TTS must not survive as ghost text (Johnny-trt.39). A
+				// 'replied' terminal keeps it: the authoritative agent_spoke
+				// lands right after and replaces the bubble without a flicker.
+				const e = event as TurnTerminalEvent;
+				if (e.terminal_state !== 'replied') {
+					this.transcript = clearBotPartialLineForTurn(this.transcript, e.turn_id);
+				}
 				break;
 			}
 			case 'agent_tts_failed': {
@@ -874,6 +907,11 @@ export class PlaygroundController {
 		this.transcript = clearPartialLine(this.transcript);
 	}
 
+	/** Drop BOTH live caption lines (user caption + bot bubble) at teardown. */
+	private clearAllPartials(): void {
+		this.transcript = clearBotPartialLine(clearPartialLine(this.transcript));
+	}
+
 	private appendTranscript(line: TranscriptLine): void {
 		this.transcript = appendLine(this.transcript, line);
 	}
@@ -892,7 +930,7 @@ export class PlaygroundController {
 		this.liveSession = null;
 		this.subscription?.close();
 		this.subscription = null;
-		this.clearPartial();
+		this.clearAllPartials();
 		this.connection = 'connecting';
 		if (this.connDropTimer !== null) {
 			clearTimeout(this.connDropTimer);
@@ -933,7 +971,7 @@ export class PlaygroundController {
 			this.liveSession = null;
 			this.subscription?.close();
 			this.subscription = null;
-			this.clearPartial();
+			this.clearAllPartials();
 			this.connection = 'connecting';
 			this.stopping = false;
 			this.clearDiagnostic('tts');
