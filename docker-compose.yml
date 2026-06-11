@@ -356,6 +356,11 @@ services:
       # Captured reply audio (Johnny-od1): the dispatched AgentSession's TTS
       # adapter writes one WAV per spoken reply here for Meet split sessions.
       - ${HOME}/.johnny/session-audio:/var/lib/johnny/session-audio
+      # Skill packages (Johnny-trt.23) — the Meet-surface session assembly
+      # loads the skill registry (router task catalog + executor) from the
+      # same /skills path as api/worker. Read-only: the agent worker only
+      # discovers skills; installs go through the api (Johnny-trt.32).
+      - ${HOME}/.johnny/skills:/skills:ro
 
   frontend:
     build:

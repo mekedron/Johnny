@@ -16,6 +16,7 @@ Guarded by ``importorskip`` so the suite still collects without the ``agent`` ex
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -55,6 +56,23 @@ from johnny.agent.job_session import (  # noqa: E402
 from johnny.agent.router_gate import RouterGate  # noqa: E402
 from johnny.agent.session import JohnnyAgent  # noqa: E402
 from johnny.agent.tasks import TaskCoordinator  # noqa: E402
+from johnny.skills.sandbox import SKILLS_DIR_ENV  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolated_skills_volume(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Point the skill loader at an empty tmp volume (Johnny-trt.23).
+
+    These tests run inside the api container, where ``JOHNNY_SKILLS_DIR``
+    targets the real operator volume — a delegation-capable assembly would
+    otherwise load whatever skills the host happens to have (and probe the
+    live sandbox). An empty dir keeps the default path deterministic: zero
+    skills, zero sandbox round-trips.
+    """
+    monkeypatch.setenv(SKILLS_DIR_ENV, str(tmp_path_factory.mktemp("skills")))
+
 
 # --- Fakes (mirror tests/agent/test_job_runtime.py) -------------------------
 
@@ -407,12 +425,45 @@ async def test_delegation_capable_modes_wire_task_sink_and_coordinator(
     # and stamps agent_tasks rows with the shared TurnIndex's int turn id.
     assert runtime.gate._tasks is runtime.task_coordinator
     assert runtime.gate._resolve_turn_id is not None
-    # Task catalog (Johnny-trt.19): a delegation-capable runtime teaches the
-    # router the Phase-3 stub kinds through the gate config.
-    from johnny.agent.task_catalog import STUB_TASK_CATALOG
+    # Task catalog (Johnny-trt.19/trt.23): the source is the skill loader.
+    # The isolated (empty) skills volume loads a registry with no skills, so
+    # the router is taught nothing — no eligible skill, no advertised kind.
+    assert runtime.skill_registry is not None
+    assert runtime.skill_registry.skills == ()
+    assert runtime.gate._config.task_catalog == ()
 
-    assert runtime.gate._config.task_catalog == STUB_TASK_CATALOG
+    await runtime.aclose()
+    assert db.closed is True
 
+
+async def test_delegation_capable_runtime_catalogs_injected_skills(tmp_path: Path) -> None:
+    """The Phase-4 catalog source (Johnny-trt.23): eligible skills become
+    the router's delegate vocabulary, and the runtime carries the registry."""
+    from johnny.skills.registry import load_skill_registry
+
+    (tmp_path / "fetch-news").mkdir()
+    (tmp_path / "fetch-news" / "SKILL.md").write_text(
+        "---\nname: fetch-news\ndescription: \"Fetch today's news.\"\n"
+        "metadata: '{\"johnny\": {\"keywords\": [\"news\"]}}'\n---\nInstructions.\n",
+        encoding="utf-8",
+    )
+
+    async def no_probe(names: list[str]) -> dict[str, bool]:
+        raise AssertionError("baseline-only skill must not probe the sandbox")
+
+    registry_obj = await load_skill_registry(tmp_path, check_bins=no_probe)
+    db = _FakeDbSession()
+    runtime = await build_agent_runtime(
+        _job(mode=AUTONOMOUS_MODE, redis_url="redis://r:6379/0"),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: db,
+        skill_registry=registry_obj,
+    )
+
+    assert runtime.skill_registry is registry_obj
+    assert runtime.gate._config.task_catalog == registry_obj.catalog_entries()
+    assert [entry.kind for entry in runtime.gate._config.task_catalog] == ["fetch-news"]
     await runtime.aclose()
     assert db.closed is True
 
@@ -430,6 +481,7 @@ async def test_non_speaking_modes_get_no_task_pieces(mode: str) -> None:
     assert runtime._task_wake is None
     assert runtime._db_session is None  # nothing needed the sync DB session
     assert runtime.gate._config.task_catalog == ()  # no delegation, no catalog
+    assert runtime.skill_registry is None  # and no skills load either (trt.23)
 
 
 async def test_approval_without_redis_still_wires_tasks() -> None:

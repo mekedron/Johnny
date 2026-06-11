@@ -81,7 +81,6 @@ from johnny.agent.observability import (
 )
 from johnny.agent.router_gate import RouterGate, RouterGateConfig
 from johnny.agent.session import JohnnyAgent, build_johnny_agent
-from johnny.agent.task_catalog import STUB_TASK_CATALOG
 from johnny.agent.tasks import TaskCoordinator
 from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder, build_recorder_from_env
 from johnny.voice_pipeline.event_bus import (
@@ -99,6 +98,8 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
     from app.providers.base import ProviderRegistry
+    from johnny.skills.registry import SkillRegistry
+    from johnny.skills.sandbox import SandboxClient
     from johnny.voice_pipeline.approval import ApprovalGate
     from johnny.voice_pipeline.transcript_history import TranscriptHistoryLoader
 
@@ -219,6 +220,12 @@ class AgentRuntime:
     # for delegation-capable (speaking) modes with a DB factory; None otherwise.
     task_sink: Any = None
     task_coordinator: TaskCoordinator | None = None
+    # Skill registry + sandbox plumbing (Johnny-trt.23): the loaded skills
+    # (catalog source + executor lookup) and the one HTTP client the
+    # ``sandbox.exec`` tool talks to the skills-sandbox through. ``None``
+    # whenever the runtime has no task pieces.
+    skill_registry: SkillRegistry | None = None
+    _sandbox_client: SandboxClient | None = None
     _task_wake: Any = None
     _db_session: Session | None = None
     _owns_event_bus: bool = True
@@ -278,6 +285,13 @@ class AgentRuntime:
                 await self.task_coordinator.aclose()
             except Exception:
                 logger.exception("agent runtime: task coordinator close failed for %s", sid)
+        # After the coordinator drain: in-flight skill executors may still be
+        # mid-exec against the sandbox until that drain completes.
+        if self._sandbox_client is not None:
+            try:
+                await self._sandbox_client.aclose()
+            except Exception:
+                logger.exception("agent runtime: sandbox client close failed for %s", sid)
         if self._task_wake is not None:
             try:
                 await self._task_wake.close()
@@ -389,6 +403,61 @@ def _build_sync_persistence(
     return approval_gate, decision_sink, task_sink, db_session
 
 
+async def _build_skill_pieces(
+    session_id: str,
+    *,
+    skill_registry: SkillRegistry | None,
+    sandbox_client: SandboxClient | None,
+) -> tuple[SkillRegistry, SandboxClient | None, Any]:
+    """Load the skill registry + build the sandbox-backed executor (Johnny-trt.23).
+
+    Called only for delegation-capable assemblies (a task sink exists). One
+    volume scan + at most one batched sandbox ``/bins`` probe per session
+    assembly — session start is not the per-turn hot path; the boot-time
+    capability snapshot service replaces this in Johnny-trt.55. Defensive
+    throughout: any failure degrades to an empty registry + the Phase-3
+    fail-fast stub executor (``executor=None`` keeps
+    :func:`~johnny.agent.task_wiring.build_task_coordinator`'s default), so
+    session assembly never breaks on a broken volume or a down sandbox.
+
+    Returns ``(registry, sandbox_client, executor)``; the caller stores the
+    client on the runtime for teardown.
+    """
+    from johnny.skills.executor import build_skill_task_executor
+    from johnny.skills.policy import ExecBinPolicy
+    from johnny.skills.registry import EMPTY_SKILL_REGISTRY, load_skill_registry
+    from johnny.skills.sandbox import SandboxClient as _SandboxClient
+    from johnny.skills.sandbox import skills_dir_from_env
+    from johnny.skills.tools import SandboxExecTool
+
+    if sandbox_client is None:
+        sandbox_client = _SandboxClient()
+    if skill_registry is None:
+        try:
+            skill_registry = await load_skill_registry(
+                skills_dir_from_env(), check_bins=sandbox_client.check_bins
+            )
+        except Exception:
+            logger.exception(
+                "agent runtime: skill registry load failed for %s — running without skills",
+                session_id,
+            )
+            skill_registry = EMPTY_SKILL_REGISTRY
+
+    executor = None
+    if skill_registry.eligible():
+        exec_tool = SandboxExecTool(
+            sandbox_client, policy=ExecBinPolicy(allowed=skill_registry.allowed_bins)
+        )
+        executor = build_skill_task_executor(skill_registry, exec_tool)
+        logger.info(
+            "agent runtime: skill executor wired for %s (%s)",
+            session_id,
+            skill_registry.summary(),
+        )
+    return skill_registry, sandbox_client, executor
+
+
 async def build_agent_runtime(
     config: SessionJobConfig,
     *,
@@ -399,6 +468,8 @@ async def build_agent_runtime(
     db_session_factory: Callable[[], Session] | None = None,
     session_started_at: float = 0.0,
     audio_recorder: SpokenAudioRecorder | None = None,
+    skill_registry: SkillRegistry | None = None,
+    sandbox_client: SandboxClient | None = None,
 ) -> AgentRuntime:
     """Assemble the full :class:`AgentRuntime` for one dispatched Meet session.
 
@@ -425,6 +496,13 @@ async def build_agent_runtime(
     approval decision sink. Raises :class:`AgentSessionSetupError` for a unified payload
     or a missing STT / LLM provider — the agent path is split-only (a missing TTS
     degrades to ``suggest_only`` rather than raising).
+
+    ``skill_registry`` / ``sandbox_client`` (Johnny-trt.23) are test seams: by
+    default a delegation-capable runtime loads the registry from the skills
+    volume (``JOHNNY_SKILLS_DIR``) with eligibility probed inside the
+    skills-sandbox (``JOHNNY_SKILLS_SANDBOX_URL``); an injected registry skips
+    the load, an injected client skips construction (the runtime still owns
+    closing it).
     """
     session_id = str(config.bot_session_id)
 
@@ -489,11 +567,21 @@ async def build_agent_runtime(
     # Delegated-task coordination (Johnny-trt.18): needs no live AgentSession
     # (unlike the approval coordinator), so it is assembled right here and
     # carried on the runtime for the gate's delegate branch (Johnny-trt.17).
-    # Phase 3 runs the stub executor — every kind fails fast with speech-ready
-    # text, so an ack can never become a dead promise.
+    # The skill registry (Johnny-trt.23) is loaded first — one volume scan +
+    # at most one sandbox /bins probe per assembly, never on the turn loop —
+    # because it feeds BOTH the executor (skill-backed kinds run their
+    # declared command in the sandbox; everything else falls through to the
+    # Phase-3 fail-fast stub, so an ack can never become a dead promise) and
+    # the router's task catalog below.
     task_coordinator = None
     task_wake = None
+    executor = None
     if task_sink is not None:
+        skill_registry, sandbox_client, executor = await _build_skill_pieces(
+            session_id,
+            skill_registry=skill_registry,
+            sandbox_client=sandbox_client,
+        )
         from johnny.agent.task_wiring import build_task_coordinator
 
         task_coordinator, task_wake = build_task_coordinator(
@@ -501,7 +589,11 @@ async def build_agent_runtime(
             event_bus=bus,
             session_id=session_id,
             redis_url=config.redis_url,
+            executor=executor,
         )
+    else:
+        skill_registry = None
+        sandbox_client = None
 
     gate_config = RouterGateConfig(
         mode=config.mode,
@@ -514,9 +606,15 @@ async def build_agent_runtime(
         # Task catalog (Johnny-trt.19): teach the router the delegate
         # vocabulary only when a coordinator exists to honour it — a gate
         # without task wiring stage_errors delegate verdicts, so advertising
-        # kinds there would invite turns that can only fail. Phase-3 stub
-        # entries; the Phase-4 skill loader (trt.23) becomes the source.
-        task_catalog=(STUB_TASK_CATALOG if task_coordinator is not None else ()),
+        # kinds there would invite turns that can only fail. The source is
+        # the skill loader (Johnny-trt.23): eligible SKILL.md packages on the
+        # skills volume. No eligible skills (or no volume) renders no
+        # catalog, so the router never learns kinds nothing can honour.
+        task_catalog=(
+            skill_registry.catalog_entries()
+            if task_coordinator is not None and skill_registry is not None
+            else ()
+        ),
     )
     gate = RouterGate(
         router_llm,
@@ -655,6 +753,8 @@ async def build_agent_runtime(
         decision_sink=decision_sink,
         task_sink=task_sink,
         task_coordinator=task_coordinator,
+        skill_registry=skill_registry,
+        _sandbox_client=sandbox_client,
         _task_wake=task_wake,
         _db_session=db_session,
         _owns_event_bus=owns_bus,

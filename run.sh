@@ -28,6 +28,16 @@ mkdir -p \
   "${HOME}/.johnny/skills" \
   "${HOME}/.johnny/sandbox-home"
 
+# Seed the first-party skill packages (Johnny-trt.23) into the skills volume.
+# The repo ./skills tree is the source of truth for these directories, so a
+# clean checkout boots with the google-calendar skill present — re-copied on
+# every start (repo wins for first-party dirs); operator-added skill dirs in
+# ~/.johnny/skills are never touched.
+if [[ -d skills ]]; then
+  find skills -mindepth 1 -maxdepth 1 -type d \
+    -exec cp -Rf {} "${HOME}/.johnny/skills/" \;
+fi
+
 # Legacy migration hint: older installs kept the models in named Docker
 # volumes (johnny_piper_models / johnny_whisper_models). Detect them and
 # print a one-line ``docker cp``-style migration command so the user
