@@ -839,6 +839,40 @@ budget — the same attribution as Phase 1, now with the commit stage at
 its floor. Phase 3 (router triage) and Johnny-dny (answer streaming)
 own the next felt-latency win.
 
+## Phase-3 capstone — triage-vocabulary cost measured (Johnny-trt.21, 2026-06-11)
+
+Two 24-turn `--providers local --prewarm` harness runs on the integrated
+Phase-3 branch (same canonical trio + method as the Phase-2 capstone;
+`ollama stop` before each; pooled warm replied n=44 vs Phase-2's n=33,
+analysis in `.validation/Johnny-trt.21/`):
+
+| stage (p50/p95, ms) | Phase-2 capstone | Phase-3 branch | delta |
+|---|---|---|---|
+| commit_wait (speech-end → commit) | 405.0 / 429.5 | 404.8 / 442.8 | flat — Phase-2 win retained |
+| stt_final_after_vad_end | −103.4 / −61.3 | −106.8 / −73.3 | flat (every warm final pre-commit) |
+| **router stage** (residual ≈ direct `triage_ms` ±30) | **1095.5 / 1532.8** | **1663.9 / 2198.4** | **+568 / +666** |
+| answer llm_total | 559.0 / 814.6 | 660.5 / 922.0 | +101 / +107 (ctx growth — branch replies more: 44/46 vs 33/46) |
+| tts_ttfb | 79.0 / 170.2 | 87.0 / 181.4 | flat |
+| felt e2e | 2240.9 / 2710.5 | 2749.2 / 3541.2 | +508 / +831 (≈ the triage delta) |
+
+**Attribution.** Per-call, not context: at turns 2–6 (fresh session) Phase-2
+residuals were 775–995 ms vs 1192–1606 ms on this branch. The harness session
+wires no TaskCoordinator, so the task-catalog prompt text is ruled out — the
+delta is the Phase-3 **router schema growth** (trt.16 `action` + `task
+{kind, args, ack}`, trt.53 ack-required + restraint descriptions) riding every
+call as `response_format` on the 3B router. The gate's own code adds nothing
+measurable (timed span unchanged; shadow scorer before it, transcript window
+after it; residual ≈ direct `triage_ms` cross-check). Matched-fixture median
++564 ms over 21 fixtures.
+
+**Delegated-turn felt shape (live playground, session #27).** Ack first audio
+= commit +2989 ms ≈ speech-end +3.4 s: triage 2731 ms (91 %) + say dispatch
+~28 ms + TTS TTFA 230 ms, zero `answer_llm` hop — the Phase-3 structural claim
+holds exactly; the whole felt budget is the triage call. The levers are the
+triage term itself: heuristic fast-path (Johnny-trt.51), per-agent small triage
+model slots (trt.41/42), schema-payload slimming (follow-up bead from this
+capstone).
+
 ## Optimization candidates — in priority order (re-ranked from the 2026-06-10 baseline)
 
 1. **True answer-LLM token streaming** (Johnny-dny) — the measured #1.

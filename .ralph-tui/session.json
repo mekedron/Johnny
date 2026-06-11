@@ -3,10 +3,10 @@
   "sessionId": "b8829633-95f0-4e1b-a1c5-e08500de3d70",
   "status": "running",
   "startedAt": "2026-06-11T05:16:05.966Z",
-  "updatedAt": "2026-06-11T09:37:49.090Z",
-  "currentIteration": 5,
+  "updatedAt": "2026-06-11T10:18:30.279Z",
+  "currentIteration": 6,
   "maxIterations": 0,
-  "tasksCompleted": 5,
+  "tasksCompleted": 6,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -406,6 +406,16 @@
       "durationMs": 3846225,
       "startedAt": "2026-06-11T07:36:02.175Z",
       "endedAt": "2026-06-11T08:40:08.400Z"
+    },
+    {
+      "iteration": 6,
+      "status": "completed",
+      "taskId": "Johnny-trt.58",
+      "taskTitle": "[BUILD] Phase 3: Interrupted bot replies keep their partial text — marked interrupted, never vanishing from chat/history",
+      "taskCompleted": true,
+      "durationMs": 3421362,
+      "startedAt": "2026-06-11T08:40:46.281Z",
+      "endedAt": "2026-06-11T09:37:47.643Z"
     }
   ],
   "skippedTaskIds": [],
