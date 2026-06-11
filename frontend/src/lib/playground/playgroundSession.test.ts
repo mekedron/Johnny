@@ -171,6 +171,31 @@ describe('playground live bot-reply bubble (Johnny-trt.39)', () => {
 		assert.equal(botPartials(lines).length, 0);
 	});
 
+	it('barge-in with a kept partial: the interrupted line replaces the bubble (Johnny-trt.58)', () => {
+		// Wire order: the terminal clears the bubble, then the interrupted
+		// agent_spoke appends the kept partial as a final line flagged
+		// interrupted — the phrase stays in the chat instead of vanishing.
+		let lines: TranscriptLine[] = [];
+		lines = upsertBotPartialLine(lines, 'First we check the calendar.', 0, 7, 100);
+		lines = upsertBotPartialLine(lines, 'Then we draft the', 1, 7, 200);
+		lines = clearBotPartialLineForTurn(lines, 7);
+		lines = appendLine(lines, {
+			key: 'spoke-9',
+			text: 'First we check the calendar. Then we draft the',
+			speaker: 'bot',
+			isFinal: true,
+			timestamp: 300,
+			interrupted: true
+		});
+
+		assert.equal(botPartials(lines).length, 0);
+		assert.equal(lines.length, 1);
+		const [kept] = lines;
+		assert.equal(kept.text, 'First we check the calendar. Then we draft the');
+		assert.equal(kept.isFinal, true);
+		assert.equal(kept.interrupted, true);
+	});
+
 	it("a terminal for a DIFFERENT turn does not clear the growing bubble", () => {
 		let lines: TranscriptLine[] = [];
 		lines = upsertBotPartialLine(lines, 'Still talking.', 0, 7, 100);

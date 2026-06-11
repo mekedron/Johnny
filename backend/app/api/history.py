@@ -196,6 +196,9 @@ class HistoryUtteranceRead(BaseModel):
     # Bare WAV filename for replay via GET /sessions/{id}/audio/{filename}
     # (Johnny-od1); None when no audio was captured for the reply.
     audio_file: str | None = None
+    # Barge-in partial (Johnny-trt.58) — kept in lock-step with the live
+    # serializer for the shared frontend type.
+    interrupted: bool = False
     created_at: datetime
 
 

@@ -369,6 +369,13 @@
 							{#if !line.isFinal}
 								<span class="font-sans font-normal text-warning">· partial</span>
 							{/if}
+							{#if line.interrupted}
+								<!-- Barge-in partial (Johnny-trt.58): the phrase was cut
+								     mid-speech; the text below is what was delivered. -->
+								<span class="font-sans font-normal text-warning" data-testid="interrupted-marker"
+									>· interrupted</span
+								>
+							{/if}
 						</div>
 						<p
 							class="m-0 text-sm leading-snug"

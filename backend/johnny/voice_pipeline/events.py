@@ -290,6 +290,15 @@ class AgentSpoke:
     carry) so the subscriber stamps the *exact* turn's decision row instead
     of a most-recent scan; ``None`` for unbound speech (corrections) and for
     emitters that predate the field (subscriber falls back to the scan).
+
+    ``interrupted`` (Johnny-trt.58) marks speech a barge-in cut mid-utterance:
+    ``text`` then carries the *partial* actually delivered — the caption
+    sentences flushed to TTS by cut time, an honest approximation of what was
+    audibly heard — instead of the full planned line. The turn's terminal
+    stays ``no_reply(barge_in)`` (INV-1 unchanged); this event exists so the
+    partial reaches the chat, the history, and the decision row's
+    ``final_text`` rather than vanishing. Default ``False`` keeps legacy
+    emitters and recorded fixtures parsing unchanged.
     """
 
     text: str
@@ -301,6 +310,7 @@ class AgentSpoke:
     audio_file: str | None = None
     kind: str = "reply"
     turn_id: int | None = None
+    interrupted: bool = False
     type: AgentEventType = "agent_spoke"
 
 

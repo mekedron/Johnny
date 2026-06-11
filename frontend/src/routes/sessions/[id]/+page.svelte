@@ -78,6 +78,12 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 		noReplyReason?: NoReplyReason | null;
 		// Captured reply WAV for bot lines (Johnny-od1) — renders a play button.
 		audioFile?: string | null;
+		// A barge-in cut this bot line mid-speech (Johnny-trt.58): `text` is the
+		// partial actually delivered — rendered with an interrupted marker.
+		interrupted?: boolean;
+		// The owning turn for live no_reply rows, so an interrupted partial
+		// arriving right after can replace its redundant barge-in row.
+		turnId?: number | null;
 	}
 
 	interface DecisionEntry {
@@ -332,7 +338,8 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 			isFinal: true,
 			timestampMs: Date.parse(u.created_at) || 0,
 			isBot: true,
-			audioFile: u.audio_file
+			audioFile: u.audio_file,
+			interrupted: u.interrupted === true
 		};
 	}
 
@@ -341,6 +348,10 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 	// left out — those already show as a spoken line or an approval card.
 	function decisionToNoReplyLine(d: AgentDecisionRecord): TranscriptLine | null {
 		if (d.terminal_state !== 'no_reply') return null;
+		// A barge-in that kept its partial (Johnny-trt.58) already shows as the
+		// interrupted utterance line — a second "No reply" row for the same
+		// turn would read as a contradiction.
+		if (d.no_reply_reason === 'barge_in' && (d.final_text ?? '').trim()) return null;
 		return {
 			key: `db-nr-${d.id}`,
 			text: '',
@@ -712,6 +723,7 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 		// (Johnny-trt.39) — what was actually spoken wins.
 		botPartial = null;
 		const kind = typeof ev.kind === 'string' && ev.kind ? ev.kind : 'reply';
+		const interrupted = ev.interrupted === true;
 		const matched =
 			typeof ev.matched_allowed_reply === 'string'
 				? ev.matched_allowed_reply
@@ -734,14 +746,23 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 				const diverged =
 					recommended != null &&
 					normalizeSpoken(recommended) !== normalizeSpoken(ev.text);
-				const liveActor = kind === 'reply' ? 'answer_llm' : 'router_gate';
-				const liveReason =
-					kind === 'reply'
+				// A barge-in partial (Johnny-trt.58) diverges because the USER cut
+				// the speech, not because a pipeline layer rewrote it — and the
+				// turn's outcome stays whatever its no_reply(barge_in) terminal
+				// stamped (the terminal event landed first on this channel).
+				const liveActor = interrupted
+					? 'user'
+					: kind === 'reply'
+						? 'answer_llm'
+						: 'router_gate';
+				const liveReason = interrupted
+					? 'barge-in interrupted the speech; final_text keeps the partial actually spoken'
+					: kind === 'reply'
 						? "answer LLM rephrased the router's recommended reply"
 						: 'gate spoke a fallback line instead of the router-authored text';
 				next[idx] = {
 					...d,
-					outcome: 'spoken',
+					outcome: interrupted ? d.outcome : 'spoken',
 					matchedReply: matched,
 					finalText: ev.text,
 					divergenceReason: diverged ? liveReason : d.divergenceReason,
@@ -754,6 +775,13 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 				};
 				decisions = next;
 			}
+			// The terminal's "No reply — you started speaking again" row landed a
+			// beat ago; the kept partial supersedes it (one artifact per turn).
+			if (interrupted && turnId !== null) {
+				transcripts = transcripts.filter(
+					(l) => !(l.kind === 'no_reply' && l.turnId === turnId)
+				);
+			}
 		}
 		const botLine: TranscriptLine = {
 			key: `live-spoke-${ev.seq}`,
@@ -762,7 +790,8 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 			isFinal: true,
 			timestampMs: Date.now(),
 			isBot: true,
-			audioFile: typeof ev.audio_file === 'string' && ev.audio_file ? ev.audio_file : null
+			audioFile: typeof ev.audio_file === 'string' && ev.audio_file ? ev.audio_file : null,
+			interrupted
 		};
 		transcripts = [...transcripts, botLine];
 		void autoScrollTranscript();
@@ -846,6 +875,8 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 		}
 		// INV-1: a suppressed turn becomes a muted inline chat row the instant
 		// it resolves — the affordance the operator lacked in session 14.
+		// `turnId` lets a barge-in partial arriving right after replace this
+		// row with the kept text (Johnny-trt.58).
 		if (ev.terminal_state === 'no_reply') {
 			const line: TranscriptLine = {
 				key: `live-nr-${ev.seq}`,
@@ -855,7 +886,8 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 				timestampMs: Number(ev.timestamp_ms) || Date.now(),
 				isBot: true,
 				kind: 'no_reply',
-				noReplyReason: reason
+				noReplyReason: reason,
+				turnId: typeof ev.turn_id === 'number' ? ev.turn_id : null
 			};
 			transcripts = [...transcripts, line];
 			void autoScrollTranscript();
@@ -1358,6 +1390,14 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 														<UtteranceAudioButton
 															src={sessionAudioUrl(sessionId, line.audioFile)}
 														/>
+													{/if}
+													{#if line.interrupted}
+														<!-- Barge-in partial (Johnny-trt.58): the text is what
+														     was delivered before the cut, kept readable. -->
+														<span
+															class="font-sans font-normal text-warning"
+															data-testid="interrupted-marker">· interrupted</span
+														>
 													{/if}
 												</span>
 											{:else if line.speaker}

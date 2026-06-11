@@ -167,6 +167,12 @@ export interface AgentSpokeEvent extends BaseEnvelope {
 	// router_decision / turn_terminal events carry); null/absent for unbound
 	// speech (corrections) and legacy emitters.
 	turn_id?: number | null;
+	// A barge-in cut this speech mid-utterance (Johnny-trt.58): `text` is the
+	// partial actually delivered (the caption sentences flushed by cut time).
+	// The turn's terminal stays no_reply(barge_in); the UI renders the line
+	// with an interrupted marker and must NOT flip the turn's outcome to
+	// spoken. Absent on legacy emitters — treat as false.
+	interrupted?: boolean;
 }
 
 export interface AgentSuggestedEvent extends BaseEnvelope {

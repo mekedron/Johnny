@@ -3,10 +3,10 @@
   "sessionId": "b8829633-95f0-4e1b-a1c5-e08500de3d70",
   "status": "running",
   "startedAt": "2026-06-11T05:16:05.966Z",
-  "updatedAt": "2026-06-11T08:40:09.463Z",
-  "currentIteration": 4,
+  "updatedAt": "2026-06-11T09:37:49.090Z",
+  "currentIteration": 5,
   "maxIterations": 0,
-  "tasksCompleted": 4,
+  "tasksCompleted": 5,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -396,6 +396,16 @@
       "durationMs": 2712845,
       "startedAt": "2026-06-11T06:50:14.525Z",
       "endedAt": "2026-06-11T07:35:27.370Z"
+    },
+    {
+      "iteration": 5,
+      "status": "completed",
+      "taskId": "Johnny-trt.54",
+      "taskTitle": "[BUILD] Phase 3: Decision-pipeline observability rework — full per-turn chain in history, incl. what the bot actually said",
+      "taskCompleted": true,
+      "durationMs": 3846225,
+      "startedAt": "2026-06-11T07:36:02.175Z",
+      "endedAt": "2026-06-11T08:40:08.400Z"
     }
   ],
   "skippedTaskIds": [],

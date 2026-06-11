@@ -693,6 +693,12 @@ class AgentUtterance(Base):
     # Bare WAV filename under <session-audio root>/<bot_session_id>/ (Johnny-od1);
     # NULL when no audio was captured for the reply (disabled, failed, or legacy).
     audio_file: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # A barge-in cut this utterance mid-speech (Johnny-trt.58): ``output_text``
+    # then carries the partial actually delivered (the caption sentences
+    # flushed by cut time) rather than the full planned line. The chat/history
+    # render the row with an interrupted marker; the linked decision row's
+    # terminal stays ``no_reply(barge_in)`` (INV-1 unchanged).
+    interrupted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

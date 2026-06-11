@@ -604,6 +604,16 @@ async def build_agent_runtime(
         session_id=session_id,
     )
 
+    # Tee the same per-sentence flushes into the gate's caption buffer
+    # (Johnny-trt.58): when a barge-in cuts a speech, the gate's done-callback
+    # takes the buffered sentences as the partial actually delivered, so the
+    # interrupted text is kept (marked interrupted) instead of vanishing from
+    # the chat/history. Gate first — note() is sync and trivially cheap — then
+    # the forwarder schedules the live-caption publish.
+    def _on_sentence_flushed(text: str, sequence: int) -> None:
+        gate.note_speech_caption(text, sequence)
+        speech_interim_forwarder.on_sentence_flushed(text, sequence)
+
     barge_in = BargeInClassifier(
         router_llm,
         config=BargeInClassifierConfig(enable_barge_in=True, instructions=config.instructions),
@@ -625,7 +635,7 @@ async def build_agent_runtime(
         noise_filter=NoiseFilterConfig(),
         transcript_filtered_sink=_publish_transcript_filtered,
         transcript_finalized_sink=build_transcript_finalized_emitter(bus, session_id=session_id),
-        speech_interim_sink=speech_interim_forwarder.on_sentence_flushed,
+        speech_interim_sink=_on_sentence_flushed,
         metrics_listener=metrics_translator.on_metrics_collected,
     )
 

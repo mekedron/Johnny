@@ -459,6 +459,13 @@ def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
     a delegate ack, the status stub) writes ``final_text`` onto the linked
     decision row; a ``correction`` (the trt.53 walk-back) inserts only the
     utterance row, unlinked — it belongs to the session, not to any turn.
+
+    ``interrupted`` (Johnny-trt.58) marks a barge-in partial: ``text`` is the
+    caption sentences delivered by cut time, persisted on the utterance row
+    (flagged) AND as the turn's ``final_text`` — the divergence from the
+    recommended text is audited as the user's barge-in, satisfying the ORM
+    parity guard. The turn's terminal stays ``no_reply(barge_in)`` (stamped by
+    the terminal event that always precedes this one on the channel).
     """
     if payload.get("type") != AGENT_SPOKE_EVENT_TYPE:
         return False
@@ -470,6 +477,7 @@ def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
     matched = payload.get("matched_allowed_reply")
     prompt = str(payload.get("prompt") or "")
     kind = str(payload.get("kind") or "reply")
+    interrupted = bool(payload.get("interrupted"))
     turn_id = _coerce_int_id(payload.get("turn_id"))
     # Mode is taken from the bot session row at insert time so the
     # utterance audit row mirrors the meeting's bot mode.
@@ -517,7 +525,18 @@ def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
         linked_decision.final_text = text
         recommended = linked_decision.decision_recommended_text
         if decision_texts_diverge(recommended, text):
-            if kind in ("ack", "status"):
+            if interrupted:
+                # Barge-in partial (Johnny-trt.58): the user cut the speech
+                # off, so the final text is the fragment delivered by cut
+                # time, not a rewrite by any pipeline layer. Checked first —
+                # an interrupted ack must audit as the barge-in, not as a
+                # gate fallback line.
+                actor = "user"
+                reason = (
+                    "barge-in interrupted the speech; final_text keeps the "
+                    "partial actually spoken"
+                )
+            elif kind in ("ack", "status"):
                 # say()-path speech (Johnny-trt.54): no answer LLM ran. A
                 # divergence here means the gate spoke something other than the
                 # router-authored text (e.g. the DEFAULT_DELEGATE_ACK defensive
@@ -561,6 +580,7 @@ def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
         audio_file=(
             str(audio_file) if isinstance(audio_file, str) and audio_file else None
         ),
+        interrupted=interrupted,
     )
     db.add(row)
     db.flush()

@@ -82,6 +82,7 @@ from johnny.agent.observability import (
     RecordSpoke,
     RecordSuggested,
     RecordTriageTiming,
+    SpeechCaptionBuffer,
     SpokenKind,
 )
 from johnny.agent.task_catalog import TaskCatalogEntry, render_task_catalog
@@ -328,6 +329,14 @@ class RouterGate:
         # The say() seam for delegate acks / status stubs (Johnny-trt.17),
         # attached by JohnnyAgent.on_enter once the session exists.
         self._say: SaySpeech | None = None
+        # Caption sentences of the speech playing now (Johnny-trt.58), fed by
+        # the assembly's tts_node sink tee via :meth:`note_speech_caption`.
+        # When a barge-in cuts a speech, the done-callback takes this buffer
+        # as the partial actually delivered so the text is kept (marked
+        # interrupted) instead of vanishing. Always constructed — a gate with
+        # no caption wiring just sees an empty buffer and keeps the legacy
+        # nothing-recorded behaviour.
+        self._captions = SpeechCaptionBuffer()
         self._abandon = abandon
         self._clock = clock
         # SpeechHandle ids the approval coordinator owns (it created them via its
@@ -897,10 +906,9 @@ class RouterGate:
         ``agent_utterances`` and the chat history exactly as spoken — while
         the ``turn_id=None`` / ``kind`` pair tells the subscriber to stamp
         **no** decision row's ``final_text`` (the delegating turn's canonical
-        text stays its ack). An interrupted correction records nothing here —
-        preserving interrupted partials is Johnny-trt.58's branch on this
-        same seam. Replaced wholesale by the Phase-5 re-entry queue
-        (Johnny-trt.29).
+        text stays its ack). An interrupted correction keeps its caption
+        partial the same way (Johnny-trt.58, see :meth:`_on_correction_done`).
+        Replaced wholesale by the Phase-5 re-entry queue (Johnny-trt.29).
 
         Never raises into the resolver: no ``say()`` (session never entered /
         already torn down) or a raising ``say()`` (session draining) is
@@ -951,17 +959,28 @@ class RouterGate:
 
         The unbound-speech analogue of :meth:`_on_say_done`: no turn, no
         terminal, no over-talk accounting — just the ``AgentSpoke`` that makes
-        the walk-back visible in ``agent_utterances`` and the chat.
-        Interrupted → audio discarded, nothing recorded (the trt.39
-        interrupted-speech contract; partial-text preservation is
-        Johnny-trt.58's branch on this seam).
+        the walk-back visible in ``agent_utterances`` and the chat. An
+        interrupted correction that streamed captions keeps its partial
+        (Johnny-trt.58): ``AgentSpoke(kind="correction", interrupted=True,
+        turn_id=None)`` — still stamping no decision row; cut before the first
+        flush → audio discarded, nothing recorded (legacy).
         """
+        partial = self._captions.take()
         if handle.interrupted:
+            if partial and self._record_spoke is not None:
+                logger.info(
+                    "agent.router.gate: correction interrupted — partial kept %r",
+                    partial,
+                )
+                await self._record_spoke(
+                    partial, turn_id=None, kind="correction", interrupted=True
+                )
+                return
             if self._reply_audio is not None:
                 self._reply_audio.discard_reply()
             logger.info(
-                "agent.router.gate: correction interrupted before completion — "
-                "not recorded (partial-text capture is Johnny-trt.58)"
+                "agent.router.gate: correction interrupted before completion "
+                "with no caption flushed — not recorded"
             )
             return
         if self._record_spoke is not None:
@@ -999,9 +1018,11 @@ class RouterGate:
             return
         # Buffer hygiene, mirroring bind_reply (Johnny-od1): a new speech is
         # starting, so segments left over from a previous speech must not leak
-        # into this ack's flushed WAV when the spoke emitter takes it.
+        # into this ack's flushed WAV when the spoke emitter takes it — nor
+        # stale captions into its interrupted partial (Johnny-trt.58).
         if self._reply_audio is not None:
             self._reply_audio.discard_reply()
+        self._captions.take()
         try:
             handle = say(text)
         except Exception as exc:
@@ -1044,17 +1065,33 @@ class RouterGate:
         """Emit a say-spoken turn's single terminal once the speech completes.
 
         The say-path analogue of :meth:`_on_reply_done`: ``interrupted`` →
-        ``no_reply(barge_in)`` (audio discarded, no ``AgentSpoke`` — the
-        trt.39 interrupted-reply contract); otherwise ``replied`` (counting
-        toward the over-talk cap) followed by the ``AgentSpoke`` carrying the
-        exact spoken text plus the turn id and speech kind (INV-2,
-        Johnny-trt.54 — the subscriber stamps this exact turn's
-        ``final_text``), in the terminal-before-spoke wire order the UI relies
-        on. No empty-output branch — the text was supplied, not
-        model-generated. First-wins via the ledger, so a duplicate
-        done-callback can never double-emit.
+        ``no_reply(barge_in)``; otherwise ``replied`` (counting toward the
+        over-talk cap) followed by the ``AgentSpoke`` carrying the exact
+        spoken text plus the turn id and speech kind (INV-2, Johnny-trt.54 —
+        the subscriber stamps this exact turn's ``final_text``), in the
+        terminal-before-spoke wire order the UI relies on. An interrupted
+        ack/status that already streamed captions keeps its partial exactly
+        like the reply path (Johnny-trt.58): terminal unchanged, then
+        ``AgentSpoke(interrupted=True)`` with the caption text flushed by cut
+        time and the buffered audio left for the emitter's flush; cut before
+        the first flush → audio discarded, nothing recorded (legacy). No
+        empty-output branch — the text was supplied, not model-generated.
+        First-wins via the ledger, so a duplicate done-callback can never
+        double-emit.
         """
+        partial = self._captions.take()
         if handle.interrupted:
+            if partial and self._record_spoke is not None:
+                if await self._ledger.emit(
+                    turn_id,
+                    terminal_state="no_reply",
+                    no_reply_reason="barge_in",
+                    detail=f"{interrupted_detail} (partial kept)",
+                ):
+                    await self._record_spoke(
+                        partial, turn_id=turn_id, kind=kind, interrupted=True
+                    )
+                return
             if self._reply_audio is not None:
                 self._reply_audio.discard_reply()
             await self._ledger.emit(
@@ -1111,9 +1148,13 @@ class RouterGate:
         # previous speech (Johnny-od1). This fires before the new speech's TTS
         # produces a single segment — including for approval replies and
         # explicit say()s, whose audio is never persisted — so a kept reply's
-        # WAV can only ever contain its own segments.
+        # WAV can only ever contain its own segments. The caption buffer gets
+        # the same hygiene (Johnny-trt.58): a speech whose owner never took it
+        # (an interrupted approval reply) must not leak into this reply's
+        # partial.
         if self._reply_audio is not None:
             self._reply_audio.discard_reply()
+        self._captions.take()
         if speech_handle.id in self._approval_reply_handles:
             self._approval_reply_handles.discard(speech_handle.id)
             return
@@ -1168,6 +1209,16 @@ class RouterGate:
         otherwise ``replied`` (and the utterance counts toward the over-talk cap).
         First-wins via the ledger, so a duplicate done-callback can never
         double-emit.
+
+        An interrupted reply that already streamed captions keeps its partial
+        (Johnny-trt.58): the terminal stays ``no_reply(barge_in)`` — INV-1
+        semantics unchanged — and an ``AgentSpoke(interrupted=True)`` follows
+        in the terminal-before-spoke wire order, carrying the caption text
+        flushed by cut time so the phrase lands in the chat/history instead of
+        vanishing. Its buffered audio is left for the spoke emitter to flush
+        (the partial WAV is as real as the partial text). A reply cut before
+        any caption flushed produced no audible speech — legacy behaviour:
+        audio discarded, nothing recorded.
         """
         # The reply is finished — clear it so a barge-in classifier started for a
         # later turn doesn't capture a dead handle as its interrupt target.
@@ -1177,9 +1228,26 @@ class RouterGate:
         # set stays bounded regardless of which terminal branch fires below.
         coercion_no_match = turn_id in self._coercion_no_match_turns
         self._coercion_no_match_turns.discard(turn_id)
+        # Take (and thereby clear) this speech's caption buffer in every branch,
+        # so a later speech interrupted before its first flush can never inherit
+        # a stale partial from this one.
+        partial = self._captions.take()
         if handle.interrupted:
-            # Barge-in: the reply has no terminal row/chat line to attach audio
-            # to, so the buffered segments are dropped, not persisted (Johnny-od1).
+            if partial and self._record_spoke is not None:
+                if await self._ledger.emit(
+                    turn_id,
+                    terminal_state="no_reply",
+                    no_reply_reason="barge_in",
+                    detail="reply interrupted before completion (partial kept)",
+                ):
+                    await self._record_spoke(
+                        partial, turn_id=turn_id, kind="reply", interrupted=True
+                    )
+                return
+            # No captions (cut before the first sentence flushed, TTS degrade)
+            # or no spoke seam: nothing audible to keep — the reply has no
+            # chat line to attach audio to, so the buffered segments are
+            # dropped, not persisted (Johnny-od1).
             if self._reply_audio is not None:
                 self._reply_audio.discard_reply()
             await self._ledger.emit(
@@ -1252,6 +1320,19 @@ class RouterGate:
         rather than queueing work whose ack cannot be spoken.
         """
         self._say = say
+
+    def note_speech_caption(self, text: str, sequence: int) -> None:
+        """Record one caption sentence of the speech playing now (Johnny-trt.58).
+
+        The assembly tees the agent's ``tts_node`` interim sink here (see
+        :func:`~johnny.agent.job_session.build_agent_runtime`), so the gate
+        always knows what has been flushed to TTS for the current speech.
+        When a barge-in cuts the speech, its done-callback takes the buffer as
+        the partial actually delivered — the same sentences the live caption
+        bubble showed. Sync and trivially cheap; called on the TTS hot path
+        inside the agent's defensive sink wrapper.
+        """
+        self._captions.note(text, sequence)
 
     async def aclose(self) -> None:
         """Tear down the gate at session end (Johnny-z97 §7.4).

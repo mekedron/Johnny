@@ -28,6 +28,9 @@ export interface TranscriptLine {
 	// highest sentence sequence applied, so replays/duplicates are dropped.
 	turnId?: number | null;
 	lastSequence?: number;
+	// A barge-in cut this bot line mid-speech (Johnny-trt.58): `text` is the
+	// partial actually delivered — render an interrupted marker, text readable.
+	interrupted?: boolean;
 }
 
 function isPartialLine(line: TranscriptLine): boolean {

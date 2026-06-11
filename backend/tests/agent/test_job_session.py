@@ -202,11 +202,16 @@ async def test_build_runtime_wires_full_session() -> None:
     assert runtime.agent._session_id == "7"
 
     # Live bot-reply captions (Johnny-trt.39): the runtime carries the
-    # forwarder (drained at aclose) and the agent's tts_node feeds it.
+    # forwarder (drained at aclose) and the agent's tts_node feeds it through
+    # the trt.58 tee — one flush lands in BOTH the gate's caption buffer (the
+    # interrupted-partial source) and the forwarder's live-caption publish.
     assert runtime.speech_interim_forwarder is not None
-    assert (
-        runtime.agent._speech_interim_sink == runtime.speech_interim_forwarder.on_sentence_flushed
-    )
+    sink = runtime.agent._speech_interim_sink
+    assert sink is not None
+    sink("First sentence of the reply.", 0)
+    assert runtime.gate._captions.take() == "First sentence of the reply."
+    assert runtime.speech_interim_forwarder._tasks  # publish scheduled
+    await runtime.speech_interim_forwarder.aclose()
 
     # Barge-in enabled; no approval wiring; injected bus is not owned.
     assert runtime.enable_barge_in is True

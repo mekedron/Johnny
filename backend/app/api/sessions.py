@@ -212,6 +212,9 @@ class AgentUtteranceRead(BaseModel):
     # Bare WAV filename for replay via GET /sessions/{id}/audio/{filename}
     # (Johnny-od1); None when no audio was captured for the reply.
     audio_file: str | None = None
+    # A barge-in cut this utterance mid-speech (Johnny-trt.58): output_text is
+    # the partial delivered by cut time; the UI renders an interrupted marker.
+    interrupted: bool = False
     created_at: datetime
 
 

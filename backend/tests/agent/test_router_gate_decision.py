@@ -895,7 +895,8 @@ class _RecordingObservability:
 
     ``spoke`` keeps the legacy text-only list (most assertions only care what
     was said); ``spoke_calls`` captures the full (text, turn_id, kind) triple
-    the trt.54 seam emits, and ``transcript_windows`` the per-decision window.
+    the trt.54 seam emits, ``spoke_interrupted`` the per-call trt.58 partial
+    flag, and ``transcript_windows`` the per-decision window.
     """
 
     def __init__(self) -> None:
@@ -903,6 +904,7 @@ class _RecordingObservability:
         self.transcript_windows: list[list[dict[str, Any]] | None] = []
         self.spoke: list[str] = []
         self.spoke_calls: list[tuple[str, str | None, str]] = []
+        self.spoke_interrupted: list[bool] = []
         self.suggested: list[tuple[Any, str]] = []
 
     async def record_decision(
@@ -916,10 +918,16 @@ class _RecordingObservability:
         self.transcript_windows.append(transcript_window)
 
     async def record_spoke(
-        self, text: str, *, turn_id: str | None = None, kind: str = "reply"
+        self,
+        text: str,
+        *,
+        turn_id: str | None = None,
+        kind: str = "reply",
+        interrupted: bool = False,
     ) -> None:
         self.spoke.append(text)
         self.spoke_calls.append((text, turn_id, kind))
+        self.spoke_interrupted.append(interrupted)
 
     async def record_suggested(self, decision: Any, turn_id: str) -> None:
         self.suggested.append((decision, turn_id))
@@ -1643,8 +1651,8 @@ async def test_failed_task_speaks_honest_correction_without_terminal() -> None:
 
 
 async def test_interrupted_correction_is_not_recorded() -> None:
-    """A barged-in correction records nothing (Johnny-trt.54) — preserving the
-    interrupted partial text is Johnny-trt.58's branch on this same seam."""
+    """A correction barged before its first caption flush records nothing —
+    nothing was audibly delivered (a flushed partial IS kept, Johnny-trt.58)."""
     h = _TaskGateHarness([_delegate_decision(kind="gmail.search", ack="Searching the inbox now.")])
     msg = _user_msg("find the vendor email")
 
@@ -1767,6 +1775,215 @@ async def test_say_path_reply_audio_hygiene(tmp_path: Any) -> None:
         await h.gate.run_turn(ChatContext.empty(), _user_msg("check it"))
 
     assert recorder.take_reply() is None  # discarded at say time
+
+
+# --------------------------------------------------------------------------- #
+# Interrupted partials are kept (Johnny-trt.58)                               #
+# --------------------------------------------------------------------------- #
+
+
+async def test_interrupted_reply_with_captions_keeps_partial() -> None:
+    """Barge-in mid-reply: the caption text flushed so far is recorded as an
+    interrupted AgentSpoke AFTER the unchanged no_reply(barge_in) terminal —
+    the phrase lands in the chat/history instead of vanishing."""
+    gate, emitter, obs = _make_observed_gate(
+        [{"should_speak": True, "confidence": 0.9, "reason": "ok"}]
+    )
+    msg = _user_msg("Johnny, walk me through the plan")
+    await gate.run_turn(ChatContext.empty(), msg)
+    handle = _handle(interrupted=True, chat_items=["full planned reply"])
+    gate.bind_reply(handle)
+    # The tts_node tee feeds the gate one caption per flushed sentence.
+    gate.note_speech_caption("First we check the calendar.", 0)
+    gate.note_speech_caption("Then we draft the", 1)
+
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+
+    # INV-1 unchanged: the terminal is still exactly one no_reply(barge_in).
+    assert emitter.states == ["no_reply"]
+    assert emitter.reasons == ["barge_in"]
+    assert "partial kept" in emitter.records[0][1].detail
+    # The partial is the caption-joined text, NOT the handle's chat items.
+    assert obs.spoke_calls == [
+        ("First we check the calendar. Then we draft the", msg.id, "reply")
+    ]
+    assert obs.spoke_interrupted == [True]
+    # An interrupted partial never counts toward the over-talk cap.
+    assert gate._recent_utterance_times == []
+
+
+async def test_interrupted_reply_without_captions_records_nothing() -> None:
+    """Cut before the first sentence flushed (or TTS degrade): nothing was
+    audibly delivered, so the legacy contract holds — terminal only."""
+    gate, emitter, obs = _make_observed_gate(
+        [{"should_speak": True, "confidence": 0.9, "reason": "ok"}]
+    )
+    msg = _user_msg("Johnny?")
+    await gate.run_turn(ChatContext.empty(), msg)
+    handle = _handle(interrupted=True, chat_items=["planned"])
+    gate.bind_reply(handle)
+
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+
+    assert emitter.reasons == ["barge_in"]
+    assert obs.spoke == []
+
+
+async def test_completed_reply_clears_captions_for_the_next_interrupt() -> None:
+    """A completed reply consumes its captions, so a later reply interrupted
+    before its first flush can never inherit them as a ghost partial."""
+    gate, emitter, obs = _make_observed_gate(
+        [{"should_speak": True, "confidence": 0.9, "reason": "ok"}] * 2
+    )
+    m1 = _user_msg("first ask")
+    await gate.run_turn(ChatContext.empty(), m1)
+    h1 = _handle(chat_items=[LKChatMessage(role="assistant", content=["first answer"])])
+    gate.bind_reply(h1)
+    gate.note_speech_caption("First answer.", 0)
+    cast(_FakeSpeechHandle, h1).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+
+    m2 = _user_msg("second ask")
+    await gate.run_turn(ChatContext.empty(), m2)
+    h2 = _handle(interrupted=True, chat_items=["second planned"])
+    gate.bind_reply(h2)  # interrupted before any caption flushed
+    cast(_FakeSpeechHandle, h2).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+
+    assert emitter.states == ["replied", "no_reply"]
+    assert obs.spoke == ["first answer"]  # no ghost partial from turn 1
+
+
+async def test_bind_reply_clears_stale_captions() -> None:
+    """Captions an unowned speech left behind (e.g. an interrupted approval
+    reply — no gate done-callback takes them) are dropped at the next bind,
+    mirroring the reply-audio hygiene."""
+    gate, emitter, obs = _make_observed_gate(
+        [{"should_speak": True, "confidence": 0.9, "reason": "ok"}]
+    )
+    gate.note_speech_caption("Stale approval-reply sentence.", 0)
+
+    msg = _user_msg("Johnny, next question")
+    await gate.run_turn(ChatContext.empty(), msg)
+    handle = _handle(interrupted=True, chat_items=["planned"])
+    gate.bind_reply(handle)
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+
+    assert emitter.reasons == ["barge_in"]
+    assert obs.spoke == []  # the stale caption did not surface as a partial
+
+
+async def test_interrupted_reply_partial_keeps_audio_for_emitter(tmp_path: Any) -> None:
+    """With a partial kept, the buffered segments are NOT discarded — the
+    spoke emitter owns the flush, exactly like a completed reply."""
+    from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
+
+    recorder = SpokenAudioRecorder(tmp_path, 1)
+    obs = _RecordingObservability()
+    gate = RouterGate(
+        _FakeRouterLLM([{"should_speak": True, "confidence": 0.9, "reason": "ok"}]),
+        config=RouterGateConfig(),
+        ledger=TurnLedger(_RecordingEmitter()),
+        record_spoke=obs.record_spoke,
+        reply_audio=recorder,
+    )
+    await gate.run_turn(ChatContext.empty(), _user_msg("Johnny, status?"))
+    handle = _handle(interrupted=True, chat_items=["planned"])
+    gate.bind_reply(handle)
+    gate.note_speech_caption("The status is", 0)
+    recorder.feed_segment(b"\x00\x01" * 64)
+
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+
+    assert obs.spoke_interrupted == [True]
+    assert recorder.take_reply() is not None  # left for the emitter's flush
+
+
+async def test_interrupted_ack_with_captions_keeps_partial() -> None:
+    """The say()-path analogue: a barged delegate ack keeps its caption
+    partial with kind='ack', terminal unchanged, task untouched."""
+    h = _TaskGateHarness([_delegate_decision(ack="On it — checking the calendar now.")])
+    msg = _user_msg("Johnny, dig into that")
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    h.gate.note_speech_caption("On it — checking the", 0)
+    handle = h.say.handles[0]
+    handle.interrupted = True
+    handle.fire_done()
+    await h.drain()
+
+    assert h.emitter.states == ["no_reply"]
+    assert h.emitter.reasons == ["barge_in"]
+    assert "continues" in h.emitter.records[0][1].detail  # the task is not undone
+    assert "partial kept" in h.emitter.records[0][1].detail
+    assert h.obs.spoke_calls == [("On it — checking the", msg.id, "ack")]
+    assert h.obs.spoke_interrupted == [True]
+    assert h.gate._recent_utterance_times == []
+
+
+async def test_interrupted_status_with_captions_keeps_partial() -> None:
+    h = _TaskGateHarness([_status_decision()], wire_coordinator=False)
+    msg = _user_msg("status?")
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    h.gate.note_speech_caption("Nothing in flight", 0)
+    handle = h.say.handles[0]
+    handle.interrupted = True
+    handle.fire_done()
+    await h.drain()
+
+    assert h.emitter.reasons == ["barge_in"]
+    assert h.obs.spoke_calls == [("Nothing in flight", msg.id, "status")]
+    assert h.obs.spoke_interrupted == [True]
+
+
+async def test_interrupted_correction_with_captions_keeps_partial() -> None:
+    """A barged correction keeps its partial as unbound speech — kind stays
+    'correction', turn_id stays None, still no terminal (the delegating
+    turn's ack already settled INV-1)."""
+    h = _TaskGateHarness([_delegate_decision(kind="gmail.search", ack="Searching the inbox now.")])
+    msg = _user_msg("find the vendor email")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+    # The correction is now queued; its tts flushes one sentence, then barge.
+    h.gate.note_speech_caption("Actually — I can't do", 0)
+    correction_handle = h.say.handles[1]
+    correction_handle.interrupted = True
+    correction_handle.fire_done()
+    await h.drain()
+
+    assert [kind for _, _, kind in h.obs.spoke_calls] == ["ack", "correction"]
+    assert h.obs.spoke_calls[1] == ("Actually — I can't do", None, "correction")
+    assert h.obs.spoke_interrupted == [False, True]
+    assert h.emitter.states == ["replied"]  # still exactly one terminal
+
+
+async def test_completed_speech_emits_uninterrupted_flag() -> None:
+    """Uninterrupted speech is byte-identical to before, with interrupted=False."""
+    gate, emitter, obs = _make_observed_gate(
+        [{"should_speak": True, "confidence": 0.9, "reason": "ok"}]
+    )
+    msg = _user_msg("Johnny, quick one")
+    await gate.run_turn(ChatContext.empty(), msg)
+    handle = _handle(chat_items=[LKChatMessage(role="assistant", content=["the answer"])])
+    gate.bind_reply(handle)
+    gate.note_speech_caption("The answer.", 0)
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+
+    assert emitter.states == ["replied"]
+    assert obs.spoke_calls == [("the answer", msg.id, "reply")]
+    assert obs.spoke_interrupted == [False]
 
 
 async def test_interrupted_ack_discards_audio_replied_ack_keeps_it(

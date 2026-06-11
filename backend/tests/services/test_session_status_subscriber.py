@@ -852,6 +852,178 @@ def test_apply_agent_spoke_event_ack_fallback_divergence_names_router_gate(
     assert decision.divergence_reason is not None
 
 
+# --- interrupted partials are kept (Johnny-trt.58) --------------------------
+
+
+def test_apply_agent_spoke_event_interrupted_partial_stamps_user_divergence(
+    db_session: Session,
+) -> None:
+    """A barge-in partial lands as the turn's final_text with the divergence
+    audited to the user ("barge-in"), the utterance row flagged interrupted,
+    and the terminal/outcome untouched (the terminal event already demoted
+    them — INV-1 unchanged)."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    decision_payload = _router_decision_payload(
+        session_id=bot_session.id,
+        mode="autonomous",
+        should_speak=True,
+        suggested_reply="First we check the calendar, then we draft the agenda.",
+    )
+    decision_payload["turn_id"] = 1
+    apply_router_decision_event(db_session, decision_payload)
+    db_session.flush()
+    # The terminal always precedes the spoke on the channel: barge_in demotes
+    # the optimistic outcome first.
+    apply_turn_terminal_event(
+        db_session,
+        _turn_terminal_payload(
+            session_id=bot_session.id,
+            turn_id=1,
+            terminal_state="no_reply",
+            outcome="suppressed",
+            no_reply_reason="barge_in",
+            detail="reply interrupted before completion (partial kept)",
+        ),
+    )
+    db_session.flush()
+
+    payload = _agent_spoke_payload(
+        session_id=bot_session.id, text="First we check the"
+    )
+    payload["kind"] = "reply"
+    payload["turn_id"] = 1
+    payload["interrupted"] = True
+    assert apply_agent_spoke_event(db_session, payload) is True
+    db_session.commit()  # the ORM parity guard runs at flush — must not raise
+
+    decision = db_session.scalars(sa.select(AgentDecision)).one()
+    assert decision.final_text == "First we check the"
+    assert decision.override_actor == "user"
+    assert decision.divergence_reason is not None
+    assert "barge-in" in decision.divergence_reason
+    assert decision.terminal_state == TerminalState.NO_REPLY
+    assert decision.no_reply_reason == NoReplyReason.BARGE_IN
+    assert decision.outcome == DecisionOutcome.SUPPRESSED
+    utterance = db_session.scalars(sa.select(AgentUtterance)).one()
+    assert utterance.interrupted is True
+    assert utterance.output_text == "First we check the"
+    assert utterance.agent_decision_id == decision.id
+
+
+def test_apply_agent_spoke_event_interrupted_ack_audits_user_not_gate(
+    db_session: Session,
+) -> None:
+    """An interrupted say()-path ack audits the divergence as the barge-in,
+    not as a gate fallback line — the interrupted branch wins over the
+    ack/status bucket."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    decision_payload = _router_decision_payload(
+        session_id=bot_session.id,
+        mode="autonomous",
+        should_speak=True,
+        suggested_reply="On it — checking the calendar for tomorrow now.",
+    )
+    decision_payload["turn_id"] = 1
+    apply_router_decision_event(db_session, decision_payload)
+    db_session.flush()
+
+    payload = _agent_spoke_payload(session_id=bot_session.id, text="On it — checking")
+    payload["kind"] = "ack"
+    payload["turn_id"] = 1
+    payload["interrupted"] = True
+    apply_agent_spoke_event(db_session, payload)
+    db_session.commit()
+
+    decision = db_session.scalars(sa.select(AgentDecision)).one()
+    assert decision.final_text == "On it — checking"
+    assert decision.override_actor == "user"
+    utterance = db_session.scalars(sa.select(AgentUtterance)).one()
+    assert utterance.interrupted is True
+
+
+def test_apply_agent_spoke_event_interrupted_flag_defaults_false(
+    db_session: Session,
+) -> None:
+    """Events without the field (legacy emitters) store an uninterrupted row."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    assert (
+        apply_agent_spoke_event(
+            db_session, _agent_spoke_payload(session_id=bot_session.id)
+        )
+        is True
+    )
+    row = db_session.scalars(sa.select(AgentUtterance)).one()
+    assert row.interrupted is False
+
+
+def test_apply_agent_spoke_event_interrupted_correction_is_flagged_and_unlinked(
+    db_session: Session,
+) -> None:
+    """An interrupted correction keeps the trt.54 unlinked contract — flagged
+    utterance row, no decision row touched."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    decision_payload = _router_decision_payload(
+        session_id=bot_session.id,
+        mode="autonomous",
+        should_speak=True,
+        suggested_reply="On it.",
+    )
+    decision_payload["turn_id"] = 1
+    apply_router_decision_event(db_session, decision_payload)
+    db_session.flush()
+
+    correction = _agent_spoke_payload(
+        session_id=bot_session.id, text="Actually — I can't do"
+    )
+    correction["kind"] = "correction"
+    correction["turn_id"] = None
+    correction["interrupted"] = True
+    assert apply_agent_spoke_event(db_session, correction) is True
+    db_session.commit()
+
+    decision = db_session.scalars(sa.select(AgentDecision)).one()
+    assert decision.final_text is None  # nothing stamped
+    row = db_session.scalars(sa.select(AgentUtterance)).one()
+    assert row.interrupted is True
+    assert row.agent_decision_id is None
+
+
+def test_apply_agent_spoke_event_interrupted_partial_matching_text_needs_no_actor(
+    db_session: Session,
+) -> None:
+    """A one-sentence ack fully flushed before the cut: partial == recommended,
+    so no divergence fields are required — the row is still flagged."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    decision_payload = _router_decision_payload(
+        session_id=bot_session.id,
+        mode="autonomous",
+        should_speak=True,
+        suggested_reply="On it.",
+    )
+    decision_payload["turn_id"] = 1
+    apply_router_decision_event(db_session, decision_payload)
+    db_session.flush()
+
+    payload = _agent_spoke_payload(session_id=bot_session.id, text="On it.")
+    payload["kind"] = "ack"
+    payload["turn_id"] = 1
+    payload["interrupted"] = True
+    apply_agent_spoke_event(db_session, payload)
+    db_session.commit()
+
+    decision = db_session.scalars(sa.select(AgentDecision)).one()
+    assert decision.final_text == "On it."
+    assert decision.override_actor is None
+    assert decision.divergence_reason is None
+    row = db_session.scalars(sa.select(AgentUtterance)).one()
+    assert row.interrupted is True
+
+
 def test_apply_router_decision_event_snapshots_delegate_ack_as_recommended(
     db_session: Session,
 ) -> None:

@@ -105,6 +105,10 @@ export interface AgentUtteranceRecord {
 	// Bare WAV filename of the captured reply audio (Johnny-od1); null when no
 	// audio was captured for this utterance. Play via sessionAudioUrl().
 	audio_file: string | null;
+	// A barge-in cut this utterance mid-speech (Johnny-trt.58): output_text is
+	// the partial delivered by cut time; render an interrupted marker.
+	// Optional so a cached/older API response without the field still parses.
+	interrupted?: boolean;
 	created_at: string;
 }
 

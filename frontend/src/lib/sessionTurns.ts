@@ -295,9 +295,29 @@ export interface TurnSummary {
 	text: string | null;
 }
 
+/**
+ * A barge-in cut the speech but its caption partial was kept as the turn's
+ * final text (Johnny-trt.58) — derived, no extra field: the terminal stays
+ * no_reply(barge_in) and final_text is only ever set on such a turn when the
+ * interrupted AgentSpoke stamped the partial.
+ */
+export function isInterruptedPartial(src: TurnSource): boolean {
+	return (
+		src.terminalState === 'no_reply' &&
+		src.noReplyReason === 'barge_in' &&
+		(src.finalText ?? '').trim().length > 0
+	);
+}
+
 /** What the collapsed row shows: the spoken text, the suggestion, or the no-reply reason. */
 export function summarizeTurn(src: TurnSource): TurnSummary {
 	if (src.terminalState === 'no_reply') {
+		if (isInterruptedPartial(src)) {
+			return {
+				kind: 'no_reply',
+				text: `${noReplyReasonLabel(src.noReplyReason)} · kept the partial “${src.finalText}”`
+			};
+		}
 		return { kind: 'no_reply', text: noReplyReasonLabel(src.noReplyReason) };
 	}
 	if (src.terminalState === 'pending_approval' || src.outcome === 'pending') {
@@ -747,21 +767,36 @@ function buildSteps(src: TurnSource): TurnStep[] {
 	// Spoke --------------------------------------------------------------
 	const audioS =
 		src.audioDurationMs != null ? `${(src.audioDurationMs / 1000).toFixed(1)}s of audio` : null;
+	// Barge-in with a kept partial (Johnny-trt.58): the bot DID speak — the
+	// step shows what was delivered before the cut instead of "Stayed silent".
+	const interruptedPartial = isInterruptedPartial(src);
 	steps.push({
 		key: 'spoke',
 		index: 0,
-		title: replied ? 'Spoke' : 'Stayed silent',
+		title: replied ? 'Spoke' : interruptedPartial ? 'Spoke — interrupted' : 'Stayed silent',
 		structuredName: 'agent_spoke',
-		status: replied ? (src.finalText ? 'done' : 'missing') : 'skipped',
-		tone: replied ? 'default' : 'no_reply',
+		status: replied
+			? src.finalText
+				? 'done'
+				: 'missing'
+			: interruptedPartial
+				? 'done'
+				: 'skipped',
+		tone: replied ? 'default' : interruptedPartial ? 'divergence' : 'no_reply',
 		body: replied
 			? (src.finalText ?? src.recommendedText)
-			: `Did not speak — ${noReplyReasonLabel(src.noReplyReason)}`,
+			: interruptedPartial
+				? src.finalText
+				: `Did not speak — ${noReplyReasonLabel(src.noReplyReason)}`,
 		detail: replied
 			? src.finalText
 				? audioS
 				: 'The spoken text was not recorded — a final_text stamping gap (INV-2).'
-			: null,
+			: interruptedPartial
+				? ['A barge-in cut the speech; this partial is what was delivered.', audioS]
+						.filter(Boolean)
+						.join(' ')
+				: null,
 		confidence: null,
 		durationMs: null,
 		elapsedMs: null,

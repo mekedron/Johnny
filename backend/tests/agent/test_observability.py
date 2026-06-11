@@ -63,6 +63,7 @@ from johnny.agent.observability import (  # noqa: E402
     AgentSpeechInterimForwarder,
     InterimTranscriptForwarder,
     MetricsTranslator,
+    SpeechCaptionBuffer,
     build_decision_emitter,
     build_observability,
     build_session_terminal_emitter,
@@ -490,6 +491,49 @@ async def test_spoke_emitter_resolves_turn_id_and_carries_kind() -> None:
     assert ack_ev.turn_id == decision_ev.turn_id == 1
     assert correction_ev.kind == "correction"
     assert correction_ev.turn_id is None
+
+
+async def test_spoke_emitter_carries_interrupted_flag() -> None:
+    """The trt.58 partial flag rides the event; a bare call defaults False so
+    legacy emitters and recorded fixtures parse unchanged."""
+    bus = InMemoryEventBus()
+    record = build_spoke_emitter(bus, mode="autonomous", session_id="4")
+    await record("First we check the", interrupted=True)
+    await record("Full reply.")
+    partial_ev, full_ev = bus.snapshot()
+    assert partial_ev.interrupted is True
+    assert full_ev.interrupted is False
+
+
+# --------------------------------------------------------------------------- #
+# SpeechCaptionBuffer (Johnny-trt.58)                                         #
+# --------------------------------------------------------------------------- #
+
+
+def test_caption_buffer_accumulates_and_takes() -> None:
+    buf = SpeechCaptionBuffer()
+    buf.note("First sentence.", 0)
+    buf.note("Second sentence.", 1)
+    assert buf.take() == "First sentence. Second sentence."
+    # take() empties — the next read sees nothing.
+    assert buf.take() == ""
+
+
+def test_caption_buffer_sequence_zero_starts_fresh_speech() -> None:
+    """A new speech's first flush replaces any stale buffer (the forwarder's
+    reset semantics), so an unconsumed previous speech can never leak."""
+    buf = SpeechCaptionBuffer()
+    buf.note("Stale speech nobody took.", 0)
+    buf.note("Fresh speech.", 0)
+    buf.note("Its second sentence.", 1)
+    assert buf.take() == "Fresh speech. Its second sentence."
+
+
+def test_caption_buffer_skips_blank_sentences() -> None:
+    buf = SpeechCaptionBuffer()
+    buf.note("  ", 0)
+    buf.note("Real text.", 1)
+    assert buf.take() == "Real text."
 
 
 # --------------------------------------------------------------------------- #

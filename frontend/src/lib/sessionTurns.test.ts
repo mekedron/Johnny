@@ -191,6 +191,32 @@ describe('summarizeTurn', () => {
 		const s = summarizeTurn(makeSource({ terminalState: 'pending_approval', outcome: 'pending' }));
 		assert.equal(s.kind, 'pending');
 	});
+
+	it('barge-in with a kept partial → the reason plus the partial (Johnny-trt.58)', () => {
+		const s = summarizeTurn(
+			makeSource({
+				terminalState: 'no_reply',
+				noReplyReason: 'barge_in',
+				outcome: 'suppressed',
+				finalText: 'First we check the'
+			})
+		);
+		assert.equal(s.kind, 'no_reply');
+		assert.match(s.text ?? '', /you started speaking again/);
+		assert.match(s.text ?? '', /First we check the/);
+	});
+
+	it('barge-in WITHOUT a partial keeps the plain reason', () => {
+		const s = summarizeTurn(
+			makeSource({
+				terminalState: 'no_reply',
+				noReplyReason: 'barge_in',
+				outcome: 'suppressed',
+				finalText: null
+			})
+		);
+		assert.equal(s.text, 'you started speaking again');
+	});
 });
 
 describe('buildTurnView', () => {
@@ -240,6 +266,47 @@ describe('buildTurnView', () => {
 		const spoke = view.steps.find((s) => s.key === 'spoke');
 		assert.equal(spoke?.status, 'done');
 		assert.match(spoke?.detail ?? '', /audio/);
+	});
+
+	it('an interrupted turn with a kept partial renders a done Spoke step (Johnny-trt.58)', () => {
+		const view = buildTurnView(
+			makeSource({
+				terminalState: 'no_reply',
+				noReplyReason: 'barge_in',
+				outcome: 'suppressed',
+				finalText: 'First we check the',
+				divergenceReason:
+					'barge-in interrupted the speech; final_text keeps the partial actually spoken',
+				overrideActor: 'user',
+				audioDurationMs: 2100
+			}),
+			undefined
+		);
+		const spoke = view.steps.find((s) => s.key === 'spoke');
+		assert.equal(spoke?.title, 'Spoke — interrupted');
+		assert.equal(spoke?.status, 'done');
+		assert.equal(spoke?.body, 'First we check the');
+		assert.match(spoke?.detail ?? '', /barge-in cut the speech/i);
+		assert.match(spoke?.detail ?? '', /2\.1s of audio/);
+		// The barge-in suppressor still shows in the guards (INV-1 unchanged).
+		const guards = view.steps.find((s) => s.key === 'guards');
+		assert.ok(guards?.guards.some((g) => g.structured === 'no_reply_reason · barge_in'));
+	});
+
+	it('an interrupted turn WITHOUT a partial keeps the silent Spoke step', () => {
+		const view = buildTurnView(
+			makeSource({
+				terminalState: 'no_reply',
+				noReplyReason: 'barge_in',
+				outcome: 'suppressed',
+				finalText: null,
+				audioDurationMs: null
+			}),
+			undefined
+		);
+		const spoke = view.steps.find((s) => s.key === 'spoke');
+		assert.equal(spoke?.title, 'Stayed silent');
+		assert.equal(spoke?.status, 'skipped');
 	});
 
 	it('a no-reply turn skips the answer/spoke steps and names the suppressor in a guard', () => {

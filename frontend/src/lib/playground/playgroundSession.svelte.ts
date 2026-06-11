@@ -846,7 +846,10 @@ export class PlaygroundController {
 			case 'agent_spoke': {
 				const e = event as AgentSpokeEvent;
 				// The authoritative spoken text replaces the provisional bubble
-				// (Johnny-trt.39) — what was actually spoken wins.
+				// (Johnny-trt.39) — what was actually spoken wins. For a barge-in
+				// the terminal already cleared the bubble; this event then carries
+				// the kept partial (Johnny-trt.58), rendered with an interrupted
+				// marker instead of vanishing from the chat.
 				this.transcript = clearBotPartialLine(this.transcript);
 				this.appendTranscript({
 					key: `spoke-${e.seq}`,
@@ -854,7 +857,8 @@ export class PlaygroundController {
 					speaker: 'bot',
 					isFinal: true,
 					timestamp: ts,
-					audioFile: typeof e.audio_file === 'string' && e.audio_file ? e.audio_file : null
+					audioFile: typeof e.audio_file === 'string' && e.audio_file ? e.audio_file : null,
+					interrupted: e.interrupted === true
 				});
 				this.lastSpokenAt = ts;
 				// A successful turn clears stale stage diagnostics.

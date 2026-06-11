@@ -139,8 +139,11 @@ class RecordSpoke(Protocol):
     the builder so the subscriber stamps the exact decision row (INV-2);
     ``None`` for speech bound to no turn (the trt.53 correction). ``kind``
     labels the speech path (:data:`SpokenKind`); the subscriber refuses to
-    stamp any ``final_text`` for ``"correction"``. The builder fills the rest
-    (mode, matched-allowed-reply heuristic, session id, reply audio).
+    stamp any ``final_text`` for ``"correction"``. ``interrupted``
+    (Johnny-trt.58) marks a barge-in partial — ``text`` is then the caption
+    sentences flushed by cut time, not the full planned line. The builder
+    fills the rest (mode, matched-allowed-reply heuristic, session id, reply
+    audio).
     """
 
     def __call__(
@@ -149,6 +152,7 @@ class RecordSpoke(Protocol):
         *,
         turn_id: str | None = None,
         kind: SpokenKind = "reply",
+        interrupted: bool = False,
     ) -> Awaitable[None]: ...
 
 RecordTriageTiming = Callable[[str, float, float, str], Awaitable[None]]
@@ -377,7 +381,10 @@ def build_spoke_emitter(
     reply completes with assistant output — and, since Johnny-trt.54, once per
     completed say()-path speech too (delegate ack, status stub, the trt.53
     failed-task correction), so *every* spoken utterance lands in
-    ``agent_utterances`` and the chat history. The subscriber inserts the
+    ``agent_utterances`` and the chat history. Since Johnny-trt.58 an
+    interrupted speech that produced captions emits one as well
+    (``interrupted=True``, ``text`` = the partial flushed by cut time) so a
+    barged reply keeps its partial instead of vanishing. The subscriber inserts the
     ``agent_utterances`` row and writes the spoken text back onto the turn's
     decision row (INV-2) — except for ``kind="correction"``, which is bound to
     no turn and stamps nothing. ``matched_allowed_reply`` is inferred from the
@@ -412,6 +419,7 @@ def build_spoke_emitter(
         *,
         turn_id: str | None = None,
         kind: SpokenKind = "reply",
+        interrupted: bool = False,
     ) -> None:
         matched: str | None = None
         if uses_allowlist:
@@ -438,6 +446,7 @@ def build_spoke_emitter(
                 if turn_index is not None and turn_id is not None
                 else None
             ),
+            interrupted=interrupted,
         )
         try:
             await event_bus.publish(event)
@@ -681,6 +690,45 @@ class AgentSpeechInterimForwarder:
         if not self._tasks:
             return
         await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
+
+
+class SpeechCaptionBuffer:
+    """The caption sentences of the speech playing now (Johnny-trt.58).
+
+    The text-side analogue of the reply-audio buffer hygiene: ``tts_node``
+    flushes one sentence at a time into TTS (the same flushes the
+    :class:`AgentSpeechInterimForwarder` publishes as live captions), and this
+    buffer accumulates them so the gate's done-callbacks can recover *what was
+    delivered so far* when a barge-in cuts the speech. The snapshot is an
+    honest **approximation** of what was audibly heard: a sentence is buffered
+    when it is flushed to synthesis, which slightly leads playout — the same
+    lead the live caption bubble shows, so the kept partial always matches
+    what the operator watched stream.
+
+    ``sequence == 0`` marks a fresh speech and replaces any stale buffer
+    (mirroring the caption forwarder's reset); :meth:`take` empties on read so
+    every done-path consumes its own speech's sentences and a later speech can
+    never inherit them. At most one speech synthesizes at a time (LiveKit
+    serializes playout), so a plain list — no per-speech keying — is enough;
+    the done-callback runs ticks before the next speech's first flush.
+    """
+
+    def __init__(self) -> None:
+        self._sentences: list[str] = []
+
+    def note(self, text: str, sequence: int) -> None:
+        """Record one flushed sentence; ``sequence == 0`` starts a fresh speech."""
+        if sequence == 0:
+            self._sentences = []
+        cleaned = text.strip()
+        if cleaned:
+            self._sentences.append(cleaned)
+
+    def take(self) -> str:
+        """The speech's sentences so far, space-joined — and clear the buffer."""
+        joined = " ".join(self._sentences)
+        self._sentences = []
+        return joined
 
 
 # --- LiveKit metrics → PipelineTiming translation -------------------------- #
@@ -940,6 +988,7 @@ __all__ = [
     "RecordSuggested",
     "RecordTriageTiming",
     "ResolveTurnId",
+    "SpeechCaptionBuffer",
     "SpeechInterimSink",
     "SpokenKind",
     "TranscriptFinalizedSink",

@@ -114,7 +114,7 @@ understand the bot's decision.* Concretely:
   completed correction IS recorded — `AgentSpoke(kind="correction", turn_id=None)`
   from its say-handle done-callback — so it lands in `agent_utterances` and the
   chat/history exactly as spoken while stamping **no** decision row's `final_text`
-  (an interrupted correction records nothing; partial capture is trt.58's branch).
+  (an interrupted correction keeps its caption partial the same way — trt.58 below).
   Replaced wholesale by trt.29.
 - **The whole chain is visible in history** (trt.54, shipped 2026-06-11): final
   transcript (`input_window.transcript_window`, `is_current` entry — also what makes
@@ -125,6 +125,19 @@ understand the bot's decision.* Concretely:
   `kind` (`reply|ack|status|correction`) + the durable int `turn_id`, so
   `final_text` stamps the exact turn. No turn may leave "what did it say, and
   why?" unanswerable from the UI.
+- **Interrupted speech keeps its partial** (trt.58, shipped 2026-06-11): a barge-in
+  used to make the in-flight phrase vanish (the streamed caption bubble was
+  discarded, no `AgentSpoke`, no row). Now every speech path — streamed reply,
+  delegate ack, status stub, the failed-task correction — that already flushed at
+  least one caption sentence emits `AgentSpoke(interrupted=true)` with the caption
+  text at cut time (the gate's `SpeechCaptionBuffer`, fed by a `tts_node` sink tee;
+  an honest *approximation* of what was audibly heard, since a sentence flushes to
+  synthesis slightly ahead of playout). The turn's terminal stays
+  `no_reply(barge_in)` — INV-1 untouched — while the utterance row is flagged
+  `interrupted` and the decision row's `final_text` carries the partial, audited as
+  `override_actor="user"` / barge-in divergence. Chat + history render the partial
+  with an "interrupted" marker; speech cut before any flush still records nothing
+  (nothing was heard).
 
 **Capability awareness (trt.55, Phase 4).** Operator rule (2026-06-11): *the
 decision-making must know what it is actually capable of.* "Check our Google
@@ -333,6 +346,7 @@ separately replay-gated:
 | Heuristic complexity scorer (shadow) | Johnny-trt.50 | **shipped** (2026-06-11) — pure-stdlib `johnny/agent/complexity.py` (ClawRouter pattern port, MIT attribution + per-constant provenance; 7 voice dimensions incl. the dynamic catalog delegate-prior; EN+RU+FI stem sets, left-boundary prefix matching); `RouterGate.run_turn` scores before the triage await and stashes the 4-key verdict under `raw_output.complexity_shadow` (one debug log line; scorer failure → key absent, turn untouched); first 86-turn agreement matrix in `.validation/Johnny-trt.50/05-agreement-matrix.md` (summary in §4) — catalog dim fired 32% on delegated vs 4% on silent turns, trt.51 fast-path **no-go** on the 3B router; the SIMPLE×delegate cell (12 turns, greetings delegated) is trt.53's quantified evidence |
 | Delegate restraint + contextual LLM-authored acks | Johnny-trt.53 | **shipped** (2026-06-11) — schema: `task.ack` required + canned example removed + restraint in the `action` description (parser untouched, old outputs parse identically); catalog header rewritten (only listed kinds, answerable-from-context ⇒ speak, unsure ⇒ speak, ack authored per turn in the user's language); gate: ackless delegate degrades to SPEAK with the `ack_fallback` marker in `raw_output` + warning (`DEFAULT_DELEGATE_ACK` now a logged defensive last resort); no dead promises: failed task settles re-enter as the spoken `say()` correction via the coordinator's failure-report seam (auto-attached at gate construction; after-row, no terminal, no AgentSpoke until trt.54); delegate/fallback-ack rates derivable from decision rows (§2). Replay fixtures untouched (all old-format, no `action` fields) |
 | Decision-pipeline observability (full chain incl. spoken text) | Johnny-trt.54 | **shipped** (2026-06-11) — `AgentSpoke` carries `kind` (`reply\|ack\|status\|correction`) + durable int `turn_id`: the subscriber stamps `final_text` on the exact turn's decision row (recency scan kept only as the legacy fallback) and a `correction` inserts an **unlinked** utterance row (the trt.53 walk-back lands in chat/history verbatim, stamps nothing); a delegate verdict's `task.ack` snapshots into `decision_recommended_text` (say-path divergences audit as `override_actor=router_gate`); the decision event's `input_window` gains `transcript_window` (+ instructions/threshold) so the timeline's "Heard you" works on reload AND `/sessions/{id}/replay` reconstructs agent sessions (was 0 replayable turns); session-page timeline reworked to the full chain — heard → shadow verdict (trt.50) → decided action + reason + `router_llm` timing → context → answer-model (say-path turns say "no answer hop") → router-authored ack → linked `agent_tasks` row → guards (incl. `ack_fallback` chip) → final (recommended vs final) → spoke (exact text + audio; missing `final_text` on a replied turn flags the INV-2 gap); session detail API exposes `tasks` |
+| Interrupted speech keeps its partial (chat/history/decision row) | Johnny-trt.58 | **shipped** (2026-06-11) — gate `SpeechCaptionBuffer` fed by a `tts_node` sink tee; every interrupt branch (reply/ack/status/correction) that flushed ≥1 caption emits `AgentSpoke(interrupted=true)` with the cut-time caption text AFTER the unchanged `no_reply(barge_in)` terminal; utterance row flagged `interrupted` (migration 0024), `final_text` carries the partial audited as `override_actor=user`; playground chat + session history + timeline render an "interrupted" marker; cut-before-first-flush still records nothing |
 | Phase 3 capstone (parity + INV-1 + delegated turn) | Johnny-trt.21 | planned (Phase 3) |
 | Executor, tools/skills, task events | Johnny-trt.22–26, .35 | planned (Phase 4) |
 | Capability-aware catalog (availability + honest declines) | Johnny-trt.55 | planned (Phase 4) |
