@@ -15,12 +15,15 @@ turns and easy to unit-test in isolation.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.providers import ChatMessage, LLMResponse
+
+logger = logging.getLogger(__name__)
 
 STRICT_TURN_TERMINAL = os.environ.get("JOHNNY_STRICT_TURN_TERMINAL") == "1"
 """Hard-fail on an unaccounted turn instead of just logging (INV-1, Johnny-ckz.28.3).
@@ -336,6 +339,45 @@ breaker open so the next turn retries.
 """
 
 
+SILENT_ACTION = "silent"
+SPEAK_ACTION = "speak"
+DELEGATE_ACTION = "delegate"
+STATUS_ACTION = "status"
+
+ROUTER_ACTIONS: tuple[str, ...] = (
+    SILENT_ACTION,
+    SPEAK_ACTION,
+    DELEGATE_ACTION,
+    STATUS_ACTION,
+)
+"""The router's Phase-3 triage action vocabulary (Johnny-trt.16).
+
+``silent`` / ``speak`` are the legacy should-speak verdict spelled as an
+action. ``delegate`` hands the request off as an async task (the verdict
+carries a :class:`TaskRequest`; the gate speaks the ack and the
+TaskCoordinator runs the work off the turn loop, Johnny-trt.17/.18).
+``status`` asks for a progress report on delegated work. The vocabulary is
+deliberately closed — one LLM call decides the whole triage, no second hop.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class TaskRequest:
+    """Validated async-task request from a ``delegate`` router verdict (Johnny-trt.16).
+
+    Parsed from the router's ``task`` object (``{kind, args, ack}``) by
+    :func:`_parse_task_request`, which is strict on shape — a verdict only
+    carries a ``TaskRequest`` the downstream coordinator can actually run.
+    ``ack`` is the short phrase the bot speaks immediately ("let me check on
+    that") while the task executes asynchronously; empty means the gate
+    falls back to its own ack wording.
+    """
+
+    kind: str
+    args: dict[str, Any] = field(default_factory=dict)
+    ack: str = ""
+
+
 @dataclass(frozen=True, slots=True)
 class RouterDecision:
     """Parsed output of the router LLM.
@@ -343,6 +385,15 @@ class RouterDecision:
     Mirrors :class:`RouterDecisionMade` but kept separate so the engine
     can manipulate the decision before emitting (e.g. clamp confidence,
     log raw model output).
+
+    ``action`` (Phase 3, Johnny-trt.16) is always a member of
+    :data:`ROUTER_ACTIONS` and is kept consistent with ``should_speak``
+    (``silent`` ⟺ ``should_speak=False``) — old-format model outputs that
+    predate the field derive it from ``should_speak``, which the empty-string
+    default also does for direct constructions. ``task_request`` is
+    non-``None`` **iff** ``action == "delegate"``: a delegate verdict whose
+    task object is missing or malformed is degraded to plain speak/silent by
+    the parser, so the pair can never half-exist.
     """
 
     should_speak: bool
@@ -350,7 +401,17 @@ class RouterDecision:
     reason: str
     reply_type: str | None = None
     suggested_reply: str | None = None
+    action: str = ""
+    task_request: TaskRequest | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.action:
+            object.__setattr__(
+                self,
+                "action",
+                SPEAK_ACTION if self.should_speak else SILENT_ACTION,
+            )
 
 
 _ROUTER_SCHEMA: dict[str, Any] = {
@@ -361,8 +422,42 @@ _ROUTER_SCHEMA: dict[str, Any] = {
         "reason": {"type": "string"},
         "reply_type": {"type": ["string", "null"]},
         "suggested_reply": {"type": ["string", "null"]},
+        "action": {
+            "type": "string",
+            "enum": list(ROUTER_ACTIONS),
+            "description": (
+                "What the bot should do: 'silent' = say nothing; 'speak' = "
+                "answer directly now; 'delegate' = acknowledge out loud and "
+                "hand the request off as an async task (fill in 'task'); "
+                "'status' = report progress on previously delegated work."
+            ),
+        },
+        "task": {
+            "type": ["object", "null"],
+            "description": (
+                "The async task to run — required when action='delegate', null otherwise."
+            ),
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "description": "Task kind identifier from the catalog.",
+                },
+                "args": {
+                    "type": "object",
+                    "description": "Arguments for the task kind (may be empty).",
+                },
+                "ack": {
+                    "type": "string",
+                    "description": (
+                        "Short acknowledgment the bot speaks immediately, "
+                        "e.g. 'Let me check on that.'"
+                    ),
+                },
+            },
+            "required": ["kind"],
+        },
     },
-    "required": ["should_speak", "confidence", "reason"],
+    "required": ["should_speak", "confidence", "reason", "action"],
 }
 
 
@@ -496,7 +591,87 @@ def build_barge_in_messages(
     ]
 
 
+def _parse_task_request(value: Any) -> TaskRequest | None:
+    """Validate a router ``task`` object into a :class:`TaskRequest` (Johnny-trt.16).
+
+    Strict on shape, never raising on arbitrary JSON: ``kind`` must be a
+    non-empty string, ``args`` (when given) a JSON object, ``ack`` (when
+    given) a string. Anything else returns ``None`` so the caller degrades
+    the verdict instead of delegating a task the coordinator can't run — a
+    spoken ack must never be a dead promise.
+    """
+    if not isinstance(value, dict):
+        return None
+    kind = value.get("kind")
+    if not isinstance(kind, str) or not kind.strip():
+        return None
+    args = value.get("args")
+    if args is None:
+        args = {}
+    if not isinstance(args, dict):
+        return None
+    ack = value.get("ack")
+    if ack is None:
+        ack = ""
+    if not isinstance(ack, str):
+        return None
+    return TaskRequest(kind=kind.strip(), args=args, ack=ack.strip())
+
+
+def _resolve_router_action(
+    structured: dict[str, Any], *, should_speak: bool
+) -> tuple[str, TaskRequest | None]:
+    """Resolve the Phase-3 ``action`` + ``task`` fields (Johnny-trt.16).
+
+    Returns ``(action, task_request)`` with ``action`` always a member of
+    :data:`ROUTER_ACTIONS` and ``task_request`` non-``None`` **iff** the
+    action is ``delegate``. An old-format output (no ``action`` key) derives
+    the action from ``should_speak`` — byte-for-byte parser parity with the
+    pre-Phase-3 verdicts (the replay-harness acceptance). An unknown action,
+    or a ``delegate`` whose ``task`` object is missing/malformed, degrades to
+    that same derivation with a logged warning — never an exception, so the
+    ``on_user_turn_completed`` hook can't crash on model output. A ``task``
+    attached to a non-delegate action is ignored (it survives in ``raw`` for
+    audit).
+    """
+    fallback = SPEAK_ACTION if should_speak else SILENT_ACTION
+    raw_action = structured.get("action")
+    if raw_action is None:
+        return fallback, None
+    action = str(raw_action).strip().lower()
+    if action not in ROUTER_ACTIONS:
+        logger.warning(
+            "router returned unknown action %r — degrading to %r",
+            raw_action,
+            fallback,
+        )
+        return fallback, None
+    if action != DELEGATE_ACTION:
+        return action, None
+    task_request = _parse_task_request(structured.get("task"))
+    if task_request is None:
+        logger.warning(
+            "router returned action='delegate' with a missing/malformed task "
+            "object %r — degrading to %r",
+            structured.get("task"),
+            fallback,
+        )
+        return fallback, None
+    return action, task_request
+
+
 def _parse_router_response(response: LLMResponse) -> RouterDecision:
+    """Parse the router LLM response into a :class:`RouterDecision`.
+
+    Prefers ``structured_output``, falls back to JSON-decoding ``text``, and
+    degrades to a safe silent verdict when the model gives us nothing usable.
+    The Phase-3 fields (Johnny-trt.16) are additive: an explicit, valid
+    ``action`` is authoritative over the legacy bool (``should_speak`` is
+    recomputed as ``action != "silent"`` so the gate's should-speak branch and
+    the action branch can never disagree); an output without the field keeps
+    its literal ``should_speak`` and derives the action from it — old model
+    outputs parse byte-for-byte identically.
+    """
     structured = response.structured_output
     if structured is None and response.text:
         try:
@@ -518,12 +693,19 @@ def _parse_router_response(response: LLMResponse) -> RouterDecision:
     reply_type = str(reply_type_raw) if reply_type_raw is not None else None
     suggested_raw = structured.get("suggested_reply")
     suggested_reply = str(suggested_raw) if suggested_raw is not None else None
+    action, task_request = _resolve_router_action(structured, should_speak=should_speak)
+    # Keep the pair consistent: for an old-format output the action above IS
+    # derived from should_speak, so this is an identity (parser parity); for a
+    # new-format output the explicit action wins over a contradictory bool.
+    should_speak = action != SILENT_ACTION
     return RouterDecision(
         should_speak=should_speak,
         confidence=confidence,
         reason=reason,
         reply_type=reply_type,
         suggested_reply=suggested_reply,
+        action=action,
+        task_request=task_request,
         raw=structured,
     )
 

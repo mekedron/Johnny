@@ -3,10 +3,10 @@
   "sessionId": "82402e4d-e4aa-4e51-a95b-90cc16d67f3b",
   "status": "running",
   "startedAt": "2026-06-10T20:20:17.654Z",
-  "updatedAt": "2026-06-11T03:03:27.109Z",
-  "currentIteration": 9,
+  "updatedAt": "2026-06-11T03:30:50.244Z",
+  "currentIteration": 10,
   "maxIterations": 0,
-  "tasksCompleted": 9,
+  "tasksCompleted": 10,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -117,8 +117,8 @@
       {
         "id": "Johnny-trt.15",
         "title": "[CHORE] Phase 2 capstone: re-measure with streaming STT active",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.16",
@@ -356,6 +356,16 @@
       "durationMs": 1918315,
       "startedAt": "2026-06-11T01:57:05.590Z",
       "endedAt": "2026-06-11T02:29:03.905Z"
+    },
+    {
+      "iteration": 10,
+      "status": "completed",
+      "taskId": "Johnny-trt.15",
+      "taskTitle": "[CHORE] Phase 2 capstone: re-measure with streaming STT active",
+      "taskCompleted": true,
+      "durationMs": 2030469,
+      "startedAt": "2026-06-11T02:29:35.689Z",
+      "endedAt": "2026-06-11T03:03:26.158Z"
     }
   ],
   "skippedTaskIds": [],

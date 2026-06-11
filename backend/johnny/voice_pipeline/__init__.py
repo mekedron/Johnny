@@ -83,10 +83,12 @@ from johnny.voice_pipeline.reasoning import (
     LIMITED_AUTO_SPEAK_MODE,
     LISTEN_ONLY_MODE,
     NON_SPEAKING_MODES,
+    ROUTER_ACTIONS,
     SPEAKING_MODES,
     SUGGEST_ONLY_MODE,
     BargeInDecision,
     RouterDecision,
+    TaskRequest,
 )
 from johnny.voice_pipeline.transcript_history import (
     BOT_SPEAKER_LABEL,
@@ -153,6 +155,7 @@ __all__ = [
     "LIVEKIT_TRANSPORT",
     "LOCAL_TRANSPORT",
     "NON_SPEAKING_MODES",
+    "ROUTER_ACTIONS",
     "SPEAKING_MODES",
     "SUGGEST_ONLY_MODE",
     "SUPPORTED_TRANSPORTS",
@@ -205,6 +208,7 @@ __all__ = [
     "SessionStatus",
     "SessionStatusChanged",
     "SileroVAD",
+    "TaskRequest",
     "TerminalState",
     "TranscriptFiltered",
     "TranscriptFilteredReason",

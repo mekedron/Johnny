@@ -183,6 +183,22 @@ after each iteration and it's included in prompts for context.
   used to re-glue them; trt.5/trt.6 sessions got 8 rows from 8 utterances,
   streaming sessions get lead-in fragments) — judge those runs by
   `agent_decisions` terminals, never by row-per-utterance counts.
+- **Router action/task contract (trt.16)**: `RouterDecision.action` ∈
+  `ROUTER_ACTIONS` = (silent|speak|delegate|status) and is ALWAYS consistent
+  with `should_speak` — the parser recomputes `should_speak = action !=
+  "silent"` after resolving the action, and an old-format output (no
+  `action` key) derives the action FROM `should_speak`, so the recompute is
+  an identity there (that's the replay-parity proof). `task_request` is
+  non-None **iff** `action == "delegate"` (trt.17 can branch on either);
+  a delegate with a missing/malformed task degrades to speak/silent
+  (logged warning, never an exception — `_parse_task_request` is
+  isinstance-gated on every field), and a valid task on a non-delegate
+  action is dropped (recoverable from `decision.raw`, which already flows
+  to `agent_decisions.raw_output` — that's where live action/task evidence
+  lives). Live llama3.2:3b emits the new required `action` field through
+  Ollama format-constraint without prompt changes; it picks `speak` for
+  delegate-shaped asks until the trt.19 task catalog gives it delegation
+  vocabulary.
 - **Deepgram direct-streaming voice path (trt.14)**: interims flow
   in-session end-to-end (live caption grows through multiple
   hypotheses, clears on final) — but finals carry a Deepgram speaker id
@@ -731,4 +747,57 @@ after each iteration and it's included in prompts for context.
     felt delta; the cold turn's stt_final_after can exceed the warm bar
     (+44 ms here: first segment pays WS/context setup) — report it
     separately, the acceptance metric is warm-turn shaped.
+---
+
+## 2026-06-11 - Johnny-trt.16
+- Phase-3 router schema/parser extension shipped, parity-safe. reasoning.py:
+  `ROUTER_ACTIONS` vocabulary (silent|speak|delegate|status, + per-action
+  constants), `TaskRequest` dataclass ({kind, args, ack}), `RouterDecision`
+  gains `action` (empty-default derives from should_speak in __post_init__,
+  so every existing construction site gets a correct action for free) and
+  `task_request`; `_ROUTER_SCHEMA` gains the closed `action` enum (now in
+  required) + nullable `task` object (kind required, args/ack optional,
+  descriptions guide small models); `_parse_router_response` resolves the
+  action via `_resolve_router_action` + `_parse_task_request`: old outputs
+  byte-identical (action derived, recompute is an identity), explicit valid
+  action authoritative over a contradictory bool, unknown action or
+  malformed/missing delegate task degrades to speak/silent with a logged
+  warning and never raises; `task_request` non-None iff action=delegate.
+  Package exports: ROUTER_ACTIONS + TaskRequest. One LLM call — no second
+  hop; gate untouched (branching is trt.17).
+- Verified: 26 new/extended unit tests (old-format identity matrix incl.
+  the fixture turn-7 minimal shape, valid delegate/status, contradiction
+  reconcile, normalisation, 10 malformed-task shapes, bizarre-action
+  no-crash, direct-construction derive, schema shape); tests/voice_pipeline
+  + tests/smoketest 143 passed (incl. the Phase-0 drift guards
+  test_delegation_baseline_zero_verdict_drift); tests/agent 733 passed;
+  full suite 3609 passed / 4 failed = the documented pre-existing env set
+  (2x openai_realtime_s2s live w/ dead key, 2x wizard image checks).
+  `johnny-replay --all --mode invariants` in the api container: 5/5 PASS;
+  `--mode regression` on both delegation parity fixtures: MATCH (zero
+  drift). ruff clean on my files/regions (reasoning.py was format-dirty at
+  HEAD; the 5 remaining --diff hunks are all pre-existing). Live
+  chrome-devtools playground run (session #106, dev stack,
+  Parakeet/Ollama llama3.2:3b/Piper): two chat turns on the EXTENDED
+  schema both replied, INV-1 clean; agent_decisions.raw_output carries the
+  model-emitted "action":"speak" (live schema round-trip proof); console
+  clean. Artifacts: .validation/Johnny-trt.16/ (00-notes.md maps them).
+- docs/ROUTING.md status table: trt.16 row flipped to shipped with the
+  contract one-liner.
+- Files changed: backend/johnny/voice_pipeline/reasoning.py,
+  backend/johnny/voice_pipeline/__init__.py,
+  backend/tests/voice_pipeline/test_reasoning.py, docs/ROUTING.md,
+  .ralph-tui/progress.md.
+- **Learnings:**
+  - Patterns discovered: the action/task parser contract (action↔
+    should_speak consistency recompute, task_request-iff-delegate, degrade
+    rules) — added to Codebase Patterns above.
+  - Gotchas: `bd create` WITHOUT `--db` printed a success-looking tail but
+    persisted nothing here — pass `--db .beads/beads.db` explicitly and
+    verify with `bd search`; the playground "Speaking" badge stuck on for
+    minutes after a 1.5 s reply (client browserAudio playout
+    end-accounting, unrelated to backend changes — filed Johnny-k9r);
+    `ruff format --diff <file> | grep -c ^@@` + a HEAD-pipe format check is
+    the quick way to prove your regions are clean inside a format-dirty
+    file.
 ---

@@ -200,7 +200,7 @@ separately replay-gated:
 
 | Piece | Bead | Status (2026-06-11) |
 |---|---|---|
-| Router schema: `action` + `task` (parity-safe) | Johnny-trt.16 | planned (Phase 3) |
+| Router schema: `action` + `task` (parity-safe) | Johnny-trt.16 | **shipped** (2026-06-11) — `ROUTER_ACTIONS` enum + nullable `task {kind, args, ack}` in `_ROUTER_SCHEMA`; `RouterDecision.action`/`task_request` (`task_request` non-None iff `action='delegate'`); old outputs parse identically, malformed tasks degrade to speak/silent |
 | Gate branching + ack terminal | Johnny-trt.17 | planned (Phase 3) |
 | `agent_tasks` + TaskCoordinator + stub executor | Johnny-trt.18 | planned (Phase 3) |
 | Triage budget + task catalog + observability | Johnny-trt.19 | planned (Phase 3) |
