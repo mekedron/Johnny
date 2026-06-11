@@ -51,7 +51,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -200,6 +200,20 @@ def internal_catalog_entries(*, meeting_backed: bool) -> tuple[TaskCatalogEntry,
         spec.catalog_entry(available=meeting_backed or not spec.meeting_only)
         for spec in INTERNAL_TOOLS
     )
+
+
+def executor_known_kinds(skill_kinds: Iterable[str] = ()) -> frozenset[str]:
+    """The kinds the executor chain can actually resolve (Johnny-trt.62).
+
+    Internal tools + the skills volume (``SkillRegistry.kinds()`` — any
+    eligibility, since broken skills still settle honestly with
+    skill-specific copy); future MCP kinds (Johnny-trt.36) join here, the
+    single composition seam. This set is the membership truth the gate's
+    pre-ack kind validation checks delegate verdicts against — the rendered
+    catalog is only its spoken projection, so a kind the render missed but
+    the executor can run still delegates.
+    """
+    return INTERNAL_TOOL_KINDS | frozenset(skill_kinds)
 
 
 def merge_task_catalog(
@@ -512,6 +526,7 @@ __all__ = [
     "InternalToolSpec",
     "api_base_url_from_env",
     "build_internal_task_executor",
+    "executor_known_kinds",
     "internal_catalog_entries",
     "is_internal_kind",
     "merge_task_catalog",

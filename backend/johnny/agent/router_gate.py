@@ -191,6 +191,19 @@ the capability-gap reason; the turn then speaks the honest decline
 deterministically via say() — never the answer pipeline, which could invent
 a pretend-check."""
 
+UNKNOWN_KIND_KEY = "unknown_kind"
+"""``decision.raw`` key marking a delegate verdict whose kind the executor
+chain cannot resolve at all (Johnny-trt.62) — the pre-ack membership check.
+Validated against :attr:`RouterGateConfig.executor_kinds` (internal tools +
+the skills volume — the executor's actual resolution surface), NOT the
+rendered catalog, so a kind the catalog render missed but the executor can
+run still delegates (the config-drift robustness that motivated the old
+fail-open stance). A genuinely hallucinated kind is degraded to SPEAK before
+any promise is spoken: the canonical case is a knowledge question the answer
+model can answer in one turn, which beats ack → stub-fail → spoken
+walk-back. Same ``{from_action, to_action, kind, reason}`` shape and trt.50
+ride-along as the markers above."""
+
 
 def capability_decline_speech(kind: str, reason: str) -> str:
     """Compose the spoken decline for an unavailable-capability ask (Johnny-trt.55).
@@ -263,6 +276,15 @@ class RouterGateConfig:
     # TaskCoordinator is actually wired, so the router is never taught to
     # delegate work the gate would have to stage_error.
     task_catalog: tuple[TaskCatalogEntry, ...] = ()
+    # The executor-known kind set (Johnny-trt.62): every kind the executor
+    # chain can actually resolve — internal tools + the skills volume (any
+    # eligibility; broken skills settle honestly, never the stub's
+    # unsupported-kind leg). The pre-ack membership check degrades delegate
+    # verdicts OUTSIDE this set to SPEAK; the catalog above is only the
+    # spoken projection, so a kind it missed but the executor can run still
+    # delegates. Empty = validation disabled (hand-built gates and the
+    # replay harness keep the trt.57 ride-to-the-executor stance).
+    executor_kinds: frozenset[str] = frozenset()
 
 
 class RouterGate:
@@ -510,14 +532,19 @@ class RouterGate:
         if shadow is not None:
             decision.raw[SHADOW_KEY] = shadow
 
-        # Capability backstop (Johnny-trt.55) FIRST, then the ack rule: a
-        # delegate verdict targeting an unavailable catalog kind is degraded
-        # to the deterministic spoken decline — before the ackless degrade,
-        # because an unavailable ask must never ride the answer pipeline
-        # (which could invent a pretend-check). Both helpers stash their raw
-        # markers before the emits below, so the timing row carries the
-        # *effective* action and the decision row records the gap/fallback.
+        # Delegate-verdict degrades, in precedence order. Availability FIRST
+        # (Johnny-trt.55): an unavailable catalog kind becomes the
+        # deterministic spoken decline — never the answer pipeline, which
+        # could invent a pretend-check. Membership SECOND (Johnny-trt.62): a
+        # kind the executor chain cannot resolve at all degrades to SPEAK
+        # before any ack is spoken — the answer model answers normally
+        # instead of ack → stub-fail → walk-back. The ack rule LAST
+        # (Johnny-trt.53). At most one fires (each rewrites the action away
+        # from delegate); every helper stashes its raw marker before the
+        # emits below, so the timing row carries the *effective* action and
+        # the decision row records the degrade.
         decision = self._degrade_unavailable_delegate(decision, turn_id)
+        decision = self._degrade_unknown_kind_delegate(decision, turn_id)
         decision = self._degrade_ackless_delegate(decision, turn_id)
 
         # Triage-stage timing (Johnny-trt.19): one ``router_llm`` row per turn
@@ -735,9 +762,12 @@ class RouterGate:
         capability-gap reason; the action is rewritten to ``status`` — the
         effective shape of the turn (deterministic say()-path speech, no
         answer hop, no task row) — and ``task_request`` is cleared so nothing
-        downstream can queue it. Kinds absent from the catalog entirely are
-        left alone: they ride the normal delegate path into the executor's
-        fail-fast legs (the trt.57 hallucinated-kind stance).
+        downstream can queue it. Kinds absent from the *catalog* are left
+        alone here — membership is the next degrade's job
+        (:meth:`_degrade_unknown_kind_delegate`, Johnny-trt.62, validated
+        against the executor-known set rather than the catalog render), and
+        when that set is unfilled they keep riding the executor's fail-fast
+        legs (the trt.57 stance).
         """
         task_request = decision.task_request
         if decision.action != DELEGATE_ACTION or task_request is None:
@@ -761,6 +791,54 @@ class RouterGate:
             entry.unavailable_reason or "no reason recorded",
         )
         return replace(decision, action=STATUS_ACTION, task_request=None)
+
+    def _degrade_unknown_kind_delegate(
+        self, decision: RouterDecision, turn_id: str
+    ) -> RouterDecision:
+        """Rewrite a delegate verdict for an executor-unknown kind to a plain SPEAK (Johnny-trt.62).
+
+        The pre-ack membership check: ``executor_kinds`` is the set of kinds
+        the executor chain can actually resolve (internal tools + the skills
+        volume — the truth the catalog merely projects into the prompt), so a
+        kind outside it could only ack, stub-fail, and be walked back by the
+        trt.53 correction. The canonical hallucinated kind is a knowledge
+        question the answer model can answer in one turn — strictly better
+        than that honest-but-clumsy chain — so the verdict degrades to SPEAK
+        *before any promise is spoken*: the marker is stashed in
+        ``decision.raw`` (the trt.50 ride-along, next to
+        :data:`CAPABILITY_GAP_KEY`), ``should_speak`` stays ``True`` (the
+        delegate verdict implied it), and ``task_request`` is cleared so
+        nothing downstream can queue a row.
+
+        Deliberately fail-open both ways: an empty ``executor_kinds``
+        disables the check entirely (hand-built gates, the replay harness —
+        the trt.57 ride-to-the-executor stance survives there), and a kind
+        IN the set delegates even when the catalog render missed it (config
+        drift must not break a runnable kind). Runs after the availability
+        degrade — a catalog-listed-unavailable kind speaks the trt.55
+        decline, never this degrade.
+        """
+        task_request = decision.task_request
+        if decision.action != DELEGATE_ACTION or task_request is None:
+            return decision
+        executor_kinds = self._config.executor_kinds
+        if not executor_kinds or task_request.kind in executor_kinds:
+            return decision
+        decision.raw[UNKNOWN_KIND_KEY] = {
+            "from_action": DELEGATE_ACTION,
+            "to_action": SPEAK_ACTION,
+            "kind": task_request.kind,
+            "reason": "kind is unknown to this session's executor chain",
+        }
+        logger.warning(
+            "agent.router.gate: turn=%s delegate verdict targets UNKNOWN "
+            "kind=%r (not executor-known) — degrading to SPEAK pre-ack "
+            "(Johnny-trt.62: a direct answer beats an ack that can only "
+            "stub-fail)",
+            turn_id,
+            task_request.kind,
+        )
+        return replace(decision, action=SPEAK_ACTION, task_request=None)
 
     async def _handle_capability_decline(
         self, tracker: TerminalTracker, turn_id: str, gap: dict[str, object]
@@ -1690,6 +1768,7 @@ class RouterGate:
 __all__ = [
     "ACK_FALLBACK_KEY",
     "CAPABILITY_GAP_KEY",
+    "UNKNOWN_KIND_KEY",
     "DEFAULT_DELEGATE_ACK",
     "STATUS_STUB_REPLY",
     "PersistPendingDecision",

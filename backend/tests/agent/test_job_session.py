@@ -445,6 +445,11 @@ async def test_delegation_capable_modes_wire_task_sink_and_coordinator(
     ]
     assert "no meeting to leave" in catalog[0].unavailable_reason
     assert catalog[0].keywords == ()  # unavailable kinds feed the scorer nothing
+    # Pre-ack kind validation (Johnny-trt.62): the executor-known set is
+    # filled alongside the catalog — internal tools only on an empty volume.
+    assert runtime.gate._config.executor_kinds == frozenset(
+        {"meeting.leave", "session.end"}
+    )
     # The ANSWER prompt carries the same gap honestly (Johnny-trt.55): the
     # agent's persistent instructions teach the no-pretend-check decline.
     assert "no meeting to leave" in runtime.agent.instructions
@@ -500,6 +505,11 @@ async def test_delegation_capable_runtime_catalogs_injected_skills(tmp_path: Pat
         True,
     ]
     assert runtime.gate._config.task_catalog[2:] == registry_obj.catalog_entries()
+    # The executor-known set carries the skill kind too (Johnny-trt.62) —
+    # membership truth = internal tools + the volume, not the render.
+    assert runtime.gate._config.executor_kinds == frozenset(
+        {"meeting.leave", "session.end", "fetch-news"}
+    )
     await runtime.aclose()
     assert db.closed is True
 
@@ -619,6 +629,9 @@ async def test_delegation_mode_without_db_factory_gets_no_task_pieces() -> None:
     # And no catalog (trt.19): the router is never taught kinds that could
     # only stage_error here — internal kinds included (trt.57).
     assert runtime.gate._config.task_catalog == ()
+    # The executor-known set stays empty too (trt.62) — membership
+    # validation is moot when every delegate verdict stage_errors anyway.
+    assert runtime.gate._config.executor_kinds == frozenset()
     assert runtime.internal_tools is None
 
 

@@ -320,6 +320,23 @@ async def test_broken_skill_listed_with_reason_not_dropped(tmp_path: Path) -> No
     assert registry.catalog_entries() == ()
 
 
+async def test_kinds_carries_every_skill_any_eligibility(tmp_path: Path) -> None:
+    """The skills half of the executor-known set (Johnny-trt.62): ineligible
+    skills still *resolve* in the executor to honest skill-specific settles,
+    so kinds() carries them — only kinds outside the set are hallucinations
+    the gate degrades pre-ack."""
+    _write_skill(tmp_path, "plain")
+    _write_skill(
+        tmp_path, "mail", metadata='{"openclaw": {"requires": {"bins": ["himalaya"]}}}'
+    )
+    # No checker ⇒ mail is unverifiable ⇒ ineligible — but still a known kind.
+    registry = await load_skill_registry(tmp_path, check_bins=None)
+    mail = registry.get("mail")
+    assert mail is not None and mail.eligible is False
+    assert registry.kinds() == frozenset({"plain", "mail"})
+    assert EMPTY_SKILL_REGISTRY.kinds() == frozenset()
+
+
 async def test_duplicate_skill_names_second_listed_ineligible(tmp_path: Path) -> None:
     _write_skill(tmp_path, "a-dir", name="same")
     _write_skill(tmp_path, "b-dir", name="same")

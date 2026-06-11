@@ -24,6 +24,7 @@ from johnny.agent.internal_tools import (
     InternalToolContext,
     api_base_url_from_env,
     build_internal_task_executor,
+    executor_known_kinds,
     internal_catalog_entries,
     is_internal_kind,
     merge_task_catalog,
@@ -109,6 +110,18 @@ def test_merge_puts_internal_first_and_drops_shadowing_skill_kinds() -> None:
     ]
     # The surviving session.end is the internal one, not the imposter.
     assert merged[1].one_liner != "Imposter."
+
+
+def test_executor_known_kinds_composes_internal_plus_skills() -> None:
+    """The trt.62 membership-truth seam: internal tools always count; skill
+    kinds join verbatim (any eligibility — broken skills settle honestly,
+    so they are executor-known); future MCP kinds extend HERE."""
+    assert executor_known_kinds() == INTERNAL_TOOL_KINDS
+    assert executor_known_kinds(["google-calendar", "fetch-news"]) == (
+        INTERNAL_TOOL_KINDS | {"google-calendar", "fetch-news"}
+    )
+    # A skill shadowing an internal kind changes nothing (set union).
+    assert executor_known_kinds([SESSION_END_KIND]) == INTERNAL_TOOL_KINDS
 
 
 def test_api_base_url_default_and_env(monkeypatch: Any) -> None:

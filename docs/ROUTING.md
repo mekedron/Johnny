@@ -172,9 +172,10 @@ build list:
   into `agent_decisions.raw_output` (the trt.50 ride-along, so the decision row
   records the gap), then the turn speaks the reason **deterministically via say()**
   (`kind="status"`, no answer-LLM hop that could invent a pretend-check, no
-  `agent_tasks` row). Kinds absent from the catalog entirely keep the trt.57
-  stance: they ride to the executor's fail-fast legs and the trt.53 spoken
-  correction.
+  `agent_tasks` row). Kinds absent from the catalog are the next degrade's
+  job — the trt.62 membership check below (the original trt.57
+  ride-to-the-executor stance survives only where the executor-known set is
+  unfilled: hand-built gates and the replay harness).
 - **Scorer feed**: catalog assembly gives unavailable entries `keywords=()`, so the
   trt.50 delegate prior never fires for impossible work (no scorer change).
 - **Claim-time revalidation**: the skill executor re-runs the declared availability
@@ -186,6 +187,27 @@ build list:
   revalidation and by the next session's own assembly.
 
 Never a pretend-check, never delegate-into-failure.
+
+**Pre-ack kind validation (trt.62, shipped 2026-06-11).** The membership
+companion to trt.55's availability backstop: a delegate verdict whose `kind` the
+executor chain cannot resolve **at all** (a hallucinated kind — the canonical
+case is a knowledge question like "when did WW2 start" routed as a made-up
+`history.lookup`) is degraded to plain `speak` **before any ack is spoken**, so
+the answer model answers in one turn instead of the honest-but-clumsy ack →
+stub-fail → trt.53 walk-back chain. Validated against the **executor-known kind
+set**, NOT the rendered catalog — the executor is the truth, the catalog is its
+spoken projection — which keeps the config-drift robustness that motivated the
+old fail-open: a kind the catalog render missed but the executor can run still
+delegates. The set (`RouterGateConfig.executor_kinds`) is composed once per
+assembly by `executor_known_kinds()` (internal tools ∪ `SkillRegistry.kinds()`
+— **any** eligibility, since broken skills still settle honestly with
+skill-specific copy; future MCP kinds join in that one seam). Degrade order:
+availability (trt.55) → membership (trt.62) → the ack rule (trt.53); at most
+one fires. Marker `unknown_kind` (`{from_action, to_action, kind, reason}`)
+rides `decision.raw` into `agent_decisions.raw_output` (the trt.50 ride-along);
+the timeline shows the divergence guard ("Router invented a task kind … —
+answered directly instead") via `raw_output.unknown_kind`. An empty
+`executor_kinds` disables the check (replay parity by construction).
 
 **How capabilities reach the prompt — snapshot + progressive disclosure (trt.23,
 trt.55; openclaw-verified pattern).** The capabilities live in a separate sandbox

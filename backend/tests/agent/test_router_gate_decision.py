@@ -49,6 +49,7 @@ from johnny.agent.router_gate import (  # noqa: E402
     DEFAULT_DELEGATE_ACK,
     ROUTER_DECISION_SCHEMA,
     STATUS_STUB_REPLY,
+    UNKNOWN_KIND_KEY,
     RouterGate,
     RouterGateConfig,
     capability_decline_speech,
@@ -1513,9 +1514,11 @@ async def test_delegate_on_available_kind_ignores_other_entries_gaps() -> None:
 
 
 async def test_delegate_unknown_kind_keeps_the_executor_fail_fast_path() -> None:
-    """A kind absent from the catalog entirely (hallucinated) is NOT degraded —
-    it rides the trt.57 path: queued, failed fast by the stub executor, walked
-    back by the trt.53 spoken correction."""
+    """With ``executor_kinds`` UNFILLED, a kind absent from the catalog is NOT
+    degraded — it rides the trt.57 path: queued, failed fast by the stub
+    executor, walked back by the trt.53 spoken correction. (The trt.62
+    membership check is opt-in: hand-built gates and the replay harness keep
+    this legacy stance by construction.)"""
     h = _TaskGateHarness(
         [_delegate_decision(kind="made.up")],
         config=RouterGateConfig(task_catalog=_capability_catalog()),
@@ -1527,6 +1530,7 @@ async def test_delegate_unknown_kind_keeps_the_executor_fail_fast_path() -> None
     assert len(h.sink.snapshot()) == 1  # queued — executor owns the honesty
     decision, _turn = h.obs.decisions[0]
     assert CAPABILITY_GAP_KEY not in decision.raw
+    assert UNKNOWN_KIND_KEY not in decision.raw  # empty set ⇒ check disabled
     h.say.handles[0].fire_done()
     await h.drain()
     assert h.sink.snapshot()[0].status == "failed"
@@ -1578,6 +1582,154 @@ def test_capability_decline_speech_falls_back_when_reason_blank() -> None:
     generic = capability_decline_speech("x.y", "")
     assert "x.y" in generic
     assert "isn't available" in generic
+
+
+# --- pre-ack kind validation (Johnny-trt.62) ----------------------------------
+
+
+def _membership_config() -> RouterGateConfig:
+    """A session-shaped config: catalog (the spoken projection) + the
+    executor-known set. ``calendar.check`` is deliberately executor-known but
+    ABSENT from the catalog — the config-drift case the membership check must
+    not break."""
+    return RouterGateConfig(
+        task_catalog=_capability_catalog(),
+        executor_kinds=frozenset({"session.end", "google-calendar", "calendar.check"}),
+    )
+
+
+async def test_delegate_unknown_kind_degrades_to_speak_pre_ack(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """THE trt.62 membership check: a delegate verdict whose kind no executor
+    can resolve speaks NO ack and queues NO agent_tasks row — the turn rides
+    the plain SPEAK path (the canonical hallucinated kind is a knowledge
+    question the answer model answers in one turn, which beats ack →
+    stub-fail → walk-back), instrumented in decision.raw before the emit."""
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="history.lookup")], config=_membership_config()
+    )
+    msg = _user_msg("when did world war two start?")
+
+    with caplog.at_level(logging.WARNING, logger="johnny.agent.router_gate"):
+        await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK — no raise
+
+    assert h.say.texts == []  # pre-ack: the promise was never spoken
+    assert h.sink.snapshot() == []  # and nothing was queued
+    assert h.emitter.records == []  # the upcoming reply owns the terminal
+    assert msg.id in h.gate._pending_speak_turns
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "speak"
+    assert decision.task_request is None
+    marker = decision.raw[UNKNOWN_KIND_KEY]
+    assert marker == {
+        "from_action": "delegate",
+        "to_action": "speak",
+        "kind": "history.lookup",
+        "reason": "kind is unknown to this session's executor chain",
+    }
+    json.dumps(marker)  # JSON-safe as persisted by the subscriber
+    assert "UNKNOWN kind='history.lookup'" in caplog.text
+
+
+async def test_known_kind_missing_from_catalog_still_delegates() -> None:
+    """Config-drift fail-open (the reason trt.62 validates against the
+    executor-known set, NOT the rendered catalog): a kind the catalog render
+    missed but the executor can run delegates normally."""
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="calendar.check")], config=_membership_config()
+    )
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("check the calendar"))
+
+    assert len(h.sink.snapshot()) == 1  # queued — the normal delegate path
+    assert h.say.texts == ["On it — give me a minute."]
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "delegate"
+    assert UNKNOWN_KIND_KEY not in decision.raw
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_internal_kind_delegates_normally_under_membership_check() -> None:
+    """Internal kinds are executor-known by construction — the membership
+    check never touches a catalog-listed available kind on its surface."""
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="session.end")], config=_membership_config()
+    )
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("end the session"))
+
+    assert len(h.sink.snapshot()) == 1
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "delegate"
+    assert UNKNOWN_KIND_KEY not in decision.raw
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_unavailable_degrade_wins_over_membership() -> None:
+    """Order (the bead's contract): availability FIRST, membership second — a
+    catalog-listed-unavailable kind speaks the trt.55 decline even when the
+    executor-known set would not contain it."""
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="google-calendar")],
+        config=RouterGateConfig(
+            task_catalog=_capability_catalog(),
+            # google-calendar deliberately NOT in the set: if membership ran
+            # first it would degrade to SPEAK; the decline proves the order.
+            executor_kinds=frozenset({"session.end"}),
+        ),
+    )
+    msg = _user_msg("check what's on our google calendar")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    assert h.say.texts == [_UNAVAILABLE_REASON]  # the trt.55 decline spoke
+    assert h.sink.snapshot() == []
+    decision, _turn = h.obs.decisions[0]
+    assert CAPABILITY_GAP_KEY in decision.raw
+    assert UNKNOWN_KIND_KEY not in decision.raw  # the gap degrade won
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_ackless_unknown_kind_carries_unknown_marker_not_ack_fallback() -> None:
+    """Order (membership before the ack rule): an ackless delegate verdict for
+    an executor-unknown kind degrades with the UNKNOWN marker — the more
+    meaningful diagnostic — though both legs land on the same SPEAK path."""
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="history.lookup", ack=None)],
+        config=_membership_config(),
+    )
+    msg = _user_msg("when did world war two start?")
+
+    await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK — no raise
+
+    assert h.say.texts == []
+    assert h.sink.snapshot() == []
+    assert msg.id in h.gate._pending_speak_turns
+    decision, _turn = h.obs.decisions[0]
+    assert UNKNOWN_KIND_KEY in decision.raw
+    assert ACK_FALLBACK_KEY not in decision.raw  # membership won
+    assert decision.action == "speak"
+
+
+async def test_triage_timing_carries_speak_after_unknown_kind_degrade() -> None:
+    """The timing row carries the *effective* action for a membership-degraded
+    turn (the trt.53/.55 effective-action precedent applied to trt.62)."""
+    timing = _RecordingTriageTiming()
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="history.lookup")], config=_membership_config()
+    )
+    h.gate._record_triage_timing = timing  # the harness has no timing seam arg
+
+    await h.gate.run_turn(ChatContext.empty(), _user_msg("when did WW2 start?"))
+
+    assert [c[3] for c in timing.calls] == ["speak"]
 
 
 async def test_default_ack_survives_only_as_instrumented_last_resort(

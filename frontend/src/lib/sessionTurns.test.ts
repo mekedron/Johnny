@@ -478,6 +478,35 @@ describe('the Phase-3 chain (Johnny-trt.54)', () => {
 		);
 	});
 
+	it('an unknown-kind degrade surfaces the unknown_kind guard and answers directly (trt.62)', () => {
+		const view = buildTurnView(
+			makeSource({
+				rawOutput: {
+					action: 'delegate',
+					task: { kind: 'history.lookup', args: {}, ack: 'Give me a second.' },
+					unknown_kind: {
+						from_action: 'delegate',
+						to_action: 'speak',
+						kind: 'history.lookup',
+						reason: "kind is unknown to this session's executor chain"
+					}
+				}
+			}),
+			undefined
+		);
+		// Effective action is speak — a normal answer turn: no task step, the
+		// answer hop ran (not skipped as a say-path turn would be).
+		assert.equal(view.steps.find((s) => s.key === 'task'), undefined);
+		assert.equal(view.classification.label, 'Worth replying to');
+		const guards = view.steps.find((s) => s.key === 'guards');
+		const unknownGuard = guards?.guards.find(
+			(g) => g.structured === 'raw_output.unknown_kind'
+		);
+		assert.ok(unknownGuard && unknownGuard.tone === 'divergence');
+		assert.match(unknownGuard.label, /history\.lookup/);
+		assert.match(unknownGuard.label, /answered directly/);
+	});
+
 	it('a capability-gap degrade reads as an honest decline (trt.55)', () => {
 		const reason =
 			"I can't see the Google calendar yet — no Google account is connected to my tools.";

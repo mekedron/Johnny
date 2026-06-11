@@ -197,6 +197,14 @@ export interface CapabilityGapInfo {
 	reason: string;
 }
 
+/** The trt.62 executor-unknown-kind degrade marker stashed by the gate. */
+export interface UnknownKindInfo {
+	fromAction: string;
+	toAction: string;
+	kind: string;
+	reason: string;
+}
+
 /** The router's literal action verdict (`silent`/`speak`/`delegate`/`status`); null pre-trt.16 rows / live turns. */
 export function routerAction(rawOutput: Record<string, unknown> | null): string | null {
 	const action = rawOutput?.action;
@@ -206,13 +214,16 @@ export function routerAction(rawOutput: Record<string, unknown> | null): string 
 /**
  * The action the gate actually executed: a delegate verdict targeting an
  * unavailable capability is degraded to the spoken decline (Johnny-trt.55,
- * checked first — the gate's own order), an ackless delegate verdict to a
- * plain speak (Johnny-trt.53) — in both cases the marker's `to_action` is
- * what the turn actually did.
+ * checked first — the gate's own order), one targeting a kind no executor
+ * can run to a plain speak (Johnny-trt.62), and an ackless delegate verdict
+ * to a plain speak (Johnny-trt.53) — in every case the marker's `to_action`
+ * is what the turn actually did.
  */
 export function effectiveRouterAction(rawOutput: Record<string, unknown> | null): string | null {
 	const gap = capabilityGap(rawOutput);
 	if (gap) return gap.toAction;
+	const unknown = unknownKind(rawOutput);
+	if (unknown) return unknown.toAction;
 	const fallback = ackFallback(rawOutput);
 	if (fallback) return fallback.toAction;
 	return routerAction(rawOutput);
@@ -260,6 +271,18 @@ export function capabilityGap(
 		toAction: String(gap.to_action ?? 'status'),
 		kind: String(gap.kind ?? ''),
 		reason: String(gap.reason ?? '')
+	};
+}
+
+export function unknownKind(rawOutput: Record<string, unknown> | null): UnknownKindInfo | null {
+	const raw = rawOutput?.unknown_kind;
+	if (!raw || typeof raw !== 'object') return null;
+	const info = raw as Record<string, unknown>;
+	return {
+		fromAction: String(info.from_action ?? 'delegate'),
+		toAction: String(info.to_action ?? 'speak'),
+		kind: String(info.kind ?? ''),
+		reason: String(info.reason ?? '')
 	};
 }
 
@@ -518,6 +541,7 @@ function buildSteps(src: TurnSource): TurnStep[] {
 	const sayPath = action === 'delegate' || action === 'status';
 	const fallback = ackFallback(src.rawOutput);
 	const gap = capabilityGap(src.rawOutput);
+	const unknown = unknownKind(src.rawOutput);
 
 	const steps: TurnStep[] = [];
 
@@ -743,6 +767,15 @@ function buildSteps(src: TurnSource): TurnStep[] {
 				`isn't available in this session — declined honestly instead` +
 				(gap.reason ? `: ${gap.reason}` : ''),
 			structured: 'raw_output.capability_gap',
+			tone: 'divergence'
+		});
+	}
+	if (unknown) {
+		guards.push({
+			label:
+				`Router invented a task kind (${unknown.kind || 'unknown'}) no executor can run — ` +
+				'answered directly instead of promising background work',
+			structured: 'raw_output.unknown_kind',
 			tone: 'divergence'
 		});
 	}

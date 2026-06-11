@@ -60,6 +60,7 @@ from johnny.agent.gate import TurnIndex, TurnLedger
 from johnny.agent.internal_tools import (
     InternalToolContext,
     build_internal_task_executor,
+    executor_known_kinds,
     internal_catalog_entries,
     merge_task_catalog,
 )
@@ -681,6 +682,19 @@ async def build_agent_runtime(
         if task_coordinator is not None
         else ()
     )
+    # Pre-ack kind validation set (Johnny-trt.62): the kinds the executor
+    # chain can actually resolve — internal tools + every skill on the
+    # volume regardless of eligibility (broken skills still settle honestly
+    # with skill-specific copy; only kinds outside this set hit the stub's
+    # unsupported-kind leg). The gate degrades delegate verdicts outside it
+    # to SPEAK before any ack is spoken; the catalog above stays the spoken
+    # projection, so a kind the render missed but the executor can run
+    # still delegates.
+    executor_kinds = (
+        executor_known_kinds(skill_registry.kinds() if skill_registry is not None else ())
+        if task_coordinator is not None
+        else frozenset()
+    )
 
     gate_config = RouterGateConfig(
         mode=config.mode,
@@ -691,6 +705,7 @@ async def build_agent_runtime(
         calendar_attachments_text=config.calendar_attachments_text,
         prior_session_context=config.prior_session_context,
         task_catalog=task_catalog,
+        executor_kinds=executor_kinds,
     )
     gate = RouterGate(
         router_llm,

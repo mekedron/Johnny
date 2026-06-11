@@ -336,6 +336,18 @@ class SkillRegistry:
                 return skill
         return None
 
+    def kinds(self) -> frozenset[str]:
+        """Every kind on this volume, ANY eligibility (Johnny-trt.62).
+
+        The skills half of the executor-known set the gate's pre-ack
+        membership check validates delegate verdicts against: ineligible and
+        unavailable skills still *resolve* in
+        :func:`johnny.skills.executor.build_skill_task_executor` to honest,
+        skill-specific settles — only kinds outside this set hit the stub's
+        unsupported-kind leg, so only those count as hallucinated.
+        """
+        return frozenset(skill.name for skill in self.skills)
+
     def catalog_entries(self) -> tuple[TaskCatalogEntry, ...]:
         """Eligible skills as router task-catalog entries (Phase-3 contract).
 
