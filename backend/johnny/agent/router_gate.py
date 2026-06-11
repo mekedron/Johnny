@@ -65,6 +65,7 @@ from livekit.agents.voice import SpeechHandle
 
 from app.providers.base import ChatMessage, LLMProvider
 from johnny.agent.approval import ApprovalCoordinator, ApprovalRound
+from johnny.agent.complexity import SHADOW_KEY, score_complexity
 from johnny.agent.gate import (
     GateAction,
     TerminalTracker,
@@ -339,6 +340,14 @@ class RouterGate:
         the rate limiter treat a delegate/status verdict exactly like a speak
         verdict (unchanged behaviour).
 
+        Shadow complexity pre-score (Johnny-trt.50): before awaiting the
+        router LLM the gate runs the pure-python heuristic scorer
+        (:func:`~johnny.agent.complexity.score_complexity`) over the latest
+        transcript and stashes its 4-key verdict in ``decision.raw`` so the
+        ``RouterDecisionMade`` emit persists it inside
+        ``agent_decisions.raw_output``. Observability only — no branch reads
+        it, and a scorer failure is logged and ignored.
+
         In ``approval_required`` mode an approved-to-speak turn is **parked** for
         out-of-band human approval (Johnny-z97): the gate hands it to the
         :class:`~johnny.agent.approval.ApprovalCoordinator` and raises
@@ -360,6 +369,12 @@ class RouterGate:
             # skip_reply paths documented on :meth:`TurnLedger.open`). Stay silent.
             raise StopResponse()
         tracker = self._ledger.gate_tracker(turn_id)  # opens the turn (INV-1)
+        # Shadow complexity pre-score (Johnny-trt.50): pure stdlib, computed
+        # synchronously BEFORE the triage-LLM await — where a future behavioral
+        # pre-scorer would run — and outside the triage span below so the
+        # router_llm timing row stays comparable to the pre-shadow baseline.
+        # Observability only: nothing branches on it.
+        shadow = self._complexity_shadow(new_message, turn_id)
         triage_started = time.time()
         action, decision = await run_gate(
             lambda: self._decide(turn_ctx, new_message),
@@ -381,6 +396,15 @@ class RouterGate:
                 detail="router returned no decision",
             )
             raise StopResponse()
+
+        # Shadow-verdict persistence (Johnny-trt.50): ride the decision's raw
+        # payload so the existing RouterDecisionMade emit below lands it inside
+        # ``agent_decisions.raw_output`` next to the router's own ``action`` —
+        # no event field, no migration, and the replay diff never reads raw, so
+        # parity is untouched by construction. Nothing downstream reads the key
+        # back; it exists for the offline heuristic-vs-LLM-action dataset.
+        if shadow is not None:
+            decision.raw[SHADOW_KEY] = shadow
 
         # Triage-stage timing (Johnny-trt.19): one ``router_llm`` row per turn
         # the router actually decided (timed-out / barged / errored gates leave
@@ -483,6 +507,43 @@ class RouterGate:
             decision.confidence,
             decision.reason,
         )
+
+    def _complexity_shadow(
+        self, new_message: LKChatMessage, turn_id: str
+    ) -> dict[str, object] | None:
+        """Compute the turn's shadow complexity verdict (Johnny-trt.50).
+
+        Pure-python heuristic over the latest transcript + the session's task
+        catalog (the delegate-prior dimension — empty catalog on
+        non-delegation runtimes zeroes it, mirroring the prompt's capability
+        gating). Returns the 4-key payload :meth:`run_turn` stashes under
+        :data:`~johnny.agent.complexity.SHADOW_KEY` in ``decision.raw``, or
+        ``None`` if scoring failed — shadow mode must never break a turn, so
+        every exception is swallowed into a log line. The debug line below is
+        the bead's "one debug log line" and the only runtime trace besides
+        the persisted JSON.
+        """
+        try:
+            verdict = score_complexity(
+                (new_message.text_content or "").strip(),
+                catalog=self._config.task_catalog,
+            )
+        except Exception:
+            logger.exception(
+                "agent.router.gate: complexity shadow scoring failed for turn=%s", turn_id
+            )
+            return None
+        logger.debug(
+            "agent.router.gate: turn=%s complexity-shadow tier=%s score=%.3f "
+            "confidence=%.2f ambiguous=%s signals=%s",
+            turn_id,
+            verdict.tier,
+            verdict.score,
+            verdict.confidence,
+            verdict.ambiguous,
+            list(verdict.signals[:3]),
+        )
+        return verdict.shadow_payload()
 
     async def _begin_approval(
         self, tracker: TerminalTracker, turn_id: str, decision: RouterDecision

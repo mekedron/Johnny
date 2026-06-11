@@ -3,10 +3,10 @@
   "sessionId": "b8829633-95f0-4e1b-a1c5-e08500de3d70",
   "status": "running",
   "startedAt": "2026-06-11T05:16:05.966Z",
-  "updatedAt": "2026-06-11T06:06:04.734Z",
-  "currentIteration": 1,
+  "updatedAt": "2026-06-11T06:49:42.475Z",
+  "currentIteration": 2,
   "maxIterations": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 2,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -141,8 +141,8 @@
       {
         "id": "Johnny-trt.19",
         "title": "[BUILD] Phase 3: Triage budget + observability + task catalog in router prompt",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.20",
@@ -366,6 +366,16 @@
       "durationMs": 899168,
       "startedAt": "2026-06-11T05:16:54.883Z",
       "endedAt": "2026-06-11T05:31:54.051Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "Johnny-trt.19",
+      "taskTitle": "[BUILD] Phase 3: Triage budget + observability + task catalog in router prompt",
+      "taskCompleted": true,
+      "durationMs": 2018499,
+      "startedAt": "2026-06-11T05:32:24.710Z",
+      "endedAt": "2026-06-11T06:06:03.209Z"
     }
   ],
   "skippedTaskIds": [],

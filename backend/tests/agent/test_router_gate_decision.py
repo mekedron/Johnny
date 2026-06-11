@@ -1519,3 +1519,75 @@ async def test_interrupted_ack_discards_audio_replied_ack_keeps_it(
     h2.say.handles[0].fire_done()
     await h2.drain()
     assert recorder2.take_reply() is not None
+
+
+# --------------------------------------------------------------------------- #
+# Shadow complexity verdict (Johnny-trt.50)                                    #
+# --------------------------------------------------------------------------- #
+
+
+async def test_decided_turn_carries_shadow_verdict_in_decision_raw() -> None:
+    """The 4-key heuristic verdict rides ``decision.raw`` into the decision emit,
+    sourced from the gate config's task catalog (the dynamic delegate prior)."""
+    from johnny.agent.complexity import SHADOW_KEY
+    from johnny.agent.task_catalog import STUB_TASK_CATALOG
+
+    gate, _emitter, obs = _make_observed_gate(
+        [{"should_speak": True, "confidence": 0.95, "reason": "addressed"}],
+        config=RouterGateConfig(task_catalog=STUB_TASK_CATALOG),
+    )
+    await gate.run_turn(
+        ChatContext.empty(), _user_msg("check my calendar, what meetings tomorrow")
+    )
+
+    assert len(obs.decisions) == 1
+    decision, _turn = obs.decisions[0]
+    shadow = decision.raw[SHADOW_KEY]
+    assert set(shadow) == {"score", "tier", "confidence", "top_signals"}
+    assert shadow["tier"] in ("SIMPLE", "MEDIUM", "COMPLEX", "REASONING")
+    # The catalog dimension fired through the config-sourced catalog.
+    assert any("calendar.upcoming_events" in s for s in shadow["top_signals"])
+    # JSON-safe as persisted by the subscriber into agent_decisions.raw_output.
+    json.dumps(shadow)
+
+
+async def test_declined_turn_also_carries_shadow_verdict() -> None:
+    """Silent verdicts are part of the dataset too — the decision is recorded
+    before the should_speak branch, shadow included."""
+    from johnny.agent.complexity import SHADOW_KEY
+
+    gate, _emitter, obs = _make_observed_gate(
+        [{"should_speak": False, "confidence": 0.9, "reason": "side chatter"}]
+    )
+    with pytest.raises(StopResponse):
+        await gate.run_turn(ChatContext.empty(), _user_msg("...and then we went to lunch"))
+
+    assert len(obs.decisions) == 1
+    decision, _turn = obs.decisions[0]
+    assert SHADOW_KEY in decision.raw
+
+
+async def test_shadow_scorer_failure_never_breaks_the_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shadow mode contract: a scorer crash is logged, the verdict is simply
+    absent, and the turn branches exactly as before."""
+    import johnny.agent.router_gate as router_gate_module
+    from johnny.agent.complexity import SHADOW_KEY
+
+    def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("scorer exploded")
+
+    monkeypatch.setattr(router_gate_module, "score_complexity", _boom)
+    gate, emitter, obs = _make_observed_gate(
+        [{"should_speak": True, "confidence": 0.95, "reason": "addressed"}]
+    )
+    msg = _user_msg("Johnny, status?")
+
+    await gate.run_turn(ChatContext.empty(), msg)  # speak path — must not raise
+
+    assert emitter.records == []  # no stage_error terminal from the shadow path
+    assert gate._ledger.open_turns == (msg.id,)  # turn awaiting its reply, as ever
+    assert len(obs.decisions) == 1
+    decision, _turn = obs.decisions[0]
+    assert SHADOW_KEY not in decision.raw
