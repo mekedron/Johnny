@@ -57,7 +57,12 @@ from johnny.agent.adapters.factory import (
 from johnny.agent.answer import degrade_speaking_mode_if_no_tts
 from johnny.agent.barge_in import BargeInClassifier, BargeInClassifierConfig
 from johnny.agent.gate import TurnIndex, TurnLedger
-from johnny.agent.job_config import APPROVAL_REQUIRED_MODE, SessionJobConfig
+from johnny.agent.job_config import (
+    APPROVAL_REQUIRED_MODE,
+    AUTONOMOUS_MODE,
+    LIMITED_AUTO_SPEAK_MODE,
+    SessionJobConfig,
+)
 from johnny.agent.job_runtime import (
     answer_config_from_job,
     build_session_adapters_for_job,
@@ -75,6 +80,7 @@ from johnny.agent.observability import (
 )
 from johnny.agent.router_gate import RouterGate, RouterGateConfig
 from johnny.agent.session import JohnnyAgent, build_johnny_agent
+from johnny.agent.tasks import TaskCoordinator
 from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder, build_recorder_from_env
 from johnny.voice_pipeline.event_bus import (
     DEFAULT_CHANNEL_PREFIX,
@@ -95,6 +101,16 @@ if TYPE_CHECKING:
     from johnny.voice_pipeline.transcript_history import TranscriptHistoryLoader
 
 logger = logging.getLogger(__name__)
+
+# Modes whose router verdict may turn into a spoken delegate ack + an async
+# task (Johnny-trt.18). Exactly ``johnny.voice_pipeline.reasoning.SPEAKING_MODES``
+# (a drift-guard test asserts equality): the ack is spoken audio, so non-speaking
+# modes (listen_only, suggest_only) never need the task sink — and the no-TTS
+# degrade rewrites speaking modes to suggest_only *before* this gate, so a
+# session that cannot speak gets no task wiring either.
+DELEGATION_CAPABLE_MODES: frozenset[str] = frozenset(
+    {APPROVAL_REQUIRED_MODE, LIMITED_AUTO_SPEAK_MODE, AUTONOMOUS_MODE}
+)
 
 
 def build_event_bus(redis_url: str | None) -> EventBus:
@@ -171,10 +187,13 @@ class AgentRuntime:
     the worker (Johnny-9eh) builds the :class:`~livekit.agents.AgentSession` from
     :attr:`adapters`, starts it with :attr:`agent`, and — only when
     :attr:`needs_approval_wiring` — finishes the ``approval_required`` wiring with the
-    ledger / gate / approval gate / decision sink carried here. :meth:`aclose` drains
-    the metrics publisher, closes the approval gate + owned event bus, and releases the
-    approval DB session at teardown; the gate / ledger are swept by
-    :meth:`~johnny.agent.session.JohnnyAgent.on_exit` (``RouterGate.aclose``).
+    ledger / gate / approval gate / decision sink carried here. The delegated-task
+    pieces (Johnny-trt.18) need no live session, so :attr:`task_coordinator` arrives
+    fully wired for the gate's delegate branch (Johnny-trt.17). :meth:`aclose` drains
+    the metrics publisher and in-flight task resolvers, closes the approval gate +
+    task wake + owned event bus, and releases the shared sync DB session at teardown;
+    the gate / ledger are swept by :meth:`~johnny.agent.session.JohnnyAgent.on_exit`
+    (``RouterGate.aclose``).
     """
 
     config: SessionJobConfig
@@ -193,6 +212,12 @@ class AgentRuntime:
     speech_interim_forwarder: AgentSpeechInterimForwarder | None = None
     approval_gate: ApprovalGate | None = None
     decision_sink: Any = None
+    # Delegated-task pieces (Johnny-trt.18): the synchronous agent_tasks sink +
+    # the coordinator the gate's delegate branch drives (Johnny-trt.17). Built
+    # for delegation-capable (speaking) modes with a DB factory; None otherwise.
+    task_sink: Any = None
+    task_coordinator: TaskCoordinator | None = None
+    _task_wake: Any = None
     _db_session: Session | None = None
     _owns_event_bus: bool = True
 
@@ -244,6 +269,18 @@ class AgentRuntime:
                 await self.speech_interim_forwarder.aclose()
             except Exception:
                 logger.exception("agent runtime: speech interim forwarder close failed for %s", sid)
+        # Drain in-flight task resolvers BEFORE the DB session closes below —
+        # a cancelled resolver marks its row ``cancelled`` through the sink.
+        if self.task_coordinator is not None:
+            try:
+                await self.task_coordinator.aclose()
+            except Exception:
+                logger.exception("agent runtime: task coordinator close failed for %s", sid)
+        if self._task_wake is not None:
+            try:
+                await self._task_wake.close()
+            except Exception:
+                logger.exception("agent runtime: task wake close failed for %s", sid)
         if self.approval_gate is not None:
             try:
                 await self.approval_gate.close()
@@ -261,50 +298,93 @@ class AgentRuntime:
                 logger.exception("agent runtime: db session close failed for %s", sid)
 
 
-def _build_approval_pieces(
+def _build_sync_persistence(
     config: SessionJobConfig,
     *,
     db_session_factory: Callable[[], Session] | None,
-) -> tuple[ApprovalGate | None, Any, Session | None]:
-    """Build the ``approval_required`` approval gate + synchronous decision sink.
+) -> tuple[ApprovalGate | None, Any, Any, Session | None]:
+    """Build the synchronous DB-backed pieces: approval gate/sink + task sink.
 
-    The agent approval path needs the decision row's id *synchronously* before it
-    parks a turn (Johnny-qzj), so — unlike every other event, which the async Redis
-    subscriber persists — it writes the ``pending`` row through a SQLAlchemy
-    :class:`~app.services.router_decisions.SqlAlchemyDecisionSink` directly. That
-    needs a DB session, so the worker passes a ``db_session_factory`` (``SessionLocal``
-    in production). The approval source is the Redis-backed
-    :class:`~app.services.approval.RedisApprovalGate` keyed off the session id (the
-    same channel the API publishes approve/reject clicks to). Any missing piece
-    (no redis, no DB) returns ``(None, None, None)`` so the session still runs — the
-    gate auto-rejects on its misconfig branch, parity with the legacy degrade.
+    Two flows need a row to exist *synchronously* inside the turn hook — unlike
+    every other event, which the async Redis subscriber persists:
+
+    * ``approval_required`` needs the ``pending`` decision row's id before it
+      parks a turn (Johnny-qzj) — the Redis-backed
+      :class:`~app.services.approval.RedisApprovalGate` plus a
+      :class:`~app.services.router_decisions.SqlAlchemyDecisionSink`;
+    * every delegation-capable (speaking) mode needs the ``queued``
+      ``agent_tasks`` row before the delegate ack is spoken (Johnny-trt.18) —
+      a :class:`~app.services.agent_tasks.SqlAlchemyTaskSink`.
+
+    Both ride one shared DB session from ``db_session_factory``
+    (``SessionLocal`` in production). Degrades are per-piece and the session
+    always still runs: no DB factory → ``(None, None, None, None)`` (approval
+    auto-rejects on the gate's misconfig branch; delegate verdicts terminalize
+    ``no_reply(stage_error)``); approval without redis loses only the approval
+    pieces — the task sink does not need Redis (the wake ping is optional),
+    so delegation keeps working.
+
+    Returns ``(approval_gate, decision_sink, task_sink, db_session)``.
     """
-    if config.mode != APPROVAL_REQUIRED_MODE:
-        return None, None, None
+    is_approval = config.mode == APPROVAL_REQUIRED_MODE
+    delegation_capable = config.mode in DELEGATION_CAPABLE_MODES
+    if not is_approval and not delegation_capable:
+        return None, None, None, None
     session_id = str(config.bot_session_id)
-    redis_url = config.redis_url
-    if not redis_url:
-        logger.warning(
-            "mode=approval_required but no redis_url in job payload for %s — "
-            "approval clicks cannot reach the agent; turns auto-reject",
-            session_id,
-        )
-        return None, None, None
     if db_session_factory is None:
-        logger.warning(
-            "mode=approval_required but no DB session factory for %s — "
-            "cannot persist the pending decision row; turns auto-reject",
-            session_id,
-        )
-        return None, None, None
-    from app.services.approval import RedisApprovalGate
-    from app.services.router_decisions import SqlAlchemyDecisionSink
+        if is_approval:
+            logger.warning(
+                "mode=approval_required but no DB session factory for %s — "
+                "cannot persist the pending decision row; turns auto-reject",
+                session_id,
+            )
+        else:
+            logger.warning(
+                "mode=%s but no DB session factory for %s — cannot persist "
+                "agent_tasks rows; delegate verdicts will not be honoured",
+                config.mode,
+                session_id,
+            )
+        return None, None, None, None
 
-    db_session = db_session_factory()
-    decision_sink = SqlAlchemyDecisionSink(db_session, config.bot_session_id)
-    approval_gate = RedisApprovalGate(redis_url=redis_url, session_id=session_id)
-    logger.info("approval gate wired to redis channel johnny.approval.%s", session_id)
-    return approval_gate, decision_sink, db_session
+    db_session: Session | None = None
+
+    def _db() -> Session:
+        nonlocal db_session
+        if db_session is None:
+            db_session = db_session_factory()
+        return db_session
+
+    approval_gate: ApprovalGate | None = None
+    decision_sink: Any = None
+    if is_approval:
+        redis_url = config.redis_url
+        if not redis_url:
+            logger.warning(
+                "mode=approval_required but no redis_url in job payload for %s — "
+                "approval clicks cannot reach the agent; turns auto-reject",
+                session_id,
+            )
+        else:
+            from app.services.approval import RedisApprovalGate
+            from app.services.router_decisions import SqlAlchemyDecisionSink
+
+            decision_sink = SqlAlchemyDecisionSink(_db(), config.bot_session_id)
+            approval_gate = RedisApprovalGate(redis_url=redis_url, session_id=session_id)
+            logger.info("approval gate wired to redis channel johnny.approval.%s", session_id)
+
+    task_sink: Any = None
+    if delegation_capable:
+        from app.services.agent_tasks import SqlAlchemyTaskSink
+
+        task_sink = SqlAlchemyTaskSink(_db(), config.bot_session_id)
+        logger.info(
+            "task sink wired for session %s (delegation-capable mode=%s)",
+            session_id,
+            config.mode,
+        )
+
+    return approval_gate, decision_sink, task_sink, db_session
 
 
 async def build_agent_runtime(
@@ -326,7 +406,9 @@ async def build_agent_runtime(
     classifier, and the :class:`JohnnyAgent` (noise gate + answer nodes + transcript
     rehydration + metrics listener). ``approval_required`` mode additionally builds the
     Redis approval gate + synchronous decision sink (left for the worker to attach to a
-    live :class:`AgentSession`).
+    live :class:`AgentSession`); every delegation-capable (speaking) mode also gets the
+    synchronous ``agent_tasks`` sink + a fully wired :class:`TaskCoordinator`
+    (Johnny-trt.18 — no live session needed).
 
     A speaking mode dispatched with no configured TTS is degraded to ``suggest_only``
     (Johnny-un2): the assembled config's ``mode`` is rewritten, the agent runs with
@@ -391,7 +473,7 @@ async def build_agent_runtime(
     ledger = TurnLedger(build_session_terminal_emitter(bus, turn_index, session_id=session_id))
 
     is_approval = config.mode == APPROVAL_REQUIRED_MODE
-    approval_gate, decision_sink, db_session = _build_approval_pieces(
+    approval_gate, decision_sink, task_sink, db_session = _build_sync_persistence(
         config, db_session_factory=db_session_factory
     )
     persist_pending_decision = None
@@ -400,6 +482,23 @@ async def build_agent_runtime(
 
         persist_pending_decision = build_persist_pending_decision(
             decision_sink, session_id=session_id, bot_session_id=config.bot_session_id
+        )
+
+    # Delegated-task coordination (Johnny-trt.18): needs no live AgentSession
+    # (unlike the approval coordinator), so it is assembled right here and
+    # carried on the runtime for the gate's delegate branch (Johnny-trt.17).
+    # Phase 3 runs the stub executor — every kind fails fast with speech-ready
+    # text, so an ack can never become a dead promise.
+    task_coordinator = None
+    task_wake = None
+    if task_sink is not None:
+        from johnny.agent.task_wiring import build_task_coordinator
+
+        task_coordinator, task_wake = build_task_coordinator(
+            task_sink=task_sink,
+            event_bus=bus,
+            session_id=session_id,
+            redis_url=config.redis_url,
         )
 
     gate_config = RouterGateConfig(
@@ -506,6 +605,9 @@ async def build_agent_runtime(
         min_interruption_duration_s=None,
         approval_gate=approval_gate,
         decision_sink=decision_sink,
+        task_sink=task_sink,
+        task_coordinator=task_coordinator,
+        _task_wake=task_wake,
         _db_session=db_session,
         _owns_event_bus=owns_bus,
     )

@@ -34,6 +34,7 @@ from app.providers.base import (
 from app.providers.base import ProviderKind as Kind
 from johnny.agent.job_config import (
     APPROVAL_REQUIRED_MODE,
+    AUTONOMOUS_MODE,
     LIMITED_AUTO_SPEAK_MODE,
     LISTEN_ONLY_MODE,
     SUGGEST_ONLY_MODE,
@@ -53,6 +54,7 @@ from johnny.agent.job_session import (  # noqa: E402
 )
 from johnny.agent.router_gate import RouterGate  # noqa: E402
 from johnny.agent.session import JohnnyAgent  # noqa: E402
+from johnny.agent.tasks import TaskCoordinator  # noqa: E402
 
 # --- Fakes (mirror tests/agent/test_job_runtime.py) -------------------------
 
@@ -257,9 +259,10 @@ async def test_build_runtime_approval_without_tts_degrades_to_suggest() -> None:
     # approval_required is a speaking mode, so a missing TTS degrades it to
     # suggest_only BEFORE the approval pieces are considered (the legacy order: the
     # TTS check rewrites the mode, then the approval gate keys off the rewritten
-    # mode). The rewritten config.mode is the smoking gun — _build_approval_pieces
-    # short-circuits on mode != approval_required, so no gate/sink/persist is built
-    # even though redis is configured (and the DB is never consulted).
+    # mode). The rewritten config.mode is the smoking gun — _build_sync_persistence
+    # short-circuits on a non-approval, non-delegation-capable mode, so no
+    # gate/sink/persist is built even though redis is configured (and the DB is
+    # never consulted).
     runtime = await build_agent_runtime(
         _job(
             mode=APPROVAL_REQUIRED_MODE,
@@ -369,3 +372,150 @@ async def test_approval_mode_degrades_without_db_factory() -> None:
     )
     assert runtime.needs_approval_wiring is False
     assert runtime.approval_gate is None
+
+
+# --- delegated-task wiring (Johnny-trt.18) -----------------------------------
+
+
+@pytest.mark.parametrize("mode", [LIMITED_AUTO_SPEAK_MODE, AUTONOMOUS_MODE, APPROVAL_REQUIRED_MODE])
+async def test_delegation_capable_modes_wire_task_sink_and_coordinator(
+    mode: str,
+) -> None:
+    from app.services.agent_tasks import SqlAlchemyTaskSink
+
+    db = _FakeDbSession()
+    runtime = await build_agent_runtime(
+        _job(mode=mode, redis_url="redis://r:6379/0"),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: db,
+    )
+
+    assert isinstance(runtime.task_sink, SqlAlchemyTaskSink)
+    assert runtime.task_sink.bot_session_id == 7
+    assert isinstance(runtime.task_coordinator, TaskCoordinator)
+    assert runtime._task_wake is not None  # redis_url present -> wake ping wired
+
+    await runtime.aclose()
+    assert db.closed is True
+
+
+@pytest.mark.parametrize("mode", [LISTEN_ONLY_MODE, SUGGEST_ONLY_MODE])
+async def test_non_speaking_modes_get_no_task_pieces(mode: str) -> None:
+    runtime = await build_agent_runtime(
+        _job(mode=mode, redis_url="redis://r:6379/0"),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: _FakeDbSession(),
+    )
+    assert runtime.task_sink is None
+    assert runtime.task_coordinator is None
+    assert runtime._task_wake is None
+    assert runtime._db_session is None  # nothing needed the sync DB session
+
+
+async def test_approval_without_redis_still_wires_tasks() -> None:
+    # The approval pieces need Redis (clicks travel over it); the task sink
+    # does not — a delegate verdict must keep working when only the DB exists.
+    from app.services.agent_tasks import SqlAlchemyTaskSink
+
+    db = _FakeDbSession()
+    runtime = await build_agent_runtime(
+        _job(mode=APPROVAL_REQUIRED_MODE, redis_url=None),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: db,
+    )
+    assert runtime.needs_approval_wiring is False
+    assert runtime.approval_gate is None
+    assert runtime.decision_sink is None
+    assert isinstance(runtime.task_sink, SqlAlchemyTaskSink)
+    assert isinstance(runtime.task_coordinator, TaskCoordinator)
+    assert runtime._task_wake is None  # no redis -> no wake ping
+    await runtime.aclose()
+    assert db.closed is True
+
+
+async def test_delegation_mode_without_db_factory_gets_no_task_pieces() -> None:
+    runtime = await build_agent_runtime(
+        _job(mode=LIMITED_AUTO_SPEAK_MODE),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=None,
+    )
+    assert runtime.task_sink is None
+    assert runtime.task_coordinator is None
+
+
+async def test_speaking_mode_without_tts_degrade_drops_task_wiring() -> None:
+    # The no-TTS degrade rewrites the mode to suggest_only BEFORE the
+    # persistence gate, so a session that cannot speak an ack gets no task
+    # pieces (an unspeakable ack must never queue work).
+    runtime = await build_agent_runtime(
+        _job(
+            mode=LIMITED_AUTO_SPEAK_MODE,
+            provider_config=_provider_config_without_tts(),
+        ),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: _FakeDbSession(),
+    )
+    assert runtime.config.mode == SUGGEST_ONLY_MODE
+    assert runtime.task_sink is None
+    assert runtime.task_coordinator is None
+
+
+async def test_approval_mode_shares_one_db_session_between_sinks() -> None:
+    # Both synchronous sinks ride one DB session (one connection per session,
+    # released once at teardown) — no second factory call.
+    from app.services.agent_tasks import SqlAlchemyTaskSink
+    from app.services.router_decisions import SqlAlchemyDecisionSink
+
+    sessions: list[_FakeDbSession] = []
+
+    def factory() -> _FakeDbSession:
+        sessions.append(_FakeDbSession())
+        return sessions[-1]
+
+    runtime = await build_agent_runtime(
+        _job(mode=APPROVAL_REQUIRED_MODE, redis_url="redis://r:6379/0"),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=factory,
+    )
+    assert len(sessions) == 1
+    assert isinstance(runtime.decision_sink, SqlAlchemyDecisionSink)
+    assert isinstance(runtime.task_sink, SqlAlchemyTaskSink)
+    assert runtime.decision_sink._session is runtime.task_sink._session
+    await runtime.aclose()
+    assert sessions[0].closed is True
+
+
+async def test_aclose_drains_coordinator_and_wake_before_db_close() -> None:
+    # A cancelled resolver settles its row THROUGH the sink, so the DB session
+    # must still be open when the coordinator drains.
+    events: list[str] = []
+
+    class _ProbeCoordinator:
+        async def aclose(self) -> None:
+            events.append("coordinator")
+
+    class _ProbeWake:
+        async def close(self) -> None:
+            events.append("wake")
+
+    class _ProbeDb:
+        def close(self) -> None:
+            events.append("db")
+
+    runtime = await build_agent_runtime(
+        _job(mode=LIMITED_AUTO_SPEAK_MODE),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+    )
+    runtime.task_coordinator = _ProbeCoordinator()  # type: ignore[assignment]
+    runtime._task_wake = _ProbeWake()
+    runtime._db_session = _ProbeDb()  # type: ignore[assignment]
+
+    await runtime.aclose()
+    assert events == ["coordinator", "wake", "db"]

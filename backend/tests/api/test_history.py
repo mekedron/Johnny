@@ -17,6 +17,7 @@ from app.db import Base
 from app.db.models import (
     EMBEDDING_DIM,
     AgentDecision,
+    AgentTask,
     AgentUtterance,
     BotMode,
     BotSession,
@@ -51,6 +52,7 @@ def engine() -> sa.Engine:
             TranscriptChunk.__table__,  # type: ignore[list-item]
             AgentDecision.__table__,  # type: ignore[list-item]
             AgentUtterance.__table__,  # type: ignore[list-item]
+            AgentTask.__table__,  # type: ignore[list-item]
         ],
     )
     return eng

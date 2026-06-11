@@ -199,6 +199,32 @@ after each iteration and it's included in prompts for context.
   Ollama format-constraint without prompt changes; it picks `speak` for
   delegate-shaped asks until the trt.19 task catalog gives it delegation
   vocabulary.
+- **Delegated-task contract (trt.18)**: `TaskCoordinator.begin(TaskSpec)` is
+  async and the ONE ordering guarantee is row-before-ack — the `agent_tasks`
+  row is durable (`queued`) when `begin` returns, so the gate (trt.17) awaits
+  it and ONLY speaks the ack on a non-None `QueuedTask`; `None` = persist
+  failed = speak nothing + `no_reply(stage_error)`. The `TaskQueued` event
+  (session channel) and the `johnny.tasks.wake` ping (global channel, payload
+  `{task_id, kind, session_id}`) are best-effort — a flaky bus never blocks a
+  turn whose row exists. Executors may only settle done|failed (`cancelled` is
+  the coordinator's teardown stamp via aclose, `expired` reserved); the Phase-3
+  `stub_executor` fails EVERY kind in ms with speech-ready `result_text`
+  (`unsupported_kind_text`). Wiring: `_build_sync_persistence` in
+  job_session.py builds the task sink for ALL SPEAKING_MODES (drift-guarded ≡
+  DELEGATION_CAPABLE_MODES) sharing ONE db session with the approval sink;
+  approval-without-redis still gets tasks; the no-TTS suggest_only degrade
+  runs FIRST and drops task wiring (unspeakable ack ⇒ no queue). Browser path
+  inherits it all via build_agent_runtime. Live action/task evidence:
+  `agent_tasks` rows + `agent_decisions.raw_output`.
+- **Clean-DB provider bootstrap (for clean-install validations)**: a fresh
+  volume seeds ZERO provider rows ("Session failed: no active stt provider" /
+  setup errors at playground start). There is NO `ollama` provider name —
+  Ollama rides `openai-compatible` with options `base_url=
+  http://host.docker.internal:11434/v1` + `model=<tag>`; `piper` REQUIRES
+  `voice_id` (e.g. en_US-amy-medium) at create; `parakeet` defaults its
+  sidecar URL. POST /providers then POST /providers/{id}/activate per kind —
+  a bad provider_name fails at session START (agent setup error toast), not
+  at create.
 - **Deepgram direct-streaming voice path (trt.14)**: interims flow
   in-session end-to-end (live caption grows through multiple
   hypotheses, clears on final) — but finals carry a Deepgram speaker id
@@ -800,4 +826,72 @@ after each iteration and it's included in prompts for context.
     `ruff format --diff <file> | grep -c ^@@` + a HEAD-pipe format check is
     the quick way to prove your regions are clean inside a format-dirty
     file.
+---
+
+## 2026-06-11 - Johnny-trt.18
+- Phase-3 persistence + coordinator skeleton shipped: delegated tasks now have
+  a durable home and an honest lifecycle before the gate ever branches
+  (trt.17). `agent_tasks` table (models.py `AgentTask` + `AgentTaskStatus`,
+  TimestampMixin, FK CASCADE to bot_sessions / SET NULL to agent_decisions,
+  status CHECK queued|running|done|failed|cancelled|expired, JSONB
+  request/result, `(session, created_at)` + `(status)` indexes) + idempotent/
+  reversible migration 0023. `SqlAlchemyTaskSink`
+  (app/services/agent_tasks.py, DecisionSink discipline: insert+commit =
+  durable at return; None-kwargs leave columns alone; junk status degrades to
+  failed, never loses a terminal write). Stdlib-only core
+  johnny/agent/tasks.py: TaskSpec/QueuedTask/TaskResult/TaskSink ABC/
+  InMemoryTaskSink + `TaskCoordinator` (ApprovalCoordinator discipline —
+  strong task refs, aclose cancel-drain marks rows `cancelled`, `join()` for
+  tests/drain, all announce I/O contained) + `stub_executor` failing every
+  kind fast with speech-ready text. Wiring johnny/agent/task_wiring.py:
+  TaskQueued publisher (new ephemeral `task_queued` event in events.py union;
+  subscriber ignores unknown types, ws passes the name through), lazy
+  publish-only `RedisTaskWake` on the new global `johnny.tasks.wake` channel,
+  `build_task_coordinator` factory. job_session.py: `_build_approval_pieces`
+  → `_build_sync_persistence` (approval gate/sink + task sink share one db
+  session; task sink for all SPEAKING_MODES incl. approval-without-redis;
+  non-speaking modes + the no-TTS degrade get nothing), AgentRuntime carries
+  task_sink/task_coordinator/_task_wake and acloses coordinator+wake BEFORE
+  the db session.
+- Verified: 181 tests across the 6 new/extended files (coordinator ordering
+  matrix incl. row-before-publish, lifecycle queued→running→failed,
+  cancel-marks-cancelled, stub fail-fast, sink SQLite round-trips, the bead's
+  queued→failed integration, migration 0023 create/defaults/CHECK/idempotent/
+  downgrade, job_session mode matrix + aclose order probe, drift guards
+  TaskStatus≡AgentTaskStatus and DELEGATION_CAPABLE_MODES≡SPEAKING_MODES);
+  full suite 3745 passed / 7 failed = documented pre-existing env set (dead
+  OPENAI_API_KEY live tests incl. the providers_ui lifecycle trio + wizard
+  image checks); ruff lint clean on all 16 touched files, new files
+  format-clean, HEAD-dirty files my-regions-clean (hunk-vs-region audit).
+  Clean install `./stop.sh && ./run.sh`: 0023 applied on fresh volume (full
+  schema dump), live in-container E2E on prod stack — row queued 4.9 ms at
+  begin-return, failed 8.1 ms (≤2 s bar) with spoken-form error stored; live
+  Redis capture of `task_queued` on johnny.session.{id} AND the wake ping on
+  johnny.tasks.wake; chrome-devtools playground session #4 (autonomous mode →
+  task wiring on the live browser path) full chat round-trip, console clean;
+  live CASCADE delete check. Artifacts: .validation/Johnny-trt.18/
+  (00-notes.md maps them).
+- Files changed: backend/app/db/models.py,
+  backend/alembic/versions/0023_agent_tasks.py (new),
+  backend/johnny/voice_pipeline/{events.py,__init__.py},
+  backend/johnny/agent/{tasks.py (new),task_wiring.py (new),job_session.py},
+  backend/app/services/agent_tasks.py (new),
+  backend/tests/{test_migration_0023.py (new),agent/test_tasks.py (new),
+  agent/test_task_wiring.py (new),services/test_agent_tasks.py (new),
+  agent/test_job_session.py,voice_pipeline/test_events.py,
+  services/test_history.py,api/test_history.py}, .ralph-tui/progress.md.
+- **Learnings:**
+  - Patterns discovered: the delegated-task contract (row-before-ack,
+    best-effort announce, executor done|failed-only, SPEAKING_MODES wiring) and
+    the clean-DB provider bootstrap recipe — both added to Codebase Patterns
+    above.
+  - Gotchas: a new ORM relationship with `cascade="all, delete-orphan"` breaks
+    every tables-subset SQLite fixture that deletes the parent ("no such
+    table: agent_tasks") — grep tests for `create_all(...tables=[` lists
+    containing BotSession and add the new table; job_session INFO lines
+    ("task sink wired") are swallowed by docker logs exactly like the gate's
+    breadcrumbs — prove wiring by unit matrix + the fact that session start
+    traverses build_agent_runtime (a raise there fails the start visibly);
+    redis-cli in the redis image has no `--timeout` flag — capture pub/sub
+    in-process with redis.asyncio instead of backgrounding redis-cli.
 ---

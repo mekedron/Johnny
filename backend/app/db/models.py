@@ -150,6 +150,27 @@ class NoReplyReason(enum.StrEnum):
     LEGACY = "legacy"
 
 
+class AgentTaskStatus(enum.StrEnum):
+    """Lifecycle of one delegated async task (Johnny-trt.18).
+
+    ``queued`` is stamped synchronously *before* the ack is spoken (the
+    row is the promise the ack makes); ``running`` when an executor picks
+    it up; ``done`` / ``failed`` when execution settles (``result_text``
+    or ``error`` carries the speech-ready summary); ``cancelled`` when the
+    session tore down with the task in flight; ``expired`` is reserved for
+    a future staleness sweep over tasks nothing ever picked up. Kept in
+    lock-step with :data:`johnny.agent.tasks.TaskStatus` (the stdlib-only
+    coordinator side; a drift-guard test asserts equality).
+    """
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+
+
 def _str_enum_values(enum_cls: type[enum.Enum]) -> list[str]:
     """Return enum members' ``.value`` strings — used so SAEnum stores the
     lowercase value (matching the migrations' CHECK constraints) instead of
@@ -447,6 +468,9 @@ class BotSession(TimestampMixin, Base):
     agent_utterances: Mapped[list[AgentUtterance]] = relationship(
         back_populates="bot_session", cascade="all, delete-orphan"
     )
+    agent_tasks: Mapped[list[AgentTask]] = relationship(
+        back_populates="bot_session", cascade="all, delete-orphan"
+    )
 
 
 class TranscriptChunk(Base):
@@ -677,6 +701,72 @@ class AgentUtterance(Base):
 
     bot_session: Mapped[BotSession] = relationship(back_populates="agent_utterances")
     decision: Mapped[AgentDecision | None] = relationship(back_populates="utterances")
+
+
+class AgentTask(TimestampMixin, Base):
+    """One delegated async task and its lifecycle (Johnny-trt.18, Phase 3).
+
+    A ``delegate`` router verdict makes the bot speak a short ack and hand
+    the request off the turn loop. This row is what makes that ack a real
+    promise: it is inserted ``queued`` *before* the ack is spoken (the
+    status query and the UI correlate on it), an executor flips it through
+    ``running`` to a terminal status, and ``result_text`` carries the
+    speech-ready summary a later ``status`` turn (or proactive report,
+    Phase 5) reads out loud.
+
+    ``agent_decision_id`` links back to the delegating turn's canonical
+    decision row when one was persisted synchronously (``ON DELETE SET
+    NULL`` — the task audit outlives a pruned decision); ``turn_id`` is the
+    same durable per-session counter ``agent_decisions.turn_id`` carries.
+    ``request_json`` snapshots the validated task request (``{kind, args,
+    ack}``) so the executor never has to re-parse router output.
+    ``callback_token`` is reserved for executors that complete out of
+    process (Phase 4) and is NULL until one mints it.
+    """
+
+    __tablename__ = "agent_tasks"
+    __table_args__ = (
+        Index("ix_agent_tasks_session_created", "bot_session_id", "created_at"),
+        Index("ix_agent_tasks_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_session_id: Mapped[int] = mapped_column(
+        ForeignKey("bot_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    agent_decision_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_decisions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    turn_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    kind: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_json: Mapped[dict[str, Any]] = mapped_column(_json_column(), nullable=False)
+    status: Mapped[AgentTaskStatus] = mapped_column(
+        SAEnum(
+            AgentTaskStatus,
+            name="agent_task_status",
+            native_enum=False,
+            length=16,
+            validate_strings=True,
+            values_callable=_str_enum_values,
+        ),
+        nullable=False,
+        default=AgentTaskStatus.QUEUED,
+        server_default=AgentTaskStatus.QUEUED.value,
+    )
+    # The ack actually spoken for this task (speech text, INV-2 style audit);
+    # NULL when the gate fell back to its own wording or nothing was spoken.
+    ack_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Speech-ready result/error summary — what a status turn reads out loud.
+    result_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(_json_column(), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    callback_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    bot_session: Mapped[BotSession] = relationship(back_populates="agent_tasks")
+    decision: Mapped[AgentDecision | None] = relationship()
 
 
 class SessionTiming(Base):

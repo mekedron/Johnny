@@ -30,6 +30,7 @@ ApprovalResolvedEventType = Literal["approval_resolved"]
 PipelineTimingEventType = Literal["pipeline_timing"]
 PipelineStageFailedEventType = Literal["pipeline_stage_failed"]
 TurnTerminalEventType = Literal["turn_terminal"]
+TaskQueuedEventType = Literal["task_queued"]
 
 TerminalState = Literal["replied", "pending_approval", "no_reply"]
 """The single state a transcribed user turn resolves to (INV-1, Johnny-ckz.28.3).
@@ -517,6 +518,38 @@ class ApprovalResolved:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskQueued:
+    """A delegated async task was accepted and persisted ``queued`` (Johnny-trt.18).
+
+    Emitted by the :class:`~johnny.agent.tasks.TaskCoordinator` right after
+    the ``agent_tasks`` row exists (the row is inserted synchronously
+    *before* the ack is spoken, so by the time a subscriber sees this event
+    the ``task_id`` is queryable). The live UI uses it to show "Johnny is
+    working on ..." chips; the durable record is the ``agent_tasks`` row
+    itself, so the status subscriber ignores this type (no extra
+    persistence — the same ephemeral contract as the interim events).
+
+    * ``task_id`` — the ``agent_tasks`` row id consumers correlate on.
+    * ``kind`` — the task-kind identifier from the router's verdict.
+    * ``turn_id`` — the delegating turn's durable int id (same value its
+      ``TurnTerminal`` carries); ``None`` for tasks queued outside a turn.
+    * ``decision_id`` — the delegating turn's ``agent_decisions`` row id
+      when one was persisted synchronously; ``None`` otherwise.
+    * ``ack_text`` — the ack phrase attached to the task (may be empty when
+      the gate fell back to its own wording).
+    """
+
+    task_id: int
+    kind: str
+    timestamp_ms: int
+    turn_id: int | None = None
+    decision_id: int | None = None
+    ack_text: str = ""
+    session_id: str | None = None
+    type: TaskQueuedEventType = "task_queued"
+
+
+@dataclass(frozen=True, slots=True)
 class PipelineTiming:
     """One measured stage timing for the per-turn activity log (Johnny-ckz.7).
 
@@ -569,6 +602,7 @@ PipelineEvent = (
     | ApprovalPending
     | ApprovalResolved
     | PipelineTiming
+    | TaskQueued
     | TurnTerminal
 )
 """Union of every event the pipeline emits."""
@@ -603,6 +637,7 @@ __all__ = [
     "RouterDecisionMade",
     "SessionStatus",
     "SessionStatusChanged",
+    "TaskQueued",
     "TerminalState",
     "TranscriptFiltered",
     "TranscriptFilteredReason",

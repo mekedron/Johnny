@@ -15,6 +15,7 @@ from johnny.voice_pipeline.events import (
     ApprovalResolved,
     RouterDecisionMade,
     SessionStatusChanged,
+    TaskQueued,
     TranscriptFiltered,
     TranscriptFinalized,
     TranscriptInterim,
@@ -108,6 +109,46 @@ def test_event_to_dict_agent_speech_interim() -> None:
         "turn_id": 7,
         "session_id": "s",
         "type": "agent_speech_interim",
+    }
+
+
+def test_task_queued_defaults() -> None:
+    ev = TaskQueued(task_id=42, kind="web_search", timestamp_ms=1_000)
+    assert ev.task_id == 42
+    assert ev.kind == "web_search"
+    assert ev.timestamp_ms == 1_000
+    assert ev.turn_id is None
+    assert ev.decision_id is None
+    assert ev.ack_text == ""
+    assert ev.session_id is None
+    assert ev.type == "task_queued"
+
+
+def test_task_queued_is_frozen() -> None:
+    ev = TaskQueued(task_id=1, kind="k", timestamp_ms=0)
+    with pytest.raises(FrozenInstanceError):
+        ev.kind = "mutated"  # type: ignore[misc]
+
+
+def test_event_to_dict_task_queued() -> None:
+    ev = TaskQueued(
+        task_id=42,
+        kind="web_search",
+        timestamp_ms=1_000,
+        turn_id=4,
+        decision_id=17,
+        ack_text="on it",
+        session_id="s",
+    )
+    assert event_to_dict(ev) == {
+        "task_id": 42,
+        "kind": "web_search",
+        "timestamp_ms": 1_000,
+        "turn_id": 4,
+        "decision_id": 17,
+        "ack_text": "on it",
+        "session_id": "s",
+        "type": "task_queued",
     }
 
 

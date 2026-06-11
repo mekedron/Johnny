@@ -1,0 +1,114 @@
+"""Delegated-task persistence — the production ``TaskSink`` (Johnny-trt.18).
+
+:class:`SqlAlchemyTaskSink` writes the ``agent_tasks`` rows the
+:class:`~johnny.agent.tasks.TaskCoordinator` drives: the ``queued`` row a
+``delegate`` turn persists **synchronously before the ack is spoken** (the
+status query and the UI correlate on its id), and the status flips an
+executor stamps as the work runs.
+
+Modeled on :class:`app.services.router_decisions.SqlAlchemyDecisionSink`: the
+coordinator core lives in ``johnny.agent`` and never imports this module —
+the session assembly (:func:`johnny.agent.job_session.build_agent_runtime`)
+constructs the sink with a ``Session`` + ``bot_session_id`` and injects it.
+Tests of the coordinator use :class:`johnny.agent.tasks.InMemoryTaskSink`.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING
+
+from app.db.models import AgentTask, AgentTaskStatus
+from johnny.agent.tasks import TaskSink, TaskSpec, TaskStatus
+
+if TYPE_CHECKING:
+    from typing import Any
+
+    from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
+
+
+class SqlAlchemyTaskSink(TaskSink):
+    """Persist delegated tasks to ``agent_tasks``.
+
+    One sink per :class:`BotSession`: the ``bot_session_id`` is bound at
+    construction time. :meth:`record_queued` inserts and commits — the row is
+    durable when it returns, which is the ordering guarantee
+    :meth:`TaskCoordinator.begin` builds the spoken ack on. Exceptions
+    propagate to the coordinator, which logs and refuses the task (no row, no
+    promise, no ack).
+    """
+
+    def __init__(
+        self,
+        session: Session,
+        bot_session_id: int,
+    ) -> None:
+        self._session = session
+        self._bot_session_id = bot_session_id
+
+    @property
+    def bot_session_id(self) -> int:
+        return self._bot_session_id
+
+    async def record_queued(self, spec: TaskSpec) -> int | None:
+        row = AgentTask(
+            bot_session_id=self._bot_session_id,
+            agent_decision_id=spec.decision_id,
+            turn_id=spec.turn_id,
+            kind=spec.kind,
+            # Snapshot of the validated request — the executor never has to
+            # re-parse router output (the raw model output already lives in
+            # agent_decisions.raw_output for audit).
+            request_json={
+                "kind": spec.kind,
+                "args": dict(spec.args),
+                "ack": spec.ack_text,
+            },
+            status=AgentTaskStatus.QUEUED,
+            ack_text=spec.ack_text or None,
+        )
+        self._session.add(row)
+        self._session.commit()
+        return int(row.id) if row.id is not None else None
+
+    async def update_status(
+        self,
+        task_id: int,
+        status: TaskStatus,
+        *,
+        result_text: str | None = None,
+        result_json: dict[str, Any] | None = None,
+        error: str | None = None,
+        attempts: int | None = None,
+    ) -> None:
+        row = self._session.get(AgentTask, task_id)
+        if row is None:
+            logger.warning("task_id=%s not found when updating status to %s", task_id, status)
+            return
+        try:
+            row.status = AgentTaskStatus(status)
+        except ValueError:
+            # The Literal type guards callers at check time; never lose a
+            # terminal write to a junk runtime value.
+            logger.error(
+                "task_id=%s: unknown status %r — recording failed instead",
+                task_id,
+                status,
+            )
+            row.status = AgentTaskStatus.FAILED
+        if result_text is not None:
+            row.result_text = result_text
+        if result_json is not None:
+            row.result_json = dict(result_json)
+        if error is not None:
+            row.error = error
+        if attempts is not None:
+            row.attempts = attempts
+        self._session.commit()
+
+
+__all__ = [
+    "SqlAlchemyTaskSink",
+]

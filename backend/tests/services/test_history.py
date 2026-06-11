@@ -13,6 +13,7 @@ from app.db import Base
 from app.db.models import (
     EMBEDDING_DIM,
     AgentDecision,
+    AgentTask,
     AgentUtterance,
     BotMode,
     BotSession,
@@ -59,6 +60,7 @@ def engine() -> sa.Engine:
             TranscriptChunk.__table__,  # type: ignore[list-item]
             AgentDecision.__table__,  # type: ignore[list-item]
             AgentUtterance.__table__,  # type: ignore[list-item]
+            AgentTask.__table__,  # type: ignore[list-item]
         ],
     )
     return eng
@@ -492,6 +494,13 @@ def test_delete_session_cascades(db_session: Session) -> None:
             output_text="hi",
         )
     )
+    db_session.add(
+        AgentTask(
+            bot_session_id=row.id,
+            kind="web_search",
+            request_json={"kind": "web_search", "args": {}, "ack": ""},
+        )
+    )
     db_session.commit()
 
     delete_session(db_session, row.id)
@@ -509,6 +518,7 @@ def test_delete_session_cascades(db_session: Session) -> None:
         db_session.scalar(sa.select(sa.func.count()).select_from(AgentUtterance))
         == 0
     )
+    assert db_session.scalar(sa.select(sa.func.count()).select_from(AgentTask)) == 0
 
 
 def test_delete_session_404(db_session: Session) -> None:
