@@ -5,6 +5,30 @@ after each iteration and it's included in prompts for context.
 
 ## Codebase Patterns (Study These First)
 
+- **Unit-testing the rune-based PlaygroundController without the svelte
+  compiler (trt.40)**: the vitest config deliberately skips the svelte
+  plugins, so `.svelte.ts` rune modules normally can't be imported — but
+  `$state(v)` initializers only run at `new`, so installing
+  `(globalThis as { $state?: unknown }).$state = (v) => v` before
+  instantiation makes class fields plain non-reactive properties, which is
+  enough for lifecycle/state assertions (see
+  `playgroundController.test.ts`; vi.mock `svelte` (tick), sessionEvents,
+  browserSessions, browserAudio, sessionDetail; node ≥21 has a global
+  `navigator` but no `mediaDevices`, so `supportsMic()` is false and audio
+  wiring self-skips). Gotcha: node:assert/strict `deepEqual(x, [])` has an
+  `asserts actual is T` signature that narrows `x` to `never[]` for the
+  REST of the test — use `.length === 0` instead.
+- **Playground per-session UI scoping (trt.40)**: every WS-subscription
+  callback (onEvent/onOpen/onClose/onError) is pinned to the sessionId it
+  subscribed for and checked against `liveSession.id` — a deliberately
+  closed socket still fires onClose/onError asynchronously, and a late
+  frame from an ended session must not repopulate, tear down, or flip the
+  connection banner of the next session. Per-session UI state
+  (transcript incl. both live captions, lastDecisionAt/lastSpokenAt,
+  isSpeaking, micLevel) resets ONLY in start()/reattach() via
+  `resetPerSessionUi()` — endSession/teardownLive intentionally keep final
+  lines visible for post-session review, and user controls (volume, mutes,
+  barge-in, composer draft) survive across sessions.
 - **Scripted fake-mic playground runs interact with trt.9 client auto
   barge-in**: launch the shared Chrome with `CHROME_EXTRA_FLAGS="--use-fake-device-for-media-stream
   --use-fake-ui-for-media-stream --use-file-for-fake-audio-capture=<wav>
@@ -505,4 +529,54 @@ after each iteration and it's included in prompts for context.
     reply's first flush, never per-sentence. zsh: `echo "==="` in a
     compound command errors ("== not found") — quote or avoid bare `===`
     separators in Bash tool calls.
+---
+
+## 2026-06-11 - Johnny-trt.40
+- Fixed the operator-reported stale-history bug: Start → dictate/chat → End
+  → Start again now opens an EMPTY playground chat window. Root cause:
+  `endSession()`/`teardownLive()` deliberately keep final lines visible for
+  post-session review, and `start()` never wiped them — plus event handlers
+  weren't keyed to the session they subscribed for.
+- Controller changes (frontend/src/lib/playground/playgroundSession.svelte.ts):
+  (1) new `resetPerSessionUi()` (transcript incl. both trt.13/trt.39 live
+  captions, lastDecisionAt, lastSpokenAt, isSpeaking, micLevel) called from
+  `start()` on POST success and from `reattach()` after its validation
+  early-returns (a REJECTED reattach leaves a reviewed window alone; seeding
+  then fills the session's own history); user controls + composer draft
+  deliberately survive. (2) `isActiveSession(id)` guard: `handleSessionEvent`
+  takes the bound sessionId and drops frames from any non-active
+  subscription (delayed finals, trailing pipeline events, and a stale
+  `session_status_change(ended)` that would otherwise TEAR DOWN the new
+  session); onOpen/onClose/onError are equally pinned so a deliberately
+  closed old socket (which still fires onClose asynchronously) can't flip
+  the fresh session's banner to "reconnecting". (3) Audited teardown: both
+  end paths + destroy() close the subscription; `ReconnectingSubscription`
+  drops post-close frames — the id guard covers the remaining async
+  socket-lifecycle races.
+- Tests: 4 new controller-level tests (playgroundController.test.ts) run the
+  REAL controller under plain vitest via a globalThis `$state` identity shim
+  (no svelte compiler): full repro start→chat→end→start asserts the wipe +
+  closed old subscription; late stale final/bot-sentence/ended-status via the
+  old subscription don't touch (or kill) session 2; reconnect cycle
+  mid-session never resets; stale socket close can't flip connection after
+  1200 ms debounce (fake timers). vitest 117/117, svelte-check 0/0, eslint
+  clean on touched files (repo-wide lint has one PRE-EXISTING
+  settings/+page.svelte `PermissionName` no-undef, file unchanged vs HEAD).
+- Browser validation (chrome-devtools, dev stack, Parakeet+Ollama+Piper,
+  sessions 102/103): exact repro driven live — #102 chat (user line + reply,
+  trt.39 bubble seen reconciling), End, Start → #103 window empty across 10
+  DOM samples / 5 s (`everHadLines=false`, badge `idle`), #103's own chat
+  round-trips, /sessions/102 history intact, console clean, DB rows ended +
+  correctly per-session. Artifacts: .validation/Johnny-trt.40/ (00-notes.md
+  maps them).
+- Files changed: frontend/src/lib/playground/playgroundSession.svelte.ts,
+  frontend/src/lib/playground/playgroundController.test.ts (new),
+  .ralph-tui/progress.md.
+- **Learnings:**
+  - Patterns discovered: the `$state`-shim controller-testing recipe and the
+    per-session scoping rules — added to Codebase Patterns above.
+  - Gotchas: node:assert/strict `deepEqual(x, [])` narrows `x` to `never[]`
+    via its asserts-signature (use `.length`); `npx prettier` pulls an
+    unpinned version and false-flags files — this frontend has NO prettier,
+    `pnpm lint` is just `eslint .`.
 ---

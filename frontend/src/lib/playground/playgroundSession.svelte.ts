@@ -482,6 +482,10 @@ export class PlaygroundController {
 
 		try {
 			const session = await startBrowserSession(this.buildPayload());
+			// A new session gets a clean window (Johnny-trt.40): the previous
+			// session's lines stay visible after End for review, but must not
+			// leak into the next session's chat.
+			this.resetPerSessionUi();
 			this.liveSession = session;
 			this.connection = 'connecting';
 			this.subscribeToLiveEvents(session.id);
@@ -539,6 +543,11 @@ export class PlaygroundController {
 			) {
 				this.mode = overrides.mode as BotMode;
 			}
+			// Committed to the reattach — zero stale per-session state before
+			// seeding this session's own history (Johnny-trt.40). Kept below
+			// the validation early-returns so a REJECTED reattach (already
+			// ended / not a browser session) leaves the reviewed window alone.
+			this.resetPerSessionUi();
 			this.liveSession = {
 				id: s.id,
 				meeting_config_id: s.meeting_config_id,
@@ -724,27 +733,39 @@ export class PlaygroundController {
 	}
 
 	// --- Live event subscription ------------------------------------------
+	/** True while `sessionId` is the session this playground is bound to. */
+	private isActiveSession(sessionId: number): boolean {
+		return this.liveSession !== null && this.liveSession.id === sessionId;
+	}
+
 	private subscribeToLiveEvents(sessionId: number): void {
 		this.subscription?.close();
+		// Every callback is pinned to the session it subscribed for
+		// (Johnny-trt.40): a late frame or a socket-lifecycle callback from
+		// an ended session's connection (a deliberately-closed socket still
+		// fires onClose/onError) must not touch the fresh session's window
+		// or its connection banner.
 		this.subscription = subscribeToSession(String(sessionId), {
-			onEvent: this.handleSessionEvent,
+			onEvent: (event) => this.handleSessionEvent(sessionId, event),
 			onOpen: () => {
+				if (!this.isActiveSession(sessionId)) return;
 				this.connection = 'open';
 				if (this.connDropTimer !== null) {
 					clearTimeout(this.connDropTimer);
 					this.connDropTimer = null;
 				}
 			},
-			onClose: () => this.onConnectionDrop(),
-			onError: () => this.onConnectionDrop()
+			onClose: () => this.onConnectionDrop(sessionId),
+			onError: () => this.onConnectionDrop(sessionId)
 		});
 	}
 
-	private onConnectionDrop(): void {
-		// Only meaningful while we expect to be connected. After teardown
-		// we close the socket deliberately — that close must not raise a
-		// false "connection lost" banner.
-		if (!this.liveSession) return;
+	private onConnectionDrop(sessionId: number): void {
+		// Only meaningful while this subscription's session is the active
+		// one. After teardown — or once a newer session took over — its
+		// socket closes deliberately; that close must not raise a false
+		// "connection lost" banner.
+		if (!this.isActiveSession(sessionId)) return;
 		// Debounce: the reconnecting socket fires close on every cycle, so
 		// only flip to "reconnecting" if it stays down briefly.
 		if (this.connDropTimer !== null) return;
@@ -753,13 +774,18 @@ export class PlaygroundController {
 		// reconnect within the debounce window shows nothing.
 		this.connDropTimer = setTimeout(() => {
 			this.connDropTimer = null;
-			if (this.liveSession) {
+			if (this.isActiveSession(sessionId)) {
 				this.connection = 'reconnecting';
 			}
 		}, 1200);
 	}
 
-	private handleSessionEvent = (event: SessionEvent): void => {
+	private handleSessionEvent = (boundSessionId: number, event: SessionEvent): void => {
+		// Drop frames from any subscription that is no longer the active
+		// session's (Johnny-trt.40): delayed finals or trailing pipeline
+		// events from an ended session must not repopulate — or tear down —
+		// the new session's window.
+		if (!this.isActiveSession(boundSessionId)) return;
 		const ts = Date.now();
 		switch (event.type) {
 			case 'transcript_partial': {
@@ -910,6 +936,21 @@ export class PlaygroundController {
 	/** Drop BOTH live caption lines (user caption + bot bubble) at teardown. */
 	private clearAllPartials(): void {
 		this.transcript = clearBotPartialLine(clearPartialLine(this.transcript));
+	}
+
+	/**
+	 * Zero every piece of per-session UI state when binding to a NEW session
+	 * (Johnny-trt.40): chat lines, both live captions (they live inside
+	 * `transcript`), and the speaking/thinking indicator inputs. Deliberately
+	 * leaves user controls (volume, mutes, barge-in) and the composer draft
+	 * alone. Never called mid-session — only from start()/reattach().
+	 */
+	private resetPerSessionUi(): void {
+		this.transcript = [];
+		this.lastDecisionAt = 0;
+		this.lastSpokenAt = 0;
+		this.isSpeaking = false;
+		this.micLevel = 0;
 	}
 
 	private appendTranscript(line: TranscriptLine): void {

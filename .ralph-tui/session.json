@@ -3,10 +3,10 @@
   "sessionId": "82402e4d-e4aa-4e51-a95b-90cc16d67f3b",
   "status": "running",
   "startedAt": "2026-06-10T20:20:17.654Z",
-  "updatedAt": "2026-06-11T01:38:17.667Z",
-  "currentIteration": 6,
+  "updatedAt": "2026-06-11T01:56:35.297Z",
+  "currentIteration": 7,
   "maxIterations": 0,
-  "tasksCompleted": 6,
+  "tasksCompleted": 7,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -326,6 +326,16 @@
       "durationMs": 4948874,
       "startedAt": "2026-06-10T23:41:40.525Z",
       "endedAt": "2026-06-11T01:04:09.399Z"
+    },
+    {
+      "iteration": 7,
+      "status": "completed",
+      "taskId": "Johnny-trt.39",
+      "taskTitle": "[BUILD] Phase 2: Live bot-reply captions — stream Johnny's spoken text as he talks",
+      "taskCompleted": true,
+      "durationMs": 2018502,
+      "startedAt": "2026-06-11T01:04:38.066Z",
+      "endedAt": "2026-06-11T01:38:16.568Z"
     }
   ],
   "skippedTaskIds": [],
