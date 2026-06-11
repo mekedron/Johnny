@@ -169,6 +169,20 @@ after each iteration and it's included in prompts for context.
   tolerates fences/prose (first-fence contents, then outermost-braces
   slice). Symptom-to-check if a cloud LLM declines every turn: query
   `agent_decisions` for that exact reason string.
+- **Streaming-path harness analysis (trt.15)**: with no LiveKit STT metric
+  rows on direct-streaming STT, derive per-turn stages from the wall
+  metrics: `commit_wait = vad_end + max(0, stt_final_after_vad_end)`
+  (speech-end → turn commit; VAD-bound when the final precedes the edge),
+  `post_commit = first_audio_wall − commit_wait`, `router+gate residual =
+  post_commit − llm_total − tts_ttfb` — the batch arm's residual reproduces
+  its directly-measured `router_ms` (cross-check). Pool `per_turn` rows
+  across runs per arm (`.validation/Johnny-trt.15/pool_runs.py`). Gotcha
+  for scripted browser runs: the trt.5 fake-mic WAV's lead-in boundaries
+  ("Johnny, can you? | Check whether…") have effective gaps ≥ 0.40 s — on
+  the STREAMING path they now split into separate turns (batch's slow tail
+  used to re-glue them; trt.5/trt.6 sessions got 8 rows from 8 utterances,
+  streaming sessions get lead-in fragments) — judge those runs by
+  `agent_decisions` terminals, never by row-per-utterance counts.
 - **Deepgram direct-streaming voice path (trt.14)**: interims flow
   in-session end-to-end (live caption grows through multiple
   hypotheses, clears on final) — but finals carry a Deepgram speaker id
@@ -670,4 +684,51 @@ after each iteration and it's included in prompts for context.
     /proc scan (no pgrep/pkill in the api image); the providers API
     /activate atomically deactivates the kind's sibling rows, so restoring
     a stack is just three activate calls in sequence.
+---
+
+## 2026-06-11 - Johnny-trt.15
+- Phase-2 capstone gate: re-measured the local stack with streaming STT
+  active. Four 24-turn `--providers local --prewarm` harness runs,
+  ABBA-counterbalanced (A = Phase-1 shape via `JOHNNY_PARAKEET_FORCE_BATCH=1`,
+  B = Phase-2 streaming), `ollama stop` before every run, semantic EOU
+  engaged symmetrically in both arms (production default). **Acceptance
+  bar met with margin**: streaming `stt_final_after_vad_end` over all
+  warm turns (n=46) = −109/−69 ms p50/p95, worst warm −46 ms, worst
+  anywhere +44 ms (one cold turn) vs the ≤ +100 ms bar; batch control
+  +136/+193. Turn commit is now VAD-bound — commit_wait (speech-end →
+  turn commit) p50/p95 556/611 → 405/430 (**−151/−181 ms deterministic**,
+  zero overlap between arms, matched-fixture median −145 over all 18
+  fixtures). Felt e2e pooled 2241/2711 vs Phase-1 capstone's 2276/2902
+  (−35/−191, inside the documented LLM-noise floor; matched-fixture felt
+  +21 ms — commit win cancelled by post-commit router/llm noise +
+  context growth, B arms replied 33 vs 28). Cold turn −124 ms mean.
+  LATENCY.md got the "Phase-2 capstone" section (tables + attribution +
+  verdict), the latency-map STT-final line and the stale "Still open"
+  streaming bullet updated. All five Phase-2 siblings verified closed.
+- Manual playground sniff per the LATENCY.md methodology (chrome-devtools,
+  session #105, fake-mic trt.5 WAV, streaming trio): untampered 120 ms DOM
+  trace shows the "You · partial" caption growing at the ~480 ms sidecar
+  cadence and finals replacing it in place; trt.39 bot bubbles reconciled;
+  an interrupted reply cleared with zero ghost text; 10 decisions / 0
+  missing terminals (INV-1 clean), 7 replied + 2 by-design barge-in
+  suppressions + 1 reasoned decline; 19 final-only transcript rows;
+  console clean. Chrome restored to the normal profile afterwards.
+- Files changed: docs/LATENCY.md, .ralph-tui/progress.md (docs-only — no
+  code, so no test/lint gates apply). Artifacts:
+  .validation/Johnny-trt.15/ (00-capstone-notes.md, 4 harness runs
+  txt+json, pooled analysis, pool_runs.py, sniff DOM trace, screenshot,
+  session-105 DB dump).
+- **Learnings:**
+  - Patterns discovered: the streaming-path derived-stage formulas
+    (commit_wait / post_commit / router+gate residual, cross-checked
+    against the batch arm's router_ms) and the trt.5-WAV-now-splits-on-
+    streaming gotcha — added to Codebase Patterns above.
+  - Gotchas: `e2e_vad_commit_ms` is null on the streaming arm (derive
+    from wall metrics instead); pooled felt percentiles inherit the
+    replied-count composition confound across arms (B replied more →
+    more context at matched fixtures) — pair pooled tables with
+    matched-fixture medians AND a deterministic stage before claiming a
+    felt delta; the cold turn's stt_final_after can exceed the warm bar
+    (+44 ms here: first segment pays WS/context setup) — report it
+    separately, the acceptance metric is warm-turn shaped.
 ---

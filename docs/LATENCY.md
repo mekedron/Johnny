@@ -55,7 +55,9 @@ VAD end-of-speech  ──┐
                      │  the wait for natural mid-sentence pauses)
 STT first-partial  ──┤  streaming paths only (Parakeet mlx-sidecar,
                      │  Deepgram); N/A on batch paths
-STT final          ──┤  Parakeet MLX sidecar: ~123 ms p50 measured;
+STT final          ──┤  Parakeet MLX sidecar streaming: −109 ms p50 —
+                     │  the final precedes the VAD commit (trt.15;
+                     │  forced-batch path: +136 ms after it);
                      │  Deepgram: ~170 ms p50 after VAD commit (trt.14)
 LLM first-token    ──┤  Router LLM (side call) + answer LLM. Hot path.
 LLM total          ──┤  Answer LLM. ttft == total until Johnny-dny.
@@ -746,6 +748,97 @@ requires fixing the sidecar's edge-punctuation artifact first (and a
 sub-0.36 s finalize would then also be needed for the full win). All runs,
 verdict probes, fixtures and DB dumps: `.validation/Johnny-1qr/`.
 
+## Phase-2 capstone — re-measured with streaming STT active (Johnny-trt.15, 2026-06-11)
+
+Phase 2 of the Johnny-trt epic put streaming STT into the voice pipeline
+and made it visible: Parakeet cache-aware streaming over the sidecar WS
+(trt.12), live user captions (trt.13), live bot-reply captions (trt.39),
+the Deepgram voice-path verification + all-cloud baseline + Anthropic
+structured-output fix (trt.14), and the playground stale-state reset
+(trt.40). This section is the phase gate: four 24-turn `--providers
+local --prewarm` harness runs, ABBA-counterbalanced (A = Phase-1 shape,
+`JOHNNY_PARAKEET_FORCE_BATCH=1` pinning the batch path; B = Phase-2
+streaming), Ollama unloaded before every run, same trio as the Phase-0/1
+capstones (Parakeet MLX + Ollama `llama3.2:3b` + Piper persistent
+`en_US-hfc_male-medium`). One symmetric drift vs the Phase-1 capstone
+day: the Johnny-1qr semantic EOU (shipped in between) was engaged in
+**both** arms (`semantic-eou(en)`, the production browser default,
+~+12 ms e2e). All artifacts under `.validation/Johnny-trt.15/`.
+
+**The Phase-2 acceptance bar — STT-final ≤ 100 ms after VAD end on the
+local stack — is met with margin.** `stt_final_after_vad_end_ms` over
+all warm turns (n=46 per arm, replies and declines alike):
+
+| arm | p50 | p95 | worst |
+| --- | --- | --- | ----- |
+| batch (forced, Phase-1 shape) | +136 ms | +193 ms | +210 ms |
+| streaming (Phase-2)           | **−109 ms** | **−69 ms** | −46 ms warm / +44 ms cold |
+
+Every warm streaming final landed *before* the VAD commit; the worst
+final anywhere in 48 streaming turns was the one cold turn at +44 ms.
+
+**Pooled warm replied per-turn stages (A n=28, B n=33).** The streaming
+path has no LiveKit STT metric rows (trt.14 methodology), so the commit
+and router rows are derived per turn: `commit_wait = vad_end + max(0,
+stt_final_after_vad_end)`, `router+gate residual = first_audio −
+commit_wait − llm_total − tts_ttfb` (the A-arm residual reproduces its
+directly-measured `router_ms` 1063/1390 — the derivation cross-checks):
+
+| stage (warm p50/p95, ms)  | A batch | B streaming | delta |
+| ------------------------- | ------------- | -------------- | ----- |
+| vad_end                   | 416 / 442     | 405 / 430      | flat (same 0.40 s floor) |
+| stt_final_after_vad_end   | +138 / +192   | −103 / −61     | **−242 / −253, deterministic** |
+| commit_wait (speech-end → turn commit) | 556 / 611 | 405 / 430 | **−151 / −181, deterministic** |
+| llm_ttft                  | 536 / 695     | 559 / 814      | +24 / +118 (run noise) |
+| router + gate residual    | 1063 / 1390   | 1096 / 1533    | +32 / +142 (run noise) |
+| tts_ttfb                  | 78 / 159      | 79 / 170       | flat |
+| first_audio_wall (felt)   | 2164 / 2739   | 2241 / 2711    | +77 / −28 (masked, see below) |
+| **cold turn felt (per run)** | **2100 / 1532** | **1961 / 1423** | **−124 ms mean** |
+
+The turn commit is now **VAD-bound**: commit_wait in the streaming arm
+equals `vad_end` exactly, and the arms do not overlap at all (A
+504–617 ms, B 373–439 ms across every turn of every run). That is the
+~150 ms of serial batch-STT tail removed from every local turn —
+deterministically, matched-fixture median −145 ms (spread −191..−98,
+all 18 matched fixtures moved). The pooled felt total is statistically
+flat for exactly the Phase-1-capstone reason: post-commit router+LLM
+drift between identical-config runs (±100–150 ms p50, plus
+context-growth — the B arms replied 33 warm turns vs A's 28, carrying
+more chat history at every later fixture) exceeds the commit win;
+matched-fixture felt median +21 ms confirms the cancellation. Felt e2e
+vs the Phase-1 capstone's recorded numbers: 2276/2902 → 2241/2711
+(−35 p50 / −191 p95, inside the noise floor). The honest phase-over-
+phase claim is the deterministic one: **speech-end → turn-commit p50
+556 → 405 ms (−151 ms); the felt total remains router/LLM-owned —
+Phase-3 territory.** The remaining commit-wait lever is the 0.40 s VAD
+floor itself (the 1qr 0.20 s drop attempt is blocked on the sidecar
+edge-punctuation artifact, documented above).
+
+**Manual playground sniff (session #105, chrome-devtools, fake-mic
+WAV, streaming trio + semantic EOU).** The trt.13 "You · partial"
+caption grew at the ~480 ms sidecar decode cadence through multiple
+hypotheses per utterance and was replaced in place by each final
+(untampered 120 ms DOM-sampling trace); trt.39 bot bubbles reconciled
+on completed replies, and an interrupted reply's bubble cleared with
+zero ghost text. `agent_decisions`: 10 decisions, 0 missing terminals
+(INV-1 clean) — 7 replied, 2 barge-in suppressions (the WAV's short
+gaps, by design), 1 reasoned decline; 19 transcript rows, finals only.
+The trt.12 turn-semantics change showed up exactly as documented:
+lead-in fragments split at effective gaps in [0.40, 0.52) s that batch
+STT's slow tail used to re-glue, while the semantic EOU glued two
+think-aloud fragments ("Johnny, let me think." + the question) into
+single decisions. Console: zero errors/warnings.
+
+**Phase-2 verdict.** Streaming STT: shipped and measured — the STT tail
+is gone from the hot path (final precedes the commit by ~100 ms instead
+of trailing it by ~140 ms), the acceptance bar met with ~150 ms of
+margin on warm turns, and the pipeline is now visibly streaming in the
+UI (live captions both directions). Felt p50 on the local stack is
+unchanged within noise because the two LLM calls own the post-commit
+budget — the same attribution as Phase 1, now with the commit stage at
+its floor. Phase 3 (router triage) and Johnny-dny (answer streaming)
+own the next felt-latency win.
+
 ## Optimization candidates — in priority order (re-ranked from the 2026-06-10 baseline)
 
 1. **True answer-LLM token streaming** (Johnny-dny) — the measured #1.
@@ -832,5 +925,8 @@ verdict probes, fixtures and DB dumps: `.validation/Johnny-1qr/`.
 - True answer-LLM token streaming for openai-compatible — Johnny-dny
   (the measured #1 bottleneck).
 - STT timing-row turn attribution off-by-one — Johnny-5vb.
-- Streaming STT (partials) — Johnny-trt Phase 2; until then "STT first
-  partial" is not a measurable stage on the batch Parakeet path.
+- ✅ Streaming STT (partials) — **SHIPPED** (Johnny-trt Phase 2:
+  trt.12 Parakeet streaming + trt.13/trt.39 live captions; capstone
+  re-measure in the Phase-2 capstone section above). The
+  `in-container` / `coreml-sidecar` Parakeet runtimes remain batch-only
+  (documented follow-up in `.validation/Johnny-trt.12/00-decision-note.md`).

@@ -3,10 +3,10 @@
   "sessionId": "82402e4d-e4aa-4e51-a95b-90cc16d67f3b",
   "status": "running",
   "startedAt": "2026-06-10T20:20:17.654Z",
-  "updatedAt": "2026-06-11T02:29:04.873Z",
-  "currentIteration": 8,
+  "updatedAt": "2026-06-11T03:03:27.109Z",
+  "currentIteration": 9,
   "maxIterations": 0,
-  "tasksCompleted": 8,
+  "tasksCompleted": 9,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -111,8 +111,8 @@
       {
         "id": "Johnny-trt.14",
         "title": "[CHORE] Phase 2: Verify Deepgram direct-streaming voice path + all-cloud measurement",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.15",
@@ -346,6 +346,16 @@
       "durationMs": 1067571,
       "startedAt": "2026-06-11T01:38:46.598Z",
       "endedAt": "2026-06-11T01:56:34.169Z"
+    },
+    {
+      "iteration": 9,
+      "status": "completed",
+      "taskId": "Johnny-trt.14",
+      "taskTitle": "[CHORE] Phase 2: Verify Deepgram direct-streaming voice path + all-cloud measurement",
+      "taskCompleted": true,
+      "durationMs": 1918315,
+      "startedAt": "2026-06-11T01:57:05.590Z",
+      "endedAt": "2026-06-11T02:29:03.905Z"
     }
   ],
   "skippedTaskIds": [],
