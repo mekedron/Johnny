@@ -3,10 +3,10 @@
   "sessionId": "b8829633-95f0-4e1b-a1c5-e08500de3d70",
   "status": "running",
   "startedAt": "2026-06-11T05:16:05.966Z",
-  "updatedAt": "2026-06-11T11:27:00.538Z",
-  "currentIteration": 8,
+  "updatedAt": "2026-06-11T11:38:54.230Z",
+  "currentIteration": 9,
   "maxIterations": 0,
-  "tasksCompleted": 8,
+  "tasksCompleted": 9,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -165,8 +165,8 @@
       {
         "id": "Johnny-trt.23",
         "title": "[BUILD] Phase 4: Tool layer + skill registry (openclaw-compatible SKILL.md) + first skill: calendar via gog",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.24",
@@ -436,6 +436,16 @@
       "durationMs": 1319949,
       "startedAt": "2026-06-11T10:19:04.635Z",
       "endedAt": "2026-06-11T10:41:04.584Z"
+    },
+    {
+      "iteration": 9,
+      "status": "completed",
+      "taskId": "Johnny-trt.23",
+      "taskTitle": "[BUILD] Phase 4: Tool layer + skill registry (openclaw-compatible SKILL.md) + first skill: calendar via gog",
+      "taskCompleted": true,
+      "durationMs": 2721204,
+      "startedAt": "2026-06-11T10:41:38.361Z",
+      "endedAt": "2026-06-11T11:26:59.565Z"
     }
   ],
   "skippedTaskIds": [],
