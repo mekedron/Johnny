@@ -17,6 +17,7 @@ from app.providers import LLMResponse
 from johnny.voice_pipeline.reasoning import (
     _BARGE_IN_SCHEMA,
     _ROUTER_SCHEMA,
+    _ROUTER_SCHEMA_NO_CATALOG,
     AUTONOMOUS_MODE,
     BARGE_IN_CATEGORIES,
     DEFAULT_NOISE_STOPLIST,
@@ -459,3 +460,38 @@ def test_router_schema_never_primes_a_canned_ack() -> None:
     # The action description carries the restraint rule (prefer speak).
     action_desc = _ROUTER_SCHEMA["properties"]["action"]["description"]
     assert "choose speak" in action_desc
+
+
+def test_router_schema_no_catalog_is_byte_identical_to_phase2() -> None:
+    """Johnny-trt.59: the no-catalog schema IS the pre-Phase-3 schema.
+
+    Pinned as a literal, the same way the no-catalog *prompt* is pinned
+    byte-identical (trt.19): a session that cannot delegate sends exactly the
+    Phase-2 response_format — no ``action``, no ``task``, no descriptions —
+    so the local router's constrained decode pays nothing for delegation it
+    cannot use (~+80 ms p50 schema share on the 3B router,
+    .validation/Johnny-trt.59/). Outputs without ``action`` parse through
+    :func:`_resolve_router_action`'s should_speak derivation, byte-for-byte
+    the pre-Phase-3 verdicts.
+    """
+    assert _ROUTER_SCHEMA_NO_CATALOG == {
+        "type": "object",
+        "properties": {
+            "should_speak": {"type": "boolean"},
+            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            "reason": {"type": "string"},
+            "reply_type": {"type": ["string", "null"]},
+            "suggested_reply": {"type": ["string", "null"]},
+        },
+        "required": ["should_speak", "confidence", "reason"],
+    }
+    # The legacy properties stay structurally identical across both schemas —
+    # the full schema is the no-catalog schema plus action/task, nothing else.
+    for legacy in ("should_speak", "confidence", "reason", "reply_type", "suggested_reply"):
+        assert _ROUTER_SCHEMA["properties"][legacy] == (
+            _ROUTER_SCHEMA_NO_CATALOG["properties"][legacy]
+        )
+    assert set(_ROUTER_SCHEMA["properties"]) - set(_ROUTER_SCHEMA_NO_CATALOG["properties"]) == {
+        "action",
+        "task",
+    }

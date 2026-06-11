@@ -48,6 +48,7 @@ from johnny.agent.router_gate import (  # noqa: E402
     CAPABILITY_GAP_KEY,
     DEFAULT_DELEGATE_ACK,
     ROUTER_DECISION_SCHEMA,
+    ROUTER_DECISION_SCHEMA_NO_CATALOG,
     STATUS_STUB_REPLY,
     UNKNOWN_KIND_KEY,
     RouterGate,
@@ -220,8 +221,9 @@ async def test_speak_does_not_raise_and_emits_no_gate_terminal() -> None:
     assert emitter.records == []
     # The turn is open in the ledger, awaiting its reply.
     assert gate._ledger.open_turns == (msg.id,)
-    # The router was asked for the decision schema.
-    assert router.last_response_format is ROUTER_DECISION_SCHEMA
+    # The router was asked for the decision schema — the no-catalog variant,
+    # since the default config carries no task catalog (Johnny-trt.59).
+    assert router.last_response_format is ROUTER_DECISION_SCHEMA_NO_CATALOG
 
 
 async def test_speak_then_reply_completion_emits_exactly_one_replied() -> None:
@@ -669,6 +671,50 @@ async def test_router_prompt_without_catalog_is_byte_identical_to_pre_trt19() ->
     assert [m.content for m in router_default.calls[0]] == [
         m.content for m in router_empty.calls[0]
     ]
+    # And the schema follows the same condition (Johnny-trt.59): no catalog ⇒
+    # the pre-Phase-3 response_format, so the whole router call is
+    # byte-identical to the Phase-2 build.
+    assert router_default.last_response_format is ROUTER_DECISION_SCHEMA_NO_CATALOG
+    assert router_empty.last_response_format is ROUTER_DECISION_SCHEMA_NO_CATALOG
+
+
+async def test_router_schema_follows_catalog_both_ways() -> None:
+    """Schema mirrors the prompt's catalog condition (Johnny-trt.59).
+
+    A catalog-wired gate requests the full Phase-3 schema (action + task —
+    delegation must stay expressible, including the trt.55 unavailable-decline
+    flow); a catalog-less gate requests the no-catalog schema, where
+    delegate/status are unrepresentable exactly where they could only
+    stage_error, and the local constrained decode stays Phase-2-sized — the
+    delegation-capability cost (schema ~+80 ms + catalog prompt ~+560 ms p50
+    on the 3B router, .validation/Johnny-trt.59/) is paid only where
+    delegation works.
+    """
+    from johnny.agent.task_catalog import TaskCatalogEntry
+
+    decisions = [{"should_speak": True, "confidence": 1.0, "reason": "x"}]
+    catalog = (TaskCatalogEntry(kind="calendar.upcoming_events", one_liner="Look up events."),)
+    gate_with, _, router_with = _make_gate(
+        decisions, config=RouterGateConfig(task_catalog=catalog)
+    )
+    await gate_with.run_turn(ChatContext.empty(), _user_msg("check my calendar"))
+    assert router_with.last_response_format is ROUTER_DECISION_SCHEMA
+
+    # An all-unavailable catalog still teaches the honest decline through the
+    # prompt, so the action vocabulary must stay expressible too.
+    unavailable = (
+        TaskCatalogEntry(
+            kind="gmail.search",
+            one_liner="Search the mailbox.",
+            available=False,
+            unavailable_reason="link a Google account in settings",
+        ),
+    )
+    gate_unavail, _, router_unavail = _make_gate(
+        decisions, config=RouterGateConfig(task_catalog=unavailable)
+    )
+    await gate_unavail.run_turn(ChatContext.empty(), _user_msg("any new email?"))
+    assert router_unavail.last_response_format is ROUTER_DECISION_SCHEMA
 
 
 # --------------------------------------------------------------------------- #

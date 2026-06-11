@@ -3,10 +3,10 @@
   "sessionId": "b8829633-95f0-4e1b-a1c5-e08500de3d70",
   "status": "running",
   "startedAt": "2026-06-11T05:16:05.966Z",
-  "updatedAt": "2026-06-11T16:40:41.186Z",
-  "currentIteration": 16,
+  "updatedAt": "2026-06-11T17:38:06.298Z",
+  "currentIteration": 19,
   "maxIterations": 0,
-  "tasksCompleted": 16,
+  "tasksCompleted": 17,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -516,10 +516,43 @@
       "durationMs": 722497,
       "startedAt": "2026-06-11T15:53:57.620Z",
       "endedAt": "2026-06-11T16:06:00.117Z"
+    },
+    {
+      "iteration": 17,
+      "status": "completed",
+      "taskId": "Johnny-trt.62",
+      "taskTitle": "[BUILD] Phase 4: Pre-ack kind validation — unknown task kinds degrade to speak, validated against executor-known kinds",
+      "taskCompleted": true,
+      "durationMs": 2042922,
+      "startedAt": "2026-06-11T16:06:36.849Z",
+      "endedAt": "2026-06-11T16:40:39.771Z"
+    },
+    {
+      "iteration": 18,
+      "status": "failed",
+      "taskId": "Johnny-trt.26",
+      "taskTitle": "[CHORE] Phase 4 capstone: end-to-end calendar task in the playground",
+      "taskCompleted": false,
+      "durationMs": 418898,
+      "startedAt": "2026-06-11T16:41:17.747Z",
+      "endedAt": "2026-06-11T16:48:16.645Z"
+    },
+    {
+      "iteration": 19,
+      "status": "completed",
+      "taskId": "Johnny-trt.59",
+      "taskTitle": "[MEASURE] Phase-3 router schema costs +568ms p50 triage on the 3B local router — slim the payload or accept as the trt.51/41/42 price",
+      "taskCompleted": false,
+      "durationMs": 2094097,
+      "startedAt": "2026-06-11T16:48:38.544Z",
+      "endedAt": "2026-06-11T17:23:32.641Z"
     }
   ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
-  "activeTaskIds": [],
+  "activeTaskIds": [
+    "Johnny-trt.26",
+    "Johnny-trt.59"
+  ],
   "subagentPanelVisible": false
 }

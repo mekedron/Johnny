@@ -237,9 +237,10 @@ class HarnessStubSTTProvider(STTProvider):
 class HarnessStubLLMProvider(LLMProvider):
     """Stub router/answer LLM with distinct, configurable per-call delays.
 
-    The router gate calls ``chat(..., response_format=ROUTER_DECISION_SCHEMA)``
-    — answered with an always-SPEAK verdict (confidence 0.95) after
-    ``router_delay_ms``. The answer path streams a plain turn through
+    The router gate calls ``chat(..., response_format=<decision schema>)``
+    (the no-catalog variant here — harness sessions wire no TaskCoordinator,
+    Johnny-trt.59) — answered with an always-SPEAK verdict (confidence 0.95)
+    after ``router_delay_ms``. The answer path streams a plain turn through
     ``stream_chat`` — answered with the fixed reply in two deltas, the first
     after ``answer_ttft_ms`` (so the llm metric's ``ttft`` is real, unlike the
     openai-compatible adapter's buffered fallback — Johnny-dny) and the rest
@@ -547,6 +548,7 @@ class HarnessResult:
     vad_label: str = "browser-default"
     endpointing_label: str = "browser-default"
     turn_detection_label: str = "vad"
+    task_wiring: bool = True
     turns: list[TurnTimings] = field(default_factory=list)
 
     @property
@@ -745,6 +747,7 @@ async def run_latency_harness(
     semantic_eou: str = "auto",
     bot_session_id: int = 0,
     prewarm: bool = False,
+    task_wiring: bool = True,
 ) -> HarnessResult:
     """Run ``turns`` scripted voice turns and return per-turn stage timings.
 
@@ -790,6 +793,17 @@ async def run_latency_harness(
     expected felt delta is ~0 — the knob exists to verify that, and to
     measure floor-drop experiments when combined with ``vad_min_silence_s``
     + ``endpointing_min_delay_s``.
+
+    Task wiring (Johnny-trt.59): ``task_wiring`` is the delegation-capability
+    A/B knob. ``True`` (default) assembles like production — task sink +
+    coordinator + skill-loader catalog, so every router call carries the
+    catalog prompt block and the full Phase-3 action+task schema. ``False``
+    drops the DB factory: no catalog, and the router call is byte-identical
+    to the Phase-2 build in both prompt and schema (the no-catalog variant)
+    — the pure conversational hot-path arm for phase-over-phase baselines.
+    The trt.21 capstone runs were unknowingly wired (the stub catalog rode
+    along), so its "+568 ms schema cost" was really schema + catalog prompt
+    combined — probe decomposition in ``.validation/Johnny-trt.59/``.
     """
     from johnny.agent.browser_session import (
         BROWSER_ENDPOINTING_MIN_DELAY_S,
@@ -868,6 +882,7 @@ async def run_latency_harness(
         vad=vad,
         endpointing=endpointing,
         semantic_eou=None if semantic_eou == "auto" else (semantic_eou == "on"),
+        task_wiring=task_wiring,
     )
 
     # Resolve the endpointing default label now that the build settled the path.
@@ -918,6 +933,7 @@ async def run_latency_harness(
         vad_label=vad_label,
         endpointing_label=endpointing_label,
         turn_detection_label=agent_session.turn_detection_label,
+        task_wiring=task_wiring,
     )
 
     try:
@@ -1014,6 +1030,7 @@ def render_report(result: HarnessResult) -> str:
         f"vad={result.vad_label} "
         f"endpointing={result.endpointing_label} "
         f"turn_detection={result.turn_detection_label} "
+        f"task_wiring={'on' if result.task_wiring else 'off'} "
         f"turns={len(result.turns)}/{result.turns_requested} "
         f"completed={len(completed)} replied={len(replied)} "
         f"no_reply={len(completed) - len(replied)} "
@@ -1061,6 +1078,7 @@ def result_to_json(result: HarnessResult) -> dict[str, Any]:
         "vad": result.vad_label,
         "endpointing": result.endpointing_label,
         "turn_detection": result.turn_detection_label,
+        "task_wiring": result.task_wiring,
         "turns_requested": result.turns_requested,
         "turns_run": len(result.turns),
         "completed": len(result.completed),
@@ -1166,6 +1184,19 @@ def main(argv: Sequence[str] | None = None) -> None:
         ),
     )
     parser.add_argument(
+        "--task-wiring",
+        choices=("on", "off"),
+        default="on",
+        help=(
+            "delegation-capability A/B knob (Johnny-trt.59): on (default) = "
+            "production-shaped assembly (task sink + coordinator + skill "
+            "catalog → catalog prompt block + full action/task schema on "
+            "every router call); off = no DB factory → empty catalog → the "
+            "router call is byte-identical to the Phase-2 build (prompt AND "
+            "schema) — the pure conversational hot-path arm"
+        ),
+    )
+    parser.add_argument(
         "--turn-timeout-s",
         type=float,
         default=120.0,
@@ -1202,6 +1233,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 vad_min_silence_s=args.vad_min_silence_s,
                 endpointing_min_delay_s=args.endpointing_min_delay_s,
                 semantic_eou=args.semantic_eou,
+                task_wiring=args.task_wiring == "on",
             )
         )
     except Exception:

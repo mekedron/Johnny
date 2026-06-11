@@ -305,6 +305,7 @@ class BrowserAgentSession:
         transcript_history_loader: TranscriptHistoryLoader | None = None,
         endpointing: EndpointingOptions | None = None,
         semantic_eou: bool | None = None,
+        task_wiring: bool = True,
     ) -> BrowserAgentSession:
         """Assemble the runtime + roomless session + audio I/O for one session.
 
@@ -336,6 +337,12 @@ class BrowserAgentSession:
         :func:`browser_endpointing`, ``min_delay`` 0.40 s); the latency
         harness passes e.g. ``{"min_delay": 0.5}`` to reproduce the pre-trt.6
         engine padding for A/B runs.
+
+        ``task_wiring=False`` (Johnny-trt.59, harness-only) drops the DB
+        session factory so the assembly builds no task sink → no coordinator
+        → no skill registry scan → empty task catalog: the router call is
+        byte-identical to the pre-Phase-3 build in both prompt and schema —
+        the "pure conversational hot path" A/B arm. Production always wires.
         """
         from app.db.session import SessionLocal
 
@@ -359,7 +366,7 @@ class BrowserAgentSession:
             vad=vad,
             event_bus=event_bus,
             transcript_history_loader=transcript_history_loader,
-            db_session_factory=SessionLocal,
+            db_session_factory=SessionLocal if task_wiring else None,
             # Epoch-seconds reference so the metrics translator emits
             # session-relative ``started_at_ms`` (the subscriber writes it into
             # the INTEGER ``session_timings.started_at_ms``; a raw epoch-ms

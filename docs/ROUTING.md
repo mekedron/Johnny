@@ -47,6 +47,8 @@ that this hook stalls the reply pipeline while it runs.
  │ triage LLM (router)         │  one call, tight JSON schema, ~8 s hard
  │  action ∈ {silent, speak,   │  budget (trt.19); task catalog rendered
  │   delegate, status}         │  into the prompt; cheap+fast model slot
+ │                             │  (no catalog ⇒ pre-Phase-3 schema, no
+ │                             │  action/task fields at all — trt.59)
  └────────────┬────────────────┘
               ▼
    silent ──► terminal no_reply(...)                      (INV-1)
@@ -102,7 +104,11 @@ understand the bot's decision.* Concretely:
 - **Delegate restraint** (trt.53, in the catalog header + the `action` schema
   description): answerable-from-context → `speak`, even when catalog keywords
   appear; only catalog-listed kinds are delegatable; when unsure between speak and
-  delegate, **speak** — a real answer beats a hollow promise.
+  delegate, **speak** — a real answer beats a hollow promise. The catalog header is
+  the authoritative carrier: grammar-constrained local decoders (Ollama) never see
+  schema descriptions at all, so since trt.59 the schema descriptions are terse
+  pointers (the pinned phrases survive) and the full contract rides the prompt,
+  which renders on every call that uses the full schema.
 - **No dead promises** (trt.53 stopgap until the Phase-5 re-entry queue): a
   delegated task that settles `failed` (since trt.23: a skill run that fails in
   the sandbox — e.g. gog not authed — or a kind no skill backs; the speech-ready
@@ -374,16 +380,97 @@ the final transcript, fuzzy-match the agent's name + aliases.
   arbitration (trt.47) consumes first: a by-name match wins the turn claim outright;
   LLM-based peer selectivity applies only to unaddressed turns.
 
-## 6. Deferred behavioral uses (trt.51 — go/no-go from §4's data)
+## 6. Deferred behavioral uses (trt.51 — decided 2026-06-11, none ship)
 
-None of these ship until the shadow agreement matrix justifies them; each is
-separately replay-gated:
+The go/no-go spike (trt.51) was executed against two agreement datasets: the
+**pre-restraint** trt.50 matrix (86 turns = 34 replay-fixture + 52 real;
+`.validation/Johnny-trt.50/05-agreement-matrix.md`) and a **post-restraint**
+rerun over every decision row in the dev DB (78 rows — all browser/playground
+surface, all post-trt.53 code, every row carrying the live-persisted shadow
+payload + trt.54 transcript window; the 2 coaxed trt.62 rows excluded from
+headlines — `.validation/Johnny-trt.51/01-go-no-go-data.md`, regenerate with
+`agreement_trt51.py` next to it). Mixed live router models and the default
+persona, i.e. the operator's real configurations, not one canonical model.
 
-| Behavior | What it does | Go condition |
-|---|---|---|
-| (a) Playground fast-path | high-confidence SIMPLE turns skip the triage LLM, go straight to the streaming answer LLM (saves the full triage round-trip). **Meetings never fast-path** — silent\|speak is social. | shadow agreement on SIMPLE turns ≥ ~98% vs router speak-decisions on the playground surface |
-| (b) Prompt prior | one additive line of router-prompt context ("signal: likely-complex (calendar keywords)") | measurably improves delegate precision/recall; requires a deliberate replay-fixture refresh |
-| (c) Micro-reply gate | the trt.17-noted inline micro-reply (triage returns a short `speak_text` for trivial turns — one model call total) is allowed only on heuristic high-confidence SIMPLE | folds into the trt.17/trt.51 evaluation |
+| Behavior | What it does | Go condition | Decision (2026-06-11) |
+|---|---|---|---|
+| (a) Playground fast-path | high-confidence SIMPLE turns skip the triage LLM, go straight to the streaming answer LLM (saves the full triage round-trip). **Meetings never fast-path** — silent\|speak is social. | shadow agreement on SIMPLE turns ≥ ~98% vs router speak-decisions on the playground surface | **no-go, deferred** — 94% (30/32), and both misses are functional |
+| (b) Prompt prior | one additive line of router-prompt context ("signal: likely-complex (calendar keywords)") | measurably improves delegate precision/recall; requires a deliberate replay-fixture refresh | **rejected** — the gap it would close no longer exists (recall 81% / precision 65% with zero prompt help) |
+| (c) Micro-reply gate | the trt.17-noted inline micro-reply (triage returns a short `speak_text` for trivial turns — one model call total) is allowed only on heuristic high-confidence SIMPLE | folds into the trt.17/trt.51 evaluation | **rejected** — (a)'s gate + cheapest-slot authorship + re-fattens the trt.59-slimmed schema |
+
+**(a) Playground fast-path — no-go, deferred with revisit triggers.** Restraint
+moved agreement a long way: heuristic-SIMPLE turns were **33% speak**
+pre-restraint (14/43 — the over-delegating era) and are **94% speak**
+post-restraint (30/32 natural playground turns; identical on gate-effective
+actions). Still short of the ~98% bar, and both misses are the expensive kind:
+
+- `"I mean."` → router `silent` (correct). Playground turns contain STT
+  fragments and mumbles a fast-path would answer — silence is a real
+  playground outcome too, not only a Meet one.
+- `"Quit."` → router `delegate` → `session.end` (internal tool, trt.57). The
+  **shortest imperatives score maximally SIMPLE** (top signal: "short
+  (1 token)") yet are exactly the turns that must reach the catalog-aware LLM
+  to *act* — fast-pathed, the bot would have replied in words instead of
+  quitting. This class (`"Quit."`, `"Stop."`, `"Leave."`) did not exist when
+  the go condition was written (pre-trt.57); the failure is structural, not
+  statistical.
+
+The strict slice (conf ≥ 0.9) is 3/3 = 100% — far too thin to clear a 98% bar.
+The prize is real — triage p50 ≈ 1.1–1.7 s on the canonical llama3.2:3b trio
+(Phase-2 vs Phase-3 capstone), skipped entirely on ~42% of playground turns
+(the SIMPLE share) — which is why this is deferred, not rejected. Revisit when
+ALL of: (1) trt.41/42 land the per-agent router slot (the same latency attacked
+from the model side — re-price the prize then); (2) ≥50 high-confidence SIMPLE
+playground turns on the then-current router show ≥98% speak agreement with
+zero internal-tool-command misses; (3) the short-imperative command class has a
+deterministic answer first (an internal-tool exact-phrase match in the §2
+pre-stage, the trt.52 shape — without it every `"Quit."` is a coin-flip the
+fast-path converts into a silent no-op).
+
+**(b) Prompt prior — rejected.** The pre-restraint motivation (catalog dim
+fired on only 32% of delegated turns; the router delegated greetings) is gone:
+post-restraint the dimension fires on **81% of delegated turns vs 12% of speak
+turns** (TP 13 / FP 7 / FN 3 over 76 natural rows → precision 65%, recall
+81%). Attribution is twofold — the router improved (trt.53 restraint + the
+trt.55/62 degrades) and the catalog feeding the dimension got real (skill
+loader + internal-tool keywords replaced the stubs; the scorer mechanism is
+unchanged since trt.50) — but either way the router already extracts the
+catalog signal from the catalog rendered into its prompt (§2); a heuristic echo
+of the same keywords adds no information. The remaining errors are not
+keyword-shaped: the 3 FN are `"Quit."` (`session.end`), a barged "Oh right,
+can you end No no no…" (`session.end`), and a kind-less malformed delegate on
+operator meta-talk; the one real FP-side miss
+("Yep, uh just quit the meeting, please." → speak) fired the dimension only via
+keyword *crosstalk* (google-calendar's "meeting"), which a kind-agnostic
+"likely-complex" line would have pushed toward the *wrong* delegation; the
+other FP are calendar-vocabulary turns the router correctly answered inline
+(results already in chat ctx — the restraint design). Against zero measurable
+upside stand known costs: a deliberate replay-fixture refresh (trt.19
+discipline), per-model prompt-compliance variance, and the trt.62 finding that
+prompt additions interact unpredictably with 3B-class routers. Re-open only
+with a demonstrated delegate-miss failure mode in hand that deterministic
+options (catalog keywords, §5-style pre-stage matching) cannot reach.
+
+**(c) Micro-reply gate — rejected**, closing the trt.17 evaluation. Three
+independent reasons. (1) The safety gate is (a)'s gate at 94% — and a missed
+delegate/status here doesn't just cost latency, it ships a *wrong user-facing
+reply* authored without catalog context (`"Quit."` would get a chatty answer).
+(2) Per-agent model roles (§3) pin the router slot as the cheapest model;
+micro-reply moves answer authorship into exactly that slot, regressing the
+surface the answer slot exists to protect — live SIMPLE-turn replies are
+persona-styled (median 20 words, the default personality's voice throughout),
+not template fillers a 3B triage model could safely author. (3) Schema cost:
+trt.59 measured the action/task fields at ~+80 ms p50 per call on the 3B
+router and slimmed the schema; a `speak_text` field would ride EVERY triage
+call's constrained decode, re-adding per-call output tokens the epic just paid
+to remove — for a saving (the answer hop's TTFT) that is the smaller share of
+felt latency. The epic-level ClawRouter decision ("no 4th answer-tier model
+slot — delegation + micro-reply cover it") stays satisfied by delegation
+alone.
+
+Nothing ships ⇒ no implementation beads filed (the trt.20 deferred-spike
+pattern); the (a) revisit triggers are noted on trt.42, the bead whose landing
+re-prices the fast-path.
 
 ## 7. Invariants and budgets
 
@@ -432,7 +519,7 @@ separately replay-gated:
 | Agent edit page (Triage/Answer/Reasoning pickers) | Johnny-trt.44 | planned (Phase 6) |
 | Name-addressing gate (`address_required` + aliases) | Johnny-trt.52 | planned (Phase 6) |
 | Multi-agent turn arbitration (consumes addressing) | Johnny-trt.47 | planned (Phase 6) |
-| Deferred: fast-path / prompt prior / micro-reply | Johnny-trt.51 | deferred spike |
+| Deferred: fast-path / prompt prior / micro-reply | Johnny-trt.51 | **decided** (2026-06-11), nothing ships — (a) fast-path no-go/deferred at 94% SIMPLE×speak agreement (30/32 post-restraint playground turns; both misses functional: a correctly-silenced fragment + `"Quit."` = a delegated internal-tool command), revisit gated on trt.41/42 + ≥50 turns @ ≥98% + a deterministic short-imperative pre-stage; (b) prompt prior rejected (catalog dim recall 81% / precision 65% post-restraint with zero prompt help — no gap left; residual errors aren't keyword-shaped; fixture-refresh + 3B prompt-pollution costs); (c) micro-reply rejected (same gate + answer authorship in the cheapest model slot + re-fattens the trt.59-slimmed schema). Evidence: §6 + `.validation/Johnny-trt.51/` |
 | Deferred: speculative-parallel router | Johnny-trt.20 | deferred spike |
 
 Keeping this file current is acceptance criteria on trt.50, trt.51, trt.52, trt.53,

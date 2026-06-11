@@ -437,39 +437,37 @@ _ROUTER_SCHEMA: dict[str, Any] = {
         "action": {
             "type": "string",
             "enum": list(ROUTER_ACTIONS),
+            # Descriptions are deliberately terse (Johnny-trt.59): the full
+            # restraint + ack contract rides the catalog prompt header
+            # (:func:`johnny.agent.task_catalog.render_task_catalog`), which
+            # renders on every call this schema is used for. Schema
+            # descriptions never reach grammar-constrained local decoders
+            # (Ollama) at all — they only cost tokens on cloud providers.
             "description": (
-                "What the bot should do: 'silent' = say nothing; 'speak' = "
-                "answer directly now — the default whenever the request can "
-                "be answered from the conversation, your own knowledge, or "
-                "the provided context; 'delegate' = hand the request off as "
-                "an async task (fill in 'task') — only for real work in an "
-                "external system matching a listed delegatable task kind; "
-                "'status' = report progress on previously delegated work. "
-                "When unsure between speak and delegate, choose speak."
+                "silent = say nothing; speak = answer now; delegate = queue "
+                "a listed task kind (fill 'task'); status = report progress "
+                "on delegated work. When unsure between speak and delegate, "
+                "choose speak."
             ),
         },
         "task": {
             "type": ["object", "null"],
-            "description": (
-                "The async task to run — required when action='delegate', null otherwise."
-            ),
+            "description": "Required when action='delegate', null otherwise.",
             "properties": {
                 "kind": {
                     "type": "string",
-                    "description": "Task kind identifier from the catalog.",
+                    "description": "Task kind from the catalog.",
                 },
                 "args": {
                     "type": "object",
-                    "description": "Arguments for the task kind (may be empty).",
+                    "description": "Arguments (may be empty).",
                 },
                 "ack": {
                     "type": "string",
                     "description": (
-                        "The sentence the bot speaks right now, written fresh "
-                        "for this request in the language the user spoke: name "
-                        "the specific work you are starting and why it needs a "
-                        "moment. Never a generic one-size-fits-all filler "
-                        "phrase."
+                        "Spoken right now, authored fresh in the language the "
+                        "user spoke: name the specific work and why it needs "
+                        "a moment — never generic filler."
                     ),
                 },
             },
@@ -483,6 +481,31 @@ _ROUTER_SCHEMA: dict[str, Any] = {
     },
     "required": ["should_speak", "confidence", "reason", "action"],
 }
+
+_ROUTER_SCHEMA_NO_CATALOG: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "should_speak": {"type": "boolean"},
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "reason": {"type": "string"},
+        "reply_type": {"type": ["string", "null"]},
+        "suggested_reply": {"type": ["string", "null"]},
+    },
+    "required": ["should_speak", "confidence", "reason"],
+}
+"""The router schema for sessions with NO task catalog (Johnny-trt.59).
+
+Byte-identical to the pre-Phase-3 schema, the same way an empty catalog
+leaves the router *prompt* byte-identical (the trt.19 stance): a session
+that cannot delegate must not pay the ``action`` + ``task`` decode cost on
+every verdict (~+80 ms p50 per call on the canonical llama3.2:3b — the
+schema's own share of the +568 ms the Phase-3 capstone measured; the rest
+was the catalog prompt block, decomposed in ``.validation/Johnny-trt.59/``).
+The grammar also makes ``delegate`` unrepresentable exactly where it could
+only stage_error, the capability-gating principle applied to the schema.
+Outputs parse through the same lenient parser: no ``action`` key ⇒ derived
+from ``should_speak`` (:func:`_resolve_router_action`), byte-for-byte the
+pre-Phase-3 verdicts."""
 
 
 @dataclass(frozen=True, slots=True)

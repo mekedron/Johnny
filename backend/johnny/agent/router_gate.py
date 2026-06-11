@@ -117,6 +117,17 @@ logger = logging.getLogger(__name__)
 # change behaviour.
 ROUTER_DECISION_SCHEMA = _reasoning._ROUTER_SCHEMA
 
+# The no-delegation schema (Johnny-trt.59): sessions with an empty task
+# catalog request the pre-Phase-3 schema — the same condition that omits the
+# catalog block from the prompt (:meth:`RouterGate._router_messages`), so a
+# no-delegation session's router call is byte-identical to the Phase-2 build
+# in BOTH prompt and response_format. Measured on the local 3B router
+# (llama3.2:3b, .validation/Johnny-trt.59/): the action+task schema alone
+# costs ~+80 ms p50 per call (extra constrained-decode output tokens) and the
+# catalog prompt block another ~+560 ms (longer delegation-aware reasoning) —
+# both paid only where a coordinator can honour a delegate verdict.
+ROUTER_DECISION_SCHEMA_NO_CATALOG = _reasoning._ROUTER_SCHEMA_NO_CATALOG
+
 
 def _default_clock() -> int:
     """Monotonic wall clock in milliseconds for the rate-limit window."""
@@ -1345,7 +1356,16 @@ class RouterGate:
         # triage timing row persists (details.prompt_chars) — measured here so
         # it reflects exactly what was sent, render caps included.
         self._last_prompt_chars = sum(len(message.content or "") for message in messages)
-        response = await self._router_llm.chat(messages, response_format=ROUTER_DECISION_SCHEMA)
+        # Schema mirrors the prompt's catalog condition (Johnny-trt.59): no
+        # catalog ⇒ no delegation vocabulary anywhere — the model can neither
+        # read about nor emit delegate/status, and the constrained decode
+        # stays Phase-2-sized.
+        schema = (
+            ROUTER_DECISION_SCHEMA
+            if self._config.task_catalog
+            else ROUTER_DECISION_SCHEMA_NO_CATALOG
+        )
+        response = await self._router_llm.chat(messages, response_format=schema)
         return _reasoning._parse_router_response(response)
 
     # ------------------------------------------------------------------ #
