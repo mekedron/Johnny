@@ -102,24 +102,26 @@ default — with `turn_detection="vad"` nothing ever escalates to it. The
 Meet/room path still passes no endpointing (0.5 / 3.0 defaults,
 multi-party padding).
 
-**Semantic turn detector: investigated and wontfixed (Johnny-trt.6).**
-The plan was LiveKit's multilingual EOU model in-process on the roomless
-browser session (an `InferenceExecutor` shim around the registered
-`_EUORunnerMultilingual`) paired with `{"min_delay": 0.2, "max_delay":
-1.5}` — commit early when the model calls the utterance complete, hold
-hesitant speech to 1.5 s. The spike killed it on the bead's own abort
-line (RSS > ~500 MB): the multilingual ONNX is 396 MB on disk and
-`initialize()` costs **+884 MB RSS** in the api process (~1.0 GB total
-with imports; `enable_cpu_mem_arena=False` doesn't help — still ~1.05 GB
-total). Warm inference is ~12 ms, so CPU was never the issue. Two extra
-findings: the multilingual revision (v0.4.1-intl) supports 14 languages
-**not including Finnish** (the per-turn `supports_language` gate would
-skip it for fi configs anyway), and the EOU bounce task only runs after
-VAD END_OF_SPEECH — the model cannot commit *below* the Silero floor, so
+**Semantic turn detector: multilingual wontfixed (Johnny-trt.6); the
+English-only model SHIPPED in-process (Johnny-1qr — see the shipped
+section below).** The trt.6 plan was LiveKit's multilingual EOU model
+in-process on the roomless browser session (an `InferenceExecutor` shim
+around the registered `_EUORunnerMultilingual`) paired with
+`{"min_delay": 0.2, "max_delay": 1.5}` — commit early when the model
+calls the utterance complete, hold hesitant speech to 1.5 s. The spike
+killed the multilingual model on the bead's own abort line (RSS >
+~500 MB): the multilingual ONNX is 396 MB on disk and `initialize()`
+costs **+884 MB RSS** in the api process (~1.0 GB total with imports;
+`enable_cpu_mem_arena=False` doesn't help — still ~1.05 GB total). Warm
+inference is ~12 ms, so CPU was never the issue. Two extra findings: the
+multilingual revision (v0.4.1-intl) supports 14 languages **not including
+Finnish** (the per-turn `supports_language` gate would skip it for fi
+configs anyway), and the EOU bounce task only runs after VAD
+END_OF_SPEECH — the model cannot commit *below* the Silero floor, so
 "commit at ~0.2 s" additionally requires dropping the VAD floor, which
 re-segments the batch-STT StreamAdapter. The **English-only** model fits
-the line (+406 MB RSS, 1.4 ms inference) and is filed as an opt-in
-follow-up (Johnny-1qr). Full spike numbers:
+the line (+414 MB RSS re-measured in-image, 1.7 ms warm prediction) and
+shipped as Johnny-1qr. Full spike numbers:
 `.validation/Johnny-trt.6/00-spike-note.md`.
 
 ## How to measure on this machine
@@ -216,6 +218,15 @@ docker compose exec api python -m johnny.agent.latency_harness \
 # LiveKit engine default).
 docker compose exec api python -m johnny.agent.latency_harness \
     --turns 24 --endpointing-min-delay-s 0.5
+
+# A/B the in-process semantic turn detector (Johnny-1qr): auto (default)
+# follows the configured STT language exactly like production (the stub trio
+# carries none → VAD-only; --providers local follows the operator's config);
+# on stamps language=en into the STT options and REQUIRES the detector (pair
+# with --prewarm so turn 1 skips the ~400 MB model load); off forces the
+# VAD-only baseline arm.
+docker compose exec api python -m johnny.agent.latency_harness \
+    --turns 24 --prewarm --semantic-eou on
 ```
 
 Output: per-stage p50/p95/min/max — `vad_end_ms` (speech-end → VAD commit,
@@ -592,6 +603,61 @@ Live verification: playground session 86 (chrome-devtools, fake-mic
 fixture) ran the streaming path end-to-end — one long-lived WS per
 session, per-utterance `stream.segment` lines in the sidecar log,
 transcripts committed per turn, trt.9 client barge-in unaffected.
+
+## Semantic turn detector (en) in-process — ✅ SHIPPED (Johnny-1qr, 2026-06-11)
+
+The Johnny-trt.6 follow-up: the **English-only** LiveKit EOU model now runs
+*inside the API process* on the roomless browser session.
+`InProcessInferenceExecutor` (`johnny/agent/turn_detector.py`) implements the
+SDK's `InferenceExecutor` protocol over the registered `_EUORunnerEn` — the
+~3.3 s model load and each `run()` happen in worker threads, the load is
+shielded so a cold first prediction's 3 s timeout cannot abort or duplicate
+it, and `InProcessEnglishModel` exposes the executor kwarg the stock
+`EnglishModel` hides behind `get_job_context()`. Engagement is gated at
+session build on the operator's STT language normalizing to `en`
+(`stt_language_from_provider_config` reads the same option keys the STT
+adapter stamps per-transcript, so the build gate and the SDK's per-turn
+`supports_language` gate cannot disagree); any other language — or
+`JOHNNY_BROWSER_FORCE_VAD_TURNS=1` — keeps the trt.6 VAD-only retune. The
+loaded runner is a process singleton: **+414 MB RSS measured in-image**
+(under the bead's 500 MB abort line; multilingual stays wontfixed at
++884 MB), loaded once via the trt.8 background session warm-up, warm
+`predict_end_of_turn` p50 1.7 ms. Meet/room path untouched (it keeps the
+job-context `MultilingualModel`).
+
+What it changes: the engaged session runs endpointing `{min_delay: 0.40,
+max_delay: 1.5}` — the same 0.40 s Silero floor as the VAD-only path
+(one shared model), but a >0.40 s pause whose accumulated transcript the
+model judges **mid-thought** escalates the commit to 1.5 s, and resumed
+speech cancels it entirely; pre-1qr every such pause was an unconditional
+hard cut. A "complete" verdict commits at the floor — today's exact timing.
+Cost on the felt path: ~+12 ms e2e p50 (24-turn stub A/B, the per-turn EOU
+bounce: thread-hop + 1.7 ms inference), with hesitations ≤ 0.35 s riding
+out mechanically exactly as before (VAD never fires). Live proof
+(playground session 97, streaming Parakeet + Ollama llama3.2:3b + Piper,
+scripted fake-mic WAV, 7 utterances → exactly 9 INV-1-clean decisions):
+two utterances with an incomplete lead phrase + 0.45/0.55 s mid-sentence
+pause each landed as **one** decision carrying both transcript segments
+(the model held the commit through the pause — `max_delay` escalation is
+unreachable under `turn_detection="vad"`, so the holds are themselves proof
+of engagement), while a complete-sentence + 0.5 s pause control correctly
+split in two, and the trt.5 hesitation fixtures (0.20–0.35 s) stayed
+single turns.
+
+**A 0.20 s floor drop ("commit earlier when confident") was built and
+reverted inside this bead's validation.** With `min_silence` 0.20 +
+`min_delay` 0.20 the stub harness measured felt p50 798 → 610 ms (−188 ms;
+`vad_end` 402 → 202 ms) — but the live varied-pause run hit the bead's
+abort criterion: the 0.35 s-edge hesitations split, because the streaming
+sidecar finalizes at ~0.36 s of trailing silence and **hallucinates
+terminal punctuation at segment edges** ("Jenny, can you?"), which the EOU
+model correctly reads as a complete utterance and commits. On the local
+stack the drop was worth only ~30 ms anyway (commits become bound by the
+sidecar's ~0.36 s endpoint); the −188 ms stands as the fast-finals upper
+bound (stub 80 ms finals ≈ cloud STT). Re-attempting the floor drop
+requires fixing the sidecar's edge-punctuation artifact first (and a
+sub-0.36 s finalize would then also be needed for the full win). All runs,
+verdict probes, fixtures and DB dumps: `.validation/Johnny-1qr/`.
 
 ## Optimization candidates — in priority order (re-ranked from the 2026-06-10 baseline)
 

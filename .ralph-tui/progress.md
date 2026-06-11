@@ -80,6 +80,28 @@ after each iteration and it's included in prompts for context.
   filter. Client must clear the caption on user final AND
   `transcript_filtered` (a noise-dropped turn emits no final) AND teardown,
   and treat an empty hypothesis as a clear.
+- **Semantic-EOU mechanics on the browser session (1qr)**: the in-process
+  en model only changes behavior at pauses ≥ the Silero floor — its
+  "incomplete" verdict escalates the commit to endpointing `max_delay`
+  (resumed speech cancels it; an utterance held this way accumulates
+  multiple STT finals into ONE decision — that hold is itself proof the
+  detector engaged, since `max_delay` is inert under
+  `turn_detection="vad"`). The model leans hard on terminal punctuation
+  (probe: punctuated complete sentences p 0.85–0.94, mid-sentence cuts
+  p ≤ 0.005, complete-but-unpunctuated p 0.005 → HOLD) and the streaming
+  sidecar HALLUCINATES terminal punctuation at its ~0.36 s segment edges
+  ("Jenny, can you?") — that combination is why the 0.20 s floor drop was
+  reverted (0.35 s-edge hesitations split); any future floor drop must fix
+  the sidecar edge-punctuation artifact first. Engagement gate =
+  STT-language-normalizes-to-en (same factory keys as the per-transcript
+  stamp) + `JOHNNY_BROWSER_FORCE_VAD_TURNS` unset. The ~400 MB runner is a
+  process singleton behind a shielded lazy load (a cold predict's 3 s
+  timeout cancels mid-load without aborting or duplicating it).
+- **fullPage screenshots mid-session reset playground control state**: the
+  viewport resize remounts the controls component — an in-page-clicked mic
+  mute was silently undone (~35 s later the fake-mic loop resumed feeding
+  STT). Use viewport screenshots while session state matters, or end the
+  session before capturing fullPage.
 - **Local-provider harness runs have a ±100–150 ms p50 LLM-noise floor**:
   router/llm p50 drifts that much between *identical-config* 24-turn runs
   (Ollama run noise + replied-count-driven context growth — runs that
@@ -337,4 +359,67 @@ after each iteration and it's included in prompts for context.
     --check -` before blaming (or "fixing") your own diff; hard End-session
     mid-turn can double-write the turn's decision row (terminal-first
     ordering race, pre-existing — filed Johnny-9p4).
+---
+
+## 2026-06-11 - Johnny-1qr
+- En-only in-process semantic turn detector shipped on the browser session.
+  New `johnny/agent/turn_detector.py`: `InProcessInferenceExecutor`
+  (InferenceExecutor protocol over the registered `_EUORunnerEn`;
+  thread-offloaded shielded lazy load — a cold predict's 3 s timeout can't
+  abort/duplicate the ~3.3 s load; threading-lock-serialized `run()`;
+  `warm_up()` never raises) + `InProcessEnglishModel` (exposes the
+  executor kwarg `EnglishModel` hides) + the
+  `JOHNNY_BROWSER_FORCE_VAD_TURNS` kill-switch + en-language normalization.
+  Factory grew `stt_language_from_provider_config` (same `_STT_LANGUAGE_KEYS`
+  as the per-transcript stamp, so build gate and per-turn gate can't drift).
+  `BrowserAgentSession.build` gained `semantic_eou: bool|None` (None=auto
+  language gate — production; False=baseline arm; True=require-or-raise),
+  engages the detector with `browser_semantic_endpointing()` =
+  `{min_delay: 0.40, max_delay: 1.5}` over the SAME shared 0.40 s Silero,
+  exposes `semantic_eou_active`/`turn_detection_label`, and `warm_up()`
+  pre-loads the EOU runner alongside providers. Harness grew
+  `--semantic-eou {auto,on,off}` (on stamps language=en into the stub STT
+  options + requires engagement) + `turn_detection` label in
+  report/JSON. Meet/room path untouched.
+- **The bead's 0.20 s floor drop was built, measured, and reverted inside
+  validation**: stub A/B at floor 0.20 measured felt p50 798→610 ms
+  (−188 ms; vad_end 402→202) — but the live varied-pause run hit the abort
+  criterion: 0.35 s-edge hesitations split (sidecar ~0.36 s finalize +
+  terminal-punctuation hallucination at segment edges reads as complete to
+  the model). Shipped config keeps the trt.6 floor; the detector is a pure
+  quality upgrade: >0.40 s mid-thought pauses are HELD to 1.5 s instead of
+  hard-cut (live session 97: held_02/03 = ONE decision each carrying both
+  STT segments; confident-commit control split in two; trt.5 hesitations
+  all single; 7 utterances → exactly 9 INV-1-clean decisions; console
+  clean), at ~+12 ms e2e p50 bounce cost (felt-neutrality A/B 24/24 both
+  arms).
+- Abort criteria: RSS +413.7 MB in-image (< 500 line; load 3.31 s, warm
+  predict p50 1.7 ms); varied-pause regression green in the shipped config.
+- Verified: 3652 passed in-image (7 failures = the documented pre-existing
+  invalid-OPENAI_API_KEY live tests + wizard image checks), 38 new
+  turn-detector tests + reworked browser-session/harness tests; ruff
+  lint+format clean on all 8 touched files (the one `ruff check` error in
+  johnny/agent/ is browser_audio_io.py E501, pre-existing at HEAD).
+- Files changed: backend/johnny/agent/turn_detector.py (new),
+  backend/johnny/agent/browser_session.py,
+  backend/johnny/agent/adapters/factory.py, backend/johnny/agent/session.py,
+  backend/johnny/agent/latency_harness.py,
+  backend/tests/agent/test_turn_detector.py (new),
+  backend/tests/agent/test_browser_session.py,
+  backend/tests/agent/test_latency_harness.py, docs/LATENCY.md,
+  .ralph-tui/progress.md. Artifacts: .validation/Johnny-1qr/ (00-notes.md
+  maps them; both floor configs' runs kept).
+- **Learnings:**
+  - Patterns discovered: semantic-EOU mechanics + punctuation-led verdicts +
+    the floor-drop blocker, and the fullPage-screenshot state-reset gotcha —
+    both added to Codebase Patterns above.
+  - Gotchas: the playground auto-falls-back unified→split with a one-shot
+    failed session row when pipeline_mode is stale (session 93/94 pair);
+    `input_window` on agent_decisions is mode-only — correlate decisions to
+    utterances via `created_at - bot_sessions.started_at` vs transcript
+    `start_offset_ms`; bundled medium/long harness fixtures contain internal
+    ≥0.2 s quiet runs (single-utterance only guaranteed at the 0.40 floor);
+    the stub STT maps ANY segment to a fixed complete-question transcript,
+    so semantic+low-floor stub runs split at fixture-internal pauses by
+    design — use shorts-only there.
 ---

@@ -292,11 +292,12 @@ def build_agent_session(
     Meet path's locked decision), but that model resolves its inference executor
     from the live LiveKit ``get_job_context()`` and so cannot run outside a
     dispatched job. The in-browser playground (Johnny-7g5.1) runs the session
-    *in the API process* with no job context, so it passes ``"vad"`` — Silero
-    VAD endpointing, which needs no job context and matches the legacy browser
-    the legacy split pipeline's own VAD-based turn-taking (it never used a semantic EOU
-    model). Any value LiveKit accepts (a model, ``"vad"`` / ``"stt"`` / …) is
-    forwarded verbatim.
+    *in the API process* with no job context, so it passes either ``"vad"``
+    (Silero VAD endpointing, the legacy browser pipeline's own turn-taking) or
+    — for English STT configs — the in-process
+    :class:`~johnny.agent.turn_detector.InProcessEnglishModel`, whose executor
+    needs no job context (Johnny-1qr). Any value LiveKit accepts (a model,
+    ``"vad"`` / ``"stt"`` / …) is forwarded verbatim.
 
     ``preemptive_generation`` defaults to ``False`` because Johnny gates every
     turn through the router "should-speak" decision in

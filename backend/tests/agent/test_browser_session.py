@@ -356,6 +356,11 @@ def test_browser_endpointing_pins_the_vad_floor_min_delay() -> None:
     assert browser_session.browser_endpointing() == {"min_delay": 0.40}
 
 
+# Stand-in for the process-shared Silero handle (one floor serves both the
+# VAD-only and semantic paths — Johnny-1qr).
+_PLAIN_VAD_SENTINEL = object()
+
+
 def _patch_build_seams(
     monkeypatch: pytest.MonkeyPatch,
 ) -> list[dict[str, Any]]:
@@ -381,8 +386,19 @@ def _patch_build_seams(
 
     monkeypatch.setattr(browser_session, "build_agent_runtime", _fake_runtime)
     monkeypatch.setattr(browser_session, "build_agent_session", _fake_session)
-    monkeypatch.setattr(browser_session, "_shared_vad", lambda: object())
+    monkeypatch.setattr(browser_session, "_shared_vad", lambda: _PLAIN_VAD_SENTINEL)
     return captured
+
+
+def _job_config(language: str | None = None) -> Any:
+    """A minimal duck-typed SessionJobConfig for build() gate tests."""
+    from types import SimpleNamespace
+
+    options: dict[str, Any] = {} if language is None else {"language": language}
+    return SimpleNamespace(
+        bot_session_id=7,
+        provider_config={"stt": {"options": options}},
+    )
 
 
 async def test_build_applies_browser_endpointing_by_default(
@@ -421,6 +437,190 @@ async def test_build_forwards_an_explicit_endpointing_override(
     )
     assert len(captured) == 1
     assert captured[0]["endpointing"] == {"min_delay": 0.5}
+
+
+# --------------------------------------------------------------------------- #
+# In-process semantic turn detector gating (Johnny-1qr)                        #
+# --------------------------------------------------------------------------- #
+
+
+async def test_build_engages_the_semantic_detector_for_an_en_stt_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An English STT language engages the in-process EOU model + max_delay tuning."""
+    from types import SimpleNamespace
+
+    from johnny.agent.browser_session import BrowserAgentSession
+    from johnny.agent.turn_detector import InProcessEnglishModel
+
+    monkeypatch.delenv("JOHNNY_BROWSER_FORCE_VAD_TURNS", raising=False)
+    captured = _patch_build_seams(monkeypatch)
+    sess = await BrowserAgentSession.build(
+        SimpleNamespace(sample_rate=48000),  # type: ignore[arg-type]
+        _job_config(language="en"),
+        event_bus=SimpleNamespace(),  # type: ignore[arg-type]
+    )
+    assert len(captured) == 1
+    detector = captured[0]["turn_detection"]
+    assert isinstance(detector, InProcessEnglishModel)
+    # Same min_delay floor as the VAD-only path; max_delay live for the
+    # "model says incomplete" hold (Johnny-1qr — the 0.20 s floor drop was
+    # reverted in validation, see browser_session.py).
+    assert captured[0]["endpointing"] == {"min_delay": 0.40, "max_delay": 1.5}
+    assert captured[0]["vad"] is _PLAIN_VAD_SENTINEL  # one shared 0.40 s Silero
+    assert sess.semantic_eou_active
+    assert sess.turn_detection_label == "semantic-eou(en)"
+    # The session carries the model's executor so warm_up() can pre-load it.
+    assert sess._eou_executor is detector.executor  # noqa: SLF001
+    assert not detector.executor.initialized  # build must never pay the model load
+
+
+async def test_build_keeps_vad_for_a_non_english_stt_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fi config keeps the tuned VAD-only path (the en-only model is useless there)."""
+    from types import SimpleNamespace
+
+    from johnny.agent.browser_session import BrowserAgentSession
+
+    monkeypatch.delenv("JOHNNY_BROWSER_FORCE_VAD_TURNS", raising=False)
+    captured = _patch_build_seams(monkeypatch)
+    sess = await BrowserAgentSession.build(
+        SimpleNamespace(sample_rate=48000),  # type: ignore[arg-type]
+        _job_config(language="fi"),
+        event_bus=SimpleNamespace(),  # type: ignore[arg-type]
+    )
+    assert captured[0]["turn_detection"] == "vad"
+    assert captured[0]["endpointing"] == {"min_delay": 0.40}
+    assert captured[0]["vad"] is _PLAIN_VAD_SENTINEL
+    assert not sess.semantic_eou_active
+    assert sess.turn_detection_label == "vad"
+
+
+async def test_build_kill_switch_forces_vad_even_for_en(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """JOHNNY_BROWSER_FORCE_VAD_TURNS=1 pins the trt.6 path regardless of language."""
+    from types import SimpleNamespace
+
+    from johnny.agent.browser_session import BrowserAgentSession
+
+    monkeypatch.setenv("JOHNNY_BROWSER_FORCE_VAD_TURNS", "1")
+    captured = _patch_build_seams(monkeypatch)
+    sess = await BrowserAgentSession.build(
+        SimpleNamespace(sample_rate=48000),  # type: ignore[arg-type]
+        _job_config(language="en"),
+        event_bus=SimpleNamespace(),  # type: ignore[arg-type]
+    )
+    assert captured[0]["turn_detection"] == "vad"
+    assert captured[0]["endpointing"] == {"min_delay": 0.40}
+    assert captured[0]["vad"] is _PLAIN_VAD_SENTINEL
+    assert not sess.semantic_eou_active
+
+
+async def test_build_semantic_eou_false_forces_vad(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The harness baseline arm: semantic_eou=False never engages the detector."""
+    from types import SimpleNamespace
+
+    from johnny.agent.browser_session import BrowserAgentSession
+
+    monkeypatch.delenv("JOHNNY_BROWSER_FORCE_VAD_TURNS", raising=False)
+    captured = _patch_build_seams(monkeypatch)
+    sess = await BrowserAgentSession.build(
+        SimpleNamespace(sample_rate=48000),  # type: ignore[arg-type]
+        _job_config(language="en"),
+        event_bus=SimpleNamespace(),  # type: ignore[arg-type]
+        semantic_eou=False,
+    )
+    assert captured[0]["turn_detection"] == "vad"
+    assert captured[0]["endpointing"] == {"min_delay": 0.40}
+    assert not sess.semantic_eou_active
+
+
+async def test_build_semantic_eou_true_raises_when_the_gates_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit-on A/B arm must fail loudly, never silently measure VAD-only."""
+    from types import SimpleNamespace
+
+    from johnny.agent.browser_session import BrowserAgentSession
+
+    monkeypatch.delenv("JOHNNY_BROWSER_FORCE_VAD_TURNS", raising=False)
+    captured = _patch_build_seams(monkeypatch)
+    with pytest.raises(RuntimeError, match="semantic_eou=True"):
+        await BrowserAgentSession.build(
+            SimpleNamespace(sample_rate=48000),  # type: ignore[arg-type]
+            _job_config(language="fi"),
+            event_bus=SimpleNamespace(),  # type: ignore[arg-type]
+            semantic_eou=True,
+        )
+    assert captured == []  # failed before any session was assembled
+
+
+async def test_build_explicit_endpointing_wins_over_the_semantic_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An A/B endpointing override is verbatim even with the detector engaged."""
+    from types import SimpleNamespace
+
+    from johnny.agent.browser_session import BrowserAgentSession
+
+    monkeypatch.delenv("JOHNNY_BROWSER_FORCE_VAD_TURNS", raising=False)
+    captured = _patch_build_seams(monkeypatch)
+    sess = await BrowserAgentSession.build(
+        SimpleNamespace(sample_rate=48000),  # type: ignore[arg-type]
+        _job_config(language="en"),
+        event_bus=SimpleNamespace(),  # type: ignore[arg-type]
+        endpointing={"min_delay": 0.5},
+    )
+    assert captured[0]["endpointing"] == {"min_delay": 0.5}
+    assert sess.semantic_eou_active  # the override changes endpointing, not the detector
+
+
+def test_browser_semantic_endpointing_pins_floor_and_max_delay() -> None:
+    """Johnny-1qr: semantic endpointing = the trt.6 floor + a live 1.5 s max_delay.
+
+    min_delay deliberately equals the VAD-only path's (zero engine padding,
+    one shared 0.40 s Silero floor — the 0.20 s floor drop was reverted in
+    validation per the bead's varied-pause abort criterion); max_delay is
+    meaningful here because the engaged turn detector escalates to it on a
+    "model says incomplete" verdict.
+    """
+    from johnny.agent import browser_session
+
+    assert browser_session.BROWSER_SEMANTIC_ENDPOINTING_MAX_DELAY_S == 1.5
+    assert browser_session.browser_semantic_endpointing() == {
+        "min_delay": browser_session.BROWSER_ENDPOINTING_MIN_DELAY_S,
+        "max_delay": 1.5,
+    }
+    assert browser_session.browser_semantic_endpointing()["min_delay"] == 0.40
+
+
+async def test_warm_up_also_initializes_the_eou_executor() -> None:
+    """Johnny-1qr: warm_up pre-loads the EOU runner alongside the providers."""
+    calls: list[str] = []
+
+    class _Runtime:
+        async def warm_up(self) -> None:
+            calls.append("runtime")
+
+    class _Executor:
+        async def warm_up(self) -> None:
+            calls.append("eou")
+
+    sess = BrowserAgentSession(
+        runtime=cast(Any, _Runtime()),
+        session=cast(Any, None),
+        transport=cast(Any, None),
+        audio_out=cast(Any, None),
+        transcript_sink=cast(Any, None),
+        session_id="7",
+        eou_executor=cast(Any, _Executor()),
+    )
+    await sess.warm_up()
+    assert sorted(calls) == ["eou", "runtime"]
 
 
 async def test_build_wires_the_interim_caption_forwarder(

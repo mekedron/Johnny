@@ -231,6 +231,27 @@ def _selected(options: dict[str, Any], keys: tuple[str, ...]) -> str | None:
     return None
 
 
+def stt_language_from_provider_config(provider_config: Mapping[str, Any]) -> str | None:
+    """The operator-configured STT language from a job payload's ``provider_config``.
+
+    Resolves the same option keys (:data:`_STT_LANGUAGE_KEYS`) the adapter
+    factory threads into :func:`~johnny.agent.adapters.johnny_stt.build_stt_adapter`
+    — i.e. the exact language the session's STT stamps onto every transcript's
+    ``SpeechData`` — so a build-time consumer (the browser session's semantic
+    turn-detector gate, Johnny-1qr) can never disagree with the per-turn
+    ``supports_language`` gate the SDK applies to those stamps. ``None`` when
+    the payload has no STT entry / options / language selection (the adapter
+    then stamps ``""`` = unknown, and the per-turn gate skips any EOU model).
+    """
+    entry = provider_config.get(ProviderKind.STT.value)
+    if not isinstance(entry, Mapping):
+        return None
+    options = entry.get("options")
+    if not isinstance(options, Mapping):
+        return None
+    return _selected(dict(options), _STT_LANGUAGE_KEYS)
+
+
 def _assemble_split_adapters(
     *,
     stt: ProviderInstance,
@@ -552,5 +573,6 @@ __all__ = [
     "SessionAdapters",
     "build_session_adapters",
     "build_session_adapters_from_payload",
+    "stt_language_from_provider_config",
     "warm_up_session_providers",
 ]

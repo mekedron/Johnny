@@ -178,7 +178,8 @@ def test_endpointing_selection_lands_in_report_and_json(harness_result: HarnessR
     """Johnny-trt.6: runs self-describe which engine endpointing they measured.
 
     The shared fixture passes no override, so it resolves the browser
-    session's own endpointing (min_delay 0.40 s — the trt.6 VAD-only retune);
+    session's own endpointing (min_delay 0.40 s — the trt.6 VAD-only retune;
+    the language-less stub trio never engages the semantic detector);
     the --endpointing-min-delay-s label mapping is pinned on a synthetic
     result, mirroring the VAD-label test above.
     """
@@ -191,3 +192,30 @@ def test_endpointing_selection_lands_in_report_and_json(harness_result: HarnessR
     )
     assert "endpointing=min_delay=0.5s" in render_report(pinned)
     assert result_to_json(pinned)["endpointing"] == "min_delay=0.5s"
+
+
+def test_turn_detection_selection_lands_in_report_and_json(
+    harness_result: HarnessResult,
+) -> None:
+    """Johnny-1qr: runs self-describe their turn-detection arm (--semantic-eou).
+
+    The shared fixture runs the stub trio with semantic_eou="auto": the stubs
+    carry no STT language, so the session resolves to VAD-only — exactly the
+    pre-1qr behaviour, keeping every other assertion in this module valid.
+    The engaged-arm rendering is pinned on a synthetic result (an engaged run
+    would load the ~400 MB EOU model into the test process).
+    """
+    assert harness_result.turn_detection_label == "vad"
+    assert "turn_detection=vad" in render_report(harness_result)
+    assert result_to_json(harness_result)["turn_detection"] == "vad"
+
+    engaged = HarnessResult(
+        providers_mode="stub",
+        turns_requested=1,
+        turn_detection_label="semantic-eou(en)",
+        endpointing_label="browser-semantic-default (min_delay=0.4s, max_delay=1.5s)",
+    )
+    report = render_report(engaged)
+    assert "turn_detection=semantic-eou(en)" in report
+    assert "endpointing=browser-semantic-default (min_delay=0.4s, max_delay=1.5s)" in report
+    assert result_to_json(engaged)["turn_detection"] == "semantic-eou(en)"

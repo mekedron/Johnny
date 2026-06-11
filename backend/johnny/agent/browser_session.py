@@ -11,13 +11,21 @@ replaces did the same). This module is the in-process counterpart of the worker:
   every Phase-2 seam (adapters, router gate, observability, barge-in, the
   :class:`~johnny.agent.session.JohnnyAgent`) from a
   :class:`~johnny.agent.job_config.SessionJobConfig`;
-* it builds the :class:`~livekit.agents.AgentSession` with **VAD turn detection**
-  (not the job-context-bound ``MultilingualModel``) so it runs with no job
-  context — matching the legacy browser pipeline's own VAD-based turn-taking.
-  Hosting the semantic EOU model in-process instead was investigated and
-  wontfixed (Johnny-trt.6): the multilingual ONNX model costs ~884 MB RSS in
-  the API process, over the bead's ~500 MB line. The session compensates with
-  tuned VAD-only endpointing (:data:`BROWSER_ENDPOINTING_MIN_DELAY_S`);
+* it builds the :class:`~livekit.agents.AgentSession` with turn detection that
+  needs **no job context**. For an English STT config that is the in-process
+  en-only semantic EOU model
+  (:class:`~johnny.agent.turn_detector.InProcessEnglishModel` over the
+  process-shared :class:`~johnny.agent.turn_detector.InProcessInferenceExecutor`,
+  Johnny-1qr) with :func:`browser_semantic_endpointing` — same 0.40 s floor
+  as the VAD-only path, but a pause the model judges mid-thought is held to
+  ``max_delay`` 1.5 s instead of hard-cutting at the floor (resumed speech
+  cancels the commit entirely). Any other language (or the
+  ``JOHNNY_BROWSER_FORCE_VAD_TURNS`` kill-switch) keeps plain **VAD turn
+  detection** with the tuned VAD-only endpointing
+  (:data:`BROWSER_ENDPOINTING_MIN_DELAY_S`, Johnny-trt.6) — the *multilingual*
+  in-process model stays wontfixed (~884 MB RSS, over the ~500 MB line; the
+  en-only model measured ~+410 MB / 1.7 ms in-image — Johnny-trt.6 spike +
+  the Johnny-1qr re-measure);
 * it binds the session to the browser via
   :class:`~johnny.agent.browser_audio_io.BrowserAudioInput` /
   :class:`~johnny.agent.browser_audio_io.BrowserAudioOutput` instead of
@@ -41,6 +49,7 @@ import-safe top-level :mod:`johnny.agent` package.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import TYPE_CHECKING, Any
@@ -48,6 +57,7 @@ from typing import TYPE_CHECKING, Any
 from livekit.agents.llm import StopResponse
 from livekit.agents.llm.chat_context import ChatMessage as LKChatMessage
 
+from johnny.agent.adapters.factory import stt_language_from_provider_config
 from johnny.agent.browser_audio_io import BrowserAudioInput, BrowserAudioOutput
 from johnny.agent.job_config import SessionJobConfig
 from johnny.agent.job_session import AgentRuntime, build_agent_runtime
@@ -56,6 +66,12 @@ from johnny.agent.observability import (
     build_transcript_finalized_emitter,
 )
 from johnny.agent.session import build_agent_session, load_vad
+from johnny.agent.turn_detector import (
+    InProcessEnglishModel,
+    InProcessInferenceExecutor,
+    browser_vad_turns_forced,
+    is_english_stt_language,
+)
 from johnny.voice_pipeline.events import TranscriptFinalized
 
 if TYPE_CHECKING:
@@ -86,27 +102,53 @@ _SHARED_VAD: VAD | None = None
 BROWSER_VAD_MIN_SILENCE_DURATION_S = 0.40
 
 
-# Engine endpointing floor for the browser session (Johnny-trt.6). The bead's
-# in-process semantic turn detector was dropped per its own spike criterion —
-# the multilingual EOU model costs ~884 MB RSS inside the API process (ONNX is
-# 396 MB on disk; the >~500 MB abort line; full numbers in docs/LATENCY.md) —
-# so the browser session stays on VAD endpointing and instead retunes the
-# engine's ``min_delay`` padding down to the VAD floor. ``min_delay`` is
+# Engine endpointing floor for the VAD-only browser session (Johnny-trt.6).
+# The trt.6 bead's in-process semantic turn detector was dropped per its own
+# spike criterion — the *multilingual* EOU model costs ~884 MB RSS inside the
+# API process (ONNX is 396 MB on disk; the >~500 MB abort line; full numbers
+# in docs/LATENCY.md) — so the VAD-only path retunes the engine's
+# ``min_delay`` padding down to the VAD floor instead. ``min_delay`` is
 # anchored at the *last detected speech*, so it overlaps (not stacks on)
 # Silero's 0.40 s ``min_silence_duration`` wait: 0.40 commits the turn the
 # moment the VAD floor is crossed instead of padding it to LiveKit's 0.5 s
 # default. Hesitation tolerance is the VAD floor itself — pauses < 0.40 s
 # never fire END_OF_SPEECH (the trt.5 varied-pause envelope, 0.20–0.35 s,
-# is untouched). On today's batch-STT path the commit is STT-final-bound
-# (~0.52 s with Parakeet's ~123 ms finals) so this is felt-neutral; it
-# removes the engine's 0.5 s floor so streaming/cloud STT (Phase 2) commits
-# at the VAD floor. ``max_delay`` stays unset: with ``turn_detection="vad"``
-# no semantic model ever escalates to it.
+# is untouched). ``max_delay`` stays unset: with ``turn_detection="vad"``
+# no semantic model ever escalates to it. This remains the path for any
+# non-English STT config and for ``JOHNNY_BROWSER_FORCE_VAD_TURNS=1``; an
+# English config upgrades to the semantic tuning below (Johnny-1qr).
 BROWSER_ENDPOINTING_MIN_DELAY_S = 0.40
+
+# Semantic-EOU browser tuning (Johnny-1qr). With the in-process en-only turn
+# detector engaged, the Silero floor and ``min_delay`` stay at the trt.6
+# 0.40 s — only ``max_delay`` becomes live: a pause > 0.40 s whose
+# accumulated transcript the model judges mid-thought escalates the commit
+# to 1.5 s, and any resumed speech cancels it entirely (the SDK's EOU
+# bounce task) — pre-1qr such pauses were unconditional hard cuts. A
+# "complete" verdict commits at the floor, exactly today's timing, so the
+# detector is a pure quality upgrade with no felt-latency cost. Hesitations
+# <= 0.35 s never fire END_OF_SPEECH and ride out mechanically, identical
+# to the VAD-only path. ``max_delay`` 1.5 s halves the SDK's 3.0 s default
+# (a single-speaker playground does not need multi-party patience, but a
+# mid-thought pause deserves more than the floor).
+#
+# Dropping the floor to ~0.2 s for an additional "commit earlier when
+# confident" win was BUILT AND REVERTED in validation: at a 0.20 s floor
+# the live varied-pause run split the 0.35 s-edge hesitations — the
+# streaming Parakeet sidecar finalizes at ~0.36 s of trailing silence and
+# hallucinates terminal punctuation at segment edges ("Jenny, can you?"),
+# which the EOU model correctly reads as a complete utterance. That hit
+# the bead's abort criterion (0.20-0.35 s hesitations must ride out), so
+# the floor drop is blocked until the sidecar's edge-punctuation artifact
+# is addressed (see docs/LATENCY.md and .validation/Johnny-1qr/). On the
+# local stack the drop was worth only ~30 ms anyway (commits become
+# final-bound at the sidecar's ~0.36 s endpoint); the stub A/B's −188 ms
+# felt p50 at a 0.20 s floor is recorded as the fast-finals upper bound.
+BROWSER_SEMANTIC_ENDPOINTING_MAX_DELAY_S = 1.5
 
 
 def browser_endpointing() -> EndpointingOptions:
-    """Endpointing options for the browser session (Johnny-trt.6 VAD-only retune).
+    """Endpointing options for the VAD-only browser session (Johnny-trt.6 retune).
 
     ``min_delay`` only — missing keys inherit the SDK defaults (see
     :func:`johnny.agent.session.build_turn_handling`). Browser sessions ONLY;
@@ -114,6 +156,20 @@ def browser_endpointing() -> EndpointingOptions:
     3.0 s defaults (multi-party padding rationale, Johnny-arh).
     """
     return {"min_delay": BROWSER_ENDPOINTING_MIN_DELAY_S}
+
+
+def browser_semantic_endpointing() -> EndpointingOptions:
+    """Endpointing options when the semantic turn detector is engaged (Johnny-1qr).
+
+    ``min_delay`` stays the trt.6 VAD-floor value (zero engine padding);
+    ``max_delay`` is live here — a "model says incomplete" verdict holds the
+    commit to it instead of hard-cutting at the floor. Browser sessions ONLY,
+    like :func:`browser_endpointing`.
+    """
+    return {
+        "min_delay": BROWSER_ENDPOINTING_MIN_DELAY_S,
+        "max_delay": BROWSER_SEMANTIC_ENDPOINTING_MAX_DELAY_S,
+    }
 
 
 def load_browser_vad() -> VAD:
@@ -128,11 +184,64 @@ def load_browser_vad() -> VAD:
 
 
 def _shared_vad() -> VAD:
-    """Return the process-shared browser Silero VAD, loading it once on first use."""
+    """Return the process-shared browser Silero VAD, loading it once on first use.
+
+    One handle serves the VAD-only AND the semantic-EOU paths (Johnny-1qr):
+    both run the same 0.40 s floor, so the semantic path differs only in
+    ``turn_detection`` + ``endpointing``, never in the Silero model.
+    """
     global _SHARED_VAD
     if _SHARED_VAD is None:
         _SHARED_VAD = load_browser_vad()
     return _SHARED_VAD
+
+
+def resolve_browser_turn_detector(config: SessionJobConfig) -> InProcessEnglishModel | None:
+    """The in-process semantic turn detector for this session, or ``None`` (Johnny-1qr).
+
+    Engages only when every gate passes, otherwise the session keeps the tuned
+    VAD-only path (Johnny-trt.6):
+
+    * the ``JOHNNY_BROWSER_FORCE_VAD_TURNS`` kill-switch is unset;
+    * the operator-configured STT language normalizes to English — the same
+      option keys the STT adapter stamps onto every transcript, so this
+      build-time gate cannot disagree with the SDK's per-turn
+      ``supports_language`` gate. The en-only revision supports nothing else
+      (and the multilingual one has no Finnish either — trt.6 spike), and the
+      matching 0.20 s VAD floor must never ship without a model to judge the
+      pauses it exposes;
+    * the model wrapper constructs (reads ``languages.json`` from the
+      image-baked HF cache) — a failure logs and falls back rather than
+      blocking the session.
+
+    Construction is cheap; the ~+400 MB runner load happens lazily in the
+    process-shared executor (or in :meth:`BrowserAgentSession.warm_up`).
+    ``config`` is duck-typed (``provider_config`` read via ``getattr``) so
+    harness/test fakes that model only the fields they exercise resolve to
+    the VAD-only path instead of crashing.
+    """
+    if browser_vad_turns_forced():
+        logger.info(
+            "browser session: JOHNNY_BROWSER_FORCE_VAD_TURNS set — keeping VAD-only turn detection"
+        )
+        return None
+    language = stt_language_from_provider_config(getattr(config, "provider_config", None) or {})
+    if not is_english_stt_language(language):
+        if language:
+            logger.info(
+                "browser session: STT language %r is not English — the en-only "
+                "semantic turn detector stays off (VAD-only endpointing)",
+                language,
+            )
+        return None
+    try:
+        return InProcessEnglishModel()
+    except Exception:
+        logger.exception(
+            "browser session: semantic turn detector unavailable — falling back "
+            "to VAD-only endpointing"
+        )
+        return None
 
 
 class BrowserAgentSession:
@@ -157,6 +266,7 @@ class BrowserAgentSession:
         transcript_sink: TranscriptFinalizedSink,
         session_id: str,
         interim_forwarder: InterimTranscriptForwarder | None = None,
+        eou_executor: InProcessInferenceExecutor | None = None,
     ) -> None:
         self._runtime = runtime
         self._session = session
@@ -165,10 +275,24 @@ class BrowserAgentSession:
         self._transcript_sink = transcript_sink
         self._session_id = session_id
         self._interim_forwarder = interim_forwarder
+        # The in-process executor behind the session's semantic turn detector
+        # (Johnny-1qr); None on the VAD-only path. Carried so warm_up() can
+        # pre-load the EOU model off the first turn's hot path.
+        self._eou_executor = eou_executor
         # Session-start reference for the typed-input transcript offset (so it
         # lands in the INTEGER transcript_chunks.start_offset_ms as an
         # offset-from-start, never a raw epoch-ms value — Johnny-7g5.1).
         self._started_monotonic = time.monotonic()
+
+    @property
+    def semantic_eou_active(self) -> bool:
+        """Whether this session runs the in-process semantic turn detector."""
+        return self._eou_executor is not None
+
+    @property
+    def turn_detection_label(self) -> str:
+        """Display label for the session's turn-detection strategy (harness/logs)."""
+        return "semantic-eou(en)" if self.semantic_eou_active else "vad"
 
     @classmethod
     async def build(
@@ -180,24 +304,51 @@ class BrowserAgentSession:
         vad: VAD | None = None,
         transcript_history_loader: TranscriptHistoryLoader | None = None,
         endpointing: EndpointingOptions | None = None,
+        semantic_eou: bool | None = None,
     ) -> BrowserAgentSession:
         """Assemble the runtime + roomless session + audio I/O for one session.
 
         Mirrors the worker's entrypoint (Johnny-9eh) minus the room: reuses
         :func:`build_agent_runtime` for every shared seam, builds the
-        :class:`AgentSession` with VAD turn detection, and — only in
-        ``approval_required`` mode with a live gate — wires the approval
-        coordinator (it needs the built session for out-of-band
-        ``generate_reply``). Raises
+        :class:`AgentSession` with job-context-free turn detection (semantic
+        or VAD — see below), and — only in ``approval_required`` mode with a
+        live gate — wires the approval coordinator (it needs the built session
+        for out-of-band ``generate_reply``). Raises
         :class:`~johnny.agent.adapters.factory.AgentSessionSetupError` for a
         non-split / under-configured payload, exactly like the worker.
 
-        ``endpointing`` overrides the browser default
-        (:func:`browser_endpointing`, ``min_delay`` 0.40 s — Johnny-trt.6);
-        the latency harness passes e.g. ``{"min_delay": 0.5}`` to reproduce
-        the pre-trt.6 engine padding for A/B runs.
+        ``semantic_eou`` selects the turn-detection strategy (Johnny-1qr):
+        ``None`` (the default, and what production passes) auto-engages the
+        in-process en-only semantic turn detector when
+        :func:`resolve_browser_turn_detector`'s gates pass — an English STT
+        config with the kill-switch unset — pairing it with
+        :func:`browser_semantic_endpointing` (the trt.6 ``min_delay`` floor
+        plus a live ``max_delay`` 1.5 s for "model says incomplete" holds);
+        any failed gate keeps tuned VAD-only turn detection (Johnny-trt.6).
+        ``False`` forces VAD-only (the harness baseline arm). ``True``
+        requires the detector and raises ``RuntimeError`` when it cannot
+        engage — an A/B arm must never silently measure the wrong path (the
+        trt.11 lesson). Both strategies run the same 0.40 s Silero floor.
+
+        ``endpointing`` overrides the engaged path's default
+        (:func:`browser_semantic_endpointing` — ``min_delay`` 0.40 s /
+        ``max_delay`` 1.5 s — when the detector engages, else
+        :func:`browser_endpointing`, ``min_delay`` 0.40 s); the latency
+        harness passes e.g. ``{"min_delay": 0.5}`` to reproduce the pre-trt.6
+        engine padding for A/B runs.
         """
         from app.db.session import SessionLocal
+
+        detector: InProcessEnglishModel | None = None
+        if semantic_eou is not False:
+            detector = resolve_browser_turn_detector(config)
+            if semantic_eou is True and detector is None:
+                raise RuntimeError(
+                    "semantic_eou=True but the en-only semantic turn detector could "
+                    "not engage — it needs an English STT language in the session's "
+                    "provider_config, JOHNNY_BROWSER_FORCE_VAD_TURNS unset, and the "
+                    "image-baked turn-detector model files"
+                )
 
         if vad is None:
             vad = _shared_vad()
@@ -216,6 +367,16 @@ class BrowserAgentSession:
             session_started_at=time.time(),
         )
 
+        # Turn detection without a job context: the en-only semantic model
+        # over the in-process executor when the Johnny-1qr gates passed, else
+        # plain VAD endpointing (the multilingual model stays job-context
+        # -bound and was wontfixed in-process at ~884 MB RSS — trt.6 spike).
+        # The endpointing default tracks the engaged path; an explicit
+        # ``endpointing`` always wins (the harness A/B seam).
+        if endpointing is None:
+            endpointing = (
+                browser_semantic_endpointing() if detector is not None else browser_endpointing()
+            )
         session = build_agent_session(
             stt=runtime.adapters.stt,
             llm=runtime.adapters.llm,
@@ -223,14 +384,14 @@ class BrowserAgentSession:
             vad=vad,
             enable_barge_in=runtime.enable_barge_in,
             min_interruption_duration_s=runtime.min_interruption_duration_s,
-            # VAD endpointing, not a semantic EOU model: the multilingual turn
-            # detector resolves its inference executor from get_job_context(),
-            # which does not exist in the API process — and hosting it
-            # in-process was wontfixed at ~884 MB RSS (Johnny-trt.6 spike;
-            # see BROWSER_ENDPOINTING_MIN_DELAY_S above). Matches the legacy
-            # browser pipeline (VAD-based turn-taking).
-            turn_detection="vad",
-            endpointing=endpointing if endpointing is not None else browser_endpointing(),
+            turn_detection=detector if detector is not None else "vad",
+            endpointing=endpointing,
+        )
+        logger.info(
+            "browser session %s turn detection: %s (endpointing=%s)",
+            session_id,
+            "semantic-eou(en)" if detector is not None else "vad",
+            endpointing,
         )
 
         if runtime.needs_approval_wiring and runtime.approval_gate is not None:
@@ -265,6 +426,7 @@ class BrowserAgentSession:
             transcript_sink=transcript_sink,
             session_id=session_id,
             interim_forwarder=interim_forwarder,
+            eou_executor=detector.executor if detector is not None else None,
         )
 
     async def warm_up(self) -> None:
@@ -272,12 +434,18 @@ class BrowserAgentSession:
 
         Delegates to :meth:`~johnny.agent.job_session.AgentRuntime.warm_up`
         (whisper weights, Piper voice ONNX, local-LLM model load — each
-        provider's own ``warm_up()`` hook). The browser runner fires this as
-        a background task right after :meth:`build`, concurrently with
-        :meth:`start` — the session's ready signal never waits on it. Never
-        raises; per-provider failures are logged inside.
+        provider's own ``warm_up()`` hook) and, when the semantic turn
+        detector is engaged (Johnny-1qr), concurrently pre-loads its EOU
+        runner so the first turn's prediction never pays the model load
+        inside its 3 s budget. The browser runner fires this as a background
+        task right after :meth:`build`, concurrently with :meth:`start` —
+        the session's ready signal never waits on it. Never raises;
+        per-provider / executor failures are logged inside.
         """
-        await self._runtime.warm_up()
+        warm_ups = [self._runtime.warm_up()]
+        if self._eou_executor is not None:
+            warm_ups.append(self._eou_executor.warm_up())
+        await asyncio.gather(*warm_ups)
 
     async def start(self) -> None:
         """Bind the browser audio seams and start the session roomless.
@@ -416,11 +584,14 @@ class BrowserAgentSession:
 
 __all__ = [
     "BROWSER_ENDPOINTING_MIN_DELAY_S",
+    "BROWSER_SEMANTIC_ENDPOINTING_MAX_DELAY_S",
     "BROWSER_VAD_MIN_SILENCE_DURATION_S",
     "BrowserAgentSession",
     "browser_endpointing",
+    "browser_semantic_endpointing",
     "build_browser_agent_session",
     "load_browser_vad",
+    "resolve_browser_turn_detector",
 ]
 
 
@@ -432,6 +603,7 @@ async def build_browser_agent_session(
     vad: VAD | None = None,
     transcript_history_loader: TranscriptHistoryLoader | None = None,
     endpointing: EndpointingOptions | None = None,
+    semantic_eou: bool | None = None,
 ) -> BrowserAgentSession:
     """Functional alias for :meth:`BrowserAgentSession.build` (call-site clarity)."""
     return await BrowserAgentSession.build(
@@ -441,4 +613,5 @@ async def build_browser_agent_session(
         vad=vad,
         transcript_history_loader=transcript_history_loader,
         endpointing=endpointing,
+        semantic_eou=semantic_eou,
     )

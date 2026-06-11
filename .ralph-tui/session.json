@@ -3,10 +3,10 @@
   "sessionId": "82402e4d-e4aa-4e51-a95b-90cc16d67f3b",
   "status": "running",
   "startedAt": "2026-06-10T20:20:17.654Z",
-  "updatedAt": "2026-06-10T23:41:18.765Z",
-  "currentIteration": 4,
+  "updatedAt": "2026-06-11T01:04:10.327Z",
+  "currentIteration": 5,
   "maxIterations": 0,
-  "tasksCompleted": 4,
+  "tasksCompleted": 5,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -105,8 +105,8 @@
       {
         "id": "Johnny-trt.13",
         "title": "[BUILD] Phase 2: Live interim captions in the playground",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.14",
@@ -306,6 +306,16 @@
       "durationMs": 4610711,
       "startedAt": "2026-06-10T21:47:20.749Z",
       "endedAt": "2026-06-10T23:04:11.460Z"
+    },
+    {
+      "iteration": 5,
+      "status": "completed",
+      "taskId": "Johnny-trt.13",
+      "taskTitle": "[BUILD] Phase 2: Live interim captions in the playground",
+      "taskCompleted": true,
+      "durationMs": 2203805,
+      "startedAt": "2026-06-10T23:04:34.033Z",
+      "endedAt": "2026-06-10T23:41:17.838Z"
     }
   ],
   "skippedTaskIds": [],

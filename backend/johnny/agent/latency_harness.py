@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -538,6 +539,7 @@ class HarnessResult:
     prewarmed: bool = False
     vad_label: str = "browser-default"
     endpointing_label: str = "browser-default"
+    turn_detection_label: str = "vad"
     turns: list[TurnTimings] = field(default_factory=list)
 
     @property
@@ -724,6 +726,7 @@ async def run_latency_harness(
     vad: VAD | None = None,
     vad_min_silence_s: float | None = None,
     endpointing_min_delay_s: float | None = None,
+    semantic_eou: str = "auto",
     bot_session_id: int = 0,
     prewarm: bool = False,
 ) -> HarnessResult:
@@ -747,26 +750,41 @@ async def run_latency_harness(
     ``prewarm=True`` run's to size the prewarm win.
 
     VAD selection (Johnny-trt.5): by default the session resolves the browser
-    engine's own Silero model
-    (:func:`~johnny.agent.browser_session.load_browser_vad`, 0.40 s
-    min-silence floor) — the harness measures the playground as configured.
-    ``vad_min_silence_s`` loads a Silero with that floor instead (the A/B
-    knob: ``0.55`` reproduces the pre-trt.5 default); an explicit ``vad``
-    instance wins over both.
+    engine's own Silero model (0.40 s min-silence floor — shared by the
+    VAD-only and semantic paths). ``vad_min_silence_s`` loads a Silero with
+    a different floor instead (the A/B knob: ``0.55`` reproduces the
+    pre-trt.5 default); an explicit ``vad`` instance wins over both.
 
     Endpointing (Johnny-trt.6): by default the session resolves the browser
-    engine's own endpointing
-    (:func:`~johnny.agent.browser_session.browser_endpointing`,
-    ``min_delay`` 0.40 s). ``endpointing_min_delay_s`` overrides it — the A/B
-    knob: ``0.5`` reproduces the pre-trt.6 LiveKit engine default.
+    engine's own endpointing (``min_delay`` 0.40 s, plus ``max_delay`` 1.5 s
+    when the semantic detector engages). ``endpointing_min_delay_s``
+    overrides it — the A/B knob: ``0.5`` reproduces the pre-trt.6 LiveKit
+    engine default.
+
+    Semantic turn detection (Johnny-1qr): ``semantic_eou`` is the A/B knob
+    over the in-process en-only EOU model. ``"auto"`` (default) lets the
+    session decide exactly like production — for the language-less stub trio
+    that resolves to VAD-only, for ``--providers local`` it follows the
+    operator's STT language. ``"on"`` stamps ``language: "en"`` into the STT
+    options (the stub carries none) and *requires* the detector
+    (``build(semantic_eou=True)`` raises rather than measuring the wrong
+    arm); pair it with ``prewarm=True`` so turn 1 does not pay the ~400 MB
+    model load inside its EOU budget. ``"off"`` forces the tuned VAD-only
+    path — the baseline arm. Both arms run the same 0.40 s floor, so the
+    expected felt delta is ~0 — the knob exists to verify that, and to
+    measure floor-drop experiments when combined with ``vad_min_silence_s``
+    + ``endpointing_min_delay_s``.
     """
     from johnny.agent.browser_session import (
         BROWSER_ENDPOINTING_MIN_DELAY_S,
+        BROWSER_SEMANTIC_ENDPOINTING_MAX_DELAY_S,
         BROWSER_VAD_MIN_SILENCE_DURATION_S,
         BrowserAgentSession,
     )
     from johnny.agent.session import load_vad
 
+    if semantic_eou not in ("auto", "on", "off"):
+        raise ValueError(f"unknown semantic_eou {semantic_eou!r} (use auto, on or off)")
     if provider_config is None:
         if providers_mode == "stub":
             register_stub_providers()
@@ -781,6 +799,12 @@ async def run_latency_harness(
                 f"no active {kind.upper()} provider configured — the harness needs "
                 "the full STT+LLM+TTS trio (configure providers, or use --providers stub)"
             )
+    if semantic_eou == "on":
+        # The explicit-on arm needs an English STT language for both the build
+        # gate and the per-turn SpeechData stamps; the stub trio carries none.
+        # Copy first — the caller's dict must not grow the stamp.
+        provider_config = copy.deepcopy(provider_config)
+        provider_config["stt"].setdefault("options", {}).setdefault("language", "en")
 
     # The harness session is synthetic: reply-audio WAVs under
     # JOHNNY_SESSION_AUDIO_DIR/<bot_session_id>/ would be junk, so disable the
@@ -794,16 +818,19 @@ async def run_latency_harness(
         vad = load_vad(min_silence_duration=vad_min_silence_s)
         vad_label = f"min_silence={vad_min_silence_s:g}s"
     else:
-        # None → BrowserAgentSession.build resolves the browser default.
+        # None → BrowserAgentSession.build resolves the browser default (the
+        # one 0.40 s floor shared by the VAD-only and semantic paths).
         vad_label = f"browser-default (min_silence={BROWSER_VAD_MIN_SILENCE_DURATION_S:g}s)"
 
+    endpointing_label: str | None
     if endpointing_min_delay_s is not None:
         endpointing: EndpointingOptions | None = {"min_delay": endpointing_min_delay_s}
         endpointing_label = f"min_delay={endpointing_min_delay_s:g}s"
     else:
-        # None → BrowserAgentSession.build resolves the browser default.
+        # None → BrowserAgentSession.build resolves the browser default, which
+        # depends on whether the semantic detector engages — labeled post-build.
         endpointing = None
-        endpointing_label = f"browser-default (min_delay={BROWSER_ENDPOINTING_MIN_DELAY_S:g}s)"
+        endpointing_label = None
 
     config = SessionJobConfig(
         bot_session_id=bot_session_id,
@@ -819,8 +846,23 @@ async def run_latency_harness(
     await transport.start()
 
     agent_session: BrowserAgentSession = await BrowserAgentSession.build(
-        transport, config, event_bus=bus, vad=vad, endpointing=endpointing
+        transport,
+        config,
+        event_bus=bus,
+        vad=vad,
+        endpointing=endpointing,
+        semantic_eou=None if semantic_eou == "auto" else (semantic_eou == "on"),
     )
+
+    # Resolve the endpointing default label now that the build settled the path.
+    if endpointing_label is None:
+        endpointing_label = (
+            "browser-semantic-default "
+            f"(min_delay={BROWSER_ENDPOINTING_MIN_DELAY_S:g}s, "
+            f"max_delay={BROWSER_SEMANTIC_ENDPOINTING_MAX_DELAY_S:g}s)"
+            if agent_session.semantic_eou_active
+            else f"browser-default (min_delay={BROWSER_ENDPOINTING_MIN_DELAY_S:g}s)"
+        )
 
     if prewarm:
         prewarm_start = time.perf_counter()
@@ -859,6 +901,7 @@ async def run_latency_harness(
         prewarmed=prewarm,
         vad_label=vad_label,
         endpointing_label=endpointing_label,
+        turn_detection_label=agent_session.turn_detection_label,
     )
 
     try:
@@ -954,6 +997,7 @@ def render_report(result: HarnessResult) -> str:
         f"prewarm={'on' if result.prewarmed else 'off'} "
         f"vad={result.vad_label} "
         f"endpointing={result.endpointing_label} "
+        f"turn_detection={result.turn_detection_label} "
         f"turns={len(result.turns)}/{result.turns_requested} "
         f"completed={len(completed)} replied={len(replied)} "
         f"no_reply={len(completed) - len(replied)} "
@@ -1000,6 +1044,7 @@ def result_to_json(result: HarnessResult) -> dict[str, Any]:
         "prewarm": result.prewarmed,
         "vad": result.vad_label,
         "endpointing": result.endpointing_label,
+        "turn_detection": result.turn_detection_label,
         "turns_requested": result.turns_requested,
         "turns_run": len(result.turns),
         "completed": len(result.completed),
@@ -1093,6 +1138,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         ),
     )
     parser.add_argument(
+        "--semantic-eou",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help=(
+            "in-process en-only semantic turn detector (Johnny-1qr): auto = let the "
+            "session decide from the STT language (the stub trio carries none, so "
+            "stub runs stay VAD-only); on = stamp language=en and require the "
+            "detector (pair with --prewarm so turn 1 skips the model load); "
+            "off = force the tuned VAD-only baseline arm"
+        ),
+    )
+    parser.add_argument(
         "--turn-timeout-s",
         type=float,
         default=120.0,
@@ -1128,6 +1185,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 prewarm=args.prewarm,
                 vad_min_silence_s=args.vad_min_silence_s,
                 endpointing_min_delay_s=args.endpointing_min_delay_s,
+                semantic_eou=args.semantic_eou,
             )
         )
     except Exception:
