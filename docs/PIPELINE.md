@@ -273,8 +273,8 @@ control entry points worth knowing:
 See [§6](#6-storage) for the column-level writes; summarised here as a component.
 
 - **Source:** `app/services/session_status_subscriber.py::run_subscriber` (L816), dispatched by `_apply_in_transaction` (L628). Started as a **daemon thread** with its own event loop from `app/worker.py::_start_status_subscriber_thread` (L294).
-- **Input:** Redis `psubscribe johnny.session.*`. **Output:** rows in `bot_sessions`, `transcript_chunks`, `agent_decisions`, `agent_utterances`, `session_timings`.
-- **Dispatch table** — branches on `payload["type"]`; **7 handled**, the rest silently dropped:
+- **Input:** Redis `psubscribe johnny.session.*`. **Output:** rows in `bot_sessions`, `transcript_chunks`, `agent_decisions`, `agent_utterances`, `session_timings`, `conversation_events`.
+- **Dispatch table** — branches on `payload["type"]`; **8 dispatch branches** (the conversation-events branch handles seven types), the rest silently dropped:
 
   | `type` | handler | table |
   |---|---|---|
@@ -285,6 +285,7 @@ See [§6](#6-storage) for the column-level writes; summarised here as a componen
   | `pipeline_timing` | `apply_pipeline_timing_event` | `session_timings` (INSERT) |
   | `turn_terminal` | `apply_turn_terminal_event` | `agent_decisions` (UPDATE or synthetic INSERT) |
   | `transcript_filtered` | `apply_transcript_filtered_event` | `agent_decisions` (synthetic `no_reply` INSERT) |
+  | `interruption_recorded` / `floor_acquired` / `floor_released` / `floor_expired` / `turn_claim_won` / `turn_claim_lost` / `peer_speech_suppressed` | `apply_conversation_event` | `conversation_events` (INSERT, Johnny-trt.49) |
 
   Published-but-never-persisted (reach the browser WS only): `agent_suggested`,
   `agent_tts_failed`, `pipeline_stage_failed`, `approval_pending`,
@@ -485,8 +486,9 @@ which is how the 0018 backfill can stamp diverging legacy text.
 Every event is a frozen `@dataclass` in
 `backend/johnny/voice_pipeline/events.py`, carries `timestamp_ms` (monotonic
 offset from session start) + optional `session_id`, and is serialised to JSON by
-`event_to_dict` (`dataclasses.asdict`). `PipelineEvent` (L491) is the union of
-all 12.
+`event_to_dict` (`dataclasses.asdict`). `PipelineEvent` is the union of all of
+them (the 12 originals + the task lifecycle events + the seven
+conversation-dynamics events, Johnny-trt.49).
 
 | Event (`type` string) | Key fields | Emitted by | Persisted? | UI surface |
 |---|---|---|---|---|
@@ -502,6 +504,27 @@ all 12.
 | `ApprovalResolved` (`approval_resolved`) | `decision_id, resolution: approved\|rejected\|timeout` | `_handle_approval_required` + API | ❌ | clears the approval card (live WS) |
 | `PipelineTiming` (`pipeline_timing`) | `turn_id, stage: PipelineTimingStage, started_at_ms, duration_ms, provider_name?, details` | `_emit_timing` | ✅ `session_timings` | per-turn activity log / reasoning timeline |
 | `TurnTerminal` (`turn_terminal`) | `turn_id, terminal_state: TerminalState, outcome, no_reply_reason?, detail` | `_emit_turn_terminal` | ✅ stamps/creates `agent_decisions` | terminal chip + "Final decision" step |
+| `InterruptionRecorded` (`interruption_recorded`) | `who: InterruptionWho, cut_latency_ms?, speech_kind, turn_id?, partial_kept` | `RouterGate` interrupted settle paths (every cut speech: reply / ack / status / correction / task result, Johnny-trt.49) | ✅ `conversation_events` | activity log row + turn-header barge-in badge with cut latency |
+| `FloorAcquired` (`floor_acquired`) | `holder, wait_ms` | trt.46 shared speech floor (vocabulary shipped ahead of the emitter) | ✅ `conversation_events` | activity log "Session" group |
+| `FloorReleased` (`floor_released`) | `holder, hold_ms, reason` | trt.46 shared speech floor | ✅ `conversation_events` | activity log "Session" group |
+| `FloorExpired` (`floor_expired`) | `holder, hold_ms` | trt.46 floor TTL lapse (crash safety) | ✅ `conversation_events` | activity log "Session" group |
+| `TurnClaimWon` (`turn_claim_won`) | `bucket, claimant, contenders` | trt.46/47 turn arbitration | ✅ `conversation_events` | activity log "Session" group |
+| `TurnClaimLost` (`turn_claim_lost`) | `bucket, claimant, winner, contenders` | trt.46/47 turn arbitration | ✅ `conversation_events` | activity log "Session" group |
+| `PeerSpeechSuppressed` (`peer_speech_suppressed`) | `peer, window_ms, text_match_hits` | trt.46 peer-awareness loop rule | ✅ `conversation_events` | activity log "Session" group |
+
+**Conversation dynamics (Johnny-trt.49).** The last seven rows are the
+conversation-dynamics vocabulary — interruptions and "all those small
+actions" persisted for post-hoc analysis. `InterruptionRecorded` is live
+today on every surface: the gate consults its `InterruptionMonitor`
+(`johnny/agent/interruptions.py` — fed user speech edges from
+`user_state_changed` in `JohnnyAgent.on_enter`, and stop requests from
+`BrowserAgentSession.interrupt()`) at every `handle.interrupted` settle, so
+`who` distinguishes a participant talking over the bot (`user_over_bot`)
+from an explicit stop (`bot_cut_by_stop`) and `cut_latency_ms` measures
+speech-onset → audio-stop (`None` when nothing observed explains the cut).
+The floor / claim / suppression events are persisted-and-rendered-ready for
+the multi-agent foundation (Johnny-trt.46), which emits them; their
+`timestamp_ms` is session-relative like `PipelineTiming.started_at_ms`.
 
 **Wire-type remapping** (`api/ws.py::WIRE_TYPE_MAP`): `transcript_finalized →
 transcript_final`, `router_decision_made → router_decision`,
@@ -539,6 +562,7 @@ erDiagram
     bot_sessions ||--o{ agent_decisions : "CASCADE"
     bot_sessions ||--o{ agent_utterances : "CASCADE"
     bot_sessions ||--o{ session_timings : "CASCADE"
+    bot_sessions ||--o{ conversation_events : "CASCADE"
     agent_decisions ||--o{ agent_utterances : "agent_decision_id (SET NULL)"
     agents ||--o{ meeting_agents : "agent_id (CASCADE)"
     meeting_configs ||--o{ meeting_agents : "meeting_config_id (CASCADE)"
@@ -609,6 +633,18 @@ erDiagram
         string provider_name "denormalised"
         json details
     }
+    conversation_events {
+        int id PK
+        int bot_session_id FK
+        string event_type "the wire type, CHECK-enforced (trt.49)"
+        int timestamp_ms "session-relative"
+        int turn_id "nullable — floor/claim/suppression are session-scoped"
+        string agent_name "holder / claimant / peer (nullable)"
+        string counterpart_name "claim winner (nullable)"
+        int duration_ms "cut latency / wait / hold / window (nullable)"
+        string reason "who-cut / release reason / bucket"
+        json details
+    }
 ```
 
 There is **no `approvals` table** — the approval round is Redis-only
@@ -653,6 +689,20 @@ Columns: `bot_session_id`, `turn_id`, `stage` (whitelisted to the 9
 violations), `started_at_ms`, `duration_ms`, `provider_name?` (denormalised),
 `details` JSON. Composite index `(bot_session_id, turn_id, started_at_ms)`.
 
+**`conversation_events`** (added 0029, Johnny-trt.49) — append-only INSERT per
+conversation-dynamics event, in `apply_conversation_event`. The durable
+analysis record for interruptions / floor handoffs / turn claims /
+peer-speech suppression; queryable per meeting via
+`bot_sessions.meeting_config_id`. `event_type` stores the wire `type`
+verbatim (CHECK `ck_conversation_events_event_type`); the headline metric
+(cut latency / floor wait / hold / suppression window) lands in
+`duration_ms`, agent attribution in `agent_name`/`counterpart_name`, who-cut
+or the release reason or the contended bucket in `reason`, everything else
+in `details` — the full per-type mapping is on the ORM model
+(`app.db.models.ConversationEvent`). Index `(bot_session_id, timestamp_ms)`.
+Served by `GET /sessions/{id}/conversation_events` and included in the
+history export.
+
 **`bot_sessions`** (0001; `source`+`playground_overrides`+nullable
 `meeting_config_id` 0007; `session_summary` 0013; `bot_name` 0016) — UPDATEd by
 `apply_status_event` on lifecycle transitions. Browser sessions self-persist
@@ -688,6 +738,7 @@ removed.
 | 0026 | **drops** `pipeline_settings` + deactivates `kind='s2s'` provider rows (S2S surface removal, Johnny-trt.43) |
 | 0027 | agents rebuild: `agents` + `meeting_agents` tables, `bot_sessions.agent_id/agent_snapshot`, drops templates/personalities + the meeting override soup (Johnny-trt.41) |
 | 0028 | `meeting_agents.identity_account_id` — per-assignment join identity for multi-agent meetings (Johnny-trt.45) |
+| 0029 | `conversation_events` table — the conversation-dynamics record: interruptions + the multi-agent floor/claim/suppression vocabulary (Johnny-trt.49) |
 
 > **Migrate-image gotcha:** the `migrate` compose service bakes its own image.
 > `docker compose build api worker frontend` does **not** rebuild it — a new

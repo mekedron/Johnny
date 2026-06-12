@@ -555,6 +555,20 @@ class JohnnyAgent(Agent):
 
         self.session.on("speech_created", _on_speech_created)
 
+        # Conversation dynamics (Johnny-trt.49): feed the gate's interruption
+        # monitor the VAD-confirmed user speech edges so a cut speech's settle
+        # path attributes user-over-bot barge-ins and measures the
+        # onset→audio-stop cut latency. Same duck-typed ``new_state`` read as
+        # the task deliverer's listener (Johnny-trt.28).
+        def _on_user_state_changed(ev: Any) -> None:
+            state = str(getattr(ev, "new_state", ""))
+            if state == "speaking":
+                gate.note_user_speech_onset()
+            elif state in ("listening", "away"):
+                gate.note_user_speech_ended()
+
+        self.session.on("user_state_changed", _on_user_state_changed)
+
     async def on_exit(self) -> None:
         """Tear down the gate + approval coordinator at session end (Johnny-qzj).
 

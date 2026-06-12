@@ -82,6 +82,7 @@ from johnny.agent.observability import (
     AgentSpeechInterimForwarder,
     MetricsTranslator,
     build_decision_emitter,
+    build_interruption_emitter,
     build_session_terminal_emitter,
     build_spoke_emitter,
     build_suggested_emitter,
@@ -820,6 +821,16 @@ async def build_agent_runtime(
             bus,
             turn_index,
             provider_name=router_llm.name,
+            session_started_at=session_started_at,
+            session_id=session_id,
+        ),
+        # Conversation dynamics (Johnny-trt.49): one InterruptionRecorded per
+        # cut speech, persisted by the subscriber to ``conversation_events`` —
+        # who interrupted whom and the onset→audio-stop cut latency. Same
+        # session-start reference as the timing emitters above.
+        record_interruption=build_interruption_emitter(
+            bus,
+            turn_index,
             session_started_at=session_started_at,
             session_id=session_id,
         ),

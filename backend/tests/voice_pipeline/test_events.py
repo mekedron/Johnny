@@ -13,6 +13,11 @@ from johnny.voice_pipeline.events import (
     AgentTTSFailed,
     ApprovalPending,
     ApprovalResolved,
+    FloorAcquired,
+    FloorExpired,
+    FloorReleased,
+    InterruptionRecorded,
+    PeerSpeechSuppressed,
     RouterDecisionMade,
     SessionStatusChanged,
     TaskCompleted,
@@ -22,6 +27,8 @@ from johnny.voice_pipeline.events import (
     TranscriptFiltered,
     TranscriptFinalized,
     TranscriptInterim,
+    TurnClaimLost,
+    TurnClaimWon,
     event_to_dict,
 )
 
@@ -786,3 +793,125 @@ def test_transcript_filtered_reason_supports_all_documented_values() -> None:
     # Also confirm the Literal/typing import path is intact for downstream
     # consumers that branch on the reason value.
     assert Literal[*reasons] is not None
+
+
+# --------------------------------------------------------------------------- #
+# Conversation-dynamics events (Johnny-trt.49)                                #
+# --------------------------------------------------------------------------- #
+
+
+def test_interruption_recorded_defaults() -> None:
+    ev = InterruptionRecorded(who="user_over_bot", timestamp_ms=4_200)
+    assert ev.who == "user_over_bot"
+    assert ev.timestamp_ms == 4_200
+    assert ev.cut_latency_ms is None
+    assert ev.speech_kind == "reply"
+    assert ev.turn_id is None
+    assert ev.partial_kept is False
+    assert ev.session_id is None
+    assert ev.type == "interruption_recorded"
+
+
+def test_interruption_recorded_is_frozen() -> None:
+    ev = InterruptionRecorded(who="bot_cut_by_stop", timestamp_ms=0)
+    with pytest.raises(FrozenInstanceError):
+        ev.who = "user_over_bot"  # type: ignore[misc]
+
+
+def test_event_to_dict_interruption_recorded() -> None:
+    ev = InterruptionRecorded(
+        who="bot_cut_by_stop",
+        timestamp_ms=9_000,
+        cut_latency_ms=412,
+        speech_kind="ack",
+        turn_id=7,
+        partial_kept=True,
+        session_id="42",
+    )
+    assert event_to_dict(ev) == {
+        "who": "bot_cut_by_stop",
+        "timestamp_ms": 9_000,
+        "cut_latency_ms": 412,
+        "speech_kind": "ack",
+        "turn_id": 7,
+        "partial_kept": True,
+        "session_id": "42",
+        "type": "interruption_recorded",
+    }
+
+
+def test_floor_event_defaults_and_round_trip() -> None:
+    acquired = FloorAcquired(holder="Echo B", timestamp_ms=1_000)
+    assert acquired.wait_ms == 0
+    assert acquired.type == "floor_acquired"
+
+    released = FloorReleased(
+        holder="Echo B", timestamp_ms=9_500, hold_ms=8_500, reason="completed"
+    )
+    assert event_to_dict(released) == {
+        "holder": "Echo B",
+        "timestamp_ms": 9_500,
+        "hold_ms": 8_500,
+        "reason": "completed",
+        "session_id": None,
+        "type": "floor_released",
+    }
+
+    expired = FloorExpired(holder="Johnny", timestamp_ms=30_000, hold_ms=30_000)
+    assert expired.type == "floor_expired"
+    assert event_to_dict(expired)["hold_ms"] == 30_000
+
+
+def test_turn_claim_events_round_trip() -> None:
+    won = TurnClaimWon(
+        bucket="utt-12",
+        timestamp_ms=2_000,
+        claimant="Johnny",
+        contenders=("Echo B",),
+        session_id="42",
+    )
+    payload = event_to_dict(won)
+    assert payload["type"] == "turn_claim_won"
+    assert payload["bucket"] == "utt-12"
+    assert list(payload["contenders"]) == ["Echo B"]
+
+    lost = TurnClaimLost(
+        bucket="utt-12",
+        timestamp_ms=2_001,
+        claimant="Echo B",
+        winner="Johnny",
+        contenders=("Johnny",),
+    )
+    assert lost.winner == "Johnny"
+    assert event_to_dict(lost)["winner"] == "Johnny"
+
+
+def test_peer_speech_suppressed_round_trip() -> None:
+    ev = PeerSpeechSuppressed(
+        peer="Echo B",
+        timestamp_ms=5_000,
+        window_ms=3_200,
+        text_match_hits=2,
+        session_id="42",
+    )
+    assert event_to_dict(ev) == {
+        "peer": "Echo B",
+        "timestamp_ms": 5_000,
+        "window_ms": 3_200,
+        "text_match_hits": 2,
+        "session_id": "42",
+        "type": "peer_speech_suppressed",
+    }
+
+
+def test_interruption_who_supports_all_documented_values() -> None:
+    """Constructor accepts every documented attribution — pins the Literal contract."""
+    from typing import get_args
+
+    from johnny.voice_pipeline.events import InterruptionWho
+
+    values = get_args(InterruptionWho)
+    assert set(values) == {"user_over_bot", "bot_cut_by_stop"}
+    for who in values:
+        ev = InterruptionRecorded(who=who, timestamp_ms=0)  # type: ignore[arg-type]
+        assert ev.who == who

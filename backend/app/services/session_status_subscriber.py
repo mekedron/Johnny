@@ -29,10 +29,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
+    CONVERSATION_EVENT_TYPES as CONVERSATION_EVENT_TYPE_VALUES,
+)
+from app.db.models import (
     AgentDecision,
     AgentUtterance,
     BotMode,
     BotSession,
+    ConversationEvent,
     DecisionOutcome,
     GoogleAccount,
     NoReplyReason,
@@ -88,6 +92,14 @@ TASK_EVENT_TYPES = frozenset(
         TASK_RESULT_EXPIRED_EVENT_TYPE,
     }
 )
+
+# Conversation-dynamics events persisted to ``conversation_events``
+# (Johnny-trt.49): interruptions (live today, single-agent barge-ins) plus
+# the multi-agent floor / claim / suppression vocabulary (emitters land with
+# Johnny-trt.46). One value set end-to-end: these wire types double as the
+# ``conversation_events.event_type`` column values (CHECK-enforced).
+CONVERSATION_EVENT_TYPES = frozenset(CONVERSATION_EVENT_TYPE_VALUES)
+INTERRUPTION_RECORDED_EVENT_TYPE = "interruption_recorded"
 
 # Whitelist of stages persisted to ``session_timings`` (Johnny-ckz.7). The
 # pipeline may emit additional stages in the future; an unknown value is
@@ -806,6 +818,100 @@ def apply_transcript_filtered_event(db: Session, payload: dict[str, Any]) -> boo
     return True
 
 
+def apply_conversation_event(db: Session, payload: dict[str, Any]) -> bool:
+    """Insert one ``conversation_events`` row from a conversation-dynamics event (Johnny-trt.49).
+
+    One handler for the whole vocabulary (interruptions, floor handoffs,
+    turn claims, peer-speech suppression): the wire ``type`` is stored
+    verbatim as ``event_type`` and the per-type fields are folded into the
+    shared columns exactly as documented on
+    :class:`~app.db.models.ConversationEvent` — the headline metric (cut
+    latency / wait / hold / window) lands in ``duration_ms``, the acting
+    agent in ``agent_name``, and everything else rides ``details`` so the
+    analysis record loses nothing the emitter knew.
+
+    Returns ``False`` (without raising) for any payload the writer can't
+    trust — wrong/unknown event type, missing session id — keeping one
+    malformed payload from breaking the subscriber loop (the
+    ``apply_pipeline_timing_event`` discipline). Raises
+    :class:`BotSessionNotFoundError` for an unknown session so the caller
+    logs and moves on.
+    """
+    event_type = payload.get("type")
+    if not isinstance(event_type, str) or event_type not in CONVERSATION_EVENT_TYPES:
+        return False
+    session_id = _coerce_int_id(payload.get("session_id"))
+    if session_id is None:
+        return False
+    if db.get(BotSession, session_id) is None:
+        raise BotSessionNotFoundError(session_id)
+    timestamp_ms = _coerce_int_id(payload.get("timestamp_ms")) or 0
+
+    turn_id: int | None = None
+    agent_name: str | None = None
+    counterpart_name: str | None = None
+    duration_ms: int | None = None
+    reason = ""
+    details: dict[str, Any] = {}
+
+    if event_type == INTERRUPTION_RECORDED_EVENT_TYPE:
+        turn_id = _coerce_int_id(payload.get("turn_id"))
+        duration_ms = _coerce_int_id(payload.get("cut_latency_ms"))
+        reason = str(payload.get("who") or "")
+        details = {
+            "speech_kind": str(payload.get("speech_kind") or ""),
+            "partial_kept": bool(payload.get("partial_kept")),
+        }
+    elif event_type in ("floor_acquired", "floor_released", "floor_expired"):
+        agent_name = _coerce_name(payload.get("holder"))
+        duration_ms = _coerce_int_id(
+            payload.get("wait_ms" if event_type == "floor_acquired" else "hold_ms")
+        )
+        if event_type == "floor_released":
+            reason = str(payload.get("reason") or "")
+        elif event_type == "floor_expired":
+            reason = "ttl_expired"
+    elif event_type in ("turn_claim_won", "turn_claim_lost"):
+        agent_name = _coerce_name(payload.get("claimant"))
+        if event_type == "turn_claim_lost":
+            counterpart_name = _coerce_name(payload.get("winner"))
+        reason = str(payload.get("bucket") or "")
+        contenders = payload.get("contenders")
+        details = {
+            "contenders": [str(c) for c in contenders]
+            if isinstance(contenders, (list, tuple))
+            else []
+        }
+    elif event_type == "peer_speech_suppressed":
+        agent_name = _coerce_name(payload.get("peer"))
+        duration_ms = _coerce_int_id(payload.get("window_ms"))
+        details = {
+            "text_match_hits": _coerce_int_id(payload.get("text_match_hits")) or 0
+        }
+
+    row = ConversationEvent(
+        bot_session_id=session_id,
+        event_type=event_type,
+        timestamp_ms=max(0, timestamp_ms),
+        turn_id=turn_id,
+        agent_name=agent_name,
+        counterpart_name=counterpart_name,
+        duration_ms=duration_ms,
+        reason=reason[:255],
+        details=details,
+    )
+    db.add(row)
+    db.flush()
+    return True
+
+
+def _coerce_name(value: Any) -> str | None:
+    """A non-empty display name (truncated to the column), else ``None``."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()[:128]
+    return None
+
+
 def _coerce_int_id(value: Any) -> int | None:
     if value is None:
         return None
@@ -910,6 +1016,8 @@ async def _apply_in_transaction(
                     applied = apply_turn_terminal_event(db, payload)
                 elif event_type == TRANSCRIPT_FILTERED_EVENT_TYPE:
                     applied = apply_transcript_filtered_event(db, payload)
+                elif event_type in CONVERSATION_EVENT_TYPES:
+                    applied = apply_conversation_event(db, payload)
             except BotSessionNotFoundError as exc:
                 logger.warning("status-sub: %s", exc)
                 return False
@@ -1146,7 +1254,9 @@ async def run_subscriber(
 
 __all__ = [
     "AGENT_SPOKE_EVENT_TYPE",
+    "CONVERSATION_EVENT_TYPES",
     "DEFAULT_APPROVAL_TIMEOUT_S",
+    "INTERRUPTION_RECORDED_EVENT_TYPE",
     "PIPELINE_TIMING_EVENT_TYPE",
     "PIPELINE_TIMING_STAGES",
     "PendingEventPublisher",
@@ -1165,6 +1275,7 @@ __all__ = [
     "TURN_BOUND_SPOKEN_KINDS",
     "TURN_TERMINAL_EVENT_TYPE",
     "apply_agent_spoke_event",
+    "apply_conversation_event",
     "apply_pipeline_timing_event",
     "apply_router_decision_event",
     "apply_status_event",

@@ -34,6 +34,23 @@ TaskQueuedEventType = Literal["task_queued"]
 TaskProgressEventType = Literal["task_progress"]
 TaskCompletedEventType = Literal["task_completed"]
 TaskResultExpiredEventType = Literal["task_result_expired"]
+InterruptionRecordedEventType = Literal["interruption_recorded"]
+FloorAcquiredEventType = Literal["floor_acquired"]
+FloorReleasedEventType = Literal["floor_released"]
+FloorExpiredEventType = Literal["floor_expired"]
+TurnClaimWonEventType = Literal["turn_claim_won"]
+TurnClaimLostEventType = Literal["turn_claim_lost"]
+PeerSpeechSuppressedEventType = Literal["peer_speech_suppressed"]
+
+InterruptionWho = Literal["user_over_bot", "bot_cut_by_stop"]
+"""Who cut the bot's speech off (Johnny-trt.49).
+
+* ``user_over_bot`` — a participant's speech interrupted the bot: the
+  LiveKit-native VAD interrupt or the slow barge-in classifier
+  (Johnny-k8t) stopped the audio because someone talked over it.
+* ``bot_cut_by_stop`` — an explicit stop request cut the bot: the
+  playground Stop button / ``/stop`` endpoint (Johnny-ckz.13).
+"""
 
 TaskCompletedStatus = Literal["done", "failed"]
 """How a delegated task settled (Johnny-trt.25, Phase 4).
@@ -678,6 +695,169 @@ class TaskResultExpired:
 
 
 @dataclass(frozen=True, slots=True)
+class InterruptionRecorded:
+    """The bot's speech was cut mid-utterance — who did it and how fast (Johnny-trt.49).
+
+    Emitted by the :class:`~johnny.agent.router_gate.RouterGate` once per
+    interrupted speech (any kind: reply, ack, status, correction, task
+    result), alongside the existing INV-1 record (``turn_terminal``
+    ``no_reply(barge_in)`` for turn-bound speech). The subscriber persists it
+    to ``conversation_events`` — the durable conversation-dynamics record —
+    so barge-in behaviour is analysable per session / per meeting after the
+    fact, which the ``interrupted`` flag on the utterance row alone cannot
+    support (it exists only when a partial was kept).
+
+    * ``who`` — :data:`InterruptionWho`: a participant talked over the bot,
+      or an explicit stop request cut it.
+    * ``timestamp_ms`` — session-relative offset of the audio stop (same
+      time base as :attr:`PipelineTiming.started_at_ms`).
+    * ``cut_latency_ms`` — speech-onset → audio-stop for ``user_over_bot``
+      (how long the bot kept talking over the participant; onset is the
+      VAD-confirmed ``user_state_changed`` speaking edge), or
+      stop-request → audio-stop for ``bot_cut_by_stop``. ``None`` when no
+      onset was tracked (the cut had no observed cause — e.g. teardown).
+    * ``speech_kind`` — which speech path was cut; the
+      :data:`~johnny.agent.observability.SpokenKind` vocabulary
+      (``reply`` / ``ack`` / ``status`` / ``correction`` / ``task_result``).
+    * ``turn_id`` — the cut speech's durable turn id; ``None`` for
+      out-of-band speech (corrections, task results).
+    * ``partial_kept`` — whether a partial ``AgentSpoke`` survived the cut
+      (Johnny-trt.58); ``False`` means nothing audible was recorded.
+    """
+
+    who: InterruptionWho
+    timestamp_ms: int
+    cut_latency_ms: int | None = None
+    speech_kind: str = "reply"
+    turn_id: int | None = None
+    partial_kept: bool = False
+    session_id: str | None = None
+    type: InterruptionRecordedEventType = "interruption_recorded"
+
+
+@dataclass(frozen=True, slots=True)
+class FloorAcquired:
+    """An agent acquired the shared speech floor (Johnny-trt.49, vocabulary).
+
+    Part of the multi-agent conversation-dynamics vocabulary: the emitter is
+    the shared-floor lock of the multi-agent foundation (Johnny-trt.46) —
+    this bead ships the event shape, persistence, and rendering so the floor
+    machinery lands with its observability ready. Single-agent sessions never
+    emit it.
+
+    * ``holder`` — the acquiring agent's display name.
+    * ``wait_ms`` — how long the agent waited for the floor before getting
+      it (0 = it was free).
+    """
+
+    holder: str
+    timestamp_ms: int
+    wait_ms: int = 0
+    session_id: str | None = None
+    type: FloorAcquiredEventType = "floor_acquired"
+
+
+@dataclass(frozen=True, slots=True)
+class FloorReleased:
+    """An agent released the shared speech floor (Johnny-trt.49, vocabulary).
+
+    * ``holder`` — the releasing agent's display name.
+    * ``hold_ms`` — how long the floor was held.
+    * ``reason`` — why it was released (free text; the floor lock
+      (Johnny-trt.46) owns the vocabulary — e.g. ``"completed"``,
+      ``"interrupted"``, ``"teardown"``), kept untyped so the emitter can
+      refine it additively.
+    """
+
+    holder: str
+    timestamp_ms: int
+    hold_ms: int = 0
+    reason: str = ""
+    session_id: str | None = None
+    type: FloorReleasedEventType = "floor_released"
+
+
+@dataclass(frozen=True, slots=True)
+class FloorExpired:
+    """A speech-floor lease lapsed without an explicit release (Johnny-trt.49).
+
+    The crash-safety path of the Johnny-trt.46 floor lock: the holder
+    stopped heartbeating (process death, hang) and the TTL freed the floor
+    for the other agents. ``hold_ms`` is how long the lease was held when
+    it expired.
+    """
+
+    holder: str
+    timestamp_ms: int
+    hold_ms: int = 0
+    session_id: str | None = None
+    type: FloorExpiredEventType = "floor_expired"
+
+
+@dataclass(frozen=True, slots=True)
+class TurnClaimWon:
+    """This agent won the claim to answer one utterance bucket (Johnny-trt.49).
+
+    Multi-agent turn arbitration vocabulary (emitter: Johnny-trt.46/47):
+    when several agents want to answer the same participant utterance, they
+    contend per utterance *bucket* and exactly one wins.
+
+    * ``bucket`` — the contended utterance bucket's identifier.
+    * ``claimant`` — the winning agent's display name (this session's agent).
+    * ``contenders`` — the other agents that contended, by display name.
+    """
+
+    bucket: str
+    timestamp_ms: int
+    claimant: str = ""
+    contenders: tuple[str, ...] = ()
+    session_id: str | None = None
+    type: TurnClaimWonEventType = "turn_claim_won"
+
+
+@dataclass(frozen=True, slots=True)
+class TurnClaimLost:
+    """This agent lost the claim for one utterance bucket (Johnny-trt.49).
+
+    Mirror of :class:`TurnClaimWon` from the loser's side — both sides
+    persist so the analysis record shows every contention, not just wins.
+    ``winner`` names who took the turn.
+    """
+
+    bucket: str
+    timestamp_ms: int
+    claimant: str = ""
+    winner: str = ""
+    contenders: tuple[str, ...] = ()
+    session_id: str | None = None
+    type: TurnClaimLostEventType = "turn_claim_lost"
+
+
+@dataclass(frozen=True, slots=True)
+class PeerSpeechSuppressed:
+    """Audio inside a peer agent's floor window was suppressed (Johnny-trt.49).
+
+    The strict v1 loop rule of Johnny-trt.46: audio heard while a peer bot
+    holds the floor is labeled as that peer's speech and never opens a turn.
+    One event per suppressed window so cross-talk between agents stays
+    auditable.
+
+    * ``peer`` — the peer agent whose floor window labeled the audio.
+    * ``window_ms`` — the suppression window's length.
+    * ``text_match_hits`` — how many transcript candidates the text-match
+      backstop (against the peer's published ``AgentSpoke`` text) caught
+      inside the window.
+    """
+
+    peer: str
+    timestamp_ms: int
+    window_ms: int = 0
+    text_match_hits: int = 0
+    session_id: str | None = None
+    type: PeerSpeechSuppressedEventType = "peer_speech_suppressed"
+
+
+@dataclass(frozen=True, slots=True)
 class PipelineTiming:
     """One measured stage timing for the per-turn activity log (Johnny-ckz.7).
 
@@ -735,6 +915,13 @@ PipelineEvent = (
     | TaskCompleted
     | TaskResultExpired
     | TurnTerminal
+    | InterruptionRecorded
+    | FloorAcquired
+    | FloorReleased
+    | FloorExpired
+    | TurnClaimWon
+    | TurnClaimLost
+    | PeerSpeechSuppressed
 )
 """Union of every event the pipeline emits."""
 
@@ -758,6 +945,12 @@ __all__ = [
     "ApprovalPending",
     "ApprovalResolution",
     "ApprovalResolved",
+    "FloorAcquired",
+    "FloorExpired",
+    "FloorReleased",
+    "InterruptionRecorded",
+    "InterruptionWho",
+    "PeerSpeechSuppressed",
     "PipelineEvent",
     "PipelineStageFailed",
     "PipelineStageFailedCategory",
@@ -778,6 +971,8 @@ __all__ = [
     "TranscriptFilteredReason",
     "TranscriptFinalized",
     "TranscriptInterim",
+    "TurnClaimLost",
+    "TurnClaimWon",
     "TurnTerminal",
     "event_to_dict",
 ]

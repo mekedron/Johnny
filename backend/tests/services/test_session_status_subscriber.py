@@ -22,6 +22,7 @@ from app.db.models import (
     BotSession,
     BotSessionStatus,
     CalendarEvent,
+    ConversationEvent,
     DecisionOutcome,
     GoogleAccount,
     MeetingConfig,
@@ -33,6 +34,7 @@ from app.services import session_status_subscriber
 from app.services.bot_sessions import BotSessionNotFoundError
 from app.services.session_status_subscriber import (
     AGENT_SPOKE_EVENT_TYPE,
+    CONVERSATION_EVENT_TYPES,
     PIPELINE_TIMING_EVENT_TYPE,
     ROUTER_DECISION_EVENT_TYPE,
     SESSION_STATUS_EVENT_TYPE,
@@ -41,6 +43,7 @@ from app.services.session_status_subscriber import (
     _PendingApprovalEvent,
     _ReloginEvent,
     apply_agent_spoke_event,
+    apply_conversation_event,
     apply_pipeline_timing_event,
     apply_router_decision_event,
     apply_status_event,
@@ -67,6 +70,7 @@ def engine() -> sa.Engine:
             AgentDecision.__table__,  # type: ignore[list-item]
             AgentUtterance.__table__,  # type: ignore[list-item]
             SessionTiming.__table__,  # type: ignore[list-item]
+            ConversationEvent.__table__,  # type: ignore[list-item]
         ],
     )
     return eng
@@ -2008,3 +2012,292 @@ async def test_task_events_leave_persisted_tables_untouched(
         applied = await session_status_subscriber._apply_in_transaction(payload)
         assert applied is False
     assert _counts() == before
+
+
+# --- conversation-dynamics event persistence (Johnny-trt.49) ----------------
+
+
+def _interruption_payload(session_id: Any, **overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "type": "interruption_recorded",
+        "who": "user_over_bot",
+        "timestamp_ms": 4_200,
+        "cut_latency_ms": 320,
+        "speech_kind": "reply",
+        "turn_id": 3,
+        "partial_kept": True,
+        "session_id": session_id,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_conversation_event_types_constant_matches_wire_names() -> None:
+    """Drift pin: the subscriber's persist-set ≡ the events module vocabulary
+    ≡ the CHECK-constrained column values."""
+    from app.db.models import CONVERSATION_EVENT_TYPES as DB_VALUES
+    from johnny.voice_pipeline.events import (
+        FloorAcquired,
+        FloorExpired,
+        FloorReleased,
+        InterruptionRecorded,
+        PeerSpeechSuppressed,
+        TurnClaimLost,
+        TurnClaimWon,
+    )
+
+    wire_names = {
+        InterruptionRecorded(who="user_over_bot", timestamp_ms=0).type,
+        FloorAcquired(holder="x", timestamp_ms=0).type,
+        FloorReleased(holder="x", timestamp_ms=0).type,
+        FloorExpired(holder="x", timestamp_ms=0).type,
+        TurnClaimWon(bucket="b", timestamp_ms=0).type,
+        TurnClaimLost(bucket="b", timestamp_ms=0).type,
+        PeerSpeechSuppressed(peer="x", timestamp_ms=0).type,
+    }
+    assert CONVERSATION_EVENT_TYPES == wire_names
+    assert set(DB_VALUES) == wire_names
+
+
+def test_apply_interruption_event_maps_all_columns(db_session: Session) -> None:
+    row = _seed(db_session)
+    applied = apply_conversation_event(
+        db_session, _interruption_payload(row.id)
+    )
+    assert applied is True
+
+    event = db_session.scalars(sa.select(ConversationEvent)).one()
+    assert event.bot_session_id == row.id
+    assert event.event_type == "interruption_recorded"
+    assert event.timestamp_ms == 4_200
+    assert event.turn_id == 3
+    assert event.duration_ms == 320  # the cut latency is the headline metric
+    assert event.reason == "user_over_bot"
+    assert event.agent_name is None
+    assert event.counterpart_name is None
+    assert event.details == {"speech_kind": "reply", "partial_kept": True}
+
+
+def test_apply_interruption_without_latency_keeps_duration_null(
+    db_session: Session,
+) -> None:
+    """An unattributed cut (no observed onset) persists NULL, never a fake 0."""
+    row = _seed(db_session)
+    apply_conversation_event(
+        db_session,
+        _interruption_payload(
+            row.id, cut_latency_ms=None, turn_id=None, partial_kept=False
+        ),
+    )
+    event = db_session.scalars(sa.select(ConversationEvent)).one()
+    assert event.duration_ms is None
+    assert event.turn_id is None
+    assert event.details["partial_kept"] is False
+
+
+def test_apply_floor_events_map_holder_and_durations(db_session: Session) -> None:
+    row = _seed(db_session)
+    apply_conversation_event(
+        db_session,
+        {
+            "type": "floor_acquired",
+            "holder": "Echo B",
+            "timestamp_ms": 1_000,
+            "wait_ms": 1_200,
+            "session_id": row.id,
+        },
+    )
+    apply_conversation_event(
+        db_session,
+        {
+            "type": "floor_released",
+            "holder": "Echo B",
+            "timestamp_ms": 9_500,
+            "hold_ms": 8_500,
+            "reason": "completed",
+            "session_id": row.id,
+        },
+    )
+    apply_conversation_event(
+        db_session,
+        {
+            "type": "floor_expired",
+            "holder": "Johnny",
+            "timestamp_ms": 40_000,
+            "hold_ms": 30_000,
+            "session_id": row.id,
+        },
+    )
+
+    acquired, released, expired = db_session.scalars(
+        sa.select(ConversationEvent).order_by(ConversationEvent.id)
+    ).all()
+    assert (acquired.agent_name, acquired.duration_ms) == ("Echo B", 1_200)
+    assert acquired.reason == ""
+    assert (released.agent_name, released.duration_ms, released.reason) == (
+        "Echo B",
+        8_500,
+        "completed",
+    )
+    assert (expired.agent_name, expired.duration_ms, expired.reason) == (
+        "Johnny",
+        30_000,
+        "ttl_expired",
+    )
+
+
+def test_apply_turn_claim_events_map_bucket_and_contenders(
+    db_session: Session,
+) -> None:
+    row = _seed(db_session)
+    apply_conversation_event(
+        db_session,
+        {
+            "type": "turn_claim_won",
+            "bucket": "utt-12",
+            "timestamp_ms": 2_000,
+            "claimant": "Johnny",
+            "contenders": ["Echo B"],
+            "session_id": row.id,
+        },
+    )
+    apply_conversation_event(
+        db_session,
+        {
+            "type": "turn_claim_lost",
+            "bucket": "utt-12",
+            "timestamp_ms": 2_001,
+            "claimant": "Echo B",
+            "winner": "Johnny",
+            "contenders": ["Johnny"],
+            "session_id": row.id,
+        },
+    )
+
+    won, lost = db_session.scalars(
+        sa.select(ConversationEvent).order_by(ConversationEvent.id)
+    ).all()
+    assert (won.agent_name, won.reason) == ("Johnny", "utt-12")
+    assert won.counterpart_name is None
+    assert won.details == {"contenders": ["Echo B"]}
+    assert (lost.agent_name, lost.counterpart_name) == ("Echo B", "Johnny")
+    assert lost.details == {"contenders": ["Johnny"]}
+
+
+def test_apply_peer_speech_suppressed_maps_window_and_hits(
+    db_session: Session,
+) -> None:
+    row = _seed(db_session)
+    apply_conversation_event(
+        db_session,
+        {
+            "type": "peer_speech_suppressed",
+            "peer": "Echo B",
+            "timestamp_ms": 5_000,
+            "window_ms": 3_200,
+            "text_match_hits": 2,
+            "session_id": row.id,
+        },
+    )
+    event = db_session.scalars(sa.select(ConversationEvent)).one()
+    assert event.agent_name == "Echo B"
+    assert event.duration_ms == 3_200
+    assert event.details == {"text_match_hits": 2}
+
+
+def test_apply_conversation_event_rejects_wrong_or_unknown_type(
+    db_session: Session,
+) -> None:
+    row = _seed(db_session)
+    assert (
+        apply_conversation_event(
+            db_session, {"type": "agent_spoke", "session_id": row.id}
+        )
+        is False
+    )
+    assert (
+        apply_conversation_event(
+            db_session, {"type": "floor_vibrated", "session_id": row.id}
+        )
+        is False
+    )
+    assert db_session.scalars(sa.select(ConversationEvent)).all() == []
+
+
+def test_apply_conversation_event_requires_session_id(
+    db_session: Session,
+) -> None:
+    assert (
+        apply_conversation_event(db_session, _interruption_payload(None))
+        is False
+    )
+    assert (
+        apply_conversation_event(db_session, _interruption_payload("not-an-int"))
+        is False
+    )
+
+
+def test_apply_conversation_event_unknown_session_raises(
+    db_session: Session,
+) -> None:
+    with pytest.raises(BotSessionNotFoundError):
+        apply_conversation_event(db_session, _interruption_payload(99_999))
+
+
+@pytest.mark.asyncio
+async def test_conversation_events_route_through_the_subscriber_loop(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: a wire interruption payload through run_subscriber lands as
+    a conversation_events row — the scripted-barge-in persistence proof."""
+    row = _seed(db_session)
+    db_session.commit()
+    engine = db_session.bind
+    assert engine is not None
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_scope() -> Iterator[Session]:
+        sess = Session(engine)
+        try:
+            yield sess
+            sess.commit()
+        except BaseException:
+            sess.rollback()
+            raise
+        finally:
+            sess.close()
+
+    monkeypatch.setattr(
+        session_status_subscriber, "session_scope", fake_scope
+    )
+
+    payloads = [
+        _interruption_payload(row.id),
+        {
+            "type": "floor_acquired",
+            "holder": "Echo B",
+            "timestamp_ms": 1_000,
+            "wait_ms": 0,
+            "session_id": row.id,
+        },
+    ]
+
+    async def factory(_url: str) -> AsyncIterator[dict[str, Any]]:
+        for p in payloads:
+            yield p
+
+    await run_subscriber("redis://ignored", message_stream_factory=factory)
+
+    with Session(engine) as s:
+        events = s.scalars(
+            sa.select(ConversationEvent).order_by(ConversationEvent.id)
+        ).all()
+        assert [e.event_type for e in events] == [
+            "interruption_recorded",
+            "floor_acquired",
+        ]
+        assert events[0].duration_ms == 320
+        assert events[1].agent_name == "Echo B"

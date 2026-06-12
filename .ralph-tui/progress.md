@@ -150,6 +150,25 @@ after each iteration and it's included in prompts for context.
   the constraint. Any "the payload is the full desired list" replace endpoint
   hits this the first time a client re-sends an unchanged item —
   `session.flush()` after the deletes fixes it.
+- **Synthetic user speech in the playground via getUserMedia override**
+  (trt.49): the mic-dependent server paths (Silero VAD onset, native barge-in,
+  user_state_changed) ARE autonomously testable — `navigate_page initScript`
+  replaces `navigator.mediaDevices.getUserMedia` with an
+  AudioContext+MediaStreamDestination stream and exposes
+  `window.__injectSpeech(url)` (fetch → decodeAudioData → BufferSource into the
+  destination); start the session AFTER the override so it acquires the fake
+  mic (ctx came up `running`, no autoplay fight), then inject a REAL Piper
+  reply WAV (`/sessions/<id>/audio/<utt-*.wav>` — Silero classifies it as
+  speech; sine/noise won't work). Injected speech triggered the genuine
+  VAD interrupt mid-TTS. Softens the trt.30 "no live mic = un-measurable"
+  constraint for everything except real-Meet transport. Measured: server-side
+  onset→audio-stop cut latency ≈3.1 s on the local trio (the trt.9 client gate
+  exists for a reason); the Stop-button path cuts in ≈160 ms.
+- **Adding a DB table means updating ~4 test create_all lists** (trt.49):
+  tests pin `Base.metadata.create_all(tables=[...])` per file — grep
+  `create_all` under tests/ (hit: test_sessions.py, test_history.py ×2,
+  test_session_status_subscriber.py) or the new table 500s only in the suites
+  that touch it.
 - **Validating Google-sync'd UI without a real Google account** (trt.45,
   calendar meeting-config panel): seed REAL rows (google_accounts with a
   Fernet-valid dummy token → token_health=ok; calendar_events with a fake
@@ -715,4 +734,71 @@ after each iteration and it's included in prompts for context.
     retry once before debugging "the fix didn't work".
   - The trt.42 e2e-provider-suite deactivation did NOT recur (suite run with
     --ignore=tests/e2e); canonical trio stayed active throughout.
+---
+
+## 2026-06-12 - Johnny-trt.49
+- Conversation-dynamics observability shipped: interruptions + the multi-agent
+  floor/claim/suppression vocabulary persisted durably and rendered in the
+  activity log. (1) **Vocabulary** (events.py): InterruptionRecorded (who:
+  user_over_bot|bot_cut_by_stop, cut_latency_ms onset→audio-stop or None when
+  unobserved, speech_kind, turn_id, partial_kept), FloorAcquired/Released/
+  Expired (holder, wait/hold, reason), TurnClaimWon/Lost (bucket, claimant,
+  winner, contenders), PeerSpeechSuppressed (peer, window_ms, text_match_hits)
+  — all in the PipelineEvent union; floor/claim/suppression are persisted-ready
+  for trt.46's emitters. (2) **Live emitter** (single-agent value now): new
+  johnny/agent/interruptions.py InterruptionMonitor (pure, clock-injected;
+  stop-request beats live/recent user onset, onset survives the silence edge
+  for the slow-classifier window, stop marker consumed once); the gate
+  constructs it on its own ms clock, emits via the new
+  build_interruption_emitter seam from EVERY handle.interrupted settle path
+  (reply/_on_say_done inside the ledger's first-wins branch → exactly-once;
+  correction/task_result unbound). user_state_changed speaking/listening edges
+  wired in JohnnyAgent.on_enter; BrowserAgentSession.interrupt() (Stop button +
+  WS stop + trt.9 client gate) notes the stop BEFORE session.interrupt().
+  (3) **Persistence**: conversation_events table (migration 0029, CHECK on
+  event_type = the wire types, (session, ts) index; column map documented on
+  the model) written by the subscriber's apply_conversation_event for all 7
+  types; queryable per meeting via bot_sessions; rides the history export.
+  (4) **Surfaces**: GET /sessions/{id}/conversation_events; activity log
+  interleaves dynamics rows into their turn (warning-tinted Interruption with
+  cut-latency + "Barge-in · 3.11 s"/"Stopped · 160 ms" header badge) and
+  collects session-scoped floor/claim/suppression rows into a trailing
+  "Session" group (floor rows info-tinted); live refresh on agent_spoke +
+  barge_in terminals.
+- Files: backend johnny/voice_pipeline/events.py, johnny/agent/{interruptions
+  (new),observability,router_gate,session,browser_session,job_session}.py,
+  app/db/models.py, alembic/versions/0029_conversation_events.py,
+  app/services/{session_status_subscriber,history}.py, app/api/sessions.py,
+  docs/PIPELINE.md (§3.12 dispatch row, §5 event table + dynamics block, §6 ER/
+  tables/lineage); frontend src/lib/{sessionDetail.ts,sessionActivity.ts(new),
+  sessionActivity.test.ts(new)}, src/routes/sessions/[id]/+page.svelte; tests:
+  test_events(+7), test_interruptions(new 13), test_router_gate_decision(+9 +
+  recorder seam), test_observability(+4), test_johnny_agent(+1 updated +1 new),
+  test_session_status_subscriber(+10), test_sessions(+4), test_history(+export
+  assert), tests/integration/test_conversation_dynamics.py (new 2: gate→bus→
+  JSON→subscriber→row).
+- Quality: backend full suite (–e2e) 4049 passed / 2 pre-existing wizard env
+  failures; mypy --strict + ruff clean on touched; frontend svelte-check 0/0,
+  vitest 107, build ✔. Browser validation .validation/Johnny-trt.49/
+  (00-RUN-NOTES.md + 2 screenshots): session 42 Stop-button → bot_cut_by_stop
+  160 ms row + badge; session 43 REAL injected speech (fake-mic initScript +
+  Piper WAV) → genuine VAD cut → user_over_bot 3111 ms row + badge; 4 synthetic
+  floor/claim/suppression payloads via redis-cli persisted by the LIVE worker
+  subscriber, rendered in the "Session" group, surviving session end.
+- **Learnings:**
+  - getUserMedia-override speech injection (pattern added at top) — the
+    mic-gated paths are testable; real speech audio (a Piper reply WAV) is
+    what satisfies Silero, not tones/noise.
+  - Server-side VAD cut latency ≈3.1 s onset→audio-stop on the local trio vs
+    ≈160 ms for the explicit stop path — the first tracked numbers for the
+    metric trt.9 exists to fix; the InterruptionRecorded row now measures it
+    per cut.
+  - The playground's trt.9 client auto barge-in routes through the same stop
+    endpoint as the button, so client-gate cuts attribute bot_cut_by_stop
+    (the client's stop request IS the cut); pure user_over_bot needs the gate
+    off (it ships default-off in the current UI) or a real Meet.
+  - Svelte collapses whitespace at {#if} boundaries inside inline-flex —
+    wrap badge text parts in <span>s and let gap-* space them, never trailing
+    text-node spaces.
+  - New-table test fixture sweep (pattern at top): 4 create_all lists.
 ---

@@ -74,6 +74,8 @@ from johnny.voice_pipeline.events import (
     AgentSpeechInterim,
     AgentSpoke,
     AgentSuggested,
+    InterruptionRecorded,
+    InterruptionWho,
     PipelineTiming,
     PipelineTimingStage,
     RouterDecisionMade,
@@ -185,6 +187,31 @@ class RecordTriageTiming(Protocol):
         *,
         prompt_chars: int | None = None,
     ) -> Awaitable[None]: ...
+
+class RecordInterruption(Protocol):
+    """Publish one cut speech's ``InterruptionRecorded`` (Johnny-trt.49).
+
+    Called by the gate from every ``handle.interrupted`` settle path
+    (reply, ack/status say, correction, task result) with the attribution
+    its :class:`~johnny.agent.interruptions.InterruptionMonitor` resolved:
+    ``who`` cut the speech and the onset→stop ``cut_latency_ms`` (``None``
+    when no cause was observed). ``turn_id`` is the LiveKit ``str`` turn id
+    for turn-bound speech (resolved to the durable int by the builder, the
+    :class:`RecordSpoke` discipline) and ``None`` for out-of-band speech;
+    ``speech_kind`` is the :data:`SpokenKind` that was cut; ``partial_kept``
+    mirrors whether a trt.58 partial ``AgentSpoke`` survived.
+    """
+
+    def __call__(
+        self,
+        who: InterruptionWho,
+        *,
+        cut_latency_ms: int | None,
+        speech_kind: SpokenKind,
+        turn_id: str | None = None,
+        partial_kept: bool = False,
+    ) -> Awaitable[None]: ...
+
 
 TranscriptFinalizedSink = Callable[[TranscriptFinalized], Awaitable[None]]
 """Publish a kept STT final's ``TranscriptFinalized`` (mirror of
@@ -531,6 +558,62 @@ def build_triage_timing_emitter(
         except Exception:
             logger.exception(
                 "failed to publish triage timing for session=%s turn=%s",
+                session_id,
+                turn_id,
+            )
+
+    return _record
+
+
+def build_interruption_emitter(
+    event_bus: EventBus,
+    turn_index: TurnIndex,
+    *,
+    session_started_at: float = 0.0,
+    session_id: str | None = None,
+    clock: Callable[[], float] = time.time,
+) -> RecordInterruption:
+    """Build the gate's cut-speech ``InterruptionRecorded`` emitter (Johnny-trt.49).
+
+    Publishes the conversation-dynamics record the subscriber persists to
+    ``conversation_events``. ``timestamp_ms`` is the session-relative offset
+    of the audio stop (the ``build_triage_timing_emitter`` convention:
+    epoch-seconds ``clock`` minus ``session_started_at``; a ``<= 0``
+    reference falls back to raw epoch ms). ``turn_id`` resolves through the
+    shared :class:`~johnny.agent.gate.TurnIndex` so the row groups with the
+    cut turn's decision / terminal / timing rows in the activity log;
+    ``None`` (out-of-band speech) stays ``None``. Defensive like every
+    emitter here: a failing bus is logged, never raised into the gate's
+    done-callback.
+    """
+
+    async def _record(
+        who: InterruptionWho,
+        *,
+        cut_latency_ms: int | None,
+        speech_kind: SpokenKind,
+        turn_id: str | None = None,
+        partial_kept: bool = False,
+    ) -> None:
+        now = clock()
+        if session_started_at > 0:
+            timestamp_ms = round((now - session_started_at) * 1000)
+        else:
+            timestamp_ms = round(now * 1000)
+        event = InterruptionRecorded(
+            who=who,
+            timestamp_ms=max(0, timestamp_ms),
+            cut_latency_ms=cut_latency_ms,
+            speech_kind=speech_kind,
+            turn_id=turn_index.resolve(turn_id) if turn_id is not None else None,
+            partial_kept=partial_kept,
+            session_id=session_id,
+        )
+        try:
+            await event_bus.publish(event)
+        except Exception:
+            logger.exception(
+                "failed to publish interruption_recorded for session=%s turn=%s",
                 session_id,
                 turn_id,
             )
@@ -1014,6 +1097,7 @@ __all__ = [
     "MetricsTranslator",
     "Observability",
     "RecordDecision",
+    "RecordInterruption",
     "RecordSpoke",
     "RecordSuggested",
     "RecordTriageTiming",
@@ -1023,6 +1107,7 @@ __all__ = [
     "SpokenKind",
     "TranscriptFinalizedSink",
     "build_decision_emitter",
+    "build_interruption_emitter",
     "build_observability",
     "build_session_terminal_emitter",
     "build_spoke_emitter",

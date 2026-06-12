@@ -569,7 +569,12 @@ class BrowserAgentSession:
         :meth:`BrowserAudioOutput.clear_buffer`). The endpoint also drains the
         transport playback queue + signals the browser directly, so a stop still
         cuts audio even when nothing is currently generating.
+
+        The stop is noted on the gate *first* (Johnny-trt.49) so the cut
+        speech's settle path attributes ``bot_cut_by_stop`` (with
+        request→audio-stop latency) instead of guessing a participant spoke.
         """
+        self._runtime.gate.note_stop_requested()
         try:
             self._session.interrupt()
         except Exception:

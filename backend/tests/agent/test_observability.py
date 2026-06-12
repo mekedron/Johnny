@@ -64,6 +64,7 @@ from johnny.agent.observability import (  # noqa: E402
     MetricsTranslator,
     SpeechCaptionBuffer,
     build_decision_emitter,
+    build_interruption_emitter,
     build_observability,
     build_session_terminal_emitter,
     build_spoke_emitter,
@@ -1187,3 +1188,89 @@ async def test_replay_pipeline_timing_persists_session_timing(
     assert timing.turn_id == 6
     assert timing.duration_ms == 600
     assert timing.details["time_to_first_audio_ms"] == 100
+
+
+# --------------------------------------------------------------------------- #
+# build_interruption_emitter (Johnny-trt.49)                                  #
+# --------------------------------------------------------------------------- #
+
+
+async def test_interruption_emitter_publishes_session_relative_event() -> None:
+    bus = InMemoryEventBus()
+    index = TurnIndex()
+    emit = build_interruption_emitter(
+        bus,
+        index,
+        session_started_at=1000.0,
+        session_id="7",
+        clock=lambda: 1004.2,  # the cut lands 4.2 s into the session
+    )
+
+    await emit(
+        "user_over_bot",
+        cut_latency_ms=320,
+        speech_kind="reply",
+        turn_id="item_abc",
+        partial_kept=True,
+    )
+
+    (event,) = bus.snapshot()
+    assert event.type == "interruption_recorded"
+    assert event.who == "user_over_bot"
+    assert event.timestamp_ms == 4200  # session-relative audio stop
+    assert event.cut_latency_ms == 320
+    assert event.speech_kind == "reply"
+    assert event.turn_id == 1  # str → int via the shared index
+    assert event.partial_kept is True
+    assert event.session_id == "7"
+
+
+async def test_interruption_emitter_unbound_speech_keeps_turn_none() -> None:
+    bus = InMemoryEventBus()
+    emit = build_interruption_emitter(
+        bus, TurnIndex(), session_started_at=1000.0, clock=lambda: 1001.0
+    )
+
+    await emit(
+        "bot_cut_by_stop",
+        cut_latency_ms=None,
+        speech_kind="task_result",
+        turn_id=None,
+        partial_kept=False,
+    )
+
+    (event,) = bus.snapshot()
+    assert event.turn_id is None
+    assert event.cut_latency_ms is None
+    assert event.who == "bot_cut_by_stop"
+
+
+async def test_interruption_emitter_shares_turn_index_with_terminals() -> None:
+    """The conversation_events row groups with the cut turn's decision /
+    terminal rows — same shared index, same durable int."""
+    bus = InMemoryEventBus()
+    index = TurnIndex()
+    terminal_emit = build_session_terminal_emitter(bus, index, session_id="7")
+    interruption_emit = build_interruption_emitter(bus, index, session_id="7")
+
+    await terminal_emit(
+        "item_t1",
+        GateTerminal(
+            terminal_state="no_reply", no_reply_reason="barge_in", detail="cut"
+        ),
+    )
+    await interruption_emit(
+        "user_over_bot",
+        cut_latency_ms=210,
+        speech_kind="reply",
+        turn_id="item_t1",
+    )
+
+    terminal, interruption = bus.snapshot()
+    assert terminal.turn_id == interruption.turn_id == 1
+
+
+async def test_interruption_emitter_swallows_bus_failures() -> None:
+    emit = build_interruption_emitter(_FlakyBus(), TurnIndex(), session_id="1")
+    # Must not raise into the gate's done-callback.
+    await emit("user_over_bot", cut_latency_ms=1, speech_kind="reply")

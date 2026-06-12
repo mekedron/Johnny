@@ -24,8 +24,8 @@ them:
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -40,6 +40,7 @@ from app.db.models import (
     BotSessionSource,
     BotSessionStatus,
     CalendarEvent,
+    ConversationEvent,
     DecisionOutcome,
     GoogleAccount,
     MeetingConfig,
@@ -487,6 +488,22 @@ def _serialise_utterance(row: AgentUtterance) -> dict[str, Any]:
     }
 
 
+def _serialise_conversation_event(row: ConversationEvent) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "bot_session_id": row.bot_session_id,
+        "event_type": row.event_type,
+        "timestamp_ms": row.timestamp_ms,
+        "turn_id": row.turn_id,
+        "agent_name": row.agent_name,
+        "counterpart_name": row.counterpart_name,
+        "duration_ms": row.duration_ms,
+        "reason": row.reason,
+        "details": row.details,
+        "created_at": _serialise_datetime(row.created_at),
+    }
+
+
 def export_session(session: Session, bot_session_id: int) -> dict[str, Any]:
     """Serialise a session + its cascade to a JSON-safe dict.
 
@@ -496,6 +513,17 @@ def export_session(session: Session, bot_session_id: int) -> dict[str, Any]:
     """
     row, transcripts, decisions, utterances = get_session_full_detail(
         session, bot_session_id
+    )
+    # The conversation-dynamics record (Johnny-trt.49) rides the export so
+    # offline analysis sees interruptions / floor handoffs next to the turns.
+    conversation_events = list(
+        session.scalars(
+            select(ConversationEvent)
+            .where(ConversationEvent.bot_session_id == bot_session_id)
+            .order_by(
+                ConversationEvent.timestamp_ms.asc(), ConversationEvent.id.asc()
+            )
+        ).all()
     )
     return {
         "session": {
@@ -517,6 +545,9 @@ def export_session(session: Session, bot_session_id: int) -> dict[str, Any]:
         "transcripts": [_serialise_transcript(t) for t in transcripts],
         "decisions": [_serialise_decision(d) for d in decisions],
         "utterances": [_serialise_utterance(u) for u in utterances],
+        "conversation_events": [
+            _serialise_conversation_event(e) for e in conversation_events
+        ],
     }
 
 

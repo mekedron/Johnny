@@ -748,4 +748,50 @@ async def test_on_enter_attaches_say_and_speech_created_listener(
     await agent.on_enter()
 
     assert gate._say == fake_session.say  # the bound method, attached not called
-    assert [name for name, _ in fake_session.listeners] == ["speech_created"]
+    # The generate_reply FIFO binding plus the user speech edges feeding the
+    # gate's interruption monitor (Johnny-trt.49).
+    assert [name for name, _ in fake_session.listeners] == [
+        "speech_created",
+        "user_state_changed",
+    ]
+
+
+async def test_on_enter_user_state_listener_feeds_interruption_monitor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The user_state_changed listener translates speaking/listening edges
+    into the gate's interruption-monitor notes (Johnny-trt.49), so a cut
+    speech can attribute a user-over-bot barge-in."""
+    from johnny.agent.gate import TurnLedger
+    from johnny.agent.router_gate import RouterGate, RouterGateConfig
+
+    async def _emit(_turn_id: str, _terminal: Any) -> None:
+        return None
+
+    gate = RouterGate(
+        _NoopRouterLLM(),
+        config=RouterGateConfig(),
+        ledger=TurnLedger(_emit),
+    )
+    agent = JohnnyAgent(router_gate=gate)
+    fake_session = _OnEnterFakeSession()
+    monkeypatch.setattr(JohnnyAgent, "session", property(lambda self: fake_session))
+    await agent.on_enter()
+
+    (listener,) = [cb for name, cb in fake_session.listeners if name == "user_state_changed"]
+
+    class _Ev:
+        def __init__(self, new_state: str) -> None:
+            self.new_state = new_state
+
+    listener(_Ev("speaking"))
+    cut = gate._interruptions.attribute_cut()
+    assert cut.who == "user_over_bot"
+    assert cut.cut_latency_ms is not None
+
+    listener(_Ev("listening"))
+    assert gate._interruptions._onset_ended_at is not None
+    # An away edge (participant left) counts as silence too — and a junk
+    # state is ignored rather than crashing the listener.
+    listener(_Ev("away"))
+    listener(_Ev("warp_speed"))

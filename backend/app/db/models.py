@@ -971,6 +971,88 @@ class SessionTiming(Base):
     )
 
 
+# Legal ``conversation_events.event_type`` values (Johnny-trt.49) — identical
+# to the wire ``type`` discriminators of the conversation-dynamics events in
+# ``johnny.voice_pipeline.events`` so one vocabulary spans emit → persistence
+# → rendering. Enforced by a CHECK constraint on the table (matching the
+# alembic migration, the ``session_timings.stage`` discipline).
+CONVERSATION_EVENT_TYPES: tuple[str, ...] = (
+    "interruption_recorded",
+    "floor_acquired",
+    "floor_released",
+    "floor_expired",
+    "turn_claim_won",
+    "turn_claim_lost",
+    "peer_speech_suppressed",
+)
+
+
+class ConversationEvent(Base):
+    """One conversation-dynamics event in a session (Johnny-trt.49).
+
+    The durable analysis record for interruptions, speech-floor handoffs,
+    turn claims, and peer-speech suppression — "all those small actions" the
+    operator wants queryable long after the session ended. Written only by
+    the status subscriber from the pipeline's conversation-dynamics events;
+    queryable per meeting via ``bot_sessions.meeting_config_id`` (each
+    multi-agent co-session carries its own ``agent_id``/snapshot, so agent
+    attribution rides the session FK plus the name columns here).
+
+    Column use per ``event_type`` (everything else in ``details``):
+
+    * ``interruption_recorded`` — ``duration_ms`` = cut latency (speech
+      onset → audio stop; NULL when no cause was observed), ``reason`` =
+      who cut (``user_over_bot`` / ``bot_cut_by_stop``), ``turn_id`` = the
+      cut speech's turn (NULL for out-of-band speech), ``details`` =
+      ``{speech_kind, partial_kept}``.
+    * ``floor_acquired`` — ``agent_name`` = holder, ``duration_ms`` = wait.
+    * ``floor_released`` — ``agent_name`` = holder, ``duration_ms`` = hold,
+      ``reason`` = release reason.
+    * ``floor_expired`` — ``agent_name`` = holder, ``duration_ms`` = hold at
+      TTL lapse, ``reason`` = ``ttl_expired``.
+    * ``turn_claim_won`` / ``turn_claim_lost`` — ``agent_name`` = claimant,
+      ``counterpart_name`` = winner (lost only), ``reason`` = the contended
+      utterance bucket, ``details`` = ``{contenders}``.
+    * ``peer_speech_suppressed`` — ``agent_name`` = the peer whose floor
+      window labeled the audio, ``duration_ms`` = window length,
+      ``details`` = ``{text_match_hits}``.
+
+    ``timestamp_ms`` is the session-relative offset (the
+    ``session_timings.started_at_ms`` time base) so the activity log can
+    interleave these with the per-turn timing rows.
+    """
+
+    __tablename__ = "conversation_events"
+    __table_args__ = (
+        Index(
+            "ix_conversation_events_session_ts",
+            "bot_session_id",
+            "timestamp_ms",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_session_id: Mapped[int] = mapped_column(
+        ForeignKey("bot_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    timestamp_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    turn_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    agent_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    counterpart_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reason: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    details: Mapped[dict[str, Any]] = mapped_column(
+        _json_column(), nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
 class ProviderCredential(TimestampMixin, Base):
     __tablename__ = "provider_credentials"
     __table_args__ = (

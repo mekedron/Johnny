@@ -24,6 +24,7 @@ from app.db.models import (
     BotSessionSource,
     BotSessionStatus,
     CalendarEvent,
+    ConversationEvent,
     DecisionOutcome,
     GoogleAccount,
     MeetingConfig,
@@ -51,6 +52,7 @@ def engine() -> sa.Engine:
             AgentDecision.__table__,  # type: ignore[list-item]
             AgentUtterance.__table__,  # type: ignore[list-item]
             AgentTask.__table__,  # type: ignore[list-item]
+            ConversationEvent.__table__,  # type: ignore[list-item]
         ],
     )
     return eng

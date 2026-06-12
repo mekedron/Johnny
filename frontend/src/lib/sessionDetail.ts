@@ -324,3 +324,51 @@ export function getSessionTimings(
 	const qs = limit !== undefined ? `?limit=${encodeURIComponent(limit)}` : '';
 	return request<SessionTimingsResponse>(`/sessions/${botSessionId}/timings${qs}`);
 }
+
+// Conversation-dynamics record (Johnny-trt.49): interruptions, speech-floor
+// handoffs, turn claims, peer-speech suppression — the wire `type` values
+// double as the persisted `event_type` column values.
+export type ConversationEventType =
+	| 'interruption_recorded'
+	| 'floor_acquired'
+	| 'floor_released'
+	| 'floor_expired'
+	| 'turn_claim_won'
+	| 'turn_claim_lost'
+	| 'peer_speech_suppressed';
+
+/**
+ * One persisted conversation-dynamics row (Johnny-trt.49). Column use per
+ * `event_type` mirrors the backend model: `duration_ms` is the headline
+ * metric (cut latency / floor wait / hold / suppression window), `reason`
+ * carries who-cut (`user_over_bot` / `bot_cut_by_stop`), the floor release
+ * reason, or the contended bucket; `agent_name`/`counterpart_name` attribute
+ * multi-agent events; everything else rides `details`.
+ */
+export interface ConversationEventRecord {
+	id: number;
+	bot_session_id: number;
+	event_type: ConversationEventType | string;
+	timestamp_ms: number;
+	turn_id: number | null;
+	agent_name: string | null;
+	counterpart_name: string | null;
+	duration_ms: number | null;
+	reason: string;
+	details: Record<string, unknown>;
+	created_at: string;
+}
+
+export interface ConversationEventsResponse {
+	events: ConversationEventRecord[];
+}
+
+export function getConversationEvents(
+	botSessionId: number,
+	limit?: number
+): Promise<ConversationEventsResponse> {
+	const qs = limit !== undefined ? `?limit=${encodeURIComponent(limit)}` : '';
+	return request<ConversationEventsResponse>(
+		`/sessions/${botSessionId}/conversation_events${qs}`
+	);
+}

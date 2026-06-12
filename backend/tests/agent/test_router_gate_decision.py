@@ -989,6 +989,9 @@ class _RecordingObservability:
         self.spoke_calls: list[tuple[str, str | None, str]] = []
         self.spoke_interrupted: list[bool] = []
         self.suggested: list[tuple[Any, str]] = []
+        # Conversation dynamics (Johnny-trt.49): every _emit_interruption call
+        # as a dict of the seam's kwargs plus "who".
+        self.interruptions: list[dict[str, Any]] = []
 
     async def record_decision(
         self,
@@ -1015,6 +1018,25 @@ class _RecordingObservability:
     async def record_suggested(self, decision: Any, turn_id: str) -> None:
         self.suggested.append((decision, turn_id))
 
+    async def record_interruption(
+        self,
+        who: str,
+        *,
+        cut_latency_ms: int | None,
+        speech_kind: str,
+        turn_id: str | None = None,
+        partial_kept: bool = False,
+    ) -> None:
+        self.interruptions.append(
+            {
+                "who": who,
+                "cut_latency_ms": cut_latency_ms,
+                "speech_kind": speech_kind,
+                "turn_id": turn_id,
+                "partial_kept": partial_kept,
+            }
+        )
+
 
 def _make_observed_gate(
     decisions: list[dict[str, Any]] | None = None,
@@ -1031,6 +1053,7 @@ def _make_observed_gate(
         record_decision=obs.record_decision,
         record_spoke=obs.record_spoke,
         record_suggested=obs.record_suggested,
+        record_interruption=obs.record_interruption,
     )
     return gate, emitter, obs
 
@@ -1342,6 +1365,7 @@ class _TaskGateHarness:
             record_decision=self.obs.record_decision,
             record_spoke=self.obs.record_spoke,
             record_suggested=self.obs.record_suggested,
+            record_interruption=self.obs.record_interruption,
             reply_audio=recorder,
             tasks=self.coordinator,
             resolve_turn_id=self.turn_index.resolve,
@@ -2987,3 +3011,230 @@ async def test_speak_task_result_without_say_returns_none() -> None:
 async def test_speak_task_result_say_raising_returns_none() -> None:
     h = _TaskGateHarness([], say_raises=RuntimeError("session draining"))
     assert h.gate.speak_task_result("text") is None
+
+
+# --------------------------------------------------------------------------- #
+# Conversation-dynamics interruption events (Johnny-trt.49)                   #
+# --------------------------------------------------------------------------- #
+
+
+class _SteppableClock:
+    """A mutable ms clock shared by the gate and its InterruptionMonitor."""
+
+    def __init__(self, now: int = 0) -> None:
+        self.now = now
+
+    def __call__(self) -> int:
+        return self.now
+
+
+def _make_dynamics_gate(
+    decisions: list[dict[str, Any]] | None = None,
+) -> tuple[RouterGate, _RecordingEmitter, _RecordingObservability, _SteppableClock]:
+    """An observed gate whose clock (and thus interruption monitor) is steppable."""
+    emitter = _RecordingEmitter()
+    obs = _RecordingObservability()
+    clock = _SteppableClock(10_000)
+    gate = RouterGate(
+        _FakeRouterLLM(decisions),
+        config=RouterGateConfig(),
+        ledger=TurnLedger(emitter),
+        record_decision=obs.record_decision,
+        record_spoke=obs.record_spoke,
+        record_suggested=obs.record_suggested,
+        record_interruption=obs.record_interruption,
+        clock=clock,
+    )
+    return gate, emitter, obs, clock
+
+
+async def test_interrupted_reply_emits_user_over_bot_with_cut_latency() -> None:
+    """User barge-in mid-reply: the InterruptionRecorded seam fires once with
+    who=user_over_bot and the onset→audio-stop latency, alongside the
+    unchanged no_reply(barge_in) terminal."""
+    gate, emitter, obs, clock = _make_dynamics_gate(
+        [{"should_speak": True, "confidence": 0.9, "reason": "ok"}]
+    )
+    msg = _user_msg("Johnny, walk me through it")
+    await gate.run_turn(ChatContext.empty(), msg)
+    handle = _handle(interrupted=True)
+    gate.bind_reply(handle)
+
+    # The user starts talking over the bot; the SDK cuts the audio 320 ms in.
+    gate.note_user_speech_onset()
+    clock.now += 320
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+
+    assert emitter.reasons == ["barge_in"]  # INV-1 unchanged
+    assert obs.interruptions == [
+        {
+            "who": "user_over_bot",
+            "cut_latency_ms": 320,
+            "speech_kind": "reply",
+            "turn_id": msg.id,
+            "partial_kept": False,
+        }
+    ]
+
+
+async def test_interrupted_reply_with_partial_marks_partial_kept() -> None:
+    gate, _emitter, obs, clock = _make_dynamics_gate(
+        [{"should_speak": True, "confidence": 0.9, "reason": "ok"}]
+    )
+    msg = _user_msg("Johnny, plan?")
+    await gate.run_turn(ChatContext.empty(), msg)
+    handle = _handle(interrupted=True, chat_items=["planned"])
+    gate.bind_reply(handle)
+    gate.note_speech_caption("First we check the calendar.", 0)
+    gate.note_user_speech_onset()
+    clock.now += 150
+
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+
+    assert obs.spoke_interrupted == [True]  # the trt.58 partial still lands
+    assert obs.interruptions == [
+        {
+            "who": "user_over_bot",
+            "cut_latency_ms": 150,
+            "speech_kind": "reply",
+            "turn_id": msg.id,
+            "partial_kept": True,
+        }
+    ]
+
+
+async def test_stop_request_attributes_bot_cut_by_stop() -> None:
+    """The playground Stop button path: note_stop_requested() before the SDK
+    interrupt attributes the cut to the stop with request→stop latency."""
+    gate, _emitter, obs, clock = _make_dynamics_gate(
+        [{"should_speak": True, "confidence": 0.9, "reason": "ok"}]
+    )
+    msg = _user_msg("Johnny, talk")
+    await gate.run_turn(ChatContext.empty(), msg)
+    handle = _handle(interrupted=True)
+    gate.bind_reply(handle)
+
+    gate.note_stop_requested()
+    clock.now += 80
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+
+    assert obs.interruptions == [
+        {
+            "who": "bot_cut_by_stop",
+            "cut_latency_ms": 80,
+            "speech_kind": "reply",
+            "turn_id": msg.id,
+            "partial_kept": False,
+        }
+    ]
+
+
+async def test_uninterrupted_reply_emits_no_interruption() -> None:
+    gate, _emitter, obs, _clock = _make_dynamics_gate(
+        [{"should_speak": True, "confidence": 0.9, "reason": "ok"}]
+    )
+    msg = _user_msg("Johnny, quick one")
+    await gate.run_turn(ChatContext.empty(), msg)
+    handle = _handle(
+        chat_items=[LKChatMessage(role="assistant", content=["sure thing"])]
+    )
+    gate.bind_reply(handle)
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+
+    assert obs.interruptions == []
+
+
+async def test_interruption_without_observed_cause_has_no_latency() -> None:
+    """A cut with no onset and no stop request (e.g. teardown) still records,
+    honestly latency-less — never a fabricated number."""
+    gate, _emitter, obs, _clock = _make_dynamics_gate(
+        [{"should_speak": True, "confidence": 0.9, "reason": "ok"}]
+    )
+    msg = _user_msg("Johnny, hello?")
+    await gate.run_turn(ChatContext.empty(), msg)
+    handle = _handle(interrupted=True)
+    gate.bind_reply(handle)
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+
+    assert obs.interruptions == [
+        {
+            "who": "user_over_bot",
+            "cut_latency_ms": None,
+            "speech_kind": "reply",
+            "turn_id": msg.id,
+            "partial_kept": False,
+        }
+    ]
+
+
+async def test_interrupted_ack_emits_interruption_kind_ack() -> None:
+    h = _TaskGateHarness([_delegate_decision()])
+    msg = _user_msg("Johnny, dig into that")
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    h.gate.note_user_speech_onset()
+    handle = h.say.handles[0]
+    handle.interrupted = True
+    handle.fire_done()
+    await h.drain()
+
+    assert len(h.obs.interruptions) == 1
+    cut = h.obs.interruptions[0]
+    assert cut["who"] == "user_over_bot"
+    assert cut["speech_kind"] == "ack"
+    assert cut["turn_id"] == msg.id
+    assert cut["partial_kept"] is False
+    assert cut["cut_latency_ms"] is not None  # real monotonic clock: >= 0
+    assert cut["cut_latency_ms"] >= 0
+
+
+async def test_interrupted_status_emits_interruption_kind_status() -> None:
+    h = _TaskGateHarness([_status_decision()])
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("status?"))
+
+    handle = h.say.handles[0]
+    handle.interrupted = True
+    handle.fire_done()
+    await h.drain()
+
+    assert [c["speech_kind"] for c in h.obs.interruptions] == ["status"]
+
+
+async def test_interrupted_task_result_emits_unbound_interruption() -> None:
+    h = _TaskGateHarness([])
+    handle = h.gate.speak_task_result("Result line never finished.")
+    assert handle is not None
+    fake = cast(_FakeSpeechHandle, handle)
+    fake.interrupted = True
+    fake.fire_done()
+    await h.drain()
+
+    assert [
+        (c["speech_kind"], c["turn_id"], c["partial_kept"])
+        for c in h.obs.interruptions
+    ] == [("task_result", None, False)]
+
+
+async def test_duplicate_interrupted_done_callbacks_emit_one_interruption() -> None:
+    """The ledger's first-wins terminal gates the interruption emit, so a
+    duplicate done-callback can never double-record the cut."""
+    gate, emitter, obs, _clock = _make_dynamics_gate(
+        [{"should_speak": True, "confidence": 0.9, "reason": "ok"}]
+    )
+    msg = _user_msg("Johnny, again")
+    await gate.run_turn(ChatContext.empty(), msg)
+    handle = _handle(interrupted=True)
+    gate.bind_reply(handle)
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+    await gate._on_reply_done(msg.id, handle)  # the duplicate
+
+    assert len(emitter.records) == 1
+    assert len(obs.interruptions) == 1

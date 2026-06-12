@@ -20,6 +20,7 @@ from app.db.models import (
     BotSessionSource,
     BotSessionStatus,
     CalendarEvent,
+    ConversationEvent,
     DecisionOutcome,
     GoogleAccount,
     MeetingConfig,
@@ -59,6 +60,7 @@ def engine() -> sa.Engine:
             AgentDecision.__table__,  # type: ignore[list-item]
             AgentUtterance.__table__,  # type: ignore[list-item]
             AgentTask.__table__,  # type: ignore[list-item]
+            ConversationEvent.__table__,  # type: ignore[list-item]
         ],
     )
     return eng
@@ -600,6 +602,17 @@ def test_export_session_includes_related_rows(db_session: Session) -> None:
             audio_duration_ms=350,
         )
     )
+    db_session.add(
+        ConversationEvent(
+            bot_session_id=row.id,
+            event_type="interruption_recorded",
+            timestamp_ms=4_200,
+            turn_id=1,
+            duration_ms=320,
+            reason="user_over_bot",
+            details={"speech_kind": "reply", "partial_kept": False},
+        )
+    )
     db_session.commit()
 
     dump = export_session(db_session, row.id)
@@ -613,6 +626,11 @@ def test_export_session_includes_related_rows(db_session: Session) -> None:
     assert dump["decisions"][0]["input_window"] == {"transcript": "..."}
     assert len(dump["utterances"]) == 1
     assert dump["utterances"][0]["mode"] == "approval_required"
+    # The conversation-dynamics record rides the export (Johnny-trt.49).
+    assert len(dump["conversation_events"]) == 1
+    assert dump["conversation_events"][0]["event_type"] == "interruption_recorded"
+    assert dump["conversation_events"][0]["duration_ms"] == 320
+    assert dump["conversation_events"][0]["reason"] == "user_over_bot"
 
 
 def test_export_session_404(db_session: Session) -> None:

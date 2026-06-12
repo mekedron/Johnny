@@ -22,6 +22,7 @@
 	import { readSessionAgent } from '$lib/agents';
 	import {
 		DECISION_OUTCOME_LABEL,
+		getConversationEvents,
 		getSessionDetail,
 		getSessionTimings,
 		noReplyReasonLabel,
@@ -30,6 +31,7 @@
 		type AgentDecisionRecord,
 		type AgentTaskRecord,
 		type AgentUtteranceRecord,
+		type ConversationEventRecord,
 		type DecisionOutcome,
 		type MeetingBotParticipation,
 		type NoReplyReason,
@@ -38,6 +40,13 @@
 		type TerminalState,
 		type TranscriptChunk
 	} from '$lib/sessionDetail';
+	import {
+		buildActivityTurns,
+		conversationEventLabel,
+		conversationEventSummary,
+		interruptionWhoLabel,
+		isFloorEvent
+	} from '$lib/sessionActivity';
 	import { dismissBot, undismissBot } from '$lib/meetingConfigs';
 	import UtteranceAudioButton from '$lib/components/UtteranceAudioButton.svelte';
 	import {
@@ -167,7 +176,10 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 
 	let timings = $state<SessionTimingRecord[]>([]);
 	let timingsLoadError = $state<string | null>(null);
-	let expandedTurnIds = $state<Set<number>>(new Set());
+	// Conversation-dynamics rows (Johnny-trt.49): interruptions / floor /
+	// claims / suppression, interleaved into the activity log.
+	let conversationEvents = $state<ConversationEventRecord[]>([]);
+	let expandedTurnIds = $state<Set<number | null>>(new Set());
 
 	let connected = $state(false);
 	let connectError = $state<string | null>(null);
@@ -428,7 +440,12 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 		hasError: boolean;
 	}
 
-	const groupedTimings = $derived(groupTimingsByTurn(timings));
+	// Activity log (Johnny-ckz.7 + trt.49): per-turn pipeline timings
+	// interleaved with the conversation-dynamics rows.
+	const activityTurns = $derived(buildActivityTurns(timings, conversationEvents));
+	const activityTurnCount = $derived(
+		activityTurns.filter((t) => t.turnId !== null).length
+	);
 
 	// Per-turn reasoning timeline (Johnny-ckz.28.4). Derived from the same
 	// reactive `decisions` + `timings` the panels read, so the timeline updates
@@ -436,7 +453,7 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 	// step-by-step (heard → classified → terminal → spoke) without a reload.
 	const timingByTurn = $derived.by(() => {
 		const map = new Map<number, TurnTiming>();
-		for (const t of groupedTimings) {
+		for (const t of groupTimingsByTurn(timings)) {
 			map.set(t.turnId, {
 				events: t.events,
 				endToEndMs: t.endToEndMs,
@@ -528,7 +545,7 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 		return parts.join(' · ');
 	}
 
-	function toggleTurn(turnId: number): void {
+	function toggleTurn(turnId: number | null): void {
 		const next = new Set(expandedTurnIds);
 		if (next.has(turnId)) {
 			next.delete(turnId);
@@ -545,6 +562,17 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 			timings = resp.timings;
 		} catch (err) {
 			timingsLoadError = err instanceof Error ? err.message : String(err);
+		}
+	}
+
+	async function loadConversationEvents() {
+		// Quiet best-effort like loadTimings: the activity log renders what it
+		// has; a transient fetch error must not blank the timing rows.
+		try {
+			const resp = await getConversationEvents(sessionId);
+			conversationEvents = resp.events;
+		} catch (err) {
+			console.warn('conversation events load failed', err);
 		}
 	}
 
@@ -820,6 +848,7 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 		transcripts = [...transcripts, botLine];
 		void autoScrollTranscript();
 		void loadTimings();
+		void loadConversationEvents();
 		// A delegate ack means a fresh agent_tasks row exists (row-before-ack);
 		// refresh the detail so the turn chain links it (Johnny-trt.54). Task
 		// speech (correction / spoken result, Johnny-trt.28) refreshes too so
@@ -898,6 +927,12 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 			(botPartial.turnId === null || botPartial.turnId === ev.turn_id)
 		) {
 			botPartial = null;
+		}
+		// A barge-in terminal means an InterruptionRecorded row just persisted
+		// (Johnny-trt.49) — and a cut-before-captions barge-in emits NO
+		// agent_spoke, so this is its only live refresh trigger.
+		if (ev.terminal_state === 'no_reply' && reason === 'barge_in') {
+			void loadConversationEvents();
 		}
 		// INV-1: a suppressed turn becomes a muted inline chat row the instant
 		// it resolves — the affordance the operator lacked in session 14.
@@ -1099,6 +1134,7 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 			void autoScrollTranscript();
 		});
 		void loadTimings();
+		void loadConversationEvents();
 		startSubscription();
 		durationTimer = setInterval(() => {
 			nowMs = Date.now();
@@ -1703,7 +1739,7 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 					class="font-mono text-xs text-muted-foreground"
 					data-testid="activity-turn-count"
 				>
-					{groupedTimings.length} {groupedTimings.length === 1 ? 'turn' : 'turns'}
+					{activityTurnCount} {activityTurnCount === 1 ? 'turn' : 'turns'}
 				</span>
 			</Card.Header>
 			<div class="px-4 py-3">
@@ -1711,18 +1747,18 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 					<p class="text-sm text-warning" data-testid="activity-load-error">
 						Activity log unavailable: {timingsLoadError}
 					</p>
-				{:else if groupedTimings.length === 0}
+				{:else if activityTurns.length === 0}
 					<p class="text-sm text-muted-foreground italic">
 						No activity events yet. The activity log captures per-turn pipeline timings (STT, router LLM, answer LLM, TTS, interrupts) as the session progresses.
 					</p>
 				{:else}
 					<ul class="m-0 flex list-none flex-col gap-2 p-0">
-						{#each groupedTimings as turn (turn.turnId)}
+						{#each activityTurns as turn (turn.turnId ?? 'session')}
 							{@const expanded = expandedTurnIds.has(turn.turnId)}
 							<li
 								class="rounded-md border border-border bg-surface-2"
 								data-testid="activity-turn"
-								data-turn-id={turn.turnId}
+								data-turn-id={turn.turnId ?? 'session'}
 							>
 								<button
 									type="button"
@@ -1735,19 +1771,33 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 										class="font-mono text-xs text-muted-foreground"
 										style="min-width: 4ch"
 									>
-										#{turn.turnId}
+										{turn.turnId === null ? 'Session' : `#${turn.turnId}`}
 									</span>
 									<span class="font-mono text-xs">
-										{turn.events.length}
-										{turn.events.length === 1 ? 'event' : 'events'}
+										{turn.rows.length}
+										{turn.rows.length === 1 ? 'event' : 'events'}
 									</span>
-									<span
-										class="font-mono text-xs font-medium text-foreground"
-										data-testid="activity-turn-end-to-end"
-										title="End-to-end (user speech end → first audio out)"
-									>
-										end-to-end {formatTimingMs(turn.endToEndMs)}
-									</span>
+									{#if turn.turnId !== null}
+										<span
+											class="font-mono text-xs font-medium text-foreground"
+											data-testid="activity-turn-end-to-end"
+											title="End-to-end (user speech end → first audio out)"
+										>
+											end-to-end {formatTimingMs(turn.endToEndMs)}
+										</span>
+									{/if}
+									{#if turn.interruption}
+										<span
+											class="inline-flex items-center gap-1 rounded-sm border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[0.65rem] font-semibold tracking-wide uppercase text-warning"
+											data-testid="activity-turn-interruption-badge"
+											title="The bot's speech was cut mid-utterance (speech onset → audio stop)"
+										>
+											<span>{interruptionWhoLabel(turn.interruption.reason)}</span>
+											{#if turn.interruption.duration_ms !== null}
+												<span>· {formatTimingMs(turn.interruption.duration_ms)}</span>
+											{/if}
+										</span>
+									{/if}
 									{#if turn.hasError}
 										<span
 											class="inline-flex items-center rounded-sm border border-destructive/40 bg-destructive/10 px-1.5 py-0.5 text-[0.65rem] font-semibold tracking-wide uppercase text-foreground"
@@ -1769,40 +1819,71 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 											class="m-0 flex list-none flex-col gap-1 p-0 text-xs"
 											data-testid="activity-events"
 										>
-											{#each turn.events as ev (ev.id)}
-												<li
-													class="grid grid-cols-[6ch_minmax(0,9rem)_minmax(0,7rem)_minmax(0,1fr)] items-baseline gap-x-3 gap-y-0.5"
-													data-testid="activity-event"
-													data-stage={ev.stage}
-												>
-													<time
-														class="font-mono text-muted-foreground"
-														title="Offset from session start"
+											{#each turn.rows as row (row.key)}
+												{#if row.kind === 'timing'}
+													{@const ev = row.timing}
+													<li
+														class="grid grid-cols-[6ch_minmax(0,9rem)_minmax(0,7rem)_minmax(0,1fr)] items-baseline gap-x-3 gap-y-0.5"
+														data-testid="activity-event"
+														data-stage={ev.stage}
 													>
-														{formatStartedAtMs(ev.started_at_ms)}
-													</time>
-													<span
-														class="font-medium text-foreground"
-														class:text-destructive={isErrorStage(ev.stage)}
-														class:text-warning={isInterruptStage(ev.stage)}
-													>
-														{stageLabel(ev.stage)}
-													</span>
-													<span class="font-mono text-foreground">
-														{formatTimingMs(ev.duration_ms)}
-													</span>
-													<span class="text-muted-foreground">
-														{#if ev.provider_name}
-															<span class="font-mono">{ev.provider_name}</span>
-															{#if detailSummary(ev)}
-																<span class="mx-1" aria-hidden="true">·</span>
+														<time
+															class="font-mono text-muted-foreground"
+															title="Offset from session start"
+														>
+															{formatStartedAtMs(ev.started_at_ms)}
+														</time>
+														<span
+															class="font-medium text-foreground"
+															class:text-destructive={isErrorStage(ev.stage)}
+															class:text-warning={isInterruptStage(ev.stage)}
+														>
+															{stageLabel(ev.stage)}
+														</span>
+														<span class="font-mono text-foreground">
+															{formatTimingMs(ev.duration_ms)}
+														</span>
+														<span class="text-muted-foreground">
+															{#if ev.provider_name}
+																<span class="font-mono">{ev.provider_name}</span>
+																{#if detailSummary(ev)}
+																	<span class="mx-1" aria-hidden="true">·</span>
+																{/if}
 															{/if}
-														{/if}
-														{#if detailSummary(ev)}
-															<span>{detailSummary(ev)}</span>
-														{/if}
-													</span>
-												</li>
+															{#if detailSummary(ev)}
+																<span>{detailSummary(ev)}</span>
+															{/if}
+														</span>
+													</li>
+												{:else}
+													{@const ev = row.event}
+													<li
+														class="grid grid-cols-[6ch_minmax(0,9rem)_minmax(0,7rem)_minmax(0,1fr)] items-baseline gap-x-3 gap-y-0.5"
+														data-testid="activity-dynamics-event"
+														data-event-type={ev.event_type}
+													>
+														<time
+															class="font-mono text-muted-foreground"
+															title="Offset from session start"
+														>
+															{formatStartedAtMs(ev.timestamp_ms)}
+														</time>
+														<span
+															class="font-medium"
+															class:text-warning={ev.event_type === 'interruption_recorded'}
+															class:text-info={isFloorEvent(ev.event_type)}
+															class:text-foreground={ev.event_type !== 'interruption_recorded' && !isFloorEvent(ev.event_type)}
+														>
+															{conversationEventLabel(ev.event_type)}
+														</span>
+														<span class="font-mono text-foreground">
+															{formatTimingMs(ev.duration_ms)}
+														</span>
+														<span class="text-muted-foreground">
+															{conversationEventSummary(ev)}
+														</span>
+													</li>
+												{/if}
 											{/each}
 										</ul>
 									</div>

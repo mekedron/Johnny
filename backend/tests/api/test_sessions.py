@@ -22,6 +22,7 @@ from app.db.models import (
     BotSession,
     BotSessionStatus,
     CalendarEvent,
+    ConversationEvent,
     DecisionOutcome,
     GoogleAccount,
     MeetingAgent,
@@ -60,6 +61,7 @@ def engine() -> sa.Engine:
             AgentUtterance.__table__,  # type: ignore[list-item]
             AgentTask.__table__,  # type: ignore[list-item]
             SessionTiming.__table__,  # type: ignore[list-item]
+            ConversationEvent.__table__,  # type: ignore[list-item]
         ],
     )
     return eng
@@ -601,6 +603,91 @@ def test_get_session_timings_rejects_invalid_limit(client: TestClient) -> None:
     res = client.get("/sessions/1/timings?limit=0")
     assert res.status_code == 422
     res = client.get("/sessions/1/timings?limit=10000")
+    assert res.status_code == 422
+
+
+# --- GET /sessions/{id}/conversation_events (Johnny-trt.49) -----------------
+
+
+def test_get_conversation_events_404_for_unknown(client: TestClient) -> None:
+    res = client.get("/sessions/9999/conversation_events")
+    assert res.status_code == 404
+
+
+def test_get_conversation_events_empty_for_quiet_session(
+    client: TestClient, db_session: Session
+) -> None:
+    _, cfg = _seed_meeting(db_session)
+    row = BotSession(meeting_config_id=cfg.id, status=BotSessionStatus.ENDED)
+    db_session.add(row)
+    db_session.commit()
+    res = client.get(f"/sessions/{row.id}/conversation_events")
+    assert res.status_code == 200
+    assert res.json() == {"events": []}
+
+
+def test_get_conversation_events_returns_rows_sorted_by_timestamp(
+    client: TestClient, db_session: Session
+) -> None:
+    """Chronological order so the activity log interleaves them with the
+    per-turn timings; only this session's rows come back."""
+    _, cfg = _seed_meeting(db_session)
+    row = BotSession(meeting_config_id=cfg.id, status=BotSessionStatus.JOINED)
+    other = BotSession(meeting_config_id=cfg.id, status=BotSessionStatus.JOINED)
+    db_session.add_all([row, other])
+    db_session.flush()
+
+    db_session.add(
+        ConversationEvent(
+            bot_session_id=row.id,
+            event_type="floor_acquired",
+            timestamp_ms=9_000,
+            agent_name="Echo B",
+            duration_ms=1_200,
+        )
+    )
+    db_session.add(
+        ConversationEvent(
+            bot_session_id=row.id,
+            event_type="interruption_recorded",
+            timestamp_ms=4_200,
+            turn_id=3,
+            duration_ms=320,
+            reason="user_over_bot",
+            details={"speech_kind": "reply", "partial_kept": True},
+        )
+    )
+    db_session.add(
+        ConversationEvent(
+            bot_session_id=other.id,
+            event_type="interruption_recorded",
+            timestamp_ms=1,
+            reason="bot_cut_by_stop",
+        )
+    )
+    db_session.commit()
+
+    res = client.get(f"/sessions/{row.id}/conversation_events")
+    assert res.status_code == 200
+    events = res.json()["events"]
+    assert [e["event_type"] for e in events] == [
+        "interruption_recorded",
+        "floor_acquired",
+    ]
+    first = events[0]
+    assert first["turn_id"] == 3
+    assert first["duration_ms"] == 320
+    assert first["reason"] == "user_over_bot"
+    assert first["details"] == {"speech_kind": "reply", "partial_kept": True}
+    assert events[1]["agent_name"] == "Echo B"
+
+
+def test_get_conversation_events_rejects_invalid_limit(
+    client: TestClient,
+) -> None:
+    res = client.get("/sessions/1/conversation_events?limit=0")
+    assert res.status_code == 422
+    res = client.get("/sessions/1/conversation_events?limit=10000")
     assert res.status_code == 422
 
 

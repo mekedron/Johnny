@@ -45,6 +45,7 @@ from app.db.models import (
     BotSessionSource,
     BotSessionStatus,
     CalendarEvent,
+    ConversationEvent,
     DecisionOutcome,
     MeetingConfig,
     NoReplyReason,
@@ -270,6 +271,36 @@ class SessionTimingsResponse(BaseModel):
     """Response shape for ``GET /sessions/{id}/timings``."""
 
     timings: list[SessionTimingRead]
+
+
+class ConversationEventRead(BaseModel):
+    """One persisted conversation-dynamics row (Johnny-trt.49).
+
+    Mirrors ``conversation_events`` so the session detail page can
+    interleave interruptions / floor handoffs / turn claims / suppression
+    windows into the activity log. Column-use-per-type is documented on
+    :class:`app.db.models.ConversationEvent`.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    bot_session_id: int
+    event_type: str
+    timestamp_ms: int
+    turn_id: int | None
+    agent_name: str | None
+    counterpart_name: str | None
+    duration_ms: int | None
+    reason: str
+    details: dict[str, Any]
+    created_at: datetime
+
+
+class ConversationEventsResponse(BaseModel):
+    """Response shape for ``GET /sessions/{id}/conversation_events``."""
+
+    events: list[ConversationEventRead]
 
 
 class MeetingBotParticipationRead(BaseModel):
@@ -636,6 +667,48 @@ def get_session_timings(
     )
 
 
+@router.get(
+    "/{bot_session_id}/conversation_events",
+    response_model=ConversationEventsResponse,
+)
+def get_session_conversation_events(
+    bot_session_id: int,
+    session: SessionDep,
+    limit: Annotated[
+        int,
+        Query(ge=1, le=MAX_TIMINGS_LIMIT),
+    ] = DEFAULT_TIMINGS_LIMIT,
+) -> ConversationEventsResponse:
+    """Return one session's conversation-dynamics record (Johnny-trt.49).
+
+    Each row is one interruption / floor handoff / turn claim /
+    peer-suppression event, sorted chronologically (``timestamp_ms`` ASC)
+    so the activity log interleaves them with the per-turn timings.
+    Sessions that pre-date the record return an empty list.
+    """
+    row = session.get(BotSession, bot_session_id)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="bot_session not found",
+        )
+
+    events = list(
+        session.scalars(
+            select(ConversationEvent)
+            .where(ConversationEvent.bot_session_id == bot_session_id)
+            .order_by(
+                ConversationEvent.timestamp_ms.asc(),
+                ConversationEvent.id.asc(),
+            )
+            .limit(limit)
+        ).all()
+    )
+    return ConversationEventsResponse(
+        events=[ConversationEventRead.model_validate(e) for e in events],
+    )
+
+
 @router.get("/{bot_session_id}/audio/{filename}")
 def get_session_audio(bot_session_id: int, filename: str) -> FileResponse:
     """Serve one captured reply WAV for playback (Johnny-od1).
@@ -755,6 +828,8 @@ __all__ = [
     "AgentTaskRead",
     "AgentUtteranceRead",
     "BotSessionRead",
+    "ConversationEventRead",
+    "ConversationEventsResponse",
     "MeetingBotParticipationRead",
     "SessionDetailResponse",
     "SessionTimingRead",

@@ -80,8 +80,10 @@ from johnny.agent.gate import (
     TurnLedger,
     run_gate,
 )
+from johnny.agent.interruptions import InterruptionMonitor
 from johnny.agent.observability import (
     RecordDecision,
+    RecordInterruption,
     RecordSpoke,
     RecordSuggested,
     RecordTriageTiming,
@@ -359,6 +361,7 @@ class RouterGate:
         record_spoke: RecordSpoke | None = None,
         record_suggested: RecordSuggested | None = None,
         record_triage_timing: RecordTriageTiming | None = None,
+        record_interruption: RecordInterruption | None = None,
         reply_audio: SpokenAudioRecorder | None = None,
         tasks: TaskCoordinator | None = None,
         resolve_turn_id: Callable[[str], int] | None = None,
@@ -384,6 +387,17 @@ class RouterGate:
         # emits no metric for it — the gate publishes its own ``router_llm``
         # timing per decided turn so session_timings shows the triage cost.
         self._record_triage_timing = record_triage_timing
+        # Conversation-dynamics emit (Johnny-trt.49): one InterruptionRecorded
+        # per cut speech, attributed by the monitor below. Optional like the
+        # other seams — a bare gate observes interruptions but emits nothing.
+        self._record_interruption = record_interruption
+        # Who-cut-the-bot attribution (Johnny-trt.49). Always constructed (the
+        # SpeechCaptionBuffer discipline): the session surface feeds user
+        # speech edges via note_user_speech_onset/_ended, the stop endpoints
+        # feed note_stop_requested, and every interrupted settle path asks
+        # attribute_cut() for (who, cut latency). Shares the gate's ms clock
+        # so tests drive both from one fake.
+        self._interruptions = InterruptionMonitor(clock=clock)
         # The session's reply-audio recorder (Johnny-od1). The gate only does
         # buffer hygiene: reset at every speech bind so stale segments (an
         # approval reply, a say(), an interrupted reply) never leak into the
@@ -1394,12 +1408,18 @@ class RouterGate:
                 await self._record_spoke(
                     partial, turn_id=None, kind="correction", interrupted=True
                 )
+                await self._emit_interruption(
+                    speech_kind="correction", turn_id=None, partial_kept=True
+                )
                 return
             if self._reply_audio is not None:
                 self._reply_audio.discard_reply()
             logger.info(
                 "agent.router.gate: correction interrupted before completion "
                 "with no caption flushed — not recorded"
+            )
+            await self._emit_interruption(
+                speech_kind="correction", turn_id=None, partial_kept=False
             )
             return
         if self._record_spoke is not None:
@@ -1477,12 +1497,18 @@ class RouterGate:
                 await self._record_spoke(
                     partial, turn_id=None, kind="task_result", interrupted=True
                 )
+                await self._emit_interruption(
+                    speech_kind="task_result", turn_id=None, partial_kept=True
+                )
                 return
             if self._reply_audio is not None:
                 self._reply_audio.discard_reply()
             logger.info(
                 "agent.router.gate: task result delivery interrupted before any "
                 "caption flushed — not recorded"
+            )
+            await self._emit_interruption(
+                speech_kind="task_result", turn_id=None, partial_kept=False
             )
             return
         if self._record_spoke is not None:
@@ -1604,15 +1630,21 @@ class RouterGate:
                     await self._record_spoke(
                         partial, turn_id=turn_id, kind=kind, interrupted=True
                     )
+                    await self._emit_interruption(
+                        speech_kind=kind, turn_id=turn_id, partial_kept=True
+                    )
                 return
             if self._reply_audio is not None:
                 self._reply_audio.discard_reply()
-            await self._ledger.emit(
+            if await self._ledger.emit(
                 turn_id,
                 terminal_state="no_reply",
                 no_reply_reason="barge_in",
                 detail=interrupted_detail,
-            )
+            ):
+                await self._emit_interruption(
+                    speech_kind=kind, turn_id=turn_id, partial_kept=False
+                )
             return
         if not await self._ledger.emit(turn_id, terminal_state="replied", detail=replied_detail):
             # A duplicate done-callback lost the first-wins race — the winner
@@ -1803,6 +1835,12 @@ class RouterGate:
                     await self._record_spoke(
                         partial, turn_id=turn_id, kind="reply", interrupted=True
                     )
+                    # Conversation dynamics (Johnny-trt.49): who cut the reply
+                    # and how fast — inside the first-wins branch like the
+                    # spoke, so it emits exactly once per cut.
+                    await self._emit_interruption(
+                        speech_kind="reply", turn_id=turn_id, partial_kept=True
+                    )
                 return
             # No captions (cut before the first sentence flushed, TTS degrade)
             # or no spoke seam: nothing audible to keep — the reply has no
@@ -1810,12 +1848,15 @@ class RouterGate:
             # dropped, not persisted (Johnny-od1).
             if self._reply_audio is not None:
                 self._reply_audio.discard_reply()
-            await self._ledger.emit(
+            if await self._ledger.emit(
                 turn_id,
                 terminal_state="no_reply",
                 no_reply_reason="barge_in",
                 detail="reply interrupted before completion",
-            )
+            ):
+                await self._emit_interruption(
+                    speech_kind="reply", turn_id=turn_id, partial_kept=False
+                )
             return
         if not handle.chat_items:
             if self._reply_audio is not None:
@@ -1941,6 +1982,68 @@ class RouterGate:
         inside the agent's defensive sink wrapper.
         """
         self._captions.note(text, sequence)
+
+    # ------------------------------------------------------------------ #
+    # Conversation dynamics (Johnny-trt.49)                               #
+    # ------------------------------------------------------------------ #
+
+    def note_user_speech_onset(self) -> None:
+        """A participant started speaking (the ``user_state_changed`` speaking edge).
+
+        Wired by :meth:`~johnny.agent.session.JohnnyAgent.on_enter`. Feeds
+        the interruption monitor so a ``user_over_bot`` cut measures its
+        latency from this VAD-confirmed onset. Sync and trivially cheap.
+        """
+        self._interruptions.note_user_speech_onset()
+
+    def note_user_speech_ended(self) -> None:
+        """The participant went silent (``listening`` / ``away`` edge) — see above."""
+        self._interruptions.note_user_speech_ended()
+
+    def note_stop_requested(self) -> None:
+        """An explicit stop is about to interrupt the session (Johnny-trt.49).
+
+        Called by the stop endpoints
+        (:meth:`~johnny.agent.browser_session.BrowserAgentSession.interrupt`)
+        *before* the SDK ``session.interrupt()``, so the cut speech's settle
+        path attributes ``bot_cut_by_stop`` with request→stop latency instead
+        of guessing a participant spoke.
+        """
+        self._interruptions.note_stop_requested()
+
+    async def _emit_interruption(
+        self,
+        *,
+        speech_kind: SpokenKind,
+        turn_id: str | None,
+        partial_kept: bool,
+    ) -> None:
+        """Publish one cut speech's ``InterruptionRecorded`` (Johnny-trt.49).
+
+        Called from every ``handle.interrupted`` settle branch — inside the
+        ledger's first-wins window for turn-bound speech, so a duplicate
+        done-callback can never double-emit. Attribution is resolved *now*
+        (audio stop time) by the monitor; no-op without the emit seam.
+        """
+        if self._record_interruption is None:
+            return
+        cut = self._interruptions.attribute_cut()
+        logger.info(
+            "agent.router.gate: interruption recorded who=%s latency_ms=%s "
+            "kind=%s turn=%s partial_kept=%s",
+            cut.who,
+            cut.cut_latency_ms,
+            speech_kind,
+            turn_id,
+            partial_kept,
+        )
+        await self._record_interruption(
+            cut.who,
+            cut_latency_ms=cut.cut_latency_ms,
+            speech_kind=speech_kind,
+            turn_id=turn_id,
+            partial_kept=partial_kept,
+        )
 
     async def aclose(self) -> None:
         """Tear down the gate at session end (Johnny-z97 §7.4).
