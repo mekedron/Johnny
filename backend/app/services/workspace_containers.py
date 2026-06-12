@@ -11,7 +11,9 @@ module is the container half behind that endpoint:
   ``johnny.workspace-id=<id>``, with its own named state volume
   (``johnny-workspace-<id>-home``) mounted at ``/home/sandbox`` — the same
   container path the default's ``~/.johnny/sandbox-home`` bind uses — plus
-  the shared read-only ``/skills`` mount;
+  its OWN skill packages (``~/.johnny/workspaces/<slug>/skills``) read-only
+  at ``/skills`` (Johnny-wks.3: per-workspace catalogs — a skill installed
+  in one workspace exists in no other container);
 * containers are LAZY: nothing runs until a dispatch surface or the task
   worker calls :func:`ensure_workspace_container_for_stamp` (first delegated
   task or capability probe), which starts — or transparently restarts — the
@@ -50,6 +52,7 @@ reset leaves them intact. The only deletion path is the explicit
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -92,13 +95,16 @@ DEFAULT_WORKSPACE_SANDBOX_IMAGE = "johnny-skills-sandbox:latest"
 WORKSPACE_SANDBOX_NETWORK_ENV = "JOHNNY_WORKSPACE_SANDBOX_NETWORK"
 DEFAULT_WORKSPACE_SANDBOX_NETWORK = "johnny_default"
 
-# Host source for the shared read-only /skills mount. Compose passes the
-# HOST path (${HOME}/.johnny/skills) because bind sources are interpreted by
-# the Docker daemon on the host, not by this container. A bare name is
-# mounted as a named volume (the meet-worker launcher convention); empty /
-# "none" disables the mount.
-WORKSPACE_SKILLS_VOLUME_ENV = "JOHNNY_WORKSPACE_SKILLS_VOLUME"
-DEFAULT_WORKSPACE_SKILLS_VOLUME = str(Path.home() / ".johnny" / "skills")
+# Host ROOT under which per-workspace dirs live (Johnny-wks.3): workspace
+# <slug>'s skill packages are bind-mounted from
+# ``<root>/<slug>/skills`` read-only at /skills inside ITS container only —
+# the per-workspace catalog isolation. Compose passes the HOST path
+# (${HOME}/.johnny/workspaces) because bind sources are interpreted by the
+# Docker daemon on the host, not by this container; api/worker see the same
+# tree through their own /workspaces mount (JOHNNY_WORKSPACES_DIR). Empty /
+# "none" disables the mount (skill-less workspace containers).
+WORKSPACES_HOST_DIR_ENV = "JOHNNY_WORKSPACES_HOST_DIR"
+DEFAULT_WORKSPACES_HOST_DIR = str(Path.home() / ".johnny" / "workspaces")
 WORKSPACE_SKILLS_TARGET = "/skills"
 
 # The per-workspace state mount target — the same container path the default
@@ -121,6 +127,16 @@ DEFAULT_WORKSPACE_STARTUP_TIMEOUT_SECONDS = 20
 DEFAULT_STOP_TIMEOUT_SECONDS = 10
 _HEALTH_POLL_INTERVAL_S = 0.5
 _LAST_USED_KEY_PREFIX = "johnny:workspace:sandbox:last-used:"
+
+# Change-event channel (Johnny-wks.3): every container lifecycle transition
+# (fresh launch, idle-sweep stop, delete-time retire) publishes
+# ``{"workspace_id": N, "event": ...}`` here so per-sandbox capability
+# snapshot caches refresh THAT key only — today's one consumer is the task
+# worker's URL-keyed registry cache
+# (:meth:`app.services.task_worker.SandboxExecutorProvider.invalidate_workspace`).
+# Best-effort by design: a missed publish only leaves the existing
+# staleness backstops (registry TTL + kind-miss refresh) in charge.
+WORKSPACE_SANDBOX_EVENT_CHANNEL = "johnny.workspace.sandbox-changed"
 
 # Resource caps mirrored from the compose `skills-sandbox` service so one
 # pair of knobs governs every sandbox, default and per-workspace alike.
@@ -208,10 +224,8 @@ def workspace_volume_name(workspace_id: int) -> str:
     return f"{workspace_container_name(workspace_id)}-home"
 
 
-def _skills_volume_setting() -> str | None:
-    raw = os.environ.get(
-        WORKSPACE_SKILLS_VOLUME_ENV, DEFAULT_WORKSPACE_SKILLS_VOLUME
-    ).strip()
+def _workspaces_host_dir_setting() -> str | None:
+    raw = os.environ.get(WORKSPACES_HOST_DIR_ENV, DEFAULT_WORKSPACES_HOST_DIR).strip()
     if raw.lower() in {"", "0", "false", "off", "none"}:
         return None
     return raw
@@ -286,7 +300,7 @@ class WorkspaceContainerManager:
         *,
         image: str | None = None,
         network: str | None = None,
-        skills_volume: str | None = None,
+        workspaces_host_dir: str | None = None,
         redis_url: str | None = None,
         startup_timeout_s: float | None = None,
         stop_timeout_s: int = DEFAULT_STOP_TIMEOUT_SECONDS,
@@ -296,10 +310,12 @@ class WorkspaceContainerManager:
     ) -> None:
         self._image = image or get_workspace_sandbox_image()
         self._network = network if network is not None else get_workspace_sandbox_network()
-        # An explicit "" disables the skills mount (the _read_volume_env
-        # convention); None defers to the environment.
-        self._skills_volume = (
-            skills_volume if skills_volume is not None else _skills_volume_setting()
+        # An explicit "" disables the per-workspace skills mount (the
+        # _read_volume_env convention); None defers to the environment.
+        self._workspaces_host_dir = (
+            workspaces_host_dir
+            if workspaces_host_dir is not None
+            else _workspaces_host_dir_setting()
         ) or None
         self._redis_url = (
             redis_url
@@ -403,6 +419,11 @@ class WorkspaceContainerManager:
                 workspace_id,
             )
             return False
+        # A fresh container is up (the fast path returned above): any
+        # snapshot probed against the previous lifetime is stale for this
+        # key — announce before the health wait so the refresh isn't gated
+        # on a slow boot (Johnny-wks.3).
+        await self._publish_change(workspace_id, "started")
         healthy = await self._wait_healthy(workspace_id)
         if not healthy:
             logger.warning(
@@ -450,8 +471,9 @@ class WorkspaceContainerManager:
                 "mode": "rw",
             }
         }
-        if self._skills_volume is not None:
-            volumes[self._skills_volume] = {
+        skills_source = self._workspace_skills_source(workspace_id, slug)
+        if skills_source is not None:
+            volumes[skills_source] = {
                 "bind": WORKSPACE_SKILLS_TARGET,
                 "mode": "ro",
             }
@@ -485,6 +507,47 @@ class WorkspaceContainerManager:
                 workspace_id,
                 name,
             )
+
+    def _workspace_skills_source(self, workspace_id: int, slug: str | None) -> str | None:
+        """The HOST path of this workspace's skill packages, or ``None``.
+
+        ``<workspaces root>/<slug>/skills`` — the wks.3 per-workspace
+        catalog: each container sees ONLY its own packages at /skills, so a
+        skill installed in one workspace exists in no other's executor. The
+        api/worker-visible twin of the path is pre-created through their
+        ``/workspaces`` mount first, so the docker daemon never auto-creates
+        the host dir root-owned (which would break the install flow's
+        writes). No slug (a malformed stamp) → no mount: discovery can't
+        locate the dir either, so the container honestly carries no skills.
+        """
+        if self._workspaces_host_dir is None:
+            return None
+        if not slug:
+            logger.warning(
+                "workspace %s: no slug available — launching without a "
+                "skills mount (catalog stays empty for this workspace)",
+                workspace_id,
+            )
+            return None
+        from johnny.skills.sandbox import WORKSPACE_SKILLS_SUBDIR, workspaces_dir_from_env
+
+        try:
+            (Path(workspaces_dir_from_env()) / slug / WORKSPACE_SKILLS_SUBDIR).mkdir(
+                parents=True, exist_ok=True
+            )
+        except OSError:
+            logger.warning(
+                "workspace %s: could not pre-create %s/%s/%s through the "
+                "workspaces mount; the docker daemon will create the host "
+                "dir (possibly root-owned)",
+                workspace_id,
+                workspaces_dir_from_env(),
+                slug,
+                WORKSPACE_SKILLS_SUBDIR,
+                exc_info=True,
+            )
+        root = self._workspaces_host_dir.rstrip("/")
+        return f"{root}/{slug}/{WORKSPACE_SKILLS_SUBDIR}"
 
     def _ensure_volume(
         self,
@@ -547,6 +610,46 @@ class WorkspaceContainerManager:
                 await asyncio.sleep(_HEALTH_POLL_INTERVAL_S)
         finally:
             await http.aclose()
+
+    # --- change events (Johnny-wks.3) ---------------------------------------
+
+    async def _publish_change(self, workspace_id: int, event: str) -> None:
+        """Announce a container lifecycle transition on the change channel.
+
+        Best-effort like the activity touch: a failed publish only leaves
+        the snapshot-staleness backstops (registry TTL, kind-miss refresh)
+        in charge for this key.
+        """
+        try:
+            client = self._redis_client()
+            if client is None:
+                return
+            try:
+                await client.publish(
+                    WORKSPACE_SANDBOX_EVENT_CHANNEL,
+                    json.dumps({"workspace_id": workspace_id, "event": event}),
+                )
+            finally:
+                await client.aclose()
+        except Exception:  # noqa: BLE001 — events must never block lifecycle work
+            logger.warning(
+                "workspace %s: failed to publish sandbox %s event",
+                workspace_id,
+                event,
+                exc_info=True,
+            )
+
+    def _publish_change_sync(self, workspace_id: int, event: str) -> None:
+        """The :meth:`retire` (sync caller) wrapper — same best-effort stance."""
+        try:
+            asyncio.run(self._publish_change(workspace_id, event))
+        except Exception:  # noqa: BLE001 — see _publish_change
+            logger.warning(
+                "workspace %s: failed to publish sandbox %s event",
+                workspace_id,
+                event,
+                exc_info=True,
+            )
 
     # --- activity tracking ------------------------------------------------
 
@@ -688,6 +791,7 @@ class WorkspaceContainerManager:
                     ws_id,
                 )
                 continue
+            await self._publish_change(ws_id, "stopped")
             stopped += 1
         return stopped
 
@@ -766,6 +870,8 @@ class WorkspaceContainerManager:
                 f"workspace {workspace_id} container(s) still present after "
                 f"retire: {leftovers}"
             )
+        if targets:
+            self._publish_change_sync(workspace_id, "retired")
         if not remove_volume:
             return
         volume_name = workspace_volume_name(workspace_id)
@@ -858,11 +964,13 @@ __all__ = [
     "DEFAULT_WORKSPACE_SANDBOX_IMAGE",
     "DEFAULT_WORKSPACE_SWEEP_INTERVAL_SECONDS",
     "WORKSPACE_ID_LABEL",
+    "WORKSPACE_SANDBOX_EVENT_CHANNEL",
     "WORKSPACE_SLUG_LABEL",
     "WORKSPACE_HOME_TARGET",
     "WORKSPACE_IDLE_TTL_ENV",
     "WORKSPACE_SANDBOX_IMAGE_ENV",
     "WORKSPACE_SWEEP_INTERVAL_ENV",
+    "WORKSPACES_HOST_DIR_ENV",
     "WorkspaceContainerError",
     "WorkspaceContainerManager",
     "ensure_workspace_container_for_stamp",

@@ -3,10 +3,10 @@
   "sessionId": "b6e04a59-a239-41cc-9d46-aaf1f127490a",
   "status": "running",
   "startedAt": "2026-06-12T16:03:53.991Z",
-  "updatedAt": "2026-06-12T17:32:38.579Z",
-  "currentIteration": 1,
+  "updatedAt": "2026-06-12T18:20:30.613Z",
+  "currentIteration": 2,
   "maxIterations": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 2,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -39,8 +39,8 @@
       {
         "id": "Johnny-wks.2",
         "title": "[BUILD] Workspace container lifecycle — lazy launch, idle-TTL stop, labels, sweep, per-workspace state dir",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-wks.3",
@@ -78,6 +78,16 @@
       "durationMs": 2052611,
       "startedAt": "2026-06-12T16:12:57.614Z",
       "endedAt": "2026-06-12T16:47:10.225Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "Johnny-wks.2",
+      "taskTitle": "[BUILD] Workspace container lifecycle — lazy launch, idle-TTL stop, labels, sweep, per-workspace state dir",
+      "taskCompleted": true,
+      "durationMs": 2720605,
+      "startedAt": "2026-06-12T16:47:17.112Z",
+      "endedAt": "2026-06-12T17:32:37.717Z"
     }
   ],
   "skippedTaskIds": [],

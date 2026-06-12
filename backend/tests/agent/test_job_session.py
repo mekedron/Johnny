@@ -685,6 +685,43 @@ def test_session_sandbox_resolver_keys_by_workspace(
     assert resolve_session_sandbox_url(finance) == "http://johnny-workspace-7:8088"
 
 
+def test_session_skills_dir_resolver_keys_by_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Johnny-wks.3: catalog DISCOVERY is keyed by the same workspace stamp
+    as the probes — default/legacy scans the shared volume byte-identically;
+    a non-default workspace scans its own packages dir; a stamp with no
+    usable slug resolves to None (load nothing rather than guess)."""
+    from johnny.agent.job_session import resolve_session_skills_dir
+    from johnny.skills.sandbox import SKILLS_DIR_ENV, WORKSPACES_DIR_ENV
+
+    monkeypatch.setenv(SKILLS_DIR_ENV, "/shared-skills")
+    monkeypatch.setenv(WORKSPACES_DIR_ENV, "/ws-root")
+
+    assert resolve_session_skills_dir(_job(mode=AUTONOMOUS_MODE)) == "/shared-skills"
+    default_stamped = _job(
+        mode=AUTONOMOUS_MODE,
+        agent_snapshot={
+            "workspace_id": 1,
+            "workspace": {"id": 1, "name": "Default", "slug": "default", "is_default": True},
+        },
+    )
+    assert resolve_session_skills_dir(default_stamped) == "/shared-skills"
+    finance = _job(
+        mode=AUTONOMOUS_MODE,
+        agent_snapshot={
+            "workspace_id": 7,
+            "workspace": {"id": 7, "name": "Finance", "slug": "finance", "is_default": False},
+        },
+    )
+    assert resolve_session_skills_dir(finance) == "/ws-root/finance/skills"
+    slugless = _job(
+        mode=AUTONOMOUS_MODE,
+        agent_snapshot={"workspace_id": 9, "workspace": {"id": 9, "is_default": False}},
+    )
+    assert resolve_session_skills_dir(slugless) is None
+
+
 async def test_default_sandbox_client_is_built_on_the_resolved_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -704,6 +741,56 @@ async def test_default_sandbox_client_is_built_on_the_resolved_url(
     assert runtime._sandbox_client.base_url == "http://sandbox-trt63:9999"
     await runtime.aclose()
     assert db.closed is True
+
+
+async def test_assembly_catalog_derives_from_the_agents_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Johnny-wks.3 end-to-end at assembly level: a skill installed only in
+    the Finance workspace is promised only to Finance-attached sessions, and
+    the shared volume's skills never leak into them (and vice versa)."""
+
+    def _write_skill(root: Any, name: str) -> None:
+        directory = root / name
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: A {name} helper.\n---\nSteps.",
+            encoding="utf-8",
+        )
+
+    shared = tmp_path / "shared-skills"
+    shared.mkdir()
+    _write_skill(shared, "sharedskill")
+    _write_skill(tmp_path / "workspaces" / "finance" / "skills", "financeskill")
+    monkeypatch.setenv("JOHNNY_SKILLS_DIR", str(shared))
+    monkeypatch.setenv("JOHNNY_WORKSPACES_DIR", str(tmp_path / "workspaces"))
+
+    finance_job = _job(
+        mode=AUTONOMOUS_MODE,
+        agent_snapshot={
+            "workspace_id": 7,
+            "workspace": {"id": 7, "name": "Finance", "slug": "finance", "is_default": False},
+        },
+    )
+    runtime = await build_agent_runtime(
+        finance_job,
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: _FakeDbSession(),
+    )
+    assert runtime.skill_registry is not None
+    assert runtime.skill_registry.kinds() == frozenset({"financeskill"})
+    await runtime.aclose()
+
+    default_runtime = await build_agent_runtime(
+        _job(mode=AUTONOMOUS_MODE),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: _FakeDbSession(),
+    )
+    assert default_runtime.skill_registry is not None
+    assert default_runtime.skill_registry.kinds() == frozenset({"sharedskill"})
+    await default_runtime.aclose()
 
 
 @pytest.mark.parametrize("mode", [LISTEN_ONLY_MODE, SUGGEST_ONLY_MODE])

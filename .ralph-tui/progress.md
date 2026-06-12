@@ -45,6 +45,24 @@ after each iteration and it's included in prompts for context.
 - **uvicorn api logs hide `app.services.*` INFO** (no basicConfig in the api process — only
   the worker calls it). Don't debug a service by grepping api logs for its logger; assert on
   observable side effects (containers, volumes, redis keys, DB rows) instead.
+- **Per-workspace skills = swap the MOUNT SOURCE, not the path** (wks.3): every container
+  sees ITS OWN skill set at the same `/skills` path (default → `~/.johnny/skills`; workspace
+  → `~/.johnny/workspaces/<slug>/skills` ro), so SKILL.md argv like `sh /skills/<name>/run.sh`
+  stays relocatable across targets. Discovery (api/worker/agent-worker) reads ALL trees via
+  one parent mount `~/.johnny/workspaces:/workspaces`; the resolver-twin pattern extends to a
+  THIRD pair: `resolve_session_skills_dir` / `resolve_skills_dir` next to the two URL seams.
+  Slug missing on a non-default stamp → return None → EMPTY registry (promise nothing, never
+  guess a dir).
+- **In-container pytest runs with `JOHNNY_USE_DOCKER_LAUNCHER=true`** (compose backend-env):
+  any test that reaches `should_use_docker_launcher()`-gated code (workspace ensure at claim
+  / dispatch / capabilities GET) MUST `monkeypatch.delenv("JOHNNY_USE_DOCKER_LAUNCHER")` or
+  inject a fake manager — otherwise the test launches a REAL `johnny-workspace-<id>`
+  container against the host daemon (it happened: stray workspace-7 from a provider test).
+- **Cache invalidation by aging, not eviction** (SandboxExecutorProvider): to refresh a
+  per-URL cached (client, registry) entry from another thread/loop, set
+  `entry.loaded_at = float("-inf")` instead of deleting it — the next claim's TTL check
+  reloads via `_load(reuse=entry)` which REUSES the client, so no client is ever closed
+  under an in-flight executor and no cross-loop lock is needed.
 
 ---
 
@@ -164,3 +182,70 @@ after each iteration and it's included in prompts for context.
     time workspace code: UI click → stamp → ensure → in-process probes, no Meet needed.
 ---
 
+## 2026-06-12 - Johnny-wks.3
+- Per-workspace routing shipped — the wks.1/wks.2 seams flipped from one entry to many:
+  (1) DISCOVERY keyed by workspace: new third resolver pair
+  `johnny/agent/job_session.py::resolve_session_skills_dir` +
+  `app/services/task_worker.py::resolve_skills_dir` (twins of the two URL seams) — default/
+  legacy scan `JOHNNY_SKILLS_DIR` byte-identically; non-default scans
+  `<JOHNNY_WORKSPACES_DIR>/<slug>/skills`; slug-less non-default stamp → None → EMPTY
+  registry. `SessionJobConfig` grew a lenient `workspace_slug` property.
+  (2) Workspace containers now mount THEIR OWN skills dir
+  (`~/.johnny/workspaces/<slug>/skills` ro at `/skills`, replacing wks.2's shared mount;
+  `JOHNNY_WORKSPACES_HOST_DIR` env replaces `JOHNNY_WORKSPACE_SKILLS_VOLUME`); the dir is
+  pre-created through the api/worker `/workspaces` mount so docker never root-creates it.
+  (3) Capabilities API workspace-keyed: `GET /capabilities/skills|tools?workspace_id=` (404
+  unknown; non-default lazily ENSURES the container — the GET is the refresh; sandbox key
+  `workspace-<id>` vs `global`), `/tools?agent_id=` derives the agent's workspace exactly
+  like dispatch (`resolve_agent_workspace`); `_known_kinds` scans every workspace volume so
+  workspace-local kinds are toggle-addressable.
+  (4) Install flow (trt.32 minimal seam, built in-place per the epic note):
+  `POST /capabilities/skills/install` {workspace_id?, files[], overwrite} — strict 422s
+  (traversal, parse problems, no frontmatter name, INTERNAL KINDS = locality-guard
+  regression), 409+overwrite, lands the package in that volume only.
+  (5) Snapshot freshness: `WORKSPACE_SANDBOX_EVENT_CHANNEL`
+  (`johnny.workspace.sandbox-changed`) published best-effort on fresh launch / idle-sweep
+  stop / retire; the TaskWorker wake listener subscribes both channels and
+  `SandboxExecutorProvider.invalidate_workspace(id)` ages out exactly that URL's snapshot.
+- Files: backend/johnny/skills/sandbox.py (workspaces-dir helpers), johnny/agent/
+  job_config.py (+workspace_slug), johnny/agent/job_session.py (skills-dir resolver +
+  _build_skill_pieces), app/services/task_worker.py (resolve_skills_dir, _load(skills_dir),
+  invalidate_workspace, dual-channel listener, _handle_workspace_event),
+  app/services/workspace_containers.py (per-slug mount, dir pre-create, change events),
+  app/api/capabilities.py (workspace keying + install), docker-compose.yml (/workspaces
+  mounts on api rw / worker rw / agent-worker ro + env), run.sh (~/.johnny/workspaces),
+  .env.example; tests extended in all five matching test files.
+- Validation: full suite 4397 passed (two documented env-dependent groups excluded); ruff +
+  mypy clean on every changed file. Real-browser (chrome-devtools, dev stack from a clean
+  ./stop.sh && ./run-dev.sh — compose/env deltas are mode-agnostic, no new deps): Finance
+  workspace + 2 attached agents created from the frontend origin; install matrix driven
+  live (default→/skills, finance→/workspaces/finance/skills, dup 409, traversal 422,
+  meeting.leave 422 locality, unknown ws 404); host fs isolation confirmed; capability
+  views: default={google-calendar,where-am-i}, finance={ledger-report,where-am-i},
+  FinanceBot+FinanceBot2 catalogs identical with ONE install (sharing) and never
+  google-calendar; Johnny's never ledger-report. Playground sessions (UI button) for
+  FinanceBot (autonomous) + Johnny: snapshots stamped, dispatch ensure launched
+  johnny-workspace-2 with the per-slug ro mount (inspected). EXEC ROUTING live: identical
+  hand-queued `where-am-i` rows → finance stamp ran in johnny-workspace-2's hostname,
+  default stamp in skills-sandbox's (worker registry logs show per-URL per-dir snapshots).
+  Freshness live: rm container → capabilities GET relaunches → "started" event → worker
+  log "workspace 2 sandbox changed — registry snapshot invalidated"; delete matrix (409
+  attached → detach → 204 remove_volume=true retiring the RUNNING container) → "retired"
+  event invalidated again. Artifacts: .validation/Johnny-wks.3/01-04*.
+- **Learnings:**
+  - In-container pytest inherits JOHNNY_USE_DOCKER_LAUNCHER=true — a provider/dispatch test
+    without delenv launches REAL workspace containers (caught a stray johnny-workspace-7;
+    fixed with monkeypatch.delenv in the test).
+  - The playground "Mode: listen only" agents assemble with NO task pieces (no registry, no
+    catalog) — set mode=autonomous (requires non-empty character_prompt, 422 otherwise) for
+    any delegation-path validation.
+  - Provider trio bring-up on a fresh DB: POST /providers {kind, provider_name, values{field
+    names from /providers/schemas}} then POST /providers/{id}/activate; faster-whisper field
+    is model_size (not model). A dead ollama LLM still assembles+joins (failures are
+    turn-time) — enough for dispatch/catalog validation without speech.
+  - Only ONE browser session may be live at a time (409 names the active id) — sequential
+    sessions for A/B agent comparisons.
+  - psql-inserted agent_tasks rows (request_json mirroring the sink's stamp shape) + a
+    johnny.tasks.wake publish are the cheapest REAL claim→exec→settle drive for worker
+    routing proofs — no LLM needed; result_text carries the skill's stdout.
+---

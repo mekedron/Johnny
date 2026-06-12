@@ -78,6 +78,42 @@ def skills_dir_from_env() -> str:
     return os.environ.get(SKILLS_DIR_ENV, "").strip() or DEFAULT_SKILLS_DIR
 
 
+# --- Per-workspace skill packages (Johnny-wks.3) ------------------------------
+# A NON-DEFAULT workspace's skills live in its OWN host directory
+# (~/.johnny/workspaces/<slug>/skills — the epic's storage convention),
+# mounted read-only at /skills inside that workspace's container. The same
+# package therefore works unchanged in any workspace: a SKILL.md argv like
+# ``bash /skills/<name>/run.sh`` resolves against whichever skills dir the
+# executing container mounts. api/worker (discovery + the install flow) see
+# every workspace's dir through one parent mount, rooted at
+# ``JOHNNY_WORKSPACES_DIR`` (/workspaces in compose). The DEFAULT workspace
+# keeps :func:`skills_dir_from_env` — the pre-workspaces shared volume,
+# byte-identical.
+WORKSPACES_DIR_ENV = "JOHNNY_WORKSPACES_DIR"
+DEFAULT_WORKSPACES_DIR = "/workspaces"
+WORKSPACE_SKILLS_SUBDIR = "skills"
+
+
+def workspaces_dir_from_env() -> str:
+    """The container-side root under which per-workspace dirs live
+    (``/workspaces/<slug>/...`` as seen by api / worker / agent-worker)."""
+    return (
+        os.environ.get(WORKSPACES_DIR_ENV, "").strip().rstrip("/")
+        or DEFAULT_WORKSPACES_DIR
+    )
+
+
+def workspace_skills_dir(slug: str) -> str:
+    """Where a NON-DEFAULT workspace's skill packages are discovered/installed.
+
+    Keyed by the FROZEN slug (the wks.1 storage-identity decision): renames
+    never re-key skills, and a workspace recreated with the same slug regains
+    them — the same continuity-by-design the wks.2 state volume documents.
+    Inside the workspace's own container this directory is ``/skills``.
+    """
+    return f"{workspaces_dir_from_env()}/{slug}/{WORKSPACE_SKILLS_SUBDIR}"
+
+
 class SandboxError(Exception):
     """Base class for sandbox client failures."""
 
@@ -261,10 +297,13 @@ class SandboxClient:
 __all__ = [
     "DEFAULT_SANDBOX_URL",
     "DEFAULT_SKILLS_DIR",
+    "DEFAULT_WORKSPACES_DIR",
     "SANDBOX_URL_ENV",
     "SKILLS_DIR_ENV",
+    "WORKSPACES_DIR_ENV",
     "WORKSPACE_CONTAINER_PREFIX",
     "WORKSPACE_SANDBOX_PORT",
+    "WORKSPACE_SKILLS_SUBDIR",
     "SandboxClient",
     "SandboxError",
     "SandboxExecResult",
@@ -274,4 +313,6 @@ __all__ = [
     "sandbox_url_from_env",
     "skills_dir_from_env",
     "workspace_container_name",
+    "workspace_skills_dir",
+    "workspaces_dir_from_env",
 ]

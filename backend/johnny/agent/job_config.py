@@ -380,6 +380,23 @@ class SessionJobConfig:
             return bool(entry.get("is_default"))
         return False
 
+    @property
+    def workspace_slug(self) -> str | None:
+        """The stamped workspace's frozen slug (Johnny-wks.3), or ``None``.
+
+        The key the per-workspace SKILLS-DIR resolver consumes (the
+        discovery twin of the sandbox-URL seam): a non-default workspace's
+        skill packages live under ``~/.johnny/workspaces/<slug>/skills``.
+        Lenient like the other snapshot reads — absent / blank / non-string
+        degrades to ``None`` (the resolver then promises no workspace-local
+        skills rather than guessing a directory).
+        """
+        entry = self.agent_snapshot.get(SNAPSHOT_WORKSPACE_KEY)
+        if not isinstance(entry, Mapping):
+            return None
+        slug = str(entry.get("slug") or "").strip()
+        return slug or None
+
     def capability_policy(self) -> Any:
         """The resolved capability policy stamped at dispatch (Johnny-trt.38).
 

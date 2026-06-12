@@ -48,6 +48,7 @@ poll as the fallback for missed pings and pre-crash backlog.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -516,6 +517,35 @@ def resolve_sandbox_url(claimed: ClaimedTask) -> str:
     return sandbox_url_for_workspace(claimed.workspace_id)
 
 
+def resolve_skills_dir(claimed: ClaimedTask) -> str | None:
+    """Which skills DIRECTORY this task's registry is discovered from —
+    keyed by WORKSPACE (Johnny-wks.3).
+
+    The discovery twin of :func:`resolve_sandbox_url` (its session sibling
+    is :func:`johnny.agent.job_session.resolve_session_skills_dir`): default
+    / legacy rows scan the shared volume from ``JOHNNY_SKILLS_DIR``
+    (byte-identical pre-workspaces behavior); a non-default row scans its
+    workspace's own packages under ``~/.johnny/workspaces/<slug>/skills`` —
+    the same set the session's catalog promised, so the worker can never run
+    a kind the workspace doesn't carry. ``None`` (a non-default stamp with
+    no slug) means the directory cannot be located: the registry loads empty
+    and the task settles with the honest unsupported-kind speech.
+    """
+    from johnny.skills.sandbox import skills_dir_from_env, workspace_skills_dir
+
+    if claimed.workspace_id is None or claimed.workspace_is_default:
+        return skills_dir_from_env()
+    if not claimed.workspace_slug:
+        logger.warning(
+            "task worker: task %s workspace %s stamp carries no slug — "
+            "loading no workspace-local skills",
+            claimed.task_id,
+            claimed.workspace_id,
+        )
+        return None
+    return workspace_skills_dir(claimed.workspace_slug)
+
+
 def load_mcp_server_configs() -> tuple[McpServerConfig, ...]:
     """Fresh enabled MCP server configs (Johnny-trt.36), read per execution.
 
@@ -612,12 +642,13 @@ class SandboxExecutorProvider:
         from johnny.skills.tools import SandboxExecTool
 
         url = resolve_sandbox_url(claimed)
+        skills_dir = resolve_skills_dir(claimed)
         await self._ensure_workspace_container(claimed)
         async with self._lock:
             entry = self._entries.get(url)
             age = time.monotonic() - entry.loaded_at if entry is not None else None
             if entry is None or age is None or age >= self._registry_ttl_s:
-                entry = await self._load(url, reuse=entry)
+                entry = await self._load(url, skills_dir=skills_dir, reuse=entry)
             elif not self._kind_ready(entry, claimed.kind):
                 logger.info(
                     "task worker: kind=%s not available in the cached snapshot "
@@ -626,7 +657,7 @@ class SandboxExecutorProvider:
                     age,
                     url,
                 )
-                entry = await self._load(url, reuse=entry)
+                entry = await self._load(url, skills_dir=skills_dir, reuse=entry)
             registry = entry.registry
             client = entry.client
         if policy is not None:
@@ -702,20 +733,54 @@ class SandboxExecutorProvider:
         except Exception:  # noqa: BLE001 — the sweep must never kill the pass
             logger.exception("task worker: mcp idle sweep failed")
 
-    async def _load(self, url: str, *, reuse: _ExecutorEntry | None) -> _ExecutorEntry:
+    def invalidate_workspace(self, workspace_id: int) -> None:
+        """Mark ONE workspace's cached snapshot stale (Johnny-wks.3).
+
+        Called when that workspace's container starts / stops / retires (the
+        change-event refresh): the snapshot was probed against a sandbox that
+        no longer looks like that, so the next claim against this key reloads
+        instead of serving verdicts from the previous container's lifetime.
+        Scoped to the one URL — other workspaces' snapshots stay warm. The
+        entry is aged out rather than evicted so the cached client (which the
+        next ``_load`` reuses, and which an in-flight executor may still
+        hold) is never closed under a running task. A plain attribute write
+        on purpose: callable from the wake listener without taking the
+        provider lock, and the worst race is one redundant refresh.
+        """
+        from johnny.skills.sandbox import sandbox_url_for_workspace
+
+        entry = self._entries.get(sandbox_url_for_workspace(workspace_id))
+        if entry is None:
+            return
+        entry.loaded_at = float("-inf")
+        logger.info(
+            "task worker: workspace %s sandbox changed — registry snapshot "
+            "invalidated for the next claim",
+            workspace_id,
+        )
+
+    async def _load(
+        self, url: str, *, skills_dir: str | None, reuse: _ExecutorEntry | None
+    ) -> _ExecutorEntry:
         from johnny.skills.registry import (
+            EMPTY_SKILL_REGISTRY,
             build_sandbox_availability_runner,
             load_skill_registry,
         )
-        from johnny.skills.sandbox import SandboxClient, skills_dir_from_env
+        from johnny.skills.sandbox import SandboxClient
 
         client = reuse.client if reuse is not None else SandboxClient(base_url=url)
-        registry = await load_skill_registry(
-            skills_dir_from_env(),
-            check_bins=client.check_bins,
-            check_env=client.check_env,
-            run_check=build_sandbox_availability_runner(client),
-        )
+        if skills_dir is None:
+            # Unlocatable workspace dir (no slug on the stamp): promise
+            # nothing rather than scanning a guessed path.
+            registry = EMPTY_SKILL_REGISTRY
+        else:
+            registry = await load_skill_registry(
+                skills_dir,
+                check_bins=client.check_bins,
+                check_env=client.check_env,
+                run_check=build_sandbox_availability_runner(client),
+            )
         entry = _ExecutorEntry(registry=registry, client=client, loaded_at=time.monotonic())
         self._entries[url] = entry
         logger.info("task worker: skill registry loaded for %s (%s)", url, registry.summary())
@@ -1189,9 +1254,18 @@ class TaskWorker:
         surfaces idle-socket read timeouts as crashes); it also gives the
         stop flag a 1 s check cadence. Self-healing: a dropped connection
         logs, backs off, and resubscribes — the poll interval covers the
-        gap. The payload content is ignored; the durable queue is the table.
+        gap. A wake's payload content is ignored; the durable queue is the
+        table.
+
+        The same subscription also carries the workspace sandbox
+        change-event channel (Johnny-wks.3): a container start/stop/retire
+        invalidates the executor provider's registry snapshot for THAT
+        workspace only, so the next claim re-probes instead of serving
+        verdicts from the previous container lifetime.
         """
         from redis.asyncio import Redis
+
+        from app.services.workspace_containers import WORKSPACE_SANDBOX_EVENT_CHANNEL
 
         redis_url = self._redis_url
         if redis_url is None:  # run() only spawns the listener with a URL
@@ -1201,8 +1275,12 @@ class TaskWorker:
             try:
                 client = Redis.from_url(redis_url, decode_responses=False)
                 pubsub = client.pubsub(ignore_subscribe_messages=True)
-                await pubsub.subscribe(TASKS_WAKE_CHANNEL)
-                logger.info("task worker: subscribed to %s", TASKS_WAKE_CHANNEL)
+                await pubsub.subscribe(TASKS_WAKE_CHANNEL, WORKSPACE_SANDBOX_EVENT_CHANNEL)
+                logger.info(
+                    "task worker: subscribed to %s + %s",
+                    TASKS_WAKE_CHANNEL,
+                    WORKSPACE_SANDBOX_EVENT_CHANNEL,
+                )
                 while not self._stop.is_set():
                     try:
                         message = await pubsub.get_message(
@@ -1210,7 +1288,14 @@ class TaskWorker:
                         )
                     except TimeoutError:
                         continue
-                    if message is not None and message.get("type") == "message":
+                    if message is None or message.get("type") != "message":
+                        continue
+                    channel = message.get("channel")
+                    if isinstance(channel, bytes):
+                        channel = channel.decode("utf-8", "replace")
+                    if channel == WORKSPACE_SANDBOX_EVENT_CHANNEL:
+                        self._handle_workspace_event(message.get("data"))
+                    else:
                         self._wake.set()
             except asyncio.CancelledError:
                 raise
@@ -1226,6 +1311,27 @@ class TaskWorker:
                         await client.aclose()
                     except Exception:  # noqa: BLE001
                         pass
+
+    def _handle_workspace_event(self, data: Any) -> None:
+        """Invalidate ONE workspace's cached snapshot on its change event.
+
+        Defensive parse: a malformed payload is dropped (the TTL / kind-miss
+        refresh backstops still bound staleness). No-op with an injected
+        single executor (tests) — there is no provider cache to refresh.
+        """
+        if self._provider is None:
+            return
+        try:
+            if isinstance(data, bytes | bytearray):
+                data = data.decode("utf-8", "replace")
+            payload = json.loads(data) if isinstance(data, str) else None
+            if not isinstance(payload, dict):
+                return
+            workspace_id = int(payload["workspace_id"])
+        except (KeyError, TypeError, ValueError):
+            logger.warning("task worker: unparseable workspace sandbox event %r", data)
+            return
+        self._provider.invalidate_workspace(workspace_id)
 
     def _event_buses(self) -> tuple[RedisEventBus, ...]:
         """Both announce surfaces, lazily: the UI session channel
@@ -1369,6 +1475,7 @@ __all__ = [
     "get_task_running_ttl_seconds",
     "get_task_sweep_interval_seconds",
     "resolve_sandbox_url",
+    "resolve_skills_dir",
     "run_task_executor_loop",
     "settle_claimed_task",
     "sweep_stale_tasks",

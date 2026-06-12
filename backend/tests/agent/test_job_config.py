@@ -163,6 +163,7 @@ def test_snapshot_workspace_lenient_read() -> None:  # Johnny-wks.1
     legacy = cfg({})
     assert legacy.workspace_id is None
     assert legacy.workspace_is_default is True
+    assert legacy.workspace_slug is None
 
     # The producer's shape: id + identity object.
     stamped = cfg(
@@ -173,6 +174,7 @@ def test_snapshot_workspace_lenient_read() -> None:  # Johnny-wks.1
     )
     assert stamped.workspace_id == 7
     assert stamped.workspace_is_default is False
+    assert stamped.workspace_slug == "finance"
 
     # Default workspace stamped explicitly.
     default = cfg(
@@ -183,11 +185,17 @@ def test_snapshot_workspace_lenient_read() -> None:  # Johnny-wks.1
     )
     assert default.workspace_id == 1
     assert default.workspace_is_default is True
+    assert default.workspace_slug == "default"
 
     # Malformed id degrades to absent (= default workspace).
     junk = cfg({"workspace_id": "lots"})
     assert junk.workspace_id is None
     assert junk.workspace_is_default is True
+
+    # Slug reads degrade like the rest (Johnny-wks.3): blank / non-mapping
+    # identity objects yield None, never a guessed directory key.
+    assert cfg({"workspace_id": 7, "workspace": {"slug": "  "}}).workspace_slug is None
+    assert cfg({"workspace_id": 7, "workspace": "junk"}).workspace_slug is None
 
 
 def test_workspace_from_agent_snapshot_sanitizes() -> None:  # Johnny-wks.1

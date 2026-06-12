@@ -1,18 +1,21 @@
-"""Tests for app.services.workspace_containers (Johnny-wks.2).
+"""Tests for app.services.workspace_containers (Johnny-wks.2 / wks.3).
 
 The container half of workspaces: lazy launch with the full run contract
-(name, label, named state volume, shared skills mount, init=True, resource
-caps), transparent restart of stopped containers, the launch race, the
-idle-TTL sweep with its Redis-evidence rule and post-stop verification, and
-the retire path the delete endpoint drives (container always; volume only on
-the explicit flag).
+(name, label, named state volume, the workspace's OWN skills mount,
+init=True, resource caps), transparent restart of stopped containers, the
+launch race, the idle-TTL sweep with its Redis-evidence rule and post-stop
+verification, the retire path the delete endpoint drives (container always;
+volume only on the explicit flag), and the wks.3 sandbox change events each
+lifecycle transition publishes.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -23,6 +26,7 @@ from app.services.workspace_containers import (
     DEFAULT_WORKSPACE_SANDBOX_IMAGE,
     WORKSPACE_HOME_TARGET,
     WORKSPACE_ID_LABEL,
+    WORKSPACE_SANDBOX_EVENT_CHANNEL,
     WORKSPACE_SLUG_LABEL,
     WorkspaceContainerError,
     WorkspaceContainerManager,
@@ -152,11 +156,23 @@ class _FakeClient:
 
 
 class _FakeRedis:
-    """Per-call async redis stand-in (set/mget/aclose)."""
+    """Per-call async redis stand-in (set/mget/publish/aclose).
 
-    def __init__(self, store: dict[str, str], *, raises: bool = False) -> None:
+    ``store`` doubles as the shared state across per-call clients; published
+    events are appended to the shared ``events`` list under the
+    ``"__events__"`` key convention used by :func:`_manager`.
+    """
+
+    def __init__(
+        self,
+        store: dict[str, str],
+        *,
+        raises: bool = False,
+        events: list[tuple[str, str]] | None = None,
+    ) -> None:
         self.store = store
         self.raises = raises
+        self.events = events if events is not None else []
         self.closed = 0
 
     async def set(self, key: str, value: str) -> None:
@@ -168,6 +184,11 @@ class _FakeRedis:
         if self.raises:
             raise ConnectionError("redis down")
         return [self.store.get(key) for key in keys]
+
+    async def publish(self, channel: str, payload: str) -> None:
+        if self.raises:
+            raise ConnectionError("redis down")
+        self.events.append((channel, payload))
 
     async def aclose(self) -> None:
         self.closed += 1
@@ -196,6 +217,20 @@ class _FakeHttpClient:
         self.closed += 1
 
 
+@pytest.fixture(autouse=True)
+def _container_side_workspaces_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Point the api/worker-side /workspaces view at a scratch dir.
+
+    The launcher pre-creates ``<root>/<slug>/skills`` through this view
+    before bind-mounting it (wks.3); tests must never write the real mount.
+    """
+    root = tmp_path / "workspaces-view"
+    monkeypatch.setenv("JOHNNY_WORKSPACES_DIR", str(root))
+    return root
+
+
 def _manager(
     client: _FakeClient,
     *,
@@ -203,20 +238,36 @@ def _manager(
     redis_raises: bool = False,
     health: list[int | None] | None = None,
     startup_timeout_s: float = 0.0,
-    skills_volume: str | None = "/host/.johnny/skills",
+    workspaces_host_dir: str | None = "/host/.johnny/workspaces",
+    events: list[tuple[str, str]] | None = None,
 ) -> tuple[WorkspaceContainerManager, dict[str, str]]:
     store = redis_store if redis_store is not None else {}
+    shared_events: list[tuple[str, str]] = events if events is not None else []
     manager = WorkspaceContainerManager(
         image="johnny-skills-sandbox:test",
         network="testnet",
-        skills_volume=skills_volume if skills_volume is not None else "",
+        workspaces_host_dir=(
+            workspaces_host_dir if workspaces_host_dir is not None else ""
+        ),
         redis_url="redis://unused",
         startup_timeout_s=startup_timeout_s,
         client=client,  # type: ignore[arg-type]
         http_client_factory=lambda: _FakeHttpClient(health or [200]),  # type: ignore[arg-type,return-value]
-        redis_client_factory=lambda: _FakeRedis(store, raises=redis_raises),
+        redis_client_factory=lambda: _FakeRedis(
+            store, raises=redis_raises, events=shared_events
+        ),
     )
     return manager, store
+
+
+def _published(events: list[tuple[str, str]]) -> list[tuple[int, str]]:
+    """Decode (workspace_id, event) pairs published on the change channel."""
+    out: list[tuple[int, str]] = []
+    for channel, payload in events:
+        assert channel == WORKSPACE_SANDBOX_EVENT_CHANNEL
+        body = json.loads(payload)
+        out.append((int(body["workspace_id"]), str(body["event"])))
+    return out
 
 
 def _running(
@@ -238,9 +289,12 @@ def _running(
 # --- ensure_running -----------------------------------------------------------
 
 
-async def test_ensure_launches_with_the_full_run_contract() -> None:
+async def test_ensure_launches_with_the_full_run_contract(
+    _container_side_workspaces_dir: Path,
+) -> None:
     client = _FakeClient()
-    manager, store = _manager(client)
+    events: list[tuple[str, str]] = []
+    manager, store = _manager(client, events=events)
 
     assert await manager.ensure_running(workspace_id=7, slug="finance") is True
 
@@ -256,13 +310,20 @@ async def test_ensure_launches_with_the_full_run_contract() -> None:
         WORKSPACE_ID_LABEL: "7",
         WORKSPACE_SLUG_LABEL: "finance",
     }
-    # Its own named state volume at the default's container path + the
-    # shared read-only skills mount.
+    # Its own named state volume at the default's container path + ITS OWN
+    # read-only skills mount (wks.3: per-workspace packages, never the
+    # shared volume).
     assert kwargs["volumes"]["johnny-workspace-7-home"] == {
         "bind": WORKSPACE_HOME_TARGET,
         "mode": "rw",
     }
-    assert kwargs["volumes"]["/host/.johnny/skills"] == {"bind": "/skills", "mode": "ro"}
+    assert kwargs["volumes"]["/host/.johnny/workspaces/finance/skills"] == {
+        "bind": "/skills",
+        "mode": "ro",
+    }
+    # The api/worker-side twin of the skills dir was pre-created so the
+    # docker daemon never auto-creates the host dir root-owned.
+    assert (_container_side_workspaces_dir / "finance" / "skills").is_dir()
     # Resource caps mirror the compose service defaults.
     assert kwargs["pids_limit"] == 256
     assert kwargs["nano_cpus"] == 2_000_000_000
@@ -275,8 +336,19 @@ async def test_ensure_launches_with_the_full_run_contract() -> None:
             {"labels": {WORKSPACE_ID_LABEL: "7", WORKSPACE_SLUG_LABEL: "finance"}},
         )
     ]
-    # Activity recorded.
+    # Activity recorded + the wks.3 change event for this key.
     assert "johnny:workspace:sandbox:last-used:7" in store
+    assert _published(events) == [(7, "started")]
+
+
+async def test_ensure_without_slug_launches_without_a_skills_mount() -> None:
+    """No slug → no locatable packages dir; the container honestly carries
+    no skills instead of mounting a guessed path."""
+    client = _FakeClient()
+    manager, _ = _manager(client)
+    assert await manager.ensure_running(workspace_id=7) is True
+    _, kwargs = client.containers.run_calls[0]
+    assert list(kwargs["volumes"]) == ["johnny-workspace-7-home"]
 
 
 async def test_ensure_fast_path_touches_without_relaunch_or_health_poll() -> None:
@@ -288,19 +360,22 @@ async def test_ensure_fast_path_touches_without_relaunch_or_health_poll() -> Non
     def _no_health() -> Any:
         raise AssertionError("fast path must not poll /health")
 
+    events: list[tuple[str, str]] = []
     manager = WorkspaceContainerManager(
         image="x",
         network="n",
-        skills_volume="",
+        workspaces_host_dir="",
         redis_url="redis://unused",
         startup_timeout_s=5.0,
         client=client,  # type: ignore[arg-type]
         http_client_factory=_no_health,
-        redis_client_factory=lambda: _FakeRedis(store),
+        redis_client_factory=lambda: _FakeRedis(store, events=events),
     )
     assert await manager.ensure_running(workspace_id=7) is True
     assert client.containers.run_calls == []
     assert "johnny:workspace:sandbox:last-used:7" in store
+    # Already-running is not a lifecycle transition — no change event.
+    assert events == []
 
 
 async def test_ensure_replaces_a_stopped_container_with_state_intact() -> None:
@@ -374,9 +449,11 @@ async def test_sweep_stops_only_idle_containers_and_verifies() -> None:
     client.containers.by_name[busy.name] = busy
     import time as _time
 
+    events: list[tuple[str, str]] = []
     manager, _ = _manager(
         client,
         redis_store={"johnny:workspace:sandbox:last-used:8": str(_time.time())},
+        events=events,
     )
     stopped = await manager.sweep_idle(idle_ttl_s=600)
     assert stopped == 1
@@ -384,6 +461,8 @@ async def test_sweep_stops_only_idle_containers_and_verifies() -> None:
     assert busy.stop_calls == [] and busy.removed is False
     # The named state volume is untouched by the sweep, always.
     assert client.volumes.create_calls == []
+    # The change event names the swept key only (wks.3).
+    assert _published(events) == [(7, "stopped")]
 
 
 async def test_sweep_honours_the_started_at_floor() -> None:
@@ -429,11 +508,20 @@ def test_retire_unions_name_and_label_and_verifies() -> None:
     rogue = _running(7, name="johnny-workspace-7-old")
     client.containers.by_name[named.name] = named
     client.containers.by_name[rogue.name] = rogue
-    manager, _ = _manager(client)
+    events: list[tuple[str, str]] = []
+    manager, _ = _manager(client, events=events)
 
     manager.retire(workspace_id=7, remove_volume=False)
     assert named.removed is True
     assert rogue.removed is True  # found via the label, not the name
+    assert _published(events) == [(7, "retired")]
+
+
+def test_retire_with_nothing_to_remove_publishes_no_event() -> None:
+    events: list[tuple[str, str]] = []
+    manager, _ = _manager(_FakeClient(), events=events)
+    manager.retire(workspace_id=7, remove_volume=False)
+    assert events == []
 
 
 def test_retire_raises_when_a_container_survives() -> None:
@@ -493,7 +581,7 @@ async def test_stamp_helper_gates_and_routes(
 
     class _Recorder(WorkspaceContainerManager):
         def __init__(self) -> None:
-            super().__init__(image="x", network="n", skills_volume="", redis_url="")
+            super().__init__(image="x", network="n", workspaces_host_dir="", redis_url="")
 
         async def ensure_running(
             self, *, workspace_id: int, slug: str | None = None
@@ -529,7 +617,7 @@ async def test_stamp_helper_never_raises(
 ) -> None:
     class _Exploding(WorkspaceContainerManager):
         def __init__(self) -> None:
-            super().__init__(image="x", network="n", skills_volume="", redis_url="")
+            super().__init__(image="x", network="n", workspaces_host_dir="", redis_url="")
 
         async def ensure_running(
             self, *, workspace_id: int, slug: str | None = None

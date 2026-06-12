@@ -254,6 +254,33 @@ def test_resolve_sandbox_url_keys_by_workspace(
     assert resolve_sandbox_url(finance) == "http://johnny-workspace-7:8088"
 
 
+def test_resolve_skills_dir_keys_by_workspace(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The discovery twin (Johnny-wks.3): default / legacy claims scan the
+    shared volume; a non-default workspace scans its own packages dir; a
+    non-default stamp with no slug resolves to None (promise nothing)."""
+    from app.services.task_worker import resolve_skills_dir
+    from johnny.skills.sandbox import SKILLS_DIR_ENV, WORKSPACES_DIR_ENV
+
+    monkeypatch.setenv(SKILLS_DIR_ENV, "/shared-skills")
+    monkeypatch.setenv(WORKSPACES_DIR_ENV, "/ws-root")
+
+    _insert(db)
+    _insert(db, workspace={"id": 1, "is_default": True})
+    _insert(db, workspace={"id": 7, "name": "Finance", "slug": "finance", "is_default": False})
+    _insert(db, workspace={"id": 9, "is_default": False})  # no slug stamped
+    legacy, default_stamped, finance, slugless = claim_queued_tasks(
+        db, limit=10, now=_NOW
+    )
+    db.commit()
+
+    assert resolve_skills_dir(legacy) == "/shared-skills"
+    assert resolve_skills_dir(default_stamped) == "/shared-skills"
+    assert resolve_skills_dir(finance) == "/ws-root/finance/skills"
+    assert resolve_skills_dir(slugless) is None
+
+
 async def test_executor_for_lazily_ensures_the_workspace_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -277,7 +304,7 @@ async def test_executor_for_lazily_ensures_the_workspace_container(
         registry_ttl_s=3600.0, mcp_manager=object(), mcp_config_loader=tuple
     )
 
-    async def fake_load(url: str, *, reuse: Any = None) -> Any:
+    async def fake_load(url: str, *, skills_dir: Any = None, reuse: Any = None) -> Any:
         entry = _ExecutorEntry(registry=EMPTY_SKILL_REGISTRY, client=None, loaded_at=1e12)
         provider._entries[url] = entry
         return entry
@@ -306,6 +333,104 @@ async def test_executor_for_lazily_ensures_the_workspace_container(
         _claimed(workspace_id=7, workspace_is_default=False, workspace_slug="finance")
     )
     assert ensured == [{"id": 7, "is_default": False, "slug": "finance"}]
+
+
+async def test_executor_for_loads_the_workspaces_own_skills_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The provider's registry load scans the claim's workspace dir
+    (Johnny-wks.3) and caches per URL — the default claim never sees a
+    workspace dir and vice versa."""
+    from app.services.task_worker import SandboxExecutorProvider
+    from johnny.skills.sandbox import SKILLS_DIR_ENV, WORKSPACES_DIR_ENV
+
+    monkeypatch.setenv(SKILLS_DIR_ENV, "/shared-skills")
+    monkeypatch.setenv(WORKSPACES_DIR_ENV, "/ws-root")
+    monkeypatch.setenv("JOHNNY_SKILLS_SANDBOX_URL", "http://sb-test:8088")
+    # The in-container test env opts into the docker launcher; the claim-path
+    # ensure must stay a no-op here or this test launches a REAL container.
+    monkeypatch.delenv("JOHNNY_USE_DOCKER_LAUNCHER", raising=False)
+
+    provider = SandboxExecutorProvider(
+        registry_ttl_s=3600.0, mcp_manager=object(), mcp_config_loader=tuple
+    )
+    loads: list[tuple[str, Any]] = []
+
+    async def fake_registry_load(skills_dir: Any, **kwargs: Any) -> Any:
+        from johnny.skills.registry import EMPTY_SKILL_REGISTRY
+
+        loads.append(("load", skills_dir))
+        return EMPTY_SKILL_REGISTRY
+
+    monkeypatch.setattr(
+        "johnny.skills.registry.load_skill_registry", fake_registry_load
+    )
+
+    def _claimed(**kwargs: Any) -> ClaimedTask:
+        return ClaimedTask(
+            task_id=1,
+            bot_session_id=7,
+            kind="some-skill",
+            args={},
+            ack_text="",
+            turn_id=None,
+            decision_id=None,
+            attempts=1,
+            **kwargs,
+        )
+
+    await provider.executor_for(_claimed())
+    await provider.executor_for(
+        _claimed(workspace_id=7, workspace_is_default=False, workspace_slug="finance")
+    )
+    assert [d for _, d in loads] == ["/shared-skills", "/ws-root/finance/skills"]
+    await provider.aclose()
+
+
+async def test_invalidate_workspace_ages_only_that_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wks.3 change-event refresh: one workspace's cached snapshot is
+    aged out (forcing a reload on its next claim, reusing the client); other
+    keys stay warm, and an unknown key is a no-op."""
+    from app.services.task_worker import SandboxExecutorProvider, _ExecutorEntry
+    from johnny.skills.registry import EMPTY_SKILL_REGISTRY
+    from johnny.skills.sandbox import sandbox_url_for_workspace
+
+    provider = SandboxExecutorProvider(
+        registry_ttl_s=3600.0, mcp_manager=object(), mcp_config_loader=tuple
+    )
+    finance_url = sandbox_url_for_workspace(7)
+    other_url = sandbox_url_for_workspace(8)
+    provider._entries[finance_url] = _ExecutorEntry(
+        registry=EMPTY_SKILL_REGISTRY, client=None, loaded_at=1e12
+    )
+    provider._entries[other_url] = _ExecutorEntry(
+        registry=EMPTY_SKILL_REGISTRY, client=None, loaded_at=1e12
+    )
+
+    provider.invalidate_workspace(7)
+    assert provider._entries[finance_url].loaded_at == float("-inf")
+    assert provider._entries[other_url].loaded_at == 1e12
+    provider.invalidate_workspace(999)  # unknown key: no-op, no raise
+
+
+def test_worker_routes_workspace_events_to_the_provider() -> None:
+    """The wake listener's second channel: a sandbox change event
+    invalidates the named workspace; malformed payloads are dropped."""
+    from app.services.task_worker import TaskWorker
+
+    worker = TaskWorker(redis_url="redis://unused")
+    assert worker._provider is not None
+    invalidated: list[int] = []
+    worker._provider.invalidate_workspace = invalidated.append  # type: ignore[method-assign]
+
+    worker._handle_workspace_event(b'{"workspace_id": 7, "event": "started"}')
+    worker._handle_workspace_event('{"workspace_id": "8", "event": "stopped"}')
+    worker._handle_workspace_event(b"not json")
+    worker._handle_workspace_event(b'{"event": "started"}')
+    worker._handle_workspace_event(None)
+    assert invalidated == [7, 8]
 
 
 # --- settle_claimed_task ----------------------------------------------------------
@@ -934,7 +1059,7 @@ async def test_executor_for_chains_skills_then_mcp(
         registry_ttl_s=3600.0, mcp_manager=manager, mcp_config_loader=loader
     )
 
-    async def fake_load(url: str, *, reuse: Any = None) -> Any:
+    async def fake_load(url: str, *, skills_dir: Any = None, reuse: Any = None) -> Any:
         entry = _ExecutorEntry(
             registry=EMPTY_SKILL_REGISTRY, client=None, loaded_at=1e12
         )

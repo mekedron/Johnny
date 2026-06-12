@@ -110,18 +110,25 @@ x-backend-env: &backend-env
   # worker (task claim + idle sweep) lazily launch one container of the
   # skills-sandbox image per NON-default workspace, named
   # johnny-workspace-<id> and labelled johnny.workspace-id=<id>. The image
-  # tag matches the `image:` the skills-sandbox service is built with; the
-  # skills mount needs the HOST path (bind sources are resolved by the
-  # docker daemon, not inside this container). Idle containers are stopped
-  # after the TTL; their named state volumes (johnny-workspace-<id>-home)
-  # are launcher-created — NOT compose-declared — so `down -v` resets never
-  # delete workspace state.
+  # tag matches the `image:` the skills-sandbox service is built with. Idle
+  # containers are stopped after the TTL; their named state volumes
+  # (johnny-workspace-<id>-home) are launcher-created — NOT compose-declared
+  # — so `down -v` resets never delete workspace state.
   JOHNNY_WORKSPACE_SANDBOX_IMAGE: ${JOHNNY_WORKSPACE_SANDBOX_IMAGE:-johnny-skills-sandbox:latest}
   JOHNNY_WORKSPACE_SANDBOX_NETWORK: ${JOHNNY_WORKSPACE_SANDBOX_NETWORK:-johnny_default}
-  JOHNNY_WORKSPACE_SKILLS_VOLUME: ${JOHNNY_WORKSPACE_SKILLS_VOLUME:-${HOME}/.johnny/skills}
   JOHNNY_WORKSPACE_IDLE_TTL_SECONDS: ${JOHNNY_WORKSPACE_IDLE_TTL_SECONDS:-1800}
   JOHNNY_WORKSPACE_SWEEP_INTERVAL_SECONDS: ${JOHNNY_WORKSPACE_SWEEP_INTERVAL_SECONDS:-60}
   JOHNNY_WORKSPACE_STARTUP_TIMEOUT_SECONDS: ${JOHNNY_WORKSPACE_STARTUP_TIMEOUT_SECONDS:-20}
+  # Per-workspace SKILL PACKAGES (Johnny-wks.3): workspace <slug>'s skills
+  # live under ~/.johnny/workspaces/<slug>/skills on the host. Each
+  # workspace container bind-mounts ITS OWN dir read-only at /skills (the
+  # launcher needs the HOST path — bind sources are resolved by the docker
+  # daemon, not inside this container), while api/worker/agent-worker see
+  # the whole tree at /workspaces for discovery and the install flow. The
+  # DEFAULT workspace keeps the shared ${HOME}/.johnny/skills volume above —
+  # byte-identical pre-workspaces behavior.
+  JOHNNY_WORKSPACES_HOST_DIR: ${JOHNNY_WORKSPACES_HOST_DIR:-${HOME}/.johnny/workspaces}
+  JOHNNY_WORKSPACES_DIR: ${JOHNNY_WORKSPACES_DIR:-/workspaces}
   # Mirrored onto every spawned workspace sandbox so ONE set of operator
   # knobs governs the default compose sandbox and the per-workspace ones
   # alike (the skills-sandbox service below reads the same variables).
@@ -292,9 +299,16 @@ services:
       # <name>/SKILL.md here. Mounted at /skills (not /var/lib/johnny/...)
       # deliberately — identical container path in every service means skill
       # dirs need no path translation between discovery (api/worker) and
-      # execution (sandbox). Read-write here for the future skill-install
-      # flow (Johnny-trt.32); the sandbox mounts it read-only.
+      # execution (sandbox). Read-write here for the skill-install flow
+      # (Johnny-trt.32, default-workspace target); the sandbox mounts it
+      # read-only.
       - ${HOME}/.johnny/skills:/skills
+      # Per-workspace trees (Johnny-wks.3): <slug>/skills holds each
+      # non-default workspace's packages — the api scans them for the
+      # workspace-keyed capability views, writes installs targeted at a
+      # workspace, and pre-creates <slug>/skills before the launcher
+      # bind-mounts it into that workspace's container.
+      - ${HOME}/.johnny/workspaces:/workspaces
     healthcheck:
       test:
         - "CMD"
@@ -348,6 +362,10 @@ services:
       # Skill packages (Johnny-trt.35) — same path as api/skills-sandbox;
       # the worker executor pass (Johnny-trt.24) reads SKILL.md from here.
       - ${HOME}/.johnny/skills:/skills
+      # Per-workspace trees (Johnny-wks.3): the worker's registry loads
+      # scan <slug>/skills for non-default claims, and its claim-path
+      # container ensure pre-creates the dir before the bind mount.
+      - ${HOME}/.johnny/workspaces:/workspaces
     healthcheck:
       test:
         - "CMD"
@@ -403,6 +421,10 @@ services:
       # same /skills path as api/worker. Read-only: the agent worker only
       # discovers skills; installs go through the api (Johnny-trt.32).
       - ${HOME}/.johnny/skills:/skills:ro
+      # Per-workspace trees (Johnny-wks.3): Meet sessions of agents on a
+      # non-default workspace discover that workspace's packages here.
+      # Read-only for the same reason as /skills.
+      - ${HOME}/.johnny/workspaces:/workspaces:ro
 
   frontend:
     build:

@@ -1,9 +1,11 @@
-"""Tests for the /capabilities inventory API (Johnny-trt.37).
+"""Tests for the /capabilities inventory API (Johnny-trt.37 / wks.3).
 
 The Skills read (fresh registry scan + per-kind policy verdicts), the
 merged Tools catalog (internal → skills → MCP with the policy projected
-on), and the per-kind toggle that writes the global layer's ``tools_deny``
-— including the honest-enable case where a glob keeps the kind denied.
+on), the per-kind toggle that writes the global layer's ``tools_deny``
+— including the honest-enable case where a glob keeps the kind denied —
+plus the Johnny-wks.3 per-workspace keying of both reads and the skill
+install flow with its workspace target.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from sqlalchemy.orm import Session, sessionmaker
 import app.api.capabilities as capabilities_api
 from app.api.deps import get_session
 from app.db import Base
-from app.db.models import McpServer
+from app.db.models import Agent, McpServer, Workspace
 from app.main import app
 
 # --- fixtures -----------------------------------------------------------------
@@ -94,16 +96,34 @@ def _write_skill(root: Path, directory: str, *, name: str, metadata: str = "") -
 @pytest.fixture
 def skills_volume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Two skills: baseline-only ``echoer`` and ``calmail`` missing ``himalaya``."""
-    _write_skill(tmp_path, "echoer", name="echoer")
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    _write_skill(shared, "echoer", name="echoer")
     _write_skill(
-        tmp_path,
+        shared,
         "calmail",
         name="calmail",
         metadata='{"openclaw": {"requires": {"bins": ["himalaya"]}}}',
     )
-    monkeypatch.setenv("JOHNNY_SKILLS_DIR", str(tmp_path))
+    monkeypatch.setenv("JOHNNY_SKILLS_DIR", str(shared))
+    monkeypatch.setenv("JOHNNY_WORKSPACES_DIR", str(tmp_path / "workspaces"))
+    # The in-container test env carries the compose launcher opt-in; the
+    # workspace views' lazy ensure must stay a no-op here.
+    monkeypatch.delenv("JOHNNY_USE_DOCKER_LAUNCHER", raising=False)
     monkeypatch.setattr(capabilities_api, "SandboxClient", FakeSandboxClient)
-    return tmp_path
+    return shared
+
+
+@pytest.fixture
+def finance_workspace(
+    db_session: Session, tmp_path: Path, skills_volume: Path
+) -> Workspace:
+    """A non-default workspace whose own volume carries ``ledger`` only."""
+    row = Workspace(name="Finance", slug="finance", is_default=False)
+    db_session.add(row)
+    db_session.commit()
+    _write_skill(tmp_path / "workspaces" / "finance" / "skills", "ledger", name="ledger")
+    return row
 
 
 def _skill(body: dict[str, Any], kind: str) -> dict[str, Any]:
@@ -295,3 +315,204 @@ def test_toggle_mcp_kind_uses_cached_tools(
     )
     assert res.status_code == 200
     assert res.json()["enabled"] is False
+
+
+# --- per-workspace keying (Johnny-wks.3) -----------------------------------------
+
+
+def test_skills_workspace_view_lists_only_its_own_packages(
+    client: TestClient, finance_workspace: Workspace
+) -> None:
+    """The Finance inventory is its OWN volume: ``ledger`` and nothing
+    shared; the parameterless view stays the shared volume with no leak."""
+    res = client.get("/capabilities/skills", params={"workspace_id": finance_workspace.id})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["sandbox"] == f"workspace-{finance_workspace.id}"
+    assert body["workspace_id"] == finance_workspace.id
+    assert body["workspace_slug"] == "finance"
+    assert body["skills_dir"].endswith("workspaces/finance/skills")
+    assert [s["kind"] for s in body["skills"]] == ["ledger"]
+
+    default_body = client.get("/capabilities/skills").json()
+    assert default_body["sandbox"] == "global"
+    assert default_body["workspace_id"] is None
+    kinds = [s["kind"] for s in default_body["skills"]]
+    assert "ledger" not in kinds
+    assert set(kinds) == {"echoer", "calmail"}
+
+
+def test_skills_unknown_workspace_404(client: TestClient, skills_volume: Path) -> None:
+    assert client.get("/capabilities/skills", params={"workspace_id": 999}).status_code == 404
+
+
+def test_tools_catalog_derives_from_the_agents_workspace(
+    client: TestClient, finance_workspace: Workspace, db_session: Session
+) -> None:
+    """``agent_id`` resolves the agent's attached workspace exactly like
+    dispatch does: its catalog promises the workspace-local skill, never the
+    shared volume's — and internal kinds stay present (they are
+    session-local, not sandbox inventory)."""
+    agent = Agent(name="FinanceBot", workspace_id=finance_workspace.id)
+    db_session.add(agent)
+    db_session.commit()
+
+    body = client.get("/capabilities/tools", params={"agent_id": agent.id}).json()
+    kinds = [t["kind"] for t in body["tools"]]
+    assert body["sandbox"] == f"workspace-{finance_workspace.id}"
+    assert "ledger" in kinds
+    assert "echoer" not in kinds
+    assert kinds[:2] == ["meeting.leave", "session.end"]  # locality guard intact
+
+    # An explicit workspace_id wins over the agent derivation.
+    explicit = client.get(
+        "/capabilities/tools",
+        params={"agent_id": agent.id, "workspace_id": finance_workspace.id},
+    ).json()
+    assert [t["kind"] for t in explicit["tools"]] == kinds
+
+
+def test_tools_parameterless_view_never_leaks_workspace_skills(
+    client: TestClient, finance_workspace: Workspace
+) -> None:
+    body = client.get("/capabilities/tools").json()
+    assert body["sandbox"] == "global"
+    kinds = [t["kind"] for t in body["tools"]]
+    assert "ledger" not in kinds
+    assert "echoer" in kinds
+
+
+def test_toggle_addresses_workspace_local_kinds(
+    client: TestClient, finance_workspace: Workspace
+) -> None:
+    """A deny on a workspace-local kind is placeable from the global tab."""
+    res = client.post("/capabilities/tools/toggle", json={"kind": "ledger", "enabled": False})
+    assert res.status_code == 200, res.text
+    assert res.json()["enabled"] is False
+
+
+# --- POST /capabilities/skills/install (Johnny-trt.32 seam · wks.3) ----------------
+
+
+def _package(name: str, *, extra_meta: str = "") -> list[dict[str, Any]]:
+    skill_md = "\n".join(
+        [
+            "---",
+            f"name: {name}",
+            f"description: A {name} helper.",
+            *( [f"metadata: {extra_meta}"] if extra_meta else [] ),
+            "---",
+            "",
+            f"Run the {name} steps.",
+        ]
+    )
+    return [
+        {"path": "SKILL.md", "content": skill_md},
+        {"path": "run.sh", "content": "#!/bin/sh\necho ok\n", "executable": True},
+        {"path": "lib/helper.py", "content": "print('ok')\n"},
+    ]
+
+
+def test_install_into_a_workspace_lands_only_there(
+    client: TestClient, finance_workspace: Workspace, tmp_path: Path, skills_volume: Path
+) -> None:
+    res = client.post(
+        "/capabilities/skills/install",
+        json={"workspace_id": finance_workspace.id, "files": _package("reports")},
+    )
+    assert res.status_code == 201, res.text
+    body = res.json()
+    assert body["kind"] == "reports"
+    assert body["sandbox"] == f"workspace-{finance_workspace.id}"
+    assert body["replaced"] is False
+
+    target = tmp_path / "workspaces" / "finance" / "skills" / "reports"
+    assert (target / "SKILL.md").is_file()
+    assert (target / "lib" / "helper.py").is_file()
+    # The executable flag landed on the script.
+    assert (target / "run.sh").stat().st_mode & 0o111
+    # That volume ONLY: nothing arrived on the shared one.
+    assert not (skills_volume / "reports").exists()
+
+    # The workspace's next inventory read discovers it; the default's never does.
+    ws_kinds = [
+        s["kind"]
+        for s in client.get(
+            "/capabilities/skills", params={"workspace_id": finance_workspace.id}
+        ).json()["skills"]
+    ]
+    assert "reports" in ws_kinds
+    default_kinds = [
+        s["kind"] for s in client.get("/capabilities/skills").json()["skills"]
+    ]
+    assert "reports" not in default_kinds
+
+
+def test_install_default_target_lands_on_the_shared_volume(
+    client: TestClient, skills_volume: Path
+) -> None:
+    res = client.post("/capabilities/skills/install", json={"files": _package("notes")})
+    assert res.status_code == 201, res.text
+    assert res.json()["sandbox"] == "global"
+    assert (skills_volume / "notes" / "SKILL.md").is_file()
+
+
+def test_install_conflict_then_overwrite(
+    client: TestClient, finance_workspace: Workspace
+) -> None:
+    first = client.post(
+        "/capabilities/skills/install",
+        json={"workspace_id": finance_workspace.id, "files": _package("reports")},
+    )
+    assert first.status_code == 201
+    dup = client.post(
+        "/capabilities/skills/install",
+        json={"workspace_id": finance_workspace.id, "files": _package("reports")},
+    )
+    assert dup.status_code == 409
+    replaced = client.post(
+        "/capabilities/skills/install",
+        json={
+            "workspace_id": finance_workspace.id,
+            "files": _package("reports"),
+            "overwrite": True,
+        },
+    )
+    assert replaced.status_code == 201
+    assert replaced.json()["replaced"] is True
+
+
+def test_install_rejects_bad_packages(
+    client: TestClient, finance_workspace: Workspace, skills_volume: Path
+) -> None:
+    def _install(files: list[dict[str, Any]], **extra: Any) -> Any:
+        return client.post(
+            "/capabilities/skills/install", json={"files": files, **extra}
+        )
+
+    # Unknown workspace target.
+    assert _install(_package("x"), workspace_id=999).status_code == 404
+    # Path traversal / absolute paths.
+    bad_path = _package("x")
+    bad_path[1]["path"] = "../escape.sh"
+    assert _install(bad_path).status_code == 422
+    absolute = _package("x")
+    absolute[1]["path"] = "/etc/owned"
+    assert _install(absolute).status_code == 422
+    # No SKILL.md at the package root.
+    assert _install([{"path": "run.sh", "content": "x"}]).status_code == 422
+    # SKILL.md without a frontmatter name.
+    unnamed = [{"path": "SKILL.md", "content": "---\ndescription: x\n---\nbody"}]
+    assert _install(unnamed).status_code == 422
+    # Internal kinds stay session-local (the locality-guard regression).
+    internal = [
+        {
+            "path": "SKILL.md",
+            "content": "---\nname: meeting.leave\ndescription: x\n---\nbody",
+        }
+    ]
+    res = _install(internal)
+    assert res.status_code == 422
+    assert "internal" in res.json()["detail"]
+    # Nothing from the rejected installs reached either volume.
+    assert not (skills_volume / "x").exists()

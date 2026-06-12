@@ -17,6 +17,10 @@ fi
 # same survive-a-reset reasoning.
 # Create idempotently on first boot so the very first run does not
 # fail mounting a missing directory.
+# workspaces holds one dir per non-default workspace
+# (~/.johnny/workspaces/<slug>/skills — Johnny-wks.3 per-workspace skill
+# packages; wks.4 adds the keyring next to it), same survive-a-reset
+# reasoning.
 mkdir -p \
   "${HOME}/.johnny/piper-models" \
   "${HOME}/.johnny/whisper-models" \
@@ -26,6 +30,7 @@ mkdir -p \
   "${HOME}/.johnny/kitten-models" \
   "${HOME}/.johnny/session-audio" \
   "${HOME}/.johnny/skills" \
+  "${HOME}/.johnny/workspaces" \
   "${HOME}/.johnny/sandbox-home"
 
 # Seed the first-party skill packages (Johnny-trt.23) into the skills volume.

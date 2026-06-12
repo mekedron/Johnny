@@ -560,6 +560,42 @@ def resolve_session_sandbox_url(config: SessionJobConfig) -> str:
     return sandbox_url_for_workspace(workspace_id)
 
 
+def resolve_session_skills_dir(config: SessionJobConfig) -> str | None:
+    """Which skills DIRECTORY this session's catalog is discovered from —
+    keyed by WORKSPACE (Johnny-wks.3).
+
+    The discovery twin of :func:`resolve_session_sandbox_url` (its worker
+    sibling is :func:`app.services.task_worker.resolve_skills_dir`): the
+    DEFAULT workspace — and every legacy snapshot — scans the shared volume
+    from ``JOHNNY_SKILLS_DIR`` (byte-identical pre-workspaces behavior); a
+    non-default workspace scans its OWN packages under
+    ``~/.johnny/workspaces/<slug>/skills`` (mounted at the same ``/skills``
+    path inside that workspace's container, so packages stay relocatable).
+    A skill installed only in the Finance workspace is therefore promised
+    only in sessions of agents attached to it — and a workspace dir that
+    does not exist yet simply yields an empty catalog.
+
+    ``None`` (a non-default stamp with no usable slug — hand-built or
+    corrupted) means the directory cannot be located: the caller loads NO
+    skills rather than guessing, the same promise-nothing degrade as an
+    unreachable sandbox.
+    """
+    from johnny.skills.sandbox import skills_dir_from_env, workspace_skills_dir
+
+    if config.workspace_id is None or config.workspace_is_default:
+        return skills_dir_from_env()
+    slug = config.workspace_slug
+    if not slug:
+        logger.warning(
+            "agent runtime: workspace %s stamp carries no slug — loading no "
+            "workspace-local skills for session %s",
+            config.workspace_id,
+            config.bot_session_id,
+        )
+        return None
+    return workspace_skills_dir(slug)
+
+
 async def _build_skill_pieces(
     config: SessionJobConfig,
     *,
@@ -598,25 +634,31 @@ async def _build_skill_pieces(
         load_skill_registry,
     )
     from johnny.skills.sandbox import SandboxClient as _SandboxClient
-    from johnny.skills.sandbox import skills_dir_from_env
 
     session_id = str(config.bot_session_id)
     if sandbox_client is None:
         sandbox_client = _SandboxClient(base_url=resolve_session_sandbox_url(config))
     if skill_registry is None:
-        try:
-            skill_registry = await load_skill_registry(
-                skills_dir_from_env(),
-                check_bins=sandbox_client.check_bins,
-                check_env=sandbox_client.check_env,
-                run_check=build_sandbox_availability_runner(sandbox_client),
-            )
-        except Exception:
-            logger.exception(
-                "agent runtime: skill registry load failed for %s — running without skills",
-                session_id,
-            )
+        # Discovery is workspace-keyed too (Johnny-wks.3): the catalog scans
+        # the SAME workspace's skills dir the probes above target, so a
+        # workspace-local skill is promised only to its own sessions.
+        skills_dir = resolve_session_skills_dir(config)
+        if skills_dir is None:
             skill_registry = EMPTY_SKILL_REGISTRY
+        else:
+            try:
+                skill_registry = await load_skill_registry(
+                    skills_dir,
+                    check_bins=sandbox_client.check_bins,
+                    check_env=sandbox_client.check_env,
+                    run_check=build_sandbox_availability_runner(sandbox_client),
+                )
+            except Exception:
+                logger.exception(
+                    "agent runtime: skill registry load failed for %s — running without skills",
+                    session_id,
+                )
+                skill_registry = EMPTY_SKILL_REGISTRY
     logger.info(
         "agent runtime: skill catalog loaded for %s (%s)",
         session_id,
@@ -1165,4 +1207,5 @@ __all__ = [
     "build_agent_runtime",
     "build_event_bus",
     "resolve_session_sandbox_url",
+    "resolve_session_skills_dir",
 ]
