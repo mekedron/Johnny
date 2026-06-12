@@ -80,3 +80,8 @@ client_secret*.json
 
 # LiveKit examples
 agent-starter-python/
+
+# Provider config seed (Johnny-d3e): the with-secrets export the api
+# re-applies after a clean stack reset. Contains plaintext API keys —
+# never commit it (config/providers.example.json is the committed shape).
+config/providers.json

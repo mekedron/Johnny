@@ -39,7 +39,6 @@ from johnny.agent.job_config import (
     LIMITED_AUTO_SPEAK_MODE,
     LISTEN_ONLY_MODE,
     SUGGEST_ONLY_MODE,
-    UNIFIED_PIPELINE_MODE,
     SessionJobConfig,
 )
 from johnny.voice_pipeline.event_bus import InMemoryEventBus, RedisEventBus
@@ -251,11 +250,6 @@ async def test_build_runtime_owns_self_built_event_bus() -> None:
     await runtime.aclose()  # defensive teardown never raises
 
 
-async def test_build_runtime_rejects_unified_payload() -> None:
-    with pytest.raises(AgentSessionSetupError):
-        await build_agent_runtime(_job(pipeline_mode=UNIFIED_PIPELINE_MODE), registry=_registry())
-
-
 async def test_build_runtime_rejects_missing_llm() -> None:
     pc = _split_provider_config()
     del pc["llm"]
@@ -271,7 +265,8 @@ async def test_build_runtime_degrades_speaking_mode_without_tts() -> None:
     # adapters carry no TTS, the assembled config + gate + answer config all run
     # suggest_only, and the agent runs with tts_available=False — so the router
     # still records decisions (surfaced as suggestions) instead of the worker
-    # abandoning the job. Parity with meet_worker.pipeline_runner._assemble_pipeline.
+    # abandoning the job (degrade behaviour inherited from the retired
+    # in-worker assembler).
     runtime = await build_agent_runtime(
         _job(mode=LIMITED_AUTO_SPEAK_MODE, provider_config=_provider_config_without_tts()),
         event_bus=InMemoryEventBus(),

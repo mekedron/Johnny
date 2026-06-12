@@ -1,6 +1,6 @@
 """Unit tests for the per-session reply-audio recorder (Johnny-od1).
 
-The recorder is the capture seam both speech engines share: TTS/S2S segments
+The recorder is the speech engine's capture seam: TTS segments
 are buffered per reply and flushed to one WAV under
 ``<root>/<bot_session_id>/`` by ``take_reply``. These tests pin the WAV
 format (16 kHz mono S16LE — byte-identical to what was fed), the duration

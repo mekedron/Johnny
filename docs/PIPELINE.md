@@ -21,16 +21,35 @@ like the README. Dense, concrete, worked examples over prose.
 > worker (`JOHNNY_ORCHESTRATOR=agentsession`, the default) and for the browser /
 > playground in-process. Its transport-independent decision core (modes, the
 > router/barge-in schemas + parsers, the noise-filter knobs) lives in
-> `backend/johnny/voice_pipeline/reasoning.py`. The in-worker engine that
-> remains is `UnifiedVoicePipeline` (the S2S route, opt-in via
-> `JOHNNY_ORCHESTRATOR=legacy`). Sections 2–7 below describe the retired split
+> `backend/johnny/voice_pipeline/reasoning.py`. No in-worker engine remains:
+> the meet-worker is a pure audio bridge (`JOHNNY_ORCHESTRATOR=legacy` survives
+> only as a break-glass join-and-capture mode). Sections 2–7 below describe the retired split
 > engine's behavior **as a reference for what the AgentSession engine
 > reproduces** (INV-1 / INV-2, the gates, the event/DB model) — its file/line
 > anchors point into pre-retirement git history; for live code read
 > `johnny/agent/` (orchestration) + `voice_pipeline/reasoning.py` (decision core).
 
-> **One-line architecture.** The engine (the `AgentSession` split path /
-> `UnifiedVoicePipeline`) never writes the database directly. It publishes
+> **Removed: the unified / S2S route (Johnny-trt.43, 2026-06-12).** The
+> second pipeline shape — `UnifiedVoicePipeline`
+> (`johnny/voice_pipeline/unified_pipeline.py`), the `s2s` provider kind with
+> its `gemini-live` / `openai-realtime` / `stub` adapters
+> (`app/providers/{s2s_base,gemini_live_s2s,openai_realtime_s2s,stub_s2s}.py`),
+> the `pipeline_settings.pipeline_mode` singleton + `/providers/pipeline` API
+> + the Split/Unified toggle on the /providers page,
+> `SessionJobConfig.pipeline_mode` / `JOHNNY_PIPELINE_MODE`, the meet-worker's
+> in-worker runner (`johnny/meet_worker/pipeline_runner.py`), the unified
+> replay driver (`run_replay`), and the S2S interrupt harness
+> (`johnny/e2e/interrupt/`) — was **removed from the product surface**: agents
+> are born split-only and no half-working path ships. The last commit
+> containing the code is
+> `fc16a1e785595ff2fd1db6d60b56f07711c5ddae`; migration `0026` drops
+> `pipeline_settings` and deactivates historical `kind='s2s'` provider rows
+> (credentials preserved, never loaded). Re-introduction is deferred to epic
+> **Johnny-20h**, redesigned as per-agent `RealtimeModel` adapters on the
+> LiveKit `AgentSession` engine — not a revival of this in-worker pipeline.
+
+> **One-line architecture.** The engine (the `AgentSession` pipeline) never
+> writes the database directly. It publishes
 > `PipelineEvent`s to a Redis `EventBus`; a single subscriber in the API worker
 > (`session_status_subscriber.py`) is the **sole durable writer**, and the
 > browser WebSocket (`api/ws.py`) is the live read path. Persistence and the UI
@@ -38,8 +57,8 @@ like the README. Dense, concrete, worked examples over prose.
 
 ## Contents
 
-1. [Two routes at a glance](#1-two-routes-at-a-glance)
-2. [High-level data flow](#2-high-level-data-flow) — sequence diagrams (split + unified)
+1. [Two routes at a glance](#1-two-routes-at-a-glance) — now one route; see the S2S tombstone above
+2. [High-level data flow](#2-high-level-data-flow) — sequence diagram
 3. [Component reference](#3-component-reference)
 4. [The router / decision layer](#4-the-router--decision-layer) — gates, modes, decision record
 5. [Message + event shapes](#5-message--event-shapes)
@@ -52,37 +71,23 @@ like the README. Dense, concrete, worked examples over prose.
 
 ## 1. Two routes at a glance
 
-A session runs in **exactly one** of two routes, chosen by the
-`pipeline_settings.pipeline_mode` singleton (`split` | `unified`) — never both.
+**There is one route now.** Every session — Meet and browser/playground alike
+— runs the split STT → router LLM → answer LLM → TTS pipeline on the LiveKit
+`AgentSession` engine. The second route this section used to compare against
+(the unified / S2S pipeline, selected by the since-dropped
+`pipeline_settings.pipeline_mode` singleton) was removed in **Johnny-trt.43**
+— the tombstone at the top of this document records exactly what was deleted,
+the pre-removal git SHA, and the deferred re-introduction epic (Johnny-20h:
+per-agent `RealtimeModel` adapters on `AgentSession`).
 
-| | **Split pipeline** (default) | **Unified / S2S pipeline** |
-|---|---|---|
-| Class | the retired split engine — the retired split engine) | `UnifiedVoicePipeline` — `backend/johnny/voice_pipeline/unified_pipeline.py` |
-| Provider kinds | `STT` + `LLM` (router **and** answer) + `TTS` | one `S2S` provider (GPT-Realtime, Gemini Live) |
-| Stages you can see | VAD → STT → router LLM → answer LLM → TTS, all instrumented | provider-internal; only transcripts + audio surface |
-| Modes | all five (`listen_only` … `autonomous`) | none — provider always answers |
-| Gates/suppressors | noise gate, router decline, confidence, barge-in, rate-limit, TTS breaker, allow-list | none (provider-side VAD/decision) |
-| Events emitted | all 12 `PipelineEvent` types | only `TranscriptFinalized` + `AgentSpoke` |
-| Per-turn invariants | INV-1 (terminal state) + INV-2 (decision↔utterance parity) **enforced** | **not** enforced — no `TurnTerminal`, no `agent_decisions` row |
-| Persisted tables | `transcript_chunks`, `agent_decisions`, `agent_utterances`, `session_timings` | `transcript_chunks`, `agent_utterances` only |
+Construction sites:
 
-Everything in sections 3–8 describes the **split pipeline** unless a heading
-says otherwise; the split pipeline is where all the decision-making,
-instrumentation, and invariants live. The unified route is a thinner shell
-documented at [§3.13](#313-unifiedvoicepipeline--the-s2s-route) and
-[§2.2](#22-unified-s2s-route).
-
-Both routes are constructed per-session and dispatched identically in two
-construction sites:
-
-- **Meet sessions** — `johnny/meet_worker/pipeline_runner.py::build_and_run_pipeline`
-  reads `JOHNNY_PIPELINE_MODE` (default `split`; unknown → WARN + `split`).
+- **Meet sessions** — the dispatched agent worker builds the session from the
+  job payload (`johnny/agent/job_runtime.py`); the meet-worker is a pure
+  audio bridge into the session's LiveKit room.
 - **Browser / playground sessions** — `app/services/browser_pipeline_runner.py::run_browser_pipeline`
-  reads `spec.pipeline_mode` (unknown → `BrowserRunOutcome("failed", …)`, no silent
-  fallback). **`split` runs on the LiveKit `AgentSession` engine** in-process
-  (`johnny/agent/browser_session.py::BrowserAgentSession`, Johnny-7g5.1); `unified`
-  stays on `UnifiedVoicePipeline`. `assemble_browser_pipeline` now only builds the
-  unified pipeline (split → the agent engine).
+  runs the same engine **in-process and roomless**
+  (`johnny/agent/browser_session.py::BrowserAgentSession`, Johnny-7g5.1).
 
 > **Migration note (epic Johnny-7g5).** The LiveKit `AgentSession` migration moves
 > the **Meet** path off this in-process engine behind `JOHNNY_ORCHESTRATOR=agentsession`
@@ -92,8 +97,8 @@ construction sites:
 > over `BrowserAudioTransport` (`johnny/agent/browser_audio_io.py`), with
 > `feed_text → router gate → session.generate_reply()`. It does **not** read
 > `JOHNNY_ORCHESTRATOR` and does **not** dispatch a remote agent worker (the engine
-> runs in the API process). So the browser path no longer constructs the retired split engine
-> (`unified` keeps its own `UnifiedVoicePipeline`). History:
+> runs in the API process). So the browser path no longer constructs the retired split engine.
+> History:
 > [playground-orchestration-deferral.md](playground-orchestration-deferral.md).
 
 ---
@@ -157,52 +162,14 @@ Every stage also emits a `PipelineTiming` event (`stt` / `router_llm` /
 `answer_llm` / `tts` / `end_to_end` / `interrupt_*`) consumed by the subscriber
 into `session_timings` and by the per-turn reasoning timeline in the UI.
 
-### 2.2 Unified (S2S) route
+### 2.2 Unified (S2S) route — removed
 
-The unified route forwards raw frames to a single provider session and relays
-whatever comes back. There is **no VAD, no noise gate, no router, no mode, no
-terminal-state invariant** — the S2S model owns turn-taking and decision-making
-internally.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant P as Participant
-    participant T as Transport
-    participant CL as _capture_loop
-    participant S as S2SSession
-    participant EL as _events_loop
-    participant EB as EventBus (Redis)
-
-    P->>T: mic PCM
-    T->>CL: capture_frames()
-    CL->>S: send_audio(pcm) — raw, per frame
-    Note over CL: finally: commit_user_turn()
-    S-->>EL: events() stream
-    alt S2STranscript (is_final)
-        EL->>EB: TranscriptFinalized
-    else S2SAudioFrame
-        EL->>T: play_frames(pcm) → participant hears it
-    else S2SResponseCompleted
-        EL->>EB: AgentSpoke (audio_duration_ms ≈ bytes/32000)
-    else S2SToolCall
-        Note over EL: unhandled → logger.debug (known gap)
-    end
-```
-
-### 2.3 Divergence points (split vs unified)
-
-| Concern | Split | Unified |
-|---|---|---|
-| Turn segmentation | local `VADAnalyzer` + `end_of_speech_ms` endpointing | provider-internal VAD; `commit_user_turn()` hint only |
-| "Should the bot speak?" | explicit router LLM call (`_ROUTER_SCHEMA`) | provider decides; bot always tries to answer |
-| Modes / approval / allow-list | full five-mode matrix (§4.3) | none (`UnifiedPipelineConfig` has no `mode`) |
-| Barge-in | fast VAD path + slow classifier (Johnny-ze3/di9) | `session.interrupt()` → provider cancellation |
-| Context (instructions/calendar/prior summary) | merged into both prompts | **only `instructions` + `voice_id`** reach `open_session`; the other context fields round-trip through config but are **not yet merged** (documented gap) |
-| `decision_sink` / `agent_decisions` | written every turn | not written — no decision rows |
-| INV-1 / INV-2 | enforced | absent (no `TurnTerminal`, no parity row) |
-| Timing instrumentation | per-stage `PipelineTiming` | none — reasoning timeline is empty for S2S sessions |
-| Context on container restart | rehydrated from `transcript_chunks` | lost (provider holds context in-session only) |
+The unified route (raw frames forwarded to a single S2S provider session — no
+VAD, no router, no modes, no terminal-state invariant) was removed in
+**Johnny-trt.43** together with its sequence diagram and the split-vs-unified
+divergence table that lived here. Read them in pre-removal git history
+(`fc16a1e785595ff2fd1db6d60b56f07711c5ddae`); re-introduction is deferred to
+epic **Johnny-20h** on the `AgentSession` `RealtimeModel` design.
 
 ---
 
@@ -298,7 +265,7 @@ control entry points worth knowing:
 ### 3.11 Provider registry + loader
 
 - **Sources:** `app/providers/base.py::ProviderRegistry` (L426, process-wide singleton via `get_registry()`) and `app/providers/loader.py::load_active_providers` (L42).
-- **`ProviderKind`** (L38): `STT | LLM | TTS | S2S`. `load_active_providers` queries `provider_credentials WHERE is_active` (one active row per kind, enforced by the partial unique index `uq_provider_credentials_active_per_kind`), decrypts credentials, and `instantiate`s a **fresh instance per call**. Kinds with no active row are absent from the result.
+- **`ProviderKind`**: `STT | LLM | TTS` (the fourth `S2S` kind was removed in Johnny-trt.43). `load_active_providers` queries `provider_credentials WHERE is_active` scoped to the live kinds (one active row per kind, enforced by the partial unique index `uq_provider_credentials_active_per_kind`), decrypts credentials, and `instantiate`s a **fresh instance per call**. Kinds with no active row are absent from the result.
 - **Surfaces:** denormalised `provider_name` on every `PipelineTiming` row (so the UI shows "TTS: 1.4 s — Local Piper" without a join).
 
 ### 3.12 Subscriber — the sole durable writer
@@ -327,15 +294,13 @@ See [§6](#6-storage) for the column-level writes; summarised here as a componen
 - **Lifecycle:** one daemon thread for the whole API-worker process. **If it crashes, it is not restarted** — all subsequent events are lost until the process restarts (§7).
 - **Failure isolation:** browser sessions self-persist their terminal `bot_sessions` status inside the runner (the subscriber only runs in the worker process).
 
-### 3.13 `UnifiedVoicePipeline` — the S2S route
+### 3.13 `UnifiedVoicePipeline` — the S2S route (removed)
 
-- **Source:** `unified_pipeline.py::UnifiedVoicePipeline` (L118). Entry: `run()` (L165).
-- **Inputs (constructor):** `transport`, `s2s: S2SProvider`, `event_bus`, `config: UnifiedPipelineConfig`, optional `transcript_sink`/`utterance_sink`. No router LLM, no VAD, no decision sink, no approval gate, no history loader.
-- **`run()`:** `s2s.open_session(instructions=…, voice_id=…)`, then three tasks — `_capture_loop` (raw `send_audio` per frame, `commit_user_turn()` on end), `_events_loop` (relays the `S2SEvent` stream), and `_stop_event.wait()`. `FIRST_COMPLETED` triggers teardown with a 0.5 s drain + 1.0 s grace.
-- **`S2SProvider` / `S2SSession`** (`app/providers/s2s_base.py`): `open_session(instructions, voice_id, tools)`; session methods `send_audio`, `commit_user_turn`, `events()`, `interrupt()`, `close()`. `S2SEvent = S2SAudioFrame | S2STranscript | S2SResponseStarted | S2SResponseCompleted | S2SToolCall`.
-- **State owned:** `_session`, `_stop_event`, `_assistant_audio_running_text`, `_assistant_audio_byte_count`, `_session_started_at`. None of the split pipeline's routing/history/barge-in state.
-- **Lifecycle:** per session; the `S2SProvider` is long-lived, the `S2SSession` single-use.
-- **Known gaps (documented in code):** context fields beyond `instructions`/`voice_id` are not merged into `open_session`; `S2SToolCall` falls through to `logger.debug`; no timing instrumentation; `_now_ms` uses the deprecated `get_event_loop()`.
+Removed in **Johnny-trt.43** along with the `S2SProvider`/`S2SSession` ABCs
+and the concrete adapters. The component reference that lived here is in
+pre-removal git history (`fc16a1e785595ff2fd1db6d60b56f07711c5ddae`);
+the deferred re-introduction (epic **Johnny-20h**) targets per-agent
+`RealtimeModel` adapters on `AgentSession` instead of this class.
 
 ### 3.14 Where pipeline decisions surface in the UI
 
@@ -525,10 +490,10 @@ all 12.
 
 | Event (`type` string) | Key fields | Emitted by | Persisted? | UI surface |
 |---|---|---|---|---|
-| `TranscriptFinalized` (`transcript_finalized`) | `text, speaker?, confidence?` | split + unified STT | ✅ `transcript_chunks` | transcript pane; WS type → `transcript_final` |
+| `TranscriptFinalized` (`transcript_finalized`) | `text, speaker?, confidence?` | STT finals | ✅ `transcript_chunks` | transcript pane; WS type → `transcript_final` |
 | `TranscriptFiltered` (`transcript_filtered`) | `text, reason: TranscriptFilteredReason, audio_duration_ms?` | `_publish_noise_filtered` | ✅ synthetic `no_reply` decision (except `audio_too_short`) | activity log / "No reply — filtered as background noise" |
 | `RouterDecisionMade` (`router_decision_made`) | `should_speak, confidence, reason, reply_type?, suggested_reply?, input_window, raw_output, turn_id?` | `_respond_to_transcript_inner` | ✅ `agent_decisions` | decisions panel; WS type → `router_decision` |
-| `AgentSpoke` (`agent_spoke`) | `text, audio_duration_ms, matched_allowed_reply?, prompt` | `_answer_and_speak` + unified | ✅ `agent_utterances` (+ updates decision) | chat line |
+| `AgentSpoke` (`agent_spoke`) | `text, audio_duration_ms, matched_allowed_reply?, prompt` | `_answer_and_speak` | ✅ `agent_utterances` (+ updates decision) | chat line |
 | `AgentSuggested` (`agent_suggested`) | `suggested_reply, decision_id?, reason, reply_type?` | `_handle_suggest_only` | ❌ (decision row carries `outcome=suggested`) | suggestion notification (live WS only) |
 | `AgentTTSFailed` (`agent_tts_failed`) | `provider_name?, category: AgentTTSFailedCategory, message, terminal` | `_respond_loop` TTSError handler | ❌ | playground diagnostics (live WS only) |
 | `PipelineStageFailed` (`pipeline_stage_failed`) | `stage: stt\|router_llm\|answer_llm, category, message, provider_name?` | `_emit_stage_failed` | ❌ | playground diagnostics (live WS only) |
@@ -576,10 +541,6 @@ erDiagram
     bot_sessions ||--o{ session_timings : "CASCADE"
     agent_decisions ||--o{ agent_utterances : "agent_decision_id (SET NULL)"
     personalities ||--o{ meeting_configs : "personality_id (SET NULL)"
-    pipeline_settings {
-        int id "singleton id=1"
-        string pipeline_mode "split|unified"
-    }
 
     bot_sessions {
         int id PK
@@ -684,9 +645,9 @@ violations), `started_at_ms`, `duration_ms`, `provider_name?` (denormalised),
 their terminal status from the runner (the subscriber runs only in the worker
 process).
 
-**`pipeline_settings`** (0009) — singleton (`CHECK id=1`) holding
-`pipeline_mode` (`split`/`unified`), seeded `split`. Read at session start to
-pick the route.
+**`pipeline_settings`** (0009) — the singleton split/unified toggle. **Dropped
+by migration 0026** (Johnny-trt.43): nothing reads it since the S2S route was
+removed.
 
 ### 6.3 Enums
 
@@ -694,7 +655,7 @@ pick the route.
 - **`TerminalState`** (0019): `replied | pending_approval | no_reply`; `terminal_state_for_outcome()` maps `spoken→replied`, `pending→pending_approval`, everything else → `no_reply`. Shared by the 0019 backfill SQL and the subscriber so they cannot disagree.
 - **`NoReplyReason`** (0019): the 12 wire values **plus `legacy`** (backfill-only) = 13 in the DB.
 - **`BotMode`** (`listen_only | suggest_only | approval_required | limited_auto_speak | autonomous`; `autonomous` consolidated the dropped `free_auto_speak` in 0017).
-- **`PipelineMode`** (`split | unified`, 0009), **`BotSessionSource`** (`meet | browser`, 0007), **`BotSessionStatus`** (`scheduled | joining | joined | ended | failed`).
+- **`BotSessionSource`** (`meet | browser`, 0007), **`BotSessionStatus`** (`scheduled | joining | joined | ended | failed`). (The `PipelineMode` enum from 0009 was removed with its table in 0026, Johnny-trt.43.)
 
 ### 6.4 Migration lineage (pipeline-relevant)
 
@@ -710,6 +671,7 @@ pick the route.
 | 0017 | `free_auto_speak → autonomous` data migration |
 | 0018 | `agent_decisions.decision_recommended_text / final_text / divergence_reason / override_actor` (INV-2) + legacy backfill |
 | 0019 | `agent_decisions.turn_id / terminal_state / no_reply_reason` (INV-1) + backfill (`legacy` reason on backfilled `no_reply` rows) |
+| 0026 | **drops** `pipeline_settings` + deactivates `kind='s2s'` provider rows (S2S surface removal, Johnny-trt.43) |
 
 > **Migrate-image gotcha:** the `migrate` compose service bakes its own image.
 > `docker compose build api worker frontend` does **not** rebuild it — a new

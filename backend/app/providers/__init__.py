@@ -49,8 +49,6 @@ from app.providers.elevenlabs_tts import ElevenLabsTTS
 from app.providers.elevenlabs_tts import register as _register_elevenlabs_tts
 from app.providers.faster_whisper_stt import FasterWhisperSTT
 from app.providers.faster_whisper_stt import register as _register_faster_whisper_stt
-from app.providers.gemini_live_s2s import GeminiLiveS2S
-from app.providers.gemini_live_s2s import register as _register_gemini_live_s2s
 from app.providers.gemini_llm import GeminiLLM
 from app.providers.gemini_llm import register as _register_gemini_llm
 from app.providers.kitten_tts import KittenTTS
@@ -61,8 +59,6 @@ from app.providers.openai_compatible_llm import OpenAICompatibleLLM
 from app.providers.openai_compatible_llm import register as _register_openai_compatible_llm
 from app.providers.openai_llm import OpenAILLM
 from app.providers.openai_llm import register as _register_openai_llm
-from app.providers.openai_realtime_s2s import OpenAIRealtimeS2S
-from app.providers.openai_realtime_s2s import register as _register_openai_realtime_s2s
 from app.providers.openai_realtime_stt import OpenAIRealtimeSTT
 from app.providers.openai_realtime_stt import register as _register_openai_realtime_stt
 from app.providers.openai_tts import OpenAITTS
@@ -71,18 +67,6 @@ from app.providers.parakeet_stt import ParakeetSTT
 from app.providers.parakeet_stt import register as _register_parakeet_stt
 from app.providers.piper_tts import PiperTTS
 from app.providers.piper_tts import register as _register_piper_tts
-from app.providers.s2s_base import (
-    S2SAudioFrame,
-    S2SError,
-    S2SEvent,
-    S2SProvider,
-    S2SResponseCompleted,
-    S2SResponseStarted,
-    S2SRole,
-    S2SSession,
-    S2SToolCall,
-    S2STranscript,
-)
 from app.providers.schema import (
     FieldDef,
     FieldGroup,
@@ -95,8 +79,6 @@ from app.providers.schema_validation import (
     split_values,
     validate_payload,
 )
-from app.providers.stub_s2s import StubS2S, StubS2SSession
-from app.providers.stub_s2s import register as _register_stub_s2s
 
 # Auto-register adapters whose imports only pull in stdlib + httpx (a
 # lightweight runtime dep already required by FastAPI / tests). Adapters
@@ -120,9 +102,6 @@ _register_parakeet_stt(replace=True)
 _register_deepgram_stt(replace=True)
 _register_openai_realtime_stt(replace=True)
 _register_elevenlabs_stt(replace=True)
-_register_stub_s2s(replace=True)
-_register_gemini_live_s2s(replace=True)
-_register_openai_realtime_s2s(replace=True)
 
 __all__ = [
     "AnthropicLLM",
@@ -139,7 +118,6 @@ __all__ = [
     "FieldType",
     "FieldValidationError",
     "GeminiLLM",
-    "GeminiLiveS2S",
     "KittenTTS",
     "KokoroTTS",
     "LLMError",
@@ -147,7 +125,6 @@ __all__ = [
     "LLMResponse",
     "OpenAICompatibleLLM",
     "OpenAILLM",
-    "OpenAIRealtimeS2S",
     "OpenAIRealtimeSTT",
     "OpenAITTS",
     "ParakeetSTT",
@@ -159,20 +136,8 @@ __all__ = [
     "ProviderKind",
     "ProviderRegistry",
     "ProviderSchema",
-    "S2SAudioFrame",
-    "S2SError",
-    "S2SEvent",
-    "S2SProvider",
-    "S2SResponseCompleted",
-    "S2SResponseStarted",
-    "S2SRole",
-    "S2SSession",
-    "S2SToolCall",
-    "S2STranscript",
     "STTError",
     "STTProvider",
-    "StubS2S",
-    "StubS2SSession",
     "TTSError",
     "TTSErrorCategory",
     "TTSProvider",

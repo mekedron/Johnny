@@ -91,8 +91,8 @@ Truly-streaming providers are intentionally absent. Deepgram emits interim +
 final transcripts incrementally under continuous feed (its own server-side
 endpointing fires finals), so it is driven directly through :class:`JohnnySTT`.
 OpenAI Realtime is also absent: its split-STT path (manual ``commit`` on
-``audio_iter`` exhaustion, ``turn_detection: null``) is superseded by the
-dedicated S2S / RealtimeModel adapter work (Johnny-20h), not this batch wrapper.
+``audio_iter`` exhaustion, ``turn_detection: null``) is deliberately left to
+the deferred RealtimeModel adapter epic (Johnny-20h), not this batch wrapper.
 
 Parakeet is absent from the set because batch-ness is **per-runtime** there
 (Johnny-trt.12): the ``mlx-sidecar`` runtime streams cache-aware over the

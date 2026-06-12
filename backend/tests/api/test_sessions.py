@@ -626,7 +626,7 @@ def _seed_replayable_browser_session(db_session: Session) -> int:
         meeting_config_id=None,
         source=BotSessionSource.BROWSER,
         status=BotSessionStatus.ENDED,
-        playground_overrides={"pipeline_mode": "split"},
+        playground_overrides={"playground": True},
     )
     db_session.add(row)
     db_session.flush()

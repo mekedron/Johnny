@@ -202,7 +202,7 @@ def get_meet_worker_volumes() -> dict[str, dict[str, str]]:
       others so the ~600 MB download is reused across containers.
     * ``~/.johnny/session-audio`` (or named volume) →
       ``/var/lib/johnny/session-audio`` — captured reply audio
-      (Johnny-od1): a unified S2S session writes one WAV per assistant
+      (Johnny-od1): the session writes one WAV per assistant
       response here; the api serves them for History / live playback.
 
     Returns a Docker SDK-compatible mapping. An operator can disable any
@@ -660,10 +660,6 @@ class DockerContainerLauncher(ContainerLauncher):
             "JOHNNY_CALENDAR_ATTACHMENTS": ctx.calendar_attachments_text or "",
             "JOHNNY_PRIOR_SESSION_CONTEXT": ctx.prior_session_context or "",
             "JOHNNY_PROVIDER_CONFIG": json.dumps(ctx.provider_config or {}),
-            # Johnny-ckz.17: split (STT+LLM+TTS) vs unified (S2S) toggle.
-            # Defaults to "split" via LaunchContext so existing deploys
-            # keep the legacy pipeline shape with zero behaviour change.
-            "JOHNNY_PIPELINE_MODE": ctx.pipeline_mode or "split",
         }
         # JOHNNY_REDIS_URL lets the meet-worker connect its event bus to
         # the same Redis the API/worker process uses. Without it the
@@ -688,8 +684,8 @@ class DockerContainerLauncher(ContainerLauncher):
         # adds JOHNNY_ORCHESTRATOR + the minted per-room bridge token + room /
         # identity so the meet-worker runs as a pure audio bridge into the
         # session's LiveKit room (the STT→LLM→TTS pipeline runs in the
-        # dispatched agent worker). Empty in the default legacy mode → the env
-        # is byte-identical to before, so no behaviour change ships.
+        # dispatched agent worker). In the break-glass legacy mode it pins
+        # JOHNNY_ORCHESTRATOR=legacy only (join-and-capture, Johnny-9xt).
         env.update(bridge_launch_environment(bot_session_id=ctx.bot_session_id))
         env.update(self._extra_environment)
         return env

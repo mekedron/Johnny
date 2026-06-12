@@ -932,8 +932,8 @@ capstone).
    still locks in a 0.5–1.0 s start transient, so the fix pairs the
    flags with bridge-side silence-gating of downlink writes. This is
    the dominant Meet-surface latency cost → fix bead **Johnny-dkj**
-   (P1). Applies to the legacy unified S2S in-worker path too (same
-   bridge).
+   (P1). (When measured this also applied to the since-removed unified
+   S2S in-worker path — same bridge; deleted in Johnny-trt.43.)
 
 ## What this work shipped (Johnny-ckz.8 iteration + Johnny-cxu baseline)
 

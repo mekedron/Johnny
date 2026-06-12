@@ -79,7 +79,7 @@ from app.services.personality_resolver import (
     apply_personality,
     select_personality,
 )
-from app.services.provider_payload import build_provider_payload, resolve_pipeline_mode
+from app.services.provider_payload import build_provider_payload
 from johnny.voice_pipeline import (
     BrowserAudioTransport,
     EventBus,
@@ -260,13 +260,11 @@ class BrowserSessionRunner:
     pipeline: Any = None
     """The assembled engine for this run.
 
-    A :class:`~johnny.agent.browser_session.BrowserAgentSession` (split, the
-    AgentSession engine — Johnny-7g5.1) or a
-    :class:`~johnny.voice_pipeline.unified_pipeline.UnifiedVoicePipeline`
-    (unified S2S). Captured via the ``on_assembled`` callback so the text-input
-    endpoint can call ``feed_text`` (drives the router → answer → TTS path from
-    typed input) and the stop control can call ``interrupt`` — both engines
-    expose the same surface (Johnny-ckz.11/ckz.13)."""
+    A :class:`~johnny.agent.browser_session.BrowserAgentSession` (the
+    AgentSession engine — Johnny-7g5.1). Captured via the ``on_assembled``
+    callback so the text-input endpoint can call ``feed_text`` (drives the
+    router → answer → TTS path from typed input) and the stop control can
+    call ``interrupt`` (Johnny-ckz.11/ckz.13)."""
     event_bus: EventBus | None = None
     """The session's event bus (shared with the assembled pipeline).
 
@@ -618,7 +616,6 @@ def _build_spec_from_event(
         or "autonomous"
     )
 
-    pipeline_mode = resolve_pipeline_mode(session)
     # Johnny-dsy: pull the most recent prior session's summary for the
     # same recurring series so the bot can reference last week's open
     # questions without re-asking. ``None`` when the event isn't part of
@@ -652,12 +649,10 @@ def _build_spec_from_event(
         prior_session_context=prior_session_context,
         provider_payload=effective_providers,
         event_bus=_build_event_bus(),
-        pipeline_mode=pipeline_mode.value,
     )
     overrides_snapshot: dict[str, Any] = {
         "calendar_event_id": event_id,
         "playground": False,
-        "pipeline_mode": pipeline_mode.value,
     }
     overrides_snapshot.update(_personality_snapshot(resolution))
     if payload.system_prompt:
@@ -709,7 +704,6 @@ def _build_spec_playground(
         session, payload.provider_overrides, resolution.payload
     )
 
-    pipeline_mode = resolve_pipeline_mode(session)
     spec = BrowserPipelineSpec(
         session_id=str(bot_session_id),
         bot_session_id=bot_session_id,
@@ -720,13 +714,11 @@ def _build_spec_playground(
         calendar_context="",
         provider_payload=effective_providers,
         event_bus=_build_event_bus(),
-        pipeline_mode=pipeline_mode.value,
     )
     overrides_snapshot: dict[str, Any] = {
         "calendar_event_id": None,
         "playground": True,
         "persona": persona,
-        "pipeline_mode": pipeline_mode.value,
     }
     overrides_snapshot.update(_personality_snapshot(resolution))
     if payload.system_prompt:

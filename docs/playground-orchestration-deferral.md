@@ -10,9 +10,9 @@
 > `turn_detection="vad"` (the multilingual turn detector needs a live
 > `get_job_context()`, absent in the API process — and VAD endpointing matches the
 > legacy browser pipeline anyway). `app/services/browser_pipeline_runner.py`
-> dispatches `split → BrowserAgentSession`, `unified → UnifiedVoicePipeline` (the
-> agent engine is split-only; unified stays on its own pipeline, which is *not*
-> the retired split engine). The browser path no longer constructs the retired split engine. Verified
+> runs every session on `BrowserAgentSession` (the `unified →
+> UnifiedVoicePipeline` branch was later removed with the S2S surface in
+> Johnny-trt.43). The browser path no longer constructs the retired split engine. Verified
 > end-to-end via chrome-devtools MCP (typed input + a real-speech voice round-trip)
 > with INV-1 + decision↔utterance parity persisted. The rest of this record is kept
 > for the original rationale + the design it pointed at.

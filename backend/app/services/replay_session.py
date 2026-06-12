@@ -81,6 +81,9 @@ def build_replay_fixture_dict(
 ) -> dict[str, Any]:
     """Map persisted rows to the on-disk ``fixture.json`` dict shape (pure)."""
     overrides = session.playground_overrides or {}
+    # Split is the only runtime; sessions recorded before Johnny-trt.43 may
+    # carry a legacy ``pipeline_mode`` override — preserve it so the replay
+    # endpoint can refuse those honestly instead of mis-replaying them.
     runtime = str(overrides.get("pipeline_mode") or "split")
     answer_by_decision: dict[int, str] = {}
     for u in utterances:

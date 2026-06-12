@@ -22,9 +22,7 @@ transcribe and decide, so a missing active row for either is a fail-fast
 surprise — mirroring the meet-worker's ``PipelineSetupError`` and the loader's own
 "fail fast at startup" contract. **TTS is optional**: a missing TTS yields
 ``SessionAdapters.tts = None`` (the session binds no TTS and the worker degrades a
-speaking mode to ``suggest_only``, Johnny-un2), exactly as the meet-worker's
-``_assemble_pipeline`` degrades rather than crashing. Unified (S2S) mode does not
-use this factory.
+speaking mode to ``suggest_only``, Johnny-un2) rather than crashing.
 
 Requires both the ``agent`` extra (``livekit-agents``, via the adapters) and
 SQLAlchemy (via the loader); imported only in the api/agent image, never from
@@ -84,9 +82,8 @@ if not any(getattr(h, "_johnny_warm_up", False) for h in logger.handlers):
     logger.addHandler(_h)
     logger.propagate = False
 
-# The three split-pipeline kinds a LiveKit AgentSession drives. Passing these
-# to the loader scopes its query to the split stack; an active S2S row (unified
-# mode) is intentionally not loaded — that mode bypasses this factory entirely.
+# The three pipeline kinds a LiveKit AgentSession drives. Passing these to
+# the loader scopes its query to exactly this stack.
 _SPLIT_KINDS: tuple[ProviderKind, ...] = (
     ProviderKind.STT,
     ProviderKind.LLM,
@@ -171,8 +168,8 @@ def _require(
     """Return the active provider for ``kind`` or fail fast.
 
     Raises :class:`AgentSessionSetupError` when no active row resolved for
-    ``kind`` — the operator hasn't configured that stage, or the deployment is
-    in S2S mode (which bypasses this factory). The concrete-ABC narrowing each
+    ``kind`` — the operator hasn't configured that stage. The concrete-ABC
+    narrowing each
     adapter constructor needs is done by the ``isinstance`` checks in
     :func:`build_session_adapters` (mirroring the meet-worker's ``_as_stt``
     guards): the registry maps a ``kind`` to a factory of the matching provider
@@ -181,10 +178,8 @@ def _require(
     instance = active.get(kind)
     if instance is None:
         raise AgentSessionSetupError(
-            f"no active {kind.value} provider — a split AgentSession needs an "
-            f"active kind={kind.value!r} row "
-            "(configure one in admin, or run unified/S2S mode, which does not "
-            "use this factory)"
+            f"no active {kind.value} provider — an AgentSession needs an "
+            f"active kind={kind.value!r} row (configure one in admin)"
         )
     return instance
 
@@ -391,8 +386,8 @@ def _provider_from_payload_entry(
     :func:`app.services.provider_payload.build_provider_payload` produces, *after*
     the personality LLM/TTS override is layered on by
     :func:`app.services.personality_resolver.apply_personality`), rebuild a
-    :class:`~app.providers.base.ProviderConfig`, and instantiate through the same
-    registry the meet-worker uses (``johnny.meet_worker.pipeline_runner._build_provider``).
+    :class:`~app.providers.base.ProviderConfig`, and instantiate through the
+    process-wide provider registry.
     Returns the live provider plus its option dict (for the voice/model/language
     pass-through).
 
@@ -407,11 +402,10 @@ def _provider_from_payload_entry(
     entry = provider_config.get(kind.value)
     if not isinstance(entry, Mapping):
         raise AgentSessionSetupError(
-            f"no active {kind.value} provider in the dispatched job payload — a "
-            f"split AgentSession needs a {kind.value!r} entry in provider_config "
+            f"no active {kind.value} provider in the dispatched job payload — an "
+            f"AgentSession needs a {kind.value!r} entry in provider_config "
             "(the API builds it from the active rows + personality override; an "
-            "empty/partial payload means listen-only or S2S, which does not use "
-            "this factory)"
+            "empty/partial payload means listen-only)"
         )
     provider_name = str(entry.get("provider_name") or "").strip()
     if not provider_name:

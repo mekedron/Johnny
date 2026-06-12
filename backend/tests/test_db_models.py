@@ -99,5 +99,6 @@ def test_enums_have_expected_members() -> None:
         "rejected",
         "suggested",
     }
-    # Johnny-ckz.17 added the ``s2s`` kind for unified speech-to-speech providers.
-    assert {e.value for e in ProviderKind} == {"stt", "llm", "tts", "s2s"}
+    # stt/llm/tts only — the ``s2s`` kind was removed with the S2S surface
+    # (Johnny-trt.43; historical rows are deactivated by migration 0026).
+    assert {e.value for e in ProviderKind} == {"stt", "llm", "tts"}

@@ -54,8 +54,8 @@ x-backend-env: &backend-env
   # Captured reply audio (Johnny-od1): every utterance Johnny speaks is saved
   # as a WAV under <dir>/<bot_session_id>/ for History + live-view playback.
   # Host bind-mount shared by api (browser sessions + serving + delete),
-  # agent-worker (Meet split TTS), worker (orphan sweep), and each spawned
-  # meet-worker (unified S2S) via the launcher volume below.
+  # agent-worker (Meet TTS), worker (orphan sweep), and each spawned
+  # meet-worker via the launcher volume below.
   JOHNNY_SESSION_AUDIO_DIR: ${JOHNNY_SESSION_AUDIO_DIR:-/var/lib/johnny/session-audio}
   JOHNNY_MEET_WORKER_SESSION_AUDIO_VOLUME: ${JOHNNY_MEET_WORKER_SESSION_AUDIO_VOLUME:-${HOME}/.johnny/session-audio}
   JOHNNY_CONTAINER_MONITOR_INTERVAL_SECONDS: ${JOHNNY_CONTAINER_MONITOR_INTERVAL_SECONDS:-30}
@@ -466,9 +466,9 @@ services:
       - ${HOME}/.johnny/whisper-models:/var/lib/johnny/whisper-models
       - ${HOME}/.johnny/parakeet-models:/var/lib/johnny/parakeet-models
       - ${HOME}/.johnny/parakeet-packages:/var/lib/johnny/parakeet-packages
-      # Captured reply audio (Johnny-od1): unified S2S sessions write one
-      # WAV per assistant response here (split sessions write from the
-      # agent-worker instead).
+      # Captured reply audio (Johnny-od1): one WAV per assistant response
+      # (written from the agent-worker; the mount is kept on the meet-worker
+      # for the bridge-era serving path).
       - ${HOME}/.johnny/session-audio:/var/lib/johnny/session-audio
 
   # Base image for the noVNC bot sign-in flow (Johnny-105). Playwright

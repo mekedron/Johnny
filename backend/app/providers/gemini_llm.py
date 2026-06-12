@@ -552,9 +552,7 @@ async def fetch_model_catalog(
     Gemini's catalog enumerates EVERY model the account has access to,
     including embedding, image, and Live (bidi) endpoints that the
     text/chat adapter cannot drive. Filters to entries with
-    ``generateContent`` in ``supportedGenerationMethods`` — the same
-    capability flag the Johnny-ckz.20 S2S adapter uses for its
-    ``bidiGenerateContent`` filter. Pagination follows
+    ``generateContent`` in ``supportedGenerationMethods``. Pagination follows
     ``nextPageToken``. The ``models/`` prefix on each ``name`` is
     stripped — the user-facing dropdown wants ``gemini-2.5-flash``,
     not ``models/gemini-2.5-flash``. Raises :class:`LLMError` on

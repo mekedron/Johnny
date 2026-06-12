@@ -28,9 +28,7 @@ import {
 import { startBrowserAudioSession, type BrowserAudioSession } from '$lib/browserAudio';
 import { BOT_MODES, listTemplates, type BotMode, type Template } from '$lib/templates';
 import {
-	getPipelineSettings,
 	listProviders,
-	type PipelineSettings,
 	type Provider,
 	type ProviderKind
 } from '$lib/providers';
@@ -154,17 +152,14 @@ export class PlaygroundController {
 	providerOverrides = $state<Record<ProviderKind, number | null>>({
 		stt: null,
 		llm: null,
-		tts: null,
-		s2s: null
+		tts: null
 	});
 	templates = $state<Template[]>([]);
-	providers = $state<{ stt: Provider[]; llm: Provider[]; tts: Provider[]; s2s: Provider[] }>({
+	providers = $state<{ stt: Provider[]; llm: Provider[]; tts: Provider[] }>({
 		stt: [],
 		llm: [],
-		tts: [],
-		s2s: []
+		tts: []
 	});
-	pipelineSettings = $state<PipelineSettings | null>(null);
 	loadingMetadata = $state(true);
 
 	// --- Live session ------------------------------------------------------
@@ -264,16 +259,14 @@ export class PlaygroundController {
 	loadMetadata = async (): Promise<void> => {
 		this.loadingMetadata = true;
 		try {
-			const [tpls, provs, settings, persons, accts] = await Promise.all([
+			const [tpls, provs, persons, accts] = await Promise.all([
 				listTemplates(),
 				listProviders(),
-				getPipelineSettings().catch(() => null),
 				listPersonalities().catch(() => [] as Personality[]),
 				listAccounts().catch(() => [] as Account[])
 			]);
 			this.templates = tpls;
 			this.providers = provs;
-			this.pipelineSettings = settings;
 			this.personalities = persons;
 			this.accounts = accts;
 			this.seedPersonalitySelection();
@@ -420,10 +413,7 @@ export class PlaygroundController {
 
 	private buildPayload(): StartBrowserSessionPayload {
 		const overrides: Record<string, BrowserProviderOverride> = {};
-		const overrideKinds: readonly ProviderKind[] =
-			this.pipelineSettings?.pipeline_mode === 'unified'
-				? (['s2s'] as const)
-				: (['stt', 'llm', 'tts'] as const);
+		const overrideKinds: readonly ProviderKind[] = ['stt', 'llm', 'tts'] as const;
 		for (const kind of overrideKinds) {
 			const id = this.providerOverrides[kind];
 			if (id !== null && id !== undefined) {

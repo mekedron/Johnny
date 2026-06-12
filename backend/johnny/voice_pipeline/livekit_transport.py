@@ -598,10 +598,9 @@ class MeetRoomBridge:
     async def run(self, stop_event: asyncio.Event) -> None:
         """Start the bridge and run until ``stop_event`` or a pump exits.
 
-        Mirrors :func:`johnny.meet_worker.pipeline_runner.build_and_run_pipeline`
-        so the bootstrap (Johnny-9eh) can drive the bridge the same way it
-        drives the legacy pipeline: a single coroutine that returns once the
-        meeting ends or shutdown is requested.
+        A single coroutine the bootstrap (Johnny-9eh) drives like any other
+        engine task: it returns once the meeting ends or shutdown is
+        requested.
         """
         await self.start()
         stop_task = asyncio.create_task(stop_event.wait())

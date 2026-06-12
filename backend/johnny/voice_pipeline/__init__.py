@@ -113,13 +113,6 @@ from johnny.voice_pipeline.transport import (
     LocalAudioTransport,
     create_transport_from_env,
 )
-from johnny.voice_pipeline.unified_pipeline import (
-    DEFAULT_FRAME_DURATION_MS as UNIFIED_DEFAULT_FRAME_DURATION_MS,
-)
-from johnny.voice_pipeline.unified_pipeline import (
-    UnifiedPipelineConfig,
-    UnifiedVoicePipeline,
-)
 from johnny.voice_pipeline.utterance_sink import (
     InMemoryUtteranceSink,
     NoopUtteranceSink,
@@ -218,9 +211,6 @@ __all__ = [
     "TranscriptHistoryLoader",
     "TranscriptRecord",
     "TranscriptSink",
-    "UNIFIED_DEFAULT_FRAME_DURATION_MS",
-    "UnifiedPipelineConfig",
-    "UnifiedVoicePipeline",
     "TurnTerminal",
     "UtteranceRecord",
     "UtteranceSink",

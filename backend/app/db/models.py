@@ -99,22 +99,6 @@ class BotDismissActor(enum.StrEnum):
     SCHEDULE = "schedule"
 
 
-class PipelineMode(enum.StrEnum):
-    """Which voice pipeline shape a session runs (Johnny-ckz.17).
-
-    ``SPLIT`` is the legacy three-stage pipeline (STT → LLM → TTS) and
-    the default. ``UNIFIED`` routes the session through a single S2S
-    provider (OpenAI GPT-Realtime, Gemini Live) — STT + LLM + TTS
-    collapsed into one bidirectional connection. The choice is a
-    global deployment setting persisted on :class:`PipelineSettings`
-    and consulted by both the meet-worker (live Meet sessions) and the
-    in-process browser pipeline runner (playground / sandbox).
-    """
-
-    SPLIT = "split"
-    UNIFIED = "unified"
-
-
 class DecisionOutcome(enum.StrEnum):
     SPOKEN = "spoken"
     SUPPRESSED = "suppressed"
@@ -949,34 +933,3 @@ class Personality(TimestampMixin, Base):
     )
 
 
-class PipelineSettings(TimestampMixin, Base):
-    """Singleton settings row controlling pipeline shape (Johnny-ckz.17).
-
-    Holds the global ``pipeline_mode`` (``split`` vs ``unified``)
-    consulted by every session entry point — meet-worker and in-browser
-    runner alike. Stored as a singleton row (``id=1`` enforced via a
-    CHECK) so both API readers and the seeder don't have to handle
-    multi-row ambiguity. Updates go through ``app.api.providers`` and
-    are picked up on the next session start.
-
-    Concrete S2S provider selection is governed by the existing
-    ``provider_credentials.is_active`` invariant: when
-    ``pipeline_mode='unified'`` the runner loads the active row where
-    ``kind='s2s'`` and instantiates it as the session's S2S provider.
-    """
-
-    __tablename__ = "pipeline_settings"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    pipeline_mode: Mapped[PipelineMode] = mapped_column(
-        SAEnum(
-            PipelineMode,
-            name="pipeline_mode",
-            native_enum=False,
-            length=16,
-            values_callable=_str_enum_values,
-        ),
-        nullable=False,
-        default=PipelineMode.SPLIT,
-        server_default=PipelineMode.SPLIT.value,
-    )

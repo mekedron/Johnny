@@ -13,7 +13,7 @@
 	import UtteranceAudioButton from '$lib/components/UtteranceAudioButton.svelte';
 	import { sessionAudioUrl } from '$lib/sessionDetail';
 	import { BOT_MODE_LABEL, type BotMode } from '$lib/templates';
-	import { PIPELINE_MODE_LABEL, type Provider, type ProviderKind } from '$lib/providers';
+	import { type Provider, type ProviderKind } from '$lib/providers';
 	import { readSessionPersonality, fallbackChipText } from '$lib/personalities';
 	import type { LiveState, PlaygroundController } from '$lib/playground/playgroundSession.svelte';
 
@@ -46,13 +46,6 @@
 				: {};
 		const liveMode = typeof overrides.mode === 'string' ? overrides.mode : controller.mode;
 		chips.push({ label: 'Mode', value: BOT_MODE_LABEL[liveMode as BotMode] ?? liveMode });
-		const livePipelineMode =
-			typeof overrides.pipeline_mode === 'string'
-				? overrides.pipeline_mode
-				: (controller.pipelineSettings?.pipeline_mode ?? null);
-		if (livePipelineMode === 'split' || livePipelineMode === 'unified') {
-			chips.push({ label: 'Pipeline', value: PIPELINE_MODE_LABEL[livePipelineMode] });
-		}
 		const templateId =
 			typeof overrides.template_id === 'number'
 				? overrides.template_id
@@ -65,14 +58,11 @@
 			overrides.providers && typeof overrides.providers === 'object'
 				? (overrides.providers as Record<string, { credentials_id?: number }>)
 				: undefined;
-		const providerEntries: Array<[ProviderKind, Provider[]]> =
-			livePipelineMode === 'unified'
-				? [['s2s', controller.providers.s2s]]
-				: [
-						['stt', controller.providers.stt],
-						['llm', controller.providers.llm],
-						['tts', controller.providers.tts]
-					];
+		const providerEntries: Array<[ProviderKind, Provider[]]> = [
+			['stt', controller.providers.stt],
+			['llm', controller.providers.llm],
+			['tts', controller.providers.tts]
+		];
 		for (const [kind, list] of providerEntries) {
 			const id = liveProviders?.[kind]?.credentials_id ?? controller.providerOverrides[kind];
 			if (id !== null && id !== undefined) {

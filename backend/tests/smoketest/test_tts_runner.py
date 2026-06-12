@@ -171,7 +171,6 @@ _PROVIDERS = {
     ],
     "stt": [],
     "llm": [],
-    "s2s": [],
 }
 
 _SCHEMAS = {
@@ -192,7 +191,6 @@ _SCHEMAS = {
     ],
     "stt": [],
     "llm": [],
-    "s2s": [],
 }
 
 

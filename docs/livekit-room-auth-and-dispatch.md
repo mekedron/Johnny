@@ -103,8 +103,9 @@ lockstep during the migration; `from_env()`/`to_env()` bridge the two.
 
 Fields: `bot_session_id`, `room_name`, `meet_link`, `meeting_config_id`,
 `calendar_event_id`, `account_id`, `mode` (`listen_only` | `suggest_only` |
-`approval_required` | `limited_auto_speak`), `pipeline_mode` (`split` |
-`unified`), the prompt-assembly text (`instructions`, `personality_prompt`,
+`approval_required` | `limited_auto_speak`; the former `pipeline_mode` field
+was removed with the S2S surface, Johnny-trt.43 — unknown keys in old payloads
+are ignored), the prompt-assembly text (`instructions`, `personality_prompt`,
 `context`, `calendar_context`, `calendar_attachments_text`,
 `prior_session_context` → feeds `AgentInstructionsConfig`), `provider_config`
 (the exact `build_provider_payload` shape: `{kind: {provider_name, display_name,

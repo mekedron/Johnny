@@ -419,9 +419,9 @@ def test_list_empty_returns_three_buckets(client: TestClient) -> None:
     resp = client.get("/providers")
     assert resp.status_code == 200
     data = resp.json()
-    # Johnny-ckz.17 added the ``s2s`` kind alongside stt/llm/tts; the
-    # legacy buckets must still be present + empty.
-    assert data == {"stt": [], "llm": [], "tts": [], "s2s": []}
+    # stt/llm/tts are the only kinds — the ``s2s`` bucket was removed with
+    # the S2S surface (Johnny-trt.43).
+    assert data == {"stt": [], "llm": [], "tts": []}
 
 
 def test_list_groups_by_kind(client: TestClient) -> None:
@@ -2709,7 +2709,7 @@ def test_list_llm_models_returns_models_for_openai_row(
 def test_list_llm_models_rejects_non_llm_kind(
     client: TestClient,
 ) -> None:
-    """STT / TTS / S2S rows must return 400 — wrong-kind dispatch."""
+    """STT / TTS rows must return 400 — wrong-kind dispatch."""
     get_registry().register(ProviderKind.STT, "ok-stt", _OKSTT, replace=True)
     created = client.post("/providers", json=_create_payload()).json()
     resp = client.get(f"/providers/{created['id']}/llm_models")

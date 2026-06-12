@@ -57,7 +57,13 @@ def load_active_providers(
     reg = registry if registry is not None else get_registry()
     dec = decrypt if decrypt is not None else _identity_decryptor
 
-    stmt = select(ProviderCredential).where(ProviderCredential.is_active.is_(True))
+    # Always scope to the live ProviderKind values: a historical
+    # ``kind='s2s'`` row (tombstoned by Johnny-trt.43) must never reach the
+    # enum coercion, even if reactivated by hand.
+    stmt = select(ProviderCredential).where(
+        ProviderCredential.is_active.is_(True),
+        ProviderCredential.kind.in_(list(ProviderKind)),
+    )
     if kinds is not None:
         stmt = stmt.where(ProviderCredential.kind.in_(list(kinds)))
 

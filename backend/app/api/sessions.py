@@ -66,7 +66,6 @@ from app.services.session_scheduler import (
 from johnny.smoketest.replay import (
     check_invariants,
     diff_against_recorded,
-    run_replay,
 )
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -528,15 +527,23 @@ async def replay_session(
             ),
         )
 
-    if fixture.runtime == "split":
-        # The split STT→LLM→TTS replay runs on the LiveKit-Agents engine
-        # (Johnny-n22 retired the hand-rolled split orchestrator); unified
-        # (S2S) fixtures stay on run_replay / UnifiedVoicePipeline.
-        from johnny.smoketest.replay_agent import run_agent_replay
+    if fixture.runtime != "split":
+        # The 'unified' (S2S) replay engine was removed with the S2S surface
+        # (Johnny-trt.43); only sessions recorded before the removal can
+        # carry another runtime, and they can no longer be replayed.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"session runtime {fixture.runtime!r} is not replayable: the "
+                "unified (S2S) pipeline was removed (Johnny-trt.43) — only "
+                "split sessions replay"
+            ),
+        )
+    # The split STT→LLM→TTS replay runs on the LiveKit-Agents engine
+    # (Johnny-n22 retired the hand-rolled split orchestrator).
+    from johnny.smoketest.replay_agent import run_agent_replay
 
-        result = await run_agent_replay(fixture)
-    else:
-        result = await run_replay(fixture)
+    result = await run_agent_replay(fixture)
     violations = check_invariants(result.events, fixture.runtime)
     diffs = diff_against_recorded(fixture, result.records)
 

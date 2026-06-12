@@ -35,7 +35,6 @@ from johnny.smoketest.replay import (
     diff_against_recorded,
     discover_fixtures,
     load_fixture,
-    run_replay,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,10 +68,10 @@ def _render_invariants(
     """Print the invariants verdict for one fixture; return its failure count."""
     fx = result.fixture
     violations = check_invariants(result.events, fx.runtime)
-    # A mis-segmented split fixture (VAD produced a different number of turns
+    # A mis-segmented fixture (VAD produced a different number of turns
     # than transcripts) is itself a hard failure — the replay didn't reproduce
-    # the session, so any green would be a lie. Unified has no STT segmentation.
-    seg_ok = fx.runtime != "split" or result.stt_calls == fx.turn_count
+    # the session, so any green would be a lie.
+    seg_ok = result.stt_calls == fx.turn_count
     label = f"[bold]{fx.label}[/bold] (session {fx.session_id}, {fx.runtime})"
     if not seg_ok:
         console.print(
@@ -113,8 +112,8 @@ def _render_regression(console: Console, result: ReplayResult) -> None:
     help=(
         "Replay committed session fixtures through the voice engine and assert "
         "the .28.x invariants (mode=invariants, the CI gate) or diff against the "
-        "originally-recorded outcome (mode=regression). Split fixtures run on the "
-        "LiveKit-Agents engine; unified (S2S) fixtures run on UnifiedVoicePipeline."
+        "originally-recorded outcome (mode=regression). Fixtures run on the "
+        "LiveKit-Agents engine (split — the only runtime since Johnny-trt.43)."
     )
 )
 @click.option("--session-id", type=str, default=None, help="Replay one fixture by session id.")
@@ -170,9 +169,8 @@ def main(
             "fixture's recorded LLM outputs."
         )
 
-    # Split fixtures run on the LiveKit-Agents engine (lazy import so the
-    # unified/S2S path stays usable without the ``agent`` extra); unified
-    # fixtures run on UnifiedVoicePipeline via run_replay.
+    # Fixtures run on the LiveKit-Agents engine (lazy import so --help and
+    # argument errors stay usable without the ``agent`` extra).
     console = Console()
     console.print(
         f"[bold cyan]Johnny replay harness[/bold cyan] — "
@@ -182,13 +180,15 @@ def main(
     fixtures = _resolve_fixtures(fixtures_dir, session_id, run_all)
     failures = 0
     for fx in fixtures:
-        if fx.runtime == "split":
-            from johnny.smoketest.replay_agent import run_agent_replay
+        if fx.runtime != "split":
+            raise click.ClickException(
+                f"fixture {fx.label!r} has runtime={fx.runtime!r}: the "
+                "unified (S2S) replay engine was removed in Johnny-trt.43 — "
+                "only split fixtures replay"
+            )
+        from johnny.smoketest.replay_agent import run_agent_replay
 
-            runner = run_agent_replay
-        else:
-            runner = run_replay
-        result = asyncio.run(runner(fx))
+        result = asyncio.run(run_agent_replay(fx))
         if mode == "invariants":
             failures += _render_invariants(console, result)
         else:

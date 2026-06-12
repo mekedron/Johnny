@@ -37,12 +37,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from johnny.agent.adapters.factory import (
-    AgentSessionSetupError,
     SessionAdapters,
     build_session_adapters_from_payload,
 )
 from johnny.agent.answer import AnswerConfig
-from johnny.agent.job_config import UNIFIED_PIPELINE_MODE, SessionJobConfig
+from johnny.agent.job_config import SessionJobConfig
 from johnny.agent.session import AgentInstructionsConfig
 
 if TYPE_CHECKING:
@@ -99,19 +98,10 @@ def build_session_adapters_for_job(
     worker drives exactly the providers (and personality override) the API selected.
     ``registry`` / ``vad`` are forwarded for test injection and shared-VAD reuse.
 
-    A ``unified`` (S2S) session is rejected with
-    :class:`~johnny.agent.adapters.factory.AgentSessionSetupError`: the split
-    adapter factory only builds the STT/LLM/TTS trio, and the AgentSession harness
-    (:func:`~johnny.agent.session.build_agent_session`) is split-only at this phase —
-    a unified session still runs on the legacy meet-worker's ``UnifiedVoicePipeline``.
-    Fail fast here rather than mis-building a split session from an ``s2s`` payload.
+    The STT/LLM/TTS trio is the only pipeline shape: the ``unified`` (S2S)
+    mode this guard used to reject was removed from the product in
+    Johnny-trt.43 (re-introduction deferred to epic Johnny-20h).
     """
-    if config.pipeline_mode == UNIFIED_PIPELINE_MODE:
-        raise AgentSessionSetupError(
-            "unified/S2S pipeline_mode is not driven by the split AgentSession "
-            "adapter factory; a unified session runs on the legacy meet-worker "
-            "UnifiedVoicePipeline (set pipeline_mode=split for the agent path)"
-        )
     return build_session_adapters_from_payload(
         config.provider_config, registry=registry, vad=vad, tts_recorder=tts_recorder
     )

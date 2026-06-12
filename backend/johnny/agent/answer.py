@@ -23,8 +23,8 @@ gate (:mod:`johnny.agent.router_gate`) compose:
   re-exported mode constants — the *mode* gating: which modes coerce, which never
   produce audio (``listen_only`` / ``suggest_only``), and the graceful
   *TTS-missing degrade* that downgrades a speaking mode to ``suggest_only`` rather
-  than crashing when no TTS provider is configured (parity with the legacy
-  ``meet_worker.pipeline_runner._assemble_pipeline`` ``SPEAKING_MODES`` check).
+  than crashing when no TTS provider is configured (the ``SPEAKING_MODES``
+  check inherited from the retired in-worker assembler).
 
 Deliberately ``livekit``-free (stdlib + :mod:`app.providers` + the legacy
 constants), so it imports cheaply and its unit tests collect without the
@@ -120,8 +120,8 @@ def degrade_speaking_mode_if_no_tts(mode: str, *, tts_available: bool) -> str:
     — ``limited_auto_speak`` / ``autonomous`` / ``approval_required``) must not
     crash when the operator has configured no TTS; instead the bot keeps
     *thinking* and surfaces suggestions (``suggest_only``) rather than approving a
-    reply it can never play. Parity with the legacy
-    ``meet_worker.pipeline_runner._assemble_pipeline`` degrade. Non-speaking modes
+    reply it can never play (behaviour inherited from the retired in-worker
+    assembler). Non-speaking modes
     (already silent) and unknown modes pass through unchanged, and a present TTS
     is always a no-op.
     """

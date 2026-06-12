@@ -10,16 +10,13 @@ from app.providers import (
     DeepgramSTT,
     ElevenLabsTTS,
     FasterWhisperSTT,
-    GeminiLiveS2S,
     GeminiLLM,
     OpenAICompatibleLLM,
     OpenAILLM,
-    OpenAIRealtimeS2S,
     OpenAIRealtimeSTT,
     OpenAITTS,
     ParakeetSTT,
     PiperTTS,
-    StubS2S,
 )
 from app.providers.base import ProviderKind
 from app.providers.schema import (
@@ -43,15 +40,12 @@ ADAPTERS = [
     ElevenLabsTTS,
     FasterWhisperSTT,
     GeminiLLM,
-    GeminiLiveS2S,
     OpenAICompatibleLLM,
     OpenAILLM,
-    OpenAIRealtimeS2S,
     OpenAIRealtimeSTT,
     OpenAITTS,
     ParakeetSTT,
     PiperTTS,
-    StubS2S,
 ]
 
 
@@ -60,7 +54,7 @@ def test_each_adapter_declares_a_schema(adapter: type) -> None:
     schema = adapter.field_schema()
     assert isinstance(schema, ProviderSchema)
     assert schema.fields, f"{adapter.__name__} has no fields"
-    assert schema.kind.value in {"stt", "llm", "tts", "s2s"}
+    assert schema.kind.value in {"stt", "llm", "tts"}
     assert schema.provider_name
     assert schema.display_name
     assert schema.summary

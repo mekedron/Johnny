@@ -31,10 +31,9 @@ identically) and the recorded answer via the reply ``SpeechHandle`` the gate's
 gate bound, reproducing the session-14 router hang and proving the new engine
 turns it into a durable ``no_reply(stage_error)`` instead of the silent drop.
 
-**Split-only.** The new engine is split-only (unified/S2S still runs on the
-legacy :class:`~johnny.voice_pipeline.UnifiedVoicePipeline`, see
-:func:`johnny.agent.job_session.build_agent_runtime`), so this driver rejects a
-unified fixture — the legacy harness remains the engine for those.
+**Split-only.** Split is the only runtime (the unified/S2S replay engine was
+removed with the S2S surface in Johnny-trt.43), so this driver rejects any
+fixture that declares another runtime instead of mis-replaying it.
 
 Requires the ``agent`` extra (``livekit-agents``) and pulls
 :mod:`johnny.agent.router_gate`; imported only by the agent-engine CLI path /
@@ -172,16 +171,16 @@ async def run_agent_replay(fixture: ReplayFixture) -> ReplayResult:
       the speak path's terminal (``replied`` / ``model_empty_output``);
     * a ``simulate == "timeout"`` turn reproduces the session-14 router hang.
 
-    Returns the same :class:`~johnny.smoketest.replay.ReplayResult` the legacy
-    :func:`~johnny.smoketest.replay.run_replay` returns, so the pure checkers gate
-    both engines identically. Raises :class:`ValueError` for a unified fixture —
-    the agent engine is split-only.
+    Returns a :class:`~johnny.smoketest.replay.ReplayResult` so the pure
+    checkers gate the engine. Raises :class:`ValueError` for a fixture whose
+    runtime is not ``split`` — the only runtime since the unified (S2S)
+    replay engine was removed (Johnny-trt.43).
     """
     if fixture.runtime != SPLIT_RUNTIME:
         raise ValueError(
             f"the AgentSession engine is split-only; fixture {fixture.label!r} is "
-            f"runtime={fixture.runtime!r} (unified/S2S still runs on the legacy "
-            "UnifiedVoicePipeline — use johnny.smoketest.replay.run_replay)"
+            f"runtime={fixture.runtime!r} (the unified/S2S replay engine was "
+            "removed in Johnny-trt.43)"
         )
 
     bus = InMemoryEventBus()

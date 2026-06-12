@@ -13,9 +13,7 @@ import pytest
 
 from johnny.agent.job_config import (
     DEFAULT_MODE,
-    DEFAULT_PIPELINE_MODE,
     SUPPORTED_MODES,
-    SUPPORTED_PIPELINE_MODES,
     SessionJobConfig,
     agent_identity_for_session,
     bridge_identity_for_session,
@@ -32,7 +30,6 @@ def _full_config() -> SessionJobConfig:
         calendar_event_id=99,
         account_id=3,
         mode="approval_required",
-        pipeline_mode="split",
         instructions="Be brief.",
         personality_prompt="[personality: Ada]\nWitty.",
         context="Quarterly review.",
@@ -75,7 +72,6 @@ def test_to_metadata_is_deterministic_json() -> None:
 def test_minimal_config_uses_safe_defaults() -> None:
     cfg = SessionJobConfig(bot_session_id=1, room_name=room_name_for_session(1))
     assert cfg.mode == DEFAULT_MODE == "listen_only"
-    assert cfg.pipeline_mode == DEFAULT_PIPELINE_MODE == "split"
     assert cfg.provider_config == {}
     assert cfg.redis_url is None
     assert SessionJobConfig.from_metadata(cfg.to_metadata()) == cfg
@@ -97,11 +93,14 @@ def test_from_dict_rejects_unknown_mode() -> None:
         SessionJobConfig.from_dict({"bot_session_id": 1, "room_name": "r", "mode": "shout"})
 
 
-def test_from_dict_rejects_unknown_pipeline_mode() -> None:
-    with pytest.raises(ValueError, match="unknown pipeline_mode"):
-        SessionJobConfig.from_dict(
-            {"bot_session_id": 1, "room_name": "r", "pipeline_mode": "hologram"}
-        )
+def test_from_dict_ignores_retired_pipeline_mode_key() -> None:
+    # Sessions dispatched before Johnny-trt.43 carried a ``pipeline_mode``
+    # key; the contract must ignore it (unknown keys are dropped) rather
+    # than reject an old in-flight payload.
+    cfg = SessionJobConfig.from_dict(
+        {"bot_session_id": 1, "room_name": "r", "pipeline_mode": "unified"}
+    )
+    assert not hasattr(cfg, "pipeline_mode")
 
 
 def test_from_dict_rejects_non_object_provider_config() -> None:
@@ -133,7 +132,6 @@ def test_from_env_mirrors_launcher_contract() -> None:
         "JOHNNY_CALENDAR_ATTACHMENTS": "att",
         "JOHNNY_PRIOR_SESSION_CONTEXT": "prior",
         "JOHNNY_PROVIDER_CONFIG": json.dumps({"tts": {"provider_name": "piper"}}),
-        "JOHNNY_PIPELINE_MODE": "unified",
         "JOHNNY_REDIS_URL": "redis://redis:6379/0",
         "LIVEKIT_ROOM": "johnny-session-55",
     }
@@ -143,7 +141,6 @@ def test_from_env_mirrors_launcher_contract() -> None:
     assert cfg.calendar_event_id is None  # "None" coerced to absent
     assert cfg.account_id == 2
     assert cfg.mode == "suggest_only"
-    assert cfg.pipeline_mode == "unified"
     assert cfg.room_name == "johnny-session-55"
     assert cfg.provider_config == {"tts": {"provider_name": "piper"}}
     assert cfg.redis_url == "redis://redis:6379/0"
@@ -153,7 +150,6 @@ def test_from_env_defaults_room_and_modes_when_blank() -> None:
     cfg = SessionJobConfig.from_env({"JOHNNY_SESSION_ID": "9"})
     assert cfg.room_name == room_name_for_session(9) == "johnny-session-9"
     assert cfg.mode == "listen_only"
-    assert cfg.pipeline_mode == "split"
     assert cfg.provider_config == {}
     assert cfg.redis_url is None
 
@@ -177,13 +173,12 @@ def test_identity_helpers_are_distinct_and_room_scoped() -> None:
 def test_mode_vocabularies_match_canonical_pipeline_constants() -> None:
     """Drift guard: the duplicated literals must equal the canonical defs.
 
-    job_config re-declares the mode / pipeline-mode strings to stay
+    job_config re-declares the mode strings to stay
     dependency-free; if the canonical constants ever change, this fails so the
     copy is updated in lockstep. Skipped if the heavy modules can't import in
     this environment.
     """
     try:
-        from johnny.meet_worker.pipeline_runner import SPLIT_MODE, UNIFIED_MODE
         from johnny.voice_pipeline.reasoning import (
             APPROVAL_REQUIRED_MODE,
             AUTONOMOUS_MODE,
@@ -209,7 +204,6 @@ def test_mode_vocabularies_match_canonical_pipeline_constants() -> None:
     # for an autonomous meeting was rejected at parse and the agent abandoned the
     # job (Johnny-52b). This union assertion catches any future such omission.
     assert SUPPORTED_MODES == NON_SPEAKING_MODES | SPEAKING_MODES
-    assert SUPPORTED_PIPELINE_MODES == {SPLIT_MODE, UNIFIED_MODE}
 
 
 def test_from_metadata_accepts_autonomous_mode() -> None:
@@ -225,7 +219,6 @@ def test_from_metadata_accepts_autonomous_mode() -> None:
         bot_session_id=42,
         room_name=room_name_for_session(42),
         mode="autonomous",
-        pipeline_mode="split",
     )
     restored = SessionJobConfig.from_metadata(cfg.to_metadata())
     assert restored.mode == "autonomous"

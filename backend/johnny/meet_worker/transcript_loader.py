@@ -5,11 +5,12 @@ The meet-worker container is SQLAlchemy-free by design, so it can't read
 ``GET /sessions/{bot_session_id}`` endpoint on startup and seeds the
 voice pipeline's in-memory transcript history from the response.
 
-The loader is wired by :func:`johnny.meet_worker.pipeline_runner.\
-_build_transcript_history_loader` when ``JOHNNY_API_BASE_URL`` is set
-in the container environment. Without that env var the pipeline keeps
-its default :class:`NoopTranscriptHistoryLoader` and a container restart
+Callers wire the loader when ``JOHNNY_API_BASE_URL`` is set in the
+container environment. Without that env var the consumer keeps its
+default :class:`NoopTranscriptHistoryLoader` and a container restart
 mid-session resets context (logged at INFO so operators can spot it).
+(The in-worker pipeline runner that originally wired this was removed
+in Johnny-trt.43; the loader remains for the agent-era history seam.)
 """
 
 from __future__ import annotations

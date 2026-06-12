@@ -80,11 +80,12 @@ JOIN_TIMEOUT_ENV = "JOHNNY_JOIN_TIMEOUT_S"
 HEADLESS_ENV = "JOHNNY_PLAYWRIGHT_HEADLESS"
 SKIP_SELFCHECK_ENV = "JOHNNY_BOOTSTRAP_SKIP_SELFCHECK"
 
-# Per-session engine selector (Johnny-wz5). ``agentsession`` runs this
-# meet-worker as a pure audio *bridge* into the session's LiveKit room — the
-# STT→LLM→TTS pipeline runs in the separately-dispatched agent worker
-# (Johnny-9eh). ``legacy`` (the default, and the value for any unrecognised
-# string) runs the in-worker voice pipeline unchanged. The value is set by the
+# Per-session engine selector (Johnny-wz5). ``agentsession`` (the default)
+# runs this meet-worker as a pure audio *bridge* into the session's LiveKit
+# room — the STT→LLM→TTS pipeline runs in the separately-dispatched agent
+# worker (Johnny-9eh). ``legacy`` is the break-glass opt-out (Johnny-9xt):
+# the worker joins the Meet and runs the diagnostic audio-capture pump only —
+# the in-worker pipeline was removed in Johnny-trt.43. The value is set by the
 # launcher (app.services.agent_dispatch.bridge_launch_environment), which mirrors
 # the same JOHNNY_ORCHESTRATOR vocabulary.
 ORCHESTRATOR_ENV = "JOHNNY_ORCHESTRATOR"
@@ -122,8 +123,9 @@ class BootstrapConfig:
     """Per-session engine (Johnny-wz5; default flipped in Johnny-n22):
     ``agentsession`` (default) or ``legacy``.
 
-    Defaulted to the proven agent path; ``legacy`` opts a session out to the
-    in-worker S2S (unified) pipeline.
+    Defaulted to the proven agent path; ``legacy`` is the break-glass
+    opt-out — join the Meet and run the diagnostic capture pump only (no
+    in-worker pipeline since Johnny-trt.43).
     """
 
 
@@ -377,26 +379,6 @@ async def _run_screenshot_loop(
         )
 
 
-def _provider_config_present(env: dict[str, str] | None = None) -> bool:
-    """Whether ``JOHNNY_PROVIDER_CONFIG`` contains a usable payload.
-
-    Empty string / ``{}`` / malformed JSON all count as absent, so the
-    bootstrap falls back to the logging-only capture pump rather than
-    crashing with a parse error mid-meeting.
-    """
-    import json as _json
-
-    src = env if env is not None else os.environ
-    raw = src.get("JOHNNY_PROVIDER_CONFIG", "").strip()
-    if not raw or raw == "{}":
-        return False
-    try:
-        parsed = _json.loads(raw)
-    except _json.JSONDecodeError:
-        return False
-    return isinstance(parsed, dict) and len(parsed) > 0
-
-
 async def _run_audio_capture_pump(
     bridge: MeetAudioBridge,
     *,
@@ -415,9 +397,9 @@ async def _run_audio_capture_pump(
     * Emits a log line every ``log_every_frames`` frames (default ~1s),
     * Surfaces silence (>3s without a frame) as a WARNING.
 
-    A future change will fork this stream into VAD → STT → LLM → TTS. For
-    Johnny-d2g step 1 just having the audio flowing + logged is the
-    user-visible diagnostic improvement.
+    This is the entire legacy-mode engine: a diagnostic tap that proves
+    meeting audio flows. The in-worker voice pipeline that used to consume
+    these frames was removed in Johnny-trt.43.
     """
     frame_count = 0
     byte_count = 0
@@ -626,14 +608,16 @@ async def run(config: BootstrapConfig) -> int:
             ) as session:
                 # 4. Select the per-session engine (Johnny-wz5).
                 #
-                # ``legacy`` (default): capture meeting audio here via the
-                # PulseAudio bridge (Johnny-d2g) and run the STT→LLM→TTS voice
-                # pipeline in-worker. ``agentsession``: the meet-worker is a pure
-                # audio bridge into this session's LiveKit room — the pipeline
-                # runs in the separately-dispatched agent worker (Johnny-9eh).
-                # MeetRoomBridge owns its OWN MeetAudioBridge against the same
-                # PulseAudio sinks, so in bridge mode we do NOT also start the
-                # in-worker capture bridge (two would fight for the same sinks).
+                # ``agentsession`` (default): the meet-worker is a pure audio
+                # bridge into this session's LiveKit room — the pipeline runs
+                # in the separately-dispatched agent worker (Johnny-9eh).
+                # ``legacy`` (break-glass, Johnny-9xt): capture meeting audio
+                # via the PulseAudio bridge (Johnny-d2g) into the diagnostic
+                # logging pump — no in-worker pipeline exists since
+                # Johnny-trt.43. MeetRoomBridge owns its OWN MeetAudioBridge
+                # against the same PulseAudio sinks, so in bridge mode we do
+                # NOT also start the in-worker capture bridge (two would fight
+                # for the same sinks).
                 bridge: MeetAudioBridge | None = None
                 pump_stop = asyncio.Event()
                 shot_stop = asyncio.Event()
@@ -660,10 +644,14 @@ async def run(config: BootstrapConfig) -> int:
                         )
                         engine_task = asyncio.create_task(room_bridge.run(engine_stop))
                     else:
-                        # Legacy in-worker pipeline. Wire the audio bridge so we
-                        # actually capture meeting audio (Johnny-d2g). The bridge
+                        # Legacy break-glass mode: wire the audio bridge so we
+                        # still capture meeting audio (Johnny-d2g). The bridge
                         # spawns parec/pacat subprocesses against PulseAudio's
-                        # johnny_speaker sink and johnny_mic loopback.
+                        # johnny_speaker sink and johnny_mic loopback. The
+                        # capture pump only logs frame stats — the in-worker
+                        # voice pipeline was removed in Johnny-trt.43, so this
+                        # mode exists to keep a dispatch-failure session from
+                        # crash-looping (Johnny-9xt), not to converse.
                         bridge = MeetAudioBridge()
                         try:
                             await bridge.start()
@@ -679,41 +667,23 @@ async def run(config: BootstrapConfig) -> int:
                                 error=exc,
                             )
 
-                        # Either the voice pipeline OR the logging-only
-                        # capture pump runs — both call bridge.capture_frames()
-                        # and would compete for queue items. The pipeline is
-                        # the production path; the capture pump is a fallback
-                        # for diagnostics when no providers are configured.
-                        from johnny.meet_worker.pipeline_runner import (
-                            build_and_run_pipeline,
+                        log_stage(
+                            STAGE_AUDIO_BRIDGE,
+                            session_id=config.session_id,
+                            level=logging.WARNING,
+                            msg=(
+                                "orchestrator=legacy — running the diagnostic "
+                                "audio capture pump only (the in-worker voice "
+                                "pipeline was removed in Johnny-trt.43)"
+                            ),
                         )
-
-                        if _provider_config_present():
-                            engine_task = asyncio.create_task(
-                                build_and_run_pipeline(
-                                    bridge,
-                                    event_bus=bus,
-                                    session_id=config.session_id,
-                                    stop_event=engine_stop,
-                                )
-                            )
-                        else:
-                            log_stage(
-                                STAGE_AUDIO_BRIDGE,
+                        pump_task = asyncio.create_task(
+                            _run_audio_capture_pump(
+                                bridge,
                                 session_id=config.session_id,
-                                level=logging.WARNING,
-                                msg=(
-                                    "no provider payload set; running "
-                                    "audio capture pump only (no transcription)"
-                                ),
+                                stop_event=pump_stop,
                             )
-                            pump_task = asyncio.create_task(
-                                _run_audio_capture_pump(
-                                    bridge,
-                                    session_id=config.session_id,
-                                    stop_event=pump_stop,
-                                )
-                            )
+                        )
 
                     # Screenshot loop: every 15s save a frame so an
                     # operator can ``docker cp`` it out without crashing

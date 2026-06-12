@@ -30,7 +30,6 @@
 		deleteProvider,
 		downloadBlob,
 		exportProviders,
-		getPipelineSettings,
 		getProviderPackage,
 		groupedFields,
 		GROUP_LABEL,
@@ -42,7 +41,6 @@
 		listProviders,
 		listSchemas,
 		listSttCatalog,
-		PIPELINE_MODE_LABEL,
 		playSample,
 		previewLlmModels,
 		previewPlaySample,
@@ -55,14 +53,11 @@
 		sidecarHealth,
 		sttTestRecording,
 		testProvider,
-		updatePipelineSettings,
 		updateProvider,
 		validateClient,
 		ValidationFailure,
 		type LlmModel,
 		type PackageStatus,
-		type PipelineMode,
-		type PipelineSettings,
 		type Provider,
 		type ProviderKind,
 		type ProviderPreviewPayload,
@@ -99,15 +94,13 @@
 	const KIND_SHORT_LABEL: Record<ProviderKind, string> = {
 		stt: 'STT',
 		llm: 'LLM',
-		tts: 'TTS',
-		s2s: 'S2S'
+		tts: 'TTS'
 	};
 
 	const KIND_DESCRIPTION: Record<ProviderKind, string> = {
 		stt: 'Speech-to-text — transcribes meeting audio',
 		llm: 'Language model — drafts decisions and replies',
-		tts: 'Text-to-speech — voices Johnny in the meeting',
-		s2s: 'Speech-to-speech — unified realtime provider (OpenAI Realtime, Gemini Live)'
+		tts: 'Text-to-speech — voices Johnny in the meeting'
 	};
 
 	// Safety cap for the mic recorder (Johnny-ckz.12). The operator can
@@ -121,13 +114,6 @@
 	let providersList = $state<Provider[]>([]);
 	let loading = $state(false);
 	let error = $state<string | null>(null);
-
-	// Pipeline mode toggle state (Johnny-ckz.21). Persisted to a singleton
-	// row on the backend via PUT /providers/pipeline; the next session
-	// (Meet or playground) picks up the new value when it spawns.
-	let pipelineSettings = $state<PipelineSettings | null>(null);
-	let pipelineModeSubmitting = $state(false);
-	let pipelineModeError = $state<string | null>(null);
 
 	let mode = $state<ModalMode>('closed');
 	let draftKind = $state<ProviderKind | null>(null);
@@ -205,18 +191,12 @@
 		loading = true;
 		error = null;
 		try {
-			const [schemasResp, providersResp, sttCatalogResp, pipelineResp] = await Promise.all([
+			const [schemasResp, providersResp, sttCatalogResp] = await Promise.all([
 				listSchemas(),
 				listProviders(),
-				listSttCatalog().catch(() => null),
-				getPipelineSettings().catch(() => null)
+				listSttCatalog().catch(() => null)
 			]);
-			providersList = [
-				...providersResp.stt,
-				...providersResp.llm,
-				...providersResp.tts,
-				...providersResp.s2s
-			];
+			providersList = [...providersResp.stt, ...providersResp.llm, ...providersResp.tts];
 			const merged: CatalogEntry[] = [];
 			if (sttCatalogResp) {
 				for (const entry of sttCatalogResp.providers) {
@@ -229,28 +209,11 @@
 			}
 			for (const s of (schemasResp as ProviderSchemaList).llm) merged.push(schemaToEntry(s));
 			for (const s of (schemasResp as ProviderSchemaList).tts) merged.push(schemaToEntry(s));
-			for (const s of (schemasResp as ProviderSchemaList).s2s) merged.push(schemaToEntry(s));
 			catalog = merged;
-			pipelineSettings = pipelineResp;
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
 			loading = false;
-		}
-	}
-
-	async function onSelectPipelineMode(next: PipelineMode) {
-		if (pipelineModeSubmitting) return;
-		if (pipelineSettings?.pipeline_mode === next) return;
-		pipelineModeSubmitting = true;
-		pipelineModeError = null;
-		try {
-			const updated = await updatePipelineSettings({ pipeline_mode: next });
-			pipelineSettings = updated;
-		} catch (e) {
-			pipelineModeError = e instanceof Error ? e.message : String(e);
-		} finally {
-			pipelineModeSubmitting = false;
 		}
 	}
 
@@ -1029,39 +992,10 @@
 	}
 
 	const groupedRows = $derived.by(() => {
-		const groups: Record<ProviderKind, Provider[]> = { stt: [], llm: [], tts: [], s2s: [] };
+		const groups: Record<ProviderKind, Provider[]> = { stt: [], llm: [], tts: [] };
 		for (const row of providersList) groups[row.kind].push(row);
 		return groups;
 	});
-
-	const pipelineMode = $derived<PipelineMode>(pipelineSettings?.pipeline_mode ?? 'split');
-
-	const activeS2sProvider = $derived(
-		groupedRows.s2s.find((row) => row.is_active) ?? null
-	);
-
-	const hasS2sProvider = $derived(groupedRows.s2s.length > 0);
-
-	// Kinds that drive the pipeline in the current mode. Switching modes
-	// does NOT delete the inactive mode's providers — they stay in the DB
-	// and are simply hidden / muted so the user can flip back without
-	// reconfiguring. The "inactive" rows render in a muted section below
-	// so the operator can still see them, edit them, and switch back.
-	const activeKindsForMode: Record<PipelineMode, ProviderKind[]> = {
-		split: ['stt', 'llm', 'tts'],
-		unified: ['s2s']
-	};
-	const inactiveKindsForMode: Record<PipelineMode, ProviderKind[]> = {
-		split: ['s2s'],
-		unified: ['stt', 'llm', 'tts']
-	};
-
-	const activeKinds = $derived(activeKindsForMode[pipelineMode]);
-	const inactiveKinds = $derived(inactiveKindsForMode[pipelineMode]);
-
-	const inactiveKindsWithRows = $derived(
-		inactiveKinds.filter((kind) => groupedRows[kind].length > 0)
-	);
 
 	onDestroy(() => {
 		stopPreview();
@@ -1077,7 +1011,7 @@
 <Page testId="providers-page">
 	<PageHeader
 		title="Providers"
-		description="Provider adapters Johnny uses during meetings. Pick a pipeline shape below, then wire the providers that shape needs. The modal handles configuration, testing, renaming, and deletion."
+		description="Provider adapters Johnny uses during meetings — one active STT, LLM, and TTS provider drive every session. The modal handles configuration, testing, renaming, and deletion."
 	>
 		{#snippet actions()}
 			<Button variant="outline" onclick={openExport} data-testid="export-button">
@@ -1099,126 +1033,6 @@
 		</Alert.Root>
 	{/if}
 
-	<section
-		class="flex flex-col gap-3 rounded-md border border-border bg-card px-5 py-4"
-		aria-label="Pipeline mode"
-		data-testid="pipeline-mode-section"
-	>
-		<div class="flex items-baseline justify-between gap-3">
-			<div class="flex flex-col gap-0.5">
-				<h2 class="m-0 text-sm font-semibold text-foreground">Pipeline mode</h2>
-				<p class="m-0 text-xs text-muted-foreground">
-					Split runs STT → LLM → TTS — three providers per turn. Unified hands
-					audio directly to a single speech-to-speech model. The choice
-					applies to live meetings and the /playground sandbox alike.
-				</p>
-			</div>
-			<span
-				class="text-[0.65rem] font-medium tracking-wide text-ink-subtle uppercase"
-				data-testid="pipeline-mode-current"
-			>
-				Current: {PIPELINE_MODE_LABEL[pipelineMode]}
-			</span>
-		</div>
-		<div
-			class="grid grid-cols-2 gap-2"
-			role="radiogroup"
-			aria-label="Pipeline mode"
-			data-testid="pipeline-mode-toggle"
-		>
-			<button
-				type="button"
-				role="radio"
-				aria-checked={pipelineMode === 'split'}
-				disabled={pipelineModeSubmitting}
-				onclick={() => onSelectPipelineMode('split')}
-				class="relative flex flex-col items-start gap-1 rounded-md border bg-surface-1 px-4 py-3 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:opacity-60"
-				class:border-foreground={pipelineMode === 'split'}
-				class:bg-surface-2={pipelineMode === 'split'}
-				class:border-border={pipelineMode !== 'split'}
-				class:hover:border-border-strong={pipelineMode !== 'split'}
-				data-testid="pipeline-mode-split"
-			>
-				{#if pipelineMode === 'split'}
-					<CheckIcon
-						class="absolute top-2.5 right-2.5 size-3.5 text-foreground"
-						aria-hidden="true"
-					/>
-				{/if}
-				<span class="font-mono text-xs text-ink-subtle">Split</span>
-				<span class="text-sm font-medium text-foreground">STT + LLM + TTS</span>
-				<span class="text-[0.7rem] text-muted-foreground">
-					Three swappable providers. Pick best-in-class for each stage; tune
-					each independently.
-				</span>
-			</button>
-			<button
-				type="button"
-				role="radio"
-				aria-checked={pipelineMode === 'unified'}
-				disabled={pipelineModeSubmitting}
-				onclick={() => onSelectPipelineMode('unified')}
-				class="relative flex flex-col items-start gap-1 rounded-md border bg-surface-1 px-4 py-3 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:opacity-60"
-				class:border-foreground={pipelineMode === 'unified'}
-				class:bg-surface-2={pipelineMode === 'unified'}
-				class:border-border={pipelineMode !== 'unified'}
-				class:hover:border-border-strong={pipelineMode !== 'unified'}
-				data-testid="pipeline-mode-unified"
-			>
-				{#if pipelineMode === 'unified'}
-					<CheckIcon
-						class="absolute top-2.5 right-2.5 size-3.5 text-foreground"
-						aria-hidden="true"
-					/>
-				{/if}
-				<span class="font-mono text-xs text-ink-subtle">Unified</span>
-				<span class="text-sm font-medium text-foreground">Speech-to-speech</span>
-				<span class="text-[0.7rem] text-muted-foreground">
-					One realtime provider (OpenAI Realtime, Gemini Live) handles audio
-					in + audio out. Lowest end-to-end latency.
-				</span>
-			</button>
-		</div>
-		{#if pipelineModeError}
-			<Alert.Root variant="destructive" data-testid="pipeline-mode-error">
-				<CircleAlertIcon />
-				<Alert.Description>{pipelineModeError}</Alert.Description>
-			</Alert.Root>
-		{/if}
-		{#if pipelineMode === 'unified' && !hasS2sProvider}
-			<Alert.Root data-testid="pipeline-mode-needs-s2s">
-				<CircleAlertIcon />
-				<Alert.Title>No S2S provider configured yet</Alert.Title>
-				<Alert.Description>
-					Unified mode needs a speech-to-speech provider. Click
-					<span class="font-medium text-foreground">Add provider</span>
-					above and pick <span class="font-mono">S2S</span> as the kind.
-				</Alert.Description>
-			</Alert.Root>
-		{:else if pipelineMode === 'unified' && !activeS2sProvider}
-			<Alert.Root data-testid="pipeline-mode-no-active-s2s">
-				<CircleAlertIcon />
-				<Alert.Title>No active S2S provider</Alert.Title>
-				<Alert.Description>
-					You have an S2S provider configured but none is marked active. Open
-					one below and click <span class="font-medium text-foreground">Activate</span>
-					so the next session can use it.
-				</Alert.Description>
-			</Alert.Root>
-		{:else if pipelineMode === 'unified' && activeS2sProvider}
-			<p
-				class="m-0 text-[0.7rem] text-muted-foreground"
-				data-testid="pipeline-mode-active-s2s"
-			>
-				Active S2S provider:
-				<span class="font-medium text-foreground">
-					{activeS2sProvider.display_name}
-				</span>
-				· next session — Meet or /playground — will use it.
-			</p>
-		{/if}
-	</section>
-
 	{#if !loading && providersList.length === 0}
 		<div
 			class="flex flex-col items-center gap-3 rounded-md border border-dashed border-border bg-surface-1 px-6 py-12 text-center"
@@ -1226,15 +1040,9 @@
 		>
 			<PackageIcon class="size-6 text-ink-subtle" />
 			<p class="m-0 max-w-[42ch] text-sm text-muted-foreground">
-				No providers configured.
-				{#if pipelineMode === 'unified'}
-					Click <span class="font-medium text-foreground">Add provider</span>
-					and pick <span class="font-mono">S2S</span> to wire up a
-					speech-to-speech adapter for unified mode.
-				{:else}
-					Click <span class="font-medium text-foreground">Add provider</span>
-					to wire Johnny up with an STT, LLM, or TTS adapter.
-				{/if}
+				No providers configured. Click
+				<span class="font-medium text-foreground">Add provider</span>
+				to wire Johnny up with an STT, LLM, or TTS adapter.
 			</p>
 			<Button onclick={openModalForNew} data-testid="empty-add-provider">
 				<PlusIcon />
@@ -1245,7 +1053,7 @@
 
 	{#if providersList.length > 0}
 		<div class="flex flex-col gap-8" data-testid="providers-list">
-			{#each activeKinds as kind (kind)}
+			{#each PROVIDER_KINDS as kind (kind)}
 				{@const rows = groupedRows[kind]}
 				{#if rows.length > 0}
 					<section
@@ -1338,100 +1146,6 @@
 				{/if}
 			{/each}
 
-			{#if pipelineMode === 'unified' && groupedRows.s2s.length === 0}
-				<section
-					class="flex flex-col items-start gap-2 rounded-md border border-dashed border-border bg-surface-1 px-4 py-4"
-					aria-label="Add S2S provider prompt"
-					data-testid="add-s2s-prompt"
-				>
-					<h2 class="m-0 text-sm font-semibold text-foreground">
-						No S2S provider yet
-					</h2>
-					<p class="m-0 text-xs text-muted-foreground">
-						Unified mode needs one speech-to-speech provider. Click below to
-						add one.
-					</p>
-					<Button onclick={openModalForNew} data-testid="add-s2s-button">
-						<PlusIcon />
-						Add S2S provider
-					</Button>
-				</section>
-			{/if}
-
-			{#if inactiveKindsWithRows.length > 0}
-				<section
-					class="flex flex-col gap-3 rounded-md border border-dashed border-border/60 bg-surface-1/30 px-4 py-4 opacity-80"
-					aria-label="Currently unused providers"
-					data-testid="inactive-kinds-section"
-				>
-					<div class="flex items-baseline justify-between">
-						<h2 class="m-0 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
-							Currently unused —
-							{pipelineMode === 'split' ? 'Unified mode' : 'Split mode'} providers
-						</h2>
-						<span class="text-[0.65rem] text-ink-subtle">
-							preserved · used if you switch back
-						</span>
-					</div>
-					<p class="m-0 text-xs text-muted-foreground">
-						These rows belong to the other pipeline shape — they stay
-						configured so you can flip the toggle without losing settings.
-					</p>
-					{#each inactiveKindsWithRows as kind (kind)}
-						{@const rows = groupedRows[kind]}
-						<div class="flex flex-col gap-2" data-testid={`inactive-group-${kind}`}>
-							<div class="flex items-baseline justify-between px-1">
-								<h3 class="m-0 text-xs font-medium text-muted-foreground">
-									{KIND_SHORT_LABEL[kind]} <span class="text-ink-subtle">·</span>
-									<span class="font-normal text-ink-subtle">
-										{KIND_DESCRIPTION[kind]}
-									</span>
-								</h3>
-								<span class="text-[0.65rem] text-ink-subtle">{rows.length}</span>
-							</div>
-							<ul class="m-0 flex list-none flex-col gap-1.5 p-0">
-								{#each rows as row (row.id)}
-									{@const entry = catalogEntryFor(row.kind, row.provider_name)}
-									<li
-										class="flex items-stretch gap-1 rounded-md border border-border/60 bg-card/60 transition-colors duration-150 focus-within:border-border hover:border-border hover:bg-surface-2"
-									>
-										<button
-											type="button"
-											onclick={() => openModalForEdit(row)}
-											class="flex min-w-0 flex-1 items-center gap-3 rounded-md px-4 py-2.5 text-left outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-											data-testid={`inactive-row-${row.kind}-${row.id}`}
-										>
-											<div class="flex min-w-0 flex-1 flex-col gap-1">
-												<div class="flex items-center gap-2">
-													<span class="truncate text-sm text-muted-foreground">
-														{row.display_name}
-													</span>
-													{#if row.is_active}
-														<span
-															class="inline-flex shrink-0 items-center gap-1 rounded-full border border-border/60 bg-surface-3/60 px-1.5 py-0.5 text-[0.6rem] font-medium text-muted-foreground"
-															title="Active default for {KIND_SHORT_LABEL[row.kind]} when {pipelineMode === 'split' ? 'Unified' : 'Split'} mode is selected"
-														>
-															<span>Active (other mode)</span>
-														</span>
-													{/if}
-												</div>
-												<div
-													class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[0.65rem] text-ink-subtle"
-												>
-													<span class="font-mono">
-														{entry?.display_name ?? row.provider_name}
-													</span>
-												</div>
-											</div>
-											<ChevronRightIcon class="size-4 shrink-0 text-ink-subtle" />
-										</button>
-									</li>
-								{/each}
-							</ul>
-						</div>
-					{/each}
-				</section>
-			{/if}
 		</div>
 	{/if}
 </Page>

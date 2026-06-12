@@ -66,6 +66,22 @@ after each iteration and it's included in prompts for context.
   speak follow-ups are grounded (say() text rides the chat history). To
   reproduce: poll WS frames for task_completed in-page and send the
   follow-up within ms (typed asks make the race trivially winnable).
+- **Removing a value from a DB-backed StrEnum is a LOAD-time hazard** (trt.43,
+  ProviderKind.S2S removal): with SAEnum(native_enum=False) the coercion runs in
+  the result processor, so ANY select that can return a historical row with the
+  retired value raises LookupError — including startup paths (providers_seed
+  `_index_existing`). The full recipe: (1) migration deactivates + logs the rows
+  (keep them — deleting loses credentials/history); (2) leave the old widened
+  CHECK in place (narrowing fails on the historical rows); (3) scope EVERY
+  ORM select to `kind.in_(list(Enum))` (list API, export, loader, seeder);
+  (4) pin it with a raw-SQL test that inserts the retired value and asserts
+  fail-fast-not-crash. grep for `select(Model)` to find unfiltered loads.
+- **`config/providers.json` is the with-secrets reseed file** (Johnny-d3e flow):
+  `GET /providers/export?with_secrets=true` → save there → `./stop.sh &&
+  ./run.sh` re-applies it on api boot, so clean-install validation keeps the
+  canonical trio without hand-reconfiguring. It holds plaintext keys and is
+  gitignored (added in trt.43) — never commit it; providers.example.json is the
+  committed shape.
 - **Live-Meet capstones are operator-gated; an agent cannot self-run them**
   (trt.30): a real Meet join needs a human Google sign-in (`storage_state.json`
   in `johnny_google_auth_state`; noVNC/seed/upload ALL require real
@@ -341,4 +357,20 @@ after each iteration and it's included in prompts for context.
   - evaluate_script filePath saves the function's return value
     DOUBLE-encoded when you return JSON.stringify(...) — json.loads twice
     (or return the object directly) when post-processing saved frames.
+---
+
+## 2026-06-12 - Johnny-trt.43
+- **S2S/unified pipeline removed from the product surface** (operator reversal — re-introduction deferred to epic Johnny-20h on the AgentSession RealtimeModel design). Pre-removal SHA pinned in tombstones: `fc16a1e785595ff2fd1db6d60b56f07711c5ddae`.
+- Deleted: `app/providers/{s2s_base,gemini_live_s2s,openai_realtime_s2s,stub_s2s}.py`, `johnny/voice_pipeline/unified_pipeline.py`, `johnny/meet_worker/pipeline_runner.py`, the whole `johnny/e2e/` interrupt harness (its only runnable mode was unified S2S; split was already retired in Johnny-n22), unified replay driver (`run_replay` + `_ReplayS2S*` in `johnny/smoketest/replay.py`), `tests/fixtures/sessions/unified-demo/`, and 9 test files covering those paths.
+- `ProviderKind` is 3-kind again; `pipeline_mode` plumbing gone end-to-end: `SessionJobConfig` field + `JOHNNY_PIPELINE_MODE` env, `PipelineMode`/`PipelineSettings` ORM + `/providers/pipeline` API, `resolve/upsert_pipeline_mode`, `BrowserPipelineSpec.pipeline_mode`, scheduler/dispatch/docker-launcher threading, session-start overrides snapshot. `from_dict` ignores the retired key (old in-flight dispatch payloads parse).
+- Migration **0026**: drops `pipeline_settings`, deactivates historical `kind='s2s'` provider rows with a logged note per row (credentials preserved; 0010's widened CHECK left in place deliberately — narrowing would fail on those rows).
+- meet-worker `legacy` orchestrator mode is now join-and-capture-pump only (break-glass for the Johnny-9xt crash-loop pin) — comments updated everywhere legacy was described as "runs the in-worker pipeline".
+- Frontend: `s2s` kind, PipelineMode types/labels, the providers-page Split/Unified toggle + S2S sections, playground S2S override, LiveSession pipeline chip — all removed; svelte-check 0/0.
+- Docs: tombstone block at the top of `docs/PIPELINE.md` (+ §1/§2.2/§3.13 rewritten, ER/enum/migration tables updated); README providers note; REPLAY_HARNESS/LATENCY/livekit-room-auth/playground-deferral/.env.example/docker-compose comments updated.
+- Verified: backend 4022 passed (2 pre-existing wizard failures: api container has no docker CLI — fail identically on the unmodified tree); ruff clean for touched files; frontend 135 tests + build + svelte-check clean (1 pre-existing lint error in settings page); chrome-devtools browser run on dev AND on a full `./stop.sh && ./run.sh` clean install (fresh 0001→0026 migration chain, providers reseeded, prod playground split session converses; screenshots under `.validation/Johnny-trt.43/`).
+- Files changed: ~60 backend (app/johnny/tests/alembic), 6 frontend, 8 docs/config.
+- **Learnings:**
+  - **Removing a value from a DB-backed StrEnum (SAEnum, native_enum=False) crashes at row LOAD, not at write** — `LookupError` in the result processor. Every `select(ProviderCredential)` without a kind filter had to be scoped to `kind.in_(list(ProviderKind))` (providers list API, export endpoint, loader, seeder `_index_existing` — the last one runs during startup seeding, so one historical s2s row would have bricked boot). Migration deactivation alone is NOT enough.
+  - `config/providers.json` (the with-secrets export the api auto-reseeds from after `down -v`) was NOT gitignored — added the rule before the engine's auto-commit could capture plaintext keys.
+  - The clean-install gate is the real prize: the fresh-DB alembic chain (0009 creates → 0026 drops `pipeline_settings`) only proves itself on `./stop.sh && ./run.sh`.
 ---

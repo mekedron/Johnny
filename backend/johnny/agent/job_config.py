@@ -19,10 +19,9 @@ Deliberately **stdlib-only** (no ``livekit`` import, no ``app.providers`` /
 ``sqlalchemy``): the contract is shared by the API (which builds it), the agent
 worker (which parses it), and unit tests, so it must import cheaply everywhere —
 the same import-safety discipline the top-level :mod:`johnny.agent` package
-holds. The mode / pipeline-mode literals are duplicated here rather than
-imported from the 138 KB the legacy split engine module; a drift guard in
-``tests/agent/test_job_config.py`` asserts they still match the canonical
-definitions.
+holds. The mode literals are duplicated here rather than imported from the
+heavyweight engine modules; a drift guard in ``tests/agent/test_job_config.py``
+asserts they still match the canonical definitions.
 """
 
 from __future__ import annotations
@@ -34,8 +33,7 @@ from typing import Any
 
 # --- Behaviour vocabularies -------------------------------------------------
 # These mirror the canonical constants in
-# ``johnny.voice_pipeline.reasoning`` (LISTEN_ONLY_MODE, …) and
-# ``johnny.meet_worker.pipeline_runner`` (SPLIT_MODE / UNIFIED_MODE). They are
+# ``johnny.voice_pipeline.reasoning`` (LISTEN_ONLY_MODE, …). They are
 # re-declared here to keep this module dependency-free; the drift guard test
 # fails if the canonical values ever diverge.
 LISTEN_ONLY_MODE = "listen_only"
@@ -58,11 +56,6 @@ SUPPORTED_MODES: frozenset[str] = frozenset(
     }
 )
 DEFAULT_MODE = LISTEN_ONLY_MODE
-
-SPLIT_PIPELINE_MODE = "split"
-UNIFIED_PIPELINE_MODE = "unified"
-SUPPORTED_PIPELINE_MODES: frozenset[str] = frozenset({SPLIT_PIPELINE_MODE, UNIFIED_PIPELINE_MODE})
-DEFAULT_PIPELINE_MODE = SPLIT_PIPELINE_MODE
 
 # --- Room / identity naming -------------------------------------------------
 # One LiveKit room per Meet session, named off the durable bot_session_id so
@@ -113,7 +106,6 @@ ENV_CALENDAR_CONTEXT = "JOHNNY_CALENDAR_CONTEXT"
 ENV_CALENDAR_ATTACHMENTS = "JOHNNY_CALENDAR_ATTACHMENTS"
 ENV_PRIOR_SESSION_CONTEXT = "JOHNNY_PRIOR_SESSION_CONTEXT"
 ENV_PROVIDER_CONFIG = "JOHNNY_PROVIDER_CONFIG"
-ENV_PIPELINE_MODE = "JOHNNY_PIPELINE_MODE"
 ENV_REDIS_URL = "JOHNNY_REDIS_URL"
 # Room name: reuse the existing LiveKitTransport env var so the bridge and the
 # agent agree without a new variable (johnny.voice_pipeline.livekit_transport).
@@ -144,8 +136,7 @@ class SessionJobConfig:
     * **correlation / routing** — ``bot_session_id`` (the durable session row,
       also the source of the room name), ``room_name``, ``meet_link`` and the
       optional ``meeting_config_id`` / ``calendar_event_id`` / ``account_id``;
-    * **behaviour** — ``mode`` (one of :data:`SUPPORTED_MODES`) and
-      ``pipeline_mode`` (``split`` / ``unified``);
+    * **behaviour** — ``mode`` (one of :data:`SUPPORTED_MODES`);
     * **prompt assembly** — ``instructions`` / ``personality_prompt`` /
       ``context`` / ``calendar_context`` / ``calendar_attachments_text`` /
       ``prior_session_context``, the inputs to
@@ -166,7 +157,6 @@ class SessionJobConfig:
     calendar_event_id: int | None = None
     account_id: int | None = None
     mode: str = DEFAULT_MODE
-    pipeline_mode: str = DEFAULT_PIPELINE_MODE
     instructions: str = ""
     personality_prompt: str = ""
     context: str = ""
@@ -204,9 +194,10 @@ class SessionJobConfig:
 
         Raises :class:`ValueError` on a missing/blank ``bot_session_id`` or
         ``room_name`` (the two fields with no safe default) or an unknown
-        ``mode`` / ``pipeline_mode`` — the wire format is validated strictly so
-        a malformed dispatch fails loud at the agent rather than silently
-        mis-driving a meeting.
+        ``mode`` — the wire format is validated strictly so a malformed
+        dispatch fails loud at the agent rather than silently mis-driving a
+        meeting. Unknown keys (e.g. the retired ``pipeline_mode``,
+        Johnny-trt.43) are ignored.
         """
         if "bot_session_id" not in data or data["bot_session_id"] in (None, ""):
             raise ValueError("SessionJobConfig requires bot_session_id")
@@ -216,12 +207,6 @@ class SessionJobConfig:
         mode = str(data.get("mode") or DEFAULT_MODE)
         if mode not in SUPPORTED_MODES:
             raise ValueError(f"unknown mode {mode!r}; expected one of {sorted(SUPPORTED_MODES)}")
-        pipeline_mode = str(data.get("pipeline_mode") or DEFAULT_PIPELINE_MODE)
-        if pipeline_mode not in SUPPORTED_PIPELINE_MODES:
-            raise ValueError(
-                f"unknown pipeline_mode {pipeline_mode!r}; expected one of "
-                f"{sorted(SUPPORTED_PIPELINE_MODES)}"
-            )
         provider_config = data.get("provider_config") or {}
         if not isinstance(provider_config, Mapping):
             raise ValueError("provider_config must be a JSON object")
@@ -233,7 +218,6 @@ class SessionJobConfig:
             calendar_event_id=_coerce_optional_int(data.get("calendar_event_id")),
             account_id=_coerce_optional_int(data.get("account_id")),
             mode=mode,
-            pipeline_mode=pipeline_mode,
             instructions=str(data.get("instructions") or ""),
             personality_prompt=str(data.get("personality_prompt") or ""),
             context=str(data.get("context") or ""),
@@ -269,9 +253,9 @@ class SessionJobConfig:
         :meth:`app.services.docker_launcher.DockerContainerLauncher.
         _build_environment` so the dispatch path (Johnny-7we) can construct a
         config from the same data the meet-worker already receives. Lenient
-        like the launcher: a blank ``JOHNNY_MODE`` becomes ``listen_only`` and a
-        blank ``JOHNNY_PIPELINE_MODE`` becomes ``split``; the room name falls
-        back to :func:`room_name_for_session` when ``LIVEKIT_ROOM`` is unset.
+        like the launcher: a blank ``JOHNNY_MODE`` becomes ``listen_only``; the
+        room name falls back to :func:`room_name_for_session` when
+        ``LIVEKIT_ROOM`` is unset.
         """
         session_id = _int_or_none(environ.get(ENV_SESSION_ID))
         if session_id is None:
@@ -279,7 +263,6 @@ class SessionJobConfig:
         room_name = (environ.get(ENV_ROOM) or "").strip() or room_name_for_session(session_id)
         provider_config = _parse_provider_config(environ.get(ENV_PROVIDER_CONFIG))
         mode = (environ.get(ENV_MODE) or "").strip() or DEFAULT_MODE
-        pipeline_mode = (environ.get(ENV_PIPELINE_MODE) or "").strip() or DEFAULT_PIPELINE_MODE
         return cls(
             bot_session_id=session_id,
             room_name=room_name,
@@ -288,7 +271,6 @@ class SessionJobConfig:
             calendar_event_id=_int_or_none(environ.get(ENV_CALENDAR_EVENT_ID)),
             account_id=_int_or_none(environ.get(ENV_ACCOUNT_ID)),
             mode=mode,
-            pipeline_mode=pipeline_mode,
             instructions=environ.get(ENV_INSTRUCTIONS, ""),
             personality_prompt=environ.get(ENV_PERSONALITY_PROMPT, ""),
             context=environ.get(ENV_CONTEXT, ""),
@@ -315,7 +297,6 @@ class SessionJobConfig:
             ENV_CALENDAR_EVENT_ID: _id_to_env(self.calendar_event_id),
             ENV_ACCOUNT_ID: _id_to_env(self.account_id),
             ENV_MODE: self.mode,
-            ENV_PIPELINE_MODE: self.pipeline_mode,
             ENV_INSTRUCTIONS: self.instructions,
             ENV_PERSONALITY_PROMPT: self.personality_prompt,
             ENV_CONTEXT: self.context,
@@ -362,15 +343,11 @@ __all__ = [
     "AUTONOMOUS_MODE",
     "BRIDGE_IDENTITY_PREFIX",
     "DEFAULT_MODE",
-    "DEFAULT_PIPELINE_MODE",
     "LIMITED_AUTO_SPEAK_MODE",
     "LISTEN_ONLY_MODE",
     "ROOM_NAME_PREFIX",
-    "SPLIT_PIPELINE_MODE",
     "SUGGEST_ONLY_MODE",
     "SUPPORTED_MODES",
-    "SUPPORTED_PIPELINE_MODES",
-    "UNIFIED_PIPELINE_MODE",
     "SessionJobConfig",
     "agent_identity_for_session",
     "bridge_identity_for_session",

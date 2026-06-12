@@ -25,7 +25,6 @@ from app.db.models import (
     CalendarEvent,
     GoogleAccount,
     MeetingConfig,
-    PipelineSettings,
     ProfileTemplate,
 )
 from app.services.meeting_lifecycle import (
@@ -60,7 +59,6 @@ def engine() -> sa.Engine:
             ProfileTemplate.__table__,  # type: ignore[list-item]
             MeetingConfig.__table__,  # type: ignore[list-item]
             BotSession.__table__,  # type: ignore[list-item]
-            PipelineSettings.__table__,  # type: ignore[list-item]
         ],
     )
     return eng

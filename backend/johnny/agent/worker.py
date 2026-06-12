@@ -69,8 +69,8 @@ async def entrypoint(ctx: JobContext) -> None:
     """Run one dispatched Meet session end-to-end (the per-job entrypoint).
 
     Parses the dispatch metadata, assembles + starts the agent, and arms the
-    empty-room shutdown. A malformed payload or an un-buildable split session
-    (unified payload / missing provider) is logged and the job is abandoned cleanly
+    empty-room shutdown. A malformed payload or an un-buildable session
+    (missing provider) is logged and the job is abandoned cleanly
     rather than crashing the shared worker.
     """
     config = _parse_job_config(ctx)
@@ -78,11 +78,10 @@ async def entrypoint(ctx: JobContext) -> None:
         return
     session_id = str(config.bot_session_id)
     logger.info(
-        "agent worker: dispatched session=%s room=%s mode=%s pipeline_mode=%s",
+        "agent worker: dispatched session=%s room=%s mode=%s",
         session_id,
         config.room_name,
         config.mode,
-        config.pipeline_mode,
     )
 
     vad = _prewarmed_vad(ctx)
@@ -99,8 +98,8 @@ async def entrypoint(ctx: JobContext) -> None:
         )
     except AgentSessionSetupError:
         logger.exception(
-            "agent worker: cannot assemble a split AgentSession for session=%s — "
-            "abandoning job (unified/S2S or an under-configured payload)",
+            "agent worker: cannot assemble an AgentSession for session=%s — "
+            "abandoning job (under-configured payload)",
             session_id,
         )
         return

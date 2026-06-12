@@ -320,7 +320,14 @@ def parse_providers_file(path: Path) -> list[ProviderSeedEntry]:
 def _index_existing(
     session: Session,
 ) -> dict[tuple[str, str, str], ProviderCredential]:
-    rows = session.scalars(select(ProviderCredential)).all()
+    # Live kinds only: a historical ``kind='s2s'`` row (tombstoned by
+    # Johnny-trt.43, deactivated in migration 0026) would crash the enum
+    # coercion at load — and this index runs during startup seeding.
+    rows = session.scalars(
+        select(ProviderCredential).where(
+            ProviderCredential.kind.in_(list(ProviderKind))
+        )
+    ).all()
     return {
         (
             r.kind.value if isinstance(r.kind, ProviderKind) else str(r.kind),

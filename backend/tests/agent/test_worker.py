@@ -218,7 +218,7 @@ async def test_entrypoint_abandons_on_setup_error(monkeypatch: pytest.MonkeyPatc
     from johnny.agent.adapters.factory import AgentSessionSetupError
 
     async def _boom(*_a: Any, **_k: Any) -> Any:
-        raise AgentSessionSetupError("unified payload")
+        raise AgentSessionSetupError("under-configured payload")
 
     monkeypatch.setattr(worker, "build_agent_runtime", _boom)
     ctx = _FakeCtx(_valid_metadata())

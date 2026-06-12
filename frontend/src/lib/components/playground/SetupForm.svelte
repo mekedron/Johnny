@@ -198,65 +198,35 @@
 						</p>
 					</div>
 
-					{#if controller.pipelineSettings?.pipeline_mode === 'unified'}
-						<div class="grid gap-3 sm:grid-cols-1">
+					<div class="grid gap-3 sm:grid-cols-3">
+						{#each ['stt', 'llm', 'tts'] as const as kind (kind)}
+							{@const list = controller.providers[kind]}
 							<div class="flex flex-col gap-1.5">
-								<label for="pg-s2s" class="text-sm leading-none font-medium text-foreground">
-									S2S provider
+								<label for={`pg-${kind}`} class="text-sm leading-none font-medium text-foreground">
+									{kind.toUpperCase()} provider
 								</label>
 								<select
-									id="pg-s2s"
-									data-testid="playground-s2s-override"
-									value={controller.providerOverrides.s2s ?? ''}
+									id={`pg-${kind}`}
+									data-testid={`playground-${kind}-override`}
+									value={controller.providerOverrides[kind as ProviderKind] ?? ''}
 									class="{FIELD_CLASS} h-9"
 									onchange={(e) => {
 										const v = (e.target as HTMLSelectElement).value;
-										controller.providerOverrides.s2s = v === '' ? null : Number(v);
+										controller.providerOverrides[kind as ProviderKind] =
+											v === '' ? null : Number(v);
 									}}
 								>
 									<option value="">Use active default</option>
-									{#each controller.providers.s2s as p (p.id)}
+									{#each list as p (p.id)}
 										<option value={p.id}>{p.display_name}{p.is_active ? ' · active' : ''}</option>
 									{/each}
 								</select>
 							</div>
-						</div>
-						<p class="m-0 text-xs text-muted-foreground">
-							Pipeline is in <span class="font-medium text-foreground">Unified (S2S)</span>
-							mode — STT/LLM/TTS overrides are not used. Change the pipeline shape on the
-							<a href="/providers" class="underline">Providers page</a>.
-						</p>
-					{:else}
-						<div class="grid gap-3 sm:grid-cols-3">
-							{#each ['stt', 'llm', 'tts'] as const as kind (kind)}
-								{@const list = controller.providers[kind]}
-								<div class="flex flex-col gap-1.5">
-									<label for={`pg-${kind}`} class="text-sm leading-none font-medium text-foreground">
-										{kind.toUpperCase()} provider
-									</label>
-									<select
-										id={`pg-${kind}`}
-										data-testid={`playground-${kind}-override`}
-										value={controller.providerOverrides[kind as ProviderKind] ?? ''}
-										class="{FIELD_CLASS} h-9"
-										onchange={(e) => {
-											const v = (e.target as HTMLSelectElement).value;
-											controller.providerOverrides[kind as ProviderKind] =
-												v === '' ? null : Number(v);
-										}}
-									>
-										<option value="">Use active default</option>
-										{#each list as p (p.id)}
-											<option value={p.id}>{p.display_name}{p.is_active ? ' · active' : ''}</option>
-										{/each}
-									</select>
-								</div>
-							{/each}
-						</div>
-						<p class="m-0 text-xs text-muted-foreground">
-							Provider overrides apply for this session only — global active rows are not touched.
-						</p>
-					{/if}
+						{/each}
+					</div>
+					<p class="m-0 text-xs text-muted-foreground">
+						Provider overrides apply for this session only — global active rows are not touched.
+					</p>
 				</div>
 			{/if}
 		</div>

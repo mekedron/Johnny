@@ -108,7 +108,6 @@ from app.db.models import (
     GoogleAccount,
     MeetingConfig,
     Personality,
-    PipelineSettings,
     ProfileTemplate,
     ProviderCredential,
     TranscriptChunk,
@@ -177,7 +176,6 @@ def engine() -> sa.Engine:
             TranscriptChunk.__table__,  # type: ignore[list-item]
             AgentDecision.__table__,  # type: ignore[list-item]
             AgentUtterance.__table__,  # type: ignore[list-item]
-            PipelineSettings.__table__,  # type: ignore[list-item]
         ],
     )
     return eng

@@ -4,7 +4,7 @@ The producer half of the LiveKit-era session threading: the API already
 assembles everything one Meet session needs into a
 :class:`~app.services.session_scheduler.LaunchContext` (active providers with the
 personality override applied, the assembled instructions / personality prompt /
-calendar + cross-session context, the mode + pipeline mode). This module turns that
+calendar + cross-session context, the mode). This module turns that
 :class:`LaunchContext` into the dispatch contract
 (:class:`~johnny.agent.job_config.SessionJobConfig`) and hands it to the LiveKit
 agent worker via :func:`~johnny.agent.dispatch.dispatch_agent`, so the same config
@@ -32,7 +32,6 @@ from typing import TYPE_CHECKING
 
 from johnny.agent.job_config import (
     DEFAULT_MODE,
-    DEFAULT_PIPELINE_MODE,
     SessionJobConfig,
     room_name_for_session,
 )
@@ -49,8 +48,10 @@ logger = logging.getLogger(__name__)
 # default flipped to ``agentsession`` in Johnny-n22). ``agentsession`` (the
 # default) dispatches the LiveKit agent worker AND switches the spawned
 # meet-worker to pure-bridge mode (:func:`bridge_launch_environment`).
-# ``legacy`` opts a session out of the agent worker and runs the in-worker S2S
-# (unified) pipeline only — a single env flip is the rollback.
+# ``legacy`` opts a session out of the agent worker: the meet-worker joins and
+# runs its diagnostic audio-capture pump only (the in-worker pipeline was
+# removed in Johnny-trt.43). It survives solely as the break-glass pin that
+# stops a dispatch-failure crash-loop (Johnny-9xt).
 ENV_ORCHESTRATOR = "JOHNNY_ORCHESTRATOR"
 ORCHESTRATOR_AGENTSESSION = "agentsession"
 ORCHESTRATOR_LEGACY = "legacy"
@@ -85,10 +86,10 @@ def session_job_config_from_launch_context(
     approval-gate wiring) is not on the launch context — it lives on the launcher —
     so the caller passes it in.
 
-    A blank ``mode`` / ``pipeline_mode`` (the launch context's struct defaults)
-    coerces to the contract defaults (``listen_only`` / ``split``), matching the
-    leniency of :meth:`SessionJobConfig.from_env` so an under-configured session
-    degrades identically on either transport.
+    A blank ``mode`` (the launch context's struct default) coerces to the
+    contract default (``listen_only``), matching the leniency of
+    :meth:`SessionJobConfig.from_env` so an under-configured session degrades
+    identically on either transport.
     """
     return SessionJobConfig(
         bot_session_id=ctx.bot_session_id,
@@ -98,7 +99,6 @@ def session_job_config_from_launch_context(
         calendar_event_id=ctx.calendar_event_id,
         account_id=ctx.identity_account_id,
         mode=ctx.mode or DEFAULT_MODE,
-        pipeline_mode=ctx.pipeline_mode or DEFAULT_PIPELINE_MODE,
         instructions=ctx.instructions,
         personality_prompt=ctx.personality_prompt,
         context=ctx.context,
@@ -143,8 +143,9 @@ def agent_orchestrator_enabled(environ: Mapping[str, str] | None = None) -> bool
 
     Reads ``JOHNNY_ORCHESTRATOR`` (default :data:`DEFAULT_ORCHESTRATOR` =
     ``agentsession`` since Johnny-n22); the agent worker is *on by default* and
-    only the exact value ``legacy`` opts a session out (running the in-worker S2S
-    pipeline instead). A typo'd / unrecognised value fails safe to the proven
+    only the exact value ``legacy`` opts a session out (the meet-worker then
+    joins and captures audio for diagnostics only — the in-worker pipeline was
+    removed in Johnny-trt.43). A typo'd / unrecognised value fails safe to the proven
     agent path. The single ``legacy`` env flip is the rollback.
     """
     src = environ if environ is not None else os.environ
@@ -163,8 +164,8 @@ def bridge_launch_environment(
     spawned container's environment by
     :meth:`app.services.docker_launcher.DockerContainerLauncher._build_environment`.
 
-    * ``legacy`` mode → ``{JOHNNY_ORCHESTRATOR: legacy}``: the meet-worker runs
-      the in-worker voice pipeline. The flag is pinned **explicitly** (not an
+    * ``legacy`` mode → ``{JOHNNY_ORCHESTRATOR: legacy}``: the meet-worker joins
+      and runs its diagnostic capture pump only. The flag is pinned **explicitly** (not an
       empty dict) because the meet-worker's absent-default is ``agentsession``
       (bootstrap.py) — leaving it unset would flip the spawned container to the
       opposite mode and crash it with no LiveKit token (Johnny-9xt).
@@ -179,7 +180,7 @@ def bridge_launch_environment(
     Defensive, mirroring :func:`maybe_dispatch_session_agent`: if the token can't
     be minted (missing ``LIVEKIT_API_KEY`` / ``LIVEKIT_API_SECRET``) the call
     degrades to ``{JOHNNY_ORCHESTRATOR: legacy}`` with a logged warning, so the
-    meet-worker falls back to the proven legacy pipeline rather than launching a
+    meet-worker falls back to join-and-capture rather than launching a
     dead bridge. ``room_auth`` is imported lazily so this module stays
     ``livekit``-free at import time.
     """
@@ -190,7 +191,7 @@ def bridge_launch_environment(
         # ``agentsession`` (bootstrap.py) — the opposite of what the API intends
         # — so it would try to build a LiveKit room bridge with no token and
         # crash-loop (exit 3, Johnny-9xt). Pinning legacy keeps both halves in
-        # agreement: the meet-worker runs the in-worker pipeline.
+        # agreement: the meet-worker joins and idles on the capture pump.
         return {ENV_ORCHESTRATOR: ORCHESTRATOR_LEGACY}
 
     from johnny.agent.job_config import bridge_identity_for_session
@@ -207,7 +208,7 @@ def bridge_launch_environment(
     except Exception:
         logger.exception(
             "bridge token mint failed for bot_session_id=%s; the meet-worker "
-            "will fall back to the legacy pipeline for this session",
+            "will fall back to legacy join-and-capture for this session",
             bot_session_id,
         )
         # Pin legacy (not {}) for the same reason as the disabled branch above:

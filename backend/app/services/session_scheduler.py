@@ -177,13 +177,6 @@ class LaunchContext:
     summary" prompt line.
     """
     provider_config: dict[str, Any] = field(default_factory=dict)
-    pipeline_mode: str = "split"
-    """Pipeline shape — ``split`` (STT→LLM→TTS) or ``unified`` (S2S) (Johnny-ckz.17).
-
-    Defaults to ``split`` so the existing scheduler path is unchanged.
-    The Docker launcher forwards this to the meet-worker via the
-    ``JOHNNY_PIPELINE_MODE`` env var.
-    """
 
 
 @dataclass(frozen=True)
@@ -465,17 +458,12 @@ async def start_session_for_meeting(
     # bot still joins — it just runs in listen-only mode for that
     # session.
     provider_payload: dict[str, Any] = {}
-    pipeline_mode_value = "split"
     personality_prompt = ""
     try:
         from app.security.crypto import CryptoError, get_crypto
-        from app.services.provider_payload import (
-            build_provider_payload,
-            resolve_pipeline_mode,
-        )
+        from app.services.provider_payload import build_provider_payload
 
         provider_payload = build_provider_payload(session, get_crypto())
-        pipeline_mode_value = resolve_pipeline_mode(session).value
     except CryptoError as exc:
         logger.warning(
             "provider payload skipped — FERNET_KEY not configured (%s); "
@@ -582,7 +570,6 @@ async def start_session_for_meeting(
         calendar_attachments_text=calendar_attachments,
         prior_session_context=prior_session_context,
         provider_config=provider_payload,
-        pipeline_mode=pipeline_mode_value,
     )
     try:
         result = await launcher.start(ctx)
@@ -604,11 +591,11 @@ async def start_session_for_meeting(
         result.container_name,
     )
 
-    # Agent-worker lifecycle (Johnny-9eh): when JOHNNY_ORCHESTRATOR=agentsession,
-    # dispatch the LiveKit agent into this session's room (one room per session).
-    # No-op + cheap in the default `legacy` mode, and defensive — a dispatch
-    # failure never breaks the meet-worker that is already running. The full
-    # per-session engine selection (and the meet-worker→bridge switch) is Johnny-wz5.
+    # Agent-worker lifecycle (Johnny-9eh): when JOHNNY_ORCHESTRATOR=agentsession
+    # (the default), dispatch the LiveKit agent into this session's room (one
+    # room per session). Defensive — a dispatch failure never breaks the
+    # meet-worker that is already running. The full per-session engine
+    # selection (and the meet-worker→bridge switch) is Johnny-wz5.
     await maybe_dispatch_session_agent(ctx)
     return row
 

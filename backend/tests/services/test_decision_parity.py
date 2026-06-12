@@ -2,7 +2,7 @@
 
 The guard is a SQLAlchemy ``before_insert`` / ``before_update`` mapper event,
 so it covers *every* path that writes a decision row — the event-sourced
-subscriber, the ``SqlAlchemyDecisionSink``, the unified S2S runtime, and any
+subscriber, the ``SqlAlchemyDecisionSink``, and any
 test fixture — without each path re-implementing the check. A ``final_text``
 that diverges from ``decision_recommended_text`` is rejected at flush time
 unless both ``override_actor`` and ``divergence_reason`` are set, making a

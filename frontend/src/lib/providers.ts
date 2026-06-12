@@ -9,35 +9,17 @@
  * (HTTP 422) surface as field-level messages keyed by field name.
  */
 
-export type ProviderKind = 'stt' | 'llm' | 'tts' | 's2s';
+// The three pipeline kinds. A fourth 's2s' kind (unified speech-to-speech)
+// existed until Johnny-trt.43 removed the S2S surface; re-introduction is
+// deferred to epic Johnny-20h (tombstone in docs/PIPELINE.md).
+export type ProviderKind = 'stt' | 'llm' | 'tts';
 
-export const PROVIDER_KINDS: readonly ProviderKind[] = ['stt', 'llm', 'tts', 's2s'];
+export const PROVIDER_KINDS: readonly ProviderKind[] = ['stt', 'llm', 'tts'];
 
 export const PROVIDER_KIND_LABEL: Record<ProviderKind, string> = {
 	stt: 'STT (Speech-to-Text)',
 	llm: 'LLM (Language Model)',
-	tts: 'TTS (Text-to-Speech)',
-	s2s: 'S2S (Speech-to-Speech)'
-};
-
-/**
- * Pipeline shape (Johnny-ckz.17).
- *
- * - `split`: classic three-stage pipeline (STT → LLM → TTS) using the
- *   active provider per kind.
- * - `unified`: single bidirectional S2S provider (OpenAI GPT-Realtime,
- *   Gemini Live) using the active `s2s` row.
- *
- * Stored on the backend as a singleton `pipeline_settings` row and
- * fetched by the frontend to render the Split vs Unified toggle.
- */
-export type PipelineMode = 'split' | 'unified';
-
-export const PIPELINE_MODES: readonly PipelineMode[] = ['split', 'unified'];
-
-export const PIPELINE_MODE_LABEL: Record<PipelineMode, string> = {
-	split: 'Split (STT + LLM + TTS)',
-	unified: 'Unified (S2S realtime)'
+	tts: 'TTS (Text-to-Speech)'
 };
 
 export type FieldType =
@@ -106,7 +88,6 @@ export interface ProviderSchemaList {
 	stt: ProviderSchema[];
 	llm: ProviderSchema[];
 	tts: ProviderSchema[];
-	s2s: ProviderSchema[];
 }
 
 export interface Provider {
@@ -125,25 +106,6 @@ export interface ProviderList {
 	stt: Provider[];
 	llm: Provider[];
 	tts: Provider[];
-	s2s: Provider[];
-}
-
-/**
- * Pipeline settings returned by `GET /providers/pipeline` (Johnny-ckz.17).
- *
- * `pipeline_mode` is the persisted split-vs-unified toggle.
- * `s2s_provider` is the canonical name of the currently active S2S
- * row (null when no active row exists; the UI shows "configure an S2S
- * provider" prompt in that state so unified mode can't be selected
- * before a provider is wired).
- */
-export interface PipelineSettings {
-	pipeline_mode: PipelineMode;
-	s2s_provider: string | null;
-}
-
-export interface PipelineSettingsUpdatePayload {
-	pipeline_mode: PipelineMode;
 }
 
 export interface ProviderCreatePayload {
@@ -328,33 +290,6 @@ export function sidecarHealth(url: string): Promise<SidecarsHealthResponse> {
 
 export function listProviders(): Promise<ProviderList> {
 	return request<ProviderList>('/providers');
-}
-
-/**
- * Fetch the current pipeline settings (Johnny-ckz.17).
- *
- * Returns the persisted `pipeline_mode` plus the name of the active
- * S2S provider (or null when none is active). Used by the /providers
- * page to render the Split vs Unified toggle and to badge the toggle
- * disabled when the unified mode would have no provider to dispatch to.
- */
-export function getPipelineSettings(): Promise<PipelineSettings> {
-	return request<PipelineSettings>('/providers/pipeline');
-}
-
-/**
- * Update the persisted pipeline mode (Johnny-ckz.17).
- *
- * Next session start picks up the new mode; in-flight sessions stay on
- * whatever shape they were assembled with.
- */
-export function updatePipelineSettings(
-	payload: PipelineSettingsUpdatePayload
-): Promise<PipelineSettings> {
-	return request<PipelineSettings>('/providers/pipeline', {
-		method: 'PUT',
-		body: JSON.stringify(payload)
-	});
 }
 
 export function createProvider(payload: ProviderCreatePayload): Promise<Provider> {

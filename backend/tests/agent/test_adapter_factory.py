@@ -393,10 +393,23 @@ def test_empty_db_fails_fast(session: Session) -> None:
         build_session_adapters(session, registry=_registry())
 
 
-def test_active_s2s_only_is_not_enough(session: Session) -> None:
-    # Unified mode rows do not satisfy the split factory (it scopes the loader
-    # to STT/LLM/TTS); it must still fail fast rather than load the s2s row.
-    _insert(session, kind=ProviderKind.S2S, provider_name="openai_realtime", credentials={"k": "v"})
+def test_historical_s2s_row_is_ignored_not_crashed_on(session: Session) -> None:
+    # Johnny-trt.43 removed ProviderKind.S2S; a pre-removal DB may still hold a
+    # ``kind='s2s'`` row (deactivated by migration 0026, but possibly hand-
+    # reactivated). The loader's kind filter must skip it entirely — failing
+    # fast on the missing STT, never crashing on the enum coercion.
+    from sqlalchemy import text
+
+    session.execute(
+        text(
+            "INSERT INTO provider_credentials "
+            "(kind, provider_name, display_name, credentials_encrypted, "
+            " config, is_active, created_at, updated_at) "
+            "VALUES ('s2s', 'openai_realtime', 's2s:openai_realtime', "
+            "'{}', '{}', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+    )
+    session.commit()
 
     with pytest.raises(AgentSessionSetupError) as excinfo:
         build_session_adapters(session, registry=_registry())
@@ -781,8 +794,9 @@ def test_payload_empty_fails_fast() -> None:
 
 
 def test_payload_s2s_only_is_not_enough() -> None:
-    # A unified payload carries only the s2s entry; the split factory must still
-    # fail fast on the missing STT rather than reach for s2s.
+    # A stale dispatch payload (pre-Johnny-trt.43) could carry only an "s2s"
+    # entry; the factory must fail fast on the missing STT rather than reach
+    # for the retired key.
     payload = {"s2s": _entry(provider_name="openai_realtime")}
 
     with pytest.raises(AgentSessionSetupError) as excinfo:

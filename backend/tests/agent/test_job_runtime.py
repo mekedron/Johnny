@@ -52,14 +52,12 @@ from app.services.provider_payload import build_provider_payload
 from johnny.agent.job_config import (
     APPROVAL_REQUIRED_MODE,
     SUGGEST_ONLY_MODE,
-    UNIFIED_PIPELINE_MODE,
     SessionJobConfig,
 )
 
 pytest.importorskip("livekit.agents")
 
 from johnny.agent.adapters.factory import (  # noqa: E402
-    AgentSessionSetupError,
     SessionAdapters,
 )
 from johnny.agent.adapters.johnny_llm import JohnnyLLM  # noqa: E402
@@ -233,13 +231,6 @@ def test_build_adapters_for_job_honours_payload_override() -> None:
     assert adapters.llm.model == "claude"
 
 
-def test_build_adapters_for_job_rejects_unified() -> None:
-    job = _job(pipeline_mode=UNIFIED_PIPELINE_MODE)
-    with pytest.raises(AgentSessionSetupError) as excinfo:
-        build_session_adapters_for_job(job, registry=_registry())
-    assert "unified" in str(excinfo.value).lower()
-
-
 # --- Acceptance: provider/personality X -> adapters/instructions X ----------
 
 
@@ -352,7 +343,6 @@ def test_session_config_round_trips_provider_personality_mode(
         personality_prompt=resolution.personality_prompt,
         context="Internal sync.",
         provider_config=resolution.payload,
-        pipeline_mode="split",
     )
     config = session_job_config_from_launch_context(ctx, redis_url="redis://r:6379/0")
 

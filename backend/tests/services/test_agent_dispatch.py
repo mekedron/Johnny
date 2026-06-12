@@ -28,7 +28,6 @@ from app.services.agent_dispatch import (
 from app.services.session_scheduler import LaunchContext
 from johnny.agent.job_config import (
     DEFAULT_MODE,
-    DEFAULT_PIPELINE_MODE,
     SessionJobConfig,
 )
 
@@ -49,7 +48,6 @@ def _full_ctx() -> LaunchContext:
         calendar_attachments_text="doc body",
         prior_session_context="Last week: agreed on X.",
         provider_config={"llm": {"provider_name": "openai"}},
-        pipeline_mode="unified",
     )
 
 
@@ -63,7 +61,6 @@ def test_config_from_launch_context_maps_every_field() -> None:
     assert config.calendar_event_id == 99
     assert config.account_id == 3  # identity_account_id -> account_id
     assert config.mode == "approval_required"
-    assert config.pipeline_mode == "unified"
     assert config.instructions == "Stick to the agenda."
     assert config.personality_prompt == "[personality: Aria]\nWarm and concise."
     assert config.context == "Internal sync."
@@ -91,8 +88,8 @@ def test_config_copies_provider_config() -> None:
 
 
 def test_config_blank_mode_and_default_redis_are_lenient() -> None:
-    # LaunchContext's struct defaults (mode="" , pipeline_mode="split") coerce to
-    # the contract defaults, and redis defaults to None when not supplied.
+    # LaunchContext's struct default (mode="") coerces to
+    # the contract default, and redis defaults to None when not supplied.
     ctx = LaunchContext(
         bot_session_id=8,
         meeting_config_id=1,
@@ -103,7 +100,6 @@ def test_config_blank_mode_and_default_redis_are_lenient() -> None:
     )
     config = session_job_config_from_launch_context(ctx)
     assert config.mode == DEFAULT_MODE
-    assert config.pipeline_mode == DEFAULT_PIPELINE_MODE
     assert config.redis_url is None
 
 

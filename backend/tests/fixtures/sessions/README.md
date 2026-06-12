@@ -5,16 +5,16 @@ capture workflow, and the harness internals are documented in
 [docs/REPLAY_HARNESS.md](../../../../docs/REPLAY_HARNESS.md). Fixtures are
 discovered automatically (`discover_fixtures` globs `*/fixture.json`):
 committing a new directory adds it to `johnny-replay --all` and to the
-parametrised CI gates — `tests/smoketest/test_replay_harness.py` replays the
-unified (S2S) fixtures on `UnifiedVoicePipeline`,
-`tests/smoketest/test_replay_harness_agent.py` replays the split fixtures on
-the LiveKit-Agents engine (RouterGate + TurnLedger).
+parametrised CI gates — `tests/smoketest/test_replay_harness_agent.py` replays
+every fixture on the LiveKit-Agents engine (RouterGate + TurnLedger). All
+fixtures are `split`: the unified (S2S) runtime and its `unified-demo` fixture
+were removed with the S2S surface (Johnny-trt.43; restoration pointer in
+docs/PIPELINE.md).
 
 | Fixture | Runtime | What it pins |
 | --- | --- | --- |
 | `14/` | split | The flagship session-14 silent drop: turn 4's router hangs (`"simulate": "timeout"`) and must terminate in a durable `no_reply(stage_error)`. |
 | `3/` | split | A real known-good browser session captured from the DB — proves the harness reproduces real per-turn decisions + utterances. |
-| `unified-demo/` | unified | Hand-authored unified-S2S conversation — proves the unified pipeline never drops an assistant utterance (INV-U). |
 | `delegation-calendar/` | split | **Phase-3 parity baseline** — delegation- and status-shaped asks addressed to the bot, with small-talk pivots. |
 | `delegation-smalltalk/` | split | **Phase-3 parity baseline** — the negative half: delegation-/status-*shaped* utterances addressed to humans, plus a low-confidence suppression. |
 

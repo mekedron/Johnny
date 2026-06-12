@@ -50,8 +50,8 @@ Given a saved session, the harness:
    `split` session it synthesises one VAD-detectable tone burst per turn, lets
    the real `EnergyVAD` segment them, and the fake STT returns the recorded
    transcript for each segment — the same `router → answer → terminal` path a
-   live meeting takes. For a `unified` session it drives the real
-   `UnifiedVoicePipeline` through a recorded S2S provider.
+   live meeting takes. (`unified` sessions and their `run_replay` driver were
+   removed with the S2S surface, Johnny-trt.43.)
 3. **Captures every pipeline event** (`transcript_finalized`,
    `router_decision_made`, `agent_spoke`, `turn_terminal`, …) on an in-memory
    event bus — no database, no Redis.
@@ -78,7 +78,9 @@ on any violation.
 | --- | --- | --- |
 | **INV-1** | split | Every turn that reached the router emits **exactly one** `turn_terminal`; a `no_reply` terminal names its suppressor. A decided turn with no terminal is the silent drop the invariant forbids. |
 | **INV-2** | split | The chat and the decisions panel cannot diverge in **existence**: every `agent_spoke` traces to a `should_speak` decision and a `replied` terminal, the counts match, and no `replied` terminal lacks a spoken utterance. (Text *rephrase* between the recommended and spoken reply is allowed — the answer LLM is a second call — and is reconciled by the subscriber's ORM parity guard, covered by `test_decision_parity.py`.) |
-| **INV-U** | unified | The unified analogue of "no turn vanishes": every assistant response the S2S model produced reaches the user as exactly one `agent_spoke` (existence parity between assistant transcripts and spoken utterances). The unified pipeline has no router/terminal spine, so INV-1/INV-2 don't apply. |
+
+(A third invariant, INV-U for the `unified` runtime, was removed together
+with the S2S surface in Johnny-trt.43.)
 
 ### `--mode regression` (manual review)
 
@@ -105,13 +107,13 @@ closed the gap.
 
 Committed fixtures live at `backend/tests/fixtures/sessions/<id>/fixture.json`
 (see the [fixture README](../backend/tests/fixtures/sessions/README.md) for the
-per-fixture contract). The harness ships five, covering both runtimes:
+per-fixture contract). The harness ships four, all `split` (the `unified`
+runtime and its `unified-demo` fixture were removed in Johnny-trt.43):
 
 | Fixture | Runtime | What it proves |
 | --- | --- | --- |
 | `14/` | split | The flagship session-14 silent drop. Turn 4's router hangs (`"simulate": "timeout"`); with the timeout fix in place the turn now terminates cleanly. Reconstructed from the [.28.1 forensic analysis](../tasks/prd-pipeline-decision-revision.md). |
 | `3/` | split | A real known-good browser session captured from the DB — proves the harness reproduces a real session's decisions + utterances and the invariants hold on real data. |
-| `unified-demo/` | unified | A hand-authored unified-S2S conversation (no real unified session existed in the DB) — proves the unified pipeline never drops an assistant utterance. |
 | `delegation-calendar/` | split | **Phase-3 verdict-parity baseline** (Johnny-trt.3): delegation- and status-shaped asks addressed to the bot ("can you check our calendar for upcoming meetings?", "are you still working on that?") with small-talk pivots. Must replay with **zero** divergence from its recorded verdicts. |
 | `delegation-smalltalk/` | split | The negative half of the parity baseline: the same delegation/status *phrasing* addressed to humans (router declines), plain small talk, and a retracted ask suppressed by the confidence threshold (`no_reply/low_confidence`). |
 
@@ -130,7 +132,7 @@ the gate exists to catch.
 {
   "session_id": "14",
   "label": "session-14-silent-drop",
-  "runtime": "split",            // "split" | "unified"
+  "runtime": "split",            // "split" — the only runtime (Johnny-trt.43)
   "mode": "autonomous",
   "confidence_threshold": 0.7,
   "allowed_replies": [],
@@ -191,9 +193,9 @@ CI parametrised test picks it up automatically.
 
 ## CI wiring
 
-`backend/tests/smoketest/test_replay_harness.py` (unified fixtures on
-`UnifiedVoicePipeline`) and `test_replay_harness_agent.py` (split fixtures on
-the LiveKit-Agents engine) run as part of the normal test suite and:
+`backend/tests/smoketest/test_replay_harness.py` (pure checker teeth) and
+`test_replay_harness_agent.py` (every fixture on the LiveKit-Agents engine)
+run as part of the normal test suite and:
 
 - replay **every** committed fixture through `--mode invariants` and fail the
   build on any violation,
@@ -231,8 +233,8 @@ session without re-running a live Meet.
 
 ```
 fixture.json ─┐
-              ├─► run_replay() ─► real the retired split engine / UnifiedVoicePipeline
-DB session  ──┘      │                    │  (fake STT/TTS, recorded LLM/S2S)
+              ├─► run_agent_replay() ─► LiveKit-Agents engine (RouterGate + ledger)
+DB session  ──┘      │                    │  (fake STT/TTS, recorded LLM)
  (load_replay_       │                    ▼
   fixture)           │            InMemoryEventBus  ──►  captured events
                      ▼                                        │
@@ -241,14 +243,15 @@ DB session  ──┘      │                    │  (fake STT/TTS, recorded L
         ┌────────────┴─────────────┐
         ▼                          ▼
   check_invariants()       diff_against_recorded()
-   (INV-1/2/U)               (replayed vs recorded)
+   (INV-1/2)                 (replayed vs recorded)
 ```
 
 - **Pure half** (`johnny/smoketest/replay.py`): the fixture model,
   `assemble_turns`, `check_invariants`, `diff_against_recorded` — no providers,
   no DB.
-- **Driving half** (same module): the fake providers + `run_replay`, which spin
-  the real pipeline.
+- **Driving half** (`johnny/smoketest/replay_agent.py`): `run_agent_replay`,
+  which spins the LiveKit-Agents engine. (The former `run_replay` driver for
+  unified/S2S fixtures was removed in Johnny-trt.43.)
 - **DB bridge** (`app/services/replay_session.py`): turns a persisted session
   into a `ReplayFixture` — shared by the capture step and the live endpoint.
 - **CLI** (`johnny/smoketest/replay_cli.py`): the `johnny-replay` entrypoint,

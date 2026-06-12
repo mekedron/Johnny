@@ -2,18 +2,18 @@
 
 The LiveKit-Agents ``AgentSession`` engine is the split STT→LLM→TTS path
 (``JOHNNY_ORCHESTRATOR=agentsession``, the default since Johnny-n22). Every
-committed **split** fixture is fed through
+committed fixture is fed through
 :func:`johnny.smoketest.replay_agent.run_agent_replay` (RouterGate + TurnLedger +
-observability) and must hold the ``.28.x`` invariants. ``test_replay_harness.py``
-gates the unified (S2S) fixtures on ``UnifiedVoicePipeline``.
+observability) and must hold the ``.28.x`` invariants. (The unified/S2S replay
+engine and its fixture were removed with the S2S surface, Johnny-trt.43.)
 
 Jobs:
 
-1. every committed **split** fixture holds INV-1 (one terminal per turn) +
+1. every committed fixture holds INV-1 (one terminal per turn) +
    INV-2 (decision↔utterance parity) under the engine;
 2. the flagship session-14 silent drop terminates in a durable
    ``no_reply(stage_error)`` (the router-timeout fix, Johnny-9k2);
-3. a unified fixture is rejected (unified/S2S stays on ``UnifiedVoicePipeline``).
+3. a fixture declaring a non-split runtime is rejected, not mis-replayed.
 
 Guarded by ``importorskip`` so the suite still collects without the ``agent``
 extra (``livekit-agents``).
@@ -156,12 +156,13 @@ async def test_delegation_smalltalk_pins_suppression_reasons() -> None:
     assert terminals[8].no_reply_reason == "low_confidence", terminals[8]
 
 
-async def test_unified_fixture_rejected_by_agent_engine() -> None:
-    """The agent engine is split-only; a unified fixture must be rejected, not
-    silently mis-replayed (unified/S2S stays on the legacy UnifiedVoicePipeline)."""
-    unified = FIXTURES_DIR / "unified-demo"
-    if not (unified / "fixture.json").exists():
-        pytest.skip("no unified fixture committed")
-    fixture = load_fixture(unified)
+async def test_non_split_fixture_rejected_by_agent_engine() -> None:
+    """The agent engine is split-only; a fixture declaring the retired
+    ``unified`` runtime must be rejected, not silently mis-replayed."""
+    from johnny.smoketest.replay import fixture_from_dict
+
+    fixture = fixture_from_dict(
+        {"session_id": "u", "label": "retired-unified", "runtime": "unified"}
+    )
     with pytest.raises(ValueError, match="split-only"):
         await run_agent_replay(fixture)

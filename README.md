@@ -144,6 +144,13 @@ into `sandbox/setup.d/`, then rerun `./run-dev.sh`. Full guide:
 Dedicated adapters for the hosted APIs. Configure each via the Providers
 page; only `api_key` is required, all other options have sensible defaults.
 
+> **Provider kinds are STT / LLM / TTS.** A fourth `s2s` kind (unified
+> speech-to-speech: Gemini Live, OpenAI Realtime) and its pipeline-mode
+> toggle were removed from the product in **Johnny-trt.43** (pre-removal
+> code at git `fc16a1e785595ff2fd1db6d60b56f07711c5ddae`; details in
+> [docs/PIPELINE.md](docs/PIPELINE.md)). Re-introduction is deferred to
+> epic **Johnny-20h** on the AgentSession `RealtimeModel` design.
+
 - **OpenAI** (`openai`) — defaults to `gpt-4o-mini`; override `model` for
   `gpt-4o`, `o1-mini`, or anything else OpenAI hosts.
 - **Anthropic** (`anthropic`) — defaults to `claude-3-5-haiku-20241022`;

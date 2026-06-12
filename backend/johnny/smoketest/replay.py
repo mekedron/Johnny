@@ -25,77 +25,32 @@ segment them, reproducing the live turn-by-turn flow. The fake STT returns the
 recorded transcript text for each segment; the noise gate is disabled because
 the recordings are already *post-gate* finalised transcripts.
 
-The module is split into a *pure* half (fixture model, event→turn assembly,
-invariant checks, regression diff) that needs no providers, and a *driving*
-half (``run_replay``) that imports the provider ABCs and spins the pipeline.
+This module is the *pure* half (fixture model, event→turn assembly,
+invariant checks, regression diff) — it needs no providers. The driving half
+lives in :mod:`johnny.smoketest.replay_agent` (the LiveKit-Agents engine).
+The retired ``run_replay`` driver for ``unified`` (S2S) fixtures was removed
+with the S2S surface in Johnny-trt.43.
 """
 
 from __future__ import annotations
 
-import array
-import asyncio
 import json
-import math
-from collections.abc import AsyncIterable, AsyncIterator, Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.providers import (
-    ChatMessage,
-    LLMProvider,
-    LLMResponse,
-    STTProvider,
-    ToolDefinition,
-    TranscriptEvent,
-    TTSProvider,
-)
-from app.providers.s2s_base import (
-    S2SAudioFrame,
-    S2SEvent,
-    S2SProvider,
-    S2SResponseCompleted,
-    S2SResponseStarted,
-    S2SSession,
-    S2STranscript,
-)
 from johnny.voice_pipeline import (
     AgentSpoke,
-    BrowserAudioTransport,
-    EnergyVAD,
-    InMemoryEventBus,
-    JohnnyTransport,
     PipelineEvent,
     RouterDecisionMade,
     TranscriptFiltered,
     TranscriptFinalized,
     TurnTerminal,
-    UnifiedPipelineConfig,
-    UnifiedVoicePipeline,
     event_to_dict,
 )
 
 SPLIT_RUNTIME = "split"
-UNIFIED_RUNTIME = "unified"
-
-# --- synthetic-audio constants (mirror tests/voice_pipeline/conftest.py) ----
-
-SAMPLE_RATE = 16_000
-SAMPLE_WIDTH = 2  # s16
-FRAME_DURATION_MS = 20
-BYTES_PER_FRAME = (SAMPLE_RATE * FRAME_DURATION_MS // 1000) * SAMPLE_WIDTH
-TONE_MS = 600
-GAP_MS = 800
-LEAD_MS = 200
-VAD_THRESHOLD = 0.05
-END_OF_SPEECH_MS = 300
-
-# Router timeout used when a fixture turn simulates the session-14 hang. Kept
-# small so the timeout path runs fast in CI while still exercising the real
-# ``asyncio.wait_for`` bound that turns a stalled router into a durable
-# ``no_reply`` row instead of a silent drop.
-SIMULATED_HANG_TIMEOUT_S = 0.25
-SIMULATED_HANG_SLEEP_S = 5.0
 
 
 # --- fixture model (pure) ---------------------------------------------------
@@ -129,7 +84,7 @@ class ReplayFixture:
 
     session_id: str
     label: str
-    runtime: str  # "split" | "unified"
+    runtime: str  # "split" — the only runtime since Johnny-trt.43
     mode: str = "autonomous"
     confidence_threshold: float = 0.7
     allowed_replies: tuple[str, ...] = ()
@@ -222,9 +177,16 @@ def assemble_turns(
     ``AgentSpoke`` does not (it never has), so — exactly like the durable
     subscriber — each spoken utterance is bound to the most recent
     ``should_speak`` decision seen in emission order.
+
+    Raises :class:`ValueError` for any runtime other than ``split`` — the
+    ``unified`` (S2S) assembly was removed with the S2S surface
+    (Johnny-trt.43).
     """
-    if runtime == UNIFIED_RUNTIME:
-        return _assemble_unified_turns(events)
+    if runtime != SPLIT_RUNTIME:
+        raise ValueError(
+            f"unknown replay runtime {runtime!r}: only 'split' exists — the "
+            "'unified' (S2S) replay was removed in Johnny-trt.43"
+        )
     records: dict[int, TurnRecord] = {}
 
     def rec(turn_id: int) -> TurnRecord:
@@ -266,37 +228,6 @@ def assemble_turns(
     return [records[k] for k in sorted(records)]
 
 
-def _assemble_unified_turns(events: Sequence[PipelineEvent]) -> list[TurnRecord]:
-    """Per-turn records for a unified-S2S replay.
-
-    Unified has no router/terminal spine — a turn is a (user transcript,
-    assistant utterance) pair. Pairs the i-th user transcript with the i-th
-    ``agent_spoke`` positionally; an assistant utterance with no matching user
-    turn (or vice versa) shows up as a half-filled record the invariant check
-    catches.
-    """
-    user_texts = [
-        e.text
-        for e in events
-        if isinstance(e, TranscriptFinalized) and e.speaker != "assistant"
-    ]
-    spokes = [e.text for e in events if isinstance(e, AgentSpoke)]
-    records: list[TurnRecord] = []
-    for i in range(max(len(user_texts), len(spokes))):
-        spoke = spokes[i] if i < len(spokes) else None
-        records.append(
-            TurnRecord(
-                turn_id=i + 1,
-                heard_text=user_texts[i] if i < len(user_texts) else None,
-                should_speak=spoke is not None,
-                spoke_text=spoke,
-                terminal_state="replied" if spoke is not None else "no_reply",
-                outcome="spoken" if spoke is not None else "suppressed",
-            )
-        )
-    return records
-
-
 # --- invariant checks (pure) ------------------------------------------------
 
 
@@ -312,48 +243,17 @@ class InvariantViolation:
 def check_invariants(
     events: Sequence[PipelineEvent], runtime: str = SPLIT_RUNTIME
 ) -> list[InvariantViolation]:
-    """Assert the invariants appropriate to ``runtime`` over a captured stream."""
-    if runtime == UNIFIED_RUNTIME:
-        return _check_unified_invariants(events)
-    return _check_split_invariants(events)
+    """Assert the invariants appropriate to ``runtime`` over a captured stream.
 
-
-def _check_unified_invariants(
-    events: Sequence[PipelineEvent],
-) -> list[InvariantViolation]:
-    """Unified-S2S analogue of INV-1/INV-2: no assistant utterance is dropped.
-
-    The unified pipeline has no router/terminal spine, so the invariant is
-    existence parity between what the model produced (assistant transcripts)
-    and what reached the user (``agent_spoke``): equal counts, no orphan
-    utterance. This is the unified statement of "a turn can never silently
-    vanish" — the same guarantee the split INV-1 makes via terminal states.
+    Raises :class:`ValueError` for any runtime other than ``split`` (the
+    ``unified``/INV-U checks were removed with the S2S surface, Johnny-trt.43).
     """
-    violations: list[InvariantViolation] = []
-    assistant_transcripts = [
-        e
-        for e in events
-        if isinstance(e, TranscriptFinalized) and e.speaker == "assistant"
-    ]
-    spokes = [e for e in events if isinstance(e, AgentSpoke)]
-    if len(assistant_transcripts) != len(spokes):
-        violations.append(
-            InvariantViolation(
-                "INV-U",
-                None,
-                f"{len(assistant_transcripts)} assistant transcript(s) but "
-                f"{len(spokes)} agent_spoke event(s) — a unified turn was "
-                f"dropped between model output and the user",
-            )
+    if runtime != SPLIT_RUNTIME:
+        raise ValueError(
+            f"unknown replay runtime {runtime!r}: only 'split' exists — the "
+            "'unified' (S2S) replay was removed in Johnny-trt.43"
         )
-    for i, spoke in enumerate(spokes, start=1):
-        if not spoke.text.strip():
-            violations.append(
-                InvariantViolation(
-                    "INV-U", i, "agent_spoke carries empty text"
-                )
-            )
-    return violations
+    return _check_split_invariants(events)
 
 
 def _check_split_invariants(
@@ -504,7 +404,7 @@ def diff_against_recorded(
     return diffs
 
 
-# --- run (driving half) -----------------------------------------------------
+# --- result record (shared with the replay_agent driver) --------------------
 
 
 @dataclass
@@ -520,143 +420,6 @@ class ReplayResult:
         return [event_to_dict(e) for e in self.events]
 
 
-async def run_replay(fixture: ReplayFixture) -> ReplayResult:
-    """Drive a ``unified`` (S2S) ``fixture`` through the real pipeline.
-
-    Only ``unified`` fixtures run here, over a recorded S2S provider. The split
-    STT→LLM→TTS replay was retired with the hand-rolled split orchestrator
-    (Johnny-n22); split fixtures now run on the LiveKit-Agents engine via
-    :func:`johnny.smoketest.replay_agent.run_agent_replay`.
-    """
-    if fixture.runtime == UNIFIED_RUNTIME:
-        return await _run_unified_replay(fixture)
-    raise RuntimeError(
-        f"split replay retired (Johnny-n22): fixture runtime={fixture.runtime!r} "
-        "runs on the LiveKit-Agents engine — use "
-        "johnny.smoketest.replay_agent.run_agent_replay"
-    )
-
-
-class _ReplayS2SSession(S2SSession):
-    """An S2S session that replays a fixture's recorded turns.
-
-    On the single ``commit_user_turn`` the unified pipeline issues at
-    end-of-capture, queues every recorded turn's event sequence (user
-    transcript → response started → assistant transcript → audio →
-    response completed) so the real :class:`UnifiedVoicePipeline` publishes
-    one ``agent_spoke`` per recorded assistant turn.
-    """
-
-    def __init__(self, turns: Sequence[ReplayTurn]) -> None:
-        self._turns = list(turns)
-        self._queue: asyncio.Queue[S2SEvent | None] = asyncio.Queue()
-        self._closed = False
-        self.commit_count = 0
-
-    async def send_audio(self, pcm: bytes) -> None:  # noqa: ARG002
-        pass
-
-    async def commit_user_turn(self) -> None:
-        if self.commit_count:
-            return
-        self.commit_count += 1
-        for turn in self._turns:
-            await self._queue.put(
-                S2STranscript(text=turn.text, is_final=True, role="user")
-            )
-            answer = turn.answer
-            if answer is None:
-                continue
-            await self._queue.put(S2SResponseStarted())
-            await self._queue.put(
-                S2STranscript(text=answer, is_final=True, role="assistant")
-            )
-            await self._queue.put(S2SAudioFrame(pcm=b"\x00\x00" * 160))
-            await self._queue.put(S2SResponseCompleted(finish_reason="stop"))
-
-    async def events(self) -> AsyncIterator[S2SEvent]:
-        while True:
-            event = await self._queue.get()
-            if event is None:
-                return
-            yield event
-
-    async def interrupt(self) -> None:  # noqa: B027
-        pass
-
-    async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        await self._queue.put(None)
-
-
-class _ReplayS2S(S2SProvider):
-    """S2S provider whose every session replays the fixture's recorded turns."""
-
-    def __init__(self, turns: Sequence[ReplayTurn]) -> None:
-        self._turns = list(turns)
-
-    @property
-    def name(self) -> str:
-        return "replay-s2s"
-
-    async def open_session(
-        self,
-        *,
-        instructions: str = "",  # noqa: ARG002
-        voice_id: str | None = None,  # noqa: ARG002
-        tools: Sequence[ToolDefinition] = (),  # noqa: ARG002
-    ) -> S2SSession:
-        return _ReplayS2SSession(self._turns)
-
-
-async def _run_unified_replay(fixture: ReplayFixture) -> ReplayResult:
-    """Unified-S2S replay: drive the real :class:`UnifiedVoicePipeline` with a
-    recorded S2S provider, capturing the assistant transcripts + agent_spoke.
-    """
-    transport = BrowserAudioTransport()
-    bus = InMemoryEventBus()
-    s2s = _ReplayS2S(fixture.turns)
-    config = UnifiedPipelineConfig(
-        session_id=fixture.session_id,
-        bot_session_id=None,
-        instructions=fixture.instructions,
-    )
-    pipeline = UnifiedVoicePipeline(
-        transport=transport,
-        s2s=s2s,
-        event_bus=bus,
-        config=config,
-    )
-    await transport.start()
-    # Push one frame per turn so the capture loop forwards audio, then stop the
-    # transport — its EOF triggers the single commit_user_turn that drains all
-    # recorded turns through the pipeline.
-    for _ in fixture.turns:
-        transport.push_capture_frame(b"\x01\x01" * 160)
-
-    run_task = asyncio.create_task(pipeline.run())
-
-    async def _stop() -> None:
-        await asyncio.sleep(0.05)
-        await transport.stop()
-
-    await asyncio.wait_for(asyncio.gather(run_task, _stop()), timeout=10.0)
-
-    events = bus.snapshot()
-    records = assemble_turns(events, UNIFIED_RUNTIME)
-    return ReplayResult(
-        fixture=fixture,
-        events=events,
-        records=records,
-        # The unified path has no STT segmentation stage; the assistant↔spoke
-        # parity check (INV-U) is what catches a dropped turn here, so report
-        # turn_count to make the split-only segmentation guard a no-op pass.
-        stt_calls=fixture.turn_count,
-    )
-
-
 __all__ = [
     "InvariantViolation",
     "ReplayFixture",
@@ -670,5 +433,4 @@ __all__ = [
     "discover_fixtures",
     "fixture_from_dict",
     "load_fixture",
-    "run_replay",
 ]
