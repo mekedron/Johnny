@@ -165,9 +165,10 @@ def _job(**overrides: Any) -> SessionJobConfig:
 
 def test_instructions_config_copies_all_prompt_fields() -> None:
     job = _job(
-        instructions="Be brief.",
-        character_prompt="[character: Aria]\nWarm and curious.",
-        context="Quarterly sync.",
+        agent_snapshot={
+            "character_prompt": "[character: Aria]\nWarm and curious.",
+            "assignment_context": "Quarterly sync.",
+        },
         calendar_context="Q3 planning",
         calendar_attachments_text="doc body",
         prior_session_context="Last week we agreed X.",
@@ -175,23 +176,24 @@ def test_instructions_config_copies_all_prompt_fields() -> None:
 
     cfg = instructions_config_from_job(job)
 
-    assert cfg.instructions == "Be brief."
     assert cfg.character_prompt == "[character: Aria]\nWarm and curious."
     assert cfg.context == "Quarterly sync."
     assert cfg.calendar_context == "Q3 planning"
     assert cfg.calendar_attachments_text == "doc body"
     assert cfg.prior_session_context == "Last week we agreed X."
 
-    # The rendered system prompt carries the agent's character identity.
+    # The rendered system prompt carries the agent's character identity and
+    # the per-assignment brief in the documented "Context:" slot.
     system = build_agent_instructions(cfg)
     assert "Aria" in system
     assert "Warm and curious." in system
+    assert "Context: Quarterly sync." in system
 
 
 def test_instructions_config_defaults_are_empty() -> None:
     cfg = instructions_config_from_job(_job())
-    assert cfg.instructions == ""
     assert cfg.character_prompt == ""
+    assert cfg.context == ""
     assert cfg.prior_session_context == ""
 
 
@@ -200,9 +202,9 @@ def test_instructions_config_defaults_are_empty() -> None:
 
 @pytest.mark.parametrize("mode", [SUGGEST_ONLY_MODE, APPROVAL_REQUIRED_MODE])
 def test_answer_config_threads_mode(mode: str) -> None:
-    cfg = answer_config_from_job(_job(mode=mode))
+    cfg = answer_config_from_job(_job(agent_snapshot={"mode": mode}))
     assert cfg.mode == mode
-    # No allowlist on the job -> stays empty.
+    # No allowlist on the snapshot -> stays empty.
     assert cfg.allowed_replies == ()
 
 
@@ -210,7 +212,12 @@ def test_answer_config_threads_allowed_replies() -> None:
     """Johnny-trt.41: the frozen agent allowlist rides the dispatch contract
     into the answer path's coercion target."""
     cfg = answer_config_from_job(
-        _job(mode="limited_auto_speak", allowed_replies=("Yes.", "No."))
+        _job(
+            agent_snapshot={
+                "mode": "limited_auto_speak",
+                "allowed_replies": ["Yes.", "No."],
+            }
+        )
     )
     assert cfg.mode == "limited_auto_speak"
     assert cfg.allowed_replies == ("Yes.", "No.")
@@ -332,14 +339,13 @@ def test_session_config_round_trips_provider_agent_mode(
     db.add(aria)
     db.flush()
 
-    # 2. Run the REAL API assembly: payload + agent selection + snapshot.
+    # 2. Run the REAL API assembly: payload + agent selection + snapshot
+    #    (the per-assignment brief lands inside the snapshot, Johnny-trt.45).
     base_payload = build_provider_payload(db, crypto)
     resolution = select_agent(db)
     agent = resolution.agent
     assert agent is not None and agent.name == "Aria"
-    snapshot = build_agent_snapshot(
-        agent, assignment_context=resolution.assignment_context
-    )
+    snapshot = build_agent_snapshot(agent, assignment_context="Stick to the agenda.")
 
     # 3. Build the launch context the scheduler would, then run the REAL producer.
     from app.services.agent_dispatch import session_job_config_from_launch_context
@@ -352,12 +358,8 @@ def test_session_config_round_trips_provider_agent_mode(
         identity_account_id=3,
         meet_link="https://meet.example/abc",
         container_name="meet-worker-session-42",
-        mode=str(snapshot["mode"]),
-        instructions="Stick to the agenda.",
-        character_prompt=str(snapshot["character_prompt"]),
-        allowed_replies=tuple(snapshot["allowed_replies"]),
-        confidence_threshold=float(snapshot["confidence_threshold"]),
-        context="Internal sync.",
+        agent_id=agent.id,
+        agent_snapshot=snapshot,
         provider_config=base_payload,
     )
     config = session_job_config_from_launch_context(ctx, redis_url="redis://r:6379/0")
@@ -386,12 +388,13 @@ def test_session_config_round_trips_provider_agent_mode(
     system = build_agent_instructions(instructions_config_from_job(rehydrated))
     assert "Aria" in system
     assert "Warm, curious, and concise." in system
-    assert "Stick to the agenda." in system
+    assert "Context: Stick to the agenda." in system
 
     answer_cfg = answer_config_from_job(rehydrated)
     assert answer_cfg.mode == SUGGEST_ONLY_MODE
     assert answer_cfg.allowed_replies == ("Sounds good.", "Let me check.")
     assert rehydrated.confidence_threshold == pytest.approx(0.66)
+    assert rehydrated.agent_id == agent.id
     # Approval / event-bus wiring rides along too.
     assert rehydrated.redis_url == "redis://r:6379/0"
     assert rehydrated.room_name == "johnny-session-42"
@@ -415,12 +418,12 @@ def test_round_trip_metadata_is_plain_json(db: Session, crypto: CredentialCrypto
         identity_account_id=1,
         meet_link="",
         container_name="c",
-        mode="approval_required",
+        agent_snapshot={"mode": "approval_required"},
         provider_config=base_payload,
     )
     metadata = session_job_config_from_launch_context(ctx).to_metadata()
 
     decoded = json.loads(metadata)
-    assert decoded["mode"] == "approval_required"
+    assert decoded["agent_snapshot"]["mode"] == "approval_required"
     assert decoded["room_name"] == "johnny-session-5"
     assert decoded["provider_config"]["llm"]["provider_name"] == "openai"

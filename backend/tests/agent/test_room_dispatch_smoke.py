@@ -128,7 +128,7 @@ async def test_explicit_dispatch_is_accepted_and_carries_metadata() -> None:
     cfg = SessionJobConfig(
         bot_session_id=session_id,
         room_name=room,
-        mode="suggest_only",
+        agent_snapshot={"mode": "suggest_only"},
         provider_config={"stt": {"provider_name": "deepgram"}},
     )
 

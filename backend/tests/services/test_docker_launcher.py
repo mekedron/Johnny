@@ -277,6 +277,14 @@ def test_get_prune_age_seconds_default() -> None:
 # --- DockerContainerLauncher.start ----------------------------------------
 
 
+_CTX_SNAPSHOT: dict[str, Any] = {
+    "agent_id": 9,
+    "name": "Johnny",
+    "mode": "listen_only",
+    "assignment_context": "Standup with the platform team.",
+}
+
+
 def _make_ctx(
     *,
     bot_session_id: int = 1,
@@ -285,10 +293,8 @@ def _make_ctx(
     identity_account_id: int = 300,
     meet_link: str = "https://meet.google.com/abc-defg-hij",
     container_name: str | None = None,
-    mode: str = "listen_only",
-    instructions: str = "Stay quiet unless asked.",
-    character_prompt: str = "",
-    context: str = "Standup with the platform team.",
+    agent_id: int | None = 9,
+    agent_snapshot: dict[str, Any] | None = None,
     calendar_context: str = "",
     calendar_attachments_text: str = "",
     prior_session_context: str = "",
@@ -301,10 +307,10 @@ def _make_ctx(
         identity_account_id=identity_account_id,
         meet_link=meet_link,
         container_name=container_name or f"meet-worker-session-{bot_session_id}",
-        mode=mode,
-        instructions=instructions,
-        character_prompt=character_prompt,
-        context=context,
+        agent_id=agent_id,
+        agent_snapshot=(
+            agent_snapshot if agent_snapshot is not None else dict(_CTX_SNAPSHOT)
+        ),
         calendar_context=calendar_context,
         calendar_attachments_text=calendar_attachments_text,
         prior_session_context=prior_session_context,
@@ -330,16 +336,19 @@ async def test_start_runs_container_with_env_and_labels(
     assert env["JOHNNY_CALENDAR_EVENT_ID"] == "200"
     assert env["JOHNNY_ACCOUNT_ID"] == "300"
     assert env["JOHNNY_MEET_LINK"] == "https://meet.google.com/abc-defg-hij"
-    assert env["JOHNNY_MODE"] == "listen_only"
-    assert env["JOHNNY_INSTRUCTIONS"] == "Stay quiet unless asked."
-    # Johnny-trt.41: same defaulting for the agent character env var so the
-    # meet-worker can `env.get(...) -> ""` without a guard when no agent.
-    assert env["JOHNNY_CHARACTER_PROMPT"] == ""
-    # Johnny-trt.41: behavior knobs from the frozen agent snapshot ride the
-    # env contract too — JSON list + stringified float with safe defaults.
-    assert json.loads(env["JOHNNY_ALLOWED_REPLIES"]) == []
-    assert env["JOHNNY_CONFIDENCE_THRESHOLD"] == "0.7"
-    assert env["JOHNNY_CONTEXT"] == "Standup with the platform team."
+    # Johnny-trt.45: behavior rides the frozen agent snapshot as ONE JSON
+    # env var; the retired per-field overrides must NOT be emitted at all.
+    assert env["JOHNNY_AGENT_ID"] == "9"
+    assert json.loads(env["JOHNNY_AGENT_SNAPSHOT"]) == _CTX_SNAPSHOT
+    for retired in (
+        "JOHNNY_MODE",
+        "JOHNNY_INSTRUCTIONS",
+        "JOHNNY_CHARACTER_PROMPT",
+        "JOHNNY_CONTEXT",
+        "JOHNNY_ALLOWED_REPLIES",
+        "JOHNNY_CONFIDENCE_THRESHOLD",
+    ):
+        assert retired not in env
     # No calendar description set → empty string env var, NOT a missing
     # key (a missing key would crash the launcher's _build_environment
     # downstream consumers).

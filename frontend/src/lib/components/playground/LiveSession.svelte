@@ -43,8 +43,19 @@
 			session?.playground_overrides && typeof session.playground_overrides === 'object'
 				? (session.playground_overrides as Record<string, unknown>)
 				: {};
-		const liveMode = typeof overrides.mode === 'string' ? overrides.mode : controller.mode;
-		chips.push({ label: 'Mode', value: BOT_MODE_LABEL[liveMode as BotMode] ?? liveMode });
+		// Johnny-trt.45: the AGENT is the session's configuration — lead with it.
+		const liveAgent = session ? readSessionAgent(session).agentName : null;
+		if (liveAgent) {
+			chips.push({ label: 'Agent', value: liveAgent });
+		}
+		// Mode comes from the agent profile now; render the selected agent's
+		// configured mode (the dispatched snapshot equals it since trt.45).
+		const agentMode = controller.agents.find(
+			(a) => a.id === (session ? readSessionAgent(session).agentId : null)
+		)?.mode;
+		if (agentMode) {
+			chips.push({ label: 'Mode', value: BOT_MODE_LABEL[agentMode as BotMode] ?? agentMode });
+		}
 		const liveProviders =
 			overrides.providers && typeof overrides.providers === 'object'
 				? (overrides.providers as Record<string, { credentials_id?: number }>)
@@ -64,14 +75,9 @@
 				if (def) chips.push({ label: kind.toUpperCase(), value: `${def.display_name} (default)` });
 			}
 		}
-		const liveCharacter = session ? readSessionAgent(session).agentName : null;
-		if (liveCharacter) {
-			chips.push({ label: 'Character', value: liveCharacter });
-		}
-		const livePersona =
-			typeof overrides.persona === 'string' ? overrides.persona : controller.persona;
-		if (livePersona && livePersona.trim().length > 0) {
-			chips.push({ label: 'Persona', value: livePersona.trim().slice(0, 32) });
+		const liveContext = typeof overrides.context === 'string' ? overrides.context : '';
+		if (liveContext.trim().length > 0) {
+			chips.push({ label: 'Context', value: liveContext.trim().slice(0, 32) });
 		}
 		return chips;
 	});

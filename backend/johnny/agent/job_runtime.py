@@ -54,15 +54,13 @@ if TYPE_CHECKING:
 def instructions_config_from_job(config: SessionJobConfig) -> AgentInstructionsConfig:
     """Map the prompt-assembly fields of a job payload to :class:`AgentInstructionsConfig`.
 
-    The prompt inputs travel the payload one-for-one (mirroring the
-    ``JOHNNY_INSTRUCTIONS`` / ``JOHNNY_CHARACTER_PROMPT`` / ``JOHNNY_CONTEXT`` /
-    ``JOHNNY_CALENDAR_CONTEXT`` / ``JOHNNY_CALENDAR_ATTACHMENTS`` /
-    ``JOHNNY_PRIOR_SESSION_CONTEXT`` env vars the meet-worker reads), so this is a
-    pure field copy — :func:`~johnny.agent.session.build_agent_instructions` does
-    the actual prompt rendering.
+    ``character_prompt`` and ``context`` (the per-assignment brief) are
+    derived from the payload's frozen agent snapshot (Johnny-trt.45); the
+    calendar / cross-session fields travel the payload per-field. A pure
+    copy — :func:`~johnny.agent.session.build_agent_instructions` does the
+    actual prompt rendering.
     """
     return AgentInstructionsConfig(
-        instructions=config.instructions,
         character_prompt=config.character_prompt,
         context=config.context,
         calendar_context=config.calendar_context,

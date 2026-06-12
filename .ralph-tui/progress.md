@@ -82,16 +82,23 @@ after each iteration and it's included in prompts for context.
   canonical trio without hand-reconfiguring. It holds plaintext keys and is
   gitignored (added in trt.43) — never commit it; providers.example.json is the
   committed shape.
-- **Agent snapshot is the behavior bus (trt.41)**: bot_sessions.agent_snapshot
-  (frozen at dispatch by app/services/agents.build_agent_snapshot) is the ONLY
-  behavior source — mode/character_prompt/allowed_replies/confidence_threshold
-  ride LaunchContext → SessionJobConfig → RouterGateConfig/AnswerConfig; the
-  browser path overwrites snapshot["mode"] with the EFFECTIVE per-start mode.
-  Sibling tasks (trt.42 providers, trt.52 addressing) extend the snapshot, not
-  config-table reads; session_status_subscriber + history already read mode
-  from it. Selection precedence: request agent_id → first enabled
-  meeting_agents assignment by position → is_default agent → contract-default
-  degrade (mode "", threshold 0.7).
+- **Agent snapshot is the behavior bus (trt.41; rides WHOLE since trt.45)**:
+  bot_sessions.agent_snapshot (frozen at dispatch by
+  app/services/agents.build_agent_snapshot) is the ONLY behavior source — the
+  snapshot dict itself rides LaunchContext.agent_snapshot →
+  SessionJobConfig.agent_snapshot (dispatch metadata + the single
+  JOHNNY_AGENT_SNAPSHOT env var), and the contract DERIVES mode/
+  character_prompt/context(=assignment_context)/allowed_replies/
+  confidence_threshold as read-only properties (with_mode() for the no-TTS
+  degrade). The per-start mode override is GONE (trt.45) — the browser path
+  no longer overwrites snapshot["mode"]; the ONE per-start knob is the
+  context brief, folded into assignment_context by the spec builder so spec/
+  pins/row freeze share one dict. Sibling tasks extend the snapshot, not
+  config-table reads; session_status_subscriber + history read mode from it.
+  Selection precedence: request agent_id → first enabled meeting_agents
+  assignment by position → is_default agent → contract-default degrade
+  (empty snapshot → listen_only/0.7; browser surfaces synthesize
+  {"mode":"autonomous"}).
 - **Live-Meet capstones are operator-gated; an agent cannot self-run them**
   (trt.30): a real Meet join needs a human Google sign-in (`storage_state.json`
   in `johnny_google_auth_state`; noVNC/seed/upload ALL require real
@@ -106,19 +113,23 @@ after each iteration and it's included in prompts for context.
   transport proven live (session 23, memory `johnny-orchestrator-default-mismatch-9xt`);
   no autonomous run ties them with 2 humans. Operator runbook:
   `.validation/Johnny-trt.30/00-RUN-NOTES.md`.
-- **Generation-scoped context injection is the answer-grounding seam (0qw)**:
-  livekit-agents 1.5.17 gives `on_user_turn_completed` a TEMP MUTABLE COPY of
-  the agent ctx and generates THIS reply from it (`_generate_reply(chat_ctx=
-  temp_mutable_chat_ctx)`); `generate_reply(user_input=…, chat_ctx=…)` accepts
-  an explicit ctx and `_pipeline_reply_task_impl` re-copies it + persists the
-  user/assistant messages into the DURABLE agent ctx separately — so mutating
-  the turn copy (voice) or passing `session.history.copy()` (typed feed_text)
-  injects per-reply system messages that NEVER pollute durable history. The
-  typed path previously passed the LIVE `session.history` to run_turn — any
-  gate-side ctx mutation would have persisted; keep the copy+forward shape.
-  Also: injected-but-unproven delivery must NOT consume the queued RESULT
-  (no proof a free-form reply relayed it; suppressed truth = the session-4
-  sin; double-spoken truth is the safe failure).
+- **Generation-scoped context injection is the answer-grounding seam (0qw,
+  CORRECTED in trt.45)**: livekit-agents 1.5.17 gives `on_user_turn_completed`
+  a TEMP MUTABLE COPY of the agent ctx and generates THIS reply from it;
+  `generate_reply(user_input=…, chat_ctx=…)` accepts an explicit ctx and
+  `_pipeline_reply_task_impl` re-copies it + persists the user/assistant
+  messages into the DURABLE agent ctx separately — so mutating the turn copy
+  injects per-reply system messages that NEVER pollute durable history.
+  **The typed path's copy source must be `runtime.agent.chat_ctx`, NOT
+  `session.history`**: the SDK keeps the agent's static instructions as a
+  system item inside `agent._chat_ctx` ONLY (`update_instructions` at activity
+  start), and `generate_reply`'s own `instructions` param defaults to None —
+  0qw's `session.history.copy()` generated typed replies with NO system
+  prompt at all (out of character, blind to the context slot; fixed +
+  regression-pinned in trt.45). Also: injected-but-unproven delivery must NOT
+  consume the queued RESULT (no proof a free-form reply relayed it;
+  suppressed truth = the session-4 sin; double-spoken truth is the safe
+  failure).
 - **`is_active` means "the global default", NOT "enabled" — per-agent pins must
   honor inactive provider rows** (trt.42): the partial unique index
   `uq_provider_credentials_active_per_kind` allows at most ONE active row per
@@ -132,6 +143,25 @@ after each iteration and it's included in prompts for context.
   api` (root logger = WARNING) — attach the factory.py handler idiom
   (marker-attribute guard + propagate=False) when a breadcrumb is operator-
   facing evidence.
+- **Replace-children-with-same-unique-key needs a flush between delete and
+  re-insert** (trt.45, meeting_agents): SQLAlchemy's unit of work orders
+  INSERTs before DELETEs within one flush, so `session.delete(old)` +
+  re-adding a row with the same `(parent_id, child_key)` unique pair 422s on
+  the constraint. Any "the payload is the full desired list" replace endpoint
+  hits this the first time a client re-sends an unchanged item —
+  `session.flush()` after the deletes fixes it.
+- **Validating Google-sync'd UI without a real Google account** (trt.45,
+  calendar meeting-config panel): seed REAL rows (google_accounts with a
+  Fernet-valid dummy token → token_health=ok; calendar_events with a fake
+  meet link), then shim ONLY the Google-dependent listing fetch in-page via
+  `navigate_page initScript` wrapping `window.fetch` for
+  `/calendar/events?` — every other call (meeting-config GET/PUT, scheduler,
+  containers) runs fully real. To exercise the real scheduler: move the
+  event's start_time into the join window and watch the worker's 60s pass;
+  fake meet links make spawned meet-workers exit fast → the per-meeting gate
+  REDISPATCHES every pass, so disable the meeting (enabled=false + move the
+  event out) the moment evidence is captured, then `docker rm -f` the
+  meet-worker-session-* strays and end the rows.
 
 ---
 
@@ -602,4 +632,87 @@ after each iteration and it's included in prompts for context.
   - In-page racer hit 2.4 ms follow-up-after-settle (vs 6 ms in trt.60) —
     the 2 ms-poll evaluate_script pattern is reliably faster than the race
     window needs.
+---
+
+## 2026-06-12 - Johnny-trt.45
+- Phase-6 assignment reshape shipped: meetings + playground are configured by
+  ASSIGNING AGENTS, each with exactly ONE per-assignment `context` brief.
+  (1) **Contract**: SessionJobConfig now carries `agent_id` + `agent_snapshot`
+  (the frozen trt.41 blob, riding dispatch metadata AND one
+  `JOHNNY_AGENT_SNAPSHOT` env var); mode/character_prompt/context(=
+  assignment_context)/allowed_replies/confidence_threshold became
+  snapshot-derived read-only properties with contract-default degrades;
+  `with_mode()` replaces `dataclasses.replace(config, mode=…)` for the no-TTS
+  degrade; the six per-field env overrides (JOHNNY_MODE/INSTRUCTIONS/
+  CHARACTER_PROMPT/CONTEXT/ALLOWED_REPLIES/CONFIDENCE_THRESHOLD) are GONE
+  (drift guard updated + a retired-vars-are-inert test); from_dict ignores the
+  retired top-level keys (old in-flight payloads parse). LaunchContext +
+  BrowserPipelineSpec reshaped identically; `instructions` (the old
+  system-prompt override slot) removed end-to-end incl. the
+  AgentInstructionsConfig field + its "Meeting instructions:" line (empty for
+  every post-trt.41 session — prompt stays byte-identical, order preserved,
+  context lands in the documented "Context:" slot).
+  (2) **Scheduler fan-out**: `start_sessions_for_meeting` launches one
+  bot_session PER enabled assignment (position order; no assignments → one
+  default-agent session; per-assignment failures don't stop co-agents,
+  all-fail re-raises); per-assignment provider resolution on a copy of the
+  shared base payload; `start_session_for_meeting` kept as a thin
+  first-row wrapper for the manual Join-now API.
+  (3) **Per-assignment identity** (migration 0028): meeting_agents.
+  identity_account_id (FK google_accounts, SET NULL), dispatch joins as the
+  assignment's account with meeting-level fallback; upsert/read API +
+  validation; UI "Joins as" picker + shared-identity warning when two enabled
+  assignments resolve to one account.
+  (4) **Playground**: StartBrowserSessionPayload = event_id/account_id/
+  agent_id/context/provider_overrides (mode/persona/system_prompt removed →
+  422); ONE effective snapshot built per start (spec + pins + row freeze share
+  the same dict, no drift); agent-less degrade = synthetic
+  {"mode":"autonomous"} snapshot. Frontend: agent picker (default
+  preselected) + context field; advanced = provider overrides only;
+  LiveSession chips lead with Agent (+ Context chip); reattach re-seeds
+  agent/context from overrides.
+  (5) **Meeting config UI**: full assignment editor (add/remove agent rows,
+  per-row context textarea, enabled toggle, identity picker, duplicate-agent
+  guard, empty state "default agent attends"), full-list upsert always sent.
+- **Bugs found & fixed during validation** (both regression-pinned):
+  Johnny-0qw's typed path passed `session.history.copy()` to generate_reply —
+  the agent's instructions system item lives ONLY in `agent._chat_ctx`, so
+  typed replies ran with NO system prompt (out of character, context-blind);
+  fixed to copy `runtime.agent.chat_ctx` (the voice path's exact copy
+  source). And `_replace_assignments` 422'd on re-saving a kept agent
+  (SQLAlchemy INSERT-before-DELETE vs the unique pair) — flush between.
+- Files: backend johnny/agent/{job_config,job_runtime,session,job_session,
+  browser_session,latency_harness}.py, app/services/{session_scheduler,
+  agent_dispatch,docker_launcher,browser_pipeline_runner}.py,
+  app/api/{browser_sessions,meeting_configs}.py, app/db/models.py,
+  alembic/versions/0028_meeting_agent_identity.py, docs/{PIPELINE.md,
+  livekit-room-auth-and-dispatch.md}; frontend src/lib/{browserSessions,
+  meetingConfigs,sessions}.ts, src/lib/playground/playgroundSession.svelte.ts,
+  src/lib/components/playground/{SetupForm,LiveSession}.svelte,
+  src/routes/calendar/+page.svelte; tests: 13 backend files updated, new
+  scheduler fan-out/identity/partial-failure tests, meeting-config identity +
+  re-save tests, feed_text instruction regression pin.
+- Quality: backend 4000 passed / 2 pre-existing wizard env failures (verified
+  identical on stashed tree); ruff + mypy (strict on johnny/agent) clean on
+  touched files; frontend svelte-check 0/0, vitest 96, build clean, lint =
+  1 pre-existing settings error. Browser validation
+  .validation/Johnny-trt.45/ (00-RUN-NOTES.md + 7 artifacts): new playground
+  form live (payload exactly {agent_id, account_id, context}), session #32
+  answered the context probe grounded AND in-character ("…10:00 AM in Room
+  Delta… Maria and Tom… choom"), Echo B picker session #33; meeting-config
+  editor round-trip with shared-identity warning appearing/clearing; LIVE
+  worker scheduler pass started=2 → bot_sessions 34 (Johnny) + 35 (Echo B)
+  each with its own snapshot/context, spawned containers carried
+  JOHNNY_ACCOUNT_ID 1 vs 2 + JOHNNY_AGENT_SNAPSHOT and ZERO retired vars.
+- **Learnings:**
+  - The agent-ctx-vs-session-history split (pattern bullet CORRECTED above):
+    the SDK's `update_instructions` writes the instructions system item into
+    `agent._chat_ctx` only; `session.history` is the surface mirror without
+    it, and `generate_reply(chat_ctx=…)` adds no instructions of its own.
+  - SQLAlchemy UOW orders INSERTs before DELETEs in one flush (pattern above).
+  - uvicorn --reload races a save→request within ~1s: the request can hit
+    the OLD process and fail; the same request a moment later succeeds —
+    retry once before debugging "the fix didn't work".
+  - The trt.42 e2e-provider-suite deactivation did NOT recur (suite run with
+    --ignore=tests/e2e); canonical trio stayed active throughout.
 ---

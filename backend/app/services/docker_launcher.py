@@ -652,15 +652,15 @@ class DockerContainerLauncher(ContainerLauncher):
             "JOHNNY_CALENDAR_EVENT_ID": str(ctx.calendar_event_id),
             "JOHNNY_ACCOUNT_ID": str(ctx.identity_account_id),
             "JOHNNY_MEET_LINK": ctx.meet_link,
-            "JOHNNY_MODE": ctx.mode or "",
-            "JOHNNY_INSTRUCTIONS": ctx.instructions or "",
-            "JOHNNY_CHARACTER_PROMPT": ctx.character_prompt or "",
-            "JOHNNY_CONTEXT": ctx.context or "",
+            # Behavior rides the frozen agent snapshot as one JSON blob
+            # (Johnny-trt.45) — the per-field JOHNNY_MODE / INSTRUCTIONS /
+            # CHARACTER_PROMPT / CONTEXT / ALLOWED_REPLIES /
+            # CONFIDENCE_THRESHOLD overrides were retired with it.
+            "JOHNNY_AGENT_ID": "" if ctx.agent_id is None else str(ctx.agent_id),
+            "JOHNNY_AGENT_SNAPSHOT": json.dumps(dict(ctx.agent_snapshot or {})),
             "JOHNNY_CALENDAR_CONTEXT": ctx.calendar_context or "",
             "JOHNNY_CALENDAR_ATTACHMENTS": ctx.calendar_attachments_text or "",
             "JOHNNY_PRIOR_SESSION_CONTEXT": ctx.prior_session_context or "",
-            "JOHNNY_ALLOWED_REPLIES": json.dumps(list(ctx.allowed_replies)),
-            "JOHNNY_CONFIDENCE_THRESHOLD": str(ctx.confidence_threshold),
             "JOHNNY_PROVIDER_CONFIG": json.dumps(ctx.provider_config or {}),
         }
         # JOHNNY_REDIS_URL lets the meet-worker connect its event bus to

@@ -3,8 +3,7 @@
 	import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
 	import PlayIcon from '@lucide/svelte/icons/play';
 	import { Button } from '$lib/components/ui/button/index.js';
-	import { Input } from '$lib/components/ui/input/index.js';
-	import { BOT_MODE_LABEL, BOT_MODES, type BotMode } from '$lib/sessionDetail';
+	import { agentLabel } from '$lib/agents';
 	import type { ProviderKind } from '$lib/providers';
 	import type { PlaygroundController } from '$lib/playground/playgroundSession.svelte';
 
@@ -13,13 +12,9 @@
 	const FIELD_CLASS =
 		'border-input bg-background flex w-full rounded-md border px-3 py-2 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50';
 
-	const MODE_DESCRIPTION: Record<BotMode, string> = {
-		listen_only: 'Transcribe silently. Johnny never speaks.',
-		suggest_only: 'Propose replies in the UI. Operator decides whether to speak.',
-		approval_required: 'Propose a reply, then wait for operator approval before speaking.',
-		limited_auto_speak: 'Auto-speak — but only from a fixed allowlist below.',
-		autonomous: 'Free-form speech guided only by the instructions. No approval, no allowlist.'
-	};
+	const selectedAgent = $derived(
+		controller.agents.find((a) => a.id === controller.selectedAgentId) ?? null
+	);
 </script>
 
 <section
@@ -35,32 +30,62 @@
 				Configure
 			</h2>
 			<p class="m-0 text-xs text-muted-foreground">
-				Defaults match a casual free-chat session. Drop into Advanced for prompt or provider
-				overrides.
+				Pick an agent and optionally give it context for this session. Behavior, character and
+				voice come from the agent.
 			</p>
 		</div>
 		{#if controller.loadingMetadata}
-			<span class="text-xs italic text-muted-foreground"> Loading providers… </span>
+			<span class="text-xs italic text-muted-foreground"> Loading agents… </span>
 		{/if}
 	</header>
 
 	<div class="flex flex-col gap-5 px-5 py-5">
-		<!-- Decision mode -->
+		<!-- Agent (Johnny-trt.45) -->
 		<div class="flex flex-col gap-1.5">
-			<label for="pg-mode" class="text-sm leading-none font-medium text-foreground">
-				Decision mode
+			<label for="pg-agent" class="text-sm leading-none font-medium text-foreground">
+				Agent
 			</label>
 			<select
-				id="pg-mode"
-				bind:value={controller.mode}
+				id="pg-agent"
+				value={controller.selectedAgentId ?? ''}
+				onchange={(e) =>
+					(controller.selectedAgentId =
+						e.currentTarget.value === '' ? null : Number(e.currentTarget.value))}
 				class="{FIELD_CLASS} h-9"
-				data-testid="playground-mode-select"
+				data-testid="playground-agent-select"
 			>
-				{#each BOT_MODES as m (m)}
-					<option value={m}>{BOT_MODE_LABEL[m]}</option>
+				{#each controller.agents as a (a.id)}
+					<option value={a.id}>{agentLabel(a)}</option>
 				{/each}
 			</select>
-			<p class="m-0 text-xs text-muted-foreground">{MODE_DESCRIPTION[controller.mode]}</p>
+			<p class="m-0 text-xs text-muted-foreground" data-testid="playground-agent-hint">
+				{#if selectedAgent}
+					{selectedAgent.description?.trim() ||
+						`Mode: ${selectedAgent.mode.replaceAll('_', ' ')}.`}
+				{:else}
+					No agents found — the server falls back to its defaults.
+				{/if}
+			</p>
+		</div>
+
+		<!-- Context (the ONE free-text slot, Johnny-trt.45) -->
+		<div class="flex flex-col gap-1.5">
+			<label for="pg-context" class="text-sm leading-none font-medium text-foreground">
+				Context <span class="text-ink-subtle font-normal">· optional</span>
+			</label>
+			<textarea
+				id="pg-context"
+				bind:value={controller.context}
+				rows={3}
+				class="{FIELD_CLASS} resize-y"
+				placeholder="What should the agent know for this session? Meeting brief, fake calendar metadata, attendees…"
+				data-testid="playground-context-input"
+			></textarea>
+			<p class="m-0 text-xs text-muted-foreground">
+				Injected into the agent's instructions as <code
+					class="rounded-xs bg-surface-2 px-1 py-0.5 text-[0.7rem]">Context</code
+				> — the same slot a meeting assignment's context uses.
+			</p>
 		</div>
 
 		<!-- Account (Johnny-8th) -->
@@ -88,24 +113,7 @@
 			</p>
 		</div>
 
-		<!-- Persona -->
-		<div class="flex flex-col gap-1.5">
-			<label for="pg-persona" class="text-sm leading-none font-medium text-foreground">
-				Persona
-			</label>
-			<Input
-				id="pg-persona"
-				bind:value={controller.persona}
-				maxlength={200}
-				placeholder="e.g. concise, friendly conversation partner"
-				data-testid="playground-persona-input"
-			/>
-			<p class="m-0 text-xs text-muted-foreground">
-				Short description that shapes the bot's tone.
-			</p>
-		</div>
-
-		<!-- Advanced -->
+		<!-- Advanced: provider overrides (dev-only escape hatch) -->
 		<div class="flex flex-col">
 			<button
 				type="button"
@@ -121,9 +129,7 @@
 					<ChevronRightIcon class="size-4" />
 				{/if}
 				Advanced
-				<span class="text-xs font-normal text-ink-subtle">
-					· system prompt, context, provider overrides
-				</span>
+				<span class="text-xs font-normal text-ink-subtle"> · provider overrides </span>
 			</button>
 
 			{#if controller.advancedOpen}
@@ -131,40 +137,6 @@
 					id="pg-advanced"
 					class="mt-3 flex flex-col gap-5 rounded-md border border-separator bg-surface-1 px-4 py-4"
 				>
-					<div class="flex flex-col gap-1.5">
-						<label for="pg-prompt" class="text-sm leading-none font-medium text-foreground">
-							System prompt
-						</label>
-						<textarea
-							id="pg-prompt"
-							bind:value={controller.systemPrompt}
-							rows={4}
-							class="{FIELD_CLASS} resize-y"
-							placeholder="Extra system-prompt instructions for this session"
-							data-testid="playground-system-prompt"
-						></textarea>
-					</div>
-
-					<div class="flex flex-col gap-1.5">
-						<label for="pg-context" class="text-sm leading-none font-medium text-foreground">
-							Context injection
-						</label>
-						<textarea
-							id="pg-context"
-							bind:value={controller.contextInjection}
-							rows={3}
-							class="{FIELD_CLASS} resize-y"
-							placeholder="Paste fake calendar metadata, attendees, document snippets…"
-							data-testid="playground-context-input"
-						></textarea>
-						<p class="m-0 text-xs text-muted-foreground">
-							Appended as <code
-								class="rounded-xs bg-surface-2 px-1 py-0.5 text-[0.7rem]">Additional context</code
-							>
-							so the playground can simulate per-event surfaces without a real calendar event.
-						</p>
-					</div>
-
 					<div class="grid gap-3 sm:grid-cols-3">
 						{#each ['stt', 'llm', 'tts'] as const as kind (kind)}
 							{@const list = controller.providers[kind]}
@@ -183,7 +155,7 @@
 											v === '' ? null : Number(v);
 									}}
 								>
-									<option value="">Use active default</option>
+									<option value="">Use agent / active default</option>
 									{#each list as p (p.id)}
 										<option value={p.id}>{p.display_name}{p.is_active ? ' · active' : ''}</option>
 									{/each}
@@ -192,7 +164,8 @@
 						{/each}
 					</div>
 					<p class="m-0 text-xs text-muted-foreground">
-						Provider overrides apply for this session only — global active rows are not touched.
+						Dev escape hatch: overrides apply for this session only and win over the agent's
+						provider pins. Global active rows are not touched.
 					</p>
 				</div>
 			{/if}

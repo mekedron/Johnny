@@ -94,6 +94,11 @@ def _fake_runtime(*, needs_approval: bool = False) -> SimpleNamespace:
 
 def _valid_metadata(**overrides: Any) -> str:
     fields: dict[str, Any] = {"bot_session_id": 7, "room_name": "johnny-session-7"}
+    # Behavior rides the snapshot since Johnny-trt.45 — fold a bare ``mode``
+    # override into it so call sites stay readable.
+    mode = overrides.pop("mode", None)
+    if mode is not None:
+        fields["agent_snapshot"] = {"mode": mode}
     fields.update(overrides)
     return SessionJobConfig(**fields).to_metadata()
 

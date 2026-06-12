@@ -163,7 +163,7 @@ def test_start_playground_creates_browser_session(
 ) -> None:
     res = client.post(
         "/sessions/browser/start",
-        json={"persona": "concise tutor"},
+        json={"context": "Pretend we are mid-sprint."},
     )
     assert res.status_code == 201, res.text
     body = res.json()
@@ -174,7 +174,7 @@ def test_start_playground_creates_browser_session(
     assert body["sample_rate"] == 16_000
     overrides = body["playground_overrides"]
     assert overrides["playground"] is True
-    assert overrides["persona"] == "concise tutor"
+    assert overrides["context"] == "Pretend we are mid-sprint."
     # Row is persisted.
     row = db_session.get(BotSession, body["id"])
     assert row is not None
@@ -293,21 +293,17 @@ def test_start_rehearsal_404s_when_event_has_no_meeting_config(
     assert res.status_code == 404
 
 
-def test_start_playground_with_system_prompt_records_override(
-    client: TestClient,
-) -> None:
-    res = client.post(
-        "/sessions/browser/start",
-        json={
-            "system_prompt": "You are a French tutor.",
-            "persona": "patient teacher",
-        },
-    )
-    assert res.status_code == 201
-    body = res.json()
-    overrides = body["playground_overrides"]
-    assert overrides["system_prompt"] == "You are a French tutor."
-    assert overrides["persona"] == "patient teacher"
+def test_start_rejects_retired_override_fields(client: TestClient) -> None:
+    """Johnny-trt.45: the per-start mode/persona/system_prompt override soup
+    is GONE from the payload — the agent profile is the only behavior
+    source. extra="forbid" turns the retired keys into a 422."""
+    for retired in (
+        {"persona": "patient teacher"},
+        {"system_prompt": "You are a French tutor."},
+        {"mode": "autonomous"},
+    ):
+        res = client.post("/sessions/browser/start", json=retired)
+        assert res.status_code == 422, (retired, res.text)
 
 
 def test_start_rejects_unknown_fields(client: TestClient) -> None:
@@ -552,7 +548,6 @@ def test_inline_overrides_allowed_when_opt_in(
     res = client.post(
         "/sessions/browser/start",
         json={
-            "persona": "test",
             "provider_overrides": {
                 "tts": {
                     "credentials_inline": {
@@ -1018,24 +1013,24 @@ def test_start_playground_agent_seeds_mode(
         )
     assert res.status_code == 201, res.text
     spec = spawn.call_args.kwargs["spec"]
-    assert spec.mode == "listen_only"  # agent.mode seeded it
-    assert spec.character_prompt == ""
+    assert spec.agent_snapshot["mode"] == "listen_only"  # agent.mode seeded it
+    assert spec.agent_snapshot["character_prompt"] == ""
 
 
 def test_start_playground_defaults_to_autonomous_without_agents(
     client: TestClient, db_session: Session, _patch_crypto: None
 ) -> None:
-    """No mode requested and no agent in the DB at all → the playground falls
-    back to autonomous (Johnny-ckz.25) with a non-empty system prompt, and the
-    bare session resolves no agent: bot_name stays None, no agent keys in the
-    snapshot."""
+    """No agent in the DB at all → the playground degrades to a minimal
+    synthetic snapshot carrying autonomous (Johnny-ckz.25 free-chat default,
+    Johnny-trt.45 shape), and the bare session resolves no agent: bot_name
+    stays None, no agent keys in the overrides, row snapshot stays None."""
     _seed_provider(db_session, kind=ProviderKind.LLM, name="anthropic", display="Claude")
     with mock.patch.object(browser_sessions_module, "_spawn_runner") as spawn:
         res = client.post("/sessions/browser/start", json={})
     assert res.status_code == 201, res.text
     spec = spawn.call_args.kwargs["spec"]
-    assert spec.mode == "autonomous"
-    assert spec.instructions.strip() != ""
+    assert spec.agent_id is None
+    assert spec.agent_snapshot["mode"] == "autonomous"
     ov = res.json()["playground_overrides"]
     assert "agent_id" not in ov
     assert "agent_name" not in ov
@@ -1046,19 +1041,31 @@ def test_start_playground_defaults_to_autonomous_without_agents(
     assert row.bot_name is None
 
 
-def test_start_playground_explicit_mode_beats_agent(
+def test_start_playground_per_start_context_rides_snapshot(
     client: TestClient, db_session: Session, _patch_crypto: None
 ) -> None:
-    p = _seed_agent(
-        db_session, name="Listener", is_default=True, mode=BotMode.LISTEN_ONLY
-    )
+    """Johnny-trt.45: the ONE free-text per-start slot lands in the
+    snapshot's assignment_context — on the spec, the overrides bag, AND the
+    frozen row snapshot (the same dict, so they can never drift)."""
+    _seed_agent(db_session, name="Johnny", is_default=True)
     with mock.patch.object(browser_sessions_module, "_spawn_runner") as spawn:
         res = client.post(
             "/sessions/browser/start",
-            json={"agent_id": p.id, "mode": "autonomous"},
+            json={"context": "Pretend the Q3 review is tomorrow."},
         )
     assert res.status_code == 201, res.text
-    assert spawn.call_args.kwargs["spec"].mode == "autonomous"
+    spec = spawn.call_args.kwargs["spec"]
+    assert spec.agent_snapshot["assignment_context"] == (
+        "Pretend the Q3 review is tomorrow."
+    )
+    ov = res.json()["playground_overrides"]
+    assert ov["context"] == "Pretend the Q3 review is tomorrow."
+    row = db_session.get(BotSession, res.json()["id"])
+    assert row is not None
+    assert row.agent_snapshot is not None
+    assert row.agent_snapshot["assignment_context"] == (
+        "Pretend the Q3 review is tomorrow."
+    )
 
 
 def test_start_playground_agent_behavior_rides_spec(
@@ -1079,10 +1086,10 @@ def test_start_playground_agent_behavior_rides_spec(
         res = client.post("/sessions/browser/start", json={"agent_id": p.id})
     assert res.status_code == 201, res.text
     spec = spawn.call_args.kwargs["spec"]
-    assert spec.mode == "limited_auto_speak"
-    assert spec.character_prompt == "You are terse."
-    assert spec.allowed_replies == ("Yes.", "No.")
-    assert spec.confidence_threshold == pytest.approx(0.55)
+    assert spec.agent_snapshot["mode"] == "limited_auto_speak"
+    assert spec.agent_snapshot["character_prompt"] == "You are terse."
+    assert spec.agent_snapshot["allowed_replies"] == ["Yes.", "No."]
+    assert spec.agent_snapshot["confidence_threshold"] == pytest.approx(0.55)
 
 
 def test_start_playground_stale_agent_id_degrades_to_default(
@@ -1126,8 +1133,8 @@ def test_start_rehearsal_uses_meeting_assignment_without_request(
     assert ov["agent_id"] == meeting_agent.id  # assignment, not the default
     assert ov["agent_name"] == "MeetingPreset"
     spec = spawn.call_args.kwargs["spec"]
-    assert spec.mode == "suggest_only"
-    assert spec.context == "Demo brief for this meeting."
+    assert spec.agent_snapshot["mode"] == "suggest_only"
+    assert spec.agent_snapshot["assignment_context"] == "Demo brief for this meeting."
     row = db_session.get(BotSession, res.json()["id"])
     assert row is not None
     assert row.bot_name == "MeetingPreset"
@@ -1153,4 +1160,4 @@ def test_start_rehearsal_explicit_agent_beats_meeting_assignment(
     assert res.status_code == 201, res.text
     ov = res.json()["playground_overrides"]
     assert ov["agent_id"] == requested.id
-    assert spawn.call_args.kwargs["spec"].mode == "autonomous"
+    assert spawn.call_args.kwargs["spec"].agent_snapshot["mode"] == "autonomous"

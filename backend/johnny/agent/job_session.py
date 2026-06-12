@@ -662,7 +662,7 @@ async def build_agent_runtime(
             session_id,
             effective_mode,
         )
-        config = replace(config, mode=effective_mode)
+        config = config.with_mode(effective_mode)
 
     bus = event_bus if event_bus is not None else build_event_bus(config.redis_url)
     owns_bus = event_bus is None
@@ -772,7 +772,6 @@ async def build_agent_runtime(
     gate_config = RouterGateConfig(
         mode=config.mode,
         character_prompt=config.character_prompt,
-        instructions=config.instructions,
         context=config.context,
         calendar_context=config.calendar_context,
         calendar_attachments_text=config.calendar_attachments_text,
@@ -796,8 +795,9 @@ async def build_agent_runtime(
             ),
             # Run-config snapshot keys (Johnny-trt.54): persisted into every
             # decision row's input_window so the session replay and the
-            # timeline's context step reconstruct what the router saw.
-            instructions=config.instructions,
+            # timeline's context step reconstruct what the router saw. The
+            # free-form instructions override was retired (Johnny-trt.45) —
+            # the emitter's default "" keeps the row shape unchanged.
             confidence_threshold=gate_config.confidence_threshold,
             session_id=session_id,
         ),
@@ -887,7 +887,10 @@ async def build_agent_runtime(
 
     barge_in = BargeInClassifier(
         router_llm,
-        config=BargeInClassifierConfig(enable_barge_in=True, instructions=config.instructions),
+        # ``instructions`` keeps its parity default "" — the per-meeting
+        # override it used to fold into the classifier prompt was retired
+        # (Johnny-trt.45; it had been empty since the trt.41 rebuild).
+        config=BargeInClassifierConfig(enable_barge_in=True),
     )
 
     async def _publish_transcript_filtered(event: TranscriptFiltered) -> None:

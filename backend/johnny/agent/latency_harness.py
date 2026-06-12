@@ -865,8 +865,12 @@ async def run_latency_harness(
     config = SessionJobConfig(
         bot_session_id=bot_session_id,
         room_name=f"latency-harness-{bot_session_id}",
-        mode=AUTONOMOUS_MODE,
-        instructions=_HARNESS_INSTRUCTIONS,
+        # Behavior rides the snapshot since Johnny-trt.45; the harness brief
+        # lands in the assignment-context slot (the one free-text slot).
+        agent_snapshot={
+            "mode": AUTONOMOUS_MODE,
+            "assignment_context": _HARNESS_INSTRUCTIONS,
+        },
         provider_config=provider_config,
         redis_url=None,  # the harness owns an in-memory bus; nothing reaches Redis/DB
     )

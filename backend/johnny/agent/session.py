@@ -135,12 +135,16 @@ class AgentInstructionsConfig:
 
     Mirrors the subset of the legacy pipeline config
     the legacy answer LLM rendered into its system message — the agent's
-    character identity layer (Johnny-trt.41), the meeting brief, the calendar
+    character identity layer (Johnny-trt.41), the per-assignment brief
+    (``context``, Johnny-trt.45 — the ONE free-text slot an assignment
+    carries; everything else comes from the agent profile), the calendar
     background, and the cross-session memory (Johnny-dsy). The agent worker
-    fills these from the same launcher env vars the meet-worker reads
-    (``JOHNNY_CHARACTER_PROMPT``, ``JOHNNY_INSTRUCTIONS``, ``JOHNNY_CONTEXT``,
-    ``JOHNNY_CALENDAR_CONTEXT``, ``JOHNNY_CALENDAR_ATTACHMENTS``,
-    ``JOHNNY_PRIOR_SESSION_CONTEXT``).
+    fills ``character_prompt`` / ``context`` from the job payload's frozen
+    agent snapshot and the calendar fields from the payload's per-field
+    mirrors (``JOHNNY_CALENDAR_CONTEXT``, ``JOHNNY_CALENDAR_ATTACHMENTS``,
+    ``JOHNNY_PRIOR_SESSION_CONTEXT``). The free-form ``instructions`` slot
+    (the old per-meeting/system-prompt override) was retired with the
+    Johnny-trt.45 assignment reshape.
 
     Every field defaults to ``""`` and an empty field renders nothing, so an
     unconfigured session degrades to the base framing alone (regression guard).
@@ -152,7 +156,6 @@ class AgentInstructionsConfig:
     rather than improvising a pretend-check.
     """
 
-    instructions: str = ""
     character_prompt: str = ""
     context: str = ""
     calendar_context: str = ""
@@ -169,10 +172,14 @@ def build_agent_instructions(config: AgentInstructionsConfig) -> str:
     the model adopts the character before it reads the job) → history note →
     capability notes (Johnny-trt.55 — unavailable-capability honesty, absent
     when the session has no gaps so the prompt stays byte-identical) →
-    meeting instructions → context → calendar description → calendar
-    attachments → last-session summary. Per-turn-only pieces from the legacy
-    builder (the router hint, ``allowed_replies``) are NOT part of the static
-    instructions — the router gate (Johnny-xpa) and per-turn handlers own those.
+    context (the per-assignment brief — the documented Johnny-trt.45 slot)
+    → calendar description → calendar attachments → last-session summary.
+    The retired "Meeting instructions" line rendered between capability
+    notes and context; it was empty for every post-trt.41 session, so its
+    removal keeps the assembled prompt byte-identical. Per-turn-only pieces
+    from the legacy builder (the router hint, ``allowed_replies``) are NOT
+    part of the static instructions — the router gate (Johnny-xpa) and
+    per-turn handlers own those.
     """
     system = _BASE_INSTRUCTIONS
     if config.character_prompt:
@@ -181,11 +188,9 @@ def build_agent_instructions(config: AgentInstructionsConfig) -> str:
     if config.capability_notes:
         # Capability honesty (Johnny-trt.55): rendered AFTER the character so
         # the no-pretend-check rule outranks roleplay habits, and before the
-        # operator's instructions so those can refine rather than be
-        # contradicted (the router prompt's catalog-ordering rationale).
+        # assignment brief so that can refine rather than be contradicted
+        # (the router prompt's catalog-ordering rationale).
         system += f"\n\n{config.capability_notes}"
-    if config.instructions:
-        system += f"\n\nMeeting instructions: {config.instructions}"
     if config.context:
         system += f"\n\nContext: {config.context}"
     if config.calendar_context:

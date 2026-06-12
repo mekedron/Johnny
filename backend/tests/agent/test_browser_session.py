@@ -81,6 +81,20 @@ class _FakeSpeechHandle:
             cb(self)
 
 
+class _FakeAgent:
+    """A stand-in JohnnyAgent: the durable agent chat ctx feed_text copies.
+
+    Mirrors the SDK shape feed_text relies on (Johnny-trt.45): the agent's
+    static instructions live as a system item INSIDE ``agent.chat_ctx`` —
+    ``session.history`` never carries them.
+    """
+
+    def __init__(self, instructions: str = "BASE-INSTRUCTIONS") -> None:
+        self.chat_ctx = ChatContext.empty()
+        if instructions:
+            self.chat_ctx.add_message(role="system", content=instructions)
+
+
 class _FakeSession:
     """A stand-in AgentSession exposing only what feed_text touches."""
 
@@ -125,7 +139,7 @@ def _make_session(
     async def _sink(ev: Any) -> None:
         transcripts.append(ev)
 
-    runtime = cast(Any, type("R", (), {"gate": gate})())
+    runtime = cast(Any, type("R", (), {"gate": gate, "agent": _FakeAgent()})())
     sess = BrowserAgentSession(
         runtime=runtime,
         session=cast(Any, fake_session),
@@ -163,6 +177,30 @@ async def test_feed_text_speak_routes_through_gate_to_generate_reply() -> None:
     assert terminal.terminal_state == "replied"
     # decision↔terminal parity: the recorded decision shares the turn id.
     assert sess._test_decisions and sess._test_decisions[0][0] == turn_id  # type: ignore[attr-defined]
+
+
+async def test_feed_text_generation_ctx_carries_agent_instructions() -> None:
+    """Regression pin (Johnny-trt.45, fixing a Johnny-0qw regression): the
+    typed path generates from a copy of the AGENT's chat ctx — which carries
+    the static instructions system item (character prompt + per-assignment
+    context) — never from ``session.history``, which the SDK keeps WITHOUT
+    that item. Copying the history produced typed replies with no system
+    prompt at all: out of character and blind to the assignment context."""
+    sess, fake_session, _, _ = _make_session(
+        {"should_speak": True, "confidence": 0.95, "reason": "addressed"}
+    )
+    assert await sess.feed_text("Johnny, who are you?") is True
+
+    assert len(fake_session.generate_reply_ctxs) == 1
+    reply_ctx = fake_session.generate_reply_ctxs[0]
+    system_items = [
+        item.text_content or ""
+        for item in reply_ctx.items
+        if getattr(item, "role", None) == "system"
+    ]
+    assert system_items == ["BASE-INSTRUCTIONS"]
+    # And it is a generation-scoped copy, not the durable agent ctx itself.
+    assert reply_ctx is not sess._runtime.agent.chat_ctx
 
 
 async def test_feed_text_router_declines_no_reply_and_one_terminal() -> None:
@@ -213,12 +251,13 @@ async def test_feed_text_generates_from_a_copy_so_injection_never_persists() -> 
         7, status="done", kind="google-calendar", result_text="You have 3 events this week."
     )
     fake_session = _FakeSession(gate)
-    fake_session.history.add_message(role="user", content="check the calendar please")
+    fake_agent = _FakeAgent()
+    fake_agent.chat_ctx.add_message(role="user", content="check the calendar please")
 
     async def _sink(ev: Any) -> None:
         pass
 
-    runtime = cast(Any, type("R", (), {"gate": gate})())
+    runtime = cast(Any, type("R", (), {"gate": gate, "agent": fake_agent})())
     sess = BrowserAgentSession(
         runtime=runtime,
         session=cast(Any, fake_session),
@@ -230,23 +269,33 @@ async def test_feed_text_generates_from_a_copy_so_injection_never_persists() -> 
 
     assert await sess.feed_text("so what's in the calendar?") is True
 
-    # The reply generated from the gate's turn context: prior history + the
-    # injected grounding message.
+    # The reply generated from the gate's turn context: the agent ctx copy
+    # (instructions + prior history) + the injected grounding message.
     assert len(fake_session.generate_reply_ctxs) == 1
     reply_ctx = fake_session.generate_reply_ctxs[0]
     assert reply_ctx is not fake_session.history
-    injected = [
+    assert reply_ctx is not fake_agent.chat_ctx
+    system_items = [
         item.text_content or ""
         for item in reply_ctx.items
         if getattr(item, "role", None) == "system"
     ]
-    assert len(injected) == 1
-    assert "You have 3 events this week." in injected[0]
-    # The durable history holds NO system message — the injection was
+    # The agent's own instructions ride the copy (the trt.45 fix of the 0qw
+    # regression — session.history never carried them), then the grounding.
+    assert len(system_items) == 2
+    assert system_items[0] == "BASE-INSTRUCTIONS"
+    assert "You have 3 events this week." in system_items[1]
+    # The durable contexts hold NO grounding message — the injection was
     # generation-scoped (the SDK persists the user/assistant messages itself).
     assert [
         item for item in fake_session.history.items if getattr(item, "role", None) == "system"
     ] == []
+    durable_system = [
+        item.text_content or ""
+        for item in fake_agent.chat_ctx.items
+        if getattr(item, "role", None) == "system"
+    ]
+    assert durable_system == ["BASE-INSTRUCTIONS"]
     await coordinator.aclose()
 
 

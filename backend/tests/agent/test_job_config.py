@@ -2,6 +2,11 @@
 
 Stdlib-only: :mod:`johnny.agent.job_config` imports no ``livekit`` and no
 ``app.providers``, so these run anywhere the package is importable.
+
+Johnny-trt.45: behavior (mode / character / context / allowlist / threshold)
+rides the frozen ``agent_snapshot`` blob; the per-field overrides and their
+``JOHNNY_*`` env vars are gone. The drift guard against the docker launcher's
+``_build_environment`` pins the new env key set.
 """
 
 from __future__ import annotations
@@ -22,6 +27,21 @@ from johnny.agent.job_config import (
 )
 
 
+def _snapshot() -> dict[str, Any]:
+    """A realistic frozen agent snapshot (build_agent_snapshot's shape)."""
+    return {
+        "agent_id": 4,
+        "name": "Ada",
+        "avatar": None,
+        "character_prompt": "[character: Ada]\nWitty.",
+        "mode": "approval_required",
+        "allowed_replies": ["Yes.", "No.", "Could you repeat that?"],
+        "confidence_threshold": 0.62,
+        "providers": {"tts_provider_id": 3, "tts_voice_id": "amy"},
+        "assignment_context": "Quarterly review.",
+    }
+
+
 def _full_config() -> SessionJobConfig:
     return SessionJobConfig(
         bot_session_id=42,
@@ -30,15 +50,11 @@ def _full_config() -> SessionJobConfig:
         meeting_config_id=7,
         calendar_event_id=99,
         account_id=3,
-        mode="approval_required",
-        instructions="Be brief.",
-        character_prompt="[character: Ada]\nWitty.",
-        context="Quarterly review.",
+        agent_id=4,
+        agent_snapshot=_snapshot(),
         calendar_context="Q3 numbers.",
         calendar_attachments_text="doc body",
         prior_session_context="last time we agreed X",
-        allowed_replies=("Yes.", "No.", "Could you repeat that?"),
-        confidence_threshold=0.62,
         provider_config={
             "stt": {
                 "provider_name": "deepgram",
@@ -66,29 +82,56 @@ def test_metadata_round_trip_preserves_every_field() -> None:
 def test_to_metadata_is_deterministic_json() -> None:
     cfg = _full_config()
     # sort_keys makes the serialisation stable, so two dumps match and the
-    # nested provider_config survives the trip intact.
+    # nested provider_config / agent_snapshot survive the trip intact.
     assert cfg.to_metadata() == cfg.to_metadata()
     payload = json.loads(cfg.to_metadata())
     assert payload["provider_config"]["stt"]["options"]["model"] == "nova-3"
+    assert payload["agent_snapshot"]["assignment_context"] == "Quarterly review."
+
+
+def test_behavior_derives_from_snapshot() -> None:
+    """The Johnny-trt.45 invariant: behavior has ONE source — the snapshot."""
+    cfg = _full_config()
+    assert cfg.mode == "approval_required"
+    assert cfg.character_prompt == "[character: Ada]\nWitty."
+    assert cfg.context == "Quarterly review."
+    assert cfg.allowed_replies == ("Yes.", "No.", "Could you repeat that?")
+    assert cfg.confidence_threshold == pytest.approx(0.62)
 
 
 def test_minimal_config_uses_safe_defaults() -> None:
     cfg = SessionJobConfig(bot_session_id=1, room_name=room_name_for_session(1))
     assert cfg.mode == DEFAULT_MODE == "listen_only"
     assert cfg.character_prompt == ""
+    assert cfg.context == ""
     assert cfg.allowed_replies == ()
     assert cfg.confidence_threshold == DEFAULT_CONFIDENCE_THRESHOLD
+    assert cfg.agent_id is None
+    assert cfg.agent_snapshot == {}
     assert cfg.provider_config == {}
     assert cfg.redis_url is None
     assert SessionJobConfig.from_metadata(cfg.to_metadata()) == cfg
 
 
-def test_to_dict_serialises_allowed_replies_as_list() -> None:
-    """The wire shape is a JSON array (tuples don't exist in JSON)."""
+def test_with_mode_rewrites_the_snapshot_copy_only() -> None:
+    """The no-TTS degrade seam: a new config whose snapshot carries the
+    effective mode; the original config (and its snapshot) is untouched."""
     cfg = _full_config()
-    payload = cfg.to_dict()
-    assert payload["allowed_replies"] == ["Yes.", "No.", "Could you repeat that?"]
-    assert isinstance(payload["allowed_replies"], list)
+    degraded = cfg.with_mode("suggest_only")
+    assert degraded.mode == "suggest_only"
+    assert degraded.agent_snapshot["mode"] == "suggest_only"
+    assert cfg.mode == "approval_required"
+    # Every other snapshot key survives the rewrite.
+    assert degraded.character_prompt == cfg.character_prompt
+    assert degraded.context == cfg.context
+
+
+def test_snapshot_mode_is_lenient_at_read_time() -> None:
+    """A hand-built/corrupt snapshot mutes the bot instead of crashing."""
+    cfg = SessionJobConfig(
+        bot_session_id=1, room_name="r", agent_snapshot={"mode": "shout"}
+    )
+    assert cfg.mode == DEFAULT_MODE
 
 
 @pytest.mark.parametrize("bad", [{}, {"bot_session_id": None}, {"bot_session_id": ""}])
@@ -102,19 +145,50 @@ def test_from_dict_requires_room_name() -> None:
         SessionJobConfig.from_dict({"bot_session_id": 1, "room_name": "  "})
 
 
-def test_from_dict_rejects_unknown_mode() -> None:
-    with pytest.raises(ValueError, match="unknown mode"):
-        SessionJobConfig.from_dict({"bot_session_id": 1, "room_name": "r", "mode": "shout"})
+def test_from_dict_rejects_unknown_snapshot_mode() -> None:
+    """The wire format stays strict: a dispatched payload whose snapshot
+    names a mode the engine doesn't know fails loud at the worker."""
+    with pytest.raises(ValueError, match="unknown agent_snapshot mode"):
+        SessionJobConfig.from_dict(
+            {
+                "bot_session_id": 1,
+                "room_name": "r",
+                "agent_snapshot": {"mode": "shout"},
+            }
+        )
 
 
-def test_from_dict_ignores_retired_pipeline_mode_key() -> None:
-    # Sessions dispatched before Johnny-trt.43 carried a ``pipeline_mode``
-    # key; the contract must ignore it (unknown keys are dropped) rather
-    # than reject an old in-flight payload.
+def test_from_dict_rejects_non_object_snapshot() -> None:
+    with pytest.raises(ValueError, match="agent_snapshot"):
+        SessionJobConfig.from_dict(
+            {"bot_session_id": 1, "room_name": "r", "agent_snapshot": [1, 2]}
+        )
+
+
+def test_from_dict_ignores_retired_keys() -> None:
+    # Sessions dispatched before Johnny-trt.43/.45 carried ``pipeline_mode``
+    # and the per-field behavior overrides; the contract must ignore them
+    # (unknown keys are dropped) rather than reject an old in-flight payload.
     cfg = SessionJobConfig.from_dict(
-        {"bot_session_id": 1, "room_name": "r", "pipeline_mode": "unified"}
+        {
+            "bot_session_id": 1,
+            "room_name": "r",
+            "pipeline_mode": "unified",
+            "mode": "autonomous",
+            "instructions": "old",
+            "character_prompt": "old",
+            "context": "old",
+            "allowed_replies": ["old"],
+            "confidence_threshold": 0.1,
+        }
     )
     assert not hasattr(cfg, "pipeline_mode")
+    # The retired top-level fields do NOT leak into behavior — only the
+    # snapshot drives it, and this payload has none.
+    assert cfg.mode == DEFAULT_MODE
+    assert cfg.character_prompt == ""
+    assert cfg.allowed_replies == ()
+    assert cfg.confidence_threshold == DEFAULT_CONFIDENCE_THRESHOLD
 
 
 def test_from_dict_rejects_non_object_provider_config() -> None:
@@ -132,21 +206,18 @@ def test_from_metadata_rejects_malformed_payload(raw: str) -> None:
 
 def test_from_env_mirrors_launcher_contract() -> None:
     # Exactly the keys app.services.docker_launcher._build_environment sets.
+    snapshot = _snapshot()
     env = {
         "JOHNNY_SESSION_ID": "55",
         "JOHNNY_MEETING_CONFIG_ID": "8",
         "JOHNNY_CALENDAR_EVENT_ID": "None",  # launcher str(None) when absent
         "JOHNNY_ACCOUNT_ID": "2",
         "JOHNNY_MEET_LINK": "https://meet.google.com/x",
-        "JOHNNY_MODE": "suggest_only",
-        "JOHNNY_INSTRUCTIONS": "hi",
-        "JOHNNY_CHARACTER_PROMPT": "persona",
-        "JOHNNY_CONTEXT": "ctx",
+        "JOHNNY_AGENT_ID": "4",
+        "JOHNNY_AGENT_SNAPSHOT": json.dumps(snapshot),
         "JOHNNY_CALENDAR_CONTEXT": "cal",
         "JOHNNY_CALENDAR_ATTACHMENTS": "att",
         "JOHNNY_PRIOR_SESSION_CONTEXT": "prior",
-        "JOHNNY_ALLOWED_REPLIES": json.dumps(["Yes.", "No."]),
-        "JOHNNY_CONFIDENCE_THRESHOLD": "0.65",
         "JOHNNY_PROVIDER_CONFIG": json.dumps({"tts": {"provider_name": "piper"}}),
         "JOHNNY_REDIS_URL": "redis://redis:6379/0",
         "LIVEKIT_ROOM": "johnny-session-55",
@@ -156,13 +227,36 @@ def test_from_env_mirrors_launcher_contract() -> None:
     assert cfg.meeting_config_id == 8
     assert cfg.calendar_event_id is None  # "None" coerced to absent
     assert cfg.account_id == 2
-    assert cfg.mode == "suggest_only"
-    assert cfg.character_prompt == "persona"
-    assert cfg.allowed_replies == ("Yes.", "No.")
-    assert cfg.confidence_threshold == pytest.approx(0.65)
+    assert cfg.agent_id == 4
+    assert cfg.agent_snapshot == snapshot
+    assert cfg.mode == "approval_required"
+    assert cfg.character_prompt == snapshot["character_prompt"]
+    assert cfg.allowed_replies == ("Yes.", "No.", "Could you repeat that?")
+    assert cfg.confidence_threshold == pytest.approx(0.62)
     assert cfg.room_name == "johnny-session-55"
     assert cfg.provider_config == {"tts": {"provider_name": "piper"}}
     assert cfg.redis_url == "redis://redis:6379/0"
+
+
+def test_from_env_retired_behavior_vars_are_inert() -> None:
+    """Johnny-trt.45 acceptance: the removed override env vars are GONE —
+    setting them changes nothing (behavior comes from the snapshot alone)."""
+    cfg = SessionJobConfig.from_env(
+        {
+            "JOHNNY_SESSION_ID": "9",
+            "JOHNNY_MODE": "autonomous",
+            "JOHNNY_INSTRUCTIONS": "old override",
+            "JOHNNY_CHARACTER_PROMPT": "old persona",
+            "JOHNNY_CONTEXT": "old ctx",
+            "JOHNNY_ALLOWED_REPLIES": json.dumps(["Yes."]),
+            "JOHNNY_CONFIDENCE_THRESHOLD": "0.11",
+        }
+    )
+    assert cfg.mode == DEFAULT_MODE
+    assert cfg.character_prompt == ""
+    assert cfg.context == ""
+    assert cfg.allowed_replies == ()
+    assert cfg.confidence_threshold == DEFAULT_CONFIDENCE_THRESHOLD
 
 
 def test_from_env_defaults_room_and_modes_when_blank() -> None:
@@ -171,24 +265,35 @@ def test_from_env_defaults_room_and_modes_when_blank() -> None:
     assert cfg.mode == "listen_only"
     assert cfg.allowed_replies == ()
     assert cfg.confidence_threshold == DEFAULT_CONFIDENCE_THRESHOLD
+    assert cfg.agent_snapshot == {}
     assert cfg.provider_config == {}
     assert cfg.redis_url is None
 
 
-def test_from_env_tolerates_malformed_behavior_values() -> None:
+def test_from_env_tolerates_malformed_snapshot_values() -> None:
     """A sloppy snapshot degrades to the contract defaults, never raises."""
     cfg = SessionJobConfig.from_env(
+        {"JOHNNY_SESSION_ID": "9", "JOHNNY_AGENT_SNAPSHOT": "not json"}
+    )
+    assert cfg.agent_snapshot == {}
+    assert cfg.mode == DEFAULT_MODE
+    # Junk inside an otherwise-valid snapshot degrades per-field.
+    sloppy = SessionJobConfig.from_env(
         {
             "JOHNNY_SESSION_ID": "9",
-            "JOHNNY_ALLOWED_REPLIES": "not json",
-            "JOHNNY_CONFIDENCE_THRESHOLD": "much",
+            "JOHNNY_AGENT_SNAPSHOT": json.dumps(
+                {"allowed_replies": "not a list", "confidence_threshold": "much"}
+            ),
         }
     )
-    assert cfg.allowed_replies == ()
-    assert cfg.confidence_threshold == DEFAULT_CONFIDENCE_THRESHOLD
+    assert sloppy.allowed_replies == ()
+    assert sloppy.confidence_threshold == DEFAULT_CONFIDENCE_THRESHOLD
     # Out-of-range values clamp instead of poisoning the gate.
     high = SessionJobConfig.from_env(
-        {"JOHNNY_SESSION_ID": "9", "JOHNNY_CONFIDENCE_THRESHOLD": "7.5"}
+        {
+            "JOHNNY_SESSION_ID": "9",
+            "JOHNNY_AGENT_SNAPSHOT": json.dumps({"confidence_threshold": 7.5}),
+        }
     )
     assert high.confidence_threshold == 1.0
 
@@ -271,7 +376,7 @@ def test_from_metadata_accepts_autonomous_mode() -> None:
     cfg = SessionJobConfig(
         bot_session_id=42,
         room_name=room_name_for_session(42),
-        mode="autonomous",
+        agent_snapshot={"mode": "autonomous"},
     )
     restored = SessionJobConfig.from_metadata(cfg.to_metadata())
     assert restored.mode == "autonomous"

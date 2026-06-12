@@ -3,10 +3,10 @@
   "sessionId": "d4e0eaf8-2f04-47a7-b280-1ca8b39424b6",
   "status": "running",
   "startedAt": "2026-06-11T21:01:32.322Z",
-  "updatedAt": "2026-06-12T04:04:53.638Z",
-  "currentIteration": 9,
+  "updatedAt": "2026-06-12T05:21:11.359Z",
+  "currentIteration": 10,
   "maxIterations": 0,
-  "tasksCompleted": 9,
+  "tasksCompleted": 10,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -512,6 +512,16 @@
       "durationMs": 2794027,
       "startedAt": "2026-06-12T02:44:28.171Z",
       "endedAt": "2026-06-12T03:31:02.198Z"
+    },
+    {
+      "iteration": 10,
+      "status": "completed",
+      "taskId": "Johnny-0qw",
+      "taskTitle": "[BUG] Phase 5: speak-verdict follow-up in the settle→delivery window answers blind — registry result not consulted (session-4 regression survives on the speak path)",
+      "taskCompleted": true,
+      "durationMs": 1983825,
+      "startedAt": "2026-06-12T03:31:48.712Z",
+      "endedAt": "2026-06-12T04:04:52.537Z"
     }
   ],
   "skippedTaskIds": [],

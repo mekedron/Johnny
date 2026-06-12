@@ -230,13 +230,15 @@ def test_snapshot_behavior_rides_the_dispatch_contract_into_the_gate(
 ) -> None:
     """Drift guard: the gate reads behavior FROM the snapshot (Johnny-trt.41).
 
-    The path under pin: agent_snapshot → LaunchContext → SessionJobConfig
-    (the dispatch metadata the worker rebuilds) — the same four behavior
-    fields, value-for-value. ``job_session`` then passes
-    ``config.allowed_replies`` / ``config.confidence_threshold`` /
-    ``config.mode`` / ``config.character_prompt`` verbatim into
+    Since Johnny-trt.45 the snapshot rides the dispatch contract WHOLE:
+    agent_snapshot → LaunchContext.agent_snapshot →
+    SessionJobConfig.agent_snapshot (the dispatch metadata the worker
+    rebuilds), and the contract derives mode / character_prompt /
+    allowed_replies / confidence_threshold / context from it.
+    ``job_session`` then passes those properties verbatim into
     ``RouterGateConfig``, so equality across this round trip proves no
-    layer re-reads behavior from config tables.
+    layer re-reads behavior from config tables — and no layer can drift
+    from the persisted ``bot_sessions.agent_snapshot``.
     """
     from app.services.agent_dispatch import session_job_config_from_launch_context
     from app.services.session_scheduler import LaunchContext
@@ -259,22 +261,22 @@ def test_snapshot_behavior_rides_the_dispatch_contract_into_the_gate(
         identity_account_id=4,
         meet_link="https://meet.google.com/abc-defg-hij",
         container_name="meet-worker-session-1",
-        mode=str(snapshot["mode"]),
-        character_prompt=str(snapshot["character_prompt"]),
-        allowed_replies=tuple(snapshot["allowed_replies"]),
-        confidence_threshold=float(snapshot["confidence_threshold"]),
-        context=str(snapshot["assignment_context"]),
+        agent_id=agent.id,
+        agent_snapshot=snapshot,
     )
     config = session_job_config_from_launch_context(ctx)
 
+    assert config.agent_snapshot == snapshot
     assert config.mode == snapshot["mode"]
     assert config.character_prompt == snapshot["character_prompt"]
     assert list(config.allowed_replies) == snapshot["allowed_replies"]
     assert config.confidence_threshold == snapshot["confidence_threshold"]
+    assert config.context == snapshot["assignment_context"]
 
     # The dispatch metadata round-trips the behavior unchanged — what the
     # worker's gate assembly receives is byte-for-byte the snapshot values.
     rebuilt = SessionJobConfig.from_metadata(config.to_metadata())
+    assert rebuilt.agent_snapshot == snapshot
     assert rebuilt.mode == snapshot["mode"]
     assert rebuilt.character_prompt == snapshot["character_prompt"]
     assert list(rebuilt.allowed_replies) == snapshot["allowed_replies"]

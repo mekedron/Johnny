@@ -155,10 +155,29 @@ def _provider_config_without_tts() -> dict[str, Any]:
     return pc
 
 
+# Behavior kwargs fold into the agent snapshot (Johnny-trt.45): tests keep
+# their readable `_job(mode=..., character_prompt=...)` shape while the
+# contract itself only carries the snapshot. ``context`` maps to the
+# snapshot's ``assignment_context`` slot; ``instructions`` was retired.
+_SNAPSHOT_KWARGS = {
+    "mode": "mode",
+    "character_prompt": "character_prompt",
+    "allowed_replies": "allowed_replies",
+    "confidence_threshold": "confidence_threshold",
+    "context": "assignment_context",
+}
+
+
 def _job(**overrides: Any) -> SessionJobConfig:
+    snapshot: dict[str, Any] = dict(overrides.pop("agent_snapshot", {}) or {})
+    for kwarg, key in _SNAPSHOT_KWARGS.items():
+        if kwarg in overrides:
+            value = overrides.pop(kwarg)
+            snapshot[key] = list(value) if isinstance(value, tuple) else value
     fields: dict[str, Any] = {
         "bot_session_id": 7,
         "room_name": "johnny-session-7",
+        "agent_snapshot": snapshot,
         "provider_config": _split_provider_config(),
     }
     fields.update(overrides)
@@ -185,7 +204,7 @@ def test_build_event_bus_redis_with_url() -> None:
 async def test_build_runtime_wires_full_session() -> None:
     bus = InMemoryEventBus()
     runtime = await build_agent_runtime(
-        _job(mode=LIMITED_AUTO_SPEAK_MODE, instructions="Be brief."),
+        _job(mode=LIMITED_AUTO_SPEAK_MODE, context="Be brief."),
         event_bus=bus,
         registry=_registry(),
     )

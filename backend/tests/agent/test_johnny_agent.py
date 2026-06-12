@@ -94,7 +94,6 @@ def test_empty_config_renders_base_framing_and_history_note_only() -> None:
 
 def test_all_components_render_in_legacy_order() -> None:
     config = AgentInstructionsConfig(
-        instructions="Stay on the agenda.",
         character_prompt="[personality: Pirate]\nArr, ye be a pirate.",
         context="Quarterly planning.",
         calendar_context="Q3 OKR review.",
@@ -105,7 +104,6 @@ def test_all_components_render_in_legacy_order() -> None:
 
     # Every configured component is present...
     assert "[personality: Pirate]\nArr, ye be a pirate." in text
-    assert "Meeting instructions: Stay on the agenda." in text
     assert "Context: Quarterly planning." in text
     assert "Calendar event description: Q3 OKR review." in text
     assert "Calendar attachments (linked documents from the event " in text
@@ -113,10 +111,11 @@ def test_all_components_render_in_legacy_order() -> None:
     assert "Last session summary: Last week we deferred hiring." in text
 
     # ...and in the legacy answer-stage order: personality FIRST (before the
-    # job/brief), then instructions → context → calendar → attachments → prior.
+    # job/brief), then context → calendar → attachments → prior (the retired
+    # "Meeting instructions" slot rendered between capability notes and
+    # context; it was empty for every post-trt.41 session — Johnny-trt.45).
     positions = [
         text.index("[personality: Pirate]"),
-        text.index("Meeting instructions:"),
         text.index("Context: Quarterly planning."),
         text.index("Calendar event description:"),
         text.index("Calendar attachments"),
@@ -125,7 +124,7 @@ def test_all_components_render_in_legacy_order() -> None:
     assert positions == sorted(positions)
     # Personality is rendered ahead of the base "job" tail too: it sits right
     # after the opening framing sentence.
-    assert text.index("[personality: Pirate]") < text.index("Meeting instructions:")
+    assert text.index("[personality: Pirate]") < text.index("Context: Quarterly planning.")
 
 
 def test_personality_renders_before_history_note() -> None:
@@ -189,42 +188,42 @@ def test_bare_agent_uses_default_instructions_and_empty_history() -> None:
 
 
 def test_prompt_config_builds_instructions() -> None:
-    config = AgentInstructionsConfig(instructions="Be brief.")
+    config = AgentInstructionsConfig(context="Be brief.")
     agent = JohnnyAgent(prompt_config=config)
     assert agent.instructions == build_agent_instructions(config)
-    assert "Meeting instructions: Be brief." in agent.instructions
+    assert "Context: Be brief." in agent.instructions
 
 
 def test_explicit_instructions_override_prompt_config() -> None:
     agent = JohnnyAgent(
         instructions="VERBATIM",
-        prompt_config=AgentInstructionsConfig(instructions="ignored"),
+        prompt_config=AgentInstructionsConfig(context="ignored"),
     )
     assert agent.instructions == "VERBATIM"
 
 
-def test_capability_notes_render_between_personality_and_instructions() -> None:
+def test_capability_notes_render_between_personality_and_context() -> None:
     """Johnny-trt.55: the answer model sees the unavailable-capability honesty
     block — after the personality (so no-pretend-check outranks roleplay),
-    before the operator instructions (so those refine, not contradict)."""
+    before the assignment brief (so that refines, not contradicts)."""
     notes = (
         "Things you CANNOT do in this session right now. If asked for one of "
         "these, say so plainly:\n- google-calendar: no Google account is connected."
     )
     config = AgentInstructionsConfig(
         character_prompt="You are a cyberpunk concierge.",
-        instructions="Be brief.",
+        context="Be brief.",
         capability_notes=notes,
     )
     rendered = build_agent_instructions(config)
     assert notes in rendered
     assert rendered.index("cyberpunk") < rendered.index("CANNOT do")
-    assert rendered.index("CANNOT do") < rendered.index("Meeting instructions: Be brief.")
+    assert rendered.index("CANNOT do") < rendered.index("Context: Be brief.")
 
 
 def test_empty_capability_notes_leave_prompt_byte_identical() -> None:
-    base = AgentInstructionsConfig(instructions="Be brief.")
-    with_empty = AgentInstructionsConfig(instructions="Be brief.", capability_notes="")
+    base = AgentInstructionsConfig(context="Be brief.")
+    with_empty = AgentInstructionsConfig(context="Be brief.", capability_notes="")
     assert build_agent_instructions(base) == build_agent_instructions(with_empty)
     assert "CANNOT" not in build_agent_instructions(base)
 
@@ -250,7 +249,7 @@ async def test_build_johnny_agent_rehydrates_from_loader() -> None:
         [_participant("Earlier question.", speaker="Bob"), _bot("Earlier answer.")]
     )
     agent = await build_johnny_agent(
-        prompt_config=AgentInstructionsConfig(instructions="Help out."),
+        prompt_config=AgentInstructionsConfig(context="Help out."),
         transcript_history_loader=loader,
         session_id="sess-1",
         bot_session_id=42,
@@ -261,15 +260,15 @@ async def test_build_johnny_agent_rehydrates_from_loader() -> None:
         ("assistant", "Earlier answer."),
     ]
     # ...instructions built from the config...
-    assert "Meeting instructions: Help out." in agent.instructions
+    assert "Context: Help out." in agent.instructions
     # ...and the loader was queried with both ids (parity with the pipeline).
     assert loader.calls == [("sess-1", 42)]
 
 
 async def test_build_johnny_agent_without_loader_starts_empty() -> None:
-    agent = await build_johnny_agent(prompt_config=AgentInstructionsConfig(instructions="x"))
+    agent = await build_johnny_agent(prompt_config=AgentInstructionsConfig(context="x"))
     assert list(agent.chat_ctx.items) == []
-    assert "Meeting instructions: x" in agent.instructions
+    assert "Context: x" in agent.instructions
 
 
 async def test_build_johnny_agent_swallows_loader_failure() -> None:
@@ -293,7 +292,7 @@ async def test_build_johnny_agent_explicit_instructions_win() -> None:
     loader = InMemoryTranscriptHistoryLoader([_bot("hi")])
     agent = await build_johnny_agent(
         instructions="OVERRIDE",
-        prompt_config=AgentInstructionsConfig(instructions="ignored"),
+        prompt_config=AgentInstructionsConfig(context="ignored"),
         transcript_history_loader=loader,
     )
     assert agent.instructions == "OVERRIDE"

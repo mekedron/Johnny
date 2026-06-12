@@ -32,17 +32,13 @@ import {
 	type ProviderKind
 } from '$lib/providers';
 import { listAccounts, type Account } from '$lib/accounts';
+import { listAgents, type Agent } from '$lib/agents';
 import {
 	PlaygroundMicDeniedError,
 	startPlaygroundStt,
 	type PlaygroundSttSession
 } from '$lib/playgroundStt';
-import {
-	BOT_MODES,
-	getSessionDetail,
-	type BotMode,
-	type SessionDetail
-} from '$lib/sessionDetail';
+import { getSessionDetail, type SessionDetail } from '$lib/sessionDetail';
 import {
 	subscribeToSession,
 	type AgentSpeechPartialEvent,
@@ -132,16 +128,16 @@ function stageCategoryLabel(category: string): string {
 
 export class PlaygroundController {
 	// --- Configuration -----------------------------------------------------
-	persona = $state('Concise, friendly conversation partner.');
-	systemPrompt = $state(
-		'Respond directly without any speaker label, bot name, role prefix, or text before the actual message.'
-	);
-	mode = $state<BotMode>('autonomous');
+	// Johnny-trt.45: a playground session is configured by picking an AGENT
+	// plus one free-text context brief — the old per-start persona /
+	// system-prompt / mode knobs are gone (behavior comes from the agent).
+	agents = $state<Agent[]>([]);
+	selectedAgentId = $state<number | null>(null);
+	context = $state('');
 	// Johnny-8th: account this playground run belongs to (null = account-less).
 	// Sticky in localStorage (seeded in loadMetadata).
 	selectedAccountId = $state<number | null>(null);
 	accounts = $state<Account[]>([]);
-	contextInjection = $state('');
 	advancedOpen = $state(false);
 	providerOverrides = $state<Record<ProviderKind, number | null>>({
 		stt: null,
@@ -252,13 +248,16 @@ export class PlaygroundController {
 	loadMetadata = async (): Promise<void> => {
 		this.loadingMetadata = true;
 		try {
-			const [provs, accts] = await Promise.all([
+			const [provs, accts, agents] = await Promise.all([
 				listProviders(),
-				listAccounts().catch(() => [] as Account[])
+				listAccounts().catch(() => [] as Account[]),
+				listAgents().catch(() => [] as Agent[])
 			]);
 			this.providers = provs;
 			this.accounts = accts;
+			this.agents = agents;
 			this.seedAccountSelection();
+			this.seedAgentSelection();
 		} catch (err) {
 			this.setDiagnostic('general', {
 				severity: 'error',
@@ -269,6 +268,22 @@ export class PlaygroundController {
 			this.loadingMetadata = false;
 		}
 	};
+
+	/**
+	 * Preselect the default agent (Johnny-trt.45). A selection the user
+	 * already made this page-life (or a reattach seed) is kept when it
+	 * still exists; a stale id falls back to the default.
+	 */
+	private seedAgentSelection(): void {
+		if (
+			this.selectedAgentId !== null &&
+			this.agents.some((a) => a.id === this.selectedAgentId)
+		) {
+			return;
+		}
+		const def = this.agents.find((a) => a.is_default) ?? this.agents[0];
+		this.selectedAgentId = def?.id ?? null;
+	}
 
 	// --- account sticky selection (Johnny-8th) -----------------------------
 
@@ -354,22 +369,16 @@ export class PlaygroundController {
 				overrides[kind] = { credentials_id: id };
 			}
 		}
-		// No agent_id: the server resolves the meeting's assignment / default
-		// agent. A playground agent picker arrives in a later task.
+		// Johnny-trt.45: agent + one context brief is the whole configuration;
+		// behavior (mode/character/allowlist) comes from the agent profile.
 		const payload: StartBrowserSessionPayload = {
-			mode: this.mode,
-			persona: this.persona.trim() || undefined,
+			agent_id: this.selectedAgentId,
 			account_id: this.selectedAccountId
 		};
+		const ctx = this.context.trim();
+		if (ctx) payload.context = ctx;
 		if (Object.keys(overrides).length > 0) {
 			payload.provider_overrides = overrides;
-		}
-		const parts: string[] = [];
-		if (this.systemPrompt.trim()) parts.push(this.systemPrompt.trim());
-		const ctx = this.contextInjection.trim();
-		if (ctx) parts.push(`Additional context:\n${ctx}`);
-		if (parts.length > 0) {
-			payload.system_prompt = parts.join('\n\n');
 		}
 		return payload;
 	}
@@ -452,13 +461,9 @@ export class PlaygroundController {
 				return;
 			}
 			const overrides = (s.playground_overrides ?? {}) as Record<string, unknown>;
-			if (typeof overrides.persona === 'string') this.persona = overrides.persona;
-			if (typeof overrides.system_prompt === 'string') this.systemPrompt = overrides.system_prompt;
-			if (
-				typeof overrides.mode === 'string' &&
-				(BOT_MODES as readonly string[]).includes(overrides.mode)
-			) {
-				this.mode = overrides.mode as BotMode;
+			if (typeof overrides.context === 'string') this.context = overrides.context;
+			if (typeof overrides.agent_id === 'number') {
+				this.selectedAgentId = overrides.agent_id;
 			}
 			// Committed to the reattach — zero stale per-session state before
 			// seeding this session's own history (Johnny-trt.40). Kept below

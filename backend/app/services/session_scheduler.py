@@ -10,9 +10,11 @@ Shape:
 
 * :func:`select_due_meetings` — find meeting_configs whose event starts
   within the next ``join_window_seconds`` and has no active bot_session.
-* :func:`start_session_for_meeting` — create a ``scheduled`` bot_session
-  row, call ``launcher.start``, then transition to ``joining``. Errors
-  during launch are translated into ``failed``.
+* :func:`start_sessions_for_meeting` — create one ``scheduled`` bot_session
+  row PER enabled agent assignment (Johnny-trt.45; no assignments → one
+  session on the default agent), call ``launcher.start`` for each, then
+  transition to ``joining``. Errors during launch are translated into
+  ``failed``.
 * :func:`stop_session_by_id` — call ``launcher.stop`` and transition the
   row to ``ended`` (or ``failed`` on launcher error). Idempotent for
   rows already in a terminal state.
@@ -33,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -45,6 +48,7 @@ from app.db.models import (
     BotSessionSource,
     BotSessionStatus,
     CalendarEvent,
+    MeetingAgent,
     MeetingConfig,
 )
 from app.services.agent_dispatch import maybe_dispatch_session_agent
@@ -54,7 +58,6 @@ from app.services.bot_sessions import (
     mark_session_failed,
     mark_session_joining,
 )
-from johnny.agent.job_config import DEFAULT_CONFIDENCE_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
@@ -123,9 +126,9 @@ class LaunchContext:
     ignore it and pick its own name as long as it returns the actual
     name in :class:`LaunchResult`.
 
-    ``instructions`` and ``provider_config`` are passed as environment
+    ``agent_snapshot`` and ``provider_config`` are passed as environment
     variables to the meet-worker by the Docker launcher (US-030) so the
-    pipeline knows what to say and which providers are active. Defaults
+    pipeline knows how to behave and which providers are active. Defaults
     keep the scheduler's no-op path unchanged.
     """
 
@@ -135,28 +138,25 @@ class LaunchContext:
     identity_account_id: int
     meet_link: str
     container_name: str
-    mode: str = ""
-    instructions: str = ""
-    character_prompt: str = ""
-    """The agent's character / communication-style prompt (Johnny-trt.41).
+    agent_id: int | None = None
+    """The agent serving this session (Johnny-trt.45). ``None`` only when
+    no agent exists at all — the session then runs the contract defaults."""
+    agent_snapshot: Mapping[str, Any] = field(default_factory=dict)
+    """The agent's frozen behavior + provider-pin blob (Johnny-trt.41/45).
 
-    Read from the session's frozen agent snapshot and forwarded to the
-    meet-worker via the ``JOHNNY_CHARACTER_PROMPT`` env var (and to the
-    dispatched agent worker as job metadata) so a scheduled bot adopts the
-    same character a playground session would. Empty when no agent resolved.
+    The exact dict persisted on ``bot_sessions.agent_snapshot`` at dispatch
+    — including the per-assignment ``assignment_context`` brief. Forwarded
+    to the meet-worker as one ``JOHNNY_AGENT_SNAPSHOT`` JSON env var (and to
+    the dispatched agent worker as job metadata); it replaced the per-field
+    mode / character / context / allowed-replies / threshold env overrides.
+    Empty when no agent resolved (contract defaults).
     """
-    allowed_replies: tuple[str, ...] = ()
-    """The agent's limited-auto-speak allowlist, frozen at dispatch
-    (Johnny-trt.41). Empty for modes without an allowlist."""
-    confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD
-    """The agent's router speak floor, frozen at dispatch (Johnny-trt.41)."""
-    context: str = ""
     calendar_context: str = ""
     """Calendar event description — pre-meeting context from the event itself.
 
-    Passed alongside ``context`` (the user-typed brief) so the bot sees
-    both. Kept distinct so an audit can tell them apart and so the user
-    can edit one without disturbing the other.
+    Per-meeting (not per-agent), so it rides next to the snapshot rather
+    than inside it. Kept distinct from the assignment brief so an audit can
+    tell them apart and the user can edit one without disturbing the other.
     """
     calendar_attachments_text: str = ""
     """Resolved text body of Google Docs / Sheets / Drive files linked
@@ -405,29 +405,103 @@ def _validate_meeting_for_launch(meeting: MeetingConfig) -> str:
     return event.meet_link
 
 
-async def start_session_for_meeting(
+def _enabled_assignments(meeting: MeetingConfig) -> list[MeetingAgent]:
+    """The meeting's enabled agent assignments, ordered by (position, id)."""
+    candidates = [a for a in meeting.agent_assignments if a.enabled]
+    candidates.sort(key=lambda a: (a.position, a.id))
+    return candidates
+
+
+def _build_base_provider_payload(session: Session) -> dict[str, Any]:
+    """Materialise the global-active provider rows for the meet-worker.
+
+    Built once per meeting launch and shared across its per-assignment
+    sessions (each assignment then layers its agent's pins on a copy).
+    ``crypto`` is the production CredentialCrypto; a startup
+    misconfiguration (no FERNET_KEY) degrades gracefully to an empty
+    payload so the bot still joins — it just runs in listen-only mode.
+    """
+    from app.security.crypto import CryptoError
+
+    try:
+        from app.security.crypto import get_crypto
+        from app.services.provider_payload import build_provider_payload
+
+        return build_provider_payload(session, get_crypto())
+    except CryptoError as exc:
+        logger.warning(
+            "provider payload skipped — FERNET_KEY not configured (%s); "
+            "meet-worker will run without providers",
+            exc,
+        )
+        return {}
+    except Exception:  # noqa: BLE001 — never block a launch on payload errors
+        logger.exception("provider payload build failed; sending empty payload")
+        return {}
+
+
+def _find_prior_session_context(
+    session: Session,
+    *,
+    meeting: MeetingConfig,
+    exclude_bot_session_id: int,
+) -> str:
+    """Prior-occurrence summary for recurring meetings (Johnny-dsy).
+
+    ``exclude`` guards the corner case where this row already has a summary
+    written (re-launch after a crash) so we don't echo our own state back
+    at ourselves. Never blocks a launch.
+    """
+    event = meeting.calendar_event
+    recurring_event_id = event.recurring_event_id if event is not None else None
+    try:
+        from app.services.history import find_prior_session_summary
+
+        prior = find_prior_session_summary(
+            session,
+            recurring_event_id=recurring_event_id,
+            exclude_bot_session_id=exclude_bot_session_id,
+        )
+        return prior.summary if prior is not None else ""
+    except Exception:  # noqa: BLE001 — never block a launch on history lookup
+        logger.exception(
+            "prior_session_summary lookup failed for meeting_config=%s; "
+            "continuing without cross-session context",
+            meeting.id,
+        )
+        return ""
+
+
+async def _start_one_session(
     session: Session,
     *,
     meeting: MeetingConfig,
     launcher: ContainerLauncher,
+    meet_link: str,
+    agent: Any,
+    assignment: MeetingAgent | None,
+    base_provider_payload: Mapping[str, Any],
 ) -> BotSession:
-    """Create the bot_session row and ask the launcher to start the worker.
+    """Create + launch ONE bot_session for one agent assignment.
 
-    Flow:
+    ``agent`` is the resolved :class:`~app.db.models.Agent` row (or ``None``
+    for the contract-default degrade); ``assignment`` the
+    :class:`MeetingAgent` row that selected it (``None`` for the
+    no-assignments default-agent fallback). The flow per session:
 
-    1. ``validate`` — checks enabled + has meet link.
-    2. Insert ``bot_sessions`` row in ``scheduled`` so its id exists
+    1. Insert the ``bot_sessions`` row in ``scheduled`` so its id exists
        before we tell the launcher (the id is part of the container name).
-    3. ``await launcher.start(...)``. Any exception is recorded against
-       the row via :func:`mark_session_failed` and re-raised.
-    4. Persist the returned ``container_name`` and transition to
-       ``joining``.
-
-    Returns the persisted row. The session is left uncommitted; the
-    caller's outer transaction commits.
+    2. Freeze the agent's behavior + the per-assignment ``context`` brief
+       onto the row as ``agent_snapshot`` (Johnny-trt.41/45) — everything
+       downstream reads the snapshot, never the live agents/meeting_agents
+       rows.
+    3. Resolve the agent's provider pins onto a copy of the shared base
+       payload (Johnny-trt.42).
+    4. ``await launcher.start(...)``; failures are recorded on the row via
+       :func:`mark_session_failed` and re-raised.
+    5. Persist the returned ``container_name``, transition to ``joining``,
+       and dispatch the agent worker into the session's room.
     """
-    meet_link = _validate_meeting_for_launch(meeting)
-
     row = BotSession(
         meeting_config_id=meeting.id,
         # Tag with the calendar owner so History can filter by account
@@ -438,79 +512,37 @@ async def start_session_for_meeting(
     session.add(row)
     session.flush()
 
-    # Materialise the active provider rows so the meet-worker bootstrap
-    # can instantiate STT / LLM / TTS without DB access. ``crypto`` is
-    # the production CredentialCrypto by default; tests inject a
-    # NoopCrypto via the ``crypto`` kwarg. A startup misconfiguration
-    # (no FERNET_KEY) degrades gracefully to an empty payload so the
-    # bot still joins — it just runs in listen-only mode for that
-    # session.
-    provider_payload: dict[str, Any] = {}
-    try:
-        from app.security.crypto import CryptoError, get_crypto
-        from app.services.provider_payload import build_provider_payload
-
-        provider_payload = build_provider_payload(session, get_crypto())
-    except CryptoError as exc:
-        logger.warning(
-            "provider payload skipped — FERNET_KEY not configured (%s); "
-            "meet-worker will run without providers",
-            exc,
-        )
-    except Exception:  # noqa: BLE001 — never block a launch on payload errors
-        logger.exception("provider payload build failed; sending empty payload")
-
-    # Johnny-trt.41: resolve the agent serving this session (first enabled
-    # assignment → default agent) and FREEZE its behavior onto the row as
-    # ``agent_snapshot`` before dispatch. Everything downstream — the launch
-    # context, the gate's allowed_replies/threshold, history's bot name —
-    # reads the snapshot, never the live agents/meeting_agents rows, so
-    # editing an agent mid-meeting can't mutate a running session. Wrapped in
-    # a guard so an agent lookup glitch degrades to the contract defaults
-    # (listen-only, no character) rather than blocking the launch.
-    mode_value = ""
-    character_prompt = ""
-    assignment_context = ""
-    allowed_replies: tuple[str, ...] = ()
-    confidence_threshold = DEFAULT_CONFIDENCE_THRESHOLD
+    # Freeze the agent's behavior (Johnny-trt.41) + the assignment brief
+    # (Johnny-trt.45) onto the row before dispatch. Guarded so a snapshot
+    # glitch degrades to the contract defaults rather than blocking launch.
     agent_snapshot: dict[str, Any] | None = None
-    try:
-        from app.services.agents import build_agent_snapshot, select_agent
+    if agent is not None:
+        try:
+            from app.services.agents import build_agent_snapshot
 
-        resolution = select_agent(session, meeting=meeting)
-        agent = resolution.agent
-        if agent is not None:
-            snapshot = build_agent_snapshot(
-                agent, assignment_context=resolution.assignment_context
+            agent_snapshot = build_agent_snapshot(
+                agent,
+                assignment_context=(assignment.context if assignment is not None else None),
             )
             row.agent_id = agent.id
-            row.agent_snapshot = snapshot
+            row.agent_snapshot = agent_snapshot
             row.bot_name = agent.name
-            agent_snapshot = snapshot
-            mode_value = str(snapshot["mode"])
-            character_prompt = str(snapshot["character_prompt"])
-            assignment_context = resolution.assignment_context or ""
-            allowed_replies = tuple(snapshot["allowed_replies"])
-            confidence_threshold = float(snapshot["confidence_threshold"])
-        else:
-            logger.warning(
-                "no agent resolved for meeting_config=%s (empty agents table?); "
+        except Exception:  # noqa: BLE001 — never block a launch on agent errors
+            agent_snapshot = None
+            logger.exception(
+                "agent snapshot failed for meeting_config=%s agent=%s; "
                 "launching with contract defaults",
                 meeting.id,
+                getattr(agent, "id", None),
             )
-    except Exception:  # noqa: BLE001 — never block a launch on agent errors
-        logger.exception(
-            "agent resolution failed for meeting_config=%s; "
-            "launching with contract defaults",
-            meeting.id,
-        )
 
-    # Johnny-trt.42: apply the snapshot's provider pins to the global payload
-    # so the dispatched session runs the agent's providers (answer/router LLM
-    # roles, TTS + voice, the reasoning stamp). Unusable pins degrade to the
-    # global-active entry with a visible provider_switch row in the activity
-    # log; any resolver error degrades to the unresolved payload — provider
-    # resolution must never block a launch.
+    # Johnny-trt.42: apply the snapshot's provider pins to a copy of the
+    # global payload so the dispatched session runs the agent's providers
+    # (answer/router LLM roles, TTS + voice, the reasoning stamp). Unusable
+    # pins degrade to the global-active entry with a visible provider_switch
+    # row in the activity log; any resolver error degrades to the unresolved
+    # payload — provider resolution must never block a launch.
+    provider_payload: dict[str, Any] = dict(base_provider_payload)
     if agent_snapshot is not None and provider_payload:
         try:
             from app.security.crypto import get_crypto
@@ -537,56 +569,32 @@ async def start_session_for_meeting(
                 row.id,
             )
 
-    calendar_description = ""
-    calendar_attachments = ""
-    recurring_event_id: str | None = None
     event = meeting.calendar_event
-    if event is not None:
-        if event.description:
-            calendar_description = event.description
-        if event.attachments_text:
-            calendar_attachments = event.attachments_text
-        recurring_event_id = event.recurring_event_id
+    calendar_description = (event.description or "") if event is not None else ""
+    calendar_attachments = (event.attachments_text or "") if event is not None else ""
 
-    # Johnny-dsy: cross-session continuity. When this calendar event is
-    # an occurrence of a recurring series, pull the previous terminal
-    # bot_session's summary so the bot can pick up open questions /
-    # decisions from last week without re-asking. ``exclude`` guards the
-    # corner case where this row already has a summary written (re-launch
-    # after a crash) so we don't echo our own state back at ourselves.
-    prior_session_context = ""
-    try:
-        from app.services.history import find_prior_session_summary
-
-        prior = find_prior_session_summary(
-            session,
-            recurring_event_id=recurring_event_id,
-            exclude_bot_session_id=row.id,
-        )
-        if prior is not None:
-            prior_session_context = prior.summary
-    except Exception:  # noqa: BLE001 — never block a launch on history lookup
-        logger.exception(
-            "prior_session_summary lookup failed for meeting_config=%s; "
-            "continuing without cross-session context",
-            meeting.id,
-        )
+    # Per-assignment identity (Johnny-trt.45): each agent joins the Meet as
+    # its own Google account so two agents appear as two participants — a
+    # single account cannot join one Meet twice. The meeting-level identity
+    # account remains the fallback for assignments that pin none.
+    identity_account_id = meeting.identity_account_id
+    if assignment is not None and assignment.identity_account_id is not None:
+        identity_account_id = assignment.identity_account_id
 
     ctx = LaunchContext(
         bot_session_id=row.id,
         meeting_config_id=meeting.id,
         calendar_event_id=meeting.calendar_event_id,
-        identity_account_id=meeting.identity_account_id,
+        identity_account_id=identity_account_id,
         meet_link=meet_link,
         container_name=container_name_for_session(row.id),
-        mode=mode_value,
-        character_prompt=character_prompt,
-        allowed_replies=allowed_replies,
-        confidence_threshold=confidence_threshold,
-        context=assignment_context,
+        agent_id=row.agent_id,
+        agent_snapshot=agent_snapshot or {},
         calendar_context=calendar_description,
         calendar_attachments_text=calendar_attachments,
-        prior_session_context=prior_session_context,
+        prior_session_context=_find_prior_session_context(
+            session, meeting=meeting, exclude_bot_session_id=row.id
+        ),
         provider_config=provider_payload,
     )
     try:
@@ -603,9 +611,10 @@ async def start_session_for_meeting(
     row.container_name = result.container_name
     mark_session_joining(session, row.id)
     logger.info(
-        "started bot_session id=%s for meeting_config id=%s as container %s",
+        "started bot_session id=%s for meeting_config id=%s agent=%s as container %s",
         row.id,
         meeting.id,
+        row.agent_id,
         result.container_name,
     )
 
@@ -616,6 +625,108 @@ async def start_session_for_meeting(
     # selection (and the meet-worker→bridge switch) is Johnny-wz5.
     await maybe_dispatch_session_agent(ctx)
     return row
+
+
+async def start_sessions_for_meeting(
+    session: Session,
+    *,
+    meeting: MeetingConfig,
+    launcher: ContainerLauncher,
+) -> list[BotSession]:
+    """Launch one bot_session PER enabled agent assignment (Johnny-trt.45).
+
+    Meetings are configured by assigning agents (:class:`MeetingAgent`
+    rows): each enabled assignment gets its own session, its own frozen
+    agent snapshot (carrying the per-assignment ``context`` brief), its own
+    provider resolution, and its own join identity (the assignment's
+    ``identity_account_id``, falling back to the meeting-level account). A
+    meeting with **no** enabled assignments falls back to one session on
+    the default agent — the pre-trt.45 behavior.
+
+    Per-assignment launcher failures are recorded on their own rows and do
+    NOT stop the remaining assignments; the error re-raises only when *no*
+    session could be launched at all, so the scheduler pass still counts a
+    fully-failed meeting as an error. Returns the successfully-launched
+    rows. The session is left uncommitted; the caller's outer transaction
+    commits.
+
+    The shared speech floor / peer awareness for the launched co-agents is
+    sibling work (Johnny-trt.46) — this function owns the fan-out only.
+    """
+    meet_link = _validate_meeting_for_launch(meeting)
+    base_provider_payload = _build_base_provider_payload(session)
+
+    # Build the (agent, assignment) launch list. Assignment-less meetings
+    # degrade to the default agent; agent resolution errors degrade to the
+    # contract defaults (one agent-less session) — a launch is never blocked.
+    launches: list[tuple[Any, MeetingAgent | None]] = []
+    try:
+        assignments = _enabled_assignments(meeting)
+        if assignments:
+            launches = [(a.agent, a) for a in assignments if a.agent is not None]
+        if not launches:
+            from app.services.agents import select_default_agent
+
+            default_agent = select_default_agent(session)
+            if default_agent is None:
+                logger.warning(
+                    "no agent resolved for meeting_config=%s (empty agents "
+                    "table?); launching with contract defaults",
+                    meeting.id,
+                )
+            launches = [(default_agent, None)]
+    except Exception:  # noqa: BLE001 — never block a launch on agent errors
+        logger.exception(
+            "agent resolution failed for meeting_config=%s; "
+            "launching with contract defaults",
+            meeting.id,
+        )
+        launches = [(None, None)]
+
+    rows: list[BotSession] = []
+    last_error: Exception | None = None
+    for agent, assignment in launches:
+        try:
+            rows.append(
+                await _start_one_session(
+                    session,
+                    meeting=meeting,
+                    launcher=launcher,
+                    meet_link=meet_link,
+                    agent=agent,
+                    assignment=assignment,
+                    base_provider_payload=base_provider_payload,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — keep launching the co-agents
+            last_error = exc
+            logger.warning(
+                "assignment launch failed for meeting_config=%s agent=%s: %s",
+                meeting.id,
+                getattr(agent, "id", None),
+                exc,
+            )
+    if not rows and last_error is not None:
+        raise last_error
+    return rows
+
+
+async def start_session_for_meeting(
+    session: Session,
+    *,
+    meeting: MeetingConfig,
+    launcher: ContainerLauncher,
+) -> BotSession:
+    """Single-session compatibility wrapper over :func:`start_sessions_for_meeting`.
+
+    Kept for callers that address "the" session of a meeting (the manual
+    Join-now endpoint's response shape). Launches every enabled assignment
+    exactly like the scheduler does and returns the FIRST launched row.
+    """
+    rows = await start_sessions_for_meeting(
+        session, meeting=meeting, launcher=launcher
+    )
+    return rows[0]
 
 
 async def stop_session_by_id(
@@ -717,7 +828,8 @@ async def run_scheduler_pass_with_session(
     settled = 0
     errors = 0
 
-    # Start sweep.
+    # Start sweep. One session launches per enabled agent assignment
+    # (Johnny-trt.45); ``started`` counts sessions, not meetings.
     due = select_due_meetings(
         session,
         now=moment,
@@ -725,10 +837,10 @@ async def run_scheduler_pass_with_session(
     )
     for meeting in due:
         try:
-            await start_session_for_meeting(
+            rows = await start_sessions_for_meeting(
                 session, meeting=meeting, launcher=launcher
             )
-            started += 1
+            started += len(rows)
         except (ValueError, LauncherError) as exc:
             logger.warning(
                 "scheduler start failed meeting_config_id=%s: %s",
@@ -852,5 +964,6 @@ __all__ = [
     "select_due_stops",
     "select_relogin_to_settle",
     "start_session_for_meeting",
+    "start_sessions_for_meeting",
     "stop_session_by_id",
 ]

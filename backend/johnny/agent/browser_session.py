@@ -517,9 +517,22 @@ class BrowserAgentSession:
         # mutable copy and generates from it); the typed path must mirror it —
         # run the gate on a copy and generate from that same copy, so the
         # injection reaches exactly this reply and never pollutes the durable
-        # session.history (generate_reply still persists the user message and
-        # the assistant reply into the live ctx itself).
-        turn_ctx = self._session.history.copy()
+        # context (generate_reply still persists the user message and the
+        # assistant reply into the live ctx itself).
+        #
+        # The copy source must be the AGENT's chat context, not
+        # ``session.history`` (Johnny-trt.45 fix of a Johnny-0qw regression):
+        # the SDK keeps the agent's static instructions as a system item
+        # inside ``agent._chat_ctx`` ONLY (``update_instructions`` at activity
+        # start), while ``session.history`` is the session-surface mirror
+        # without it — and ``generate_reply(chat_ctx=…)`` adds no instructions
+        # of its own (its ``instructions`` param defaults to None). Copying
+        # the history therefore generated typed replies with NO system prompt
+        # at all: out of character, blind to the per-assignment context. The
+        # agent ctx copy is also exactly what the SDK's voice path hands
+        # ``on_user_turn_completed``, so the two surfaces now scope turns
+        # identically.
+        turn_ctx = self._runtime.agent.chat_ctx.copy()
         new_message = LKChatMessage(role="user", content=[cleaned])
         try:
             await self._runtime.gate.run_turn(turn_ctx, new_message)

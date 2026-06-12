@@ -542,13 +542,23 @@ erDiagram
     agent_decisions ||--o{ agent_utterances : "agent_decision_id (SET NULL)"
     agents ||--o{ meeting_agents : "agent_id (CASCADE)"
     meeting_configs ||--o{ meeting_agents : "meeting_config_id (CASCADE)"
+    google_accounts ||--o{ meeting_agents : "identity_account_id (SET NULL)"
     agents ||--o{ bot_sessions : "agent_id (SET NULL)"
 
+    meeting_agents {
+        int id PK
+        int meeting_config_id FK
+        int agent_id FK
+        int identity_account_id FK "per-assignment join identity (trt.45); NULL = meeting-level account"
+        text context "the ONE per-assignment brief (trt.45)"
+        bool enabled "one bot session launches per ENABLED assignment"
+        int position "launch/selection order"
+    }
     bot_sessions {
         int id PK
         int meeting_config_id FK "NULL for browser/playground"
         int agent_id FK "the serving agent (SET NULL)"
-        json agent_snapshot "behavior frozen at dispatch (trt.41)"
+        json agent_snapshot "behavior frozen at dispatch (trt.41); rides the dispatch contract whole (trt.45)"
         string source "meet|browser"
         string status "scheduled|joining|joined|ended|failed"
         text session_summary "for recurring-meeting memory"
@@ -676,6 +686,8 @@ removed.
 | 0018 | `agent_decisions.decision_recommended_text / final_text / divergence_reason / override_actor` (INV-2) + legacy backfill |
 | 0019 | `agent_decisions.turn_id / terminal_state / no_reply_reason` (INV-1) + backfill (`legacy` reason on backfilled `no_reply` rows) |
 | 0026 | **drops** `pipeline_settings` + deactivates `kind='s2s'` provider rows (S2S surface removal, Johnny-trt.43) |
+| 0027 | agents rebuild: `agents` + `meeting_agents` tables, `bot_sessions.agent_id/agent_snapshot`, drops templates/personalities + the meeting override soup (Johnny-trt.41) |
+| 0028 | `meeting_agents.identity_account_id` — per-assignment join identity for multi-agent meetings (Johnny-trt.45) |
 
 > **Migrate-image gotcha:** the `migrate` compose service bakes its own image.
 > `docker compose build api worker frontend` does **not** rebuild it — a new

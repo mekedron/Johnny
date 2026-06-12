@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 import sqlalchemy as sa
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import Base
@@ -39,6 +40,7 @@ from app.services.session_scheduler import (
     select_due_stops,
     select_relogin_to_settle,
     start_session_for_meeting,
+    start_sessions_for_meeting,
     stop_session_by_id,
 )
 
@@ -142,10 +144,12 @@ def _assign_agent(
     context: str | None = None,
     enabled: bool = True,
     position: int = 0,
+    identity_account_id: int | None = None,
 ) -> MeetingAgent:
     row = MeetingAgent(
         meeting_config_id=meeting.id,
         agent_id=agent.id,
+        identity_account_id=identity_account_id,
         context=context,
         enabled=enabled,
         position=position,
@@ -608,24 +612,21 @@ async def test_start_session_default_agent_stamps_row_and_ctx(
         "tts_voice_id",
         "tts_options",
     }
-    # The launch context reads the snapshot fields.
+    # The launch context carries the SAME snapshot dict (Johnny-trt.45);
+    # behavior derives from it, never from per-field overrides.
     ctx = launcher.started[0]
-    assert ctx.mode == "limited_auto_speak"
-    assert ctx.character_prompt == "You are Johnny, sharp and dry."
-    assert ctx.allowed_replies == ("Yes.", "No.")
-    assert ctx.confidence_threshold == pytest.approx(0.62)
-    # Instructions died with the override soup; context is the assignment's
-    # (none here — default-agent session).
-    assert ctx.instructions == ""
-    assert ctx.context == ""
+    assert ctx.agent_id == agent.id
+    assert ctx.agent_snapshot == snapshot
 
 
 @pytest.mark.asyncio
-async def test_start_session_enabled_assignment_beats_default_agent(
+async def test_start_sessions_launches_one_session_per_enabled_assignment(
     db_session: Session,
 ) -> None:
-    """(b) The meeting's first ENABLED assignment (lowest position) wins over
-    the default agent, and its per-assignment context rides ctx.context."""
+    """(b) Johnny-trt.45 acceptance: one bot session PER enabled assignment,
+    each with its own agent snapshot (incl. the per-assignment context),
+    ordered by position; disabled assignments are skipped and the default
+    agent does NOT additionally launch."""
     cfg = _seed_full_meeting(
         db_session,
         start_offset=timedelta(seconds=30),
@@ -633,50 +634,169 @@ async def test_start_session_enabled_assignment_beats_default_agent(
     )
     _seed_agent(db_session, name="Default", is_default=True)
     disabled = _seed_agent(db_session, name="Disabled", mode=BotMode.AUTONOMOUS)
-    assigned = _seed_agent(
+    aria = _seed_agent(
         db_session,
         name="Aria",
         mode=BotMode.SUGGEST_ONLY,
         character_prompt="You are Aria.",
     )
-    later = _seed_agent(db_session, name="Later", mode=BotMode.AUTONOMOUS)
-    # A disabled assignment at position 0 must be skipped...
+    finn = _seed_agent(
+        db_session,
+        name="Finn",
+        mode=BotMode.AUTONOMOUS,
+        character_prompt="You are Finn.",
+    )
     _assign_agent(
         db_session, meeting=cfg, agent=disabled, enabled=False, position=0
     )
-    # ...the enabled one at the lowest position wins...
     _assign_agent(
         db_session,
         meeting=cfg,
-        agent=assigned,
+        agent=aria,
         context="Aria runs the demo today.",
         position=1,
     )
-    # ...beating a higher-position enabled assignment.
-    _assign_agent(db_session, meeting=cfg, agent=later, position=2)
+    _assign_agent(
+        db_session,
+        meeting=cfg,
+        agent=finn,
+        context="Finn takes notes.",
+        position=2,
+    )
 
     launcher = NoopContainerLauncher()
-    row = await start_session_for_meeting(
+    rows = await start_sessions_for_meeting(
         db_session, meeting=cfg, launcher=launcher
     )
-    db_session.refresh(row)
-    assert row.agent_id == assigned.id
-    assert row.bot_name == "Aria"
-    assert row.agent_snapshot is not None
-    assert row.agent_snapshot["assignment_context"] == "Aria runs the demo today."
-    ctx = launcher.started[0]
-    assert ctx.mode == "suggest_only"
-    assert ctx.character_prompt == "You are Aria."
-    assert ctx.context == "Aria runs the demo today."
-    assert ctx.instructions == ""
+
+    assert len(rows) == 2
+    assert len(launcher.started) == 2
+    by_agent = {row.agent_id: row for row in rows}
+    assert set(by_agent) == {aria.id, finn.id}
+    aria_row, finn_row = by_agent[aria.id], by_agent[finn.id]
+    db_session.refresh(aria_row)
+    db_session.refresh(finn_row)
+    assert aria_row.bot_name == "Aria"
+    assert aria_row.agent_snapshot is not None
+    assert aria_row.agent_snapshot["mode"] == "suggest_only"
+    assert aria_row.agent_snapshot["assignment_context"] == "Aria runs the demo today."
+    assert finn_row.bot_name == "Finn"
+    assert finn_row.agent_snapshot is not None
+    assert finn_row.agent_snapshot["assignment_context"] == "Finn takes notes."
+    # Each launch context carries its own session id + frozen snapshot;
+    # position order decides launch order.
+    assert [c.agent_id for c in launcher.started] == [aria.id, finn.id]
+    for started_ctx in launcher.started:
+        matching_row = by_agent[started_ctx.agent_id]
+        assert started_ctx.bot_session_id == matching_row.id
+        assert started_ctx.agent_snapshot == matching_row.agent_snapshot
+        assert started_ctx.container_name == container_name_for_session(
+            matching_row.id
+        )
+
+
+@pytest.mark.asyncio
+async def test_per_assignment_identity_account_with_meeting_fallback(
+    db_session: Session,
+) -> None:
+    """Johnny-trt.45 multi-agent identity: an assignment pinning its own
+    Google account joins with it; an assignment pinning none falls back to
+    the meeting-level identity account."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    second_account = GoogleAccount(
+        email="second-identity@example.com", refresh_token_encrypted="x"
+    )
+    db_session.add(second_account)
+    db_session.flush()
+    aria = _seed_agent(db_session, name="Aria")
+    finn = _seed_agent(db_session, name="Finn")
+    _assign_agent(
+        db_session,
+        meeting=cfg,
+        agent=aria,
+        position=0,
+        identity_account_id=second_account.id,
+    )
+    _assign_agent(db_session, meeting=cfg, agent=finn, position=1)
+
+    launcher = NoopContainerLauncher()
+    await start_sessions_for_meeting(db_session, meeting=cfg, launcher=launcher)
+
+    identities = {c.agent_id: c.identity_account_id for c in launcher.started}
+    assert identities[aria.id] == second_account.id
+    assert identities[finn.id] == cfg.identity_account_id
+
+
+@pytest.mark.asyncio
+async def test_assignment_launch_failure_does_not_stop_co_agents(
+    db_session: Session,
+) -> None:
+    """A launcher failure on one assignment records that row failed and
+    keeps launching the rest; the call returns the successful rows."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    aria = _seed_agent(db_session, name="Aria")
+    finn = _seed_agent(db_session, name="Finn")
+    _assign_agent(db_session, meeting=cfg, agent=aria, position=0)
+    _assign_agent(db_session, meeting=cfg, agent=finn, position=1)
+
+    class _FirstBoomLauncher(NoopContainerLauncher):
+        async def start(self, ctx: LaunchContext) -> LaunchResult:
+            if not self.started:
+                self.started.append(ctx)
+                raise LauncherError("docker exploded")
+            return await super().start(ctx)
+
+    launcher = _FirstBoomLauncher()
+    rows = await start_sessions_for_meeting(
+        db_session, meeting=cfg, launcher=launcher
+    )
+
+    assert len(rows) == 1
+    assert rows[0].agent_id == finn.id
+    failed = db_session.scalars(
+        select(BotSession).where(BotSession.status == BotSessionStatus.FAILED)
+    ).all()
+    assert len(failed) == 1
+    assert failed[0].agent_id == aria.id
+    assert "launcher.start failed" in (failed[0].error_reason or "")
+
+
+@pytest.mark.asyncio
+async def test_all_assignments_failing_raises(db_session: Session) -> None:
+    """When NO session could launch at all, the error propagates so the
+    scheduler pass still counts the meeting as errored."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    aria = _seed_agent(db_session, name="Aria")
+    _assign_agent(db_session, meeting=cfg, agent=aria, position=0)
+
+    class _BoomLauncher(NoopContainerLauncher):
+        async def start(self, ctx: LaunchContext) -> LaunchResult:
+            raise LauncherError("docker exploded")
+
+    with pytest.raises(LauncherError):
+        await start_sessions_for_meeting(
+            db_session, meeting=cfg, launcher=_BoomLauncher()
+        )
 
 
 @pytest.mark.asyncio
 async def test_start_session_without_any_agent_degrades_to_contract_defaults(
     db_session: Session,
 ) -> None:
-    """(c) No agents in the DB at all → contract defaults: empty mode, no
-    bot_name/agent stamp, default threshold. The launch still happens."""
+    """(c) No agents in the DB at all → contract defaults: empty snapshot, no
+    bot_name/agent stamp. The launch still happens."""
     cfg = _seed_full_meeting(
         db_session,
         start_offset=timedelta(seconds=30),
@@ -692,12 +812,8 @@ async def test_start_session_without_any_agent_degrades_to_contract_defaults(
     assert row.agent_snapshot is None
     assert row.bot_name is None
     ctx = launcher.started[0]
-    assert ctx.mode == ""
-    assert ctx.character_prompt == ""
-    assert ctx.instructions == ""
-    assert ctx.context == ""
-    assert ctx.allowed_replies == ()
-    assert ctx.confidence_threshold == pytest.approx(0.7)
+    assert ctx.agent_id is None
+    assert ctx.agent_snapshot == {}
     # No calendar description was set → empty calendar_context.
     assert ctx.calendar_context == ""
 

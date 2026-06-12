@@ -39,7 +39,7 @@ export interface BotSession {
 	 */
 	audio_ws_path?: string | null;
 	/**
-	 * Per-session playground overrides (persona, system prompt,
+	 * Per-session playground overrides (agent id/name, context brief,
 	 * provider overrides). Populated for browser-source sessions only.
 	 */
 	playground_overrides?: Record<string, unknown> | null;

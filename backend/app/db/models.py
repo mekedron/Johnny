@@ -454,10 +454,18 @@ class MeetingAgent(TimestampMixin, Base):
     binds an :class:`Agent` to a :class:`MeetingConfig` with a per-assignment
     ``context`` brief (what THIS agent should know for THIS meeting — the
     replacement for the old per-meeting instructions/context override soup),
-    an ``enabled`` toggle and an ordering ``position``. The multi-agent
-    *runtime* (arbitration, per-agent turn claims) is sibling work
-    (Johnny-trt.45/.47); until it lands the session dispatch resolves the
-    first enabled assignment by position.
+    an ``enabled`` toggle and an ordering ``position``. The scheduler
+    launches one bot session per enabled assignment (Johnny-trt.45); the
+    multi-agent *runtime* (shared speech floor, peer awareness) is sibling
+    work (Johnny-trt.46).
+
+    ``identity_account_id`` (Johnny-trt.45) is the per-assignment join
+    identity: a Google account cannot join one Meet twice as two
+    participants, so each co-attending agent needs its own account to
+    appear under its own name. ``NULL`` falls back to the meeting-level
+    :attr:`MeetingConfig.identity_account_id`; deleting the account resets
+    the assignment to that fallback (``SET NULL``) rather than blocking
+    the delete or orphaning the row.
     """
 
     __tablename__ = "meeting_agents"
@@ -477,6 +485,10 @@ class MeetingAgent(TimestampMixin, Base):
         ForeignKey("agents.id", ondelete="CASCADE"),
         nullable=False,
     )
+    identity_account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("google_accounts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     context: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -485,6 +497,7 @@ class MeetingAgent(TimestampMixin, Base):
         back_populates="agent_assignments"
     )
     agent: Mapped[Agent] = relationship(back_populates="meeting_assignments")
+    identity_account: Mapped[GoogleAccount | None] = relationship()
 
 
 class BotSession(TimestampMixin, Base):

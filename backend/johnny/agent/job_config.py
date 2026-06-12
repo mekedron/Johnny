@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import Any
 
 # --- Behaviour vocabularies -------------------------------------------------
@@ -148,17 +148,21 @@ def agent_identity_for_session(bot_session_id: int | str) -> str:
 # SessionJobConfig.from_env() can rebuild the payload from the very same
 # environment the meet-worker reads — single-sourcing the contract during the
 # migration (Johnny-7we threads this into the dispatch call).
+#
+# Johnny-trt.45: the six per-field behavior overrides (JOHNNY_MODE /
+# JOHNNY_INSTRUCTIONS / JOHNNY_CHARACTER_PROMPT / JOHNNY_CONTEXT /
+# JOHNNY_ALLOWED_REPLIES / JOHNNY_CONFIDENCE_THRESHOLD) were retired —
+# behavior now rides the frozen agent snapshot as one JSON env var
+# (JOHNNY_AGENT_SNAPSHOT, mirroring ``bot_sessions.agent_snapshot``).
+# Calendar/cross-session context stays per-field: it is per-MEETING, not
+# per-agent, so it does not belong inside the agent snapshot.
 ENV_SESSION_ID = "JOHNNY_SESSION_ID"
 ENV_MEETING_CONFIG_ID = "JOHNNY_MEETING_CONFIG_ID"
 ENV_CALENDAR_EVENT_ID = "JOHNNY_CALENDAR_EVENT_ID"
 ENV_ACCOUNT_ID = "JOHNNY_ACCOUNT_ID"
 ENV_MEET_LINK = "JOHNNY_MEET_LINK"
-ENV_MODE = "JOHNNY_MODE"
-ENV_INSTRUCTIONS = "JOHNNY_INSTRUCTIONS"
-ENV_CHARACTER_PROMPT = "JOHNNY_CHARACTER_PROMPT"
-ENV_ALLOWED_REPLIES = "JOHNNY_ALLOWED_REPLIES"
-ENV_CONFIDENCE_THRESHOLD = "JOHNNY_CONFIDENCE_THRESHOLD"
-ENV_CONTEXT = "JOHNNY_CONTEXT"
+ENV_AGENT_ID = "JOHNNY_AGENT_ID"
+ENV_AGENT_SNAPSHOT = "JOHNNY_AGENT_SNAPSHOT"
 ENV_CALENDAR_CONTEXT = "JOHNNY_CALENDAR_CONTEXT"
 ENV_CALENDAR_ATTACHMENTS = "JOHNNY_CALENDAR_ATTACHMENTS"
 ENV_PRIOR_SESSION_CONTEXT = "JOHNNY_PRIOR_SESSION_CONTEXT"
@@ -167,6 +171,17 @@ ENV_REDIS_URL = "JOHNNY_REDIS_URL"
 # Room name: reuse the existing LiveKitTransport env var so the bridge and the
 # agent agree without a new variable (johnny.voice_pipeline.livekit_transport).
 ENV_ROOM = "LIVEKIT_ROOM"
+
+# --- Agent-snapshot keys (Johnny-trt.45) -------------------------------------
+# The behavior keys this contract reads from the frozen agent snapshot
+# (:func:`app.services.agents.build_agent_snapshot` is the producer). The
+# snapshot may carry more (identity, provider pins) — the extra keys ride
+# along untouched for downstream consumers (e.g. history rendering).
+SNAPSHOT_MODE_KEY = "mode"
+SNAPSHOT_CHARACTER_PROMPT_KEY = "character_prompt"
+SNAPSHOT_ALLOWED_REPLIES_KEY = "allowed_replies"
+SNAPSHOT_CONFIDENCE_THRESHOLD_KEY = "confidence_threshold"
+SNAPSHOT_ASSIGNMENT_CONTEXT_KEY = "assignment_context"
 
 
 def _int_or_none(raw: str | None) -> int | None:
@@ -193,22 +208,26 @@ class SessionJobConfig:
     * **correlation / routing** — ``bot_session_id`` (the durable session row,
       also the source of the room name), ``room_name``, ``meet_link`` and the
       optional ``meeting_config_id`` / ``calendar_event_id`` / ``account_id``;
-    * **behaviour** — ``mode`` (one of :data:`SUPPORTED_MODES`),
-      ``allowed_replies`` (the limited-auto-speak allowlist) and
-      ``confidence_threshold`` (the router's speak floor) — sourced from the
-      session's frozen agent snapshot (Johnny-trt.41), never re-read from
-      config tables at turn time;
-    * **prompt assembly** — ``instructions`` / ``character_prompt`` /
-      ``context`` / ``calendar_context`` / ``calendar_attachments_text`` /
-      ``prior_session_context``, the inputs to
-      :class:`johnny.agent.session.AgentInstructionsConfig`;
+    * **agent** (Johnny-trt.45) — ``agent_id`` plus ``agent_snapshot``, the
+      frozen behavior blob (:func:`app.services.agents.build_agent_snapshot`)
+      persisted on ``bot_sessions.agent_snapshot`` at dispatch. The behavior
+      knobs the runtime reads (:attr:`mode`, :attr:`character_prompt`,
+      :attr:`context`, :attr:`allowed_replies`, :attr:`confidence_threshold`)
+      are derived **from the snapshot** — there is no separate per-field
+      override channel anymore, so a session can never run a mode its
+      snapshot doesn't carry;
+    * **meeting context** — ``calendar_context`` /
+      ``calendar_attachments_text`` / ``prior_session_context``: per-meeting
+      (not per-agent) prompt inputs, kept as plain fields;
     * **providers** — ``provider_config``, the exact dict shape produced by
       :func:`app.services.provider_payload.build_provider_payload`
-      (``{kind: {provider_name, display_name, credentials, options}}``);
+      (``{kind: {provider_name, display_name, credentials, options}}``),
+      with the agent's pins already resolved in (Johnny-trt.42);
     * **infra** — ``redis_url`` for the event-bus / approval-gate wiring.
 
-    All text fields default to ``""`` and ids/redis to ``None`` so an
-    under-configured session degrades exactly as the legacy env contract does.
+    An empty ``agent_snapshot`` degrades to the contract defaults
+    (``listen_only``, no character, threshold 0.7) — exactly the agent-less
+    degrade the selection chain documents (Johnny-trt.41).
     """
 
     bot_session_id: int
@@ -217,29 +236,76 @@ class SessionJobConfig:
     meeting_config_id: int | None = None
     calendar_event_id: int | None = None
     account_id: int | None = None
-    mode: str = DEFAULT_MODE
-    instructions: str = ""
-    character_prompt: str = ""
-    context: str = ""
+    agent_id: int | None = None
+    agent_snapshot: Mapping[str, Any] = field(default_factory=dict)
     calendar_context: str = ""
     calendar_attachments_text: str = ""
     prior_session_context: str = ""
-    allowed_replies: tuple[str, ...] = ()
-    confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD
     provider_config: Mapping[str, Any] = field(default_factory=dict)
     redis_url: str | None = None
+
+    # -- snapshot-derived behavior (Johnny-trt.45) --------------------------
+
+    @property
+    def mode(self) -> str:
+        """The session mode from the agent snapshot.
+
+        Lenient at read time: blank / missing / unknown values degrade to
+        :data:`DEFAULT_MODE` (``listen_only``) so a hand-built or corrupt
+        snapshot mutes the bot rather than crashing the session. The wire
+        parser (:meth:`from_dict`) is strict instead — a dispatched payload
+        with an unknown snapshot mode fails loud at the worker.
+        """
+        raw = str(self.agent_snapshot.get(SNAPSHOT_MODE_KEY) or "").strip()
+        return raw if raw in SUPPORTED_MODES else DEFAULT_MODE
+
+    @property
+    def character_prompt(self) -> str:
+        """The agent's character prompt (empty when no agent resolved)."""
+        return str(self.agent_snapshot.get(SNAPSHOT_CHARACTER_PROMPT_KEY) or "")
+
+    @property
+    def context(self) -> str:
+        """The per-assignment brief (``assignment_context`` in the snapshot).
+
+        One free-text slot per assignment (Johnny-trt.45): the meeting's
+        :class:`MeetingAgent.context` for scheduled sessions, the per-start
+        context field for playground sessions.
+        """
+        return str(self.agent_snapshot.get(SNAPSHOT_ASSIGNMENT_CONTEXT_KEY) or "")
+
+    @property
+    def allowed_replies(self) -> tuple[str, ...]:
+        """The limited-auto-speak allowlist from the snapshot (lenient)."""
+        return _coerce_replies(self.agent_snapshot.get(SNAPSHOT_ALLOWED_REPLIES_KEY))
+
+    @property
+    def confidence_threshold(self) -> float:
+        """The router speak floor from the snapshot (lenient, clamped)."""
+        return _coerce_threshold(
+            self.agent_snapshot.get(SNAPSHOT_CONFIDENCE_THRESHOLD_KEY)
+        )
+
+    def with_mode(self, mode: str) -> SessionJobConfig:
+        """A copy whose snapshot carries ``mode`` — the runtime degrade seam.
+
+        Replaces the pre-trt.45 ``dataclasses.replace(config, mode=...)`` the
+        no-TTS degrade used: mode lives inside the snapshot now, so the
+        degrade rewrites the snapshot copy (the durable row snapshot is
+        untouched — this is the in-process effective mode only).
+        """
+        snapshot = {**dict(self.agent_snapshot), SNAPSHOT_MODE_KEY: mode}
+        return replace(self, agent_snapshot=snapshot)
 
     # -- serialisation ----------------------------------------------------
 
     def to_dict(self) -> dict[str, Any]:
-        """Plain JSON-able dict (``provider_config`` copied to a plain dict)."""
+        """Plain JSON-able dict (mapping fields copied to plain dicts)."""
         out: dict[str, Any] = {}
         for f in fields(self):
             value = getattr(self, f.name)
-            if f.name == "provider_config":
+            if f.name in ("provider_config", "agent_snapshot"):
                 value = dict(value)
-            elif f.name == "allowed_replies":
-                value = list(value)
             out[f.name] = value
         return out
 
@@ -258,20 +324,30 @@ class SessionJobConfig:
         """Build from a decoded mapping, validating the enumerated fields.
 
         Raises :class:`ValueError` on a missing/blank ``bot_session_id`` or
-        ``room_name`` (the two fields with no safe default) or an unknown
-        ``mode`` — the wire format is validated strictly so a malformed
-        dispatch fails loud at the agent rather than silently mis-driving a
-        meeting. Unknown keys (e.g. the retired ``pipeline_mode``,
-        Johnny-trt.43) are ignored.
+        ``room_name`` (the two fields with no safe default), a non-object
+        ``agent_snapshot``, or a snapshot carrying an unknown ``mode`` — the
+        wire format is validated strictly so a malformed dispatch fails loud
+        at the agent rather than silently mis-driving a meeting. Unknown
+        keys — including the retired per-field behavior overrides (``mode``
+        / ``instructions`` / ``character_prompt`` / ``context`` /
+        ``allowed_replies`` / ``confidence_threshold``, Johnny-trt.45) and
+        ``pipeline_mode`` (Johnny-trt.43) — are ignored, so an old in-flight
+        dispatch payload still parses (degrading to the snapshot defaults).
         """
         if "bot_session_id" not in data or data["bot_session_id"] in (None, ""):
             raise ValueError("SessionJobConfig requires bot_session_id")
         room_name = str(data.get("room_name") or "").strip()
         if not room_name:
             raise ValueError("SessionJobConfig requires a non-empty room_name")
-        mode = str(data.get("mode") or DEFAULT_MODE)
-        if mode not in SUPPORTED_MODES:
-            raise ValueError(f"unknown mode {mode!r}; expected one of {sorted(SUPPORTED_MODES)}")
+        agent_snapshot = data.get("agent_snapshot") or {}
+        if not isinstance(agent_snapshot, Mapping):
+            raise ValueError("agent_snapshot must be a JSON object")
+        snapshot_mode = str(agent_snapshot.get(SNAPSHOT_MODE_KEY) or "").strip()
+        if snapshot_mode and snapshot_mode not in SUPPORTED_MODES:
+            raise ValueError(
+                f"unknown agent_snapshot mode {snapshot_mode!r}; "
+                f"expected one of {sorted(SUPPORTED_MODES)}"
+            )
         provider_config = data.get("provider_config") or {}
         if not isinstance(provider_config, Mapping):
             raise ValueError("provider_config must be a JSON object")
@@ -282,15 +358,11 @@ class SessionJobConfig:
             meeting_config_id=_coerce_optional_int(data.get("meeting_config_id")),
             calendar_event_id=_coerce_optional_int(data.get("calendar_event_id")),
             account_id=_coerce_optional_int(data.get("account_id")),
-            mode=mode,
-            instructions=str(data.get("instructions") or ""),
-            character_prompt=str(data.get("character_prompt") or ""),
-            context=str(data.get("context") or ""),
+            agent_id=_coerce_optional_int(data.get("agent_id")),
+            agent_snapshot=dict(agent_snapshot),
             calendar_context=str(data.get("calendar_context") or ""),
             calendar_attachments_text=str(data.get("calendar_attachments_text") or ""),
             prior_session_context=str(data.get("prior_session_context") or ""),
-            allowed_replies=_coerce_replies(data.get("allowed_replies")),
-            confidence_threshold=_coerce_threshold(data.get("confidence_threshold")),
             provider_config=dict(provider_config),
             redis_url=(str(data["redis_url"]) if data.get("redis_url") else None),
         )
@@ -320,16 +392,16 @@ class SessionJobConfig:
         :meth:`app.services.docker_launcher.DockerContainerLauncher.
         _build_environment` so the dispatch path (Johnny-7we) can construct a
         config from the same data the meet-worker already receives. Lenient
-        like the launcher: a blank ``JOHNNY_MODE`` becomes ``listen_only``; the
-        room name falls back to :func:`room_name_for_session` when
-        ``LIVEKIT_ROOM`` is unset.
+        like the launcher: a malformed ``JOHNNY_AGENT_SNAPSHOT`` degrades to
+        an empty snapshot (listen-only contract defaults); the room name
+        falls back to :func:`room_name_for_session` when ``LIVEKIT_ROOM`` is
+        unset.
         """
         session_id = _int_or_none(environ.get(ENV_SESSION_ID))
         if session_id is None:
             raise ValueError(f"{ENV_SESSION_ID} must be a positive integer")
         room_name = (environ.get(ENV_ROOM) or "").strip() or room_name_for_session(session_id)
         provider_config = _parse_provider_config(environ.get(ENV_PROVIDER_CONFIG))
-        mode = (environ.get(ENV_MODE) or "").strip() or DEFAULT_MODE
         return cls(
             bot_session_id=session_id,
             room_name=room_name,
@@ -337,17 +409,11 @@ class SessionJobConfig:
             meeting_config_id=_int_or_none(environ.get(ENV_MEETING_CONFIG_ID)),
             calendar_event_id=_int_or_none(environ.get(ENV_CALENDAR_EVENT_ID)),
             account_id=_int_or_none(environ.get(ENV_ACCOUNT_ID)),
-            mode=mode,
-            instructions=environ.get(ENV_INSTRUCTIONS, ""),
-            character_prompt=environ.get(ENV_CHARACTER_PROMPT, ""),
-            context=environ.get(ENV_CONTEXT, ""),
+            agent_id=_int_or_none(environ.get(ENV_AGENT_ID)),
+            agent_snapshot=_parse_json_object(environ.get(ENV_AGENT_SNAPSHOT)),
             calendar_context=environ.get(ENV_CALENDAR_CONTEXT, ""),
             calendar_attachments_text=environ.get(ENV_CALENDAR_ATTACHMENTS, ""),
             prior_session_context=environ.get(ENV_PRIOR_SESSION_CONTEXT, ""),
-            allowed_replies=_parse_replies_env(environ.get(ENV_ALLOWED_REPLIES)),
-            confidence_threshold=_coerce_threshold(
-                environ.get(ENV_CONFIDENCE_THRESHOLD)
-            ),
             provider_config=provider_config,
             redis_url=(environ.get(ENV_REDIS_URL) or None),
         )
@@ -367,15 +433,11 @@ class SessionJobConfig:
             ENV_MEETING_CONFIG_ID: _id_to_env(self.meeting_config_id),
             ENV_CALENDAR_EVENT_ID: _id_to_env(self.calendar_event_id),
             ENV_ACCOUNT_ID: _id_to_env(self.account_id),
-            ENV_MODE: self.mode,
-            ENV_INSTRUCTIONS: self.instructions,
-            ENV_CHARACTER_PROMPT: self.character_prompt,
-            ENV_CONTEXT: self.context,
+            ENV_AGENT_ID: _id_to_env(self.agent_id),
+            ENV_AGENT_SNAPSHOT: json.dumps(dict(self.agent_snapshot)),
             ENV_CALENDAR_CONTEXT: self.calendar_context,
             ENV_CALENDAR_ATTACHMENTS: self.calendar_attachments_text,
             ENV_PRIOR_SESSION_CONTEXT: self.prior_session_context,
-            ENV_ALLOWED_REPLIES: json.dumps(list(self.allowed_replies)),
-            ENV_CONFIDENCE_THRESHOLD: str(self.confidence_threshold),
             ENV_PROVIDER_CONFIG: json.dumps(dict(self.provider_config)),
         }
         if self.redis_url:
@@ -417,26 +479,16 @@ def _coerce_threshold(value: Any) -> float:
     return max(0.0, min(1.0, threshold))
 
 
-def _parse_replies_env(raw: str | None) -> tuple[str, ...]:
-    """Decode ``JOHNNY_ALLOWED_REPLIES`` JSON; empty/invalid → ``()``."""
-    if not raw or not raw.strip():
-        return ()
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return ()
-    return _coerce_replies(data)
-
-
 def _id_to_env(value: int | None) -> str:
     return "" if value is None else str(value)
 
 
-def _parse_provider_config(raw: str | None) -> dict[str, Any]:
-    """Decode ``JOHNNY_PROVIDER_CONFIG`` JSON; empty/invalid → ``{}``.
+def _parse_json_object(raw: str | None) -> dict[str, Any]:
+    """Decode a JSON-object env value; empty/invalid → ``{}``.
 
-    Matches the meet-worker's tolerance: a missing or unparyable provider
-    payload degrades to an empty config (listen-only) rather than refusing to
+    Matches the meet-worker's tolerance: a missing or unparseable
+    ``JOHNNY_PROVIDER_CONFIG`` / ``JOHNNY_AGENT_SNAPSHOT`` degrades to an
+    empty mapping (listen-only contract defaults) rather than refusing to
     start.
     """
     if not raw or not raw.strip():
@@ -446,6 +498,10 @@ def _parse_provider_config(raw: str | None) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return dict(data) if isinstance(data, Mapping) else {}
+
+
+# Backwards-compatible alias — provider parsing predates the snapshot var.
+_parse_provider_config = _parse_json_object
 
 
 __all__ = [
@@ -460,6 +516,11 @@ __all__ = [
     "PROVIDER_CONFIG_REASONING_LLM_KEY",
     "PROVIDER_CONFIG_ROUTER_LLM_KEY",
     "ROOM_NAME_PREFIX",
+    "SNAPSHOT_ALLOWED_REPLIES_KEY",
+    "SNAPSHOT_ASSIGNMENT_CONTEXT_KEY",
+    "SNAPSHOT_CHARACTER_PROMPT_KEY",
+    "SNAPSHOT_CONFIDENCE_THRESHOLD_KEY",
+    "SNAPSHOT_MODE_KEY",
     "SUGGEST_ONLY_MODE",
     "SUPPORTED_MODES",
     "SessionJobConfig",

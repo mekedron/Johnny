@@ -25,9 +25,7 @@ def _spec(provider_payload: dict | None = None) -> BrowserPipelineSpec:
     return BrowserPipelineSpec(
         session_id="e2e",
         bot_session_id=1,
-        mode="autonomous",
-        instructions="",
-        context="",
+        agent_snapshot={"mode": "autonomous"},
         calendar_context="",
         provider_payload=provider_payload or {},
         event_bus=InMemoryEventBus(),

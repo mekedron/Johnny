@@ -22,6 +22,13 @@ export interface MeetingConfigAgent {
 	id: number;
 	agent_id: number;
 	agent_name: string;
+	/**
+	 * Per-assignment join identity (Johnny-trt.45): the Google account this
+	 * agent joins the Meet as. `null` = the meeting-level identity account.
+	 * Co-attending agents need distinct accounts to appear as distinct
+	 * participants.
+	 */
+	identity_account_id: number | null;
 	/** Per-meeting context for this agent; `null` = none. */
 	context: string | null;
 	enabled: boolean;
@@ -47,6 +54,8 @@ export interface MeetingConfig {
 /** One agent assignment in the upsert payload. */
 export interface MeetingConfigAgentPayload {
 	agent_id: number;
+	/** Per-assignment join identity; omit/null = meeting-level account. */
+	identity_account_id?: number | null;
 	context?: string | null;
 	enabled?: boolean;
 	position?: number;

@@ -392,6 +392,35 @@ def test_put_replaces_assignment_list(
     assert agents[0]["context"] == "new"
 
 
+def test_put_resaving_same_agent_updates_in_place(
+    client: TestClient,
+    seed_event: CalendarEvent,
+    seed_account: GoogleAccount,
+    seed_agent: Agent,
+) -> None:
+    """Re-saving a list that KEEPS an agent (the UI always sends the full
+    desired list, Johnny-trt.45) must not trip the unique constraint — the
+    replacement deletes flush before the re-inserts."""
+    client.put(
+        f"/calendar/events/{seed_event.id}/meeting-config",
+        json=_upsert_payload(
+            identity_account_id=seed_account.id,
+            agents=[{"agent_id": seed_agent.id, "context": "v1"}],
+        ),
+    )
+    resp = client.put(
+        f"/calendar/events/{seed_event.id}/meeting-config",
+        json=_upsert_payload(
+            identity_account_id=seed_account.id,
+            agents=[{"agent_id": seed_agent.id, "context": "v2"}],
+        ),
+    )
+    assert resp.status_code == 200, resp.json()
+    agents = resp.json()["agents"]
+    assert [a["agent_id"] for a in agents] == [seed_agent.id]
+    assert agents[0]["context"] == "v2"
+
+
 def test_put_rejects_unknown_agent_id(
     client: TestClient,
     seed_event: CalendarEvent,
@@ -406,6 +435,65 @@ def test_put_rejects_unknown_agent_id(
     )
     assert resp.status_code == 422
     assert "agent_id=4242" in resp.json()["detail"]
+
+
+def test_put_assignment_identity_account_round_trips(
+    client: TestClient,
+    db_session: Session,
+    seed_event: CalendarEvent,
+    seed_account: GoogleAccount,
+    seed_agent: Agent,
+    seed_agent_b: Agent,
+) -> None:
+    """Johnny-trt.45: the per-assignment join identity persists and reads
+    back; an assignment without one reads ``None`` (meeting-level fallback
+    applies at dispatch)."""
+    second = GoogleAccount(
+        email="second-identity@example.com", refresh_token_encrypted="x"
+    )
+    db_session.add(second)
+    db_session.commit()
+    payload = _upsert_payload(
+        identity_account_id=seed_account.id,
+        agents=[
+            {
+                "agent_id": seed_agent.id,
+                "identity_account_id": second.id,
+                "position": 0,
+            },
+            {"agent_id": seed_agent_b.id, "position": 1},
+        ],
+    )
+    resp = client.put(
+        f"/calendar/events/{seed_event.id}/meeting-config", json=payload
+    )
+    assert resp.status_code == 200, resp.json()
+    agents = resp.json()["agents"]
+    assert agents[0]["identity_account_id"] == second.id
+    assert agents[1]["identity_account_id"] is None
+    fetched = client.get(f"/calendar/events/{seed_event.id}/meeting-config").json()
+    assert fetched["agents"] == agents
+    row = db_session.scalar(
+        sa.select(MeetingAgent).where(MeetingAgent.agent_id == seed_agent.id)
+    )
+    assert row is not None and row.identity_account_id == second.id
+
+
+def test_put_rejects_unknown_assignment_identity_account(
+    client: TestClient,
+    seed_event: CalendarEvent,
+    seed_account: GoogleAccount,
+    seed_agent: Agent,
+) -> None:
+    payload = _upsert_payload(
+        identity_account_id=seed_account.id,
+        agents=[{"agent_id": seed_agent.id, "identity_account_id": 31337}],
+    )
+    resp = client.put(
+        f"/calendar/events/{seed_event.id}/meeting-config", json=payload
+    )
+    assert resp.status_code == 422
+    assert "identity_account_id=31337" in resp.json()["detail"]
 
 
 def test_put_rejects_duplicate_agent_id(

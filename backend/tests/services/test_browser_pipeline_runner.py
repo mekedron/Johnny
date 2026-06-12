@@ -34,13 +34,17 @@ def _spec(
     return BrowserPipelineSpec(
         session_id="42",
         bot_session_id=42,
-        mode=mode,
-        instructions="Be brief.",
-        context="ctx",
+        agent_id=4,
+        agent_snapshot={
+            "agent_id": 4,
+            "name": "X",
+            "mode": mode,
+            "character_prompt": "[personality: X]",
+            "assignment_context": "ctx",
+        },
         calendar_context="cal",
         provider_payload=provider_payload,
         event_bus=InMemoryEventBus(),
-        character_prompt="[personality: X]",
         prior_session_context="last week",
     )
 
@@ -59,8 +63,10 @@ def test_job_config_from_spec_maps_every_field() -> None:
     config = _job_config_from_spec(spec, redis_url="redis://x:6379/0")
     assert config.bot_session_id == 42
     assert config.room_name == room_name_for_session(42)
+    assert config.agent_id == 4
+    assert config.agent_snapshot == spec.agent_snapshot
+    # Behavior derives from the snapshot (Johnny-trt.45).
     assert config.mode == "autonomous"
-    assert config.instructions == "Be brief."
     assert config.character_prompt == "[personality: X]"
     assert config.context == "ctx"
     assert config.calendar_context == "cal"

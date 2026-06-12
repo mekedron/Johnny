@@ -31,6 +31,16 @@ from johnny.agent.job_config import (
     SessionJobConfig,
 )
 
+_SNAPSHOT = {
+    "agent_id": 4,
+    "name": "Aria",
+    "character_prompt": "[personality: Aria]\nWarm and concise.",
+    "mode": "approval_required",
+    "allowed_replies": [],
+    "confidence_threshold": 0.7,
+    "assignment_context": "Internal sync.",
+}
+
 
 def _full_ctx() -> LaunchContext:
     return LaunchContext(
@@ -40,10 +50,8 @@ def _full_ctx() -> LaunchContext:
         identity_account_id=3,
         meet_link="https://meet.example/abc",
         container_name="meet-worker-session-42",
-        mode="approval_required",
-        instructions="Stick to the agenda.",
-        character_prompt="[personality: Aria]\nWarm and concise.",
-        context="Internal sync.",
+        agent_id=4,
+        agent_snapshot=dict(_SNAPSHOT),
         calendar_context="Q3 planning",
         calendar_attachments_text="doc body",
         prior_session_context="Last week: agreed on X.",
@@ -60,8 +68,10 @@ def test_config_from_launch_context_maps_every_field() -> None:
     assert config.meeting_config_id == 11
     assert config.calendar_event_id == 99
     assert config.account_id == 3  # identity_account_id -> account_id
+    assert config.agent_id == 4
+    assert config.agent_snapshot == _SNAPSHOT
+    # Behavior derives from the snapshot (Johnny-trt.45).
     assert config.mode == "approval_required"
-    assert config.instructions == "Stick to the agenda."
     assert config.character_prompt == "[personality: Aria]\nWarm and concise."
     assert config.context == "Internal sync."
     assert config.calendar_context == "Q3 planning"
@@ -87,9 +97,9 @@ def test_config_copies_provider_config() -> None:
     assert config.provider_config is not src  # fresh copy, not the launcher's dict
 
 
-def test_config_blank_mode_and_default_redis_are_lenient() -> None:
-    # LaunchContext's struct default (mode="") coerces to
-    # the contract default, and redis defaults to None when not supplied.
+def test_config_empty_snapshot_and_default_redis_are_lenient() -> None:
+    # LaunchContext's struct default (empty snapshot) degrades to the
+    # contract default mode, and redis defaults to None when not supplied.
     ctx = LaunchContext(
         bot_session_id=8,
         meeting_config_id=1,
@@ -100,6 +110,8 @@ def test_config_blank_mode_and_default_redis_are_lenient() -> None:
     )
     config = session_job_config_from_launch_context(ctx)
     assert config.mode == DEFAULT_MODE
+    assert config.agent_id is None
+    assert config.agent_snapshot == {}
     assert config.redis_url is None
 
 

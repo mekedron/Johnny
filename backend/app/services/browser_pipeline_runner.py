@@ -27,13 +27,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import app.providers  # noqa: F401 — registers adapters at import time
 from johnny.agent.job_config import (
-    DEFAULT_MODE,
-    SUPPORTED_MODES,
     SessionJobConfig,
     room_name_for_session,
 )
@@ -93,12 +91,18 @@ class BrowserPipelineSpec:
 
     session_id: str
     bot_session_id: int
-    mode: str
-    instructions: str
-    context: str
     calendar_context: str
     provider_payload: Mapping[str, Mapping[str, Any]]
     event_bus: EventBus
+    agent_id: int | None = None
+    """The agent serving this session (Johnny-trt.45); ``None`` when no
+    agent resolved (the contract-default degrade)."""
+    agent_snapshot: Mapping[str, Any] = field(default_factory=dict)
+    """The frozen behavior snapshot (Johnny-trt.41/45) — the same dict the
+    API persists on ``bot_sessions.agent_snapshot``. The job contract
+    derives mode / character / context / allowlist / threshold from it;
+    an empty snapshot degrades to the contract defaults (listen-only).
+    """
     calendar_attachments_text: str = ""
     """Resolved Google Docs / Sheets / Drive bodies (Johnny-4da).
 
@@ -119,19 +123,6 @@ class BrowserPipelineSpec:
     existing test fixtures and dispatch helpers keep working without
     modification.
     """
-    character_prompt: str = ""
-    """The agent's character / communication-style prompt (Johnny-trt.41).
-
-    Filled by the API session-start path from the session's frozen agent
-    snapshot and mapped onto the :class:`SessionJobConfig` so the character
-    reaches the model. Empty for a session that resolved no agent.
-    """
-    allowed_replies: tuple[str, ...] = ()
-    """The agent's limited-auto-speak allowlist, frozen at dispatch
-    (Johnny-trt.41). Empty for modes without an allowlist."""
-    confidence_threshold: float | None = None
-    """The agent's router speak floor, frozen at dispatch (Johnny-trt.41).
-    ``None`` keeps the contract default."""
 
 
 def _job_config_from_spec(spec: BrowserPipelineSpec, *, redis_url: str | None) -> SessionJobConfig:
@@ -139,34 +130,24 @@ def _job_config_from_spec(spec: BrowserPipelineSpec, *, redis_url: str | None) -
 
     The agent engine is driven by the same per-session contract the Meet
     dispatch uses (Johnny-7we/9eh): the two carry the same provider payload +
-    prompt assembly + mode, just sourced differently (admin/meeting config here
-    vs. the dispatch metadata for Meet). ``room_name`` is required by the
-    contract but unused in-process (there is no room); it is derived for
+    agent snapshot + meeting context, just sourced differently (admin/meeting
+    config here vs. the dispatch metadata for Meet). ``room_name`` is required
+    by the contract but unused in-process (there is no room); it is derived for
     correlation only. ``redis_url`` is threaded so ``approval_required`` mode can
     reach the Redis approval gate (every other mode is Redis-via-event-bus only).
-    A blank/unknown ``mode`` coerces to ``listen_only`` (the contract's own
-    leniency).
+    A blank/unknown snapshot mode degrades to ``listen_only`` (the contract's
+    own read-time leniency).
     """
-    mode = (spec.mode or "").strip() or DEFAULT_MODE
-    if mode not in SUPPORTED_MODES:
-        mode = DEFAULT_MODE
-    extra: dict[str, Any] = {}
-    if spec.confidence_threshold is not None:
-        extra["confidence_threshold"] = spec.confidence_threshold
     return SessionJobConfig(
         bot_session_id=spec.bot_session_id,
         room_name=room_name_for_session(spec.bot_session_id),
-        mode=mode,
-        instructions=spec.instructions,
-        character_prompt=spec.character_prompt,
-        context=spec.context,
+        agent_id=spec.agent_id,
+        agent_snapshot=dict(spec.agent_snapshot),
         calendar_context=spec.calendar_context,
         calendar_attachments_text=spec.calendar_attachments_text,
         prior_session_context=spec.prior_session_context,
-        allowed_replies=tuple(spec.allowed_replies),
         provider_config=dict(spec.provider_payload),
         redis_url=redis_url,
-        **extra,
     )
 
 
@@ -231,9 +212,10 @@ async def run_browser_pipeline(
             logger.exception("on_assembled hook raised for session=%s", spec.session_id)
 
     logger.info(
-        "browser agent session assembled for session=%s mode=%s",
+        "browser agent session assembled for session=%s mode=%s agent=%s",
         spec.session_id,
-        spec.mode,
+        config.mode,
+        spec.agent_id,
     )
     await transport.start()
     try:

@@ -5,13 +5,15 @@ This module owns:
 * ``POST /sessions/browser/start`` — create a ``bot_sessions`` row with
   ``source='browser'`` for either:
 
-  - **Rehearsal of a calendar event**: pass ``event_id``; the system
-    prompt / context / providers are loaded from that event's
-    ``meeting_config`` exactly like a real meeting (AC #1 — context
-    parity verifiable by diffing the prompt against a real session).
-  - **Playground**: pass no event; persona / instructions and
-    per-session provider overrides come from the request body. Overrides
-    do NOT mutate the global ``provider_credentials`` rows (AC #6).
+  - **Rehearsal of a calendar event**: pass ``event_id``; the agent /
+    context / providers are loaded from that event's ``meeting_config``
+    exactly like a real meeting (AC #1 — context parity verifiable by
+    diffing the prompt against a real session).
+  - **Playground**: pass no event; the session is configured by picking
+    an AGENT plus one free-text ``context`` brief (Johnny-trt.45 — all
+    other behavior comes from the agent profile), with per-session
+    provider overrides as a dev-only escape hatch. Overrides do NOT
+    mutate the global ``provider_credentials`` rows (AC #6).
 
 * ``WS /ws/sessions/{id}/audio`` — bidirectional 16 kHz mono S16LE PCM
   stream. Client sends raw frames as binary WebSocket messages; server
@@ -98,7 +100,12 @@ router = APIRouter(prefix="/sessions/browser", tags=["browser-sessions"])
 ws_router = APIRouter(tags=["browser-sessions-ws"])
 
 DEFAULT_SAMPLE_RATE = 16_000
-DEFAULT_PERSONA = "Friendly conversation partner. Be concise."
+
+# Mode for the browser degrade path when no agent exists at all (an unseeded
+# / stripped schema): the playground keeps its historical free-chat default
+# rather than the meet contract's listen_only — a mute playground would read
+# as broken. Carried inside a minimal synthetic snapshot (Johnny-trt.45).
+AGENTLESS_BROWSER_MODE = BotMode.AUTONOMOUS.value
 
 SINGLE_SESSION_POLICY = "reject"
 """How to handle a start request when a browser session is already live.
@@ -126,19 +133,18 @@ _session_runners: dict[int, BrowserSessionRunner] = {}
 class StartBrowserSessionPayload(BaseModel):
     """Body of ``POST /sessions/browser/start``.
 
-    ``event_id`` and the per-session overrides are mutually
-    informative, not exclusive: a rehearsal that overrides the LLM is
-    valid (you might want to try a different model against the same
-    meeting context). The server merges in this order: meeting config
-    → playground overrides → request overrides.
+    Johnny-trt.45: sessions are configured by picking an AGENT plus one
+    free-text ``context`` brief — the per-start ``mode`` / ``persona`` /
+    ``system_prompt`` override soup was removed; all behavior comes from
+    the agent profile. ``provider_overrides`` stays as the dev-only
+    escape hatch for one-session provider experiments.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     event_id: int | None = None
     """Calendar event to rehearse against. When ``None`` the session is
-    a free-form playground run (no calendar context, mode + persona
-    come from the request)."""
+    a free-form playground run (no calendar context)."""
 
     account_id: int | None = None
     """Google account this playground session belongs to (Johnny-8th) so
@@ -146,26 +152,20 @@ class StartBrowserSessionPayload(BaseModel):
     an account-less run. For a rehearsal (``event_id`` set) it defaults to the
     event's calendar owner when omitted."""
 
-    mode: str | None = None
-    """Override the bot mode for this session. Defaults to the meeting
-    config's mode when ``event_id`` is set, otherwise ``autonomous``
-    so the playground can have a casual chat without an allowlist."""
-
-    persona: str | None = None
-    """Short persona description that becomes part of the system prompt
-    (e.g. 'cheerful product manager who loves crisp questions').
-    Playground-only — ignored for rehearsals."""
-
-    system_prompt: str | None = None
-    """Custom system prompt that REPLACES the meeting's instructions.
-    Use for testing prompt changes without editing the meeting config."""
-
     agent_id: int | None = None
     """Agent (Johnny-trt.41) to serve this session. ``None`` falls back to
     the meeting's first enabled assignment (rehearsal) then the
     ``is_default`` agent. An id that no longer exists degrades to that
     fallback chain rather than failing the start. The resolved agent's
     behavior snapshot is frozen onto the session row at dispatch."""
+
+    context: str | None = Field(default=None, max_length=8_000)
+    """Per-start context brief (Johnny-trt.45) — the ONE free-text slot.
+
+    Lands in the snapshot's ``assignment_context`` (the same slot a
+    meeting assignment's context uses), so it renders in the documented
+    "Context:" position of the assembled instructions. For a rehearsal it
+    overrides the matched assignment's saved context for this run only."""
 
     provider_overrides: dict[str, BrowserProviderOverride] | None = None
     """Per-kind provider overrides — keyed by 'stt' / 'llm' / 'tts'.
@@ -177,7 +177,9 @@ class StartBrowserSessionPayload(BaseModel):
     ``JOHNNY_ALLOW_INLINE_PROVIDER_CREDS=1``).
 
     Overrides apply for THIS session only — they do NOT touch
-    ``provider_credentials.is_active`` (AC #6)."""
+    ``provider_credentials.is_active`` (AC #6). Kept (dev-only escape
+    hatch) when the rest of the override soup was removed in
+    Johnny-trt.45."""
 
 
 class BrowserProviderOverride(BaseModel):
@@ -548,14 +550,38 @@ def _agent_overrides_fragment(resolution: AgentResolution) -> dict[str, Any]:
     }
 
 
+def _effective_agent_snapshot(
+    resolution: AgentResolution, *, context: str | None
+) -> dict[str, Any]:
+    """The frozen behavior snapshot this session runs (Johnny-trt.45).
+
+    Built ONCE per start and shared by the provider-pin resolution, the
+    pipeline spec (→ the job contract), and the ``bot_sessions`` row
+    freeze, so the three can never drift. The per-start ``context`` (the
+    playground's one free-text slot) overrides the matched assignment's
+    saved brief for this run; no agent at all degrades to a minimal
+    synthetic snapshot carrying the browser surface's autonomous default
+    (a mute playground would read as broken).
+    """
+    effective_context = (context or "").strip() or resolution.assignment_context
+    if resolution.agent is None:
+        return {
+            "mode": AGENTLESS_BROWSER_MODE,
+            "assignment_context": effective_context or None,
+        }
+    return build_agent_snapshot(
+        resolution.agent, assignment_context=effective_context or None
+    )
+
+
 def _apply_agent_provider_pins(
     session: Session,
     *,
     bot_session_id: int,
     base_payload: dict[str, Any],
-    resolution: AgentResolution,
+    snapshot: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Resolve the agent's provider pins into the base payload (Johnny-trt.42).
+    """Resolve the snapshot's provider pins into the base payload (Johnny-trt.42).
 
     Layered BETWEEN the global-active payload and the explicit per-start
     ``provider_overrides`` (precedence: per-start override > agent pin >
@@ -563,10 +589,9 @@ def _apply_agent_provider_pins(
     knob and must keep winning). Unusable pins fall back with a visible
     ``provider_switch`` row in this session's activity log. Any resolver
     error degrades to the unresolved payload; a session start is never
-    blocked on pin resolution.
+    blocked on pin resolution. A pin-less snapshot (the agent-less synthetic
+    one) passes the payload through untouched.
     """
-    if resolution.agent is None:
-        return base_payload
     try:
         from app.security.crypto import get_crypto
 
@@ -574,9 +599,7 @@ def _apply_agent_provider_pins(
             session,
             get_crypto(),
             base_payload=base_payload,
-            snapshot=build_agent_snapshot(
-                resolution.agent, assignment_context=resolution.assignment_context
-            ),
+            snapshot=snapshot,
             context_label=f"browser_session={bot_session_id}",
         )
         persist_provider_fallback_warnings(
@@ -619,34 +642,25 @@ def _build_spec_from_event(
         )
         base_payload = {}
     # Resolve the session's agent: explicit request → the meeting's first
-    # enabled assignment → the default agent (Johnny-trt.41).
+    # enabled assignment → the default agent (Johnny-trt.41), then freeze
+    # its behavior + the effective context brief into ONE snapshot
+    # (Johnny-trt.45) shared by pins / spec / row.
     resolution = _resolve_agent(
         session,
         bot_session_id=bot_session_id,
         requested_id=payload.agent_id,
         meeting=meeting,
     )
-    agent = resolution.agent
+    agent_snapshot = _effective_agent_snapshot(resolution, context=payload.context)
     base_payload = _apply_agent_provider_pins(
         session,
         bot_session_id=bot_session_id,
         base_payload=base_payload,
-        resolution=resolution,
+        snapshot=agent_snapshot,
     )
     effective_providers = _resolve_provider_overrides(
         session, payload.provider_overrides, base_payload
     )
-
-    # Behavior comes from the agent; the explicit request mode (a playground
-    # experiment knob) still wins for this one session.
-    agent_mode = (
-        (agent.mode.value if hasattr(agent.mode, "value") else str(agent.mode))
-        if agent is not None
-        else None
-    )
-    mode = payload.mode or agent_mode or BotMode.AUTONOMOUS.value
-    effective_instructions = payload.system_prompt or ""
-    effective_context = resolution.assignment_context or ""
 
     # Johnny-dsy: pull the most recent prior session's summary for the
     # same recurring series so the bot can reference last week's open
@@ -672,21 +686,11 @@ def _build_spec_from_event(
     spec = BrowserPipelineSpec(
         session_id=str(bot_session_id),
         bot_session_id=bot_session_id,
-        mode=mode,
-        instructions=effective_instructions,
-        character_prompt=(agent.character_prompt or "") if agent is not None else "",
-        context=effective_context,
+        agent_id=resolution.agent.id if resolution.agent is not None else None,
+        agent_snapshot=agent_snapshot,
         calendar_context=event.description or "",
         calendar_attachments_text=event.attachments_text or "",
         prior_session_context=prior_session_context,
-        allowed_replies=(
-            tuple(str(r) for r in (agent.allowed_replies or []))
-            if agent is not None
-            else ()
-        ),
-        confidence_threshold=(
-            float(agent.confidence_threshold) if agent is not None else None
-        ),
         provider_payload=effective_providers,
         event_bus=_build_event_bus(),
     )
@@ -695,10 +699,8 @@ def _build_spec_from_event(
         "playground": False,
     }
     overrides_snapshot.update(_agent_overrides_fragment(resolution))
-    if payload.system_prompt:
-        overrides_snapshot["system_prompt"] = payload.system_prompt
-    if payload.persona:
-        overrides_snapshot["persona"] = payload.persona
+    if payload.context:
+        overrides_snapshot["context"] = payload.context
     if payload.provider_overrides:
         overrides_snapshot["providers"] = {
             kind: override.model_dump(exclude_none=True)
@@ -713,12 +715,6 @@ def _build_spec_playground(
     bot_session_id: int,
     payload: StartBrowserSessionPayload,
 ) -> tuple[BrowserPipelineSpec, dict[str, Any], AgentResolution]:
-    persona = payload.persona or DEFAULT_PERSONA
-    instructions = (
-        payload.system_prompt
-        or f"You are a helpful assistant in playground mode. Persona: {persona}"
-    )
-
     try:
         from app.security.crypto import get_crypto
 
@@ -729,27 +725,22 @@ def _build_spec_playground(
             bot_session_id,
         )
         base_payload = {}
-    # Resolve the session's agent (explicit request → default agent); its
-    # mode seeds the playground unless the request picked one explicitly
-    # (Johnny-trt.41): explicit request mode > agent mode > autonomous.
+    # Resolve the session's agent (explicit request → default agent) and
+    # freeze its behavior + the per-start context brief into ONE snapshot
+    # (Johnny-trt.45). The agent profile is the only behavior source — the
+    # old per-start mode/persona/system_prompt knobs are gone.
     resolution = _resolve_agent(
         session,
         bot_session_id=bot_session_id,
         requested_id=payload.agent_id,
         meeting=None,
     )
-    agent = resolution.agent
-    agent_mode = (
-        (agent.mode.value if hasattr(agent.mode, "value") else str(agent.mode))
-        if agent is not None
-        else None
-    )
-    mode = payload.mode or agent_mode or BotMode.AUTONOMOUS.value
+    agent_snapshot = _effective_agent_snapshot(resolution, context=payload.context)
     base_payload = _apply_agent_provider_pins(
         session,
         bot_session_id=bot_session_id,
         base_payload=base_payload,
-        resolution=resolution,
+        snapshot=agent_snapshot,
     )
     effective_providers = _resolve_provider_overrides(
         session, payload.provider_overrides, base_payload
@@ -758,30 +749,19 @@ def _build_spec_playground(
     spec = BrowserPipelineSpec(
         session_id=str(bot_session_id),
         bot_session_id=bot_session_id,
-        mode=mode,
-        instructions=instructions,
-        character_prompt=(agent.character_prompt or "") if agent is not None else "",
-        context="",
+        agent_id=resolution.agent.id if resolution.agent is not None else None,
+        agent_snapshot=agent_snapshot,
         calendar_context="",
-        allowed_replies=(
-            tuple(str(r) for r in (agent.allowed_replies or []))
-            if agent is not None
-            else ()
-        ),
-        confidence_threshold=(
-            float(agent.confidence_threshold) if agent is not None else None
-        ),
         provider_payload=effective_providers,
         event_bus=_build_event_bus(),
     )
     overrides_snapshot: dict[str, Any] = {
         "calendar_event_id": None,
         "playground": True,
-        "persona": persona,
     }
     overrides_snapshot.update(_agent_overrides_fragment(resolution))
-    if payload.system_prompt:
-        overrides_snapshot["system_prompt"] = payload.system_prompt
+    if payload.context:
+        overrides_snapshot["context"] = payload.context
     if payload.provider_overrides:
         overrides_snapshot["providers"] = {
             kind: override.model_dump(exclude_none=True)
@@ -958,21 +938,16 @@ async def start_browser_session(
         )
 
     row.playground_overrides = overrides_snapshot
-    # Johnny-trt.41: freeze the resolved agent onto the session row at
+    # Johnny-trt.41/45: freeze the resolved agent onto the session row at
     # dispatch — the snapshot is the session's behavior source of truth and
     # ``bot_name`` is what history renders (NULL → the UI's "Johnny"
-    # fallback when no agent resolved).
+    # fallback when no agent resolved). The row gets THE SAME dict the spec
+    # carries into the job contract (built once in the spec builder,
+    # including the effective per-start context), so the persisted record
+    # and the dispatched behavior can never drift.
     if resolution.agent is not None:
         row.agent_id = resolution.agent.id
-        snapshot = build_agent_snapshot(
-            resolution.agent, assignment_context=resolution.assignment_context
-        )
-        # The snapshot records the EFFECTIVE dispatched behavior: an explicit
-        # per-start mode override (a playground experiment knob) replaces the
-        # agent's configured mode for this one session, and downstream
-        # readers (the utterance-audit subscriber) must see what actually ran.
-        snapshot["mode"] = spec.mode
-        row.agent_snapshot = snapshot
+        row.agent_snapshot = dict(spec.agent_snapshot)
         row.bot_name = resolution.agent.name
 
     _spawn_runner(bot_session_id=row.id, spec=spec)

@@ -56,11 +56,18 @@ router = APIRouter(prefix="/calendar/events", tags=["meeting-configs"])
 
 
 class MeetingAgentAssignment(BaseModel):
-    """One agent assignment inside the upsert payload."""
+    """One agent assignment inside the upsert payload.
+
+    ``identity_account_id`` (Johnny-trt.45) is the per-assignment join
+    identity — a Google account cannot join one Meet twice, so co-attending
+    agents need distinct accounts to appear as distinct participants.
+    ``None`` falls back to the meeting-level identity account at dispatch.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     agent_id: int = Field(ge=1)
+    identity_account_id: int | None = Field(default=None, ge=1)
     context: str | None = None
     enabled: bool = True
     position: int = Field(default=0, ge=0)
@@ -93,6 +100,7 @@ class MeetingAgentRead(BaseModel):
     id: int
     agent_id: int
     agent_name: str | None = None
+    identity_account_id: int | None = None
     context: str | None
     enabled: bool
     position: int
@@ -156,7 +164,7 @@ def _get_account_or_422(session: Session, account_id: int) -> GoogleAccount:
 def _validate_assignments_or_422(
     session: Session, assignments: list[MeetingAgentAssignment]
 ) -> None:
-    """Reject assignments referencing missing agents or repeating one (422)."""
+    """Reject assignments referencing missing agents/accounts or repeats (422)."""
     seen: set[int] = set()
     for assignment in assignments:
         if assignment.agent_id in seen:
@@ -170,6 +178,17 @@ def _validate_assignments_or_422(
                 status_code=422,
                 detail=f"agent_id={assignment.agent_id} does not reference an agent",
             )
+        if (
+            assignment.identity_account_id is not None
+            and session.get(GoogleAccount, assignment.identity_account_id) is None
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"identity_account_id={assignment.identity_account_id} "
+                    "does not reference an account"
+                ),
+            )
 
 
 def _replace_assignments(
@@ -177,12 +196,21 @@ def _replace_assignments(
     row: MeetingConfig,
     assignments: list[MeetingAgentAssignment],
 ) -> None:
-    """Replace the meeting's assignment list with the payload's."""
+    """Replace the meeting's assignment list with the payload's.
+
+    The deletes are flushed BEFORE the replacements are added: re-saving a
+    list that keeps an agent (the UI always sends the full desired list,
+    Johnny-trt.45) re-inserts the same ``(meeting_config_id, agent_id)``
+    pair, and SQLAlchemy's unit of work orders INSERTs ahead of DELETEs
+    within one flush — colliding with ``uq_meeting_agents_config_agent``.
+    """
     for existing in list(row.agent_assignments):
         session.delete(existing)
+    session.flush()
     row.agent_assignments = [
         MeetingAgent(
             agent_id=assignment.agent_id,
+            identity_account_id=assignment.identity_account_id,
             context=assignment.context,
             enabled=assignment.enabled,
             position=assignment.position,
@@ -207,6 +235,7 @@ def _read_with_state(session: Session, row: MeetingConfig) -> MeetingConfigRead:
             id=assignment.id,
             agent_id=assignment.agent_id,
             agent_name=assignment.agent.name if assignment.agent else None,
+            identity_account_id=assignment.identity_account_id,
             context=assignment.context,
             enabled=assignment.enabled,
             position=assignment.position,

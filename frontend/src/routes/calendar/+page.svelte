@@ -33,8 +33,10 @@
 		undismissBot,
 		upsertMeetingConfig,
 		type MeetingConfig,
+		type MeetingConfigAgentPayload,
 		type MeetingConfigUpsertPayload
 	} from '$lib/meetingConfigs';
+	import { agentLabel, listAgents, type Agent } from '$lib/agents';
 	import { startSession } from '$lib/sessions';
 	import { startBrowserSession } from '$lib/browserSessions';
 	import { goto } from '$app/navigation';
@@ -75,6 +77,84 @@
 	let dismissBusy = $state(false);
 	let dismissMessage = $state<string | null>(null);
 
+	// --- Agent assignments (Johnny-trt.45) ---------------------------------
+	// One bot session launches per ENABLED assignment; each assignment is an
+	// agent + ONE context brief + an optional join identity (a Google account
+	// cannot join one Meet twice, so co-attending agents need distinct
+	// accounts). Array order = position.
+	interface AssignmentDraft {
+		agent_id: number;
+		identity_account_id: number | null;
+		context: string;
+		enabled: boolean;
+	}
+	let agents = $state<Agent[]>([]);
+	let formAgents = $state<AssignmentDraft[]>([]);
+
+	function draftsFromConfig(config: MeetingConfig | null): AssignmentDraft[] {
+		if (!config) return [];
+		return config.agents
+			.slice()
+			.sort((a, b) => a.position - b.position || a.id - b.id)
+			.map((a) => ({
+				agent_id: a.agent_id,
+				identity_account_id: a.identity_account_id,
+				context: a.context ?? '',
+				enabled: a.enabled
+			}));
+	}
+
+	function assignmentsPayload(): MeetingConfigAgentPayload[] {
+		return formAgents.map((a, index) => ({
+			agent_id: a.agent_id,
+			identity_account_id: a.identity_account_id,
+			context: a.context.trim() || null,
+			enabled: a.enabled,
+			position: index
+		}));
+	}
+
+	function addAssignment() {
+		const used = new Set(formAgents.map((a) => a.agent_id));
+		const next = agents.find((a) => !used.has(a.id));
+		if (!next) return;
+		formAgents = [
+			...formAgents,
+			{ agent_id: next.id, identity_account_id: null, context: '', enabled: true }
+		];
+	}
+
+	function removeAssignment(index: number) {
+		formAgents = formAgents.filter((_, i) => i !== index);
+	}
+
+	const unassignedAgents = $derived(
+		agents.filter((a) => !formAgents.some((d) => d.agent_id === a.id))
+	);
+
+	/**
+	 * Effective join identity per enabled assignment (assignment account or
+	 * the meeting-level fallback). Two enabled assignments resolving to the
+	 * same account would appear as ONE participant — warn before save.
+	 */
+	const sharedIdentityWarning = $derived.by(() => {
+		const effective = formAgents
+			.filter((a) => a.enabled)
+			.map((a) => a.identity_account_id ?? formIdentityId)
+			.filter((id): id is number => id !== null);
+		const dupes = effective.filter((id, i) => effective.indexOf(id) !== i);
+		if (dupes.length === 0) return null;
+		const email = accounts.find((a) => a.id === dupes[0])?.email ?? `#${dupes[0]}`;
+		return (
+			`Two enabled agents would join as ${email}. A Google account can't ` +
+			'join the same Meet twice — give each agent its own identity account.'
+		);
+	});
+
+	function agentName(agentId: number): string {
+		return agents.find((a) => a.id === agentId)?.name ?? `Agent #${agentId}`;
+	}
+
 	const groupedDays = $derived(
 		summary ? groupEventsByDay(summary.events) : []
 	);
@@ -92,30 +172,38 @@
 	);
 	const hasPendingChanges = $derived.by(() => {
 		if (!existingConfig) return true;
-		return (
+		if (
 			formIdentityId !== existingConfig.identity_account_id ||
 			formEnabled !== existingConfig.enabled
-		);
+		) {
+			return true;
+		}
+		const saved = draftsFromConfig(existingConfig);
+		if (saved.length !== formAgents.length) return true;
+		return formAgents.some((draft, i) => {
+			const prev = saved[i];
+			return (
+				draft.agent_id !== prev.agent_id ||
+				draft.identity_account_id !== prev.identity_account_id ||
+				draft.context.trim() !== prev.context.trim() ||
+				draft.enabled !== prev.enabled
+			);
+		});
 	});
-
-	/**
-	 * Read-only summary of the meeting's agent assignments (the management
-	 * UI for them is a later task). Empty = the default agent applies.
-	 */
-	function agentSummary(config: MeetingConfig): string {
-		const names = config.agents
-			.slice()
-			.sort((a, b) => a.position - b.position)
-			.map((a) => a.agent_name);
-		if (names.length === 0) return 'Agent: default';
-		return names.length === 1 ? `Agent: ${names[0]}` : `Agents: ${names.join(', ')}`;
-	}
 
 	async function loadAccounts() {
 		loadingAccounts = true;
 		error = null;
 		try {
-			accounts = await listAccounts();
+			// Agents power the assignment editor; a load failure leaves the
+			// list empty (the editor then renders its empty state) without
+			// blocking the calendar itself.
+			const [accountList, agentList] = await Promise.all([
+				listAccounts(),
+				listAgents().catch(() => [] as Agent[])
+			]);
+			accounts = accountList;
+			agents = agentList;
 			if (accounts.length === 0) {
 				selectedAccountId = null;
 				summary = null;
@@ -210,12 +298,14 @@
 		if (config) {
 			formIdentityId = config.identity_account_id;
 			formEnabled = config.enabled;
+			formAgents = draftsFromConfig(config);
 			return;
 		}
 		const defaultAccount =
 			accounts.find((a) => a.bot_session.connected) ?? accounts[0];
 		formIdentityId = defaultAccount?.id ?? null;
 		formEnabled = true;
+		formAgents = [];
 	}
 
 	async function confirmDisable() {
@@ -259,14 +349,19 @@
 		formSaving = true;
 		panelError = null;
 		panelSuccess = null;
-		// `agents` is deliberately omitted: assignments are managed elsewhere
-		// (a later task) and an omitted key leaves them unchanged server-side.
+		// The full desired assignment list always rides the upsert
+		// (Johnny-trt.45): the server replaces assignments with it, and an
+		// empty list means "no assignments — the default agent attends".
 		const payload: MeetingConfigUpsertPayload = {
 			identity_account_id: formIdentityId,
-			enabled: formEnabled
+			enabled: formEnabled,
+			agents: assignmentsPayload()
 		};
 		try {
 			existingConfig = await upsertMeetingConfig(selectedEvent.id, payload);
+			// Re-seed the drafts from the saved truth so "Save changes"
+			// settles back to "Saved" (ids/positions may normalise).
+			formAgents = draftsFromConfig(existingConfig);
 			panelSuccess = 'Saved.';
 			if (summary) {
 				const idx = summary.events.findIndex((e) => e.id === selectedEvent?.id);
@@ -948,19 +1043,137 @@
 							</p>
 						</section>
 
-						{#if existingConfig}
-							<section class="flex flex-col gap-1">
-								<span
-									class="text-sm text-muted-foreground"
-									data-testid="agents-summary"
-								>
-									{agentSummary(existingConfig)}
+						<section class="flex flex-col gap-3" data-testid="agents-section">
+							<div class="flex items-baseline justify-between">
+								<span class="text-sm leading-none font-medium text-foreground">
+									Agents
 								</span>
-								<p class="m-0 text-xs text-ink-subtle">
-									Agent assignments for this meeting are managed separately.
+								<Button
+									type="button"
+									variant="outline"
+									size="sm"
+									onclick={addAssignment}
+									disabled={unassignedAgents.length === 0}
+									title={unassignedAgents.length === 0
+										? 'Every agent is already assigned.'
+										: 'Assign another agent to this meeting.'}
+									data-testid="add-agent-button"
+								>
+									Add agent
+								</Button>
+							</div>
+							<p class="m-0 text-xs text-muted-foreground">
+								One bot joins per enabled agent. Each agent brings its own
+								character, providers and voice — give it per-meeting context
+								here.
+							</p>
+
+							{#if formAgents.length === 0}
+								<p
+									class="m-0 rounded-md border border-dashed border-border bg-surface-1 px-3 py-2.5 text-xs text-muted-foreground"
+									data-testid="agents-empty"
+								>
+									No agents assigned — the default agent attends.
 								</p>
-							</section>
-						{/if}
+							{:else}
+								<ul class="m-0 flex list-none flex-col gap-3 p-0">
+									{#each formAgents as draft, index (index)}
+										<li
+											class="flex flex-col gap-2.5 rounded-md border border-border bg-surface-1 px-3 py-3"
+											data-testid={`agent-row-${index}`}
+										>
+											<div class="flex items-center gap-2">
+												<select
+													value={draft.agent_id}
+													onchange={(e) =>
+														(formAgents[index].agent_id = Number(
+															e.currentTarget.value
+														))}
+													class="border-input flex h-9 min-w-0 flex-1 rounded-md border bg-background px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+													data-testid={`agent-select-${index}`}
+												>
+													{#each agents as a (a.id)}
+														<option
+															value={a.id}
+															disabled={a.id !== draft.agent_id &&
+																formAgents.some((d) => d.agent_id === a.id)}
+														>
+															{agentLabel(a)}
+														</option>
+													{/each}
+												</select>
+												<label
+													class="flex shrink-0 items-center gap-1.5 text-xs text-foreground"
+													title="Disabled assignments stay saved but don't launch a bot."
+												>
+													<input
+														type="checkbox"
+														bind:checked={formAgents[index].enabled}
+														class="size-4 rounded-sm border border-border-strong bg-surface-3 [accent-color:var(--color-foreground)]"
+														data-testid={`agent-enabled-${index}`}
+													/>
+													Enabled
+												</label>
+												<Button
+													type="button"
+													variant="ghost"
+													size="icon"
+													onclick={() => removeAssignment(index)}
+													aria-label={`Remove ${agentName(draft.agent_id)} from this meeting`}
+													title="Remove this agent from the meeting"
+													data-testid={`agent-remove-${index}`}
+												>
+													<XIcon />
+												</Button>
+											</div>
+											<label class="flex flex-col gap-1">
+												<span class="text-xs text-muted-foreground">
+													Joins as
+												</span>
+												<select
+													value={draft.identity_account_id ?? ''}
+													onchange={(e) =>
+														(formAgents[index].identity_account_id =
+															e.currentTarget.value === ''
+																? null
+																: Number(e.currentTarget.value))}
+													class="border-input flex h-9 w-full rounded-md border bg-background px-3 py-1 font-mono text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+													data-testid={`agent-identity-${index}`}
+												>
+													<option value="">
+														Meeting identity{formIdentityId !== null
+															? ` (${accounts.find((a) => a.id === formIdentityId)?.email ?? '—'})`
+															: ''}
+													</option>
+													{#each accounts as account (account.id)}
+														<option value={account.id}>{account.email}</option>
+													{/each}
+												</select>
+											</label>
+											<label class="flex flex-col gap-1">
+												<span class="text-xs text-muted-foreground">
+													Context for {agentName(draft.agent_id)} · optional
+												</span>
+												<textarea
+													bind:value={formAgents[index].context}
+													rows={2}
+													placeholder="What should this agent know for this meeting?"
+													class="border-input flex w-full resize-y rounded-md border bg-background px-3 py-2 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+													data-testid={`agent-context-${index}`}
+												></textarea>
+											</label>
+										</li>
+									{/each}
+								</ul>
+							{/if}
+
+							{#if sharedIdentityWarning}
+								<Alert.Root data-testid="shared-identity-warning">
+									<TriangleAlertIcon />
+									<Alert.Description>{sharedIdentityWarning}</Alert.Description>
+								</Alert.Root>
+							{/if}
+						</section>
 					</div>
 
 					<footer

@@ -102,14 +102,19 @@ of one Meet session, **consumed by Johnny-7we**. It mirrors the legacy
 lockstep during the migration; `from_env()`/`to_env()` bridge the two.
 
 Fields: `bot_session_id`, `room_name`, `meet_link`, `meeting_config_id`,
-`calendar_event_id`, `account_id`, `mode` (`listen_only` | `suggest_only` |
-`approval_required` | `limited_auto_speak`; the former `pipeline_mode` field
-was removed with the S2S surface, Johnny-trt.43 — unknown keys in old payloads
-are ignored), the prompt-assembly text (`instructions`, `character_prompt`,
-`context`, `calendar_context`, `calendar_attachments_text`,
-`prior_session_context` → feeds `AgentInstructionsConfig`), the agent-snapshot
-behavior knobs (`allowed_replies`, `confidence_threshold` — Johnny-trt.41),
-`provider_config`
+`calendar_event_id`, `account_id`, `agent_id` + `agent_snapshot`
+(Johnny-trt.45 — the frozen agent behavior blob persisted on
+`bot_sessions.agent_snapshot`; the contract DERIVES `mode` (`listen_only` |
+`suggest_only` | `approval_required` | `limited_auto_speak` | `autonomous`),
+`character_prompt`, `context` (the per-assignment brief,
+`assignment_context` in the snapshot), `allowed_replies` and
+`confidence_threshold` from it as read-only properties. The former per-field
+overrides — top-level `mode`/`instructions`/`character_prompt`/`context`/
+`allowed_replies`/`confidence_threshold`, like `pipeline_mode` before them
+(Johnny-trt.43) — are ignored as unknown keys in old payloads), the
+per-meeting context text (`calendar_context`, `calendar_attachments_text`,
+`prior_session_context` → feeds `AgentInstructionsConfig` together with the
+snapshot-derived character/context), `provider_config`
 (the `build_provider_payload` shape: `{kind: {provider_id, provider_name,
 display_name, credentials, options}}`, with the session agent's provider pins
 already applied by `app.services.agent_providers.resolve_agent_provider_payload`,

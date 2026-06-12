@@ -31,7 +31,6 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from johnny.agent.job_config import (
-    DEFAULT_MODE,
     SessionJobConfig,
     room_name_for_session,
 )
@@ -78,18 +77,15 @@ def session_job_config_from_launch_context(
     """Translate the API's :class:`LaunchContext` into the dispatch :class:`SessionJobConfig`.
 
     A near field-for-field copy — the two carry the same per-session config, only
-    bound for different transports (env vars vs. dispatch metadata). Two small
-    bridges: ``room_name`` is derived from the durable ``bot_session_id`` via
-    :func:`~johnny.agent.job_config.room_name_for_session` (one room per session, so
-    the bridge and the agent agree without a side channel), and ``account_id`` reads
-    the launch context's ``identity_account_id``. ``redis_url`` (the event-bus /
-    approval-gate wiring) is not on the launch context — it lives on the launcher —
-    so the caller passes it in.
-
-    A blank ``mode`` (the launch context's struct default) coerces to the
-    contract default (``listen_only``), matching the leniency of
-    :meth:`SessionJobConfig.from_env` so an under-configured session degrades
-    identically on either transport.
+    bound for different transports (env vars vs. dispatch metadata). Behavior
+    rides the frozen ``agent_snapshot`` blob (Johnny-trt.45) — the contract
+    derives mode / character / context / allowlist / threshold from it. Two
+    small bridges: ``room_name`` is derived from the durable ``bot_session_id``
+    via :func:`~johnny.agent.job_config.room_name_for_session` (one room per
+    session, so the bridge and the agent agree without a side channel), and
+    ``account_id`` reads the launch context's ``identity_account_id``.
+    ``redis_url`` (the event-bus / approval-gate wiring) is not on the launch
+    context — it lives on the launcher — so the caller passes it in.
     """
     return SessionJobConfig(
         bot_session_id=ctx.bot_session_id,
@@ -98,15 +94,11 @@ def session_job_config_from_launch_context(
         meeting_config_id=ctx.meeting_config_id,
         calendar_event_id=ctx.calendar_event_id,
         account_id=ctx.identity_account_id,
-        mode=ctx.mode or DEFAULT_MODE,
-        instructions=ctx.instructions,
-        character_prompt=ctx.character_prompt,
-        context=ctx.context,
+        agent_id=ctx.agent_id,
+        agent_snapshot=dict(ctx.agent_snapshot),
         calendar_context=ctx.calendar_context,
         calendar_attachments_text=ctx.calendar_attachments_text,
         prior_session_context=ctx.prior_session_context,
-        allowed_replies=tuple(ctx.allowed_replies),
-        confidence_threshold=ctx.confidence_threshold,
         provider_config=dict(ctx.provider_config),
         redis_url=redis_url,
     )

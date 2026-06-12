@@ -51,15 +51,18 @@ export interface StartBrowserSessionPayload {
 	 * account-less run; for a rehearsal it defaults to the event's owner.
 	 */
 	account_id?: number | null;
-	mode?: string;
-	persona?: string;
-	system_prompt?: string;
 	/**
 	 * Agent (Johnny-trt.41) to apply for this session. `null` / omitted
 	 * falls back to the meeting's agent assignment (rehearsal) then the
 	 * `is_default` agent — resolved server-side.
 	 */
 	agent_id?: number | null;
+	/**
+	 * Per-start context brief (Johnny-trt.45) — the ONE free-text slot.
+	 * All other behavior comes from the agent profile; the old per-start
+	 * mode/persona/system_prompt overrides were removed.
+	 */
+	context?: string;
 	provider_overrides?: Record<string, BrowserProviderOverride>;
 }
 
