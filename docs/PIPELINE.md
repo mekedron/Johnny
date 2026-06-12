@@ -540,11 +540,15 @@ erDiagram
     bot_sessions ||--o{ agent_utterances : "CASCADE"
     bot_sessions ||--o{ session_timings : "CASCADE"
     agent_decisions ||--o{ agent_utterances : "agent_decision_id (SET NULL)"
-    personalities ||--o{ meeting_configs : "personality_id (SET NULL)"
+    agents ||--o{ meeting_agents : "agent_id (CASCADE)"
+    meeting_configs ||--o{ meeting_agents : "meeting_config_id (CASCADE)"
+    agents ||--o{ bot_sessions : "agent_id (SET NULL)"
 
     bot_sessions {
         int id PK
         int meeting_config_id FK "NULL for browser/playground"
+        int agent_id FK "the serving agent (SET NULL)"
+        json agent_snapshot "behavior frozen at dispatch (trt.41)"
         string source "meet|browser"
         string status "scheduled|joining|joined|ended|failed"
         text session_summary "for recurring-meeting memory"

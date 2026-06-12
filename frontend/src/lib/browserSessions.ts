@@ -55,12 +55,11 @@ export interface StartBrowserSessionPayload {
 	persona?: string;
 	system_prompt?: string;
 	/**
-	 * Personality preset (Johnny-oly) to apply for this session. `null` /
-	 * omitted falls back to the meeting's personality (rehearsal) then the
-	 * `is_default` personality — see the resolver precedence in
-	 * `app/services/personality_resolver.py`.
+	 * Agent (Johnny-trt.41) to apply for this session. `null` / omitted
+	 * falls back to the meeting's agent assignment (rehearsal) then the
+	 * `is_default` agent — resolved server-side.
 	 */
-	personality_id?: number | null;
+	agent_id?: number | null;
 	provider_overrides?: Record<string, BrowserProviderOverride>;
 }
 

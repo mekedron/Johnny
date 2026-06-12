@@ -56,6 +56,10 @@ SUPPORTED_MODES: frozenset[str] = frozenset(
     }
 )
 DEFAULT_MODE = LISTEN_ONLY_MODE
+# Mirrors johnny.voice_pipeline.reasoning.DEFAULT_CONFIDENCE_THRESHOLD (the
+# router gate's own default) — re-declared to keep this module
+# dependency-free; the drift guard test pins the two together.
+DEFAULT_CONFIDENCE_THRESHOLD = 0.7
 
 # --- Room / identity naming -------------------------------------------------
 # One LiveKit room per Meet session, named off the durable bot_session_id so
@@ -100,7 +104,9 @@ ENV_ACCOUNT_ID = "JOHNNY_ACCOUNT_ID"
 ENV_MEET_LINK = "JOHNNY_MEET_LINK"
 ENV_MODE = "JOHNNY_MODE"
 ENV_INSTRUCTIONS = "JOHNNY_INSTRUCTIONS"
-ENV_PERSONALITY_PROMPT = "JOHNNY_PERSONALITY_PROMPT"
+ENV_CHARACTER_PROMPT = "JOHNNY_CHARACTER_PROMPT"
+ENV_ALLOWED_REPLIES = "JOHNNY_ALLOWED_REPLIES"
+ENV_CONFIDENCE_THRESHOLD = "JOHNNY_CONFIDENCE_THRESHOLD"
 ENV_CONTEXT = "JOHNNY_CONTEXT"
 ENV_CALENDAR_CONTEXT = "JOHNNY_CALENDAR_CONTEXT"
 ENV_CALENDAR_ATTACHMENTS = "JOHNNY_CALENDAR_ATTACHMENTS"
@@ -136,8 +142,12 @@ class SessionJobConfig:
     * **correlation / routing** — ``bot_session_id`` (the durable session row,
       also the source of the room name), ``room_name``, ``meet_link`` and the
       optional ``meeting_config_id`` / ``calendar_event_id`` / ``account_id``;
-    * **behaviour** — ``mode`` (one of :data:`SUPPORTED_MODES`);
-    * **prompt assembly** — ``instructions`` / ``personality_prompt`` /
+    * **behaviour** — ``mode`` (one of :data:`SUPPORTED_MODES`),
+      ``allowed_replies`` (the limited-auto-speak allowlist) and
+      ``confidence_threshold`` (the router's speak floor) — sourced from the
+      session's frozen agent snapshot (Johnny-trt.41), never re-read from
+      config tables at turn time;
+    * **prompt assembly** — ``instructions`` / ``character_prompt`` /
       ``context`` / ``calendar_context`` / ``calendar_attachments_text`` /
       ``prior_session_context``, the inputs to
       :class:`johnny.agent.session.AgentInstructionsConfig`;
@@ -158,11 +168,13 @@ class SessionJobConfig:
     account_id: int | None = None
     mode: str = DEFAULT_MODE
     instructions: str = ""
-    personality_prompt: str = ""
+    character_prompt: str = ""
     context: str = ""
     calendar_context: str = ""
     calendar_attachments_text: str = ""
     prior_session_context: str = ""
+    allowed_replies: tuple[str, ...] = ()
+    confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD
     provider_config: Mapping[str, Any] = field(default_factory=dict)
     redis_url: str | None = None
 
@@ -175,6 +187,8 @@ class SessionJobConfig:
             value = getattr(self, f.name)
             if f.name == "provider_config":
                 value = dict(value)
+            elif f.name == "allowed_replies":
+                value = list(value)
             out[f.name] = value
         return out
 
@@ -219,11 +233,13 @@ class SessionJobConfig:
             account_id=_coerce_optional_int(data.get("account_id")),
             mode=mode,
             instructions=str(data.get("instructions") or ""),
-            personality_prompt=str(data.get("personality_prompt") or ""),
+            character_prompt=str(data.get("character_prompt") or ""),
             context=str(data.get("context") or ""),
             calendar_context=str(data.get("calendar_context") or ""),
             calendar_attachments_text=str(data.get("calendar_attachments_text") or ""),
             prior_session_context=str(data.get("prior_session_context") or ""),
+            allowed_replies=_coerce_replies(data.get("allowed_replies")),
+            confidence_threshold=_coerce_threshold(data.get("confidence_threshold")),
             provider_config=dict(provider_config),
             redis_url=(str(data["redis_url"]) if data.get("redis_url") else None),
         )
@@ -272,11 +288,15 @@ class SessionJobConfig:
             account_id=_int_or_none(environ.get(ENV_ACCOUNT_ID)),
             mode=mode,
             instructions=environ.get(ENV_INSTRUCTIONS, ""),
-            personality_prompt=environ.get(ENV_PERSONALITY_PROMPT, ""),
+            character_prompt=environ.get(ENV_CHARACTER_PROMPT, ""),
             context=environ.get(ENV_CONTEXT, ""),
             calendar_context=environ.get(ENV_CALENDAR_CONTEXT, ""),
             calendar_attachments_text=environ.get(ENV_CALENDAR_ATTACHMENTS, ""),
             prior_session_context=environ.get(ENV_PRIOR_SESSION_CONTEXT, ""),
+            allowed_replies=_parse_replies_env(environ.get(ENV_ALLOWED_REPLIES)),
+            confidence_threshold=_coerce_threshold(
+                environ.get(ENV_CONFIDENCE_THRESHOLD)
+            ),
             provider_config=provider_config,
             redis_url=(environ.get(ENV_REDIS_URL) or None),
         )
@@ -298,11 +318,13 @@ class SessionJobConfig:
             ENV_ACCOUNT_ID: _id_to_env(self.account_id),
             ENV_MODE: self.mode,
             ENV_INSTRUCTIONS: self.instructions,
-            ENV_PERSONALITY_PROMPT: self.personality_prompt,
+            ENV_CHARACTER_PROMPT: self.character_prompt,
             ENV_CONTEXT: self.context,
             ENV_CALENDAR_CONTEXT: self.calendar_context,
             ENV_CALENDAR_ATTACHMENTS: self.calendar_attachments_text,
             ENV_PRIOR_SESSION_CONTEXT: self.prior_session_context,
+            ENV_ALLOWED_REPLIES: json.dumps(list(self.allowed_replies)),
+            ENV_CONFIDENCE_THRESHOLD: str(self.confidence_threshold),
             ENV_PROVIDER_CONFIG: json.dumps(dict(self.provider_config)),
         }
         if self.redis_url:
@@ -315,6 +337,44 @@ def _coerce_optional_int(value: Any) -> int | None:
     if value is None or value == "":
         return None
     return int(value)
+
+
+def _coerce_replies(value: Any) -> tuple[str, ...]:
+    """Coerce a decoded JSON value to the allowed-replies tuple.
+
+    Lenient like the rest of the optional fields: ``None`` / non-list →
+    empty (the no-allowlist default); items are stringified and blanks
+    dropped so a sloppy payload degrades instead of failing the dispatch.
+    """
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(str(item).strip() for item in value if str(item).strip())
+
+
+def _coerce_threshold(value: Any) -> float:
+    """Coerce a decoded JSON / env value to the confidence threshold.
+
+    ``None`` / blank / unparseable degrade to
+    :data:`DEFAULT_CONFIDENCE_THRESHOLD`; parsed values are clamped into
+    ``[0.0, 1.0]`` (defensive against a corrupt snapshot)."""
+    if value is None or value == "":
+        return DEFAULT_CONFIDENCE_THRESHOLD
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_CONFIDENCE_THRESHOLD
+    return max(0.0, min(1.0, threshold))
+
+
+def _parse_replies_env(raw: str | None) -> tuple[str, ...]:
+    """Decode ``JOHNNY_ALLOWED_REPLIES`` JSON; empty/invalid → ``()``."""
+    if not raw or not raw.strip():
+        return ()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return ()
+    return _coerce_replies(data)
 
 
 def _id_to_env(value: int | None) -> str:
@@ -342,6 +402,7 @@ __all__ = [
     "APPROVAL_REQUIRED_MODE",
     "AUTONOMOUS_MODE",
     "BRIDGE_IDENTITY_PREFIX",
+    "DEFAULT_CONFIDENCE_THRESHOLD",
     "DEFAULT_MODE",
     "LIMITED_AUTO_SPEAK_MODE",
     "LISTEN_ONLY_MODE",

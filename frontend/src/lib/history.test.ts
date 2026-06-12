@@ -90,14 +90,14 @@ describe('listHistoryFilters', () => {
 	it('GETs /history/filters and returns the options', async () => {
 		const opts: HistoryFilterOptions = {
 			accounts: [{ id: 1, email: 'a@b.com' }],
-			personalities: ['Aria'],
+			agents: ['Aria'],
 			sources: ['browser', 'meet']
 		};
 		const { calls } = stubFetch(opts);
 		const res = await listHistoryFilters();
 		const url = new URL(calls[0]);
 		assert.equal(url.pathname, '/history/filters');
-		assert.deepEqual(res.personalities, ['Aria']);
+		assert.deepEqual(res.agents, ['Aria']);
 		assert.deepEqual(res.accounts, [{ id: 1, email: 'a@b.com' }]);
 	});
 });

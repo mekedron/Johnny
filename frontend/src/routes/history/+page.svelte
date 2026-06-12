@@ -18,7 +18,7 @@
 	import * as Alert from '$lib/components/ui/alert/index.js';
 	import Page from '$lib/components/page.svelte';
 	import PageHeader from '$lib/components/page-header.svelte';
-	import { BOT_MODE_LABEL } from '$lib/templates';
+	import { BOT_MODE_LABEL } from '$lib/sessionDetail';
 	import { BOT_SESSION_STATUS_LABEL, type BotSessionSource } from '$lib/sessions';
 	import {
 		formatDateRange,
@@ -44,7 +44,7 @@
 	let filterOptions = $state<HistoryFilterOptions | null>(null);
 	let typeFilter = $state<'all' | BotSessionSource>('all');
 	let accountFilter = $state<number | null>(null);
-	let personalityFilter = $state<string | null>(null);
+	let agentFilter = $state<string | null>(null);
 
 	// --- Transcript search ---
 	let searchQuery = $state('');
@@ -54,14 +54,14 @@
 	let searchActive = $state(false);
 
 	function activeFilters(): boolean {
-		return typeFilter !== 'all' || accountFilter !== null || personalityFilter !== null;
+		return typeFilter !== 'all' || accountFilter !== null || agentFilter !== null;
 	}
 
 	function buildFilters() {
 		return {
 			source: typeFilter === 'all' ? null : typeFilter,
 			account_id: accountFilter,
-			bot_name: personalityFilter
+			bot_name: agentFilter
 		};
 	}
 
@@ -83,7 +83,7 @@
 			filterOptions = await listHistoryFilters();
 		} catch {
 			// Non-fatal: the list still loads; dropdowns just stay empty.
-			filterOptions = { accounts: [], personalities: [], sources: [] };
+			filterOptions = { accounts: [], agents: [], sources: [] };
 		}
 	}
 
@@ -94,7 +94,7 @@
 	function clearFilters() {
 		typeFilter = 'all';
 		accountFilter = null;
-		personalityFilter = null;
+		agentFilter = null;
 		void loadPage(0);
 	}
 
@@ -305,21 +305,21 @@
 		</div>
 
 		<div class="flex min-w-[14rem] flex-1 flex-col gap-1.5">
-			<label for="filter-personality" class="text-xs font-medium tracking-wide text-muted-foreground">
-				Personality
+			<label for="filter-agent" class="text-xs font-medium tracking-wide text-muted-foreground">
+				Agent
 			</label>
 			<select
-				id="filter-personality"
-				value={personalityFilter ?? ''}
+				id="filter-agent"
+				value={agentFilter ?? ''}
 				onchange={(e) => {
-					personalityFilter = e.currentTarget.value === '' ? null : e.currentTarget.value;
+					agentFilter = e.currentTarget.value === '' ? null : e.currentTarget.value;
 					applyFilters();
 				}}
-				data-testid="filter-personality"
+				data-testid="filter-agent"
 				class="border-input bg-background h-9 w-full rounded-md border px-3 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
 			>
-				<option value="">All personalities</option>
-				{#each filterOptions?.personalities ?? [] as name (name)}
+				<option value="">All agents</option>
+				{#each filterOptions?.agents ?? [] as name (name)}
 					<option value={name}>{name}</option>
 				{/each}
 			</select>
@@ -410,7 +410,7 @@
 									<ClockIcon class="size-3.5" />
 									{formatDateRange(session.started_at, session.ended_at)}
 								</span>
-								<span class="inline-flex items-center gap-1" title="Personality">
+								<span class="inline-flex items-center gap-1" title="Agent">
 									<UserIcon class="size-3.5" />
 									{botDisplayName(session)}
 								</span>

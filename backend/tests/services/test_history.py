@@ -23,7 +23,6 @@ from app.db.models import (
     DecisionOutcome,
     GoogleAccount,
     MeetingConfig,
-    ProfileTemplate,
     TranscriptChunk,
 )
 from app.services.history import (
@@ -54,7 +53,6 @@ def engine() -> sa.Engine:
         tables=[
             GoogleAccount.__table__,  # type: ignore[list-item]
             CalendarEvent.__table__,  # type: ignore[list-item]
-            ProfileTemplate.__table__,  # type: ignore[list-item]
             MeetingConfig.__table__,  # type: ignore[list-item]
             BotSession.__table__,  # type: ignore[list-item]
             TranscriptChunk.__table__,  # type: ignore[list-item]
@@ -75,26 +73,14 @@ def db_session(engine: sa.Engine) -> Iterator[Session]:
         sess.close()
 
 
-def _seed_account_template(
-    db_session: Session, *, seed: int
-) -> tuple[GoogleAccount, ProfileTemplate]:
+def _seed_account(db_session: Session, *, seed: int) -> GoogleAccount:
     acc = GoogleAccount(
         email=f"u{seed}@example.com",
         refresh_token_encrypted="x",
     )
     db_session.add(acc)
     db_session.flush()
-    tpl = ProfileTemplate(
-        name=f"tpl-{seed}",
-        mode=BotMode.APPROVAL_REQUIRED,
-        base_instructions="",
-        base_context="",
-        allowed_replies=[],
-        confidence_threshold=0.7,
-    )
-    db_session.add(tpl)
-    db_session.flush()
-    return acc, tpl
+    return acc
 
 
 def _seed_session(
@@ -108,7 +94,7 @@ def _seed_session(
     seed: int = 0,
 ) -> BotSession:
     """Seed a full chain ending in a bot_sessions row."""
-    acc, tpl = _seed_account_template(db_session, seed=seed)
+    acc = _seed_account(db_session, seed=seed)
     base = datetime.now(UTC).replace(microsecond=0)
     event = CalendarEvent(
         account_id=acc.id,
@@ -122,9 +108,8 @@ def _seed_session(
     db_session.flush()
     cfg = MeetingConfig(
         calendar_event_id=event.id,
-        profile_template_id=tpl.id,
         identity_account_id=acc.id,
-        mode=mode,
+        enabled=True,
     )
     db_session.add(cfg)
     db_session.flush()
@@ -134,6 +119,9 @@ def _seed_session(
         status=status,
         started_at=started_at,
         ended_at=ended_at,
+        # Johnny-trt.41: a session's mode now lives in its frozen agent
+        # snapshot, not on the meeting config.
+        agent_snapshot={"mode": mode.value},
     )
     db_session.add(row)
     db_session.commit()
@@ -426,8 +414,8 @@ def test_list_history_filters_only_present_terminal_values(
     options = list_history_filters(db_session)
     emails = {a.email for a in options.accounts}
     assert emails == {"u0@example.com", "pg@example.com"}
-    assert "Aria" in options.personalities
-    assert "Ghost" not in options.personalities
+    assert "Aria" in options.agents
+    assert "Ghost" not in options.agents
     assert set(options.sources) == {"meet", "browser"}
 
 
@@ -802,7 +790,7 @@ def _seed_recurring_session(
     ended_at: datetime | None = None,
 ) -> BotSession:
     """Seed a CalendarEvent + MeetingConfig + BotSession with the given series id."""
-    acc, tpl = _seed_account_template(db_session, seed=seed)
+    acc = _seed_account(db_session, seed=seed)
     base = datetime.now(UTC).replace(microsecond=0)
     event = CalendarEvent(
         account_id=acc.id,
@@ -817,9 +805,8 @@ def _seed_recurring_session(
     db_session.flush()
     cfg = MeetingConfig(
         calendar_event_id=event.id,
-        profile_template_id=tpl.id,
         identity_account_id=acc.id,
-        mode=BotMode.APPROVAL_REQUIRED,
+        enabled=True,
     )
     db_session.add(cfg)
     db_session.flush()

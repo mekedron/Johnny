@@ -16,14 +16,12 @@ from app.api.deps import get_session
 from app.db import Base
 from app.db.models import (
     AgentDecision,
-    BotMode,
     BotSession,
     BotSessionStatus,
     CalendarEvent,
     DecisionOutcome,
     GoogleAccount,
     MeetingConfig,
-    ProfileTemplate,
 )
 from app.main import app
 from app.services.approval import approval_channel
@@ -62,7 +60,6 @@ def engine() -> sa.Engine:
         tables=[
             GoogleAccount.__table__,  # type: ignore[list-item]
             CalendarEvent.__table__,  # type: ignore[list-item]
-            ProfileTemplate.__table__,  # type: ignore[list-item]
             MeetingConfig.__table__,  # type: ignore[list-item]
             BotSession.__table__,  # type: ignore[list-item]
             AgentDecision.__table__,  # type: ignore[list-item]
@@ -131,21 +128,10 @@ def _seed_session_with_pending_decision(
     )
     db_session.add(event)
     db_session.flush()
-    template = ProfileTemplate(
-        name="tpl",
-        mode=BotMode.APPROVAL_REQUIRED,
-        base_instructions="",
-        base_context="",
-        allowed_replies=[],
-        confidence_threshold=0.5,
-    )
-    db_session.add(template)
-    db_session.flush()
     cfg = MeetingConfig(
         calendar_event_id=event.id,
-        profile_template_id=template.id,
         identity_account_id=account.id,
-        mode=BotMode.APPROVAL_REQUIRED,
+        enabled=True,
     )
     db_session.add(cfg)
     db_session.flush()

@@ -1,4 +1,12 @@
-"""Tests for the per-meeting bot configuration HTTP API (US-009)."""
+"""Tests for the per-meeting bot configuration HTTP API (US-009, reshaped Johnny-trt.41).
+
+The agents rebuild removed the per-meeting override soup (template /
+personality FKs, mode, instructions, context, allowed_replies,
+confidence_threshold). A meeting config is now: identity account + enabled +
+the list of agent assignments (each binding an Agent with an optional
+per-assignment context brief), plus the occurrence-scoped bot-dismissal
+state (Johnny-trt.56).
+"""
 
 from __future__ import annotations
 
@@ -14,13 +22,14 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_session
 from app.db import Base
 from app.db.models import (
+    Agent,
     BotMode,
     BotSession,
     BotSessionStatus,
     CalendarEvent,
     GoogleAccount,
+    MeetingAgent,
     MeetingConfig,
-    ProfileTemplate,
 )
 from app.main import app
 
@@ -37,8 +46,9 @@ def engine() -> sa.Engine:
         tables=[
             GoogleAccount.__table__,  # type: ignore[list-item]
             CalendarEvent.__table__,  # type: ignore[list-item]
-            ProfileTemplate.__table__,  # type: ignore[list-item]
+            Agent.__table__,  # type: ignore[list-item]
             MeetingConfig.__table__,  # type: ignore[list-item]
+            MeetingAgent.__table__,  # type: ignore[list-item]
             BotSession.__table__,  # type: ignore[list-item]
         ],
     )
@@ -115,15 +125,20 @@ def seed_event(db_session: Session, seed_account: GoogleAccount) -> CalendarEven
     return row
 
 
-@pytest.fixture
-def seed_template_listen(db_session: Session) -> ProfileTemplate:
-    row = ProfileTemplate(
-        name="Listen-only",
-        mode=BotMode.LISTEN_ONLY,
-        base_instructions="be quiet",
-        base_context="",
+def _make_agent(
+    db_session: Session,
+    *,
+    name: str,
+    mode: BotMode = BotMode.LISTEN_ONLY,
+    is_default: bool = False,
+) -> Agent:
+    row = Agent(
+        name=name,
+        character_prompt=f"You are {name}.",
+        mode=mode,
         allowed_replies=[],
         confidence_threshold=0.7,
+        is_default=is_default,
     )
     db_session.add(row)
     db_session.commit()
@@ -132,30 +147,18 @@ def seed_template_listen(db_session: Session) -> ProfileTemplate:
 
 
 @pytest.fixture
-def seed_template_limited(db_session: Session) -> ProfileTemplate:
-    row = ProfileTemplate(
-        name="Limited auto-speak",
-        mode=BotMode.LIMITED_AUTO_SPEAK,
-        base_instructions="answer only with approved replies",
-        base_context="",
-        allowed_replies=["Yes", "No", "Could you repeat that?"],
-        confidence_threshold=0.8,
-    )
-    db_session.add(row)
-    db_session.commit()
-    db_session.refresh(row)
-    return row
+def seed_agent(db_session: Session) -> Agent:
+    return _make_agent(db_session, name="Johnny", is_default=True)
+
+
+@pytest.fixture
+def seed_agent_b(db_session: Session) -> Agent:
+    return _make_agent(db_session, name="Aria", mode=BotMode.AUTONOMOUS)
 
 
 def _upsert_payload(**overrides: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
-        "profile_template_id": 0,  # caller must override
-        "identity_account_id": 0,
-        "mode": "listen_only",
-        "instructions": "be polite",
-        "context": "weekly sync",
-        "allowed_replies": None,
-        "confidence_threshold": 0.75,
+        "identity_account_id": 0,  # caller must override
         "enabled": True,
     }
     base.update(overrides)
@@ -184,39 +187,27 @@ def test_get_no_config_returns_404(
 def test_put_creates_config(
     client: TestClient,
     seed_event: CalendarEvent,
-    seed_template_listen: ProfileTemplate,
     seed_account: GoogleAccount,
 ) -> None:
-    payload = _upsert_payload(
-        profile_template_id=seed_template_listen.id,
-        identity_account_id=seed_account.id,
-    )
+    payload = _upsert_payload(identity_account_id=seed_account.id)
     resp = client.put(
         f"/calendar/events/{seed_event.id}/meeting-config", json=payload
     )
     assert resp.status_code == 200, resp.json()
     body = resp.json()
     assert body["calendar_event_id"] == seed_event.id
-    assert body["profile_template_id"] == seed_template_listen.id
     assert body["identity_account_id"] == seed_account.id
-    assert body["mode"] == "listen_only"
-    assert body["instructions"] == "be polite"
-    assert body["context"] == "weekly sync"
-    assert body["allowed_replies"] is None
-    assert body["confidence_threshold"] == 0.75
     assert body["enabled"] is True
+    assert body["agents"] == []
+    assert body["bot_state"] == "scheduled"
 
 
 def test_put_creates_then_get_returns_same(
     client: TestClient,
     seed_event: CalendarEvent,
-    seed_template_listen: ProfileTemplate,
     seed_account: GoogleAccount,
 ) -> None:
-    payload = _upsert_payload(
-        profile_template_id=seed_template_listen.id,
-        identity_account_id=seed_account.id,
-    )
+    payload = _upsert_payload(identity_account_id=seed_account.id)
     created = client.put(
         f"/calendar/events/{seed_event.id}/meeting-config", json=payload
     ).json()
@@ -224,36 +215,12 @@ def test_put_creates_then_get_returns_same(
     assert fetched == created
 
 
-def test_put_defaults_mode_to_template(
-    client: TestClient,
-    seed_event: CalendarEvent,
-    seed_template_limited: ProfileTemplate,
-    seed_account: GoogleAccount,
-) -> None:
-    payload = _upsert_payload(
-        profile_template_id=seed_template_limited.id,
-        identity_account_id=seed_account.id,
-        mode=None,
-        allowed_replies=None,
-    )
-    payload.pop("mode")
-    resp = client.put(
-        f"/calendar/events/{seed_event.id}/meeting-config", json=payload
-    )
-    assert resp.status_code == 200, resp.json()
-    assert resp.json()["mode"] == "limited_auto_speak"
-
-
 def test_put_with_bot_identity(
     client: TestClient,
     seed_event: CalendarEvent,
-    seed_template_listen: ProfileTemplate,
     seed_bot_account: GoogleAccount,
 ) -> None:
-    payload = _upsert_payload(
-        profile_template_id=seed_template_listen.id,
-        identity_account_id=seed_bot_account.id,
-    )
+    payload = _upsert_payload(identity_account_id=seed_bot_account.id)
     resp = client.put(
         f"/calendar/events/{seed_event.id}/meeting-config", json=payload
     )
@@ -263,40 +230,18 @@ def test_put_with_bot_identity(
 
 def test_put_rejects_unknown_event(
     client: TestClient,
-    seed_template_listen: ProfileTemplate,
     seed_account: GoogleAccount,
 ) -> None:
-    payload = _upsert_payload(
-        profile_template_id=seed_template_listen.id,
-        identity_account_id=seed_account.id,
-    )
+    payload = _upsert_payload(identity_account_id=seed_account.id)
     resp = client.put("/calendar/events/9999/meeting-config", json=payload)
     assert resp.status_code == 404
-
-
-def test_put_rejects_unknown_template(
-    client: TestClient,
-    seed_event: CalendarEvent,
-    seed_account: GoogleAccount,
-) -> None:
-    payload = _upsert_payload(
-        profile_template_id=999, identity_account_id=seed_account.id
-    )
-    resp = client.put(
-        f"/calendar/events/{seed_event.id}/meeting-config", json=payload
-    )
-    assert resp.status_code == 422
-    assert "profile_template_id" in resp.json()["detail"]
 
 
 def test_put_rejects_unknown_account(
     client: TestClient,
     seed_event: CalendarEvent,
-    seed_template_listen: ProfileTemplate,
 ) -> None:
-    payload = _upsert_payload(
-        profile_template_id=seed_template_listen.id, identity_account_id=999
-    )
+    payload = _upsert_payload(identity_account_id=999)
     resp = client.put(
         f"/calendar/events/{seed_event.id}/meeting-config", json=payload
     )
@@ -304,181 +249,15 @@ def test_put_rejects_unknown_account(
     assert "identity_account_id" in resp.json()["detail"]
 
 
-def test_put_strips_blank_allowed_replies(
+def test_put_rejects_retired_override_fields(
     client: TestClient,
     seed_event: CalendarEvent,
-    seed_template_listen: ProfileTemplate,
     seed_account: GoogleAccount,
 ) -> None:
+    """The pre-trt.41 override fields are gone — extra=forbid 422s them."""
     payload = _upsert_payload(
-        profile_template_id=seed_template_listen.id,
         identity_account_id=seed_account.id,
-        mode="limited_auto_speak",
-        allowed_replies=["yes", "", "  ", "no thanks  "],
-    )
-    resp = client.put(
-        f"/calendar/events/{seed_event.id}/meeting-config", json=payload
-    )
-    assert resp.status_code == 200, resp.json()
-    assert resp.json()["allowed_replies"] == ["yes", "no thanks"]
-
-
-def test_put_limited_auto_speak_without_replies_uses_template(
-    client: TestClient,
-    seed_event: CalendarEvent,
-    seed_template_limited: ProfileTemplate,
-    seed_account: GoogleAccount,
-) -> None:
-    """When meeting overrides are None but template has replies, accept."""
-    payload = _upsert_payload(
-        profile_template_id=seed_template_limited.id,
-        identity_account_id=seed_account.id,
-        mode="limited_auto_speak",
-        allowed_replies=None,
-    )
-    resp = client.put(
-        f"/calendar/events/{seed_event.id}/meeting-config", json=payload
-    )
-    assert resp.status_code == 200, resp.json()
-
-
-def test_put_limited_auto_speak_with_empty_overrides_and_no_template_replies(
-    client: TestClient,
-    seed_event: CalendarEvent,
-    seed_template_listen: ProfileTemplate,  # no allowed_replies
-    seed_account: GoogleAccount,
-) -> None:
-    """Empty override + template without replies → rejected."""
-    payload = _upsert_payload(
-        profile_template_id=seed_template_listen.id,
-        identity_account_id=seed_account.id,
-        mode="limited_auto_speak",
-        allowed_replies=[],
-    )
-    resp = client.put(
-        f"/calendar/events/{seed_event.id}/meeting-config", json=payload
-    )
-    assert resp.status_code == 422
-    assert "allowed_replies" in str(resp.json()["detail"])
-
-
-# --- Johnny-ckz.2: autonomous mode validation ------------------------------
-
-
-@pytest.fixture
-def seed_template_autonomous(db_session: Session) -> ProfileTemplate:
-    """Template configured for autonomous mode with non-empty instructions."""
-    row = ProfileTemplate(
-        name="Autonomous",
-        mode=BotMode.AUTONOMOUS,
-        base_instructions="Be a helpful meeting participant.",
-        base_context="",
-        allowed_replies=[],
-        confidence_threshold=0.8,
-    )
-    db_session.add(row)
-    db_session.commit()
-    db_session.refresh(row)
-    return row
-
-
-@pytest.fixture
-def seed_template_listen_blank(db_session: Session) -> ProfileTemplate:
-    """Listen-only template with deliberately blank instructions —
-    used to verify autonomous-mode validation rejects falling through
-    to a template whose instructions are empty."""
-    row = ProfileTemplate(
-        name="Blank listen",
-        mode=BotMode.LISTEN_ONLY,
-        base_instructions="",
-        base_context="",
-        allowed_replies=[],
-        confidence_threshold=0.7,
-    )
-    db_session.add(row)
-    db_session.commit()
-    db_session.refresh(row)
-    return row
-
-
-def test_put_autonomous_with_template_instructions_ok(
-    client: TestClient,
-    seed_event: CalendarEvent,
-    seed_template_autonomous: ProfileTemplate,
-    seed_account: GoogleAccount,
-) -> None:
-    """Autonomous mode with a template providing instructions and no
-    per-meeting override should save successfully."""
-    payload = _upsert_payload(
-        profile_template_id=seed_template_autonomous.id,
-        identity_account_id=seed_account.id,
-        mode="autonomous",
-        instructions=None,
-        allowed_replies=None,
-    )
-    resp = client.put(
-        f"/calendar/events/{seed_event.id}/meeting-config", json=payload
-    )
-    assert resp.status_code == 200, resp.json()
-    assert resp.json()["mode"] == "autonomous"
-
-
-def test_put_autonomous_with_per_meeting_instructions_ok(
-    client: TestClient,
-    seed_event: CalendarEvent,
-    seed_template_listen_blank: ProfileTemplate,
-    seed_account: GoogleAccount,
-) -> None:
-    """Template instructions blank but per-meeting override populated
-    → still acceptable; the override is the governance source."""
-    payload = _upsert_payload(
-        profile_template_id=seed_template_listen_blank.id,
-        identity_account_id=seed_account.id,
-        mode="autonomous",
-        instructions="Drive the meeting for the host.",
-        allowed_replies=None,
-    )
-    resp = client.put(
-        f"/calendar/events/{seed_event.id}/meeting-config", json=payload
-    )
-    assert resp.status_code == 200, resp.json()
-
-
-def test_put_autonomous_blank_override_and_blank_template_rejected(
-    client: TestClient,
-    seed_event: CalendarEvent,
-    seed_template_listen_blank: ProfileTemplate,
-    seed_account: GoogleAccount,
-) -> None:
-    """Both sources blank → rejected with 422 and a clear message."""
-    payload = _upsert_payload(
-        profile_template_id=seed_template_listen_blank.id,
-        identity_account_id=seed_account.id,
-        mode="autonomous",
-        instructions=None,
-        allowed_replies=None,
-    )
-    resp = client.put(
-        f"/calendar/events/{seed_event.id}/meeting-config", json=payload
-    )
-    assert resp.status_code == 422
-    assert "instructions" in str(resp.json()["detail"])
-    assert "autonomous" in str(resp.json()["detail"])
-
-
-def test_put_autonomous_whitespace_override_treated_as_blank(
-    client: TestClient,
-    seed_event: CalendarEvent,
-    seed_template_listen_blank: ProfileTemplate,
-    seed_account: GoogleAccount,
-) -> None:
-    """Whitespace-only instructions count as blank for validation."""
-    payload = _upsert_payload(
-        profile_template_id=seed_template_listen_blank.id,
-        identity_account_id=seed_account.id,
-        mode="autonomous",
-        instructions="   \n\t ",
-        allowed_replies=None,
+        mode="listen_only",
     )
     resp = client.put(
         f"/calendar/events/{seed_event.id}/meeting-config", json=payload
@@ -486,60 +265,192 @@ def test_put_autonomous_whitespace_override_treated_as_blank(
     assert resp.status_code == 422
 
 
-def test_put_autonomous_does_not_require_allowed_replies(
+# --- PUT: agent assignments (Johnny-trt.41) ---------------------------------
+
+
+def test_put_with_agents_round_trips_ordered_with_names(
     client: TestClient,
+    db_session: Session,
     seed_event: CalendarEvent,
-    seed_template_autonomous: ProfileTemplate,
     seed_account: GoogleAccount,
+    seed_agent: Agent,
+    seed_agent_b: Agent,
 ) -> None:
-    """Autonomous deliberately ignores allowed_replies — empty list ok."""
+    """An explicit agents list persists and reads back ordered by position,
+    with ``agent_name`` resolved from the agents table."""
     payload = _upsert_payload(
-        profile_template_id=seed_template_autonomous.id,
         identity_account_id=seed_account.id,
-        mode="autonomous",
-        instructions="Take notes and answer.",
-        allowed_replies=[],
+        agents=[
+            # Deliberately submitted out of order; position drives the read.
+            {
+                "agent_id": seed_agent_b.id,
+                "context": "Aria covers the demo.",
+                "enabled": True,
+                "position": 1,
+            },
+            {
+                "agent_id": seed_agent.id,
+                "context": None,
+                "enabled": True,
+                "position": 0,
+            },
+        ],
     )
     resp = client.put(
         f"/calendar/events/{seed_event.id}/meeting-config", json=payload
     )
     assert resp.status_code == 200, resp.json()
-    assert resp.json()["allowed_replies"] == []
+    agents = resp.json()["agents"]
+    assert [a["agent_id"] for a in agents] == [seed_agent.id, seed_agent_b.id]
+    assert [a["agent_name"] for a in agents] == ["Johnny", "Aria"]
+    assert [a["position"] for a in agents] == [0, 1]
+    assert agents[0]["context"] is None
+    assert agents[1]["context"] == "Aria covers the demo."
+    assert all(a["enabled"] is True for a in agents)
+    # And the same shape comes back on GET.
+    fetched = client.get(f"/calendar/events/{seed_event.id}/meeting-config").json()
+    assert fetched["agents"] == agents
+    # Rows actually persisted.
+    count = db_session.scalar(sa.select(sa.func.count()).select_from(MeetingAgent))
+    assert count == 2
 
 
-def test_put_rejects_threshold_out_of_range(
+def test_put_agents_omitted_leaves_assignments_untouched(
     client: TestClient,
     seed_event: CalendarEvent,
-    seed_template_listen: ProfileTemplate,
+    seed_account: GoogleAccount,
+    seed_agent: Agent,
+) -> None:
+    base = _upsert_payload(
+        identity_account_id=seed_account.id,
+        agents=[{"agent_id": seed_agent.id, "context": "brief", "position": 0}],
+    )
+    first = client.put(
+        f"/calendar/events/{seed_event.id}/meeting-config", json=base
+    ).json()
+    assert len(first["agents"]) == 1
+
+    # Second upsert omits ``agents`` entirely → assignments survive.
+    update = _upsert_payload(identity_account_id=seed_account.id, enabled=False)
+    assert "agents" not in update
+    second = client.put(
+        f"/calendar/events/{seed_event.id}/meeting-config", json=update
+    ).json()
+    assert second["enabled"] is False
+    assert [a["agent_id"] for a in second["agents"]] == [seed_agent.id]
+    assert second["agents"][0]["context"] == "brief"
+
+
+def test_put_agents_empty_list_clears_assignments(
+    client: TestClient,
+    db_session: Session,
+    seed_event: CalendarEvent,
+    seed_account: GoogleAccount,
+    seed_agent: Agent,
+) -> None:
+    base = _upsert_payload(
+        identity_account_id=seed_account.id,
+        agents=[{"agent_id": seed_agent.id}],
+    )
+    client.put(f"/calendar/events/{seed_event.id}/meeting-config", json=base)
+
+    cleared = _upsert_payload(identity_account_id=seed_account.id, agents=[])
+    resp = client.put(
+        f"/calendar/events/{seed_event.id}/meeting-config", json=cleared
+    )
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["agents"] == []
+    count = db_session.scalar(sa.select(sa.func.count()).select_from(MeetingAgent))
+    assert count == 0
+
+
+def test_put_replaces_assignment_list(
+    client: TestClient,
+    seed_event: CalendarEvent,
+    seed_account: GoogleAccount,
+    seed_agent: Agent,
+    seed_agent_b: Agent,
+) -> None:
+    """An explicit list REPLACES the previous one (not a merge)."""
+    client.put(
+        f"/calendar/events/{seed_event.id}/meeting-config",
+        json=_upsert_payload(
+            identity_account_id=seed_account.id,
+            agents=[{"agent_id": seed_agent.id, "context": "old"}],
+        ),
+    )
+    resp = client.put(
+        f"/calendar/events/{seed_event.id}/meeting-config",
+        json=_upsert_payload(
+            identity_account_id=seed_account.id,
+            agents=[{"agent_id": seed_agent_b.id, "context": "new"}],
+        ),
+    )
+    assert resp.status_code == 200, resp.json()
+    agents = resp.json()["agents"]
+    assert [a["agent_id"] for a in agents] == [seed_agent_b.id]
+    assert agents[0]["context"] == "new"
+
+
+def test_put_rejects_unknown_agent_id(
+    client: TestClient,
+    seed_event: CalendarEvent,
     seed_account: GoogleAccount,
 ) -> None:
     payload = _upsert_payload(
-        profile_template_id=seed_template_listen.id,
         identity_account_id=seed_account.id,
-        confidence_threshold=1.5,
+        agents=[{"agent_id": 4242}],
     )
     resp = client.put(
         f"/calendar/events/{seed_event.id}/meeting-config", json=payload
     )
     assert resp.status_code == 422
+    assert "agent_id=4242" in resp.json()["detail"]
 
 
-def test_put_accepts_explicit_zero_threshold(
+def test_put_rejects_duplicate_agent_id(
     client: TestClient,
     seed_event: CalendarEvent,
-    seed_template_listen: ProfileTemplate,
     seed_account: GoogleAccount,
+    seed_agent: Agent,
 ) -> None:
     payload = _upsert_payload(
-        profile_template_id=seed_template_listen.id,
         identity_account_id=seed_account.id,
-        confidence_threshold=0.0,
+        agents=[
+            {"agent_id": seed_agent.id, "position": 0},
+            {"agent_id": seed_agent.id, "position": 1},
+        ],
     )
     resp = client.put(
         f"/calendar/events/{seed_event.id}/meeting-config", json=payload
     )
-    assert resp.status_code == 200
-    assert resp.json()["confidence_threshold"] == 0.0
+    assert resp.status_code == 422
+    assert "more than once" in resp.json()["detail"]
+
+
+def test_put_assignment_enabled_and_disabled_round_trip(
+    client: TestClient,
+    seed_event: CalendarEvent,
+    seed_account: GoogleAccount,
+    seed_agent: Agent,
+    seed_agent_b: Agent,
+) -> None:
+    payload = _upsert_payload(
+        identity_account_id=seed_account.id,
+        agents=[
+            {"agent_id": seed_agent.id, "enabled": False, "position": 0},
+            {"agent_id": seed_agent_b.id, "enabled": True, "position": 1},
+        ],
+    )
+    resp = client.put(
+        f"/calendar/events/{seed_event.id}/meeting-config", json=payload
+    )
+    assert resp.status_code == 200, resp.json()
+    agents = resp.json()["agents"]
+    assert [(a["agent_id"], a["enabled"]) for a in agents] == [
+        (seed_agent.id, False),
+        (seed_agent_b.id, True),
+    ]
 
 
 # --- PUT (update) ----------------------------------------------------------
@@ -548,78 +459,30 @@ def test_put_accepts_explicit_zero_threshold(
 def test_put_updates_existing(
     client: TestClient,
     seed_event: CalendarEvent,
-    seed_template_listen: ProfileTemplate,
-    seed_template_limited: ProfileTemplate,
     seed_account: GoogleAccount,
+    seed_bot_account: GoogleAccount,
     db_session: Session,
 ) -> None:
-    base = _upsert_payload(
-        profile_template_id=seed_template_listen.id,
-        identity_account_id=seed_account.id,
-        mode="listen_only",
-    )
+    base = _upsert_payload(identity_account_id=seed_account.id)
     first = client.put(
         f"/calendar/events/{seed_event.id}/meeting-config", json=base
     ).json()
 
     update = _upsert_payload(
-        profile_template_id=seed_template_limited.id,
-        identity_account_id=seed_account.id,
-        mode="approval_required",
-        instructions="updated",
-        context="updated context",
-        allowed_replies=["okay"],
-        confidence_threshold=0.9,
+        identity_account_id=seed_bot_account.id,
+        enabled=False,
     )
     second = client.put(
         f"/calendar/events/{seed_event.id}/meeting-config", json=update
     ).json()
     assert second["id"] == first["id"]
-    assert second["profile_template_id"] == seed_template_limited.id
-    assert second["mode"] == "approval_required"
-    assert second["instructions"] == "updated"
-    assert second["context"] == "updated context"
-    assert second["allowed_replies"] == ["okay"]
-    assert second["confidence_threshold"] == 0.9
+    assert second["identity_account_id"] == seed_bot_account.id
+    assert second["enabled"] is False
     # Only one row in DB.
     count = db_session.scalar(
         sa.select(sa.func.count()).select_from(MeetingConfig)
     )
     assert count == 1
-
-
-def test_put_can_clear_override_fields(
-    client: TestClient,
-    seed_event: CalendarEvent,
-    seed_template_listen: ProfileTemplate,
-    seed_account: GoogleAccount,
-) -> None:
-    base = _upsert_payload(
-        profile_template_id=seed_template_listen.id,
-        identity_account_id=seed_account.id,
-        instructions="initial",
-        context="initial",
-        allowed_replies=["only-with-mode-limited"],
-        confidence_threshold=0.6,
-    )
-    client.put(f"/calendar/events/{seed_event.id}/meeting-config", json=base)
-
-    cleared = _upsert_payload(
-        profile_template_id=seed_template_listen.id,
-        identity_account_id=seed_account.id,
-        instructions=None,
-        context=None,
-        allowed_replies=None,
-        confidence_threshold=None,
-    )
-    resp = client.put(
-        f"/calendar/events/{seed_event.id}/meeting-config", json=cleared
-    )
-    body = resp.json()
-    assert body["instructions"] is None
-    assert body["context"] is None
-    assert body["allowed_replies"] is None
-    assert body["confidence_threshold"] is None
 
 
 # --- DELETE ----------------------------------------------------------------
@@ -628,13 +491,13 @@ def test_put_can_clear_override_fields(
 def test_delete_existing(
     client: TestClient,
     seed_event: CalendarEvent,
-    seed_template_listen: ProfileTemplate,
     seed_account: GoogleAccount,
+    seed_agent: Agent,
     db_session: Session,
 ) -> None:
     payload = _upsert_payload(
-        profile_template_id=seed_template_listen.id,
         identity_account_id=seed_account.id,
+        agents=[{"agent_id": seed_agent.id}],
     )
     client.put(f"/calendar/events/{seed_event.id}/meeting-config", json=payload)
     resp = client.delete(f"/calendar/events/{seed_event.id}/meeting-config")
@@ -643,6 +506,11 @@ def test_delete_existing(
         sa.select(sa.func.count()).select_from(MeetingConfig)
     )
     assert count == 0
+    # Assignments cascade with the config; the agent itself survives.
+    assert (
+        db_session.scalar(sa.select(sa.func.count()).select_from(MeetingAgent)) == 0
+    )
+    assert db_session.get(Agent, seed_agent.id) is not None
 
 
 def test_delete_idempotent(
@@ -678,13 +546,9 @@ def _quiet_state_publisher(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, d
 def _create_config(
     client: TestClient,
     event: CalendarEvent,
-    template: ProfileTemplate,
     account: GoogleAccount,
 ) -> dict:
-    payload = _upsert_payload(
-        profile_template_id=template.id,
-        identity_account_id=account.id,
-    )
+    payload = _upsert_payload(identity_account_id=account.id)
     resp = client.put(f"/calendar/events/{event.id}/meeting-config", json=payload)
     assert resp.status_code == 200, resp.json()
     return resp.json()
@@ -693,10 +557,9 @@ def _create_config(
 def test_fresh_config_reads_scheduled_state(
     client: TestClient,
     seed_event: CalendarEvent,
-    seed_template_listen: ProfileTemplate,
     seed_account: GoogleAccount,
 ) -> None:
-    body = _create_config(client, seed_event, seed_template_listen, seed_account)
+    body = _create_config(client, seed_event, seed_account)
     assert body["bot_state"] == "scheduled"
     assert body["bot_dismissed_at"] is None
     assert body["bot_dismissed_by"] is None
@@ -707,10 +570,9 @@ def test_dismiss_sets_state_and_stops_active_session(
     client: TestClient,
     db_session: Session,
     seed_event: CalendarEvent,
-    seed_template_listen: ProfileTemplate,
     seed_account: GoogleAccount,
 ) -> None:
-    body = _create_config(client, seed_event, seed_template_listen, seed_account)
+    body = _create_config(client, seed_event, seed_account)
     live = BotSession(
         meeting_config_id=body["id"],
         status=BotSessionStatus.JOINED,
@@ -736,10 +598,9 @@ def test_dismiss_sets_state_and_stops_active_session(
 def test_dismiss_defaults_actor_to_ui_with_empty_body(
     client: TestClient,
     seed_event: CalendarEvent,
-    seed_template_listen: ProfileTemplate,
     seed_account: GoogleAccount,
 ) -> None:
-    _create_config(client, seed_event, seed_template_listen, seed_account)
+    _create_config(client, seed_event, seed_account)
     resp = client.post(
         f"/calendar/events/{seed_event.id}/meeting-config/bot-dismissal"
     )
@@ -750,10 +611,9 @@ def test_dismiss_defaults_actor_to_ui_with_empty_body(
 def test_dismiss_accepts_voice_actor(
     client: TestClient,
     seed_event: CalendarEvent,
-    seed_template_listen: ProfileTemplate,
     seed_account: GoogleAccount,
 ) -> None:
-    _create_config(client, seed_event, seed_template_listen, seed_account)
+    _create_config(client, seed_event, seed_account)
     resp = client.post(
         f"/calendar/events/{seed_event.id}/meeting-config/bot-dismissal",
         json={"dismissed_by": "voice"},
@@ -765,11 +625,10 @@ def test_dismiss_accepts_voice_actor(
 def test_dismiss_publishes_state_change_event(
     client: TestClient,
     seed_event: CalendarEvent,
-    seed_template_listen: ProfileTemplate,
     seed_account: GoogleAccount,
     _quiet_state_publisher: list[tuple[str, dict]],
 ) -> None:
-    _create_config(client, seed_event, seed_template_listen, seed_account)
+    _create_config(client, seed_event, seed_account)
     resp = client.post(
         f"/calendar/events/{seed_event.id}/meeting-config/bot-dismissal"
     )
@@ -797,10 +656,9 @@ def test_dismiss_404_unknown_event(client: TestClient) -> None:
 def test_get_reflects_dismissed_state(
     client: TestClient,
     seed_event: CalendarEvent,
-    seed_template_listen: ProfileTemplate,
     seed_account: GoogleAccount,
 ) -> None:
-    _create_config(client, seed_event, seed_template_listen, seed_account)
+    _create_config(client, seed_event, seed_account)
     client.post(f"/calendar/events/{seed_event.id}/meeting-config/bot-dismissal")
     fetched = client.get(f"/calendar/events/{seed_event.id}/meeting-config").json()
     assert fetched["bot_state"] == "dismissed"
@@ -810,11 +668,10 @@ def test_get_reflects_dismissed_state(
 def test_undismiss_clears_state(
     client: TestClient,
     seed_event: CalendarEvent,
-    seed_template_listen: ProfileTemplate,
     seed_account: GoogleAccount,
     _quiet_state_publisher: list[tuple[str, dict]],
 ) -> None:
-    _create_config(client, seed_event, seed_template_listen, seed_account)
+    _create_config(client, seed_event, seed_account)
     client.post(f"/calendar/events/{seed_event.id}/meeting-config/bot-dismissal")
 
     resp = client.delete(
@@ -836,11 +693,10 @@ def test_undismiss_clears_state(
 def test_undismiss_idempotent_when_not_dismissed(
     client: TestClient,
     seed_event: CalendarEvent,
-    seed_template_listen: ProfileTemplate,
     seed_account: GoogleAccount,
     _quiet_state_publisher: list[tuple[str, dict]],
 ) -> None:
-    _create_config(client, seed_event, seed_template_listen, seed_account)
+    _create_config(client, seed_event, seed_account)
     resp = client.delete(
         f"/calendar/events/{seed_event.id}/meeting-config/bot-dismissal"
     )

@@ -17,7 +17,7 @@
 		stopSession,
 		type BotSession
 	} from '$lib/sessions';
-	import { readSessionPersonality, fallbackChipText } from '$lib/personalities';
+	import { readSessionAgent } from '$lib/agents';
 	import {
 		subscribeToGlobal,
 		subscribeToSession,
@@ -49,8 +49,6 @@
 	const navItems = [
 		{ href: '/calendar', label: 'Calendar' },
 		{ href: '/playground', label: 'Playground' },
-		{ href: '/templates', label: 'Templates' },
-		{ href: '/personalities', label: 'Personalities' },
 		{ href: '/providers', label: 'Providers' },
 		{ href: '/history', label: 'History' },
 		{ href: '/settings', label: 'Settings' }
@@ -446,7 +444,7 @@
 					{:else}
 						<ul class="flex flex-col gap-3">
 							{#each activeSessions as session (session.id)}
-								{@const pers = readSessionPersonality(session)}
+								{@const agent = readSessionAgent(session)}
 								<li
 									class="flex flex-col gap-1.5"
 									data-testid="status-session-{session.id}"
@@ -483,16 +481,14 @@
 											</span>
 										{/if}
 									</div>
-									{#if pers.name}
-										<a
-											class="text-muted-foreground hover:text-foreground inline-flex w-fit items-center gap-1 text-[11px] hover:underline"
-											href="/personalities"
-											onclick={closeSidebar}
+									{#if agent.agentName}
+										<span
+											class="text-muted-foreground inline-flex w-fit items-center gap-1 text-[11px]"
 											data-testid="status-session-{session.id}-character"
 										>
 											<span class="text-ink-subtle">Character:</span>
-											<span class="text-foreground font-medium">{pers.name}</span>
-										</a>
+											<span class="text-foreground font-medium">{agent.agentName}</span>
+										</span>
 									{/if}
 									{#if session.error_reason}
 										<p
@@ -502,16 +498,6 @@
 											{session.error_reason}
 										</p>
 									{/if}
-									{#each pers.fallbacks as fb (fb.kind)}
-										<a
-											class="text-warning hover:text-warning border-warning/40 bg-warning/10 block rounded-sm border px-1.5 py-1 text-[11px] leading-tight hover:underline"
-											href="/personalities"
-											onclick={closeSidebar}
-											data-testid="status-session-{session.id}-fallback-{fb.kind}"
-										>
-											{fallbackChipText(pers.name, fb)}
-										</a>
-									{/each}
 									<Button
 										variant="outline"
 										size="sm"

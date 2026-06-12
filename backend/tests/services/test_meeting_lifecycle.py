@@ -19,13 +19,11 @@ from sqlalchemy.orm import Session
 from app.db import Base
 from app.db.models import (
     BotDismissActor,
-    BotMode,
     BotSession,
     BotSessionStatus,
     CalendarEvent,
     GoogleAccount,
     MeetingConfig,
-    ProfileTemplate,
 )
 from app.services.meeting_lifecycle import (
     BOT_STATE_EVENT_TYPE,
@@ -56,7 +54,6 @@ def engine() -> sa.Engine:
         tables=[
             GoogleAccount.__table__,  # type: ignore[list-item]
             CalendarEvent.__table__,  # type: ignore[list-item]
-            ProfileTemplate.__table__,  # type: ignore[list-item]
             MeetingConfig.__table__,  # type: ignore[list-item]
             BotSession.__table__,  # type: ignore[list-item]
         ],
@@ -99,21 +96,9 @@ def _seed_meeting(
     )
     sess.add(event)
     sess.flush()
-    template = ProfileTemplate(
-        name=f"tpl-{external_id}",
-        mode=BotMode.LISTEN_ONLY,
-        base_instructions="",
-        base_context="",
-        allowed_replies=[],
-        confidence_threshold=0.7,
-    )
-    sess.add(template)
-    sess.flush()
     cfg = MeetingConfig(
         calendar_event_id=event.id,
-        profile_template_id=template.id,
         identity_account_id=account.id,
-        mode=BotMode.LISTEN_ONLY,
         enabled=enabled,
     )
     sess.add(cfg)

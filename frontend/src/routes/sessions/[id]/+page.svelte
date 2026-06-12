@@ -19,8 +19,7 @@
 		type BotSession,
 		type BotSessionStatus
 	} from '$lib/sessions';
-	import { readSessionPersonality, fallbackChipText } from '$lib/personalities';
-	import PersonalityDetailPanel from '$lib/components/PersonalityDetailPanel.svelte';
+	import { readSessionAgent } from '$lib/agents';
 	import {
 		DECISION_OUTCOME_LABEL,
 		getSessionDetail,
@@ -184,11 +183,10 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 			(session.status === 'ended' || session.status === 'failed')
 	);
 
-	// Johnny-oly.6: personality decoration for the active-session card.
-	const sessionPersonality = $derived(
-		session !== null ? readSessionPersonality(session) : null
+	// Agent decoration for the active-session card (bot_name / overrides).
+	const sessionAgent = $derived(
+		session !== null ? readSessionAgent(session) : null
 	);
-	let personalityPanelOpen = $state(false);
 
 	const startedAtMs = $derived<number | null>(
 		session !== null && session.started_at !== null
@@ -1168,20 +1166,9 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 			>
 				{#if session !== null}
 					<span class="font-mono">{session.source}</span>
-					{#if sessionPersonality?.name}
+					{#if sessionAgent?.agentName}
 						<span aria-hidden="true">·</span>
-						{#if sessionPersonality.personalityId !== null}
-							<button
-								type="button"
-								class="text-foreground hover:underline"
-								onclick={() => (personalityPanelOpen = true)}
-								data-testid="session-character"
-							>
-								Character: {sessionPersonality.name}
-							</button>
-						{:else}
-							<span data-testid="session-character">Character: {sessionPersonality.name}</span>
-						{/if}
+						<span data-testid="session-character">Character: {sessionAgent.agentName}</span>
 					{/if}
 					{#if durationLabel}
 						<span aria-hidden="true">·</span>
@@ -1287,19 +1274,6 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 			<Alert.Title>Could not change meeting participation</Alert.Title>
 			<Alert.Description>{dismissError}</Alert.Description>
 		</Alert.Root>
-	{/if}
-
-	{#if sessionPersonality && sessionPersonality.fallbacks.length > 0}
-		<div class="flex flex-col gap-1.5" data-testid="session-fallbacks">
-			{#each sessionPersonality.fallbacks as fb (fb.kind)}
-				<a
-					href="/personalities"
-					class="text-warning border-warning/40 bg-warning/10 hover:bg-warning/15 block rounded-md border px-3 py-2 text-xs"
-				>
-					{fallbackChipText(sessionPersonality.name, fb)}
-				</a>
-			{/each}
-		</div>
 	{/if}
 
 	{#if loadError}
@@ -1841,10 +1815,3 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 		</Card.Root>
 	{/if}
 </Page>
-
-{#if personalityPanelOpen && sessionPersonality?.personalityId != null}
-	<PersonalityDetailPanel
-		personalityId={sessionPersonality.personalityId}
-		onClose={() => (personalityPanelOpen = false)}
-	/>
-{/if}

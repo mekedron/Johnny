@@ -6,8 +6,6 @@
  * inline.
  */
 
-import type { BotMode } from './templates';
-
 /**
  * Derived bot-participation state for one meeting occurrence (Johnny-trt.56).
  * `active` = a non-terminal bot session exists; `dismissed` = "End for this
@@ -19,19 +17,24 @@ export type MeetingBotState = 'scheduled' | 'active' | 'dismissed' | 'ended';
 /** Who dismissed the bot: the UI action, a voice request, or a policy. */
 export type BotDismissActor = 'ui' | 'voice' | 'schedule';
 
+/** One agent assigned to a meeting, as read back from the API. */
+export interface MeetingConfigAgent {
+	id: number;
+	agent_id: number;
+	agent_name: string;
+	/** Per-meeting context for this agent; `null` = none. */
+	context: string | null;
+	enabled: boolean;
+	position: number;
+}
+
 export interface MeetingConfig {
 	id: number;
 	calendar_event_id: number;
-	profile_template_id: number;
 	identity_account_id: number;
-	/** Personality preset for this meeting; `null` = inherit the default. */
-	personality_id: number | null;
-	mode: BotMode;
-	instructions: string | null;
-	context: string | null;
-	allowed_replies: string[] | null;
-	confidence_threshold: number | null;
 	enabled: boolean;
+	/** Agents assigned to this meeting; empty = the default agent applies. */
+	agents: MeetingConfigAgent[];
 	/** Derived per request — never persisted (Johnny-trt.56). */
 	bot_state: MeetingBotState;
 	bot_dismissed_at: string | null;
@@ -41,16 +44,19 @@ export interface MeetingConfig {
 	updated_at: string;
 }
 
+/** One agent assignment in the upsert payload. */
+export interface MeetingConfigAgentPayload {
+	agent_id: number;
+	context?: string | null;
+	enabled?: boolean;
+	position?: number;
+}
+
 export interface MeetingConfigUpsertPayload {
-	profile_template_id: number;
 	identity_account_id: number;
-	personality_id?: number | null;
-	mode?: BotMode | null;
-	instructions: string | null;
-	context: string | null;
-	allowed_replies: string[] | null;
-	confidence_threshold: number | null;
 	enabled: boolean;
+	/** Omit to leave the meeting's agent assignments unchanged. */
+	agents?: MeetingConfigAgentPayload[] | null;
 }
 
 const API_BASE: string = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
@@ -181,28 +187,3 @@ export function undismissBot(eventId: number): Promise<MeetingConfig> {
 	});
 }
 
-/**
- * Parse a textarea where each line is one phrase. Trims whitespace and
- * drops blank lines. Used to convert the `allowed_replies` textarea into
- * the API's `string[]` shape. Returns `null` when the input is blank so
- * the API stores "no override" instead of an empty list.
- */
-export function parseAllowedRepliesText(text: string): string[] | null {
-	const out: string[] = [];
-	for (const raw of text.split('\n')) {
-		const line = raw.trim();
-		if (line.length === 0) continue;
-		out.push(line);
-	}
-	return out.length === 0 ? null : out;
-}
-
-/**
- * Format an `allowed_replies` array back into a textarea-friendly string.
- * Returns "" when the array is null (no override) so the textarea is
- * empty for the user.
- */
-export function formatAllowedRepliesText(value: string[] | null): string {
-	if (value === null) return '';
-	return value.join('\n');
-}

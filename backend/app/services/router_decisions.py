@@ -1,18 +1,18 @@
-"""Router decision persistence + threshold resolution.
+"""Router decision persistence.
 
-Two responsibilities glued together because they share a domain:
-
-* :func:`resolve_confidence_threshold` answers "what confidence floor
-  should the router enforce for *this* meeting?" — meeting-level override
-  wins, profile-template default fills the gap.
-* :class:`SqlAlchemyDecisionSink` is the production
-  :class:`DecisionSink` that writes a row to ``agent_decisions`` whenever
-  the router emits a decision in the pipeline.
+:class:`SqlAlchemyDecisionSink` is the production :class:`DecisionSink`
+that writes a row to ``agent_decisions`` whenever the router emits a
+decision in the pipeline.
 
 The pipeline lives in ``johnny.voice_pipeline`` and never imports this
 module — instead the scheduler (US-029/US-030) constructs the sink with a
 ``Session`` and a ``bot_session_id`` and hands it to the pipeline. Tests
 of the pipeline use :class:`johnny.voice_pipeline.InMemoryDecisionSink`.
+
+The old ``resolve_confidence_threshold`` helper (meeting override →
+template default) was removed in the Johnny-trt.41 agents rebuild: the
+threshold now rides the session's frozen agent snapshot into
+``RouterGateConfig`` — nothing resolves it from config tables any more.
 """
 
 from __future__ import annotations
@@ -28,38 +28,7 @@ from johnny.voice_pipeline.events import RouterDecisionMade
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
-    from app.db.models import MeetingConfig, ProfileTemplate
-
 logger = logging.getLogger(__name__)
-
-DEFAULT_CONFIDENCE_THRESHOLD = 0.7
-"""Process-wide fallback when neither the profile template nor the meeting
-config sets a confidence threshold (e.g. ad-hoc sessions without a profile)."""
-
-
-def resolve_confidence_threshold(
-    profile_template: ProfileTemplate | None,
-    meeting_config: MeetingConfig | None = None,
-) -> float:
-    """Pick the confidence threshold for a given (profile, meeting) pair.
-
-    Resolution order, highest priority first:
-
-    1. ``meeting_config.confidence_threshold`` when set (per-meeting override)
-    2. ``profile_template.confidence_threshold`` (template default)
-    3. :data:`DEFAULT_CONFIDENCE_THRESHOLD` (process-wide fallback)
-
-    The threshold is always clamped into ``[0.0, 1.0]`` — defensive against
-    a corrupt DB row or a typo in the UI.
-    """
-    candidates: list[float] = []
-    if meeting_config is not None and meeting_config.confidence_threshold is not None:
-        candidates.append(float(meeting_config.confidence_threshold))
-    if profile_template is not None and profile_template.confidence_threshold is not None:
-        candidates.append(float(profile_template.confidence_threshold))
-    candidates.append(DEFAULT_CONFIDENCE_THRESHOLD)
-    threshold = candidates[0]
-    return max(0.0, min(1.0, threshold))
 
 
 _OUTCOME_MAP: dict[PipelineOutcome, DecisionOutcome] = {
@@ -136,7 +105,5 @@ class SqlAlchemyDecisionSink(DecisionSink):
 
 
 __all__ = [
-    "DEFAULT_CONFIDENCE_THRESHOLD",
     "SqlAlchemyDecisionSink",
-    "resolve_confidence_threshold",
 ]

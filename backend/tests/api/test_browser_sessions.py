@@ -32,6 +32,7 @@ from app.api import browser_sessions as browser_sessions_module
 from app.api.deps import get_session
 from app.db import Base
 from app.db.models import (
+    Agent,
     AgentDecision,
     AgentTask,
     AgentUtterance,
@@ -41,9 +42,8 @@ from app.db.models import (
     BotSessionStatus,
     CalendarEvent,
     GoogleAccount,
+    MeetingAgent,
     MeetingConfig,
-    Personality,
-    ProfileTemplate,
     ProviderCredential,
     TranscriptChunk,
 )
@@ -79,10 +79,10 @@ def engine() -> sa.Engine:
         tables=[
             GoogleAccount.__table__,  # type: ignore[list-item]
             CalendarEvent.__table__,  # type: ignore[list-item]
-            ProfileTemplate.__table__,  # type: ignore[list-item]
             ProviderCredential.__table__,  # type: ignore[list-item]
-            Personality.__table__,  # type: ignore[list-item]
+            Agent.__table__,  # type: ignore[list-item]
             MeetingConfig.__table__,  # type: ignore[list-item]
+            MeetingAgent.__table__,  # type: ignore[list-item]
             BotSession.__table__,  # type: ignore[list-item]
             TranscriptChunk.__table__,  # type: ignore[list-item]
             AgentDecision.__table__,  # type: ignore[list-item]
@@ -122,7 +122,6 @@ def client(db_session: Session) -> Iterator[TestClient]:
 def _seed_meeting(
     db_session: Session,
     *,
-    mode: BotMode = BotMode.LISTEN_ONLY,
     summary: str = "Quarterly planning",
     description: str = "Discuss roadmap",
 ) -> tuple[CalendarEvent, MeetingConfig]:
@@ -144,23 +143,9 @@ def _seed_meeting(
     )
     db_session.add(event)
     db_session.flush()
-    template = ProfileTemplate(
-        name="tpl",
-        mode=mode,
-        base_instructions="Be helpful.",
-        base_context="Quarterly planning context.",
-        allowed_replies=[],
-        confidence_threshold=0.7,
-    )
-    db_session.add(template)
-    db_session.flush()
     cfg = MeetingConfig(
         calendar_event_id=event.id,
-        profile_template_id=template.id,
         identity_account_id=account.id,
-        mode=mode,
-        instructions="Meeting-specific brief.",
-        context="Specific roadmap items.",
         enabled=True,
     )
     db_session.add(cfg)
@@ -907,20 +892,19 @@ def test_disconnect_watchdog_schedules_and_cancels_cleanly() -> None:
     asyncio.run(_run())
 
 
-# --- Johnny-oly.3: personality-driven provider + mode resolution -----------
+# --- Johnny-trt.41: agent-driven behavior + identity resolution -------------
 
-_PERSONALITY_CRYPTO = CredentialCrypto(Fernet.generate_key())
+_PROVIDER_CRYPTO = CredentialCrypto(Fernet.generate_key())
 
 
 @pytest.fixture
 def _patch_crypto(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make get_crypto() return a known key so seeded provider rows decrypt.
 
-    Both build_provider_payload and the personality resolver import
-    ``app.security.crypto.get_crypto`` lazily inside the spec builders, so
-    patching the source attribute reaches both.
+    build_provider_payload imports ``app.security.crypto.get_crypto`` lazily
+    inside the spec builders, so patching the source attribute reaches it.
     """
-    monkeypatch.setattr("app.security.crypto.get_crypto", lambda: _PERSONALITY_CRYPTO)
+    monkeypatch.setattr("app.security.crypto.get_crypto", lambda: _PROVIDER_CRYPTO)
 
 
 def _seed_provider(
@@ -938,7 +922,7 @@ def _seed_provider(
         provider_name=name,
         display_name=display,
         credentials_encrypted=encrypt_json(
-            _PERSONALITY_CRYPTO, credentials or {"api_key": "k"}
+            _PROVIDER_CRYPTO, credentials or {"api_key": "k"}
         ),
         config=options or {},
         is_active=is_active,
@@ -949,21 +933,23 @@ def _seed_provider(
     return row
 
 
-def _seed_personality(
+def _seed_agent(
     db_session: Session,
     *,
     name: str,
     is_default: bool = False,
-    llm: int | None = None,
-    tts: int | None = None,
-    mode: BotMode | None = None,
-) -> Personality:
-    row = Personality(
-        display_name=name,
+    mode: BotMode = BotMode.LISTEN_ONLY,
+    character_prompt: str = "",
+    allowed_replies: list[str] | None = None,
+    confidence_threshold: float = 0.7,
+) -> Agent:
+    row = Agent(
+        name=name,
         is_default=is_default,
-        llm_provider_id=llm,
-        tts_provider_id=tts,
-        default_mode=mode,
+        mode=mode,
+        character_prompt=character_prompt,
+        allowed_replies=allowed_replies or [],
+        confidence_threshold=confidence_threshold,
     )
     db_session.add(row)
     db_session.commit()
@@ -971,109 +957,200 @@ def _seed_personality(
     return row
 
 
-def test_start_playground_default_personality_decorates_snapshot(
+def _assign_agent(
+    db_session: Session,
+    *,
+    cfg: MeetingConfig,
+    agent: Agent,
+    context: str | None = None,
+    enabled: bool = True,
+    position: int = 0,
+) -> MeetingAgent:
+    row = MeetingAgent(
+        meeting_config_id=cfg.id,
+        agent_id=agent.id,
+        context=context,
+        enabled=enabled,
+        position=position,
+    )
+    db_session.add(row)
+    db_session.commit()
+    db_session.refresh(cfg)
+    return row
+
+
+def test_start_playground_default_agent_decorates_snapshot_and_row(
     client: TestClient, db_session: Session, _patch_crypto: None
 ) -> None:
-    """No personality_id given → the is_default personality is selected and its
-    identity is recorded in the overrides snapshot (for the Johnny-oly.5 chip)."""
+    """No agent_id given → the is_default agent is selected: its identity is
+    recorded in the overrides snapshot (agent_id/agent_name) and frozen onto
+    the row (agent_id / agent_snapshot / bot_name)."""
     _seed_provider(db_session, kind=ProviderKind.LLM, name="anthropic", display="Claude")
-    johnny = _seed_personality(db_session, name="Johnny", is_default=True)
+    johnny = _seed_agent(
+        db_session, name="Johnny", is_default=True, character_prompt="Wake up."
+    )
 
     res = client.post("/sessions/browser/start", json={})
     assert res.status_code == 201, res.text
     ov = res.json()["playground_overrides"]
-    assert ov["personality_id"] == johnny.id
-    assert ov["personality_name"] == "Johnny"
-    assert "personality_fallbacks" not in ov  # NULL FKs inherit silently
+    assert ov["agent_id"] == johnny.id
+    assert ov["agent_name"] == "Johnny"
+    # No personality_* keys survive the rebuild.
+    assert not any(k.startswith("personality") for k in ov)
+
+    row = db_session.get(BotSession, res.json()["id"])
+    assert row is not None
+    assert row.agent_id == johnny.id
+    assert row.bot_name == "Johnny"
+    assert row.agent_snapshot is not None
+    assert row.agent_snapshot["character_prompt"] == "Wake up."
 
 
-def test_start_playground_personality_seeds_mode(
+def test_start_playground_agent_seeds_mode(
     client: TestClient, db_session: Session, _patch_crypto: None
 ) -> None:
-    p = _seed_personality(
+    p = _seed_agent(
         db_session, name="Listener", is_default=True, mode=BotMode.LISTEN_ONLY
     )
     with mock.patch.object(browser_sessions_module, "_spawn_runner") as spawn:
         res = client.post(
-            "/sessions/browser/start", json={"personality_id": p.id}
+            "/sessions/browser/start", json={"agent_id": p.id}
         )
     assert res.status_code == 201, res.text
     spec = spawn.call_args.kwargs["spec"]
-    assert spec.mode == "listen_only"  # personality.default_mode seeded it
+    assert spec.mode == "listen_only"  # agent.mode seeded it
+    assert spec.character_prompt == ""
 
 
-def test_start_playground_defaults_to_autonomous(
+def test_start_playground_defaults_to_autonomous_without_agents(
     client: TestClient, db_session: Session, _patch_crypto: None
 ) -> None:
-    """No mode and no personality default_mode → the playground falls back to
-    autonomous (Johnny-ckz.25). The playground always supplies a non-empty
-    system prompt, so the autonomous session has governing instructions."""
+    """No mode requested and no agent in the DB at all → the playground falls
+    back to autonomous (Johnny-ckz.25) with a non-empty system prompt, and the
+    bare session resolves no agent: bot_name stays None, no agent keys in the
+    snapshot."""
     _seed_provider(db_session, kind=ProviderKind.LLM, name="anthropic", display="Claude")
-    _seed_personality(db_session, name="Johnny", is_default=True, mode=None)
     with mock.patch.object(browser_sessions_module, "_spawn_runner") as spawn:
         res = client.post("/sessions/browser/start", json={})
     assert res.status_code == 201, res.text
     spec = spawn.call_args.kwargs["spec"]
     assert spec.mode == "autonomous"
     assert spec.instructions.strip() != ""
+    ov = res.json()["playground_overrides"]
+    assert "agent_id" not in ov
+    assert "agent_name" not in ov
+    row = db_session.get(BotSession, res.json()["id"])
+    assert row is not None
+    assert row.agent_id is None
+    assert row.agent_snapshot is None
+    assert row.bot_name is None
 
 
-def test_start_playground_explicit_mode_beats_personality(
+def test_start_playground_explicit_mode_beats_agent(
     client: TestClient, db_session: Session, _patch_crypto: None
 ) -> None:
-    p = _seed_personality(
+    p = _seed_agent(
         db_session, name="Listener", is_default=True, mode=BotMode.LISTEN_ONLY
     )
     with mock.patch.object(browser_sessions_module, "_spawn_runner") as spawn:
         res = client.post(
             "/sessions/browser/start",
-            json={"personality_id": p.id, "mode": "autonomous"},
+            json={"agent_id": p.id, "mode": "autonomous"},
         )
     assert res.status_code == 201, res.text
     assert spawn.call_args.kwargs["spec"].mode == "autonomous"
 
 
-def test_start_rehearsal_personality_fallback_warns_but_starts(
+def test_start_playground_agent_behavior_rides_spec(
     client: TestClient, db_session: Session, _patch_crypto: None
 ) -> None:
-    """A personality pinned at a deactivated provider still starts the session,
-    falls back to the global-active provider, records the fallback in the
-    snapshot, and leaves the meeting's mode untouched (§4c)."""
-    event, _cfg = _seed_meeting(db_session, mode=BotMode.LISTEN_ONLY)
-    _seed_provider(db_session, kind=ProviderKind.LLM, name="ga", display="GA")
-    dormant = _seed_provider(
-        db_session, kind=ProviderKind.LLM, name="dormant", display="Dormant", is_active=False
+    """The resolved agent's behavior knobs (character prompt, allowlist,
+    threshold) reach the pipeline spec."""
+    p = _seed_agent(
+        db_session,
+        name="Gatekeeper",
+        is_default=True,
+        mode=BotMode.LIMITED_AUTO_SPEAK,
+        character_prompt="You are terse.",
+        allowed_replies=["Yes.", "No."],
+        confidence_threshold=0.55,
     )
-    p = _seed_personality(
-        db_session, name="PinsDormant", llm=dormant.id, mode=BotMode.AUTONOMOUS
+    with mock.patch.object(browser_sessions_module, "_spawn_runner") as spawn:
+        res = client.post("/sessions/browser/start", json={"agent_id": p.id})
+    assert res.status_code == 201, res.text
+    spec = spawn.call_args.kwargs["spec"]
+    assert spec.mode == "limited_auto_speak"
+    assert spec.character_prompt == "You are terse."
+    assert spec.allowed_replies == ("Yes.", "No.")
+    assert spec.confidence_threshold == pytest.approx(0.55)
+
+
+def test_start_playground_stale_agent_id_degrades_to_default(
+    client: TestClient, db_session: Session, _patch_crypto: None
+) -> None:
+    """An agent_id that no longer exists must not fail the start — it falls
+    through to the default agent (reliability beats strictness)."""
+    johnny = _seed_agent(db_session, name="Johnny", is_default=True)
+    res = client.post("/sessions/browser/start", json={"agent_id": 99_999})
+    assert res.status_code == 201, res.text
+    ov = res.json()["playground_overrides"]
+    assert ov["agent_id"] == johnny.id
+    assert ov["agent_name"] == "Johnny"
+
+
+def test_start_rehearsal_uses_meeting_assignment_without_request(
+    client: TestClient, db_session: Session, _patch_crypto: None
+) -> None:
+    """The meeting's first ENABLED assignment (by position) is honored when no
+    explicit agent_id is sent — beating the default agent — and its
+    per-assignment context rides the spec."""
+    event, cfg = _seed_meeting(db_session)
+    _seed_agent(db_session, name="Johnny", is_default=True)
+    skipped = _seed_agent(db_session, name="DisabledFirst", mode=BotMode.AUTONOMOUS)
+    meeting_agent = _seed_agent(
+        db_session, name="MeetingPreset", mode=BotMode.SUGGEST_ONLY
     )
+    _assign_agent(db_session, cfg=cfg, agent=skipped, enabled=False, position=0)
+    _assign_agent(
+        db_session,
+        cfg=cfg,
+        agent=meeting_agent,
+        context="Demo brief for this meeting.",
+        position=1,
+    )
+
+    with mock.patch.object(browser_sessions_module, "_spawn_runner") as spawn:
+        res = client.post("/sessions/browser/start", json={"event_id": event.id})
+    assert res.status_code == 201, res.text
+    ov = res.json()["playground_overrides"]
+    assert ov["agent_id"] == meeting_agent.id  # assignment, not the default
+    assert ov["agent_name"] == "MeetingPreset"
+    spec = spawn.call_args.kwargs["spec"]
+    assert spec.mode == "suggest_only"
+    assert spec.context == "Demo brief for this meeting."
+    row = db_session.get(BotSession, res.json()["id"])
+    assert row is not None
+    assert row.bot_name == "MeetingPreset"
+    assert row.agent_snapshot is not None
+    assert row.agent_snapshot["assignment_context"] == "Demo brief for this meeting."
+
+
+def test_start_rehearsal_explicit_agent_beats_meeting_assignment(
+    client: TestClient, db_session: Session, _patch_crypto: None
+) -> None:
+    """Explicit request agent_id is precedence level 1 — above the meeting's
+    own assignment."""
+    event, cfg = _seed_meeting(db_session)
+    assigned = _seed_agent(db_session, name="MeetingPreset")
+    requested = _seed_agent(db_session, name="Requested", mode=BotMode.AUTONOMOUS)
+    _assign_agent(db_session, cfg=cfg, agent=assigned, position=0)
 
     with mock.patch.object(browser_sessions_module, "_spawn_runner") as spawn:
         res = client.post(
             "/sessions/browser/start",
-            json={"event_id": event.id, "personality_id": p.id},
+            json={"event_id": event.id, "agent_id": requested.id},
         )
     assert res.status_code == 201, res.text
     ov = res.json()["playground_overrides"]
-    assert ov["personality_id"] == p.id
-    assert ov["personality_fallbacks"] == [{"kind": "llm", "reason": "deactivated"}]
-    spec = spawn.call_args.kwargs["spec"]
-    assert spec.provider_payload["llm"]["provider_name"] == "ga"  # global active
-    assert spec.mode == "listen_only"  # meeting.mode wins over personality
-
-
-def test_start_rehearsal_uses_meeting_personality_without_request(
-    client: TestClient, db_session: Session, _patch_crypto: None
-) -> None:
-    """meeting_configs.personality_id (Johnny-oly.3 schema) is honored when no
-    explicit personality_id is sent — precedence level 2 (PRD §4a)."""
-    event, cfg = _seed_meeting(db_session)
-    _seed_personality(db_session, name="Johnny", is_default=True)
-    meeting_p = _seed_personality(db_session, name="MeetingPreset")
-    cfg.personality_id = meeting_p.id
-    db_session.commit()
-
-    res = client.post("/sessions/browser/start", json={"event_id": event.id})
-    assert res.status_code == 201, res.text
-    ov = res.json()["playground_overrides"]
-    assert ov["personality_id"] == meeting_p.id  # meeting's, not the default
+    assert ov["agent_id"] == requested.id
+    assert spawn.call_args.kwargs["spec"].mode == "autonomous"

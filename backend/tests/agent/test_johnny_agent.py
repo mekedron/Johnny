@@ -95,7 +95,7 @@ def test_empty_config_renders_base_framing_and_history_note_only() -> None:
 def test_all_components_render_in_legacy_order() -> None:
     config = AgentInstructionsConfig(
         instructions="Stay on the agenda.",
-        personality_prompt="[personality: Pirate]\nArr, ye be a pirate.",
+        character_prompt="[personality: Pirate]\nArr, ye be a pirate.",
         context="Quarterly planning.",
         calendar_context="Q3 OKR review.",
         calendar_attachments_text="Doc body: roadmap.",
@@ -130,7 +130,7 @@ def test_all_components_render_in_legacy_order() -> None:
 
 def test_personality_renders_before_history_note() -> None:
     text = build_agent_instructions(
-        AgentInstructionsConfig(personality_prompt="[personality: X]\nBe X.")
+        AgentInstructionsConfig(character_prompt="[personality: X]\nBe X.")
     )
     assert text.index("[personality: X]") < text.index("assistant turns are your own prior speech")
 
@@ -212,7 +212,7 @@ def test_capability_notes_render_between_personality_and_instructions() -> None:
         "these, say so plainly:\n- google-calendar: no Google account is connected."
     )
     config = AgentInstructionsConfig(
-        personality_prompt="You are a cyberpunk concierge.",
+        character_prompt="You are a cyberpunk concierge.",
         instructions="Be brief.",
         capability_notes=notes,
     )

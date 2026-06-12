@@ -27,7 +27,6 @@ from app.db.models import (
     DecisionOutcome,
     GoogleAccount,
     MeetingConfig,
-    ProfileTemplate,
     TranscriptChunk,
 )
 from app.main import app
@@ -46,7 +45,6 @@ def engine() -> sa.Engine:
         tables=[
             GoogleAccount.__table__,  # type: ignore[list-item]
             CalendarEvent.__table__,  # type: ignore[list-item]
-            ProfileTemplate.__table__,  # type: ignore[list-item]
             MeetingConfig.__table__,  # type: ignore[list-item]
             BotSession.__table__,  # type: ignore[list-item]
             TranscriptChunk.__table__,  # type: ignore[list-item]
@@ -102,16 +100,6 @@ def _seed_session(
     )
     db_session.add(acc)
     db_session.flush()
-    tpl = ProfileTemplate(
-        name=f"tpl-{seed}",
-        mode=mode,
-        base_instructions="",
-        base_context="",
-        allowed_replies=[],
-        confidence_threshold=0.7,
-    )
-    db_session.add(tpl)
-    db_session.flush()
     base = datetime.now(UTC).replace(microsecond=0)
     event = CalendarEvent(
         account_id=acc.id,
@@ -125,9 +113,8 @@ def _seed_session(
     db_session.flush()
     cfg = MeetingConfig(
         calendar_event_id=event.id,
-        profile_template_id=tpl.id,
         identity_account_id=acc.id,
-        mode=mode,
+        enabled=True,
     )
     db_session.add(cfg)
     db_session.flush()
@@ -137,6 +124,9 @@ def _seed_session(
         status=status,
         started_at=started_at,
         ended_at=ended_at,
+        # Johnny-trt.41: the session's mode lives in its frozen agent
+        # snapshot now, not on the meeting config.
+        agent_snapshot={"mode": mode.value},
     )
     db_session.add(row)
     db_session.commit()
@@ -337,14 +327,14 @@ def test_history_filters_lists_present_values(
         "u0@example.com",
         "pg@example.com",
     }
-    assert "Aria" in body["personalities"]
+    assert "Aria" in body["agents"]
     assert set(body["sources"]) == {"meet", "browser"}
 
 
 def test_history_filters_empty(client: TestClient) -> None:
     res = client.get("/history/filters")
     assert res.status_code == 200
-    assert res.json() == {"accounts": [], "personalities": [], "sources": []}
+    assert res.json() == {"accounts": [], "agents": [], "sources": []}
 
 
 # --- GET /history/sessions/{id} -------------------------------------------

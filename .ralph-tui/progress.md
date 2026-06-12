@@ -82,6 +82,16 @@ after each iteration and it's included in prompts for context.
   canonical trio without hand-reconfiguring. It holds plaintext keys and is
   gitignored (added in trt.43) — never commit it; providers.example.json is the
   committed shape.
+- **Agent snapshot is the behavior bus (trt.41)**: bot_sessions.agent_snapshot
+  (frozen at dispatch by app/services/agents.build_agent_snapshot) is the ONLY
+  behavior source — mode/character_prompt/allowed_replies/confidence_threshold
+  ride LaunchContext → SessionJobConfig → RouterGateConfig/AnswerConfig; the
+  browser path overwrites snapshot["mode"] with the EFFECTIVE per-start mode.
+  Sibling tasks (trt.42 providers, trt.52 addressing) extend the snapshot, not
+  config-table reads; session_status_subscriber + history already read mode
+  from it. Selection precedence: request agent_id → first enabled
+  meeting_agents assignment by position → is_default agent → contract-default
+  degrade (mode "", threshold 0.7).
 - **Live-Meet capstones are operator-gated; an agent cannot self-run them**
   (trt.30): a real Meet join needs a human Google sign-in (`storage_state.json`
   in `johnny_google_auth_state`; noVNC/seed/upload ALL require real
@@ -373,4 +383,67 @@ after each iteration and it's included in prompts for context.
   - **Removing a value from a DB-backed StrEnum (SAEnum, native_enum=False) crashes at row LOAD, not at write** — `LookupError` in the result processor. Every `select(ProviderCredential)` without a kind filter had to be scoped to `kind.in_(list(ProviderKind))` (providers list API, export endpoint, loader, seeder `_index_existing` — the last one runs during startup seeding, so one historical s2s row would have bricked boot). Migration deactivation alone is NOT enough.
   - `config/providers.json` (the with-secrets export the api auto-reseeds from after `down -v`) was NOT gitignored — added the rule before the engine's auto-commit could capture plaintext keys.
   - The clean-install gate is the real prize: the fresh-DB alembic chain (0009 creates → 0026 drops `pipeline_settings`) only proves itself on `./stop.sh && ./run.sh`.
+---
+
+## 2026-06-12 - Johnny-trt.41
+- Phase-6 agents rebuild shipped: ProfileTemplate + Personality (and the
+  meeting-override soup) replaced by one first-class AGENT entity, destructive
+  migration 0027 (no data migration; courtesy carry-over of the default
+  personality's name/prompt/mode/llm+tts pins into the seeded default agent).
+  New `agents` table (identity name/avatar/description, character_prompt,
+  behavior mode/allowed_replies/confidence_threshold, THREE LLM role slots
+  router/answer/reasoning + tts pin/voice/options per the bead notes — split-only,
+  NO pipeline_mode), `meeting_agents` assignment table (context/enabled/position),
+  meeting_configs reduced to calendar/identity/enabled/dismissal,
+  bot_sessions.agent_id + agent_snapshot frozen at dispatch. /agents CRUD
+  (+clone/set-default, kind-validated FKs, effective-state PATCH validation);
+  meeting-config upsert now {identity_account_id, enabled, agents[]}. Behavior
+  plumbed snapshot→LaunchContext→SessionJobConfig(allowed_replies,
+  confidence_threshold, character_prompt — personality_prompt renamed, env
+  JOHNNY_CHARACTER_PROMPT + JOHNNY_ALLOWED_REPLIES + JOHNNY_CONFIDENCE_THRESHOLD)
+  →RouterGateConfig/AnswerConfig. Turn-time config-table reads eliminated
+  (session_status_subscriber meeting.mode → snapshot; history list_past_sessions
+  → snapshot; resolve_confidence_threshold deleted). Frontend: /templates +
+  /personalities routes/libs/pickers deleted, lib/agents.ts (listAgents +
+  readSessionAgent), calendar form reduced, playground pickers dropped, history
+  filter "Agent". Docs: PIPELINE ER, livekit dispatch contract, README, LATENCY.
+- Files: backend/app/db/models.py, app/db/__init__.py, app/services/{agents(new),
+  session_scheduler, agent_dispatch, browser_pipeline_runner, docker_launcher,
+  router_decisions, history, session_status_subscriber}.py, app/api/{agents(new),
+  meeting_configs, browser_sessions, history, main}.py, deleted app/api/{templates,
+  personalities}.py + app/services/{templates,personality_resolver}.py,
+  johnny/agent/{job_config, job_runtime, job_session, session, router_gate,
+  answer-docs, factory-docs}.py, alembic/versions/0027_agents_rebuild.py,
+  frontend (see git diff), tests: 7 files deleted, ~24 updated, 3 new
+  (test_agents 24, test_agents_service, test_migration_0027 8).
+- Quality: backend 3953 passed / 5 pre-existing env failures (3× OpenAI-401
+  lifecycle, 2× no-docker-CLI wizard); frontend vitest 96 + svelte-check 0/0;
+  ruff+mypy clean on touched files. Browser validation .validation/Johnny-trt.41/
+  (01-07): /templates + /personalities 404, nav clean, playground session #18
+  typed turn answered IN CHARACTER ("Affirmative, choom...") with
+  agent_id=1/agent_snapshot frozen on the row and the utterance audit row
+  mode=autonomous read from the snapshot; history Agent filter; calendar clean.
+  Clean install: ./stop.sh && ./run-dev.sh → alembic 0027, canonical Johnny
+  seeded, providers reseeded from config/providers.json, all healthy.
+- **Learnings:**
+  - Pre-trt.41 the agentsession gate ran on DEFAULT allowed_replies/threshold —
+    job_session never passed them into RouterGateConfig (SessionJobConfig didn't
+    carry them). The snapshot plumbing made them real for the first time; any
+    "limited_auto_speak didn't coerce" history predates this.
+  - The dispatch-freeze invariant has TWO readers outside the session loop that
+    used to re-read config tables at turn time: session_status_subscriber
+    (meeting.mode for utterance audit rows — playground rows silently audited
+    listen_only before) and history.list_past_sessions (selected the dropped
+    column → would crash). Grep for `meeting_config` relationships when removing
+    columns; the drift check only catches MISSING columns, not stale readers.
+  - alembic + SQLite: op.add_column with an inline ForeignKey raises
+    NotImplementedError — wrap FK adds AND column drops in batch_alter_table
+    (pass-through plain ALTERs on Postgres); on downgrade drop dependent
+    indexes BEFORE batch drop_column or the table-recreate re-creates the index
+    against the dropped column. Migration tests for destructive reshapes must
+    hand-build the PRE-state schema (current models are the POST state).
+  - After `./stop.sh` (down -v) provider-row IDs are reassigned by reseed order
+    from config/providers.json — activate by kind/provider_name, not by
+    remembered numeric id (post-rebuild dev DB: llm=2 openai-compatible,
+    stt=3 parakeet, tts=4 piper).
 ---

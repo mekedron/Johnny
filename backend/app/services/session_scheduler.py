@@ -54,6 +54,7 @@ from app.services.bot_sessions import (
     mark_session_failed,
     mark_session_joining,
 )
+from johnny.agent.job_config import DEFAULT_CONFIDENCE_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
@@ -136,15 +137,19 @@ class LaunchContext:
     container_name: str
     mode: str = ""
     instructions: str = ""
-    personality_prompt: str = ""
-    """Personality IDENTITY-layer system prompt (Johnny-oly.8).
+    character_prompt: str = ""
+    """The agent's character / communication-style prompt (Johnny-trt.41).
 
-    The resolved personality's ``description`` wrapped as
-    ``[personality: <name>]\\n<description>``. Forwarded to the meet-worker
-    via the ``JOHNNY_PERSONALITY_PROMPT`` env var so a scheduled bot adopts
-    the same persona a playground session would. Empty when no personality
-    applied.
+    Read from the session's frozen agent snapshot and forwarded to the
+    meet-worker via the ``JOHNNY_CHARACTER_PROMPT`` env var (and to the
+    dispatched agent worker as job metadata) so a scheduled bot adopts the
+    same character a playground session would. Empty when no agent resolved.
     """
+    allowed_replies: tuple[str, ...] = ()
+    """The agent's limited-auto-speak allowlist, frozen at dispatch
+    (Johnny-trt.41). Empty for modes without an allowlist."""
+    confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD
+    """The agent's router speak floor, frozen at dispatch (Johnny-trt.41)."""
     context: str = ""
     calendar_context: str = ""
     """Calendar event description — pre-meeting context from the event itself.
@@ -384,17 +389,6 @@ def list_active_sessions(session: Session) -> list[BotSession]:
 # --- Start / stop --------------------------------------------------------
 
 
-def _combine_text(base: str | None, override: str | None) -> str:
-    """Concatenate template base text with the meeting-level override.
-
-    Used to build the effective instructions / context the meet-worker
-    receives via environment variables. Empty strings are skipped so the
-    result has no leading or trailing separator.
-    """
-    parts = [part for part in (base, override) if part]
-    return "\n\n".join(parts)
-
-
 def _validate_meeting_for_launch(meeting: MeetingConfig) -> str:
     """Return the meet_link or raise ``ValueError`` if the meeting cannot launch."""
     if not meeting.enabled:
@@ -444,12 +438,6 @@ async def start_session_for_meeting(
     session.add(row)
     session.flush()
 
-    template = meeting.profile_template
-    base_instructions = template.base_instructions if template is not None else ""
-    base_context = template.base_context if template is not None else ""
-    effective_instructions = _combine_text(base_instructions, meeting.instructions)
-    effective_context = _combine_text(base_context, meeting.context)
-
     # Materialise the active provider rows so the meet-worker bootstrap
     # can instantiate STT / LLM / TTS without DB access. ``crypto`` is
     # the production CredentialCrypto by default; tests inject a
@@ -458,7 +446,6 @@ async def start_session_for_meeting(
     # bot still joins — it just runs in listen-only mode for that
     # session.
     provider_payload: dict[str, Any] = {}
-    personality_prompt = ""
     try:
         from app.security.crypto import CryptoError, get_crypto
         from app.services.provider_payload import build_provider_payload
@@ -473,50 +460,47 @@ async def start_session_for_meeting(
     except Exception:  # noqa: BLE001 — never block a launch on payload errors
         logger.exception("provider payload build failed; sending empty payload")
 
-    # Johnny-oly.3: layer the meeting's personality (or the global default) over
-    # the global-active payload before it is serialised into
-    # ``JOHNNY_PROVIDER_CONFIG`` for the DB-free meet-worker. A scheduled launch
-    # has no per-start request, so selection is meeting.personality_id → the
-    # ``is_default`` personality. Wrapped in its own guard AFTER the block above
-    # so a personality glitch degrades to the global-active payload (not empty),
-    # and mode stays the meeting's non-null ``mode`` (personalities never
-    # override an existing meeting's mode at launch — PRD §4c).
+    # Johnny-trt.41: resolve the agent serving this session (first enabled
+    # assignment → default agent) and FREEZE its behavior onto the row as
+    # ``agent_snapshot`` before dispatch. Everything downstream — the launch
+    # context, the gate's allowed_replies/threshold, history's bot name —
+    # reads the snapshot, never the live agents/meeting_agents rows, so
+    # editing an agent mid-meeting can't mutate a running session. Wrapped in
+    # a guard so an agent lookup glitch degrades to the contract defaults
+    # (listen-only, no character) rather than blocking the launch. Provider
+    # pin resolution from the snapshot is Johnny-trt.42.
+    mode_value = ""
+    character_prompt = ""
+    assignment_context = ""
+    allowed_replies: tuple[str, ...] = ()
+    confidence_threshold = DEFAULT_CONFIDENCE_THRESHOLD
     try:
-        from app.security.crypto import get_crypto
-        from app.services.personality_resolver import (
-            apply_personality,
-            select_personality,
-        )
+        from app.services.agents import build_agent_snapshot, select_agent
 
-        personality = select_personality(session, requested_id=None, meeting=meeting)
-        resolution = apply_personality(
-            session, provider_payload, personality, crypto=get_crypto()
-        )
-        provider_payload = resolution.payload
-        # Johnny-oly.8: the personality's description rides to the DB-free
-        # meet-worker as JOHNNY_PERSONALITY_PROMPT so the scheduled bot adopts
-        # the same persona a playground session would.
-        personality_prompt = resolution.personality_prompt
-        # Johnny-oly.6: snapshot the resolved personality so history renders this
-        # session's bot name and the active-session card can show the character +
-        # any provider fallback. ``playground_overrides`` doubles as the generic
-        # per-session decoration bag here (the meet-worker itself never reads it).
-        row.bot_name = resolution.personality_name
-        if resolution.personality_id is not None:
-            snapshot: dict[str, Any] = {
-                "personality_id": resolution.personality_id,
-                "personality_name": resolution.personality_name,
-            }
-            if resolution.fallbacks:
-                snapshot["personality_fallbacks"] = [
-                    {"kind": fb.kind, "reason": fb.reason}
-                    for fb in resolution.fallbacks
-                ]
-            row.playground_overrides = snapshot
-    except Exception:  # noqa: BLE001 — never block a launch on personality errors
+        resolution = select_agent(session, meeting=meeting)
+        agent = resolution.agent
+        if agent is not None:
+            snapshot = build_agent_snapshot(
+                agent, assignment_context=resolution.assignment_context
+            )
+            row.agent_id = agent.id
+            row.agent_snapshot = snapshot
+            row.bot_name = agent.name
+            mode_value = str(snapshot["mode"])
+            character_prompt = str(snapshot["character_prompt"])
+            assignment_context = resolution.assignment_context or ""
+            allowed_replies = tuple(snapshot["allowed_replies"])
+            confidence_threshold = float(snapshot["confidence_threshold"])
+        else:
+            logger.warning(
+                "no agent resolved for meeting_config=%s (empty agents table?); "
+                "launching with contract defaults",
+                meeting.id,
+            )
+    except Exception:  # noqa: BLE001 — never block a launch on agent errors
         logger.exception(
-            "personality resolution failed for meeting_config=%s; "
-            "launching with global-active providers",
+            "agent resolution failed for meeting_config=%s; "
+            "launching with contract defaults",
             meeting.id,
         )
 
@@ -562,10 +546,11 @@ async def start_session_for_meeting(
         identity_account_id=meeting.identity_account_id,
         meet_link=meet_link,
         container_name=container_name_for_session(row.id),
-        mode=str(meeting.mode.value if hasattr(meeting.mode, "value") else meeting.mode),
-        instructions=effective_instructions,
-        personality_prompt=personality_prompt,
-        context=effective_context,
+        mode=mode_value,
+        character_prompt=character_prompt,
+        allowed_replies=allowed_replies,
+        confidence_threshold=confidence_threshold,
+        context=assignment_context,
         calendar_context=calendar_description,
         calendar_attachments_text=calendar_attachments,
         prior_session_context=prior_session_context,

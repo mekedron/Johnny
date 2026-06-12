@@ -134,7 +134,7 @@ class HistoryFiltersResponse(BaseModel):
     """Distinct filter values present across terminal sessions."""
 
     accounts: list[HistoryAccountOptionRead]
-    personalities: list[str]
+    agents: list[str]
     sources: list[str]
 
 
@@ -294,7 +294,7 @@ def list_history(
 
 @router.get("/filters", response_model=HistoryFiltersResponse)
 def list_history_filter_options(session: SessionDep) -> HistoryFiltersResponse:
-    """Distinct account / personality / source values present in history.
+    """Distinct account / agent / source values present in history.
 
     Powers the History page filter dropdowns; only values with at least one
     terminal session are returned.
@@ -305,7 +305,7 @@ def list_history_filter_options(session: SessionDep) -> HistoryFiltersResponse:
             HistoryAccountOptionRead(id=opt.id, email=opt.email)
             for opt in options.accounts
         ],
-        personalities=options.personalities,
+        agents=options.agents,
         sources=options.sources,
     )
 

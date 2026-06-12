@@ -23,9 +23,8 @@ export interface BotSession {
 	status: BotSessionStatus;
 	container_name: string | null;
 	/**
-	 * Display name of the personality resolved at session start (Johnny-oly.6).
-	 * `null` for legacy sessions and for sessions with no personality; the UI
-	 * falls back to "Johnny" when rendering.
+	 * Display name of the agent resolved at session start. `null` for
+	 * legacy sessions; the UI falls back to "Johnny" when rendering.
 	 */
 	bot_name?: string | null;
 	started_at: string | null;

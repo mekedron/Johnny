@@ -6,7 +6,7 @@ replacing the hand-rolled the legacy split pipeline engine:
 * :mod:`johnny.agent.session` — the ``AgentSession`` harness
   (:func:`~johnny.agent.session.build_agent_session`) and
   :class:`~johnny.agent.session.JohnnyAgent`, the ``livekit.agents.Agent``
-  subclass that carries Johnny's assembled instructions/personality and
+  subclass that carries Johnny's assembled instructions/character and
   rehydrates prior transcript history into the LiveKit ``chat_ctx`` on respawn
   (Johnny-re2), with the router "should-speak" gate landing in a later phase.
 * :mod:`johnny.agent.adapters` — the provider adapter layer that wraps
@@ -33,7 +33,7 @@ replacing the hand-rolled the legacy split pipeline engine:
 
 * :mod:`johnny.agent.job_config` — the per-session agent **job-payload
   contract** (:class:`~johnny.agent.job_config.SessionJobConfig`): the
-  serialisable description of one Meet session (providers, personality, mode,
+  serialisable description of one Meet session (providers, character, mode,
   instructions, approval/redis wiring) that the API dispatches to the agent
   worker as room/dispatch metadata, mirroring the legacy ``JOHNNY_*`` launcher
   env contract (spike Johnny-y4j; consumed by Johnny-7we). Stdlib-only.

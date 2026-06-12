@@ -502,14 +502,23 @@ def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
     kind = str(payload.get("kind") or "reply")
     interrupted = bool(payload.get("interrupted"))
     turn_id = _coerce_int_id(payload.get("turn_id"))
-    # Mode is taken from the bot session row at insert time so the
-    # utterance audit row mirrors the meeting's bot mode.
+    # Mode comes from the session's frozen agent snapshot (Johnny-trt.41) —
+    # the behavior captured at dispatch — never from a live config-table
+    # read, so editing an agent mid-meeting can't skew the audit rows.
     session_row = db.get(BotSession, session_id)
     mode = BotMode.LISTEN_ONLY
-    if session_row is not None:
-        meeting = getattr(session_row, "meeting_config", None)
-        if meeting is not None and getattr(meeting, "mode", None) is not None:
-            mode = meeting.mode
+    if session_row is not None and session_row.agent_snapshot:
+        raw_mode = session_row.agent_snapshot.get("mode")
+        if raw_mode:
+            try:
+                mode = BotMode(str(raw_mode))
+            except ValueError:
+                logger.warning(
+                    "agent_snapshot.mode=%r on session %s is not a BotMode; "
+                    "auditing utterance as listen_only",
+                    raw_mode,
+                    session_id,
+                )
     linked_decision: AgentDecision | None = None
     if kind in TURN_BOUND_SPOKEN_KINDS:
         if turn_id is not None:

@@ -106,7 +106,7 @@ _STUB_TTS_PROVIDER_NAME = "console-stub-tts"
 # TTS adapter path (the smoke discards the audio; there is no output sink).
 _SILENCE_FRAME = b"\x00\x00" * (PCM_SAMPLE_RATE_HZ // 10)
 
-# Bare smoke instructions — no personality/brief; a bare ``JohnnyAgent`` with no
+# Bare smoke instructions — no character/brief; a bare ``JohnnyAgent`` with no
 # router gate replies to every turn (and ``run`` bypasses the gate regardless).
 _CONSOLE_INSTRUCTIONS = "You are Johnny in a console smoke test. Reply briefly."
 

@@ -595,7 +595,7 @@ async def test_router_prompt_includes_framing_mode_threshold_and_transcript() ->
         config=RouterGateConfig(
             mode="autonomous",
             confidence_threshold=0.55,
-            personality_prompt="[personality: Sage]\nYou are wise.",
+            character_prompt="[personality: Sage]\nYou are wise.",
             instructions="Stay on agenda.",
         ),
     )
@@ -656,7 +656,7 @@ async def test_router_prompt_without_catalog_is_byte_identical_to_pre_trt19() ->
     cfg_kwargs: dict[str, Any] = {
         "mode": "autonomous",
         "confidence_threshold": 0.55,
-        "personality_prompt": "[personality: Sage]",
+        "character_prompt": "[personality: Sage]",
         "instructions": "Stay on agenda.",
     }
     gate_default, _, router_default = _make_gate(

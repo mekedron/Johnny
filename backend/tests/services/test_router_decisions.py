@@ -1,4 +1,10 @@
-"""Tests for the SQLAlchemy-backed decision sink and threshold resolver."""
+"""Tests for the SQLAlchemy-backed decision sink.
+
+The ``resolve_confidence_threshold`` helper (profile/meeting threshold
+fallback) died with the Johnny-trt.41 agents rebuild — the threshold is now
+frozen on ``bot_sessions.agent_snapshot`` at dispatch and consumed straight
+from the job config; only the decision sink remains in this module.
+"""
 
 from __future__ import annotations
 
@@ -9,108 +15,9 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from app.db import Base
-from app.db.models import (
-    AgentDecision,
-    BotMode,
-    DecisionOutcome,
-    MeetingConfig,
-    ProfileTemplate,
-)
-from app.services.router_decisions import (
-    DEFAULT_CONFIDENCE_THRESHOLD,
-    SqlAlchemyDecisionSink,
-    resolve_confidence_threshold,
-)
+from app.db.models import AgentDecision, DecisionOutcome
+from app.services.router_decisions import SqlAlchemyDecisionSink
 from johnny.voice_pipeline.events import RouterDecisionMade
-
-# --- Threshold resolution ------------------------------------------------
-
-
-def _profile(threshold: float | None) -> ProfileTemplate:
-    """Build an unsaved ProfileTemplate. ``confidence_threshold`` defaults to 0.7."""
-    return ProfileTemplate(
-        name="t",
-        mode=BotMode.LIMITED_AUTO_SPEAK,
-        base_instructions="",
-        base_context="",
-        allowed_replies=[],
-        confidence_threshold=threshold if threshold is not None else 0.7,
-    )
-
-
-def _meeting(threshold: float | None) -> MeetingConfig:
-    """Build an unsaved MeetingConfig. ``confidence_threshold`` may be None."""
-    return MeetingConfig(
-        calendar_event_id=1,
-        profile_template_id=1,
-        identity_account_id=1,
-        mode=BotMode.LIMITED_AUTO_SPEAK,
-        instructions=None,
-        context=None,
-        allowed_replies=None,
-        confidence_threshold=threshold,
-        enabled=True,
-    )
-
-
-def test_resolve_threshold_uses_meeting_when_set() -> None:
-    profile = _profile(0.6)
-    meeting = _meeting(0.9)
-    assert resolve_confidence_threshold(profile, meeting) == pytest.approx(0.9)
-
-
-def test_resolve_threshold_falls_back_to_profile_when_meeting_null() -> None:
-    profile = _profile(0.55)
-    meeting = _meeting(None)
-    assert resolve_confidence_threshold(profile, meeting) == pytest.approx(0.55)
-
-
-def test_resolve_threshold_falls_back_to_default_when_no_inputs() -> None:
-    assert resolve_confidence_threshold(None, None) == pytest.approx(
-        DEFAULT_CONFIDENCE_THRESHOLD
-    )
-
-
-def test_resolve_threshold_default_constant_value() -> None:
-    assert DEFAULT_CONFIDENCE_THRESHOLD == pytest.approx(0.7)
-
-
-def test_resolve_threshold_profile_only_uses_profile() -> None:
-    profile = _profile(0.42)
-    assert resolve_confidence_threshold(profile, None) == pytest.approx(0.42)
-
-
-def test_resolve_threshold_meeting_zero_is_honored() -> None:
-    """meeting.confidence_threshold=0.0 means 'speak on any nonzero confidence'
-    and must NOT fall through to the profile."""
-    profile = _profile(0.7)
-    meeting = _meeting(0.0)
-    assert resolve_confidence_threshold(profile, meeting) == pytest.approx(0.0)
-
-
-def test_resolve_threshold_clamps_out_of_range_values() -> None:
-    profile = _profile(1.5)
-    assert resolve_confidence_threshold(profile, None) == pytest.approx(1.0)
-    profile2 = _profile(-0.2)
-    assert resolve_confidence_threshold(profile2, None) == pytest.approx(0.0)
-
-
-def test_resolve_threshold_meeting_null_profile_null_default() -> None:
-    profile = ProfileTemplate(
-        name="x",
-        mode=BotMode.LIMITED_AUTO_SPEAK,
-        base_instructions="",
-        base_context="",
-        allowed_replies=[],
-    )
-    meeting = _meeting(None)
-    # The ORM default for ProfileTemplate.confidence_threshold is 0.7 — even
-    # without a value passed explicitly, the SQLAlchemy column default fires
-    # only on flush. So the unsaved instance has the attribute = 0.7
-    # because we initialised it that way. Use it directly:
-    threshold = resolve_confidence_threshold(profile, meeting)
-    assert 0.0 <= threshold <= 1.0
-
 
 # --- SqlAlchemyDecisionSink -------------------------------------------------
 

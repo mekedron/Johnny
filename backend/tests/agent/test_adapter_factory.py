@@ -616,7 +616,7 @@ def test_providers_public_surface_unchanged() -> None:
 
 # --- build_session_adapters_from_payload (Johnny-7we) -----------------------
 # The DB-free sibling: the dispatched agent worker rebuilds the same three
-# adapters from the ``provider_config`` payload (the personality-resolved
+# adapters from the ``provider_config`` payload (the API-assembled
 # ``{kind: {provider_name, display_name, credentials, options}}`` dict the API
 # serialised into the job metadata) instead of querying the DB. These mirror the
 # DB-path tests above against the payload entry point.
@@ -699,11 +699,11 @@ def test_payload_builds_the_three_adapters() -> None:
     assert adapters.tts.model == "sonic-2024"
 
 
-def test_payload_personality_override_drives_the_llm_adapter() -> None:
-    # The whole point of building from the payload (not the DB): a personality
-    # that overrode the LLM provider yields *that* provider in the adapter, even
-    # though the DB's globally-active LLM row is a different one. apply_personality
-    # has already swapped the "llm" entry on the API side, so the worker honours it.
+def test_payload_override_drives_the_llm_adapter() -> None:
+    # The whole point of building from the payload (not the DB): a payload
+    # whose LLM entry was overridden API-side yields *that* provider in the
+    # adapter, even though the DB's globally-active LLM row is a different
+    # one. The worker honours whatever the API serialised into the payload.
     reg = _registry()
     reg.register(ProviderKind.LLM, "anthropic", _FakeLLM)
     payload = _split_payload()

@@ -42,7 +42,7 @@ def _full_ctx() -> LaunchContext:
         container_name="meet-worker-session-42",
         mode="approval_required",
         instructions="Stick to the agenda.",
-        personality_prompt="[personality: Aria]\nWarm and concise.",
+        character_prompt="[personality: Aria]\nWarm and concise.",
         context="Internal sync.",
         calendar_context="Q3 planning",
         calendar_attachments_text="doc body",
@@ -62,7 +62,7 @@ def test_config_from_launch_context_maps_every_field() -> None:
     assert config.account_id == 3  # identity_account_id -> account_id
     assert config.mode == "approval_required"
     assert config.instructions == "Stick to the agenda."
-    assert config.personality_prompt == "[personality: Aria]\nWarm and concise."
+    assert config.character_prompt == "[personality: Aria]\nWarm and concise."
     assert config.context == "Internal sync."
     assert config.calendar_context == "Q3 planning"
     assert config.calendar_attachments_text == "doc body"

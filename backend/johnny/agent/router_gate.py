@@ -283,7 +283,7 @@ class RouterGateConfig:
 
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD
     mode: str = DEFAULT_MODE
-    personality_prompt: str = ""
+    character_prompt: str = ""
     instructions: str = ""
     context: str = ""
     calendar_context: str = ""
@@ -1887,7 +1887,7 @@ class RouterGate:
     ) -> list[ChatMessage]:
         """Build the router prompt, mirroring the legacy split pipeline.
 
-        System message: the gating-router framing + personality + mode +
+        System message: the gating-router framing + character + mode +
         confidence threshold + task catalog (Johnny-trt.19, only when
         delegation is wired) + meeting/calendar context + allowed replies. User
         message: the rolling conversation (rendered from ``turn_ctx``) plus the
@@ -1901,8 +1901,8 @@ class RouterGate:
             "the bot should speak in response to the latest transcript. "
             "Reply as JSON matching the supplied schema."
         )
-        if cfg.personality_prompt:
-            system += f"\n\n{cfg.personality_prompt}"
+        if cfg.character_prompt:
+            system += f"\n\n{cfg.character_prompt}"
         system += (
             f"\n\nIn the 'Recent conversation' list below, lines prefixed "
             f"'{BOT_SPEAKER_LABEL}:' are the bot's OWN earlier utterances "

@@ -5,13 +5,16 @@ Two layers:
 * unit tests for the pure mappers in :mod:`johnny.agent.job_runtime`
   (:func:`instructions_config_from_job` / :func:`answer_config_from_job` /
   :func:`build_session_adapters_for_job`);
-* the **acceptance round trip** — a session configured with provider/personality X
-  yields adapters + instructions X *inside the worker*. The test drives the REAL API
-  assembly (:func:`app.services.provider_payload.build_provider_payload` +
-  :func:`app.services.personality_resolver.apply_personality`), the REAL producer
-  (:func:`app.services.agent_dispatch.session_job_config_from_launch_context`), the
-  REAL dispatch serialisation (``to_metadata`` → ``from_metadata``), and the REAL
-  consumer (the job-runtime builders), so nothing about the threading is faked.
+* the **acceptance round trip** — a session served by agent X with provider
+  payload Y yields adapters + instructions X/Y *inside the worker*. The test
+  drives the REAL API assembly
+  (:func:`app.services.provider_payload.build_provider_payload` +
+  :func:`app.services.agents.select_agent` / ``build_agent_snapshot``), the
+  REAL producer
+  (:func:`app.services.agent_dispatch.session_job_config_from_launch_context`),
+  the REAL dispatch serialisation (``to_metadata`` → ``from_metadata``), and
+  the REAL consumer (the job-runtime builders), so nothing about the
+  threading is faked.
 
 Guarded by ``importorskip`` so the suite still collects without the ``agent`` extra.
 """
@@ -29,9 +32,8 @@ from sqlalchemy.orm import Session
 
 from app.db import Base
 from app.db.models import (
+    Agent,
     BotMode,
-    MeetingConfig,
-    Personality,
     ProviderCredential,
     ProviderKind,
 )
@@ -47,7 +49,7 @@ from app.providers.base import (
     TTSProvider,
 )
 from app.security.crypto import CredentialCrypto, encrypt_json
-from app.services.personality_resolver import apply_personality, select_personality
+from app.services.agents import build_agent_snapshot, select_agent
 from app.services.provider_payload import build_provider_payload
 from johnny.agent.job_config import (
     APPROVAL_REQUIRED_MODE,
@@ -164,7 +166,7 @@ def _job(**overrides: Any) -> SessionJobConfig:
 def test_instructions_config_copies_all_prompt_fields() -> None:
     job = _job(
         instructions="Be brief.",
-        personality_prompt="[personality: Aria]\nWarm and curious.",
+        character_prompt="[character: Aria]\nWarm and curious.",
         context="Quarterly sync.",
         calendar_context="Q3 planning",
         calendar_attachments_text="doc body",
@@ -174,13 +176,13 @@ def test_instructions_config_copies_all_prompt_fields() -> None:
     cfg = instructions_config_from_job(job)
 
     assert cfg.instructions == "Be brief."
-    assert cfg.personality_prompt == "[personality: Aria]\nWarm and curious."
+    assert cfg.character_prompt == "[character: Aria]\nWarm and curious."
     assert cfg.context == "Quarterly sync."
     assert cfg.calendar_context == "Q3 planning"
     assert cfg.calendar_attachments_text == "doc body"
     assert cfg.prior_session_context == "Last week we agreed X."
 
-    # The rendered system prompt carries the personality identity.
+    # The rendered system prompt carries the agent's character identity.
     system = build_agent_instructions(cfg)
     assert "Aria" in system
     assert "Warm and curious." in system
@@ -189,7 +191,7 @@ def test_instructions_config_copies_all_prompt_fields() -> None:
 def test_instructions_config_defaults_are_empty() -> None:
     cfg = instructions_config_from_job(_job())
     assert cfg.instructions == ""
-    assert cfg.personality_prompt == ""
+    assert cfg.character_prompt == ""
     assert cfg.prior_session_context == ""
 
 
@@ -200,8 +202,18 @@ def test_instructions_config_defaults_are_empty() -> None:
 def test_answer_config_threads_mode(mode: str) -> None:
     cfg = answer_config_from_job(_job(mode=mode))
     assert cfg.mode == mode
-    # allowed_replies is not part of the dispatch contract -> stays empty.
+    # No allowlist on the job -> stays empty.
     assert cfg.allowed_replies == ()
+
+
+def test_answer_config_threads_allowed_replies() -> None:
+    """Johnny-trt.41: the frozen agent allowlist rides the dispatch contract
+    into the answer path's coercion target."""
+    cfg = answer_config_from_job(
+        _job(mode="limited_auto_speak", allowed_replies=("Yes.", "No."))
+    )
+    assert cfg.mode == "limited_auto_speak"
+    assert cfg.allowed_replies == ("Yes.", "No.")
 
 
 # --- build_session_adapters_for_job -----------------------------------------
@@ -221,7 +233,7 @@ def test_build_adapters_for_job_split() -> None:
 
 def test_build_adapters_for_job_honours_payload_override() -> None:
     # The job runtime builds from the payload's provider_config, so a payload whose
-    # llm entry was overridden (personality, API-side) yields that provider.
+    # llm entry was overridden (per-session override, API-side) yields that provider.
     pc = _split_provider_config()
     pc["llm"] = _entry("anthropic", options={"model": "claude"})
 
@@ -231,7 +243,7 @@ def test_build_adapters_for_job_honours_payload_override() -> None:
     assert adapters.llm.model == "claude"
 
 
-# --- Acceptance: provider/personality X -> adapters/instructions X ----------
+# --- Acceptance: provider/agent X -> adapters/instructions X ----------------
 
 
 @pytest.fixture
@@ -250,7 +262,7 @@ def db() -> Session:
         engine,
         tables=[
             ProviderCredential.__table__,  # type: ignore[list-item]
-            Personality.__table__,  # type: ignore[list-item]
+            Agent.__table__,  # type: ignore[list-item]
         ],
     )
     return Session(engine)
@@ -278,12 +290,13 @@ def _seed_provider(
     return row
 
 
-def test_session_config_round_trips_provider_personality_mode(
+def test_session_config_round_trips_provider_agent_mode(
     db: Session, crypto: CredentialCrypto
 ) -> None:
-    # 1. Seed the admin-active split stack + a meeting personality "Aria" that
-    #    points at the active LLM/TTS rows (the realistic v1 shape) and carries a
-    #    persona description + a default mode.
+    # 1. Seed the admin-active split stack + a default agent "Aria" carrying a
+    #    character prompt and behavior knobs (Johnny-trt.41: behavior lives on
+    #    the agent; pinned-provider resolution is trt.42, so the payload here
+    #    is the globally-active stack).
     _seed_provider(
         db,
         crypto,
@@ -292,7 +305,7 @@ def test_session_config_round_trips_provider_personality_mode(
         credentials={"api_key": "stt-secret"},
         options={"model": "nova-3", "language": "en-US"},
     )
-    llm_row = _seed_provider(
+    _seed_provider(
         db,
         crypto,
         kind=ProviderKind.LLM,
@@ -300,7 +313,7 @@ def test_session_config_round_trips_provider_personality_mode(
         credentials={"api_key": "llm-secret"},
         options={"model": "gpt-4o"},
     )
-    tts_row = _seed_provider(
+    _seed_provider(
         db,
         crypto,
         kind=ProviderKind.TTS,
@@ -308,24 +321,25 @@ def test_session_config_round_trips_provider_personality_mode(
         credentials={"api_key": "tts-secret"},
         options={"voice_id": "sonic"},
     )
-    aria = Personality(
-        display_name="Aria",
-        description="Warm, curious, and concise.",
+    aria = Agent(
+        name="Aria",
+        character_prompt="[character: Aria]\nWarm, curious, and concise.",
+        mode=BotMode.SUGGEST_ONLY,
+        allowed_replies=["Sounds good.", "Let me check."],
+        confidence_threshold=0.66,
         is_default=True,
-        llm_provider_id=llm_row.id,
-        tts_provider_id=tts_row.id,
-        default_mode=BotMode.SUGGEST_ONLY,
     )
     db.add(aria)
     db.flush()
 
-    meeting = MeetingConfig(personality_id=aria.id, mode=BotMode.SUGGEST_ONLY)
-
-    # 2. Run the REAL API assembly: payload + personality resolution.
+    # 2. Run the REAL API assembly: payload + agent selection + snapshot.
     base_payload = build_provider_payload(db, crypto)
-    personality = select_personality(db, requested_id=None, meeting=meeting)
-    assert personality is not None and personality.display_name == "Aria"
-    resolution = apply_personality(db, base_payload, personality, crypto=crypto)
+    resolution = select_agent(db)
+    agent = resolution.agent
+    assert agent is not None and agent.name == "Aria"
+    snapshot = build_agent_snapshot(
+        agent, assignment_context=resolution.assignment_context
+    )
 
     # 3. Build the launch context the scheduler would, then run the REAL producer.
     from app.services.agent_dispatch import session_job_config_from_launch_context
@@ -338,19 +352,21 @@ def test_session_config_round_trips_provider_personality_mode(
         identity_account_id=3,
         meet_link="https://meet.example/abc",
         container_name="meet-worker-session-42",
-        mode=str(meeting.mode.value),
+        mode=str(snapshot["mode"]),
         instructions="Stick to the agenda.",
-        personality_prompt=resolution.personality_prompt,
+        character_prompt=str(snapshot["character_prompt"]),
+        allowed_replies=tuple(snapshot["allowed_replies"]),
+        confidence_threshold=float(snapshot["confidence_threshold"]),
         context="Internal sync.",
-        provider_config=resolution.payload,
+        provider_config=base_payload,
     )
     config = session_job_config_from_launch_context(ctx, redis_url="redis://r:6379/0")
 
     # 4. Cross the dispatch wire exactly as LiveKit would (metadata round trip).
     rehydrated = SessionJobConfig.from_metadata(config.to_metadata())
 
-    # 5. Consume it inside the "worker": the configured providers + the personality
-    #    identity + the meeting mode all survive end-to-end.
+    # 5. Consume it inside the "worker": the configured providers + the agent's
+    #    character + behavior all survive end-to-end.
     adapters = build_session_adapters_for_job(rehydrated, registry=_registry())
     assert adapters.tts is not None
     assert adapters.stt.provider == "deepgram"
@@ -372,7 +388,10 @@ def test_session_config_round_trips_provider_personality_mode(
     assert "Warm, curious, and concise." in system
     assert "Stick to the agenda." in system
 
-    assert answer_config_from_job(rehydrated).mode == SUGGEST_ONLY_MODE
+    answer_cfg = answer_config_from_job(rehydrated)
+    assert answer_cfg.mode == SUGGEST_ONLY_MODE
+    assert answer_cfg.allowed_replies == ("Sounds good.", "Let me check.")
+    assert rehydrated.confidence_threshold == pytest.approx(0.66)
     # Approval / event-bus wiring rides along too.
     assert rehydrated.redis_url == "redis://r:6379/0"
     assert rehydrated.room_name == "johnny-session-42"
@@ -380,7 +399,7 @@ def test_session_config_round_trips_provider_personality_mode(
 
 def test_round_trip_metadata_is_plain_json(db: Session, crypto: CredentialCrypto) -> None:
     # Sanity that the producer output is wire-serialisable as LiveKit metadata
-    # (a JSON string) and decodes to the personality-resolved provider set.
+    # (a JSON string) and decodes to the assembled provider set.
     _seed_provider(
         db, crypto, kind=ProviderKind.LLM, provider_name="openai", credentials={"api_key": "k"}
     )

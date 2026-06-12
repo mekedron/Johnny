@@ -362,19 +362,21 @@ JOHNNY_LIVEKIT_SMOKE_TOKEN=<token-minted-with-livekit-cli> \
 uv run pytest -k livekit_smoke -v
 ```
 
-## Personalities
+## Agents
 
-A **personality** is a named, reusable preset that decides which character,
-brain, and voice Johnny brings to a session. Manage them at
-[`/personalities`](http://localhost:5173/personalities): each one bundles a
-freeform **character** field, an optional LLM override, an optional TTS voice,
-and a default decision mode. The personality's character is freeform text
-injected verbatim as the LLM system prompt — write a paragraph, a bullet list,
-an Always/Never block, whatever helps the model act like the character. Attach a
-personality to a calendar meeting or pick one when starting a playground
-session. The bootstrap **Johnny** default inherits the globally active providers
-(no provider setup needed) and ships with a built-in cyberpunk-rockerboy
-character; clone-and-edit it from the page if you want a tamer default.
+An **agent** is the one entity that decides who joins your meeting: its
+identity (name, avatar, human description), its freeform **character prompt**
+(injected verbatim as the LLM system prompt — a paragraph, a bullet list, an
+Always/Never block, whatever helps the model act the part), its behavior
+(decision mode, allowed replies, confidence threshold), and its provider pins
+(router/answer/reasoning LLM role slots plus a TTS voice). Agents replaced the
+earlier profile-templates + personalities pair (Johnny-trt.41). Manage them via
+the `/agents` API (the management page is on its way); meetings reference
+agents through per-meeting assignments with an optional context brief, and
+every session freezes its agent's behavior into a snapshot at dispatch. The
+bootstrap **Johnny** default inherits the globally active providers (no
+provider setup needed) and ships with a built-in cyberpunk-rockerboy
+character; clone-and-edit it if you want a tamer default.
 
 ## Quality gates
 

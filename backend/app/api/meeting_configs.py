@@ -1,4 +1,4 @@
-"""Per-meeting bot configuration HTTP endpoints (US-009).
+"""Per-meeting bot configuration HTTP endpoints (US-009, reshaped Johnny-trt.41).
 
 CRUD for :class:`MeetingConfig` rows, keyed by ``calendar_event_id`` so
 the UI can address each row by the event it belongs to without first
@@ -10,23 +10,15 @@ fetching the meeting-config id.
 * ``DELETE /calendar/events/{event_id}/meeting-config`` — drop the row;
   invoked when the user disables "Enable Johnny" in the UI.
 
-The ``mode`` field on the row falls back to the linked profile template's
-``mode`` if the payload omits it, but the column itself is NOT NULL so
-every saved row has an explicit mode for downstream pipeline code.
-
-Per-meeting overrides (``instructions``, ``context``, ``allowed_replies``,
-``confidence_threshold``) are nullable — ``None`` means "use the
-template's value at runtime". Empty strings / empty lists are stored
-verbatim so a user can deliberately blank out a base instruction.
-
-When mode is ``limited_auto_speak``, the effective allowed-replies list
-(meeting override OR template base) must be non-empty; we reject the
-PUT with HTTP 422 if it would leave the pipeline with nothing to say.
-
-When mode is ``autonomous``, the effective instructions (meeting
-override OR template base) must be non-empty — autonomous mode has no
-allowlist or approval round, so the instructions are the only
-governance for what the bot says. Save fails with HTTP 422 otherwise.
+The Johnny-trt.41 agents rebuild removed the per-meeting override soup
+(template/personality FKs, mode, instructions, context, allowed_replies,
+confidence_threshold). A meeting config is now just: which identity
+account joins, whether the bot is enabled, the occurrence-scoped dismissal
+state (Johnny-trt.56), and the list of :class:`MeetingAgent` assignments —
+each binding an agent (the behavior owner) to this meeting with an
+optional per-assignment ``context`` brief. A meeting with no assignments
+falls back to the default agent at dispatch (see
+:mod:`app.services.agents`).
 """
 
 from __future__ import annotations
@@ -35,20 +27,19 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_session
 from app.db.models import (
+    Agent,
     BotDismissActor,
-    BotMode,
     CalendarEvent,
     GoogleAccount,
+    MeetingAgent,
     MeetingConfig,
-    Personality,
-    ProfileTemplate,
 )
 from app.services.meeting_lifecycle import (
     MeetingBotState,
@@ -64,36 +55,47 @@ router = APIRouter(prefix="/calendar/events", tags=["meeting-configs"])
 # --- Pydantic schemas ------------------------------------------------------
 
 
+class MeetingAgentAssignment(BaseModel):
+    """One agent assignment inside the upsert payload."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: int = Field(ge=1)
+    context: str | None = None
+    enabled: bool = True
+    position: int = Field(default=0, ge=0)
+
+
 class MeetingConfigUpsert(BaseModel):
     """Payload for ``PUT /calendar/events/{event_id}/meeting-config``.
 
     Used for both create and update — the endpoint upserts in one call.
-    ``mode`` is optional; when omitted we copy the linked template's
-    ``mode``. ``enabled`` defaults to ``True``; the frontend deletes the
-    row instead of toggling enabled=false, but the column is preserved
+    ``agents`` is the full desired assignment list: omitted (``None``)
+    leaves existing assignments untouched; an explicit list REPLACES them
+    (an empty list clears all assignments, falling the meeting back to the
+    default agent). ``enabled`` defaults to ``True``; the frontend deletes
+    the row instead of toggling enabled=false, but the column is preserved
     for future "snooze" semantics.
     """
 
-    profile_template_id: int = Field(ge=1)
-    identity_account_id: int = Field(ge=1)
-    personality_id: int | None = Field(default=None, ge=1)
-    """Optional personality preset (Johnny-oly) for this meeting. ``None`` =
-    inherit the global default personality at session start (PRD §4a). The
-    session resolver tolerates a stale id, but the upsert still 422s on an id
-    that doesn't reference an existing personality for clearer operator feedback."""
-    mode: BotMode | None = None
-    instructions: str | None = None
-    context: str | None = None
-    allowed_replies: list[str] | None = None
-    confidence_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
-    enabled: bool = True
+    model_config = ConfigDict(extra="forbid")
 
-    @field_validator("allowed_replies")
-    @classmethod
-    def _strip_blank_replies(cls, value: list[str] | None) -> list[str] | None:
-        if value is None:
-            return None
-        return [v.strip() for v in value if v and v.strip()]
+    identity_account_id: int = Field(ge=1)
+    enabled: bool = True
+    agents: list[MeetingAgentAssignment] | None = None
+
+
+class MeetingAgentRead(BaseModel):
+    """Public view of one :class:`MeetingAgent` assignment row."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    agent_id: int
+    agent_name: str | None = None
+    context: str | None
+    enabled: bool
+    position: int
 
 
 class MeetingConfigRead(BaseModel):
@@ -110,15 +112,9 @@ class MeetingConfigRead(BaseModel):
 
     id: int
     calendar_event_id: int
-    profile_template_id: int
     identity_account_id: int
-    personality_id: int | None
-    mode: BotMode
-    instructions: str | None
-    context: str | None
-    allowed_replies: list[str] | None
-    confidence_threshold: float | None
     enabled: bool
+    agents: list[MeetingAgentRead] = Field(default_factory=list)
     bot_state: MeetingBotState = MeetingBotState.SCHEDULED
     bot_dismissed_at: datetime | None = None
     bot_dismissed_by: BotDismissActor | None = None
@@ -148,15 +144,6 @@ def _get_event_or_404(session: Session, event_id: int) -> CalendarEvent:
     return row
 
 
-def _get_template_or_422(session: Session, template_id: int) -> ProfileTemplate:
-    row = session.get(ProfileTemplate, template_id)
-    if row is None:
-        raise HTTPException(
-            status_code=422, detail="profile_template_id does not reference a template"
-        )
-    return row
-
-
 def _get_account_or_422(session: Session, account_id: int) -> GoogleAccount:
     row = session.get(GoogleAccount, account_id)
     if row is None:
@@ -166,73 +153,42 @@ def _get_account_or_422(session: Session, account_id: int) -> GoogleAccount:
     return row
 
 
-def _validate_personality_or_422(session: Session, personality_id: int | None) -> None:
-    """Reject a non-null ``personality_id`` that references no personality.
-
-    ``None`` is always valid (inherit the global default). A set-but-missing id
-    is a 422 — friendlier than letting the DB FK raise a generic IntegrityError.
-    """
-    if personality_id is None:
-        return
-    if session.get(Personality, personality_id) is None:
-        raise HTTPException(
-            status_code=422,
-            detail="personality_id does not reference a personality",
-        )
-
-
-def _validate_limited_auto_speak(
-    mode: BotMode,
-    overrides: list[str] | None,
-    template: ProfileTemplate,
+def _validate_assignments_or_422(
+    session: Session, assignments: list[MeetingAgentAssignment]
 ) -> None:
-    """Reject save when limited_auto_speak would leave no replies to pick.
-
-    Effective allowed-replies = meeting override if set, else template
-    base. Either branch must be non-empty for limited_auto_speak so the
-    pipeline always has at least one safe phrase to choose from.
-    """
-    if mode is not BotMode.LIMITED_AUTO_SPEAK:
-        return
-    effective = overrides if overrides is not None else list(template.allowed_replies or [])
-    if len(effective) == 0:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "allowed_replies must be non-empty when mode is 'limited_auto_speak' "
-                "(either set per-meeting overrides, or use a template that has them)"
-            ),
-        )
+    """Reject assignments referencing missing agents or repeating one (422)."""
+    seen: set[int] = set()
+    for assignment in assignments:
+        if assignment.agent_id in seen:
+            raise HTTPException(
+                status_code=422,
+                detail=f"agent_id={assignment.agent_id} is assigned more than once",
+            )
+        seen.add(assignment.agent_id)
+        if session.get(Agent, assignment.agent_id) is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"agent_id={assignment.agent_id} does not reference an agent",
+            )
 
 
-def _validate_autonomous(
-    mode: BotMode,
-    instructions_override: str | None,
-    template: ProfileTemplate,
+def _replace_assignments(
+    session: Session,
+    row: MeetingConfig,
+    assignments: list[MeetingAgentAssignment],
 ) -> None:
-    """Reject save when autonomous mode would have no instructions.
-
-    Effective instructions = meeting override (when explicitly set to a
-    non-empty string) else template base. Either source must yield a
-    non-empty value because autonomous mode has no allowlist or approval
-    round; the instructions are the only governance for the bot's
-    free-form output.
-    """
-    if mode is not BotMode.AUTONOMOUS:
-        return
-    if instructions_override is not None and instructions_override.strip():
-        return
-    template_instructions = (template.base_instructions or "").strip()
-    if template_instructions:
-        return
-    raise HTTPException(
-        status_code=422,
-        detail=(
-            "instructions must be non-empty when mode is 'autonomous' "
-            "(either set per-meeting overrides, or use a template that has "
-            "non-empty base_instructions)"
-        ),
-    )
+    """Replace the meeting's assignment list with the payload's."""
+    for existing in list(row.agent_assignments):
+        session.delete(existing)
+    row.agent_assignments = [
+        MeetingAgent(
+            agent_id=assignment.agent_id,
+            context=assignment.context,
+            enabled=assignment.enabled,
+            position=assignment.position,
+        )
+        for assignment in assignments
+    ]
 
 
 def _get_config_for_event(
@@ -246,11 +202,23 @@ def _get_config_for_event(
 def _read_with_state(session: Session, row: MeetingConfig) -> MeetingConfigRead:
     """Validate the row and stamp the derived ``bot_state`` (Johnny-trt.56)."""
     view = MeetingConfigRead.model_validate(row)
+    agents = [
+        MeetingAgentRead(
+            id=assignment.id,
+            agent_id=assignment.agent_id,
+            agent_name=assignment.agent.name if assignment.agent else None,
+            context=assignment.context,
+            enabled=assignment.enabled,
+            position=assignment.position,
+        )
+        for assignment in row.agent_assignments
+    ]
     return view.model_copy(
         update={
+            "agents": agents,
             "bot_state": derive_bot_state(
                 row, active_session=has_active_session(session, row.id)
-            )
+            ),
         }
     )
 
@@ -285,55 +253,31 @@ def upsert_meeting_config(
 ) -> MeetingConfigRead:
     """Create or replace the meeting config for an event.
 
-    Returns 201 only on first-time creation (via the ``Location`` header
-    isn't relevant for a single-resource URL), so we keep the success
-    code 200 for both create and update. The upsert checks the linked
-    template and account exist (HTTP 422 if not) and enforces the
-    limited-auto-speak invariant before flushing.
+    Success code is 200 for both create and update (single-resource URL).
+    The upsert checks the identity account exists and every assigned agent
+    exists (HTTP 422 if not) before flushing.
     """
     _get_event_or_404(session, event_id)
-    template = _get_template_or_422(session, payload.profile_template_id)
     _get_account_or_422(session, payload.identity_account_id)
-    _validate_personality_or_422(session, payload.personality_id)
-
-    mode = payload.mode if payload.mode is not None else template.mode
-    _validate_limited_auto_speak(mode, payload.allowed_replies, template)
-    _validate_autonomous(mode, payload.instructions, template)
+    if payload.agents is not None:
+        _validate_assignments_or_422(session, payload.agents)
 
     existing = _get_config_for_event(session, event_id)
     if existing is None:
         row = MeetingConfig(
             calendar_event_id=event_id,
-            profile_template_id=payload.profile_template_id,
             identity_account_id=payload.identity_account_id,
-            personality_id=payload.personality_id,
-            mode=mode,
-            instructions=payload.instructions,
-            context=payload.context,
-            allowed_replies=(
-                list(payload.allowed_replies)
-                if payload.allowed_replies is not None
-                else None
-            ),
-            confidence_threshold=payload.confidence_threshold,
             enabled=payload.enabled,
         )
         session.add(row)
+        session.flush()
     else:
         row = existing
-        row.profile_template_id = payload.profile_template_id
         row.identity_account_id = payload.identity_account_id
-        row.personality_id = payload.personality_id
-        row.mode = mode
-        row.instructions = payload.instructions
-        row.context = payload.context
-        row.allowed_replies = (
-            list(payload.allowed_replies)
-            if payload.allowed_replies is not None
-            else None
-        )
-        row.confidence_threshold = payload.confidence_threshold
         row.enabled = payload.enabled
+
+    if payload.agents is not None:
+        _replace_assignments(session, row, payload.agents)
 
     try:
         session.flush()
@@ -434,6 +378,8 @@ async def undismiss_bot(event_id: int, session: SessionDep) -> MeetingConfigRead
 
 __all__ = [
     "BotDismissPayload",
+    "MeetingAgentAssignment",
+    "MeetingAgentRead",
     "MeetingConfigRead",
     "MeetingConfigUpsert",
     "router",

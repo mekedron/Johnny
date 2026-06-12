@@ -119,16 +119,19 @@ class BrowserPipelineSpec:
     existing test fixtures and dispatch helpers keep working without
     modification.
     """
-    personality_prompt: str = ""
-    """Personality IDENTITY-layer system prompt (Johnny-oly.8).
+    character_prompt: str = ""
+    """The agent's character / communication-style prompt (Johnny-trt.41).
 
-    Filled by the API session-start path from
-    :attr:`~app.services.personality_resolver.PersonalityResolution.personality_prompt`
-    (the resolved personality's ``description`` wrapped as
-    ``[personality: <name>]\\n<description>``). Mapped onto the
-    :class:`SessionJobConfig` so the persona reaches the model. Empty for a
-    session that resolved no personality.
+    Filled by the API session-start path from the session's frozen agent
+    snapshot and mapped onto the :class:`SessionJobConfig` so the character
+    reaches the model. Empty for a session that resolved no agent.
     """
+    allowed_replies: tuple[str, ...] = ()
+    """The agent's limited-auto-speak allowlist, frozen at dispatch
+    (Johnny-trt.41). Empty for modes without an allowlist."""
+    confidence_threshold: float | None = None
+    """The agent's router speak floor, frozen at dispatch (Johnny-trt.41).
+    ``None`` keeps the contract default."""
 
 
 def _job_config_from_spec(spec: BrowserPipelineSpec, *, redis_url: str | None) -> SessionJobConfig:
@@ -147,18 +150,23 @@ def _job_config_from_spec(spec: BrowserPipelineSpec, *, redis_url: str | None) -
     mode = (spec.mode or "").strip() or DEFAULT_MODE
     if mode not in SUPPORTED_MODES:
         mode = DEFAULT_MODE
+    extra: dict[str, Any] = {}
+    if spec.confidence_threshold is not None:
+        extra["confidence_threshold"] = spec.confidence_threshold
     return SessionJobConfig(
         bot_session_id=spec.bot_session_id,
         room_name=room_name_for_session(spec.bot_session_id),
         mode=mode,
         instructions=spec.instructions,
-        personality_prompt=spec.personality_prompt,
+        character_prompt=spec.character_prompt,
         context=spec.context,
         calendar_context=spec.calendar_context,
         calendar_attachments_text=spec.calendar_attachments_text,
         prior_session_context=spec.prior_session_context,
+        allowed_replies=tuple(spec.allowed_replies),
         provider_config=dict(spec.provider_payload),
         redis_url=redis_url,
+        **extra,
     )
 
 

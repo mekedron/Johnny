@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.agents import router as agents_router
 from app.api.auth import router as auth_router
 from app.api.bot_signin import router as bot_signin_router
 from app.api.bot_signin import ws_router as bot_signin_ws_router
@@ -18,12 +19,10 @@ from app.api.calendar import router as calendar_router
 from app.api.decisions import router as decisions_router
 from app.api.history import router as history_router
 from app.api.meeting_configs import router as meeting_configs_router
-from app.api.personalities import router as personalities_router
 from app.api.providers import router as providers_router
 from app.api.sessions import router as sessions_router
 from app.api.sidecars import router as sidecars_router
 from app.api.stt_stream import router as stt_stream_router
-from app.api.templates import router as templates_router
 from app.api.ws import router as ws_router
 
 logger = logging.getLogger(__name__)
@@ -50,12 +49,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     try:
         from app.db.session import session_scope
-        from app.services.templates import seed_initial_templates
+        from app.services.agents import seed_default_agent
 
         with session_scope() as session:
-            seed_initial_templates(session)
+            seed_default_agent(session)
     except Exception as exc:  # noqa: BLE001 — seeding must never crash boot
-        logger.warning("template seeding skipped: %s", exc)
+        logger.warning("default-agent seeding skipped: %s", exc)
 
     try:
         from app.db.session import session_scope
@@ -123,6 +122,7 @@ app.add_middleware(
     ],
 )
 
+app.include_router(agents_router)
 app.include_router(auth_router)
 app.include_router(bot_signin_router)
 app.include_router(bot_signin_ws_router)
@@ -132,12 +132,10 @@ app.include_router(calendar_router)
 app.include_router(decisions_router)
 app.include_router(history_router)
 app.include_router(meeting_configs_router)
-app.include_router(personalities_router)
 app.include_router(providers_router)
 app.include_router(sessions_router)
 app.include_router(sidecars_router)
 app.include_router(stt_stream_router)
-app.include_router(templates_router)
 app.include_router(ws_router)
 
 

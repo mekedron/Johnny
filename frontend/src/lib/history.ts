@@ -7,11 +7,11 @@
  * - pgvector-backed transcript search.
  */
 
-import type { BotMode } from '$lib/templates';
 import type { BotSessionStatus, BotSessionSource } from '$lib/sessions';
 import type {
 	AgentDecisionRecord,
 	AgentUtteranceRecord,
+	BotMode,
 	TranscriptChunk
 } from '$lib/sessionDetail';
 
@@ -26,7 +26,7 @@ export interface PastSessionSummary {
 	status: BotSessionStatus;
 	/** `null` for playground sessions (mode comes from the meeting config). */
 	mode: BotMode | null;
-	/** Snapshotted personality display name; `null` falls back to "Johnny". */
+	/** Snapshotted agent display name; `null` falls back to "Johnny". */
 	bot_name: string | null;
 	/** Owning Google account; `null` for account-less playground runs. */
 	account_id: number | null;
@@ -64,7 +64,8 @@ export interface HistoryAccountOption {
 /** Distinct filter values present across terminal sessions (for dropdowns). */
 export interface HistoryFilterOptions {
 	accounts: HistoryAccountOption[];
-	personalities: string[];
+	/** Distinct snapshotted agent display names (`bot_name` values). */
+	agents: string[];
 	sources: BotSessionSource[];
 }
 
@@ -74,7 +75,7 @@ export interface HistorySessionRecord {
 	status: BotSessionStatus;
 	container_name: string | null;
 	/**
-	 * Personality display name snapshotted at session start (Johnny-oly.6).
+	 * Agent display name snapshotted at session start.
 	 * `null` for legacy sessions — the history page falls back to "Johnny".
 	 */
 	bot_name: string | null;
@@ -92,12 +93,12 @@ export interface HistoryDetail {
 	utterances: AgentUtteranceRecord[];
 }
 
-/** Historical default bot name for sessions with no personality snapshot. */
+/** Historical default bot name for sessions with no agent snapshot. */
 export const DEFAULT_BOT_NAME = 'Johnny';
 
 /**
  * The bot name to render for a session: the snapshotted `bot_name` when present
- * (Johnny-oly.6), else the historical "Johnny" fallback for legacy sessions.
+ * (the resolved agent's name), else the historical "Johnny" fallback.
  */
 export function botDisplayName(session: { bot_name?: string | null }): string {
 	const name = session.bot_name;
@@ -178,7 +179,7 @@ export function listHistorySessions(
 	return request<HistoryListResponse>(`/history/sessions?${qs.toString()}`);
 }
 
-/** Distinct accounts / personalities / sources present in history — for the
+/** Distinct accounts / agents / sources present in history — for the
  * filter dropdowns, so they only offer values that actually have sessions. */
 export function listHistoryFilters(): Promise<HistoryFilterOptions> {
 	return request<HistoryFilterOptions>('/history/filters');

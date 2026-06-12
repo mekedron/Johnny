@@ -2,6 +2,7 @@
 
 from app.db.base import Base
 from app.db.models import (
+    Agent,
     AgentDecision,
     AgentUtterance,
     BotMode,
@@ -10,14 +11,15 @@ from app.db.models import (
     CalendarEvent,
     DecisionOutcome,
     GoogleAccount,
+    MeetingAgent,
     MeetingConfig,
-    ProfileTemplate,
     ProviderCredential,
     ProviderKind,
     TranscriptChunk,
 )
 
 __all__ = [
+    "Agent",
     "AgentDecision",
     "AgentUtterance",
     "Base",
@@ -27,8 +29,8 @@ __all__ = [
     "CalendarEvent",
     "DecisionOutcome",
     "GoogleAccount",
+    "MeetingAgent",
     "MeetingConfig",
-    "ProfileTemplate",
     "ProviderCredential",
     "ProviderKind",
     "TranscriptChunk",

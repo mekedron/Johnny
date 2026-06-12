@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from collections.abc import Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -118,11 +119,11 @@ class HistoryFilterOptions:
     """Distinct filter values present in terminal sessions.
 
     Powers the History page filter dropdowns so they only offer values that
-    actually exist in the data (e.g. accounts/personalities with ≥1 session).
+    actually exist in the data (e.g. accounts/agents with ≥1 session).
     """
 
     accounts: list[HistoryAccountOption]
-    personalities: list[str]
+    agents: list[str]
     sources: list[str]
 
 
@@ -159,6 +160,25 @@ def _duration_ms(
     return max(0, int(delta.total_seconds() * 1000))
 
 
+def _mode_from_snapshot(snapshot: Any) -> BotMode | None:
+    """Session mode as frozen on ``bot_sessions.agent_snapshot`` (Johnny-trt.41).
+
+    The per-meeting ``mode`` column died with the agents rebuild; the mode a
+    session actually ran in lives in its dispatch-time agent snapshot.
+    Tolerant: rows without a snapshot (pre-rebuild history, agent-less
+    sessions) and unknown values render as ``None`` rather than erroring.
+    """
+    if not isinstance(snapshot, Mapping):
+        return None
+    raw = snapshot.get("mode")
+    if not raw:
+        return None
+    try:
+        return BotMode(str(raw))
+    except ValueError:
+        return None
+
+
 def list_past_sessions(
     session: Session,
     *,
@@ -181,7 +201,7 @@ def list_past_sessions(
 
     Optional filters narrow both the page and the ``total`` (so paging stays
     correct) by session ``source`` (meet vs browser), owning ``account_id``,
-    and snapshotted ``bot_name`` (personality).
+    and snapshotted ``bot_name`` (the session's agent name).
     """
     if limit < 1 or limit > MAX_HISTORY_PAGE_SIZE:
         raise ValueError(
@@ -214,7 +234,7 @@ def list_past_sessions(
             BotSession.ended_at,
             BotSession.created_at,
             BotSession.updated_at,
-            MeetingConfig.mode,
+            BotSession.agent_snapshot,
             CalendarEvent.summary.label("meeting_summary"),
             GoogleAccount.email.label("account_email"),
             transcript_count,
@@ -252,7 +272,7 @@ def list_past_sessions(
             meeting_config_id=row.meeting_config_id,
             source=row.source,
             status=row.status,
-            mode=row.mode,
+            mode=_mode_from_snapshot(row.agent_snapshot),
             bot_name=row.bot_name,
             account_id=row.account_id,
             account_email=row.account_email,
@@ -282,7 +302,7 @@ def list_past_sessions(
 def list_history_filters(session: Session) -> HistoryFilterOptions:
     """Return the distinct filter values present across terminal sessions.
 
-    Only surfaces accounts / personalities / sources that actually have at
+    Only surfaces accounts / agents / sources that actually have at
     least one terminal session, so the History filter dropdowns never offer a
     value that would yield an empty page.
     """
@@ -308,7 +328,7 @@ def list_history_filters(session: Session) -> HistoryFilterOptions:
             .order_by(BotSession.bot_name.asc())
         ).all()
     )
-    personalities = [name for name in bot_names if name]
+    agents = [name for name in bot_names if name]
 
     source_values = list(
         session.scalars(
@@ -325,7 +345,7 @@ def list_history_filters(session: Session) -> HistoryFilterOptions:
     )
 
     return HistoryFilterOptions(
-        accounts=accounts, personalities=personalities, sources=sources
+        accounts=accounts, agents=agents, sources=sources
     )
 
 

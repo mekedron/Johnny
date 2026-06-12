@@ -38,7 +38,6 @@ from app.db.models import (
     CalendarEvent,
     GoogleAccount,
     MeetingConfig,
-    ProfileTemplate,
 )
 from app.main import app
 from app.security.crypto import CredentialCrypto
@@ -134,7 +133,6 @@ def engine() -> sa.Engine:
         tables=[
             GoogleAccount.__table__,  # type: ignore[list-item]
             CalendarEvent.__table__,  # type: ignore[list-item]
-            ProfileTemplate.__table__,  # type: ignore[list-item]
             MeetingConfig.__table__,  # type: ignore[list-item]
         ],
     )

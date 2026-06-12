@@ -161,7 +161,7 @@ real `/playground` path (real browser, real WebSocket, real providers):
    (pkill the running Chrome first; `AudioServiceSandbox` must be off on
    macOS or the audio service silently reads no file and the mic stays
    silent). The WAV restarts per getUserMedia stream and loops at EOF.
-3. **Drive `/playground`**: autonomous mode, no personality override,
+3. **Drive `/playground`**: autonomous mode, the default agent,
    persona pinned to one-sentence answers. Each WAV utterance becomes a
    real VAD→STT→router→LLM→TTS turn; the 10 s gaps let replies finish
    (long replies get barge-in cut by the next utterance — fine, the

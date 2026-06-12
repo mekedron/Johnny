@@ -383,9 +383,9 @@ def _provider_from_payload_entry(
     The DB-free analogue of one :func:`~app.providers.loader.load_active_providers`
     row: read the ``{provider_name, display_name, credentials, options}`` entry the
     API serialised (the exact shape
-    :func:`app.services.provider_payload.build_provider_payload` produces, *after*
-    the personality LLM/TTS override is layered on by
-    :func:`app.services.personality_resolver.apply_personality`), rebuild a
+    :func:`app.services.provider_payload.build_provider_payload` produces;
+    per-agent provider-pin resolution layers on here when Johnny-trt.42
+    lands), rebuild a
     :class:`~app.providers.base.ProviderConfig`, and instantiate through the
     process-wide provider registry.
     Returns the live provider plus its option dict (for the voice/model/language
@@ -404,7 +404,7 @@ def _provider_from_payload_entry(
         raise AgentSessionSetupError(
             f"no active {kind.value} provider in the dispatched job payload — an "
             f"AgentSession needs a {kind.value!r} entry in provider_config "
-            "(the API builds it from the active rows + personality override; an "
+            "(the API builds it from the active provider rows; an "
             "empty/partial payload means listen-only)"
         )
     provider_name = str(entry.get("provider_name") or "").strip()
@@ -469,11 +469,11 @@ def build_session_adapters_from_payload(
     The DB-free sibling of :func:`build_session_adapters` (Johnny-7we): the
     dispatched agent worker (Johnny-9eh) receives the session's providers as the
     ``provider_config`` carried in its :class:`~johnny.agent.job_config.SessionJobConfig`
-    job metadata, not from a DB query. That payload is the **personality-resolved**
-    one — :func:`app.services.personality_resolver.apply_personality` has already
-    swapped in the personality's LLM/TTS provider on the API side — so building the
-    adapters *from the payload* (rather than re-reading the admin-active rows) is
-    what makes the worker honour the session's personality override. Each entry is
+    job metadata, not from a DB query. That payload is resolved API-side —
+    the active provider rows serialised at dispatch (per-agent provider pins
+    layer on here when Johnny-trt.42 lands) — so building the adapters *from
+    the payload* (rather than re-reading the admin-active rows) is what makes
+    the worker honour the session's frozen provider selection. Each entry is
     rebuilt with the same registry + :class:`~app.providers.base.ProviderConfig`
     path the meet-worker uses, then wrapped via the shared
     :func:`_assemble_split_adapters` tail (so the voice/model/language selections in

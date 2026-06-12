@@ -46,7 +46,6 @@ from app.db.models import (  # noqa: E402
     GoogleAccount,
     MeetingConfig,
     NoReplyReason,
-    ProfileTemplate,
     SessionTiming,
     TerminalState,
     TranscriptChunk,
@@ -984,7 +983,6 @@ def engine() -> sa.Engine:
         tables=[
             GoogleAccount.__table__,  # type: ignore[list-item]
             CalendarEvent.__table__,  # type: ignore[list-item]
-            ProfileTemplate.__table__,  # type: ignore[list-item]
             MeetingConfig.__table__,  # type: ignore[list-item]
             BotSession.__table__,  # type: ignore[list-item]
             AgentDecision.__table__,  # type: ignore[list-item]

@@ -13,14 +13,15 @@ from sqlalchemy.orm import Session
 
 from app.db import Base
 from app.db.models import (
+    Agent,
     BotMode,
     BotSession,
     BotSessionSource,
     BotSessionStatus,
     CalendarEvent,
     GoogleAccount,
+    MeetingAgent,
     MeetingConfig,
-    ProfileTemplate,
 )
 from app.services.session_scheduler import (
     DEFAULT_RELOGIN_TTL_SECONDS,
@@ -56,8 +57,9 @@ def engine() -> sa.Engine:
         tables=[
             GoogleAccount.__table__,  # type: ignore[list-item]
             CalendarEvent.__table__,  # type: ignore[list-item]
-            ProfileTemplate.__table__,  # type: ignore[list-item]
+            Agent.__table__,  # type: ignore[list-item]
             MeetingConfig.__table__,  # type: ignore[list-item]
+            MeetingAgent.__table__,  # type: ignore[list-item]
             BotSession.__table__,  # type: ignore[list-item]
         ],
     )
@@ -82,7 +84,7 @@ def _seed_full_meeting(
     enabled: bool = True,
     external_id: str = "evt-1",
 ) -> MeetingConfig:
-    """Insert account + event + template + meeting_config in one go."""
+    """Insert account + event + meeting_config in one go."""
     now = datetime.now(UTC).replace(microsecond=0)
     account = GoogleAccount(
         email=f"u-{external_id}@example.com",
@@ -99,26 +101,59 @@ def _seed_full_meeting(
     )
     sess.add(event)
     sess.flush()
-    template = ProfileTemplate(
-        name=f"tpl-{external_id}",
-        mode=BotMode.LISTEN_ONLY,
-        base_instructions="",
-        base_context="",
-        allowed_replies=[],
-        confidence_threshold=0.7,
-    )
-    sess.add(template)
-    sess.flush()
     cfg = MeetingConfig(
         calendar_event_id=event.id,
-        profile_template_id=template.id,
         identity_account_id=account.id,
-        mode=BotMode.LISTEN_ONLY,
         enabled=enabled,
     )
     sess.add(cfg)
     sess.flush()
     return cfg
+
+
+def _seed_agent(
+    sess: Session,
+    *,
+    name: str,
+    mode: BotMode = BotMode.AUTONOMOUS,
+    character_prompt: str = "",
+    allowed_replies: list[str] | None = None,
+    confidence_threshold: float = 0.7,
+    is_default: bool = False,
+) -> Agent:
+    row = Agent(
+        name=name,
+        character_prompt=character_prompt,
+        mode=mode,
+        allowed_replies=allowed_replies or [],
+        confidence_threshold=confidence_threshold,
+        is_default=is_default,
+    )
+    sess.add(row)
+    sess.flush()
+    return row
+
+
+def _assign_agent(
+    sess: Session,
+    *,
+    meeting: MeetingConfig,
+    agent: Agent,
+    context: str | None = None,
+    enabled: bool = True,
+    position: int = 0,
+) -> MeetingAgent:
+    row = MeetingAgent(
+        meeting_config_id=meeting.id,
+        agent_id=agent.id,
+        context=context,
+        enabled=enabled,
+        position=position,
+    )
+    sess.add(row)
+    sess.flush()
+    sess.refresh(meeting)
+    return row
 
 
 # --- Interval helper -------------------------------------------------------
@@ -523,32 +558,146 @@ async def test_start_session_creates_row_and_calls_launcher(
     assert ctx.meet_link == "https://meet.google.com/abc-defg-hij"
 
 
+# --- Johnny-trt.41: agent resolution at launch ------------------------------
+
+
 @pytest.mark.asyncio
-async def test_start_session_passes_instructions_and_context_to_launcher(
+async def test_start_session_default_agent_stamps_row_and_ctx(
     db_session: Session,
 ) -> None:
-    """Effective instructions/context = template base + meeting override."""
+    """(a) With no assignments, the ``is_default`` agent serves the session:
+    its behavior is frozen onto row.agent_snapshot / row.bot_name and the
+    LaunchContext reads the snapshot, never the live rows."""
     cfg = _seed_full_meeting(
         db_session,
         start_offset=timedelta(seconds=30),
         end_offset=timedelta(minutes=30),
     )
-    # Customize template + meeting overrides
-    cfg.profile_template.base_instructions = "Be polite."
-    cfg.profile_template.base_context = "Engineering team standup."
-    cfg.instructions = "Stay quiet unless asked."
-    cfg.context = "Today: new hire intros."
-    db_session.flush()
+    agent = _seed_agent(
+        db_session,
+        name="Johnny",
+        mode=BotMode.LIMITED_AUTO_SPEAK,
+        character_prompt="You are Johnny, sharp and dry.",
+        allowed_replies=["Yes.", "No."],
+        confidence_threshold=0.62,
+        is_default=True,
+    )
 
     launcher = NoopContainerLauncher()
-    await start_session_for_meeting(
+    row = await start_session_for_meeting(
         db_session, meeting=cfg, launcher=launcher
     )
-    assert len(launcher.started) == 1
+    db_session.refresh(row)
+    # The row freezes the serving agent.
+    assert row.agent_id == agent.id
+    assert row.bot_name == "Johnny"
+    snapshot = row.agent_snapshot
+    assert snapshot is not None
+    assert snapshot["agent_id"] == agent.id
+    assert snapshot["name"] == "Johnny"
+    assert snapshot["mode"] == "limited_auto_speak"
+    assert snapshot["character_prompt"] == "You are Johnny, sharp and dry."
+    assert snapshot["allowed_replies"] == ["Yes.", "No."]
+    assert snapshot["confidence_threshold"] == pytest.approx(0.62)
+    assert snapshot["assignment_context"] is None
+    assert set(snapshot["providers"]) == {
+        "router_llm_provider_id",
+        "answer_llm_provider_id",
+        "reasoning_llm_provider_id",
+        "tts_provider_id",
+        "tts_voice_id",
+        "tts_options",
+    }
+    # The launch context reads the snapshot fields.
     ctx = launcher.started[0]
-    assert ctx.instructions == "Be polite.\n\nStay quiet unless asked."
-    assert ctx.context == "Engineering team standup.\n\nToday: new hire intros."
-    assert ctx.mode == BotMode.LISTEN_ONLY.value
+    assert ctx.mode == "limited_auto_speak"
+    assert ctx.character_prompt == "You are Johnny, sharp and dry."
+    assert ctx.allowed_replies == ("Yes.", "No.")
+    assert ctx.confidence_threshold == pytest.approx(0.62)
+    # Instructions died with the override soup; context is the assignment's
+    # (none here — default-agent session).
+    assert ctx.instructions == ""
+    assert ctx.context == ""
+
+
+@pytest.mark.asyncio
+async def test_start_session_enabled_assignment_beats_default_agent(
+    db_session: Session,
+) -> None:
+    """(b) The meeting's first ENABLED assignment (lowest position) wins over
+    the default agent, and its per-assignment context rides ctx.context."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    _seed_agent(db_session, name="Default", is_default=True)
+    disabled = _seed_agent(db_session, name="Disabled", mode=BotMode.AUTONOMOUS)
+    assigned = _seed_agent(
+        db_session,
+        name="Aria",
+        mode=BotMode.SUGGEST_ONLY,
+        character_prompt="You are Aria.",
+    )
+    later = _seed_agent(db_session, name="Later", mode=BotMode.AUTONOMOUS)
+    # A disabled assignment at position 0 must be skipped...
+    _assign_agent(
+        db_session, meeting=cfg, agent=disabled, enabled=False, position=0
+    )
+    # ...the enabled one at the lowest position wins...
+    _assign_agent(
+        db_session,
+        meeting=cfg,
+        agent=assigned,
+        context="Aria runs the demo today.",
+        position=1,
+    )
+    # ...beating a higher-position enabled assignment.
+    _assign_agent(db_session, meeting=cfg, agent=later, position=2)
+
+    launcher = NoopContainerLauncher()
+    row = await start_session_for_meeting(
+        db_session, meeting=cfg, launcher=launcher
+    )
+    db_session.refresh(row)
+    assert row.agent_id == assigned.id
+    assert row.bot_name == "Aria"
+    assert row.agent_snapshot is not None
+    assert row.agent_snapshot["assignment_context"] == "Aria runs the demo today."
+    ctx = launcher.started[0]
+    assert ctx.mode == "suggest_only"
+    assert ctx.character_prompt == "You are Aria."
+    assert ctx.context == "Aria runs the demo today."
+    assert ctx.instructions == ""
+
+
+@pytest.mark.asyncio
+async def test_start_session_without_any_agent_degrades_to_contract_defaults(
+    db_session: Session,
+) -> None:
+    """(c) No agents in the DB at all → contract defaults: empty mode, no
+    bot_name/agent stamp, default threshold. The launch still happens."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    launcher = NoopContainerLauncher()
+    row = await start_session_for_meeting(
+        db_session, meeting=cfg, launcher=launcher
+    )
+    db_session.refresh(row)
+    assert row.status == BotSessionStatus.JOINING
+    assert row.agent_id is None
+    assert row.agent_snapshot is None
+    assert row.bot_name is None
+    ctx = launcher.started[0]
+    assert ctx.mode == ""
+    assert ctx.character_prompt == ""
+    assert ctx.instructions == ""
+    assert ctx.context == ""
+    assert ctx.allowed_replies == ()
+    assert ctx.confidence_threshold == pytest.approx(0.7)
     # No calendar description was set → empty calendar_context.
     assert ctx.calendar_context == ""
 
@@ -701,26 +850,6 @@ async def test_start_session_recurring_but_no_prior_session(
         db_session, meeting=cfg, launcher=launcher
     )
     assert launcher.started[0].prior_session_context == ""
-
-
-@pytest.mark.asyncio
-async def test_start_session_handles_empty_override_text(
-    db_session: Session,
-) -> None:
-    """Missing overrides fall back to template-only text — no extra separator."""
-    cfg = _seed_full_meeting(
-        db_session,
-        start_offset=timedelta(seconds=30),
-        end_offset=timedelta(minutes=30),
-    )
-    cfg.profile_template.base_instructions = "Only template instructions."
-    cfg.instructions = None
-    db_session.flush()
-    launcher = NoopContainerLauncher()
-    await start_session_for_meeting(
-        db_session, meeting=cfg, launcher=launcher
-    )
-    assert launcher.started[0].instructions == "Only template instructions."
 
 
 @pytest.mark.asyncio
@@ -991,24 +1120,20 @@ async def test_scheduler_pass_counts_launcher_errors(db_session: Session) -> Non
     assert result.error_count == 1
 
 
-# --- Johnny-oly.3: personality applied at scheduled meet-worker launch ------
+# --- Johnny-trt.41: active provider payload still rides the launch ----------
 
 
 @pytest.mark.asyncio
-async def test_start_session_applies_meeting_personality_with_fallback(
+async def test_start_session_serialises_active_provider_payload(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The meeting's personality is selected + applied to the provider payload
-    before it is serialised for the DB-free meet-worker. A pin at a deactivated
-    provider falls back to the global-active row and logs a fallback line —
-    proving the scheduler honours meeting_configs.personality_id."""
-    import logging
-
+    """The globally-active provider rows are materialised into
+    ``ctx.provider_config`` so the DB-free meet-worker can instantiate its
+    stack. (Per-agent provider-pin resolution is Johnny-trt.42.)"""
     from cryptography.fernet import Fernet
 
-    from app.db.models import Personality, ProviderCredential
+    from app.db.models import ProviderCredential
     from app.providers.base import ProviderKind
     from app.security.crypto import CredentialCrypto, encrypt_json
 
@@ -1016,7 +1141,6 @@ async def test_start_session_applies_meeting_personality_with_fallback(
     monkeypatch.setattr("app.security.crypto.get_crypto", lambda: crypto)
 
     engine = db_session.get_bind()
-    Personality.__table__.create(bind=engine, checkfirst=True)
     ProviderCredential.__table__.create(bind=engine, checkfirst=True)
 
     cfg = _seed_full_meeting(
@@ -1042,21 +1166,10 @@ async def test_start_session_applies_meeting_personality_with_fallback(
     )
     db_session.add_all([ga, dormant])
     db_session.flush()
-    personality = Personality(
-        display_name="PinsDormant",
-        is_default=True,
-        llm_provider_id=dormant.id,
-    )
-    db_session.add(personality)
-    db_session.flush()
-    cfg.personality_id = personality.id
-    db_session.flush()
 
     launcher = NoopContainerLauncher()
-    with caplog.at_level(logging.WARNING):
-        await start_session_for_meeting(db_session, meeting=cfg, launcher=launcher)
+    await start_session_for_meeting(db_session, meeting=cfg, launcher=launcher)
 
     ctx = launcher.started[0]
-    assert ctx.provider_config["llm"]["provider_name"] == "ga"  # global-active fallback
-    assert "personality.fallback:" in caplog.text
-    assert "reason=deactivated" in caplog.text
+    assert ctx.provider_config["llm"]["provider_name"] == "ga"  # active row only
+    assert ctx.provider_config["llm"]["credentials"] == {"api_key": "k"}

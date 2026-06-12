@@ -40,7 +40,7 @@ def _spec(
         calendar_context="cal",
         provider_payload=provider_payload,
         event_bus=InMemoryEventBus(),
-        personality_prompt="[personality: X]",
+        character_prompt="[personality: X]",
         prior_session_context="last week",
     )
 
@@ -61,7 +61,7 @@ def test_job_config_from_spec_maps_every_field() -> None:
     assert config.room_name == room_name_for_session(42)
     assert config.mode == "autonomous"
     assert config.instructions == "Be brief."
-    assert config.personality_prompt == "[personality: X]"
+    assert config.character_prompt == "[personality: X]"
     assert config.context == "ctx"
     assert config.calendar_context == "cal"
     assert config.prior_session_context == "last week"

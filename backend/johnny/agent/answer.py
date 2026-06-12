@@ -79,7 +79,7 @@ class AnswerConfig:
     ``mode`` (governs coercion / non-speaking / TTS-degrade) and
     ``allowed_replies`` (the allow-list coercion target). The router-decision,
     approval, and noise knobs belong to :class:`~johnny.agent.router_gate.RouterGateConfig`
-    and the gate; the prompt/personality pieces belong to
+    and the gate; the prompt/character pieces belong to
     :class:`~johnny.agent.session.AgentInstructionsConfig`. Defaults match
     the legacy split pipeline so an unconfigured reply behaves like
     the legacy default session.

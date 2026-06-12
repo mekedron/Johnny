@@ -55,9 +55,9 @@
 	let activeTab = $state<Tab>('transcript');
 
 	const exportHref = $derived(exportHistoryUrl(sessionId));
-	// Johnny-oly.6: render the bot name snapshotted for THIS session. Legacy
-	// sessions (and any with no personality) carry a null snapshot and fall
-	// back to "Johnny", the historical default.
+	// Render the bot name snapshotted for THIS session (the resolved agent's
+	// name). Legacy sessions carry a null snapshot and fall back to "Johnny",
+	// the historical default.
 	const botName = $derived(detail ? botDisplayName(detail.session) : 'Johnny');
 
 	async function loadDetail() {

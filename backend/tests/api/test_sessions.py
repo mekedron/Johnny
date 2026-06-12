@@ -14,6 +14,7 @@ from app.api.deps import get_session
 from app.api.sessions import set_launcher
 from app.db import Base
 from app.db.models import (
+    Agent,
     AgentDecision,
     AgentTask,
     AgentUtterance,
@@ -23,8 +24,8 @@ from app.db.models import (
     CalendarEvent,
     DecisionOutcome,
     GoogleAccount,
+    MeetingAgent,
     MeetingConfig,
-    ProfileTemplate,
     SessionTiming,
     TranscriptChunk,
 )
@@ -50,8 +51,9 @@ def engine() -> sa.Engine:
         tables=[
             GoogleAccount.__table__,  # type: ignore[list-item]
             CalendarEvent.__table__,  # type: ignore[list-item]
-            ProfileTemplate.__table__,  # type: ignore[list-item]
+            Agent.__table__,  # type: ignore[list-item]
             MeetingConfig.__table__,  # type: ignore[list-item]
+            MeetingAgent.__table__,  # type: ignore[list-item]
             BotSession.__table__,  # type: ignore[list-item]
             TranscriptChunk.__table__,  # type: ignore[list-item]
             AgentDecision.__table__,  # type: ignore[list-item]
@@ -110,7 +112,7 @@ def _seed_meeting(
     meet_link: str | None = "https://meet.google.com/xyz-pqrs-tuv",
     enabled: bool = True,
 ) -> tuple[CalendarEvent, MeetingConfig]:
-    """Seed a full account/event/template/meeting_config chain."""
+    """Seed a full account/event/meeting_config chain."""
     now = datetime.now(UTC).replace(microsecond=0)
     account = GoogleAccount(
         email="u@example.com",
@@ -127,21 +129,9 @@ def _seed_meeting(
     )
     db_session.add(event)
     db_session.flush()
-    template = ProfileTemplate(
-        name="tpl",
-        mode=BotMode.LISTEN_ONLY,
-        base_instructions="",
-        base_context="",
-        allowed_replies=[],
-        confidence_threshold=0.7,
-    )
-    db_session.add(template)
-    db_session.flush()
     cfg = MeetingConfig(
         calendar_event_id=event.id,
-        profile_template_id=template.id,
         identity_account_id=account.id,
-        mode=BotMode.LISTEN_ONLY,
         enabled=enabled,
     )
     db_session.add(cfg)

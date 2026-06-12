@@ -47,6 +47,22 @@ export type BotMode =
 	| 'limited_auto_speak'
 	| 'autonomous';
 
+export const BOT_MODES: readonly BotMode[] = [
+	'listen_only',
+	'suggest_only',
+	'approval_required',
+	'limited_auto_speak',
+	'autonomous'
+];
+
+export const BOT_MODE_LABEL: Record<BotMode, string> = {
+	listen_only: 'Listen only',
+	suggest_only: 'Suggest only',
+	approval_required: 'Approval required',
+	limited_auto_speak: 'Limited auto-speak',
+	autonomous: 'Autonomous'
+};
+
 export interface TranscriptChunk {
 	id: number;
 	bot_session_id: number;

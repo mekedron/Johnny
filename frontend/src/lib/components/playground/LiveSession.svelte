@@ -11,10 +11,9 @@
 	import VolumeXIcon from '@lucide/svelte/icons/volume-x';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import UtteranceAudioButton from '$lib/components/UtteranceAudioButton.svelte';
-	import { sessionAudioUrl } from '$lib/sessionDetail';
-	import { BOT_MODE_LABEL, type BotMode } from '$lib/templates';
+	import { BOT_MODE_LABEL, sessionAudioUrl, type BotMode } from '$lib/sessionDetail';
 	import { type Provider, type ProviderKind } from '$lib/providers';
-	import { readSessionPersonality, fallbackChipText } from '$lib/personalities';
+	import { readSessionAgent } from '$lib/agents';
 	import type { LiveState, PlaygroundController } from '$lib/playground/playgroundSession.svelte';
 
 	let { controller }: { controller: PlaygroundController } = $props();
@@ -46,14 +45,6 @@
 				: {};
 		const liveMode = typeof overrides.mode === 'string' ? overrides.mode : controller.mode;
 		chips.push({ label: 'Mode', value: BOT_MODE_LABEL[liveMode as BotMode] ?? liveMode });
-		const templateId =
-			typeof overrides.template_id === 'number'
-				? overrides.template_id
-				: controller.selectedTemplateId;
-		if (templateId !== null && templateId !== undefined) {
-			const t = controller.templates.find((tpl) => tpl.id === templateId);
-			if (t) chips.push({ label: 'Template', value: t.name });
-		}
 		const liveProviders =
 			overrides.providers && typeof overrides.providers === 'object'
 				? (overrides.providers as Record<string, { credentials_id?: number }>)
@@ -73,8 +64,7 @@
 				if (def) chips.push({ label: kind.toUpperCase(), value: `${def.display_name} (default)` });
 			}
 		}
-		const liveCharacter =
-			typeof overrides.personality_name === 'string' ? overrides.personality_name : null;
+		const liveCharacter = session ? readSessionAgent(session).agentName : null;
 		if (liveCharacter) {
 			chips.push({ label: 'Character', value: liveCharacter });
 		}
@@ -84,16 +74,6 @@
 			chips.push({ label: 'Persona', value: livePersona.trim().slice(0, 32) });
 		}
 		return chips;
-	});
-
-	// Johnny-oly.6: surface a personality provider fallback as a warning line.
-	const liveFallbacks = $derived.by(() => {
-		const session = controller.liveSession;
-		return session ? readSessionPersonality(session).fallbacks : [];
-	});
-	const liveCharacterName = $derived.by(() => {
-		const session = controller.liveSession;
-		return session ? readSessionPersonality(session).name : null;
 	});
 
 	function handleComposerKeydown(e: KeyboardEvent) {
@@ -152,18 +132,6 @@
 								<span class="font-semibold text-ink-subtle">{chip.label}</span>
 								<span class="text-foreground">{chip.value}</span>
 							</span>
-						{/each}
-					</div>
-				{/if}
-				{#if liveFallbacks.length > 0}
-					<div class="flex flex-col gap-1" data-testid="live-fallbacks">
-						{#each liveFallbacks as fb (fb.kind)}
-							<a
-								href="/personalities"
-								class="text-warning border-warning/40 bg-warning/10 hover:bg-warning/15 block rounded-sm border px-2 py-1 text-xs"
-							>
-								{fallbackChipText(liveCharacterName, fb)}
-							</a>
 						{/each}
 					</div>
 				{/if}

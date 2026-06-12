@@ -15,7 +15,6 @@
 	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import * as Alert from '$lib/components/ui/alert/index.js';
-	import { Input } from '$lib/components/ui/input/index.js';
 	import Page from '$lib/components/page.svelte';
 	import PageHeader from '$lib/components/page-header.svelte';
 	import { listAccounts, type Account } from '$lib/accounts';
@@ -28,18 +27,9 @@
 		type CalendarSyncSummary
 	} from '$lib/calendar';
 	import {
-		BOT_MODE_LABEL,
-		BOT_MODES,
-		listTemplates,
-		type BotMode,
-		type Template
-	} from '$lib/templates';
-	import {
 		deleteMeetingConfig,
 		dismissBot,
-		formatAllowedRepliesText,
 		getMeetingConfig,
-		parseAllowedRepliesText,
 		undismissBot,
 		upsertMeetingConfig,
 		type MeetingConfig,
@@ -47,23 +37,9 @@
 	} from '$lib/meetingConfigs';
 	import { startSession } from '$lib/sessions';
 	import { startBrowserSession } from '$lib/browserSessions';
-	import PersonalityPicker from '$lib/components/PersonalityPicker.svelte';
-	import {
-		listPersonalities,
-		defaultPersonalitySelection,
-		type Personality
-	} from '$lib/personalities';
 	import { goto } from '$app/navigation';
 
 	const WINDOW_DAYS = 14;
-
-	const MODE_DESCRIPTION: Record<BotMode, string> = {
-		listen_only: 'Transcribe silently. Johnny never speaks.',
-		suggest_only: 'Propose replies in the UI. Operator decides whether to speak.',
-		approval_required: 'Propose a reply, then wait for operator approval before speaking.',
-		limited_auto_speak: 'Auto-speak — but only from a fixed allowlist below.',
-		autonomous: 'Free-form speech guided only by the instructions. No approval, no allowlist.'
-	};
 
 	let accounts = $state<Account[]>([]);
 	let selectedAccountId = $state<number | null>(null);
@@ -82,23 +58,12 @@
 		selectedAccount?.token_health === 'needs_reauth'
 	);
 
-	let templates = $state<Template[]>([]);
-	let templatesLoaded = $state(false);
-	let templatesError = $state<string | null>(null);
-	let personalities = $state<Personality[]>([]);
-	let personalitiesLoaded = $state(false);
 	let panelLoading = $state(false);
 	let panelError = $state<string | null>(null);
 	let panelSuccess = $state<string | null>(null);
 	let existingConfig = $state<MeetingConfig | null>(null);
-	let formTemplateId = $state<number | null>(null);
 	let formIdentityId = $state<number | null>(null);
-	let formPersonalityId = $state<number | null>(null);
-	let formMode = $state<BotMode>('listen_only');
-	let formInstructions = $state('');
-	let formContext = $state('');
-	let formAllowedRepliesText = $state('');
-	let formThresholdText = $state('');
+	let formEnabled = $state(true);
 	let formSaving = $state(false);
 	let formDeleting = $state(false);
 	let askingDisable = $state(false);
@@ -125,27 +90,26 @@
 			? summary.created_count + summary.updated_count + summary.deleted_count
 			: 0
 	);
-	const requiresAllowedReplies = $derived(formMode === 'limited_auto_speak');
-	const requiresInstructions = $derived(formMode === 'autonomous');
-
 	const hasPendingChanges = $derived.by(() => {
 		if (!existingConfig) return true;
-		const allowed = formatAllowedRepliesText(existingConfig.allowed_replies);
-		const threshold =
-			existingConfig.confidence_threshold !== null
-				? String(existingConfig.confidence_threshold)
-				: '';
 		return (
-			formTemplateId !== existingConfig.profile_template_id ||
 			formIdentityId !== existingConfig.identity_account_id ||
-			formPersonalityId !== existingConfig.personality_id ||
-			formMode !== existingConfig.mode ||
-			formInstructions !== (existingConfig.instructions ?? '') ||
-			formContext !== (existingConfig.context ?? '') ||
-			formAllowedRepliesText !== allowed ||
-			formThresholdText !== threshold
+			formEnabled !== existingConfig.enabled
 		);
 	});
+
+	/**
+	 * Read-only summary of the meeting's agent assignments (the management
+	 * UI for them is a later task). Empty = the default agent applies.
+	 */
+	function agentSummary(config: MeetingConfig): string {
+		const names = config.agents
+			.slice()
+			.sort((a, b) => a.position - b.position)
+			.map((a) => a.agent_name);
+		if (names.length === 0) return 'Agent: default';
+		return names.length === 1 ? `Agent: ${names[0]}` : `Agents: ${names.join(', ')}`;
+	}
 
 	async function loadAccounts() {
 		loadingAccounts = true;
@@ -229,40 +193,12 @@
 		tryBotMessage = null;
 		dismissMessage = null;
 		try {
-			await Promise.all([
-				ensureTemplatesLoaded(),
-				ensurePersonalitiesLoaded(),
-				loadConfig(event.id)
-			]);
+			await loadConfig(event.id);
 			seedForm(existingConfig);
 		} catch (e) {
 			panelError = e instanceof Error ? e.message : String(e);
 		} finally {
 			panelLoading = false;
-		}
-	}
-
-	async function ensurePersonalitiesLoaded() {
-		if (personalitiesLoaded) return;
-		// Best-effort: a personality load failure must not block configuring a
-		// meeting. The picker just shows the blank option until it loads.
-		try {
-			personalities = await listPersonalities();
-			personalitiesLoaded = true;
-		} catch {
-			personalities = [];
-		}
-	}
-
-	async function ensureTemplatesLoaded() {
-		if (templatesLoaded) return;
-		try {
-			templates = await listTemplates();
-			templatesLoaded = true;
-			templatesError = null;
-		} catch (e) {
-			templatesError = e instanceof Error ? e.message : String(e);
-			throw e;
 		}
 	}
 
@@ -272,40 +208,14 @@
 
 	function seedForm(config: MeetingConfig | null) {
 		if (config) {
-			formTemplateId = config.profile_template_id;
 			formIdentityId = config.identity_account_id;
-			formMode = config.mode;
-			formPersonalityId = config.personality_id;
-			formInstructions = config.instructions ?? '';
-			formContext = config.context ?? '';
-			formAllowedRepliesText = formatAllowedRepliesText(config.allowed_replies);
-			formThresholdText =
-				config.confidence_threshold !== null
-					? String(config.confidence_threshold)
-					: '';
+			formEnabled = config.enabled;
 			return;
 		}
-		formTemplateId = templates[0]?.id ?? null;
 		const defaultAccount =
 			accounts.find((a) => a.bot_session.connected) ?? accounts[0];
 		formIdentityId = defaultAccount?.id ?? null;
-		formPersonalityId = defaultPersonalitySelection(personalities);
-		const seedTemplate = templates[0] ?? null;
-		formMode = seedTemplate?.mode ?? 'listen_only';
-		formInstructions = '';
-		formContext = '';
-		formAllowedRepliesText = '';
-		formThresholdText = '';
-	}
-
-	function onTemplateChange(event: Event) {
-		const value = (event.currentTarget as HTMLSelectElement).value;
-		const parsed = Number(value);
-		formTemplateId = Number.isFinite(parsed) ? parsed : null;
-		// Adopt the template's mode so the form pre-fills sanely; the
-		// operator may still override before save.
-		const tpl = templates.find((t) => t.id === formTemplateId);
-		if (tpl) formMode = tpl.mode;
+		formEnabled = true;
 	}
 
 	async function confirmDisable() {
@@ -342,32 +252,18 @@
 	async function onSubmit(event: Event) {
 		event.preventDefault();
 		if (!selectedEvent) return;
-		if (formTemplateId === null) {
-			panelError = 'Pick a profile template.';
-			return;
-		}
 		if (formIdentityId === null) {
 			panelError = 'Pick an identity account.';
-			return;
-		}
-		const parsedThreshold = parseThreshold(formThresholdText);
-		if (parsedThreshold === 'invalid') {
-			panelError = 'Confidence threshold must be a number between 0 and 1.';
 			return;
 		}
 		formSaving = true;
 		panelError = null;
 		panelSuccess = null;
+		// `agents` is deliberately omitted: assignments are managed elsewhere
+		// (a later task) and an omitted key leaves them unchanged server-side.
 		const payload: MeetingConfigUpsertPayload = {
-			profile_template_id: formTemplateId,
 			identity_account_id: formIdentityId,
-			personality_id: formPersonalityId,
-			mode: formMode,
-			instructions: formInstructions.trim() === '' ? null : formInstructions,
-			context: formContext.trim() === '' ? null : formContext,
-			allowed_replies: parseAllowedRepliesText(formAllowedRepliesText),
-			confidence_threshold: parsedThreshold,
-			enabled: true
+			enabled: formEnabled
 		};
 		try {
 			existingConfig = await upsertMeetingConfig(selectedEvent.id, payload);
@@ -386,14 +282,6 @@
 		} finally {
 			formSaving = false;
 		}
-	}
-
-	function parseThreshold(value: string): number | null | 'invalid' {
-		const trimmed = value.trim();
-		if (trimmed.length === 0) return null;
-		const num = Number(trimmed);
-		if (!Number.isFinite(num) || num < 0 || num > 1) return 'invalid';
-		return num;
 	}
 
 	async function handleJoinNow() {
@@ -866,29 +754,6 @@
 				<p class="px-6 py-5 text-sm italic text-muted-foreground">
 					Loading configuration…
 				</p>
-			{:else if templatesError}
-				<div class="px-6 py-5">
-					<Alert.Root variant="destructive">
-						<CircleAlertIcon />
-						<Alert.Title>Couldn't load templates</Alert.Title>
-						<Alert.Description>{templatesError}</Alert.Description>
-					</Alert.Root>
-				</div>
-			{:else if templates.length === 0}
-				<div class="px-6 py-5">
-					<Alert.Root>
-						<CircleAlertIcon />
-						<Alert.Title>No templates yet</Alert.Title>
-						<Alert.Description>
-							Create a profile template before configuring this meeting.
-						</Alert.Description>
-					</Alert.Root>
-					<div class="mt-3">
-						<Button variant="outline" href="/templates">
-							Create a template
-						</Button>
-					</div>
-				</div>
 			{:else if accounts.length === 0}
 				<div class="px-6 py-5">
 					<Alert.Root>
@@ -915,7 +780,7 @@
 								class="text-[0.65rem] text-ink-subtle"
 								data-testid="bot-state-chip"
 							>
-								Configured · {BOT_MODE_LABEL[existingConfig.mode]}
+								Configured
 								{existingConfig.bot_state === 'dismissed'
 									? ' · Ended for this meeting'
 									: existingConfig.bot_state === 'active'
@@ -1048,27 +913,6 @@
 
 						<section class="flex flex-col gap-2">
 							<label
-								for="mc-template"
-								class="text-sm leading-none font-medium text-foreground"
-								>Profile template</label
-							>
-							<select
-								id="mc-template"
-								value={formTemplateId ?? ''}
-								onchange={onTemplateChange}
-								class="border-input flex h-9 w-full rounded-md border bg-background px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
-								data-testid="template-select"
-							>
-								{#each templates as tpl (tpl.id)}
-									<option value={tpl.id}>
-										{tpl.name} · {BOT_MODE_LABEL[tpl.mode]}
-									</option>
-								{/each}
-							</select>
-						</section>
-
-						<section class="flex flex-col gap-2">
-							<label
 								for="mc-identity"
 								class="text-sm leading-none font-medium text-foreground"
 								>Identity</label
@@ -1089,127 +933,34 @@
 
 						<section class="flex flex-col gap-2">
 							<label
-								for="mc-mode"
-								class="text-sm leading-none font-medium text-foreground"
-								>Mode</label
+								class="flex items-center gap-2 text-sm leading-none font-medium text-foreground"
 							>
-							<select
-								id="mc-mode"
-								bind:value={formMode}
-								class="border-input flex h-9 w-full rounded-md border bg-background px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
-								data-testid="mode-select"
-							>
-								{#each BOT_MODES as mode (mode)}
-									<option value={mode}>{BOT_MODE_LABEL[mode]}</option>
-								{/each}
-							</select>
-							<p
-								class="m-0 text-xs text-muted-foreground"
-								data-testid="mode-help"
-							>
-								{MODE_DESCRIPTION[formMode]}
+								<input
+									type="checkbox"
+									bind:checked={formEnabled}
+									class="size-4 rounded-sm border border-border-strong bg-surface-3 [accent-color:var(--color-foreground)]"
+									data-testid="enabled-toggle"
+								/>
+								Enable Johnny
+							</label>
+							<p class="m-0 text-xs text-muted-foreground">
+								When enabled, the scheduler joins this meeting automatically.
 							</p>
 						</section>
 
-						<section class="flex flex-col gap-2">
-							<PersonalityPicker
-								id="mc-personality"
-								{personalities}
-								value={formPersonalityId}
-								onChange={(v) => (formPersonalityId = v)}
-								helpText="Overrides the bot's LLM + TTS for this meeting. Blank uses the global default providers."
-							/>
-						</section>
-
-						<section class="flex flex-col gap-2">
-							<label
-								for="mc-instructions"
-								class="text-sm leading-none font-medium text-foreground"
-							>
-								Additional instructions
-								{#if requiresInstructions}
-									<span
-										class="ml-1 text-destructive"
-										aria-hidden="true">*</span
-									>
-								{/if}
-							</label>
-							<textarea
-								id="mc-instructions"
-								bind:value={formInstructions}
-								rows="3"
-								required={requiresInstructions}
-								placeholder="Override or extend the template's instructions for this meeting."
-								class="border-input flex w-full rounded-md border bg-background px-3 py-2 font-mono text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
-								data-testid="instructions-input"
-							></textarea>
-							{#if requiresInstructions}
-								<p class="m-0 text-xs text-warning">
-									Required in Autonomous mode — the only governance for what
-									Johnny will say.
-								</p>
-							{/if}
-						</section>
-
-						<section class="flex flex-col gap-2">
-							<label
-								for="mc-context"
-								class="text-sm leading-none font-medium text-foreground"
-								>Additional context</label
-							>
-							<textarea
-								id="mc-context"
-								bind:value={formContext}
-								rows="3"
-								placeholder="Anything Johnny should know — project, audience, history."
-								class="border-input flex w-full rounded-md border bg-background px-3 py-2 font-mono text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
-								data-testid="context-input"
-							></textarea>
-						</section>
-
-						{#if requiresAllowedReplies}
-							<section
-								class="flex flex-col gap-2"
-								data-testid="allowed-section"
-							>
-								<label
-									for="mc-allowed"
-									class="text-sm leading-none font-medium text-foreground"
+						{#if existingConfig}
+							<section class="flex flex-col gap-1">
+								<span
+									class="text-sm text-muted-foreground"
+									data-testid="agents-summary"
 								>
-									Additional allowed replies
-								</label>
-								<textarea
-									id="mc-allowed"
-									bind:value={formAllowedRepliesText}
-									rows="3"
-									placeholder={'Yes\nNo\nCould you repeat that?'}
-									class="border-input flex w-full rounded-md border bg-background px-3 py-2 font-mono text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
-									data-testid="allowed-replies-input"
-								></textarea>
-								<p class="m-0 text-xs text-muted-foreground">
-									One reply per line. Combined with the template's replies.
+									{agentSummary(existingConfig)}
+								</span>
+								<p class="m-0 text-xs text-ink-subtle">
+									Agent assignments for this meeting are managed separately.
 								</p>
 							</section>
 						{/if}
-
-						<section class="flex flex-col gap-2">
-							<div class="flex items-baseline justify-between gap-3">
-								<label
-									for="mc-threshold"
-									class="text-sm leading-none font-medium text-foreground"
-									>Confidence threshold</label
-								>
-								<span class="text-xs text-ink-subtle">0.0–1.0 · blank inherits</span>
-							</div>
-							<Input
-								id="mc-threshold"
-								bind:value={formThresholdText}
-								inputmode="decimal"
-								placeholder="e.g. 0.8"
-								class="font-mono"
-								data-testid="threshold-input"
-							/>
-						</section>
 					</div>
 
 					<footer

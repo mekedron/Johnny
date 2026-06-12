@@ -2,7 +2,6 @@
 	import { onMount } from 'svelte';
 	import CalendarIcon from '@lucide/svelte/icons/calendar';
 	import PlayIcon from '@lucide/svelte/icons/circle-play';
-	import ScrollTextIcon from '@lucide/svelte/icons/scroll-text';
 	import CableIcon from '@lucide/svelte/icons/cable';
 	import HistoryIcon from '@lucide/svelte/icons/history';
 	import SettingsIcon from '@lucide/svelte/icons/settings';
@@ -50,12 +49,6 @@
 			label: 'Playground',
 			description: 'Talk to Johnny in the browser without Meet.',
 			icon: PlayIcon
-		},
-		{
-			href: '/templates',
-			label: 'Templates',
-			description: 'Reusable behavior profiles applied per meeting.',
-			icon: ScrollTextIcon
 		},
 		{
 			href: '/providers',

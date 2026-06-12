@@ -26,24 +26,23 @@ import {
 	type StartBrowserSessionPayload
 } from '$lib/browserSessions';
 import { startBrowserAudioSession, type BrowserAudioSession } from '$lib/browserAudio';
-import { BOT_MODES, listTemplates, type BotMode, type Template } from '$lib/templates';
 import {
 	listProviders,
 	type Provider,
 	type ProviderKind
 } from '$lib/providers';
-import {
-	listPersonalities,
-	defaultPersonalitySelection,
-	type Personality
-} from '$lib/personalities';
 import { listAccounts, type Account } from '$lib/accounts';
 import {
 	PlaygroundMicDeniedError,
 	startPlaygroundStt,
 	type PlaygroundSttSession
 } from '$lib/playgroundStt';
-import { getSessionDetail, type SessionDetail } from '$lib/sessionDetail';
+import {
+	BOT_MODES,
+	getSessionDetail,
+	type BotMode,
+	type SessionDetail
+} from '$lib/sessionDetail';
 import {
 	subscribeToSession,
 	type AgentSpeechPartialEvent,
@@ -138,13 +137,8 @@ export class PlaygroundController {
 		'Respond directly without any speaker label, bot name, role prefix, or text before the actual message.'
 	);
 	mode = $state<BotMode>('autonomous');
-	selectedTemplateId = $state<number | null>(null);
-	// Johnny-oly.6: selected personality (null = blank/no override). Sticky in
-	// localStorage so the last pick survives a reload (seeded in loadMetadata).
-	selectedPersonalityId = $state<number | null>(null);
-	personalities = $state<Personality[]>([]);
 	// Johnny-8th: account this playground run belongs to (null = account-less).
-	// Sticky in localStorage like the personality pick (seeded in loadMetadata).
+	// Sticky in localStorage (seeded in loadMetadata).
 	selectedAccountId = $state<number | null>(null);
 	accounts = $state<Account[]>([]);
 	contextInjection = $state('');
@@ -154,7 +148,6 @@ export class PlaygroundController {
 		llm: null,
 		tts: null
 	});
-	templates = $state<Template[]>([]);
 	providers = $state<{ stt: Provider[]; llm: Provider[]; tts: Provider[] }>({
 		stt: [],
 		llm: [],
@@ -259,82 +252,23 @@ export class PlaygroundController {
 	loadMetadata = async (): Promise<void> => {
 		this.loadingMetadata = true;
 		try {
-			const [tpls, provs, persons, accts] = await Promise.all([
-				listTemplates(),
+			const [provs, accts] = await Promise.all([
 				listProviders(),
-				listPersonalities().catch(() => [] as Personality[]),
 				listAccounts().catch(() => [] as Account[])
 			]);
-			this.templates = tpls;
 			this.providers = provs;
-			this.personalities = persons;
 			this.accounts = accts;
-			this.seedPersonalitySelection();
 			this.seedAccountSelection();
 		} catch (err) {
 			this.setDiagnostic('general', {
 				severity: 'error',
 				title: 'Could not load configuration',
-				message: `Failed to load templates / providers: ${this.errText(err)}`
+				message: `Failed to load providers: ${this.errText(err)}`
 			});
 		} finally {
 			this.loadingMetadata = false;
 		}
 	};
-
-	// --- personality sticky selection (Johnny-oly.6) -----------------------
-
-	private static readonly PERSONALITY_KEY = 'johnny:playground:personality';
-
-	/**
-	 * Seed the selection from localStorage, falling back to the default
-	 * personality. A stored '' is the blank/no-override option; a stored id no
-	 * longer in the library falls back to the default.
-	 */
-	private seedPersonalitySelection(): void {
-		const stored = this.readStoredPersonality();
-		if (stored === undefined) {
-			this.selectedPersonalityId = defaultPersonalitySelection(this.personalities);
-			return;
-		}
-		if (stored !== null && !this.personalities.some((p) => p.id === stored)) {
-			this.selectedPersonalityId = defaultPersonalitySelection(this.personalities);
-			return;
-		}
-		this.selectedPersonalityId = stored;
-	}
-
-	/** Set the selection and persist it (sticky across reloads). */
-	selectPersonality = (value: number | null): void => {
-		this.selectedPersonalityId = value;
-		try {
-			if (typeof localStorage === 'undefined') return;
-			localStorage.setItem(
-				PlaygroundController.PERSONALITY_KEY,
-				value === null ? '' : String(value)
-			);
-		} catch {
-			// localStorage can throw (private mode / quota); a non-sticky
-			// selection is acceptable degradation.
-		}
-	};
-
-	/**
-	 * Read the stored selection: `undefined` = nothing stored, `null` = the
-	 * blank option, a number = a pinned personality id.
-	 */
-	private readStoredPersonality(): number | null | undefined {
-		try {
-			if (typeof localStorage === 'undefined') return undefined;
-			const raw = localStorage.getItem(PlaygroundController.PERSONALITY_KEY);
-			if (raw === null) return undefined;
-			if (raw === '') return null;
-			const n = Number(raw);
-			return Number.isFinite(n) ? n : undefined;
-		} catch {
-			return undefined;
-		}
-	}
 
 	// --- account sticky selection (Johnny-8th) -----------------------------
 
@@ -420,23 +354,17 @@ export class PlaygroundController {
 				overrides[kind] = { credentials_id: id };
 			}
 		}
+		// No agent_id: the server resolves the meeting's assignment / default
+		// agent. A playground agent picker arrives in a later task.
 		const payload: StartBrowserSessionPayload = {
 			mode: this.mode,
 			persona: this.persona.trim() || undefined,
-			personality_id: this.selectedPersonalityId,
 			account_id: this.selectedAccountId
 		};
 		if (Object.keys(overrides).length > 0) {
 			payload.provider_overrides = overrides;
 		}
 		const parts: string[] = [];
-		if (this.selectedTemplateId !== null) {
-			const tpl = this.templates.find((t) => t.id === this.selectedTemplateId);
-			if (tpl) {
-				if (tpl.base_instructions) parts.push(tpl.base_instructions);
-				if (tpl.base_context) parts.push(`Context:\n${tpl.base_context}`);
-			}
-		}
 		if (this.systemPrompt.trim()) parts.push(this.systemPrompt.trim());
 		const ctx = this.contextInjection.trim();
 		if (ctx) parts.push(`Additional context:\n${ctx}`);
@@ -526,7 +454,6 @@ export class PlaygroundController {
 			const overrides = (s.playground_overrides ?? {}) as Record<string, unknown>;
 			if (typeof overrides.persona === 'string') this.persona = overrides.persona;
 			if (typeof overrides.system_prompt === 'string') this.systemPrompt = overrides.system_prompt;
-			if (typeof overrides.template_id === 'number') this.selectedTemplateId = overrides.template_id;
 			if (
 				typeof overrides.mode === 'string' &&
 				(BOT_MODES as readonly string[]).includes(overrides.mode)

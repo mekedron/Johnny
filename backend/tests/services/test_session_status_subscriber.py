@@ -26,7 +26,6 @@ from app.db.models import (
     GoogleAccount,
     MeetingConfig,
     NoReplyReason,
-    ProfileTemplate,
     SessionTiming,
     TerminalState,
 )
@@ -63,7 +62,6 @@ def engine() -> sa.Engine:
         tables=[
             GoogleAccount.__table__,  # type: ignore[list-item]
             CalendarEvent.__table__,  # type: ignore[list-item]
-            ProfileTemplate.__table__,  # type: ignore[list-item]
             MeetingConfig.__table__,  # type: ignore[list-item]
             BotSession.__table__,  # type: ignore[list-item]
             AgentDecision.__table__,  # type: ignore[list-item]
@@ -256,14 +254,10 @@ def _seed_signed_out_meeting(
     )
     db_session.add(event)
     db_session.flush()
-    template = ProfileTemplate(name="signed-out-tmpl", mode=BotMode.LISTEN_ONLY)
-    db_session.add(template)
-    db_session.flush()
     meeting = MeetingConfig(
         calendar_event_id=event.id,
-        profile_template_id=template.id,
         identity_account_id=account.id,
-        mode=BotMode.LISTEN_ONLY,
+        enabled=True,
     )
     db_session.add(meeting)
     db_session.flush()

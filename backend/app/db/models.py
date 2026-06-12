@@ -308,26 +308,94 @@ class CalendarEvent(TimestampMixin, Base):
     )
 
 
-class ProfileTemplate(TimestampMixin, Base):
-    __tablename__ = "profile_templates"
+class Agent(TimestampMixin, Base):
+    """One first-class AGENT — identity, character, behavior, providers (Johnny-trt.41).
+
+    Replaces the retired ProfileTemplate + Personality pair (and the
+    per-meeting override soup that composed them). An agent owns:
+
+    * **identity** — ``name`` (what users call it in the meeting), ``avatar``
+      (an emoji / short glyph for the UI), ``description`` (human-facing
+      library text, NOT injected into any prompt);
+    * **character** — ``character_prompt``, the communication-style /
+      character text injected verbatim as the IDENTITY layer of the LLM
+      system prompt (upstream of the per-mode JOB layer);
+    * **behavior** — ``mode``, ``allowed_replies``, ``confidence_threshold``
+      (the router knobs that used to be re-read from meeting_config /
+      template rows at turn time; sessions now read them from the
+      ``bot_sessions.agent_snapshot`` captured at dispatch);
+    * **providers** — split-pipeline role slots (Johnny-trt.41 note: agents
+      are split-only; the S2S branch was reversed). The single legacy LLM
+      pin became THREE role slots: ``router_llm_provider_id`` (triage),
+      ``answer_llm_provider_id`` (conversational replies),
+      ``reasoning_llm_provider_id`` (delegated tasks in the worker
+      executor), plus ``tts_provider_id`` with ``tts_voice_id`` /
+      ``tts_options``. All nullable: NULL = inherit the global default for
+      that role → global active (the resolution itself is Johnny-trt.42;
+      this table only stores + kind-validates the pins).
+
+    Exactly one row carries ``is_default=true`` at any time, enforced by a
+    partial unique index (the personalities/providers pattern). Provider
+    deletes ``SET NULL`` the FK rather than cascading so deleting a provider
+    never destroys an agent.
+    """
+
+    __tablename__ = "agents"
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_agents_name"),
+        Index(
+            "uq_agents_single_default",
+            "is_default",
+            unique=True,
+            postgresql_where=text("is_default"),
+            sqlite_where=text("is_default"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
-    mode: Mapped[BotMode] = mapped_column(_bot_mode_column(), nullable=False)
-    base_instructions: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    base_context: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    avatar: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    character_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    mode: Mapped[BotMode] = mapped_column(
+        _bot_mode_column(), nullable=False, default=BotMode.LISTEN_ONLY
+    )
     allowed_replies: Mapped[list[str]] = mapped_column(
         _json_column(), nullable=False, default=list
     )
     confidence_threshold: Mapped[float] = mapped_column(Float, nullable=False, default=0.7)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    router_llm_provider_id: Mapped[int | None] = mapped_column(
+        ForeignKey("provider_credentials.id", ondelete="SET NULL"), nullable=True
+    )
+    answer_llm_provider_id: Mapped[int | None] = mapped_column(
+        ForeignKey("provider_credentials.id", ondelete="SET NULL"), nullable=True
+    )
+    reasoning_llm_provider_id: Mapped[int | None] = mapped_column(
+        ForeignKey("provider_credentials.id", ondelete="SET NULL"), nullable=True
+    )
+    tts_provider_id: Mapped[int | None] = mapped_column(
+        ForeignKey("provider_credentials.id", ondelete="SET NULL"), nullable=True
+    )
+    tts_voice_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    tts_options: Mapped[dict[str, Any]] = mapped_column(
+        _json_column(), nullable=False, default=dict
+    )
 
-    meeting_configs: Mapped[list[MeetingConfig]] = relationship(
-        back_populates="profile_template"
+    meeting_assignments: Mapped[list[MeetingAgent]] = relationship(
+        back_populates="agent", cascade="all, delete-orphan"
     )
 
 
 class MeetingConfig(TimestampMixin, Base):
-    """Per-meeting bot configuration; references a profile template and stores overrides."""
+    """Per-meeting bot participation: identity account + agent assignments.
+
+    The behavior/override columns (mode / instructions / context /
+    allowed_replies / confidence_threshold / template + personality FKs)
+    were removed in the Johnny-trt.41 agents rebuild — behavior now lives on
+    the assigned :class:`Agent` rows (via :class:`MeetingAgent`), snapshotted
+    onto ``bot_sessions.agent_snapshot`` at dispatch.
+    """
 
     __tablename__ = "meeting_configs"
 
@@ -337,27 +405,10 @@ class MeetingConfig(TimestampMixin, Base):
         nullable=False,
         unique=True,
     )
-    profile_template_id: Mapped[int] = mapped_column(
-        ForeignKey("profile_templates.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
     identity_account_id: Mapped[int] = mapped_column(
         ForeignKey("google_accounts.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    # Johnny-oly.3: optional per-meeting personality (LLM/TTS/mode preset).
-    # NULL = use the global default personality. ``ON DELETE SET NULL`` (not
-    # RESTRICT like the template FK) so deleting a personality never blocks —
-    # the session resolver falls back to the default / global active instead.
-    personality_id: Mapped[int | None] = mapped_column(
-        ForeignKey("personalities.id", ondelete="SET NULL"),
-        nullable=True,
-    )
-    mode: Mapped[BotMode] = mapped_column(_bot_mode_column(), nullable=False)
-    instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
-    context: Mapped[str | None] = mapped_column(Text, nullable=True)
-    allowed_replies: Mapped[list[str] | None] = mapped_column(_json_column(), nullable=True)
-    confidence_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     # Johnny-trt.56: bot-participation dismissal, scoped to the current
     # occurrence. The three columns are set / cleared together; dismissal is
@@ -385,11 +436,55 @@ class MeetingConfig(TimestampMixin, Base):
     )
 
     calendar_event: Mapped[CalendarEvent] = relationship(back_populates="meeting_config")
-    profile_template: Mapped[ProfileTemplate] = relationship(back_populates="meeting_configs")
     identity_account: Mapped[GoogleAccount] = relationship()
+    agent_assignments: Mapped[list[MeetingAgent]] = relationship(
+        back_populates="meeting_config",
+        cascade="all, delete-orphan",
+        order_by="MeetingAgent.position",
+    )
     bot_sessions: Mapped[list[BotSession]] = relationship(
         back_populates="meeting_config", cascade="all, delete-orphan"
     )
+
+
+class MeetingAgent(TimestampMixin, Base):
+    """One agent assigned to one meeting (Johnny-trt.41).
+
+    The assignment table that makes meetings multi-agent by schema: each row
+    binds an :class:`Agent` to a :class:`MeetingConfig` with a per-assignment
+    ``context`` brief (what THIS agent should know for THIS meeting — the
+    replacement for the old per-meeting instructions/context override soup),
+    an ``enabled`` toggle and an ordering ``position``. The multi-agent
+    *runtime* (arbitration, per-agent turn claims) is sibling work
+    (Johnny-trt.45/.47); until it lands the session dispatch resolves the
+    first enabled assignment by position.
+    """
+
+    __tablename__ = "meeting_agents"
+    __table_args__ = (
+        UniqueConstraint(
+            "meeting_config_id", "agent_id", name="uq_meeting_agents_config_agent"
+        ),
+        Index("ix_meeting_agents_meeting_config_id", "meeting_config_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    meeting_config_id: Mapped[int] = mapped_column(
+        ForeignKey("meeting_configs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    agent_id: Mapped[int] = mapped_column(
+        ForeignKey("agents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    context: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    meeting_config: Mapped[MeetingConfig] = relationship(
+        back_populates="agent_assignments"
+    )
+    agent: Mapped[Agent] = relationship(back_populates="meeting_assignments")
 
 
 class BotSession(TimestampMixin, Base):
@@ -398,6 +493,7 @@ class BotSession(TimestampMixin, Base):
         Index("ix_bot_sessions_meeting_config_id", "meeting_config_id"),
         Index("ix_bot_sessions_status", "status"),
         Index("ix_bot_sessions_account_id", "account_id"),
+        Index("ix_bot_sessions_agent_id", "agent_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -443,11 +539,26 @@ class BotSession(TimestampMixin, Base):
         default=BotSessionStatus.SCHEDULED,
     )
     container_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    # Johnny-oly.6: display name of the personality resolved at session start,
-    # snapshotted so history renders the bot's name as it was for THIS session.
-    # NULL for sessions created before this column landed (and whenever no
-    # personality resolved); the UI falls back to "Johnny" for a NULL value.
+    # Display name of the agent resolved at session start, snapshotted so
+    # history renders the bot's name as it was for THIS session. NULL for
+    # sessions created before this column landed (and whenever no agent
+    # resolved); the UI falls back to "Johnny" for a NULL value.
     bot_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Johnny-trt.41: the agent serving this session, plus its full behavior
+    # snapshot captured at dispatch. The snapshot — not the live agents /
+    # meeting_agents rows — is the source of truth for behavior fields
+    # (mode, character_prompt, allowed_replies, confidence_threshold,
+    # provider pins) for the session's whole lifetime, so editing an agent
+    # mid-meeting never mutates a running session and turn-time code never
+    # re-reads config tables. ``ON DELETE SET NULL`` keeps the audit trail
+    # when an agent is deleted; the snapshot still names it.
+    agent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    agent_snapshot: Mapped[dict[str, Any] | None] = mapped_column(
+        _json_column(), nullable=True
+    )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     logs: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -880,56 +991,5 @@ class ProviderCredential(TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
-class Personality(TimestampMixin, Base):
-    """A named, reusable LLM + TTS + default-mode preset (Johnny-oly).
-
-    A personality decides *which brain and which voice* Johnny uses for a
-    session, plus a preferred decision mode — nothing more. It is an axis
-    orthogonal to :class:`ProfileTemplate` (which owns the prompt text /
-    behaviour); the two compose. ``llm_provider_id`` / ``tts_provider_id``
-    are nullable FKs into ``provider_credentials``: when set they override
-    the globally-active provider for that kind at session start, and when
-    ``NULL`` the session inherits whatever provider is active — so the
-    bootstrap "Johnny" personality (NULL FKs) reproduces today's behaviour
-    byte-for-byte.
-
-    Exactly one row carries ``is_default=true`` at any time, enforced by a
-    partial unique index (mirrors the active-per-kind index on
-    ``provider_credentials``). Provider deletes ``SET NULL`` the FK rather
-    than cascading, so deleting a provider never destroys a personality —
-    the session resolver falls back to global-active and warns instead
-    (Johnny-oly.3). ``extra_metadata`` (DB column ``metadata``) is a
-    forward-compat bag stored but not consumed in v1.
-    """
-
-    __tablename__ = "personalities"
-    __table_args__ = (
-        UniqueConstraint("display_name", name="uq_personalities_display_name"),
-        Index(
-            "uq_personalities_single_default",
-            "is_default",
-            unique=True,
-            postgresql_where=text("is_default"),
-            sqlite_where=text("is_default"),
-        ),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    display_name: Mapped[str] = mapped_column(String(128), nullable=False)
-    description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    llm_provider_id: Mapped[int | None] = mapped_column(
-        ForeignKey("provider_credentials.id", ondelete="SET NULL"), nullable=True
-    )
-    tts_provider_id: Mapped[int | None] = mapped_column(
-        ForeignKey("provider_credentials.id", ondelete="SET NULL"), nullable=True
-    )
-    default_mode: Mapped[BotMode | None] = mapped_column(_bot_mode_column(), nullable=True)
-    # Attribute is ``extra_metadata`` because ``metadata`` is reserved on
-    # SQLAlchemy's declarative ``Base``; the DB column + JSON wire name
-    # stay the clean ``metadata``.
-    extra_metadata: Mapped[dict[str, Any]] = mapped_column(
-        "metadata", _json_column(), nullable=False, default=dict
-    )
 
 

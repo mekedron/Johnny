@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from johnny.agent.job_config import (
+    DEFAULT_CONFIDENCE_THRESHOLD,
     DEFAULT_MODE,
     SUPPORTED_MODES,
     SessionJobConfig,
@@ -31,11 +32,13 @@ def _full_config() -> SessionJobConfig:
         account_id=3,
         mode="approval_required",
         instructions="Be brief.",
-        personality_prompt="[personality: Ada]\nWitty.",
+        character_prompt="[character: Ada]\nWitty.",
         context="Quarterly review.",
         calendar_context="Q3 numbers.",
         calendar_attachments_text="doc body",
         prior_session_context="last time we agreed X",
+        allowed_replies=("Yes.", "No.", "Could you repeat that?"),
+        confidence_threshold=0.62,
         provider_config={
             "stt": {
                 "provider_name": "deepgram",
@@ -72,9 +75,20 @@ def test_to_metadata_is_deterministic_json() -> None:
 def test_minimal_config_uses_safe_defaults() -> None:
     cfg = SessionJobConfig(bot_session_id=1, room_name=room_name_for_session(1))
     assert cfg.mode == DEFAULT_MODE == "listen_only"
+    assert cfg.character_prompt == ""
+    assert cfg.allowed_replies == ()
+    assert cfg.confidence_threshold == DEFAULT_CONFIDENCE_THRESHOLD
     assert cfg.provider_config == {}
     assert cfg.redis_url is None
     assert SessionJobConfig.from_metadata(cfg.to_metadata()) == cfg
+
+
+def test_to_dict_serialises_allowed_replies_as_list() -> None:
+    """The wire shape is a JSON array (tuples don't exist in JSON)."""
+    cfg = _full_config()
+    payload = cfg.to_dict()
+    assert payload["allowed_replies"] == ["Yes.", "No.", "Could you repeat that?"]
+    assert isinstance(payload["allowed_replies"], list)
 
 
 @pytest.mark.parametrize("bad", [{}, {"bot_session_id": None}, {"bot_session_id": ""}])
@@ -126,11 +140,13 @@ def test_from_env_mirrors_launcher_contract() -> None:
         "JOHNNY_MEET_LINK": "https://meet.google.com/x",
         "JOHNNY_MODE": "suggest_only",
         "JOHNNY_INSTRUCTIONS": "hi",
-        "JOHNNY_PERSONALITY_PROMPT": "persona",
+        "JOHNNY_CHARACTER_PROMPT": "persona",
         "JOHNNY_CONTEXT": "ctx",
         "JOHNNY_CALENDAR_CONTEXT": "cal",
         "JOHNNY_CALENDAR_ATTACHMENTS": "att",
         "JOHNNY_PRIOR_SESSION_CONTEXT": "prior",
+        "JOHNNY_ALLOWED_REPLIES": json.dumps(["Yes.", "No."]),
+        "JOHNNY_CONFIDENCE_THRESHOLD": "0.65",
         "JOHNNY_PROVIDER_CONFIG": json.dumps({"tts": {"provider_name": "piper"}}),
         "JOHNNY_REDIS_URL": "redis://redis:6379/0",
         "LIVEKIT_ROOM": "johnny-session-55",
@@ -141,6 +157,9 @@ def test_from_env_mirrors_launcher_contract() -> None:
     assert cfg.calendar_event_id is None  # "None" coerced to absent
     assert cfg.account_id == 2
     assert cfg.mode == "suggest_only"
+    assert cfg.character_prompt == "persona"
+    assert cfg.allowed_replies == ("Yes.", "No.")
+    assert cfg.confidence_threshold == pytest.approx(0.65)
     assert cfg.room_name == "johnny-session-55"
     assert cfg.provider_config == {"tts": {"provider_name": "piper"}}
     assert cfg.redis_url == "redis://redis:6379/0"
@@ -150,8 +169,28 @@ def test_from_env_defaults_room_and_modes_when_blank() -> None:
     cfg = SessionJobConfig.from_env({"JOHNNY_SESSION_ID": "9"})
     assert cfg.room_name == room_name_for_session(9) == "johnny-session-9"
     assert cfg.mode == "listen_only"
+    assert cfg.allowed_replies == ()
+    assert cfg.confidence_threshold == DEFAULT_CONFIDENCE_THRESHOLD
     assert cfg.provider_config == {}
     assert cfg.redis_url is None
+
+
+def test_from_env_tolerates_malformed_behavior_values() -> None:
+    """A sloppy snapshot degrades to the contract defaults, never raises."""
+    cfg = SessionJobConfig.from_env(
+        {
+            "JOHNNY_SESSION_ID": "9",
+            "JOHNNY_ALLOWED_REPLIES": "not json",
+            "JOHNNY_CONFIDENCE_THRESHOLD": "much",
+        }
+    )
+    assert cfg.allowed_replies == ()
+    assert cfg.confidence_threshold == DEFAULT_CONFIDENCE_THRESHOLD
+    # Out-of-range values clamp instead of poisoning the gate.
+    high = SessionJobConfig.from_env(
+        {"JOHNNY_SESSION_ID": "9", "JOHNNY_CONFIDENCE_THRESHOLD": "7.5"}
+    )
+    assert high.confidence_threshold == 1.0
 
 
 def test_from_env_requires_session_id() -> None:
@@ -204,6 +243,20 @@ def test_mode_vocabularies_match_canonical_pipeline_constants() -> None:
     # for an autonomous meeting was rejected at parse and the agent abandoned the
     # job (Johnny-52b). This union assertion catches any future such omission.
     assert SUPPORTED_MODES == NON_SPEAKING_MODES | SPEAKING_MODES
+
+
+def test_default_confidence_threshold_matches_canonical_constant() -> None:
+    """Drift guard (Johnny-trt.41): job_config re-declares the router gate's
+    default speak floor to stay dependency-free; it must equal the canonical
+    ``johnny.voice_pipeline.reasoning.DEFAULT_CONFIDENCE_THRESHOLD``."""
+    try:
+        from johnny.voice_pipeline.reasoning import (
+            DEFAULT_CONFIDENCE_THRESHOLD as CANONICAL_THRESHOLD,
+        )
+    except Exception as exc:  # pragma: no cover - env without heavy deps
+        pytest.skip(f"canonical pipeline constants unavailable: {exc}")
+
+    assert DEFAULT_CONFIDENCE_THRESHOLD == CANONICAL_THRESHOLD
 
 
 def test_from_metadata_accepts_autonomous_mode() -> None:

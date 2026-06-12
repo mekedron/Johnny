@@ -63,6 +63,11 @@ from app.db.models import (
     MeetingConfig,
 )
 from app.db.session import session_scope
+from app.services.agents import (
+    AgentResolution,
+    build_agent_snapshot,
+    select_agent,
+)
 from app.services.bot_sessions import (
     BotSessionNotFoundError,
     mark_session_ended,
@@ -73,11 +78,6 @@ from app.services.browser_pipeline_runner import (
     BrowserPipelineSpec,
     BrowserRunOutcome,
     run_browser_pipeline,
-)
-from app.services.personality_resolver import (
-    PersonalityResolution,
-    apply_personality,
-    select_personality,
 )
 from app.services.provider_payload import build_provider_payload
 from johnny.voice_pipeline import (
@@ -156,12 +156,12 @@ class StartBrowserSessionPayload(BaseModel):
     """Custom system prompt that REPLACES the meeting's instructions.
     Use for testing prompt changes without editing the meeting config."""
 
-    personality_id: int | None = None
-    """Personality preset (Johnny-oly) to apply for this session. Overrides
-    the globally-active LLM/TTS providers and, for the playground, seeds the
-    default mode. ``None`` falls back to the meeting's personality (rehearsal)
-    then the ``is_default`` personality. An id that no longer exists degrades
-    to that fallback chain rather than failing the start."""
+    agent_id: int | None = None
+    """Agent (Johnny-trt.41) to serve this session. ``None`` falls back to
+    the meeting's first enabled assignment (rehearsal) then the
+    ``is_default`` agent. An id that no longer exists degrades to that
+    fallback chain rather than failing the start. The resolved agent's
+    behavior snapshot is frozen onto the session row at dispatch."""
 
     provider_overrides: dict[str, BrowserProviderOverride] | None = None
     """Per-kind provider overrides — keyed by 'stt' / 'llm' / 'tts'.
@@ -506,57 +506,42 @@ def _resolve_provider_overrides(
     return merged
 
 
-def _resolve_personality(
+def _resolve_agent(
     session: Session,
     *,
     bot_session_id: int,
     requested_id: int | None,
     meeting: MeetingConfig | None,
-    base_payload: dict[str, Any],
-) -> PersonalityResolution:
-    """Select + apply the session personality over ``base_payload``.
+) -> AgentResolution:
+    """Select the session's agent (Johnny-trt.41), never hard-failing the start.
 
-    Personality resolution must never hard-fail a session (PRD §4a step 4): a
-    missing ``personalities`` table (a stripped test schema), a crypto
-    misconfiguration, or any lookup error all degrade to "no personality
-    applied" so the session starts exactly like today, on the global-active
-    providers. Layer this BEFORE :func:`_resolve_provider_overrides` so an
-    explicit per-start provider override still wins (PRD §4b priority 1).
+    A missing ``agents`` table (a stripped test schema) or any lookup error
+    degrades to "no agent" so the session starts on the contract defaults.
+    Provider-pin resolution from the agent is Johnny-trt.42 — this only
+    picks the agent whose behavior snapshot the session freezes.
     """
     try:
-        from app.security.crypto import get_crypto
-
-        personality = select_personality(
-            session, requested_id=requested_id, meeting=meeting
-        )
-        return apply_personality(
-            session, base_payload, personality, crypto=get_crypto()
-        )
+        return select_agent(session, requested_id=requested_id, meeting=meeting)
     except Exception:
         logger.exception(
-            "browser session %s: personality resolution failed; "
-            "continuing with global-active providers",
+            "browser session %s: agent resolution failed; "
+            "continuing with contract defaults",
             bot_session_id,
         )
-        return PersonalityResolution(payload=base_payload)
+        return AgentResolution(agent=None)
 
 
-def _personality_snapshot(resolution: PersonalityResolution) -> dict[str, Any]:
-    """Overrides-snapshot fragment naming the applied personality (Johnny-oly.5).
+def _agent_overrides_fragment(resolution: AgentResolution) -> dict[str, Any]:
+    """Overrides-snapshot fragment naming the session's agent.
 
-    Empty when no personality applied, so today's snapshots are unchanged.
+    Empty when no agent resolved (the UI then falls back to "Johnny").
     """
-    if resolution.personality_id is None:
+    if resolution.agent is None:
         return {}
-    snapshot: dict[str, Any] = {
-        "personality_id": resolution.personality_id,
-        "personality_name": resolution.personality_name,
+    return {
+        "agent_id": resolution.agent.id,
+        "agent_name": resolution.agent.name,
     }
-    if resolution.fallbacks:
-        snapshot["personality_fallbacks"] = [
-            {"kind": fb.kind, "reason": fb.reason} for fb in resolution.fallbacks
-        ]
-    return snapshot
 
 
 def _build_spec_from_event(
@@ -565,26 +550,16 @@ def _build_spec_from_event(
     bot_session_id: int,
     payload: StartBrowserSessionPayload,
     event_id: int,
-) -> tuple[BrowserPipelineSpec, dict[str, Any]]:
+) -> tuple[BrowserPipelineSpec, dict[str, Any], AgentResolution]:
     event, meeting = _load_event_meeting(session, event_id)
     if meeting is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="meeting config not set for event",
         )
-    template = meeting.profile_template
-    base_instructions = template.base_instructions if template is not None else ""
-    base_context = template.base_context if template is not None else ""
-    effective_instructions = "\n\n".join(
-        part for part in (base_instructions, meeting.instructions) if part
-    )
-    if payload.system_prompt:
-        effective_instructions = payload.system_prompt
-    effective_context = "\n\n".join(
-        part for part in (base_context, meeting.context) if part
-    )
 
-    # Pull base providers from DB, then layer overrides.
+    # Pull base providers from DB, then layer the explicit per-start
+    # overrides. (Agent provider-pin resolution is Johnny-trt.42.)
     try:
         from app.security.crypto import get_crypto
 
@@ -595,26 +570,29 @@ def _build_spec_from_event(
             bot_session_id,
         )
         base_payload = {}
-    # Layer the session personality (explicit → meeting's → default) over the
-    # global-active payload, then the explicit per-start override on top.
-    # Mode is NOT seeded from the personality here: ``meeting.mode`` is NOT
-    # NULL and is the more specific per-meeting choice, so it wins (PRD §4c).
-    resolution = _resolve_personality(
+    # Resolve the session's agent: explicit request → the meeting's first
+    # enabled assignment → the default agent (Johnny-trt.41).
+    resolution = _resolve_agent(
         session,
         bot_session_id=bot_session_id,
-        requested_id=payload.personality_id,
+        requested_id=payload.agent_id,
         meeting=meeting,
-        base_payload=base_payload,
     )
+    agent = resolution.agent
     effective_providers = _resolve_provider_overrides(
-        session, payload.provider_overrides, resolution.payload
+        session, payload.provider_overrides, base_payload
     )
 
-    mode = (
-        payload.mode
-        or (meeting.mode.value if hasattr(meeting.mode, "value") else meeting.mode)
-        or "autonomous"
+    # Behavior comes from the agent; the explicit request mode (a playground
+    # experiment knob) still wins for this one session.
+    agent_mode = (
+        (agent.mode.value if hasattr(agent.mode, "value") else str(agent.mode))
+        if agent is not None
+        else None
     )
+    mode = payload.mode or agent_mode or BotMode.AUTONOMOUS.value
+    effective_instructions = payload.system_prompt or ""
+    effective_context = resolution.assignment_context or ""
 
     # Johnny-dsy: pull the most recent prior session's summary for the
     # same recurring series so the bot can reference last week's open
@@ -642,11 +620,19 @@ def _build_spec_from_event(
         bot_session_id=bot_session_id,
         mode=mode,
         instructions=effective_instructions,
-        personality_prompt=resolution.personality_prompt,
+        character_prompt=(agent.character_prompt or "") if agent is not None else "",
         context=effective_context,
         calendar_context=event.description or "",
         calendar_attachments_text=event.attachments_text or "",
         prior_session_context=prior_session_context,
+        allowed_replies=(
+            tuple(str(r) for r in (agent.allowed_replies or []))
+            if agent is not None
+            else ()
+        ),
+        confidence_threshold=(
+            float(agent.confidence_threshold) if agent is not None else None
+        ),
         provider_payload=effective_providers,
         event_bus=_build_event_bus(),
     )
@@ -654,7 +640,7 @@ def _build_spec_from_event(
         "calendar_event_id": event_id,
         "playground": False,
     }
-    overrides_snapshot.update(_personality_snapshot(resolution))
+    overrides_snapshot.update(_agent_overrides_fragment(resolution))
     if payload.system_prompt:
         overrides_snapshot["system_prompt"] = payload.system_prompt
     if payload.persona:
@@ -664,7 +650,7 @@ def _build_spec_from_event(
             kind: override.model_dump(exclude_none=True)
             for kind, override in payload.provider_overrides.items()
         }
-    return spec, overrides_snapshot
+    return spec, overrides_snapshot, resolution
 
 
 def _build_spec_playground(
@@ -672,7 +658,7 @@ def _build_spec_playground(
     *,
     bot_session_id: int,
     payload: StartBrowserSessionPayload,
-) -> tuple[BrowserPipelineSpec, dict[str, Any]]:
+) -> tuple[BrowserPipelineSpec, dict[str, Any], AgentResolution]:
     persona = payload.persona or DEFAULT_PERSONA
     instructions = (
         payload.system_prompt
@@ -689,19 +675,24 @@ def _build_spec_playground(
             bot_session_id,
         )
         base_payload = {}
-    # Playground has no per-meeting mode, so the personality's ``default_mode``
-    # seeds it here (PRD §4c priority 3): explicit request mode > personality
-    # default > hardcoded autonomous.
-    resolution = _resolve_personality(
+    # Resolve the session's agent (explicit request → default agent); its
+    # mode seeds the playground unless the request picked one explicitly
+    # (Johnny-trt.41): explicit request mode > agent mode > autonomous.
+    resolution = _resolve_agent(
         session,
         bot_session_id=bot_session_id,
-        requested_id=payload.personality_id,
+        requested_id=payload.agent_id,
         meeting=None,
-        base_payload=base_payload,
     )
-    mode = payload.mode or resolution.default_mode or BotMode.AUTONOMOUS.value
+    agent = resolution.agent
+    agent_mode = (
+        (agent.mode.value if hasattr(agent.mode, "value") else str(agent.mode))
+        if agent is not None
+        else None
+    )
+    mode = payload.mode or agent_mode or BotMode.AUTONOMOUS.value
     effective_providers = _resolve_provider_overrides(
-        session, payload.provider_overrides, resolution.payload
+        session, payload.provider_overrides, base_payload
     )
 
     spec = BrowserPipelineSpec(
@@ -709,9 +700,17 @@ def _build_spec_playground(
         bot_session_id=bot_session_id,
         mode=mode,
         instructions=instructions,
-        personality_prompt=resolution.personality_prompt,
+        character_prompt=(agent.character_prompt or "") if agent is not None else "",
         context="",
         calendar_context="",
+        allowed_replies=(
+            tuple(str(r) for r in (agent.allowed_replies or []))
+            if agent is not None
+            else ()
+        ),
+        confidence_threshold=(
+            float(agent.confidence_threshold) if agent is not None else None
+        ),
         provider_payload=effective_providers,
         event_bus=_build_event_bus(),
     )
@@ -720,7 +719,7 @@ def _build_spec_playground(
         "playground": True,
         "persona": persona,
     }
-    overrides_snapshot.update(_personality_snapshot(resolution))
+    overrides_snapshot.update(_agent_overrides_fragment(resolution))
     if payload.system_prompt:
         overrides_snapshot["system_prompt"] = payload.system_prompt
     if payload.provider_overrides:
@@ -728,7 +727,7 @@ def _build_spec_playground(
             kind: override.model_dump(exclude_none=True)
             for kind, override in payload.provider_overrides.items()
         }
-    return spec, overrides_snapshot
+    return spec, overrides_snapshot, resolution
 
 
 def _spawn_runner(
@@ -885,25 +884,36 @@ async def start_browser_session(
     session.flush()
 
     if payload.event_id is not None:
-        spec, overrides_snapshot = _build_spec_from_event(
+        spec, overrides_snapshot, resolution = _build_spec_from_event(
             session,
             bot_session_id=row.id,
             payload=payload,
             event_id=payload.event_id,
         )
     else:
-        spec, overrides_snapshot = _build_spec_playground(
+        spec, overrides_snapshot, resolution = _build_spec_playground(
             session,
             bot_session_id=row.id,
             payload=payload,
         )
 
     row.playground_overrides = overrides_snapshot
-    # Johnny-oly.6: snapshot the resolved personality's display name so history
-    # renders this session's bot name. ``_personality_snapshot`` only writes
-    # ``personality_name`` when a personality applied, so this stays NULL for a
-    # bare session and the UI falls back to "Johnny".
-    row.bot_name = overrides_snapshot.get("personality_name")
+    # Johnny-trt.41: freeze the resolved agent onto the session row at
+    # dispatch — the snapshot is the session's behavior source of truth and
+    # ``bot_name`` is what history renders (NULL → the UI's "Johnny"
+    # fallback when no agent resolved).
+    if resolution.agent is not None:
+        row.agent_id = resolution.agent.id
+        snapshot = build_agent_snapshot(
+            resolution.agent, assignment_context=resolution.assignment_context
+        )
+        # The snapshot records the EFFECTIVE dispatched behavior: an explicit
+        # per-start mode override (a playground experiment knob) replaces the
+        # agent's configured mode for this one session, and downstream
+        # readers (the utterance-audit subscriber) must see what actually ran.
+        snapshot["mode"] = spec.mode
+        row.agent_snapshot = snapshot
+        row.bot_name = resolution.agent.name
 
     _spawn_runner(bot_session_id=row.id, spec=spec)
 

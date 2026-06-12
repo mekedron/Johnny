@@ -4,10 +4,9 @@
 	import PlayIcon from '@lucide/svelte/icons/play';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Input } from '$lib/components/ui/input/index.js';
-	import { BOT_MODE_LABEL, BOT_MODES, type BotMode } from '$lib/templates';
+	import { BOT_MODE_LABEL, BOT_MODES, type BotMode } from '$lib/sessionDetail';
 	import type { ProviderKind } from '$lib/providers';
 	import type { PlaygroundController } from '$lib/playground/playgroundSession.svelte';
-	import PersonalityPicker from '$lib/components/PersonalityPicker.svelte';
 
 	let { controller }: { controller: PlaygroundController } = $props();
 
@@ -41,7 +40,7 @@
 			</p>
 		</div>
 		{#if controller.loadingMetadata}
-			<span class="text-xs italic text-muted-foreground"> Loading templates and providers… </span>
+			<span class="text-xs italic text-muted-foreground"> Loading providers… </span>
 		{/if}
 	</header>
 
@@ -62,27 +61,6 @@
 				{/each}
 			</select>
 			<p class="m-0 text-xs text-muted-foreground">{MODE_DESCRIPTION[controller.mode]}</p>
-		</div>
-
-		<!-- Template -->
-		<div class="flex flex-col gap-1.5">
-			<label for="pg-template" class="text-sm leading-none font-medium text-foreground">
-				Template <span class="text-ink-subtle font-normal">· optional</span>
-			</label>
-			<select
-				id="pg-template"
-				bind:value={controller.selectedTemplateId}
-				class="{FIELD_CLASS} h-9"
-				data-testid="playground-template-select"
-			>
-				<option value={null}>No template — free playground</option>
-				{#each controller.templates as t (t.id)}
-					<option value={t.id}>{t.name}</option>
-				{/each}
-			</select>
-			<p class="m-0 text-xs text-muted-foreground">
-				Layers template instructions and base context on top of your persona / system prompt.
-			</p>
 		</div>
 
 		<!-- Account (Johnny-8th) -->
@@ -108,17 +86,6 @@
 			<p class="m-0 text-xs text-muted-foreground">
 				Tags this recording with an account so it can be filtered by account in History.
 			</p>
-		</div>
-
-		<!-- Personality -->
-		<div class="flex flex-col gap-1.5">
-			<PersonalityPicker
-				id="pg-personality"
-				personalities={controller.personalities}
-				value={controller.selectedPersonalityId}
-				onChange={controller.selectPersonality}
-				helpText="Applies a saved character (LLM + TTS). Blank uses the global default providers."
-			/>
 		</div>
 
 		<!-- Persona -->
@@ -173,7 +140,7 @@
 							bind:value={controller.systemPrompt}
 							rows={4}
 							class="{FIELD_CLASS} resize-y"
-							placeholder="Add to (or replace) the template's instructions"
+							placeholder="Extra system-prompt instructions for this session"
 							data-testid="playground-system-prompt"
 						></textarea>
 					</div>

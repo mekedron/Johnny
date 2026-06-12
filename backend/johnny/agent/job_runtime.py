@@ -8,17 +8,17 @@ worker assembles a session from, so the threading from the API/DB lands as the
 *right* adapters + instructions inside the worker:
 
 * :func:`build_session_adapters_for_job` — the session's STT/LLM/TTS LiveKit
-  adapters, built from the payload's ``provider_config`` (which already carries the
-  personality LLM/TTS override applied API-side) via the DB-free
+  adapters, built from the payload's ``provider_config`` (resolved API-side at
+  dispatch) via the DB-free
   :func:`~johnny.agent.adapters.factory.build_session_adapters_from_payload`. So the
-  provider/personality the operator configured is exactly what the worker drives.
+  providers the operator configured are exactly what the worker drives.
 * :func:`instructions_config_from_job` — the
-  :class:`~johnny.agent.session.AgentInstructionsConfig` (personality prompt +
+  :class:`~johnny.agent.session.AgentInstructionsConfig` (character prompt +
   meeting brief + calendar background + cross-session memory) that
   :class:`~johnny.agent.session.JohnnyAgent` renders into its persistent system
   prompt.
 * :func:`answer_config_from_job` — the :class:`~johnny.agent.answer.AnswerConfig`
-  (pipeline ``mode``) the reply nodes read.
+  (pipeline ``mode`` + the agent snapshot's allowlist) the reply nodes read.
 
 This is the *translation* layer only — it deliberately does **not** assemble the
 running :class:`~livekit.agents.AgentSession` (the router gate, approval
@@ -54,8 +54,8 @@ if TYPE_CHECKING:
 def instructions_config_from_job(config: SessionJobConfig) -> AgentInstructionsConfig:
     """Map the prompt-assembly fields of a job payload to :class:`AgentInstructionsConfig`.
 
-    The five prompt inputs travel the payload one-for-one (mirroring the legacy
-    ``JOHNNY_INSTRUCTIONS`` / ``JOHNNY_PERSONALITY_PROMPT`` / ``JOHNNY_CONTEXT`` /
+    The prompt inputs travel the payload one-for-one (mirroring the
+    ``JOHNNY_INSTRUCTIONS`` / ``JOHNNY_CHARACTER_PROMPT`` / ``JOHNNY_CONTEXT`` /
     ``JOHNNY_CALENDAR_CONTEXT`` / ``JOHNNY_CALENDAR_ATTACHMENTS`` /
     ``JOHNNY_PRIOR_SESSION_CONTEXT`` env vars the meet-worker reads), so this is a
     pure field copy — :func:`~johnny.agent.session.build_agent_instructions` does
@@ -63,7 +63,7 @@ def instructions_config_from_job(config: SessionJobConfig) -> AgentInstructionsC
     """
     return AgentInstructionsConfig(
         instructions=config.instructions,
-        personality_prompt=config.personality_prompt,
+        character_prompt=config.character_prompt,
         context=config.context,
         calendar_context=config.calendar_context,
         calendar_attachments_text=config.calendar_attachments_text,
@@ -72,15 +72,17 @@ def instructions_config_from_job(config: SessionJobConfig) -> AgentInstructionsC
 
 
 def answer_config_from_job(config: SessionJobConfig) -> AnswerConfig:
-    """Map the job payload's ``mode`` to the reply path's :class:`AnswerConfig`.
+    """Map the job payload's behavior fields to the reply path's :class:`AnswerConfig`.
 
-    Only ``mode`` crosses the dispatch contract (it governs coercion /
-    non-speaking / TTS-degrade); ``allowed_replies`` is not part of the
-    :class:`SessionJobConfig` (the legacy ``JOHNNY_*`` env contract carried no
-    allow-list either), so it stays at its empty default — a configured allow-list
-    would be a contract extension, not part of this threading.
+    ``mode`` governs coercion / non-speaking / TTS-degrade;
+    ``allowed_replies`` (Johnny-trt.41, sourced from the session's frozen
+    agent snapshot) is the limited-auto-speak coercion target — the answer
+    node picks a verbatim allowed reply whenever the mode uses an allowlist.
     """
-    return AnswerConfig(mode=config.mode)
+    return AnswerConfig(
+        mode=config.mode,
+        allowed_replies=tuple(config.allowed_replies),
+    )
 
 
 def build_session_adapters_for_job(
@@ -94,8 +96,8 @@ def build_session_adapters_for_job(
 
     Thin wrapper over
     :func:`~johnny.agent.adapters.factory.build_session_adapters_from_payload`,
-    feeding it the payload's already-personality-resolved ``provider_config`` so the
-    worker drives exactly the providers (and personality override) the API selected.
+    feeding it the payload's API-resolved ``provider_config`` so the
+    worker drives exactly the providers the API selected.
     ``registry`` / ``vad`` are forwarded for test injection and shared-VAD reuse.
 
     The STT/LLM/TTS trio is the only pipeline shape: the ``unified`` (S2S)

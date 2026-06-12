@@ -29,7 +29,6 @@ from app.db.models import (
     GoogleAccount,
     MeetingConfig,
     NoReplyReason,
-    ProfileTemplate,
     SessionTiming,
     TerminalState,
     decision_texts_diverge,
@@ -48,7 +47,6 @@ def engine() -> sa.Engine:
         tables=[
             GoogleAccount.__table__,  # type: ignore[list-item]
             CalendarEvent.__table__,  # type: ignore[list-item]
-            ProfileTemplate.__table__,  # type: ignore[list-item]
             MeetingConfig.__table__,  # type: ignore[list-item]
             BotSession.__table__,  # type: ignore[list-item]
             AgentDecision.__table__,  # type: ignore[list-item]

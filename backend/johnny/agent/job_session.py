@@ -159,9 +159,9 @@ def _build_llm_provider(
     :class:`~johnny.agent.adapters.johnny_llm.JohnnyLLM` adapter (which only exposes
     the provider *name*). One instance is reused for both, mirroring the legacy
     meet-worker's ``router_llm=answer_llm=_as_llm(llm)`` (the same provider drives the
-    router decision and the answer stage). Built from the same personality-resolved
+    router decision and the answer stage). Built from the same agent-resolved
     ``provider_config`` entry the adapter factory reads, so the session, the router,
-    and the coercion all run the operator's configured (and personality-overridden)
+    and the coercion all run the operator's configured (and agent-overridden)
     LLM. Fail-fast :class:`AgentSessionSetupError` on a missing/blank/wrong-type
     entry, like the split adapter factory.
     """
@@ -542,7 +542,7 @@ async def build_agent_runtime(
     """Assemble the full :class:`AgentRuntime` for one dispatched Meet session.
 
     Wires, in the legacy split pipeline assembly order: the STT/LLM/TTS adapters
-    (from the personality-resolved ``provider_config``), the raw router/answer LLM,
+    (from the agent-resolved ``provider_config``), the raw router/answer LLM,
     the turn ledger + index, the observability emitters, the router gate, the barge-in
     classifier, and the :class:`JohnnyAgent` (noise gate + answer nodes + transcript
     rehydration + metrics listener). ``approval_required`` mode additionally builds the
@@ -714,14 +714,19 @@ async def build_agent_runtime(
         else frozenset()
     )
 
+    # Behavior knobs ride the dispatch payload from the session's frozen
+    # agent snapshot (Johnny-trt.41) — the gate never re-reads config tables
+    # at turn time.
     gate_config = RouterGateConfig(
         mode=config.mode,
-        personality_prompt=config.personality_prompt,
+        character_prompt=config.character_prompt,
         instructions=config.instructions,
         context=config.context,
         calendar_context=config.calendar_context,
         calendar_attachments_text=config.calendar_attachments_text,
         prior_session_context=config.prior_session_context,
+        allowed_replies=tuple(config.allowed_replies),
+        confidence_threshold=config.confidence_threshold,
         task_catalog=task_catalog,
         executor_kinds=executor_kinds,
     )

@@ -15,11 +15,9 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.db import Base
 from app.db.models import (
-    BotMode,
     CalendarEvent,
     GoogleAccount,
     MeetingConfig,
-    ProfileTemplate,
 )
 from app.security.crypto import CredentialCrypto
 from app.services.calendar_polling import (
@@ -46,7 +44,6 @@ def engine() -> sa.Engine:
         tables=[
             GoogleAccount.__table__,  # type: ignore[list-item]
             CalendarEvent.__table__,  # type: ignore[list-item]
-            ProfileTemplate.__table__,  # type: ignore[list-item]
             MeetingConfig.__table__,  # type: ignore[list-item]
         ],
     )
@@ -113,11 +110,6 @@ def _make_account_with_config(
     )
     session.add(account)
     session.flush()
-    template = ProfileTemplate(
-        name=f"tpl-{email}", mode=BotMode.LISTEN_ONLY, allowed_replies=[]
-    )
-    session.add(template)
-    session.flush()
     # Strip microseconds so the second-precision ISO roundtrip in the
     # mock handler doesn't make a "no-op" sync look like an update.
     s = (start or datetime.now(UTC) + timedelta(days=1)).replace(microsecond=0)
@@ -133,9 +125,7 @@ def _make_account_with_config(
     session.flush()
     cfg = MeetingConfig(
         calendar_event_id=event.id,
-        profile_template_id=template.id,
         identity_account_id=account.id,
-        mode=BotMode.LISTEN_ONLY,
         enabled=True,
     )
     session.add(cfg)
@@ -220,11 +210,6 @@ def test_distinct_when_account_has_multiple_configs(
         session, crypto, email=account.email + ".x", external_id="evt-2"
     )
     # Force the same account to own another config too.
-    template = ProfileTemplate(
-        name="another-tpl", mode=BotMode.LISTEN_ONLY, allowed_replies=[]
-    )
-    session.add(template)
-    session.flush()
     s2 = datetime.now(UTC) + timedelta(days=2)
     evt2 = CalendarEvent(
         account_id=account.id,
@@ -237,9 +222,8 @@ def test_distinct_when_account_has_multiple_configs(
     session.flush()
     cfg2 = MeetingConfig(
         calendar_event_id=evt2.id,
-        profile_template_id=template.id,
         identity_account_id=account.id,
-        mode=BotMode.LISTEN_ONLY,
+        enabled=True,
     )
     session.add(cfg2)
     session.flush()

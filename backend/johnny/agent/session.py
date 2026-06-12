@@ -6,7 +6,7 @@ This module wires Johnny's voice orchestration onto LiveKit Agents'
 * the ``stt`` / ``llm`` / ``tts`` arguments are Johnny's own LiveKit plugin
   adapters (:mod:`johnny.agent.adapters`, Phase 1), built from
   ``load_active_providers()`` by the adapter factory (Johnny-zb3);
-* :class:`JohnnyAgent` carries the assembled instructions (personality +
+* :class:`JohnnyAgent` carries the assembled instructions (character +
   meeting-context + calendar prompt, reusing the legacy answer-stage prompt
   assembly) and rehydrates prior transcript history into the LiveKit
   ``chat_ctx`` on container respawn so memory survives restarts (Johnny-re2,
@@ -113,7 +113,7 @@ DEFAULT_INSTRUCTIONS = "You are Johnny, an AI participant in a live voice meetin
 # Generic answer-stage framing, mirrored from
 # the legacy split pipeline so a LiveKit-driven Johnny opens with the
 # same job description the meet-worker answer LLM had. Deliberately nameless so
-# a configured personality (rendered next) owns the persona without conflict.
+# a configured agent character (rendered next) owns the persona without conflict.
 _BASE_INSTRUCTIONS = "You are an AI meeting participant. Produce concise, natural spoken replies."
 
 # Note explaining the rehydrated/streamed conversation history, mirroring the
@@ -134,12 +134,13 @@ class AgentInstructionsConfig:
     """Static prompt components assembled into ``Agent.instructions``.
 
     Mirrors the subset of the legacy pipeline config
-    the legacy answer LLM rendered into its system message — the Johnny-oly.8
-    personality identity layer, the meeting brief, the calendar background, and
-    the cross-session memory (Johnny-dsy). The agent worker fills these from the
-    same launcher env vars the meet-worker reads (``JOHNNY_PERSONALITY_PROMPT``,
-    ``JOHNNY_INSTRUCTIONS``, ``JOHNNY_CONTEXT``, ``JOHNNY_CALENDAR_CONTEXT``,
-    ``JOHNNY_CALENDAR_ATTACHMENTS``, ``JOHNNY_PRIOR_SESSION_CONTEXT``).
+    the legacy answer LLM rendered into its system message — the agent's
+    character identity layer (Johnny-trt.41), the meeting brief, the calendar
+    background, and the cross-session memory (Johnny-dsy). The agent worker
+    fills these from the same launcher env vars the meet-worker reads
+    (``JOHNNY_CHARACTER_PROMPT``, ``JOHNNY_INSTRUCTIONS``, ``JOHNNY_CONTEXT``,
+    ``JOHNNY_CALENDAR_CONTEXT``, ``JOHNNY_CALENDAR_ATTACHMENTS``,
+    ``JOHNNY_PRIOR_SESSION_CONTEXT``).
 
     Every field defaults to ``""`` and an empty field renders nothing, so an
     unconfigured session degrades to the base framing alone (regression guard).
@@ -152,7 +153,7 @@ class AgentInstructionsConfig:
     """
 
     instructions: str = ""
-    personality_prompt: str = ""
+    character_prompt: str = ""
     context: str = ""
     calendar_context: str = ""
     calendar_attachments_text: str = ""
@@ -164,7 +165,7 @@ def build_agent_instructions(config: AgentInstructionsConfig) -> str:
     """Assemble the persistent system prompt for :class:`JohnnyAgent`.
 
     Reuses the legacy answer-stage assembly order from
-    the legacy split pipeline: base framing → personality (FIRST, so
+    the legacy split pipeline: base framing → character (FIRST, so
     the model adopts the character before it reads the job) → history note →
     capability notes (Johnny-trt.55 — unavailable-capability honesty, absent
     when the session has no gaps so the prompt stays byte-identical) →
@@ -174,11 +175,11 @@ def build_agent_instructions(config: AgentInstructionsConfig) -> str:
     instructions — the router gate (Johnny-xpa) and per-turn handlers own those.
     """
     system = _BASE_INSTRUCTIONS
-    if config.personality_prompt:
-        system += f"\n\n{config.personality_prompt}"
+    if config.character_prompt:
+        system += f"\n\n{config.character_prompt}"
     system += f"\n\n{_HISTORY_NOTE}"
     if config.capability_notes:
-        # Capability honesty (Johnny-trt.55): rendered AFTER the personality so
+        # Capability honesty (Johnny-trt.55): rendered AFTER the character so
         # the no-pretend-check rule outranks roleplay habits, and before the
         # operator's instructions so those can refine rather than be
         # contradicted (the router prompt's catalog-ordering rationale).
@@ -418,7 +419,7 @@ def build_interruption_options(
 class JohnnyAgent(Agent):
     """Johnny's ``livekit.agents.Agent`` — instructions carrier + gate host.
 
-    Carries the assembled meeting instructions (personality + brief + calendar
+    Carries the assembled meeting instructions (character + brief + calendar
     + cross-session memory, see :func:`build_agent_instructions`) and seeds the
     LiveKit ``chat_ctx`` with rehydrated prior transcripts so a container
     respawn doesn't wipe the bot's memory (Johnny-re2).

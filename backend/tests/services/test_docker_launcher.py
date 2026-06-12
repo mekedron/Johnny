@@ -287,7 +287,7 @@ def _make_ctx(
     container_name: str | None = None,
     mode: str = "listen_only",
     instructions: str = "Stay quiet unless asked.",
-    personality_prompt: str = "",
+    character_prompt: str = "",
     context: str = "Standup with the platform team.",
     calendar_context: str = "",
     calendar_attachments_text: str = "",
@@ -303,7 +303,7 @@ def _make_ctx(
         container_name=container_name or f"meet-worker-session-{bot_session_id}",
         mode=mode,
         instructions=instructions,
-        personality_prompt=personality_prompt,
+        character_prompt=character_prompt,
         context=context,
         calendar_context=calendar_context,
         calendar_attachments_text=calendar_attachments_text,
@@ -332,9 +332,13 @@ async def test_start_runs_container_with_env_and_labels(
     assert env["JOHNNY_MEET_LINK"] == "https://meet.google.com/abc-defg-hij"
     assert env["JOHNNY_MODE"] == "listen_only"
     assert env["JOHNNY_INSTRUCTIONS"] == "Stay quiet unless asked."
-    # Johnny-oly.8: same defaulting for the personality persona env var so the
-    # meet-worker can `env.get(...) -> ""` without a guard when no personality.
-    assert env["JOHNNY_PERSONALITY_PROMPT"] == ""
+    # Johnny-trt.41: same defaulting for the agent character env var so the
+    # meet-worker can `env.get(...) -> ""` without a guard when no agent.
+    assert env["JOHNNY_CHARACTER_PROMPT"] == ""
+    # Johnny-trt.41: behavior knobs from the frozen agent snapshot ride the
+    # env contract too — JSON list + stringified float with safe defaults.
+    assert json.loads(env["JOHNNY_ALLOWED_REPLIES"]) == []
+    assert env["JOHNNY_CONFIDENCE_THRESHOLD"] == "0.7"
     assert env["JOHNNY_CONTEXT"] == "Standup with the platform team."
     # No calendar description set → empty string env var, NOT a missing
     # key (a missing key would crash the launcher's _build_environment
