@@ -3,10 +3,10 @@
   "sessionId": "b6e04a59-a239-41cc-9d46-aaf1f127490a",
   "status": "running",
   "startedAt": "2026-06-12T16:03:53.991Z",
-  "updatedAt": "2026-06-12T18:20:30.613Z",
-  "currentIteration": 2,
+  "updatedAt": "2026-06-12T19:33:19.298Z",
+  "currentIteration": 3,
   "maxIterations": 0,
-  "tasksCompleted": 2,
+  "tasksCompleted": 3,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -45,8 +45,8 @@
       {
         "id": "Johnny-wks.3",
         "title": "[BUILD] Per-workspace routing — exec, capability snapshot, catalog, and install flow target the agent's workspace",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-wks.4",
@@ -88,6 +88,16 @@
       "durationMs": 2720605,
       "startedAt": "2026-06-12T16:47:17.112Z",
       "endedAt": "2026-06-12T17:32:37.717Z"
+    },
+    {
+      "iteration": 3,
+      "status": "completed",
+      "taskId": "Johnny-wks.3",
+      "taskTitle": "[BUILD] Per-workspace routing — exec, capability snapshot, catalog, and install flow target the agent's workspace",
+      "taskCompleted": true,
+      "durationMs": 2864304,
+      "startedAt": "2026-06-12T17:32:45.449Z",
+      "endedAt": "2026-06-12T18:20:29.753Z"
     }
   ],
   "skippedTaskIds": [],

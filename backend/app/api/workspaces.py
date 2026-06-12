@@ -112,6 +112,44 @@ def _name_conflict(name: str) -> HTTPException:
     )
 
 
+def _remove_workspace_gog_dir(row: Workspace) -> None:
+    """Honor the explicit state-removal choice for the workspace's Google
+    credentials too (Johnny-wks.4).
+
+    The gog state (file keyring with refresh tokens) lives OUTSIDE the
+    docker volume — ``~/.johnny/workspaces/<slug>/gog``, by the operator's
+    storage convention — so ``remove_volume=true`` must remove it as well or
+    the most sensitive state would silently survive an explicit "remove the
+    state" request (and a future same-slug workspace would inherit it). The
+    skills dir is left alone (inert packages; the whole-dir choice is the
+    workspaces UI's affordance). A removal failure aborts with 409 and
+    preserves the row, the same contract as a container/volume teardown
+    failure.
+    """
+    import shutil
+    from pathlib import Path
+
+    from johnny.skills.sandbox import workspace_gog_dir, workspaces_dir_from_env
+
+    root = Path(workspaces_dir_from_env()).resolve()
+    target = Path(workspace_gog_dir(row.slug)).resolve()
+    if root not in target.parents or not row.slug:
+        return  # malformed slug/root — nothing safe to remove
+    if not target.exists():
+        return
+    try:
+        shutil.rmtree(target)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"workspace {row.name!r}: its Google credential dir could "
+                f"not be removed ({exc}). The workspace was NOT deleted; "
+                "resolve the file permissions and retry."
+            ),
+        ) from exc
+
+
 # --- Endpoints -------------------------------------------------------------
 
 
@@ -241,6 +279,8 @@ def delete_workspace(
                     "container/volume issue is resolved."
                 ),
             ) from exc
+        if remove_volume:
+            _remove_workspace_gog_dir(row)
     elif remove_volume:
         # Honor-or-refuse: this deployment doesn't drive docker, so the
         # explicit request can't be carried out — refusing beats silently

@@ -27,6 +27,8 @@ export interface Agent {
 	tts_provider_id: number | null;
 	tts_voice_id: string | null;
 	tts_options: Record<string, unknown> | null;
+	/** Workspace attachment (Johnny-wks.1); null = the default workspace. */
+	workspace_id: number | null;
 	created_at: string;
 	updated_at: string;
 	/** Meetings currently assigning this agent — drives the delete warning. */

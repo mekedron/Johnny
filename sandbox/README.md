@@ -111,9 +111,59 @@ Then rerun `./run-dev.sh` (or `./run.sh`) to rebuild. Verify with
 Never hot-patch the running container (`docker compose exec skills-sandbox
 apt-get install ...`) — it vanishes on the next rebuild.
 
+## Workspace accounts (per-workspace gog auth)
+
+Google identity lives on the **workspace** (Johnny-wks.4): connecting an
+account stores its credentials in that workspace's gog **file keyring** —
+authorize once and every agent attached to the workspace can use the
+account in delegated tasks; no other workspace's container ever sees it.
+
+**Connect from the UI** (the primary flow): the agent edit page →
+Capabilities → *Workspace accounts* (the workspaces detail page gains the
+same panel with Johnny-wks.5). Enter the email, finish the Google consent
+in the tab that opens, done. The only manual prerequisite is the OAuth
+client JSON in the default sandbox (steps 1–3 below, once per deployment);
+workspace connects copy that app identity automatically.
+
+**Where the state lives:**
+
+| Workspace | gog state | Survives |
+| --- | --- | --- |
+| default | XDG layout under `~/.johnny/sandbox-home` (this section's flow, unchanged) | rebuilds, `./stop.sh`, clean installs |
+| non-default | `~/.johnny/workspaces/<slug>/gog` bind-mounted at `/home/sandbox/gog`, announced via `GOG_HOME` to every process in that container | idle-TTL container restarts, `./stop.sh` (`down -v`), clean installs |
+
+Because each workspace's credentials are a plain host directory,
+cross-workspace isolation is checkable from the host:
+`ls ~/.johnny/workspaces/<slug>/gog/data/keyring/`. Deleting a workspace
+with "remove state" removes its gog dir too (credentials never outlive an
+explicit state-removal choice). On a Linux host, chown new workspace dirs
+to uid 1000 like sandbox-home (macOS Docker Desktop handles it).
+
+**Callback-port strategy** (the wks.4 design decision): there is **no OAuth
+callback listener and no published port**. The api drives gog's
+remote/manual flow — `gog auth add --remote --step 1` (exec'd inside the
+target workspace's container, lazy-starting it if needed) prints the
+consent URL with `--redirect-uri` pointed at the api's
+`GET /workspaces/accounts/oauth/callback`; Google redirects the operator's
+browser there; the api relays the full redirect URL back into the same
+container (`--step 2`), where gog exchanges the code and stores the
+refresh token in the workspace's keyring. Connects are **serialized** —
+one at a time across all workspaces, held as a Redis pending record with a
+10-minute TTL and a visible UI lock (cancel anytime). Constraint inherited
+from Google: `http://` redirect URIs are only allowed for loopback
+addresses, so drive the UI via `localhost`/`127.0.0.1` (the same constraint
+the legacy port-8089 flow had).
+
+The port-8089 publish on this compose service remains only for the legacy
+manual flow below; the UI flow never uses it.
+
 ## gog auth (one-time)
 
-gog needs OAuth credentials before calendar / gmail skills can use it.
+gog needs OAuth client credentials (the app identity) before any account —
+default or workspace — can be connected. Steps 1–3 are the once-per-
+deployment setup the UI connect flow depends on; step 4 is the legacy
+manual way to add an account to the **default** sandbox (the UI does this
+for you now, for any workspace).
 
 **1. Switch to the file keyring backend** (headless container — no system keyring daemon):
 

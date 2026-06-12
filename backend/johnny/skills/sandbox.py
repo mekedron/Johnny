@@ -114,6 +114,30 @@ def workspace_skills_dir(slug: str) -> str:
     return f"{workspaces_dir_from_env()}/{slug}/{WORKSPACE_SKILLS_SUBDIR}"
 
 
+# --- Per-workspace gog state (Johnny-wks.4) ------------------------------------
+# A NON-DEFAULT workspace's Google identity (gog's config, OAuth client
+# credentials, and file keyring with the refresh tokens) lives in its OWN
+# host directory — ``~/.johnny/workspaces/<slug>/gog`` — bind-mounted into
+# that workspace's container and announced to every process there via
+# ``GOG_HOME``. The host bind (not the wks.2 state volume) is the operator's
+# storage convention: auth survives idle-TTL restarts, ``./stop.sh``
+# (``down -v``), and clean installs, and cross-workspace credential-absence
+# checks are plain host-path checks. The DEFAULT workspace keeps gog's XDG
+# layout under the ``~/.johnny/sandbox-home`` bind, byte-identical.
+WORKSPACE_GOG_SUBDIR = "gog"
+
+
+def workspace_gog_dir(slug: str) -> str:
+    """A NON-DEFAULT workspace's gog state dir, as seen by api / worker.
+
+    Slug-keyed like :func:`workspace_skills_dir` and for the same reason:
+    renames never re-key credentials, and recreating a deleted workspace
+    with the same slug regains them unless the operator chose state removal
+    at delete time.
+    """
+    return f"{workspaces_dir_from_env()}/{slug}/{WORKSPACE_GOG_SUBDIR}"
+
+
 class SandboxError(Exception):
     """Base class for sandbox client failures."""
 
@@ -302,6 +326,7 @@ __all__ = [
     "SKILLS_DIR_ENV",
     "WORKSPACES_DIR_ENV",
     "WORKSPACE_CONTAINER_PREFIX",
+    "WORKSPACE_GOG_SUBDIR",
     "WORKSPACE_SANDBOX_PORT",
     "WORKSPACE_SKILLS_SUBDIR",
     "SandboxClient",
@@ -313,6 +338,7 @@ __all__ = [
     "sandbox_url_from_env",
     "skills_dir_from_env",
     "workspace_container_name",
+    "workspace_gog_dir",
     "workspace_skills_dir",
     "workspaces_dir_from_env",
 ]

@@ -33,6 +33,7 @@
 	import PageHeader from '$lib/components/page-header.svelte';
 	import ToolsPanel from '$lib/components/capabilities/ToolsPanel.svelte';
 	import VoicePicker from '$lib/components/settings/VoicePicker.svelte';
+	import WorkspaceAccountsPanel from '$lib/components/workspaces/WorkspaceAccountsPanel.svelte';
 	import { BOT_MODES, BOT_MODE_LABEL } from '$lib/sessionDetail';
 	import { listProviders, playSample, type ProviderList } from '$lib/providers';
 	import {
@@ -694,6 +695,11 @@
 			</header>
 			{#if agent !== null}
 				<ToolsPanel agentId={agent.id} />
+				<Separator />
+				<!-- Identity lives on the WORKSPACE (Johnny-wks.4): policy above
+				     says what this agent may run; the workspace's accounts decide
+				     as whom. Shared by every agent attached to the workspace. -->
+				<WorkspaceAccountsPanel workspaceId={agent.workspace_id} />
 			{:else}
 				<p class="text-muted-foreground m-0 text-sm" data-testid="capabilities-locked">
 					Save the agent first — the capability policy attaches to the saved agent.

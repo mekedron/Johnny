@@ -70,6 +70,7 @@ from app.services.docker_launcher import (
     should_use_docker_launcher,
 )
 from johnny.skills.sandbox import (
+    WORKSPACE_GOG_SUBDIR,
     sandbox_url_for_workspace,
     workspace_container_name,
 )
@@ -111,6 +112,18 @@ WORKSPACE_SKILLS_TARGET = "/skills"
 # sandbox's `~/.johnny/sandbox-home` bind uses, so tool dotfiles / gog auth
 # live in the identical place in every workspace.
 WORKSPACE_HOME_TARGET = "/home/sandbox"
+
+# Per-workspace gog state (Johnny-wks.4): ``~/.johnny/workspaces/<slug>/gog``
+# bind-mounted here, announced to every process in the container via
+# ``GOG_HOME`` — gog's config, OAuth client credentials, and file keyring
+# (the refresh tokens) all live in the HOST dir, so a connected Google
+# account survives idle-TTL restarts, ``./stop.sh`` factory resets, and
+# clean installs, and exists in no other workspace's container (the bead's
+# absence guarantee is a host-path check). The default workspace keeps
+# gog's XDG layout under its ``~/.johnny/sandbox-home`` bind instead —
+# byte-identical to the pre-workspaces flow.
+WORKSPACE_GOG_TARGET = f"{WORKSPACE_HOME_TARGET}/gog"
+GOG_HOME_ENV = "GOG_HOME"
 
 WORKSPACE_IDLE_TTL_ENV = "JOHNNY_WORKSPACE_IDLE_TTL_SECONDS"
 DEFAULT_WORKSPACE_IDLE_TTL_SECONDS = 1800  # 30 min of no dispatch/claim
@@ -477,12 +490,18 @@ class WorkspaceContainerManager:
                 "bind": WORKSPACE_SKILLS_TARGET,
                 "mode": "ro",
             }
+        gog_source = self._workspace_gog_source(workspace_id, slug)
+        if gog_source is not None:
+            volumes[gog_source] = {
+                "bind": WORKSPACE_GOG_TARGET,
+                "mode": "rw",
+            }
         run_kwargs: dict[str, Any] = {
             "detach": True,
             "name": name,
             "labels": labels,
             "volumes": volumes,
-            "environment": self._build_environment(),
+            "environment": self._build_environment(gog_home=gog_source is not None),
             "restart_policy": {"Name": "no"},
             # tini as PID 1 (Johnny-ajc): SIGTERM from the idle sweep's
             # `docker stop` is forwarded whatever the daemon is doing.
@@ -520,19 +539,44 @@ class WorkspaceContainerManager:
         writes). No slug (a malformed stamp) → no mount: discovery can't
         locate the dir either, so the container honestly carries no skills.
         """
+        from johnny.skills.sandbox import WORKSPACE_SKILLS_SUBDIR
+
+        return self._workspace_subdir_source(
+            workspace_id, slug, WORKSPACE_SKILLS_SUBDIR, purpose="skills"
+        )
+
+    def _workspace_gog_source(self, workspace_id: int, slug: str | None) -> str | None:
+        """The HOST path of this workspace's gog state dir, or ``None``.
+
+        ``<workspaces root>/<slug>/gog`` (Johnny-wks.4) — mounted rw at
+        :data:`WORKSPACE_GOG_TARGET` and announced via ``GOG_HOME``, so the
+        workspace's Google credentials live on the host and survive every
+        container/volume lifecycle event. No slug → no mount AND no
+        ``GOG_HOME``: gog falls back to its XDG layout inside the state
+        volume rather than silently splitting state between a guessed host
+        dir and the volume.
+        """
+        return self._workspace_subdir_source(
+            workspace_id, slug, WORKSPACE_GOG_SUBDIR, purpose="gog state"
+        )
+
+    def _workspace_subdir_source(
+        self, workspace_id: int, slug: str | None, subdir: str, *, purpose: str
+    ) -> str | None:
         if self._workspaces_host_dir is None:
             return None
         if not slug:
             logger.warning(
                 "workspace %s: no slug available — launching without a "
-                "skills mount (catalog stays empty for this workspace)",
+                "%s mount",
                 workspace_id,
+                purpose,
             )
             return None
-        from johnny.skills.sandbox import WORKSPACE_SKILLS_SUBDIR, workspaces_dir_from_env
+        from johnny.skills.sandbox import workspaces_dir_from_env
 
         try:
-            (Path(workspaces_dir_from_env()) / slug / WORKSPACE_SKILLS_SUBDIR).mkdir(
+            (Path(workspaces_dir_from_env()) / slug / subdir).mkdir(
                 parents=True, exist_ok=True
             )
         except OSError:
@@ -543,11 +587,11 @@ class WorkspaceContainerManager:
                 workspace_id,
                 workspaces_dir_from_env(),
                 slug,
-                WORKSPACE_SKILLS_SUBDIR,
+                subdir,
                 exc_info=True,
             )
         root = self._workspaces_host_dir.rstrip("/")
-        return f"{root}/{slug}/{WORKSPACE_SKILLS_SUBDIR}"
+        return f"{root}/{slug}/{subdir}"
 
     def _ensure_volume(
         self,
@@ -571,8 +615,13 @@ class WorkspaceContainerManager:
                 raise
         client.volumes.create(name, labels=dict(labels))
 
-    def _build_environment(self) -> dict[str, str]:
+    def _build_environment(self, *, gog_home: bool = False) -> dict[str, str]:
         env = {"SANDBOX_EXEC_PORT": "8088"}
+        if gog_home:
+            # Routes ALL gog state (config + client credentials + file
+            # keyring) into the host-bound dir, for the auth flow and for
+            # every skill exec alike (Johnny-wks.4).
+            env[GOG_HOME_ENV] = WORKSPACE_GOG_TARGET
         for var in _SANDBOX_PASSTHROUGH_ENV:
             value = os.environ.get(var)
             if value:
@@ -963,6 +1012,8 @@ __all__ = [
     "DEFAULT_WORKSPACE_IDLE_TTL_SECONDS",
     "DEFAULT_WORKSPACE_SANDBOX_IMAGE",
     "DEFAULT_WORKSPACE_SWEEP_INTERVAL_SECONDS",
+    "GOG_HOME_ENV",
+    "WORKSPACE_GOG_TARGET",
     "WORKSPACE_ID_LABEL",
     "WORKSPACE_SANDBOX_EVENT_CHANNEL",
     "WORKSPACE_SLUG_LABEL",

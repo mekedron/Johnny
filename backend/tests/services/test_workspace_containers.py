@@ -24,6 +24,7 @@ import pytest
 from app.services.workspace_containers import (
     DEFAULT_WORKSPACE_IDLE_TTL_SECONDS,
     DEFAULT_WORKSPACE_SANDBOX_IMAGE,
+    WORKSPACE_GOG_TARGET,
     WORKSPACE_HOME_TARGET,
     WORKSPACE_ID_LABEL,
     WORKSPACE_SANDBOX_EVENT_CHANNEL,
@@ -321,9 +322,24 @@ async def test_ensure_launches_with_the_full_run_contract(
         "bind": "/skills",
         "mode": "ro",
     }
-    # The api/worker-side twin of the skills dir was pre-created so the
-    # docker daemon never auto-creates the host dir root-owned.
+    # The workspace's gog state rides the HOST bind (wks.4: auth survives
+    # every container/volume lifecycle event) and GOG_HOME routes every
+    # process in the container — skill execs included — to it.
+    assert kwargs["volumes"]["/host/.johnny/workspaces/finance/gog"] == {
+        "bind": WORKSPACE_GOG_TARGET,
+        "mode": "rw",
+    }
+    assert kwargs["environment"]["GOG_HOME"] == WORKSPACE_GOG_TARGET
+    # No other mounts sneak in: state volume + skills + gog is the contract.
+    assert sorted(kwargs["volumes"]) == [
+        "/host/.johnny/workspaces/finance/gog",
+        "/host/.johnny/workspaces/finance/skills",
+        "johnny-workspace-7-home",
+    ]
+    # The api/worker-side twins of the per-workspace dirs were pre-created
+    # so the docker daemon never auto-creates the host dirs root-owned.
     assert (_container_side_workspaces_dir / "finance" / "skills").is_dir()
+    assert (_container_side_workspaces_dir / "finance" / "gog").is_dir()
     # Resource caps mirror the compose service defaults.
     assert kwargs["pids_limit"] == 256
     assert kwargs["nano_cpus"] == 2_000_000_000
@@ -342,13 +358,15 @@ async def test_ensure_launches_with_the_full_run_contract(
 
 
 async def test_ensure_without_slug_launches_without_a_skills_mount() -> None:
-    """No slug → no locatable packages dir; the container honestly carries
-    no skills instead of mounting a guessed path."""
+    """No slug → no locatable packages/gog dirs; the container honestly
+    carries no skills and no GOG_HOME instead of mounting guessed paths
+    (gog falls back to its XDG layout inside the state volume)."""
     client = _FakeClient()
     manager, _ = _manager(client)
     assert await manager.ensure_running(workspace_id=7) is True
     _, kwargs = client.containers.run_calls[0]
     assert list(kwargs["volumes"]) == ["johnny-workspace-7-home"]
+    assert "GOG_HOME" not in kwargs["environment"]
 
 
 async def test_ensure_fast_path_touches_without_relaunch_or_health_poll() -> None:

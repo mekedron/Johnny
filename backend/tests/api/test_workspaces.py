@@ -10,6 +10,7 @@ explicit rows everywhere, plus the NULL-attached agents on the default.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -219,6 +220,23 @@ def test_delete_with_attached_agents_409_then_succeeds_after_detach(
 # --- delete × container/volume teardown (Johnny-wks.2) -------------------------
 
 
+@pytest.fixture(autouse=True)
+def _scratch_workspaces_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the api-side ``/workspaces`` view at a scratch dir.
+
+    The DELETE endpoint's gog-dir removal (Johnny-wks.4) resolves
+    ``JOHNNY_WORKSPACES_DIR`` and rmtrees ``<root>/<slug>/gog`` on the
+    explicit ``remove_volume`` opt-in. When this suite runs inside the api
+    container that env var points at the REAL host mount — without this
+    fixture a ``"Finance"``-slugged delete test once deleted the operator's
+    actual ``~/.johnny/workspaces/finance/gog`` keyring mid-suite. Tests
+    must never see the real tree.
+    """
+    root = tmp_path / "workspaces-view"
+    monkeypatch.setenv("JOHNNY_WORKSPACES_DIR", str(root))
+    return root
+
+
 class _FakeManager:
     """Stands in for WorkspaceContainerManager in the delete endpoint."""
 
@@ -268,6 +286,36 @@ def test_delete_remove_volume_is_explicit(
     resp = client.delete(f"/workspaces/{created['id']}?remove_volume=true")
     assert resp.status_code == 204
     assert fake_manager.calls == [(created["id"], True)]
+
+
+def test_delete_remove_volume_removes_the_gog_dir(
+    client: TestClient,
+    fake_manager: _FakeManager,
+    _scratch_workspaces_dir: Path,
+) -> None:
+    """The explicit state-removal choice covers the host-side credentials
+    too (Johnny-wks.4) — otherwise a recreated same-slug workspace would
+    silently inherit the old one's Google tokens."""
+    created = _create(client, "Finance")
+    gog_dir = _scratch_workspaces_dir / created["slug"] / "gog" / "data"
+    gog_dir.mkdir(parents=True)
+    (gog_dir / "keyring-entry").write_text("sealed")
+    resp = client.delete(f"/workspaces/{created['id']}?remove_volume=true")
+    assert resp.status_code == 204
+    assert not (_scratch_workspaces_dir / created["slug"] / "gog").exists()
+
+
+def test_delete_without_remove_volume_keeps_the_gog_dir(
+    client: TestClient,
+    fake_manager: _FakeManager,
+    _scratch_workspaces_dir: Path,
+) -> None:
+    created = _create(client, "Finance")
+    gog_dir = _scratch_workspaces_dir / created["slug"] / "gog"
+    gog_dir.mkdir(parents=True)
+    resp = client.delete(f"/workspaces/{created['id']}")
+    assert resp.status_code == 204
+    assert gog_dir.exists()  # state stays recoverable, like the volume
 
 
 def test_delete_teardown_failure_409_preserves_the_row(

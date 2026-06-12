@@ -58,6 +58,18 @@ after each iteration and it's included in prompts for context.
   / dispatch / capabilities GET) MUST `monkeypatch.delenv("JOHNNY_USE_DOCKER_LAUNCHER")` or
   inject a fake manager — otherwise the test launches a REAL `johnny-workspace-<id>`
   container against the host daemon (it happened: stray workspace-7 from a provider test).
+- **Per-workspace gog identity = one bind + one env var** (wks.4): mount
+  `~/.johnny/workspaces/<slug>/gog` rw at `/home/sandbox/gog` and set `GOG_HOME` there —
+  every exec'd process (skills included) reads the workspace keyring with no skill
+  changes. OAuth connect uses gog's `--remote --step 1/2` (no callback listener, no
+  port): the api relays the browser redirect into the container; one Redis pending
+  record = the serialization lock AND the UI lock state. Always append `login_hint`
+  (gog's URL lacks it) and normalize localhost→127.0.0.1 in redirect URIs.
+- **In-container pytest sees REAL host mounts** (sibling of the docker-launcher delenv
+  rule): any api test driving endpoints with fs side effects under
+  `workspaces_dir_from_env()` MUST autouse-fixture JOHNNY_WORKSPACES_DIR to tmp_path —
+  a delete test once rmtree'd the operator's real workspace keyring through the live
+  /workspaces mount (bd memory: johnny-incontainer-pytest-real-mounts).
 - **Cache invalidation by aging, not eviction** (SandboxExecutorProvider): to refresh a
   per-URL cached (client, registry) entry from another thread/loop, set
   `entry.loaded_at = float("-inf")` instead of deleting it — the next claim's TTL check
@@ -248,4 +260,81 @@ after each iteration and it's included in prompts for context.
   - psql-inserted agent_tasks rows (request_json mirroring the sink's stamp shape) + a
     johnny.tasks.wake publish are the cheapest REAL claim→exec→settle drive for worker
     routing proofs — no LLM needed; result_text carries the skill's stdout.
+---
+
+## 2026-06-12 - Johnny-wks.4
+- Workspace account connect shipped — gog OAuth into the WORKSPACE's file keyring:
+  (1) STORAGE (operator convention): non-default workspace gog state lives on the HOST at
+  `~/.johnny/workspaces/<slug>/gog`, bind-mounted rw at `/home/sandbox/gog` and announced
+  container-wide via `GOG_HOME` (workspace_containers grew `_workspace_gog_source` twin +
+  `_build_environment(gog_home=)`; no slug → no mount AND no GOG_HOME). Default workspace
+  keeps XDG under sandbox-home, byte-identical. Keyring survives idle-TTL restarts,
+  `./stop.sh` (down -v), and clean installs; cross-workspace absence = host path checks.
+  (2) CALLBACK-PORT STRATEGY (documented in sandbox/README.md): NO listener, NO published
+  port — gog's `--remote --step 1/2` flow; step 1 execs in the target container (lazy-
+  started) with `--redirect-uri` at the api's `GET /workspaces/accounts/oauth/callback`;
+  the api relays the browser's redirect into the same container for the step-2 exchange.
+  Serialized one-at-a-time via a single Redis pending record (TTL 600s) with a clear UI
+  lock + cancel; `login_hint` appended (gog's URL lacks it — multi-session browsers
+  otherwise consent as authuser=0); `localhost`→`127.0.0.1` normalized in the redirect.
+  (3) BACKEND: app/services/workspace_accounts.py (WorkspaceGogAuthService: accounts_view /
+  start_connect / complete_callback / cancel_pending / disconnect; bootstrap = keyring-file
+  + GOG_KEYRING_PASSWORD precondition + client-JSON seeding from the default sandbox with
+  honest 422s; pre-wks.4 containers auto-recreated when GOG_HOME missing), api/
+  workspace_accounts.py (GET accounts is-the-refresh; connect 409/422/502/503 mapping;
+  HTML callback page; DELETE pending/{email}); workspace DELETE remove_volume=true now also
+  rmtrees the gog dir (guarded resolve-under-root; 409 preserves row on failure).
+  (4) FRONTEND: lib/workspace-accounts.ts + components/workspaces/WorkspaceAccountsPanel
+  .svelte (list/connect/pending-lock/busy/completed/failed/disconnect-confirm; 2.5s poll
+  while awaiting), mounted in the agent edit Capabilities section (wks.5's detail page
+  reuses it); Agent type grew workspace_id.
+- Files: backend/app/services/{workspace_accounts(new),workspace_containers}.py,
+  backend/app/api/{workspace_accounts(new),workspaces}.py, backend/app/main.py,
+  backend/johnny/skills/sandbox.py (workspace_gog_dir), sandbox/README.md,
+  frontend/src/lib/{workspace-accounts.ts(new),agents.ts,agents.test.ts},
+  frontend/src/lib/components/workspaces/WorkspaceAccountsPanel.svelte (new),
+  frontend/src/routes/agents/[id]/+page.svelte; tests: services/test_workspace_accounts.py
+  (new, 24), api/test_workspace_accounts.py (new, 18), test_workspace_containers.py +
+  api/test_workspaces.py extended.
+- Validation: full suite 4322 passed; ruff+mypy+svelte-check+vitest clean (pre-existing
+  providers E501s / settings-page no-undef untouched). Real-browser (chrome-devtools):
+  panel on agent edit → connect → pending lock banner + Google account chooser + full
+  consent driven to Google's approval wall; account listed with services badge on BOTH
+  attached agents; cancel + disconnect-confirm flows; screenshots 01-06 under
+  .validation/Johnny-wks.4/. REAL credential placed via gog's designed `auth tokens
+  export/import` path (see learnings); two delegated tasks (one per attached agent)
+  through the real worker claim→exec→settle returned LIVE Google Calendar data from
+  johnny-workspace-N; absence asserted in Ops workspace + default keeps its own keyring
+  after Finance disconnect; real sweep_idle TTL stop → relaunch with auth intact;
+  `./stop.sh && ./run.sh` clean install → same-name workspace regained the account and
+  made a live API call from the freshly baked image.
+- **Learnings:**
+  - **Google blocked the interactive consent in THIS environment, not the code**: the
+    operator's OAuth client is org_internal ("restricted to users within its
+    organization") — gmail.com gets a hard `signin/oauth/error`; and the automation
+    profile's aikamatkat session hit Google's generic "Something went wrong" wall at the
+    grant step on EVERY variant (custom redirect, gog's own default random-port redirect,
+    with/without prompt=consent) — reproduced with gog's untouched flow, so environmental.
+    The flow is proven to Google's wall; operators complete it from any healthy local
+    browser session (the redirect targets 127.0.0.1:8000 directly).
+  - `gog auth add --remote --step 1/2` is the server-friendly OAuth: per-state files in
+    `$GOG_HOME/config/oauth-manual-state-<state>.json` (step 2 must repeat --redirect-uri
+    + --services), TSV `auth_url\t...` output, rc=10 for missing client creds. gog reuses
+    pending state per (email,services). `gog auth tokens export/import` migrates a refresh
+    token between keyrings non-interactively (same OAuth app) — the validation path when
+    consent is environmentally blocked.
+  - `GOG_HOME` relocates ALL gog state (config/data/keyring) in one env var; execd inherits
+    container env so every skill exec routes to the workspace keyring with zero skill
+    changes. `gog auth list` works without the keyring password (listing isn't decryption).
+  - THE BIG ONE: in-container pytest sees the REAL /workspaces mount — a Finance-slugged
+    DELETE test with remove_volume=true rmtree'd the operator's actual
+    ~/.johnny/workspaces/finance/gog mid-suite (caught because the clean-install check
+    found the keyring gone; bisected via mtimes). Fix: autouse fixture pointing
+    JOHNNY_WORKSPACES_DIR at tmp_path in tests/api/test_workspaces.py + regression tests
+    pinning gog-dir removal/retention. Saved as bd memory
+    johnny-incontainer-pytest-real-mounts. Any future endpoint with fs side effects under
+    workspaces_dir_from_env() needs the same fixture in ITS api tests.
+  - Workspace containers launched before wks.4 lack the gog mount — the connect flow
+    probes check_env(GOG_HOME) and retires+re-ensures once (containers are disposable;
+    state is in volume+binds), refusing honestly if GOG_HOME still absent.
 ---
