@@ -150,7 +150,8 @@ call → tool calls} until done) is a **linear** loop, not a DAG.
     task row's stamped per-agent reasoning provider after trt.42);
   - loop with a hard iteration cap and per-call timeout: reasoning call →
     parse tool calls (`app/providers/base.ToolCall`) → dispatch through the
-    registry (`sandbox.exec` for CLI work, mcp__* in Phase 6) → append
+    registry (`sandbox.exec` for CLI work, `mcp__*` shipped — Johnny-trt.36,
+    docs/MCP.md) → append
     results to the loop context;
   - write progress into `agent_tasks.result_json` + `TaskProgress` events
     (the row stays the single observable truth; the tasks panel and status

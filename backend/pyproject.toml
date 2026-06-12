@@ -19,6 +19,11 @@ dependencies = [
     "cryptography>=44.0.0",
     "httpx>=0.28.0",
     "websockets>=14.0",
+    # Official Model Context Protocol SDK (Johnny-trt.36): the worker's lazy
+    # MCP client (ClientSession + streamable-HTTP transport) and the api's
+    # probe endpoint. The stdio transport is custom (sandbox-bridged) but
+    # reuses the SDK's session/protocol layer.
+    "mcp>=1.9,<2",
     "docker>=7.1.0",
     "rich>=13.9.0",
     "click>=8.1.0",

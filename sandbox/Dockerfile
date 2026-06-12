@@ -112,6 +112,10 @@ RUN set -eux; \
 RUN useradd --create-home --shell /bin/bash --uid 1000 sandbox
 
 COPY execd.py /opt/sandbox/execd.py
+# Reference stdio MCP server (Johnny-trt.36): a known-good fixture operators
+# (and the integration suite) can register as command=python3
+# args=["/opt/sandbox/mcp_fixture_server.py"] to verify the MCP plumbing.
+COPY mcp_fixture_server.py /opt/sandbox/mcp_fixture_server.py
 
 USER sandbox
 WORKDIR /home/sandbox

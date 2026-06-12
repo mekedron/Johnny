@@ -30,6 +30,27 @@ after each iteration and it's included in prompts for context.
 - **`tests/services/test_task_worker.py` schema**: the worker now reads
   `bot_sessions` + `capability_policies` per claim — any new worker-reads
   table must join the fixture's `create_all(tables=[…])` list.
+- **Adding a capability SOURCE (trt.36 recipe, three seams)**: (1) catalog —
+  entries merge in `job_session.build_agent_runtime` via
+  `merge_task_catalog(internal, skills, mcp)` (earlier source wins on a
+  duplicate kind = resolution order) + `executor_known_kinds(skills,
+  mcp_kinds=…)`; read CACHED state on the sinks' shared `db_session`
+  (rollback after — the one-connection-per-runtime contract is test-pinned),
+  never connect at assembly; (2) worker — chain a new executor as the skill
+  runner's `fallback` (internal → skills → NEW → stub) and bypass
+  `SandboxExecutorProvider._kind_ready` for your kinds or every claim forces
+  a registry reload; configs re-read per execution (no-restart edits);
+  (3) policy/availability ride free: kind-shaped names go through
+  `apply_policy_to_catalog` + the worker's per-claim `check_tool` untouched,
+  and `TaskCatalogEntry(available=False, unavailable_reason=…)` is the
+  honest-decline shape for source-health failures.
+- **SDK transports across the sandbox boundary**: the `mcp` SDK's session
+  layer runs anywhere if you re-implement only the byte pump —
+  `johnny/mcp/client.py:sandbox_stdio_client` mirrors `stdio_client` over
+  execd's `/mcp/start|send|recv|stop` line bridge (newline-delimited
+  JSON-RPC, long-poll recv). Long-lived SDK sessions need a HOLDER TASK
+  (context managers bound to their opening task): `McpConnection._hold`
+  parks on a close event; eviction = set event + await task.
 
 ---
 
@@ -102,3 +123,87 @@ after each iteration and it's included in prompts for context.
     uses it consistently elsewhere — matched convention over novelty.
 ---
 
+
+## 2026-06-12 - Johnny-trt.36
+- Shipped the MCP connector — the third capability source. (1) CONFIG:
+  `mcp_servers` table (migration 0031, provider-settings pattern): name
+  (slug, no underscores — makes `mcp__<server>__<tool>` parse-unambiguous),
+  transport stdio|http with CHECK-enforced field shape, enabled,
+  Fernet-encrypted env/headers blob (responses mask to key names),
+  include/exclude tool globs (read-time, exclude wins), clamped timeouts +
+  idle TTL, probe cache (`tools_cache` + `last_probe_*`). CRUD +
+  `POST /mcp-servers/{id}/probe` (connect → initialize → tools/list →
+  verdict persisted; failure keeps the STALE cache so the catalog renders
+  unavailable-with-reason per trt.55 instead of forgetting tools). (2)
+  EXECUTOR: worker chain internal → skills → mcp → stub (`johnny/mcp/
+  executor.py` as the skill runner's fallback); `McpClientManager` connects
+  lazily on first tool reference, reuses per config fingerprint
+  (command/env/url/headers + sandbox for stdio; filter/TTL edits apply live),
+  idle-evicts on the worker sweep, evicts poisoned (timed-out/lost)
+  connections immediately, reconnects transparently; configs re-read fresh
+  per execution (no-restart edits, live-proven). Every failure leg settles
+  spoken-form (`isn't configured` / `isn't enabled` / `switched off` /
+  `couldn't reach` / `took too long`). (3) PLACEMENT: stdio servers spawn
+  INSIDE the skills-sandbox via new execd endpoints `/mcp/start|send|recv|
+  stop` (stdlib line-bridge: long-poll recv, session cap, line cap, idle
+  reaper, SIGTERM→SIGKILL stop); the official `mcp` SDK ClientSession drives
+  both transports — custom `sandbox_stdio_client` pumps SessionMessages over
+  the bridge, http uses the SDK streamable-http transport directly. (4)
+  CATALOG: assembly reads the cached DB view on the sinks' shared session
+  (never connects), `merge_task_catalog` gained the third source +
+  duplicate-kind resolution-order rule, `executor_known_kinds(…, mcp_kinds)`
+  feeds the gate. Reference fixture `/opt/sandbox/mcp_fixture_server.py`
+  (echo/add/always-fail) baked into the sandbox image.
+- Files: NEW `johnny/mcp/{__init__,config,catalog,client,executor}.py`,
+  `app/services/mcp_servers.py`, `app/api/mcp_servers.py`,
+  `alembic/versions/0031_mcp_servers.py`, `sandbox/mcp_fixture_server.py`,
+  `docs/MCP.md`, tests (config 17, catalog 11, manager 10, executor 14,
+  hermetic SDK-chain-over-fake-bridge 4, service 5, API 8, migration 3,
+  worker 2, job_session 1, integration-vs-real-sandbox 4). MODIFIED:
+  `app/db/models.py` (McpServer), `app/main.py` (router),
+  `app/services/task_worker.py` (manager on provider, chain, _kind_ready
+  bypass, sweep hook, per-claim config loader), `johnny/agent/
+  internal_tools.py` (3-source merge + mcp_kinds), `johnny/agent/
+  job_session.py` (_load_mcp_snapshots on the sinks' session),
+  `sandbox/execd.py` (+bridge, client-gone reply fix), `sandbox/Dockerfile`,
+  `backend/pyproject.toml` + `uv.lock` (mcp>=1.9,<2 main dep), docs
+  cross-refs (ROUTING status row, CAPABILITY-POLICY, TASK-ENGINE).
+- Validation: full suite 4338 passed / 5 pre-existing environment failures
+  (same set as the trt.38 run: 3× expired OPENAI_API_KEY e2e, 2× wizard
+  docker-cli-in-container); ruff + mypy clean on all touched files; images
+  REBUILT from pyproject+lock (clean-install proof — worker container
+  imports mcp from the baked layer); live E2E under
+  `.validation/Johnny-trt.36/`: create (secrets masked) → probe through the
+  real bridge (210 ms, filter verdicts, qualified kinds) → real worker ran
+  `mcp__fixture-live__echo`/`__add` to `done` (84 ms tool call) → sad paths
+  spoken-form → idle eviction at a PATCHed 10 s TTL + transparent reconnect
+  (also after a sandbox restart) all visible in worker logs → no fixture
+  process on host/api/worker. Demo rows cleaned. No UI surface exists yet
+  (trt.37 builds it on this API), so browser validation is N/A for this
+  bead — stated per the repo rule.
+- **Learnings:**
+  - The SDK's transports are async CMs bound to their opening task — a
+    long-lived connection needs a holder task parked on a close event
+    (`McpConnection._hold`); call sites use the session cross-task, eviction
+    sets the event and awaits the holder.
+  - The one-connection-per-runtime contract is TEST-PINNED
+    (`test_approval_mode_shares_one_db_session_between_sinks`): any new
+    assembly-time DB read must ride the sinks' shared session (+ rollback
+    after, even on failure — a failed SELECT otherwise poisons the shared
+    transaction), not a second factory call.
+  - `SandboxExecutorProvider._kind_ready` MUST whitelist non-skill kinds:
+    anything the skill registry can't know forces a full volume-scan +
+    sandbox-probe reload on EVERY claim of that kind.
+  - Worker loaders for executor-facing config should return disabled rows
+    too — filtering them upstream collapses the spoken "isn't enabled" vs
+    "isn't configured" distinction the executor wants to make.
+  - stdlib `http.server` long-poll endpoints need BrokenPipeError/
+    ConnectionResetError tolerated in the reply writer: a client cancelling
+    its in-flight poll at transport close is routine, not an error.
+  - `mcp` SDK (1.27.2) validates `inputSchema` as REQUIRED on tools/list
+    replies — a fixture/fake MCP server without it fails the SDK's pydantic
+    parse (probe degrades correctly, but the fixture must carry schemas).
+  - `decrypt_json` in app.security.crypto coerces values to `str` — nested
+    secret blobs (env + headers dicts) need plain
+    `crypto.encrypt(json.dumps(…))` round-trips instead.
+---

@@ -765,3 +765,99 @@ async def test_loop_fails_closed_when_policy_resolution_breaks(
     await _run_until(worker, lambda: _row(db, task_id).status == AgentTaskStatus.FAILED)
     row = _row(db, task_id)
     assert "couldn't verify" in (row.result_text or "")
+
+
+# --- MCP wiring on the provider (Johnny-trt.36) ----------------------------------
+
+
+def test_kind_ready_bypasses_registry_refresh_for_mcp_kinds() -> None:
+    """An mcp__ claim must never force a registry reload (volume scan + probes)."""
+    from app.services.task_worker import SandboxExecutorProvider, _ExecutorEntry
+
+    class ExplodingRegistry:
+        def get(self, kind: str) -> Any:
+            raise AssertionError("mcp kinds must not consult the skill registry")
+
+    provider = SandboxExecutorProvider(
+        registry_ttl_s=60.0, mcp_manager=object(), mcp_config_loader=tuple
+    )
+    entry = _ExecutorEntry(registry=ExplodingRegistry(), client=None, loaded_at=0.0)
+    assert provider._kind_ready(entry, "mcp__fixture__echo") is True
+    with pytest.raises(AssertionError):
+        provider._kind_ready(entry, "google-calendar")
+
+
+async def test_executor_for_chains_skills_then_mcp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The provider's chain resolves an mcp__ kind through the manager with
+    fresh per-claim configs, and still stubs unknown kinds."""
+    from app.services.task_worker import SandboxExecutorProvider, _ExecutorEntry
+    from johnny.mcp.client import McpCallResult
+    from johnny.mcp.config import McpServerConfig
+    from johnny.skills.registry import EMPTY_SKILL_REGISTRY
+
+    class FakeManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        async def call_tool(
+            self,
+            config: McpServerConfig,
+            *,
+            sandbox_url: str,
+            tool: str,
+            arguments: dict[str, Any],
+        ) -> McpCallResult:
+            self.calls.append((sandbox_url, tool))
+            return McpCallResult(text="echo: hi", is_error=False, duration_ms=1)
+
+    loads: list[int] = []
+
+    def loader() -> tuple[McpServerConfig, ...]:
+        loads.append(1)
+        return (McpServerConfig(name="fixture", transport="stdio", command="python3"),)
+
+    manager = FakeManager()
+    provider = SandboxExecutorProvider(
+        registry_ttl_s=3600.0, mcp_manager=manager, mcp_config_loader=loader
+    )
+
+    async def fake_load(url: str, *, reuse: Any = None) -> Any:
+        entry = _ExecutorEntry(
+            registry=EMPTY_SKILL_REGISTRY, client=None, loaded_at=1e12
+        )
+        provider._entries[url] = entry
+        return entry
+
+    monkeypatch.setattr(provider, "_load", fake_load)
+    monkeypatch.setenv("JOHNNY_SKILLS_SANDBOX_URL", "http://sb-test:8088")
+
+    def _claimed(kind: str) -> ClaimedTask:
+        return ClaimedTask(
+            task_id=1,
+            bot_session_id=7,
+            kind=kind,
+            args={"message": "hi"},
+            ack_text="on it",
+            turn_id=None,
+            decision_id=None,
+            attempts=1,
+        )
+
+    executor = await provider.executor_for(_claimed("mcp__fixture__echo"))
+    result = await executor(_claimed("mcp__fixture__echo").as_queued_task())
+    assert result.status == "done"
+    assert result.result_text == "echo: hi"
+    assert manager.calls == [("http://sb-test:8088", "echo")]
+    assert loads == [1]  # configs were read fresh for this execution
+
+    # A second execution re-reads configs (the no-restart freshness model).
+    result = await executor(_claimed("mcp__fixture__echo").as_queued_task())
+    assert result.status == "done"
+    assert loads == [1, 1]
+
+    # Unknown non-mcp kinds still fall through to the fail-fast stub.
+    stubbed = await executor(_claimed("never-heard-of-it").as_queued_task())
+    assert stubbed.status == "failed"
+    assert manager.calls == [("http://sb-test:8088", "echo")] * 2

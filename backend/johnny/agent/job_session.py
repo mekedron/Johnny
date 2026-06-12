@@ -102,6 +102,7 @@ from johnny.agent.speech_floor import (
 )
 from johnny.agent.task_catalog import render_capability_notes
 from johnny.agent.tasks import TaskCoordinator, stub_executor
+from johnny.mcp.catalog import McpServerSnapshot, mcp_catalog_entries, mcp_known_kinds
 from johnny.skills.capability_policy import apply_policy_to_catalog
 from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder, build_recorder_from_env
 from johnny.voice_pipeline.event_bus import (
@@ -612,6 +613,53 @@ async def _build_skill_pieces(
     return skill_registry, sandbox_client
 
 
+def _load_mcp_snapshots(
+    config: SessionJobConfig,
+    db_session: Session | None,
+) -> tuple[McpServerSnapshot, ...]:
+    """The MCP servers' cached capability view for this session (Johnny-trt.36).
+
+    One small DB read per delegation-capable assembly: enabled ``mcp_servers``
+    rows → secretless configs + the last successful probe's tool list + the
+    latest probe verdict. Assembly NEVER connects to MCP servers — the probe
+    endpoint and the worker's lazy claim-time client own connections; a
+    server whose latest probe failed contributes its cached tools as
+    unavailable-with-reason entries (Johnny-trt.55) instead of vanishing.
+
+    Reads on the sinks' shared session (every delegation-capable assembly
+    has one — the one-connection-per-runtime contract stays intact), then
+    rolls the read transaction back so the otherwise-idle session is left
+    exactly as the sinks expect, even when the read failed mid-transaction.
+    Defensive like the skill loader: any failure degrades to no MCP entries,
+    never a broken assembly.
+    """
+    if db_session is None:
+        return ()
+    try:
+        from app.services.mcp_servers import load_server_snapshots
+
+        snapshots = load_server_snapshots(db_session)
+    except Exception:
+        logger.exception(
+            "agent runtime: mcp server snapshot load failed for %s — "
+            "running without MCP tools",
+            config.bot_session_id,
+        )
+        return ()
+    finally:
+        try:
+            db_session.rollback()
+        except Exception:  # noqa: BLE001 — a fake/closed session ends the read too
+            logger.debug("mcp snapshot read: rollback unavailable", exc_info=True)
+    if snapshots:
+        logger.info(
+            "agent runtime: mcp catalog loaded for %s (%d server(s))",
+            config.bot_session_id,
+            len(snapshots),
+        )
+    return snapshots
+
+
 async def build_agent_runtime(
     config: SessionJobConfig,
     *,
@@ -806,6 +854,16 @@ async def build_agent_runtime(
     # unavailable backstop degrades a forced delegate to the spoken decline
     # and emits the policy_denied event naming the layer.
     capability_policy = config.capability_policy()
+    # MCP-contributed tools (Johnny-trt.36): the third catalog source —
+    # cached probe results read from the DB (no connections at assembly),
+    # one entry per enabled server's filter-surviving tool, qualified as
+    # mcp__<server>__<tool>. Policy filtering below applies to them exactly
+    # like skills (deny globs such as mcp__shady__* hide a whole server).
+    mcp_snapshots = (
+        _load_mcp_snapshots(config, db_session)
+        if task_coordinator is not None
+        else ()
+    )
     task_catalog = (
         apply_policy_to_catalog(
             merge_task_catalog(
@@ -813,6 +871,7 @@ async def build_agent_runtime(
                     meeting_backed=config.calendar_event_id is not None
                 ),
                 skill_registry.catalog_entries() if skill_registry is not None else (),
+                mcp_catalog_entries(mcp_snapshots),
             ),
             capability_policy,
         )
@@ -822,13 +881,16 @@ async def build_agent_runtime(
     # Pre-ack kind validation set (Johnny-trt.62): the kinds the executor
     # chain can actually resolve — internal tools + every skill on the
     # volume regardless of eligibility (broken skills still settle honestly
-    # with skill-specific copy; only kinds outside this set hit the stub's
-    # unsupported-kind leg). The gate degrades delegate verdicts outside it
-    # to SPEAK before any ack is spoken; the catalog above stays the spoken
-    # projection, so a kind the render missed but the executor can run
-    # still delegates.
+    # with skill-specific copy) + the MCP servers' cached qualified tools;
+    # only kinds outside this set hit the stub's unsupported-kind leg. The
+    # gate degrades delegate verdicts outside it to SPEAK before any ack is
+    # spoken; the catalog above stays the spoken projection, so a kind the
+    # render missed but the executor can run still delegates.
     executor_kinds = (
-        executor_known_kinds(skill_registry.kinds() if skill_registry is not None else ())
+        executor_known_kinds(
+            skill_registry.kinds() if skill_registry is not None else (),
+            mcp_kinds=mcp_known_kinds(mcp_snapshots),
+        )
         if task_coordinator is not None
         else frozenset()
     )

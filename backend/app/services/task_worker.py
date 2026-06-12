@@ -71,6 +71,7 @@ from johnny.agent.tasks import (
     executor_error_text,
     stub_executor,
 )
+from johnny.mcp.config import McpServerConfig, is_mcp_kind
 from johnny.voice_pipeline.event_bus import DEFAULT_CHANNEL_PREFIX, RedisEventBus
 from johnny.voice_pipeline.events import PolicyDenied, TaskCompleted, TaskProgress
 
@@ -469,6 +470,31 @@ def resolve_sandbox_url(claimed: ClaimedTask) -> str:
     return sandbox_url_from_env()
 
 
+def load_mcp_server_configs() -> tuple[McpServerConfig, ...]:
+    """Fresh enabled MCP server configs (Johnny-trt.36), read per execution.
+
+    The MCP twin of the per-claim policy resolution: never cached, so an
+    operator's enable/disable/filter edit bites the very next claimed task
+    without a worker restart. Raises on a failed read — the executor's
+    config leg settles the task with could-not-verify speech (fail closed),
+    mirroring :meth:`TaskWorker._resolve_policy`.
+    """
+    from app.db.session import SessionLocal
+    from app.security.crypto import get_crypto
+    from app.services.mcp_servers import load_server_configs
+
+    db = SessionLocal()
+    try:
+        configs = load_server_configs(db, get_crypto())
+        db.commit()
+        return configs
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 @dataclass(slots=True)
 class _ExecutorEntry:
     registry: Any
@@ -503,16 +529,38 @@ class SandboxExecutorProvider:
     LLM when absent.
     """
 
-    def __init__(self, *, registry_ttl_s: float | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        registry_ttl_s: float | None = None,
+        mcp_manager: Any | None = None,
+        mcp_config_loader: Callable[[], tuple[McpServerConfig, ...]] | None = None,
+    ) -> None:
         self._registry_ttl_s = (
             registry_ttl_s if registry_ttl_s is not None else get_task_registry_ttl_seconds()
         )
         self._entries: dict[str, _ExecutorEntry] = {}
         self._lock = asyncio.Lock()
+        # MCP connector (Johnny-trt.36): connections live HERE — one manager
+        # per worker process, lazily created on the first mcp__ claim so the
+        # SDK import never taxes a worker that has no servers configured.
+        # Both are injection seams for tests.
+        self._mcp_manager = mcp_manager
+        self._mcp_config_loader = (
+            mcp_config_loader if mcp_config_loader is not None else load_mcp_server_configs
+        )
+
+    def _mcp_manager_lazy(self) -> Any:
+        if self._mcp_manager is None:
+            from johnny.mcp.client import McpClientManager
+
+            self._mcp_manager = McpClientManager()
+        return self._mcp_manager
 
     async def executor_for(
         self, claimed: ClaimedTask, *, policy: Any | None = None
     ) -> TaskExecutor:
+        from johnny.mcp.executor import build_mcp_task_executor
         from johnny.skills.executor import build_skill_task_executor
         from johnny.skills.policy import ExecBinPolicy, compute_allowed_bins
         from johnny.skills.tools import SandboxExecTool
@@ -551,11 +599,35 @@ class SandboxExecutorProvider:
         else:
             bin_policy = ExecBinPolicy(allowed=registry.allowed_bins)
         exec_tool = SandboxExecTool(client, policy=bin_policy)
-        return build_skill_task_executor(registry, exec_tool, fallback=stub_executor)
+        # Resolution chain (Johnny-trt.24): internal guard → skills → mcp →
+        # stub. The MCP leg is the skill runner's fallback: configs re-read
+        # fresh per execution (the no-restart pattern), connections lazy +
+        # cached on the manager, stdio servers spawned in THIS task's
+        # resolved sandbox (the Phase-7 per-agent seam rides ``url``).
+        mcp_executor = build_mcp_task_executor(
+            self._mcp_manager_lazy(),
+            load_servers=self._mcp_config_loader,
+            sandbox_url=url,
+            fallback=stub_executor,
+        )
+        return build_skill_task_executor(registry, exec_tool, fallback=mcp_executor)
 
     def _kind_ready(self, entry: _ExecutorEntry, kind: str) -> bool:
+        if is_mcp_kind(kind):
+            # MCP kinds never live in the skill registry — refreshing it for
+            # them would force a full volume scan + sandbox probe per claim.
+            return True
         skill = entry.registry.get(kind)
         return skill is not None and bool(skill.eligible) and bool(skill.available)
+
+    async def sweep_mcp_idle(self) -> None:
+        """Evict MCP connections idle past their TTL (the worker's sweep hook)."""
+        if self._mcp_manager is None:
+            return
+        try:
+            await self._mcp_manager.sweep_idle()
+        except Exception:  # noqa: BLE001 — the sweep must never kill the pass
+            logger.exception("task worker: mcp idle sweep failed")
 
     async def _load(self, url: str, *, reuse: _ExecutorEntry | None) -> _ExecutorEntry:
         from johnny.skills.registry import (
@@ -583,6 +655,11 @@ class SandboxExecutorProvider:
             except Exception:  # noqa: BLE001 — teardown is best-effort
                 logger.exception("task worker: sandbox client close failed")
         self._entries.clear()
+        if self._mcp_manager is not None:
+            try:
+                await self._mcp_manager.aclose()
+            except Exception:  # noqa: BLE001 — teardown is best-effort
+                logger.exception("task worker: mcp manager close failed")
 
 
 class TaskWorker:
@@ -991,6 +1068,11 @@ class TaskWorker:
     # ------------------------------------------------------------------ #
 
     async def _sweep_once(self) -> None:
+        # MCP idle eviction rides the same cadence (Johnny-trt.36): a
+        # connection unused past its server's idle_ttl_s closes here and
+        # transparently reconnects on the next claimed mcp__ kind.
+        if self._provider is not None:
+            await self._provider.sweep_mcp_idle()
         try:
             with self._scoped_db() as db:
                 swept = sweep_stale_tasks(

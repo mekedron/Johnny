@@ -138,8 +138,10 @@ would record in its event.
   `ExecBinPolicy.policy_check` callable / `_denial` seam returns a
   structured verdict per binary and could inspect argv there without
   reshaping callers (see `johnny/skills/policy.py` module docstring).
-- **MCP health** (trt.36) joins the *availability* predicate
-  (`evaluate_skill_availability`), not this policy; MCP tools join the
-  policy namespace as `mcp__<server>__<tool>` kinds automatically.
+- **MCP health** (trt.36, shipped 2026-06-12) feeds the *availability*
+  shape, not this policy: an enabled server's cached tools render
+  unavailable-with-reason while its last probe failed (docs/MCP.md). MCP
+  tools join the policy namespace as `mcp__<server>__<tool>` kinds
+  automatically — deny `mcp__shady__*` to hide a whole server.
 - **Per-agent sandboxes** (Phase 7) change *where/as-whom*, not this layer;
   the worker's `resolve_sandbox_url` seam and this policy compose unchanged.

@@ -21,6 +21,7 @@ from app.api.calendar import router as calendar_router
 from app.api.capability_policies import router as capability_policies_router
 from app.api.decisions import router as decisions_router
 from app.api.history import router as history_router
+from app.api.mcp_servers import router as mcp_servers_router
 from app.api.meeting_configs import router as meeting_configs_router
 from app.api.providers import router as providers_router
 from app.api.sessions import router as sessions_router
@@ -145,6 +146,7 @@ app.include_router(calendar_router)
 app.include_router(capability_policies_router)
 app.include_router(decisions_router)
 app.include_router(history_router)
+app.include_router(mcp_servers_router)
 app.include_router(meeting_configs_router)
 app.include_router(providers_router)
 app.include_router(sessions_router)

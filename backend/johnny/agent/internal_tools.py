@@ -202,40 +202,57 @@ def internal_catalog_entries(*, meeting_backed: bool) -> tuple[TaskCatalogEntry,
     )
 
 
-def executor_known_kinds(skill_kinds: Iterable[str] = ()) -> frozenset[str]:
+def executor_known_kinds(
+    skill_kinds: Iterable[str] = (), mcp_kinds: Iterable[str] = ()
+) -> frozenset[str]:
     """The kinds the executor chain can actually resolve (Johnny-trt.62).
 
     Internal tools + the skills volume (``SkillRegistry.kinds()`` — any
     eligibility, since broken skills still settle honestly with
-    skill-specific copy); future MCP kinds (Johnny-trt.36) join here, the
-    single composition seam. This set is the membership truth the gate's
-    pre-ack kind validation checks delegate verdicts against — the rendered
-    catalog is only its spoken projection, so a kind the render missed but
-    the executor can run still delegates.
+    skill-specific copy) + the MCP servers' cached, filter-surviving
+    qualified tools (Johnny-trt.36 — probe-failed servers stay in: their
+    catalog entries render unavailable, so the gate degrades to the spoken
+    decline, and the worker still attempts the lazy reconnect). This set is
+    the membership truth the gate's pre-ack kind validation checks delegate
+    verdicts against — the rendered catalog is only its spoken projection,
+    so a kind the render missed but the executor can run still delegates.
     """
-    return INTERNAL_TOOL_KINDS | frozenset(skill_kinds)
+    return INTERNAL_TOOL_KINDS | frozenset(skill_kinds) | frozenset(mcp_kinds)
 
 
 def merge_task_catalog(
     internal: tuple[TaskCatalogEntry, ...],
     skills: tuple[TaskCatalogEntry, ...],
+    mcp: tuple[TaskCatalogEntry, ...] = (),
 ) -> tuple[TaskCatalogEntry, ...]:
-    """Compose the session catalog in resolution order: internal first, then skills.
+    """Compose the session catalog in resolution order: internal → skills → mcp.
 
-    A skill entry whose kind collides with an internal kind is dropped — the
+    An entry whose kind collides with an internal kind is dropped — the
     internal executor resolves first anyway (a volume skill can never run for
     an internal kind), so advertising the shadowed duplicate would only teach
-    the router a lie about where the work happens.
+    the router a lie about where the work happens. The same earlier-source-
+    wins rule applies between skills and MCP (the worker dispatches skills
+    before the MCP leg, Johnny-trt.24): a duplicate kind keeps the entry of
+    the source that will actually run it.
     """
     merged = list(internal)
-    for entry in skills:
+    seen = {entry.kind for entry in internal}
+    for entry in (*skills, *mcp):
         if is_internal_kind(entry.kind):
             logger.warning(
-                "internal tools: skill catalog entry %r shadows an internal kind — dropped",
+                "internal tools: catalog entry %r shadows an internal kind — dropped",
+                entry.kind,
+            )
+            continue
+        if entry.kind in seen:
+            logger.warning(
+                "internal tools: duplicate catalog kind %r — keeping the "
+                "earlier (resolution-order) entry",
                 entry.kind,
             )
             continue
         merged.append(entry)
+        seen.add(entry.kind)
     return tuple(merged)
 
 

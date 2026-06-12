@@ -3,10 +3,10 @@
   "sessionId": "3d476ec0-b6b4-4e27-bac1-955df71159b4",
   "status": "running",
   "startedAt": "2026-06-12T10:57:09.857Z",
-  "updatedAt": "2026-06-12T12:28:13.214Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-12T13:26:17.461Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -261,8 +261,8 @@
       {
         "id": "Johnny-trt.38",
         "title": "[BUILD] Phase 6: Configurable capability policies — layered allow/deny + editable safe-bins",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.39",
@@ -440,7 +440,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-trt.38",
+      "taskTitle": "[BUILD] Phase 6: Configurable capability policies — layered allow/deny + editable safe-bins",
+      "taskCompleted": true,
+      "durationMs": 3954269,
+      "startedAt": "2026-06-12T11:22:17.951Z",
+      "endedAt": "2026-06-12T12:28:12.220Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

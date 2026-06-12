@@ -551,6 +551,92 @@ async def test_meet_backed_runtime_advertises_meeting_leave() -> None:
     assert db.closed is True
 
 
+async def test_delegation_capable_runtime_catalogs_mcp_tools() -> None:
+    """The third catalog source (Johnny-trt.36): enabled MCP servers' cached
+    probe results become mcp__<server>__<tool> entries (filters applied,
+    probe-failed servers unavailable-with-reason) and join executor_kinds —
+    all read on the sinks' shared session, no second factory call."""
+    import sqlalchemy as sa
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import Base
+    from app.db.models import McpServer
+
+    engine = sa.create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=sa.pool.StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    maker = sessionmaker(bind=engine)
+    seed = maker()
+    seed.add(
+        McpServer(
+            name="fixture",
+            transport="stdio",
+            command="python3",
+            tools_cache=[
+                {"name": "echo", "description": "Echo a message."},
+                {"name": "add", "description": "Add two numbers."},
+            ],
+            tool_exclude=["add"],
+            last_probe_ok=True,
+        )
+    )
+    seed.add(
+        McpServer(
+            name="downed",
+            transport="http",
+            url="https://down.test/mcp",
+            tools_cache=[{"name": "search", "description": "Search things."}],
+            last_probe_ok=False,
+            last_probe_error="connect refused",
+        )
+    )
+    seed.add(
+        McpServer(
+            name="off",
+            transport="stdio",
+            command="python3",
+            enabled=False,
+            tools_cache=[{"name": "ghost", "description": "Never appears."}],
+            last_probe_ok=True,
+        )
+    )
+    seed.commit()
+    seed.close()
+
+    sessions: list[Any] = []
+
+    def factory() -> Any:
+        sessions.append(maker())
+        return sessions[-1]
+
+    runtime = await build_agent_runtime(
+        _job(mode=AUTONOMOUS_MODE, redis_url="redis://r:6379/0"),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=factory,
+    )
+    assert len(sessions) == 1  # the MCP read rode the sinks' session
+    catalog = {entry.kind: entry for entry in runtime.gate._config.task_catalog}
+    # Filter-surviving tool from the healthy server: available.
+    assert catalog["mcp__fixture__echo"].available
+    assert catalog["mcp__fixture__echo"].one_liner == "Echo a message."
+    # The excluded tool and the disabled server's tools never appear.
+    assert "mcp__fixture__add" not in catalog
+    assert "mcp__off__ghost" not in catalog
+    # Probe-failed server: unavailable-with-reason (Johnny-trt.55), not gone.
+    downed = catalog["mcp__downed__search"]
+    assert not downed.available
+    assert "downed connector" in downed.unavailable_reason
+    # Pre-ack membership truth (Johnny-trt.62) carries both reachable and
+    # probe-failed kinds — the gate degrades the latter to a spoken decline.
+    assert {"mcp__fixture__echo", "mcp__downed__search"} <= runtime.gate._config.executor_kinds
+    assert "mcp__fixture__add" not in runtime.gate._config.executor_kinds
+    await runtime.aclose()
+
+
 # --- sandbox endpoint resolution (Johnny-trt.63, the Phase-7 seam) -----------
 
 
