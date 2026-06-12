@@ -49,7 +49,9 @@
 	const navItems = [
 		{ href: '/calendar', label: 'Calendar' },
 		{ href: '/playground', label: 'Playground' },
+		{ href: '/agents', label: 'Agents' },
 		{ href: '/providers', label: 'Providers' },
+		{ href: '/capabilities', label: 'Capabilities' },
 		{ href: '/history', label: 'History' },
 		{ href: '/settings', label: 'Settings' }
 	];

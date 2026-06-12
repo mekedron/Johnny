@@ -563,3 +563,39 @@ def test_test_voice_no_provider_anywhere_is_409(
 
 def test_test_voice_unknown_agent_404(voice_client: TestClient) -> None:
     assert voice_client.post("/agents/424242/test_voice").status_code == 404
+
+
+# --- meeting_count (Johnny-trt.44) -------------------------------------------
+
+
+def test_meeting_count_zero_without_assignments(client: TestClient) -> None:
+    created = client.post("/agents", json=_create_payload()).json()
+    assert created["meeting_count"] == 0
+    assert client.get(f"/agents/{created['id']}").json()["meeting_count"] == 0
+
+
+def test_meeting_count_reflects_meeting_agent_rows(
+    client: TestClient, db_session: Session
+) -> None:
+    # The SQLite test engine doesn't enforce FKs (no PRAGMA foreign_keys),
+    # so assignment rows can point at synthetic meeting_config ids — the
+    # count only reads meeting_agents.agent_id.
+    from app.db.models import MeetingAgent
+
+    a = client.post("/agents", json=_create_payload(name="A")).json()
+    b = client.post("/agents", json=_create_payload(name="B")).json()
+    db_session.add_all(
+        [
+            MeetingAgent(meeting_config_id=101, agent_id=a["id"]),
+            MeetingAgent(meeting_config_id=102, agent_id=a["id"], enabled=False),
+        ]
+    )
+    db_session.flush()
+
+    by_id = {row["id"]: row for row in client.get("/agents").json()}
+    assert by_id[a["id"]]["meeting_count"] == 2
+    assert by_id[b["id"]]["meeting_count"] == 0
+    assert client.get(f"/agents/{a['id']}").json()["meeting_count"] == 2
+    # Patch responses carry the count too (the edit page refreshes from them).
+    patched = client.patch(f"/agents/{a['id']}", json={"avatar": "🤖"}).json()
+    assert patched["meeting_count"] == 2

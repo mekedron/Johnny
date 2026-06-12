@@ -18,6 +18,7 @@ from app.api.browser_session_groups import ws_router as browser_session_groups_w
 from app.api.browser_sessions import router as browser_sessions_router
 from app.api.browser_sessions import ws_router as browser_sessions_ws_router
 from app.api.calendar import router as calendar_router
+from app.api.capabilities import router as capabilities_router
 from app.api.capability_policies import router as capability_policies_router
 from app.api.decisions import router as decisions_router
 from app.api.history import router as history_router
@@ -143,6 +144,7 @@ app.include_router(browser_session_groups_ws_router)
 app.include_router(browser_sessions_router)
 app.include_router(browser_sessions_ws_router)
 app.include_router(calendar_router)
+app.include_router(capabilities_router)
 app.include_router(capability_policies_router)
 app.include_router(decisions_router)
 app.include_router(history_router)

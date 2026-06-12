@@ -29,12 +29,12 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_crypto, get_session
-from app.db.models import Agent, BotMode, ProviderCredential
+from app.db.models import Agent, BotMode, MeetingAgent, ProviderCredential
 from app.providers.base import ProviderKind
 from app.security.crypto import CredentialCrypto
 
@@ -135,6 +135,11 @@ class AgentRead(BaseModel):
     tts_options: dict[str, Any]
     created_at: datetime
     updated_at: datetime
+    # How many meetings currently assign this agent (``meeting_agents``
+    # rows, enabled or not). The edit/list UI uses it to warn before a
+    # delete — removing the agent cascades those assignments away
+    # (Johnny-trt.44 acceptance).
+    meeting_count: int = 0
 
 
 # --- Helpers ---------------------------------------------------------------
@@ -149,6 +154,24 @@ def _get_row_or_404(session: Session, agent_id: int) -> Agent:
     if row is None:
         raise HTTPException(status_code=404, detail="agent not found")
     return row
+
+
+def _meeting_counts(session: Session, agent_ids: list[int]) -> dict[int, int]:
+    """``{agent_id: meeting_agents row count}`` for the given agents."""
+    if not agent_ids:
+        return {}
+    rows = session.execute(
+        select(MeetingAgent.agent_id, func.count())
+        .where(MeetingAgent.agent_id.in_(agent_ids))
+        .group_by(MeetingAgent.agent_id)
+    ).all()
+    return {agent_id: count for agent_id, count in rows}
+
+
+def _agent_read(session: Session, row: Agent) -> AgentRead:
+    read = AgentRead.model_validate(row)
+    read.meeting_count = _meeting_counts(session, [row.id]).get(row.id, 0)
+    return read
 
 
 def _validate_provider_fk(
@@ -257,7 +280,13 @@ def list_agents(session: SessionDep) -> list[AgentRead]:
     rows = session.scalars(
         select(Agent).order_by(Agent.is_default.desc(), Agent.name, Agent.id)
     ).all()
-    return [AgentRead.model_validate(row) for row in rows]
+    counts = _meeting_counts(session, [row.id for row in rows])
+    reads: list[AgentRead] = []
+    for row in rows:
+        read = AgentRead.model_validate(row)
+        read.meeting_count = counts.get(row.id, 0)
+        reads.append(read)
+    return reads
 
 
 @router.post("", response_model=AgentRead, status_code=status.HTTP_201_CREATED)
@@ -281,7 +310,7 @@ def create_agent(payload: AgentCreate, session: SessionDep) -> AgentRead:
         session.rollback()
         raise _name_conflict(payload.name) from exc
     session.refresh(row)
-    return AgentRead.model_validate(row)
+    return _agent_read(session, row)
 
 
 @router.post(
@@ -311,13 +340,13 @@ def clone_agent(agent_id: int, session: SessionDep) -> AgentRead:
     session.add(row)
     session.flush()
     session.refresh(row)
-    return AgentRead.model_validate(row)
+    return _agent_read(session, row)
 
 
 @router.get("/{agent_id}", response_model=AgentRead)
 def get_agent(agent_id: int, session: SessionDep) -> AgentRead:
     """Read a single agent."""
-    return AgentRead.model_validate(_get_row_or_404(session, agent_id))
+    return _agent_read(session, _get_row_or_404(session, agent_id))
 
 
 @router.patch("/{agent_id}", response_model=AgentRead)
@@ -379,7 +408,7 @@ def update_agent(
         session.rollback()
         raise _name_conflict(row.name) from exc
     session.refresh(row)
-    return AgentRead.model_validate(row)
+    return _agent_read(session, row)
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -581,7 +610,7 @@ def set_default_agent(agent_id: int, session: SessionDep) -> AgentRead:
     row.is_default = True
     session.flush()
     session.refresh(row)
-    return AgentRead.model_validate(row)
+    return _agent_read(session, row)
 
 
 __all__ = ["AgentCreate", "AgentRead", "AgentUpdate", "router"]
