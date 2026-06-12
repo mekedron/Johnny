@@ -110,8 +110,14 @@ are ignored), the prompt-assembly text (`instructions`, `character_prompt`,
 `prior_session_context` → feeds `AgentInstructionsConfig`), the agent-snapshot
 behavior knobs (`allowed_replies`, `confidence_threshold` — Johnny-trt.41),
 `provider_config`
-(the exact `build_provider_payload` shape: `{kind: {provider_name, display_name,
-credentials, options}}`), and `redis_url`.
+(the `build_provider_payload` shape: `{kind: {provider_id, provider_name,
+display_name, credentials, options}}`, with the session agent's provider pins
+already applied by `app.services.agent_providers.resolve_agent_provider_payload`,
+Johnny-trt.42 — plus two optional role keys: `router_llm`, an instantiable
+entry present only when the agent's triage pin differs from the answer `llm`
+entry, and `reasoning_llm`, a **credential-less** identity descriptor stamped
+onto `agent_tasks` rows at delegation time, never instantiated by the
+session), and `redis_url`.
 
 `to_metadata()` / `from_metadata()` are the JSON wire form; `from_metadata`
 validates the enums strictly so a malformed dispatch fails loud at the agent.

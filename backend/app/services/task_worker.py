@@ -489,9 +489,13 @@ class SandboxExecutorProvider:
     before the task is failed. Claim-time availability revalidation
     (Johnny-trt.55) stays inside the runner itself.
 
-    Model resolution for future multi-step kinds (global LLM today, the task
-    row's stamped per-agent reasoning provider after Johnny-trt.42) will
-    live behind one function here, next to :func:`resolve_sandbox_url`.
+    Model resolution for future multi-step kinds will live behind one
+    function here, next to :func:`resolve_sandbox_url`: each queued row's
+    ``request_json["reasoning_llm"]`` already stamps the requesting agent's
+    resolved reasoning provider (``{provider_id, provider_name, display_name,
+    model}``, Johnny-trt.42 — identity only, credentials re-read from the
+    DB), so the resolver reads the stamp and falls back to the global active
+    LLM when absent.
     """
 
     def __init__(self, *, registry_ttl_s: float | None = None) -> None:

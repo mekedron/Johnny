@@ -45,7 +45,7 @@ def build_provider_payload(
     db: Session,
     crypto: CredentialCrypto,
 ) -> dict[str, Any]:
-    """Return ``{kind: {provider_name, credentials, options, display_name}}``.
+    """Return ``{kind: {provider_id, provider_name, credentials, options, display_name}}``.
 
     Iterates every active row in ``provider_credentials``. Rows whose
     ciphertext can't be decrypted are skipped with a warning so a single
@@ -53,6 +53,12 @@ def build_provider_payload(
     live :class:`ProviderKind` values so a historical ``kind='s2s'`` row
     (tombstoned by Johnny-trt.43, deactivated in migration 0026) can never
     crash the enum coercion even if reactivated by hand.
+
+    ``provider_id`` (the row's primary key) rides each entry so the per-agent
+    resolution layer (Johnny-trt.42) can compare entries by identity — two
+    rows of the same ``provider_name`` (e.g. two ``openai-compatible`` LLMs
+    pointing at different servers) are distinct providers. Consumers that
+    instantiate providers read only the named fields and ignore it.
     """
     payload: dict[str, Any] = {}
     rows = db.scalars(
@@ -76,6 +82,7 @@ def build_provider_payload(
             row.kind.value if isinstance(row.kind, ProviderKind) else str(row.kind)
         )
         payload[kind_key] = {
+            "provider_id": row.id,
             "provider_name": row.provider_name,
             "display_name": row.display_name,
             "credentials": credentials,

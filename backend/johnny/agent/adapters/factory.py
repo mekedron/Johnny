@@ -383,9 +383,10 @@ def _provider_from_payload_entry(
     The DB-free analogue of one :func:`~app.providers.loader.load_active_providers`
     row: read the ``{provider_name, display_name, credentials, options}`` entry the
     API serialised (the exact shape
-    :func:`app.services.provider_payload.build_provider_payload` produces;
-    per-agent provider-pin resolution layers on here when Johnny-trt.42
-    lands), rebuild a
+    :func:`app.services.provider_payload.build_provider_payload` produces,
+    with the agent's provider pins already applied by
+    :func:`app.services.agent_providers.resolve_agent_provider_payload`,
+    Johnny-trt.42), rebuild a
     :class:`~app.providers.base.ProviderConfig`, and instantiate through the
     process-wide provider registry.
     Returns the live provider plus its option dict (for the voice/model/language
@@ -470,10 +471,12 @@ def build_session_adapters_from_payload(
     dispatched agent worker (Johnny-9eh) receives the session's providers as the
     ``provider_config`` carried in its :class:`~johnny.agent.job_config.SessionJobConfig`
     job metadata, not from a DB query. That payload is resolved API-side —
-    the active provider rows serialised at dispatch (per-agent provider pins
-    layer on here when Johnny-trt.42 lands) — so building the adapters *from
-    the payload* (rather than re-reading the admin-active rows) is what makes
-    the worker honour the session's frozen provider selection. Each entry is
+    the active provider rows serialised at dispatch with the session agent's
+    provider pins + TTS voice already applied
+    (:func:`app.services.agent_providers.resolve_agent_provider_payload`,
+    Johnny-trt.42) — so building the adapters *from the payload* (rather
+    than re-reading the admin-active rows) is what makes the worker honour
+    the session's frozen provider selection. Each entry is
     rebuilt with the same registry + :class:`~app.providers.base.ProviderConfig`
     path the meet-worker uses, then wrapped via the shared
     :func:`_assemble_split_adapters` tail (so the voice/model/language selections in

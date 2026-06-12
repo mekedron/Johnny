@@ -702,3 +702,109 @@ async def test_aclose_drains_coordinator_and_wake_before_db_close() -> None:
 
     await runtime.aclose()
     assert events == ["coordinator", "wake", "db"]
+
+
+# --- per-agent LLM role split (Johnny-trt.42) --------------------------------
+
+
+def _registry_with_second_llm() -> ProviderRegistry:
+    reg = _registry()
+    reg.register(Kind.LLM, "ollama", _FakeLLM)
+    return reg
+
+
+async def test_router_llm_entry_splits_gate_from_answer_provider() -> None:
+    """A ``router_llm`` payload entry (the agent's triage pin) drives the gate
+    + barge-in on a DIFFERENT provider than the answer coercion + reply node."""
+    pc = _split_provider_config()
+    pc["router_llm"] = {
+        "provider_name": "ollama",
+        "display_name": "Tiny triage",
+        "credentials": {},
+        "options": {},
+    }
+    runtime = await build_agent_runtime(
+        _job(mode=AUTONOMOUS_MODE, character_prompt="Be Johnny.", provider_config=pc),
+        event_bus=InMemoryEventBus(),
+        registry=_registry_with_second_llm(),
+    )
+
+    assert runtime.gate._router_llm.name == "ollama"
+    assert runtime.agent._barge_in is not None
+    assert runtime.agent._barge_in._router_llm is runtime.gate._router_llm
+    # Answer side: the coercion provider AND the session reply adapter stay
+    # on the ``llm`` entry.
+    assert runtime.agent._answer_llm is not None
+    assert runtime.agent._answer_llm.name == "openai"
+    assert runtime.adapters.llm.provider == "openai"
+    assert runtime.gate._router_llm is not runtime.agent._answer_llm
+    await runtime.aclose()
+
+
+async def test_absent_router_llm_reuses_one_answer_instance() -> None:
+    """No ``router_llm`` key (agent pins nothing / pins match) → the
+    pre-trt.42 shape: one raw provider instance serves gate and coercion."""
+    runtime = await build_agent_runtime(
+        _job(mode=AUTONOMOUS_MODE, character_prompt="Be Johnny."),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+    )
+    assert runtime.gate._router_llm is runtime.agent._answer_llm
+    assert runtime.gate._router_llm.name == "openai"
+    await runtime.aclose()
+
+
+async def test_triage_timing_names_the_router_provider() -> None:
+    """session_timings' router_llm stage must stamp the TRIAGE provider — the
+    trt.42 acceptance's 'different providers for router vs answer stages'."""
+    pc = _split_provider_config()
+    pc["router_llm"] = {
+        "provider_name": "ollama",
+        "display_name": "Tiny triage",
+        "credentials": {},
+        "options": {},
+    }
+    bus = InMemoryEventBus()
+    runtime = await build_agent_runtime(
+        _job(mode=AUTONOMOUS_MODE, character_prompt="Be Johnny.", provider_config=pc),
+        event_bus=bus,
+        registry=_registry_with_second_llm(),
+    )
+    emit = runtime.gate._record_triage_timing
+    assert emit is not None
+    await emit("turn-1", 0.0, 0.0125, "speak")
+    timing = next(
+        e for e in bus.snapshot() if getattr(e, "type", "") == "pipeline_timing"
+    )
+    assert timing.stage == "router_llm"
+    assert timing.provider_name == "ollama"
+    await runtime.aclose()
+
+
+async def test_reasoning_descriptor_reaches_the_task_sink() -> None:
+    """The payload's credential-less ``reasoning_llm`` descriptor lands on the
+    task sink, so every queued agent_tasks row records the requesting agent's
+    reasoning model (Johnny-trt.42)."""
+    pc = _split_provider_config()
+    pc["reasoning_llm"] = {
+        "provider_id": 9,
+        "provider_name": "openai",
+        "display_name": "Cloud reasoning",
+        "model": "gpt-large",
+    }
+    db = _FakeDbSession()
+    runtime = await build_agent_runtime(
+        _job(mode=AUTONOMOUS_MODE, character_prompt="Be Johnny.", provider_config=pc),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: db,
+    )
+    sink = runtime.task_sink
+    assert sink is not None
+    assert sink._reasoning_llm == {
+        "provider_id": 9,
+        "provider_name": "openai",
+        "display_name": "Cloud reasoning",
+        "model": "gpt-large",
+    }
+    await runtime.aclose()

@@ -467,13 +467,13 @@ async def start_session_for_meeting(
     # reads the snapshot, never the live agents/meeting_agents rows, so
     # editing an agent mid-meeting can't mutate a running session. Wrapped in
     # a guard so an agent lookup glitch degrades to the contract defaults
-    # (listen-only, no character) rather than blocking the launch. Provider
-    # pin resolution from the snapshot is Johnny-trt.42.
+    # (listen-only, no character) rather than blocking the launch.
     mode_value = ""
     character_prompt = ""
     assignment_context = ""
     allowed_replies: tuple[str, ...] = ()
     confidence_threshold = DEFAULT_CONFIDENCE_THRESHOLD
+    agent_snapshot: dict[str, Any] | None = None
     try:
         from app.services.agents import build_agent_snapshot, select_agent
 
@@ -486,6 +486,7 @@ async def start_session_for_meeting(
             row.agent_id = agent.id
             row.agent_snapshot = snapshot
             row.bot_name = agent.name
+            agent_snapshot = snapshot
             mode_value = str(snapshot["mode"])
             character_prompt = str(snapshot["character_prompt"])
             assignment_context = resolution.assignment_context or ""
@@ -503,6 +504,38 @@ async def start_session_for_meeting(
             "launching with contract defaults",
             meeting.id,
         )
+
+    # Johnny-trt.42: apply the snapshot's provider pins to the global payload
+    # so the dispatched session runs the agent's providers (answer/router LLM
+    # roles, TTS + voice, the reasoning stamp). Unusable pins degrade to the
+    # global-active entry with a visible provider_switch row in the activity
+    # log; any resolver error degrades to the unresolved payload — provider
+    # resolution must never block a launch.
+    if agent_snapshot is not None and provider_payload:
+        try:
+            from app.security.crypto import get_crypto
+            from app.services.agent_providers import (
+                persist_provider_fallback_warnings,
+                resolve_agent_provider_payload,
+            )
+
+            resolved = resolve_agent_provider_payload(
+                session,
+                get_crypto(),
+                base_payload=provider_payload,
+                snapshot=agent_snapshot,
+                context_label=f"bot_session={row.id}",
+            )
+            provider_payload = resolved.payload
+            persist_provider_fallback_warnings(
+                session, bot_session_id=row.id, warnings=resolved.warnings
+            )
+        except Exception:  # noqa: BLE001 — never block a launch on pin resolution
+            logger.exception(
+                "agent provider resolution failed for bot_session=%s; "
+                "launching with the global-active payload",
+                row.id,
+            )
 
     calendar_description = ""
     calendar_attachments = ""

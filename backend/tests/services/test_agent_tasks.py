@@ -103,6 +103,24 @@ async def test_record_queued_optional_fields_default_null(db_session: Session) -
     assert row.request_json == {"kind": "web_search", "args": {}, "ack": ""}
 
 
+async def test_record_queued_stamps_reasoning_llm(db_session: Session) -> None:
+    """The session's resolved reasoning-LLM identity rides every queued row
+    (Johnny-trt.42) — identity only, never credentials. Absent descriptor
+    (agents that pin nothing on an LLM-less payload) leaves the legacy shape."""
+    descriptor = {
+        "provider_id": 6,
+        "provider_name": "openai",
+        "display_name": "Cloud reasoning",
+        "model": "gpt-large",
+    }
+    sink = SqlAlchemyTaskSink(db_session, bot_session_id=99, reasoning_llm=descriptor)
+    await sink.record_queued(_spec())
+    row = db_session.scalars(sa.select(AgentTask)).one()
+    assert row.request_json["reasoning_llm"] == descriptor
+    assert "credentials" not in row.request_json["reasoning_llm"]
+    assert row.request_json["kind"] == "web_search"
+
+
 # --- update_status --------------------------------------------------------------
 
 

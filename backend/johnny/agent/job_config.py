@@ -61,6 +61,57 @@ DEFAULT_MODE = LISTEN_ONLY_MODE
 # dependency-free; the drift guard test pins the two together.
 DEFAULT_CONFIDENCE_THRESHOLD = 0.7
 
+# --- Provider-config role keys (Johnny-trt.42) -------------------------------
+# ``provider_config`` is keyed by provider kind (``stt`` / ``llm`` / ``tts``,
+# the shape :func:`app.services.provider_payload.build_provider_payload`
+# produces). Per-agent role resolution adds two OPTIONAL keys on top:
+#
+# * ``router_llm`` — the triage-stage LLM entry (same instantiable shape as
+#   ``llm``). Present only when the resolved router provider differs from the
+#   answer entry under ``llm``; absent → the session reuses the ``llm`` entry
+#   (and the same live instance) for both stages, exactly the pre-trt.42
+#   behavior.
+# * ``reasoning_llm`` — a **credential-less descriptor**
+#   (``{provider_id, provider_name, display_name, model}``) naming the LLM
+#   delegated tasks should reason with. It is NOT instantiable (no
+#   ``credentials``); its only consumer is the ``agent_tasks`` row stamp at
+#   delegation time (the worker executor resolves the real provider from the
+#   DB when multi-step kinds land). Never build a ``ProviderConfig`` from it.
+PROVIDER_CONFIG_ROUTER_LLM_KEY = "router_llm"
+PROVIDER_CONFIG_REASONING_LLM_KEY = "reasoning_llm"
+
+
+def reasoning_llm_from_provider_config(
+    provider_config: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """The sanitized reasoning-LLM descriptor from a job payload, or ``None``.
+
+    Reads the optional :data:`PROVIDER_CONFIG_REASONING_LLM_KEY` entry and
+    re-sanitizes it defensively: only the identity fields survive
+    (``provider_id`` / ``provider_name`` / ``display_name`` / ``model``), so a
+    malformed payload that smuggled credentials under this key can never leak
+    them into the ``agent_tasks`` row stamp. ``None`` when the key is absent,
+    not a mapping, or names no provider.
+    """
+    entry = provider_config.get(PROVIDER_CONFIG_REASONING_LLM_KEY)
+    if not isinstance(entry, Mapping):
+        return None
+    provider_name = str(entry.get("provider_name") or "").strip()
+    if not provider_name:
+        return None
+    descriptor: dict[str, Any] = {"provider_name": provider_name}
+    provider_id = entry.get("provider_id")
+    if isinstance(provider_id, int):
+        descriptor["provider_id"] = provider_id
+    display_name = str(entry.get("display_name") or "").strip()
+    if display_name:
+        descriptor["display_name"] = display_name
+    model = entry.get("model")
+    if isinstance(model, str) and model:
+        descriptor["model"] = model
+    return descriptor
+
+
 # --- Room / identity naming -------------------------------------------------
 # One LiveKit room per Meet session, named off the durable bot_session_id so
 # the bridge, the agent, and the API all derive the same room without a side
@@ -406,11 +457,14 @@ __all__ = [
     "DEFAULT_MODE",
     "LIMITED_AUTO_SPEAK_MODE",
     "LISTEN_ONLY_MODE",
+    "PROVIDER_CONFIG_REASONING_LLM_KEY",
+    "PROVIDER_CONFIG_ROUTER_LLM_KEY",
     "ROOM_NAME_PREFIX",
     "SUGGEST_ONLY_MODE",
     "SUPPORTED_MODES",
     "SessionJobConfig",
     "agent_identity_for_session",
     "bridge_identity_for_session",
+    "reasoning_llm_from_provider_config",
     "room_name_for_session",
 ]

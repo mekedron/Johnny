@@ -345,3 +345,221 @@ def test_set_default_is_atomic_single_default(
 
     defaults = [row for row in client.get("/agents").json() if row["is_default"]]
     assert [row["id"] for row in defaults] == [b["id"]]
+
+
+# --- test_voice endpoint (Johnny-trt.42) -------------------------------------
+
+
+@pytest.fixture
+def crypto() -> Any:
+    from cryptography.fernet import Fernet
+
+    from app.security.crypto import CredentialCrypto
+
+    return CredentialCrypto(Fernet.generate_key())
+
+
+@pytest.fixture
+def voice_client(db_session: Session, crypto: Any) -> Iterator[TestClient]:
+    """A client with crypto + a clean provider registry for synth tests."""
+    from app.api.deps import get_crypto
+    from app.providers.base import get_registry
+
+    def _override_session() -> Iterator[Session]:
+        try:
+            yield db_session
+            db_session.commit()
+        except Exception:
+            db_session.rollback()
+            raise
+
+    registry = get_registry()
+    saved = dict(registry._factories)  # noqa: SLF001 — test-only snapshot
+    registry.clear()
+    app.dependency_overrides[get_session] = _override_session
+    app.dependency_overrides[get_crypto] = lambda: crypto
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+        app.dependency_overrides.pop(get_crypto, None)
+        registry.clear()
+        for key, factory in saved.items():
+            registry.register(key[0], key[1], factory)
+
+
+def _recording_tts_class() -> type:
+    """Audible fake TTSProvider that records the options it was built with."""
+    from collections.abc import AsyncIterator
+
+    from app.providers.base import ProviderConfig, TTSProvider
+
+    class _RecordingTTS(TTSProvider):
+        built_options: dict[str, Any] | None = None
+
+        def __init__(self, config: ProviderConfig) -> None:
+            _RECORDING_TTS.built_options = dict(config.options)
+
+        @property
+        def name(self) -> str:
+            return "recording-tts"
+
+        async def synthesize_stream(
+            self, text: str, voice_id: str | None = None
+        ) -> AsyncIterator[bytes]:
+            import array
+
+            # 3 s of constant-amplitude 16 kHz mono S16LE — clears check_audible.
+            yield array.array("h", [10_000] * 48_000).tobytes()
+
+    return _RecordingTTS
+
+
+def _seed_tts_row(
+    db_session: Session,
+    crypto: Any,
+    *,
+    provider_name: str = "fake-tts",
+    display_name: str = "Fake TTS",
+    options: dict[str, Any] | None = None,
+    is_active: bool = False,
+) -> ProviderCredential:
+    from app.security.crypto import encrypt_json
+
+    row = ProviderCredential(
+        kind=ProviderKind.TTS,
+        provider_name=provider_name,
+        display_name=display_name,
+        credentials_encrypted=encrypt_json(crypto, {"api_key": "k"}),
+        config=dict(options or {}),
+        is_active=is_active,
+    )
+    db_session.add(row)
+    db_session.flush()
+    return row
+
+
+_RECORDING_TTS = _recording_tts_class()
+
+
+def _register_fake_tts(provider_name: str = "fake-tts") -> None:
+    from app.providers.base import get_registry
+
+    get_registry().register(ProviderKind.TTS, provider_name, _RECORDING_TTS)
+
+
+def test_test_voice_synthesizes_with_pinned_provider_and_voice(
+    voice_client: TestClient, db_session: Session, crypto: Any
+) -> None:
+    _register_fake_tts()
+    row = _seed_tts_row(db_session, crypto, options={"model_id": "m1"})
+    agent = Agent(
+        name="Echo",
+        tts_provider_id=row.id,
+        tts_voice_id="Rachel",
+        tts_options={"stability": 0.4},
+    )
+    db_session.add(agent)
+    db_session.flush()
+
+    resp = voice_client.post(f"/agents/{agent.id}/test_voice")
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"] == "audio/wav"
+    assert resp.content[:4] == b"RIFF"
+    assert resp.headers["X-TTS-Audible"] == "1"
+    assert resp.headers["X-TTS-Provider"] == "Fake TTS"
+    assert resp.headers["X-TTS-Voice"] == "Rachel"
+    # The agent's exact combo reached the provider factory: row config +
+    # agent tts_options merged, the agent voice last.
+    assert _RECORDING_TTS.built_options == {
+        "model_id": "m1",
+        "stability": 0.4,
+        "voice_id": "Rachel",
+    }
+
+
+def test_test_voice_pin_honors_inactive_rows(
+    voice_client: TestClient, db_session: Session, crypto: Any
+) -> None:
+    """One active row per kind — pins must work on inactive rows or per-agent
+    voices are impossible. The pin wins over the active row."""
+    _register_fake_tts()
+    _register_fake_tts("other-tts")
+    _seed_tts_row(
+        db_session, crypto, provider_name="other-tts",
+        display_name="Global active", is_active=True,
+    )
+    pinned = _seed_tts_row(db_session, crypto, is_active=False)
+    agent = Agent(name="Echo", tts_provider_id=pinned.id, tts_voice_id="V2")
+    db_session.add(agent)
+    db_session.flush()
+
+    resp = voice_client.post(f"/agents/{agent.id}/test_voice")
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["X-TTS-Provider"] == "Fake TTS"
+    assert _RECORDING_TTS.built_options is not None
+    assert _RECORDING_TTS.built_options["voice_id"] == "V2"
+
+
+def test_test_voice_unpinned_agent_uses_global_active_without_voice(
+    voice_client: TestClient, db_session: Session, crypto: Any
+) -> None:
+    _register_fake_tts()
+    _seed_tts_row(
+        db_session, crypto, options={"voice_id": "row-default"}, is_active=True
+    )
+    agent = Agent(name="Echo")
+    db_session.add(agent)
+    db_session.flush()
+
+    resp = voice_client.post(f"/agents/{agent.id}/test_voice")
+    assert resp.status_code == 200, resp.text
+    # The row's own configured voice plays; nothing agent-side overrides it.
+    assert _RECORDING_TTS.built_options == {"voice_id": "row-default"}
+    assert resp.headers["X-TTS-Voice"] == "row-default"
+
+
+def test_test_voice_missing_pin_is_409_not_fallback(
+    voice_client: TestClient, db_session: Session, crypto: Any
+) -> None:
+    """Unlike session start (which falls back so a meeting proceeds), the
+    Test endpoint must surface a broken pin to the edit page."""
+    _register_fake_tts()
+    _seed_tts_row(db_session, crypto, is_active=True)
+    agent = Agent(name="Echo", tts_provider_id=9999)
+    db_session.add(agent)
+    db_session.flush()
+
+    resp = voice_client.post(f"/agents/{agent.id}/test_voice")
+    assert resp.status_code == 409
+    assert "no longer exists" in resp.json()["detail"]
+
+
+def test_test_voice_wrong_kind_pin_is_409(
+    voice_client: TestClient, db_session: Session, crypto: Any
+) -> None:
+    llm_row = _seed_provider(db_session, kind=ProviderKind.LLM, name="some-llm")
+    agent = Agent(name="Echo", tts_provider_id=llm_row.id)
+    db_session.add(agent)
+    db_session.flush()
+
+    resp = voice_client.post(f"/agents/{agent.id}/test_voice")
+    assert resp.status_code == 409
+    assert "kind llm" in resp.json()["detail"]
+
+
+def test_test_voice_no_provider_anywhere_is_409(
+    voice_client: TestClient, db_session: Session
+) -> None:
+    agent = Agent(name="Echo")
+    db_session.add(agent)
+    db_session.flush()
+
+    resp = voice_client.post(f"/agents/{agent.id}/test_voice")
+    assert resp.status_code == 409
+    assert "no global" in resp.json()["detail"]
+
+
+def test_test_voice_unknown_agent_404(voice_client: TestClient) -> None:
+    assert voice_client.post("/agents/424242/test_voice").status_code == 404

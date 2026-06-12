@@ -63,6 +63,10 @@ from app.db.models import (
     MeetingConfig,
 )
 from app.db.session import session_scope
+from app.services.agent_providers import (
+    persist_provider_fallback_warnings,
+    resolve_agent_provider_payload,
+)
 from app.services.agents import (
     AgentResolution,
     build_agent_snapshot,
@@ -517,8 +521,8 @@ def _resolve_agent(
 
     A missing ``agents`` table (a stripped test schema) or any lookup error
     degrades to "no agent" so the session starts on the contract defaults.
-    Provider-pin resolution from the agent is Johnny-trt.42 — this only
-    picks the agent whose behavior snapshot the session freezes.
+    This only picks the agent; its provider pins are applied to the payload
+    by :func:`_apply_agent_provider_pins` (Johnny-trt.42).
     """
     try:
         return select_agent(session, requested_id=requested_id, meeting=meeting)
@@ -544,6 +548,50 @@ def _agent_overrides_fragment(resolution: AgentResolution) -> dict[str, Any]:
     }
 
 
+def _apply_agent_provider_pins(
+    session: Session,
+    *,
+    bot_session_id: int,
+    base_payload: dict[str, Any],
+    resolution: AgentResolution,
+) -> dict[str, Any]:
+    """Resolve the agent's provider pins into the base payload (Johnny-trt.42).
+
+    Layered BETWEEN the global-active payload and the explicit per-start
+    ``provider_overrides`` (precedence: per-start override > agent pin >
+    global active — the overrides are the playground's one-session experiment
+    knob and must keep winning). Unusable pins fall back with a visible
+    ``provider_switch`` row in this session's activity log. Any resolver
+    error degrades to the unresolved payload; a session start is never
+    blocked on pin resolution.
+    """
+    if resolution.agent is None:
+        return base_payload
+    try:
+        from app.security.crypto import get_crypto
+
+        resolved = resolve_agent_provider_payload(
+            session,
+            get_crypto(),
+            base_payload=base_payload,
+            snapshot=build_agent_snapshot(
+                resolution.agent, assignment_context=resolution.assignment_context
+            ),
+            context_label=f"browser_session={bot_session_id}",
+        )
+        persist_provider_fallback_warnings(
+            session, bot_session_id=bot_session_id, warnings=resolved.warnings
+        )
+        return resolved.payload
+    except Exception:  # noqa: BLE001 — never block a start on pin resolution
+        logger.exception(
+            "browser session %s: agent provider resolution failed; "
+            "continuing with the global-active payload",
+            bot_session_id,
+        )
+        return base_payload
+
+
 def _build_spec_from_event(
     session: Session,
     *,
@@ -558,8 +606,8 @@ def _build_spec_from_event(
             detail="meeting config not set for event",
         )
 
-    # Pull base providers from DB, then layer the explicit per-start
-    # overrides. (Agent provider-pin resolution is Johnny-trt.42.)
+    # Pull base providers from DB, layer the agent's provider pins
+    # (Johnny-trt.42), then the explicit per-start overrides on top.
     try:
         from app.security.crypto import get_crypto
 
@@ -579,6 +627,12 @@ def _build_spec_from_event(
         meeting=meeting,
     )
     agent = resolution.agent
+    base_payload = _apply_agent_provider_pins(
+        session,
+        bot_session_id=bot_session_id,
+        base_payload=base_payload,
+        resolution=resolution,
+    )
     effective_providers = _resolve_provider_overrides(
         session, payload.provider_overrides, base_payload
     )
@@ -691,6 +745,12 @@ def _build_spec_playground(
         else None
     )
     mode = payload.mode or agent_mode or BotMode.AUTONOMOUS.value
+    base_payload = _apply_agent_provider_pins(
+        session,
+        bot_session_id=bot_session_id,
+        base_payload=base_payload,
+        resolution=resolution,
+    )
     effective_providers = _resolve_provider_overrides(
         session, payload.provider_overrides, base_payload
     )

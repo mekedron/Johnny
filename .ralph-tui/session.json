@@ -3,10 +3,10 @@
   "sessionId": "d4e0eaf8-2f04-47a7-b280-1ca8b39424b6",
   "status": "running",
   "startedAt": "2026-06-11T21:01:32.322Z",
-  "updatedAt": "2026-06-12T02:43:46.512Z",
-  "currentIteration": 7,
+  "updatedAt": "2026-06-12T03:31:03.468Z",
+  "currentIteration": 8,
   "maxIterations": 0,
-  "tasksCompleted": 7,
+  "tasksCompleted": 8,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -273,8 +273,8 @@
       {
         "id": "Johnny-trt.41",
         "title": "[BUILD] Phase 6: Agent entity — wipe templates/personalities, clean rebuild",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.42",
@@ -492,6 +492,16 @@
       "durationMs": 3422502,
       "startedAt": "2026-06-12T00:34:52.791Z",
       "endedAt": "2026-06-12T01:31:55.293Z"
+    },
+    {
+      "iteration": 8,
+      "status": "completed",
+      "taskId": "Johnny-trt.41",
+      "taskTitle": "[BUILD] Phase 6: Agent entity — wipe templates/personalities, clean rebuild",
+      "taskCompleted": true,
+      "durationMs": 4266278,
+      "startedAt": "2026-06-12T01:32:39.140Z",
+      "endedAt": "2026-06-12T02:43:45.418Z"
     }
   ],
   "skippedTaskIds": [],

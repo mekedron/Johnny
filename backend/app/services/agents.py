@@ -21,7 +21,9 @@ session-start surfaces share:
 
 Provider *resolution* (turning the snapshot's pinned provider ids into a
 session provider payload, applying the voice) is deliberately NOT here —
-that is Johnny-trt.42. This bead stores + snapshots the pins only.
+it lives in :mod:`app.services.agent_providers` (Johnny-trt.42), called by
+the session-start surfaces right after the snapshot freeze. This module
+stores + snapshots the pins only.
 """
 
 from __future__ import annotations
@@ -152,8 +154,10 @@ def build_agent_snapshot(
 
     Everything a session needs at and after dispatch, detached from the live
     row: identity (for rendering), the character prompt, the behavior knobs
-    the router gate consumes, and the provider role-slot pins Johnny-trt.42
-    will resolve. Plain JSON-able types only.
+    the router gate consumes, and the provider role-slot pins that
+    :func:`app.services.agent_providers.resolve_agent_provider_payload`
+    (Johnny-trt.42) turns into the session provider payload at dispatch.
+    Plain JSON-able types only.
     """
     return {
         "agent_id": agent.id,

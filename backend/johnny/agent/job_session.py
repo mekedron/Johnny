@@ -68,7 +68,9 @@ from johnny.agent.job_config import (
     APPROVAL_REQUIRED_MODE,
     AUTONOMOUS_MODE,
     LIMITED_AUTO_SPEAK_MODE,
+    PROVIDER_CONFIG_ROUTER_LLM_KEY,
     SessionJobConfig,
+    reasoning_llm_from_provider_config,
 )
 from johnny.agent.job_runtime import (
     answer_config_from_job,
@@ -147,33 +149,64 @@ def build_event_bus(redis_url: str | None) -> EventBus:
     return RedisEventBus(client, channel_prefix=DEFAULT_CHANNEL_PREFIX)
 
 
+# LLM roles a session builds raw providers for (Johnny-trt.42). ``router``
+# drives the triage gate + barge-in classifier; ``answer`` the allowed-reply
+# coercion (the AgentSession reply node itself runs the adapter built from the
+# same ``llm`` entry by the factory). The ``reasoning`` role is NOT built here
+# — it is a credential-less stamp on agent_tasks rows (see
+# :func:`johnny.agent.job_config.reasoning_llm_from_provider_config`).
+LLM_ROLE_ROUTER = "router"
+LLM_ROLE_ANSWER = "answer"
+
+
+def _llm_entry_for_role(
+    provider_config: Mapping[str, Any], role: str
+) -> Mapping[str, Any] | None:
+    """The payload entry serving ``role``: ``router_llm`` (router only) → ``llm``.
+
+    The agent-resolution layer (Johnny-trt.42) emits the optional
+    ``router_llm`` key only when the agent's router pin resolves to a
+    different provider row than the answer entry; its absence means both
+    roles share the ``llm`` entry — and the caller reuses one live instance.
+    """
+    if role == LLM_ROLE_ROUTER:
+        entry = provider_config.get(PROVIDER_CONFIG_ROUTER_LLM_KEY)
+        if isinstance(entry, Mapping):
+            return entry
+    entry = provider_config.get(ProviderKind.LLM.value)
+    return entry if isinstance(entry, Mapping) else None
+
+
 def _build_llm_provider(
     provider_config: Mapping[str, Any],
     *,
     registry: ProviderRegistry | None = None,
+    role: str = LLM_ROLE_ANSWER,
 ) -> LLMProvider:
-    """Instantiate the raw answer/router :class:`LLMProvider` from the job payload.
+    """Instantiate the raw :class:`LLMProvider` serving ``role`` from the job payload.
 
     The router gate (:class:`RouterGate`) and the allowed-reply coercion both need
     the *raw* :class:`~app.providers.base.LLMProvider` — not the session
     :class:`~johnny.agent.adapters.johnny_llm.JohnnyLLM` adapter (which only exposes
-    the provider *name*). One instance is reused for both, mirroring the legacy
-    meet-worker's ``router_llm=answer_llm=_as_llm(llm)`` (the same provider drives the
-    router decision and the answer stage). Built from the same agent-resolved
-    ``provider_config`` entry the adapter factory reads, so the session, the router,
-    and the coercion all run the operator's configured (and agent-overridden)
-    LLM. Fail-fast :class:`AgentSessionSetupError` on a missing/blank/wrong-type
-    entry, like the split adapter factory.
+    the provider *name*). Since Johnny-trt.42 the two stages can run DIFFERENT
+    providers: the ``router`` role reads the optional ``router_llm`` payload entry
+    (the agent's triage pin) falling back to ``llm``; the ``answer`` role always
+    reads ``llm`` — the same agent-resolved entry the adapter factory builds the
+    session's reply node from, so the coercion and the spoken replies stay on one
+    provider. Fail-fast :class:`AgentSessionSetupError` on a missing/blank/
+    wrong-type entry, like the split adapter factory.
     """
-    entry = provider_config.get(ProviderKind.LLM.value)
-    if not isinstance(entry, Mapping):
+    entry = _llm_entry_for_role(provider_config, role)
+    if entry is None:
         raise AgentSessionSetupError(
             "no active LLM provider in the dispatched job payload — the router gate "
-            "and answer stage need an 'llm' entry in provider_config"
+            f"and answer stage need an 'llm' entry in provider_config (role={role})"
         )
     provider_name = str(entry.get("provider_name") or "").strip()
     if not provider_name:
-        raise AgentSessionSetupError("the 'llm' entry in the job payload has no provider_name")
+        raise AgentSessionSetupError(
+            f"the LLM entry serving role={role} in the job payload has no provider_name"
+        )
     config = ProviderConfig(
         kind=ProviderKind.LLM,
         provider_name=provider_name,
@@ -431,7 +464,14 @@ def _build_sync_persistence(
     if delegation_capable:
         from app.services.agent_tasks import SqlAlchemyTaskSink
 
-        task_sink = SqlAlchemyTaskSink(_db(), config.bot_session_id)
+        # Per-agent reasoning model (Johnny-trt.42): every queued row carries
+        # the requesting agent's resolved reasoning-LLM identity so the worker
+        # executor can run multi-step kinds on it. Credential-less by contract.
+        task_sink = SqlAlchemyTaskSink(
+            _db(),
+            config.bot_session_id,
+            reasoning_llm=reasoning_llm_from_provider_config(config.provider_config),
+        )
         logger.info(
             "task sink wired for session %s (delegation-capable mode=%s)",
             session_id,
@@ -590,7 +630,19 @@ async def build_agent_runtime(
     adapters = build_session_adapters_for_job(
         config, registry=registry, vad=vad, tts_recorder=recorder
     )
-    router_llm = _build_llm_provider(config.provider_config, registry=registry)
+    # Raw LLMs by role (Johnny-trt.42): the router gate (+ barge-in) may run a
+    # different provider than the answer-side coercion when the agent pinned a
+    # triage model. Absent ``router_llm`` key → both roles share the ``llm``
+    # entry AND one live instance (the pre-trt.42 shape — some providers hold
+    # client state worth not duplicating).
+    answer_llm = _build_llm_provider(
+        config.provider_config, registry=registry, role=LLM_ROLE_ANSWER
+    )
+    router_llm = (
+        _build_llm_provider(config.provider_config, registry=registry, role=LLM_ROLE_ROUTER)
+        if isinstance(config.provider_config.get(PROVIDER_CONFIG_ROUTER_LLM_KEY), Mapping)
+        else answer_llm
+    )
 
     # Graceful no-TTS degrade (Johnny-un2), parity with the meet-worker's
     # ``pipeline_runner._assemble_pipeline``: a speaking mode with no configured TTS
@@ -858,7 +910,7 @@ async def build_agent_runtime(
         bot_session_id=config.bot_session_id,
         router_gate=gate,
         barge_in=barge_in,
-        answer_llm=router_llm,
+        answer_llm=answer_llm,
         answer_config=answer_config_from_job(config),
         tts_available=tts_available,
         noise_filter=NoiseFilterConfig(),

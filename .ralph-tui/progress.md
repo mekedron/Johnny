@@ -106,6 +106,19 @@ after each iteration and it's included in prompts for context.
   transport proven live (session 23, memory `johnny-orchestrator-default-mismatch-9xt`);
   no autonomous run ties them with 2 humans. Operator runbook:
   `.validation/Johnny-trt.30/00-RUN-NOTES.md`.
+- **`is_active` means "the global default", NOT "enabled" — per-agent pins must
+  honor inactive provider rows** (trt.42): the partial unique index
+  `uq_provider_credentials_active_per_kind` allows at most ONE active row per
+  kind, so any two-agents-two-providers feature necessarily references
+  inactive rows (precedent: the playground per-start overrides load by id
+  with no is_active check). "Unusable pin" = missing row / wrong kind /
+  undecryptable credentials → fall back to global-active + turn-0
+  `provider_switch` row in session_timings (stage already whitelisted AND
+  labeled in the UI activity log — reserved since ckz.7, first used here).
+  Also: `logger.info` from app.services modules is INVISIBLE in `docker logs
+  api` (root logger = WARNING) — attach the factory.py handler idiom
+  (marker-attribute guard + propagate=False) when a breadcrumb is operator-
+  facing evidence.
 
 ---
 
@@ -446,4 +459,79 @@ after each iteration and it's included in prompts for context.
     from config/providers.json — activate by kind/provider_name, not by
     remembered numeric id (post-rebuild dev DB: llm=2 openai-compatible,
     stt=3 parakeet, tts=4 piper).
+---
+
+## 2026-06-12 - Johnny-trt.42
+- Agent provider resolution shipped — pins are finally REAL at session build.
+  New seam `app/services/agent_providers.py::resolve_agent_provider_payload`:
+  both session-start surfaces (scheduler `start_session_for_meeting`, browser
+  `_build_spec_from_event`/`_build_spec_playground` via shared
+  `_apply_agent_provider_pins`) apply the trt.41 snapshot's pins to the
+  global payload right after the snapshot freeze. Role-based, split-only:
+  `llm` entry = resolved ANSWER provider; optional `router_llm` entry emitted
+  only when the triage pin resolves to a DIFFERENT row (absent → one shared
+  raw-LLM instance, the pre-trt.42 shape; an answer-pin-only agent gets an
+  explicit router_llm pointing at the global active so cheap triage stays
+  cheap); `reasoning_llm` = credential-less identity descriptor
+  ({provider_id, provider_name, display_name, model}), stamped into
+  agent_tasks.request_json by SqlAlchemyTaskSink at queue time; TTS pin swaps
+  the entry AND merges agent tts_options + tts_voice_id into
+  options["voice_id"] — the exact key the adapter factory already feeds
+  JohnnyTTS, so the voice is applied at the adapter layer with zero factory
+  changes. Unusable pins (missing/wrong_kind/decrypt_failed) fall back to
+  global-active + WARNING log + turn-0 `provider_switch` session_timings row
+  (visible in the session-page activity log); resolution failures degrade to
+  the unresolved payload — a launch is never blocked. Payload entries now
+  carry `provider_id` (additive). `job_session._build_llm_provider` grew a
+  `role` param; gate/barge-in run the router provider, coercion + reply node
+  the answer provider. ClawRouter call-time fallback DECIDED: session-start
+  only (no mid-turn hop — triage call dominates the latency budget and a
+  mid-turn swap complicates INV-1; documented in ROUTING.md §3).
+  Per-agent voice Test endpoint: POST /agents/{id}/test_voice — synthesizes
+  TTS_SAMPLE_PHRASE with the agent's exact saved provider+voice (pin honors
+  inactive rows; unpinned agent = global active without voice; broken pin =
+  409 naming it, NOT a silent fallback), returns WAV + X-TTS-Provider/
+  X-TTS-Voice headers (added to CORS expose_headers).
+- Files: backend/app/services/{agent_providers(new), provider_payload,
+  agent_tasks, session_scheduler, agents, task_worker}.py,
+  app/api/{agents, browser_sessions}.py, app/main.py,
+  johnny/agent/{job_config, job_session}.py, johnny/agent/adapters/factory.py
+  (docstrings), docs/{ROUTING.md §3, livekit-room-auth-and-dispatch.md},
+  tests: test_agent_providers.py (new, 17), test_agent_tasks.py (+1),
+  test_agents.py (+7 test_voice), test_job_session.py (+4 role split).
+- Quality: full backend suite 3981 passed / 5 pre-existing env failures
+  (same set as trt.41: 3× OpenAI-401 lifecycle, 2× no-docker-CLI wizard);
+  ruff + mypy clean on touched files. Browser validation
+  .validation/Johnny-trt.42/ (00-RUN-NOTES.md + 7 artifacts): session 1
+  (Johnny, global trio) spoke en_US-hfc_male-medium vs session 2 (Echo B,
+  pinned INACTIVE "Piper B" row) spoke en_US-amy-medium — proven at
+  piper.synth log + reply WAVs saved for by-ear; session 3 (wrong-kind pin
+  via SQL) started on global Piper WITHOUT the agent voice leaking, UI
+  activity log renders turn #0 "Provider switch | Piper (local)"; session 4
+  live delegate → agent_tasks row #1 request_json.reasoning_llm = the
+  pinned "Ollama router" identity, worker ran the real gog calendar task to
+  done; test_voice 409 on broken pin + 200 audio/wav played in-browser with
+  X-TTS-Voice=en_US-amy-medium. Fixtures kept for operator by-ear replay
+  (agent Echo B id 2 + provider rows 5/6, documented in run notes); Johnny
+  restored as default; canonical trio reactivated post-suite (e2e suite
+  deactivates rows — known trt.29 behavior).
+- **Learnings:**
+  - The bead's "inactive pinned provider → fall back" bullet contradicts its
+    own A/B acceptance: one-active-per-kind means a second TTS pin is ALWAYS
+    inactive. Resolved by reinterpreting "inactive" as genuinely-unusable
+    (missing/wrong-kind/undecryptable) — pattern entry added at top.
+  - Postgres FKs make dangling pin ids unreachable through the API (SET NULL
+    on provider delete; fk_agents_* reject junk updates) — the live fallback
+    leg needs the wrong-kind shape (`UPDATE agents SET tts_provider_id=<llm
+    row>`); "missing" survives only via a stale snapshot race, but keep the
+    branch: it is the defensive floor for hand-edited/test data.
+  - `metric.label` (LiveKit) stamps the ADAPTER class qualname for
+    answer_llm/tts session_timings rows, NOT the provider name — only the
+    gate's own triage emitter names the provider (router_llm rows). The
+    per-provider evidence for answer/tts lives in the resolution breadcrumb
+    + piper.synth logs. If trt.44+ wants provider names in those rows, set
+    explicit labels on JohnnyLLM/JohnnyTTS.
+  - The playground UI has no agent picker (dropped in trt.41) — A/B between
+    agents via the UI = set-default flip per run (POST /agents/{id}/set-default),
+    which is also the honest UI path until trt.45 assignment UI lands.
 ---

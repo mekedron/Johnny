@@ -23,18 +23,20 @@ Validation parity with the retired templates/personalities rules:
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_session
+from app.api.deps import get_crypto, get_session
 from app.db.models import Agent, BotMode, ProviderCredential
 from app.providers.base import ProviderKind
+from app.security.crypto import CredentialCrypto
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -139,6 +141,7 @@ class AgentRead(BaseModel):
 
 
 SessionDep = Annotated[Session, Depends(get_session)]
+CryptoDep = Annotated[CredentialCrypto, Depends(get_crypto)]
 
 
 def _get_row_or_404(session: Session, agent_id: int) -> Agent:
@@ -392,6 +395,175 @@ def delete_agent(agent_id: int, session: SessionDep) -> None:
             ),
         )
     session.delete(row)
+
+
+@router.post(
+    "/{agent_id}/test_voice",
+    responses={
+        200: {"content": {"audio/wav": {}}},
+        404: {"description": "Agent not found"},
+        409: {"description": "The agent's saved TTS provider/voice is unusable"},
+        502: {"description": "Synthesis failed"},
+    },
+)
+async def test_agent_voice(
+    agent_id: int,
+    session: SessionDep,
+    crypto: CryptoDep,
+) -> Response:
+    """Synthesize a sample with the agent's EXACT saved provider + voice (Johnny-trt.42).
+
+    The per-agent twin of ``POST /providers/{id}/play_sample``: resolves the
+    agent's ``tts_provider_id`` pin (any existing TTS row — pins reference
+    inactive rows by design, since only one row per kind can be globally
+    active) and applies the agent's ``tts_voice_id`` / ``tts_options`` for
+    this one synth call, returning a self-contained 16 kHz mono WAV.
+
+    An agent with no TTS pin tests the global-active TTS row with its own
+    saved voice — what an unpinned session would actually speak. Unlike
+    session start (which falls back with a warning so a meeting always
+    proceeds), an unusable PIN here is a 409: the edit page should see the
+    broken state, not a sample synthesized with some other provider. For
+    previewing an *unsaved* picker selection the edit page keeps using
+    ``play_sample`` with its ``voice_id`` override.
+    """
+    # Lazy: the providers module imports every provider adapter; keep this
+    # module import-light for the CRUD-only callers (and the sample helpers
+    # are deliberately single-sourced there, not duplicated here).
+    from app.api.providers import TTS_SAMPLE_PHRASE, _pcm_to_wav_bytes, _tts_sample_headers
+    from app.providers.audio_assert import check_audible, measure_pcm16
+    from app.providers.base import (
+        ProviderConfig,
+        TTSProvider,
+        UnknownProviderError,
+        get_registry,
+    )
+    from app.security.crypto import CryptoError, decrypt_json
+
+    agent = _get_row_or_404(session, agent_id)
+
+    pin_id = agent.tts_provider_id
+    pinned = pin_id is not None
+    if pin_id is not None:
+        row = session.get(ProviderCredential, pin_id)
+        if row is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"agent {agent.name!r} pins TTS provider "
+                    f"id={pin_id}, which no longer exists — "
+                    "sessions fall back to the global-active TTS; re-pin a "
+                    "provider to test the exact voice"
+                ),
+            )
+        if row.kind is not ProviderKind.TTS:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"agent {agent.name!r} pins provider id={row.id} of kind "
+                    f"{row.kind.value}, not tts — re-pin a TTS provider"
+                ),
+            )
+    else:
+        row = session.scalar(
+            select(ProviderCredential).where(
+                ProviderCredential.kind == ProviderKind.TTS,
+                ProviderCredential.is_active.is_(True),
+            )
+        )
+        if row is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"agent {agent.name!r} pins no TTS provider and no global "
+                    "TTS provider is active — nothing to synthesize with"
+                ),
+            )
+
+    registry = get_registry()
+    if not registry.has(row.kind, row.provider_name):
+        raise HTTPException(
+            status_code=502,
+            detail=f"no factory registered for tts:{row.provider_name}",
+        )
+    try:
+        creds = decrypt_json(crypto, row.credentials_encrypted)
+    except (CryptoError, ValueError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"failed to decrypt credentials: {exc}",
+        ) from exc
+
+    # The exact option merge the session resolver applies (Johnny-trt.42):
+    # the agent's tts_options over the row config, the agent voice last.
+    # Voice/options apply only on the agent's own pin — on the unpinned
+    # global row they'd name another provider's voice (CRUD enforces
+    # voice ⇒ pin, so there is nothing to apply anyway).
+    options = dict(row.config or {})
+    if pinned:
+        options.update(dict(agent.tts_options or {}))
+        if agent.tts_voice_id and agent.tts_voice_id.strip():
+            options["voice_id"] = agent.tts_voice_id.strip()
+
+    config = ProviderConfig(
+        kind=row.kind,
+        provider_name=row.provider_name,
+        display_name=row.display_name,
+        credentials=creds,
+        options=options,
+    )
+    try:
+        instance = registry.instantiate(config)
+    except UnknownProviderError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"provider factory missing: {exc}"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 — surface any factory error
+        raise HTTPException(
+            status_code=502, detail=f"provider construction failed: {exc}"
+        ) from exc
+    if not isinstance(instance, TTSProvider):
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"tts:{row.provider_name} did not build a TTSProvider "
+                "(registry misconfiguration)"
+            ),
+        )
+
+    start = time.perf_counter()
+    ttfa_ms = -1
+    try:
+        chunks: list[bytes] = []
+        async for frame in instance.synthesize_stream(TTS_SAMPLE_PHRASE):
+            if ttfa_ms < 0:
+                ttfa_ms = int((time.perf_counter() - start) * 1000)
+            chunks.append(frame)
+        pcm = b"".join(chunks)
+    except Exception as exc:  # noqa: BLE001 — surface any synth error
+        raise HTTPException(status_code=502, detail=f"synthesis failed: {exc}") from exc
+    finally:
+        try:
+            await instance.close()
+        except Exception:  # noqa: BLE001, S110 — cleanup best-effort
+            pass
+    total_ms = int((time.perf_counter() - start) * 1000)
+
+    if not pcm:
+        raise HTTPException(status_code=502, detail="synthesis produced no audio")
+
+    metrics = measure_pcm16(pcm)
+    reasons = check_audible(metrics, TTS_SAMPLE_PHRASE)
+    headers = _tts_sample_headers(
+        instance, ttfa_ms, total_ms, f"agent-{agent.id}-voice.wav", metrics, reasons
+    )
+    headers["X-TTS-Provider"] = row.display_name
+    headers["X-TTS-Voice"] = str(options.get("voice_id") or "")
+    return Response(
+        content=_pcm_to_wav_bytes(pcm),
+        media_type="audio/wav",
+        headers=headers,
+    )
 
 
 @router.post("/{agent_id}/set-default", response_model=AgentRead)

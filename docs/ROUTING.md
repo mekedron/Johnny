@@ -277,19 +277,33 @@ do triage while a heavyweight API model does delegated reasoning:
 All three are nullable with one fallback chain:
 **agent role slot → global default for that role → global active LLM.**
 
-- Today the runtime cannot express this split: one provider drives both router and
-  answer (`router_llm=answer_llm` in `backend/johnny/agent/job_session.py`). trt.42
-  splits the payload into roles behind a single resolution seam; Phases 3–4 keep the
-  global model behind that same seam so the per-agent slots drop in without rework
-  (trt.19/trt.24 notes).
+- **Shipped (trt.42).** Resolution lives behind one seam:
+  `app.services.agent_providers.resolve_agent_provider_payload`, called by both
+  session-start surfaces right after the trt.41 snapshot freeze. The payload's
+  `llm` entry becomes the resolved ANSWER provider; an optional `router_llm`
+  entry carries the triage provider when it differs (absent → one shared
+  instance, the pre-trt.42 shape); `reasoning_llm` is a credential-less
+  identity descriptor. `job_session._build_llm_provider(role=...)` consumes
+  the split. Because at most ONE provider row per kind can be globally active
+  (partial unique index), **pins deliberately honor inactive rows** — that is
+  what makes two agents on two TTS providers possible; "unusable" (fallback +
+  warning) means missing row / wrong kind / undecryptable credentials.
 - The reasoning provider is **stamped into the `agent_tasks` row at delegation time**
-  so the worker executes each task with the *requesting agent's* reasoning model
-  (trt.42 → trt.24).
-- **Runtime fallback chains** (ClawRouter pattern, trt.42 note): the same chain
-  applies at *call* time — a hard provider error mid-turn falls through one hop max,
-  emitting a warning event naming the agent and provider. If that retry hop threatens
-  the latency budget, it gets scoped down to session-start health-check fallback;
-  decided during trt.42 implementation.
+  (`request_json["reasoning_llm"]` — identity only, the worker re-reads
+  credentials from the DB) so the executor can run each task with the
+  *requesting agent's* reasoning model once multi-step kinds land (trt.24).
+- **Runtime fallback chains** (ClawRouter pattern) — decided during trt.42
+  implementation: **session-start resolution only; no mid-turn call-time
+  provider hop.** Rationale: the triage call dominates the felt-latency budget
+  (Phase-3/4 capstones measured ~89% of ack latency in the 3B triage call), so
+  a same-turn retry against a second provider doubles the worst case; and a
+  mid-turn provider swap inside the gate would complicate the INV-1
+  one-terminal-per-turn accounting for no real coverage — the common failure
+  (operator deactivates/deletes/breaks a pinned provider) is caught at session
+  start, and a hard mid-turn provider error keeps today's honest
+  `no_reply(stage_error)` terminal. Unusable pins surface as a turn-0
+  `provider_switch` row in `session_timings` (the activity log) naming the
+  agent and provider, plus a WARNING in the api log.
 
 ## 4. Heuristic complexity scorer (trt.50 — shadow first)
 

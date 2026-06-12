@@ -119,6 +119,11 @@ app.add_middleware(
         "X-TTS-Peak",
         "X-TTS-Audible",
         "X-TTS-Audible-Reason",
+        # The per-agent test_voice endpoint (Johnny-trt.42) additionally
+        # names the exact provider + voice the sample was synthesized with,
+        # so the agent edit page can confirm the saved combo it just played.
+        "X-TTS-Provider",
+        "X-TTS-Voice",
     ],
 )
 

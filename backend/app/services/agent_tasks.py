@@ -16,13 +16,13 @@ Tests of the coordinator use :class:`johnny.agent.tasks.InMemoryTaskSink`.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from app.db.models import AgentTask, AgentTaskStatus
 from johnny.agent.tasks import TaskSink, TaskSnapshot, TaskSpec, TaskStatus
 
 if TYPE_CHECKING:
-    from typing import Any
+    from collections.abc import Mapping
 
     from sqlalchemy.orm import Session
 
@@ -44,28 +44,39 @@ class SqlAlchemyTaskSink(TaskSink):
         self,
         session: Session,
         bot_session_id: int,
+        *,
+        reasoning_llm: Mapping[str, Any] | None = None,
     ) -> None:
         self._session = session
         self._bot_session_id = bot_session_id
+        # The session's resolved reasoning-LLM identity (Johnny-trt.42):
+        # ``{provider_id, provider_name, display_name, model}`` — NEVER
+        # credentials. Frozen per session like every other dispatch input;
+        # stamped into each queued row so the worker executor can resolve the
+        # requesting agent's reasoning model when multi-step kinds land.
+        self._reasoning_llm = dict(reasoning_llm) if reasoning_llm else None
 
     @property
     def bot_session_id(self) -> int:
         return self._bot_session_id
 
     async def record_queued(self, spec: TaskSpec) -> int | None:
+        # Snapshot of the validated request — the executor never has to
+        # re-parse router output (the raw model output already lives in
+        # agent_decisions.raw_output for audit).
+        request_json: dict[str, Any] = {
+            "kind": spec.kind,
+            "args": dict(spec.args),
+            "ack": spec.ack_text,
+        }
+        if self._reasoning_llm is not None:
+            request_json["reasoning_llm"] = dict(self._reasoning_llm)
         row = AgentTask(
             bot_session_id=self._bot_session_id,
             agent_decision_id=spec.decision_id,
             turn_id=spec.turn_id,
             kind=spec.kind,
-            # Snapshot of the validated request — the executor never has to
-            # re-parse router output (the raw model output already lives in
-            # agent_decisions.raw_output for audit).
-            request_json={
-                "kind": spec.kind,
-                "args": dict(spec.args),
-                "ack": spec.ack_text,
-            },
+            request_json=request_json,
             status=AgentTaskStatus.QUEUED,
             ack_text=spec.ack_text or None,
         )
