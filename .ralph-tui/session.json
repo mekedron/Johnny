@@ -3,10 +3,10 @@
   "sessionId": "d4e0eaf8-2f04-47a7-b280-1ca8b39424b6",
   "status": "running",
   "startedAt": "2026-06-11T21:01:32.322Z",
-  "updatedAt": "2026-06-12T00:08:50.185Z",
-  "currentIteration": 4,
+  "updatedAt": "2026-06-12T00:34:13.422Z",
+  "currentIteration": 5,
   "maxIterations": 0,
-  "tasksCompleted": 4,
+  "tasksCompleted": 5,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -399,8 +399,8 @@
       {
         "id": "Johnny-trt.60",
         "title": "[CHORE] Phase 5: Final tool-correctness verification — calendar answers match ground truth end-to-end (ask → ack → execute → spoken result)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.61",
@@ -462,6 +462,16 @@
       "durationMs": 2601437,
       "startedAt": "2026-06-11T22:53:07.262Z",
       "endedAt": "2026-06-11T23:36:28.699Z"
+    },
+    {
+      "iteration": 5,
+      "status": "completed",
+      "taskId": "Johnny-trt.60",
+      "taskTitle": "[CHORE] Phase 5: Final tool-correctness verification — calendar answers match ground truth end-to-end (ask → ack → execute → spoken result)",
+      "taskCompleted": true,
+      "durationMs": 1899693,
+      "startedAt": "2026-06-11T23:37:09.408Z",
+      "endedAt": "2026-06-12T00:08:49.101Z"
     }
   ],
   "skippedTaskIds": [],

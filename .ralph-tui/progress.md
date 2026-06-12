@@ -66,6 +66,20 @@ after each iteration and it's included in prompts for context.
   speak follow-ups are grounded (say() text rides the chat history). To
   reproduce: poll WS frames for task_completed in-page and send the
   follow-up within ms (typed asks make the race trivially winnable).
+- **Live-Meet capstones are operator-gated; an agent cannot self-run them**
+  (trt.30): a real Meet join needs a human Google sign-in (`storage_state.json`
+  in `johnny_google_auth_state`; noVNC/seed/upload ALL require real
+  credentials + 2FA — `JOHNNY_BOT_AUTH_STATE_ROOT` mock cookies only pass the
+  existence check, then fail `MeetAccountSignedOutError`), AND ≥2 live humans
+  with real audio. Also: `session_timings` records `stt`/`end_to_end` ONLY
+  with a speech endpoint — the typed/playground path logs `router_llm`/
+  `answer_llm`/`tts` only (sessions 61-72), so "ack ≤2 s **from speech-end**"
+  is structurally un-measurable without a live mic. The faithful proxy is the
+  agentsession loop itself (one `attach_task_speech_wiring` factory for both
+  surfaces, trt.28): mechanics proven on playground (trt.26/28/29/60) +
+  transport proven live (session 23, memory `johnny-orchestrator-default-mismatch-9xt`);
+  no autonomous run ties them with 2 humans. Operator runbook:
+  `.validation/Johnny-trt.30/00-RUN-NOTES.md`.
 
 ---
 
@@ -245,6 +259,33 @@ after each iteration and it's included in prompts for context.
   - mypy strict won't narrow `queue: X | None` across an `item` derived inside
     the None-guard — restructure so the call sits inside the guarded block
     (`continue` out) instead of re-testing item afterwards.
+---
+
+## 2026-06-12 - Johnny-trt.30
+- Phase-5 capstone: live-Meet validation of the full loop. NO source changes.
+  The literal acceptance — a RECORDED live Google Meet run with ≥2 humans
+  (complex ask → ack ≤~2s from speech-end → conversation continues → mid-flight
+  status → result at a boundary; timings in session_timings) — is **operator-
+  gated and was NOT self-run**: it needs (1) a human Google sign-in for the
+  meet-worker (`johnny_google_auth_state` empty, 0 `google_accounts`, no
+  `storage_state.json`; no dev bypass yields real Google cookies) and (2) ≥2
+  live humans with real audio, neither of which an autonomous agent can supply.
+- Did autonomously: proved the live-Meet path is push-button-ready except for
+  the operator inputs (orchestrator=agentsession pinned, meet-worker image
+  present, launcher mounts/env, providers active, WS serves meet sessions,
+  scheduler dispatch conditions); pulled session_timings evidence (sessions
+  63/65 — router_llm ack ~2.4-2.6s, held-result tts, NO stt/end_to_end on the
+  typed path); browser-confirmed the operator entry points are live (/settings
+  "Add your first meeting bot", /calendar "No Google accounts connected"); wrote
+  the full evidence map + operator runbook. Assembled proof that the mechanics
+  this bead owns (ack/boundary/status) are validated on the IDENTICAL
+  agentsession code via trt.26/28/29/60, and the live transport leg via session
+  23 — but no single run ties them with 2 humans (that's the runbook).
+- Files changed: none. Artifacts: .validation/Johnny-trt.30/ (00-RUN-NOTES.md +
+  01/02 screenshots). Decision on how to resolve the capstone surfaced to the
+  operator (close on documented readiness+proxy vs keep open for the operator's
+  own live run).
+- **Learnings:** see the live-Meet-capstone pattern added to the top section.
 ---
 
 ## 2026-06-12 - Johnny-trt.60
