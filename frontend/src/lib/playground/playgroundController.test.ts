@@ -61,9 +61,14 @@ vi.mock('$lib/sessionEvents', () => ({
 
 vi.mock('$lib/browserSessions', () => ({
 	audioWebSocketUrl: () => 'ws://localhost:8000/test',
+	groupAudioWebSocketUrl: () => 'ws://localhost:8000/group-test',
+	listActiveBrowserGroups: vi.fn(async () => []),
+	postBrowserGroupText: vi.fn(async () => ({ accepted: true, drove_pipeline: {} })),
 	postBrowserText: vi.fn(async () => undefined),
 	startBrowserSession: vi.fn(),
-	stopBrowserSession: vi.fn(async () => undefined)
+	startBrowserSessionGroup: vi.fn(),
+	stopBrowserSession: vi.fn(async () => undefined),
+	stopBrowserSessionGroup: vi.fn(async () => undefined)
 }));
 
 vi.mock('$lib/browserAudio', () => ({
@@ -245,5 +250,173 @@ describe('playground per-session UI scoping (Johnny-trt.40)', () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+});
+
+// --- Multi-agent group mode (Johnny-trt.48) --------------------------------
+
+import {
+	postBrowserGroupText,
+	startBrowserSessionGroup,
+	stopBrowserSessionGroup,
+	type BrowserSessionGroup
+} from '$lib/browserSessions';
+
+function browserGroup(groupId: number, names: string[]): BrowserSessionGroup {
+	return {
+		group_id: groupId,
+		audio_ws_path: `/ws/sessions/groups/${groupId}/audio`,
+		sample_rate: 16_000,
+		members: names.map((name, index) => ({
+			session: browserSession(groupId + index),
+			agent_id: 100 + index,
+			agent_name: name
+		}))
+	};
+}
+
+async function startGroup(
+	controller: PlaygroundController,
+	groupId: number,
+	names: string[]
+): Promise<void> {
+	controller.selectedAgentIds = names.map((_, index) => 100 + index);
+	vi.mocked(startBrowserSessionGroup).mockResolvedValueOnce(browserGroup(groupId, names));
+	await controller.start();
+}
+
+function subFor(sessionId: number): CapturedSubscription {
+	const sub = h.subscriptions.find(
+		(s) => s.sessionId === String(sessionId) && !s.closed
+	);
+	assert.ok(sub, `no live subscription for session ${sessionId}`);
+	return sub as CapturedSubscription;
+}
+
+function floorEvent(
+	seq: number,
+	type: 'floor_acquired' | 'floor_released' | 'floor_expired',
+	waitMs = 0
+): SessionEvent {
+	return {
+		seq,
+		type,
+		holder: 'x',
+		wait_ms: waitMs,
+		timestamp_ms: 0
+	} as unknown as SessionEvent;
+}
+
+describe('playground multi-agent group mode (Johnny-trt.48)', () => {
+	beforeEach(() => {
+		vi.mocked(startBrowserSessionGroup).mockReset();
+		vi.mocked(stopBrowserSessionGroup).mockClear();
+		vi.mocked(postBrowserGroupText).mockClear();
+	});
+
+	it('2+ selected agents start a group: member feeds subscribed, strip seeded', async () => {
+		const c = new PlaygroundController();
+		await startGroup(c, 10, ['Alex', 'Echo']);
+		assert.equal(c.liveGroup?.group_id, 10);
+		assert.equal(c.isGroup, true);
+		assert.deepEqual(
+			c.groupMembers.map((m) => [m.sessionId, m.name, m.state]),
+			[
+				[10, 'Alex', 'idle'],
+				[11, 'Echo', 'idle']
+			]
+		);
+		// One event subscription per member.
+		assert.deepEqual(
+			h.subscriptions.map((s) => s.sessionId),
+			['10', '11']
+		);
+		const payload = vi.mocked(startBrowserSessionGroup).mock.calls[0][0];
+		assert.deepEqual(payload.agents, [{ agent_id: 100 }, { agent_id: 101 }]);
+	});
+
+	it('user lines render once (leader feed); agent lines are labeled per member', async () => {
+		const c = new PlaygroundController();
+		await startGroup(c, 10, ['Alex', 'Echo']);
+		// The same typed ask is published by BOTH members' pipelines.
+		subFor(10).opts.onEvent(finalEvent(1, 'Alex, what time is it?'));
+		subFor(11).opts.onEvent(finalEvent(1, 'Alex, what time is it?'));
+		assert.equal(c.transcript.filter((l) => l.speaker === 'user').length, 1);
+
+		subFor(10).opts.onEvent(spokeEvent(2, 'It is ten.'));
+		subFor(11).opts.onEvent(spokeEvent(2, 'I agree, ten.'));
+		const botLines = c.transcript.filter((l) => l.speaker === 'bot');
+		assert.deepEqual(
+			botLines.map((l) => [l.label, l.text]),
+			[
+				['Alex', 'It is ten.'],
+				['Echo', 'I agree, ten.']
+			]
+		);
+	});
+
+	it('floor + suppression + peer-labeled finals drive the state strip', async () => {
+		const c = new PlaygroundController();
+		await startGroup(c, 10, ['Alex', 'Echo']);
+
+		subFor(10).opts.onEvent(floorEvent(1, 'floor_acquired', 230));
+		let alex = c.groupMembers.find((m) => m.sessionId === 10);
+		assert.equal(alex?.holdsFloor, true);
+		assert.equal(alex?.state, 'speaking');
+		assert.equal(alex?.floorWaitMs, 230);
+
+		// Echo hears Alex: a peer-labeled final (speaker = agent name).
+		subFor(11).opts.onEvent({
+			seq: 2,
+			type: 'transcript_final',
+			text: 'whatever STT heard',
+			timestamp_ms: 0,
+			speaker: 'Alex'
+		} as SessionEvent);
+		const echo = c.groupMembers.find((m) => m.sessionId === 11);
+		assert.equal(echo?.heardPeer, 'Alex');
+		// Peer-labeled finals never become chat lines.
+		assert.equal(c.transcript.length, 0);
+
+		subFor(10).opts.onEvent(floorEvent(3, 'floor_released'));
+		alex = c.groupMembers.find((m) => m.sessionId === 10);
+		assert.equal(alex?.holdsFloor, false);
+		assert.equal(alex?.state, 'idle');
+
+		subFor(11).opts.onEvent({
+			seq: 4,
+			type: 'peer_speech_suppressed',
+			peer: 'Alex',
+			window_ms: 4100,
+			text_match_hits: 1,
+			timestamp_ms: 0
+		} as unknown as SessionEvent);
+		const echoAfter = c.groupMembers.find((m) => m.sessionId === 11);
+		assert.equal(echoAfter?.suppressedCount, 1);
+		assert.equal(echoAfter?.lastSuppressedPeer, 'Alex');
+	});
+
+	it('one member ending keeps the group; the last teardowns it', async () => {
+		const c = new PlaygroundController();
+		await startGroup(c, 10, ['Alex', 'Echo']);
+		subFor(11).opts.onEvent(statusEvent(1, 'ended'));
+		assert.equal(c.liveGroup?.group_id, 10);
+		assert.equal(c.groupMembers.find((m) => m.sessionId === 11)?.status, 'ended');
+
+		subFor(10).opts.onEvent(statusEvent(2, 'ended'));
+		assert.equal(c.liveGroup, null);
+		assert.equal(c.isLive, false);
+	});
+
+	it('sendText routes to the group endpoint; End group stops the group', async () => {
+		const c = new PlaygroundController();
+		await startGroup(c, 10, ['Alex', 'Echo']);
+		c.textInput = 'Echo, your turn';
+		await c.sendText();
+		assert.deepEqual(vi.mocked(postBrowserGroupText).mock.calls, [[10, 'Echo, your turn']]);
+
+		await c.endSession();
+		assert.deepEqual(vi.mocked(stopBrowserSessionGroup).mock.calls, [[10]]);
+		assert.equal(c.liveGroup, null);
 	});
 });

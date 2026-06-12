@@ -197,6 +197,12 @@ end
 class RedisFloorBackend:
     """Production :class:`FloorBackend` on the meeting's Redis key + channel.
 
+    ``meeting_id`` is the floor's scope token: a real ``meeting_config_id``
+    for Meet sessions, or a synthetic string scope (e.g.
+    ``browser-group-{id}``, Johnny-trt.48) for surfaces that share a floor
+    without a meeting row — the string namespace can never collide with the
+    integer meeting keyspace.
+
     One client per backend (the session owns exactly one). The subscribe
     loop follows the :class:`~johnny.agent.task_wiring.TaskEventListener`
     discipline: a dropped connection logs, backs off, and resubscribes —
@@ -209,7 +215,7 @@ class RedisFloorBackend:
         self,
         *,
         redis_url: str,
-        meeting_id: int,
+        meeting_id: int | str,
         client_factory: Callable[[], Any] | None = None,
         reconnect_backoff_s: float = 2.0,
     ) -> None:
@@ -637,6 +643,64 @@ class PeerFloorState:
         return len(self._open)
 
 
+def shield_handle_through_peer_tail(
+    handle: Any,
+    floor: SpeechFloor | None,
+    *,
+    poll_s: float = 0.1,
+    max_shield_s: float = 15.0,
+) -> asyncio.Task[None] | None:
+    """Keep a brand-new speech uninterruptible through a floor-handoff tail.
+
+    Johnny-trt.48: the trt.46 peer awareness suppresses peer speech at the
+    STT *final* seam, but the SDK's VAD-level interruption fires earlier —
+    at a floor handoff the previous holder's trailing audio still has this
+    session's ``user_state`` at "speaking", and the SDK reads that as a live
+    barge-in and cuts the brand-new speech within milliseconds (surfaced by
+    the trt.48 ensemble scenario: the second agent's replies terminalized
+    ``no_reply(barge_in)`` with ~10 ms floor holds, every handoff). The
+    shield applies the exact discriminator the final seam uses — "a peer's
+    floor window covers now" — to the interruption path: the handle is
+    marked uninterruptible while the window is closing, and a lift task
+    restores interruptibility the moment it closes (bounded by
+    ``max_shield_s`` as leak insurance), so genuine user barge-in works for
+    the rest of the speech. Explicit stops (the Stop button / client gate)
+    force-interrupt and always win.
+
+    Returns the lift task — the caller must keep a strong reference — or
+    ``None`` when no shield was needed (no floor, window already closed, or
+    the handle was already uninterruptible).
+    """
+    if floor is None:
+        return None
+    try:
+        if not floor.peer_window_active():
+            return None
+        if not bool(getattr(handle, "allow_interruptions", True)):
+            return None
+        handle.allow_interruptions = False
+    except Exception:
+        logger.exception(
+            "speech floor: handoff shield could not arm — speech left interruptible"
+        )
+        return None
+    logger.info(
+        "speech floor: handoff shield armed — peer window still closing; "
+        "speech starts uninterruptible"
+    )
+
+    async def _lift() -> None:
+        deadline = time.monotonic() + max_shield_s
+        try:
+            while time.monotonic() < deadline and floor.peer_window_active():
+                await asyncio.sleep(poll_s)
+        finally:
+            with contextlib.suppress(Exception):
+                handle.allow_interruptions = True
+
+    return asyncio.ensure_future(_lift())
+
+
 # --- The per-session facade --------------------------------------------------
 
 
@@ -1041,4 +1105,5 @@ __all__ = [
     "SpeechFloor",
     "normalize_speech_text",
     "session_relative_ms",
+    "shield_handle_through_peer_tail",
 ]

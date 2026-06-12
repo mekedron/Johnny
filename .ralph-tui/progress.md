@@ -5,6 +5,41 @@ after each iteration and it's included in prompts for context.
 
 ## Codebase Patterns (Study These First)
 
+- **Peer audio can cut a co-agent's reply through the SDK's VAD interruption —
+  shield speeches created inside a peer's suppression window** (trt.48): the
+  trt.46 floor suppresses peer speech only at the STT FINAL seam, but
+  livekit's interruption fires earlier — at a floor handoff the previous
+  holder's trailing audio keeps the new speaker's `user_state == "speaking"`,
+  and the SDK insta-cuts the brand-new reply (~10 ms holds,
+  `no_reply(barge_in)`, `user_over_bot` with the peer's onset). Fix lives in
+  `speech_floor.shield_handle_through_peer_tail`, armed by the gate on EVERY
+  handle-creating path (bind_reply, _say_with_terminal, correction,
+  speak_task_result): `handle.allow_interruptions = False` while
+  `floor.peer_window_active()`, lifted when the window closes (15 s bound).
+  Explicit stops must then FORCE: `session.interrupt(force=True)`
+  (non-forced raises RuntimeError on a shielded current speech). Applies to
+  real multi-agent Meets too — any future speak path MUST arm the shield.
+- **Cross-feeding co-agent audio = sample-ADD on a tick clock, never frame
+  interleave** (trt.48, `GroupAudioRouter`): pushing paced peer frames into
+  the same capture queue a live mic feeds interleaves two real-time streams
+  → each plays at half speed and Silero classifies neither as speech. The
+  working shape: a 20 ms ticker consumes mic-buffer + per-source cross-feed
+  buffers once per tick and pushes ONE saturating-summed frame per member
+  (own audio excluded) — real-time pacing falls out of the clock, streams
+  stay continuous (VAD end-of-speech closes without a mic), and stub-TTS
+  scenarios must emit RECORDED SPEECH (a fixtures/*.pcm), not
+  silence/noise, or the cross-feed exercises nothing (trt.2).
+- **Playground groups ride the single-session machinery wholesale** (trt.48):
+  a group = N normal browser sessions (rows, runners, event feeds, /text,
+  /stop all unchanged) + one umbrella id (= leader bot_session_id) + the
+  floor scope `browser-group-{gid}` threaded
+  spec→run_browser_pipeline→BrowserAgentSession.build→build_agent_runtime
+  (string scopes share the meeting lock keyspace collision-free) + ONE group
+  WS speaking the exact single-session wire protocol (browserAudio.ts
+  unchanged). Group text fan-out MUST be concurrent (`asyncio.gather`) —
+  `feed_text` blocks inside `run_turn` on the floor acquire for up to 12 s
+  when a peer is speaking.
+
 - **Speech-floor architecture + its e2e validation seam** (trt.46): multi-agent
   coordination is peer-to-peer over redis — lock `johnny:floor:lock:meeting:{id}`
   (SET NX PX, TTL 10s, heartbeat ~3s, compare-and-set Lua renew/release) +
@@ -900,4 +935,94 @@ after each iteration and it's included in prompts for context.
     scheduler's gate uses _ACTIVE_STATUSES (incl. waiting_for_relogin) —
     preserve BOTH semantics via a statuses param, or manual relogin
     recovery silently breaks.
+---
+
+## 2026-06-12 - Johnny-trt.48
+- Multi-agent playground shipped — the browser test surface for agent
+  ensembles (and the trt.47 tuning bench). (1) **Session groups**:
+  `POST /sessions/browser/groups/start` (new app/api/browser_session_groups.py)
+  launches one in-process browser session per explicit agent (2..4, dup/cap/
+  unknown → 422/404), umbrella id = leader bot_session_id; the one-active
+  gate refactored into shared `ensure_no_live_browser_session` (a group
+  counts as THE active session; 409 detail gains `active_group_id`); members
+  are first-class sessions (rows with a `group` overrides fragment, runners
+  in the single registry → per-member /text, /stop, sidebar Leave-now work
+  unchanged; member audio socket attach refused → pointed at the group WS).
+  Monitor task detaches ended members (group survives) and tears the group
+  down with the last one; group stop/text/active endpoints; disconnect
+  watchdog + silent drain at group level (single parity). (2) **Floor for
+  meeting-less co-agents**: spec.floor_scope →
+  BrowserAgentSession.build(floor_scope, floor_backend) →
+  build_agent_runtime — members share lock
+  `johnny:floor:lock:meeting:browser-group-{gid}` (RedisFloorBackend
+  meeting_id widened to int|str; meeting keys byte-identical); injectable
+  floor_backend = the hermetic scenario seam. (3) **GroupAudioRouter**
+  (johnny/voice_pipeline/group_audio.py): ONE WS ⇄ N member transports —
+  20 ms-tick capture mixer (mic + every OTHER member's TTS, saturating
+  numpy sum; real-time cross-feed pacing from the clock), playback merge
+  (member-tagged for selective interrupt purge), control fan-in
+  (member-tagged interrupts), group cancel/notify_ended/close. (4)
+  **Floor-handoff shield** (the scenario's catch — pattern bullet above):
+  shield_handle_through_peer_tail + gate arming on all four speech paths +
+  BrowserAgentSession.interrupt(force=True). (5) **Per-agent state strip**
+  (LiveSession.svelte + controller group mode): floor holder ("Speaking ·
+  floor · waited X s"), thinking, suppressed ×N, transient "heard <peer>",
+  claims W/L (trt.47-ready), Left/Failed, per-member End; user lines
+  deduped to the leader feed, agent lines labeled per member; multi-select
+  agent roster in SetupForm ("Start group · N agents"); group start/stop/
+  text/reattach client (browserSessions.ts), conflict prompt group-aware.
+  (6) **Ensemble scenario** (johnny/agent/ensemble_scenario.py +
+  fixtures/ensemble_addressing.json + tests/integration/
+  test_ensemble_scenario.py): real BrowserAgentSessions + GroupAudioRouter +
+  shared floor (in-memory hub default, --redis for stack parity), stub trio
+  with a recorded-speech TTS; asserts zero hold overlap (arrival-clock),
+  audio-inside-own-holds, strict loop rule (decisions == scripted asks),
+  peer labeling present, every reply survives handoff; `addressed_to` per
+  step is the trt.47 flip seam. CLI: `python -m johnny.agent.ensemble_scenario`.
+- Files: backend johnny/voice_pipeline/{group_audio(new),__init__}.py,
+  johnny/agent/{speech_floor,job_session,browser_session,router_gate,
+  ensemble_scenario(new)}.py, johnny/agent/fixtures/ensemble_addressing.json
+  (new), app/api/{browser_sessions,browser_session_groups(new)}.py,
+  app/services/browser_pipeline_runner.py, app/main.py, docs/PIPELINE.md
+  (§3.15 group block); frontend src/lib/{browserSessions.ts,
+  playground/{playgroundSession.svelte.ts,transcriptLines.ts,
+  playgroundController.test.ts}}, src/lib/components/playground/
+  {SetupForm,LiveSession}.svelte; tests: test_group_audio (new 11),
+  test_browser_session_groups (new 13), test_peer_tail_shield (new 6),
+  test_job_session (+2), test_ensemble_scenario (new 1 integration),
+  test_browser_pipeline_runner (fake build signature), vitest +5 group.
+- Quality: full backend (–e2e) 4154+ passed / 2 pre-existing wizard env
+  failures (the runner-fake failure fixed in-task); mypy --strict clean on
+  johnny touched, mypy clean on app touched; ruff clean; frontend
+  svelte-check 0/0, vitest 112, build ✔, lint = the pre-existing settings
+  error. Browser validation .validation/Johnny-trt.48/ (00-RUN-NOTES.md +
+  8 artifacts): live group #68 (Johnny + Echo B, different voices), typed
+  ask → both replied in sequence, Johnny waited 9.01 s for the floor,
+  ZERO overlap across 6 floor holds (60–80 ms handoffs, persisted
+  conversation_events analysis), strip showed live floor handoff +
+  suppressed ×N, Johnny's transcript labeled Echo B's speech (3 rows, no
+  turns opened), live `floor_unavailable` verdict under real operator
+  voice traffic, per-member end → group survived → "End group" clean;
+  single-agent path regression-checked unchanged (Session #70, no strip).
+- **Learnings:**
+  - The handoff shield + the mixer design + the groups-ride-singles shape
+    (three pattern bullets at top).
+  - The ensemble scenario found the handoff cut on its FIRST run — the
+    "feed each other's pipelines as peer audio" requirement is what makes
+    the playground a real test surface; redis-cli synthetic frames would
+    never have caught it.
+  - SpeechHandle.allow_interruptions has a SETTER in livekit-agents 1.5.17
+    and activity.interrupt(force=) propagates everywhere — the shield can
+    be armed/lifted mid-flight; non-forced session.interrupt() RAISES on a
+    shielded current speech (RuntimeError), so explicit stop paths must
+    pass force=True.
+  - The operator joined the validation run live on the real mic (Russian +
+    English + button interrupts): the floor held under genuine contention
+    — bot_cut_by_stop rows from the Interrupt button, a real
+    floor_unavailable decline, suppression in both directions. Transcripts
+    of peer TTS audio are garbled STT (Piper→Parakeet) — the LABEL is the
+    evidence, not the text (text-match backstop rarely hits cross-engine).
+  - uvicorn --reload does NOT watch tests/ — editing test files mid-live-
+    validation is safe; editing app/johnny files reloads the API and kills
+    in-process groups.
 ---

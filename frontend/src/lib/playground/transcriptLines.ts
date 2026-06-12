@@ -31,6 +31,12 @@ export interface TranscriptLine {
 	// A barge-in cut this bot line mid-speech (Johnny-trt.58): `text` is the
 	// partial actually delivered — render an interrupted marker, text readable.
 	interrupted?: boolean;
+	// Speaker label for multi-agent group transcripts (Johnny-trt.48): which
+	// agent spoke this bot line. Absent in single-agent mode ("Johnny").
+	label?: string | null;
+	// Owning bot session for group lines (Johnny-trt.48) — group transcripts
+	// interleave members, so per-line audio needs the member's session id.
+	sessionId?: number | null;
 }
 
 function isPartialLine(line: TranscriptLine): boolean {

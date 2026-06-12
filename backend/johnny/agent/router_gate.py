@@ -98,6 +98,7 @@ from johnny.agent.speech_floor import (
     RELEASE_TEARDOWN,
     FloorLease,
     SpeechFloor,
+    shield_handle_through_peer_tail,
 )
 from johnny.agent.speech_queue import SpeechItem, SpeechPriority, SpeechQueue
 from johnny.agent.task_catalog import TaskCatalogEntry, render_task_catalog
@@ -1431,6 +1432,7 @@ class RouterGate:
         # Corrections count as "the bot is still talking" for the internal
         # teardown wait (Johnny-trt.57) just like acks do.
         self._last_say_handle = handle
+        self._arm_peer_tail_shield(handle)
 
         def _on_done(done_handle: SpeechHandle) -> None:
             task = asyncio.ensure_future(
@@ -1541,6 +1543,7 @@ class RouterGate:
         # Results count as "the bot is still talking" for the internal
         # teardown wait (Johnny-trt.57) just like acks and corrections do.
         self._last_say_handle = handle
+        self._arm_peer_tail_shield(handle)
 
         def _on_done(done_handle: SpeechHandle) -> None:
             task = asyncio.ensure_future(self._on_task_result_done(done_handle, text))
@@ -1666,6 +1669,7 @@ class RouterGate:
         # yet started) therefore always finds the farewell ack here when it
         # calls wait_recent_say_done() as its first act (Johnny-trt.57).
         self._last_say_handle = handle
+        self._arm_peer_tail_shield(handle)
 
         def _on_done(done_handle: SpeechHandle) -> None:
             task = asyncio.ensure_future(
@@ -1861,6 +1865,7 @@ class RouterGate:
         # can capture (turn_id, handle) as the interrupt target + generation
         # guard key. Cleared when the reply completes (_on_reply_done).
         self._active_reply = (turn_id, speech_handle)
+        self._arm_peer_tail_shield(speech_handle)
 
         def _on_done(handle: SpeechHandle) -> None:
             task = asyncio.ensure_future(self._on_reply_done(turn_id, handle))
@@ -2099,6 +2104,22 @@ class RouterGate:
         (:meth:`johnny.agent.task_wiring.TaskSpeechDeliverer._deliver`).
         """
         self._floor = floor
+
+    def _arm_peer_tail_shield(self, handle: SpeechHandle) -> None:
+        """Handoff shield (Johnny-trt.48) for a speech created at floor handoff.
+
+        Armed on every speech-creating path right after the handle exists:
+        while the previous holder's suppression window is still closing, the
+        SDK's VAD-level interruption would read its trailing audio as live
+        user speech and insta-cut this brand-new speech — the floor analogue
+        of the noise-gate "the turn never begins" rule, applied to the
+        interruption seam. No-op without a floor or outside a peer window.
+        The lift task rides ``_reply_tasks`` for the strong reference.
+        """
+        task = shield_handle_through_peer_tail(handle, self._floor)
+        if task is not None:
+            self._reply_tasks.add(task)
+            task.add_done_callback(self._reply_tasks.discard)
 
     async def _release_floor_lease(
         self,

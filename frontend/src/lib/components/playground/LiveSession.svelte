@@ -38,6 +38,16 @@
 
 	const activeChips = $derived.by(() => {
 		const chips: { label: string; value: string }[] = [];
+		// Multi-agent group (Johnny-trt.48): the roster is the configuration.
+		if (controller.liveGroup) {
+			chips.push({
+				label: 'Agents',
+				value: controller.groupMembers.map((m) => m.name).join(' · ')
+			});
+			const ctx = controller.context.trim();
+			if (ctx) chips.push({ label: 'Context', value: ctx.slice(0, 32) });
+			return chips;
+		}
 		const session = controller.liveSession;
 		const overrides =
 			session?.playground_overrides && typeof session.playground_overrides === 'object'
@@ -90,7 +100,7 @@
 	}
 </script>
 
-{#if controller.liveSession}
+{#if controller.liveSession || controller.liveGroup}
 	<section
 		class="flex flex-col rounded-md border border-border bg-card"
 		aria-labelledby="live-heading"
@@ -105,7 +115,14 @@
 						id="live-heading"
 						class="m-0 text-base leading-tight font-semibold tracking-tight text-foreground"
 					>
-						Session <span class="font-mono">#{controller.liveSession.id}</span>
+						{#if controller.liveGroup}
+							Group <span class="font-mono">#{controller.liveGroup.group_id}</span>
+							<span class="font-normal text-muted-foreground">
+								· {controller.groupMembers.length} agents</span
+							>
+						{:else if controller.liveSession}
+							Session <span class="font-mono">#{controller.liveSession.id}</span>
+						{/if}
 					</h2>
 					<span
 						class="inline-flex items-center gap-1.5 text-xs"
@@ -153,15 +170,17 @@
 				>
 					<OctagonXIcon /> Interrupt
 				</Button>
-				<Button
-					variant="ghost"
-					size="sm"
-					href={`/sessions/${controller.liveSession.id}`}
-					target="_blank"
-					rel="noopener"
-				>
-					<ExternalLinkIcon /> Open detail
-				</Button>
+				{#if controller.liveSession}
+					<Button
+						variant="ghost"
+						size="sm"
+						href={`/sessions/${controller.liveSession.id}`}
+						target="_blank"
+						rel="noopener"
+					>
+						<ExternalLinkIcon /> Open detail
+					</Button>
+				{/if}
 				<Button
 					variant="destructive"
 					size="sm"
@@ -169,10 +188,124 @@
 					onclick={() => controller.endSession()}
 					data-testid="playground-end-button"
 				>
-					<SquareIcon /> {controller.stopping ? 'Ending…' : 'End session'}
+					<SquareIcon />
+					{controller.stopping
+						? 'Ending…'
+						: controller.liveGroup
+							? 'End group'
+							: 'End session'}
 				</Button>
 			</div>
 		</header>
+
+		<!-- Per-agent state strip (Johnny-trt.48): who listens / thinks /
+		     holds the floor / suppressed whom / lost a claim — driven by the
+		     conversation-dynamics events on each member's feed. -->
+		{#if controller.liveGroup}
+			<div
+				class="grid gap-2 border-b border-separator px-5 py-3 sm:grid-cols-2 lg:grid-cols-4"
+				aria-label="Agent state strip"
+				data-testid="agent-state-strip"
+			>
+				{#each controller.groupMembers as member (member.sessionId)}
+					<div
+						class="flex flex-col gap-1.5 rounded-md border px-3 py-2"
+						class:border-border={!member.holdsFloor}
+						class:border-foreground={member.holdsFloor}
+						class:bg-surface-2={member.holdsFloor}
+						class:opacity-60={member.status !== 'live'}
+						data-testid={`agent-strip-${member.sessionId}`}
+						data-state={member.status !== 'live' ? member.status : member.state}
+						data-holds-floor={member.holdsFloor}
+					>
+						<div class="flex items-center gap-1.5">
+							<BotIcon class="size-3.5 shrink-0" />
+							<span class="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+								{member.name}
+							</span>
+							<a
+								class="font-mono text-[0.7rem] text-ink-subtle hover:text-foreground"
+								href={`/sessions/${member.sessionId}`}
+								target="_blank"
+								rel="noopener"
+								title="Open this agent's session detail"
+							>
+								#{member.sessionId}
+							</a>
+							{#if member.status === 'live'}
+								<button
+									type="button"
+									class="rounded-sm p-0.5 text-ink-subtle transition-colors hover:bg-surface-3 hover:text-destructive"
+									onclick={() => controller.endGroupMember(member.sessionId)}
+									aria-label={`End ${member.name}`}
+									title={`End ${member.name} — the rest of the group keeps running`}
+									data-testid={`agent-strip-end-${member.sessionId}`}
+								>
+									<SquareIcon class="size-3" />
+								</button>
+							{/if}
+						</div>
+						<div class="flex flex-wrap items-center gap-1.5 text-[0.7rem]">
+							{#if member.status !== 'live'}
+								<span
+									class="rounded-xs px-1.5 py-0.5 font-medium"
+									class:bg-surface-3={member.status === 'ended'}
+									class:text-muted-foreground={member.status === 'ended'}
+									class:bg-destructive={member.status === 'failed'}
+									class:text-destructive-foreground={member.status === 'failed'}
+								>
+									{member.status === 'ended' ? 'Left' : 'Failed'}
+								</span>
+							{:else if member.holdsFloor}
+								<span
+									class="inline-flex items-center gap-1 rounded-xs bg-foreground px-1.5 py-0.5 font-medium text-background"
+									data-testid={`agent-floor-${member.sessionId}`}
+								>
+									<span class="live-pulse h-1.5 w-1.5 rounded-full bg-background"></span>
+									<span>Speaking · floor</span>
+									{#if member.floorWaitMs !== null && member.floorWaitMs > 50}
+										<span>waited {(member.floorWaitMs / 1000).toFixed(1)}s</span>
+									{/if}
+								</span>
+							{:else if member.state === 'thinking'}
+								<span class="rounded-xs bg-surface-3 px-1.5 py-0.5 font-medium text-foreground">
+									Thinking…
+								</span>
+							{:else}
+								<span class="rounded-xs bg-surface-2 px-1.5 py-0.5 text-muted-foreground">
+									Listening
+								</span>
+							{/if}
+							{#if member.heardPeer}
+								<span
+									class="rounded-xs bg-surface-2 px-1.5 py-0.5 italic text-muted-foreground"
+									data-testid={`agent-heard-peer-${member.sessionId}`}
+								>
+									heard {member.heardPeer}
+								</span>
+							{/if}
+							{#if member.suppressedCount > 0}
+								<span
+									class="rounded-xs border border-border px-1.5 py-0.5 text-muted-foreground"
+									title={`Peer speech labeled + suppressed (never opened a turn)${member.lastSuppressedPeer ? ` — last: ${member.lastSuppressedPeer}` : ''}`}
+									data-testid={`agent-suppressed-${member.sessionId}`}
+								>
+									suppressed ×{member.suppressedCount}
+								</span>
+							{/if}
+							{#if member.claimsLost > 0 || member.claimsWon > 0}
+								<span
+									class="rounded-xs border border-border px-1.5 py-0.5 text-muted-foreground"
+									title="Turn claims won/lost (Johnny-trt.47 arbitration)"
+								>
+									claims {member.claimsWon}W/{member.claimsLost}L
+								</span>
+							{/if}
+						</div>
+					</div>
+				{/each}
+			</div>
+		{/if}
 
 		<!-- Voice controls -->
 		<div
@@ -318,10 +451,11 @@
 						>
 							{#if isBot}
 								<BotIcon class="size-3" />
-								<span>Johnny</span>
-								{#if line.audioFile && controller.liveSession}
+								<span>{line.label ?? 'Johnny'}</span>
+								{@const audioSessionId = line.sessionId ?? controller.liveSession?.id ?? null}
+								{#if line.audioFile && audioSessionId !== null}
 									<UtteranceAudioButton
-										src={sessionAudioUrl(controller.liveSession.id, line.audioFile)}
+										src={sessionAudioUrl(audioSessionId, line.audioFile)}
 									/>
 								{/if}
 							{:else if isUser}

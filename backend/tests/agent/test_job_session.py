@@ -891,3 +891,55 @@ async def test_meeting_without_redis_runs_floorless() -> None:
         assert runtime.speech_floor is None
     finally:
         await runtime.aclose()
+
+
+async def test_floor_scope_builds_floor_for_meetingless_group_member() -> None:
+    """A playground-group member (Johnny-trt.48): no meeting_config_id, but a
+    ``browser-group-*`` floor scope → the floor builds and keys the lock in
+    the string namespace (collision-free with integer meeting scopes)."""
+    db = _FakeDbSession()
+    runtime = await build_agent_runtime(
+        _job(
+            mode=AUTONOMOUS_MODE,
+            redis_url="redis://r:6379/0",
+            agent_snapshot={"name": "Alex", "mode": "autonomous"},
+        ),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: db,
+        floor_scope="browser-group-7",
+    )
+    try:
+        floor = runtime.speech_floor
+        assert floor is not None
+        assert runtime.gate._floor is floor
+        assert runtime.agent._peer_floor is floor
+        assert floor._agent_name == "Alex"
+        assert floor._backend._lock_key == "johnny:floor:lock:meeting:browser-group-7"
+    finally:
+        await runtime.aclose()
+
+
+async def test_injected_floor_backend_skips_redis() -> None:
+    """The ensemble scenario seam: an injected backend builds the floor even
+    with no redis_url at all (hermetic regression runs share one in-memory
+    hub across members)."""
+    from johnny.agent.speech_floor import InMemoryFloorBackend, InMemoryFloorHub
+
+    db = _FakeDbSession()
+    hub = InMemoryFloorHub()
+    backend = InMemoryFloorBackend(hub)
+    runtime = await build_agent_runtime(
+        _job(mode=AUTONOMOUS_MODE, agent_snapshot={"name": "Echo", "mode": "autonomous"}),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: db,
+        floor_scope="browser-group-ensemble",
+        floor_backend=backend,
+    )
+    try:
+        floor = runtime.speech_floor
+        assert floor is not None
+        assert floor._backend is backend
+    finally:
+        await runtime.aclose()

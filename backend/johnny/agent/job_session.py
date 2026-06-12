@@ -92,6 +92,7 @@ from johnny.agent.observability import (
 from johnny.agent.router_gate import RouterGate, RouterGateConfig
 from johnny.agent.session import JohnnyAgent, build_johnny_agent
 from johnny.agent.speech_floor import (
+    FloorBackend,
     RedisFloorBackend,
     SpeechFloor,
     session_relative_ms,
@@ -598,6 +599,8 @@ async def build_agent_runtime(
     audio_recorder: SpokenAudioRecorder | None = None,
     skill_registry: SkillRegistry | None = None,
     sandbox_client: SandboxClient | None = None,
+    floor_scope: str | None = None,
+    floor_backend: FloorBackend | None = None,
 ) -> AgentRuntime:
     """Assemble the full :class:`AgentRuntime` for one dispatched Meet session.
 
@@ -631,6 +634,13 @@ async def build_agent_runtime(
     skills-sandbox (``JOHNNY_SKILLS_SANDBOX_URL``); an injected registry skips
     the load, an injected client skips construction (the runtime still owns
     closing it).
+
+    ``floor_scope`` (Johnny-trt.48) builds the shared speech floor for a
+    meeting-less co-agent surface: the multi-agent playground group passes its
+    ``browser-group-{id}`` scope so member sessions contend on one lock exactly
+    like meeting co-agents. ``None`` keeps the trt.46 rule (floor iff
+    ``meeting_config_id``). ``floor_backend`` substitutes the Redis backend
+    (the ensemble scenario's shared in-memory hub — hermetic regression runs).
     """
     session_id = str(config.bot_session_id)
 
@@ -870,25 +880,36 @@ async def build_agent_runtime(
     if internal_tools is not None:
         internal_tools.attach_farewell_wait(gate.wait_recent_say_done)
 
-    # Shared speech floor (Johnny-trt.46): only a meeting-scoped session can
-    # have co-agents (the scheduler launches one session per enabled
-    # assignment, Johnny-trt.45), so only those build the meeting's Redis
-    # floor — every speak path then acquires it before its first audio frame
-    # and peers' floor windows label/suppress their speech in this session's
-    # STT. Playground / single-surface sessions (meeting_config_id=None) and
+    # Shared speech floor (Johnny-trt.46): only a session that can have
+    # co-agents builds one — every speak path then acquires it before its
+    # first audio frame and peers' floor windows label/suppress their speech
+    # in this session's STT. The floor's scope token is the meeting's id for
+    # Meet sessions (the scheduler launches one session per enabled
+    # assignment, Johnny-trt.45) or the caller-provided ``floor_scope`` for
+    # meeting-less co-agent surfaces (the multi-agent playground group,
+    # Johnny-trt.48 — a ``browser-group-{id}`` namespace that cannot collide
+    # with meeting ids). Single-agent sessions (no meeting, no scope) and
     # no-Redis smoke runs leave it None: speak paths ungated, zero floor
     # events (the events.py single-agent contract). The holder identity is
     # the frozen snapshot's display name — what peers print in transcripts.
+    # ``floor_backend`` (test seam) substitutes the Redis lock+broadcast with
+    # an injected backend (the scenario harness's shared in-memory hub).
     speech_floor: SpeechFloor | None = None
-    if config.meeting_config_id is not None and config.redis_url:
+    scope: str | None = floor_scope
+    if scope is None and config.meeting_config_id is not None:
+        scope = str(config.meeting_config_id)
+    if scope is not None and (floor_backend is not None or config.redis_url):
         agent_display_name = (
             str(config.agent_snapshot.get("name") or "").strip()
             or f"agent-{config.bot_session_id}"
         )
+        backend: FloorBackend = (
+            floor_backend
+            if floor_backend is not None
+            else RedisFloorBackend(redis_url=config.redis_url or "", meeting_id=scope)
+        )
         speech_floor = SpeechFloor(
-            backend=RedisFloorBackend(
-                redis_url=config.redis_url, meeting_id=config.meeting_config_id
-            ),
+            backend=backend,
             session_id=session_id,
             agent_name=agent_display_name,
             publish_event=bus.publish,

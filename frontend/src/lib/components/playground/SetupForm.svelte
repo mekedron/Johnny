@@ -15,6 +15,8 @@
 	const selectedAgent = $derived(
 		controller.agents.find((a) => a.id === controller.selectedAgentId) ?? null
 	);
+
+	const selectedCount = $derived(controller.selectedAgentIds.length);
 </script>
 
 <section
@@ -40,28 +42,55 @@
 	</header>
 
 	<div class="flex flex-col gap-5 px-5 py-5">
-		<!-- Agent (Johnny-trt.45) -->
+		<!-- Agents (Johnny-trt.45 single / Johnny-trt.48 multi) -->
 		<div class="flex flex-col gap-1.5">
-			<label for="pg-agent" class="text-sm leading-none font-medium text-foreground">
-				Agent
-			</label>
-			<select
-				id="pg-agent"
-				value={controller.selectedAgentId ?? ''}
-				onchange={(e) =>
-					(controller.selectedAgentId =
-						e.currentTarget.value === '' ? null : Number(e.currentTarget.value))}
-				class="{FIELD_CLASS} h-9"
-				data-testid="playground-agent-select"
+			<span class="text-sm leading-none font-medium text-foreground" id="pg-agents-label">
+				Agents
+				{#if selectedCount >= 2}
+					<span class="ml-1 rounded-xs bg-surface-2 px-1.5 py-0.5 font-mono text-[0.7rem] text-muted-foreground">
+						group · {selectedCount}
+					</span>
+				{/if}
+			</span>
+			<div
+				class="flex flex-col divide-y divide-separator rounded-md border border-input bg-background"
+				role="group"
+				aria-labelledby="pg-agents-label"
+				data-testid="playground-agent-roster"
 			>
 				{#each controller.agents as a (a.id)}
-					<option value={a.id}>{agentLabel(a)}</option>
+					{@const checked = controller.selectedAgentIds.includes(a.id)}
+					{@const order = controller.selectedAgentIds.indexOf(a.id)}
+					<label
+						class="flex cursor-pointer items-center gap-2.5 px-3 py-2 text-sm transition-colors hover:bg-surface-1"
+						data-testid={`playground-agent-option-${a.id}`}
+					>
+						<input
+							type="checkbox"
+							class="size-3.5 rounded-sm border border-border-strong bg-surface-3 [accent-color:var(--color-foreground)]"
+							{checked}
+							onchange={() => controller.toggleAgentSelection(a.id)}
+						/>
+						<span class="min-w-0 flex-1 truncate text-foreground">{agentLabel(a)}</span>
+						{#if checked && selectedCount >= 2}
+							<span class="shrink-0 font-mono text-[0.7rem] text-ink-subtle">#{order + 1}</span>
+						{/if}
+					</label>
 				{/each}
-			</select>
+				{#if controller.agents.length === 0}
+					<p class="m-0 px-3 py-2 text-xs text-muted-foreground">
+						No agents found — the server falls back to its defaults.
+					</p>
+				{/if}
+			</div>
 			<p class="m-0 text-xs text-muted-foreground" data-testid="playground-agent-hint">
-				{#if selectedAgent}
+				{#if selectedCount >= 2}
+					Multi-agent group: one session per agent behind one mic — they share the speech
+					floor and hear each other (Johnny-trt.48).
+				{:else if selectedAgent}
 					{selectedAgent.description?.trim() ||
 						`Mode: ${selectedAgent.mode.replaceAll('_', ' ')}.`}
+					Pick a second agent to rehearse a multi-agent meeting.
 				{:else}
 					No agents found — the server falls back to its defaults.
 				{/if}
@@ -179,7 +208,11 @@
 			data-testid="playground-start-button"
 		>
 			<PlayIcon />
-			{controller.starting ? 'Starting…' : 'Start session'}
+			{controller.starting
+				? 'Starting…'
+				: selectedCount >= 2
+					? `Start group · ${selectedCount} agents`
+					: 'Start session'}
 		</Button>
 	</footer>
 </section>

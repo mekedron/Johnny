@@ -123,6 +123,12 @@ class BrowserPipelineSpec:
     existing test fixtures and dispatch helpers keep working without
     modification.
     """
+    floor_scope: str | None = None
+    """Shared speech-floor scope for a multi-agent playground group member
+    (Johnny-trt.48). Every member of one group carries the same
+    ``browser-group-{group_id}`` token so their sessions contend on one
+    meeting-style floor lock (Johnny-trt.46) and suppress each other's
+    audio. ``None`` — every non-group session — assembles no floor."""
 
 
 def _job_config_from_spec(spec: BrowserPipelineSpec, *, redis_url: str | None) -> SessionJobConfig:
@@ -187,7 +193,11 @@ async def run_browser_pipeline(
 
     try:
         agent_session = await BrowserAgentSession.build(
-            transport, config, event_bus=spec.event_bus, vad=vad
+            transport,
+            config,
+            event_bus=spec.event_bus,
+            vad=vad,
+            floor_scope=spec.floor_scope,
         )
     except AgentSessionSetupError as exc:
         logger.exception("browser agent assembly failed for session=%s", spec.session_id)

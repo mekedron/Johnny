@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     from livekit.agents.vad import VAD
 
     from johnny.agent.observability import TranscriptFinalizedSink
+    from johnny.agent.speech_floor import FloorBackend
     from johnny.voice_pipeline.browser_transport import BrowserAudioTransport
     from johnny.voice_pipeline.event_bus import EventBus
     from johnny.voice_pipeline.transcript_history import TranscriptHistoryLoader
@@ -306,6 +307,8 @@ class BrowserAgentSession:
         endpointing: EndpointingOptions | None = None,
         semantic_eou: bool | None = None,
         task_wiring: bool = True,
+        floor_scope: str | None = None,
+        floor_backend: FloorBackend | None = None,
     ) -> BrowserAgentSession:
         """Assemble the runtime + roomless session + audio I/O for one session.
 
@@ -343,6 +346,14 @@ class BrowserAgentSession:
         → no skill registry scan → empty task catalog: the router call is
         byte-identical to the pre-Phase-3 build in both prompt and schema —
         the "pure conversational hot path" A/B arm. Production always wires.
+
+        ``floor_scope`` (Johnny-trt.48) builds the shared speech floor for a
+        multi-agent playground group member — every member of one group passes
+        the same ``browser-group-{id}`` scope so their speak paths contend on
+        one lock and label each other's audio, exactly like meeting co-agents
+        (Johnny-trt.46). ``None`` (every single-agent playground start) keeps
+        the floorless contract byte-identical. ``floor_backend`` substitutes
+        the Redis lock+broadcast (the ensemble scenario's in-memory hub).
         """
         from app.db.session import SessionLocal
 
@@ -367,6 +378,8 @@ class BrowserAgentSession:
             event_bus=event_bus,
             transcript_history_loader=transcript_history_loader,
             db_session_factory=SessionLocal if task_wiring else None,
+            floor_scope=floor_scope,
+            floor_backend=floor_backend,
             # Epoch-seconds reference so the metrics translator emits
             # session-relative ``started_at_ms`` (the subscriber writes it into
             # the INTEGER ``session_timings.started_at_ms``; a raw epoch-ms
@@ -573,10 +586,15 @@ class BrowserAgentSession:
         The stop is noted on the gate *first* (Johnny-trt.49) so the cut
         speech's settle path attributes ``bot_cut_by_stop`` (with
         request→audio-stop latency) instead of guessing a participant spoke.
+
+        ``force=True`` (Johnny-trt.48): an explicit human stop must also cut
+        a speech the floor-handoff shield is holding uninterruptible (the
+        shield only guards against the SDK reading a peer's trailing audio
+        as a barge-in, never against the operator).
         """
         self._runtime.gate.note_stop_requested()
         try:
-            self._session.interrupt()
+            self._session.interrupt(force=True)
         except Exception:
             logger.exception(
                 "browser agent session interrupt failed for session=%s", self._session_id

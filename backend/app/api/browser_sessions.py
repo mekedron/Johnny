@@ -437,6 +437,69 @@ def _find_active_browser_sessions(session: Session) -> list[BotSession]:
     )
 
 
+def group_id_of_row(row: BotSession) -> int | None:
+    """The playground group this browser session belongs to, if any.
+
+    Read from the ``group`` fragment the group start stamps into
+    ``playground_overrides`` (Johnny-trt.48) — no schema change; ``None``
+    for every classic single session.
+    """
+    overrides = row.playground_overrides
+    group = overrides.get("group") if isinstance(overrides, dict) else None
+    if isinstance(group, dict):
+        gid = group.get("id")
+        if isinstance(gid, int):
+            return gid
+    return None
+
+
+async def ensure_no_live_browser_session(session: Session) -> None:
+    """Enforce the one-active-browser-session rule (Johnny-8zv.2 / trt.48).
+
+    First reaps any stale rows whose runner is gone — e.g. the API restarted
+    and lost the in-memory registry — so crashes can't accumulate or lock the
+    user out; then raises 409 if a genuinely live session remains, returning
+    its id (and its group id, when the live session is a multi-agent group
+    member) so the UI can offer Resume / End-and-start. A session GROUP
+    counts as "the one active session": its members are browser rows with
+    live runners, so a group blocks new starts exactly like a single — the
+    trt.48 relaxation is that one *group start* launches N members at once,
+    not that independent sessions may coexist.
+    """
+    live: list[BotSession] = []
+    for active in _find_active_browser_sessions(session):
+        if get_session_runner(active.id) is not None:
+            live.append(active)
+            continue
+        try:
+            mark_session_ended(session, active.id)
+        except BotSessionNotFoundError:
+            pass
+        await publish_session_status_oneoff(str(active.id), "ended", None)
+    if not live:
+        return
+    if SINGLE_SESSION_POLICY == "auto_replace":
+        for active in live:
+            request_browser_session_stop(active.id)
+        return
+    group_id = group_id_of_row(live[0])
+    detail: dict[str, Any] = {
+        "message": (
+            f"A browser session group (#{group_id}) is already live. "
+            "End it before starting a new one."
+            if group_id is not None
+            else (
+                f"A browser session (#{live[0].id}) is already live. "
+                "Resume it, or end it before starting a new one."
+            )
+        ),
+        "active_session_id": live[0].id,
+    }
+    if group_id is not None:
+        detail["active_group_id"] = group_id
+    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
+
+
 def _load_event_meeting(
     session: Session, event_id: int
 ) -> tuple[CalendarEvent, MeetingConfig | None]:
@@ -869,36 +932,10 @@ async def start_browser_session(
     """
     # One-active-browser-session rule (Johnny-8zv.2). A second concurrent
     # in-process pipeline fights over the mic + provider quota, which is
-    # the "unpredictable behaviour" users reported. First reap any stale
-    # rows whose runner is gone — e.g. the API restarted and lost the
-    # in-memory registry — so crashes can't accumulate or lock the user
-    # out; then reject (or auto-replace) only if a genuinely live session
-    # remains, returning its id so the UI can offer Resume.
-    live: list[BotSession] = []
-    for active in _find_active_browser_sessions(session):
-        if get_session_runner(active.id) is not None:
-            live.append(active)
-            continue
-        try:
-            mark_session_ended(session, active.id)
-        except BotSessionNotFoundError:
-            pass
-        await publish_session_status_oneoff(str(active.id), "ended", None)
-    if live:
-        if SINGLE_SESSION_POLICY == "auto_replace":
-            for active in live:
-                request_browser_session_stop(active.id)
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "message": (
-                        f"A browser session (#{live[0].id}) is already live. "
-                        "Resume it, or end it before starting a new one."
-                    ),
-                    "active_session_id": live[0].id,
-                },
-            )
+    # the "unpredictable behaviour" users reported. Shared with the group
+    # start (Johnny-trt.48): reap stale rows, then 409 while anything —
+    # single session or group — is genuinely live.
+    await ensure_no_live_browser_session(session)
 
     meeting_config_id: int | None = None
     account_id: int | None = payload.account_id
@@ -1135,6 +1172,27 @@ async def browser_audio_socket(
                     ``{"type": "ended", "reason": "..."}``,
                     ``{"type": "interrupt", "seq": N}`` — Johnny-ckz.13).
     """
+    # A multi-agent group member's audio is owned by the GROUP socket
+    # (Johnny-trt.48): its transport is already being drained by the group
+    # router, so a direct attach here would race it frame-by-frame. Lazy
+    # import — the groups module imports this one.
+    from app.api.browser_session_groups import group_id_for_member
+
+    member_group = group_id_for_member(bot_session_id)
+    if member_group is not None:
+        await websocket.accept()
+        await websocket.send_json(
+            {
+                "type": "ended",
+                "reason": (
+                    f"session belongs to playground group #{member_group}; "
+                    f"attach to /ws/sessions/groups/{member_group}/audio"
+                ),
+            }
+        )
+        await websocket.close(code=1008)
+        return
+
     runner = get_session_runner(bot_session_id)
     if runner is None or runner.transport.is_closed:
         # Accept then close so the client gets a clean reason rather
@@ -1437,7 +1495,9 @@ __all__ = [
     "BrowserTextInput",
     "StartBrowserSessionPayload",
     "deregister_runner",
+    "ensure_no_live_browser_session",
     "get_session_runner",
+    "group_id_of_row",
     "list_runner_ids",
     "register_runner",
     "router",

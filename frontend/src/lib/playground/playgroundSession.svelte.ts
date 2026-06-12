@@ -18,11 +18,17 @@
 import { tick } from 'svelte';
 import {
 	audioWebSocketUrl,
+	groupAudioWebSocketUrl,
+	listActiveBrowserGroups,
+	postBrowserGroupText,
 	postBrowserText,
 	startBrowserSession,
+	startBrowserSessionGroup,
 	stopBrowserSession,
+	stopBrowserSessionGroup,
 	type BrowserProviderOverride,
 	type BrowserSession,
+	type BrowserSessionGroup,
 	type StartBrowserSessionPayload
 } from '$lib/browserSessions';
 import { startBrowserAudioSession, type BrowserAudioSession } from '$lib/browserAudio';
@@ -68,6 +74,28 @@ import {
 export type LiveState = 'idle' | 'listening' | 'thinking' | 'speaking';
 
 export type DictationState = 'idle' | 'starting' | 'recording' | 'stopping';
+
+/** One agent's live card in the multi-agent state strip (Johnny-trt.48). */
+export interface GroupMemberStrip {
+	sessionId: number;
+	agentId: number;
+	name: string;
+	status: 'live' | 'ended' | 'failed';
+	/** Conversational state, floor-first: `speaking` while holding the floor,
+	 * `thinking` between a should-speak verdict and its speech. */
+	state: 'idle' | 'thinking' | 'speaking';
+	holdsFloor: boolean;
+	/** How long the agent waited for the floor on its current/last hold. */
+	floorWaitMs: number | null;
+	/** Peer-speech suppressions reported by this member's sweep. */
+	suppressedCount: number;
+	lastSuppressedPeer: string | null;
+	/** Transient "heard <peer>" marker from a peer-labeled transcript final. */
+	heardPeer: string | null;
+	claimsWon: number;
+	claimsLost: number;
+	lastClaim: 'won' | 'lost' | null;
+}
 
 // Re-exported from the pure transitions module (Johnny-trt.13) so existing
 // `$lib/playground/playgroundSession.svelte` importers keep working.
@@ -133,6 +161,9 @@ export class PlaygroundController {
 	// system-prompt / mode knobs are gone (behavior comes from the agent).
 	agents = $state<Agent[]>([]);
 	selectedAgentId = $state<number | null>(null);
+	// Johnny-trt.48: multi-select roster. One id = classic single session
+	// (selectedAgentId mirrors it); 2+ ids = a session GROUP, in pick order.
+	selectedAgentIds = $state<number[]>([]);
 	context = $state('');
 	// Johnny-8th: account this playground run belongs to (null = account-less).
 	// Sticky in localStorage (seeded in loadMetadata).
@@ -153,6 +184,10 @@ export class PlaygroundController {
 
 	// --- Live session ------------------------------------------------------
 	liveSession = $state<BrowserSession | null>(null);
+	// Johnny-trt.48: a live multi-agent group (mutually exclusive with
+	// liveSession). Member event feeds drive the per-agent state strip.
+	liveGroup = $state<BrowserSessionGroup | null>(null);
+	groupMembers = $state<GroupMemberStrip[]>([]);
 	audioSession = $state<BrowserAudioSession | null>(null);
 	starting = $state(false);
 	stopping = $state(false);
@@ -162,8 +197,11 @@ export class PlaygroundController {
 	connection = $state<ConnectionState>('connecting');
 
 	// --- Single-session conflict (Johnny-8zv.2) ---------------------------
-	/** Set when /start returns 409 because a session is already live. */
-	activeConflict = $state<{ id: number; message: string } | null>(null);
+	/** Set when /start returns 409 because a session (or group) is already
+	 * live. `groupId` is present when the live thing is a group (trt.48). */
+	activeConflict = $state<{ id: number; groupId: number | null; message: string } | null>(
+		null
+	);
 
 	// --- Diagnostics (Johnny-8zv.3) ---------------------------------------
 	// Keyed by kind so a repeatedly-failing stage updates in place.
@@ -198,13 +236,23 @@ export class PlaygroundController {
 
 	// --- Non-reactive internals -------------------------------------------
 	private subscription: Subscription | null = null;
+	private groupSubscriptions: Subscription[] = [];
+	private heardPeerTimers = new Map<number, ReturnType<typeof setTimeout>>();
 	private dictationSession: PlaygroundSttSession | null = null;
 	private dictationPrevMicMuted = false;
 	private connDropTimer: ReturnType<typeof setTimeout> | null = null;
 
 	// --- Derived -----------------------------------------------------------
 	get isLive(): boolean {
-		return this.liveSession !== null;
+		return this.liveSession !== null || this.liveGroup !== null;
+	}
+
+	get isGroup(): boolean {
+		return this.liveGroup !== null;
+	}
+
+	get isGroupSelection(): boolean {
+		return this.selectedAgentIds.length >= 2;
 	}
 
 	get diagnostics(): Diagnostic[] {
@@ -272,18 +320,36 @@ export class PlaygroundController {
 	/**
 	 * Preselect the default agent (Johnny-trt.45). A selection the user
 	 * already made this page-life (or a reattach seed) is kept when it
-	 * still exists; a stale id falls back to the default.
+	 * still exists; stale ids fall out and an empty roster falls back to
+	 * the default. The single-select mirror (`selectedAgentId`) tracks the
+	 * roster's first pick for the classic one-agent start.
 	 */
 	private seedAgentSelection(): void {
-		if (
-			this.selectedAgentId !== null &&
-			this.agents.some((a) => a.id === this.selectedAgentId)
-		) {
-			return;
+		const known = this.selectedAgentIds.filter((id) =>
+			this.agents.some((a) => a.id === id)
+		);
+		if (known.length === 0 && this.selectedAgentId !== null) {
+			// A pre-roster seed (reattach) lands in selectedAgentId first.
+			if (this.agents.some((a) => a.id === this.selectedAgentId)) {
+				known.push(this.selectedAgentId);
+			}
 		}
-		const def = this.agents.find((a) => a.is_default) ?? this.agents[0];
-		this.selectedAgentId = def?.id ?? null;
+		if (known.length === 0) {
+			const def = this.agents.find((a) => a.is_default) ?? this.agents[0];
+			if (def) known.push(def.id);
+		}
+		this.selectedAgentIds = known;
+		this.selectedAgentId = known[0] ?? null;
 	}
+
+	/** Toggle one agent in the roster (Johnny-trt.48); order = pick order. */
+	toggleAgentSelection = (agentId: number): void => {
+		const next = this.selectedAgentIds.includes(agentId)
+			? this.selectedAgentIds.filter((id) => id !== agentId)
+			: [...this.selectedAgentIds, agentId];
+		this.selectedAgentIds = next;
+		this.selectedAgentId = next[0] ?? null;
+	};
 
 	// --- account sticky selection (Johnny-8th) -----------------------------
 
@@ -396,7 +462,13 @@ export class PlaygroundController {
 		// Re-entry guard (Johnny-8zv.2): the `starting` flag resets in the
 		// finally before audio finishes wiring, so without this a double
 		// click would fire two /start calls.
-		if (this.liveSession || this.starting) return;
+		if (this.isLive || this.starting) return;
+		// Johnny-trt.48: 2+ selected agents start a session GROUP; the
+		// single-agent path below stays byte-identical.
+		if (this.isGroupSelection) {
+			await this.startGroup();
+			return;
+		}
 		this.starting = true;
 		this.clearAllDiagnostics();
 		this.sessionNotice = null;
@@ -416,27 +488,89 @@ export class PlaygroundController {
 			this.liveSession = session;
 			this.connection = 'connecting';
 			this.subscribeToLiveEvents(session.id);
-			if (supportsMic) await this.wireAudio(session);
+			if (supportsMic) await this.wireAudio(audioWebSocketUrl(session));
 			await tick();
 		} catch (err) {
-			const status = (err as { status?: number }).status;
-			if (status === 409) {
-				const activeId = this.extractActiveSessionId(err);
-				this.activeConflict = { id: activeId ?? 0, message: this.errText(err) };
-			} else {
-				this.setDiagnostic('general', {
-					severity: 'error',
-					title: 'Could not start session',
-					message: this.errText(err)
-				});
-			}
+			this.handleStartError(err, 'Could not start session');
 		} finally {
 			this.starting = false;
 		}
 	};
 
+	/** Start a multi-agent session group (Johnny-trt.48). */
+	private startGroup = async (): Promise<void> => {
+		this.starting = true;
+		this.clearAllDiagnostics();
+		this.sessionNotice = null;
+		this.activeConflict = null;
+		this.micDenied = false;
+		this.micUnsupported = false;
+		const supportsMic = this.supportsMic();
+		if (!supportsMic) this.micUnsupported = true;
+
+		try {
+			const overrides = this.buildPayload().provider_overrides;
+			const ctx = this.context.trim();
+			const group = await startBrowserSessionGroup({
+				agents: this.selectedAgentIds.map((id) => ({ agent_id: id })),
+				account_id: this.selectedAccountId,
+				...(ctx ? { context: ctx } : {}),
+				...(overrides ? { provider_overrides: overrides } : {})
+			});
+			this.bindGroup(group);
+			if (supportsMic) await this.wireAudio(groupAudioWebSocketUrl(group));
+			await tick();
+		} catch (err) {
+			this.handleStartError(err, 'Could not start group');
+		} finally {
+			this.starting = false;
+		}
+	};
+
+	/** Bind a (just-started or resumed) group: strip state + member feeds. */
+	private bindGroup(group: BrowserSessionGroup): void {
+		this.resetPerSessionUi();
+		this.liveSession = null;
+		this.liveGroup = group;
+		this.groupMembers = group.members.map((m) => ({
+			sessionId: m.session.id,
+			agentId: m.agent_id,
+			name: m.agent_name,
+			status: 'live',
+			state: 'idle',
+			holdsFloor: false,
+			floorWaitMs: null,
+			suppressedCount: 0,
+			lastSuppressedPeer: null,
+			heardPeer: null,
+			claimsWon: 0,
+			claimsLost: 0,
+			lastClaim: null
+		}));
+		this.connection = 'connecting';
+		this.subscribeToGroupEvents(group);
+	}
+
+	private handleStartError(err: unknown, title: string): void {
+		const status = (err as { status?: number }).status;
+		if (status === 409) {
+			const activeId = this.extractActiveSessionId(err);
+			this.activeConflict = {
+				id: activeId ?? 0,
+				groupId: this.extractActiveGroupId(err),
+				message: this.errText(err)
+			};
+		} else {
+			this.setDiagnostic('general', {
+				severity: 'error',
+				title,
+				message: this.errText(err)
+			});
+		}
+	}
+
 	reattach = async (id: number): Promise<void> => {
-		if (this.liveSession || this.starting) return;
+		if (this.isLive || this.starting) return;
 		this.starting = true;
 		this.clearAllDiagnostics();
 		this.sessionNotice = null;
@@ -464,6 +598,7 @@ export class PlaygroundController {
 			if (typeof overrides.context === 'string') this.context = overrides.context;
 			if (typeof overrides.agent_id === 'number') {
 				this.selectedAgentId = overrides.agent_id;
+				this.selectedAgentIds = [overrides.agent_id];
 			}
 			// Committed to the reattach — zero stale per-session state before
 			// seeding this session's own history (Johnny-trt.40). Kept below
@@ -486,7 +621,7 @@ export class PlaygroundController {
 			this.connection = 'connecting';
 			this.subscribeToLiveEvents(s.id);
 			if (this.supportsMic()) {
-				await this.wireAudio(this.liveSession);
+				await this.wireAudio(audioWebSocketUrl(this.liveSession));
 			} else {
 				this.micUnsupported = true;
 			}
@@ -535,13 +670,60 @@ export class PlaygroundController {
 			return;
 		}
 		this.activeConflict = null;
+		if (conflict.groupId !== null) {
+			await this.reattachGroup(conflict.groupId);
+			return;
+		}
 		await this.reattach(conflict.id);
+	};
+
+	/** Re-bind to a live group after a reload / 409 (Johnny-trt.48). */
+	reattachGroup = async (groupId: number): Promise<void> => {
+		if (this.isLive || this.starting) return;
+		this.starting = true;
+		this.clearAllDiagnostics();
+		this.sessionNotice = null;
+		try {
+			const groups = await listActiveBrowserGroups();
+			const group = groups.find((g) => g.group_id === groupId);
+			if (!group) {
+				this.setDiagnostic('general', {
+					severity: 'info',
+					title: 'Group no longer live',
+					message: 'That session group has already ended. Start a fresh one.'
+				});
+				return;
+			}
+			this.bindGroup(group);
+			this.selectedAgentIds = group.members.map((m) => m.agent_id);
+			this.selectedAgentId = this.selectedAgentIds[0] ?? null;
+			if (this.supportsMic()) {
+				await this.wireAudio(groupAudioWebSocketUrl(group));
+			} else {
+				this.micUnsupported = true;
+			}
+			await tick();
+		} catch (err) {
+			this.setDiagnostic('general', {
+				severity: 'error',
+				title: 'Could not reattach to group',
+				message: this.errText(err)
+			});
+		} finally {
+			this.starting = false;
+		}
 	};
 
 	endConflictAndStart = async (): Promise<void> => {
 		const conflict = this.activeConflict;
 		this.activeConflict = null;
-		if (conflict && conflict.id > 0) {
+		if (conflict && conflict.groupId !== null) {
+			try {
+				await stopBrowserSessionGroup(conflict.groupId);
+			} catch {
+				// Best effort — start() below re-reports a 409 if still live.
+			}
+		} else if (conflict && conflict.id > 0) {
 			try {
 				await stopBrowserSession(conflict.id);
 			} catch {
@@ -557,9 +739,9 @@ export class PlaygroundController {
 	};
 
 	// --- Audio -------------------------------------------------------------
-	private async wireAudio(session: BrowserSession): Promise<void> {
+	private async wireAudio(wsUrl: string): Promise<void> {
 		const audio = await startBrowserAudioSession({
-			wsUrl: audioWebSocketUrl(session),
+			wsUrl,
 			initialVolume: this.volume,
 			autoBargeIn: this.autoBargeIn,
 			onReady: () => {
@@ -600,9 +782,21 @@ export class PlaygroundController {
 	}
 
 	private handleAudioEnded(reason: string | null | undefined): void {
-		if (!this.liveSession) return;
+		if (!this.isLive) return;
 		// 'closed' = we tore the socket down ourselves; ignore.
 		if (!reason || reason === 'closed') return;
+		// Group audio teardown (trt.48): the member status events drive the
+		// real teardown; a "group ended"/"not active" audio close is just its
+		// echo, anything else is a transport blip worth a notice.
+		if (this.liveGroup) {
+			if (reason.includes('group ended') || reason.includes('not active')) return;
+			this.setDiagnostic('general', {
+				severity: 'warning',
+				title: 'Audio stream interrupted',
+				message: `Audio stream ended: ${reason}`
+			});
+			return;
+		}
 		// Audio is held by another tab — the session is fine, just the PCM
 		// stream is taken. Don't tear down (events still flow here); show a
 		// clear notice instead of a misleading "reconnecting" banner.
@@ -819,6 +1013,222 @@ export class PlaygroundController {
 		}
 	};
 
+	// --- Group event handling (Johnny-trt.48) -------------------------------
+
+	/** One event subscription per member; the leader's drives the banner. */
+	private subscribeToGroupEvents(group: BrowserSessionGroup): void {
+		this.closeGroupSubscriptions();
+		const leaderId = group.group_id;
+		this.groupSubscriptions = group.members.map((m) =>
+			subscribeToSession(String(m.session.id), {
+				onEvent: (event) => this.handleGroupEvent(group.group_id, m.session.id, event),
+				onOpen: () => {
+					if (m.session.id !== leaderId || !this.isActiveGroup(group.group_id)) return;
+					this.connection = 'open';
+					if (this.connDropTimer !== null) {
+						clearTimeout(this.connDropTimer);
+						this.connDropTimer = null;
+					}
+				},
+				onClose: () => this.onGroupConnectionDrop(group.group_id, m.session.id),
+				onError: () => this.onGroupConnectionDrop(group.group_id, m.session.id)
+			})
+		);
+	}
+
+	private isActiveGroup(groupId: number): boolean {
+		return this.liveGroup !== null && this.liveGroup.group_id === groupId;
+	}
+
+	private onGroupConnectionDrop(groupId: number, memberId: number): void {
+		if (memberId !== groupId || !this.isActiveGroup(groupId)) return;
+		if (this.connDropTimer !== null) return;
+		this.connDropTimer = setTimeout(() => {
+			this.connDropTimer = null;
+			if (this.isActiveGroup(groupId)) this.connection = 'reconnecting';
+		}, 1200);
+	}
+
+	private updateMember(sessionId: number, patch: Partial<GroupMemberStrip>): void {
+		this.groupMembers = this.groupMembers.map((m) =>
+			m.sessionId === sessionId ? { ...m, ...patch } : m
+		);
+	}
+
+	/**
+	 * Per-member event fan-in. The user's lines render once (from the
+	 * LEADER's feed — every member publishes its own copy of the same typed
+	 * ask); each agent's `agent_spoke` renders labeled with its name; the
+	 * conversation-dynamics events (floor / suppression / claims — trt.46/49,
+	 * claims emitted from trt.47) drive the per-agent state strip. A
+	 * peer-labeled transcript final (speaker = a co-agent's name) is the
+	 * trt.46 suppression labeling — strip marker, never a chat line (the
+	 * speaking agent's own `agent_spoke` is the canonical line).
+	 */
+	private handleGroupEvent = (
+		groupId: number,
+		memberId: number,
+		event: SessionEvent
+	): void => {
+		if (!this.isActiveGroup(groupId)) return;
+		const member = this.groupMembers.find((m) => m.sessionId === memberId);
+		if (!member) return;
+		const isLeader = memberId === groupId;
+		const ts = Date.now();
+		const raw = event as unknown as Record<string, unknown>;
+		switch (event.type as string) {
+			case 'transcript_partial': {
+				if (isLeader) this.upsertPartial((event as TranscriptPartialEvent).text, ts);
+				break;
+			}
+			case 'transcript_final': {
+				const fin = event as TranscriptFinalEvent;
+				if (fin.speaker === 'user') {
+					if (isLeader) {
+						this.clearPartial();
+						this.appendTranscript({
+							key: `final-${memberId}-${fin.seq}`,
+							text: fin.text,
+							speaker: 'user',
+							isFinal: true,
+							timestamp: ts
+						});
+					}
+				} else if (typeof fin.speaker === 'string' && fin.speaker) {
+					this.markHeardPeer(memberId, fin.speaker);
+				}
+				break;
+			}
+			case 'transcript_filtered': {
+				if (isLeader) this.clearPartial();
+				break;
+			}
+			case 'router_decision': {
+				if ((event as RouterDecisionEvent).should_speak) {
+					this.lastDecisionAt = ts;
+					if (member.state !== 'speaking') {
+						this.updateMember(memberId, { state: 'thinking' });
+					}
+				}
+				break;
+			}
+			case 'agent_spoke': {
+				const spoke = event as AgentSpokeEvent;
+				this.appendTranscript({
+					key: `spoke-${memberId}-${spoke.seq}`,
+					text: spoke.text,
+					speaker: 'bot',
+					isFinal: true,
+					timestamp: ts,
+					audioFile:
+						typeof spoke.audio_file === 'string' && spoke.audio_file
+							? spoke.audio_file
+							: null,
+					interrupted: spoke.interrupted === true,
+					label: member.name,
+					sessionId: memberId
+				});
+				this.lastSpokenAt = ts;
+				if (member.state === 'thinking') {
+					this.updateMember(memberId, { state: 'idle' });
+				}
+				this.clearDiagnostic('router_llm');
+				this.clearDiagnostic('answer_llm');
+				this.clearDiagnostic('tts');
+				break;
+			}
+			case 'floor_acquired': {
+				this.updateMember(memberId, {
+					holdsFloor: true,
+					state: 'speaking',
+					floorWaitMs: typeof raw.wait_ms === 'number' ? raw.wait_ms : null
+				});
+				break;
+			}
+			case 'floor_released':
+			case 'floor_expired': {
+				this.updateMember(memberId, { holdsFloor: false, state: 'idle' });
+				break;
+			}
+			case 'peer_speech_suppressed': {
+				this.updateMember(memberId, {
+					suppressedCount: member.suppressedCount + 1,
+					lastSuppressedPeer: typeof raw.peer === 'string' ? raw.peer : null
+				});
+				break;
+			}
+			case 'turn_claim_won': {
+				this.updateMember(memberId, {
+					claimsWon: member.claimsWon + 1,
+					lastClaim: 'won'
+				});
+				break;
+			}
+			case 'turn_claim_lost': {
+				this.updateMember(memberId, {
+					claimsLost: member.claimsLost + 1,
+					lastClaim: 'lost'
+				});
+				break;
+			}
+			case 'agent_tts_failed': {
+				this.handleTtsFailed(event as AgentTTSFailedEvent);
+				break;
+			}
+			case 'pipeline_stage_failed': {
+				this.handleStageFailed(event as PipelineStageFailedEvent);
+				break;
+			}
+			case 'session_status_change': {
+				const st = event as SessionStatusChangeEvent;
+				if (st.status === 'ended' || st.status === 'failed') {
+					this.updateMember(memberId, {
+						status: st.status,
+						holdsFloor: false,
+						state: 'idle'
+					});
+					if (this.groupMembers.every((m) => m.status !== 'live')) {
+						this.teardownLive('ended', null);
+					}
+				}
+				break;
+			}
+		}
+	};
+
+	private markHeardPeer(memberId: number, peer: string): void {
+		this.updateMember(memberId, { heardPeer: peer });
+		const existing = this.heardPeerTimers.get(memberId);
+		if (existing) clearTimeout(existing);
+		this.heardPeerTimers.set(
+			memberId,
+			setTimeout(() => {
+				this.heardPeerTimers.delete(memberId);
+				this.updateMember(memberId, { heardPeer: null });
+			}, 4000)
+		);
+	}
+
+	/** End ONE agent's session; the rest of the group keeps running. */
+	endGroupMember = async (sessionId: number): Promise<void> => {
+		try {
+			await stopBrowserSession(sessionId);
+		} catch (err) {
+			this.setDiagnostic('general', {
+				severity: 'error',
+				title: 'Could not end agent',
+				message: this.errText(err)
+			});
+		}
+	};
+
+	private closeGroupSubscriptions(): void {
+		for (const sub of this.groupSubscriptions) sub.close();
+		this.groupSubscriptions = [];
+		for (const timer of this.heardPeerTimers.values()) clearTimeout(timer);
+		this.heardPeerTimers.clear();
+	}
+
 	private handleTtsFailed(e: AgentTTSFailedEvent): void {
 		const provider = e.provider_name ? ` · ${e.provider_name}` : '';
 		const title =
@@ -877,6 +1287,7 @@ export class PlaygroundController {
 		this.lastSpokenAt = 0;
 		this.isSpeaking = false;
 		this.micLevel = 0;
+		this.groupMembers = [];
 	}
 
 	private appendTranscript(line: TranscriptLine): void {
@@ -890,13 +1301,16 @@ export class PlaygroundController {
 	 * with the user-initiated endSession().
 	 */
 	teardownLive(status: 'ended' | 'failed' = 'ended', reason: string | null = null): void {
-		if (!this.liveSession) return;
+		if (!this.isLive) return;
+		const wasGroup = this.liveGroup !== null;
 		void this.audioSession?.stop();
 		this.audioSession = null;
 		this.audioReady = false;
 		this.liveSession = null;
+		this.liveGroup = null;
 		this.subscription?.close();
 		this.subscription = null;
+		this.closeGroupSubscriptions();
 		this.clearAllPartials();
 		this.connection = 'connecting';
 		if (this.connDropTimer !== null) {
@@ -912,22 +1326,27 @@ export class PlaygroundController {
 				message: reason ?? 'The session failed.'
 			});
 		} else {
-			this.sessionNotice = reason ?? 'The session ended.';
+			this.sessionNotice = reason ?? (wasGroup ? 'The group ended.' : 'The session ended.');
 		}
 	}
 
 	/** User clicked "End session": stop server-side, then tear down. */
 	endSession = async (): Promise<void> => {
 		const current = this.liveSession;
-		if (!current) return;
+		const group = this.liveGroup;
+		if (!current && !group) return;
 		this.stopping = true;
 		try {
 			await this.audioSession?.stop();
-			await stopBrowserSession(current.id);
+			if (group) {
+				await stopBrowserSessionGroup(group.group_id);
+			} else if (current) {
+				await stopBrowserSession(current.id);
+			}
 		} catch (err) {
 			this.setDiagnostic('general', {
 				severity: 'error',
-				title: 'Could not end session',
+				title: group ? 'Could not end group' : 'Could not end session',
 				message: this.errText(err)
 			});
 		} finally {
@@ -936,23 +1355,34 @@ export class PlaygroundController {
 			this.audioSession = null;
 			this.audioReady = false;
 			this.liveSession = null;
+			this.liveGroup = null;
 			this.subscription?.close();
 			this.subscription = null;
+			this.closeGroupSubscriptions();
 			this.clearAllPartials();
 			this.connection = 'connecting';
 			this.stopping = false;
 			this.clearDiagnostic('tts');
-			this.sessionNotice = 'The session ended.';
+			this.sessionNotice = group ? 'The group ended.' : 'The session ended.';
 		}
 	};
 
 	// --- Text + controls ---------------------------------------------------
 	sendText = async (): Promise<void> => {
+		const text = this.textInput.trim();
+		if (text.length === 0) return;
+		const group = this.liveGroup;
 		const current = this.liveSession;
-		if (!current || this.textInput.trim().length === 0) return;
+		if (!group && !current) return;
 		this.textPending = true;
 		try {
-			await postBrowserText(current.id, this.textInput.trim());
+			if (group) {
+				// Say it to the whole room — every member's gate decides
+				// (Johnny-trt.48; the trt.47 turn-claim tuning surface).
+				await postBrowserGroupText(group.group_id, text);
+			} else if (current) {
+				await postBrowserText(current.id, text);
+			}
 			this.textInput = '';
 		} catch (err) {
 			this.setDiagnostic('general', {
@@ -1070,13 +1500,15 @@ export class PlaygroundController {
 
 	// --- Lifecycle ---------------------------------------------------------
 	destroy = (): void => {
-		// Navigating away stops audio but does NOT end the session
-		// (Johnny-ckz.11) — the user can reopen it from the session detail.
+		// Navigating away stops audio but does NOT end the session/group
+		// (Johnny-ckz.11) — the user can reopen it from the session detail
+		// (or resume the group from the start-conflict prompt).
 		void this.audioSession?.stop();
 		void this.dictationSession?.abort();
 		this.dictationSession = null;
 		this.subscription?.close();
 		this.subscription = null;
+		this.closeGroupSubscriptions();
 		if (this.connDropTimer !== null) {
 			clearTimeout(this.connDropTimer);
 			this.connDropTimer = null;
@@ -1094,6 +1526,18 @@ export class PlaygroundController {
 			const detail = (body as { detail?: unknown }).detail;
 			if (detail && typeof detail === 'object' && 'active_session_id' in detail) {
 				const id = (detail as { active_session_id?: unknown }).active_session_id;
+				if (typeof id === 'number') return id;
+			}
+		}
+		return null;
+	}
+
+	private extractActiveGroupId(err: unknown): number | null {
+		const body = (err as { body?: unknown }).body;
+		if (body && typeof body === 'object' && 'detail' in body) {
+			const detail = (body as { detail?: unknown }).detail;
+			if (detail && typeof detail === 'object' && 'active_group_id' in detail) {
+				const id = (detail as { active_group_id?: unknown }).active_group_id;
 				if (typeof id === 'number') return id;
 			}
 		}

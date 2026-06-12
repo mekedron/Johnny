@@ -117,7 +117,13 @@ async def test_split_run_fires_provider_warm_up_without_gating_start(
     class _FakeAgentSession:
         @classmethod
         async def build(
-            cls, transport: Any, config: Any, *, event_bus: Any, vad: Any = None
+            cls,
+            transport: Any,
+            config: Any,
+            *,
+            event_bus: Any,
+            vad: Any = None,
+            floor_scope: str | None = None,
         ) -> _FakeAgentSession:
             return cls()
 

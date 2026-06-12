@@ -1,0 +1,20 @@
+{
+  "name": "addressing-no-interrupt",
+  "_provenance": "Johnny-trt.48 — the repeatable regression for the trt.46 multi-agent foundation. Two agents are asked back to back, each addressed by name. Under the strict v1 loop rule both agents answer each ask (the always-speak stub router mirrors the worst case); the assertions are the trt.46 invariants: floor holds never overlap, audio stays inside the speaker's own holds, and the co-agent's speech is peer-labeled, never a turn. Johnny-trt.47 (turn claims + router selectivity) tunes against this same fixture: addressed_to is the per-step expectation it flips on — exactly the named agent should answer, the other should record a lost claim or a decline.",
+  "agents": [
+    { "name": "Alex", "context": "You are Alex, one of two assistants in this meeting." },
+    { "name": "Echo", "context": "You are Echo, one of two assistants in this meeting." }
+  ],
+  "steps": [
+    {
+      "text": "Alex, what time is the design review tomorrow?",
+      "addressed_to": "Alex",
+      "settle_timeout_s": 60
+    },
+    {
+      "text": "Echo, can you summarize the open action items?",
+      "addressed_to": "Echo",
+      "settle_timeout_s": 60
+    }
+  ]
+}

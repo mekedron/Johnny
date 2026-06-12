@@ -66,6 +66,35 @@ export interface StartBrowserSessionPayload {
 	provider_overrides?: Record<string, BrowserProviderOverride>;
 }
 
+// --- Multi-agent session groups (Johnny-trt.48) -----------------------------
+
+export interface GroupAgentEntry {
+	agent_id: number;
+	/** Per-member context brief; omitted inherits the group-level one. */
+	context?: string;
+}
+
+export interface StartBrowserGroupPayload {
+	/** 2+ agents — one member session per entry, in roster order. */
+	agents: GroupAgentEntry[];
+	account_id?: number | null;
+	context?: string;
+	provider_overrides?: Record<string, BrowserProviderOverride>;
+}
+
+export interface BrowserGroupMember {
+	session: BrowserSession;
+	agent_id: number;
+	agent_name: string;
+}
+
+export interface BrowserSessionGroup {
+	group_id: number;
+	audio_ws_path: string;
+	sample_rate: number;
+	members: BrowserGroupMember[];
+}
+
 // --- HTTP plumbing --------------------------------------------------------
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -149,4 +178,40 @@ export function audioWebSocketUrl(session: BrowserSession): string {
 	// API_BASE may be http or https; map to ws/wss accordingly.
 	const base = API_BASE.replace(/^http/, 'ws');
 	return `${base}${session.audio_ws_path}`;
+}
+
+// --- Group endpoints (Johnny-trt.48) ----------------------------------------
+
+export function startBrowserSessionGroup(
+	payload: StartBrowserGroupPayload
+): Promise<BrowserSessionGroup> {
+	return request<BrowserSessionGroup>('/sessions/browser/groups/start', {
+		method: 'POST',
+		body: JSON.stringify(payload)
+	});
+}
+
+export function stopBrowserSessionGroup(groupId: number): Promise<BrowserSessionGroup> {
+	return request<BrowserSessionGroup>(`/sessions/browser/groups/${groupId}/stop`, {
+		method: 'POST'
+	});
+}
+
+export function postBrowserGroupText(
+	groupId: number,
+	text: string
+): Promise<{ accepted: boolean; drove_pipeline: Record<string, boolean> }> {
+	return request<{ accepted: boolean; drove_pipeline: Record<string, boolean> }>(
+		`/sessions/browser/groups/${groupId}/text`,
+		{ method: 'POST', body: JSON.stringify({ text }) }
+	);
+}
+
+export function listActiveBrowserGroups(): Promise<BrowserSessionGroup[]> {
+	return request<BrowserSessionGroup[]>('/sessions/browser/groups/active');
+}
+
+export function groupAudioWebSocketUrl(group: BrowserSessionGroup): string {
+	const base = API_BASE.replace(/^http/, 'ws');
+	return `${base}${group.audio_ws_path}`;
 }

@@ -363,8 +363,37 @@ assignments share one). The scheduler gate is per assignment
 (`pending_assignments`): a crashed co-agent redispatches alone while its
 peers keep running, and `MAX_AGENTS_PER_MEETING` (4) is enforced with a
 422 at assignment time and re-applied defensively at launch. Single-agent
-sessions (every playground session — no `meeting_config_id`) build no
-floor: speak paths ungated, zero floor events.
+sessions (every single-agent playground session — no `meeting_config_id`,
+no group) build no floor: speak paths ungated, zero floor events.
+
+**Multi-agent playground groups (Johnny-trt.48)** are the browser test
+surface for all of the above without a real Meet: `POST
+/sessions/browser/groups/start` launches one in-process browser session per
+selected agent (2..4, explicit ids), every member's job carrying the same
+synthetic floor scope `browser-group-{group_id}` (a string namespace in the
+same lock keyspace — collision-free with integer meeting ids), so members
+contend on a real Redis floor exactly like meeting co-agents. ONE WebSocket
+(`/ws/sessions/groups/{id}/audio`, single-session wire protocol) feeds a
+`GroupAudioRouter` (`johnny/voice_pipeline/group_audio.py`): a 20 ms-clocked
+capture mixer sample-adds the user's mic with every *other* member's TTS
+into each member's inbound stream (peers genuinely hear each other at
+real-time pace — the suppression seam runs on real audio), member playback
+merges into one outbound stream, and a member's interrupt purges its queued
+audio everywhere. Members stay first-class sessions (own rows, event feeds,
+per-member stop — the group survives), and the playground renders a
+per-agent state strip from the conversation-dynamics events. The
+**floor-handoff shield** (`shield_handle_through_peer_tail`) closes a gap
+this surface exposed: a speech created while the previous holder's
+suppression window is still closing is held uninterruptible until the
+window ends, or the SDK reads the peer's trailing audio as a live barge-in
+and insta-cuts the new reply (explicit stops force-interrupt and always
+win). The fixture-driven regression for the whole stack is
+`johnny/agent/ensemble_scenario.py` (+
+`tests/integration/test_ensemble_scenario.py`): real engines + stub
+providers whose TTS streams a recorded utterance (Silero must classify the
+cross-feed as speech), asserting zero hold overlap, audio-inside-own-holds,
+the strict loop rule, and peer labeling; its per-step `addressed_to` field
+is the seam Johnny-trt.47's claim/selectivity assertions flip on.
 
 ---
 

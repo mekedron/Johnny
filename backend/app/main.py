@@ -13,6 +13,8 @@ from app.api.agents import router as agents_router
 from app.api.auth import router as auth_router
 from app.api.bot_signin import router as bot_signin_router
 from app.api.bot_signin import ws_router as bot_signin_ws_router
+from app.api.browser_session_groups import router as browser_session_groups_router
+from app.api.browser_session_groups import ws_router as browser_session_groups_ws_router
 from app.api.browser_sessions import router as browser_sessions_router
 from app.api.browser_sessions import ws_router as browser_sessions_ws_router
 from app.api.calendar import router as calendar_router
@@ -131,6 +133,11 @@ app.include_router(agents_router)
 app.include_router(auth_router)
 app.include_router(bot_signin_router)
 app.include_router(bot_signin_ws_router)
+# The groups router registers BEFORE the single-session router so its
+# literal "groups" path segments win over /sessions/browser/{id} matching
+# (Johnny-trt.48).
+app.include_router(browser_session_groups_router)
+app.include_router(browser_session_groups_ws_router)
 app.include_router(browser_sessions_router)
 app.include_router(browser_sessions_ws_router)
 app.include_router(calendar_router)

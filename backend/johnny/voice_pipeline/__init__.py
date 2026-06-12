@@ -60,6 +60,9 @@ from johnny.voice_pipeline.events import (
     TurnTerminal,
     event_to_dict,
 )
+from johnny.voice_pipeline.group_audio import (
+    GroupAudioRouter,
+)
 from johnny.voice_pipeline.livekit_transport import (
     LiveKitTransport,
     MeetRoomBridge,
@@ -173,6 +176,7 @@ __all__ = [
     "DecisionSink",
     "EnergyVAD",
     "EventBus",
+    "GroupAudioRouter",
     "InMemoryApprovalGate",
     "InMemoryDecisionSink",
     "InMemoryEventBus",
