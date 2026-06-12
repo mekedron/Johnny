@@ -33,6 +33,18 @@ after each iteration and it's included in prompts for context.
   uvicorn --reload re-runs migrations+seeds on save. Pre-existing failures on this stack:
   `tests/e2e/providers_ui/*` (need live provider keys) and `tests/wizard/test_models.py`
   image checks — both fail on HEAD too; don't chase them.
+- **SDK-launcher family pattern** (docker_launcher → workspace_containers): typing-only
+  Protocols over the docker SDK + lazy `import_module("docker")` + `_create_client` override
+  seam; `_is_not_found` detects NotFound BY CLASS NAME (no SDK import); discovery by LABEL
+  union (never remembered-name alone); post-stop re-list that raises/log.errors on survivors;
+  `init=True` always. Launcher-created NAMED volumes are not compose-declared, so `./stop.sh`'s
+  `down -v` can't delete them — that's how "state survives factory reset" is implemented.
+  Async clients (redis.asyncio/httpx) in shared services must be created PER CALL: the same
+  manager runs on the api event loop, the task-worker thread loop, AND worker `asyncio.run`
+  passes — a cached client binds to whichever loop built it and breaks the next.
+- **uvicorn api logs hide `app.services.*` INFO** (no basicConfig in the api process — only
+  the worker calls it). Don't debug a service by grepping api logs for its logger; assert on
+  observable side effects (containers, volumes, redis keys, DB rows) instead.
 
 ---
 
@@ -85,5 +97,70 @@ after each iteration and it's included in prompts for context.
   - The dev stack's providers were all inactive (fresh boot state); playground needs an
     active STT row or AgentSession assembly fails loudly. Activated parakeet/ollama/piper
     for the validation run, restored to inactive after.
+---
+
+## 2026-06-12 - Johnny-wks.2
+- Workspace container lifecycle shipped: new `app/services/workspace_containers.py` —
+  `WorkspaceContainerManager` lazily launches one `johnny-workspace-<id>` container of the
+  compose-tagged `johnny-skills-sandbox:latest` image per NON-default workspace (label
+  `johnny.workspace-id=<id>` + slug label, named state volume `johnny-workspace-<id>-home`
+  rw at `/home/sandbox` created WITH labels, shared `~/.johnny/skills` ro at `/skills`,
+  `init=True`, restart=no, johnny_default network, cpu/mem/pids caps + SANDBOX_EXEC_* env
+  mirrored from the compose service, launch-race tolerated by riding the winner, bounded
+  /health wait). Default workspace untouched (always-on compose service).
+- Lazy-launch hooks (all degrade to the wks.1 unreachable-probe path, never block):
+  `ensure_workspace_container_for_stamp` called at BOTH dispatch surfaces
+  (session_scheduler `_start_one_session` pre-launcher.start; browser_sessions pre-
+  `_spawn_runner`) and in the worker claim path (`SandboxExecutorProvider.executor_for` →
+  `_ensure_workspace_container`; ClaimedTask grew `workspace_slug`). Gated on
+  `should_use_docker_launcher()` so tests/dev no-op.
+- Idle-TTL stop: every ensure touches `johnny:workspace:sandbox:last-used:<id>` in Redis;
+  worker main-loop pass (`run_workspace_sweep_pass`, every JOHNNY_WORKSPACE_SWEEP_INTERVAL_
+  SECONDS=60) stops+removes RUNNING labeled containers idle past JOHNNY_WORKSPACE_IDLE_TTL_
+  SECONDS=1800, keyed off max(touch, StartedAt); Redis unreadable → whole pass skips (never
+  stop on missing evidence); post-stop label re-list log.errors survivors. State volume
+  untouched → next ensure restarts transparently with state intact.
+- Delete affordance: `DELETE /workspaces/{id}?remove_volume=` — container ALWAYS retired
+  (name+label union, verify-or-raise), volume removed only on explicit flag; teardown
+  failure = 409 + row preserved; docker-less deployment + remove_volume → honor-or-refuse
+  409. `./stop.sh` sweeps `label=johnny.workspace-id` BEFORE `down` (network detach);
+  volumes survive `down -v` because they're launcher-created, not compose-declared.
+- Compose: skills-sandbox gets explicit `image: johnny-skills-sandbox:latest` (meet-worker
+  pattern) so `./run.sh` build produces the launcher's tag; backend-env passes workspace
+  knobs + host skills path + sandbox caps through to api/worker. `.env.example` documents.
+- Files: backend/app/services/workspace_containers.py (new), task_worker.py,
+  session_scheduler.py, api/browser_sessions.py, api/workspaces.py, worker.py,
+  services/workspaces.py + db/models.py + johnny/skills/sandbox.py (docstring truth),
+  docker-compose.yml, stop.sh, .env.example; tests: services/test_workspace_containers.py
+  (new, 20 tests), api/test_workspaces.py, services/test_task_worker.py.
+- Validation: 4261 full-suite + 72 targeted green (only the two documented pre-existing
+  failure groups excluded); ruff+mypy clean. Real-browser (chrome-devtools) on the DEV
+  stack: Finance workspace + FinanceBot created from frontend origin, playground session
+  started from the UI → johnny-workspace-2 lazily appeared (full contract inspected:
+  init/labels/volume/mounts/limits/network), /health+/bins live on the canonical hostname,
+  snapshot stamped, redis touch set; real sweep_idle(ttl=2) stopped+removed it (volume
+  kept); claim-helper ensure restarted it and the exec-API-written state marker survived.
+  Delete matrix browser-driven: attached 409 → detach → 204 retiring a LIVE container with
+  volume kept → recreate → explicit remove_volume=true removed both. CLEAN-INSTALL cycle:
+  ./stop.sh swept the running labeled container (network removed cleanly) + both volumes
+  survived `down -v`; ./run.sh prod-shape rebuild → UI session start → lazy launch from the
+  baked image and the PRE-RESET marker readable through the re-bound volume. Artifacts:
+  .validation/Johnny-wks.2/01-03*.png.
+- **Learnings:**
+  - chrome-devtools MCP `evaluate_script` can return "No page found" while
+    list_pages/snapshot work — pass `pageId` explicitly on every evaluate call.
+  - Providers create API wants `values: {…}` (flat field dict); field names come from
+    `GET /providers/schemas`. Local trio for playground assembly: faster-whisper
+    (model=tiny) / openai-compatible (host ollama, q4_K_M tag per bd memory) / piper
+    (voice_id=en_GB-alan-low) — whisper/piper weights persist in ~/.johnny so activation
+    is instant on a fresh DB.
+  - Volume id-keying across factory resets: stop.sh wipes the DB (ids restart) but volumes
+    survive, so workspaces recreated in the same order regain their state — documented as
+    intentional continuity (same as sandbox-home). Within one DB lifetime ids never reuse,
+    which is what blocks deleted-slug state bleed.
+  - Image labels (com.docker.compose.*) merge into spawned containers' labels — filter by
+    OUR label key, never by absence of compose labels.
+  - The playground "Start session" path is the cheapest real-browser trigger for dispatch-
+    time workspace code: UI click → stamp → ensure → in-process probes, no Meet needed.
 ---
 

@@ -313,16 +313,18 @@ class CalendarEvent(TimestampMixin, Base):
 class Workspace(TimestampMixin, Base):
     """One named EXECUTION ENVIRONMENT agents attach to (Johnny-wks.1).
 
-    A workspace = a container instance of the skills-sandbox image + a host
-    state dir (``~/.johnny/workspaces/<slug>/``, bind-mounted — wks.2 wires
-    the container lifecycle) + the accounts connected inside it. Credentials
-    are STATE, not permissions: the capability policy (Johnny-trt.38) says
-    what an agent may run; the workspace decides *as whom* and against
-    *whose state* it runs.
+    A workspace = a container instance of the skills-sandbox image
+    (``johnny-workspace-<id>``, lazily launched — Johnny-wks.2) + its own
+    named state volume (``johnny-workspace-<id>-home`` at ``/home/sandbox``)
+    + the accounts connected inside it. Credentials are STATE, not
+    permissions: the capability policy (Johnny-trt.38) says what an agent
+    may run; the workspace decides *as whom* and against *whose state* it
+    runs.
 
     * ``name`` — operator-facing display name, unique, renameable;
-    * ``slug`` — the storage-dir derivation key, unique and FROZEN at
-      creation (renames never move state on disk);
+    * ``slug`` — the frozen human-readable identity key, unique, set at
+      creation; it labels the container + state volume (renames never
+      re-key state);
     * ``is_default`` — exactly one row, the seeded "Default" workspace:
       today's shared skills-sandbox service, non-deletable, so every agent
       with no explicit attachment keeps byte-identical behavior.

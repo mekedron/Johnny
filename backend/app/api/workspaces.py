@@ -9,19 +9,20 @@ only the workspace rows themselves).
 Rules (the bead's CRUD matrix):
 
 * names are unique (409) — they double as the operator's mental key;
-* the ``slug`` (storage-dir derivation key) is derived from the name at
-  creation and FROZEN — renames change the display name only, never the
-  slug, because workspace state lives on the host at
-  ``~/.johnny/workspaces/<slug>/`` and a rename must not move state;
+* the ``slug`` (the frozen human-readable identity key) is derived from the
+  name at creation and FROZEN — renames change the display name only, never
+  the slug, which rides the workspace's container/volume labels
+  (Johnny-wks.2) and must stay stable for state triage;
 * the seeded default workspace is non-deletable (409);
 * deleting any workspace is refused while agents are attached to it (409,
   with the count — detach or delete the agents first). The FK's RESTRICT
   is the belt-and-braces under this check.
 
-No container lifecycle here (Johnny-wks.2): creating a workspace creates
-the row only. Until its container ships, an attached agent's capability
-snapshot for the workspace key resolves empty — the catalog promises
-nothing, by design.
+Container lifecycle (Johnny-wks.2): creating a workspace creates the row
+only — its sandbox container (``johnny-workspace-<id>``) launches LAZILY on
+first need via :mod:`app.services.workspace_containers`. Deletion always
+retires the container; the named state volume is removed only on the
+explicit ``?remove_volume=true`` opt-in.
 """
 
 from __future__ import annotations
@@ -183,12 +184,21 @@ def update_workspace(
 
 
 @router.delete("/{workspace_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_workspace(workspace_id: int, session: SessionDep) -> None:
+def delete_workspace(
+    workspace_id: int,
+    session: SessionDep,
+    remove_volume: bool = False,
+) -> None:
     """Delete a workspace. Refuses the default and any attached workspace.
 
-    State on disk (``~/.johnny/workspaces/<slug>/``) is NEVER touched here —
-    explicit dir removal is a wks.2 operator affordance; a deleted row's
-    state stays inspectable/backupable as a plain directory.
+    The workspace's sandbox container (Johnny-wks.2) is always stopped and
+    removed — a deleted row must not leave a live executor behind. Its named
+    state volume (``johnny-workspace-<id>-home``) is NEVER auto-deleted:
+    only the explicit ``?remove_volume=true`` opt-in removes it; otherwise
+    the state stays recoverable via ``docker volume ls`` (the volume's
+    labels carry the workspace id and slug). A container/volume teardown
+    failure aborts with 409 and PRESERVES the row, so the operator can retry
+    instead of stranding an orphan.
     """
     row = _get_row_or_404(session, workspace_id)
     if row.is_default:
@@ -209,6 +219,39 @@ def delete_workspace(workspace_id: int, session: SessionDep) -> None:
             detail=(
                 f"cannot delete workspace {row.name!r} — {attached} agent(s) "
                 "are attached to it; reattach them first"
+            ),
+        )
+    from app.services.docker_launcher import should_use_docker_launcher
+    from app.services.workspace_containers import (
+        WorkspaceContainerError,
+        get_workspace_container_manager,
+    )
+
+    if should_use_docker_launcher():
+        try:
+            get_workspace_container_manager().retire(
+                workspace_id=row.id, remove_volume=remove_volume
+            )
+        except WorkspaceContainerError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"workspace {row.name!r} could not be torn down cleanly: "
+                    f"{exc}. The workspace was NOT deleted; retry once the "
+                    "container/volume issue is resolved."
+                ),
+            ) from exc
+    elif remove_volume:
+        # Honor-or-refuse: this deployment doesn't drive docker, so the
+        # explicit request can't be carried out — refusing beats silently
+        # deleting the row and leaving the volume behind.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "state-volume removal is unavailable: this deployment does "
+                "not manage docker containers (JOHNNY_USE_DOCKER_LAUNCHER is "
+                "off). Delete without remove_volume, or remove the volume "
+                "manually."
             ),
         )
     session.delete(row)

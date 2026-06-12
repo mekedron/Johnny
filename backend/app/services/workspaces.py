@@ -15,10 +15,11 @@ dispatch surfaces and the CRUD API share:
   frozen agent snapshot at dispatch (``build_agent_snapshot``), so turn-time
   code and the worker resolver key the sandbox by WORKSPACE ID without ever
   re-reading these tables (the trt.41 no-turn-time-DB-reads rule).
-* :func:`slugify` / :func:`derive_unique_slug` — the storage-dir derivation
-  key. Slugs are FROZEN at creation: workspace state lives on the host at
-  ``~/.johnny/workspaces/<slug>/`` (operator convention, wks.2 wires the
-  bind-mount), and a rename must never move state on disk.
+* :func:`slugify` / :func:`derive_unique_slug` — the frozen human-readable
+  identity key. Slugs are FROZEN at creation: they label the workspace's
+  container and named state volume (Johnny-wks.2 — the volume itself is
+  keyed by the never-reused id, ``johnny-workspace-<id>-home``), and a
+  rename must never re-key state.
 """
 
 from __future__ import annotations
@@ -48,11 +49,11 @@ _SLUG_MAX_LEN = 64
 
 
 def slugify(name: str) -> str:
-    """Lowercase-kebab the display name into a filesystem-safe dir name.
+    """Lowercase-kebab the display name into a label-safe identity key.
 
     ``"Finance Team"`` → ``finance-team``. Non-alphanumeric runs collapse to
     one hyphen; an all-symbols name degrades to ``"workspace"`` rather than
-    an empty slug (the storage dir must always have a name).
+    an empty slug (container/volume labels must always have a value).
     """
     slug = _SLUG_STRIP_RE.sub("-", name.lower()).strip("-")
     return slug[:_SLUG_MAX_LEN].rstrip("-") or "workspace"
@@ -61,10 +62,10 @@ def slugify(name: str) -> str:
 def derive_unique_slug(session: Session, name: str) -> str:
     """The slug for a NEW workspace, disambiguated against existing rows.
 
-    The slug is the host storage-dir name, so collisions are forbidden even
-    when the display names differ only in symbols (``"Team A"`` vs
-    ``"Team-A"``). First taken candidate gets a numeric suffix
-    (``finance-2``), the agents clone-name pattern.
+    The slug labels the workspace's container + state volume, so collisions
+    are forbidden even when the display names differ only in symbols
+    (``"Team A"`` vs ``"Team-A"``). First taken candidate gets a numeric
+    suffix (``finance-2``), the agents clone-name pattern.
     """
     base = slugify(name)
     existing = set(session.scalars(select(Workspace.slug)).all())

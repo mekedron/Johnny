@@ -216,6 +216,99 @@ def test_delete_with_attached_agents_409_then_succeeds_after_detach(
     assert client.get(f"/workspaces/{created['id']}").status_code == 404
 
 
+# --- delete × container/volume teardown (Johnny-wks.2) -------------------------
+
+
+class _FakeManager:
+    """Stands in for WorkspaceContainerManager in the delete endpoint."""
+
+    def __init__(self, *, raises: bool = False) -> None:
+        self.raises = raises
+        self.calls: list[tuple[int, bool]] = []
+
+    def retire(self, *, workspace_id: int, remove_volume: bool) -> None:
+        if self.raises:
+            from app.services.workspace_containers import WorkspaceContainerError
+
+            raise WorkspaceContainerError("volume is in use")
+        self.calls.append((workspace_id, remove_volume))
+
+
+@pytest.fixture
+def fake_manager(monkeypatch: pytest.MonkeyPatch) -> Iterator[_FakeManager]:
+    """Docker-driving deployment with an injected fake container manager."""
+    from typing import cast
+
+    from app.services import workspace_containers
+
+    manager = _FakeManager()
+    monkeypatch.setenv("JOHNNY_USE_DOCKER_LAUNCHER", "true")
+    workspace_containers.set_workspace_container_manager(
+        cast(workspace_containers.WorkspaceContainerManager, manager)
+    )
+    try:
+        yield manager
+    finally:
+        workspace_containers.set_workspace_container_manager(None)
+
+
+def test_delete_retires_container_and_skips_volume_by_default(
+    client: TestClient, fake_manager: _FakeManager
+) -> None:
+    created = _create(client, "Finance")
+    resp = client.delete(f"/workspaces/{created['id']}")
+    assert resp.status_code == 204
+    assert fake_manager.calls == [(created["id"], False)]
+
+
+def test_delete_remove_volume_is_explicit(
+    client: TestClient, fake_manager: _FakeManager
+) -> None:
+    created = _create(client, "Finance")
+    resp = client.delete(f"/workspaces/{created['id']}?remove_volume=true")
+    assert resp.status_code == 204
+    assert fake_manager.calls == [(created["id"], True)]
+
+
+def test_delete_teardown_failure_409_preserves_the_row(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from typing import cast
+
+    from app.services import workspace_containers
+
+    monkeypatch.setenv("JOHNNY_USE_DOCKER_LAUNCHER", "true")
+    workspace_containers.set_workspace_container_manager(
+        cast(
+            workspace_containers.WorkspaceContainerManager,
+            _FakeManager(raises=True),
+        )
+    )
+    try:
+        created = _create(client, "Finance")
+        resp = client.delete(f"/workspaces/{created['id']}?remove_volume=true")
+        assert resp.status_code == 409
+        assert "NOT deleted" in resp.json()["detail"]
+        assert client.get(f"/workspaces/{created['id']}").status_code == 200
+    finally:
+        workspace_containers.set_workspace_container_manager(None)
+
+
+def test_delete_remove_volume_unavailable_without_docker_409(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Honor-or-refuse: an explicit request this deployment can't carry out
+    is a 409, never a silent row delete that strands the volume."""
+    monkeypatch.delenv("JOHNNY_USE_DOCKER_LAUNCHER", raising=False)
+    created = _create(client, "Finance")
+    resp = client.delete(f"/workspaces/{created['id']}?remove_volume=true")
+    assert resp.status_code == 409
+    assert "unavailable" in resp.json()["detail"]
+    assert client.get(f"/workspaces/{created['id']}").status_code == 200
+    # Without the flag the plain delete still works in docker-less deployments.
+    assert client.delete(f"/workspaces/{created['id']}").status_code == 204
+
+
 # --- agent_count -------------------------------------------------------------
 
 

@@ -206,6 +206,7 @@ class ClaimedTask:
     attempts: int
     workspace_id: int | None = None
     workspace_is_default: bool = True
+    workspace_slug: str | None = None
 
     def as_queued_task(self) -> QueuedTask:
         """The executor-facing shape (the trt.23 runner contract)."""
@@ -313,7 +314,9 @@ def claim_queued_tasks(
     for row in rows:
         request = row.request_json if isinstance(row.request_json, dict) else {}
         args = request.get("args")
-        workspace_id, workspace_is_default = _workspace_from_request(request)
+        workspace_id, workspace_is_default, workspace_slug = _workspace_from_request(
+            request
+        )
         claimed.append(
             ClaimedTask(
                 task_id=int(row.id),
@@ -326,29 +329,35 @@ def claim_queued_tasks(
                 attempts=int(row.attempts),
                 workspace_id=workspace_id,
                 workspace_is_default=workspace_is_default,
+                workspace_slug=workspace_slug,
             )
         )
     return claimed
 
 
-def _workspace_from_request(request: dict[str, Any]) -> tuple[int | None, bool]:
-    """Parse the row's workspace stamp (Johnny-wks.1) → ``(id, is_default)``.
+def _workspace_from_request(
+    request: dict[str, Any],
+) -> tuple[int | None, bool, str | None]:
+    """Parse the row's workspace stamp (Johnny-wks.1) → ``(id, is_default, slug)``.
 
     Lenient like the rest of the claim parse: a missing / malformed stamp
-    degrades to ``(None, True)`` — the default workspace, exactly what every
-    pre-workspaces row meant.
+    degrades to ``(None, True, None)`` — the default workspace, exactly what
+    every pre-workspaces row meant. The slug is decoration (container/volume
+    labels for the wks.2 lazy launch); only the id/is_default pair routes.
     """
     entry = request.get("workspace")
     if not isinstance(entry, dict):
-        return None, True
+        return None, True, None
     raw_id = entry.get("id")
     try:
         workspace_id = int(raw_id) if raw_id is not None and raw_id != "" else None
     except (TypeError, ValueError):
         workspace_id = None
     if workspace_id is None:
-        return None, True
-    return workspace_id, bool(entry.get("is_default"))
+        return None, True, None
+    raw_slug = entry.get("slug")
+    slug = str(raw_slug) if raw_slug else None
+    return workspace_id, bool(entry.get("is_default")), slug
 
 
 def settle_claimed_task(
@@ -603,6 +612,7 @@ class SandboxExecutorProvider:
         from johnny.skills.tools import SandboxExecTool
 
         url = resolve_sandbox_url(claimed)
+        await self._ensure_workspace_container(claimed)
         async with self._lock:
             entry = self._entries.get(url)
             age = time.monotonic() - entry.loaded_at if entry is not None else None
@@ -648,6 +658,32 @@ class SandboxExecutorProvider:
             fallback=stub_executor,
         )
         return build_skill_task_executor(registry, exec_tool, fallback=mcp_executor)
+
+    async def _ensure_workspace_container(self, claimed: ClaimedTask) -> None:
+        """Lazy workspace launch on claim (Johnny-wks.2).
+
+        A non-default claim means this task executes against
+        ``johnny-workspace-<id>`` — start (or transparently restart after an
+        idle-TTL stop) that container before the registry probe touches it.
+        Doubles as the activity touch that keeps a busy workspace from being
+        idle-swept. The helper never raises; on failure the probe degrades to
+        all-skills-unavailable and the task settles with honest speech,
+        exactly the pre-wks.2 containerless behavior.
+        """
+        if claimed.workspace_id is None or claimed.workspace_is_default:
+            return
+        from app.services.workspace_containers import (
+            ensure_workspace_container_for_stamp,
+        )
+
+        await ensure_workspace_container_for_stamp(
+            {
+                "id": claimed.workspace_id,
+                "is_default": claimed.workspace_is_default,
+                "slug": claimed.workspace_slug,
+            },
+            context_label=f"task {claimed.task_id}",
+        )
 
     def _kind_ready(self, entry: _ExecutorEntry, kind: str) -> bool:
         if is_mcp_kind(kind):

@@ -106,6 +106,32 @@ x-backend-env: &backend-env
   JOHNNY_TASK_RUNNING_TTL_SECONDS: ${JOHNNY_TASK_RUNNING_TTL_SECONDS:-300}
   JOHNNY_TASK_MAX_ATTEMPTS: ${JOHNNY_TASK_MAX_ATTEMPTS:-3}
   JOHNNY_TASK_EXEC_TIMEOUT_SECONDS: ${JOHNNY_TASK_EXEC_TIMEOUT_SECONDS:-240}
+  # Per-workspace sandbox containers (Johnny-wks.2): the api (dispatch) and
+  # worker (task claim + idle sweep) lazily launch one container of the
+  # skills-sandbox image per NON-default workspace, named
+  # johnny-workspace-<id> and labelled johnny.workspace-id=<id>. The image
+  # tag matches the `image:` the skills-sandbox service is built with; the
+  # skills mount needs the HOST path (bind sources are resolved by the
+  # docker daemon, not inside this container). Idle containers are stopped
+  # after the TTL; their named state volumes (johnny-workspace-<id>-home)
+  # are launcher-created — NOT compose-declared — so `down -v` resets never
+  # delete workspace state.
+  JOHNNY_WORKSPACE_SANDBOX_IMAGE: ${JOHNNY_WORKSPACE_SANDBOX_IMAGE:-johnny-skills-sandbox:latest}
+  JOHNNY_WORKSPACE_SANDBOX_NETWORK: ${JOHNNY_WORKSPACE_SANDBOX_NETWORK:-johnny_default}
+  JOHNNY_WORKSPACE_SKILLS_VOLUME: ${JOHNNY_WORKSPACE_SKILLS_VOLUME:-${HOME}/.johnny/skills}
+  JOHNNY_WORKSPACE_IDLE_TTL_SECONDS: ${JOHNNY_WORKSPACE_IDLE_TTL_SECONDS:-1800}
+  JOHNNY_WORKSPACE_SWEEP_INTERVAL_SECONDS: ${JOHNNY_WORKSPACE_SWEEP_INTERVAL_SECONDS:-60}
+  JOHNNY_WORKSPACE_STARTUP_TIMEOUT_SECONDS: ${JOHNNY_WORKSPACE_STARTUP_TIMEOUT_SECONDS:-20}
+  # Mirrored onto every spawned workspace sandbox so ONE set of operator
+  # knobs governs the default compose sandbox and the per-workspace ones
+  # alike (the skills-sandbox service below reads the same variables).
+  JOHNNY_SANDBOX_CPUS: ${JOHNNY_SANDBOX_CPUS:-2}
+  JOHNNY_SANDBOX_MEM_LIMIT: ${JOHNNY_SANDBOX_MEM_LIMIT:-1g}
+  SANDBOX_EXEC_TIMEOUT_DEFAULT_S: ${SANDBOX_EXEC_TIMEOUT_DEFAULT_S:-30}
+  SANDBOX_EXEC_TIMEOUT_MAX_S: ${SANDBOX_EXEC_TIMEOUT_MAX_S:-300}
+  SANDBOX_EXEC_OUTPUT_CAP_BYTES: ${SANDBOX_EXEC_OUTPUT_CAP_BYTES:-262144}
+  SANDBOX_EXEC_BODY_CAP_BYTES: ${SANDBOX_EXEC_BODY_CAP_BYTES:-262144}
+  GOG_KEYRING_PASSWORD: ${GOG_KEYRING_PASSWORD:-}
 
 services:
   postgres:
@@ -410,6 +436,10 @@ services:
   skills-sandbox:
     build:
       context: ./sandbox
+    # Explicit tag (the meet-worker pattern) so the per-workspace launcher
+    # (Johnny-wks.2) can spawn additional containers of this exact image —
+    # `./run.sh`'s `up -d --build` builds and tags it with no extra step.
+    image: johnny-skills-sandbox:latest
     expose:
       - "8088"
     ports:

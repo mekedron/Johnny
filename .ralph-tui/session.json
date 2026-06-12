@@ -3,10 +3,10 @@
   "sessionId": "b6e04a59-a239-41cc-9d46-aaf1f127490a",
   "status": "running",
   "startedAt": "2026-06-12T16:03:53.991Z",
-  "updatedAt": "2026-06-12T16:47:11.086Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-12T17:32:38.579Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -33,8 +33,8 @@
       {
         "id": "Johnny-wks.1",
         "title": "[BUILD] Workspace entity — first-class execution environments, default workspace, agent attachment threading",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-wks.2",
@@ -68,7 +68,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-wks.1",
+      "taskTitle": "[BUILD] Workspace entity — first-class execution environments, default workspace, agent attachment threading",
+      "taskCompleted": true,
+      "durationMs": 2052611,
+      "startedAt": "2026-06-12T16:12:57.614Z",
+      "endedAt": "2026-06-12T16:47:10.225Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

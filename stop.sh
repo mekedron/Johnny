@@ -22,6 +22,24 @@ if [[ -n "$all_sessions" ]]; then
   docker rm $all_sessions
 fi
 
+# Per-workspace sandbox containers (Johnny-wks.2) are launched lazily by the
+# api/worker via the Docker SDK, so — like the meet-workers above — compose
+# `down` won't touch them, and a running one would pin the johnny_default
+# network and break its removal. Sweep by the johnny.workspace-id label
+# (names are johnny-workspace-<id>). Their named state volumes
+# (johnny-workspace-<id>-home) are deliberately NOT removed: they are
+# launcher-created, not compose-declared, so workspace state survives this
+# factory reset by design. Explicit removal is the workspace delete API's
+# ?remove_volume=true (or `docker volume rm`).
+running_workspaces=$(docker ps -q --filter "label=johnny.workspace-id")
+if [[ -n "$running_workspaces" ]]; then
+  docker stop $running_workspaces
+fi
+all_workspaces=$(docker ps -aq --filter "label=johnny.workspace-id")
+if [[ -n "$all_workspaces" ]]; then
+  docker rm $all_workspaces
+fi
+
 # Stop every host sidecar (Parakeet / Piper / Kokoro) BEFORE tearing the
 # Docker stack down, so an in-flight synthesis/transcription call drains into
 # a clean "sidecar stopped" error instead of hanging against a half-torn-down

@@ -46,11 +46,13 @@ def sandbox_url_from_env() -> str:
 # --- Per-workspace endpoints (Johnny-wks.1) ----------------------------------
 # A NON-DEFAULT workspace's exec daemon lives in its own container of the
 # same skills-sandbox image, reachable on the compose network under a
-# canonical hostname derived from the workspace id. Johnny-wks.2 launches
-# those containers with this exact name (and the johnny.workspace-id label);
-# until then the hostname resolves to nothing and every probe/exec degrades
-# through SandboxUnavailableError — an empty capability snapshot for that
-# key, never a crash (the documented containerless-workspace path).
+# canonical hostname derived from the workspace id. Those containers are
+# LAZY: ``app.services.workspace_containers`` starts one with this exact
+# name (and the johnny.workspace-id label) on first dispatch/claim and
+# idle-stops it after a TTL (Johnny-wks.2). Between launches — or when a
+# launch fails — the hostname resolves to nothing and every probe/exec
+# degrades through SandboxUnavailableError — an empty capability snapshot
+# for that key, never a crash (the documented containerless-workspace path).
 WORKSPACE_CONTAINER_PREFIX = "johnny-workspace"
 WORKSPACE_SANDBOX_PORT = 8088
 

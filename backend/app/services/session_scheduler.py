@@ -747,6 +747,19 @@ async def _start_one_session(
         ),
         provider_config=provider_payload,
     )
+    # Lazy workspace container launch (Johnny-wks.2): a non-default workspace
+    # stamp means the dispatched agent worker probes johnny-workspace-<id>
+    # during session assembly — bring the container up (or transparently
+    # restart it after an idle stop) before the meet-worker launches. Never
+    # raises; on failure the probes degrade exactly as a containerless
+    # workspace always did.
+    from app.services.workspace_containers import ensure_workspace_container_for_stamp
+
+    await ensure_workspace_container_for_stamp(
+        (agent_snapshot or {}).get("workspace"),
+        context_label=f"bot_session={row.id}",
+    )
+
     try:
         result = await launcher.start(ctx)
     except Exception as exc:

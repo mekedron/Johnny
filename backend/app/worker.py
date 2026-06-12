@@ -27,6 +27,12 @@ Responsibilities at runtime:
   per-session reply-audio dirs whose ``bot_sessions`` row no longer exists
   (Johnny-od1) — e.g. after a ``./stop.sh`` DB reset that left the host
   bind mount behind.
+* Workspace idle sweep — every ``JOHNNY_WORKSPACE_SWEEP_INTERVAL_SECONDS``
+  (default 60s) stops + removes per-workspace sandbox containers
+  (label ``johnny.workspace-id``) idle past
+  ``JOHNNY_WORKSPACE_IDLE_TTL_SECONDS`` (default 30 min); their named state
+  volumes survive, so the next dispatch/claim restarts them transparently
+  (Johnny-wks.2).
 * Delegated-task executor pass (Johnny-trt.24) — a persistent asyncio loop
   in its own daemon thread (:mod:`app.services.task_worker`): subscribes
   ``johnny.tasks.wake``, claims queued ``agent_tasks`` rows (internal kinds
@@ -93,6 +99,7 @@ from app.services.transcripts import (
     StaticEmbeddingProvider,
     compute_pending_embeddings,
 )
+from app.services.workspace_containers import get_workspace_sweep_interval_seconds
 
 HEARTBEAT_PATH = Path("/var/lib/johnny/worker/heartbeat")
 INTERVAL_SECONDS = 5
@@ -164,6 +171,21 @@ def run_container_prune_pass(
     if not isinstance(launcher, DockerContainerLauncher):
         return 0
     return prune_stopped_containers(launcher, max_age_seconds=max_age_seconds)
+
+
+def run_workspace_sweep_pass() -> int:
+    """Stop+remove idle per-workspace sandbox containers (Johnny-wks.2).
+
+    One pass of :func:`sweep_idle_workspace_containers`: containers labelled
+    ``johnny.workspace-id`` and idle past ``JOHNNY_WORKSPACE_IDLE_TTL_SECONDS``
+    are stopped and removed; their named state volumes are never touched, so
+    the next dispatch/claim restarts them with state intact. A no-op when
+    the deployment doesn't drive docker, and the whole pass skips when Redis
+    activity keys can't be read (never stop on missing evidence).
+    """
+    from app.services.workspace_containers import sweep_idle_workspace_containers
+
+    return asyncio.run(sweep_idle_workspace_containers())
 
 
 def get_session_audio_sweep_interval_seconds() -> int:
@@ -434,6 +456,8 @@ def main() -> None:
     )
 
     session_audio_sweep_interval = get_session_audio_sweep_interval_seconds()
+    workspace_sweep_interval = get_workspace_sweep_interval_seconds()
+    last_workspace_sweep_at = 0.0
     last_embedding_at = 0.0
     last_poll_at = 0.0
     last_scheduler_at = 0.0
@@ -530,6 +554,17 @@ def main() -> None:
             except Exception:
                 logger.exception("session-audio sweep failed")
             last_session_audio_sweep_at = now
+        if _should_run(now, last_workspace_sweep_at, workspace_sweep_interval):
+            try:
+                stopped = run_workspace_sweep_pass()
+                if stopped > 0:
+                    logger.info(
+                        "workspace idle sweep complete: %d container(s) stopped",
+                        stopped,
+                    )
+            except Exception:
+                logger.exception("workspace idle sweep failed")
+            last_workspace_sweep_at = now
         time.sleep(INTERVAL_SECONDS)
 
 

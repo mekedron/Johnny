@@ -1054,6 +1054,18 @@ async def start_browser_session(
         row.agent_snapshot = dict(spec.agent_snapshot)
         row.bot_name = resolution.agent.name
 
+    # Lazy workspace container launch (Johnny-wks.2): a non-default workspace
+    # stamp means the in-process assembly probes johnny-workspace-<id> in a
+    # moment — bring it up (or transparently restart it after an idle stop)
+    # first. Never raises; on failure the probes degrade exactly as a
+    # containerless workspace always did.
+    from app.services.workspace_containers import ensure_workspace_container_for_stamp
+
+    await ensure_workspace_container_for_stamp(
+        (spec.agent_snapshot or {}).get("workspace"),
+        context_label=f"browser session {row.id}",
+    )
+
     _spawn_runner(bot_session_id=row.id, spec=spec)
 
     # Transition to JOINED immediately — the audio stream is the

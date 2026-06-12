@@ -222,12 +222,15 @@ def test_claim_threads_the_workspace_stamp(db: Session) -> None:
 
     assert by_id[legacy].workspace_id is None
     assert by_id[legacy].workspace_is_default is True
+    assert by_id[legacy].workspace_slug is None
     assert by_id[stamped].workspace_id == 7
     assert by_id[stamped].workspace_is_default is False
+    assert by_id[stamped].workspace_slug == "finance"
     assert by_id[default_stamped].workspace_id == 1
     assert by_id[default_stamped].workspace_is_default is True
     assert by_id[junk].workspace_id is None
     assert by_id[junk].workspace_is_default is True
+    assert by_id[junk].workspace_slug is None
 
 
 def test_resolve_sandbox_url_keys_by_workspace(
@@ -249,6 +252,60 @@ def test_resolve_sandbox_url_keys_by_workspace(
     assert resolve_sandbox_url(legacy) == "http://sandbox-global:8088"
     assert resolve_sandbox_url(default_stamped) == "http://sandbox-global:8088"
     assert resolve_sandbox_url(finance) == "http://johnny-workspace-7:8088"
+
+
+async def test_executor_for_lazily_ensures_the_workspace_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-default claim triggers the wks.2 lazy launch (and activity
+    touch) BEFORE the registry probe; default/legacy claims never do."""
+    from app.services import workspace_containers
+    from app.services.task_worker import SandboxExecutorProvider, _ExecutorEntry
+    from johnny.skills.registry import EMPTY_SKILL_REGISTRY
+
+    ensured: list[dict[str, Any]] = []
+
+    async def fake_ensure(stamp: Any, *, context_label: str = "") -> bool:
+        ensured.append(dict(stamp))
+        return True
+
+    monkeypatch.setattr(
+        workspace_containers, "ensure_workspace_container_for_stamp", fake_ensure
+    )
+
+    provider = SandboxExecutorProvider(
+        registry_ttl_s=3600.0, mcp_manager=object(), mcp_config_loader=tuple
+    )
+
+    async def fake_load(url: str, *, reuse: Any = None) -> Any:
+        entry = _ExecutorEntry(registry=EMPTY_SKILL_REGISTRY, client=None, loaded_at=1e12)
+        provider._entries[url] = entry
+        return entry
+
+    monkeypatch.setattr(provider, "_load", fake_load)
+
+    def _claimed(**kwargs: Any) -> ClaimedTask:
+        return ClaimedTask(
+            task_id=1,
+            bot_session_id=7,
+            kind="google-calendar",
+            args={},
+            ack_text="",
+            turn_id=None,
+            decision_id=None,
+            attempts=1,
+            **kwargs,
+        )
+
+    await provider.executor_for(_claimed())  # legacy → no launch
+    await provider.executor_for(
+        _claimed(workspace_id=1, workspace_is_default=True, workspace_slug="default")
+    )
+    assert ensured == []
+    await provider.executor_for(
+        _claimed(workspace_id=7, workspace_is_default=False, workspace_slug="finance")
+    )
+    assert ensured == [{"id": 7, "is_default": False, "slug": "finance"}]
 
 
 # --- settle_claimed_task ----------------------------------------------------------
