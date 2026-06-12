@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "sessionId": "3d476ec0-b6b4-4e27-bac1-955df71159b4",
+  "sessionId": "1ca9c51f-70c8-4f6b-9822-41c37efadfa4",
   "status": "running",
-  "startedAt": "2026-06-12T10:57:09.857Z",
-  "updatedAt": "2026-06-12T13:26:17.461Z",
-  "currentIteration": 1,
+  "startedAt": "2026-06-12T14:53:58.507Z",
+  "updatedAt": "2026-06-12T14:53:58.507Z",
+  "currentIteration": 0,
   "maxIterations": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 0,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -28,7 +28,7 @@
         }
       }
     ],
-    "totalTasks": 68,
+    "totalTasks": 74,
     "tasks": [
       {
         "id": "Johnny-trt.1",
@@ -249,20 +249,20 @@
       {
         "id": "Johnny-trt.36",
         "title": "[BUILD] Phase 6: MCP connector — config, lazy client in executor, mcp__server__tool naming",
-        "status": "open",
+        "status": "completed",
         "completedInSession": false
       },
       {
         "id": "Johnny-trt.37",
         "title": "[BUILD] Phase 6: Capability management UI — tools, skills, MCP servers",
-        "status": "open",
+        "status": "completed",
         "completedInSession": false
       },
       {
         "id": "Johnny-trt.38",
         "title": "[BUILD] Phase 6: Configurable capability policies — layered allow/deny + editable safe-bins",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.39",
@@ -297,7 +297,7 @@
       {
         "id": "Johnny-trt.44",
         "title": "[BUILD] Phase 6: Agent edit page — sectioned admin UI",
-        "status": "open",
+        "status": "completed",
         "completedInSession": false
       },
       {
@@ -385,12 +385,6 @@
         "completedInSession": false
       },
       {
-        "id": "Johnny-cxu",
-        "title": "Real 20-turn p50/p95 latency capture on configured local providers (depends on Johnny-ckz.7)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
         "id": "Johnny-trt.59",
         "title": "[MEASURE] Phase-3 router schema costs +568ms p50 triage on the 3B local router — slim the payload or accept as the trt.51/41/42 price",
         "status": "completed",
@@ -399,12 +393,6 @@
       {
         "id": "Johnny-trt.60",
         "title": "[CHORE] Phase 5: Final tool-correctness verification — calendar answers match ground truth end-to-end (ask → ack → execute → spoken result)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-1qr",
-        "title": "[BUILD] Optional: en-only in-process semantic turn detector on the browser session",
         "status": "completed",
         "completedInSession": false
       },
@@ -433,25 +421,62 @@
         "completedInSession": false
       },
       {
+        "id": "Johnny-cxu",
+        "title": "Real 20-turn p50/p95 latency capture on configured local providers (depends on Johnny-ckz.7)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
         "id": "Johnny-trt.65",
         "title": "[BUILD] Phase 6: Multi-agent state-freeze audit — 'Thinking…' stuck after silent verdict, group locked in 'Speaking' — full state-machine + delivery-chain verification with tests",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.66",
+        "title": "[BUILD] Phase 7: Workspace entity — first-class execution environments, default workspace, agent attachment threading",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-1qr",
+        "title": "[BUILD] Optional: en-only in-process semantic turn detector on the browser session",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.67",
+        "title": "[BUILD] Phase 7: Workspace container lifecycle — lazy launch, idle-TTL stop, labels, sweep, per-workspace state dir",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.68",
+        "title": "[BUILD] Phase 7: Per-workspace routing — exec, capability snapshot, catalog, and install flow target the agent's workspace",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.69",
+        "title": "[BUILD] Phase 7: Workspace account connect — gog OAuth into a workspace's keyring",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.70",
+        "title": "[BUILD] Phase 7: Workspaces UI — list/detail pages + agent edit attachment picker",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.71",
+        "title": "[CHORE] Phase 7 capstone: canonical least-privilege scenario live — Finance workspace vs default, isolation and sharing proven end-to-end",
         "status": "open",
         "completedInSession": false
       }
     ]
   },
-  "iterations": [
-    {
-      "iteration": 1,
-      "status": "completed",
-      "taskId": "Johnny-trt.38",
-      "taskTitle": "[BUILD] Phase 6: Configurable capability policies — layered allow/deny + editable safe-bins",
-      "taskCompleted": true,
-      "durationMs": 3954269,
-      "startedAt": "2026-06-12T11:22:17.951Z",
-      "endedAt": "2026-06-12T12:28:12.220Z"
-    }
-  ],
+  "iterations": [],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],
