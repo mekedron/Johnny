@@ -438,6 +438,44 @@ class SpeechQueue:
         )
         return True
 
+    def restore(self, item: SpeechItem, now: float) -> bool:
+        """Return the in-flight item to its class unspoken and unblamed.
+
+        The speech-floor race seat (Johnny-trt.46): the delivery loop checks
+        the floor predicate *before* popping, but a peer can grab the floor
+        in the gap — the popped item was never spoken, so it re-enters at its
+        original ``seq`` without consuming the interruption budget (unlike
+        :meth:`mark_interrupted`, which blames the item for a cut that here
+        never happened). An item whose deadline passed while popped drops
+        with the expiry reason instead. Returns ``False`` (logged) unless
+        ``item`` is the current in-flight item.
+        """
+        if item is not self._in_flight or item.state is not ItemState.IN_FLIGHT:
+            logger.warning(
+                "speech_queue.restore: %s seq=%d is not the in-flight item "
+                "(state=%s) — ignoring",
+                item.priority.name,
+                item.seq,
+                item.state.value,
+            )
+            return False
+        self._in_flight = None
+        if now >= item.expires_at:
+            self._settle(
+                item,
+                spoken=False,
+                reason=expiry_drop_reason(item.expires_at - item.enqueued_at),
+            )
+            return True
+        item.state = ItemState.QUEUED
+        self._insert(item)
+        logger.debug(
+            "speech_queue.restore: %s seq=%d returned unspoken (floor race)",
+            item.priority.name,
+            item.seq,
+        )
+        return True
+
     # ------------------------------------------------------------------ #
     # Maintenance / reads                                                #
     # ------------------------------------------------------------------ #

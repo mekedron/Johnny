@@ -748,8 +748,12 @@ async def start_now(
 ) -> BotSessionRead:
     """Manual "Join now": spawn a worker for ``payload.event_id`` immediately.
 
-    Returns 409 if the meeting already has an active session — the UI
-    can refresh the active list to show what's already running.
+    Returns 409 only when EVERY enabled assignment already has an active
+    session (Johnny-trt.46) — a multi-agent meeting with one crashed
+    co-agent is joinable again and launches just the missing agent. The
+    coverage check deliberately counts only scheduled/joining/joined (not
+    ``waiting_for_relogin``): the operator may always manually rejoin
+    around a session parked on a sign-out, the historical recovery path.
 
     A manual join on a dismissed meeting clears the dismissal first
     (Johnny-trt.56): the operator explicitly asked for the bot back, and
@@ -762,34 +766,40 @@ async def start_now(
         dismissal_in_force,
         undismiss_bot_for_meeting,
     )
+    from app.services.session_scheduler import pending_assignments
 
     if dismissal_in_force(meeting):
         await undismiss_bot_for_meeting(session, meeting=meeting)
 
-    existing = session.scalar(
-        select(BotSession).where(
-            BotSession.meeting_config_id == meeting.id,
-            BotSession.status.in_(
-                (
-                    BotSessionStatus.SCHEDULED,
-                    BotSessionStatus.JOINING,
-                    BotSessionStatus.JOINED,
-                )
-            ),
-        )
+    manual_join_statuses = (
+        BotSessionStatus.SCHEDULED,
+        BotSessionStatus.JOINING,
+        BotSessionStatus.JOINED,
     )
-    if existing is not None:
+    if pending_assignments(session, meeting, statuses=manual_join_statuses) == []:
+        existing = session.scalar(
+            select(BotSession).where(
+                BotSession.meeting_config_id == meeting.id,
+                BotSession.status.in_(manual_join_statuses),
+            )
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
-                "message": "meeting already has an active session",
-                "bot_session_id": existing.id,
+                "message": (
+                    "meeting already has an active session for every "
+                    "enabled assignment"
+                ),
+                "bot_session_id": existing.id if existing is not None else None,
             },
         )
 
     try:
         row = await start_session_for_meeting(
-            session, meeting=meeting, launcher=launcher
+            session,
+            meeting=meeting,
+            launcher=launcher,
+            coverage_statuses=manual_join_statuses,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

@@ -38,6 +38,7 @@ export type NoReplyReason =
 	| 'noise_filtered'
 	| 'stage_error'
 	| 'listen_only'
+	| 'floor_unavailable'
 	| 'legacy';
 
 export type BotMode =
@@ -229,6 +230,7 @@ export const NO_REPLY_REASON_LABEL: Record<NoReplyReason, string> = {
 	noise_filtered: 'filtered as background noise',
 	stage_error: 'a processing step failed',
 	listen_only: 'listen-only mode',
+	floor_unavailable: 'another agent kept the floor',
 	legacy: 'no reply'
 };
 

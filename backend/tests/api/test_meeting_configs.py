@@ -791,3 +791,59 @@ def test_undismiss_idempotent_when_not_dismissed(
     assert resp.status_code == 200
     assert resp.json()["bot_state"] == "scheduled"
     assert _quiet_state_publisher == []
+
+
+# --- max-agents cap (Johnny-trt.46) -----------------------------------------
+
+
+def test_put_rejects_more_enabled_agents_than_the_cap(
+    client: TestClient,
+    db_session: Session,
+    seed_event: CalendarEvent,
+    seed_account: GoogleAccount,
+) -> None:
+    """The per-meeting co-agent cap fires at assignment time with the cap in
+    the message — the operator hears about it while editing."""
+    from app.services.session_scheduler import MAX_AGENTS_PER_MEETING
+
+    agents = [
+        _make_agent(db_session, name=f"Cap Agent {i}")
+        for i in range(MAX_AGENTS_PER_MEETING + 1)
+    ]
+    resp = client.put(
+        f"/calendar/events/{seed_event.id}/meeting-config",
+        json=_upsert_payload(
+            identity_account_id=seed_account.id,
+            agents=[{"agent_id": a.id} for a in agents],
+        ),
+    )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert "too many agents" in detail
+    assert str(MAX_AGENTS_PER_MEETING) in detail
+
+
+def test_put_disabled_assignments_do_not_count_toward_the_cap(
+    client: TestClient,
+    db_session: Session,
+    seed_event: CalendarEvent,
+    seed_account: GoogleAccount,
+) -> None:
+    from app.services.session_scheduler import MAX_AGENTS_PER_MEETING
+
+    agents = [
+        _make_agent(db_session, name=f"Bench Agent {i}")
+        for i in range(MAX_AGENTS_PER_MEETING + 2)
+    ]
+    payload_agents = [
+        {"agent_id": a.id, "enabled": i < MAX_AGENTS_PER_MEETING, "position": i}
+        for i, a in enumerate(agents)
+    ]
+    resp = client.put(
+        f"/calendar/events/{seed_event.id}/meeting-config",
+        json=_upsert_payload(
+            identity_account_id=seed_account.id, agents=payload_agents
+        ),
+    )
+    assert resp.status_code == 200, resp.json()
+    assert len(resp.json()["agents"]) == MAX_AGENTS_PER_MEETING + 2

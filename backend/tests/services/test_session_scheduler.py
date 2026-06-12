@@ -27,6 +27,7 @@ from app.db.models import (
 from app.services.session_scheduler import (
     DEFAULT_RELOGIN_TTL_SECONDS,
     DEFAULT_SCHEDULER_INTERVAL_SECONDS,
+    MAX_AGENTS_PER_MEETING,
     ContainerLauncher,
     LaunchContext,
     LauncherError,
@@ -35,6 +36,7 @@ from app.services.session_scheduler import (
     container_name_for_session,
     get_scheduler_interval_seconds,
     list_active_sessions,
+    pending_assignments,
     run_scheduler_pass_with_session,
     select_due_meetings,
     select_due_stops,
@@ -1289,3 +1291,233 @@ async def test_start_session_serialises_active_provider_payload(
     ctx = launcher.started[0]
     assert ctx.provider_config["llm"]["provider_name"] == "ga"  # active row only
     assert ctx.provider_config["llm"]["credentials"] == {"api_key": "k"}
+
+
+# --- Per-assignment gate + cap (Johnny-trt.46) ------------------------------
+
+
+def _active_session_for(
+    sess: Session,
+    cfg: MeetingConfig,
+    *,
+    agent_id: int | None = None,
+    status: BotSessionStatus = BotSessionStatus.JOINED,
+) -> BotSession:
+    row = BotSession(meeting_config_id=cfg.id, status=status, agent_id=agent_id)
+    sess.add(row)
+    sess.flush()
+    return row
+
+
+def test_select_due_includes_meeting_with_one_dead_co_agent(
+    db_session: Session,
+) -> None:
+    """The per-assignment gate: agent A joined, agent B's session crashed —
+    the meeting is due again so B (alone) can redispatch."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    aria = _seed_agent(db_session, name="Aria")
+    finn = _seed_agent(db_session, name="Finn")
+    _assign_agent(db_session, meeting=cfg, agent=aria, position=0)
+    _assign_agent(db_session, meeting=cfg, agent=finn, position=1)
+    _active_session_for(db_session, cfg, agent_id=aria.id)
+    _active_session_for(
+        db_session, cfg, agent_id=finn.id, status=BotSessionStatus.FAILED
+    )
+
+    assert [m.id for m in select_due_meetings(db_session)] == [cfg.id]
+
+
+def test_select_due_skips_fully_covered_multi_agent_meeting(
+    db_session: Session,
+) -> None:
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    aria = _seed_agent(db_session, name="Aria")
+    finn = _seed_agent(db_session, name="Finn")
+    _assign_agent(db_session, meeting=cfg, agent=aria, position=0)
+    _assign_agent(db_session, meeting=cfg, agent=finn, position=1)
+    _active_session_for(db_session, cfg, agent_id=aria.id)
+    _active_session_for(db_session, cfg, agent_id=finn.id)
+
+    assert select_due_meetings(db_session) == []
+
+
+def test_pending_assignments_shapes(db_session: Session) -> None:
+    """[] = covered; None = default-agent launch owed; list = the uncovered."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    # No assignments, no sessions → the default-agent launch is owed.
+    assert pending_assignments(db_session, cfg) is None
+    # An agent-less active session (contract degrade) covers the default case.
+    row = _active_session_for(db_session, cfg, agent_id=None)
+    assert pending_assignments(db_session, cfg) == []
+    row.status = BotSessionStatus.ENDED
+    db_session.flush()
+    # Assignments: only the uncovered ones come back, in position order.
+    aria = _seed_agent(db_session, name="Aria")
+    finn = _seed_agent(db_session, name="Finn")
+    _assign_agent(db_session, meeting=cfg, agent=aria, position=0)
+    finn_assignment = _assign_agent(db_session, meeting=cfg, agent=finn, position=1)
+    _active_session_for(db_session, cfg, agent_id=aria.id)
+    pending = pending_assignments(db_session, cfg)
+    assert pending is not None
+    assert [a.id for a in pending] == [finn_assignment.id]
+
+
+def test_pending_assignments_relogin_covers_for_scheduler_not_manual_join(
+    db_session: Session,
+) -> None:
+    """waiting_for_relogin counts as covered for the scheduler default, but
+    the manual Join-now statuses leave it joinable (the recovery path)."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    aria = _seed_agent(db_session, name="Aria")
+    _assign_agent(db_session, meeting=cfg, agent=aria, position=0)
+    _active_session_for(
+        db_session, cfg, agent_id=aria.id, status=BotSessionStatus.WAITING_FOR_RELOGIN
+    )
+
+    assert pending_assignments(db_session, cfg) == []
+    manual = (
+        BotSessionStatus.SCHEDULED,
+        BotSessionStatus.JOINING,
+        BotSessionStatus.JOINED,
+    )
+    pending = pending_assignments(db_session, cfg, statuses=manual)
+    assert pending is not None and len(pending) == 1
+
+
+@pytest.mark.asyncio
+async def test_start_sessions_launches_only_uncovered_assignments(
+    db_session: Session,
+) -> None:
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    aria = _seed_agent(db_session, name="Aria")
+    finn = _seed_agent(db_session, name="Finn")
+    _assign_agent(db_session, meeting=cfg, agent=aria, position=0)
+    _assign_agent(db_session, meeting=cfg, agent=finn, position=1)
+    _active_session_for(db_session, cfg, agent_id=aria.id)
+
+    launcher = NoopContainerLauncher()
+    rows = await start_sessions_for_meeting(
+        db_session, meeting=cfg, launcher=launcher
+    )
+
+    assert [row.agent_id for row in rows] == [finn.id]
+    assert [c.agent_id for c in launcher.started] == [finn.id]
+
+
+@pytest.mark.asyncio
+async def test_start_sessions_fully_covered_is_a_noop(db_session: Session) -> None:
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    aria = _seed_agent(db_session, name="Aria")
+    _assign_agent(db_session, meeting=cfg, agent=aria, position=0)
+    _active_session_for(db_session, cfg, agent_id=aria.id)
+
+    launcher = NoopContainerLauncher()
+    rows = await start_sessions_for_meeting(
+        db_session, meeting=cfg, launcher=launcher
+    )
+
+    assert rows == []
+    assert launcher.started == []
+
+
+@pytest.mark.asyncio
+async def test_start_session_for_meeting_raises_when_fully_covered(
+    db_session: Session,
+) -> None:
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    aria = _seed_agent(db_session, name="Aria")
+    _assign_agent(db_session, meeting=cfg, agent=aria, position=0)
+    _active_session_for(db_session, cfg, agent_id=aria.id)
+
+    with pytest.raises(ValueError, match="already has an active session"):
+        await start_session_for_meeting(
+            db_session, meeting=cfg, launcher=NoopContainerLauncher()
+        )
+
+
+@pytest.mark.asyncio
+async def test_launch_caps_enabled_assignments_at_max(db_session: Session) -> None:
+    """Defensive cap re-application at launch: rows written around the API
+    can't fan out past MAX_AGENTS_PER_MEETING."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    agents = [
+        _seed_agent(db_session, name=f"Agent {i}")
+        for i in range(MAX_AGENTS_PER_MEETING + 2)
+    ]
+    for position, agent in enumerate(agents):
+        _assign_agent(db_session, meeting=cfg, agent=agent, position=position)
+
+    launcher = NoopContainerLauncher()
+    rows = await start_sessions_for_meeting(
+        db_session, meeting=cfg, launcher=launcher
+    )
+
+    assert len(rows) == MAX_AGENTS_PER_MEETING
+    expected = [agent.id for agent in agents[:MAX_AGENTS_PER_MEETING]]
+    assert [row.agent_id for row in rows] == expected
+
+
+@pytest.mark.asyncio
+async def test_agent_id_stamped_even_when_snapshot_fails(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The per-assignment coverage key survives a snapshot glitch: the row
+    still records WHICH agent it is for, so the next pass cannot
+    double-launch the assignment (Johnny-trt.46)."""
+    import app.services.agents as agents_service
+
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    aria = _seed_agent(db_session, name="Aria")
+    _assign_agent(db_session, meeting=cfg, agent=aria, position=0)
+
+    def _boom(*args: object, **kwargs: object) -> dict[str, object]:
+        raise RuntimeError("snapshot glitch")
+
+    monkeypatch.setattr(agents_service, "build_agent_snapshot", _boom)
+
+    launcher = NoopContainerLauncher()
+    rows = await start_sessions_for_meeting(
+        db_session, meeting=cfg, launcher=launcher
+    )
+
+    assert len(rows) == 1
+    assert rows[0].agent_id == aria.id  # stamped despite the failed snapshot
+    assert rows[0].agent_snapshot is None  # contract-default degrade preserved
+    # And the meeting now reads as covered — no redispatch storm.
+    assert pending_assignments(db_session, cfg) == []

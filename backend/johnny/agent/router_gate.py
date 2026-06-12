@@ -90,6 +90,15 @@ from johnny.agent.observability import (
     SpeechCaptionBuffer,
     SpokenKind,
 )
+from johnny.agent.speech_floor import (
+    RELEASE_COMPLETED,
+    RELEASE_INTERRUPTED,
+    RELEASE_SAY_FAILED,
+    RELEASE_SUPERSEDED,
+    RELEASE_TEARDOWN,
+    FloorLease,
+    SpeechFloor,
+)
 from johnny.agent.speech_queue import SpeechItem, SpeechPriority, SpeechQueue
 from johnny.agent.task_catalog import TaskCatalogEntry, render_task_catalog
 from johnny.agent.tasks import (
@@ -433,6 +442,15 @@ class RouterGate:
         # time domain (the deliverer's clock), attached alongside.
         self._speech_queue: SpeechQueue | None = None
         self._speech_queue_clock: Callable[[], float] = time.monotonic
+        # The meeting's shared speech floor (Johnny-trt.46), attached by
+        # job_session assembly only when the session is meeting-scoped AND a
+        # co-agent is possible. ``None`` (every single-agent / playground
+        # session) means every speak path proceeds ungated. Reply leases are
+        # keyed by turn id (acquired in run_turn's SPEAK fallthrough, released
+        # by _on_reply_done); say-path leases travel through the done-callback
+        # closures; the queue-delivery lease is owned by the deliverer.
+        self._floor: SpeechFloor | None = None
+        self._floor_leases: dict[str, FloorLease] = {}
         # The most recent say() SpeechHandle (ack / status / correction),
         # kept so the internal-tool teardown runners (Johnny-trt.57) can wait
         # for the farewell ack to finish playing before disconnecting — see
@@ -747,6 +765,25 @@ class RouterGate:
             # (deterministic, no answer-LLM hop, no DB read).
             await self._handle_status(tracker, turn_id)
             raise StopResponse()
+
+        # Shared speech floor (Johnny-trt.46): in a multi-agent meeting the
+        # reply may not start while a co-agent is speaking. Acquired HERE —
+        # before the SPEAK fallthrough returns and the SDK starts generating —
+        # so the floor is held before the reply's first audio frame; released
+        # by _on_reply_done when the reply completes or is interrupted. A
+        # bounded wait that still finds a peer holding the floor suppresses
+        # the turn honestly (``floor_unavailable``) rather than overlapping.
+        if self._floor is not None:
+            lease = await self._floor.acquire("reply")
+            if lease is None:
+                await tracker.emit(
+                    terminal_state="no_reply",
+                    no_reply_reason="floor_unavailable",
+                    detail="reply suppressed — a peer agent kept the speech floor",
+                )
+                raise StopResponse()
+            self._sweep_stale_floor_leases()
+            self._floor_leases[turn_id] = lease
 
         # SPEAK: no terminal here — the reply-completion path owns it. Record
         # the turn so the next generate_reply SpeechHandle binds to it. The
@@ -1354,6 +1391,23 @@ class RouterGate:
             )
             return
         text = delegate_failure_correction(result.result_text)
+        # Shared speech floor (Johnny-trt.46): the correction is session-scoped
+        # speech with no terminal to settle, so a floor that stays busy past
+        # the wait just drops the spoken walk-back — the durable agent_tasks
+        # row already tells the truth, exactly like the say()-missing degrade.
+        # Reentrant while our own ack is still playing (the say() queue case
+        # the no-discard comment below describes).
+        floor_lease: FloorLease | None = None
+        if self._floor is not None:
+            floor_lease = await self._floor.acquire("correction")
+            if floor_lease is None:
+                logger.warning(
+                    "agent.router.gate: task #%s (%s) correction suppressed — "
+                    "a peer agent kept the speech floor",
+                    queued.task_id,
+                    queued.spec.kind,
+                )
+                return
         # No pre-say buffer discard here (unlike _say_with_terminal): the
         # resolver fires while the delegating turn's ack may still be playing,
         # and ``say()`` QUEUES the correction behind it — an eager discard
@@ -1369,13 +1423,19 @@ class RouterGate:
                 queued.task_id,
                 queued.spec.kind,
             )
+            if floor_lease is not None:
+                await self._release_floor_lease(
+                    floor_lease, interrupted=False, spoken_text="", reason=RELEASE_SAY_FAILED
+                )
             return
         # Corrections count as "the bot is still talking" for the internal
         # teardown wait (Johnny-trt.57) just like acks do.
         self._last_say_handle = handle
 
         def _on_done(done_handle: SpeechHandle) -> None:
-            task = asyncio.ensure_future(self._on_correction_done(done_handle, text))
+            task = asyncio.ensure_future(
+                self._on_correction_done(done_handle, text, floor_lease=floor_lease)
+            )
             self._reply_tasks.add(task)
             task.add_done_callback(self._reply_tasks.discard)
 
@@ -1387,7 +1447,13 @@ class RouterGate:
             text,
         )
 
-    async def _on_correction_done(self, handle: SpeechHandle, text: str) -> None:
+    async def _on_correction_done(
+        self,
+        handle: SpeechHandle,
+        text: str,
+        *,
+        floor_lease: FloorLease | None = None,
+    ) -> None:
         """Record a completed failed-task correction into history (Johnny-trt.54).
 
         The unbound-speech analogue of :meth:`_on_say_done`: no turn, no
@@ -1396,34 +1462,43 @@ class RouterGate:
         interrupted correction that streamed captions keeps its partial
         (Johnny-trt.58): ``AgentSpoke(kind="correction", interrupted=True,
         turn_id=None)`` — still stamping no decision row; cut before the first
-        flush → audio discarded, nothing recorded (legacy).
+        flush → audio discarded, nothing recorded (legacy). ``floor_lease``
+        (Johnny-trt.46) is released in the ``finally`` on every branch.
         """
-        partial = self._captions.take()
-        if handle.interrupted:
-            if partial and self._record_spoke is not None:
+        try:
+            partial = self._captions.take()
+            if handle.interrupted:
+                if partial and self._record_spoke is not None:
+                    logger.info(
+                        "agent.router.gate: correction interrupted — partial kept %r",
+                        partial,
+                    )
+                    await self._record_spoke(
+                        partial, turn_id=None, kind="correction", interrupted=True
+                    )
+                    await self._emit_interruption(
+                        speech_kind="correction", turn_id=None, partial_kept=True
+                    )
+                    return
+                if self._reply_audio is not None:
+                    self._reply_audio.discard_reply()
                 logger.info(
-                    "agent.router.gate: correction interrupted — partial kept %r",
-                    partial,
-                )
-                await self._record_spoke(
-                    partial, turn_id=None, kind="correction", interrupted=True
+                    "agent.router.gate: correction interrupted before completion "
+                    "with no caption flushed — not recorded"
                 )
                 await self._emit_interruption(
-                    speech_kind="correction", turn_id=None, partial_kept=True
+                    speech_kind="correction", turn_id=None, partial_kept=False
                 )
                 return
-            if self._reply_audio is not None:
-                self._reply_audio.discard_reply()
-            logger.info(
-                "agent.router.gate: correction interrupted before completion "
-                "with no caption flushed — not recorded"
-            )
-            await self._emit_interruption(
-                speech_kind="correction", turn_id=None, partial_kept=False
-            )
-            return
-        if self._record_spoke is not None:
-            await self._record_spoke(text, turn_id=None, kind="correction")
+            if self._record_spoke is not None:
+                await self._record_spoke(text, turn_id=None, kind="correction")
+        finally:
+            if floor_lease is not None:
+                await self._release_floor_lease(
+                    floor_lease,
+                    interrupted=bool(handle.interrupted),
+                    spoken_text=text,
+                )
 
     def speak_task_result(self, text: str) -> SpeechHandle | None:
         """Speak one delivered task result out of band (Johnny-trt.28).
@@ -1548,6 +1623,21 @@ class RouterGate:
                 detail="say() is not attached — cannot speak",
             )
             return
+        # Shared speech floor (Johnny-trt.46): acks/status/declines wait for
+        # the floor exactly like replies do — acquired before say() so no
+        # audio frame can start while a co-agent speaks. Reentrant while this
+        # session already holds it (an ack queued behind its own playing
+        # reply), so the wait only ever blocks on a *peer's* speech.
+        floor_lease: FloorLease | None = None
+        if self._floor is not None:
+            floor_lease = await self._floor.acquire(kind)
+            if floor_lease is None:
+                await tracker.emit(
+                    terminal_state="no_reply",
+                    no_reply_reason="floor_unavailable",
+                    detail=f"{kind} suppressed — a peer agent kept the speech floor",
+                )
+                return
         # Buffer hygiene, mirroring bind_reply (Johnny-od1): a new speech is
         # starting, so segments left over from a previous speech must not leak
         # into this ack's flushed WAV when the spoke emitter takes it — nor
@@ -1561,6 +1651,10 @@ class RouterGate:
             logger.exception(
                 "agent.router.gate: say() failed for turn=%s — nothing spoken", turn_id
             )
+            if floor_lease is not None:
+                await self._release_floor_lease(
+                    floor_lease, interrupted=False, spoken_text="", reason=RELEASE_SAY_FAILED
+                )
             await tracker.emit(
                 terminal_state="no_reply",
                 no_reply_reason="stage_error",
@@ -1583,6 +1677,7 @@ class RouterGate:
                     replied_detail=replied_detail,
                     interrupted_detail=interrupted_detail,
                     on_replied=on_replied,
+                    floor_lease=floor_lease,
                 )
             )
             self._reply_tasks.add(task)
@@ -1600,6 +1695,7 @@ class RouterGate:
         replied_detail: str,
         interrupted_detail: str,
         on_replied: Callable[[], None] | None = None,
+        floor_lease: FloorLease | None = None,
     ) -> None:
         """Emit a say-spoken turn's single terminal once the speech completes.
 
@@ -1616,8 +1712,40 @@ class RouterGate:
         the first flush → audio discarded, nothing recorded (legacy). No
         empty-output branch — the text was supplied, not model-generated.
         First-wins via the ledger, so a duplicate done-callback can never
-        double-emit.
+        double-emit. ``floor_lease`` (Johnny-trt.46) is released in the
+        ``finally`` on every branch, carrying the say text as the peers'
+        text-match backstop feed.
         """
+        try:
+            await self._on_say_done_inner(
+                turn_id,
+                handle,
+                text,
+                kind=kind,
+                replied_detail=replied_detail,
+                interrupted_detail=interrupted_detail,
+                on_replied=on_replied,
+            )
+        finally:
+            if floor_lease is not None:
+                await self._release_floor_lease(
+                    floor_lease,
+                    interrupted=bool(handle.interrupted),
+                    spoken_text=text,
+                )
+
+    async def _on_say_done_inner(
+        self,
+        turn_id: str,
+        handle: SpeechHandle,
+        text: str,
+        *,
+        kind: SpokenKind,
+        replied_detail: str,
+        interrupted_detail: str,
+        on_replied: Callable[[], None] | None = None,
+    ) -> None:
+        """The terminal + spoke emission body of :meth:`_on_say_done`."""
         partial = self._captions.take()
         if handle.interrupted:
             if partial and self._record_spoke is not None:
@@ -1811,7 +1939,25 @@ class RouterGate:
         (the partial WAV is as real as the partial text). A reply cut before
         any caption flushed produced no audible speech — legacy behaviour:
         audio discarded, nothing recorded.
+
+        The turn's speech-floor lease (Johnny-trt.46), when one was acquired,
+        is released in the ``finally`` — every branch (replied / interrupted /
+        empty) frees the floor for the co-agents, with the reply's spoken text
+        riding the release as the peers' text-match backstop feed.
         """
+        try:
+            await self._on_reply_done_inner(turn_id, handle)
+        finally:
+            floor_lease = self._floor_leases.pop(turn_id, None)
+            if floor_lease is not None:
+                await self._release_floor_lease(
+                    floor_lease,
+                    interrupted=bool(handle.interrupted),
+                    spoken_text=_extract_spoken_text(handle),
+                )
+
+    async def _on_reply_done_inner(self, turn_id: str, handle: SpeechHandle) -> None:
+        """The terminal + spoke emission body of :meth:`_on_reply_done`."""
         # The reply is finished — clear it so a barge-in classifier started for a
         # later turn doesn't capture a dead handle as its interrupt target.
         if self._active_reply is not None and self._active_reply[0] == turn_id:
@@ -1941,6 +2087,75 @@ class RouterGate:
         self._speech_queue = queue
         self._speech_queue_clock = clock
 
+    def attach_speech_floor(self, floor: SpeechFloor) -> None:
+        """Attach the meeting's shared speech floor (Johnny-trt.46).
+
+        Wired by the job_session assembly only for meeting-scoped sessions
+        (the multi-agent surface); single-agent / playground sessions never
+        attach one and every speak path proceeds ungated. Once attached, the
+        reply / ack / status / decline / correction paths acquire the floor
+        before their first audio frame and release it from their
+        done-callbacks; the Phase-5 result deliverer holds its own lease
+        (:meth:`johnny.agent.task_wiring.TaskSpeechDeliverer._deliver`).
+        """
+        self._floor = floor
+
+    async def _release_floor_lease(
+        self,
+        lease: FloorLease,
+        *,
+        interrupted: bool,
+        spoken_text: str,
+        reason: str | None = None,
+    ) -> None:
+        """Release one floor lease defensively (never raises into a callback).
+
+        ``reason`` defaults to the completion/interrupt vocabulary; an
+        explicit value (``say_failed`` / ``superseded`` / ``teardown``)
+        overrides it. ``spoken_text`` rides the release broadcast as the
+        peers' text-match backstop feed.
+        """
+        resolved = reason or (RELEASE_INTERRUPTED if interrupted else RELEASE_COMPLETED)
+        try:
+            await lease.release(reason=resolved, spoken_text=spoken_text)
+        except Exception:
+            logger.exception(
+                "agent.router.gate: speech floor release (%s) failed — "
+                "the TTL will free it",
+                resolved,
+            )
+
+    def _sweep_stale_floor_leases(self) -> None:
+        """Release reply leases whose turn never bound a reply (defensive).
+
+        A SPEAK turn acquires its lease before the SDK generates; if the
+        reply speech never materialises (generation error between run_turn
+        and ``speech_created``), the lease would otherwise hold the floor
+        until max-hold. A lease is live iff its turn is still pending a bind
+        or is the active reply — anything else is stale and released
+        ``superseded`` off-loop.
+        """
+        active = self._active_reply[0] if self._active_reply is not None else None
+        stale = [
+            turn_id
+            for turn_id in self._floor_leases
+            if turn_id != active and turn_id not in self._pending_speak_turns
+        ]
+        for turn_id in stale:
+            lease = self._floor_leases.pop(turn_id)
+            logger.warning(
+                "agent.router.gate: releasing stale speech-floor lease for "
+                "turn=%s (reply never bound)",
+                turn_id,
+            )
+            task = asyncio.ensure_future(
+                self._release_floor_lease(
+                    lease, interrupted=False, spoken_text="", reason=RELEASE_SUPERSEDED
+                )
+            )
+            self._reply_tasks.add(task)
+            task.add_done_callback(self._reply_tasks.discard)
+
     async def wait_recent_say_done(self, timeout_s: float = 30.0) -> None:
         """Wait for the most recent say() speech to finish playing (Johnny-trt.57).
 
@@ -2051,8 +2266,16 @@ class RouterGate:
         Cancels in-flight approval resolvers (each settles its parked turn
         ``approval_rejected`` on the way out) then sweeps the ledger so any turn
         still open or parked gets its fallback terminal — INV-1 holds even on a
-        hard teardown. Idempotent; safe to call with no coordinator attached.
+        hard teardown. Any reply floor lease still keyed here is released
+        ``teardown`` (Johnny-trt.46) so a dying session can never strand the
+        meeting's floor for a full TTL. Idempotent; safe to call with no
+        coordinator attached.
         """
+        for turn_id in list(self._floor_leases):
+            lease = self._floor_leases.pop(turn_id)
+            await self._release_floor_lease(
+                lease, interrupted=False, spoken_text="", reason=RELEASE_TEARDOWN
+            )
         if self._approval is not None:
             await self._approval.aclose()
         await self._ledger.close()

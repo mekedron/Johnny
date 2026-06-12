@@ -55,6 +55,13 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from johnny.agent.speech_floor import (
+    RELEASE_COMPLETED,
+    RELEASE_INTERRUPTED,
+    RELEASE_SAY_UNAVAILABLE,
+    FloorLease,
+    SpeechFloor,
+)
 from johnny.agent.speech_queue import (
     DEFAULT_SILENCE_GRACE_S,
     DROP_QUEUE_CLOSED,
@@ -85,6 +92,13 @@ if TYPE_CHECKING:
     from johnny.agent.router_gate import RouterGate
 
 logger = logging.getLogger(__name__)
+
+FLOOR_DELIVERY_WAIT_S = 2.0
+"""Floor-acquire wait for a queued result (Johnny-trt.46). Deliberately short:
+the predicate saw the floor open this tick, so a miss is a races-with-peer
+edge — the item is restored unblamed and the next tick retries; the long
+:data:`~johnny.agent.speech_floor.DEFAULT_ACQUIRE_TIMEOUT_S` wait is for
+turn-bound speech that has no retry loop behind it."""
 
 TASKS_WAKE_CHANNEL = "johnny.tasks.wake"
 """Redis pub/sub channel queued-task wake pings go out on.
@@ -498,6 +512,7 @@ class TaskSpeechDeliverer:
         clock: Callable[[], float] = time.monotonic,
         clock_ms: Callable[[], int] = _default_clock_ms,
         tick_s: float = DELIVERY_TICK_S,
+        floor: SpeechFloor | None = None,
     ) -> None:
         self._session = session
         self._gate = gate
@@ -508,6 +523,11 @@ class TaskSpeechDeliverer:
         self._clock = clock
         self._clock_ms = clock_ms
         self._tick_s = tick_s
+        # The meeting's shared speech floor (Johnny-trt.46), ``None`` outside
+        # multi-agent meetings. The predicate blocks delivery while a peer
+        # holds it; _deliver acquires its own lease around the playout so a
+        # queued result can never overlap a co-agent's speech.
+        self._floor = floor
         self._user_speaking = False
         self._was_speaking = False
         self._loop_task: asyncio.Task[None] | None = None
@@ -622,6 +642,11 @@ class TaskSpeechDeliverer:
             return "bot speaking"
         if not self._gate.idle:
             return "gate busy"
+        if self._floor is not None and self._floor.peer_holds_floor():
+            # Johnny-trt.46: a co-agent is speaking (its floor lease is
+            # live) — a queued result waits exactly like it waits for a
+            # human participant.
+            return "peer agent holds the floor"
         return None
 
     def _on_user_state(self, ev: Any) -> None:
@@ -671,12 +696,32 @@ class TaskSpeechDeliverer:
                 logger.exception("task speech: delivery tick failed — continuing")
 
     async def _deliver(self, item: SpeechItem) -> None:
-        """Speak one popped item and settle it by playout outcome."""
+        """Speak one popped item and settle it by playout outcome.
+
+        With a speech floor attached (Johnny-trt.46) the lease wraps the
+        whole playout: acquired with a short wait (the predicate already saw
+        the floor open this tick — a miss means a peer raced us, so the item
+        is :meth:`SpeechQueue.restore`-d unblamed for the next tick) and
+        released after the handle settles, carrying the delivered text as
+        the peers' text-match backstop feed.
+        """
+        floor_lease: FloorLease | None = None
+        if self._floor is not None:
+            floor_lease = await self._floor.acquire(
+                "task_result", timeout_s=FLOOR_DELIVERY_WAIT_S
+            )
+            if floor_lease is None:
+                self._queue.restore(item, self._clock())
+                return
         handle = self._gate.speak_task_result(item.text)
         if handle is None:
             # say() unavailable (not attached / raised): the gate already
             # logged it; degrade this item to UI-only rather than retrying
             # into the same wall.
+            if floor_lease is not None:
+                await self._release_floor_lease(
+                    floor_lease, reason=RELEASE_SAY_UNAVAILABLE, spoken_text=""
+                )
             self._queue.drop(item, reason="say() unavailable")
             return
         # The bot's own delivery is a speech onset (speech_queue module doc) —
@@ -690,12 +735,31 @@ class TaskSpeechDeliverer:
         finally:
             self._queue.note_silence_onset(self._clock())
             self._was_speaking = False
-        if bool(getattr(handle, "interrupted", False)):
+        interrupted = bool(getattr(handle, "interrupted", False))
+        if floor_lease is not None:
+            await self._release_floor_lease(
+                floor_lease,
+                reason=RELEASE_INTERRUPTED if interrupted else RELEASE_COMPLETED,
+                spoken_text=item.text,
+            )
+        if interrupted:
             # Requeue-once-then-drop is the queue's budget (trt.28 acceptance);
             # the drop fires on_dropped → TaskResultExpired("interrupted twice").
             self._queue.mark_interrupted(item, self._clock())
         else:
             self._queue.mark_spoken(item, self._clock())
+
+    async def _release_floor_lease(
+        self, lease: FloorLease, *, reason: str, spoken_text: str
+    ) -> None:
+        """Release the delivery lease defensively — the loop must never die on it."""
+        try:
+            await lease.release(reason=reason, spoken_text=spoken_text)
+        except Exception:
+            logger.exception(
+                "task speech: floor release (%s) failed — the TTL will free it",
+                reason,
+            )
 
     # ------------------------------------------------------------------ #
     # TaskResultExpired publishing (sync-callback → scheduled task)       #
@@ -808,6 +872,10 @@ def attach_task_speech_wiring(
         clock=clock,
         clock_ms=clock_ms,
         tick_s=tick_s,
+        # The meeting's shared speech floor (Johnny-trt.46); getattr per the
+        # duck-typing discipline above — None on single-agent runtimes and
+        # harness fakes, which leaves delivery ungated.
+        floor=getattr(runtime, "speech_floor", None),
     )
     # The trt.29 consumption seam: the gate's status path reads this queue to
     # consume a RESULT copy whose text it just spoke inside a status reply.

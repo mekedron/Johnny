@@ -5,6 +5,26 @@ after each iteration and it's included in prompts for context.
 
 ## Codebase Patterns (Study These First)
 
+- **Speech-floor architecture + its e2e validation seam** (trt.46): multi-agent
+  coordination is peer-to-peer over redis — lock `johnny:floor:lock:meeting:{id}`
+  (SET NX PX, TTL 10s, heartbeat ~3s, compare-and-set Lua renew/release) +
+  broadcast channel `johnny:floor:meeting:{id}` (acquired/heartbeat/released/
+  spoke frames); observers track windows on the RECEIVER clock (hold + 2s STT
+  tail) and suppress at the `_gate_stt_events` FINAL seam exactly like the noise
+  gate ("the turn never begins"), labeling the transcript with the peer's name.
+  Acquire-timeout (12s) deliberately > TTL so waiters outlive crashed holders.
+  To validate any future bus-emitting machinery end-to-end WITHOUT a live Meet:
+  instantiate the REAL objects in `docker compose exec api python` with
+  `publish_event=build_event_bus(redis).publish` bound to real bot_sessions ids
+  (INSERT 'ended' rows under a meeting first) — the LIVE worker subscriber
+  persists rows and the session page renders them; screenshot = production-path
+  evidence (stronger than trt.49's redis-cli synthetic frames).
+- **Async-generator subscribe loses pre-iteration frames**: an `async def` chain
+  with no real awaits never yields to the loop, so `ensure_future(loop())` +
+  publish-right-after silently drops the frame if the generator attaches its
+  queue at first `__anext__`. In-memory pub/sub test backends must attach the
+  queue at CONSTRUCTION (InMemoryFloorBackend pattern); for redis the start()-at-
+  assembly-seconds-before-speech gap is the documented production guard.
 - **Playground end-to-end validation method** (proven trt.25/55/58/26): typed asks
   with mic muted; raw in-page WS capture via `evaluate_script` opening
   `ws://localhost:8000/ws/sessions/<id>` into `window.__allFrames` (needs explicit
@@ -801,4 +821,83 @@ after each iteration and it's included in prompts for context.
     wrap badge text parts in <span>s and let gap-* space them, never trailing
     text-node spaces.
   - New-table test fixture sweep (pattern at top): 4 create_all lists.
+---
+
+## 2026-06-12 - Johnny-trt.46
+- Multi-agent foundation shipped (the deterministic half; arbitration = trt.47):
+  (1) **Per-assignment scheduler gate + cap**: `select_due_meetings` dropped the
+  per-meeting active-session SQL exclusion for Python-side
+  `pending_assignments()` ([]=covered / None=default-launch-owed / list=the
+  uncovered, capped); `start_sessions_for_meeting` launches ONLY uncovered
+  assignments (idempotent top-up; fully-covered → [] without touching the
+  launcher; the Join-now wrapper raises ValueError→422); `_start_one_session`
+  stamps `row.agent_id`/`bot_name` OUTSIDE the snapshot guard (a snapshot glitch
+  must not orphan assignment coverage → double-launch). `MAX_AGENTS_PER_MEETING=4`:
+  422 at assignment time (meeting_configs API, enabled-only) + defensive cap at
+  launch + proactive UI warning (calendar page, mirrors sharedIdentityWarning).
+  `POST /sessions/start` is per-assignment aware (tops up the missing co-agent;
+  409 only when fully covered; keeps the historical waiting_for_relogin manual
+  rejoin via a statuses param threaded through pending_assignments).
+  (2) **Shared speech floor** (`johnny/agent/speech_floor.py`): meeting-scoped
+  redis lease + broadcast (pattern bullet at top). Gate integration: reply
+  acquires in run_turn's SPEAK fallthrough (lease keyed by turn id, released in
+  _on_reply_done's finally), ack/status/decline in _say_with_terminal (lease via
+  closure → _on_say_done finally), correction in report_task_failure (timeout →
+  drop the walk-back, durable row already truthful), task_result owned by the
+  DELIVERER (predicate "peer agent holds the floor" + short 2s acquire + new
+  unblamed `SpeechQueue.restore` for the pop-vs-acquire race). Timeout on
+  turn-bound paths → `no_reply(floor_unavailable)` — NEW vocabulary value in
+  events.py + gate.py mirror + DB StrEnum + frontend type/label ('another agent
+  kept the floor'). Reentrant holds (ack queued behind own reply); release
+  broadcasts the spoken text (peers' backstop feed); stale-lease sweep +
+  aclose teardown release; heartbeat stops at max-hold 120s (leak insurance);
+  renew-failure marks lock lost (never DELs a peer's lock).
+  (3) **Peer awareness (strict v1)**: `JohnnyAgent._gate_stt_events` drops
+  peer-window finals after the noise gate, emitting TranscriptFinalized with
+  speaker=peer-name (new speaker_override); interims in window dropped
+  silently; text-match backstop (normalize: lower/strip-punct/collapse; exact
+  or ≥12-char containment). Holder emits FloorAcquired/Released; observer
+  sweep emits FloorExpired + PeerSpeechSuppressed (per closed window, with
+  text_match_hits). Single-agent/playground (meeting_config_id None) builds NO
+  floor — all paths byte-identical (regression-pinned).
+  (4) Per-assignment identity verified already shipped in trt.45 (no rework).
+  AgentRuntime carries speech_floor (built in build_agent_runtime when
+  meeting-scoped + redis; holder name = snapshot["name"]; session-relative
+  timestamps via session_relative_ms); aclose right after task_speech.
+- Files: backend johnny/agent/{speech_floor(new),router_gate,session,
+  task_wiring,job_session,speech_queue,gate}.py, johnny/voice_pipeline/
+  events.py, app/db/models.py, app/services/session_scheduler.py,
+  app/api/{meeting_configs,sessions}.py, docs/PIPELINE.md (§3.15 new, §5
+  dynamics block + enum count); frontend src/lib/sessionDetail.ts,
+  src/routes/calendar/+page.svelte; tests: test_speech_floor (new 27),
+  test_router_gate_floor (new 13), test_johnny_agent (+6),
+  test_speech_queue (+3), test_task_wiring (+5), test_session_scheduler (+9),
+  test_job_session (+3), test_meeting_configs (+2), test_sessions (+1 new,
+  1 updated), tests/integration/test_speech_floor_contention.py (new 4, real
+  compose redis), test_meeting_lifecycle (create_all fixture fix).
+- Quality: full backend (–e2e) 4122 passed / 2 pre-existing wizard env
+  failures; mypy --strict + ruff clean on touched; frontend svelte-check 0/0,
+  vitest 107, build ✔. Browser validation .validation/Johnny-trt.46/
+  (00-RUN-NOTES.md + 6 screenshots): real SpeechFloor pair bound to NEW
+  bot_sessions 60/61 over dev redis → live subscriber persisted 6
+  conversation_events → activity-log rows ("Floor acquired · waited 6 ms",
+  "Peer speech — suppressed … 1 text match", "Floor expired"); cap UI
+  warning + 422 verbatim + recovery save; floorless playground reply
+  in-character. 2-agent live-Meet leg operator-gated (runbook in notes,
+  trt.30 precedent).
+- **Learnings:**
+  - Floor architecture + the bus-emitter e2e validation seam and the
+    async-generator subscribe gotcha (pattern bullets at top).
+  - `_FakeDeliveryHandle.finish(*, interrupted=False)` RESETS the flag —
+    set it via finish(interrupted=True), not attribute assignment.
+  - SpeechQueue starts in silence at construction; a later
+    note_silence_onset is a DUPLICATE (anchor kept) — tests pop at
+    `now + grace`, not real monotonic.
+  - The per-assignment gate makes select_due_meetings read meeting_agents
+    on every candidate → the 5th create_all fixture list
+    (test_meeting_lifecycle) joined the trt.49 sweep.
+  - The Join-now endpoint's 409 used the stoppable trio while the
+    scheduler's gate uses _ACTIVE_STATUSES (incl. waiting_for_relogin) —
+    preserve BOTH semantics via a statuses param, or manual relogin
+    recovery silently breaks.
 ---

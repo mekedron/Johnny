@@ -225,9 +225,49 @@ def test_start_rejects_when_active_session_exists(
     res = client.post("/sessions/start", json={"event_id": event.id})
     assert res.status_code == 409
     body = res.json()
-    # Detail is the structured dict from the endpoint.
-    assert body["detail"]["message"] == "meeting already has an active session"
+    # Detail is the structured dict from the endpoint (per-assignment copy
+    # since Johnny-trt.46 — this assignment-less meeting is fully covered).
+    assert body["detail"]["message"] == (
+        "meeting already has an active session for every enabled assignment"
+    )
     assert "bot_session_id" in body["detail"]
+
+
+def test_start_tops_up_missing_co_agent_assignment(
+    client: TestClient, db_session: Session, launcher: NoopContainerLauncher
+) -> None:
+    """Johnny-trt.46: Join-now on a multi-agent meeting with one dead
+    co-agent launches ONLY the missing assignment instead of 409ing."""
+    event, cfg = _seed_meeting(db_session)
+    aria = Agent(name="Aria", mode=BotMode.AUTONOMOUS, allowed_replies=[])
+    finn = Agent(name="Finn", mode=BotMode.AUTONOMOUS, allowed_replies=[])
+    db_session.add_all([aria, finn])
+    db_session.flush()
+    db_session.add_all(
+        [
+            MeetingAgent(
+                meeting_config_id=cfg.id, agent_id=aria.id, enabled=True, position=0
+            ),
+            MeetingAgent(
+                meeting_config_id=cfg.id, agent_id=finn.id, enabled=True, position=1
+            ),
+        ]
+    )
+    db_session.add(
+        BotSession(
+            meeting_config_id=cfg.id,
+            agent_id=aria.id,
+            status=BotSessionStatus.JOINED,
+        )
+    )
+    db_session.commit()
+
+    res = client.post("/sessions/start", json={"event_id": event.id})
+
+    assert res.status_code == 201, res.text
+    assert [ctx.agent_id for ctx in launcher.started] == [finn.id]
+    launched = db_session.get(BotSession, res.json()["id"])
+    assert launched is not None and launched.agent_id == finn.id
 
 
 def test_start_rejects_missing_meet_link(

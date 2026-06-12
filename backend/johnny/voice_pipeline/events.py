@@ -84,6 +84,7 @@ NoReplyReason = Literal[
     "noise_filtered",
     "stage_error",
     "listen_only",
+    "floor_unavailable",
 ]
 """Why a turn terminated in ``no_reply`` (INV-1, Johnny-ckz.28.3).
 
@@ -102,6 +103,9 @@ the turn went instead of silence:
 * ``noise_filtered`` — the STT noise gate dropped the candidate.
 * ``stage_error`` — a stage (STT / router / answer / TTS) raised.
 * ``listen_only`` — the session is listen-only (the bot never speaks).
+* ``floor_unavailable`` — a peer agent held the shared speech floor past
+  the acquire wait (multi-agent meetings, Johnny-trt.46); the turn was
+  suppressed rather than spoken over the co-agent.
 """
 
 PipelineStageFailedStage = Literal["stt", "router_llm", "answer_llm"]

@@ -73,6 +73,14 @@ DEFAULT_RELOGIN_TTL_SECONDS = 600
 # How often the worker's periodic loop ticks the scheduler.
 DEFAULT_SCHEDULER_INTERVAL_SECONDS = 60
 SCHEDULER_INTERVAL_ENV = "JOHNNY_SCHEDULER_INTERVAL_SECONDS"
+# Hard cap on co-attending agents per meeting (Johnny-trt.46). Enforced with
+# a clear 422 at assignment time (app.api.meeting_configs) — the operator
+# hears about it while editing, not from a half-launched meeting — and
+# defensively re-applied at launch (only the first N enabled assignments
+# dispatch) so rows written around the API can't fan out unboundedly. One
+# Meet tab per agent is real CPU/RAM on the worker host; raise deliberately,
+# not by accident.
+MAX_AGENTS_PER_MEETING = 4
 
 # Statuses the stop sweep acts on (a live/scheduled worker to wind down).
 _STOP_SWEEP_STATUSES = (
@@ -259,30 +267,29 @@ def select_due_meetings(
     now: datetime | None = None,
     join_window_seconds: int = DEFAULT_JOIN_WINDOW_SECONDS,
 ) -> list[MeetingConfig]:
-    """Meeting configs whose event starts soon AND have no active session.
+    """Meeting configs whose event starts soon AND still need a session.
 
     "Soon" = ``start_time <= now + join_window_seconds`` and
     ``end_time > now`` (we don't try to join a meeting that already ended).
-    The meeting must be ``enabled``, its event must have a Meet link,
-    there must be no bot_session row in scheduled/joining/joined
-    status for it, and the bot must not be dismissed for the current
-    occurrence (Johnny-trt.56): a dismissal is in force while the event's
-    current ``start_time`` still falls inside the window captured at
-    dismissal time (``start_time <= bot_dismissed_until``) — see
+    The meeting must be ``enabled``, its event must have a Meet link, and
+    the bot must not be dismissed for the current occurrence
+    (Johnny-trt.56): a dismissal is in force while the event's current
+    ``start_time`` still falls inside the window captured at dismissal time
+    (``start_time <= bot_dismissed_until``) — see
     :mod:`app.services.meeting_lifecycle` for the occurrence-scoping rule.
+
+    The active-session gate is per ASSIGNMENT (Johnny-trt.46), not per
+    meeting: a multi-agent meeting whose agent A is joined but whose agent
+    B's session crashed is due again — the launch path then starts ONLY the
+    missing assignment. The pre-trt.46 per-meeting exclusion would have let
+    one surviving co-agent mask the other's death for the whole occurrence.
+    Evaluated via :func:`pending_assignments` over the SQL window candidates
+    (the due set is small — Python-side filtering keeps the SQL portable
+    across the SQLite test fixture and Postgres).
     """
     moment = now or _now()
     horizon = moment + timedelta(seconds=join_window_seconds)
 
-    # Distinct meeting configs whose event is due, that don't already
-    # have an active bot_session. We use a left-join + WHERE NULL pattern
-    # rather than EXISTS so the test fixture sees an executable plan on
-    # SQLite without coercing the dialect.
-    active_subq = (
-        select(BotSession.meeting_config_id)
-        .where(BotSession.status.in_(_ACTIVE_STATUSES))
-        .subquery()
-    )
     stmt = (
         select(MeetingConfig)
         .join(CalendarEvent, CalendarEvent.id == MeetingConfig.calendar_event_id)
@@ -299,10 +306,15 @@ def select_due_meetings(
                 CalendarEvent.start_time > MeetingConfig.bot_dismissed_until,
             )
         )
-        .where(MeetingConfig.id.not_in(select(active_subq)))
         .order_by(CalendarEvent.start_time, MeetingConfig.id)
     )
-    return list(session.scalars(stmt).all())
+    candidates = list(session.scalars(stmt).all())
+    due: list[MeetingConfig] = []
+    for meeting in candidates:
+        pending = pending_assignments(session, meeting)
+        if pending is None or pending:
+            due.append(meeting)
+    return due
 
 
 def select_due_stops(
@@ -412,6 +424,65 @@ def _enabled_assignments(meeting: MeetingConfig) -> list[MeetingAgent]:
     return candidates
 
 
+def _active_agent_ids(
+    session: Session,
+    meeting_id: int,
+    *,
+    statuses: tuple[BotSessionStatus, ...] = _ACTIVE_STATUSES,
+) -> tuple[set[int], int]:
+    """``(agent ids with an active session, total active count)`` for one meeting.
+
+    The per-assignment coverage read (Johnny-trt.46). ``bot_sessions.agent_id``
+    identifies the assignment within a meeting because
+    ``uq_meeting_agents_config_agent`` pins one assignment per (meeting,
+    agent). The total count covers the agent-less rows (the contract-default
+    degrade) so a no-assignments meeting still counts as covered by its
+    default-agent session.
+    """
+    rows = session.execute(
+        select(BotSession.agent_id).where(
+            BotSession.meeting_config_id == meeting_id,
+            BotSession.status.in_(statuses),
+        )
+    ).all()
+    ids = {row[0] for row in rows if row[0] is not None}
+    return ids, len(rows)
+
+
+def pending_assignments(
+    session: Session,
+    meeting: MeetingConfig,
+    *,
+    statuses: tuple[BotSessionStatus, ...] = _ACTIVE_STATUSES,
+) -> list[MeetingAgent] | None:
+    """Enabled assignments still lacking an active session (Johnny-trt.46).
+
+    The per-ASSIGNMENT scheduler gate: each enabled assignment owns one
+    active bot_session, so a crashed co-agent redispatches alone while its
+    surviving peers keep running. Returns the uncovered assignments in
+    launch order, capped at :data:`MAX_AGENTS_PER_MEETING` (the defensive
+    re-application of the assignment-time cap). Two sentinel shapes:
+
+    * ``[]`` — fully covered, nothing to launch;
+    * ``None`` — the meeting has **no** enabled assignments and **no**
+      active session: the caller owes the one default-agent launch (the
+      pre-trt.45 single-session behavior).
+
+    ``statuses`` is what counts as "covered": the scheduler default includes
+    ``waiting_for_relogin`` (don't redispatch around a session parked on the
+    operator), while the manual Join-now endpoint passes the stoppable trio
+    only — preserving its historical "the operator may rejoin while a
+    signed-out session waits" recovery semantics.
+    """
+    assignments = _enabled_assignments(meeting)[:MAX_AGENTS_PER_MEETING]
+    active_ids, active_count = _active_agent_ids(
+        session, meeting.id, statuses=statuses
+    )
+    if assignments:
+        return [a for a in assignments if a.agent_id not in active_ids]
+    return None if active_count == 0 else []
+
+
 def _build_base_provider_payload(session: Session) -> dict[str, Any]:
     """Materialise the global-active provider rows for the meet-worker.
 
@@ -513,10 +584,16 @@ async def _start_one_session(
     session.flush()
 
     # Freeze the agent's behavior (Johnny-trt.41) + the assignment brief
-    # (Johnny-trt.45) onto the row before dispatch. Guarded so a snapshot
-    # glitch degrades to the contract defaults rather than blocking launch.
+    # (Johnny-trt.45) onto the row before dispatch. ``agent_id`` is stamped
+    # OUTSIDE the snapshot guard (Johnny-trt.46): it is the per-assignment
+    # coverage key (:func:`pending_assignments`), so a snapshot glitch must
+    # degrade the session to contract defaults WITHOUT orphaning the
+    # assignment — an agent-less row would read as "assignment uncovered"
+    # and the next pass would double-launch the agent.
     agent_snapshot: dict[str, Any] | None = None
     if agent is not None:
+        row.agent_id = agent.id
+        row.bot_name = agent.name
         try:
             from app.services.agents import build_agent_snapshot
 
@@ -524,9 +601,7 @@ async def _start_one_session(
                 agent,
                 assignment_context=(assignment.context if assignment is not None else None),
             )
-            row.agent_id = agent.id
             row.agent_snapshot = agent_snapshot
-            row.bot_name = agent.name
         except Exception:  # noqa: BLE001 — never block a launch on agent errors
             agent_snapshot = None
             logger.exception(
@@ -632,6 +707,7 @@ async def start_sessions_for_meeting(
     *,
     meeting: MeetingConfig,
     launcher: ContainerLauncher,
+    coverage_statuses: tuple[BotSessionStatus, ...] = _ACTIVE_STATUSES,
 ) -> list[BotSession]:
     """Launch one bot_session PER enabled agent assignment (Johnny-trt.45).
 
@@ -650,20 +726,30 @@ async def start_sessions_for_meeting(
     rows. The session is left uncommitted; the caller's outer transaction
     commits.
 
-    The shared speech floor / peer awareness for the launched co-agents is
-    sibling work (Johnny-trt.46) — this function owns the fan-out only.
+    Idempotent per assignment (Johnny-trt.46): assignments that already own
+    an active session are skipped (:func:`pending_assignments`), so a
+    scheduler pass — or a manual Join-now — after one co-agent crashed
+    relaunches ONLY the missing agent. A fully-covered meeting returns
+    ``[]`` without touching the launcher.
     """
     meet_link = _validate_meeting_for_launch(meeting)
-    base_provider_payload = _build_base_provider_payload(session)
 
-    # Build the (agent, assignment) launch list. Assignment-less meetings
-    # degrade to the default agent; agent resolution errors degrade to the
+    # Build the (agent, assignment) launch list from the UNCOVERED
+    # assignments only. Assignment-less meetings degrade to the default
+    # agent (when uncovered); agent resolution errors degrade to the
     # contract defaults (one agent-less session) — a launch is never blocked.
     launches: list[tuple[Any, MeetingAgent | None]] = []
     try:
-        assignments = _enabled_assignments(meeting)
-        if assignments:
-            launches = [(a.agent, a) for a in assignments if a.agent is not None]
+        pending = pending_assignments(session, meeting, statuses=coverage_statuses)
+        if pending == []:
+            logger.info(
+                "meeting_config=%s: every enabled assignment already has an "
+                "active session — nothing to launch",
+                meeting.id,
+            )
+            return []
+        if pending:
+            launches = [(a.agent, a) for a in pending if a.agent is not None]
         if not launches:
             from app.services.agents import select_default_agent
 
@@ -682,6 +768,8 @@ async def start_sessions_for_meeting(
             meeting.id,
         )
         launches = [(None, None)]
+
+    base_provider_payload = _build_base_provider_payload(session)
 
     rows: list[BotSession] = []
     last_error: Exception | None = None
@@ -716,16 +804,27 @@ async def start_session_for_meeting(
     *,
     meeting: MeetingConfig,
     launcher: ContainerLauncher,
+    coverage_statuses: tuple[BotSessionStatus, ...] = _ACTIVE_STATUSES,
 ) -> BotSession:
     """Single-session compatibility wrapper over :func:`start_sessions_for_meeting`.
 
     Kept for callers that address "the" session of a meeting (the manual
-    Join-now endpoint's response shape). Launches every enabled assignment
-    exactly like the scheduler does and returns the FIRST launched row.
+    Join-now endpoint's response shape). Launches every *uncovered* enabled
+    assignment exactly like the scheduler does and returns the FIRST
+    launched row. A fully-covered meeting raises ``ValueError`` (the
+    endpoint's 422 channel) — there is nothing left to join as.
     """
     rows = await start_sessions_for_meeting(
-        session, meeting=meeting, launcher=launcher
+        session,
+        meeting=meeting,
+        launcher=launcher,
+        coverage_statuses=coverage_statuses,
     )
+    if not rows:
+        raise ValueError(
+            f"meeting_config id={meeting.id}: every enabled assignment "
+            "already has an active session"
+        )
     return rows[0]
 
 
@@ -952,12 +1051,14 @@ __all__ = [
     "LaunchContext",
     "LaunchResult",
     "LauncherError",
+    "MAX_AGENTS_PER_MEETING",
     "NoopContainerLauncher",
     "SCHEDULER_INTERVAL_ENV",
     "SchedulerPassResult",
     "container_name_for_session",
     "get_scheduler_interval_seconds",
     "list_active_sessions",
+    "pending_assignments",
     "run_scheduler_pass",
     "run_scheduler_pass_with_session",
     "select_due_meetings",

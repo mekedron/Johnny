@@ -145,6 +145,7 @@ class NoReplyReason(enum.StrEnum):
     NOISE_FILTERED = "noise_filtered"
     STAGE_ERROR = "stage_error"
     LISTEN_ONLY = "listen_only"
+    FLOOR_UNAVAILABLE = "floor_unavailable"
     LEGACY = "legacy"
 
 

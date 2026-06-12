@@ -532,3 +532,49 @@ def test_item_carries_correlation_fields() -> None:
     assert (item.task_id, item.kind, item.turn_id) == (7, "calendar.upcoming_events", "item_abc123")
     assert item.enqueued_at == 1.0
     assert item.expires_at == 1.0 + RESULT_DEFAULT_TTL_S
+
+
+# --- restore: the floor-race seat (Johnny-trt.46) -------------------------------
+
+
+def test_restore_returns_in_flight_item_unblamed() -> None:
+    queue = make_queue(0.0, grace_s=1.0)
+    recorder = Recorder()
+    first = queue.enqueue(
+        "first", SpeechPriority.RESULT_UNSOLICITED, now=0.0,
+        on_spoken=recorder.on_spoken, on_dropped=recorder.on_dropped,
+    )
+    queue.enqueue("second", SpeechPriority.RESULT_UNSOLICITED, now=0.1)
+    item = queue.pop_ready(5.0)
+    assert item is first
+
+    assert queue.restore(first, 5.1) is True
+
+    # Unblamed: no interruption consumed, no callback fired, original seat.
+    assert first.state is ItemState.QUEUED
+    assert first.interruptions == 0
+    assert recorder.spoken == [] and recorder.dropped == []
+    assert queue.pop_ready(6.0) is first  # ahead of "second" — original seq
+
+
+def test_restore_rejects_non_in_flight_items() -> None:
+    queue = make_queue(0.0, grace_s=1.0)
+    item = queue.enqueue("queued", SpeechPriority.RESULT_UNSOLICITED, now=0.0)
+    assert queue.restore(item, 1.0) is False  # never popped
+    assert item.state is ItemState.QUEUED
+
+
+def test_restore_expired_item_drops_with_expiry_reason() -> None:
+    queue = make_queue(0.0, grace_s=0.5)
+    recorder = Recorder()
+    item = queue.enqueue(
+        "stale", SpeechPriority.RESULT_UNSOLICITED, now=0.0, ttl_s=10.0,
+        on_dropped=recorder.on_dropped,
+    )
+    assert queue.pop_ready(5.0) is item
+    # The floor race outlived the deadline — restore settles it expired
+    # instead of re-seating a result nobody should hear anymore.
+    assert queue.restore(item, 11.0) is True
+    assert item.state is ItemState.DROPPED
+    assert len(recorder.dropped) == 1
+    assert recorder.dropped[0][1] == "undelivered for 10s"  # the expiry reason

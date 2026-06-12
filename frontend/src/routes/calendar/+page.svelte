@@ -133,6 +133,24 @@
 	);
 
 	/**
+	 * Per-meeting co-agent cap (Johnny-trt.46). Mirrors the backend's
+	 * MAX_AGENTS_PER_MEETING — the API rejects a save above it with a 422,
+	 * this warning just says so before the round-trip. Only enabled
+	 * assignments count.
+	 */
+	const MAX_AGENTS_PER_MEETING = 4;
+
+	const tooManyAgentsWarning = $derived.by(() => {
+		const enabled = formAgents.filter((a) => a.enabled).length;
+		if (enabled <= MAX_AGENTS_PER_MEETING) return null;
+		return (
+			`${enabled} agents are enabled for this meeting, but at most ` +
+			`${MAX_AGENTS_PER_MEETING} can attend. Disable or remove some agents ` +
+			'before saving.'
+		);
+	});
+
+	/**
 	 * Effective join identity per enabled assignment (assignment account or
 	 * the meeting-level fallback). Two enabled assignments resolving to the
 	 * same account would appear as ONE participant — warn before save.
@@ -1165,6 +1183,13 @@
 										</li>
 									{/each}
 								</ul>
+							{/if}
+
+							{#if tooManyAgentsWarning}
+								<Alert.Root data-testid="too-many-agents-warning">
+									<TriangleAlertIcon />
+									<Alert.Description>{tooManyAgentsWarning}</Alert.Description>
+								</Alert.Root>
 							{/if}
 
 							{#if sharedIdentityWarning}

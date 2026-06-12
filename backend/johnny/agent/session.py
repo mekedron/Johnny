@@ -42,7 +42,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from livekit.agents import (
     NOT_GIVEN,
@@ -99,8 +99,21 @@ if TYPE_CHECKING:
     from johnny.agent.barge_in import BargeInClassifier
     from johnny.agent.observability import SpeechInterimSink, TranscriptFinalizedSink
     from johnny.agent.router_gate import RouterGate
+    from johnny.agent.speech_floor import PeerAttribution
 
     MetricsListener = Callable[[MetricsCollectedEvent], None]
+
+
+class PeerFloorReader(Protocol):
+    """The observer reads :class:`JohnnyAgent` needs from the speech floor.
+
+    Structural subset of :class:`johnny.agent.speech_floor.SpeechFloor`
+    (Johnny-trt.46) so tests drive the suppression seam with a plain fake.
+    """
+
+    def attribute_peer_final(self, text: str) -> PeerAttribution | None: ...
+
+    def peer_window_active(self) -> bool: ...
 
 logger = logging.getLogger(__name__)
 
@@ -465,6 +478,7 @@ class JohnnyAgent(Agent):
         speech_interim_sink: SpeechInterimSink | None = None,
         metrics_listener: MetricsListener | None = None,
         session_id: str | None = None,
+        peer_floor: PeerFloorReader | None = None,
     ) -> None:
         if instructions is None:
             instructions = (
@@ -513,6 +527,17 @@ class JohnnyAgent(Agent):
         self._speech_interim_sink = speech_interim_sink
         self._metrics_listener = metrics_listener
         self._session_id = session_id
+        # Peer-speech suppression (Johnny-trt.46). In a multi-agent meeting
+        # the co-agents' TTS plays into the same room audio this session
+        # transcribes; ``peer_floor`` (the session's SpeechFloor, or any
+        # object with its observer reads) attributes STT finals that land
+        # inside a peer's broadcast floor window — or match its published
+        # spoken text — to that peer. Attributed finals are recorded in the
+        # transcript labeled with the peer agent's name and DROPPED from the
+        # SDK stream so the turn never begins (the strict v1 loop rule: a bot
+        # never responds to peer-bot speech; arbitration is Johnny-trt.47).
+        # ``None`` (single-agent / playground) leaves the node untouched.
+        self._peer_floor = peer_floor
         # Session-start reference for transcript ``timestamp_ms`` (Johnny-7g5.1).
         # The status subscriber writes ``timestamp_ms`` into
         # ``transcript_chunks.start_offset_ms`` (a 4-byte INTEGER) as an
@@ -706,20 +731,72 @@ class JohnnyAgent(Agent):
                     if dropped is not None:
                         await self._emit_transcript_filtered(dropped)
                         continue
+                # Peer-speech suppression (Johnny-trt.46): a kept final that
+                # lands inside a co-agent's floor window — or matches its
+                # published spoken text — is the PEER's voice, not a
+                # participant's. Recorded in the durable transcript labeled
+                # with the peer agent's name, then dropped from the SDK
+                # stream so the turn never begins (the noise-gate "turn never
+                # begins" contract; the strict v1 never-respond-to-peer rule).
+                peer = self._attribute_peer_final(event)
+                if peer is not None:
+                    await self._emit_transcript_finalized(event, speaker_override=peer)
+                    continue
                 # Kept final → durable transcript (Johnny-d5z). Emitted whether or
                 # not the noise gate is configured, so a session with filtering off
                 # still records its transcripts.
                 await self._emit_transcript_finalized(event)
                 yield event
                 continue
-            if (
-                event.type is SpeechEventType.INTERIM_TRANSCRIPT
-                and config is not None
-                and config.enabled
-                and self._interim_is_noise(event, config)
-            ):
-                continue
+            if event.type is SpeechEventType.INTERIM_TRANSCRIPT:
+                # A peer-window interim is suppressed silently for the same
+                # reason a noise interim is (Johnny-cmd): the SDK promotes a
+                # leftover interim to a final at turn-commit, which would
+                # re-open the turn the dropped final was meant to stop.
+                if self._peer_floor is not None and self._peer_floor.peer_window_active():
+                    continue
+                if config is not None and config.enabled and self._interim_is_noise(event, config):
+                    continue
             yield event
+
+    def _attribute_peer_final(self, event: SpeechEvent) -> str | None:
+        """The peer agent name a kept STT final attributes to, or ``None``.
+
+        Defensive wrapper over the floor's observer read (Johnny-trt.46): no
+        floor → no suppression; an attribution failure keeps the final as
+        participant speech (suppressing real users on a bug would be worse
+        than one bot-to-bot echo). Logged at ``info`` per suppression so
+        cross-talk is visible in production tails — the durable record is the
+        floor's ``PeerSpeechSuppressed`` window event.
+        """
+        floor = self._peer_floor
+        if floor is None:
+            return None
+        alt = event.alternatives[0] if event.alternatives else None
+        text = alt.text if alt is not None else ""
+        if not text.strip():
+            return None
+        try:
+            attribution = floor.attribute_peer_final(text)
+        except Exception:
+            logger.exception(
+                "peer floor attribution failed for session=%s — keeping the "
+                "final as participant speech",
+                self._session_id,
+            )
+            return None
+        if attribution is None:
+            return None
+        logger.info(
+            "peer speech suppressed for session=%s: attributed to %r via %s "
+            "(text_matched=%s) text=%r",
+            self._session_id,
+            attribution.agent,
+            attribution.via,
+            attribution.text_matched,
+            text,
+        )
+        return attribution.agent
 
     def _interim_is_noise(self, event: SpeechEvent, config: NoiseFilterConfig) -> bool:
         """Whether an interim transcript is noise, by the content gate alone.
@@ -800,7 +877,9 @@ class JohnnyAgent(Agent):
                 event.reason,
             )
 
-    async def _emit_transcript_finalized(self, event: SpeechEvent) -> None:
+    async def _emit_transcript_finalized(
+        self, event: SpeechEvent, *, speaker_override: str | None = None
+    ) -> None:
         """Publish a kept final's :class:`TranscriptFinalized` (Johnny-d5z), defensively.
 
         Builds the durable transcript event from the first alternative (text,
@@ -808,7 +887,9 @@ class JohnnyAgent(Agent):
         injected sink. A final with no alternative or empty text is skipped (no row
         worth writing); a sink failure is swallowed so the STT node cannot crash on
         a lost audit row — the same swallow-and-continue contract as
-        :meth:`_emit_transcript_filtered`.
+        :meth:`_emit_transcript_filtered`. ``speaker_override`` (Johnny-trt.46)
+        stamps a peer-attributed final with the peer agent's name — the
+        transcript labeling half of peer-speech suppression.
         """
         sink = self._transcript_finalized_sink
         if sink is None:
@@ -817,10 +898,13 @@ class JohnnyAgent(Agent):
         text = alt.text if alt is not None else ""
         if not text.strip():
             return
+        speaker = speaker_override
+        if speaker is None:
+            speaker = alt.speaker_id if alt is not None else None
         finalized = TranscriptFinalized(
             text=text,
             timestamp_ms=self._relative_ms(),
-            speaker=alt.speaker_id if alt is not None else None,
+            speaker=speaker,
             confidence=alt.confidence if alt is not None else None,
             session_id=self._session_id,
         )
@@ -972,6 +1056,7 @@ async def build_johnny_agent(
     transcript_finalized_sink: TranscriptFinalizedSink | None = None,
     speech_interim_sink: SpeechInterimSink | None = None,
     metrics_listener: MetricsListener | None = None,
+    peer_floor: PeerFloorReader | None = None,
 ) -> JohnnyAgent:
     """Build a :class:`JohnnyAgent`, rehydrating prior transcripts if available.
 
@@ -1025,6 +1110,7 @@ async def build_johnny_agent(
         speech_interim_sink=speech_interim_sink,
         metrics_listener=metrics_listener,
         session_id=session_id,
+        peer_floor=peer_floor,
     )
 
 

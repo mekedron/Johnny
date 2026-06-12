@@ -91,6 +91,11 @@ from johnny.agent.observability import (
 )
 from johnny.agent.router_gate import RouterGate, RouterGateConfig
 from johnny.agent.session import JohnnyAgent, build_johnny_agent
+from johnny.agent.speech_floor import (
+    RedisFloorBackend,
+    SpeechFloor,
+    session_relative_ms,
+)
 from johnny.agent.task_catalog import render_capability_notes
 from johnny.agent.tasks import TaskCoordinator, stub_executor
 from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder, build_recorder_from_env
@@ -279,6 +284,12 @@ class AgentRuntime:
     # attaches late. ``None`` until attached (and forever on non-delegating
     # runtimes); torn down first in :meth:`aclose`.
     task_speech: Any = None
+    # The meeting's shared speech floor (Johnny-trt.46): built only for
+    # meeting-scoped sessions with Redis (the multi-agent surface) and
+    # attached to the gate + agent + deliverer; ``None`` everywhere else
+    # (every playground session). Torn down right after the task-speech
+    # wiring so a mid-delivery lease settles before the backend closes.
+    speech_floor: SpeechFloor | None = None
     _sandbox_client: SandboxClient | None = None
     _task_wake: Any = None
     _db_session: Session | None = None
@@ -342,6 +353,14 @@ class AgentRuntime:
                 await self.task_speech.aclose()
             except Exception:
                 logger.exception("agent runtime: task speech wiring close failed for %s", sid)
+        # Speech floor next (Johnny-trt.46): releases any lease the stopped
+        # delivery loop (or a dying gate path) still holds — a torn-down
+        # session must free the meeting's floor immediately, not after a TTL.
+        if self.speech_floor is not None:
+            try:
+                await self.speech_floor.aclose()
+            except Exception:
+                logger.exception("agent runtime: speech floor close failed for %s", sid)
         # Drain in-flight task resolvers BEFORE the DB session closes below —
         # a cancelled resolver marks its row ``cancelled`` through the sink.
         if self.task_coordinator is not None:
@@ -851,6 +870,33 @@ async def build_agent_runtime(
     if internal_tools is not None:
         internal_tools.attach_farewell_wait(gate.wait_recent_say_done)
 
+    # Shared speech floor (Johnny-trt.46): only a meeting-scoped session can
+    # have co-agents (the scheduler launches one session per enabled
+    # assignment, Johnny-trt.45), so only those build the meeting's Redis
+    # floor — every speak path then acquires it before its first audio frame
+    # and peers' floor windows label/suppress their speech in this session's
+    # STT. Playground / single-surface sessions (meeting_config_id=None) and
+    # no-Redis smoke runs leave it None: speak paths ungated, zero floor
+    # events (the events.py single-agent contract). The holder identity is
+    # the frozen snapshot's display name — what peers print in transcripts.
+    speech_floor: SpeechFloor | None = None
+    if config.meeting_config_id is not None and config.redis_url:
+        agent_display_name = (
+            str(config.agent_snapshot.get("name") or "").strip()
+            or f"agent-{config.bot_session_id}"
+        )
+        speech_floor = SpeechFloor(
+            backend=RedisFloorBackend(
+                redis_url=config.redis_url, meeting_id=config.meeting_config_id
+            ),
+            session_id=session_id,
+            agent_name=agent_display_name,
+            publish_event=bus.publish,
+            timestamp_ms=session_relative_ms(session_started_at),
+        )
+        speech_floor.start()
+        gate.attach_speech_floor(speech_floor)
+
     # The metrics translator resolves a LiveKit metric's speech_id (the reply
     # SpeechHandle.id, on LLM/TTS metrics) to the durable int turn id via the gate's
     # live reply→turn binding, falling back to the most recent turn for STT metrics
@@ -932,6 +978,7 @@ async def build_agent_runtime(
         transcript_finalized_sink=build_transcript_finalized_emitter(bus, session_id=session_id),
         speech_interim_sink=_on_sentence_flushed,
         metrics_listener=metrics_translator.on_metrics_collected,
+        peer_floor=speech_floor,
     )
 
     return AgentRuntime(
@@ -952,6 +999,7 @@ async def build_agent_runtime(
         task_coordinator=task_coordinator,
         skill_registry=skill_registry,
         internal_tools=internal_tools,
+        speech_floor=speech_floor,
         _sandbox_client=sandbox_client,
         _task_wake=task_wake,
         _db_session=db_session,

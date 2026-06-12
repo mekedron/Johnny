@@ -16,7 +16,7 @@ import time
 from types import SimpleNamespace
 from typing import Any, get_args
 
-from johnny.agent.speech_queue import ItemState, SpeechQueue
+from johnny.agent.speech_queue import ItemState, SpeechPriority, SpeechQueue
 from johnny.agent.task_wiring import (
     TASKS_WAKE_CHANNEL,
     RedisTaskWake,
@@ -701,6 +701,7 @@ def _deliverer(
     grace_s: float = 0.05,
     tick_s: float = 0.01,
     coordinator: TaskCoordinator | None = None,
+    floor: Any = None,
 ) -> tuple[
     TaskSpeechDeliverer,
     SpeechQueue,
@@ -724,6 +725,7 @@ def _deliverer(
         session_id="7",
         clock_ms=lambda: 99,
         tick_s=tick_s,
+        floor=floor,
     )
     return deliverer, queue, gate, session, bus, coordinator
 
@@ -1053,3 +1055,121 @@ async def test_attach_end_to_end_failed_frame_routes_correction_seam() -> None:
     finally:
         await wiring.aclose()
         await coordinator.aclose()
+
+
+# ---- the shared speech floor (Johnny-trt.46) --------------------------------------
+
+
+class _FloorLeaseFake:
+    def __init__(self, floor: _FloorFake, kind: str) -> None:
+        self._floor = floor
+        self._kind = kind
+
+    async def release(self, *, reason: str, spoken_text: str = "") -> None:
+        self._floor.releases.append((self._kind, reason, spoken_text))
+
+
+class _FloorFake:
+    """Duck-typed SpeechFloor for the deliverer: scripted acquire + busy flag."""
+
+    def __init__(self, *, busy: bool = False, grants: list[bool] | None = None) -> None:
+        self.busy = busy
+        self._grants = grants
+        self.acquires: list[tuple[str, float | None]] = []
+        self.releases: list[tuple[str, str, str]] = []
+
+    def peer_holds_floor(self) -> bool:
+        return self.busy
+
+    async def acquire(
+        self, kind: str, *, timeout_s: float | None = None
+    ) -> _FloorLeaseFake | None:
+        self.acquires.append((kind, timeout_s))
+        if self._grants:
+            if not self._grants.pop(0):
+                return None
+        return _FloorLeaseFake(self, kind)
+
+
+async def test_predicate_blocks_while_peer_holds_floor() -> None:
+    floor = _FloorFake(busy=True)
+    deliverer, _queue, _gate, _session, _bus, coordinator = _deliverer(floor=floor)
+    assert deliverer.delivery_blocked_reason() == "peer agent holds the floor"
+    floor.busy = False
+    assert deliverer.delivery_blocked_reason() is None
+    await coordinator.aclose()
+
+
+async def test_deliver_wraps_playout_in_floor_lease() -> None:
+    floor = _FloorFake()
+    deliverer, queue, gate, _session, _bus, coordinator = _deliverer(floor=floor)
+    now = time.monotonic()
+    item = queue.enqueue("Three events this week.", SpeechPriority.RESULT_UNSOLICITED, now=now)
+    popped = queue.pop_ready(now + 1.0)
+    assert popped is item
+
+    deliver = asyncio.ensure_future(deliverer._deliver(item))
+    await asyncio.sleep(0.02)
+    assert floor.acquires == [("task_result", 2.0)]  # FLOOR_DELIVERY_WAIT_S
+    assert gate.spoken == ["Three events this week."]
+    assert floor.releases == []  # held while the playout is in flight
+    gate.handles[0].finish()
+    await deliver
+
+    assert floor.releases == [
+        ("task_result", "completed", "Three events this week.")
+    ]
+    assert item.state.value == "spoken"
+    await coordinator.aclose()
+
+
+async def test_deliver_floor_race_restores_item_unblamed() -> None:
+    floor = _FloorFake(grants=[False])
+    deliverer, queue, gate, _session, bus, coordinator = _deliverer(floor=floor)
+    now = time.monotonic()
+    item = queue.enqueue("Result text.", SpeechPriority.RESULT_UNSOLICITED, now=now)
+    assert queue.pop_ready(now + 1.0) is item
+
+    await deliverer._deliver(item)
+
+    # Nothing spoken, nothing dropped, no interruption blamed — the item sits
+    # queued at its original seat for the next tick.
+    assert gate.spoken == []
+    assert item.state.value == "queued"
+    assert item.interruptions == 0
+    assert queue.pop_ready(now + 2.0) is item
+    assert _expired_events(bus) == []
+    await coordinator.aclose()
+
+
+async def test_deliver_interrupted_releases_floor_interrupted() -> None:
+    floor = _FloorFake()
+    deliverer, queue, gate, _session, _bus, coordinator = _deliverer(floor=floor)
+    now = time.monotonic()
+    item = queue.enqueue("Cut me off.", SpeechPriority.RESULT_UNSOLICITED, now=now)
+    assert queue.pop_ready(now + 1.0) is item
+
+    deliver = asyncio.ensure_future(deliverer._deliver(item))
+    await asyncio.sleep(0.02)
+    gate.handles[0].finish(interrupted=True)
+    await deliver
+
+    assert floor.releases == [("task_result", "interrupted", "Cut me off.")]
+    assert item.state.value == "queued"  # requeued within the budget
+    assert item.interruptions == 1
+    await coordinator.aclose()
+
+
+async def test_deliver_say_unavailable_releases_floor() -> None:
+    floor = _FloorFake()
+    deliverer, queue, gate, _session, _bus, coordinator = _deliverer(floor=floor)
+    gate.say_available = False
+    now = time.monotonic()
+    item = queue.enqueue("Never spoken.", SpeechPriority.RESULT_UNSOLICITED, now=now)
+    assert queue.pop_ready(now + 1.0) is item
+
+    await deliverer._deliver(item)
+
+    assert floor.releases == [("task_result", "say_unavailable", "")]
+    assert item.state.value == "dropped"
+    await coordinator.aclose()

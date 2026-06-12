@@ -125,6 +125,7 @@ TurnNoReplyReason = Literal[
     "noise_filtered",
     "stage_error",
     "listen_only",
+    "floor_unavailable",
 ]
 """The full ``no_reply`` vocabulary the **session ledger** records — every reason
 any phase of a turn can resolve to, not just the gate-reachable ones. The gate

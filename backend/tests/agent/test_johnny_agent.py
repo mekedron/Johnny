@@ -795,3 +795,140 @@ async def test_on_enter_user_state_listener_feeds_interruption_monitor(
     # state is ignored rather than crashing the listener.
     listener(_Ev("away"))
     listener(_Ev("warp_speed"))
+
+
+# --- stt_node: peer-speech suppression (Johnny-trt.46) ----------------------
+
+
+class _FinalizedRecorder:
+    """Records every TranscriptFinalized the node publishes."""
+
+    def __init__(self) -> None:
+        self.events: list[TranscriptFinalized] = []
+
+    async def __call__(self, event: TranscriptFinalized) -> None:
+        self.events.append(event)
+
+
+class _FakePeerFloor:
+    """Scripted PeerFloorReader: attributes texts found in ``peer_texts``."""
+
+    def __init__(
+        self,
+        *,
+        peer: str = "Echo B",
+        window_active: bool = False,
+        attribute_all: bool = False,
+        raises: bool = False,
+    ) -> None:
+        self._peer = peer
+        self._window_active = window_active
+        self._attribute_all = attribute_all
+        self._raises = raises
+        self.attribute_calls: list[str] = []
+
+    def attribute_peer_final(self, text: str) -> Any:
+        if self._raises:
+            raise RuntimeError("floor backend down")
+        self.attribute_calls.append(text)
+        if not self._attribute_all:
+            return None
+
+        class _Attribution:
+            agent = self._peer
+            via = "window"
+            text_matched = False
+
+        return _Attribution()
+
+    def peer_window_active(self) -> bool:
+        return self._window_active
+
+
+async def test_peer_final_is_labeled_and_never_yielded() -> None:
+    """The strict v1 loop rule: peer speech opens no turn, transcript keeps it."""
+    finalized = _FinalizedRecorder()
+    agent = JohnnyAgent(
+        peer_floor=_FakePeerFloor(window_active=True, attribute_all=True),
+        transcript_finalized_sink=finalized,
+        session_id="sess-peer",
+    )
+
+    out = await _drain(
+        agent._gate_stt_events(_source(_final("the deploy finished an hour ago")))
+    )
+
+    assert out == []  # never reaches the turn detector — the turn never begins
+    assert len(finalized.events) == 1
+    assert finalized.events[0].speaker == "Echo B"  # labeled with the peer's name
+    assert finalized.events[0].text == "the deploy finished an hour ago"
+
+
+async def test_unattributed_final_flows_through_with_own_speaker() -> None:
+    finalized = _FinalizedRecorder()
+    peer = _FakePeerFloor(attribute_all=False)
+    agent = JohnnyAgent(
+        peer_floor=peer, transcript_finalized_sink=finalized, session_id="s"
+    )
+
+    out = await _drain(
+        agent._gate_stt_events(_source(_final("what's on the agenda?", speaker="alice")))
+    )
+
+    assert [e.alternatives[0].text for e in out] == ["what's on the agenda?"]
+    assert peer.attribute_calls == ["what's on the agenda?"]
+    assert finalized.events[0].speaker == "alice"  # override untouched
+
+
+async def test_interim_dropped_silently_while_peer_window_active() -> None:
+    agent = JohnnyAgent(peer_floor=_FakePeerFloor(window_active=True))
+
+    out = await _drain(agent._gate_stt_events(_source(_interim("we shipped the"))))
+
+    assert out == []
+
+
+async def test_interim_passes_when_no_peer_window() -> None:
+    agent = JohnnyAgent(peer_floor=_FakePeerFloor(window_active=False))
+
+    out = await _drain(agent._gate_stt_events(_source(_interim("we shipped the"))))
+
+    assert [e.alternatives[0].text for e in out] == ["we shipped the"]
+
+
+async def test_attribution_failure_keeps_final_as_participant_speech() -> None:
+    """Defensive: a floor bug must not suppress real users."""
+    finalized = _FinalizedRecorder()
+    agent = JohnnyAgent(
+        peer_floor=_FakePeerFloor(raises=True),
+        transcript_finalized_sink=finalized,
+        session_id="s",
+    )
+
+    out = await _drain(agent._gate_stt_events(_source(_final("real question here"))))
+
+    assert [e.alternatives[0].text for e in out] == ["real question here"]
+    assert len(finalized.events) == 1
+    assert finalized.events[0].speaker is None
+
+
+async def test_noise_gate_wins_over_peer_attribution() -> None:
+    """A filler inside a peer window is noise, not peer speech — one
+    TranscriptFiltered, no finalized row, no attribution call."""
+    filtered = _RecordingSink()
+    finalized = _FinalizedRecorder()
+    peer = _FakePeerFloor(window_active=True, attribute_all=True)
+    agent = JohnnyAgent(
+        noise_filter=NoiseFilterConfig(),
+        peer_floor=peer,
+        transcript_filtered_sink=filtered,
+        transcript_finalized_sink=finalized,
+        session_id="s",
+    )
+
+    out = await _drain(agent._gate_stt_events(_source(_final("uh"))))
+
+    assert out == []
+    assert [e.reason for e in filtered.events] == ["stoplist_match"]
+    assert finalized.events == []
+    assert peer.attribute_calls == []

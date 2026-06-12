@@ -3,10 +3,10 @@
   "sessionId": "d4e0eaf8-2f04-47a7-b280-1ca8b39424b6",
   "status": "running",
   "startedAt": "2026-06-11T21:01:32.322Z",
-  "updatedAt": "2026-06-12T06:35:10.992Z",
-  "currentIteration": 12,
+  "updatedAt": "2026-06-12T07:43:17.373Z",
+  "currentIteration": 13,
   "maxIterations": 0,
-  "tasksCompleted": 11,
+  "tasksCompleted": 12,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -321,8 +321,8 @@
       {
         "id": "Johnny-trt.49",
         "title": "[BUILD] Phase 6: Conversation-dynamics observability — interruptions, floor, claims persisted to history",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.50",
@@ -542,6 +542,16 @@
       "durationMs": 817735,
       "startedAt": "2026-06-12T05:21:54.302Z",
       "endedAt": "2026-06-12T05:35:32.037Z"
+    },
+    {
+      "iteration": 13,
+      "status": "completed",
+      "taskId": "Johnny-trt.49",
+      "taskTitle": "[BUILD] Phase 6: Conversation-dynamics observability — interruptions, floor, claims persisted to history",
+      "taskCompleted": true,
+      "durationMs": 3555647,
+      "startedAt": "2026-06-12T05:35:54.240Z",
+      "endedAt": "2026-06-12T06:35:09.887Z"
     }
   ],
   "skippedTaskIds": [],

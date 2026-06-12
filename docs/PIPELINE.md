@@ -317,6 +317,55 @@ Live updates ride the WS `handleDecision` / `handleAgentSpoke` /
 `handleTurnTerminal` handlers off the same reactive state, so the timeline fills
 in step-by-step during a live session.
 
+### 3.15 Shared speech floor — multi-agent meetings (Johnny-trt.46)
+
+When a meeting has more than one enabled agent assignment, the scheduler
+launches one bot session per assignment (Johnny-trt.45) and the sessions
+coordinate through `johnny/agent/speech_floor.py` with **no central
+coordinator** — two invariants, both enforced peer-to-peer over Redis:
+
+- **Never overlap.** The floor is a meeting-scoped Redis lock
+  (`johnny:floor:lock:meeting:{id}`, `SET NX PX`) with a 10 s TTL renewed by
+  a ~3 s heartbeat while held. EVERY speak path acquires it before its first
+  audio frame and releases it when the speech completes or is interrupted:
+  the reply path inside `run_turn`'s SPEAK fallthrough (released by
+  `_on_reply_done`), ack/status/decline inside `_say_with_terminal`
+  (released by `_on_say_done`), the trt.53 correction, and the Phase-5
+  result deliverer (which also gains the floor *predicate*: `pop_ready` is
+  never reached while a peer's lease is live). Acquisition waits up to 12 s
+  (deliberately > TTL, so a waiter outlives a crashed holder); a turn-bound
+  speech that still can't get the floor terminalizes
+  `no_reply(floor_unavailable)` instead of overlapping. Reentrant within a
+  session (an ack queued behind its own playing reply shares the hold), so
+  the wait only ever blocks on a *peer's* speech. A crashed holder frees
+  the floor within the TTL; an interrupted holder frees it from the
+  done-callback immediately; `RouterGate.aclose` / `AgentRuntime.aclose`
+  release anything stranded (`teardown`).
+- **Never loop (strict v1).** Floor state is broadcast on
+  `johnny:floor:meeting:{id}` (`acquired` / `heartbeat` / `released` /
+  `spoke` frames). Each session tracks peers' floor *windows*
+  (receiver-clock; hold + a 2 s post-release tail for STT latency) and, in
+  `JohnnyAgent._gate_stt_events`, an STT final inside a peer's window is
+  recorded into the transcript **labeled with the peer agent's name**
+  (`TranscriptFinalized.speaker`) and dropped from the SDK stream — the
+  turn never begins, the bot never responds to peer-bot speech
+  (arbitration relaxes this deliberately in Johnny-trt.47). The `spoke`
+  frames carry each release's spoken text as the **text-match backstop**:
+  a final whose STT latency outran the tail still attributes to the peer
+  when it matches recent published text (normalized; exact, or containment
+  at ≥ 12 chars). Honest scope: no diarization — a human talking *during*
+  a peer bot's window is attributed to the bot.
+
+Per-assignment identity (trt.45) is what makes two sessions two
+*participants*: each assignment joins as its own Google account
+(`meeting_agents.identity_account_id`; the UI warns when two enabled
+assignments share one). The scheduler gate is per assignment
+(`pending_assignments`): a crashed co-agent redispatches alone while its
+peers keep running, and `MAX_AGENTS_PER_MEETING` (4) is enforced with a
+422 at assignment time and re-applied defensively at launch. Single-agent
+sessions (every playground session — no `meeting_config_id`) build no
+floor: speak paths ungated, zero floor events.
+
 ---
 
 ## 4. The router / decision layer
@@ -522,9 +571,14 @@ today on every surface: the gate consults its `InterruptionMonitor`
 `who` distinguishes a participant talking over the bot (`user_over_bot`)
 from an explicit stop (`bot_cut_by_stop`) and `cut_latency_ms` measures
 speech-onset → audio-stop (`None` when nothing observed explains the cut).
-The floor / claim / suppression events are persisted-and-rendered-ready for
-the multi-agent foundation (Johnny-trt.46), which emits them; their
-`timestamp_ms` is session-relative like `PipelineTiming.started_at_ms`.
+The floor + suppression events are live in multi-agent meetings since
+Johnny-trt.46 (`johnny/agent/speech_floor.py`, §3.15): the *holder* emits
+`FloorAcquired`/`FloorReleased`; an *observer* emits `FloorExpired` (a
+peer's lease lapsed without release — crash) and `PeerSpeechSuppressed`
+(one per closed peer window that suppressed transcripts). The claim events
+await turn arbitration (Johnny-trt.47). Single-agent sessions never emit
+any of the five. `timestamp_ms` is session-relative like
+`PipelineTiming.started_at_ms`.
 
 **Wire-type remapping** (`api/ws.py::WIRE_TYPE_MAP`): `transcript_finalized →
 transcript_final`, `router_decision_made → router_decision`,
@@ -535,7 +589,7 @@ resume with `?since_seq=N`.
 **Enum literals** (the operator-meaningful ones):
 
 - `TerminalState` = `replied | pending_approval | no_reply`.
-- `NoReplyReason` (wire, `events.py` L41) — **12 values**: `router_declined`, `low_confidence`, `barge_in`, `rate_limited`, `tts_unavailable`, `suggest_only`, `approval_rejected`, `model_empty_output`, `no_allowed_reply_match`, `noise_filtered`, `stage_error`, `listen_only`. The DB + frontend enums add a 13th, `legacy` (backfill-only).
+- `NoReplyReason` (wire, `events.py` L41) — **13 values**: `router_declined`, `low_confidence`, `barge_in`, `rate_limited`, `tts_unavailable`, `suggest_only`, `approval_rejected`, `model_empty_output`, `no_allowed_reply_match`, `noise_filtered`, `stage_error`, `listen_only`, `floor_unavailable` (trt.46 — a peer agent kept the speech floor past the acquire wait). The DB + frontend enums add a 14th, `legacy` (backfill-only).
 - `TranscriptFilteredReason` = `audio_too_short` (pre-STT) | `empty` | `punctuation_only` | `too_short` | `stoplist_match` | `low_confidence` (post-STT).
 - `PipelineTimingStage` = `stt | router_llm | answer_llm | tts | end_to_end | interrupt_fast | interrupt_slow | provider_switch | error`.
 - `AgentTTSFailedCategory` = `quota_exceeded | auth_failed | rate_limited | unknown` — **deliberately redeclared** in `events.py` (not imported from `app.providers.base.TTSErrorCategory`) so the meet-worker package imports without `app` on `sys.path`; keep the two in manual lock-step.

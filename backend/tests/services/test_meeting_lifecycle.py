@@ -18,11 +18,13 @@ from sqlalchemy.orm import Session
 
 from app.db import Base
 from app.db.models import (
+    Agent,
     BotDismissActor,
     BotSession,
     BotSessionStatus,
     CalendarEvent,
     GoogleAccount,
+    MeetingAgent,
     MeetingConfig,
 )
 from app.services.meeting_lifecycle import (
@@ -56,6 +58,10 @@ def engine() -> sa.Engine:
             CalendarEvent.__table__,  # type: ignore[list-item]
             MeetingConfig.__table__,  # type: ignore[list-item]
             BotSession.__table__,  # type: ignore[list-item]
+            # The per-assignment scheduler gate (Johnny-trt.46) reads
+            # meeting_agents (+ its Agent FK) on every due-meeting check.
+            Agent.__table__,  # type: ignore[list-item]
+            MeetingAgent.__table__,  # type: ignore[list-item]
         ],
     )
     return eng

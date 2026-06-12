@@ -164,7 +164,25 @@ def _get_account_or_422(session: Session, account_id: int) -> GoogleAccount:
 def _validate_assignments_or_422(
     session: Session, assignments: list[MeetingAgentAssignment]
 ) -> None:
-    """Reject assignments referencing missing agents/accounts or repeats (422)."""
+    """Reject assignments referencing missing agents/accounts or repeats (422).
+
+    Also enforces the per-meeting co-agent cap (Johnny-trt.46) at assignment
+    time — the operator hears "too many agents" while editing, with the cap
+    in the message, instead of discovering a silently-truncated launch. Only
+    *enabled* assignments count: a long disabled bench is fine.
+    """
+    from app.services.session_scheduler import MAX_AGENTS_PER_MEETING
+
+    enabled_count = sum(1 for a in assignments if a.enabled)
+    if enabled_count > MAX_AGENTS_PER_MEETING:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"too many agents: {enabled_count} enabled assignments exceed "
+                f"the per-meeting cap of {MAX_AGENTS_PER_MEETING} — disable or "
+                "remove some agents"
+            ),
+        )
     seen: set[int] = set()
     for assignment in assignments:
         if assignment.agent_id in seen:

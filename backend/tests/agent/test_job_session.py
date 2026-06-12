@@ -827,3 +827,67 @@ async def test_reasoning_descriptor_reaches_the_task_sink() -> None:
         "model": "gpt-large",
     }
     await runtime.aclose()
+
+
+# --- speech floor wiring (Johnny-trt.46) -------------------------------------
+
+
+async def test_meeting_scoped_runtime_builds_and_attaches_speech_floor() -> None:
+    """A meeting-scoped session with Redis gets the shared floor: attached to
+    the gate (speak-path gating), the agent (peer suppression), and carried
+    on the runtime (deliverer wiring + teardown)."""
+    db = _FakeDbSession()
+    runtime = await build_agent_runtime(
+        _job(
+            mode=AUTONOMOUS_MODE,
+            calendar_event_id=31,
+            meeting_config_id=5,
+            redis_url="redis://r:6379/0",
+            agent_snapshot={"name": "Echo B", "mode": "autonomous"},
+        ),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: db,
+    )
+    try:
+        assert runtime.speech_floor is not None
+        assert runtime.gate._floor is runtime.speech_floor
+        assert runtime.agent._peer_floor is runtime.speech_floor
+        # The holder identity peers will see is the snapshot's display name.
+        assert runtime.speech_floor._agent_name == "Echo B"
+    finally:
+        await runtime.aclose()
+
+
+async def test_playground_runtime_has_no_speech_floor() -> None:
+    """No meeting_config_id (every playground session) → no floor anywhere:
+    speak paths ungated, no floor events possible (the events.py contract)."""
+    db = _FakeDbSession()
+    runtime = await build_agent_runtime(
+        _job(mode=AUTONOMOUS_MODE, redis_url="redis://r:6379/0"),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: db,
+    )
+    try:
+        assert runtime.speech_floor is None
+        assert runtime.gate._floor is None
+        assert runtime.agent._peer_floor is None
+    finally:
+        await runtime.aclose()
+
+
+async def test_meeting_without_redis_runs_floorless() -> None:
+    """meeting_config_id but no Redis (smoke run): floor skipped, never a
+    blocked speak path."""
+    db = _FakeDbSession()
+    runtime = await build_agent_runtime(
+        _job(mode=AUTONOMOUS_MODE, calendar_event_id=31, meeting_config_id=5),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: db,
+    )
+    try:
+        assert runtime.speech_floor is None
+    finally:
+        await runtime.aclose()
