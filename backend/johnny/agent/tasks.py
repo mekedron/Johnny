@@ -400,6 +400,21 @@ Deliberately NOT applied to completed-but-undelivered results — those are
 spoken whenever asked, however old (the session-4 hallucination seam: the
 registry copy is the only true answer the session holds)."""
 
+ANSWER_TASK_CONTEXT_HEADER = (
+    "Background task facts (authoritative — the user may ask about this work):"
+)
+"""First line of the :meth:`TaskCoordinator.answer_task_context` render
+(Johnny-0qw) — frames the lines below as session facts, not conversation."""
+
+ANSWER_TASK_CONTEXT_RULE = (
+    "When these tasks come up, report finished results exactly as written above "
+    "— never invent, guess, or embellish task results, and say unfinished work "
+    "is still in progress."
+)
+"""Closing instruction of the :meth:`TaskCoordinator.answer_task_context`
+render (Johnny-0qw): the one rule the answer model must follow — results come
+from the lines above or not at all."""
+
 
 def _spoken_kind(kind: str) -> str:
     """Humanize a task kind for speech: separators become spaces.
@@ -446,6 +461,31 @@ class StatusSummary:
 
     text: str
     carried_results: tuple[TaskRegistryEntry, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerTaskContext:
+    """What the answer LLM must know before it generates a reply (Johnny-0qw).
+
+    The speak-path counterpart of :class:`StatusSummary`: ``text`` is an
+    LLM-facing (not spoken) render of the registry's live task state —
+    completed-but-undelivered results verbatim plus in-flight task lines —
+    that the gate injects into the reply's generation context so the answer
+    model can never answer blind in the settle→delivery or ack→settle
+    windows. ``undelivered`` / ``in_flight`` carry the rendered entries for
+    the caller's bookkeeping (the gate's ``decision.raw`` ride-along). Empty
+    (the common no-tasks case) means nothing is injected and the reply is
+    byte-identical to the pre-Johnny-0qw build.
+    """
+
+    text: str = ""
+    undelivered: tuple[TaskRegistryEntry, ...] = ()
+    in_flight: tuple[TaskRegistryEntry, ...] = ()
+
+    @property
+    def empty(self) -> bool:
+        """True when the registry held nothing the answer model must know."""
+        return not (self.undelivered or self.in_flight)
 
 
 def unsupported_kind_text(kind: str) -> str:
@@ -792,6 +832,69 @@ class TaskCoordinator:
             else:
                 sentences.append(STATUS_NOTHING_IN_FLIGHT)
         return StatusSummary(text=" ".join(sentences), carried_results=tuple(undelivered))
+
+    def answer_task_context(self, *, now: float | None = None) -> AnswerTaskContext:
+        """Render the registry for the answer LLM's generation context (Johnny-0qw).
+
+        The speak-path blind-window fix: trt.29 wired the registry into the
+        ``status`` verdict, but a ``speak`` verdict landing between a task's
+        settle and its boundary delivery (or between ack and settle) reached
+        the answer model with no task knowledge at all — and it fabricated
+        results in-persona (playground session 65, the session-4 turn-21
+        regression). This render is what the gate injects as a system message
+        on the SPEAK fallthrough so that can never happen:
+
+        * **Completed-but-undelivered results** — the full ``result_text``
+          verbatim, whatever its age (the same no-staleness stance as
+          :meth:`status_summary`: the registry copy is the only true answer
+          the session holds).
+        * **In-flight tasks** — named with elapsed time and an explicit "its
+          result is not available yet", so the model says "still working on
+          it" instead of improvising an outcome.
+
+        Failures and cancelled/expired entries are deliberately absent: the
+        trt.53 correction already spoke every failure into the chat history,
+        which the answer context carries natively. Pure in-memory read, no
+        DB, no LLM; ``now`` defaults to the coordinator's clock.
+
+        Injection does **not** mark anything delivered. There is no proof the
+        answer model actually relayed an injected result (the user may have
+        asked about something else entirely), and consuming the queued RESULT
+        copy on mere injection could silence the truth forever — the exact
+        session-4 sin. The trt.28 boundary deliverer stays the authoritative
+        exactly-once spoken channel; the worst case is the result spoken once
+        grounded in a reply and once verbatim at the next boundary, which is
+        redundant but never false.
+        """
+        ts = self._monotonic() if now is None else now
+        undelivered: list[TaskRegistryEntry] = []
+        in_flight: list[TaskRegistryEntry] = []
+        for entry in self._registry.values():
+            if not entry.terminal:
+                in_flight.append(entry)
+            elif entry.status == "done" and not entry.delivered and entry.result_text.strip():
+                undelivered.append(entry)
+        if not undelivered and not in_flight:
+            return AnswerTaskContext()
+
+        lines: list[str] = [ANSWER_TASK_CONTEXT_HEADER]
+        for entry in undelivered:
+            lines.append(
+                f"The {_spoken_kind(entry.kind)} task has finished. Its actual "
+                f"result: {_ensure_sentence(entry.result_text.strip())}"
+            )
+        for entry in in_flight:
+            lines.append(
+                f"The {_spoken_kind(entry.kind)} task is still running "
+                f"({_spoken_duration(ts - entry.queued_at)}); its result is not "
+                "available yet."
+            )
+        lines.append(ANSWER_TASK_CONTEXT_RULE)
+        return AnswerTaskContext(
+            text="\n".join(lines),
+            undelivered=tuple(undelivered),
+            in_flight=tuple(in_flight),
+        )
 
     def note_task_running(
         self, task_id: int, *, kind: str = "", turn_id: int | None = None
@@ -1182,6 +1285,8 @@ class TaskCoordinator:
 
 
 __all__ = [
+    "ANSWER_TASK_CONTEXT_HEADER",
+    "ANSWER_TASK_CONTEXT_RULE",
     "DEFAULT_ACLOSE_DRAIN_GRACE_S",
     "EXECUTOR_RESULT_STATUSES",
     "STATUS_NOTHING_IN_FLIGHT",
@@ -1189,6 +1294,7 @@ __all__ = [
     "TERMINAL_TASK_STATUSES",
     "WATCH_POLL_INTERVAL_S",
     "WATCH_TIMEOUT_S",
+    "AnswerTaskContext",
     "InMemoryTaskSink",
     "PublishCompleted",
     "PublishQueued",

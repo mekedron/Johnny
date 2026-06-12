@@ -49,6 +49,7 @@ from johnny.agent.router_gate import (  # noqa: E402
     DEFAULT_DELEGATE_ACK,
     ROUTER_DECISION_SCHEMA,
     ROUTER_DECISION_SCHEMA_NO_CATALOG,
+    TASK_CONTEXT_KEY,
     UNKNOWN_KIND_KEY,
     RouterGate,
     RouterGateConfig,
@@ -61,6 +62,7 @@ from johnny.agent.speech_queue import (  # noqa: E402
     SpeechQueue,
 )
 from johnny.agent.tasks import (  # noqa: E402
+    ANSWER_TASK_CONTEXT_RULE,
     STATUS_NOTHING_IN_FLIGHT,
     InMemoryTaskSink,
     TaskCoordinator,
@@ -2284,6 +2286,195 @@ async def test_status_without_say_stage_errors() -> None:
 
     assert h.emitter.reasons == ["stage_error"]
     assert "say() is not attached" in h.emitter.records[0][1].detail
+
+
+# --------------------------------------------------------------------------- #
+# The speak path never answers blind (Johnny-0qw)                             #
+# --------------------------------------------------------------------------- #
+
+
+def _speak_decision(reason: str = "addressed") -> dict[str, Any]:
+    return {"should_speak": True, "confidence": 0.95, "reason": reason}
+
+
+def _system_texts(ctx: ChatContext) -> list[str]:
+    """Text of every system message in the context, in order."""
+    return [
+        item.text_content or ""
+        for item in ctx.items
+        if getattr(item, "role", None) == "system"
+    ]
+
+
+async def test_speak_with_undelivered_result_injects_and_never_consumes() -> None:
+    """The settle→delivery blind window (Johnny-0qw, playground session 65):
+    a speak verdict while a done result sits undelivered grounds the reply —
+    the verbatim result_text rides into turn_ctx as a system message and the
+    decision row records the visible registry state — but completing the
+    reply consumes NOTHING: the trt.28 deliverer stays the authoritative
+    exactly-once spoken channel."""
+    h = _TaskGateHarness([_speak_decision()])
+    coordinator = h.coordinator
+    assert coordinator is not None
+    entry = coordinator.note_task_settled(
+        7, status="done", kind="google-calendar", result_text="You have 3 events this week."
+    )
+    assert entry is not None
+    queue = SpeechQueue(0.0)
+    h.gate.attach_speech_queue(queue, clock=lambda: 50.0)
+    item = queue.enqueue(
+        entry.result_text,
+        SpeechPriority.RESULT_UNSOLICITED,
+        now=1.0,
+        on_spoken=lambda _item: coordinator.mark_result_delivered(7),
+        task_id=7,
+        kind="google-calendar",
+    )
+    ctx = ChatContext.empty()
+    msg = _user_msg("so what's in the calendar?")
+
+    await h.gate.run_turn(ctx, msg)  # SPEAK — returns normally
+
+    # The grounding system message reached the generation context, verbatim
+    # result + the no-invention rule.
+    injected = _system_texts(ctx)
+    assert len(injected) == 1
+    assert "The google calendar task has finished." in injected[0]
+    assert "You have 3 events this week." in injected[0]
+    assert ANSWER_TASK_CONTEXT_RULE in injected[0]
+    # The decision row records what was visible (the trt.50 raw ride-along).
+    decision, decision_turn = h.obs.decisions[0]
+    assert decision_turn == msg.id
+    assert decision.raw[TASK_CONTEXT_KEY] == {"undelivered": [7], "in_flight": []}
+
+    # The reply completes — and consumes nothing: no proof the model relayed
+    # the result, so the queued copy delivers at the next boundary regardless.
+    handle = _handle(chat_items=["grounded reply"])
+    h.gate.bind_reply(handle)
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await h.drain()
+    assert h.emitter.states == ["replied"]
+    assert entry.delivered is False
+    assert item.state is ItemState.QUEUED
+
+
+async def test_speak_with_in_flight_task_injects_running_line() -> None:
+    """The ack→settle blind window: a speak verdict while a task runs tells
+    the answer model the work is in progress with no result yet."""
+    h = _TaskGateHarness([_speak_decision()])
+    assert h.coordinator is not None
+    h.coordinator.note_task_running(31, kind="google-calendar")
+    ctx = ChatContext.empty()
+    msg = _user_msg("did you find anything?")
+
+    await h.gate.run_turn(ctx, msg)
+
+    injected = _system_texts(ctx)
+    assert len(injected) == 1
+    assert "The google calendar task is still running" in injected[0]
+    assert "its result is not available yet" in injected[0]
+    decision, _ = h.obs.decisions[0]
+    assert decision.raw[TASK_CONTEXT_KEY] == {"undelivered": [], "in_flight": [31]}
+
+
+async def test_speak_with_empty_registry_injects_nothing() -> None:
+    """The common no-tasks case: turn_ctx untouched, no raw marker — the
+    reply is byte-identical to the pre-fix build."""
+    h = _TaskGateHarness([_speak_decision()])
+    ctx = ChatContext.empty()
+
+    await h.gate.run_turn(ctx, _user_msg("how are you?"))
+
+    assert ctx.items == []
+    decision, _ = h.obs.decisions[0]
+    assert TASK_CONTEXT_KEY not in decision.raw
+
+
+async def test_speak_without_coordinator_injects_nothing() -> None:
+    h = _TaskGateHarness([_speak_decision()], wire_coordinator=False)
+    ctx = ChatContext.empty()
+
+    await h.gate.run_turn(ctx, _user_msg("how are you?"))
+
+    assert ctx.items == []
+    decision, _ = h.obs.decisions[0]
+    assert TASK_CONTEXT_KEY not in decision.raw
+
+
+async def test_status_verdict_records_state_but_injects_nothing() -> None:
+    """The status path speaks the registry render via say() — its turn_ctx
+    feeds no answer LLM, so nothing is appended; the raw marker still records
+    the visible state."""
+    h = _TaskGateHarness([_status_decision()])
+    assert h.coordinator is not None
+    h.coordinator.note_task_settled(
+        7, status="done", kind="google-calendar", result_text="You have 3 events this week."
+    )
+    ctx = ChatContext.empty()
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ctx, _user_msg("status?"))
+
+    assert ctx.items == []
+    decision, _ = h.obs.decisions[0]
+    assert decision.raw[TASK_CONTEXT_KEY] == {"undelivered": [7], "in_flight": []}
+
+
+async def test_delegate_verdict_does_not_inject() -> None:
+    """The delegate path speaks the ack via say() — no answer-LLM hop, no
+    injection; prior registry state still rides the raw marker."""
+    h = _TaskGateHarness([_delegate_decision()])
+    assert h.coordinator is not None
+    h.coordinator.note_task_running(31, kind="gmail.search")
+    ctx = ChatContext.empty()
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ctx, _user_msg("also check my calendar"))
+
+    assert ctx.items == []
+    decision, _ = h.obs.decisions[0]
+    assert decision.raw[TASK_CONTEXT_KEY] == {"undelivered": [], "in_flight": [31]}
+
+
+async def test_declined_turn_records_state_but_injects_nothing() -> None:
+    """A router-declined turn generates no reply — nothing to ground."""
+    h = _TaskGateHarness(
+        [{"should_speak": False, "confidence": 0.9, "reason": "side chatter"}]
+    )
+    assert h.coordinator is not None
+    h.coordinator.note_task_running(31, kind="gmail.search")
+    ctx = ChatContext.empty()
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ctx, _user_msg("...anyway"))
+
+    assert ctx.items == []
+    assert h.emitter.reasons == ["router_declined"]
+    decision, _ = h.obs.decisions[0]
+    assert decision.raw[TASK_CONTEXT_KEY] == {"undelivered": [], "in_flight": [31]}
+
+
+async def test_speak_injection_composes_results_and_in_flight() -> None:
+    """Both windows at once: finished-undelivered results and running tasks
+    share one injected message, finished first."""
+    h = _TaskGateHarness([_speak_decision()])
+    coordinator = h.coordinator
+    assert coordinator is not None
+    coordinator.note_task_settled(
+        7, status="done", kind="google-calendar", result_text="You have 3 events this week."
+    )
+    coordinator.note_task_running(8, kind="gmail.search")
+    ctx = ChatContext.empty()
+
+    await h.gate.run_turn(ctx, _user_msg("any news?"))
+
+    injected = _system_texts(ctx)
+    assert len(injected) == 1
+    assert injected[0].index("google calendar task has finished") < injected[0].index(
+        "gmail search task is still running"
+    )
+    decision, _ = h.obs.decisions[0]
+    assert decision.raw[TASK_CONTEXT_KEY] == {"undelivered": [7], "in_flight": [8]}
 
 
 async def test_say_path_reply_audio_hygiene(tmp_path: Any) -> None:

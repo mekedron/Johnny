@@ -92,6 +92,7 @@ from johnny.agent.speech_queue import SpeechItem, SpeechPriority, SpeechQueue
 from johnny.agent.task_catalog import TaskCatalogEntry, render_task_catalog
 from johnny.agent.tasks import (
     STATUS_NOTHING_IN_FLIGHT,
+    AnswerTaskContext,
     QueuedTask,
     StatusSummary,
     TaskCoordinator,
@@ -226,6 +227,18 @@ any promise is spoken: the canonical case is a knowledge question the answer
 model can answer in one turn, which beats ack → stub-fail → spoken
 walk-back. Same ``{from_action, to_action, kind, reason}`` shape and trt.50
 ride-along as the markers above."""
+
+TASK_CONTEXT_KEY = "task_context"
+"""``decision.raw`` key recording the task-registry state visible at decision
+time (Johnny-0qw): ``{"undelivered": [task ids], "in_flight": [task ids]}``.
+Stashed before the ``RouterDecisionMade`` emit whenever the registry holds
+either (the trt.50 ride-along — no event field, no migration), so the
+decision row shows what the turn *could* see; absent means the registry held
+nothing reportable. On the SPEAK fallthrough the same snapshot's render
+(:meth:`~johnny.agent.tasks.TaskCoordinator.answer_task_context`) is injected
+into the reply's generation context — the settle→delivery / ack→settle
+blind-window fix — so a row carrying this key with ``action == "speak"``
+identifies a grounded-by-injection reply."""
 
 
 def capability_decline_speech(kind: str, reason: str) -> str:
@@ -515,7 +528,14 @@ class RouterGate:
         emits **no** terminal on that path and does **not** record a SPEAK turn.
 
         The **speak** path emits no terminal here; it records the turn id for
-        :meth:`bind_reply` to terminalize on reply completion.
+        :meth:`bind_reply` to terminalize on reply completion. Before that it
+        grounds the reply (Johnny-0qw): when the session's task registry
+        holds completed-but-undelivered results or in-flight tasks, their
+        render is injected into ``turn_ctx`` as a system message
+        (:meth:`_inject_task_context`) — and recorded under
+        :data:`TASK_CONTEXT_KEY` in ``decision.raw`` — so the answer model
+        can never fabricate a task outcome inside the settle→delivery or
+        ack→settle windows.
         """
         turn_id = new_message.id
         if self._config.mode == LISTEN_ONLY_MODE:
@@ -578,6 +598,26 @@ class RouterGate:
         decision = self._degrade_unavailable_delegate(decision, turn_id)
         decision = self._degrade_unknown_kind_delegate(decision, turn_id)
         decision = self._degrade_ackless_delegate(decision, turn_id)
+
+        # Answer-context snapshot (Johnny-0qw): what the task registry holds
+        # right now — completed-but-undelivered results and in-flight tasks.
+        # Computed once per turn: stashed in decision.raw (the trt.50
+        # ride-along) so the decision row records what was visible, and
+        # injected into the reply's generation context on the SPEAK
+        # fallthrough below so the answer model can never answer blind in the
+        # settle→delivery or ack→settle windows. A settle landing after this
+        # snapshot is missed for this turn only — the next turn sees it, and
+        # the boundary deliverer speaks it regardless.
+        task_context = (
+            self._tasks.answer_task_context()
+            if self._tasks is not None
+            else AnswerTaskContext()
+        )
+        if not task_context.empty:
+            decision.raw[TASK_CONTEXT_KEY] = {
+                "undelivered": [entry.task_id for entry in task_context.undelivered],
+                "in_flight": [entry.task_id for entry in task_context.in_flight],
+            }
 
         # Triage-stage timing (Johnny-trt.19): one ``router_llm`` row per turn
         # the router actually decided (timed-out / barged / errored gates leave
@@ -695,7 +735,13 @@ class RouterGate:
             raise StopResponse()
 
         # SPEAK: no terminal here — the reply-completion path owns it. Record
-        # the turn so the next generate_reply SpeechHandle binds to it.
+        # the turn so the next generate_reply SpeechHandle binds to it. The
+        # task-context injection (Johnny-0qw) grounds the reply first: both
+        # call sites guarantee turn_ctx is a generation-scoped copy (the SDK's
+        # temp ctx on the voice path, feed_text's explicit copy on the typed
+        # path), so the injected message reaches exactly this reply and never
+        # the durable chat history.
+        self._inject_task_context(turn_ctx, task_context, turn_id)
         self._pending_speak_turns.append(turn_id)
         logger.info(
             "agent.router.gate: turn=%s SPEAK confidence=%.2f reason=%r",
@@ -740,6 +786,52 @@ class RouterGate:
             list(verdict.signals[:3]),
         )
         return verdict.shadow_payload()
+
+    def _inject_task_context(
+        self, turn_ctx: ChatContext, task_context: AnswerTaskContext, turn_id: str
+    ) -> None:
+        """Ground the answer LLM in the task registry before it replies (Johnny-0qw).
+
+        The speak-path blind-window fix: a ``speak`` verdict landing while
+        the registry holds a completed-but-undelivered result — the window
+        between a task's settle and its boundary delivery — used to reach the
+        answer model with no task knowledge, and it fabricated results
+        in-persona (playground session 65: invented calendar events while the
+        real result sat undelivered in the registry; the session-4 turn-21
+        regression). The same blindness existed mid-flight (ack→settle),
+        where nothing told the model a task was even running. trt.28's notes
+        named the requirement: never let the answer path answer blind.
+
+        Appends the registry render
+        (:meth:`~johnny.agent.tasks.TaskCoordinator.answer_task_context`) as
+        a system message to ``turn_ctx`` — the SDK inserts the user's message
+        after it, so it lands directly above the ask, the canonical
+        RAG-injection position. ``turn_ctx`` is a generation-scoped copy at
+        both call sites (the SDK's temp mutable ctx on the voice path;
+        ``feed_text``'s explicit copy forwarded to ``generate_reply`` on the
+        typed path), so the injection reaches exactly this reply and is never
+        persisted: once the result IS delivered, stale task lines cannot
+        linger in the durable history contradicting it.
+
+        Deliberately consumes nothing: a grounded mention inside a free-form
+        reply is not a delivery (the user may have asked about something
+        else), so the queued RESULT copy stays and the trt.28 deliverer
+        remains the authoritative exactly-once spoken channel — see
+        :meth:`~johnny.agent.tasks.TaskCoordinator.answer_task_context` for
+        the full rationale. Empty context (the common no-tasks case) appends
+        nothing — the reply is byte-identical to the pre-fix build.
+        """
+        if task_context.empty:
+            return
+        turn_ctx.add_message(role="system", content=task_context.text)
+        logger.info(
+            "agent.router.gate: turn=%s SPEAK grounded with task context "
+            "(undelivered=%s in_flight=%s, %d chars)",
+            turn_id,
+            [entry.task_id for entry in task_context.undelivered],
+            [entry.task_id for entry in task_context.in_flight],
+            len(task_context.text),
+        )
 
     def _degrade_ackless_delegate(
         self, decision: RouterDecision, turn_id: str

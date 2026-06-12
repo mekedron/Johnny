@@ -128,6 +128,28 @@ understand the bot's decision.* Concretely:
   (immediately — a walk-back must not wait for a pause), while `done` results
   re-enter through the boundary-gated speech queue and `status` asks answer
   from the registry (trt.29).
+- **The answer path never answers blind** (Johnny-0qw, shipped 2026-06-12):
+  trt.29 grounded the `status` verdict, but a `speak` verdict landing inside the
+  settle→delivery window (result done, boundary delivery not yet spoken) reached
+  the answer LLM with zero task knowledge — and it fabricated results in-persona
+  (playground session 65: invented calendar events while the real `result_text`
+  sat undelivered in the registry; the session-4 turn-21 regression). The same
+  blindness existed mid-flight (ack→settle). Now the SPEAK fallthrough injects
+  `TaskCoordinator.answer_task_context()` — completed-but-undelivered results
+  **verbatim** plus in-flight task lines with an explicit "its result is not
+  available yet" — as a system message into the reply's **generation-scoped**
+  context (the SDK's temp ctx on the voice path; `feed_text`'s copy forwarded to
+  `generate_reply(chat_ctx=…)` on the typed path), so nothing persists into the
+  durable history and stale task lines can never contradict a later delivery.
+  The visible registry state rides `decision.raw.task_context`
+  (`{undelivered: [ids], in_flight: [ids]}`, the trt.50 ride-along) on every
+  decided turn. Injection deliberately consumes **nothing**: there is no proof a
+  free-form reply actually relayed the result, so the queued RESULT copy stays
+  and the trt.28 boundary deliverer remains the authoritative exactly-once
+  spoken channel — worst case the truth is spoken twice (once grounded in the
+  reply, once verbatim at the boundary), never suppressed and never false.
+  Failures are not injected: the trt.53 correction already spoke them into the
+  chat history the answer context carries natively.
 - **The whole chain is visible in history** (trt.54, shipped 2026-06-11): final
   transcript (`input_window.transcript_window`, `is_current` entry — also what makes
   agent sessions replayable) → heuristic shadow verdict → router action + confidence
@@ -532,6 +554,7 @@ re-prices the fast-path.
 | Meeting lifecycle states (dismissible bot, no auto-rejoin) | Johnny-trt.56 | **shipped** (2026-06-11) — three dismissal stamp columns on `meeting_configs` (+`bot_dismissed_by` ui\|voice\|schedule), derived `bot_state`, occurrence-scoped in-force rule, scheduler dispatch filter, dismiss/undismiss endpoints + UI, `meeting_bot_state_changed` events |
 | Internal tools (`meeting.leave`, `session.end` by voice) | Johnny-trt.57 | **shipped** (2026-06-11) — `johnny/agent/internal_tools.py`: in-process registry + executor heading the chain (internal → skills → stub); catalog entries surface-scoped (`meeting.leave` only when the job carries a `calendar_event_id`); farewell-ack completes before teardown (`RouterGate.wait_recent_say_done`); actions post the SAME api endpoints the UI buttons call (voice dismissal `actor=voice` / `/sessions/{id}/stop`) so Johnny-ajc stop verification rides along — non-2xx → `failed` settle → spoken trt.53 correction; skill executor refuses internal kinds (locality guard); `TaskCoordinator.aclose` gained a bounded drain grace so the self-terminating settle lands `done`, not `cancelled` |
 | Speech queue + re-entry + status query | Johnny-trt.27–30 | **shipped** trt.27/28/29 (2026-06-12) — pure `SpeechQueue` core (trt.27: priorities ACK>STATUS>RESULT>NOTICE, per-class TTLs, ~1.2 s silence-grace gating, requeue-once-then-drop, exactly-once terminals); Phase-5 wiring (trt.28: `TaskEventListener` push consumer of `johnny.tasks.<id>` with resubscribe reconcile; `TaskSpeechDeliverer` boundary-gated delivery — `current_speech` None ∧ user silent ∧ `RouterGate.idle` ∧ grace — via `speak_task_result`, recorded as `AgentSpoke kind="task_result"`); **real status query** (trt.29: `status` verdicts speak `TaskCoordinator.status_summary()` — the in-memory registry rendered as in-flight progress with elapsed time, completed-but-undelivered results delivered with their actual `result_text` whatever their age (the session-4 hallucination seam) while the queued RESULT copy is consumed on uninterrupted completion (`SpeechQueue.mark_spoken` — never spoken twice; a barged-in status reply consumes nothing so the result still delivers at the next boundary), recent failures, and the graceful nothing-in-flight line; catalog header + `action` schema teach `status` for asks about started work or its outcome). Live-Meet capstone trt.30 pending |
+| Speak-path blind window closed (answer-context injection) | Johnny-0qw | **shipped** (2026-06-12) — `TaskCoordinator.answer_task_context()` (undelivered results verbatim + in-flight lines + the no-invention rule) injected as a generation-scoped system message on the SPEAK fallthrough; voice path rides the SDK's temp turn ctx, typed path generates from `feed_text`'s copy (`generate_reply(chat_ctx=…)`); visible state recorded under `raw_output.task_context`; consumes nothing — the trt.28 boundary deliverer stays the exactly-once spoken channel (see §2 "The answer path never answers blind") |
 | Per-agent model role slots (schema) | Johnny-trt.41 | planned (Phase 6) |
 | Role-based provider resolution + runtime fallback | Johnny-trt.42 | planned (Phase 6) |
 | Agent edit page (Triage/Answer/Reasoning pickers) | Johnny-trt.44 | planned (Phase 6) |

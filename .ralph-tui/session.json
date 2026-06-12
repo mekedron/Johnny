@@ -3,10 +3,10 @@
   "sessionId": "d4e0eaf8-2f04-47a7-b280-1ca8b39424b6",
   "status": "running",
   "startedAt": "2026-06-11T21:01:32.322Z",
-  "updatedAt": "2026-06-12T03:31:03.468Z",
-  "currentIteration": 8,
+  "updatedAt": "2026-06-12T04:04:53.638Z",
+  "currentIteration": 9,
   "maxIterations": 0,
-  "tasksCompleted": 8,
+  "tasksCompleted": 9,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -279,8 +279,8 @@
       {
         "id": "Johnny-trt.42",
         "title": "[BUILD] Phase 6: Agent provider resolution — voice finally applied, pipeline-mode aware",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.43",
@@ -502,6 +502,16 @@
       "durationMs": 4266278,
       "startedAt": "2026-06-12T01:32:39.140Z",
       "endedAt": "2026-06-12T02:43:45.418Z"
+    },
+    {
+      "iteration": 9,
+      "status": "completed",
+      "taskId": "Johnny-trt.42",
+      "taskTitle": "[BUILD] Phase 6: Agent provider resolution — voice finally applied, pipeline-mode aware",
+      "taskCompleted": true,
+      "durationMs": 2794027,
+      "startedAt": "2026-06-12T02:44:28.171Z",
+      "endedAt": "2026-06-12T03:31:02.198Z"
     }
   ],
   "skippedTaskIds": [],

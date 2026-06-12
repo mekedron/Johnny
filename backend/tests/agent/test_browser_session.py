@@ -89,9 +89,11 @@ class _FakeSession:
         self._activity = object()  # truthy → "running"
         self._gate = gate
         self.generate_reply_calls: list[str] = []
+        self.generate_reply_ctxs: list[ChatContext] = []
 
-    def generate_reply(self, *, user_input: str) -> SpeechHandle:
+    def generate_reply(self, *, user_input: str, chat_ctx: ChatContext) -> SpeechHandle:
         self.generate_reply_calls.append(user_input)
+        self.generate_reply_ctxs.append(chat_ctx)
         handle = _FakeSpeechHandle()
         # Simulate JohnnyAgent.on_enter's speech_created listener binding the reply.
         self._gate.bind_reply(cast(SpeechHandle, handle))
@@ -188,6 +190,64 @@ async def test_feed_text_blank_is_rejected() -> None:
     assert await sess.feed_text("   ") is False
     assert transcripts == []
     assert fake_session.generate_reply_calls == []
+
+
+async def test_feed_text_generates_from_a_copy_so_injection_never_persists() -> None:
+    """The typed path mirrors the voice path's generation-scoped context
+    (Johnny-0qw): the gate's task-grounding system message reaches the ctx
+    handed to ``generate_reply`` but never the durable ``session.history`` —
+    once the result is delivered, no stale task line can linger in history
+    contradicting it."""
+    from johnny.agent.tasks import InMemoryTaskSink, TaskCoordinator, stub_executor
+
+    emitter = _RecordingEmitter()
+    coordinator = TaskCoordinator(InMemoryTaskSink(), executor=stub_executor)
+    gate = RouterGate(
+        _ScriptedRouterLLM({"should_speak": True, "confidence": 0.95, "reason": "addressed"}),
+        config=RouterGateConfig(mode="autonomous"),
+        ledger=TurnLedger(emitter),
+        tasks=coordinator,
+    )
+    # The settle→delivery window: a done result sits undelivered.
+    coordinator.note_task_settled(
+        7, status="done", kind="google-calendar", result_text="You have 3 events this week."
+    )
+    fake_session = _FakeSession(gate)
+    fake_session.history.add_message(role="user", content="check the calendar please")
+
+    async def _sink(ev: Any) -> None:
+        pass
+
+    runtime = cast(Any, type("R", (), {"gate": gate})())
+    sess = BrowserAgentSession(
+        runtime=runtime,
+        session=cast(Any, fake_session),
+        transport=cast(Any, None),
+        audio_out=cast(Any, None),
+        transcript_sink=_sink,
+        session_id="7",
+    )
+
+    assert await sess.feed_text("so what's in the calendar?") is True
+
+    # The reply generated from the gate's turn context: prior history + the
+    # injected grounding message.
+    assert len(fake_session.generate_reply_ctxs) == 1
+    reply_ctx = fake_session.generate_reply_ctxs[0]
+    assert reply_ctx is not fake_session.history
+    injected = [
+        item.text_content or ""
+        for item in reply_ctx.items
+        if getattr(item, "role", None) == "system"
+    ]
+    assert len(injected) == 1
+    assert "You have 3 events this week." in injected[0]
+    # The durable history holds NO system message — the injection was
+    # generation-scoped (the SDK persists the user/assistant messages itself).
+    assert [
+        item for item in fake_session.history.items if getattr(item, "role", None) == "system"
+    ] == []
+    await coordinator.aclose()
 
 
 async def test_warm_up_delegates_to_the_runtime() -> None:

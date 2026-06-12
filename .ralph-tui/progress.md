@@ -106,6 +106,19 @@ after each iteration and it's included in prompts for context.
   transport proven live (session 23, memory `johnny-orchestrator-default-mismatch-9xt`);
   no autonomous run ties them with 2 humans. Operator runbook:
   `.validation/Johnny-trt.30/00-RUN-NOTES.md`.
+- **Generation-scoped context injection is the answer-grounding seam (0qw)**:
+  livekit-agents 1.5.17 gives `on_user_turn_completed` a TEMP MUTABLE COPY of
+  the agent ctx and generates THIS reply from it (`_generate_reply(chat_ctx=
+  temp_mutable_chat_ctx)`); `generate_reply(user_input=…, chat_ctx=…)` accepts
+  an explicit ctx and `_pipeline_reply_task_impl` re-copies it + persists the
+  user/assistant messages into the DURABLE agent ctx separately — so mutating
+  the turn copy (voice) or passing `session.history.copy()` (typed feed_text)
+  injects per-reply system messages that NEVER pollute durable history. The
+  typed path previously passed the LIVE `session.history` to run_turn — any
+  gate-side ctx mutation would have persisted; keep the copy+forward shape.
+  Also: injected-but-unproven delivery must NOT consume the queued RESULT
+  (no proof a free-form reply relayed it; suppressed truth = the session-4
+  sin; double-spoken truth is the safe failure).
 - **`is_active` means "the global default", NOT "enabled" — per-agent pins must
   honor inactive provider rows** (trt.42): the partial unique index
   `uq_provider_credentials_active_per_kind` allows at most ONE active row per
@@ -534,4 +547,59 @@ after each iteration and it's included in prompts for context.
   - The playground UI has no agent picker (dropped in trt.41) — A/B between
     agents via the UI = set-default flip per run (POST /agents/{id}/set-default),
     which is also the honest UI path until trt.45 assignment UI lands.
+---
+
+## 2026-06-12 - Johnny-0qw
+- Speak-path blind window CLOSED (fix direction b — answer-context injection;
+  chosen over gate-degrade-to-status, which would hijack unrelated questions
+  and break "conversation continues" mid-flight, and over ordering, which
+  fights the queue's boundary discipline). New
+  `TaskCoordinator.answer_task_context()` renders completed-but-undelivered
+  results VERBATIM + in-flight lines ("its result is not available yet") + a
+  no-invention rule (failures excluded — the trt.53 correction already rides
+  the chat history). `RouterGate.run_turn`: snapshot computed once after the
+  degrades, recorded under `decision.raw["task_context"]`
+  ({undelivered:[ids], in_flight:[ids]}, trt.50 ride-along) on EVERY decided
+  turn, injected as a system message into turn_ctx ONLY on the SPEAK
+  fallthrough (`_inject_task_context`). Typed path: `feed_text` runs the gate
+  on `session.history.copy()` and generates via
+  `generate_reply(user_input, chat_ctx=<copy>)` — same generation-only
+  semantics as the SDK's voice-path temp ctx (previously the LIVE history
+  was passed; a mutation would have persisted). Deliberately consumes
+  NOTHING: the trt.28 boundary deliverer stays the exactly-once verbatim
+  channel (worst case truth spoken twice, never suppressed/false).
+- Live race replay (chrome-devtools, .validation/Johnny-0qw/): session 18 —
+  delegate (attempt 5; sessions 14-17 speak, known 3B stochasticity) → task
+  20 done == ground truth → racer typed the verbatim session-4 follow-up
+  2.4 ms after task_completed (undelivered) → router chose speak →
+  raw_output.task_context={"undelivered":[20]} persisted → reply GROUNDED
+  (all 3 real events+times, zero fabrication — vs session 65's Ono-Sendai
+  invention) → held RESULT still delivered verbatim at the next boundary.
+  Three-way equality ground truth == agent_tasks.result_text == WS frame ==
+  utterance row ALL PASS. Mid-flight injection leg unit-pinned only (live
+  capture physically impossible: settle ~1.2 s < triage ~2.5 s, trt.29
+  precedent).
+- Files: backend/johnny/agent/{tasks,router_gate,browser_session}.py,
+  backend/tests/agent/{test_tasks,test_router_gate_decision,
+  test_browser_session}.py, docs/ROUTING.md (§2 bullet + status-table row).
+  Quality: tests/agent 1090 + voice_pipeline/integration/task_worker 318 +
+  api/skills/services/migration consumers 713 — all passed; ruff + mypy
+  --strict clean on touched files.
+- **Learnings:**
+  - livekit-agents 1.5.17 context semantics (pattern added at top):
+    on_user_turn_completed's turn_ctx is a temp copy used for THIS
+    generation; generate_reply accepts chat_ctx; durable persistence happens
+    separately — the canonical per-reply injection seam on both surfaces.
+  - The playground typed path passed the LIVE session.history into
+    run_turn — only safe while the gate never mutated it. Any future
+    gate-side ctx enrichment must keep feed_text's copy+forward shape.
+  - decision.raw mutations only persist if made BEFORE the _record_decision
+    emit (the event serializes at publish); compute-once-stash-early,
+    apply-later avoids double-compute drift.
+  - The injection logger.info is invisible in docker logs api (root
+    WARNING, trt.42); the raw_output marker is the durable forensic
+    evidence instead — design observability into the decision row, not logs.
+  - In-page racer hit 2.4 ms follow-up-after-settle (vs 6 ms in trt.60) —
+    the 2 ms-poll evaluate_script pattern is reliably faster than the race
+    window needs.
 ---

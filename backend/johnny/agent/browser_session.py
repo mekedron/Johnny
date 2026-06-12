@@ -510,9 +510,19 @@ class BrowserAgentSession:
 
         await self._emit_user_transcript(cleaned)
 
+        # Generation-scoped context copy (Johnny-0qw): the gate may inject a
+        # task-grounding system message into the turn context on a SPEAK
+        # verdict (RouterGate._inject_task_context). The voice path gets that
+        # scoping for free (the SDK hands on_user_turn_completed a temp
+        # mutable copy and generates from it); the typed path must mirror it —
+        # run the gate on a copy and generate from that same copy, so the
+        # injection reaches exactly this reply and never pollutes the durable
+        # session.history (generate_reply still persists the user message and
+        # the assistant reply into the live ctx itself).
+        turn_ctx = self._session.history.copy()
         new_message = LKChatMessage(role="user", content=[cleaned])
         try:
-            await self._runtime.gate.run_turn(self._session.history, new_message)
+            await self._runtime.gate.run_turn(turn_ctx, new_message)
         except StopResponse:
             # The gate accounted for this turn without an answer-LLM reply:
             # declined / suggest-only / listen-only (terminal already emitted),
@@ -527,10 +537,11 @@ class BrowserAgentSession:
             )
             return True
 
-        # SPEAK: generate the reply. The on_enter speech_created listener routes
-        # it to gate.bind_reply, which pops the turn run_turn just recorded.
+        # SPEAK: generate the reply from the gate's (possibly task-grounded)
+        # turn context. The on_enter speech_created listener routes it to
+        # gate.bind_reply, which pops the turn run_turn just recorded.
         try:
-            self._session.generate_reply(user_input=cleaned)
+            self._session.generate_reply(user_input=cleaned, chat_ctx=turn_ctx)
         except Exception:
             logger.exception(
                 "browser agent feed_text: generate_reply failed for session=%s",

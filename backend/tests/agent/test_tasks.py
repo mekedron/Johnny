@@ -13,10 +13,13 @@ import asyncio
 from typing import Any
 
 from johnny.agent.tasks import (
+    ANSWER_TASK_CONTEXT_HEADER,
+    ANSWER_TASK_CONTEXT_RULE,
     EXECUTOR_RESULT_STATUSES,
     STATUS_NOTHING_IN_FLIGHT,
     STATUS_RECENT_SETTLE_S,
     TERMINAL_TASK_STATUSES,
+    AnswerTaskContext,
     InMemoryTaskSink,
     QueuedTask,
     TaskCoordinator,
@@ -1440,4 +1443,171 @@ async def test_status_summary_composes_result_then_active_then_failure() -> None
         "The web search task didn't work out: No luck."
     )
     assert [entry.task_id for entry in summary.carried_results] == [done.task_id]
+    await coordinator.aclose()
+
+
+# --- the answer-context render (Johnny-0qw) --------------------------------------
+
+
+async def test_answer_task_context_empty_registry() -> None:
+    coordinator = _status_coordinator([100.0])
+    context = coordinator.answer_task_context()
+    assert context.empty
+    assert context.text == ""
+    assert context.undelivered == ()
+    assert context.in_flight == ()
+    await coordinator.aclose()
+
+
+async def test_answer_task_context_default_instance_is_empty() -> None:
+    """The coordinator-less gate's stand-in renders nothing."""
+    context = AnswerTaskContext()
+    assert context.empty
+    assert context.text == ""
+
+
+async def test_answer_task_context_undelivered_result_verbatim() -> None:
+    """The settle→delivery blind window: the result rides verbatim, framed by
+    the header and the no-invention rule."""
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    queued = await coordinator.begin(_spec(kind="google-calendar"))
+    assert queued is not None
+    entry = coordinator.note_task_settled(
+        queued.task_id, status="done", result_text="You have 3 events this week."
+    )
+    assert entry is not None
+    context = coordinator.answer_task_context()
+    assert not context.empty
+    assert context.undelivered == (entry,)
+    assert context.in_flight == ()
+    assert context.text == (
+        f"{ANSWER_TASK_CONTEXT_HEADER}\n"
+        "The google calendar task has finished. Its actual result: "
+        "You have 3 events this week.\n"
+        f"{ANSWER_TASK_CONTEXT_RULE}"
+    )
+    await coordinator.aclose()
+
+
+async def test_answer_task_context_undelivered_never_goes_stale() -> None:
+    """Same no-staleness stance as the status render: the registry copy is the
+    only true answer the session holds, however old."""
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    queued = await coordinator.begin(_spec(kind="google-calendar"))
+    assert queued is not None
+    coordinator.note_task_settled(queued.task_id, status="done", result_text="3 events")
+    now[0] = 100.0 + STATUS_RECENT_SETTLE_S * 10
+    context = coordinator.answer_task_context()
+    assert len(context.undelivered) == 1
+    assert "3 events" in context.text
+    await coordinator.aclose()
+
+
+async def test_answer_task_context_in_flight_named_with_duration() -> None:
+    """The ack→settle blind window: a running task is named, timed, and
+    explicitly result-less so the model cannot improvise an outcome."""
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    queued = await coordinator.begin(_spec(kind="gmail.search"))
+    assert queued is not None
+    coordinator.note_task_running(queued.task_id)
+    now[0] = 121.0
+    context = coordinator.answer_task_context()
+    assert context.undelivered == ()
+    assert [entry.task_id for entry in context.in_flight] == [queued.task_id]
+    assert (
+        "The gmail search task is still running (about 20 seconds in); "
+        "its result is not available yet." in context.text
+    )
+    await coordinator.aclose()
+
+
+async def test_answer_task_context_queued_counts_as_in_flight() -> None:
+    """``queued`` and ``running`` alike — the user does not care about claim
+    mechanics (the status-render stance)."""
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    now[0] = 103.0
+    context = coordinator.answer_task_context()
+    assert [entry.task_id for entry in context.in_flight] == [queued.task_id]
+    assert "just a few seconds in" in context.text
+    await coordinator.aclose()
+
+
+async def test_answer_task_context_excludes_failures_and_delivered() -> None:
+    """Failures already spoke their trt.53 correction into the chat history;
+    a delivered result rides the history as spoken text — neither is
+    re-injected. Cancelled entries are likewise silent."""
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    failed = await coordinator.begin(_spec(kind="web_search"))
+    delivered = await coordinator.begin(_spec(kind="google-calendar"))
+    cancelled = await coordinator.begin(_spec(kind="gmail.search"))
+    assert failed is not None and delivered is not None and cancelled is not None
+    coordinator.note_task_settled(failed.task_id, status="failed", result_text="No luck.")
+    coordinator.note_task_settled(
+        delivered.task_id, status="done", result_text="You have 3 events this week."
+    )
+    coordinator.mark_result_delivered(delivered.task_id)
+    coordinator.note_task_settled(cancelled.task_id, status="cancelled")
+    context = coordinator.answer_task_context()
+    assert context.empty
+    assert context.text == ""
+    await coordinator.aclose()
+
+
+async def test_answer_task_context_blank_result_done_not_included() -> None:
+    """A done task with nothing speakable (blank result_text, the UI-only
+    contract) gives the answer model nothing to report."""
+    coordinator = _status_coordinator([100.0])
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    coordinator.note_task_settled(queued.task_id, status="done", result_text="   ")
+    context = coordinator.answer_task_context()
+    assert context.empty
+    await coordinator.aclose()
+
+
+async def test_answer_task_context_result_text_gets_sentence_punctuation() -> None:
+    coordinator = _status_coordinator([100.0])
+    queued = await coordinator.begin(_spec(kind="google-calendar"))
+    assert queued is not None
+    coordinator.note_task_settled(queued.task_id, status="done", result_text="3 events")
+    context = coordinator.answer_task_context()
+    assert "Its actual result: 3 events." in context.text
+    await coordinator.aclose()
+
+
+async def test_answer_task_context_composes_finished_before_in_flight() -> None:
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    running = await coordinator.begin(_spec(kind="gmail.search"))
+    done = await coordinator.begin(_spec(kind="google-calendar"))
+    assert running is not None and done is not None
+    coordinator.note_task_settled(
+        done.task_id, status="done", result_text="You have 3 events this week."
+    )
+    now[0] = 121.0
+    context = coordinator.answer_task_context()
+    lines = context.text.split("\n")
+    assert lines[0] == ANSWER_TASK_CONTEXT_HEADER
+    assert lines[1].startswith("The google calendar task has finished.")
+    assert lines[2].startswith("The gmail search task is still running")
+    assert lines[3] == ANSWER_TASK_CONTEXT_RULE
+    assert len(lines) == 4
+    await coordinator.aclose()
+
+
+async def test_answer_task_context_injectable_now() -> None:
+    """``now`` overrides the coordinator clock (the status_summary contract)."""
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    context = coordinator.answer_task_context(now=121.0)
+    assert "about 20 seconds in" in context.text
     await coordinator.aclose()
