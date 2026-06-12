@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "sessionId": "d4e0eaf8-2f04-47a7-b280-1ca8b39424b6",
+  "sessionId": "f4fb140c-9756-44b7-9e78-53011395bd27",
   "status": "running",
-  "startedAt": "2026-06-11T21:01:32.322Z",
-  "updatedAt": "2026-06-12T08:53:10.119Z",
-  "currentIteration": 14,
+  "startedAt": "2026-06-12T08:54:49.014Z",
+  "updatedAt": "2026-06-12T09:21:40.001Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 13,
+  "tasksCompleted": 0,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -28,7 +28,7 @@
         }
       }
     ],
-    "totalTasks": 65,
+    "totalTasks": 66,
     "tasks": [
       {
         "id": "Johnny-trt.1",
@@ -51,6 +51,12 @@
       {
         "id": "Johnny-trt.4",
         "title": "[CHORE] Phase 0 capstone: baseline + SDK findings documented",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-0qw",
+        "title": "[BUG] Phase 5: speak-verdict follow-up in the settle→delivery window answers blind — registry result not consulted (session-4 regression survives on the speak path)",
         "status": "completed",
         "completedInSession": false
       },
@@ -184,31 +190,31 @@
         "id": "Johnny-trt.26",
         "title": "[CHORE] Phase 4 capstone: end-to-end calendar task in the playground",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.27",
         "title": "[BUILD] Phase 5: Speech queue pure core",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.28",
         "title": "[BUILD] Phase 5: Queue wiring + TaskEventListener + delivery timing",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.29",
         "title": "[BUILD] Phase 5: Real status query from the task registry",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.30",
         "title": "[CHORE] Phase 5 capstone: live Meet validation of the full loop",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.31",
@@ -274,19 +280,19 @@
         "id": "Johnny-trt.41",
         "title": "[BUILD] Phase 6: Agent entity — wipe templates/personalities, clean rebuild",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.42",
         "title": "[BUILD] Phase 6: Agent provider resolution — voice finally applied, pipeline-mode aware",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.43",
         "title": "[BUILD] Phase 6: Remove S2S/unified pipeline from the product surface (re-introduction deferred to a future epic)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.44",
@@ -298,13 +304,13 @@
         "id": "Johnny-trt.45",
         "title": "[BUILD] Phase 6: Meeting + playground assignment — agents replace parameter soup",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.46",
         "title": "[BUILD] Phase 6: Multi-agent foundation — speech floor + peer awareness + per-assignment identity",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.47",
@@ -315,14 +321,14 @@
       {
         "id": "Johnny-trt.48",
         "title": "[BUILD] Phase 6: Multi-agent playground — browser test pipeline for agent ensembles",
-        "status": "open",
+        "status": "completed",
         "completedInSession": false
       },
       {
         "id": "Johnny-trt.49",
         "title": "[BUILD] Phase 6: Conversation-dynamics observability — interruptions, floor, claims persisted to history",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.50",
@@ -400,7 +406,7 @@
         "id": "Johnny-trt.60",
         "title": "[CHORE] Phase 5: Final tool-correctness verification — calendar answers match ground truth end-to-end (ask → ack → execute → spoken result)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-trt.61",
@@ -426,142 +432,12 @@
     {
       "iteration": 1,
       "status": "completed",
-      "taskId": "Johnny-trt.26",
-      "taskTitle": "[CHORE] Phase 4 capstone: end-to-end calendar task in the playground",
-      "taskCompleted": true,
-      "durationMs": 2032921,
-      "startedAt": "2026-06-11T21:02:14.140Z",
-      "endedAt": "2026-06-11T21:36:07.061Z"
-    },
-    {
-      "iteration": 2,
-      "status": "completed",
-      "taskId": "Johnny-trt.27",
-      "taskTitle": "[BUILD] Phase 5: Speech queue pure core",
-      "taskCompleted": true,
-      "durationMs": 923440,
-      "startedAt": "2026-06-11T21:36:45.757Z",
-      "endedAt": "2026-06-11T21:52:09.197Z"
-    },
-    {
-      "iteration": 3,
-      "status": "completed",
-      "taskId": "Johnny-trt.28",
-      "taskTitle": "[BUILD] Phase 5: Queue wiring + TaskEventListener + delivery timing",
-      "taskCompleted": true,
-      "durationMs": 3575300,
-      "startedAt": "2026-06-11T21:52:50.170Z",
-      "endedAt": "2026-06-11T22:52:25.470Z"
-    },
-    {
-      "iteration": 4,
-      "status": "completed",
-      "taskId": "Johnny-trt.29",
-      "taskTitle": "[BUILD] Phase 5: Real status query from the task registry",
-      "taskCompleted": true,
-      "durationMs": 2601437,
-      "startedAt": "2026-06-11T22:53:07.262Z",
-      "endedAt": "2026-06-11T23:36:28.699Z"
-    },
-    {
-      "iteration": 5,
-      "status": "completed",
-      "taskId": "Johnny-trt.60",
-      "taskTitle": "[CHORE] Phase 5: Final tool-correctness verification — calendar answers match ground truth end-to-end (ask → ack → execute → spoken result)",
-      "taskCompleted": true,
-      "durationMs": 1899693,
-      "startedAt": "2026-06-11T23:37:09.408Z",
-      "endedAt": "2026-06-12T00:08:49.101Z"
-    },
-    {
-      "iteration": 6,
-      "status": "completed",
-      "taskId": "Johnny-trt.30",
-      "taskTitle": "[CHORE] Phase 5 capstone: live Meet validation of the full loop",
-      "taskCompleted": true,
-      "durationMs": 1480286,
-      "startedAt": "2026-06-12T00:09:32.020Z",
-      "endedAt": "2026-06-12T00:34:12.306Z"
-    },
-    {
-      "iteration": 7,
-      "status": "completed",
-      "taskId": "Johnny-trt.43",
-      "taskTitle": "[BUILD] Phase 6: Remove S2S/unified pipeline from the product surface (re-introduction deferred to a future epic)",
-      "taskCompleted": true,
-      "durationMs": 3422502,
-      "startedAt": "2026-06-12T00:34:52.791Z",
-      "endedAt": "2026-06-12T01:31:55.293Z"
-    },
-    {
-      "iteration": 8,
-      "status": "completed",
-      "taskId": "Johnny-trt.41",
-      "taskTitle": "[BUILD] Phase 6: Agent entity — wipe templates/personalities, clean rebuild",
-      "taskCompleted": true,
-      "durationMs": 4266278,
-      "startedAt": "2026-06-12T01:32:39.140Z",
-      "endedAt": "2026-06-12T02:43:45.418Z"
-    },
-    {
-      "iteration": 9,
-      "status": "completed",
-      "taskId": "Johnny-trt.42",
-      "taskTitle": "[BUILD] Phase 6: Agent provider resolution — voice finally applied, pipeline-mode aware",
-      "taskCompleted": true,
-      "durationMs": 2794027,
-      "startedAt": "2026-06-12T02:44:28.171Z",
-      "endedAt": "2026-06-12T03:31:02.198Z"
-    },
-    {
-      "iteration": 10,
-      "status": "completed",
-      "taskId": "Johnny-0qw",
-      "taskTitle": "[BUG] Phase 5: speak-verdict follow-up in the settle→delivery window answers blind — registry result not consulted (session-4 regression survives on the speak path)",
-      "taskCompleted": true,
-      "durationMs": 1983825,
-      "startedAt": "2026-06-12T03:31:48.712Z",
-      "endedAt": "2026-06-12T04:04:52.537Z"
-    },
-    {
-      "iteration": 11,
-      "status": "completed",
-      "taskId": "Johnny-trt.45",
-      "taskTitle": "[BUILD] Phase 6: Meeting + playground assignment — agents replace parameter soup",
-      "taskCompleted": true,
-      "durationMs": 4535515,
-      "startedAt": "2026-06-12T04:05:34.742Z",
-      "endedAt": "2026-06-12T05:21:10.257Z"
-    },
-    {
-      "iteration": 12,
-      "status": "completed",
       "taskId": "Johnny-trt.59",
       "taskTitle": "[MEASURE] Phase-3 router schema costs +568ms p50 triage on the 3B local router — slim the payload or accept as the trt.51/41/42 price",
       "taskCompleted": false,
-      "durationMs": 817735,
-      "startedAt": "2026-06-12T05:21:54.302Z",
-      "endedAt": "2026-06-12T05:35:32.037Z"
-    },
-    {
-      "iteration": 13,
-      "status": "completed",
-      "taskId": "Johnny-trt.49",
-      "taskTitle": "[BUILD] Phase 6: Conversation-dynamics observability — interruptions, floor, claims persisted to history",
-      "taskCompleted": true,
-      "durationMs": 3555647,
-      "startedAt": "2026-06-12T05:35:54.240Z",
-      "endedAt": "2026-06-12T06:35:09.887Z"
-    },
-    {
-      "iteration": 14,
-      "status": "completed",
-      "taskId": "Johnny-trt.46",
-      "taskTitle": "[BUILD] Phase 6: Multi-agent foundation — speech floor + peer awareness + per-assignment identity",
-      "taskCompleted": true,
-      "durationMs": 4044127,
-      "startedAt": "2026-06-12T06:35:52.270Z",
-      "endedAt": "2026-06-12T07:43:16.397Z"
+      "durationMs": 607271,
+      "startedAt": "2026-06-12T08:56:58.310Z",
+      "endedAt": "2026-06-12T09:07:05.581Z"
     }
   ],
   "skippedTaskIds": [],

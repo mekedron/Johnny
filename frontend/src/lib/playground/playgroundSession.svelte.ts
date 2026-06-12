@@ -165,6 +165,12 @@ export class PlaygroundController {
 	// (selectedAgentId mirrors it); 2+ ids = a session GROUP, in pick order.
 	selectedAgentIds = $state<number[]>([]);
 	context = $state('');
+	// Johnny-trt.64: optional per-agent context briefs for a group start,
+	// keyed by agent id. A blank entry is omitted from the payload so the
+	// server inherits the group-level `context`. Entries survive a roster
+	// toggle-off (re-checking an agent keeps its typed text); only the
+	// selected roster is ever serialized.
+	agentContexts = $state<Record<number, string>>({});
 	// Johnny-8th: account this playground run belongs to (null = account-less).
 	// Sticky in localStorage (seeded in loadMetadata).
 	selectedAccountId = $state<number | null>(null);
@@ -351,6 +357,11 @@ export class PlaygroundController {
 		this.selectedAgentId = next[0] ?? null;
 	};
 
+	/** Set one agent's per-member context brief (Johnny-trt.64). */
+	setAgentContext = (agentId: number, value: string): void => {
+		this.agentContexts = { ...this.agentContexts, [agentId]: value };
+	};
+
 	// --- account sticky selection (Johnny-8th) -----------------------------
 
 	private static readonly ACCOUNT_KEY = 'johnny:playground:account';
@@ -511,8 +522,13 @@ export class PlaygroundController {
 		try {
 			const overrides = this.buildPayload().provider_overrides;
 			const ctx = this.context.trim();
+			// Johnny-trt.64: a member with its own (non-blank) brief sends it;
+			// a blank one omits the field so the server inherits `context`.
 			const group = await startBrowserSessionGroup({
-				agents: this.selectedAgentIds.map((id) => ({ agent_id: id })),
+				agents: this.selectedAgentIds.map((id) => {
+					const memberCtx = (this.agentContexts[id] ?? '').trim();
+					return { agent_id: id, ...(memberCtx ? { context: memberCtx } : {}) };
+				}),
 				account_id: this.selectedAccountId,
 				...(ctx ? { context: ctx } : {}),
 				...(overrides ? { provider_overrides: overrides } : {})

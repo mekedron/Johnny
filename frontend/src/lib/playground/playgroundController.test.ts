@@ -408,6 +408,21 @@ describe('playground multi-agent group mode (Johnny-trt.48)', () => {
 		assert.equal(c.isLive, false);
 	});
 
+	it('per-agent briefs ride members[].context; blank inherits the shared one (Johnny-trt.64)', async () => {
+		const c = new PlaygroundController();
+		c.setAgentContext(100, '  You are the IT reporting agent.  '); // trimmed
+		c.setAgentContext(101, '   '); // blank → omitted → server-side inherit
+		c.setAgentContext(999, 'ghost brief for an unselected agent'); // must not leak
+		c.context = 'Shared meeting brief.';
+		await startGroup(c, 10, ['Alex', 'Echo']);
+		const payload = vi.mocked(startBrowserSessionGroup).mock.calls[0][0];
+		assert.deepEqual(payload.agents, [
+			{ agent_id: 100, context: 'You are the IT reporting agent.' },
+			{ agent_id: 101 }
+		]);
+		assert.equal(payload.context, 'Shared meeting brief.');
+	});
+
 	it('sendText routes to the group endpoint; End group stops the group', async () => {
 		const c = new PlaygroundController();
 		await startGroup(c, 10, ['Alex', 'Echo']);

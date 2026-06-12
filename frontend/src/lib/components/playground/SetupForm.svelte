@@ -61,21 +61,37 @@
 				{#each controller.agents as a (a.id)}
 					{@const checked = controller.selectedAgentIds.includes(a.id)}
 					{@const order = controller.selectedAgentIds.indexOf(a.id)}
-					<label
-						class="flex cursor-pointer items-center gap-2.5 px-3 py-2 text-sm transition-colors hover:bg-surface-1"
-						data-testid={`playground-agent-option-${a.id}`}
-					>
-						<input
-							type="checkbox"
-							class="size-3.5 rounded-sm border border-border-strong bg-surface-3 [accent-color:var(--color-foreground)]"
-							{checked}
-							onchange={() => controller.toggleAgentSelection(a.id)}
-						/>
-						<span class="min-w-0 flex-1 truncate text-foreground">{agentLabel(a)}</span>
+					<div class="flex flex-col">
+						<label
+							class="flex cursor-pointer items-center gap-2.5 px-3 py-2 text-sm transition-colors hover:bg-surface-1"
+							data-testid={`playground-agent-option-${a.id}`}
+						>
+							<input
+								type="checkbox"
+								class="size-3.5 rounded-sm border border-border-strong bg-surface-3 [accent-color:var(--color-foreground)]"
+								{checked}
+								onchange={() => controller.toggleAgentSelection(a.id)}
+							/>
+							<span class="min-w-0 flex-1 truncate text-foreground">{agentLabel(a)}</span>
+							{#if checked && selectedCount >= 2}
+								<span class="shrink-0 font-mono text-[0.7rem] text-ink-subtle">#{order + 1}</span>
+							{/if}
+						</label>
 						{#if checked && selectedCount >= 2}
-							<span class="shrink-0 font-mono text-[0.7rem] text-ink-subtle">#{order + 1}</span>
+							<!-- Per-agent context brief (Johnny-trt.64) -->
+							<div class="px-3 pb-2.5 pl-9">
+								<textarea
+									value={controller.agentContexts[a.id] ?? ''}
+									oninput={(e) => controller.setAgentContext(a.id, e.currentTarget.value)}
+									rows={2}
+									class="{FIELD_CLASS} resize-y"
+									placeholder={`Context for ${agentLabel(a)} only — leave empty to inherit the shared Context below.`}
+									aria-label={`Context for ${agentLabel(a)}`}
+									data-testid={`playground-agent-context-${a.id}`}
+								></textarea>
+							</div>
 						{/if}
-					</label>
+					</div>
 				{/each}
 				{#if controller.agents.length === 0}
 					<p class="m-0 px-3 py-2 text-xs text-muted-foreground">
@@ -86,7 +102,8 @@
 			<p class="m-0 text-xs text-muted-foreground" data-testid="playground-agent-hint">
 				{#if selectedCount >= 2}
 					Multi-agent group: one session per agent behind one mic — they share the speech
-					floor and hear each other (Johnny-trt.48).
+					floor and hear each other (Johnny-trt.48). Each agent's own context applies to
+					it alone; agents left empty inherit the shared Context below.
 				{:else if selectedAgent}
 					{selectedAgent.description?.trim() ||
 						`Mode: ${selectedAgent.mode.replaceAll('_', ' ')}.`}
@@ -111,9 +128,16 @@
 				data-testid="playground-context-input"
 			></textarea>
 			<p class="m-0 text-xs text-muted-foreground">
-				Injected into the agent's instructions as <code
-					class="rounded-xs bg-surface-2 px-1 py-0.5 text-[0.7rem]">Context</code
-				> — the same slot a meeting assignment's context uses.
+				{#if selectedCount >= 2}
+					Shared brief for the group — inherited by every agent without its own context
+					above, into the same <code class="rounded-xs bg-surface-2 px-1 py-0.5 text-[0.7rem]"
+						>Context</code
+					> slot.
+				{:else}
+					Injected into the agent's instructions as <code
+						class="rounded-xs bg-surface-2 px-1 py-0.5 text-[0.7rem]">Context</code
+					> — the same slot a meeting assignment's context uses.
+				{/if}
 			</p>
 		</div>
 
