@@ -618,6 +618,29 @@ async def _start_one_session(
     if agent is not None:
         row.agent_id = agent.id
         row.bot_name = agent.name
+        # Resolved capability policy (Johnny-trt.38): global → this agent →
+        # the 'meet' mode → this session's override, frozen at dispatch so
+        # turn-time enforcement reads the snapshot. Guarded separately from
+        # the snapshot freeze below: a policy-resolution failure degrades to
+        # no key (= unrestricted downstream, the pre-trt.38 behavior), never
+        # to a contract-defaults launch.
+        capability_policy: dict[str, Any] | None = None
+        try:
+            from app.services.capability_policies import resolve_capability_policy
+
+            capability_policy = resolve_capability_policy(
+                session,
+                agent_id=agent.id,
+                session_mode=BotSessionSource.MEET.value,
+                bot_session_id=row.id,
+            ).to_payload()
+        except Exception:  # noqa: BLE001 — policy must never block a launch
+            logger.exception(
+                "capability-policy resolution failed for meeting_config=%s "
+                "agent=%s; launching unrestricted",
+                meeting.id,
+                getattr(agent, "id", None),
+            )
         try:
             from app.services.agents import build_agent_snapshot
 
@@ -628,6 +651,7 @@ async def _start_one_session(
                 # agents — drives the router's peer-selectivity prompt block
                 # in multi-agent meetings; empty for single-agent launches.
                 peer_names=_peer_agent_names(meeting, agent),
+                capability_policy=capability_policy,
             )
             row.agent_snapshot = agent_snapshot
         except Exception:  # noqa: BLE001 — never block a launch on agent errors

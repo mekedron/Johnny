@@ -78,6 +78,7 @@ from johnny.voice_pipeline.events import (
     InterruptionWho,
     PipelineTiming,
     PipelineTimingStage,
+    PolicyDenied,
     RouterDecisionMade,
     TranscriptFinalized,
     TranscriptInterim,
@@ -210,6 +211,28 @@ class RecordInterruption(Protocol):
         speech_kind: SpokenKind,
         turn_id: str | None = None,
         partial_kept: bool = False,
+    ) -> Awaitable[None]: ...
+
+
+class RecordPolicyDenied(Protocol):
+    """Publish one enforced capability-policy denial (Johnny-trt.38).
+
+    Called by the gate when a delegate verdict targeting a policy-hidden
+    kind is degraded to the spoken decline (the trt.55 backstop with a
+    policy-flavored gap). ``capability`` is the denied kind, ``layer`` /
+    ``rule`` / ``layer_detail`` the resolved attribution off the catalog
+    entry, ``turn_id`` the LiveKit ``str`` turn id (resolved to the durable
+    int by the builder, the :class:`RecordInterruption` discipline).
+    """
+
+    def __call__(
+        self,
+        capability: str,
+        *,
+        layer: str,
+        rule: str = "",
+        layer_detail: str = "",
+        turn_id: str | None = None,
     ) -> Awaitable[None]: ...
 
 
@@ -614,6 +637,60 @@ def build_interruption_emitter(
         except Exception:
             logger.exception(
                 "failed to publish interruption_recorded for session=%s turn=%s",
+                session_id,
+                turn_id,
+            )
+
+    return _record
+
+
+def build_policy_denied_emitter(
+    event_bus: EventBus,
+    turn_index: TurnIndex,
+    *,
+    session_started_at: float = 0.0,
+    session_id: str | None = None,
+    clock: Callable[[], float] = time.time,
+) -> RecordPolicyDenied:
+    """Build the gate's ``PolicyDenied`` emitter (Johnny-trt.38).
+
+    Publishes the policy-enforcement record the subscriber persists to
+    ``conversation_events`` (``reason`` = the denying layer). Timestamp and
+    turn-id conventions are :func:`build_interruption_emitter`'s; the
+    surface is always ``router_gate`` here — the worker and sandbox-exec
+    surfaces publish their own events from the worker process. Defensive:
+    a failing bus is logged, never raised into the turn loop.
+    """
+
+    async def _record(
+        capability: str,
+        *,
+        layer: str,
+        rule: str = "",
+        layer_detail: str = "",
+        turn_id: str | None = None,
+    ) -> None:
+        now = clock()
+        if session_started_at > 0:
+            timestamp_ms = round((now - session_started_at) * 1000)
+        else:
+            timestamp_ms = round(now * 1000)
+        event = PolicyDenied(
+            capability=capability,
+            layer=layer,
+            rule=rule,
+            layer_detail=layer_detail,
+            capability_kind="tool",
+            surface="router_gate",
+            timestamp_ms=max(0, timestamp_ms),
+            turn_id=turn_index.resolve(turn_id) if turn_id is not None else None,
+            session_id=session_id,
+        )
+        try:
+            await event_bus.publish(event)
+        except Exception:
+            logger.exception(
+                "failed to publish policy_denied for session=%s turn=%s",
                 session_id,
                 turn_id,
             )
@@ -1098,6 +1175,7 @@ __all__ = [
     "Observability",
     "RecordDecision",
     "RecordInterruption",
+    "RecordPolicyDenied",
     "RecordSpoke",
     "RecordSuggested",
     "RecordTriageTiming",
@@ -1109,6 +1187,7 @@ __all__ = [
     "build_decision_emitter",
     "build_interruption_emitter",
     "build_observability",
+    "build_policy_denied_emitter",
     "build_session_terminal_emitter",
     "build_spoke_emitter",
     "build_suggested_emitter",

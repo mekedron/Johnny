@@ -1685,6 +1685,97 @@ async def test_ackless_delegate_on_unavailable_kind_declines_not_speaks() -> Non
     await h.drain()
 
 
+async def test_delegate_targeting_policy_hidden_kind_declines_and_emits_event() -> None:
+    """Johnny-trt.38: a delegate verdict forced onto a policy-HIDDEN kind
+    (absent from every rendered prompt block) degrades to the spoken policy
+    decline, queues nothing, stamps the policy-flavored gap marker, and
+    fires the policy_denied emitter naming the denying layer."""
+    from johnny.agent.task_catalog import render_capability_notes, render_task_catalog
+    from johnny.skills.capability_policy import (
+        POLICY_DENIED_SPOKEN_REASON,
+        CapabilityPolicyLayer,
+        apply_policy_to_catalog,
+        resolve_policy,
+    )
+
+    policy = resolve_policy(
+        [
+            CapabilityPolicyLayer.from_document(
+                "agent", {"tools_allow": ["session.end"]}, scope_detail="Progress Bot"
+            )
+        ]
+    )
+    catalog = apply_policy_to_catalog(_capability_catalog(), policy)
+    # The canonical scenario: the denied kind is rendered NOWHERE...
+    assert "google-calendar" not in render_task_catalog(catalog)
+    assert "google-calendar" not in render_capability_notes(catalog)
+    # ...but stays in the tuple, and remains executor-known (trt.62 must not
+    # swallow it as an unknown kind — the policy decline owns the turn).
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="google-calendar")],
+        config=RouterGateConfig(
+            task_catalog=catalog,
+            executor_kinds=frozenset({"google-calendar", "session.end"}),
+        ),
+    )
+    denials: list[dict[str, Any]] = []
+
+    async def _record_policy_denied(capability: str, **kwargs: Any) -> None:
+        denials.append({"capability": capability, **kwargs})
+
+    h.gate._record_policy_denied = _record_policy_denied
+    msg = _user_msg("run the calendar check")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    # The spoken decline is the policy reason; nothing was queued.
+    assert h.say.texts == [POLICY_DENIED_SPOKEN_REASON]
+    assert h.sink.snapshot() == []
+    # The gap marker carries the policy attribution (trt.50 ride-along).
+    decision, _turn = h.obs.decisions[0]
+    marker = decision.raw[CAPABILITY_GAP_KEY]
+    assert marker["kind"] == "google-calendar"
+    assert marker["policy"] == {"layer": "agent", "rule": "allow-list"}
+    assert UNKNOWN_KIND_KEY not in decision.raw
+    json.dumps(marker)  # JSON-safe as persisted by the subscriber
+    # The policy_denied emitter fired once, naming the layer + the turn.
+    assert denials == [
+        {
+            "capability": "google-calendar",
+            "layer": "agent",
+            "rule": "allow-list",
+            "layer_detail": "",
+            "turn_id": msg.id,
+        }
+    ]
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_plain_unavailable_gap_does_not_fire_the_policy_emitter() -> None:
+    """An ordinary trt.55 capability gap (no policy involved) must never emit
+    policy_denied — the event means POLICY enforcement, nothing else."""
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="google-calendar")],
+        config=RouterGateConfig(task_catalog=_capability_catalog()),
+    )
+    denials: list[Any] = []
+
+    async def _record_policy_denied(capability: str, **kwargs: Any) -> None:
+        denials.append(capability)
+
+    h.gate._record_policy_denied = _record_policy_denied
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("check the calendar"))
+
+    assert h.say.texts == [_UNAVAILABLE_REASON]
+    assert denials == []
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
 async def test_triage_timing_carries_status_after_capability_degrade() -> None:
     """The timing row carries the *effective* action for a gap-degraded turn
     (the trt.53 effective-action precedent applied to trt.55)."""

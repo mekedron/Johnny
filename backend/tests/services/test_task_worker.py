@@ -21,7 +21,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.db import Base
-from app.db.models import AgentTask, AgentTaskStatus
+from app.db.models import AgentTask, AgentTaskStatus, BotSession, CapabilityPolicy
 from app.services.task_worker import (
     ClaimedTask,
     TaskWorker,
@@ -43,9 +43,19 @@ def engine() -> sa.Engine:
         connect_args={"check_same_thread": False},
         poolclass=sa.pool.StaticPool,
     )
-    # agent_tasks only — SQLite doesn't enforce the FKs (the task-sink
-    # tests' fixture pattern).
-    Base.metadata.create_all(bind=eng, tables=[AgentTask.__table__])  # type: ignore[list-item]
+    # agent_tasks plus the two tables the per-claim capability-policy
+    # resolution reads (Johnny-trt.38: bot_sessions for the session's
+    # coordinates, capability_policies for the layer rows — empty = the
+    # unrestricted default). SQLite doesn't enforce the remaining FKs (the
+    # task-sink tests' fixture pattern).
+    Base.metadata.create_all(
+        bind=eng,
+        tables=[
+            AgentTask.__table__,  # type: ignore[list-item]
+            BotSession.__table__,  # type: ignore[list-item]
+            CapabilityPolicy.__table__,  # type: ignore[list-item]
+        ],
+    )
     return eng
 
 
@@ -588,3 +598,170 @@ async def test_claimed_task_dataclass_is_event_ready() -> None:
     queued = claimed.as_queued_task()
     assert queued.spec.decision_id is None
     assert queued.spec.turn_id == 4
+
+
+# --- capability-policy enforcement (Johnny-trt.38) ---------------------------
+#
+# Enforcement point #2: the worker resolves the policy FRESH per claimed task
+# and refuses denied kinds before any executor work — the no-restart
+# acceptance ("globally denying a tool blocks executor use on the next turn")
+# at unit level, plus the policy_denied announcement naming the layer.
+
+
+def _insert_session(
+    db: Session, *, session_id: int | None = None, agent_id: int | None = None
+) -> int:
+    from app.db.models import BotSessionSource, BotSessionStatus
+
+    row = BotSession(
+        source=BotSessionSource.BROWSER,
+        status=BotSessionStatus.JOINED,
+        agent_id=agent_id,
+    )
+    if session_id is not None:
+        row.id = session_id
+    db.add(row)
+    db.commit()
+    return int(row.id)
+
+
+def _insert_policy(
+    db: Session,
+    *,
+    scope: str = "global",
+    document: dict | None = None,
+    **target: Any,
+) -> None:
+    row = CapabilityPolicy(scope=scope, document=document or {}, **target)
+    db.add(row)
+    db.commit()
+
+
+def _capture_events(worker: TaskWorker) -> list[Any]:
+    events: list[Any] = []
+
+    async def _capture(event: Any) -> None:
+        events.append(event)
+
+    worker._publish = _capture  # type: ignore[method-assign]
+    return events
+
+
+async def test_loop_denies_policy_blocked_kind_without_running_executor(
+    db: Session, session_factory: sessionmaker[Session]
+) -> None:
+    session_id = _insert_session(db)
+    _insert_policy(db, document={"tools_deny": ["calendar.upcoming_events"]})
+    task_id = _insert(db, bot_session_id=session_id)
+
+    async def executor(task: QueuedTask) -> TaskResult:
+        raise AssertionError("a policy-denied kind must never reach the executor")
+
+    worker = _worker(session_factory, executor=executor)
+    events = _capture_events(worker)
+    await _run_until(
+        worker, lambda: _row(db, task_id).status == AgentTaskStatus.FAILED
+    )
+    row = _row(db, task_id)
+    assert "policy" in (row.result_text or "")
+    assert "global" in (row.error or "")  # the denying layer is recorded
+
+    denied = [e for e in events if getattr(e, "type", "") == "policy_denied"]
+    assert len(denied) == 1
+    assert denied[0].layer == "global"
+    assert denied[0].capability == "calendar.upcoming_events"
+    assert denied[0].surface == "worker"
+    assert denied[0].turn_id == 4
+
+
+async def test_policy_edit_bites_the_next_claim_without_restart(
+    db: Session, session_factory: sessionmaker[Session]
+) -> None:
+    """THE no-restart acceptance, unit-pinned: the same live worker runs a
+    kind, the operator denies it, the very next row settles policy-failed."""
+    session_id = _insert_session(db)
+    first_id = _insert(db, bot_session_id=session_id)
+
+    async def executor(task: QueuedTask) -> TaskResult:
+        return TaskResult(status="done", result_text="ran")
+
+    worker = _worker(session_factory, executor=executor)
+    runner = asyncio.ensure_future(worker.run())
+    deadline = asyncio.get_running_loop().time() + 5.0
+    try:
+        while _row(db, first_id).status != AgentTaskStatus.DONE:
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.02)
+
+        # The operator denies the kind — no restart, same worker loop.
+        _insert_policy(db, document={"tools_deny": ["calendar.*"]})
+        second_id = _insert(db, bot_session_id=session_id)
+        deadline = asyncio.get_running_loop().time() + 5.0
+        while _row(db, second_id).status != AgentTaskStatus.FAILED:
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.02)
+        assert "policy" in (_row(db, second_id).result_text or "")
+    finally:
+        worker.request_stop()
+        await asyncio.wait_for(runner, timeout=10.0)
+
+
+async def test_loop_session_mode_layer_scopes_denials_to_the_surface(
+    db: Session, session_factory: sessionmaker[Session]
+) -> None:
+    """A 'meet'-mode deny must not block a browser session's task."""
+    session_id = _insert_session(db)  # source='browser'
+    _insert_policy(
+        db,
+        scope="session_mode",
+        session_mode="meet",
+        document={"tools_deny": ["calendar.upcoming_events"]},
+    )
+    task_id = _insert(db, bot_session_id=session_id)
+
+    async def executor(task: QueuedTask) -> TaskResult:
+        return TaskResult(status="done", result_text="ran on browser")
+
+    worker = _worker(session_factory, executor=executor)
+    await _run_until(worker, lambda: _row(db, task_id).status == AgentTaskStatus.DONE)
+
+
+async def test_loop_browser_mode_deny_blocks_browser_session(
+    db: Session, session_factory: sessionmaker[Session]
+) -> None:
+    session_id = _insert_session(db)
+    _insert_policy(
+        db,
+        scope="session_mode",
+        session_mode="browser",
+        document={"tools_deny": ["calendar.upcoming_events"]},
+    )
+    task_id = _insert(db, bot_session_id=session_id)
+
+    async def executor(task: QueuedTask) -> TaskResult:
+        raise AssertionError("mode-denied kind must not run")
+
+    worker = _worker(session_factory, executor=executor)
+    events = _capture_events(worker)
+    await _run_until(worker, lambda: _row(db, task_id).status == AgentTaskStatus.FAILED)
+    denied = [e for e in events if getattr(e, "type", "") == "policy_denied"]
+    assert denied and denied[0].layer == "session_mode"
+
+
+async def test_loop_fails_closed_when_policy_resolution_breaks(
+    db: Session, session_factory: sessionmaker[Session], engine: sa.Engine
+) -> None:
+    """A broken policy read settles could-not-verify failed — never runs."""
+    session_id = _insert_session(db)
+    task_id = _insert(db, bot_session_id=session_id)
+    # Break the policy table out from under the resolver.
+    with engine.begin() as conn:
+        conn.execute(sa.text("DROP TABLE capability_policies"))
+
+    async def executor(task: QueuedTask) -> TaskResult:
+        raise AssertionError("must fail closed before the executor")
+
+    worker = _worker(session_factory, executor=executor)
+    await _run_until(worker, lambda: _row(db, task_id).status == AgentTaskStatus.FAILED)
+    row = _row(db, task_id)
+    assert "couldn't verify" in (row.result_text or "")

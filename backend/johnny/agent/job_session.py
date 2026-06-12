@@ -84,6 +84,7 @@ from johnny.agent.observability import (
     MetricsTranslator,
     build_decision_emitter,
     build_interruption_emitter,
+    build_policy_denied_emitter,
     build_session_terminal_emitter,
     build_spoke_emitter,
     build_suggested_emitter,
@@ -101,6 +102,7 @@ from johnny.agent.speech_floor import (
 )
 from johnny.agent.task_catalog import render_capability_notes
 from johnny.agent.tasks import TaskCoordinator, stub_executor
+from johnny.skills.capability_policy import apply_policy_to_catalog
 from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder, build_recorder_from_env
 from johnny.voice_pipeline.event_bus import (
     DEFAULT_CHANNEL_PREFIX,
@@ -795,12 +797,24 @@ async def build_agent_runtime(
     # skills volume, each carrying its trt.55 availability verdict
     # (credentials/env evaluated at this assembly — the session's
     # frozen snapshot).
+    # The capability policy resolved at dispatch rides the agent snapshot
+    # (Johnny-trt.38) — re-read HERE, never from the policy tables. Applied
+    # to the merged catalog below: a policy-denied kind becomes a hidden
+    # unavailable entry — absent from every rendered prompt block (the
+    # canonical least-privilege scenario: the progress agent's prompt never
+    # even mentions finance kinds), still present in the tuple so the gate's
+    # unavailable backstop degrades a forced delegate to the spoken decline
+    # and emits the policy_denied event naming the layer.
+    capability_policy = config.capability_policy()
     task_catalog = (
-        merge_task_catalog(
-            internal_catalog_entries(
-                meeting_backed=config.calendar_event_id is not None
+        apply_policy_to_catalog(
+            merge_task_catalog(
+                internal_catalog_entries(
+                    meeting_backed=config.calendar_event_id is not None
+                ),
+                skill_registry.catalog_entries() if skill_registry is not None else (),
             ),
-            skill_registry.catalog_entries() if skill_registry is not None else (),
+            capability_policy,
         )
         if task_coordinator is not None
         else ()
@@ -889,6 +903,15 @@ async def build_agent_runtime(
         # who interrupted whom and the onset→audio-stop cut latency. Same
         # session-start reference as the timing emitters above.
         record_interruption=build_interruption_emitter(
+            bus,
+            turn_index,
+            session_started_at=session_started_at,
+            session_id=session_id,
+        ),
+        # Policy enforcement (Johnny-trt.38): one PolicyDenied per delegate
+        # verdict degraded over a policy-hidden kind, persisted by the
+        # subscriber to ``conversation_events`` with the denying layer.
+        record_policy_denied=build_policy_denied_emitter(
             bus,
             turn_index,
             session_started_at=session_started_at,

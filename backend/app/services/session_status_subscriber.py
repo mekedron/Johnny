@@ -888,6 +888,20 @@ def apply_conversation_event(db: Session, payload: dict[str, Any]) -> bool:
         details = {
             "text_match_hits": _coerce_int_id(payload.get("text_match_hits")) or 0
         }
+    elif event_type == "policy_denied":
+        # Johnny-trt.38: ``reason`` carries the DENYING LAYER (the acceptance
+        # headline — "a policy-denied event naming the layer"); the
+        # capability, matching rule, layer target, and enforcement surface
+        # ride ``details``.
+        turn_id = _coerce_int_id(payload.get("turn_id"))
+        reason = str(payload.get("layer") or "")
+        details = {
+            "capability": str(payload.get("capability") or ""),
+            "capability_kind": str(payload.get("capability_kind") or "tool"),
+            "rule": str(payload.get("rule") or ""),
+            "layer_detail": str(payload.get("layer_detail") or ""),
+            "surface": str(payload.get("surface") or ""),
+        }
 
     row = ConversationEvent(
         bot_session_id=session_id,

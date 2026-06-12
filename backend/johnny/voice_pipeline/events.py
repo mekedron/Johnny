@@ -41,6 +41,7 @@ FloorExpiredEventType = Literal["floor_expired"]
 TurnClaimWonEventType = Literal["turn_claim_won"]
 TurnClaimLostEventType = Literal["turn_claim_lost"]
 PeerSpeechSuppressedEventType = Literal["peer_speech_suppressed"]
+PolicyDeniedEventType = Literal["policy_denied"]
 
 InterruptionWho = Literal["user_over_bot", "bot_cut_by_stop"]
 """Who cut the bot's speech off (Johnny-trt.49).
@@ -866,6 +867,42 @@ class PeerSpeechSuppressed:
 
 
 @dataclass(frozen=True, slots=True)
+class PolicyDenied:
+    """A capability-policy denial was ENFORCED (Johnny-trt.38).
+
+    Emitted at the three enforcement points — never for the silent catalog
+    filtering (an unrendered kind is configuration, not an event):
+
+    * ``surface="router_gate"`` — a delegate verdict targeted a
+      policy-hidden kind and was degraded to the spoken decline (the trt.55
+      backstop with a policy-flavored gap);
+    * ``surface="worker"`` — the executor pass refused a claimed task whose
+      kind the freshly-resolved policy denies (the no-restart enforcement);
+    * ``surface="sandbox_exec"`` — the exec bin policy blocked a binary the
+      capability policy denies (a ``bins_deny`` glob or a removed baseline
+      bin).
+
+    ``layer`` names the DENYING LAYER (``global`` / ``agent`` /
+    ``session_mode`` / ``session``) — the acceptance headline, persisted to
+    ``conversation_events.reason``; ``rule`` is the matching pattern (or
+    ``allow-list`` / ``removed from safe-bins``), ``layer_detail`` the
+    deciding layer's target (agent name, mode, session id).
+    ``capability`` is the tool kind or binary name per ``capability_kind``.
+    """
+
+    capability: str
+    layer: str
+    timestamp_ms: int
+    capability_kind: str = "tool"
+    rule: str = ""
+    layer_detail: str = ""
+    surface: str = "router_gate"
+    turn_id: int | None = None
+    session_id: str | None = None
+    type: PolicyDeniedEventType = "policy_denied"
+
+
+@dataclass(frozen=True, slots=True)
 class PipelineTiming:
     """One measured stage timing for the per-turn activity log (Johnny-ckz.7).
 
@@ -930,6 +967,7 @@ PipelineEvent = (
     | TurnClaimWon
     | TurnClaimLost
     | PeerSpeechSuppressed
+    | PolicyDenied
 )
 """Union of every event the pipeline emits."""
 
@@ -966,6 +1004,7 @@ __all__ = [
     "NoReplyReason",
     "PipelineTiming",
     "PipelineTimingStage",
+    "PolicyDenied",
     "RouterDecisionMade",
     "SessionStatus",
     "SessionStatusChanged",

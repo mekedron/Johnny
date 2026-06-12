@@ -230,6 +230,46 @@ def test_snapshot_is_detached_from_the_live_row(db_session: Session) -> None:
     assert snapshot["name"] == "Mika"
 
 
+def test_snapshot_carries_the_resolved_capability_policy(db_session: Session) -> None:
+    """Johnny-trt.38: the RESOLVED policy payload rides the snapshot to
+    turn-time enforcement; absent (None) keeps the legacy key-less shape and
+    the job-config read degrades to unrestricted."""
+    from johnny.agent.job_config import SessionJobConfig
+    from johnny.skills.capability_policy import (
+        CapabilityPolicyLayer,
+        resolve_policy,
+    )
+
+    agent = _agent(db_session, "Mika")
+    bare = build_agent_snapshot(agent)
+    assert "capability_policy" not in bare
+    assert SessionJobConfig(
+        bot_session_id=1, room_name="r", agent_snapshot=bare
+    ).capability_policy().tools_unrestricted
+
+    policy = resolve_policy(
+        [
+            CapabilityPolicyLayer.from_document(
+                "agent", {"tools_allow": ["google-calendar"]}, scope_detail="Mika"
+            )
+        ]
+    )
+    stamped = build_agent_snapshot(agent, capability_policy=policy.to_payload())
+    assert stamped["capability_policy"]["layers"][0]["scope"] == "agent"
+
+    rebuilt = SessionJobConfig(
+        bot_session_id=1, room_name="r", agent_snapshot=stamped
+    ).capability_policy()
+    assert rebuilt.check_tool("google-calendar").allowed
+    denied = rebuilt.check_tool("financial-reports")
+    assert not denied.allowed and denied.layer == "agent" and denied.detail == "Mika"
+
+    # Plain JSON-able — what bot_sessions.agent_snapshot stores verbatim.
+    import json
+
+    assert json.loads(json.dumps(stamped)) == stamped
+
+
 def test_snapshot_behavior_rides_the_dispatch_contract_into_the_gate(
     db_session: Session,
 ) -> None:

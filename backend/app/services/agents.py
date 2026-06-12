@@ -153,6 +153,7 @@ def build_agent_snapshot(
     *,
     assignment_context: str | None = None,
     peer_names: Sequence[str] | None = None,
+    capability_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Freeze the agent's behavior + provider pins for ``bot_sessions.agent_snapshot``.
 
@@ -167,7 +168,28 @@ def build_agent_snapshot(
     launch — the OTHER agents' display names serving the same meeting /
     playground group. It drives the router's peer-selectivity prompt block;
     absent/empty (every single-agent launch) renders no block at all.
+
+    ``capability_policy`` (Johnny-trt.38) is the RESOLVED policy payload
+    (:meth:`johnny.skills.capability_policy.ResolvedCapabilityPolicy.to_payload`,
+    via :func:`app.services.capability_policies.resolve_capability_policy`)
+    for this session's coordinates — stamped at dispatch so turn-time
+    enforcement (catalog filtering, the gate's degrade) reads the snapshot,
+    never the policy tables. ``None`` (legacy snapshots, policy-less test
+    fixtures) degrades to the unrestricted pre-trt.38 behavior downstream.
     """
+    if capability_policy is not None:
+        return {
+            **_snapshot_base(agent, assignment_context, peer_names),
+            "capability_policy": dict(capability_policy),
+        }
+    return _snapshot_base(agent, assignment_context, peer_names)
+
+
+def _snapshot_base(
+    agent: Agent,
+    assignment_context: str | None,
+    peer_names: Sequence[str] | None,
+) -> dict[str, Any]:
     return {
         "agent_id": agent.id,
         "name": agent.name,

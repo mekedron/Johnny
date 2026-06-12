@@ -614,7 +614,11 @@ def _agent_overrides_fragment(resolution: AgentResolution) -> dict[str, Any]:
 
 
 def _effective_agent_snapshot(
-    resolution: AgentResolution, *, context: str | None
+    resolution: AgentResolution,
+    *,
+    context: str | None,
+    session: Session,
+    bot_session_id: int,
 ) -> dict[str, Any]:
     """The frozen behavior snapshot this session runs (Johnny-trt.45).
 
@@ -625,15 +629,42 @@ def _effective_agent_snapshot(
     saved brief for this run; no agent at all degrades to a minimal
     synthetic snapshot carrying the browser surface's autonomous default
     (a mute playground would read as broken).
+
+    The resolved capability policy (Johnny-trt.38: global → agent →
+    'browser' mode → this session's override) is stamped in for BOTH
+    branches — an agent-less playground is still policy-bound. A resolution
+    failure degrades to no key (= unrestricted downstream), never a blocked
+    start.
     """
     effective_context = (context or "").strip() or resolution.assignment_context
+    capability_policy: dict[str, Any] | None = None
+    try:
+        from app.services.capability_policies import resolve_capability_policy
+
+        capability_policy = resolve_capability_policy(
+            session,
+            agent_id=resolution.agent.id if resolution.agent is not None else None,
+            session_mode=BotSessionSource.BROWSER.value,
+            bot_session_id=bot_session_id,
+        ).to_payload()
+    except Exception:  # noqa: BLE001 — policy must never block a session start
+        logger.exception(
+            "browser session %s: capability-policy resolution failed; "
+            "launching unrestricted",
+            bot_session_id,
+        )
     if resolution.agent is None:
-        return {
+        snapshot: dict[str, Any] = {
             "mode": AGENTLESS_BROWSER_MODE,
             "assignment_context": effective_context or None,
         }
+        if capability_policy is not None:
+            snapshot["capability_policy"] = capability_policy
+        return snapshot
     return build_agent_snapshot(
-        resolution.agent, assignment_context=effective_context or None
+        resolution.agent,
+        assignment_context=effective_context or None,
+        capability_policy=capability_policy,
     )
 
 
@@ -714,7 +745,12 @@ def _build_spec_from_event(
         requested_id=payload.agent_id,
         meeting=meeting,
     )
-    agent_snapshot = _effective_agent_snapshot(resolution, context=payload.context)
+    agent_snapshot = _effective_agent_snapshot(
+        resolution,
+        context=payload.context,
+        session=session,
+        bot_session_id=bot_session_id,
+    )
     base_payload = _apply_agent_provider_pins(
         session,
         bot_session_id=bot_session_id,
@@ -798,7 +834,12 @@ def _build_spec_playground(
         requested_id=payload.agent_id,
         meeting=None,
     )
-    agent_snapshot = _effective_agent_snapshot(resolution, context=payload.context)
+    agent_snapshot = _effective_agent_snapshot(
+        resolution,
+        context=payload.context,
+        session=session,
+        bot_session_id=bot_session_id,
+    )
     base_payload = _apply_agent_provider_pins(
         session,
         bot_session_id=bot_session_id,

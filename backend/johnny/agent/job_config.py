@@ -183,6 +183,7 @@ SNAPSHOT_ALLOWED_REPLIES_KEY = "allowed_replies"
 SNAPSHOT_CONFIDENCE_THRESHOLD_KEY = "confidence_threshold"
 SNAPSHOT_ASSIGNMENT_CONTEXT_KEY = "assignment_context"
 SNAPSHOT_PEER_NAMES_KEY = "peer_names"
+SNAPSHOT_CAPABILITY_POLICY_KEY = "capability_policy"
 
 
 def _int_or_none(raw: str | None) -> int | None:
@@ -298,6 +299,24 @@ class SessionJobConfig:
         degrade to absent.
         """
         return _coerce_replies(self.agent_snapshot.get(SNAPSHOT_PEER_NAMES_KEY))
+
+    def capability_policy(self) -> Any:
+        """The resolved capability policy stamped at dispatch (Johnny-trt.38).
+
+        Returns a
+        :class:`johnny.skills.capability_policy.ResolvedCapabilityPolicy` —
+        rebuilt from the snapshot payload, NEVER from the policy tables (the
+        trt.41 no-turn-time-DB-reads rule). Lenient like the other snapshot
+        reads: a missing/malformed payload degrades to the unrestricted
+        policy (legacy snapshots keep their pre-trt.38 behavior). A method
+        rather than a property so the (import-cheap, but not free) policy
+        module loads only on delegation-capable assemblies.
+        """
+        from johnny.skills.capability_policy import ResolvedCapabilityPolicy
+
+        return ResolvedCapabilityPolicy.from_payload(
+            self.agent_snapshot.get(SNAPSHOT_CAPABILITY_POLICY_KEY)
+        )
 
     def with_mode(self, mode: str) -> SessionJobConfig:
         """A copy whose snapshot carries ``mode`` — the runtime degrade seam.

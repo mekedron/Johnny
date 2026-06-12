@@ -270,10 +270,16 @@ def evaluate_skill_availability(
     * ``requires.config`` is carried but not evaluated — no config registry
       exists yet to resolve it against.
 
-    Later dimensions join INSIDE this function, exactly like trt.55 joined
-    eligibility: Johnny-trt.38's per-agent policy scope and Johnny-trt.36's
-    MCP server health evaluate here, so the loader and every caller stay
-    unreshaped.
+    Later CAPABILITY dimensions (e.g. Johnny-trt.36's MCP server health)
+    join INSIDE this function, exactly like trt.55 joined eligibility, so
+    the loader and every caller stay unreshaped. Johnny-trt.38's capability
+    POLICY deliberately did NOT join here: a policy-denied kind must be
+    *hidden* from every rendered prompt block (the canonical least-privilege
+    scenario), which is stronger than unavailable-with-reason — it is
+    applied as a downstream catalog transform
+    (:func:`johnny.skills.capability_policy.apply_policy_to_catalog`) and at
+    the worker's claim gate, keeping this predicate policy-agnostic (the
+    registry is shared across agents whose policies differ).
 
     The returned reason is spoken-form and actionable by contract — it is
     rendered into the router prompt for the honest decline and spoken

@@ -986,6 +986,11 @@ CONVERSATION_EVENT_TYPES: tuple[str, ...] = (
     "turn_claim_won",
     "turn_claim_lost",
     "peer_speech_suppressed",
+    # Johnny-trt.38: a capability-policy denial was ENFORCED (a forced
+    # delegate degraded at the gate, a denied kind refused at the worker, a
+    # blocked binary stopped at sandbox.exec) — never emitted for the silent
+    # catalog filtering.
+    "policy_denied",
 )
 
 
@@ -1018,6 +1023,11 @@ class ConversationEvent(Base):
     * ``peer_speech_suppressed`` — ``agent_name`` = the peer whose floor
       window labeled the audio, ``duration_ms`` = window length,
       ``details`` = ``{text_match_hits}``.
+    * ``policy_denied`` (Johnny-trt.38) — ``reason`` = the DENYING LAYER
+      (``global`` / ``agent`` / ``session_mode`` / ``session`` — the
+      acceptance headline), ``turn_id`` = the refused turn when known,
+      ``details`` = ``{capability, capability_kind (tool|bin), rule,
+      layer_detail, surface (router_gate|worker|sandbox_exec)}``.
 
     ``timestamp_ms`` is the session-relative offset (the
     ``session_timings.started_at_ms`` time base) so the activity log can
@@ -1053,6 +1063,91 @@ class ConversationEvent(Base):
         server_default=func.now(),
         nullable=False,
     )
+
+
+CAPABILITY_POLICY_SCOPES: tuple[str, ...] = ("global", "agent", "session_mode", "session")
+"""Legal ``capability_policies.scope`` values (Johnny-trt.38) — identical to
+:data:`johnny.skills.capability_policy.POLICY_SCOPE_ORDER`, CHECK-enforced by
+the 0030 migration. Resolution merges rows in exactly this order."""
+
+CAPABILITY_POLICY_SESSION_MODES: tuple[str, ...] = ("meet", "browser")
+"""Legal ``capability_policies.session_mode`` values — the
+:class:`BotSessionSource` vocabulary (meeting sessions vs the
+playground/conversation surface), CHECK-enforced by the 0030 migration."""
+
+
+class CapabilityPolicy(TimestampMixin, Base):
+    """One capability-policy scope layer (Johnny-trt.38).
+
+    DB-backed like provider settings: at most ONE row per scope target —
+    the single global row, one per agent, one per session mode (``meet`` /
+    ``browser``), one per bot session (the per-session override) — enforced
+    by partial unique indexes; the target-shape rules (exactly the matching
+    key column set for each scope) are CHECK-enforced by the 0030 migration.
+
+    ``document`` is the policy document
+    (:meth:`johnny.skills.capability_policy.CapabilityPolicyLayer.to_document`):
+    ``tools_allow`` / ``tools_also_allow`` / ``tools_deny`` / ``bins_deny``
+    glob lists, plus ``safe_bins`` (the edited trt.35 baseline; global row
+    only — its absence means the built-in baseline, so "reset to default"
+    is deleting the key). Resolution
+    (:func:`johnny.skills.capability_policy.resolve_policy`) merges the
+    matching rows global → agent → session_mode → session with deny winning
+    at every merge; the resolved policy rides ``bot_sessions.agent_snapshot``
+    to turn-time enforcement and is re-read fresh per claimed task by the
+    worker — there is no cache to invalidate, so edits bite without a
+    restart (the provider-settings update model).
+
+    Deleting an agent / session cascades its layer rows away; the global and
+    session-mode rows have no parent to cascade from.
+    """
+
+    __tablename__ = "capability_policies"
+    __table_args__ = (
+        Index(
+            "uq_capability_policies_global",
+            "scope",
+            unique=True,
+            postgresql_where=text("scope = 'global'"),
+            sqlite_where=text("scope = 'global'"),
+        ),
+        Index(
+            "uq_capability_policies_agent",
+            "agent_id",
+            unique=True,
+            postgresql_where=text("agent_id IS NOT NULL"),
+            sqlite_where=text("agent_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_capability_policies_session_mode",
+            "session_mode",
+            unique=True,
+            postgresql_where=text("session_mode IS NOT NULL"),
+            sqlite_where=text("session_mode IS NOT NULL"),
+        ),
+        Index(
+            "uq_capability_policies_session",
+            "bot_session_id",
+            unique=True,
+            postgresql_where=text("bot_session_id IS NOT NULL"),
+            sqlite_where=text("bot_session_id IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    agent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="CASCADE"), nullable=True
+    )
+    session_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    bot_session_id: Mapped[int | None] = mapped_column(
+        ForeignKey("bot_sessions.id", ondelete="CASCADE"), nullable=True
+    )
+    document: Mapped[dict[str, Any]] = mapped_column(
+        _json_column(), nullable=False, default=dict
+    )
+
+    agent: Mapped[Agent | None] = relationship()
 
 
 class ProviderCredential(TimestampMixin, Base):

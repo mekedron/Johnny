@@ -49,6 +49,15 @@ class TaskCatalogEntry:
     give unavailable entries ``keywords=()`` so the trt.50 delegate prior
     never fires for work the session cannot do (the scorer reads entries
     verbatim and deliberately does not re-check this flag).
+
+    ``hidden`` (Johnny-trt.38): a POLICY-denied kind is carried
+    ``hidden=True, available=False`` — both renderers skip it entirely (the
+    canonical least-privilege scenario: a denied capability is never even
+    *mentioned* in any prompt), but the entry stays in the catalog tuple so
+    the gate's unavailable backstop still degrades a forced delegate to the
+    spoken decline. ``policy_layer`` / ``policy_rule`` carry the deciding
+    layer for the ``policy_denied`` observability event — machine fields,
+    never rendered.
     """
 
     kind: str
@@ -56,6 +65,9 @@ class TaskCatalogEntry:
     keywords: tuple[str, ...] = field(default=())
     available: bool = True
     unavailable_reason: str = ""
+    hidden: bool = False
+    policy_layer: str = ""
+    policy_rule: str = ""
 
 
 STUB_TASK_CATALOG: tuple[TaskCatalogEntry, ...] = (
@@ -142,8 +154,15 @@ def render_task_catalog(entries: tuple[TaskCatalogEntry, ...]) -> str:
     """
     if not entries:
         return ""
-    available = tuple(entry for entry in entries if entry.available)
-    unavailable = tuple(entry for entry in entries if not entry.available)
+    # Policy-hidden entries (Johnny-trt.38) render NOWHERE — not in the
+    # delegatable block, not in the unavailable block: the canonical
+    # least-privilege scenario forbids the prompt from even naming a
+    # policy-denied kind. The gate's backstop still sees them in the tuple.
+    visible = tuple(entry for entry in entries if not entry.hidden)
+    if not visible:
+        return ""
+    available = tuple(entry for entry in visible if entry.available)
+    unavailable = tuple(entry for entry in visible if not entry.available)
     blocks: list[str] = []
     if available:
         lines = [
@@ -228,7 +247,9 @@ def render_capability_notes(entries: tuple[TaskCatalogEntry, ...]) -> str:
     byte-identical (the replay-parity stance). Same rows and caps as the
     router block — one source of truth for the spoken reasons.
     """
-    unavailable = tuple(entry for entry in entries if not entry.available)
+    unavailable = tuple(
+        entry for entry in entries if not entry.available and not entry.hidden
+    )
     if not unavailable:
         return ""
     header = (

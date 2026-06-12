@@ -1,8 +1,8 @@
 {
-  "id": "f4fb140c-9756-44b7-9e78-53011395bd27",
+  "id": "3d476ec0-b6b4-4e27-bac1-955df71159b4",
   "status": "running",
-  "startedAt": "2026-06-12T08:54:27.000Z",
-  "updatedAt": "2026-06-12T09:21:57.371Z",
+  "startedAt": "2026-06-12T10:56:48.997Z",
+  "updatedAt": "2026-06-12T10:56:48.997Z",
   "agentPlugin": "claude",
   "trackerPlugin": "beads-bv",
   "epicId": "Johnny-trt",
@@ -21,9 +21,9 @@
       }
     }
   ],
-  "currentIteration": 2,
+  "currentIteration": 0,
   "maxIterations": 0,
   "totalTasks": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 0,
   "cwd": "/Users/nikita/Projects/Johnny"
 }

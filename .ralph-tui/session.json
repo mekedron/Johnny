@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "sessionId": "f4fb140c-9756-44b7-9e78-53011395bd27",
+  "sessionId": "3d476ec0-b6b4-4e27-bac1-955df71159b4",
   "status": "running",
-  "startedAt": "2026-06-12T08:54:49.014Z",
-  "updatedAt": "2026-06-12T10:22:36.217Z",
-  "currentIteration": 2,
+  "startedAt": "2026-06-12T10:57:09.857Z",
+  "updatedAt": "2026-06-12T12:28:13.214Z",
+  "currentIteration": 0,
   "maxIterations": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 0,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -28,7 +28,7 @@
         }
       }
     ],
-    "totalTasks": 66,
+    "totalTasks": 68,
     "tasks": [
       {
         "id": "Johnny-trt.1",
@@ -315,7 +315,7 @@
       {
         "id": "Johnny-trt.47",
         "title": "[BUILD] Phase 6: Multi-agent turn arbitration — turn claims + router peer selectivity",
-        "status": "open",
+        "status": "completed",
         "completedInSession": false
       },
       {
@@ -373,12 +373,6 @@
         "completedInSession": false
       },
       {
-        "id": "Johnny-cxu",
-        "title": "Real 20-turn p50/p95 latency capture on configured local providers (depends on Johnny-ckz.7)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
         "id": "Johnny-trt.57",
         "title": "[BUILD] Phase 4: Internal tools — first-party in-app actions (meeting.leave, session.end) callable by voice",
         "status": "completed",
@@ -391,20 +385,26 @@
         "completedInSession": false
       },
       {
-        "id": "Johnny-1qr",
-        "title": "[BUILD] Optional: en-only in-process semantic turn detector on the browser session",
+        "id": "Johnny-cxu",
+        "title": "Real 20-turn p50/p95 latency capture on configured local providers (depends on Johnny-ckz.7)",
         "status": "completed",
         "completedInSession": false
       },
       {
         "id": "Johnny-trt.59",
         "title": "[MEASURE] Phase-3 router schema costs +568ms p50 triage on the 3B local router — slim the payload or accept as the trt.51/41/42 price",
-        "status": "open",
+        "status": "completed",
         "completedInSession": false
       },
       {
         "id": "Johnny-trt.60",
         "title": "[CHORE] Phase 5: Final tool-correctness verification — calendar answers match ground truth end-to-end (ask → ack → execute → spoken result)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-1qr",
+        "title": "[BUILD] Optional: en-only in-process semantic turn detector on the browser session",
         "status": "completed",
         "completedInSession": false
       },
@@ -425,35 +425,24 @@
         "title": "[CHORE] Phase 4: Sandbox-identity seams after trt.55 — verify/refactor to sandbox-keyed snapshot + single endpoint resolver (Phase-7 prep)",
         "status": "completed",
         "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.64",
+        "title": "[BUILD] Phase 6: Playground multi-agent start — per-agent context briefs in the UI (playground form only)",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-trt.65",
+        "title": "[BUILD] Phase 6: Multi-agent state-freeze audit — 'Thinking…' stuck after silent verdict, group locked in 'Speaking' — full state-machine + delivery-chain verification with tests",
+        "status": "open",
+        "completedInSession": false
       }
     ]
   },
-  "iterations": [
-    {
-      "iteration": 1,
-      "status": "completed",
-      "taskId": "Johnny-trt.59",
-      "taskTitle": "[MEASURE] Phase-3 router schema costs +568ms p50 triage on the 3B local router — slim the payload or accept as the trt.51/41/42 price",
-      "taskCompleted": false,
-      "durationMs": 607271,
-      "startedAt": "2026-06-12T08:56:58.310Z",
-      "endedAt": "2026-06-12T09:07:05.581Z"
-    },
-    {
-      "iteration": 2,
-      "status": "completed",
-      "taskId": "Johnny-trt.64",
-      "taskTitle": "[BUILD] Phase 6: Playground multi-agent start — per-agent context briefs in the UI (playground form only)",
-      "taskCompleted": true,
-      "durationMs": 846446,
-      "startedAt": "2026-06-12T09:07:32.561Z",
-      "endedAt": "2026-06-12T09:21:39.007Z"
-    }
-  ],
+  "iterations": [],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
-  "activeTaskIds": [
-    "Johnny-trt.59"
-  ],
+  "activeTaskIds": [],
   "subagentPanelVisible": false
 }

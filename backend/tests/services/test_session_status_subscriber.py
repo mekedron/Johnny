@@ -2042,6 +2042,7 @@ def test_conversation_event_types_constant_matches_wire_names() -> None:
         FloorReleased,
         InterruptionRecorded,
         PeerSpeechSuppressed,
+        PolicyDenied,
         TurnClaimLost,
         TurnClaimWon,
     )
@@ -2054,6 +2055,7 @@ def test_conversation_event_types_constant_matches_wire_names() -> None:
         TurnClaimWon(bucket="b", timestamp_ms=0).type,
         TurnClaimLost(bucket="b", timestamp_ms=0).type,
         PeerSpeechSuppressed(peer="x", timestamp_ms=0).type,
+        PolicyDenied(capability="x", layer="global", timestamp_ms=0).type,
     }
     assert CONVERSATION_EVENT_TYPES == wire_names
     assert set(DB_VALUES) == wire_names
@@ -2203,6 +2205,62 @@ def test_apply_peer_speech_suppressed_maps_window_and_hits(
     assert event.agent_name == "Echo B"
     assert event.duration_ms == 3_200
     assert event.details == {"text_match_hits": 2}
+
+
+def test_apply_policy_denied_maps_layer_to_reason(db_session: Session) -> None:
+    """Johnny-trt.38: the row's ``reason`` IS the denying layer (the
+    acceptance headline); capability/rule/surface ride ``details``."""
+    row = _seed(db_session)
+    applied = apply_conversation_event(
+        db_session,
+        {
+            "type": "policy_denied",
+            "capability": "financial-reports",
+            "capability_kind": "tool",
+            "layer": "agent",
+            "rule": "allow-list",
+            "layer_detail": "Progress Bot",
+            "surface": "router_gate",
+            "timestamp_ms": 6_000,
+            "turn_id": 9,
+            "session_id": row.id,
+        },
+    )
+    assert applied is True
+    event = db_session.scalars(sa.select(ConversationEvent)).one()
+    assert event.event_type == "policy_denied"
+    assert event.reason == "agent"  # the denying layer, queryable directly
+    assert event.turn_id == 9
+    assert event.timestamp_ms == 6_000
+    assert event.details == {
+        "capability": "financial-reports",
+        "capability_kind": "tool",
+        "rule": "allow-list",
+        "layer_detail": "Progress Bot",
+        "surface": "router_gate",
+    }
+
+
+def test_apply_policy_denied_bin_surface(db_session: Session) -> None:
+    row = _seed(db_session)
+    apply_conversation_event(
+        db_session,
+        {
+            "type": "policy_denied",
+            "capability": "curl",
+            "capability_kind": "bin",
+            "layer": "global",
+            "rule": "removed from safe-bins",
+            "surface": "sandbox_exec",
+            "timestamp_ms": 100,
+            "session_id": row.id,
+        },
+    )
+    event = db_session.scalars(sa.select(ConversationEvent)).one()
+    assert event.reason == "global"
+    assert event.details["capability_kind"] == "bin"
+    assert event.details["surface"] == "sandbox_exec"
+    assert event.turn_id is None
 
 
 def test_apply_conversation_event_rejects_wrong_or_unknown_type(

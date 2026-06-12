@@ -12,11 +12,17 @@ applied to Johnny's topology:
 * anything else is **denied with an error naming the binary**.
 
 The allow set is computed by exactly one function,
-:func:`compute_allowed_bins`, so the Phase-6 configurable policy engine
-(Johnny-trt.38: layered allow/deny, editable safe-bins, per-agent scope) can
-replace or wrap that single seam without reshaping callers — and so the
-Phase-6 management UI (Johnny-trt.37) can render the same set the executor
-enforces (:attr:`ExecBinPolicy.allowed` is plain data).
+:func:`compute_allowed_bins` — and the Phase-6 configurable policy engine
+(Johnny-trt.38, :mod:`johnny.skills.capability_policy`) layers on exactly
+that seam: pass the session's :class:`ResolvedCapabilityPolicy` and the
+operator-edited safe-bins baseline replaces :data:`BASELINE_BINS`, with
+policy-denied bins (layered ``bins_deny`` globs + baseline removals)
+filtered out of the final set — removals beat skill ``requires.bins``
+grants. :class:`ExecBinPolicy` optionally carries the same policy's
+``check_bin`` so denials are ATTRIBUTED (:class:`ExecDenial` names the
+denying layer for the ``policy_denied`` event). The trt.37 management UI
+renders the same set the executor enforces (:attr:`ExecBinPolicy.allowed`
+is plain data).
 
 Honest scope note: the *security* boundary is the sandbox container itself
 (non-root, resource-limited, no host mounts — Johnny-trt.35). This policy is
@@ -25,19 +31,31 @@ future LLM engine from reaching for tools nobody declared, and it makes the
 reachable surface inspectable. Shell strings are screened with a conservative
 scanner (substitution is rejected outright); a skill's own scripts run under
 baseline ``bash`` by design — declaring the script's *interesting* bins in
-``requires.bins`` is what surfaces them here. openclaw's per-flag safe-bin
-profiles (grep-stdin-only style) are a documented later extension, not v1.
+``requires.bins`` is what surfaces them here.
+
+**Per-bin profile extension point (documented, deliberately unbuilt)**:
+openclaw's per-flag safe-bin profiles (grep-stdin-only style) stay OUT of
+scope — the sandbox container is the security boundary, so bin-level + glob
+control suffices (the Johnny-trt.38 decision). If a future bead revisits
+that, the hook is :meth:`ExecBinPolicy._denial` / the ``policy_check``
+callable: a per-bin profile engine would return a structured verdict for an
+*allowed-but-constrained* bin there (argv inspection), without reshaping
+:meth:`check_argv` / :meth:`check_cmd` callers or the exec wire format.
 """
 
 from __future__ import annotations
 
 import re
 import shlex
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from posixpath import basename
+from typing import TYPE_CHECKING, Any
 
 from johnny.skills.frontmatter import SkillRequirements
+
+if TYPE_CHECKING:
+    from johnny.skills.capability_policy import ResolvedCapabilityPolicy
 
 BASELINE_BINS: tuple[str, ...] = (
     "bash",
@@ -146,8 +164,9 @@ def compute_allowed_bins(
     *,
     baseline: tuple[str, ...] = BASELINE_BINS,
     extras: tuple[str, ...] = SHELL_UTILITY_BINS,
+    policy: ResolvedCapabilityPolicy | None = None,
 ) -> frozenset[str]:
-    """THE allow-set computation (exec bin policy v1).
+    """THE allow-set computation (exec bin policy v1 + the trt.38 layer).
 
     Baseline toolset + everyday shell utilities + every bin declared by an
     *eligible* skill (``requires.bins`` and ``requires.anyBins`` members — an
@@ -155,12 +174,42 @@ def compute_allowed_bins(
     time). Keep all policy composition here: Johnny-trt.38 layers its
     configurable engine on this one seam, and the trt.37 UI renders its
     output.
+
+    With ``policy`` (Johnny-trt.38): the operator-edited safe-bins list
+    replaces ``baseline``, and the final set is filtered through
+    ``policy.check_bin`` — layered ``bins_deny`` globs and removed-baseline
+    bins drop out, REGARDLESS of who granted them (a removal beats a skill's
+    ``requires.bins`` grant; the trt.38 acceptance contract). Callers owning
+    per-kind enforcement should also pre-filter ``eligible_requirements`` to
+    policy-allowed skills so a denied skill's grants never enter the union.
     """
+    if policy is not None:
+        baseline = tuple(policy.safe_bins)
     allowed = set(baseline) | set(extras)
     for requires in eligible_requirements:
         allowed.update(requires.bins)
         allowed.update(requires.any_bins)
+    if policy is not None:
+        allowed = {name for name in allowed if policy.check_bin(name).allowed}
     return frozenset(allowed)
+
+
+@dataclass(frozen=True, slots=True)
+class ExecDenial:
+    """One structured exec denial: the message plus trt.38 policy attribution.
+
+    ``policy_layer`` is non-empty only when the configurable capability
+    policy made the call (then ``policy_rule`` / ``policy_detail`` carry the
+    matching pattern and the deciding layer's target) — the
+    ``policy_denied`` observability event reads exactly these fields.
+    ``bin`` is the offending binary's basename.
+    """
+
+    message: str
+    bin: str = ""
+    policy_layer: str = ""
+    policy_rule: str = ""
+    policy_detail: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,23 +218,38 @@ class ExecBinPolicy:
 
     ``check_*`` methods return ``None`` when the request is allowed, or a
     human-readable denial naming the offending binary (the Johnny-trt.23
-    acceptance contract). :attr:`allowed` is plain inspectable data for the
-    Phase-6 management UI.
+    acceptance contract); the ``*_detailed`` variants return the same
+    verdict as a structured :class:`ExecDenial` carrying trt.38 policy
+    attribution. :attr:`allowed` is plain inspectable data for the Phase-6
+    management UI.
+
+    ``policy_check`` (Johnny-trt.38) is the resolved capability policy's
+    ``check_bin`` — consulted only to ATTRIBUTE a denial (name the denying
+    layer); membership in :attr:`allowed` stays the one allow decision
+    (compute the set with :func:`compute_allowed_bins` and the same policy
+    so the two can never disagree). This callable is also the documented
+    per-bin profile extension point (module docstring).
     """
 
     allowed: frozenset[str]
+    policy_check: Callable[[str], Any] | None = None
 
-    def check_argv(self, argv: Iterable[str]) -> str | None:
+    def check_argv_detailed(self, argv: Iterable[str]) -> ExecDenial | None:
         """Vet an argv-form exec: the executable is ``argv[0]``'s basename."""
         head = next(iter(argv), "")
         name = basename(head.strip()) if head.strip() else ""
         if not name:
-            return "exec request has an empty command"
+            return ExecDenial(message="exec request has an empty command")
         if name in self.allowed:
             return None
         return self._denial(name)
 
-    def check_cmd(self, cmd: str) -> str | None:
+    def check_argv(self, argv: Iterable[str]) -> str | None:
+        """String-form :meth:`check_argv_detailed` (the trt.23 contract)."""
+        denial = self.check_argv_detailed(argv)
+        return denial.message if denial is not None else None
+
+    def check_cmd_detailed(self, cmd: str) -> ExecDenial | None:
         """Conservatively vet a shell-string exec.
 
         Command substitution / process substitution is refused outright (the
@@ -197,17 +261,21 @@ class ExecBinPolicy:
         """
         for marker in _SUBSTITUTION_MARKERS:
             if marker in cmd:
-                return (
-                    f"shell substitution ({marker!r}) is not allowed in sandbox.exec "
-                    "v1 — use argv form or ship the logic as a skill script"
+                return ExecDenial(
+                    message=(
+                        f"shell substitution ({marker!r}) is not allowed in sandbox.exec "
+                        "v1 — use argv form or ship the logic as a skill script"
+                    )
                 )
         if "\n" in cmd:
             # The lexer treats newlines as whitespace, so a second line's
             # command would escape command-position checking. Multi-line
             # shell belongs in a skill script.
-            return (
-                "multi-line shell strings are not allowed in sandbox.exec v1 — "
-                "use ';' separators, argv form, or ship the logic as a skill script"
+            return ExecDenial(
+                message=(
+                    "multi-line shell strings are not allowed in sandbox.exec v1 — "
+                    "use ';' separators, argv form, or ship the logic as a skill script"
+                )
             )
         # shlex with punctuation_chars groups operator runs (|, &&, ;, …) into
         # their own tokens even when not whitespace-separated ("a|b" → a, |, b)
@@ -217,7 +285,9 @@ class ExecBinPolicy:
         try:
             tokens = list(lexer)
         except ValueError as exc:
-            return f"could not parse shell command for the bin policy: {exc}"
+            return ExecDenial(
+                message=f"could not parse shell command for the bin policy: {exc}"
+            )
 
         expect_command = True
         for token in tokens:
@@ -244,19 +314,65 @@ class ExecBinPolicy:
                 return self._denial(name)
         return None
 
-    def check(self, *, argv: Iterable[str] | None = None, cmd: str | None = None) -> str | None:
+    def check_cmd(self, cmd: str) -> str | None:
+        """String-form :meth:`check_cmd_detailed` (the trt.23 contract)."""
+        denial = self.check_cmd_detailed(cmd)
+        return denial.message if denial is not None else None
+
+    def check_detailed(
+        self, *, argv: Iterable[str] | None = None, cmd: str | None = None
+    ) -> ExecDenial | None:
         """Vet whichever form the exec request uses (exactly one expected)."""
         if argv is not None:
-            return self.check_argv(argv)
+            return self.check_argv_detailed(argv)
         if cmd is not None:
-            return self.check_cmd(cmd)
-        return "exec request carries neither argv nor cmd"
+            return self.check_cmd_detailed(cmd)
+        return ExecDenial(message="exec request carries neither argv nor cmd")
 
-    def _denial(self, name: str) -> str:
-        return (
-            f"binary {name!r} is not allowed by the sandbox exec policy "
-            "(baseline toolset + bins declared by eligible skills); declare it "
-            "in the skill's requires.bins or install it in the sandbox image"
+    def check(self, *, argv: Iterable[str] | None = None, cmd: str | None = None) -> str | None:
+        """String-form :meth:`check_detailed` (the trt.23 contract)."""
+        denial = self.check_detailed(argv=argv, cmd=cmd)
+        return denial.message if denial is not None else None
+
+    def _denial(self, name: str) -> ExecDenial:
+        """Build the denial for one not-allowed binary, policy-attributed when possible.
+
+        The ``policy_check`` consult is attribution-only: when the trt.38
+        policy objects to the bin (a ``bins_deny`` glob or a removed
+        baseline bin), the denial names the denying layer — the message the
+        executor speaks from and the fields the ``policy_denied`` event
+        carries. A bin the policy does not object to fell out of
+        :attr:`allowed` for the v1 reason (nobody granted it), so the
+        original trt.23 copy stands.
+        """
+        if self.policy_check is not None:
+            try:
+                decision = self.policy_check(name)
+            except Exception:  # noqa: BLE001 — attribution must never break a denial
+                decision = None
+            if decision is not None and not getattr(decision, "allowed", True):
+                layer = str(getattr(decision, "layer", "") or "")
+                rule = str(getattr(decision, "rule", "") or "")
+                detail = str(getattr(decision, "detail", "") or "")
+                return ExecDenial(
+                    message=(
+                        f"binary {name!r} is blocked by the capability policy "
+                        f"(denied at the {layer or 'configured'} layer"
+                        + (f", rule {rule!r}" if rule else "")
+                        + ")"
+                    ),
+                    bin=name,
+                    policy_layer=layer,
+                    policy_rule=rule,
+                    policy_detail=detail,
+                )
+        return ExecDenial(
+            message=(
+                f"binary {name!r} is not allowed by the sandbox exec policy "
+                "(baseline toolset + bins declared by eligible skills); declare it "
+                "in the skill's requires.bins or install it in the sandbox image"
+            ),
+            bin=name,
         )
 
 
@@ -271,6 +387,7 @@ __all__ = [
     "BASELINE_BINS",
     "SHELL_UTILITY_BINS",
     "ExecBinPolicy",
+    "ExecDenial",
     "build_policy",
     "compute_allowed_bins",
 ]

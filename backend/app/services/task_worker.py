@@ -72,7 +72,7 @@ from johnny.agent.tasks import (
     stub_executor,
 )
 from johnny.voice_pipeline.event_bus import DEFAULT_CHANNEL_PREFIX, RedisEventBus
-from johnny.voice_pipeline.events import TaskCompleted, TaskProgress
+from johnny.voice_pipeline.events import PolicyDenied, TaskCompleted, TaskProgress
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -471,7 +471,6 @@ def resolve_sandbox_url(claimed: ClaimedTask) -> str:
 
 @dataclass(slots=True)
 class _ExecutorEntry:
-    executor: TaskExecutor
     registry: Any
     client: Any
     loaded_at: float
@@ -489,6 +488,12 @@ class SandboxExecutorProvider:
     before the task is failed. Claim-time availability revalidation
     (Johnny-trt.55) stays inside the runner itself.
 
+    The CACHE holds (client, registry) per URL; the runner + exec tool are
+    rebuilt per task (cheap closures) so the freshly-resolved capability
+    policy (Johnny-trt.38) shapes each task's exec-bin allow set — the
+    operator-edited safe-bins baseline in, policy-denied bins and denied
+    skills' grants out — with denials attributed to the denying layer.
+
     Model resolution for future multi-step kinds will live behind one
     function here, next to :func:`resolve_sandbox_url`: each queued row's
     ``request_json["reasoning_llm"]`` already stamps the requesting agent's
@@ -505,7 +510,13 @@ class SandboxExecutorProvider:
         self._entries: dict[str, _ExecutorEntry] = {}
         self._lock = asyncio.Lock()
 
-    async def executor_for(self, claimed: ClaimedTask) -> TaskExecutor:
+    async def executor_for(
+        self, claimed: ClaimedTask, *, policy: Any | None = None
+    ) -> TaskExecutor:
+        from johnny.skills.executor import build_skill_task_executor
+        from johnny.skills.policy import ExecBinPolicy, compute_allowed_bins
+        from johnny.skills.tools import SandboxExecTool
+
         url = resolve_sandbox_url(claimed)
         async with self._lock:
             entry = self._entries.get(url)
@@ -521,21 +532,37 @@ class SandboxExecutorProvider:
                     url,
                 )
                 entry = await self._load(url, reuse=entry)
-            return entry.executor
+            registry = entry.registry
+            client = entry.client
+        if policy is not None:
+            # Johnny-trt.38 enforcement point #3 (sandbox.exec argv[0]): the
+            # edited safe-bins baseline replaces BASELINE_BINS, denied
+            # skills' requires.bins grants never enter the union, and the
+            # policy filter drops bins_deny matches + removed baseline bins.
+            allowed = compute_allowed_bins(
+                tuple(
+                    skill.document.requires
+                    for skill in registry.eligible()
+                    if policy.check_tool(skill.name).allowed
+                ),
+                policy=policy,
+            )
+            bin_policy = ExecBinPolicy(allowed=allowed, policy_check=policy.check_bin)
+        else:
+            bin_policy = ExecBinPolicy(allowed=registry.allowed_bins)
+        exec_tool = SandboxExecTool(client, policy=bin_policy)
+        return build_skill_task_executor(registry, exec_tool, fallback=stub_executor)
 
     def _kind_ready(self, entry: _ExecutorEntry, kind: str) -> bool:
         skill = entry.registry.get(kind)
         return skill is not None and bool(skill.eligible) and bool(skill.available)
 
     async def _load(self, url: str, *, reuse: _ExecutorEntry | None) -> _ExecutorEntry:
-        from johnny.skills.executor import build_skill_task_executor
-        from johnny.skills.policy import ExecBinPolicy
         from johnny.skills.registry import (
             build_sandbox_availability_runner,
             load_skill_registry,
         )
         from johnny.skills.sandbox import SandboxClient, skills_dir_from_env
-        from johnny.skills.tools import SandboxExecTool
 
         client = reuse.client if reuse is not None else SandboxClient(base_url=url)
         registry = await load_skill_registry(
@@ -544,11 +571,7 @@ class SandboxExecutorProvider:
             check_env=client.check_env,
             run_check=build_sandbox_availability_runner(client),
         )
-        exec_tool = SandboxExecTool(client, policy=ExecBinPolicy(allowed=registry.allowed_bins))
-        executor = build_skill_task_executor(registry, exec_tool, fallback=stub_executor)
-        entry = _ExecutorEntry(
-            executor=executor, registry=registry, client=client, loaded_at=time.monotonic()
-        )
+        entry = _ExecutorEntry(registry=registry, client=client, loaded_at=time.monotonic())
         self._entries[url] = entry
         logger.info("task worker: skill registry loaded for %s (%s)", url, registry.summary())
         return entry
@@ -768,13 +791,91 @@ class TaskWorker:
         # A freed slot is a claim opportunity — don't wait out the poll.
         self._wake.set()
 
+    def _resolve_policy(self, claimed: ClaimedTask) -> Any:
+        """Resolve the capability policy FRESH from the DB (Johnny-trt.38).
+
+        Per claimed task, never cached: this is the no-restart enforcement —
+        a policy edit bites a running session's very next delegation. Raises
+        on a failed read; the caller settles the task with the trt.55
+        could-not-verify stance (fail closed — a guardrail that silently
+        vanishes on a DB hiccup is not a guardrail).
+        """
+        from app.services.capability_policies import resolve_policy_for_bot_session
+
+        with self._scoped_db() as db:
+            return resolve_policy_for_bot_session(db, claimed.bot_session_id)
+
     async def _run_claimed(self, claimed: ClaimedTask) -> None:
         async with self._semaphore:
+            # Johnny-trt.38 enforcement point #2 (executor tool dispatch):
+            # check the claimed kind against the freshly-resolved policy
+            # BEFORE any executor work; a denial settles failed with the
+            # spoken-form reason and emits policy_denied naming the layer.
+            policy_ctx: Any | None = None
+            try:
+                policy_ctx = self._resolve_policy(claimed)
+            except Exception:
+                logger.exception(
+                    "task worker: capability-policy resolution failed for "
+                    "task_id=%s — failing closed (could-not-verify)",
+                    claimed.task_id,
+                )
+                await self._settle(
+                    claimed,
+                    "failed",
+                    TaskResult(
+                        status="failed",
+                        result_text=(
+                            f"I couldn't verify the {claimed.kind} task is allowed "
+                            "right now, so I didn't start it."
+                        ),
+                        error="capability-policy resolution failed (Johnny-trt.38)",
+                    ),
+                )
+                return
+            decision = policy_ctx.policy.check_tool(claimed.kind)
+            if not decision.allowed:
+                logger.warning(
+                    "task worker: task_id=%s kind=%s DENIED by capability policy "
+                    "(layer=%s rule=%r) — settling failed (Johnny-trt.38)",
+                    claimed.task_id,
+                    claimed.kind,
+                    decision.layer,
+                    decision.rule,
+                )
+                await self._settle(
+                    claimed,
+                    "failed",
+                    TaskResult(
+                        status="failed",
+                        result_text=(
+                            f"I'm not allowed to run the {claimed.kind} task — "
+                            "my operator's policy has it switched off for this session."
+                        ),
+                        error=(
+                            f"capability policy denied kind {claimed.kind!r} at the "
+                            f"{decision.layer} layer (rule {decision.rule or 'allow-list'!r})"
+                        ),
+                    ),
+                )
+                await self._publish_policy_denied(
+                    claimed,
+                    capability=claimed.kind,
+                    capability_kind="tool",
+                    layer=decision.layer,
+                    rule=decision.rule,
+                    layer_detail=decision.detail,
+                    surface="worker",
+                    timestamp_ms=policy_ctx.session_relative_ms,
+                )
+                return
             try:
                 executor = (
                     self._executor
                     if self._executor is not None
-                    else await self._provider.executor_for(claimed)  # type: ignore[union-attr]
+                    else await self._provider.executor_for(  # type: ignore[union-attr]
+                        claimed, policy=policy_ctx.policy
+                    )
                 )
                 result = await asyncio.wait_for(
                     executor(claimed.as_queued_task()), timeout=self._exec_timeout_s
@@ -810,10 +911,15 @@ class TaskWorker:
                     claimed.task_id,
                 )
                 status = "failed"
-            await self._settle(claimed, status, result)
+            await self._settle(claimed, status, result, policy_ctx=policy_ctx)
 
     async def _settle(
-        self, claimed: ClaimedTask, status: Literal["done", "failed"], result: TaskResult
+        self,
+        claimed: ClaimedTask,
+        status: Literal["done", "failed"],
+        result: TaskResult,
+        *,
+        policy_ctx: Any | None = None,
     ) -> None:
         try:
             with self._scoped_db() as db:
@@ -857,6 +963,28 @@ class TaskWorker:
             error=result.error,
             turn_id=claimed.turn_id,
         )
+        # Johnny-trt.38 enforcement point #3 surfaced: the run hit a
+        # policy-blocked binary inside sandbox.exec (attribution rode the
+        # outcome into result_json) — announce it after the row settle, the
+        # trt.25 row-before-event discipline.
+        policy_denied = (
+            result.result_json.get("policy_denied")
+            if isinstance(result.result_json, dict)
+            else None
+        )
+        if isinstance(policy_denied, dict):
+            await self._publish_policy_denied(
+                claimed,
+                capability=str(policy_denied.get("bin") or ""),
+                capability_kind="bin",
+                layer=str(policy_denied.get("layer") or ""),
+                rule=str(policy_denied.get("rule") or ""),
+                layer_detail=str(policy_denied.get("detail") or ""),
+                surface="sandbox_exec",
+                timestamp_ms=(
+                    policy_ctx.session_relative_ms if policy_ctx is not None else 0
+                ),
+            )
 
     # ------------------------------------------------------------------ #
     # TTL sweep                                                           #
@@ -1017,6 +1145,39 @@ class TaskWorker:
                 error=error,
                 turn_id=turn_id,
                 session_id=str(bot_session_id),
+            )
+        )
+
+    async def _publish_policy_denied(
+        self,
+        claimed: ClaimedTask,
+        *,
+        capability: str,
+        capability_kind: str,
+        layer: str,
+        rule: str,
+        layer_detail: str,
+        surface: str,
+        timestamp_ms: int,
+    ) -> None:
+        """Announce one enforced policy denial (Johnny-trt.38).
+
+        Published on the session channel like every worker event; the status
+        subscriber persists it to ``conversation_events`` with the denying
+        layer as the row's ``reason``. ``timestamp_ms`` is session-relative
+        (the conversation-events time base), resolved alongside the policy.
+        """
+        await self._publish(
+            PolicyDenied(
+                capability=capability,
+                capability_kind=capability_kind,
+                layer=layer,
+                rule=rule,
+                layer_detail=layer_detail,
+                surface=surface,
+                timestamp_ms=max(0, timestamp_ms),
+                turn_id=claimed.turn_id,
+                session_id=str(claimed.bot_session_id),
             )
         )
 

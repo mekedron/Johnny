@@ -68,13 +68,19 @@ def _cap_speech(text: str) -> str:
 
 def _result_json(kind: str, outcome: ToolOutcome) -> dict[str, object]:
     """Structured row payload for the tasks panel / machine consumers."""
-    return {
+    payload: dict[str, object] = {
         "kind": kind,
         "exit_code": outcome.data.get("exit_code"),
         "duration_ms": outcome.data.get("duration_ms"),
         "timed_out": outcome.data.get("timed_out", False),
         "truncated": outcome.data.get("truncated", False),
     }
+    policy_denied = outcome.data.get("policy_denied")
+    if isinstance(policy_denied, dict):
+        # trt.38 attribution (a capability-policy bin denial): ride the row
+        # so the worker emits the policy_denied event naming the layer.
+        payload["policy_denied"] = dict(policy_denied)
+    return payload
 
 
 async def _revalidate_availability(
@@ -250,7 +256,15 @@ def build_skill_task_executor(
             )
 
         if outcome.data.get("denied"):
-            result_text = f"I'm not allowed to run what the {kind} skill asked for."
+            if isinstance(outcome.data.get("policy_denied"), dict):
+                # trt.38: the capability policy (not the v1 grant model)
+                # blocked the binary — say so in operator-actionable terms.
+                result_text = (
+                    f"I'm not allowed to run what the {kind} skill asked for — "
+                    "my operator's policy blocks one of its tools."
+                )
+            else:
+                result_text = f"I'm not allowed to run what the {kind} skill asked for."
         elif outcome.data.get("unreachable"):
             result_text = (
                 f"I couldn't run the {kind} task — my tools sandbox isn't reachable right now."

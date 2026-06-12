@@ -85,6 +85,7 @@ from johnny.agent.interruptions import InterruptionMonitor
 from johnny.agent.observability import (
     RecordDecision,
     RecordInterruption,
+    RecordPolicyDenied,
     RecordSpoke,
     RecordSuggested,
     RecordTriageTiming,
@@ -468,6 +469,7 @@ class RouterGate:
         record_suggested: RecordSuggested | None = None,
         record_triage_timing: RecordTriageTiming | None = None,
         record_interruption: RecordInterruption | None = None,
+        record_policy_denied: RecordPolicyDenied | None = None,
         reply_audio: SpokenAudioRecorder | None = None,
         tasks: TaskCoordinator | None = None,
         resolve_turn_id: Callable[[str], int] | None = None,
@@ -498,6 +500,10 @@ class RouterGate:
         # per cut speech, attributed by the monitor below. Optional like the
         # other seams — a bare gate observes interruptions but emits nothing.
         self._record_interruption = record_interruption
+        # Policy-enforcement emit (Johnny-trt.38): one PolicyDenied per
+        # delegate verdict degraded over a policy-hidden kind, naming the
+        # denying layer. Optional like every other seam.
+        self._record_policy_denied = record_policy_denied
         # Who-cut-the-bot attribution (Johnny-trt.49). Always constructed (the
         # SpeechCaptionBuffer discipline): the session surface feeds user
         # speech edges via note_user_speech_onset/_ended, the stop endpoints
@@ -913,6 +919,10 @@ class RouterGate:
             # an unavailable kind, so speak the honest decline (the catalog
             # entry's spoken-form reason) through the say() machinery — no
             # answer-LLM hop that could pretend-check, no task row at all.
+            # A policy-flavored gap (Johnny-trt.38) additionally emits the
+            # policy_denied event naming the denying layer — the forced
+            # ATTEMPT is the observable, never the silent catalog filtering.
+            await self._emit_policy_denied(turn_id, capability_gap)
             await self._handle_capability_decline(tracker, turn_id, capability_gap)
             raise StopResponse()
 
@@ -1119,18 +1129,32 @@ class RouterGate:
         )
         if entry is None or entry.available:
             return decision
-        decision.raw[CAPABILITY_GAP_KEY] = {
+        gap: dict[str, object] = {
             "from_action": DELEGATE_ACTION,
             "to_action": STATUS_ACTION,
             "kind": task_request.kind,
             "reason": entry.unavailable_reason,
         }
+        if entry.policy_layer:
+            # Johnny-trt.38: the kind is policy-hidden, not capability-broken —
+            # the marker carries the deciding layer so the decision row records
+            # it and run_turn emits the policy_denied event before the decline.
+            gap["policy"] = {
+                "layer": entry.policy_layer,
+                "rule": entry.policy_rule,
+            }
+        decision.raw[CAPABILITY_GAP_KEY] = gap
         logger.warning(
             "agent.router.gate: turn=%s delegate verdict targets UNAVAILABLE "
-            "kind=%r — degrading to the spoken decline (Johnny-trt.55: %s)",
+            "kind=%r — degrading to the spoken decline (Johnny-trt.55: %s)%s",
             turn_id,
             task_request.kind,
             entry.unavailable_reason or "no reason recorded",
+            (
+                f" [policy-denied at the {entry.policy_layer} layer, Johnny-trt.38]"
+                if entry.policy_layer
+                else ""
+            ),
         )
         return replace(decision, action=STATUS_ACTION, task_request=None)
 
@@ -2421,6 +2445,34 @@ class RouterGate:
         of guessing a participant spoke.
         """
         self._interruptions.note_stop_requested()
+
+    async def _emit_policy_denied(self, turn_id: str, gap: dict[str, object]) -> None:
+        """Publish one enforced policy denial off a policy-flavored gap (Johnny-trt.38).
+
+        Called from the capability-gap consumption in :meth:`run_turn` —
+        i.e. only when the router actually ATTEMPTED the denied kind. Gaps
+        without the ``policy`` marker (ordinary trt.55 capability gaps) and
+        gates without the emit seam are no-ops.
+        """
+        policy = gap.get("policy")
+        if self._record_policy_denied is None or not isinstance(policy, dict):
+            return
+        kind = str(gap.get("kind", ""))
+        layer = str(policy.get("layer", ""))
+        logger.info(
+            "agent.router.gate: turn=%s policy_denied kind=%s layer=%s rule=%r",
+            turn_id,
+            kind,
+            layer,
+            policy.get("rule", ""),
+        )
+        await self._record_policy_denied(
+            kind,
+            layer=layer,
+            rule=str(policy.get("rule", "")),
+            layer_detail=str(policy.get("detail", "")),
+            turn_id=turn_id,
+        )
 
     async def _emit_interruption(
         self,

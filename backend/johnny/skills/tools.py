@@ -151,10 +151,20 @@ class SandboxExecTool:
             else None
         )
 
-        denial = self._policy.check(argv=argv, cmd=cmd)
+        denial = self._policy.check_detailed(argv=argv, cmd=cmd)
         if denial is not None:
-            logger.info("sandbox.exec denied by bin policy: %s", denial)
-            return ToolOutcome(ok=False, error=denial, data={"denied": True})
+            logger.info("sandbox.exec denied by bin policy: %s", denial.message)
+            data: dict[str, Any] = {"denied": True}
+            if denial.policy_layer:
+                # trt.38 attribution rides the outcome so the worker can emit
+                # the policy_denied event naming the denying layer.
+                data["policy_denied"] = {
+                    "bin": denial.bin,
+                    "layer": denial.policy_layer,
+                    "rule": denial.policy_rule,
+                    "detail": denial.policy_detail,
+                }
+            return ToolOutcome(ok=False, error=denial.message, data=data)
 
         try:
             result = await self._sandbox.exec(
