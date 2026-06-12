@@ -3,10 +3,10 @@
   "sessionId": "d4e0eaf8-2f04-47a7-b280-1ca8b39424b6",
   "status": "running",
   "startedAt": "2026-06-11T21:01:32.322Z",
-  "updatedAt": "2026-06-11T23:36:29.775Z",
-  "currentIteration": 3,
+  "updatedAt": "2026-06-12T00:08:50.185Z",
+  "currentIteration": 4,
   "maxIterations": 0,
-  "tasksCompleted": 3,
+  "tasksCompleted": 4,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "fable",
@@ -201,8 +201,8 @@
       {
         "id": "Johnny-trt.29",
         "title": "[BUILD] Phase 5: Real status query from the task registry",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-trt.30",
@@ -452,6 +452,16 @@
       "durationMs": 3575300,
       "startedAt": "2026-06-11T21:52:50.170Z",
       "endedAt": "2026-06-11T22:52:25.470Z"
+    },
+    {
+      "iteration": 4,
+      "status": "completed",
+      "taskId": "Johnny-trt.29",
+      "taskTitle": "[BUILD] Phase 5: Real status query from the task registry",
+      "taskCompleted": true,
+      "durationMs": 2601437,
+      "startedAt": "2026-06-11T22:53:07.262Z",
+      "endedAt": "2026-06-11T23:36:28.699Z"
     }
   ],
   "skippedTaskIds": [],

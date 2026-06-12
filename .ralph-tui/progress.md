@@ -48,6 +48,24 @@ after each iteration and it's included in prompts for context.
   (stt=1 Parakeet, llm=4 ollama llama3.2:3b, tts=3 Piper) and probe
   `127.0.0.1:8765/health` (parakeet sidecar) + `127.0.0.1:11434/api/tags`
   (ollama) before starting a session.
+- **Hermetic skill-correctness testing via in-sandbox PATH shim** (trt.60,
+  tests/integration/test_calendar_correctness.py): write a fake bin under
+  `/tmp/<ns>/bin/` in the REAL skills-sandbox (state-file driven, calls
+  logged), subclass SandboxClient to inject `env["PATH"]` on every exec
+  (execd.py merges `{**os.environ, **overlay}` so PATH replaces cleanly) and
+  build the production registry+executor from that client — availability
+  probes AND run/recheck all resolve the shim; no real credentials needed,
+  operator keyring untouched. Drive TaskCoordinator with InMemoryTaskSink
+  (runs_in_session default) so the LIVE dev worker can never claim the
+  test's kind. Assert ONE text across executor result == sink row ==
+  registry entry == TaskCompleted event == status_summary render.
+- **The settle→delivery window is a speak-verdict blind spot** (trt.60 race
+  replay, filed Johnny-0qw): a follow-up routed `speak` between
+  task_completed and the boundary delivery answers BLIND (fabricates);
+  trt.29's registry read fires only on `status` verdicts. Post-delivery
+  speak follow-ups are grounded (say() text rides the chat history). To
+  reproduce: poll WS frames for task_completed in-page and send the
+  follow-up within ms (typed asks make the race trivially winnable).
 
 ---
 
@@ -227,4 +245,59 @@ after each iteration and it's included in prompts for context.
   - mypy strict won't narrow `queue: X | None` across an `item` derived inside
     the None-guard — restructure so the call sits inside the guarded block
     (`continue` out) instead of re-testing item afterwards.
+---
+
+## 2026-06-12 - Johnny-trt.60
+- Final Phase-5 tool-correctness verification shipped — the whole promise
+  proven for the reference skill: what the bot SPEAKS for a google-calendar
+  task is byte-identical to what the CLI emitted, at every seam. (1) NEW
+  hermetic suite tests/integration/test_calendar_correctness.py (6 tests,
+  ~1.4 s): fake gog PATH-shim in the REAL sandbox + production assembly
+  verbatim (registry load incl. shimmed availability probes → policy →
+  SandboxExecTool → build_skill_task_executor → TaskCoordinator in-session
+  resolver → InMemoryTaskSink), exact-equality cases for multi-event
+  (today/tomorrow/named-day/all-day), empty window, today-vs-named-day,
+  over-cap remainder, auth-missing claim-time recheck (failed + skill copy +
+  ZERO calendar fetches asserted via shim call log), and run.sh's own auth
+  guard; every case pins executor==sink==registry==event==status_summary.
+  Proven green with the keyring moved aside (NO Google account). (2) Live
+  ground-truth diff: gog raw JSON + run.sh speech captured in-sandbox before
+  AND after the browser runs (identical) — spoken == persisted == ground
+  truth, 198 chars, 3 events, zero invented (11-three-way-diff.txt ALL
+  PASS). (3) Playground session-4 replay (chrome-devtools, sessions 55–72):
+  verbatim ask 0/5 delegates (documented 3B stochasticity; explicit-phrasing
+  fallback 2/9) — Run A (session 63/task 55): delegate → LLM-authored ack →
+  worker claim +14 ms → real gog done +1.20 s → result HELD until the
+  conversational boundary → spoken once, uninterrupted, byte-identical;
+  post-delivery follow-up answers grounded from chat history. Run B (session
+  65/task 56): the turn-21 race (follow-up 6 ms after settle, result
+  undelivered) → router chose speak → BLIND FABRICATION ("Ono-Sendai deal
+  April 12th…") → held result then delivered correctly 15 s later — the
+  regression this bead hunted, durably evidenced and FILED as Johnny-0qw
+  (P1 bug, discovered-from trt.60; status-verdict path remains covered by
+  trt.29). (4) INV-2 analog verified: WS agent_spoke frame ==
+  agent_tasks.result_text == agent_utterances.output_text == history
+  transcript, both runs.
+- Files changed: backend/tests/integration/test_calendar_correctness.py
+  (new). Artifacts: .validation/Johnny-trt.60/ (00-RUN-NOTES.md + 12
+  captures). Quality: new suite 6 passed (linked + unlinked); ruff + mypy
+  --strict clean; scoped regression tests/agent tests/skills
+  tests/services/test_task_worker.py tests/integration → 1237 passed.
+- **Learnings:**
+  - execd.py builds the child env as {**os.environ, **overlay} — an env
+    PATH override fully replaces PATH, making in-sandbox bin shims
+    first-class; SandboxClient subclassing shims ALL consumers (registry
+    probes + executor) in one place.
+  - The follow-up hallucination seam has THREE states: undelivered+status →
+    verbatim registry render (trt.29 ✓), undelivered+speak → blind
+    fabrication (Johnny-0qw ✗), delivered+speak → grounded via chat history
+    (say() text persists into the answer context) though the persona still
+    embellishes agenda detail on top of real events.
+  - The explicit-phrasing delegate rate is NOT the trt.28 ~4/4 anecdote on
+    every day: 2/9 here, plus a new shape — action=delegate with NO task
+    object (model reason "Task not available for delegation"), which the
+    gate correctly degrades to the answer hop (no dead promise, no row).
+  - evaluate_script filePath saves the function's return value
+    DOUBLE-encoded when you return JSON.stringify(...) — json.loads twice
+    (or return the object directly) when post-processing saved frames.
 ---
