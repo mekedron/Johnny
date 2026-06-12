@@ -85,6 +85,28 @@ after each iteration and it's included in prompts for context.
   `entry.loaded_at = float("-inf")` instead of deleting it — the next claim's TTL check
   reloads via `_load(reuse=entry)` which REUSES the client, so no client is ever closed
   under an in-flight executor and no cross-loop lock is needed.
+- **Sessions API hides the snapshot** (wks.6): `GET /sessions/{id}` exposes
+  decisions/tasks/utterances/transcripts but NOT `agent_snapshot` or `agent_id` —
+  snapshot-stamp assertions must read postgres (`docker compose exec -T postgres psql
+  -c "SELECT agent_snapshot FROM bot_sessions WHERE id=N"`). Decision rows' input_window/
+  raw_output ARE exposed and carry the rendered router context (kind-absence checks work
+  over the JSON blob).
+- **Small-router scenarios need per-agent model pins, not global swaps** (wks.6): the
+  wizard-seeded llama3.2:3b declines honestly but speaks straight through the catalog
+  instead of delegating (trt.47's documented behavior) and its answer model invents data;
+  qwen2.5:7b-instruct-q4_K_M delegates correctly but needs `temperature: 0` to stop
+  stochastic speak-verdicts-carrying-task-objects. Fix = trt.41/42 as designed: keep the
+  seeded global default, add a second openai-compatible provider row for the strong model,
+  pin router/answer/reasoning on JUST the agents that must delegate.
+- **Cheapest full-pipeline driver** (wks.6): `POST /sessions/browser/start {agent_id}` +
+  `POST /sessions/browser/{id}/text {text}` exercises router→answer/delegate→worker→
+  speech with zero mic work; `/playground?session=N` re-binds the UI for screenshots;
+  `POST /sessions/{id}/stop` ends it. Only one live browser session at a time.
+- **Never put workspace-test fixture skills in repo `skills/`** — run.sh re-copies every
+  `skills/*` dir into `~/.johnny/skills` (the DEFAULT tree) on every start, which would
+  break the isolation you're trying to prove. Deliver fixtures via
+  `POST /capabilities/skills/install` (heredoc'd in a script, e.g.
+  scripts/finance_workspace_capstone.py).
 
 ---
 
@@ -422,4 +444,53 @@ after each iteration and it's included in prompts for context.
   - In-page navigation (goto from /agents/new to /agents/N) keeps component state —
     one-shot fetch flags (workspacesLoaded) go stale across saves; flip the flag in
     the save handler so the $effect refetches (agent_count freshness).
+---
+
+## 2026-06-12 - Johnny-wks.6
+- Capstone shipped: the canonical least-privilege scenario recorded END-TO-END on a
+  clean install (./stop.sh && ./run.sh, prod-shape), plus docs/WORKSPACES.md.
+- Scenario (sessions 4/5/7 post-reset; 1-3,6 are model-tuning history): Finance
+  workspace (slug finance, adopted the surviving johnny-workspace-2-home volume +
+  operator's host dir); financial-reports fixture skill (CLI + ledger CSV + fixture
+  credential, availability check gated on the credential) installed via the REAL
+  install flow into that workspace only; Progress Meeting agent on default with
+  agent-layer policy tools_allow=[google-calendar,google-tasks,meeting.leave,
+  session.end]; Management Meeting attached to Finance. Progress asked for Q2
+  financials -> SPOKEN decline naming the reason ("Financial reports are not
+  available in this session"), zero finance mentions in its decisions, no task, no
+  figure leak. Management same ask -> router delegate financial-reports -> worker
+  exec against http://johnny-workspace-2:8088 -> settled done -> spoke "revenue 4.82
+  million euros ... net profit 1.48 million euros". SHARING: Finance Analyst created
+  with zero installs/auth -> same delegate->exec->spoken figures (task 2, same
+  container). Structural assertions 37/37 via new
+  scripts/finance_workspace_capstone.py (install + assert subcommands): host paths,
+  rendered catalogs (default vs workspace, per-agent /capabilities/tools), policy
+  resolve naming the denying layer, psql-read snapshot stamps, decision-blob
+  kind-absence, task + spoken-figure presence.
+- Files: scripts/finance_workspace_capstone.py (new), docs/WORKSPACES.md (new),
+  docs/ROUTING.md (workspace para in §2 catalog section + status-table row),
+  docs/CAPABILITY-POLICY.md (Phase-7 wording -> shipped workspaces, 2 spots),
+  .validation/Johnny-wks.6/ (00-notes, 11 artifacts, session JSON/psql dumps).
+- **Learnings:**
+  - GET /sessions/{id} does NOT expose agent_snapshot/agent_id — snapshot assertions
+    go through psql; decisions' input_window/raw_output ARE exposed and suffice for
+    rendered-context absence checks.
+  - llama3.2:3b (wizard default): perfect honest declines, but delegates nothing —
+    its management run hallucinated $25.8M (session 2). qwen2.5:7b-instruct-q4_K_M
+    delegates correctly but emitted one speak-verdict-carrying-a-task (session 6)
+    until temperature: 0. Resolution = per-agent pins (provider row 5) on the finance
+    agents only; global default stays seeded. This is trt.41/42 used as designed,
+    and the decline-on-default story is STRONGER with the weak model (nothing in the
+    prompt to leak).
+  - qwen router on the progress agent delegated the financial ask to meeting.leave
+    (the only unavailable catalog entry) — the trt.55 backstop spoke meeting.leave's
+    off-surface copy, an honest decline with wrong-flavored words. Capability-gap
+    decline copy quality on small models is trt.51 territory, noted not chased.
+  - Default-workspace gog account (sandbox-home) survived the clean install — the
+    aikamatkat.fi account listed immediately on the fresh DB; finance keyring shows
+    none connected (wks.4 run ended disconnected), so the fixture credential carries
+    the auth story exactly as the bead allows.
+  - The interrupted/partial duplicate rendering of a task result in playground chat
+    (session 7) is cosmetic — one spoken result, rendered twice (interrupted +
+    partial). Pre-existing trt.58 display behavior, not workspace-related.
 ---

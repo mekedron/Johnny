@@ -8,10 +8,12 @@ every merge), Johnny-shaped: DB-backed rows, resolved once per session into
 the agent snapshot, re-resolved fresh per claimed task by the worker.
 
 Policy is the **OFFER** axis. It deliberately encodes no identity: *as whom*
-an agent acts (gog keyring, credentials) is sandbox **STATE** — Phase 7's
-per-agent sandboxes (`agent.sandbox_mode = global | personal`) make the
-least-privilege guarantee physical underneath this layer, and the same
-policy stays valid in either mode.
+an agent acts (gog keyring, credentials) is sandbox **STATE** — that axis
+shipped as **workspaces** ([WORKSPACES.md](WORKSPACES.md), Johnny-wks):
+agents attach to a workspace (`agents.workspace_id`) whose container, skill
+tree, and keyring make the least-privilege guarantee physical underneath
+this layer. The same policy stays valid whichever workspace an agent is
+attached to.
 
 ## The resolution order (normative)
 
@@ -143,5 +145,9 @@ would record in its event.
   unavailable-with-reason while its last probe failed (docs/MCP.md). MCP
   tools join the policy namespace as `mcp__<server>__<tool>` kinds
   automatically — deny `mcp__shady__*` to hide a whole server.
-- **Per-agent sandboxes** (Phase 7) change *where/as-whom*, not this layer;
-  the worker's `resolve_sandbox_url` seam and this policy compose unchanged.
+- **Workspaces** ([WORKSPACES.md](WORKSPACES.md), shipped) change
+  *where/as-whom*, not this layer: the worker's `resolve_sandbox_url` /
+  `resolve_skills_dir` seams pick the workspace, and this policy composes
+  unchanged on top — the canonical least-privilege scenario (progress agent
+  on default with calendar+tasks only, management agent on the finance
+  workspace) uses both axes at once.
