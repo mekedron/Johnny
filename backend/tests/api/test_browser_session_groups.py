@@ -184,6 +184,16 @@ def test_start_group_creates_member_rows_with_shared_floor_scope(
     scopes = {spec.floor_scope for spec in specs}
     assert scopes == {f"browser-group-{body['group_id']}"}
 
+    # Peer roster (Johnny-trt.47): each member's snapshot names the OTHER
+    # members — the router's peer-selectivity prompt input — and the same
+    # roster is frozen onto the row the session reads back.
+    assert specs[0].agent_snapshot["peer_names"] == ["Echo"]
+    assert specs[1].agent_snapshot["peer_names"] == ["Alex"]
+    for member_id, peers in zip(member_ids, (["Echo"], ["Alex"]), strict=True):
+        row = db_session.get(BotSession, member_id)
+        assert row is not None and row.agent_snapshot is not None
+        assert row.agent_snapshot["peer_names"] == peers
+
     # Rows: browser source, joined, agent frozen, group fragment persisted.
     for member_id, agent in zip(member_ids, agents, strict=True):
         row = db_session.get(BotSession, member_id)

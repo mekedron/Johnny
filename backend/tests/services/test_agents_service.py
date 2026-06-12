@@ -191,7 +191,9 @@ def test_snapshot_shape_and_values(db_session: Session) -> None:
         tts_voice_id="voice-7",
         tts_options={"rate": 1.1},
     )
-    snapshot = build_agent_snapshot(agent, assignment_context="weekly sync")
+    snapshot = build_agent_snapshot(
+        agent, assignment_context="weekly sync", peer_names=["Echo", "  ", "Nova"]
+    )
     assert snapshot == {
         "agent_id": agent.id,
         "name": "Mika",
@@ -209,6 +211,9 @@ def test_snapshot_shape_and_values(db_session: Session) -> None:
             "tts_options": {"rate": 1.1},
         },
         "assignment_context": "weekly sync",
+        # Johnny-trt.47: the co-agent roster, blanks dropped; defaults to []
+        # for every single-agent launch.
+        "peer_names": ["Echo", "Nova"],
     }
     # Plain JSON-able — what bot_sessions.agent_snapshot stores verbatim.
     import json

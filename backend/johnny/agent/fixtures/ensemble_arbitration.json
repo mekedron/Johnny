@@ -1,0 +1,30 @@
+{
+  "name": "arbitration-tuning",
+  "_provenance": "Johnny-trt.47 — the acceptance/tuning script: 10 by-name turns (5 per agent, interleaved) and 10 unaddressed turns. Run via `python -m johnny.agent.ensemble_scenario --scenario johnny/agent/fixtures/ensemble_arbitration.json [--redis]`; the evaluation asserts every by-name turn routed to exactly the named agent and every unaddressed turn produced exactly one answer (claim winner) with the loser terminalizing no_reply(peer_answered) — i.e. zero duplicates across all 20 turns (acceptance allows <=1).",
+  "agents": [
+    { "name": "Alex", "context": "You are Alex, one of two assistants in this meeting." },
+    { "name": "Echo", "context": "You are Echo, one of two assistants in this meeting." }
+  ],
+  "steps": [
+    { "text": "Alex, what time is the design review tomorrow?", "addressed_to": "Alex", "settle_timeout_s": 60 },
+    { "text": "What is the deployment status right now?", "addressed_to": null, "settle_timeout_s": 60 },
+    { "text": "Echo, can you summarize the open action items?", "addressed_to": "Echo", "settle_timeout_s": 60 },
+    { "text": "Does anyone remember when the offsite is planned?", "addressed_to": null, "settle_timeout_s": 60 },
+    { "text": "Alex, did the migration finish last night?", "addressed_to": "Alex", "settle_timeout_s": 60 },
+    { "text": "How many tickets are still open this sprint?", "addressed_to": null, "settle_timeout_s": 60 },
+    { "text": "Echo, what did the customer say about the trial?", "addressed_to": "Echo", "settle_timeout_s": 60 },
+    { "text": "Is the staging environment healthy?", "addressed_to": null, "settle_timeout_s": 60 },
+    { "text": "Alex, who owns the billing integration?", "addressed_to": "Alex", "settle_timeout_s": 60 },
+    { "text": "When does the contract renewal land?", "addressed_to": null, "settle_timeout_s": 60 },
+    { "text": "Echo, can you check the on-call schedule?", "addressed_to": "Echo", "settle_timeout_s": 60 },
+    { "text": "What was the action from yesterday's retro?", "addressed_to": null, "settle_timeout_s": 60 },
+    { "text": "Alex, is the API rate limit still an issue?", "addressed_to": "Alex", "settle_timeout_s": 60 },
+    { "text": "Which release train are we targeting?", "addressed_to": null, "settle_timeout_s": 60 },
+    { "text": "Echo, how did the load test go?", "addressed_to": "Echo", "settle_timeout_s": 60 },
+    { "text": "Any blockers for the demo on Friday?", "addressed_to": null, "settle_timeout_s": 60 },
+    { "text": "Alex, what changed in the security review?", "addressed_to": "Alex", "settle_timeout_s": 60 },
+    { "text": "Who is taking notes for this meeting?", "addressed_to": null, "settle_timeout_s": 60 },
+    { "text": "Echo, did we hear back from procurement?", "addressed_to": "Echo", "settle_timeout_s": 60 },
+    { "text": "What time do we reconvene tomorrow?", "addressed_to": null, "settle_timeout_s": 60 }
+  ]
+}

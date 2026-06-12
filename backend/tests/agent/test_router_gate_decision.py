@@ -685,6 +685,55 @@ async def test_router_prompt_without_catalog_is_byte_identical_to_pre_trt19() ->
     assert router_empty.last_response_format is ROUTER_DECISION_SCHEMA_NO_CATALOG
 
 
+async def test_router_prompt_renders_peer_selectivity_block() -> None:
+    """Peer roster (Johnny-trt.47): the selectivity rules land in the system
+    prompt, before the catalog/instructions so the operator can refine them."""
+    from johnny.agent.router_gate import render_peer_selectivity
+
+    gate, _, router = _make_gate(
+        [{"should_speak": True, "confidence": 1.0, "reason": "x"}],
+        config=RouterGateConfig(
+            instructions="Stay on agenda.",
+            agent_name="Alex",
+            peer_agent_names=("Echo", "Nova"),
+        ),
+    )
+    await gate.run_turn(ChatContext.empty(), _user_msg("what's the plan?"))
+
+    system = router.calls[0][0].content or ""
+    block = render_peer_selectivity("Alex", ("Echo", "Nova"))
+    assert block in system
+    assert "you are Alex, one of 3 AI assistants" in system
+    assert "The other assistants: Echo, Nova." in system
+    assert system.index(block) < system.index("Meeting instructions: Stay on agenda.")
+
+
+async def test_router_prompt_without_peers_is_byte_identical() -> None:
+    """No peers ⇒ no roster text at all — replay verdict parity. The agent
+    name alone (every single-agent session has one) must not change a byte."""
+    decisions = [{"should_speak": True, "confidence": 1.0, "reason": "x"}]
+    cfg_kwargs: dict[str, Any] = {
+        "mode": "autonomous",
+        "character_prompt": "[personality: Sage]",
+        "instructions": "Stay on agenda.",
+    }
+    gate_default, _, router_default = _make_gate(
+        decisions, config=RouterGateConfig(**cfg_kwargs)
+    )
+    gate_named, _, router_named = _make_gate(
+        decisions,
+        config=RouterGateConfig(**cfg_kwargs, agent_name="Johnny", peer_agent_names=()),
+    )
+
+    await gate_default.run_turn(ChatContext.empty(), _user_msg("And the budget?"))
+    await gate_named.run_turn(ChatContext.empty(), _user_msg("And the budget?"))
+
+    assert "Multi-assistant meeting" not in (router_default.calls[0][0].content or "")
+    assert [m.content for m in router_default.calls[0]] == [
+        m.content for m in router_named.calls[0]
+    ]
+
+
 async def test_router_schema_follows_catalog_both_ways() -> None:
     """Schema mirrors the prompt's catalog condition (Johnny-trt.59).
 

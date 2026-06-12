@@ -134,6 +134,23 @@ def test_snapshot_mode_is_lenient_at_read_time() -> None:
     assert cfg.mode == DEFAULT_MODE
 
 
+def test_snapshot_peer_names_lenient_read(  # Johnny-trt.47
+) -> None:
+    """The co-agent roster degrades like every optional snapshot field."""
+
+    def cfg(value: Any) -> SessionJobConfig:
+        return SessionJobConfig(
+            bot_session_id=1, room_name="r", agent_snapshot={"peer_names": value}
+        )
+
+    assert cfg(["Echo", " Nova ", ""]).peer_names == ("Echo", "Nova")
+    assert cfg(None).peer_names == ()
+    assert cfg("Echo").peer_names == ()  # non-list shape degrades to absent
+    assert (
+        SessionJobConfig(bot_session_id=1, room_name="r").peer_names == ()
+    )  # absent key — every single-agent session
+
+
 @pytest.mark.parametrize("bad", [{}, {"bot_session_id": None}, {"bot_session_id": ""}])
 def test_from_dict_requires_session_id(bad: dict[str, Any]) -> None:
     with pytest.raises(ValueError, match="bot_session_id"):

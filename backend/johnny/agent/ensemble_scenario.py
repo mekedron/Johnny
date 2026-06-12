@@ -15,11 +15,13 @@ agents, and assert the conversation dynamics programmatically:
   utterances; the co-agent's speech (cross-fed through the router's capture
   mixer as real audio) produces peer-labeled transcripts and
   ``PeerSpeechSuppressed`` accounting, never a turn;
-* **claims** (Johnny-trt.47 forward seam) — ``TurnClaimWon`` / ``TurnClaimLost``
-  events are collected per step; today's strict-v1 build emits none, and the
-  per-step ``addressed_to`` field is carried so the arbitration task can flip
-  the expectation to "exactly the addressed agent answers" without reshaping
-  the fixture.
+* **turn arbitration** (Johnny-trt.47) — every scripted utterance is answered
+  by EXACTLY ONE member: an ``addressed_to`` step by exactly the named agent
+  (the router's peer-selectivity block, implemented deterministically by the
+  selective router stub parsing the roster back out of the rendered prompt),
+  an unaddressed step by the turn-claim winner — with every losing contender
+  recording ``TurnClaimLost`` and terminalizing ``no_reply(peer_answered)``
+  inside the same step window.
 
 Following the Phase-0 harness pattern (:mod:`johnny.agent.latency_harness`),
 providers are in-process stubs threaded through the real registry → adapter
@@ -51,6 +53,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import time
 import uuid
@@ -68,6 +71,7 @@ from app.providers.base import (
 from johnny.agent.job_config import AUTONOMOUS_MODE, SessionJobConfig
 from johnny.agent.latency_harness import (
     BUNDLED_FIXTURES,
+    HarnessStubLLMProvider,
     register_stub_providers,
     stub_provider_config,
 )
@@ -107,6 +111,98 @@ SCENARIO_TTS_PROVIDER_NAME = "ensemble-scenario-tts"
 SCENARIO_TTS_FIXTURE = "short1"
 """Which bundled piper utterance every stub reply 'speaks' (~1.9 s). Real
 speech is load-bearing: the peers' VAD must fire on the cross-feed."""
+
+
+SCENARIO_LLM_PROVIDER_NAME = "ensemble-scenario-llm"
+
+# The roster block render (johnny.agent.router_gate.render_peer_selectivity)
+# the selective stub parses its identity back out of. Parsing the PROMPT —
+# rather than configuring each stub with its name — makes the scenario an
+# end-to-end regression of the trt.47 prompt plumbing: if peer_names ever
+# stop reaching the gate (snapshot → job config → RouterGateConfig →
+# _router_messages), the stub degrades to always-speak and the by-name
+# assertions fail loudly.
+_ROSTER_RE = re.compile(r"you are (?P<name>.+?), one of \d+ AI assistants")
+_PEERS_RE = re.compile(r"The other assistants: (?P<peers>[^\n]+?)\.\n")
+_LATEST_RE = re.compile(r"Latest transcript: (?P<text>.*)\Z", re.DOTALL)
+
+
+def _names_in(text: str, names: list[str]) -> list[str]:
+    """Which display names appear in ``text`` as whole words (case-insensitive)."""
+    found: list[str] = []
+    lowered = text.lower()
+    for name in names:
+        if re.search(rf"(?<!\w){re.escape(name.lower())}(?!\w)", lowered):
+            found.append(name)
+    return found
+
+
+class ScenarioSelectiveLLMProvider(HarnessStubLLMProvider):
+    """Router stub implementing the documented peer-selectivity rule (Johnny-trt.47).
+
+    The deterministic stand-in for a real LLM reading the
+    ``render_peer_selectivity`` block: a turn naming another assistant and
+    not me → ``should_speak=false`` ("addressed to <peer>"); anything else —
+    named me, or unaddressed — speaks, leaving unaddressed dedup to the turn
+    claim exactly as the prompt instructs. No roster block in the prompt
+    (single-agent, or the plumbing regressed) → always-speak, the
+    pre-trt.47 harness behavior.
+    """
+
+    @property
+    def name(self) -> str:
+        return SCENARIO_LLM_PROVIDER_NAME
+
+    async def chat(
+        self,
+        messages: Any,
+        tools: Any = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> Any:
+        if response_format is None:
+            return await super().chat(messages, tools, response_format)
+        system = next(
+            (m.content or "" for m in messages if getattr(m, "role", "") == "system"),
+            "",
+        )
+        user = next(
+            (m.content or "" for m in reversed(messages) if getattr(m, "role", "") == "user"),
+            "",
+        )
+        roster = _ROSTER_RE.search(system)
+        peers_match = _PEERS_RE.search(system)
+        latest = _LATEST_RE.search(user)
+        if roster and peers_match and latest:
+            me = roster.group("name").strip()
+            peers = [p.strip() for p in peers_match.group("peers").split(",") if p.strip()]
+            text = latest.group("text")
+            named_me = bool(_names_in(text, [me]))
+            named_peers = _names_in(text, peers)
+            if named_peers and not named_me:
+                verdict = {
+                    "should_speak": False,
+                    "confidence": 0.9,
+                    "reason": f"addressed to {named_peers[0]}",
+                    "reply_type": "none",
+                    "suggested_reply": "",
+                }
+                from app.providers.base import LLMResponse
+
+                return LLMResponse(
+                    text=json.dumps(verdict),
+                    finish_reason="stop",
+                    structured_output=verdict,
+                )
+        return await super().chat(messages, tools, response_format)
+
+
+def register_scenario_llm() -> None:
+    get_registry().register(
+        ProviderKind.LLM,
+        SCENARIO_LLM_PROVIDER_NAME,
+        ScenarioSelectiveLLMProvider,
+        replace=True,
+    )
 
 
 class ScenarioSpeechTTSProvider(TTSProvider):
@@ -232,13 +328,24 @@ class MemberRecord:
     audio_spans: list[tuple[float, float]] = field(default_factory=list)
     """(first_frame, last_frame) per outbound burst, from the router tap."""
     spoke: list[str] = field(default_factory=list)
+    reply_times: list[float] = field(default_factory=list)
+    """Arrival stamps of the AgentSpoke events, index-aligned with ``spoke``."""
     decisions: int = 0
+    decline_times: list[float] = field(default_factory=list)
+    """Arrival stamps of should_speak=false router verdicts (selectivity)."""
     peer_labeled_finals: list[tuple[str, str]] = field(default_factory=list)
     """(speaker_label, text) of finals attributed to a peer."""
     suppressions: list[PeerSpeechSuppressed] = field(default_factory=list)
     claims_won: list[TurnClaimWon] = field(default_factory=list)
     claims_lost: list[TurnClaimLost] = field(default_factory=list)
+    claim_lost_times: list[float] = field(default_factory=list)
+    peer_answered_times: list[float] = field(default_factory=list)
+    """Arrival stamps of no_reply(peer_answered) turn terminals (Johnny-trt.47)."""
     floor_expired: int = 0
+
+    def count_in(self, times: list[float], window: tuple[float, float]) -> int:
+        start, end = window
+        return sum(1 for t in times if start <= t < end)
 
 
 @dataclass(slots=True)
@@ -247,10 +354,22 @@ class EnsembleResult:
     members: list[MemberRecord]
     floor_mode: str = "in-memory"
     problems: list[str] = field(default_factory=list)
+    step_marks: list[float] = field(default_factory=list)
+    """Shared-clock stamp taken right before each step's utterance was fed —
+    the boundaries the per-step arbitration checks (Johnny-trt.47) window on."""
 
     @property
     def passed(self) -> bool:
         return not self.problems
+
+    def step_window(self, index: int) -> tuple[float, float]:
+        start = self.step_marks[index]
+        end = (
+            self.step_marks[index + 1]
+            if index + 1 < len(self.step_marks)
+            else float("inf")
+        )
+        return (start, end)
 
 
 def _intervals_overlap(
@@ -260,12 +379,16 @@ def _intervals_overlap(
 
 
 def evaluate_result(result: EnsembleResult, *, overlap_tolerance_s: float = 0.05) -> None:
-    """Run the trt.46 invariant checks; append human-readable problems.
+    """Run the trt.46 + trt.47 invariant checks; append human-readable problems.
 
     Mechanical restatements of the acceptance phrasing: hold intervals never
     overlap, audio stays inside the speaker's own holds, peer speech opens no
-    turns, and a peer's audio was actually heard + labeled (the suppression
-    machinery demonstrably ran — a vacuous pass is a failure here).
+    turns, a peer's audio was actually heard + labeled (the suppression
+    machinery demonstrably ran — a vacuous pass is a failure here), and —
+    the Johnny-trt.47 arbitration — every scripted utterance is answered by
+    EXACTLY ONE member: the named agent for ``addressed_to`` steps (the
+    router selectivity), the claim winner for unaddressed steps, with every
+    losing contender terminalizing ``no_reply(peer_answered)``.
     """
     members = result.members
     steps = len(result.scenario.steps)
@@ -295,7 +418,10 @@ def evaluate_result(result: EnsembleResult, *, overlap_tolerance_s: float = 0.05
                     f"{member.floor_holds}"
                 )
 
-    # 3. Strict v1 loop rule: router turns == scripted utterances, exactly.
+    # 3. Loop rule: router turns == scripted utterances, exactly. (The
+    # trt.47 handoff relaxation opens peer turns only on a by-name match;
+    # the fixture utterances never put a member name in a REPLY, so any
+    # extra turn here still means peer speech leaked through suppression.)
     for member in members:
         if member.decisions != steps:
             result.problems.append(
@@ -321,18 +447,61 @@ def evaluate_result(result: EnsembleResult, *, overlap_tolerance_s: float = 0.05
                 "in a healthy run"
             )
 
-    # 6. Every speak verdict actually played out — the handoff-shield
-    # regression pin: without shield_handle_through_peer_tail the second
-    # speaker's reply is insta-cut at every floor handoff (the SDK reads the
-    # previous holder's trailing audio as a live barge-in), terminalizing
-    # no_reply(barge_in) with a ~10 ms hold and zero replies spoken.
-    for member in members:
-        if len(member.spoke) != steps:
-            result.problems.append(
-                f"{member.name}: spoke {len(member.spoke)} replies for {steps} "
-                "scripted utterances — a reply was cut or suppressed "
-                "(floor-handoff shield regression?)"
-            )
+    # 6. Turn arbitration (Johnny-trt.47), per step: exactly ONE member
+    # answers each scripted utterance. Addressed steps must be answered by
+    # exactly the named agent (router peer selectivity — the others decline
+    # or lose the claim); unaddressed steps by exactly one claim winner,
+    # with every losing contender recording TurnClaimLost AND terminalizing
+    # no_reply(peer_answered) inside the same step window. The shield
+    # regression (a reply insta-cut at handoff) still fails here: the cut
+    # member's reply count drops and its step has no responder.
+    if not result.step_marks or len(result.step_marks) != steps:
+        result.problems.append(
+            f"step marks missing/short ({len(result.step_marks)} for {steps} "
+            "steps) — the runner did not stamp step boundaries"
+        )
+    else:
+        for index, step in enumerate(result.scenario.steps):
+            window = result.step_window(index)
+            responders = [m for m in members if m.count_in(m.reply_times, window) > 0]
+            label = f"step {index + 1} ({step.text[:40]!r})"
+            total_replies = sum(m.count_in(m.reply_times, window) for m in members)
+            if total_replies != 1:
+                result.problems.append(
+                    f"{label}: {total_replies} replies "
+                    f"({[m.name for m in responders]}) — exactly one member "
+                    "must answer each utterance"
+                )
+            if step.addressed_to is not None:
+                if [m.name for m in responders] != [step.addressed_to]:
+                    result.problems.append(
+                        f"{label}: addressed to {step.addressed_to} but answered "
+                        f"by {[m.name for m in responders] or 'nobody'}"
+                    )
+            for member in members:
+                if member in responders:
+                    continue
+                declined = member.count_in(member.decline_times, window) > 0
+                lost = member.count_in(member.claim_lost_times, window) > 0
+                peer_answered = member.count_in(member.peer_answered_times, window) > 0
+                if step.addressed_to is None:
+                    # Unaddressed + the documented permissive guidance: the
+                    # non-responder MUST have contended and lost (the claim
+                    # is the dedup), and the loss must terminalize honestly.
+                    if not (lost and peer_answered):
+                        result.problems.append(
+                            f"{label}: {member.name} did not answer but recorded "
+                            f"no lost claim + peer_answered terminal "
+                            f"(lost={lost}, peer_answered={peer_answered})"
+                        )
+                elif not (declined or (lost and peer_answered)):
+                    # Addressed to someone else: the router should decline
+                    # (selectivity); losing the claim is the accepted
+                    # fallback when both mechanisms raced.
+                    result.problems.append(
+                        f"{label}: {member.name} neither declined nor lost the "
+                        "claim — by-name selectivity did not engage"
+                    )
 
 
 # --- The runner ----------------------------------------------------------------
@@ -358,6 +527,7 @@ async def run_ensemble_scenario(
 
     register_stub_providers()
     register_scenario_tts()
+    register_scenario_llm()
     # Synthetic sessions: reply-audio WAVs under the session audio dir would
     # be junk (latency-harness precedent).
     os.environ.pop("JOHNNY_SESSION_AUDIO_DIR", None)
@@ -366,6 +536,15 @@ async def run_ensemble_scenario(
     provider_config["tts"] = {
         "provider_name": SCENARIO_TTS_PROVIDER_NAME,
         "display_name": "Ensemble scenario speech TTS",
+        "credentials": {},
+        "options": {},
+    }
+    # The selective router stub (Johnny-trt.47): same answer path as the
+    # harness stub, but the router call implements the peer-selectivity rule
+    # by parsing the roster block back out of the prompt the gate rendered.
+    provider_config["llm"] = {
+        "provider_name": SCENARIO_LLM_PROVIDER_NAME,
+        "display_name": "Ensemble scenario selective LLM",
         "credentials": {},
         "options": {},
     }
@@ -407,6 +586,12 @@ async def run_ensemble_scenario(
                     "mode": AUTONOMOUS_MODE,
                     "assignment_context": agent.context
                     or "You are in a scripted ensemble regression run.",
+                    # Peer roster (Johnny-trt.47): what the group-start /
+                    # scheduler stamps in production — drives the router's
+                    # selectivity block the selective stub parses back out.
+                    "peer_names": [
+                        other.name for other in scenario.agents if other is not agent
+                    ],
                 },
                 provider_config=provider_config,
                 redis_url=redis_url,
@@ -441,6 +626,7 @@ async def run_ensemble_scenario(
                 step.text,
                 step.addressed_to,
             )
+            result.step_marks.append(time.monotonic())
             await asyncio.gather(
                 *(session.feed_text(step.text) for session in sessions)
             )
@@ -520,14 +706,21 @@ def _collect_member(
             record.floor_expired += 1
         elif isinstance(event, AgentSpoke):
             record.spoke.append(event.text)
+            record.reply_times.append(t)
         elif isinstance(event, RouterDecisionMade):
             record.decisions += 1
+            if not event.should_speak:
+                record.decline_times.append(t)
+        elif isinstance(event, TurnTerminal):
+            if event.no_reply_reason == "peer_answered":
+                record.peer_answered_times.append(t)
         elif isinstance(event, PeerSpeechSuppressed):
             record.suppressions.append(event)
         elif isinstance(event, TurnClaimWon):
             record.claims_won.append(event)
         elif isinstance(event, TurnClaimLost):
             record.claims_lost.append(event)
+            record.claim_lost_times.append(t)
         elif (
             isinstance(event, TranscriptFinalized)
             and event.speaker is not None
@@ -590,6 +783,10 @@ def render_report(result: EnsembleResult) -> str:
         lines.append(
             f"  claims won/lost:    {len(member.claims_won)}/{len(member.claims_lost)}"
         )
+        lines.append(
+            f"  declined/peer_answered: {len(member.decline_times)}/"
+            f"{len(member.peer_answered_times)}"
+        )
         lines.append("")
     lines.append("PASS" if result.passed else "FAIL")
     for problem in result.problems:
@@ -626,6 +823,8 @@ def result_to_json(result: EnsembleResult) -> dict[str, Any]:
                 ],
                 "claims_won": len(m.claims_won),
                 "claims_lost": len(m.claims_lost),
+                "declines": len(m.decline_times),
+                "peer_answered_terminals": len(m.peer_answered_times),
                 "floor_expired": m.floor_expired,
             }
             for m in result.members
@@ -670,6 +869,7 @@ __all__ = [
     "MemberRecord",
     "RecordingBus",
     "ScenarioAgent",
+    "ScenarioSelectiveLLMProvider",
     "ScenarioSpeechTTSProvider",
     "ScenarioStep",
     "evaluate_result",

@@ -25,6 +25,8 @@ from johnny.voice_pipeline.events import (
     FloorExpired,
     FloorReleased,
     PeerSpeechSuppressed,
+    TurnClaimLost,
+    TurnClaimWon,
 )
 
 # --------------------------------------------------------------------------- #
@@ -480,3 +482,191 @@ async def test_text_backstop_via_broadcast_spoke_frames() -> None:
     finally:
         await floor_a.aclose()
         await floor_b.aclose()
+
+
+# --------------------------------------------------------------------------- #
+# Turn claims (Johnny-trt.47)                                                 #
+# --------------------------------------------------------------------------- #
+
+
+def _claim_floor(
+    hub: InMemoryFloorHub,
+    *,
+    session_id: str,
+    agent: str,
+    recorder: _EventRecorder | None = None,
+    window_ms: int = 2_000,
+) -> SpeechFloor:
+    return SpeechFloor(
+        backend=InMemoryFloorBackend(hub),
+        session_id=session_id,
+        agent_name=agent,
+        publish_event=recorder,
+        claim_window_ms=window_ms,
+    )
+
+
+async def test_claim_first_wins_second_loses_same_bucket() -> None:
+    hub = InMemoryFloorHub()
+    rec_a, rec_b = _EventRecorder(), _EventRecorder()
+    alex = _claim_floor(hub, session_id="1", agent="Alex", recorder=rec_a)
+    echo = _claim_floor(hub, session_id="2", agent="Echo", recorder=rec_b)
+
+    first = await alex.claim_turn(10_000)
+    second = await echo.claim_turn(10_300)  # VAD skew within the window
+
+    assert first.won
+    assert not second.won
+    assert second.winner == "Alex"
+    assert [e.claimant for e in rec_a.of_type(TurnClaimWon)] == ["Alex"]
+    lost = rec_b.of_type(TurnClaimLost)
+    assert [(e.claimant, e.winner) for e in lost] == [("Echo", "Alex")]
+    assert lost[0].bucket == first.bucket
+
+
+async def test_claim_cross_bucket_boundary_still_single_winner() -> None:
+    """Anchors straddling a bucket edge are the same utterance (peek ±1)."""
+    hub = InMemoryFloorHub()
+    alex = _claim_floor(hub, session_id="1", agent="Alex")
+    echo = _claim_floor(hub, session_id="2", agent="Echo")
+
+    first = await echo.claim_turn(2_010)  # bucket 1
+    second = await alex.claim_turn(1_990)  # bucket 0, |Δt| = 20ms
+
+    assert first.won
+    assert not second.won and second.winner == "Echo"
+
+
+async def test_claim_distinct_utterances_both_win() -> None:
+    hub = InMemoryFloorHub()
+    alex = _claim_floor(hub, session_id="1", agent="Alex")
+    echo = _claim_floor(hub, session_id="2", agent="Echo")
+
+    assert (await alex.claim_turn(10_000)).won
+    assert (await echo.claim_turn(22_000)).won  # 12 s later — a new question
+
+
+async def test_claim_adjacent_bucket_outside_window_is_a_new_utterance() -> None:
+    """Neighbor-bucket entries only lose the turn when within the window."""
+    hub = InMemoryFloorHub()
+    alex = _claim_floor(hub, session_id="1", agent="Alex", window_ms=1_000)
+    echo = _claim_floor(hub, session_id="2", agent="Echo", window_ms=1_000)
+
+    assert (await alex.claim_turn(1_990)).won  # bucket 1
+    # bucket 2, |Δt| = 1 210 ms > window — a distinct utterance.
+    assert (await echo.claim_turn(3_200)).won
+
+
+async def test_claim_reclaim_by_the_same_session_stays_won() -> None:
+    hub = InMemoryFloorHub()
+    recorder = _EventRecorder()
+    alex = _claim_floor(hub, session_id="1", agent="Alex", recorder=recorder)
+
+    assert (await alex.claim_turn(10_000)).won
+    assert (await alex.claim_turn(10_050)).won  # defensive re-entry
+    # Only the first claim emits — the re-claim is idempotent bookkeeping.
+    assert len(recorder.of_type(TurnClaimWon)) == 1
+
+
+async def test_claim_ttl_frees_the_bucket() -> None:
+    clock = {"now": 100.0}
+    hub = InMemoryFloorHub(clock=lambda: clock["now"])
+    alex = _claim_floor(hub, session_id="1", agent="Alex")
+    echo = _claim_floor(hub, session_id="2", agent="Echo")
+
+    assert (await alex.claim_turn(10_000)).won
+    clock["now"] += 61.0  # past DEFAULT_CLAIM_TTL_MS
+    assert (await echo.claim_turn(10_100)).won
+
+
+async def test_claim_set_race_loses_to_the_atomic_winner() -> None:
+    """Both peek empty; the second SET returns the winner's payload."""
+    hub = InMemoryFloorHub()
+    echo = _claim_floor(hub, session_id="2", agent="Echo")
+    # Seed the exact bucket between Echo's peek and set by claiming directly
+    # through a competing floor that shares the hub.
+    alex = _claim_floor(hub, session_id="1", agent="Alex")
+
+    class _RacingBackend(InMemoryFloorBackend):
+        def __init__(self) -> None:
+            super().__init__(hub)
+            self.peeked = 0
+
+        async def claim_get(self, bucket: int) -> str | None:
+            self.peeked += 1
+            if self.peeked == 3:  # after Echo's last peek, Alex's claim lands
+                await alex.claim_turn(10_100)
+            return await super().claim_get(bucket)
+
+    racing = SpeechFloor(
+        backend=_RacingBackend(), session_id="2", agent_name="Echo"
+    )
+    outcome = await racing.claim_turn(10_000)
+    assert not outcome.won
+    assert outcome.winner == "Alex"
+    del echo
+
+
+async def test_claim_post_set_verify_demotes_to_the_earlier_anchor() -> None:
+    """Cross-bucket race: both set their own bucket; (t_ms, session) decides.
+
+    Deterministic reconstruction of the true race — Alex's bucket-0 claim
+    lands between Echo's peek and Echo's post-set verify, exactly the window
+    the third claim step exists for. (A real co-floor cannot be used here:
+    sequenced through the public API one side always loses at the peek.)
+    """
+    import json as _json
+
+    hub = InMemoryFloorHub()
+    alex_payload = _json.dumps(
+        {"session_id": "1", "agent": "Alex", "t_ms": 1_990}, separators=(",", ":")
+    )
+
+    class _LateNeighbor(InMemoryFloorBackend):
+        """Echo's backend: Alex's neighboring claim appears only AFTER
+        Echo's own set (the peek missed it; the post-set verify must not)."""
+
+        async def claim_set(self, bucket: int, payload: str, ttl_ms: int) -> str | None:
+            result = await super().claim_set(bucket, payload, ttl_ms)
+            await hub.claim_set(0, alex_payload, 60_000)  # the racing winner
+            return result
+
+    echo = SpeechFloor(backend=_LateNeighbor(hub), session_id="2", agent_name="Echo")
+    outcome = await echo.claim_turn(2_010)  # bucket 1, later anchor
+
+    assert not outcome.won
+    assert outcome.winner == "Alex"
+    # Echo demoted itself and released its own bucket-1 entry, so a third
+    # contender sees only the real winner.
+    assert hub.claim_payload(1) is None
+    assert hub.claim_payload(0) is not None
+
+
+async def test_claim_backend_failure_fails_open() -> None:
+    class _BrokenBackend(InMemoryFloorBackend):
+        async def claim_get(self, bucket: int) -> str | None:
+            raise RuntimeError("redis down")
+
+    recorder = _EventRecorder()
+    floor = SpeechFloor(
+        backend=_BrokenBackend(InMemoryFloorHub()),
+        session_id="1",
+        agent_name="Alex",
+        publish_event=recorder,
+    )
+    outcome = await floor.claim_turn(10_000)
+    assert outcome.won  # benign direction: both may answer, neither stays mute
+    assert recorder.events == []  # arbitration did not run — no event lies
+
+
+async def test_claim_payload_carries_the_contention_identity() -> None:
+    import json as _json
+
+    hub = InMemoryFloorHub()
+    alex = _claim_floor(hub, session_id="s-1", agent="Alex")
+    outcome = await alex.claim_turn(10_000)
+
+    payload = hub.claim_payload(int(outcome.bucket))
+    assert payload is not None
+    data = _json.loads(payload)
+    assert data == {"session_id": "s-1", "agent": "Alex", "t_ms": 10_000}

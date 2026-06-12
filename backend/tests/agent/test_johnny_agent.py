@@ -932,3 +932,103 @@ async def test_noise_gate_wins_over_peer_attribution() -> None:
     assert [e.reason for e in filtered.events] == ["stoplist_match"]
     assert finalized.events == []
     assert peer.attribute_calls == []
+
+# --- stt_node: deliberate by-name handoffs (Johnny-trt.47) -------------------
+
+
+async def test_peer_handoff_by_name_opens_a_turn_with_speaker_prefix() -> None:
+    """Peer speech naming THIS agent is a deliberate handoff: the durable
+    transcript keeps the peer label + original text, while the SDK stream
+    gets a name-prefixed copy so the router sees who is asking."""
+    finalized = _FinalizedRecorder()
+    agent = JohnnyAgent(
+        peer_floor=_FakePeerFloor(window_active=True, attribute_all=True),
+        transcript_finalized_sink=finalized,
+        session_id="sess-handoff",
+        agent_display_name="Alex",
+    )
+
+    out = await _drain(
+        agent._gate_stt_events(
+            _source(_final("Alex, can you take the deployment question?"))
+        )
+    )
+
+    assert len(finalized.events) == 1
+    assert finalized.events[0].speaker == "Echo B"
+    assert finalized.events[0].text == "Alex, can you take the deployment question?"
+    assert [e.alternatives[0].text for e in out] == [
+        "Echo B: Alex, can you take the deployment question?"
+    ]
+
+
+async def test_peer_handoff_budget_is_one_hop_per_human_utterance() -> None:
+    """Bot-to-bot chains are bounded deterministically: a second handoff with
+    no intervening human speech is suppressed; a kept human final restores it."""
+    finalized = _FinalizedRecorder()
+    peer = _FakePeerFloor(window_active=True, attribute_all=True)
+    agent = JohnnyAgent(
+        peer_floor=peer,
+        transcript_finalized_sink=finalized,
+        session_id="sess-budget",
+        agent_display_name="Alex",
+    )
+
+    first = await _drain(
+        agent._gate_stt_events(_source(_final("Alex, what do you think?")))
+    )
+    assert len(first) == 1  # hop 1 opens
+
+    second = await _drain(
+        agent._gate_stt_events(_source(_final("Alex, and another thing?")))
+    )
+    assert second == []  # hop 2 suppressed — the loop can never run away
+
+    peer._attribute_all = False  # a human speaks (not peer-attributed)
+    human = await _drain(agent._gate_stt_events(_source(_final("ok next topic"))))
+    assert len(human) == 1
+
+    peer._attribute_all = True
+    third = await _drain(
+        agent._gate_stt_events(_source(_final("Alex, one more handoff")))
+    )
+    assert len(third) == 1  # budget restored by the human utterance
+
+
+async def test_peer_speech_not_naming_me_stays_suppressed() -> None:
+    agent = JohnnyAgent(
+        peer_floor=_FakePeerFloor(window_active=True, attribute_all=True),
+        session_id="s",
+        agent_display_name="Alex",
+    )
+
+    out = await _drain(
+        agent._gate_stt_events(_source(_final("the deploy finished an hour ago")))
+    )
+    assert out == []
+
+
+async def test_handoff_needs_a_whole_word_name_match() -> None:
+    """'Alexander' must not read as addressing 'Alex' (word-boundary rule)."""
+    agent = JohnnyAgent(
+        peer_floor=_FakePeerFloor(window_active=True, attribute_all=True),
+        session_id="s",
+        agent_display_name="Alex",
+    )
+
+    out = await _drain(
+        agent._gate_stt_events(_source(_final("Alexander filed the report")))
+    )
+    assert out == []
+
+
+async def test_handoff_disabled_without_a_display_name() -> None:
+    agent = JohnnyAgent(
+        peer_floor=_FakePeerFloor(window_active=True, attribute_all=True),
+        session_id="s",
+    )
+
+    out = await _drain(
+        agent._gate_stt_events(_source(_final("Alex, can you answer this?")))
+    )
+    assert out == []

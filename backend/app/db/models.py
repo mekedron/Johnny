@@ -146,6 +146,7 @@ class NoReplyReason(enum.StrEnum):
     STAGE_ERROR = "stage_error"
     LISTEN_ONLY = "listen_only"
     FLOOR_UNAVAILABLE = "floor_unavailable"
+    PEER_ANSWERED = "peer_answered"
     LEGACY = "legacy"
 
 

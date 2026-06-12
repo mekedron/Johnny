@@ -29,6 +29,7 @@ stores + snapshots the pins only.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -148,7 +149,10 @@ def _mode_value(mode: Any) -> str:
 
 
 def build_agent_snapshot(
-    agent: Agent, *, assignment_context: str | None = None
+    agent: Agent,
+    *,
+    assignment_context: str | None = None,
+    peer_names: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Freeze the agent's behavior + provider pins for ``bot_sessions.agent_snapshot``.
 
@@ -158,6 +162,11 @@ def build_agent_snapshot(
     :func:`app.services.agent_providers.resolve_agent_provider_payload`
     (Johnny-trt.42) turns into the session provider payload at dispatch.
     Plain JSON-able types only.
+
+    ``peer_names`` (Johnny-trt.47) is the co-agent roster of a multi-agent
+    launch — the OTHER agents' display names serving the same meeting /
+    playground group. It drives the router's peer-selectivity prompt block;
+    absent/empty (every single-agent launch) renders no block at all.
     """
     return {
         "agent_id": agent.id,
@@ -176,6 +185,7 @@ def build_agent_snapshot(
             "tts_options": dict(agent.tts_options or {}),
         },
         "assignment_context": assignment_context,
+        "peer_names": [str(n) for n in (peer_names or []) if str(n).strip()],
     }
 
 

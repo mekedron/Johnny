@@ -39,6 +39,7 @@ only by the agent worker / its tests, never from the import-safe top-level
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -92,6 +93,7 @@ from johnny.agent.observability import (
 from johnny.agent.router_gate import RouterGate, RouterGateConfig
 from johnny.agent.session import JohnnyAgent, build_johnny_agent
 from johnny.agent.speech_floor import (
+    DEFAULT_CLAIM_WINDOW_MS,
     FloorBackend,
     RedisFloorBackend,
     SpeechFloor,
@@ -502,6 +504,27 @@ def _build_sync_persistence(
     return approval_gate, decision_sink, task_sink, db_session
 
 
+def _env_int(name: str, default: int) -> int:
+    """A positive-integer env knob with a defensive fallback.
+
+    Used for the runtime tuning knobs that must not crash an assembly on a
+    typo (e.g. ``JOHNNY_TURN_CLAIM_WINDOW_MS``, Johnny-trt.47): a missing /
+    malformed / non-positive value degrades to the shipped default.
+    """
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("%s=%r is not an integer — using %d", name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning("%s=%d must be positive — using %d", name, value, default)
+        return default
+    return value
+
+
 def resolve_session_sandbox_url(config: SessionJobConfig) -> str:
     """Which sandbox serves this session's capability probes — the Phase-7 seam.
 
@@ -798,7 +821,13 @@ async def build_agent_runtime(
 
     # Behavior knobs ride the dispatch payload from the session's frozen
     # agent snapshot (Johnny-trt.41) — the gate never re-reads config tables
-    # at turn time.
+    # at turn time. ``agent_display_name`` is the one identity string used
+    # everywhere a co-agent might see this session: the floor/claim payloads,
+    # the peer-selectivity prompt, and the handoff name match (Johnny-trt.47).
+    agent_display_name = (
+        str(config.agent_snapshot.get("name") or "").strip()
+        or f"agent-{config.bot_session_id}"
+    )
     gate_config = RouterGateConfig(
         mode=config.mode,
         character_prompt=config.character_prompt,
@@ -810,6 +839,8 @@ async def build_agent_runtime(
         confidence_threshold=config.confidence_threshold,
         task_catalog=task_catalog,
         executor_kinds=executor_kinds,
+        agent_name=agent_display_name,
+        peer_agent_names=config.peer_names,
     )
     gate = RouterGate(
         router_llm,
@@ -899,10 +930,6 @@ async def build_agent_runtime(
     if scope is None and config.meeting_config_id is not None:
         scope = str(config.meeting_config_id)
     if scope is not None and (floor_backend is not None or config.redis_url):
-        agent_display_name = (
-            str(config.agent_snapshot.get("name") or "").strip()
-            or f"agent-{config.bot_session_id}"
-        )
         backend: FloorBackend = (
             floor_backend
             if floor_backend is not None
@@ -914,6 +941,13 @@ async def build_agent_runtime(
             agent_name=agent_display_name,
             publish_event=bus.publish,
             timestamp_ms=session_relative_ms(session_started_at),
+            # Turn-claim bucket window (Johnny-trt.47): the tuning knob —
+            # claims whose end-of-speech anchors fall within this window are
+            # the same utterance. Env-tunable so playground/live tuning needs
+            # no rebuild.
+            claim_window_ms=_env_int(
+                "JOHNNY_TURN_CLAIM_WINDOW_MS", DEFAULT_CLAIM_WINDOW_MS
+            ),
         )
         speech_floor.start()
         gate.attach_speech_floor(speech_floor)
@@ -1000,6 +1034,7 @@ async def build_agent_runtime(
         speech_interim_sink=_on_sentence_flushed,
         metrics_listener=metrics_translator.on_metrics_collected,
         peer_floor=speech_floor,
+        agent_display_name=agent_display_name,
     )
 
     return AgentRuntime(

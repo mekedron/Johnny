@@ -85,6 +85,7 @@ NoReplyReason = Literal[
     "stage_error",
     "listen_only",
     "floor_unavailable",
+    "peer_answered",
 ]
 """Why a turn terminated in ``no_reply`` (INV-1, Johnny-ckz.28.3).
 
@@ -106,6 +107,9 @@ the turn went instead of silence:
 * ``floor_unavailable`` — a peer agent held the shared speech floor past
   the acquire wait (multi-agent meetings, Johnny-trt.46); the turn was
   suppressed rather than spoken over the co-agent.
+* ``peer_answered`` — a peer agent won the turn claim for this utterance
+  (multi-agent arbitration, Johnny-trt.47); this agent's answer was
+  dropped outright instead of queueing a sequential duplicate.
 """
 
 PipelineStageFailedStage = Literal["stt", "router_llm", "answer_llm"]

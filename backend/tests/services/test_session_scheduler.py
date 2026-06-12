@@ -685,6 +685,10 @@ async def test_start_sessions_launches_one_session_per_enabled_assignment(
     assert finn_row.bot_name == "Finn"
     assert finn_row.agent_snapshot is not None
     assert finn_row.agent_snapshot["assignment_context"] == "Finn takes notes."
+    # Peer roster (Johnny-trt.47): each snapshot names the OTHER enabled
+    # assignments' agents — never itself, never the disabled assignment.
+    assert aria_row.agent_snapshot["peer_names"] == ["Finn"]
+    assert finn_row.agent_snapshot["peer_names"] == ["Aria"]
     # Each launch context carries its own session id + frozen snapshot;
     # position order decides launch order.
     assert [c.agent_id for c in launcher.started] == [aria.id, finn.id]

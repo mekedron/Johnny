@@ -182,6 +182,7 @@ SNAPSHOT_CHARACTER_PROMPT_KEY = "character_prompt"
 SNAPSHOT_ALLOWED_REPLIES_KEY = "allowed_replies"
 SNAPSHOT_CONFIDENCE_THRESHOLD_KEY = "confidence_threshold"
 SNAPSHOT_ASSIGNMENT_CONTEXT_KEY = "assignment_context"
+SNAPSHOT_PEER_NAMES_KEY = "peer_names"
 
 
 def _int_or_none(raw: str | None) -> int | None:
@@ -285,6 +286,18 @@ class SessionJobConfig:
         return _coerce_threshold(
             self.agent_snapshot.get(SNAPSHOT_CONFIDENCE_THRESHOLD_KEY)
         )
+
+    @property
+    def peer_names(self) -> tuple[str, ...]:
+        """Co-agent display names serving the same meeting/group (Johnny-trt.47).
+
+        Stamped into the snapshot at launch by the surfaces that know the
+        roster (the per-assignment scheduler, the playground group start);
+        empty everywhere else — single-agent sessions render no peer block.
+        Lenient like the other snapshot reads: non-list / non-string shapes
+        degrade to absent.
+        """
+        return _coerce_replies(self.agent_snapshot.get(SNAPSHOT_PEER_NAMES_KEY))
 
     def with_mode(self, mode: str) -> SessionJobConfig:
         """A copy whose snapshot carries ``mode`` — the runtime degrade seam.
@@ -521,6 +534,7 @@ __all__ = [
     "SNAPSHOT_CHARACTER_PROMPT_KEY",
     "SNAPSHOT_CONFIDENCE_THRESHOLD_KEY",
     "SNAPSHOT_MODE_KEY",
+    "SNAPSHOT_PEER_NAMES_KEY",
     "SUGGEST_ONLY_MODE",
     "SUPPORTED_MODES",
     "SessionJobConfig",

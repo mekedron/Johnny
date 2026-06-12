@@ -44,6 +44,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
+    Agent,
     BotSession,
     BotSessionSource,
     BotSessionStatus,
@@ -483,6 +484,29 @@ def pending_assignments(
     return None if active_count == 0 else []
 
 
+def _peer_agent_names(meeting: MeetingConfig, agent: Agent | None) -> list[str]:
+    """The co-agent roster one assignment's session should know (Johnny-trt.47).
+
+    Display names of every OTHER launch-eligible assignment's agent — the
+    same enabled-ordered-capped set the per-assignment scheduler launches
+    (:func:`pending_assignments`), so the roster matches who is actually in
+    the meeting even when this launch is a single crashed-peer redispatch.
+    Empty for single-assignment meetings and the no-assignments default
+    fallback: those sessions render no peer-selectivity block at all.
+    """
+    if agent is None:
+        return []
+    names: list[str] = []
+    for assignment in _enabled_assignments(meeting)[:MAX_AGENTS_PER_MEETING]:
+        peer = assignment.agent
+        if peer is None or peer.id == agent.id:
+            continue
+        name = (peer.name or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
 def _build_base_provider_payload(session: Session) -> dict[str, Any]:
     """Materialise the global-active provider rows for the meet-worker.
 
@@ -600,6 +624,10 @@ async def _start_one_session(
             agent_snapshot = build_agent_snapshot(
                 agent,
                 assignment_context=(assignment.context if assignment is not None else None),
+                # Peer roster (Johnny-trt.47): the other enabled assignments'
+                # agents — drives the router's peer-selectivity prompt block
+                # in multi-agent meetings; empty for single-agent launches.
+                peer_names=_peer_agent_names(meeting, agent),
             )
             row.agent_snapshot = agent_snapshot
         except Exception:  # noqa: BLE001 — never block a launch on agent errors

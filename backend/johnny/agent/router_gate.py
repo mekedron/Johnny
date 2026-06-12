@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -98,6 +99,7 @@ from johnny.agent.speech_floor import (
     RELEASE_TEARDOWN,
     FloorLease,
     SpeechFloor,
+    normalize_speech_text,
     shield_handle_through_peer_tail,
 )
 from johnny.agent.speech_queue import SpeechItem, SpeechPriority, SpeechQueue
@@ -157,6 +159,52 @@ ROUTER_DECISION_SCHEMA_NO_CATALOG = _reasoning._ROUTER_SCHEMA_NO_CATALOG
 def _default_clock() -> int:
     """Monotonic wall clock in milliseconds for the rate-limit window."""
     return int(time.monotonic() * 1000)
+
+
+def _default_wall_clock() -> int:
+    """Epoch milliseconds for the turn-claim anchor (Johnny-trt.47).
+
+    Deliberately *not* monotonic: the claim bucket must be comparable across
+    processes (two meet-worker containers arbitrating one meeting share the
+    host clock; per-bot VAD endpoint skew dwarfs any container clock skew).
+    """
+    return int(time.time() * 1000)
+
+
+ANCHOR_STALENESS_MS = 30_000
+"""How old the last VAD listening edge may be and still anchor a turn claim.
+The edge normally precedes ``run_turn`` by endpointing delay (≤ ~1.5 s
+semantic hold) plus the STT final's transcribe lag; anything older means the
+turn did not come from that utterance (a typed turn long after voice, a
+recovered hang) — the claim falls back to gate-entry time."""
+
+DEFAULT_CLAIM_DEFER_NAMED_PEER_S = 1.5
+"""How long an agent that was NOT addressed holds back its turn claim when
+the utterance names a peer by display name (Johnny-trt.47). The deterministic
+half of by-name routing — the bead's "a by-name match wins the turn claim
+outright": the named agent claims immediately, so it wins the bucket
+regardless of whether the un-named agent's router obeyed the selectivity
+prompt (verified necessary against llama3.2:3b, which speaks straight through
+the prompt rule — .validation/Johnny-trt.47/). Benign when the named agent
+declines: the deferred contender still claims after the grace and answers —
+by-name addressing can delay a fallback answer by this much, never silence
+it. Tuned in the multi-agent playground; Johnny-trt.52's alias matcher will
+replace the display-name match when it lands."""
+
+
+def _name_in_text(name: str, text: str) -> bool:
+    """Whole-word display-name match on backstop-normalized text (Johnny-trt.47).
+
+    The same matcher shape as the handoff check
+    (:meth:`johnny.agent.session.JohnnyAgent._is_peer_handoff`): both sides of
+    by-name routing — "open a turn for me" and "defer my claim to the named
+    peer" — must agree on what counts as being named.
+    """
+    normalized_name = normalize_speech_text(name)
+    normalized_text = normalize_speech_text(text)
+    if not normalized_name or not normalized_text:
+        return False
+    return re.search(rf"(?<!\w){re.escape(normalized_name)}(?!\w)", normalized_text) is not None
 
 
 def _extract_spoken_text(handle: SpeechHandle) -> str:
@@ -265,6 +313,40 @@ def capability_decline_speech(kind: str, reason: str) -> str:
         return spoken
     return f"I can't do that in this session — the {kind} capability isn't available right now."
 
+
+def render_peer_selectivity(agent_name: str, peer_names: tuple[str, ...]) -> str:
+    """The router prompt's peer roster + selectivity block (Johnny-trt.47).
+
+    Module-level (like :func:`render_task_catalog`) so the prompt shape is
+    testable and the ensemble scenario's selective router stub can parse the
+    same render it asserts against. The rules encode the arbitration split:
+    **by-name routing is the router's job** (strict — the named agent and
+    only the named agent answers), **unaddressed dedup is the turn claim's
+    job** (so the guidance stays permissive rather than risking a question
+    nobody answers). The deterministic pre-LLM name gate (Johnny-trt.52)
+    will consume by-name matches before this prompt ever runs; this block
+    remains the policy for everything that reaches the LLM.
+    """
+    name = agent_name.strip() or "this assistant"
+    peers = ", ".join(peer_names)
+    total = len(peer_names) + 1
+    return (
+        f"Multi-assistant meeting: you are {name}, one of {total} AI assistants "
+        f"in this meeting. The other assistants: {peers}.\n"
+        "Turn-taking rules:\n"
+        f"- A request that names another assistant ({peers}) is theirs alone: "
+        'set should_speak=false with reason "addressed to <assistant>" — even '
+        "if you know the answer — unless it explicitly asks you as well.\n"
+        f"- A request that names you ({name}) is yours: answer it.\n"
+        "- A request naming no assistant is open: answer it normally if it fits "
+        "you. Do not stay silent merely because a peer could also answer — "
+        "duplicate answers are prevented by turn arbitration outside this "
+        "decision.\n"
+        "- Another assistant may hand a question to you by name; treat that as "
+        "being addressed. A passing mention of your name in their speech is "
+        "not a handoff."
+    )
+
 # The Phase-3 STATUS_STUB_REPLY constant is gone (Johnny-trt.29): the status
 # verdict now renders the coordinator's in-memory task registry
 # (:meth:`TaskCoordinator.status_summary`); the no-coordinator / empty-registry
@@ -311,6 +393,20 @@ class RouterGateConfig:
     character_prompt: str = ""
     instructions: str = ""
     context: str = ""
+    # Multi-agent peer selectivity (Johnny-trt.47). ``agent_name`` is this
+    # session's display name (the floor/transcript identity); ``peer_agent_names``
+    # the co-agents serving the same meeting/group. Non-empty peers render the
+    # roster + selectivity block into the router prompt (by-name asks route to
+    # exactly the named agent; unaddressed asks stay permissive — the turn
+    # claim dedups). Both default empty, leaving every single-agent prompt
+    # byte-identical (replay verdict parity).
+    agent_name: str = ""
+    peer_agent_names: tuple[str, ...] = ()
+    # By-name claim defer (Johnny-trt.47): when the utterance names a peer
+    # and not this agent, this agent's turn claim waits this long so the
+    # named agent wins the bucket deterministically (prompt selectivity
+    # alone is model-dependent). 0 disables the defer.
+    claim_defer_named_peer_s: float = DEFAULT_CLAIM_DEFER_NAMED_PEER_S
     calendar_context: str = ""
     calendar_attachments_text: str = ""
     prior_session_context: str = ""
@@ -377,6 +473,7 @@ class RouterGate:
         resolve_turn_id: Callable[[str], int] | None = None,
         abandon: asyncio.Event | None = None,
         clock: Callable[[], int] = _default_clock,
+        wall_clock: Callable[[], int] = _default_wall_clock,
     ) -> None:
         self._router_llm = router_llm
         self._config = config
@@ -452,6 +549,17 @@ class RouterGate:
         # closures; the queue-delivery lease is owned by the deliverer.
         self._floor: SpeechFloor | None = None
         self._floor_leases: dict[str, FloorLease] = {}
+        # Turn-claim anchor state (Johnny-trt.47). ``wall_clock`` is epoch ms
+        # (cross-process comparable — the claim bucket key's time domain);
+        # ``_last_user_end_wall_ms`` is stamped on every VAD listening edge so
+        # a voice turn's claim anchors at the utterance's end-of-speech (the
+        # near-shared instant across co-agents) rather than at gate entry
+        # (which drifts apart by per-agent STT + router latency).
+        self._wall_clock = wall_clock
+        self._last_user_end_wall_ms: int | None = None
+        # The by-name claim-defer sleeper — an instance seam so tests assert
+        # the defer without real waits.
+        self._defer_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
         # The most recent say() SpeechHandle (ack / status / correction),
         # kept so the internal-tool teardown runners (Johnny-trt.57) can wait
         # for the farewell ack to finish playing before disconnecting — see
@@ -507,8 +615,21 @@ class RouterGate:
     # The blocking gate                                                  #
     # ------------------------------------------------------------------ #
 
-    async def run_turn(self, turn_ctx: ChatContext, new_message: LKChatMessage) -> None:
+    async def run_turn(
+        self,
+        turn_ctx: ChatContext,
+        new_message: LKChatMessage,
+        *,
+        utterance_anchor_ms: int | None = None,
+    ) -> None:
         """Run the should-speak gate for one user turn.
+
+        ``utterance_anchor_ms`` (Johnny-trt.47) pins the turn-claim anchor for
+        callers that know the utterance instant better than the VAD edge does —
+        the typed-input path (:meth:`BrowserAgentSession.feed_text`) passes its
+        entry time, since a typed turn has no end-of-speech and a stale voice
+        edge must not anchor it. ``None`` (the voice path) anchors at the last
+        VAD listening edge when recent, else gate-entry time.
 
         Returns normally to **speak** (the SDK then generates the reply); raises
         :class:`~livekit.agents.llm.StopResponse` to stay silent. Every silent
@@ -579,6 +700,10 @@ class RouterGate:
             # skip_reply paths documented on :meth:`TurnLedger.open`). Stay silent.
             raise StopResponse()
         tracker = self._ledger.gate_tracker(turn_id)  # opens the turn (INV-1)
+        # Turn-claim anchor (Johnny-trt.47), resolved at gate ENTRY — before
+        # the router await — so co-agents' anchors differ by VAD/endpointing
+        # skew, never by their router LLMs' latency spread.
+        claim_anchor_ms = self._resolve_claim_anchor(utterance_anchor_ms)
         # Shadow complexity pre-score (Johnny-trt.50): pure stdlib, computed
         # synchronously BEFORE the triage-LLM await — where a future behavioral
         # pre-scorer would run — and outside the triage span below so the
@@ -740,6 +865,47 @@ class RouterGate:
             # Phase-3 triage branches below are inline-speaking-mode only.
             await self._begin_approval(tracker, turn_id, decision)
             raise StopResponse()
+
+        # Turn claim (Johnny-trt.47): every inline-speaking outcome below —
+        # capability decline, delegate ack, status, the SPEAK reply — is a
+        # *turn response*, and in a multi-agent meeting only one agent may
+        # respond to one utterance. Claim-once on the utterance bucket: the
+        # loser terminalizes ``no_reply(peer_answered)`` HERE, instead of
+        # queueing a duplicate answer behind the floor (the pre-trt.47
+        # failure: both agents answered the same question sequentially).
+        # Runs after every never-speaks exit (listen-only, declined,
+        # low-confidence, suggest-only, rate-limited) so a non-speaking
+        # agent can never steal the turn from the one that would answer,
+        # and after the approval park (a human arbitrates those rounds).
+        # No floor (single-agent / playground singles) ⇒ no claim, no event.
+        if self._floor is not None:
+            # By-name priority (Johnny-trt.47, deterministic leg): an
+            # utterance naming a peer — and not this agent — defers this
+            # agent's claim, so the named agent wins the bucket even when a
+            # small router model speaks straight through the selectivity
+            # prompt. The deferred claim still runs: a named agent that
+            # declined leaves the bucket free and this agent answers after
+            # the grace instead of leaving the question hanging.
+            defer_s = self._claim_defer_for(new_message)
+            if defer_s > 0:
+                logger.info(
+                    "agent.router.gate: turn=%s names a peer — deferring the "
+                    "turn claim %.1fs (by-name priority)",
+                    turn_id,
+                    defer_s,
+                )
+                await self._defer_sleep(defer_s)
+            claim = await self._floor.claim_turn(claim_anchor_ms)
+            if not claim.won:
+                await tracker.emit(
+                    terminal_state="no_reply",
+                    no_reply_reason="peer_answered",
+                    detail=(
+                        f"peer agent {claim.winner or 'unknown'} claimed this "
+                        f"utterance (bucket {claim.bucket})"
+                    ),
+                )
+                raise StopResponse()
 
         capability_gap = decision.raw.get(CAPABILITY_GAP_KEY)
         if isinstance(capability_gap, dict):
@@ -2233,8 +2399,17 @@ class RouterGate:
         self._interruptions.note_user_speech_onset()
 
     def note_user_speech_ended(self) -> None:
-        """The participant went silent (``listening`` / ``away`` edge) — see above."""
+        """The participant went silent (``listening`` / ``away`` edge) — see above.
+
+        Also stamps the turn-claim anchor (Johnny-trt.47): the wall-clock
+        instant of the most recent end-of-speech, which co-agents observe
+        within VAD endpoint skew of each other — the shared key their claims
+        contend on. Peer-bot audio stamps it too (the edge fires on any
+        speech), but a real voice turn's own edge always lands closer to its
+        ``run_turn``, so the stale value is simply overwritten.
+        """
         self._interruptions.note_user_speech_ended()
+        self._last_user_end_wall_ms = self._wall_clock()
 
     def note_stop_requested(self) -> None:
         """An explicit stop is about to interrupt the session (Johnny-trt.49).
@@ -2305,6 +2480,43 @@ class RouterGate:
     # Internals                                                          #
     # ------------------------------------------------------------------ #
 
+    def _claim_defer_for(self, new_message: LKChatMessage) -> float:
+        """Seconds to hold this turn's claim back for a named peer (Johnny-trt.47).
+
+        Positive only when the utterance names at least one peer agent by
+        display name AND does not name this agent — the deterministic
+        addressed-to-someone-else signal. Naming both (or naming nobody)
+        contends immediately; the claim itself dedups.
+        """
+        cfg = self._config
+        if cfg.claim_defer_named_peer_s <= 0 or not cfg.peer_agent_names:
+            return 0.0
+        text = (new_message.text_content or "").strip()
+        if not text:
+            return 0.0
+        if cfg.agent_name and _name_in_text(cfg.agent_name, text):
+            return 0.0
+        if any(_name_in_text(peer, text) for peer in cfg.peer_agent_names):
+            return cfg.claim_defer_named_peer_s
+        return 0.0
+
+    def _resolve_claim_anchor(self, explicit_ms: int | None) -> int:
+        """The turn-claim anchor for this turn, in epoch ms (Johnny-trt.47).
+
+        Precedence: an explicit caller anchor (the typed path's entry time) →
+        the last VAD listening edge when it is recent (a voice turn's own
+        end-of-speech always immediately precedes its ``run_turn``; see
+        :data:`ANCHOR_STALENESS_MS`) → gate-entry wall time (no recent edge —
+        a typed turn on the voice surface, or VAD wiring absent).
+        """
+        if explicit_ms is not None:
+            return explicit_ms
+        now_ms = self._wall_clock()
+        last_end = self._last_user_end_wall_ms
+        if last_end is not None and 0 <= now_ms - last_end <= ANCHOR_STALENESS_MS:
+            return last_end
+        return now_ms
+
     def _is_rate_limited(self) -> bool:
         """Per-session over-talk cap, ported from the legacy split pipeline.
 
@@ -2351,6 +2563,15 @@ class RouterGate:
         )
         system += f"\n\nMode: {cfg.mode}"
         system += f"\nConfidence threshold for speaking: {cfg.confidence_threshold:.2f}"
+        if cfg.peer_agent_names:
+            # Multi-agent peer selectivity (Johnny-trt.47). Rendered before
+            # the catalog/instructions so operator instructions can refine
+            # the rules rather than be contradicted; absent peers ⇒ absent
+            # block ⇒ the single-agent prompt stays byte-identical (replay
+            # verdict parity). By-name strictness is what makes "Alex, what
+            # do you think?" route to exactly Alex; unaddressed asks stay
+            # permissive because the turn claim — not the router — dedups.
+            system += f"\n\n{render_peer_selectivity(cfg.agent_name, cfg.peer_agent_names)}"
         if cfg.task_catalog:
             # Task catalog (Johnny-trt.19): the delegate-action vocabulary.
             # Rendered before the operator's meeting instructions so those can
@@ -2475,4 +2696,5 @@ __all__ = [
     "SaySpeech",
     "capability_decline_speech",
     "delegate_failure_correction",
+    "render_peer_selectivity",
 ]

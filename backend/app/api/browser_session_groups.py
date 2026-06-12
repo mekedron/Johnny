@@ -373,6 +373,11 @@ async def start_browser_group(
     member_names: dict[int, str] = {}
     spawned: list[int] = []
     try:
+        # Two passes (Johnny-trt.47): every member's router prompt carries the
+        # peer roster, and the roster is only complete once every member's
+        # agent has resolved — so resolve all specs first, then stamp each
+        # spec's snapshot with the OTHER members' names, then spawn.
+        prepared: list[tuple[Any, dict[str, Any]]] = []
         for position, (entry, row) in enumerate(zip(payload.agents, rows, strict=True)):
             member_payload = StartBrowserSessionPayload(
                 agent_id=entry.agent_id,
@@ -393,11 +398,22 @@ async def start_browser_group(
             row.playground_overrides = overrides_snapshot
             if resolution.agent is not None:
                 row.agent_id = resolution.agent.id
-                row.agent_snapshot = dict(spec.agent_snapshot)
                 row.bot_name = resolution.agent.name
             member_names[row.id] = (
                 resolution.agent.name if resolution.agent is not None else f"agent-{row.id}"
             )
+            prepared.append((spec, overrides_snapshot))
+
+        for row, (spec, _overrides) in zip(rows, prepared, strict=True):
+            peers = [
+                name
+                for member_id, name in member_names.items()
+                if member_id != row.id and name.strip()
+            ]
+            snapshot = {**dict(spec.agent_snapshot), "peer_names": peers}
+            spec = dataclasses.replace(spec, agent_snapshot=snapshot)
+            if row.agent_id is not None:
+                row.agent_snapshot = snapshot
             runner = _spawn_runner(bot_session_id=row.id, spec=spec)
             spawned.append(row.id)
             audio.add_member(row.id, runner.transport)

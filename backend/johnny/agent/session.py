@@ -40,6 +40,7 @@ only ever imported in the full-stack worker / api / test contexts.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
@@ -71,6 +72,7 @@ from johnny.agent.noise_filter import (
     classify_noise,
     classify_transcript_text,
 )
+from johnny.agent.speech_floor import normalize_speech_text
 from johnny.voice_pipeline.events import TranscriptFiltered, TranscriptFinalized
 from johnny.voice_pipeline.transcript_history import (
     BOT_SPEAKER_LABEL,
@@ -479,6 +481,7 @@ class JohnnyAgent(Agent):
         metrics_listener: MetricsListener | None = None,
         session_id: str | None = None,
         peer_floor: PeerFloorReader | None = None,
+        agent_display_name: str = "",
     ) -> None:
         if instructions is None:
             instructions = (
@@ -538,6 +541,16 @@ class JohnnyAgent(Agent):
         # never responds to peer-bot speech; arbitration is Johnny-trt.47).
         # ``None`` (single-agent / playground) leaves the node untouched.
         self._peer_floor = peer_floor
+        # Deliberate by-name handoffs (Johnny-trt.47): peer speech that names
+        # THIS agent opens a turn instead of being suppressed — the relaxation
+        # of the trt.46 strict never-respond-to-peers rule. The display name
+        # is the floor/transcript identity; the budget flag bounds bot-to-bot
+        # chains to ONE handoff per human utterance (a kept human final
+        # restores it), which keeps "never loops" a deterministic guarantee
+        # rather than a prompt hope. The trt.52 name-alias matcher will
+        # replace the plain display-name match here.
+        self._agent_display_name = agent_display_name.strip()
+        self._peer_handoff_spent = False
         # Session-start reference for transcript ``timestamp_ms`` (Johnny-7g5.1).
         # The status subscriber writes ``timestamp_ms`` into
         # ``transcript_chunks.start_offset_ms`` (a 4-byte INTEGER) as an
@@ -737,14 +750,35 @@ class JohnnyAgent(Agent):
                 # participant's. Recorded in the durable transcript labeled
                 # with the peer agent's name, then dropped from the SDK
                 # stream so the turn never begins (the noise-gate "turn never
-                # begins" contract; the strict v1 never-respond-to-peer rule).
+                # begins" contract) — UNLESS the peer addressed this agent by
+                # name (Johnny-trt.47): a deliberate handoff opens a turn,
+                # bounded to one hop per human utterance so bot-to-bot
+                # exchange can never loop. The yielded copy is prefixed with
+                # the peer's name so the router (and the answer model) see
+                # who is asking; the durable transcript keeps the peer label
+                # + original text either way.
                 peer = self._attribute_peer_final(event)
                 if peer is not None:
                     await self._emit_transcript_finalized(event, speaker_override=peer)
+                    if self._is_peer_handoff(event):
+                        self._peer_handoff_spent = True
+                        alt = event.alternatives[0]
+                        logger.info(
+                            "peer handoff accepted for session=%s: %r hands to %r "
+                            "text=%r",
+                            self._session_id,
+                            peer,
+                            self._agent_display_name,
+                            alt.text,
+                        )
+                        alt.text = f"{peer}: {alt.text}"
+                        yield event
                     continue
                 # Kept final → durable transcript (Johnny-d5z). Emitted whether or
                 # not the noise gate is configured, so a session with filtering off
-                # still records its transcripts.
+                # still records its transcripts. A human spoke: the peer-handoff
+                # budget is restored (Johnny-trt.47).
+                self._peer_handoff_spent = False
                 await self._emit_transcript_finalized(event)
                 yield event
                 continue
@@ -797,6 +831,28 @@ class JohnnyAgent(Agent):
             text,
         )
         return attribution.agent
+
+    def _is_peer_handoff(self, event: SpeechEvent) -> bool:
+        """Whether a peer-attributed final hands the turn to THIS agent (Johnny-trt.47).
+
+        True only when the agent has a display name, the peer's text contains
+        it as a whole word (normalized like the floor's text backstop — the
+        STT rendering of the peer's TTS may differ in case/punctuation), and
+        the one-hop budget is unspent (no handoff since the last kept human
+        final). Deliberately conservative: a miss means the strict trt.46
+        suppression applies, which is the safe direction.
+        """
+        if self._peer_handoff_spent or not self._agent_display_name:
+            return False
+        alt = event.alternatives[0] if event.alternatives else None
+        text = alt.text if alt is not None else ""
+        if not text.strip():
+            return False
+        normalized = normalize_speech_text(text)
+        name = normalize_speech_text(self._agent_display_name)
+        if not normalized or not name:
+            return False
+        return re.search(rf"(?<!\w){re.escape(name)}(?!\w)", normalized) is not None
 
     def _interim_is_noise(self, event: SpeechEvent, config: NoiseFilterConfig) -> bool:
         """Whether an interim transcript is noise, by the content gate alone.
@@ -1057,6 +1113,7 @@ async def build_johnny_agent(
     speech_interim_sink: SpeechInterimSink | None = None,
     metrics_listener: MetricsListener | None = None,
     peer_floor: PeerFloorReader | None = None,
+    agent_display_name: str = "",
 ) -> JohnnyAgent:
     """Build a :class:`JohnnyAgent`, rehydrating prior transcripts if available.
 
@@ -1111,6 +1168,7 @@ async def build_johnny_agent(
         metrics_listener=metrics_listener,
         session_id=session_id,
         peer_floor=peer_floor,
+        agent_display_name=agent_display_name,
     )
 
 

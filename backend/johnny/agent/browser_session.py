@@ -521,6 +521,13 @@ class BrowserAgentSession:
             # Session not started yet — let the caller persist the chunk instead.
             return False
 
+        # Turn-claim anchor (Johnny-trt.47): a typed turn has no end-of-speech
+        # edge, so its claim anchors at ENTRY time — the playground group fans
+        # one typed utterance to all members concurrently, so entry times agree
+        # within milliseconds while their router latencies may differ by
+        # hundreds. Captured before any await below keeps it honest.
+        anchor_ms = int(time.time() * 1000)
+
         await self._emit_user_transcript(cleaned)
 
         # Generation-scoped context copy (Johnny-0qw): the gate may inject a
@@ -548,7 +555,9 @@ class BrowserAgentSession:
         turn_ctx = self._runtime.agent.chat_ctx.copy()
         new_message = LKChatMessage(role="user", content=[cleaned])
         try:
-            await self._runtime.gate.run_turn(turn_ctx, new_message)
+            await self._runtime.gate.run_turn(
+                turn_ctx, new_message, utterance_anchor_ms=anchor_ms
+            )
         except StopResponse:
             # The gate accounted for this turn without an answer-LLM reply:
             # declined / suggest-only / listen-only (terminal already emitted),

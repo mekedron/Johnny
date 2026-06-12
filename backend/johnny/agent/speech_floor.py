@@ -10,9 +10,15 @@ coordinator:
   releases it when the speech completes or is interrupted.
 * **Never loop** — a bot must not answer another bot. Each session marks
   audio heard inside a peer's floor window as *peer speech*: the transcript
-  is recorded labeled with the peer agent's name and the turn never opens
-  (the strict v1 loop rule; deliberate bot-to-bot arbitration is sibling
-  work, Johnny-trt.47).
+  is recorded labeled with the peer agent's name and the turn never opens —
+  except a deliberate by-name handoff (Johnny-trt.47: peer speech that
+  names *this* agent opens a turn, bounded to one hop per human utterance;
+  see :meth:`johnny.agent.session.JohnnyAgent._gate_stt_events`).
+* **Answer once** (Johnny-trt.47) — when several agents' routers all decide
+  to answer the same participant utterance, :meth:`SpeechFloor.claim_turn`
+  arbitrates claim-once per utterance bucket: exactly one wins; the losers
+  terminalize ``no_reply(peer_answered)`` *immediately* instead of queueing
+  duplicate answers behind the floor.
 
 The floor is a meeting-scoped Redis lock (``SET NX PX`` on
 :data:`FLOOR_LOCK_KEY_TEMPLATE`) with a TTL + heartbeat lease: a healthy
@@ -65,6 +71,8 @@ from johnny.voice_pipeline.events import (
     FloorReleased,
     PeerSpeechSuppressed,
     PipelineEvent,
+    TurnClaimLost,
+    TurnClaimWon,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,6 +84,10 @@ FLOOR_LOCK_KEY_TEMPLATE = "johnny:floor:lock:meeting:{meeting_id}"
 
 FLOOR_CHANNEL_TEMPLATE = "johnny:floor:meeting:{meeting_id}"
 """Pub/sub channel for floor state broadcasts (acquired/heartbeat/released/spoke)."""
+
+CLAIM_KEY_TEMPLATE = "johnny:claim:meeting:{meeting_id}:{bucket}"
+"""Redis key of one utterance bucket's turn claim (Johnny-trt.47). Value = the
+winner's JSON payload (``{session_id, agent, t_ms}``)."""
 
 DEFAULT_FLOOR_TTL_MS = 10_000
 """Lock lease length. A crashed holder frees the floor within this bound."""
@@ -101,6 +113,22 @@ one TTL later instead of holding the meeting hostage."""
 
 DEFAULT_SWEEP_INTERVAL_S = 0.5
 """Observer-side sweep cadence (closes peer windows, emits their events)."""
+
+DEFAULT_CLAIM_WINDOW_MS = 2_000
+"""Turn-claim utterance-bucket window (Johnny-trt.47): two sessions' claims
+whose end-of-speech anchors differ by no more than this are the *same*
+utterance, so only one may answer. Sized to cover per-bot VAD endpoint skew
+plus the semantic-EOU hold spread (a 0.40 s floor commit vs. a 1.5 s
+``max_delay`` escalation on the peer ≈ 1.1 s worst case) with margin; two
+*distinct* utterances closer together than this can mis-arbitrate, which is
+the benign direction (one answer where two were possible). Tunable per
+assembly (``JOHNNY_TURN_CLAIM_WINDOW_MS`` on the runtime assemblies)."""
+
+DEFAULT_CLAIM_TTL_MS = 60_000
+"""Turn-claim key lease. Long enough that a slow contender (cold local STT +
+router latency) still *sees* the winner's claim instead of double-answering;
+short enough that the keyspace self-cleans. Buckets are absolute-time keyed,
+so a stale claim can never collide with a later utterance's bucket."""
 
 PEER_TEXT_RETENTION_S = 60.0
 """How long a peer's published spoken text stays matchable as the backstop."""
@@ -162,6 +190,13 @@ class FloorBackend(Protocol):
     ``payload`` is the holder's exact serialized identity; ``renew`` /
     ``release`` are compare-and-set against it so a session can never extend
     or delete a lock it lost (the Redis Lua discipline).
+
+    The ``claim_*`` trio (Johnny-trt.47) is the per-utterance-bucket
+    claim-once keyspace: ``claim_set`` is an atomic get-or-set (returns the
+    existing payload when the bucket was already claimed, ``None`` when this
+    call claimed it), ``claim_get`` a plain read, ``claim_release`` a
+    compare-and-delete (a demoted cross-bucket claimer removes its own entry
+    so later contenders see only the real winner).
     """
 
     async def try_acquire(self, payload: str, ttl_ms: int) -> bool: ...
@@ -169,6 +204,12 @@ class FloorBackend(Protocol):
     async def renew(self, payload: str, ttl_ms: int) -> bool: ...
 
     async def release(self, payload: str) -> bool: ...
+
+    async def claim_get(self, bucket: int) -> str | None: ...
+
+    async def claim_set(self, bucket: int, payload: str, ttl_ms: int) -> str | None: ...
+
+    async def claim_release(self, bucket: int, payload: str) -> bool: ...
 
     async def publish(self, message: dict[str, Any]) -> None: ...
 
@@ -191,6 +232,18 @@ if redis.call('get', KEYS[1]) == ARGV[1] then
 else
     return 0
 end
+"""
+
+# Atomic get-or-set for one claim bucket (Johnny-trt.47): the first writer
+# wins and gets nil back; every later caller gets the winner's payload.
+# Plain Lua instead of SET NX GET so the oldest supported Redis works.
+_CLAIM_LUA = """
+local existing = redis.call('get', KEYS[1])
+if existing then
+    return existing
+end
+redis.call('set', KEYS[1], ARGV[1], 'px', tonumber(ARGV[2]))
+return nil
 """
 
 
@@ -222,9 +275,13 @@ class RedisFloorBackend:
         self._redis_url = redis_url
         self._lock_key = FLOOR_LOCK_KEY_TEMPLATE.format(meeting_id=meeting_id)
         self._channel = FLOOR_CHANNEL_TEMPLATE.format(meeting_id=meeting_id)
+        self._meeting_id = meeting_id
         self._client_factory = client_factory
         self._reconnect_backoff_s = reconnect_backoff_s
         self._client: Any | None = None
+
+    def _claim_key(self, bucket: int) -> str:
+        return CLAIM_KEY_TEMPLATE.format(meeting_id=self._meeting_id, bucket=bucket)
 
     def _build_client(self) -> Any:
         if self._client_factory is not None:
@@ -253,6 +310,26 @@ class RedisFloorBackend:
     async def release(self, payload: str) -> bool:
         result = await self._command_client().eval(
             _RELEASE_LUA, 1, self._lock_key, payload
+        )
+        return bool(result)
+
+    async def claim_get(self, bucket: int) -> str | None:
+        raw = await self._command_client().get(self._claim_key(bucket))
+        if raw is None:
+            return None
+        return raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+
+    async def claim_set(self, bucket: int, payload: str, ttl_ms: int) -> str | None:
+        raw = await self._command_client().eval(
+            _CLAIM_LUA, 1, self._claim_key(bucket), payload, str(ttl_ms)
+        )
+        if raw is None:
+            return None
+        return raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+
+    async def claim_release(self, bucket: int, payload: str) -> bool:
+        result = await self._command_client().eval(
+            _RELEASE_LUA, 1, self._claim_key(bucket), payload
         )
         return bool(result)
 
@@ -323,6 +400,7 @@ class InMemoryFloorHub:
     def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._lock: tuple[str, float] | None = None  # (payload, expires_at)
+        self._claims: dict[int, tuple[str, float]] = {}  # bucket -> (payload, expires_at)
         self._queues: list[asyncio.Queue[dict[str, Any]]] = []
         self.published: list[dict[str, Any]] = []
 
@@ -352,6 +430,36 @@ class InMemoryFloorHub:
             return False
         self._lock = None
         return True
+
+    def _live_claim(self, bucket: int) -> str | None:
+        entry = self._claims.get(bucket)
+        if entry is None:
+            return None
+        payload, expires_at = entry
+        if self._clock() >= expires_at:
+            del self._claims[bucket]
+            return None
+        return payload
+
+    async def claim_get(self, bucket: int) -> str | None:
+        return self._live_claim(bucket)
+
+    async def claim_set(self, bucket: int, payload: str, ttl_ms: int) -> str | None:
+        existing = self._live_claim(bucket)
+        if existing is not None:
+            return existing
+        self._claims[bucket] = (payload, self._clock() + ttl_ms / 1000.0)
+        return None
+
+    async def claim_release(self, bucket: int, payload: str) -> bool:
+        if self._live_claim(bucket) != payload:
+            return False
+        del self._claims[bucket]
+        return True
+
+    def claim_payload(self, bucket: int) -> str | None:
+        """Test read: the bucket's live claim payload, honoring expiry."""
+        return self._live_claim(bucket)
 
     async def publish(self, message: dict[str, Any]) -> None:
         self.published.append(message)
@@ -395,6 +503,15 @@ class InMemoryFloorBackend:
 
     async def release(self, payload: str) -> bool:
         return await self._hub.release(payload)
+
+    async def claim_get(self, bucket: int) -> str | None:
+        return await self._hub.claim_get(bucket)
+
+    async def claim_set(self, bucket: int, payload: str, ttl_ms: int) -> str | None:
+        return await self._hub.claim_set(bucket, payload, ttl_ms)
+
+    async def claim_release(self, bucket: int, payload: str) -> bool:
+        return await self._hub.claim_release(bucket, payload)
 
     async def publish(self, message: dict[str, Any]) -> None:
         await self._hub.publish(message)
@@ -464,6 +581,45 @@ class PeerAttribution:
     agent: str
     via: str  # "window" | "text_match"
     text_matched: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class TurnClaimOutcome:
+    """One :meth:`SpeechFloor.claim_turn` result (Johnny-trt.47).
+
+    ``won=False`` means a peer already claimed this utterance — the caller
+    terminalizes ``no_reply(peer_answered)`` instead of speaking. ``bucket``
+    is the contended bucket's identifier (the quantized anchor, stringified
+    for the event vocabulary); ``winner`` names the claiming agent on a loss
+    (best-effort — blank when the winner's payload was unreadable).
+    """
+
+    won: bool
+    bucket: str
+    winner: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _ClaimEntry:
+    """A parsed claim payload read back from the bucket keyspace."""
+
+    session_id: str
+    agent: str
+    t_ms: int
+
+
+def _parse_claim(raw: str | None) -> _ClaimEntry | None:
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        return _ClaimEntry(
+            session_id=str(data.get("session_id") or ""),
+            agent=str(data.get("agent") or ""),
+            t_ms=int(data.get("t_ms") or 0),
+        )
+    except (ValueError, TypeError):
+        return None
 
 
 class PeerFloorState:
@@ -764,6 +920,8 @@ class SpeechFloor:
         suppression_tail_s: float = DEFAULT_SUPPRESSION_TAIL_S,
         max_hold_s: float = DEFAULT_MAX_HOLD_S,
         sweep_interval_s: float = DEFAULT_SWEEP_INTERVAL_S,
+        claim_window_ms: int = DEFAULT_CLAIM_WINDOW_MS,
+        claim_ttl_ms: int = DEFAULT_CLAIM_TTL_MS,
     ) -> None:
         self._backend = backend
         self._session_id = session_id
@@ -777,6 +935,8 @@ class SpeechFloor:
         self._acquire_poll_s = acquire_poll_s
         self._max_hold_s = max_hold_s
         self._sweep_interval_s = sweep_interval_s
+        self._claim_window_ms = max(1, claim_window_ms)
+        self._claim_ttl_ms = max(self._claim_window_ms, claim_ttl_ms)
         # The exact lock value this session writes — compare-and-set target
         # for renew/release, and the identity peers see in broadcasts.
         self._payload = json.dumps(
@@ -886,6 +1046,140 @@ class SpeechFloor:
             )
         )
         return FloorLease(self, kind=kind)
+
+    async def claim_turn(self, anchor_ms: int) -> TurnClaimOutcome:
+        """Claim-once arbitration for one user utterance (Johnny-trt.47).
+
+        ``anchor_ms`` is the utterance's end-of-speech epoch timestamp as this
+        session observed it (the VAD listening edge for voice turns, the
+        feed entry time for typed turns). Sessions answering the *same*
+        utterance anchor within per-bot VAD endpoint skew of each other;
+        quantizing the anchor into ``claim_window_ms`` buckets gives the
+        shared Redis key, and the **same-utterance test is the anchor
+        distance** (``|Δt| ≤ claim_window_ms``), not the bucket identity —
+        the ±1-bucket peek below covers anchors that straddle a boundary.
+
+        Exactly-one-winner discipline:
+
+        1. *Peek* the anchor's bucket and both neighbors — a live peer claim
+           within the window means the turn is already answered → lost.
+        2. *Atomically* claim the anchor's bucket (get-or-set): losing the
+           set race to a within-window peer → lost; an out-of-window
+           occupant is a different utterance sharing the bucket (sub-window
+           utterance gap) → proceed, the benign-duplicate direction.
+        3. *Post-set verify* the neighbor buckets: two contenders straddling
+           a boundary can both pass 1–2 (each set its own bucket before the
+           other's landed), so the loser is decided deterministically by
+           ``(t_ms, session_id)`` order — both sides compute the same
+           winner; the loser deletes its own entry so later contenders see
+           one claim.
+
+        Every backend failure fails *open* (proceed as won, no event):
+        worst case both agents answer sequentially — the documented benign
+        failure mode — which beats both staying silent.
+
+        Emits ``TurnClaimWon`` / ``TurnClaimLost`` (Johnny-trt.49
+        vocabulary) through the defensive event seam. ``contenders`` is
+        best-effort: the peers this call actually observed.
+        """
+        bucket = anchor_ms // self._claim_window_ms
+        bucket_label = str(bucket)
+        payload = json.dumps(
+            {"session_id": self._session_id, "agent": self._agent_name, "t_ms": anchor_ms},
+            separators=(",", ":"),
+        )
+
+        def _same_utterance(entry: _ClaimEntry) -> bool:
+            return abs(entry.t_ms - anchor_ms) <= self._claim_window_ms
+
+        def _outranks_us(entry: _ClaimEntry) -> bool:
+            return (entry.t_ms, entry.session_id) < (anchor_ms, self._session_id)
+
+        try:
+            # 1. Peek the bucket neighborhood for an existing same-utterance claim.
+            for neighbor in (bucket - 1, bucket, bucket + 1):
+                entry = _parse_claim(await self._backend.claim_get(neighbor))
+                if entry is None or not _same_utterance(entry):
+                    continue
+                if entry.session_id == self._session_id:
+                    # Already ours (defensive — the gate claims once per turn).
+                    return TurnClaimOutcome(won=True, bucket=bucket_label)
+                return await self._claim_lost(bucket_label, entry)
+
+            # 2. Atomic get-or-set on the anchor's own bucket.
+            existing = _parse_claim(
+                await self._backend.claim_set(bucket, payload, self._claim_ttl_ms)
+            )
+            if existing is not None and existing.session_id != self._session_id:
+                if _same_utterance(existing):
+                    return await self._claim_lost(bucket_label, existing)
+                logger.warning(
+                    "turn claim: bucket %s already held for a different utterance "
+                    "(Δt=%dms > window %dms) — proceeding unarbitrated (session=%s)",
+                    bucket_label,
+                    abs(existing.t_ms - anchor_ms),
+                    self._claim_window_ms,
+                    self._session_id,
+                )
+                return await self._claim_won(bucket_label, contenders=())
+
+            # 3. Post-set verify: a same-utterance peer in a neighbor bucket
+            # that ordered before us wins; we demote and clean our entry up.
+            observed: list[str] = []
+            for neighbor in (bucket - 1, bucket + 1):
+                entry = _parse_claim(await self._backend.claim_get(neighbor))
+                if entry is None or entry.session_id == self._session_id:
+                    continue
+                if not _same_utterance(entry):
+                    continue
+                if _outranks_us(entry):
+                    with contextlib.suppress(Exception):
+                        await self._backend.claim_release(bucket, payload)
+                    return await self._claim_lost(bucket_label, entry)
+                observed.append(entry.agent)
+            return await self._claim_won(bucket_label, contenders=tuple(observed))
+        except Exception:
+            logger.exception(
+                "turn claim: backend failed for session=%s bucket=%s — "
+                "failing open (unarbitrated turn)",
+                self._session_id,
+                bucket_label,
+            )
+            return TurnClaimOutcome(won=True, bucket=bucket_label)
+
+    async def _claim_won(
+        self, bucket: str, *, contenders: tuple[str, ...]
+    ) -> TurnClaimOutcome:
+        await self._emit(
+            TurnClaimWon(
+                bucket=bucket,
+                timestamp_ms=self._timestamp_ms(),
+                claimant=self._agent_name,
+                contenders=contenders,
+                session_id=self._session_id,
+            )
+        )
+        return TurnClaimOutcome(won=True, bucket=bucket)
+
+    async def _claim_lost(self, bucket: str, winner: _ClaimEntry) -> TurnClaimOutcome:
+        winner_name = winner.agent or f"agent {winner.session_id}"
+        logger.info(
+            "turn claim: session=%s lost bucket=%s to %s",
+            self._session_id,
+            bucket,
+            winner_name,
+        )
+        await self._emit(
+            TurnClaimLost(
+                bucket=bucket,
+                timestamp_ms=self._timestamp_ms(),
+                claimant=self._agent_name,
+                winner=winner_name,
+                contenders=(winner_name,),
+                session_id=self._session_id,
+            )
+        )
+        return TurnClaimOutcome(won=False, bucket=bucket, winner=winner_name)
 
     async def _release_one(self, *, reason: str, spoken_text: str) -> None:
         """One lease's release: outermost frees the lock + emits + broadcasts."""
@@ -1083,7 +1377,10 @@ class SpeechFloor:
 
 
 __all__ = [
+    "CLAIM_KEY_TEMPLATE",
     "DEFAULT_ACQUIRE_TIMEOUT_S",
+    "DEFAULT_CLAIM_TTL_MS",
+    "DEFAULT_CLAIM_WINDOW_MS",
     "DEFAULT_FLOOR_TTL_MS",
     "DEFAULT_HEARTBEAT_INTERVAL_S",
     "DEFAULT_MAX_HOLD_S",
@@ -1103,6 +1400,7 @@ __all__ = [
     "RELEASE_TEARDOWN",
     "RedisFloorBackend",
     "SpeechFloor",
+    "TurnClaimOutcome",
     "normalize_speech_text",
     "session_relative_ms",
     "shield_handle_through_peer_tail",

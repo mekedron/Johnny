@@ -39,6 +39,7 @@ export type NoReplyReason =
 	| 'stage_error'
 	| 'listen_only'
 	| 'floor_unavailable'
+	| 'peer_answered'
 	| 'legacy';
 
 export type BotMode =
@@ -231,6 +232,7 @@ export const NO_REPLY_REASON_LABEL: Record<NoReplyReason, string> = {
 	stage_error: 'a processing step failed',
 	listen_only: 'listen-only mode',
 	floor_unavailable: 'another agent kept the floor',
+	peer_answered: 'another agent answered this one',
 	legacy: 'no reply'
 };
 
