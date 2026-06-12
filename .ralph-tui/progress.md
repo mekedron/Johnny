@@ -70,6 +70,16 @@ after each iteration and it's included in prompts for context.
   `workspaces_dir_from_env()` MUST autouse-fixture JOHNNY_WORKSPACES_DIR to tmp_path —
   a delete test once rmtree'd the operator's real workspace keyring through the live
   /workspaces mount (bd memory: johnny-incontainer-pytest-real-mounts).
+- **Lazy-ensure GETs vs container-state UI** (wks.5): the accounts GET (wks.4) and
+  capabilities GET (wks.3) lazily START a workspace container — UI that displays
+  container state must (a) gate inventory auto-fetch behind an explicit "Probe"
+  button when the container is known-idle, and (b) re-read states after any panel
+  whose GET ensures (callback prop, e.g. WorkspaceAccountsPanel onRefreshed).
+  "Stopped" vs "never-started" is decided by NAMED-VOLUME existence, not containers
+  (sweep removes on stop; volumes outlive DB resets — same-id state adoption is the
+  documented wks.2 continuity). Static routes (`/workspaces/containers`) must be
+  declared ABOVE `/{workspace_id}` in the same router — declaration order, no
+  parse-failure fall-through.
 - **Cache invalidation by aging, not eviction** (SandboxExecutorProvider): to refresh a
   per-URL cached (client, registry) entry from another thread/loop, set
   `entry.loaded_at = float("-inf")` instead of deleting it — the next claim's TTL check
@@ -337,4 +347,79 @@ after each iteration and it's included in prompts for context.
   - Workspace containers launched before wks.4 lack the gog mount — the connect flow
     probes check_env(GOG_HOME) and retires+re-ensures once (containers are disposable;
     state is in volume+binds), refusing honestly if GOG_HOME still absent.
+---
+## 2026-06-12 - Johnny-wks.5
+- Workspaces UI shipped — the wks abstraction is now operator-visible:
+  (1) BACKEND state surface: `WorkspaceContainerManager.container_states(ids)`
+  (one label list answers running/stopped; container-less ids fall through to a
+  named-volume lookup — the volume is the durable "ran before" evidence that
+  separates stopped from never-started) and `stop_container(id)` (manual twin of
+  the idle sweep: stop+remove keep-volume, retire-union discovery, verify-or-raise,
+  publishes the wks.3 "stopped" event); retire() refactored onto shared
+  `_claiming_containers`/`_stop_and_remove_all` helpers. Three endpoints on
+  /workspaces: `GET /containers` (bulk states; degrades to available=false, never
+  errors; default ws deliberately absent = compose-managed), `POST
+  /{id}/container/start` (the dispatch ensure; 502 on failure) and `/stop` (409 on
+  survivor); both 409 for the default ws and docker-less deployments; `/containers`
+  registered BEFORE `/{workspace_id}` (Starlette declaration order). WorkspaceRead
+  grew `storage_dir` (host truth from JOHNNY_WORKSPACES_HOST_DIR, `~/.johnny/
+  workspaces/<slug>` convention fallback; null for default) via
+  `workspace_storage_dir_display`.
+  (2) FRONTEND: new `lib/workspaces.ts` (full client + pure helpers:
+  `workspaceDisplayState` — default→'managed'/"Always on", `agentsAttachedTo`
+  mirroring the api's NULL-counts-into-default rule, `workspaceAttachmentValue` —
+  picking the default stores null); `lib/capabilities.ts` listSkills/listCatalogTools
+  grew workspace keying. New /workspaces list page (create/rename inline with
+  frozen-slug note/delete with the explicit remove-state checkbox + attached-blocked
+  explainer, state chips, storage paths, agent name chips) and /workspaces/[id]
+  detail (Environment card with Start/Stop + idle-TTL copy, attached-agent chips,
+  WorkspaceInventoryPanel, WorkspaceAccountsPanel). Nav gained "Workspaces".
+  (3) New `WorkspaceInventoryPanel` — read-only trt.37 views projected onto ONE
+  workspace (skills with bin/eligibility verdicts + tool catalog), policy stays on
+  /capabilities; auto-fetch is WITHHELD behind "Probe inventory" when the container
+  is known-idle (the capabilities GET lazily starts it — fetching would undo a Stop)
+  and auto-runs when running/managed/unknown.
+  (4) AGENT EDIT: Capabilities section gained the workspace attachment picker
+  (default preselected; rendered in create mode too), live summary (agent count +
+  skills-available probe + Open-workspace link), "applies after save" badge, and the
+  accounts panel re-bound to the PICKED workspace; agents.ts draft/payload/diff
+  thread workspace_id (explicit null = back to default).
+- Files: backend/app/services/{workspace_containers,workspaces}.py,
+  backend/app/api/workspaces.py, backend/tests/{services/test_workspace_containers,
+  api/test_workspaces}.py; frontend/src/lib/{workspaces.ts(new),workspaces.test.ts
+  (new),capabilities.ts,agents.ts,agents.test.ts}, frontend/src/lib/components/
+  workspaces/{WorkspaceInventoryPanel.svelte(new),WorkspaceAccountsPanel.svelte},
+  frontend/src/routes/{+layout.svelte,workspaces/+page.svelte(new),
+  workspaces/[id]/+page.svelte(new),agents/[id]/+page.svelte}.
+- Validation: backend 4340 passed full suite (documented env groups excluded) +
+  ruff/mypy clean; frontend vitest 166 + svelte-check 0/0 (eslint: only the
+  pre-existing settings-page no-undef). Real-browser (chrome-devtools, dev stack):
+  created Finance Team from the UI (slug/storage verified), detail page drove
+  Stop (container removed, volume kept, badge+inventory gate flipped) and Start
+  (container up in docker, inventory auto-probed); dropped a ledger-report skill
+  into the host tree → Refresh showed it Available against workspace-2 while the
+  Default detail kept google-calendar only (locality); LedgerBot created from
+  /agents/new with the picker (workspace_id=2 round-trip), reattached to default
+  (PATCH null) and back, unsaved badge + summary + accounts rebind verified;
+  list page delete blocked while attached, Scratch deleted with remove-state
+  (row AND johnny-workspace-3-home volume gone), rename kept the slug frozen.
+  Artifacts: .validation/Johnny-wks.5/01-10*.png. Cleanup restored Default+Johnny,
+  retired the live container, preserved pre-existing volumes and the operator's
+  finance/ops gog dirs.
+- **Learnings:**
+  - The accounts GET (wks.4) and capabilities GET (wks.3) both lazily START a
+    workspace's container — any page that renders container state AND mounts those
+    panels must re-read states after their loads (WorkspaceAccountsPanel grew an
+    `onRefreshed` callback) and must gate inventory auto-fetch when known-idle, or
+    opening the page silently undoes Stop and the badge lies.
+  - "Stopped" vs "never-started" is a VOLUME-existence question, not a container
+    one — the sweep removes containers on stop, and launcher volumes outlive DB
+    resets, so a fresh workspace can honestly show "Stopped" by adopting the state
+    of a same-id predecessor (the documented wks.2 continuity).
+  - Static routes under a `/{workspace_id}` prefix must be declared above the
+    dynamic route in the SAME router — FastAPI/Starlette match in declaration
+    order and parse-failure does not fall through (`/workspaces/containers`).
+  - In-page navigation (goto from /agents/new to /agents/N) keeps component state —
+    one-shot fetch flags (workspacesLoaded) go stale across saves; flip the flag in
+    the save handler so the $effect refetches (agent_count freshness).
 ---

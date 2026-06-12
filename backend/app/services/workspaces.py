@@ -25,6 +25,7 @@ dispatch surfaces and the CRUD API share:
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -148,6 +149,26 @@ def workspace_snapshot_payload(workspace: Workspace) -> dict[str, Any]:
     }
 
 
+def workspace_storage_dir_display(workspace: Workspace) -> str | None:
+    """The operator-facing HOST path of the workspace's state dir (Johnny-wks.5).
+
+    Non-default workspaces keep host-side state under
+    ``<JOHNNY_WORKSPACES_HOST_DIR>/<slug>/`` (skill packages, the gog
+    credential keyring — the wks.3/wks.4 storage convention). Compose passes
+    the host truth in that env var; a docker-less deployment falls back to
+    the documented ``~/.johnny/workspaces`` default so the UI still shows
+    where the convention puts things. The default workspace returns ``None``
+    — its state is the always-on sandbox's home volume plus the shared
+    ``~/.johnny/skills`` mount, not a per-workspace dir.
+    """
+    if workspace.is_default:
+        return None
+    base = os.environ.get("JOHNNY_WORKSPACES_HOST_DIR", "").strip()
+    if not base or base.lower() == "none":
+        base = "~/.johnny/workspaces"
+    return f"{base.rstrip('/')}/{workspace.slug}"
+
+
 def count_attached_agents(session: Session, workspace: Workspace) -> int:
     """How many agents EFFECTIVELY run in this workspace.
 
@@ -178,4 +199,5 @@ __all__ = [
     "select_default_workspace",
     "slugify",
     "workspace_snapshot_payload",
+    "workspace_storage_dir_display",
 ]

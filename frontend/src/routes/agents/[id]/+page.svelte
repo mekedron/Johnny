@@ -36,6 +36,12 @@
 	import WorkspaceAccountsPanel from '$lib/components/workspaces/WorkspaceAccountsPanel.svelte';
 	import { BOT_MODES, BOT_MODE_LABEL } from '$lib/sessionDetail';
 	import { listProviders, playSample, type ProviderList } from '$lib/providers';
+	import { listSkills, skillStatus } from '$lib/capabilities';
+	import {
+		listWorkspaces,
+		workspaceAttachmentValue,
+		type Workspace
+	} from '$lib/workspaces';
 	import {
 		agentGlyph,
 		BOT_MODE_HINT,
@@ -122,11 +128,62 @@
 	$effect(() => {
 		void load(idParam);
 	});
+	// Workspace attachment picker (Johnny-wks.5). The picked workspace is
+	// part of the draft — Save applies it like any other field.
+	let workspaces = $state<Workspace[]>([]);
+	let workspacesLoaded = $state(false);
+	let workspaceSkillsSummary = $state<{ available: number; total: number } | null>(null);
+
+	const defaultWorkspace = $derived(workspaces.find((ws) => ws.is_default) ?? null);
+	/** The draft's effective workspace row — null draft value = the default. */
+	const pickedWorkspace = $derived(
+		draft.workspace_id === null
+			? defaultWorkspace
+			: (workspaces.find((ws) => ws.id === draft.workspace_id) ?? null)
+	);
+
+	function handleWorkspaceChange(raw: string) {
+		const id = Number.parseInt(raw, 10);
+		const row = workspaces.find((ws) => ws.id === id) ?? null;
+		// Picking the default stores null (the NULL-inherits-default convention).
+		draft.workspace_id = row === null ? null : workspaceAttachmentValue(row);
+	}
+
+	// Capability summary for the PICKED workspace: skill availability probed
+	// against ITS sandbox (the GET lazily ensures the container — the same
+	// refresh the accounts panel below already triggers).
+	$effect(() => {
+		const picked = pickedWorkspace;
+		workspaceSkillsSummary = null;
+		if (picked === null) return;
+		let cancelled = false;
+		listSkills(picked.id)
+			.then((res) => {
+				if (cancelled) return;
+				workspaceSkillsSummary = {
+					available: res.skills.filter((s) => skillStatus(s) === 'available').length,
+					total: res.skills.length
+				};
+			})
+			.catch(() => {
+				// summary is decoration — the detail page has the full story
+			});
+		return () => {
+			cancelled = true;
+		};
+	});
+
 	$effect(() => {
 		if (providers === null) {
 			listProviders()
 				.then((list) => (providers = list))
 				.catch(() => (providers = null));
+		}
+		if (!workspacesLoaded) {
+			workspacesLoaded = true;
+			listWorkspaces()
+				.then((rows) => (workspaces = rows))
+				.catch(() => (workspaces = []));
 		}
 	});
 
@@ -163,6 +220,9 @@
 				resetFromAgent(updated);
 				savedNote = 'Changes saved.';
 			}
+			// A save may have (re)attached this agent — refresh the picker's
+			// agent counts (the $effect refetches when the flag flips).
+			workspacesLoaded = false;
 		} catch (err) {
 			// The API's own message (409 name conflict, 422 cross-field rule) —
 			// rendered verbatim so the inline copy matches the server's.
@@ -693,13 +753,66 @@
 					the <a href="/capabilities" class="underline">Capabilities</a> page.
 				</p>
 			</header>
+
+			<!-- Workspace attachment (Johnny-wks.5): WHERE delegated work runs —
+			     which sandbox container, skill packages, and Google accounts.
+			     Orthogonal to the policy layers below (what it MAY run). -->
+			<div class="flex flex-col gap-1.5" data-testid="workspace-attachment">
+				<label class="text-foreground text-xs font-medium" for="agent-workspace">
+					Workspace
+				</label>
+				<div class="flex max-w-md items-center gap-2">
+					<select
+						id="agent-workspace"
+						class={`${inputClass} flex-1`}
+						value={pickedWorkspace === null ? '' : String(pickedWorkspace.id)}
+						onchange={(e) => handleWorkspaceChange(e.currentTarget.value)}
+						data-testid="agent-workspace-select"
+					>
+						{#if pickedWorkspace === null}
+							<option value="">
+								{workspaces.length === 0 ? 'Loading workspaces…' : 'Unknown workspace'}
+							</option>
+						{/if}
+						{#each workspaces as ws (ws.id)}
+							<option value={String(ws.id)}>{ws.name}{ws.is_default ? ' (default)' : ''}</option>
+						{/each}
+					</select>
+					{#if agent !== null && (patch.workspace_id !== undefined)}
+						<Badge variant="outline" data-testid="workspace-unsaved-badge">applies after save</Badge>
+					{/if}
+				</div>
+				<p class="text-muted-foreground m-0 text-xs">
+					The execution environment for this agent's delegated tasks — its skills, sandbox
+					container, and connected accounts. Shared by every agent attached to it.
+				</p>
+				{#if pickedWorkspace !== null}
+					<p class="text-muted-foreground m-0 text-xs" data-testid="workspace-summary">
+						<span class="text-foreground font-medium">{pickedWorkspace.name}</span>
+						· {pickedWorkspace.agent_count} agent{pickedWorkspace.agent_count === 1 ? '' : 's'}
+						{#if workspaceSkillsSummary !== null}
+							· {workspaceSkillsSummary.available} of {workspaceSkillsSummary.total} skill{workspaceSkillsSummary.total ===
+							1
+								? ''
+								: 's'} available
+						{/if}
+						·
+						<a href={`/workspaces/${pickedWorkspace.id}`} class="underline" data-testid="workspace-open-link">
+							Open workspace
+						</a>
+					</p>
+				{/if}
+			</div>
+
 			{#if agent !== null}
+				<Separator />
 				<ToolsPanel agentId={agent.id} />
 				<Separator />
 				<!-- Identity lives on the WORKSPACE (Johnny-wks.4): policy above
 				     says what this agent may run; the workspace's accounts decide
-				     as whom. Shared by every agent attached to the workspace. -->
-				<WorkspaceAccountsPanel workspaceId={agent.workspace_id} />
+				     as whom. Bound to the PICKED workspace so the operator sees
+				     what an unsaved attachment change would give the agent. -->
+				<WorkspaceAccountsPanel workspaceId={draft.workspace_id} />
 			{:else}
 				<p class="text-muted-foreground m-0 text-sm" data-testid="capabilities-locked">
 					Save the agent first — the capability policy attaches to the saved agent.

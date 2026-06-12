@@ -134,6 +134,11 @@ describe('draftFromAgent', () => {
 		draft.allowed_replies.push('Maybe.');
 		assert.deepEqual(agent.allowed_replies, ['Yes.', 'No.']); // copy, not alias
 	});
+
+	it('carries the workspace attachment (null = the default workspace)', () => {
+		assert.equal(draftFromAgent(null).workspace_id, null);
+		assert.equal(draftFromAgent(makeAgent({ workspace_id: 4 })).workspace_id, 4);
+	});
 });
 
 describe('replies text round-trip', () => {
@@ -248,6 +253,19 @@ describe('diffAgentPayload', () => {
 		const draft = draftFromAgent(agent);
 		draft.tts_voice_id = '  ';
 		assert.deepEqual(diffAgentPayload(agent, draft), {});
+	});
+
+	it('patches a workspace reattachment, with explicit null for the default', () => {
+		const agent = makeAgent({ character_prompt: 'p', workspace_id: null });
+		const draft = draftFromAgent(agent);
+		draft.workspace_id = 4;
+		assert.deepEqual(diffAgentPayload(agent, draft), { workspace_id: 4 });
+
+		const attached = makeAgent({ character_prompt: 'p', workspace_id: 4 });
+		const back = draftFromAgent(attached);
+		back.workspace_id = null; // picked the default → store null, not its id
+		assert.deepEqual(diffAgentPayload(attached, back), { workspace_id: null });
+		assert.deepEqual(diffAgentPayload(attached, draftFromAgent(attached)), {});
 	});
 });
 

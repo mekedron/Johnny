@@ -57,7 +57,7 @@ import logging
 import os
 import time
 import typing
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from importlib import import_module
 from pathlib import Path
 from typing import Any, cast
@@ -150,6 +150,15 @@ _LAST_USED_KEY_PREFIX = "johnny:workspace:sandbox:last-used:"
 # Best-effort by design: a missed publish only leaves the existing
 # staleness backstops (registry TTL + kind-miss refresh) in charge.
 WORKSPACE_SANDBOX_EVENT_CHANNEL = "johnny.workspace.sandbox-changed"
+
+# Operator-facing lifecycle states (Johnny-wks.5 — the workspaces UI).
+# "stopped" covers both a present non-running container AND the
+# container-less-but-volume-present shape the idle sweep leaves behind
+# (sweep REMOVES on stop; the named volume is the durable evidence a
+# workspace ever ran). "never-started" = no container, no volume.
+WORKSPACE_STATE_RUNNING = "running"
+WORKSPACE_STATE_STOPPED = "stopped"
+WORKSPACE_STATE_NEVER_STARTED = "never-started"
 
 # Resource caps mirrored from the compose `skills-sandbox` service so one
 # pair of knobs governs every sandbox, default and per-workspace alike.
@@ -858,21 +867,94 @@ class WorkspaceContainerManager:
             return [f"<unverified: {exc}>"]
         return [str(getattr(c, "name", "?")) for c in leftovers]
 
-    # --- retire (workspace deletion) ----------------------------------------
+    # --- operator-facing state + manual stop (Johnny-wks.5) -------------------
 
-    def retire(self, *, workspace_id: int, remove_volume: bool) -> None:
-        """Tear down a deleted workspace's container — and, only on the
-        operator's explicit request, its state volume.
+    def container_states(self, workspace_ids: Sequence[int]) -> dict[int, str]:
+        """The lifecycle state of each NON-default workspace's container.
 
-        Container discovery is the Johnny-ajc union: the canonical name AND
-        the ``johnny.workspace-id`` label, so a half-renamed or duplicated
-        container can't survive unseen; afterwards a label re-list verifies
-        and any survivor RAISES (the row must not be deleted while its
-        executor lives on). Volume removal failures raise too — an explicit
-        request silently not honored is the no-op bug this launcher family
-        exists to prevent.
+        One label list answers running/stopped for every workspace that has
+        a container at all; ids with none fall through to a named-volume
+        lookup — the sweep removes containers on stop, so the volume is the
+        durable "this workspace ran before" evidence that separates
+        ``stopped`` from ``never-started``. Raises
+        :class:`WorkspaceContainerError` when the daemon can't answer (the
+        endpoint degrades to "state unavailable" instead of guessing).
         """
         client = self._client_or_create()
+        try:
+            containers = client.containers.list(
+                all=True, filters={"label": WORKSPACE_ID_LABEL}
+            )
+        except Exception as exc:  # noqa: BLE001 — daemon errors are opaque
+            raise WorkspaceContainerError(f"container list failed: {exc}") from exc
+        by_id: dict[int, list[_DockerContainer]] = {}
+        for container in containers:
+            labels = (
+                container.attrs.get("Config", {}).get("Labels", {})
+                if container.attrs
+                else {}
+            )
+            raw_id = labels.get(WORKSPACE_ID_LABEL, "") if isinstance(labels, dict) else ""
+            try:
+                by_id.setdefault(int(raw_id), []).append(container)
+            except (TypeError, ValueError):
+                continue
+        states: dict[int, str] = {}
+        for ws_id in workspace_ids:
+            owned = by_id.get(ws_id, [])
+            if any(getattr(c, "status", "") == "running" for c in owned):
+                states[ws_id] = WORKSPACE_STATE_RUNNING
+                continue
+            if owned:
+                states[ws_id] = WORKSPACE_STATE_STOPPED
+                continue
+            volume_name = workspace_volume_name(ws_id)
+            try:
+                client.volumes.get(volume_name)
+            except Exception as exc:  # noqa: BLE001 — SDK exceptions are heterogeneous
+                if _is_not_found(exc):
+                    states[ws_id] = WORKSPACE_STATE_NEVER_STARTED
+                    continue
+                raise WorkspaceContainerError(
+                    f"state volume lookup failed for {volume_name!r}: {exc}"
+                ) from exc
+            states[ws_id] = WORKSPACE_STATE_STOPPED
+        return states
+
+    def stop_container(self, *, workspace_id: int) -> bool:
+        """Stop+remove the workspace's container now (the detail page's Stop).
+
+        Manual-trigger twin of the idle sweep: removal — not just stop —
+        keeps the invariant that a present container always reflects the
+        current image/config; the named state volume is untouched, so the
+        next ensure restarts transparently with state intact. Verify-or-
+        raise (the Johnny-ajc rule): a survivor raises so the endpoint
+        reports the failure instead of a stop that didn't happen. Publishes
+        the wks.3 ``stopped`` change event on success; returns ``False``
+        when there was nothing to stop.
+        """
+        client = self._client_or_create()
+        targets = self._claiming_containers(client, workspace_id, context="stop")
+        if not targets:
+            return False
+        self._stop_and_remove_all(targets, workspace_id, context="stop")
+        leftovers = self._leftover_names(client, workspace_id)
+        if leftovers:
+            raise WorkspaceContainerError(
+                f"workspace {workspace_id} container(s) still present after "
+                f"stop: {leftovers}"
+            )
+        self._publish_change_sync(workspace_id, "stopped")
+        return True
+
+    # --- retire (workspace deletion) ----------------------------------------
+
+    def _claiming_containers(
+        self, client: _DockerClient, workspace_id: int, *, context: str
+    ) -> dict[str, _DockerContainer]:
+        """Every container claiming this workspace — the Johnny-ajc union of
+        the canonical name AND the ``johnny.workspace-id`` label, so a
+        half-renamed or duplicated container can't survive unseen."""
         name = workspace_container_name(workspace_id)
         targets: dict[str, _DockerContainer] = {}
         named = self._get_container(client, name)
@@ -884,7 +966,7 @@ class WorkspaceContainerManager:
             )
         except Exception as exc:  # noqa: BLE001 — label list is best-effort
             logger.warning(
-                "workspace %s: retire label list failed: %s", workspace_id, exc
+                "workspace %s: %s label list failed: %s", workspace_id, context, exc
             )
             labelled = []
         for container in labelled:
@@ -892,14 +974,26 @@ class WorkspaceContainerManager:
                 getattr(container, "id", None) or getattr(container, "name", None) or "?"
             )
             targets[key] = container
+        return targets
+
+    def _stop_and_remove_all(
+        self,
+        targets: dict[str, _DockerContainer],
+        workspace_id: int,
+        *,
+        context: str,
+    ) -> None:
+        """Best-effort stop+remove of every target (not-found tolerated);
+        callers verify afterwards via :meth:`_leftover_names`."""
         for container in targets.values():
             try:
                 container.stop(timeout=self._stop_timeout_s)
             except Exception as exc:  # noqa: BLE001 — best-effort stop
                 if not _is_not_found(exc):
                     logger.warning(
-                        "workspace %s: retire stop failed for %s: %s",
+                        "workspace %s: %s stop failed for %s: %s",
                         workspace_id,
+                        context,
                         getattr(container, "name", "?"),
                         exc,
                     )
@@ -908,11 +1002,27 @@ class WorkspaceContainerManager:
             except Exception as exc:  # noqa: BLE001 — best-effort remove
                 if not _is_not_found(exc):
                     logger.warning(
-                        "workspace %s: retire remove failed for %s: %s",
+                        "workspace %s: %s remove failed for %s: %s",
                         workspace_id,
+                        context,
                         getattr(container, "name", "?"),
                         exc,
                     )
+
+    def retire(self, *, workspace_id: int, remove_volume: bool) -> None:
+        """Tear down a deleted workspace's container — and, only on the
+        operator's explicit request, its state volume.
+
+        Container discovery is the Johnny-ajc union (see
+        :meth:`_claiming_containers`); afterwards a label re-list verifies
+        and any survivor RAISES (the row must not be deleted while its
+        executor lives on). Volume removal failures raise too — an explicit
+        request silently not honored is the no-op bug this launcher family
+        exists to prevent.
+        """
+        client = self._client_or_create()
+        targets = self._claiming_containers(client, workspace_id, context="retire")
+        self._stop_and_remove_all(targets, workspace_id, context="retire")
         leftovers = self._leftover_names(client, workspace_id)
         if leftovers:
             raise WorkspaceContainerError(
@@ -1020,6 +1130,9 @@ __all__ = [
     "WORKSPACE_HOME_TARGET",
     "WORKSPACE_IDLE_TTL_ENV",
     "WORKSPACE_SANDBOX_IMAGE_ENV",
+    "WORKSPACE_STATE_NEVER_STARTED",
+    "WORKSPACE_STATE_RUNNING",
+    "WORKSPACE_STATE_STOPPED",
     "WORKSPACE_SWEEP_INTERVAL_ENV",
     "WORKSPACES_HOST_DIR_ENV",
     "WorkspaceContainerError",

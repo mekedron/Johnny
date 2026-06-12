@@ -53,6 +53,8 @@ export interface AgentPayload {
 	reasoning_llm_provider_id?: number | null;
 	tts_provider_id?: number | null;
 	tts_voice_id?: string | null;
+	/** Explicit `null` reattaches to the default workspace (Johnny-wks.1). */
+	workspace_id?: number | null;
 }
 
 const API_BASE: string = import.meta.env?.VITE_API_BASE ?? 'http://localhost:8000';
@@ -199,6 +201,8 @@ export interface AgentDraft {
 	reasoning_llm_provider_id: number | null;
 	tts_provider_id: number | null;
 	tts_voice_id: string | null;
+	/** Workspace attachment; null = the default workspace (Johnny-wks.5). */
+	workspace_id: number | null;
 }
 
 /** A draft mirroring `agent`, or the blank create-mode draft for `null`. */
@@ -215,7 +219,8 @@ export function draftFromAgent(agent: Agent | null): AgentDraft {
 		answer_llm_provider_id: agent?.answer_llm_provider_id ?? null,
 		reasoning_llm_provider_id: agent?.reasoning_llm_provider_id ?? null,
 		tts_provider_id: agent?.tts_provider_id ?? null,
-		tts_voice_id: agent?.tts_voice_id ?? null
+		tts_voice_id: agent?.tts_voice_id ?? null,
+		workspace_id: agent?.workspace_id ?? null
 	};
 }
 
@@ -277,7 +282,8 @@ export function draftToCreatePayload(draft: AgentDraft): AgentPayload {
 		answer_llm_provider_id: draft.answer_llm_provider_id,
 		reasoning_llm_provider_id: draft.reasoning_llm_provider_id,
 		tts_provider_id: draft.tts_provider_id,
-		tts_voice_id: draft.tts_voice_id
+		tts_voice_id: draft.tts_voice_id,
+		workspace_id: draft.workspace_id
 	};
 }
 
@@ -316,6 +322,9 @@ export function diffAgentPayload(saved: Agent, draft: AgentDraft): AgentPayload 
 	const savedVoice = saved.tts_voice_id ?? null;
 	const draftVoice = full.tts_voice_id && full.tts_voice_id.trim() ? full.tts_voice_id : null;
 	if (draftVoice !== savedVoice) patch.tts_voice_id = draftVoice;
+	if ((full.workspace_id ?? null) !== saved.workspace_id) {
+		patch.workspace_id = full.workspace_id ?? null;
+	}
 	return patch;
 }
 

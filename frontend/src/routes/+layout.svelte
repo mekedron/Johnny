@@ -52,6 +52,7 @@
 		{ href: '/agents', label: 'Agents' },
 		{ href: '/providers', label: 'Providers' },
 		{ href: '/capabilities', label: 'Capabilities' },
+		{ href: '/workspaces', label: 'Workspaces' },
 		{ href: '/history', label: 'History' },
 		{ href: '/settings', label: 'Settings' }
 	];

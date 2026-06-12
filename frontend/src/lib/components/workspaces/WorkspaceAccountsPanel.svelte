@@ -16,8 +16,13 @@
 
 	// Embeddable (the ToolsPanel pattern): the agent edit page passes the
 	// agent's workspace_id (null = default workspace, the wks.1 convention);
-	// the workspaces detail page (Johnny-wks.5) will pass an explicit id.
-	let { workspaceId = null }: { workspaceId?: number | null } = $props();
+	// the workspaces detail page (Johnny-wks.5) passes an explicit id.
+	// `onRefreshed` fires after each accounts read — that GET lazily ensures
+	// the container, so a parent showing container state can re-read it.
+	let {
+		workspaceId = null,
+		onRefreshed = undefined
+	}: { workspaceId?: number | null; onRefreshed?: () => void } = $props();
 
 	let workspace = $state<WorkspaceSummary | null>(null);
 	let view = $state<WorkspaceAccountsView | null>(null);
@@ -49,6 +54,8 @@
 			syncPolling();
 		} catch (err) {
 			errorMessage = err instanceof Error ? err.message : 'Failed to load accounts';
+		} finally {
+			onRefreshed?.();
 		}
 	}
 

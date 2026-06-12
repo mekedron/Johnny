@@ -238,18 +238,53 @@ def _scratch_workspaces_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
 
 class _FakeManager:
-    """Stands in for WorkspaceContainerManager in the delete endpoint."""
+    """Stands in for WorkspaceContainerManager in the delete endpoint and
+    the wks.5 container-state/start/stop endpoints."""
 
-    def __init__(self, *, raises: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        raises: bool = False,
+        states: dict[int, str] | None = None,
+        states_raise: bool = False,
+        ensure_ok: bool = True,
+    ) -> None:
         self.raises = raises
+        self.states = dict(states or {})
+        self.states_raise = states_raise
+        self.ensure_ok = ensure_ok
         self.calls: list[tuple[int, bool]] = []
+        self.ensure_calls: list[tuple[int, str | None]] = []
+        self.stop_calls: list[int] = []
+
+    def _error(self, message: str) -> Exception:
+        from app.services.workspace_containers import WorkspaceContainerError
+
+        return WorkspaceContainerError(message)
 
     def retire(self, *, workspace_id: int, remove_volume: bool) -> None:
         if self.raises:
-            from app.services.workspace_containers import WorkspaceContainerError
-
-            raise WorkspaceContainerError("volume is in use")
+            raise self._error("volume is in use")
         self.calls.append((workspace_id, remove_volume))
+
+    async def ensure_running(
+        self, *, workspace_id: int, slug: str | None = None
+    ) -> bool:
+        self.ensure_calls.append((workspace_id, slug))
+        return self.ensure_ok
+
+    def stop_container(self, *, workspace_id: int) -> bool:
+        if self.raises:
+            raise self._error("container survived the stop")
+        self.stop_calls.append(workspace_id)
+        return True
+
+    def container_states(self, workspace_ids: list[int]) -> dict[int, str]:
+        if self.states_raise:
+            raise self._error("daemon unreachable")
+        return {
+            ws_id: self.states.get(ws_id, "never-started") for ws_id in workspace_ids
+        }
 
 
 @pytest.fixture
@@ -355,6 +390,143 @@ def test_delete_remove_volume_unavailable_without_docker_409(
     assert client.get(f"/workspaces/{created['id']}").status_code == 200
     # Without the flag the plain delete still works in docker-less deployments.
     assert client.delete(f"/workspaces/{created['id']}").status_code == 204
+
+
+# --- container states + manual start/stop (Johnny-wks.5) -----------------------
+
+
+def test_container_states_unavailable_without_docker(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("JOHNNY_USE_DOCKER_LAUNCHER", raising=False)
+    resp = client.get("/workspaces/containers")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is False
+    assert "JOHNNY_USE_DOCKER_LAUNCHER" in body["reason"]
+    assert body["states"] == {}
+
+
+def test_container_states_cover_non_default_workspaces_only(
+    client: TestClient,
+    fake_manager: _FakeManager,
+    default_workspace: Workspace,
+) -> None:
+    """Per-id states for every non-default workspace; the default is absent
+    (its sandbox is the compose service — 'managed', not ours to report)."""
+    finance = _create(client, "Finance")
+    ops = _create(client, "Ops")
+    fake_manager.states = {finance["id"]: "running"}
+
+    body = client.get("/workspaces/containers").json()
+    assert body["available"] is True
+    states = {int(k): v for k, v in body["states"].items()}
+    assert states == {finance["id"]: "running", ops["id"]: "never-started"}
+    assert default_workspace.id not in states
+
+
+def test_container_states_degrade_when_the_daemon_refuses(
+    client: TestClient, fake_manager: _FakeManager
+) -> None:
+    _create(client, "Finance")
+    fake_manager.states_raise = True
+    body = client.get("/workspaces/containers").json()
+    assert body["available"] is False
+    assert "daemon unreachable" in body["reason"]
+
+
+def test_start_container_ensures_with_the_frozen_slug(
+    client: TestClient, fake_manager: _FakeManager
+) -> None:
+    created = _create(client, "Finance Team")
+    resp = client.post(f"/workspaces/{created['id']}/container/start")
+    assert resp.status_code == 200
+    assert resp.json() == {"workspace_id": created["id"], "state": "running"}
+    assert fake_manager.ensure_calls == [(created["id"], "finance-team")]
+
+
+def test_start_container_failure_is_a_502(
+    client: TestClient, fake_manager: _FakeManager
+) -> None:
+    created = _create(client, "Finance")
+    fake_manager.ensure_ok = False
+    resp = client.post(f"/workspaces/{created['id']}/container/start")
+    assert resp.status_code == 502
+    assert "failed to start" in resp.json()["detail"]
+
+
+def test_stop_container_reports_the_post_stop_state(
+    client: TestClient, fake_manager: _FakeManager
+) -> None:
+    created = _create(client, "Finance")
+    fake_manager.states = {created["id"]: "stopped"}
+    resp = client.post(f"/workspaces/{created['id']}/container/stop")
+    assert resp.status_code == 200
+    assert resp.json() == {"workspace_id": created["id"], "state": "stopped"}
+    assert fake_manager.stop_calls == [created["id"]]
+
+
+def test_stop_container_survivor_is_a_409(
+    client: TestClient, fake_manager: _FakeManager
+) -> None:
+    created = _create(client, "Finance")
+    fake_manager.raises = True
+    resp = client.post(f"/workspaces/{created['id']}/container/stop")
+    assert resp.status_code == 409
+    assert "container stop failed" in resp.json()["detail"]
+
+
+def test_container_actions_refuse_the_default_workspace(
+    client: TestClient, fake_manager: _FakeManager, default_workspace: Workspace
+) -> None:
+    for action in ("start", "stop"):
+        resp = client.post(f"/workspaces/{default_workspace.id}/container/{action}")
+        assert resp.status_code == 409
+        assert "always-on compose service" in resp.json()["detail"]
+    assert fake_manager.ensure_calls == []
+    assert fake_manager.stop_calls == []
+
+
+def test_container_actions_refuse_without_docker(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("JOHNNY_USE_DOCKER_LAUNCHER", raising=False)
+    created = _create(client, "Finance")
+    for action in ("start", "stop"):
+        resp = client.post(f"/workspaces/{created['id']}/container/{action}")
+        assert resp.status_code == 409
+        assert "unavailable" in resp.json()["detail"]
+
+
+def test_container_actions_unknown_workspace_404(
+    client: TestClient, fake_manager: _FakeManager
+) -> None:
+    assert client.post("/workspaces/9999/container/start").status_code == 404
+    assert client.post("/workspaces/9999/container/stop").status_code == 404
+
+
+# --- storage_dir (the operator-facing state path) -------------------------------
+
+
+def test_storage_dir_uses_the_host_truth_env(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    default_workspace: Workspace,
+) -> None:
+    monkeypatch.setenv("JOHNNY_WORKSPACES_HOST_DIR", "/Users/op/.johnny/workspaces/")
+    created = _create(client, "Finance Team")
+    assert created["storage_dir"] == "/Users/op/.johnny/workspaces/finance-team"
+    by_name = {row["name"]: row for row in client.get("/workspaces").json()}
+    # The default's state is the sandbox volume, not a per-workspace dir.
+    assert by_name["Default"]["storage_dir"] is None
+
+
+def test_storage_dir_falls_back_to_the_documented_convention(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("JOHNNY_WORKSPACES_HOST_DIR", raising=False)
+    created = _create(client, "Finance")
+    assert created["storage_dir"] == "~/.johnny/workspaces/finance"
 
 
 # --- agent_count -------------------------------------------------------------

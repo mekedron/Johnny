@@ -78,11 +78,21 @@ export interface SkillRead {
 export interface SkillsOut {
 	sandbox: string;
 	skills_dir: string;
+	/** The workspace whose sandbox this inventory describes (Johnny-wks.3). */
+	workspace_id?: number | null;
+	workspace_slug?: string;
 	skills: SkillRead[];
 }
 
-export function listSkills(): Promise<SkillsOut> {
-	return request<SkillsOut>('/capabilities/skills');
+/**
+ * The workspace's skill inventory — GET is the refresh, and for a
+ * non-default workspace it lazily ENSURES the container first (probing a
+ * stopped sandbox would report could-not-verify for everything). No
+ * `workspaceId` keeps the original global (default-workspace) view.
+ */
+export function listSkills(workspaceId?: number | null): Promise<SkillsOut> {
+	const query = workspaceId != null ? `?workspace_id=${workspaceId}` : '';
+	return request<SkillsOut>(`/capabilities/skills${query}`);
 }
 
 export type SkillStatus = 'available' | 'unavailable' | 'ineligible' | 'disabled';
@@ -129,6 +139,8 @@ export interface CatalogToolRead {
 
 export interface CatalogOut {
 	sandbox: string;
+	workspace_id?: number | null;
+	workspace_slug?: string;
 	tools: CatalogToolRead[];
 }
 
@@ -136,6 +148,8 @@ export interface PolicyCoordinates {
 	agentId?: number | null;
 	sessionMode?: 'meet' | 'browser' | null;
 	botSessionId?: number | null;
+	/** Keys the catalog's availability probes to a workspace's sandbox (wks.3). */
+	workspaceId?: number | null;
 }
 
 function coordinateQuery(coords: PolicyCoordinates): string {
@@ -143,6 +157,7 @@ function coordinateQuery(coords: PolicyCoordinates): string {
 	if (coords.agentId != null) params.set('agent_id', String(coords.agentId));
 	if (coords.sessionMode != null) params.set('session_mode', coords.sessionMode);
 	if (coords.botSessionId != null) params.set('bot_session_id', String(coords.botSessionId));
+	if (coords.workspaceId != null) params.set('workspace_id', String(coords.workspaceId));
 	const text = params.toString();
 	return text.length > 0 ? `?${text}` : '';
 }

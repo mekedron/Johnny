@@ -29,6 +29,9 @@ from app.services.workspace_containers import (
     WORKSPACE_ID_LABEL,
     WORKSPACE_SANDBOX_EVENT_CHANNEL,
     WORKSPACE_SLUG_LABEL,
+    WORKSPACE_STATE_NEVER_STARTED,
+    WORKSPACE_STATE_RUNNING,
+    WORKSPACE_STATE_STOPPED,
     WorkspaceContainerError,
     WorkspaceContainerManager,
     ensure_workspace_container_for_stamp,
@@ -580,6 +583,101 @@ def test_retire_surfaces_a_busy_volume() -> None:
     manager, _ = _manager(client)
     with pytest.raises(WorkspaceContainerError, match="failed to remove state volume"):
         manager.retire(workspace_id=7, remove_volume=True)
+
+
+# --- container_states + stop_container (Johnny-wks.5: the workspaces UI) ----------
+
+
+def _stopped(workspace_id: int, *, name: str | None = None) -> _FakeContainer:
+    resolved_name = name or f"johnny-workspace-{workspace_id}"
+    return _FakeContainer(
+        name=resolved_name,
+        id=f"id-{resolved_name}",
+        status="exited",
+        attrs={"Config": {"Labels": {WORKSPACE_ID_LABEL: str(workspace_id)}}},
+    )
+
+
+def test_container_states_covers_all_three_shapes() -> None:
+    """running container / stopped container / volume-only / nothing — the
+    four physical shapes map onto the UI's three states."""
+    client = _FakeClient()
+    client.containers.by_name["johnny-workspace-1"] = _running(1)
+    client.containers.by_name["johnny-workspace-2"] = _stopped(2)
+    # workspace 3: swept (no container) but its state volume survives
+    client.volumes.store["johnny-workspace-3-home"] = _FakeVolume(
+        name="johnny-workspace-3-home"
+    )
+    manager, _ = _manager(client)
+
+    assert manager.container_states([1, 2, 3, 4]) == {
+        1: WORKSPACE_STATE_RUNNING,
+        2: WORKSPACE_STATE_STOPPED,
+        3: WORKSPACE_STATE_STOPPED,
+        4: WORKSPACE_STATE_NEVER_STARTED,
+    }
+
+
+def test_container_states_raises_when_the_daemon_cannot_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient()
+
+    def _boom(**_kwargs: Any) -> list[_FakeContainer]:
+        raise RuntimeError("daemon unreachable")
+
+    monkeypatch.setattr(client.containers, "list", _boom)
+    manager, _ = _manager(client)
+    with pytest.raises(WorkspaceContainerError, match="container list failed"):
+        manager.container_states([1])
+
+
+def test_stop_container_removes_and_publishes_stopped() -> None:
+    client = _FakeClient()
+    named = _running(7)
+    rogue = _running(7, name="johnny-workspace-7-old")
+    client.containers.by_name[named.name] = named
+    client.containers.by_name[rogue.name] = rogue
+    events: list[tuple[str, str]] = []
+    manager, _ = _manager(client, events=events)
+
+    assert manager.stop_container(workspace_id=7) is True
+    assert named.removed is True
+    assert rogue.removed is True  # the retire union: label, not just name
+    assert _published(events) == [(7, "stopped")]
+
+
+def test_stop_container_with_nothing_running_is_a_quiet_no_op() -> None:
+    events: list[tuple[str, str]] = []
+    manager, _ = _manager(_FakeClient(), events=events)
+    assert manager.stop_container(workspace_id=7) is False
+    assert events == []
+
+
+def test_stop_container_keeps_the_state_volume() -> None:
+    client = _FakeClient()
+    client.containers.by_name["johnny-workspace-7"] = _running(7)
+    volume = _FakeVolume(name="johnny-workspace-7-home")
+    client.volumes.store[volume.name] = volume
+    manager, _ = _manager(client)
+
+    assert manager.stop_container(workspace_id=7) is True
+    assert volume.removed is False
+    # ...which is exactly why the post-stop state reads "stopped", not
+    # "never-started": the volume is the durable evidence.
+    assert manager.container_states([7]) == {7: WORKSPACE_STATE_STOPPED}
+
+
+def test_stop_container_raises_when_a_container_survives() -> None:
+    client = _FakeClient()
+    stubborn = _running(7)
+    stubborn.raise_on_remove = RuntimeError("device busy")
+    client.containers.by_name[stubborn.name] = stubborn
+    events: list[tuple[str, str]] = []
+    manager, _ = _manager(client, events=events)
+    with pytest.raises(WorkspaceContainerError, match="still present"):
+        manager.stop_container(workspace_id=7)
+    assert events == []  # no event for a stop that didn't happen
 
 
 # --- the dispatch/claim helper -----------------------------------------------------

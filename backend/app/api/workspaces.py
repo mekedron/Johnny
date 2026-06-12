@@ -38,7 +38,17 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_session
 from app.db.models import Agent, Workspace
-from app.services.workspaces import count_attached_agents, derive_unique_slug
+from app.services.docker_launcher import should_use_docker_launcher
+from app.services.workspace_containers import (
+    WORKSPACE_STATE_RUNNING,
+    WorkspaceContainerError,
+    get_workspace_container_manager,
+)
+from app.services.workspaces import (
+    count_attached_agents,
+    derive_unique_slug,
+    workspace_storage_dir_display,
+)
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
@@ -87,6 +97,33 @@ class WorkspaceRead(BaseModel):
     # default also counts NULL-attached agents). The UI warns before delete
     # and explains the 409.
     agent_count: int = 0
+    # Operator-facing host path of the workspace's state dir (skills, gog
+    # keyring) — the wks.3/wks.4 storage convention. None for the default
+    # workspace (its state is the always-on sandbox's volume, not a dir).
+    storage_dir: str | None = None
+
+
+class WorkspaceContainerStatesRead(BaseModel):
+    """Bulk container state for the workspaces list (Johnny-wks.5).
+
+    ``available=False`` means state could not be determined at all (docker
+    isn't driven here, or the daemon refused) — the UI says "unavailable"
+    instead of guessing. ``states`` carries every NON-default workspace id →
+    running / stopped / never-started; the default workspace is deliberately
+    absent (its sandbox is the always-on compose service, ``managed`` —
+    lifecycle belongs to ./run.sh, not this launcher).
+    """
+
+    available: bool
+    reason: str = ""
+    states: dict[int, str] = Field(default_factory=dict)
+
+
+class WorkspaceContainerActionRead(BaseModel):
+    """Outcome of a manual start/stop — the workspace's resulting state."""
+
+    workspace_id: int
+    state: str
 
 
 # --- Helpers ---------------------------------------------------------------
@@ -102,7 +139,37 @@ def _get_row_or_404(session: Session, workspace_id: int) -> Workspace:
 def _workspace_read(session: Session, row: Workspace) -> WorkspaceRead:
     read = WorkspaceRead.model_validate(row)
     read.agent_count = count_attached_agents(session, row)
+    read.storage_dir = workspace_storage_dir_display(row)
     return read
+
+
+_CONTAINERS_UNMANAGED_DETAIL = (
+    "container management is unavailable: this deployment does not drive "
+    "docker (JOHNNY_USE_DOCKER_LAUNCHER is off)"
+)
+
+
+def _container_target_or_409(session: Session, workspace_id: int) -> Workspace:
+    """The workspace whose container a manual start/stop may touch.
+
+    404 for unknown rows; 409 for the default workspace (its sandbox is the
+    always-on compose service — ./run.sh owns that lifecycle, and stopping
+    it would take every NULL-attached agent down with it) and for
+    deployments that don't drive docker.
+    """
+    row = _get_row_or_404(session, workspace_id)
+    if row.is_default:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "the default workspace's sandbox is the always-on compose "
+                "service — its lifecycle is managed by ./run.sh / ./stop.sh, "
+                "not from here"
+            ),
+        )
+    if not should_use_docker_launcher():
+        raise HTTPException(status_code=409, detail=_CONTAINERS_UNMANAGED_DETAIL)
+    return row
 
 
 def _name_conflict(name: str) -> HTTPException:
@@ -187,6 +254,86 @@ def create_workspace(payload: WorkspaceCreate, session: SessionDep) -> Workspace
     return _workspace_read(session, row)
 
 
+# NOTE: registered before the /{workspace_id} routes — Starlette matches in
+# declaration order and "containers" would otherwise be parsed as an id.
+@router.get("/containers", response_model=WorkspaceContainerStatesRead)
+def workspace_container_states(session: SessionDep) -> WorkspaceContainerStatesRead:
+    """Container state per NON-default workspace, in one daemon round-trip.
+
+    Degrades to ``available=False`` (never an error response) when this
+    deployment doesn't drive docker or the daemon can't answer — the list
+    page renders "state unavailable" and everything else still works.
+    """
+    if not should_use_docker_launcher():
+        return WorkspaceContainerStatesRead(
+            available=False, reason=_CONTAINERS_UNMANAGED_DETAIL
+        )
+    ids = list(
+        session.scalars(select(Workspace.id).where(Workspace.is_default.is_(False)))
+    )
+    try:
+        states = get_workspace_container_manager().container_states(ids)
+    except WorkspaceContainerError as exc:
+        return WorkspaceContainerStatesRead(available=False, reason=str(exc))
+    return WorkspaceContainerStatesRead(available=True, states=states)
+
+
+@router.post(
+    "/{workspace_id}/container/start", response_model=WorkspaceContainerActionRead
+)
+async def start_workspace_container(
+    workspace_id: int, session: SessionDep
+) -> WorkspaceContainerActionRead:
+    """Start (or transparently restart) the workspace's sandbox container.
+
+    The same ensure the dispatch surfaces run lazily — started containers
+    still fall under the idle-TTL sweep, so an unused workspace stops again
+    on its own. ``ensure_running`` never raises; a ``False`` outcome is a
+    502 with a pointer at the api logs (daemon/image trouble).
+    """
+    row = _container_target_or_409(session, workspace_id)
+    manager = get_workspace_container_manager()
+    ok = await manager.ensure_running(workspace_id=row.id, slug=row.slug)
+    if not ok:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"workspace {row.name!r}: its sandbox container failed to "
+                "start — check the api logs (docker daemon reachability, "
+                "image availability)"
+            ),
+        )
+    return WorkspaceContainerActionRead(
+        workspace_id=row.id, state=WORKSPACE_STATE_RUNNING
+    )
+
+
+@router.post(
+    "/{workspace_id}/container/stop", response_model=WorkspaceContainerActionRead
+)
+def stop_workspace_container(
+    workspace_id: int, session: SessionDep
+) -> WorkspaceContainerActionRead:
+    """Stop+remove the workspace's container now (state stays in the volume).
+
+    Idle-sweep semantics on demand; the next dispatch — or the Start button
+    — brings the workspace back exactly as it was. A survivor (verify-or-
+    raise) is a 409 so the operator retries instead of trusting a stop that
+    didn't happen.
+    """
+    row = _container_target_or_409(session, workspace_id)
+    manager = get_workspace_container_manager()
+    try:
+        manager.stop_container(workspace_id=row.id)
+        state = manager.container_states([row.id]).get(row.id, "stopped")
+    except WorkspaceContainerError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"workspace {row.name!r}: container stop failed: {exc}",
+        ) from exc
+    return WorkspaceContainerActionRead(workspace_id=row.id, state=state)
+
+
 @router.get("/{workspace_id}", response_model=WorkspaceRead)
 def get_workspace(workspace_id: int, session: SessionDep) -> WorkspaceRead:
     """Read a single workspace."""
@@ -259,12 +406,6 @@ def delete_workspace(
                 "are attached to it; reattach them first"
             ),
         )
-    from app.services.docker_launcher import should_use_docker_launcher
-    from app.services.workspace_containers import (
-        WorkspaceContainerError,
-        get_workspace_container_manager,
-    )
-
     if should_use_docker_launcher():
         try:
             get_workspace_container_manager().retire(
@@ -297,4 +438,11 @@ def delete_workspace(
     session.delete(row)
 
 
-__all__ = ["WorkspaceCreate", "WorkspaceRead", "WorkspaceUpdate", "router"]
+__all__ = [
+    "WorkspaceContainerActionRead",
+    "WorkspaceContainerStatesRead",
+    "WorkspaceCreate",
+    "WorkspaceRead",
+    "WorkspaceUpdate",
+    "router",
+]
