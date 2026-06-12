@@ -89,9 +89,18 @@ def test_agents_table_shape() -> None:
         "tts_provider_id",
         "tts_voice_id",
         "tts_options",
+        # Johnny-wks.1: the workspace attachment (NULL = default workspace).
+        "workspace_id",
     }.issubset(columns)
     fk_targets = {fk.column.table.name for fk in table.foreign_keys}
-    assert fk_targets == {"provider_credentials"}
+    assert fk_targets == {"provider_credentials", "workspaces"}
+
+
+def test_workspaces_table_shape() -> None:
+    """Johnny-wks.1: workspaces are first-class execution environments."""
+    table = Base.metadata.tables["workspaces"]
+    columns = {c.name for c in table.columns}
+    assert {"name", "slug", "description", "is_default"}.issubset(columns)
 
 
 def test_meeting_agents_assignment_table_shape() -> None:

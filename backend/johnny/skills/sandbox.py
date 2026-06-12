@@ -43,6 +43,33 @@ def sandbox_url_from_env() -> str:
     return os.environ.get(SANDBOX_URL_ENV, "").strip().rstrip("/") or DEFAULT_SANDBOX_URL
 
 
+# --- Per-workspace endpoints (Johnny-wks.1) ----------------------------------
+# A NON-DEFAULT workspace's exec daemon lives in its own container of the
+# same skills-sandbox image, reachable on the compose network under a
+# canonical hostname derived from the workspace id. Johnny-wks.2 launches
+# those containers with this exact name (and the johnny.workspace-id label);
+# until then the hostname resolves to nothing and every probe/exec degrades
+# through SandboxUnavailableError — an empty capability snapshot for that
+# key, never a crash (the documented containerless-workspace path).
+WORKSPACE_CONTAINER_PREFIX = "johnny-workspace"
+WORKSPACE_SANDBOX_PORT = 8088
+
+
+def workspace_container_name(workspace_id: int) -> str:
+    """Canonical container/hostname for a workspace's sandbox instance."""
+    return f"{WORKSPACE_CONTAINER_PREFIX}-{workspace_id}"
+
+
+def sandbox_url_for_workspace(workspace_id: int) -> str:
+    """The exec API base URL for a NON-DEFAULT workspace's own container.
+
+    The default workspace never routes here — its endpoint stays
+    :func:`sandbox_url_from_env` (today's shared compose service), keeping
+    every pre-workspaces dispatch byte-identical.
+    """
+    return f"http://{workspace_container_name(workspace_id)}:{WORKSPACE_SANDBOX_PORT}"
+
+
 def skills_dir_from_env() -> str:
     """The skill-packages directory — the same ``/skills`` path in every
     container that mounts the volume (no per-container path translation)."""
@@ -234,11 +261,15 @@ __all__ = [
     "DEFAULT_SKILLS_DIR",
     "SANDBOX_URL_ENV",
     "SKILLS_DIR_ENV",
+    "WORKSPACE_CONTAINER_PREFIX",
+    "WORKSPACE_SANDBOX_PORT",
     "SandboxClient",
     "SandboxError",
     "SandboxExecResult",
     "SandboxRequestError",
     "SandboxUnavailableError",
+    "sandbox_url_for_workspace",
     "sandbox_url_from_env",
     "skills_dir_from_env",
+    "workspace_container_name",
 ]

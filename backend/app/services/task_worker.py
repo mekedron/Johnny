@@ -188,6 +188,12 @@ class ClaimedTask:
     ``attempts`` is the post-claim value — the fence
     :func:`settle_claimed_task` requires, so a straggling runner from an
     older attempt can never clobber a newer claim's row.
+
+    ``workspace_id`` / ``workspace_is_default`` (Johnny-wks.1) come from the
+    row's ``request_json["workspace"]`` stamp — the session's frozen
+    workspace identity. Rows with no stamp (legacy, default-workspace
+    sessions) carry ``None``/``True``: the default workspace, byte-identical
+    pre-workspaces behavior.
     """
 
     task_id: int
@@ -198,6 +204,8 @@ class ClaimedTask:
     turn_id: int | None
     decision_id: int | None
     attempts: int
+    workspace_id: int | None = None
+    workspace_is_default: bool = True
 
     def as_queued_task(self) -> QueuedTask:
         """The executor-facing shape (the trt.23 runner contract)."""
@@ -305,6 +313,7 @@ def claim_queued_tasks(
     for row in rows:
         request = row.request_json if isinstance(row.request_json, dict) else {}
         args = request.get("args")
+        workspace_id, workspace_is_default = _workspace_from_request(request)
         claimed.append(
             ClaimedTask(
                 task_id=int(row.id),
@@ -315,9 +324,31 @@ def claim_queued_tasks(
                 turn_id=row.turn_id,
                 decision_id=row.agent_decision_id,
                 attempts=int(row.attempts),
+                workspace_id=workspace_id,
+                workspace_is_default=workspace_is_default,
             )
         )
     return claimed
+
+
+def _workspace_from_request(request: dict[str, Any]) -> tuple[int | None, bool]:
+    """Parse the row's workspace stamp (Johnny-wks.1) → ``(id, is_default)``.
+
+    Lenient like the rest of the claim parse: a missing / malformed stamp
+    degrades to ``(None, True)`` — the default workspace, exactly what every
+    pre-workspaces row meant.
+    """
+    entry = request.get("workspace")
+    if not isinstance(entry, dict):
+        return None, True
+    raw_id = entry.get("id")
+    try:
+        workspace_id = int(raw_id) if raw_id is not None and raw_id != "" else None
+    except (TypeError, ValueError):
+        workspace_id = None
+    if workspace_id is None:
+        return None, True
+    return workspace_id, bool(entry.get("is_default"))
 
 
 def settle_claimed_task(
@@ -454,20 +485,26 @@ def sweep_stale_tasks(
 
 
 def resolve_sandbox_url(claimed: ClaimedTask) -> str:
-    """Which sandbox runs this task's CLI work — the Phase-7 seam.
+    """Which sandbox runs this task's CLI work — keyed by WORKSPACE (Johnny-wks.1).
 
-    Today: constant — every task gets the global skills-sandbox from
-    ``JOHNNY_SKILLS_SANDBOX_URL``. Per-agent sandboxes (operator direction,
-    Phase 7: ``agent.sandbox_mode = global | personal``) will key this off
-    the task's agent; the claim/run/settle loop must never need to change.
-    The session-assembly twin is
+    Keyed by the claimed row's workspace stamp: the DEFAULT workspace — and
+    every legacy row with no stamp — gets the global skills-sandbox from
+    ``JOHNNY_SKILLS_SANDBOX_URL`` (byte-identical pre-workspaces behavior);
+    a non-default workspace gets its own container's canonical endpoint.
+    Until that container exists (Johnny-wks.2), the registry probe against
+    it degrades to all-skills-unavailable and the task settles ``failed``
+    with honest speech — never a crash. The claim/run/settle loop never
+    needed to change (the Phase-7 promise of this seam). The
+    session-assembly twin is
     :func:`johnny.agent.job_session.resolve_session_sandbox_url`
     (Johnny-trt.63) — re-keying sandbox identity means changing exactly
     these two functions.
     """
-    from johnny.skills.sandbox import sandbox_url_from_env
+    from johnny.skills.sandbox import sandbox_url_for_workspace, sandbox_url_from_env
 
-    return sandbox_url_from_env()
+    if claimed.workspace_id is None or claimed.workspace_is_default:
+        return sandbox_url_from_env()
+    return sandbox_url_for_workspace(claimed.workspace_id)
 
 
 def load_mcp_server_configs() -> tuple[McpServerConfig, ...]:

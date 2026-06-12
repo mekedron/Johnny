@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "sessionId": "1ca9c51f-70c8-4f6b-9822-41c37efadfa4",
+  "sessionId": "b6e04a59-a239-41cc-9d46-aaf1f127490a",
   "status": "running",
-  "startedAt": "2026-06-12T14:53:58.507Z",
-  "updatedAt": "2026-06-12T14:53:58.507Z",
+  "startedAt": "2026-06-12T16:03:53.991Z",
+  "updatedAt": "2026-06-12T16:47:11.086Z",
   "currentIteration": 0,
   "maxIterations": 0,
   "tasksCompleted": 0,
@@ -12,465 +12,57 @@
   "model": "fable",
   "trackerState": {
     "plugin": "beads-bv",
-    "epicId": "Johnny-trt",
+    "epicId": "Johnny-wks",
     "epicIds": [
-      "Johnny-trt"
+      "Johnny-wks"
     ],
     "executionScopes": [
       {
-        "id": "Johnny-trt",
-        "title": "Fast conversational core: streaming hot path + async task orchestration (Meet-first)",
+        "id": "Johnny-wks",
+        "title": "(EPIC) Workspaces: first-class execution environments attached to agents",
         "type": "epic",
-        "description": "# Fast conversational core: streaming hot path + async task orchestration (Meet-first)\n\n## Why\n\nJohnny's voice conversation was compared against openclaw's \"Start Talk\" feature, which responds near-instantly. Two code-verified deep dives (openclaw + Johnny) found the gap and the operator set direction: keep the split STT→router→LLM→TTS pipeline (no cloud speech-to-speech replacement) but refactor it — the router is slow and the pipeline underperforms. Google Meet (multi-participant) is the primary surface.\n\n## Vision\n\nAdopt openclaw's \"Start Talk\" lessons inside Johnny's split pipeline:\n\n1. **Stream everything before the LLM** — STT runs DURING speech (interim + fast final), endpointing commits early when the utterance is confidently complete, providers are prewarmed, TTS head-of-line shrinks, the client cuts bot audio locally on barge-in.\n2. **Router stays but becomes fast triage** — outcome set {silent | speak | delegate | status}. Simple asks answered immediately; complex asks get an instant verbal ack (\"let me check on that\") and are delegated.\n3. **Async task threads** (openclaw's \"forced consult\" pattern, Johnny-shaped) — an operational controller (task registry, status, progress queries: \"are you still working on that?\") and an executional layer (tool calls: Calendar first, Gmail later; webhook/callback re-entry). LangGraph evaluated as the engine for multi-step kinds (operator-requested).\n4. **Speech queue with conversational re-entry** — pending utterances (ack > requested-status > unsolicited-result > notice) delivered only at turn boundaries/silence, with expiry; never cuts a participant off.\n\n## Preserved unchanged (invariants)\n\n- INV-1 (\"exactly one terminal per turn\", TurnLedger) and INV-2 — hard constraints; a delegated turn's terminal is its ack utterance; async results are session-scoped speech (approval-reply precedent), never turn terminals.\n- Replay-harness verdict parity: router schema changes are additive; old model outputs parse byte-for-byte identically.\n- Meet/room turn-taking semantics untouched by Phase-1 endpointing work (browser-session-scoped knobs only).\n- agentsession orchestrator (no legacy engine work); S2S/unified path out of scope (Johnny-20h stays deferred).\n- Docker-only runtime; clean-install reproducibility (all new deps in pyproject); chrome-devtools browser validation for every UI-visible change.\n\n## Replaced / built\n\n- Plain VAD endpointing on the browser session → tuned endpointing + roomless semantic turn detector (in-process InferenceExecutor shim).\n- Batch-only Parakeet → cache-aware streaming `transcribe_stream`.\n- Router as monolithic should-speak gate → triage with delegate/status actions + task catalog + ~8 s budget.\n- Nothing → agent_tasks table, TaskCoordinator, worker executor pass, ToolRegistry (calendar.upcoming_events first), task events, speech queue, webhook entry, Gmail scope, session-page tasks panel.\n\n## Anchors\n\n- Latency targets (docs/LATENCY.md, speech-end → first audible byte): p50/p95 = 300/500 ms all-local, 250/450 mixed, 200/400 all-cloud. Re-measured at every phase capstone via the Phase-0 harness.\n- Live-Meet E2E scenario: complex ask → ack ≤ ~2 s → conversation continues → status query answered → result delivered at a conversational boundary.\n\n## Phases (capstone-gated)\n\n- Phase 0 — Baseline & foundations: Johnny-cxu baseline (absorbed as child), scripted latency harness, livekit-agents 1.5.17 surface verification (say()/user_state_changed), replay parity fixtures.\n- Phase 1 — Hot-path latency quick wins: endpointing knobs, roomless semantic turn detector, Piper chunk_bytes 1024, provider prewarm, client-side auto barge-in, Meet bridge audit.\n- Phase 2 — Streaming STT in the voice pipeline: Parakeet cache-aware streaming, live interim captions, Deepgram verification + all-cloud numbers.\n- Phase 3 — Router triage refactor: parity-safe schema extension, gate branching + ack terminal, agent_tasks + TaskCoordinator + stub executor, triage budget/observability (+ deferred speculative-parallel spike).\n- Phase 4 — Async execution: LangGraph evaluation spike, ToolRegistry + calendar tool, worker executor pass, task event plumbing.\n- Phase 5 — Speech queue & re-entry: pure queue core, wiring + TaskEventListener + delivery timing, real status query, live-Meet validation.\n- Phase 6 — Entry points & cutover: webhook callback endpoint, Gmail scope + tool, session-page tasks panel, docs + final acceptance.\n\nRelated (not duplicated): Johnny-20h (deferred S2S epic — explicitly out of scope here), Johnny-stt (Parakeet streaming provider work references it), Johnny-ckz.7 (shipped per-turn timing instrument this epic's measurements ride on), Johnny-1ge (shipped persistent TTS).\n\nFull approved plan: /Users/nikita/.claude/plans/project-projects-openclaw-has-a-soft-barto.md (2026-06-10).\n",
+        "description": "Extracted 2026-06-12 from Johnny-trt Phase 7 (trt.66-71) per operator decision.\n\nVISION: a WORKSPACE is a named execution environment — container instance of the skills-sandbox image + host state dir (~/.johnny/workspaces/<workspace>/, bind-mounted; down -v safe) + connected accounts. Agents ATTACH to exactly one workspace (agents.workspace_id). Seeded non-deletable DEFAULT workspace = today's shared sandbox (state migrates to ~/.johnny/workspaces/default), so existing agents keep byte-identical behavior. Sharing is a FEATURE: one auth, many agents. Credentials are STATE not PERMISSIONS — policy (trt.38) says what an agent may run; the workspace decides as whom and against whose state. Canonical least-privilege scenario: management-meeting agent on a Finance workspace (financial-reports skill + creds), progress-meeting agent on default with calendar+tasks only.\n\nCHAIN: wks.1 entity -> wks.2 container lifecycle -> wks.3 routing -> wks.4 account connect -> wks.5 UI -> wks.6 capstone.\n\nGATING DIAL (operator-relaxable): wks.1 depends on Johnny-trt.34 (Phase 6 capstone), which itself waits on the human-gated Johnny-gf0 live-Meet acceptance run. If the operator wants workspaces work to start before that human gate, relax this SINGLE edge (wks.1 <- trt.34), e.g. repoint it at the remaining Phase-6 build beads.\n\nBD HAZARD: any future bd dep add touching wks.* beads walks into the dense Johnny-trt graph via the trt.34 gate edge and HANGS bd 1.0.4 — use the JSONL import workaround (bd memories: bd-dep-add-dense-graph-hang).",
         "metadata": {
           "dependencyCount": 0,
           "dependentCount": 0
         }
       }
     ],
-    "totalTasks": 74,
+    "totalTasks": 6,
     "tasks": [
       {
-        "id": "Johnny-trt.1",
-        "title": "[BUILD] Phase 0: Scripted latency harness — synthetic-audio turns with per-stage p50/p95",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.2",
-        "title": "[SPIKE] Phase 0: Verify livekit-agents 1.5.17 session surface (say, user_state_changed) in-image",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.3",
-        "title": "[BUILD] Phase 0: Replay fixtures for delegation-shaped utterances (verdict-parity baseline)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.4",
-        "title": "[CHORE] Phase 0 capstone: baseline + SDK findings documented",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-0qw",
-        "title": "[BUG] Phase 5: speak-verdict follow-up in the settle→delivery window answers blind — registry result not consulted (session-4 regression survives on the speak path)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.5",
-        "title": "[BUILD] Phase 1: Endpointing knobs — endpointing passthrough + browser-scoped Silero min_silence 0.55→0.40s",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.6",
-        "title": "[BUILD] Phase 1: Semantic turn detector on the roomless browser session (early commit when confident)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.7",
-        "title": "[BUILD] Phase 1: Piper chunk_bytes default 4096→1024",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.8",
-        "title": "[BUILD] Phase 1: Provider prewarm at session start",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.9",
-        "title": "[BUILD] Phase 1: Client-side auto barge-in in the playground",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.10",
-        "title": "[CHORE] Phase 1: Meet audio-bridge buffering audit",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.11",
-        "title": "[CHORE] Phase 1 capstone: re-measure + varied-pause regression",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.12",
-        "title": "[BUILD] Phase 2: Parakeet cache-aware streaming transcribe_stream",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.13",
-        "title": "[BUILD] Phase 2: Live interim captions in the playground",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.14",
-        "title": "[CHORE] Phase 2: Verify Deepgram direct-streaming voice path + all-cloud measurement",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.15",
-        "title": "[CHORE] Phase 2 capstone: re-measure with streaming STT active",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.16",
-        "title": "[BUILD] Phase 3: Router schema/parser extension — action + task fields (parity-safe)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.17",
-        "title": "[BUILD] Phase 3: Gate branching + ack terminal (delegate / status actions)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.18",
-        "title": "[BUILD] Phase 3: agent_tasks table + TaskSink + TaskCoordinator.begin + stub executor",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.19",
-        "title": "[BUILD] Phase 3: Triage budget + observability + task catalog in router prompt",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.20",
-        "title": "[SPIKE] Phase 3 (deferred, non-gating): speculative-parallel router for meeting modes",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.21",
-        "title": "[CHORE] Phase 3 capstone: parity + INV-1 + delegated-turn validation",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.22",
-        "title": "[SPIKE] Phase 4: LangGraph evaluation — execution engine for multi-step task kinds",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.23",
-        "title": "[BUILD] Phase 4: Tool layer + skill registry (openclaw-compatible SKILL.md) + first skill: calendar via gog",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.24",
-        "title": "[BUILD] Phase 4: Worker executor pass — claim/run/complete + redis wake",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.25",
-        "title": "[BUILD] Phase 4: Task event plumbing — events, subscriber, WS fan-out",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.26",
-        "title": "[CHORE] Phase 4 capstone: end-to-end calendar task in the playground",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.27",
-        "title": "[BUILD] Phase 5: Speech queue pure core",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.28",
-        "title": "[BUILD] Phase 5: Queue wiring + TaskEventListener + delivery timing",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.29",
-        "title": "[BUILD] Phase 5: Real status query from the task registry",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.30",
-        "title": "[CHORE] Phase 5 capstone: live Meet validation of the full loop",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.31",
-        "title": "[BUILD] Phase 6: Webhook callback endpoint for external task completion",
+        "id": "Johnny-wks.1",
+        "title": "[BUILD] Workspace entity — first-class execution environments, default workspace, agent attachment threading",
         "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-trt.32",
-        "title": "[BUILD] Phase 6: Skill generality proof — gmail-via-gog skill + one non-Google CLI skill + install flow",
+        "id": "Johnny-wks.2",
+        "title": "[BUILD] Workspace container lifecycle — lazy launch, idle-TTL stop, labels, sweep, per-workspace state dir",
         "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-trt.33",
-        "title": "[BUILD] Phase 6: Session-page tasks panel",
+        "id": "Johnny-wks.3",
+        "title": "[BUILD] Per-workspace routing — exec, capability snapshot, catalog, and install flow target the agent's workspace",
         "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-trt.34",
-        "title": "[CHORE] Phase 6 capstone: docs + cutover validation",
+        "id": "Johnny-wks.4",
+        "title": "[BUILD] Workspace account connect — gog OAuth into a workspace's keyring",
         "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-trt.35",
-        "title": "[BUILD] Phase 4: Skills-sandbox container — customizable CLI execution environment",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.36",
-        "title": "[BUILD] Phase 6: MCP connector — config, lazy client in executor, mcp__server__tool naming",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.37",
-        "title": "[BUILD] Phase 6: Capability management UI — tools, skills, MCP servers",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.38",
-        "title": "[BUILD] Phase 6: Configurable capability policies — layered allow/deny + editable safe-bins",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.39",
-        "title": "[BUILD] Phase 2: Live bot-reply captions — stream Johnny's spoken text as he talks",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.40",
-        "title": "[BUILD] Phase 2: Playground chat shows previous session's history after restart (stale state reset)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.41",
-        "title": "[BUILD] Phase 6: Agent entity — wipe templates/personalities, clean rebuild",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.42",
-        "title": "[BUILD] Phase 6: Agent provider resolution — voice finally applied, pipeline-mode aware",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.43",
-        "title": "[BUILD] Phase 6: Remove S2S/unified pipeline from the product surface (re-introduction deferred to a future epic)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.44",
-        "title": "[BUILD] Phase 6: Agent edit page — sectioned admin UI",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.45",
-        "title": "[BUILD] Phase 6: Meeting + playground assignment — agents replace parameter soup",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.46",
-        "title": "[BUILD] Phase 6: Multi-agent foundation — speech floor + peer awareness + per-assignment identity",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.47",
-        "title": "[BUILD] Phase 6: Multi-agent turn arbitration — turn claims + router peer selectivity",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.48",
-        "title": "[BUILD] Phase 6: Multi-agent playground — browser test pipeline for agent ensembles",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.49",
-        "title": "[BUILD] Phase 6: Conversation-dynamics observability — interruptions, floor, claims persisted to history",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.50",
-        "title": "[BUILD] Phase 3: Heuristic complexity pre-scorer (shadow mode) — ClawRouter pattern port",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.51",
-        "title": "[SPIKE] Phase 3 (deferred, non-gating): heuristic-informed routing behaviors — fast-path, prompt prior, micro-reply gate",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.52",
-        "title": "[BUILD] Phase 6: Name-addressing gate — per-agent 'respond only when addressed' + name-mention scoring",
+        "id": "Johnny-wks.5",
+        "title": "[BUILD] Workspaces UI — list/detail pages + agent edit attachment picker",
         "status": "open",
         "completedInSession": false
       },
       {
-        "id": "Johnny-trt.53",
-        "title": "[BUILD] Phase 3: Delegate restraint + contextual LLM-authored acks — no canned deflections, no dead promises",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.54",
-        "title": "[BUILD] Phase 3: Decision-pipeline observability rework — full per-turn chain in history, incl. what the bot actually said",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.55",
-        "title": "[BUILD] Phase 4: Capability-aware task catalog — the router only promises what this session can actually do",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.56",
-        "title": "[BUILD] Phase 4: Meeting lifecycle states — dismissible bot, no auto-rejoin after being finished",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.57",
-        "title": "[BUILD] Phase 4: Internal tools — first-party in-app actions (meeting.leave, session.end) callable by voice",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.58",
-        "title": "[BUILD] Phase 3: Interrupted bot replies keep their partial text — marked interrupted, never vanishing from chat/history",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.59",
-        "title": "[MEASURE] Phase-3 router schema costs +568ms p50 triage on the 3B local router — slim the payload or accept as the trt.51/41/42 price",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.60",
-        "title": "[CHORE] Phase 5: Final tool-correctness verification — calendar answers match ground truth end-to-end (ask → ack → execute → spoken result)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.61",
-        "title": "[BUILD] Phase 6: Playground session liveness — bounded reconnect grace, auto-end abandoned sessions",
-        "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.62",
-        "title": "[BUILD] Phase 4: Pre-ack kind validation — unknown task kinds degrade to speak, validated against executor-known kinds",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.63",
-        "title": "[CHORE] Phase 4: Sandbox-identity seams after trt.55 — verify/refactor to sandbox-keyed snapshot + single endpoint resolver (Phase-7 prep)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.64",
-        "title": "[BUILD] Phase 6: Playground multi-agent start — per-agent context briefs in the UI (playground form only)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-cxu",
-        "title": "Real 20-turn p50/p95 latency capture on configured local providers (depends on Johnny-ckz.7)",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.65",
-        "title": "[BUILD] Phase 6: Multi-agent state-freeze audit — 'Thinking…' stuck after silent verdict, group locked in 'Speaking' — full state-machine + delivery-chain verification with tests",
-        "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.66",
-        "title": "[BUILD] Phase 7: Workspace entity — first-class execution environments, default workspace, agent attachment threading",
-        "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-1qr",
-        "title": "[BUILD] Optional: en-only in-process semantic turn detector on the browser session",
-        "status": "completed",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.67",
-        "title": "[BUILD] Phase 7: Workspace container lifecycle — lazy launch, idle-TTL stop, labels, sweep, per-workspace state dir",
-        "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.68",
-        "title": "[BUILD] Phase 7: Per-workspace routing — exec, capability snapshot, catalog, and install flow target the agent's workspace",
-        "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.69",
-        "title": "[BUILD] Phase 7: Workspace account connect — gog OAuth into a workspace's keyring",
-        "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.70",
-        "title": "[BUILD] Phase 7: Workspaces UI — list/detail pages + agent edit attachment picker",
-        "status": "open",
-        "completedInSession": false
-      },
-      {
-        "id": "Johnny-trt.71",
-        "title": "[CHORE] Phase 7 capstone: canonical least-privilege scenario live — Finance workspace vs default, isolation and sharing proven end-to-end",
+        "id": "Johnny-wks.6",
+        "title": "[CHORE] Capstone: canonical least-privilege scenario live — Finance workspace vs default, isolation and sharing proven end-to-end",
         "status": "open",
         "completedInSession": false
       }

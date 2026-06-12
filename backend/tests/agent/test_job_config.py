@@ -151,6 +151,73 @@ def test_snapshot_peer_names_lenient_read(  # Johnny-trt.47
     )  # absent key — every single-agent session
 
 
+def test_snapshot_workspace_lenient_read() -> None:  # Johnny-wks.1
+    """The workspace stamp degrades like every optional snapshot field:
+    absent / malformed → (None, default) so legacy snapshots keep the
+    global sandbox byte-identically."""
+
+    def cfg(snapshot: dict[str, Any]) -> SessionJobConfig:
+        return SessionJobConfig(bot_session_id=1, room_name="r", agent_snapshot=snapshot)
+
+    # Legacy snapshot: no workspace info at all.
+    legacy = cfg({})
+    assert legacy.workspace_id is None
+    assert legacy.workspace_is_default is True
+
+    # The producer's shape: id + identity object.
+    stamped = cfg(
+        {
+            "workspace_id": 7,
+            "workspace": {"id": 7, "name": "Finance", "slug": "finance", "is_default": False},
+        }
+    )
+    assert stamped.workspace_id == 7
+    assert stamped.workspace_is_default is False
+
+    # Default workspace stamped explicitly.
+    default = cfg(
+        {
+            "workspace_id": 1,
+            "workspace": {"id": 1, "name": "Default", "slug": "default", "is_default": True},
+        }
+    )
+    assert default.workspace_id == 1
+    assert default.workspace_is_default is True
+
+    # Malformed id degrades to absent (= default workspace).
+    junk = cfg({"workspace_id": "lots"})
+    assert junk.workspace_id is None
+    assert junk.workspace_is_default is True
+
+
+def test_workspace_from_agent_snapshot_sanitizes() -> None:  # Johnny-wks.1
+    from johnny.agent.job_config import workspace_from_agent_snapshot
+
+    # No stamp → None (legacy rows stay byte-identical).
+    assert workspace_from_agent_snapshot({}) is None
+    assert workspace_from_agent_snapshot({"workspace_id": "junk"}) is None
+
+    # Full stamp: identity fields survive, unknown keys are dropped.
+    payload = workspace_from_agent_snapshot(
+        {
+            "workspace_id": 7,
+            "workspace": {
+                "id": 7,
+                "name": "Finance",
+                "slug": "finance",
+                "is_default": False,
+                "smuggled": {"credentials": "nope"},
+            },
+        }
+    )
+    assert payload == {"id": 7, "is_default": False, "name": "Finance", "slug": "finance"}
+
+    # The id can come from the identity object alone.
+    assert workspace_from_agent_snapshot(
+        {"workspace": {"id": 3, "is_default": True}}
+    ) == {"id": 3, "is_default": True}
+
+
 @pytest.mark.parametrize("bad", [{}, {"bot_session_id": None}, {"bot_session_id": ""}])
 def test_from_dict_requires_session_id(bad: dict[str, Any]) -> None:
     with pytest.raises(ValueError, match="bot_session_id"):

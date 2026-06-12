@@ -270,6 +270,77 @@ def test_snapshot_carries_the_resolved_capability_policy(db_session: Session) ->
     assert json.loads(json.dumps(stamped)) == stamped
 
 
+def test_snapshot_carries_the_resolved_workspace(db_session: Session) -> None:
+    """Johnny-wks.1: the effective workspace rides the snapshot to the
+    resolver seams; absent (None) keeps the legacy key-less shape so
+    default-workspace agents stay byte-identical."""
+    from app.db.models import Workspace
+    from app.services.workspaces import (
+        resolve_agent_workspace,
+        seed_default_workspace,
+        workspace_snapshot_payload,
+    )
+
+    agent = _agent(db_session, "Mika")
+    bare = build_agent_snapshot(agent)
+    assert "workspace_id" not in bare
+    assert "workspace" not in bare
+
+    seed_default_workspace(db_session)
+    default = resolve_agent_workspace(db_session, agent)
+    assert default is not None and default.is_default is True
+
+    stamped = build_agent_snapshot(
+        agent, workspace=workspace_snapshot_payload(default)
+    )
+    assert stamped["workspace_id"] == default.id
+    assert stamped["workspace"] == {
+        "id": default.id,
+        "name": "Default",
+        "slug": "default",
+        "is_default": True,
+    }
+
+    # An explicit non-default attachment resolves to ITS row.
+    finance = Workspace(name="Finance", slug="finance", is_default=False)
+    db_session.add(finance)
+    db_session.flush()
+    agent.workspace_id = finance.id
+    resolved = resolve_agent_workspace(db_session, agent)
+    assert resolved is not None and resolved.id == finance.id
+    stamped = build_agent_snapshot(
+        agent, workspace=workspace_snapshot_payload(resolved)
+    )
+    assert stamped["workspace_id"] == finance.id
+    assert stamped["workspace"]["is_default"] is False
+
+    # Plain JSON-able — what bot_sessions.agent_snapshot stores verbatim.
+    import json
+
+    assert json.loads(json.dumps(stamped)) == stamped
+
+
+def test_resolve_agent_workspace_degrades(db_session: Session) -> None:
+    """NULL attachment → the default workspace; unseeded schema → None;
+    a dangling id (RESTRICT should prevent it) falls back to the default."""
+    from app.services.workspaces import (
+        resolve_agent_workspace,
+        seed_default_workspace,
+    )
+
+    agent = _agent(db_session, "Mika")
+    assert resolve_agent_workspace(db_session, agent) is None  # unseeded
+    assert resolve_agent_workspace(db_session, None) is None
+
+    default = seed_default_workspace(db_session)
+    assert default is not None
+    assert resolve_agent_workspace(db_session, agent).id == default.id
+    assert resolve_agent_workspace(db_session, None).id == default.id
+
+    agent.workspace_id = 999  # dangling — fall back, never fail a dispatch
+    assert resolve_agent_workspace(db_session, agent).id == default.id
+
+
 def test_snapshot_behavior_rides_the_dispatch_contract_into_the_gate(
     db_session: Session,
 ) -> None:

@@ -310,6 +310,51 @@ class CalendarEvent(TimestampMixin, Base):
     )
 
 
+class Workspace(TimestampMixin, Base):
+    """One named EXECUTION ENVIRONMENT agents attach to (Johnny-wks.1).
+
+    A workspace = a container instance of the skills-sandbox image + a host
+    state dir (``~/.johnny/workspaces/<slug>/``, bind-mounted — wks.2 wires
+    the container lifecycle) + the accounts connected inside it. Credentials
+    are STATE, not permissions: the capability policy (Johnny-trt.38) says
+    what an agent may run; the workspace decides *as whom* and against
+    *whose state* it runs.
+
+    * ``name`` — operator-facing display name, unique, renameable;
+    * ``slug`` — the storage-dir derivation key, unique and FROZEN at
+      creation (renames never move state on disk);
+    * ``is_default`` — exactly one row, the seeded "Default" workspace:
+      today's shared skills-sandbox service, non-deletable, so every agent
+      with no explicit attachment keeps byte-identical behavior.
+
+    Agents attach via :attr:`Agent.workspace_id`; ``NULL`` there means the
+    default workspace (the provider-pin NULL-inherits convention). Deleting
+    a workspace is refused while attachments exist (API rule + the FK's
+    ``RESTRICT``); the default is never deletable.
+    """
+
+    __tablename__ = "workspaces"
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_workspaces_name"),
+        UniqueConstraint("slug", name="uq_workspaces_slug"),
+        Index(
+            "uq_workspaces_single_default",
+            "is_default",
+            unique=True,
+            postgresql_where=text("is_default"),
+            sqlite_where=text("is_default"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    slug: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    agents: Mapped[list[Agent]] = relationship(back_populates="workspace")
+
+
 class Agent(TimestampMixin, Base):
     """One first-class AGENT — identity, character, behavior, providers (Johnny-trt.41).
 
@@ -383,10 +428,19 @@ class Agent(TimestampMixin, Base):
     tts_options: Mapped[dict[str, Any]] = mapped_column(
         _json_column(), nullable=False, default=dict
     )
+    # Workspace attachment (Johnny-wks.1): which execution environment this
+    # agent's delegated work runs in. NULL = the seeded default workspace
+    # (the provider-pin NULL-inherits convention, so pre-workspaces rows and
+    # fixtures keep byte-identical behavior). RESTRICT — a workspace cannot
+    # be deleted out from under its attached agents.
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="RESTRICT"), nullable=True
+    )
 
     meeting_assignments: Mapped[list[MeetingAgent]] = relationship(
         back_populates="agent", cascade="all, delete-orphan"
     )
+    workspace: Mapped[Workspace | None] = relationship(back_populates="agents")
 
 
 class MeetingConfig(TimestampMixin, Base):

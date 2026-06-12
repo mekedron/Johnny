@@ -121,6 +121,23 @@ async def test_record_queued_stamps_reasoning_llm(db_session: Session) -> None:
     assert row.request_json["kind"] == "web_search"
 
 
+async def test_record_queued_stamps_workspace(db_session: Session) -> None:
+    """The session's frozen workspace identity rides every queued row
+    (Johnny-wks.1) so the worker resolver runs the task in the workspace the
+    session's catalog promised. No stamp (legacy / default-workspace
+    sessions) keeps the pre-workspaces row shape byte-identical."""
+    workspace = {"id": 7, "name": "Finance", "slug": "finance", "is_default": False}
+    sink = SqlAlchemyTaskSink(db_session, bot_session_id=99, workspace=workspace)
+    await sink.record_queued(_spec())
+    row = db_session.scalars(sa.select(AgentTask)).one()
+    assert row.request_json["workspace"] == workspace
+
+    bare = SqlAlchemyTaskSink(db_session, bot_session_id=99)
+    await bare.record_queued(_spec())
+    rows = db_session.scalars(sa.select(AgentTask).order_by(AgentTask.id)).all()
+    assert "workspace" not in rows[1].request_json
+
+
 # --- update_status --------------------------------------------------------------
 
 

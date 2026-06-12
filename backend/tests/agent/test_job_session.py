@@ -643,9 +643,9 @@ async def test_delegation_capable_runtime_catalogs_mcp_tools() -> None:
 def test_session_sandbox_resolver_returns_the_global_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Today every session resolves to the one global skills-sandbox; the
-    function exists so Phase 7's per-agent sandboxes change it and nothing
-    else (the snapshot + catalog already derive from the resolved client)."""
+    """A legacy snapshot (no workspace stamp) resolves to the global
+    skills-sandbox — byte-identical pre-workspaces behavior (Johnny-wks.1
+    re-keyed this seam by workspace)."""
     monkeypatch.delenv(SANDBOX_URL_ENV, raising=False)
     assert resolve_session_sandbox_url(_job(mode=AUTONOMOUS_MODE)) == DEFAULT_SANDBOX_URL
     monkeypatch.setenv(SANDBOX_URL_ENV, "http://sandbox-trt63:9999/")
@@ -653,6 +653,36 @@ def test_session_sandbox_resolver_returns_the_global_url(
         resolve_session_sandbox_url(_job(mode=AUTONOMOUS_MODE))
         == "http://sandbox-trt63:9999"
     )
+
+
+def test_session_sandbox_resolver_keys_by_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Johnny-wks.1: the snapshot's workspace stamp keys the endpoint.
+
+    Default workspace → the global URL (every existing agent unchanged);
+    non-default → its own container's canonical endpoint, which until
+    Johnny-wks.2 ships resolves to nothing and degrades to an empty
+    availability snapshot for that key."""
+    monkeypatch.setenv(SANDBOX_URL_ENV, "http://sandbox-global:8088")
+
+    default_stamped = _job(
+        mode=AUTONOMOUS_MODE,
+        agent_snapshot={
+            "workspace_id": 1,
+            "workspace": {"id": 1, "name": "Default", "slug": "default", "is_default": True},
+        },
+    )
+    assert resolve_session_sandbox_url(default_stamped) == "http://sandbox-global:8088"
+
+    finance = _job(
+        mode=AUTONOMOUS_MODE,
+        agent_snapshot={
+            "workspace_id": 7,
+            "workspace": {"id": 7, "name": "Finance", "slug": "finance", "is_default": False},
+        },
+    )
+    assert resolve_session_sandbox_url(finance) == "http://johnny-workspace-7:8088"
 
 
 async def test_default_sandbox_client_is_built_on_the_resolved_url(

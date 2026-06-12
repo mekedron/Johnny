@@ -28,6 +28,7 @@ from app.api.providers import router as providers_router
 from app.api.sessions import router as sessions_router
 from app.api.sidecars import router as sidecars_router
 from app.api.stt_stream import router as stt_stream_router
+from app.api.workspaces import router as workspaces_router
 from app.api.ws import router as ws_router
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,15 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             seed_default_agent(session)
     except Exception as exc:  # noqa: BLE001 — seeding must never crash boot
         logger.warning("default-agent seeding skipped: %s", exc)
+
+    try:
+        from app.db.session import session_scope
+        from app.services.workspaces import seed_default_workspace
+
+        with session_scope() as session:
+            seed_default_workspace(session)
+    except Exception as exc:  # noqa: BLE001 — seeding must never crash boot
+        logger.warning("default-workspace seeding skipped: %s", exc)
 
     try:
         from app.db.session import session_scope
@@ -154,6 +164,7 @@ app.include_router(providers_router)
 app.include_router(sessions_router)
 app.include_router(sidecars_router)
 app.include_router(stt_stream_router)
+app.include_router(workspaces_router)
 app.include_router(ws_router)
 
 

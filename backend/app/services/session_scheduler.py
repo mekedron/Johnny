@@ -641,6 +641,28 @@ async def _start_one_session(
                 meeting.id,
                 getattr(agent, "id", None),
             )
+        # Workspace stamp (Johnny-wks.1): the agent's effective execution
+        # environment, frozen at dispatch like the policy above. Guarded
+        # separately for the same reason — a workspace-resolution failure
+        # degrades to no stamp (= the default workspace downstream), never
+        # to a contract-defaults launch.
+        workspace_payload: dict[str, Any] | None = None
+        try:
+            from app.services.workspaces import (
+                resolve_agent_workspace,
+                workspace_snapshot_payload,
+            )
+
+            workspace_row = resolve_agent_workspace(session, agent)
+            if workspace_row is not None:
+                workspace_payload = workspace_snapshot_payload(workspace_row)
+        except Exception:  # noqa: BLE001 — workspace must never block a launch
+            logger.exception(
+                "workspace resolution failed for meeting_config=%s agent=%s; "
+                "launching on the default workspace",
+                meeting.id,
+                getattr(agent, "id", None),
+            )
         try:
             from app.services.agents import build_agent_snapshot
 
@@ -652,6 +674,7 @@ async def _start_one_session(
                 # in multi-agent meetings; empty for single-agent launches.
                 peer_names=_peer_agent_names(meeting, agent),
                 capability_policy=capability_policy,
+                workspace=workspace_payload,
             )
             row.agent_snapshot = agent_snapshot
         except Exception:  # noqa: BLE001 — never block a launch on agent errors

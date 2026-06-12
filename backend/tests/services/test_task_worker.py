@@ -87,12 +87,16 @@ def _insert(
     updated_at: datetime | None = None,
     created_at: datetime | None = None,
     args: dict[str, Any] | None = None,
+    workspace: dict[str, Any] | None = None,
 ) -> int:
+    request_json: dict[str, Any] = {"kind": kind, "args": args or {}, "ack": "on it"}
+    if workspace is not None:
+        request_json["workspace"] = workspace
     row = AgentTask(
         bot_session_id=bot_session_id,
         turn_id=turn_id,
         kind=kind,
-        request_json={"kind": kind, "args": args or {}, "ack": "on it"},
+        request_json=request_json,
         status=status,
         ack_text="on it",
         attempts=attempts,
@@ -195,6 +199,56 @@ def test_claimed_task_as_queued_task_shape(db: Session) -> None:
     assert queued.spec.args == {"q": "x"}
     assert queued.spec.ack_text == "on it"
     assert queued.spec.turn_id == 4
+
+
+# --- workspace keying (Johnny-wks.1, the trt.24 resolver seam) ---------------
+
+
+def test_claim_threads_the_workspace_stamp(db: Session) -> None:
+    """The row's request_json["workspace"] stamp arrives on ClaimedTask;
+    rows with no stamp (legacy) degrade to (None, default)."""
+    legacy = _insert(db)
+    stamped = _insert(
+        db,
+        workspace={"id": 7, "name": "Finance", "slug": "finance", "is_default": False},
+    )
+    default_stamped = _insert(
+        db, workspace={"id": 1, "name": "Default", "slug": "default", "is_default": True}
+    )
+    junk = _insert(db, workspace={"id": "lots"})
+
+    by_id = {t.task_id: t for t in claim_queued_tasks(db, limit=10, now=_NOW)}
+    db.commit()
+
+    assert by_id[legacy].workspace_id is None
+    assert by_id[legacy].workspace_is_default is True
+    assert by_id[stamped].workspace_id == 7
+    assert by_id[stamped].workspace_is_default is False
+    assert by_id[default_stamped].workspace_id == 1
+    assert by_id[default_stamped].workspace_is_default is True
+    assert by_id[junk].workspace_id is None
+    assert by_id[junk].workspace_is_default is True
+
+
+def test_resolve_sandbox_url_keys_by_workspace(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default / legacy claims → the global sandbox URL (byte-identical);
+    a non-default workspace → its own container's canonical endpoint."""
+    from app.services.task_worker import resolve_sandbox_url
+    from johnny.skills.sandbox import SANDBOX_URL_ENV
+
+    monkeypatch.setenv(SANDBOX_URL_ENV, "http://sandbox-global:8088")
+
+    _insert(db)
+    _insert(db, workspace={"id": 1, "is_default": True})
+    _insert(db, workspace={"id": 7, "name": "Finance", "is_default": False})
+    legacy, default_stamped, finance = claim_queued_tasks(db, limit=10, now=_NOW)
+    db.commit()
+
+    assert resolve_sandbox_url(legacy) == "http://sandbox-global:8088"
+    assert resolve_sandbox_url(default_stamped) == "http://sandbox-global:8088"
+    assert resolve_sandbox_url(finance) == "http://johnny-workspace-7:8088"
 
 
 # --- settle_claimed_task ----------------------------------------------------------

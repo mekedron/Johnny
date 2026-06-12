@@ -665,7 +665,33 @@ def _effective_agent_snapshot(
         resolution.agent,
         assignment_context=effective_context or None,
         capability_policy=capability_policy,
+        workspace=_resolved_workspace_payload(session, resolution.agent, bot_session_id),
     )
+
+
+def _resolved_workspace_payload(
+    session: Session, agent: Any, bot_session_id: int
+) -> dict[str, Any] | None:
+    """The agent's effective workspace stamp for the snapshot (Johnny-wks.1).
+
+    Guarded like the policy resolution above it: a failure degrades to no
+    stamp (= the default workspace downstream), never a blocked start.
+    """
+    try:
+        from app.services.workspaces import (
+            resolve_agent_workspace,
+            workspace_snapshot_payload,
+        )
+
+        workspace = resolve_agent_workspace(session, agent)
+        return workspace_snapshot_payload(workspace) if workspace is not None else None
+    except Exception:  # noqa: BLE001 — workspace must never block a session start
+        logger.exception(
+            "browser session %s: workspace resolution failed; "
+            "launching on the default workspace",
+            bot_session_id,
+        )
+        return None
 
 
 def _apply_agent_provider_pins(

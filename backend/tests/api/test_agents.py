@@ -347,6 +347,66 @@ def test_set_default_is_atomic_single_default(
     assert [row["id"] for row in defaults] == [b["id"]]
 
 
+# --- workspace attachment (Johnny-wks.1) --------------------------------------
+
+
+def _seed_workspace(db_session: Session, *, name: str = "Finance") -> Any:
+    from app.db.models import Workspace
+
+    row = Workspace(name=name, slug=name.lower(), is_default=False)
+    db_session.add(row)
+    db_session.flush()
+    return row
+
+
+def test_create_defaults_to_null_workspace(client: TestClient) -> None:
+    body = client.post("/agents", json=_create_payload()).json()
+    assert body["workspace_id"] is None  # None = the default workspace
+
+
+def test_workspace_id_round_trips_via_create_patch_and_null(
+    client: TestClient, db_session: Session
+) -> None:
+    ws = _seed_workspace(db_session)
+    created = client.post(
+        "/agents", json=_create_payload(workspace_id=ws.id)
+    ).json()
+    assert created["workspace_id"] == ws.id
+    assert client.get(f"/agents/{created['id']}").json()["workspace_id"] == ws.id
+
+    # Explicit null reattaches to the default workspace.
+    patched = client.patch(
+        f"/agents/{created['id']}", json={"workspace_id": None}
+    ).json()
+    assert patched["workspace_id"] is None
+
+    patched = client.patch(
+        f"/agents/{created['id']}", json={"workspace_id": ws.id}
+    ).json()
+    assert patched["workspace_id"] == ws.id
+
+
+def test_workspace_id_unknown_422(client: TestClient, db_session: Session) -> None:
+    resp = client.post("/agents", json=_create_payload(workspace_id=999))
+    assert resp.status_code == 422
+    assert "workspace_id=999" in resp.json()["detail"]
+
+    created = client.post("/agents", json=_create_payload()).json()
+    resp = client.patch(f"/agents/{created['id']}", json={"workspace_id": 999})
+    assert resp.status_code == 422
+
+
+def test_clone_carries_the_workspace_attachment(
+    client: TestClient, db_session: Session
+) -> None:
+    ws = _seed_workspace(db_session)
+    created = client.post(
+        "/agents", json=_create_payload(workspace_id=ws.id)
+    ).json()
+    clone = client.post(f"/agents/{created['id']}/clone").json()
+    assert clone["workspace_id"] == ws.id
+
+
 # --- test_voice endpoint (Johnny-trt.42) -------------------------------------
 
 

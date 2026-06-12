@@ -34,7 +34,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_crypto, get_session
-from app.db.models import Agent, BotMode, MeetingAgent, ProviderCredential
+from app.db.models import Agent, BotMode, MeetingAgent, ProviderCredential, Workspace
 from app.providers.base import ProviderKind
 from app.security.crypto import CredentialCrypto
 
@@ -74,6 +74,9 @@ class AgentCreate(BaseModel):
     tts_provider_id: int | None = None
     tts_voice_id: str | None = Field(default=None, max_length=128)
     tts_options: dict[str, Any] = Field(default_factory=dict)
+    # Workspace attachment (Johnny-wks.1): which execution environment the
+    # agent's delegated work runs in. None/omitted = the default workspace.
+    workspace_id: int | None = None
 
     @field_validator("allowed_replies")
     @classmethod
@@ -104,6 +107,8 @@ class AgentUpdate(BaseModel):
     tts_provider_id: int | None = None
     tts_voice_id: str | None = Field(default=None, max_length=128)
     tts_options: dict[str, Any] | None = None
+    # Send ``null`` to reattach the agent to the default workspace.
+    workspace_id: int | None = None
 
     @field_validator("allowed_replies")
     @classmethod
@@ -133,6 +138,10 @@ class AgentRead(BaseModel):
     tts_provider_id: int | None
     tts_voice_id: str | None
     tts_options: dict[str, Any]
+    # Workspace attachment (Johnny-wks.1). None = the default workspace
+    # (the provider-pin NULL-inherits convention); the snapshot stamped at
+    # dispatch always carries the resolved effective workspace.
+    workspace_id: int | None
     created_at: datetime
     updated_at: datetime
     # How many meetings currently assign this agent (``meeting_agents``
@@ -208,6 +217,21 @@ def _validate_provider_fks(session: Session, data: dict[str, Any]) -> None:
         value = data.get(field)
         if value is not None:
             _validate_provider_fk(session, value, kind, field=field)
+
+
+def _validate_workspace_fk(session: Session, data: dict[str, Any]) -> None:
+    """Reject a ``workspace_id`` that names no existing workspace (422).
+
+    ``None`` is always legal — it means the default workspace (Johnny-wks.1).
+    """
+    value = data.get("workspace_id")
+    if value is None:
+        return
+    if session.get(Workspace, value) is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"workspace_id={value} does not reference an existing workspace",
+        )
 
 
 def _validate_behavior(
@@ -294,6 +318,7 @@ def create_agent(payload: AgentCreate, session: SessionDep) -> AgentRead:
     """Create a new agent. Always created non-default."""
     data = payload.model_dump()
     _validate_provider_fks(session, data)
+    _validate_workspace_fk(session, data)
     _validate_behavior(
         mode=payload.mode,
         allowed_replies=payload.allowed_replies,
@@ -335,6 +360,7 @@ def clone_agent(agent_id: int, session: SessionDep) -> AgentRead:
         tts_provider_id=src.tts_provider_id,
         tts_voice_id=src.tts_voice_id,
         tts_options=dict(src.tts_options or {}),
+        workspace_id=src.workspace_id,
         is_default=False,
     )
     session.add(row)
@@ -382,6 +408,7 @@ def update_agent(
         data.pop("name", None)
 
     _validate_provider_fks(session, data)
+    _validate_workspace_fk(session, data)
 
     effective: dict[str, Any] = {
         "mode": row.mode,

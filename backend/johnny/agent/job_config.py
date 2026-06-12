@@ -184,6 +184,52 @@ SNAPSHOT_CONFIDENCE_THRESHOLD_KEY = "confidence_threshold"
 SNAPSHOT_ASSIGNMENT_CONTEXT_KEY = "assignment_context"
 SNAPSHOT_PEER_NAMES_KEY = "peer_names"
 SNAPSHOT_CAPABILITY_POLICY_KEY = "capability_policy"
+# Workspace attachment (Johnny-wks.1): the agent's effective execution
+# environment, resolved + stamped at dispatch. ``workspace_id`` is the key
+# the sandbox resolver seams consume (trt.63 / trt.24); ``workspace`` is the
+# identity object ({id, name, slug, is_default}) — ``is_default`` decides
+# whether the key maps to the global skills-sandbox (byte-identical legacy
+# behavior) or to that workspace's own container endpoint.
+SNAPSHOT_WORKSPACE_ID_KEY = "workspace_id"
+SNAPSHOT_WORKSPACE_KEY = "workspace"
+
+
+def workspace_from_agent_snapshot(
+    agent_snapshot: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """The sanitized workspace stamp from a frozen agent snapshot, or ``None``.
+
+    Defensive re-sanitization like
+    :func:`reasoning_llm_from_provider_config`: only the known identity
+    fields survive (``id`` / ``name`` / ``slug`` / ``is_default``). ``None``
+    when the snapshot carries no usable workspace info (legacy snapshots,
+    fixtures) — consumers then degrade to the default-workspace behavior.
+    The task sink stamps this into each queued ``agent_tasks`` row so the
+    worker executor resolves the SAME workspace the session promised.
+    """
+    raw_id: Any = agent_snapshot.get(SNAPSHOT_WORKSPACE_ID_KEY)
+    entry = agent_snapshot.get(SNAPSHOT_WORKSPACE_KEY)
+    if not isinstance(entry, Mapping):
+        entry = {}
+    if raw_id is None:
+        raw_id = entry.get("id")
+    try:
+        workspace_id = int(raw_id) if raw_id is not None and raw_id != "" else None
+    except (TypeError, ValueError):
+        workspace_id = None
+    if workspace_id is None:
+        return None
+    payload: dict[str, Any] = {
+        "id": workspace_id,
+        "is_default": bool(entry.get("is_default")),
+    }
+    name = str(entry.get("name") or "").strip()
+    if name:
+        payload["name"] = name
+    slug = str(entry.get("slug") or "").strip()
+    if slug:
+        payload["slug"] = slug
+    return payload
 
 
 def _int_or_none(raw: str | None) -> int | None:
@@ -299,6 +345,40 @@ class SessionJobConfig:
         degrade to absent.
         """
         return _coerce_replies(self.agent_snapshot.get(SNAPSHOT_PEER_NAMES_KEY))
+
+    @property
+    def workspace_id(self) -> int | None:
+        """The agent's workspace attachment from the snapshot (Johnny-wks.1).
+
+        The key the sandbox resolver seams consume. Lenient like the other
+        snapshot reads: absent / blank / unparseable degrades to ``None`` —
+        a legacy snapshot, which downstream treats as the default workspace
+        (the global skills-sandbox, byte-identical pre-workspaces behavior).
+        """
+        raw = self.agent_snapshot.get(SNAPSHOT_WORKSPACE_ID_KEY)
+        if raw is None or raw == "":
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    @property
+    def workspace_is_default(self) -> bool:
+        """Whether the stamped workspace is the seeded default (Johnny-wks.1).
+
+        ``True`` for snapshots with no workspace info at all (legacy — they
+        predate workspaces and ran the shared sandbox). With a stamped id,
+        the verdict comes from the ``workspace`` identity object; a stamped
+        id with no object is honoured as a non-default key (the producer
+        always writes both, so this shape only arises hand-built).
+        """
+        if self.workspace_id is None:
+            return True
+        entry = self.agent_snapshot.get(SNAPSHOT_WORKSPACE_KEY)
+        if isinstance(entry, Mapping):
+            return bool(entry.get("is_default"))
+        return False
 
     def capability_policy(self) -> Any:
         """The resolved capability policy stamped at dispatch (Johnny-trt.38).
@@ -554,6 +634,8 @@ __all__ = [
     "SNAPSHOT_CONFIDENCE_THRESHOLD_KEY",
     "SNAPSHOT_MODE_KEY",
     "SNAPSHOT_PEER_NAMES_KEY",
+    "SNAPSHOT_WORKSPACE_ID_KEY",
+    "SNAPSHOT_WORKSPACE_KEY",
     "SUGGEST_ONLY_MODE",
     "SUPPORTED_MODES",
     "SessionJobConfig",
@@ -561,4 +643,5 @@ __all__ = [
     "bridge_identity_for_session",
     "reasoning_llm_from_provider_config",
     "room_name_for_session",
+    "workspace_from_agent_snapshot",
 ]

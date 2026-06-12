@@ -29,7 +29,7 @@ stores + snapshots the pins only.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -154,6 +154,7 @@ def build_agent_snapshot(
     assignment_context: str | None = None,
     peer_names: Sequence[str] | None = None,
     capability_policy: dict[str, Any] | None = None,
+    workspace: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Freeze the agent's behavior + provider pins for ``bot_sessions.agent_snapshot``.
 
@@ -176,13 +177,22 @@ def build_agent_snapshot(
     enforcement (catalog filtering, the gate's degrade) reads the snapshot,
     never the policy tables. ``None`` (legacy snapshots, policy-less test
     fixtures) degrades to the unrestricted pre-trt.38 behavior downstream.
+
+    ``workspace`` (Johnny-wks.1) is the agent's RESOLVED effective workspace
+    (:func:`app.services.workspaces.workspace_snapshot_payload`, via
+    :func:`app.services.workspaces.resolve_agent_workspace`) — stamped as a
+    top-level ``workspace_id`` (the resolver seams' key) plus a ``workspace``
+    identity object. ``None`` (legacy snapshots, fixtures, an unseeded
+    schema) stamps nothing, and downstream resolvers degrade to the global
+    skills-sandbox — byte-identical pre-workspaces behavior.
     """
+    snapshot = _snapshot_base(agent, assignment_context, peer_names)
     if capability_policy is not None:
-        return {
-            **_snapshot_base(agent, assignment_context, peer_names),
-            "capability_policy": dict(capability_policy),
-        }
-    return _snapshot_base(agent, assignment_context, peer_names)
+        snapshot["capability_policy"] = dict(capability_policy)
+    if workspace is not None and workspace.get("id") is not None:
+        snapshot["workspace_id"] = int(workspace["id"])
+        snapshot["workspace"] = dict(workspace)
+    return snapshot
 
 
 def _snapshot_base(

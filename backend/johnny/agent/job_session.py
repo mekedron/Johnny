@@ -72,6 +72,7 @@ from johnny.agent.job_config import (
     PROVIDER_CONFIG_ROUTER_LLM_KEY,
     SessionJobConfig,
     reasoning_llm_from_provider_config,
+    workspace_from_agent_snapshot,
 )
 from johnny.agent.job_runtime import (
     answer_config_from_job,
@@ -493,10 +494,14 @@ def _build_sync_persistence(
         # Per-agent reasoning model (Johnny-trt.42): every queued row carries
         # the requesting agent's resolved reasoning-LLM identity so the worker
         # executor can run multi-step kinds on it. Credential-less by contract.
+        # Workspace stamp (Johnny-wks.1): the session's frozen workspace
+        # identity rides each queued row the same way, so the worker resolver
+        # runs the task in the SAME workspace this session's catalog promised.
         task_sink = SqlAlchemyTaskSink(
             _db(),
             config.bot_session_id,
             reasoning_llm=reasoning_llm_from_provider_config(config.provider_config),
+            workspace=workspace_from_agent_snapshot(config.agent_snapshot),
         )
         logger.info(
             "task sink wired for session %s (delegation-capable mode=%s)",
@@ -529,23 +534,30 @@ def _env_int(name: str, default: int) -> int:
 
 
 def resolve_session_sandbox_url(config: SessionJobConfig) -> str:
-    """Which sandbox serves this session's capability probes — the Phase-7 seam.
+    """Which sandbox serves this session's capability probes — keyed by WORKSPACE.
 
     The session-assembly twin of
     :func:`app.services.task_worker.resolve_sandbox_url` (Johnny-trt.63):
-    ONE function on purpose. Today: constant — every session probes the
-    global skills-sandbox from ``JOHNNY_SKILLS_SANDBOX_URL``. Per-agent
-    sandboxes (operator direction, Phase 7: ``agent.sandbox_mode =
-    global | personal``) will key this off the session's agent; nothing
-    downstream needs to change, because the availability snapshot and the
-    task catalog are already derived per session from whatever client this
-    resolves — there is no cross-session snapshot cache on the session
-    side to re-key (the worker's URL-keyed cache lives in
+    ONE function on purpose. Keyed by the agent snapshot's workspace stamp
+    (Johnny-wks.1): the DEFAULT workspace — and every legacy snapshot with
+    no stamp — resolves to the global skills-sandbox from
+    ``JOHNNY_SKILLS_SANDBOX_URL`` (byte-identical pre-workspaces behavior);
+    a non-default workspace resolves to its own container's canonical
+    endpoint. Until that container exists (Johnny-wks.2), probes against it
+    degrade through ``SandboxUnavailableError`` to an EMPTY availability
+    snapshot for that key — the catalog promises nothing, never a crash.
+    Nothing downstream needs to change, because the availability snapshot
+    and the task catalog are already derived per session from whatever
+    client this resolves — there is no cross-session snapshot cache on the
+    session side to re-key (the worker's URL-keyed cache lives in
     :class:`app.services.task_worker.SandboxExecutorProvider`).
     """
-    from johnny.skills.sandbox import sandbox_url_from_env
+    from johnny.skills.sandbox import sandbox_url_for_workspace, sandbox_url_from_env
 
-    return sandbox_url_from_env()
+    workspace_id = config.workspace_id
+    if workspace_id is None or config.workspace_is_default:
+        return sandbox_url_from_env()
+    return sandbox_url_for_workspace(workspace_id)
 
 
 async def _build_skill_pieces(

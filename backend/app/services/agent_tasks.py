@@ -46,6 +46,7 @@ class SqlAlchemyTaskSink(TaskSink):
         bot_session_id: int,
         *,
         reasoning_llm: Mapping[str, Any] | None = None,
+        workspace: Mapping[str, Any] | None = None,
     ) -> None:
         self._session = session
         self._bot_session_id = bot_session_id
@@ -55,6 +56,14 @@ class SqlAlchemyTaskSink(TaskSink):
         # stamped into each queued row so the worker executor can resolve the
         # requesting agent's reasoning model when multi-step kinds land.
         self._reasoning_llm = dict(reasoning_llm) if reasoning_llm else None
+        # The session's frozen workspace identity (Johnny-wks.1):
+        # ``{id, name, slug, is_default}`` from the agent snapshot's stamp.
+        # Each queued row carries it so the worker's sandbox resolver
+        # (:func:`app.services.task_worker.resolve_sandbox_url`) runs the
+        # task in the workspace the session's catalog promised. ``None``
+        # (legacy / default-workspace sessions with no stamp) keeps the row
+        # shape byte-identical to pre-workspaces rows.
+        self._workspace = dict(workspace) if workspace else None
 
     @property
     def bot_session_id(self) -> int:
@@ -71,6 +80,8 @@ class SqlAlchemyTaskSink(TaskSink):
         }
         if self._reasoning_llm is not None:
             request_json["reasoning_llm"] = dict(self._reasoning_llm)
+        if self._workspace is not None:
+            request_json["workspace"] = dict(self._workspace)
         row = AgentTask(
             bot_session_id=self._bot_session_id,
             agent_decision_id=spec.decision_id,
