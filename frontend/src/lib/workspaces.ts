@@ -3,14 +3,15 @@
  * (Johnny-wks.1 CRUD, wks.2 container teardown, wks.5 container states +
  * manual start/stop).
  *
- * A WORKSPACE is a named execution environment — its own sandbox container,
- * host state dir (skill packages + gog credential keyring), and connected
- * accounts — that agents attach to via `agents.workspace_id` (null = the
- * default workspace). The default workspace's sandbox is the always-on
- * compose service; non-default containers launch lazily and stop on idle.
- *
- * Distinct from `$lib/workspace-accounts` (the per-workspace Google account
- * surface this module's detail page embeds).
+ * A WORKSPACE is a named execution environment — its own sandbox container
+ * and host state dir (skill packages, tool dotfiles, scratch space) — that
+ * agents attach to via `agents.workspace_id` (null = the default workspace).
+ * The default workspace's sandbox is the always-on compose service;
+ * non-default containers launch lazily and stop on idle. The workspace is a
+ * pure tools container: it carries no account UI and no app-managed Google
+ * identity. (The meeting-bot Google identity lives on the AGENT — see
+ * `$lib/accounts`; `gog` is an optional CLI a developer configures by hand
+ * inside the container, used at runtime by skills like google-calendar.)
  *
  * Mirrors the `request<T>()` wrapper used by `agents.ts` / `capabilities.ts`.
  */

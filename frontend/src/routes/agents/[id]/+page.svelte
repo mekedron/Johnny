@@ -33,7 +33,6 @@
 	import PageHeader from '$lib/components/page-header.svelte';
 	import ToolsPanel from '$lib/components/capabilities/ToolsPanel.svelte';
 	import VoicePicker from '$lib/components/settings/VoicePicker.svelte';
-	import WorkspaceAccountsPanel from '$lib/components/workspaces/WorkspaceAccountsPanel.svelte';
 	import MeetingBotAccountPicker from '$lib/components/agents/MeetingBotAccountPicker.svelte';
 	import { BOT_MODES, BOT_MODE_LABEL } from '$lib/sessionDetail';
 	import { listProviders, playSample, type ProviderList } from '$lib/providers';
@@ -791,8 +790,8 @@
 			</header>
 
 			<!-- Workspace attachment (Johnny-wks.5): WHERE delegated work runs —
-			     which sandbox container, skill packages, and Google accounts.
-			     Orthogonal to the policy layers below (what it MAY run). -->
+			     which sandbox container and skill packages. Orthogonal to the
+			     policy layers below (what it MAY run). -->
 			<div class="flex flex-col gap-1.5" data-testid="workspace-attachment">
 				<label class="text-foreground text-xs font-medium" for="agent-workspace">
 					Workspace
@@ -820,7 +819,7 @@
 				</div>
 				<p class="text-muted-foreground m-0 text-xs">
 					The execution environment for this agent's delegated tasks — its skills, sandbox
-					container, and connected accounts. Shared by every agent attached to it.
+					container, and tool state. Shared by every agent attached to it.
 				</p>
 				{#if pickedWorkspace !== null}
 					<p class="text-muted-foreground m-0 text-xs" data-testid="workspace-summary">
@@ -843,12 +842,6 @@
 			{#if agent !== null}
 				<Separator />
 				<ToolsPanel agentId={agent.id} />
-				<Separator />
-				<!-- Identity lives on the WORKSPACE (Johnny-wks.4): policy above
-				     says what this agent may run; the workspace's accounts decide
-				     as whom. Bound to the PICKED workspace so the operator sees
-				     what an unsaved attachment change would give the agent. -->
-				<WorkspaceAccountsPanel workspaceId={draft.workspace_id} />
 			{:else}
 				<p class="text-muted-foreground m-0 text-sm" data-testid="capabilities-locked">
 					Save the agent first — the capability policy attaches to the saved agent.

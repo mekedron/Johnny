@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "sessionId": "a312b648-1194-46b8-b0fb-0de170f61048",
+  "sessionId": "aced5d83-4a38-43cf-99a6-d43a830ede43",
   "status": "running",
-  "startedAt": "2026-06-13T10:35:17.921Z",
-  "updatedAt": "2026-06-13T11:08:36.415Z",
+  "startedAt": "2026-06-13T11:30:13.669Z",
+  "updatedAt": "2026-06-13T11:51:03.064Z",
   "currentIteration": 0,
   "maxIterations": 0,
   "tasksCompleted": 0,
@@ -68,7 +68,7 @@
       },
       {
         "id": "Johnny-wks.7",
-        "title": "[BUILD] Per-agent Meeting Bot account (meet-join Google identity) — managed on the agent edit page; remove Meeting Bots from Settings",
+        "title": "[BUILD] Accounts = Meeting Bots only — keep meeting-bot account (done) + google-calendar skill; remove the gog-account backend + UI",
         "status": "open",
         "completedInSession": false
       },

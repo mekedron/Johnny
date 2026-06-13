@@ -28,7 +28,6 @@ from app.api.providers import router as providers_router
 from app.api.sessions import router as sessions_router
 from app.api.sidecars import router as sidecars_router
 from app.api.stt_stream import router as stt_stream_router
-from app.api.workspace_accounts import router as workspace_accounts_router
 from app.api.workspaces import router as workspaces_router
 from app.api.ws import router as ws_router
 
@@ -165,7 +164,6 @@ app.include_router(providers_router)
 app.include_router(sessions_router)
 app.include_router(sidecars_router)
 app.include_router(stt_stream_router)
-app.include_router(workspace_accounts_router)
 app.include_router(workspaces_router)
 app.include_router(ws_router)
 

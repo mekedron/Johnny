@@ -1,12 +1,13 @@
 <!--
   Workspace detail (Johnny-wks.5) — everything ONE execution environment
   holds: container lifecycle controls (start/stop with the idle-TTL story),
-  the agents that effectively run here, the sandbox-keyed capability
-  inventory (skills + tool catalog probed against THIS container), and the
-  connected Google accounts (the wks.4 connect flow's home).
+  the agents that effectively run here, and the sandbox-keyed capability
+  inventory (skills + tool catalog probed against THIS container).
 
   Policy editing stays on /capabilities; attachment changes happen on the
-  agent's edit page — this page is inventory + controls.
+  agent's edit page — this page is inventory + controls. The workspace is a
+  pure tools container: it has no account UI (the meeting-bot Google identity
+  lives on the agent; gog is an optional developer-configured CLI).
 -->
 <script lang="ts">
 	import { page } from '$app/state';
@@ -18,7 +19,6 @@
 	import { Button } from '$lib/components/ui/button/index.js';
 	import Page from '$lib/components/page.svelte';
 	import PageHeader from '$lib/components/page-header.svelte';
-	import WorkspaceAccountsPanel from '$lib/components/workspaces/WorkspaceAccountsPanel.svelte';
 	import WorkspaceInventoryPanel from '$lib/components/workspaces/WorkspaceInventoryPanel.svelte';
 	import { listAgents, type Agent } from '$lib/agents';
 	import {
@@ -138,7 +138,7 @@
 		<PageHeader
 			title={workspace.name}
 			description={workspace.description ??
-				'An isolated execution environment — its own sandbox container, skill packages, and connected accounts.'}
+				'An isolated execution environment — its own sandbox container, skill packages, and tool state.'}
 		>
 			{#snippet meta()}
 				{#if workspace?.is_default}
@@ -249,8 +249,8 @@
 					Attached agents
 				</h2>
 				<p class="text-muted-foreground m-0 text-xs">
-					Every delegated task these agents run executes in this workspace's sandbox with its
-					accounts. Attachment is set on the agent's edit page (Capabilities section).
+					Every delegated task these agents run executes in this workspace's sandbox.
+					Attachment is set on the agent's edit page (Capabilities section).
 				</p>
 			</header>
 			{#if attached.length === 0}
@@ -289,21 +289,6 @@
 				{displayState}
 				onProbed={() => void refreshStates()}
 			/>
-		</section>
-
-		<!-- ─── ACCOUNTS ──────────────────────────────────────────────────── -->
-		<section
-			class="border-border bg-surface-2 flex flex-col gap-4 rounded-md border p-5"
-			data-testid="section-accounts"
-		>
-			<header class="flex flex-col gap-0.5">
-				<h2 class="text-foreground m-0 text-xs font-semibold tracking-widest uppercase">
-					Connected accounts
-				</h2>
-			</header>
-			<!-- The accounts GET lazily ensures the container (wks.4) — keep
-			     the state badge truthful by re-reading it after each load. -->
-			<WorkspaceAccountsPanel workspaceId={workspace.id} onRefreshed={() => void refreshStates()} />
 		</section>
 	{/if}
 </Page>

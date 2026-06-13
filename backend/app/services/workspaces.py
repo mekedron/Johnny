@@ -1,9 +1,9 @@
 """Workspace entity services — seeding, attachment resolution, snapshot stamp (Johnny-wks.1).
 
 A WORKSPACE is a named execution environment (container instance of the
-skills-sandbox image + host state dir + connected accounts) that agents
-attach to via ``agents.workspace_id``. This module owns the pieces the
-dispatch surfaces and the CRUD API share:
+skills-sandbox image + host state dir) that agents attach to via
+``agents.workspace_id``. This module owns the pieces the dispatch surfaces
+and the CRUD API share:
 
 * :func:`seed_default_workspace` — insert the canonical non-deletable
   "Default" workspace when none exists (boot-time belt-and-braces over the
@@ -42,7 +42,7 @@ DEFAULT_WORKSPACE_NAME = "Default"
 DEFAULT_WORKSPACE_SLUG = "default"
 DEFAULT_WORKSPACE_DESCRIPTION = (
     "The shared execution environment every agent starts on — today's "
-    "skills-sandbox container and its connected accounts. Non-deletable."
+    "skills-sandbox container. Non-deletable."
 )
 
 _SLUG_STRIP_RE = re.compile(r"[^a-z0-9]+")

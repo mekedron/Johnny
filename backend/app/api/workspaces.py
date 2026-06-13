@@ -2,9 +2,8 @@
 
 Manages rows in ``workspaces``: list / create / read / rename / delete. A
 workspace is a named execution environment (skills-sandbox container + host
-state dir + connected accounts) that agents attach to via
-``agents.workspace_id`` (the agents API owns that field; this module owns
-only the workspace rows themselves).
+state dir) that agents attach to via ``agents.workspace_id`` (the agents API
+owns that field; this module owns only the workspace rows themselves).
 
 Rules (the bead's CRUD matrix):
 
