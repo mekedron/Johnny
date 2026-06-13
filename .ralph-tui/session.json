@@ -3,7 +3,7 @@
   "sessionId": "368ff11b-20d5-4eb0-bfb5-dc0ee5fa8fba",
   "status": "running",
   "startedAt": "2026-06-13T14:47:46.989Z",
-  "updatedAt": "2026-06-13T14:47:57.142Z",
+  "updatedAt": "2026-06-13T15:20:31.627Z",
   "currentIteration": 0,
   "maxIterations": 0,
   "tasksCompleted": 0,
@@ -131,8 +131,6 @@
   "iterations": [],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
-  "activeTaskIds": [
-    "Johnny-etu.3"
-  ],
+  "activeTaskIds": [],
   "subagentPanelVisible": false
 }
