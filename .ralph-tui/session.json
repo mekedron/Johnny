@@ -1,115 +1,138 @@
 {
   "version": 1,
-  "sessionId": "aced5d83-4a38-43cf-99a6-d43a830ede43",
+  "sessionId": "368ff11b-20d5-4eb0-bfb5-dc0ee5fa8fba",
   "status": "running",
-  "startedAt": "2026-06-13T11:30:13.669Z",
-  "updatedAt": "2026-06-13T13:18:44.145Z",
-  "currentIteration": 2,
+  "startedAt": "2026-06-13T14:47:46.989Z",
+  "updatedAt": "2026-06-13T14:47:57.142Z",
+  "currentIteration": 0,
   "maxIterations": 0,
-  "tasksCompleted": 2,
+  "tasksCompleted": 0,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "opus",
   "trackerState": {
     "plugin": "beads-bv",
-    "epicId": "Johnny-wks",
+    "epicId": "Johnny-etu",
     "epicIds": [
-      "Johnny-wks"
+      "Johnny-etu"
     ],
     "executionScopes": [
       {
-        "id": "Johnny-wks",
-        "title": "(EPIC) Workspaces: first-class execution environments attached to agents",
+        "id": "Johnny-etu",
+        "title": "Pipeline + decision-making revision: stop silent drops, enforce decision↔utterance parity, expose the bot's reasoning to the operator",
         "type": "epic",
-        "description": "Extracted 2026-06-12 from Johnny-trt Phase 7 (trt.66-71) per operator decision.\n\nVISION: a WORKSPACE is a named execution environment — container instance of the skills-sandbox image + host state dir (~/.johnny/workspaces/<workspace>/, bind-mounted; down -v safe) + connected accounts. Agents ATTACH to exactly one workspace (agents.workspace_id). Seeded non-deletable DEFAULT workspace = today's shared sandbox (state migrates to ~/.johnny/workspaces/default), so existing agents keep byte-identical behavior. Sharing is a FEATURE: one auth, many agents. Credentials are STATE not PERMISSIONS — policy (trt.38) says what an agent may run; the workspace decides as whom and against whose state. Canonical least-privilege scenario: management-meeting agent on a Finance workspace (financial-reports skill + creds), progress-meeting agent on default with calendar+tasks only.\n\nCHAIN: wks.1 entity -> wks.2 container lifecycle -> wks.3 routing -> wks.4 account connect -> wks.5 UI -> wks.6 capstone.\n\nGATING DIAL (operator-relaxable): wks.1 depends on Johnny-trt.34 (Phase 6 capstone), which itself waits on the human-gated Johnny-gf0 live-Meet acceptance run. If the operator wants workspaces work to start before that human gate, relax this SINGLE edge (wks.1 <- trt.34), e.g. repoint it at the remaining Phase-6 build beads.\n\nBD HAZARD: any future bd dep add touching wks.* beads walks into the dense Johnny-trt graph via the trt.34 gate edge and HANGS bd 1.0.4 — use the JSONL import workaround (bd memories: bd-dep-add-dense-graph-hang).",
+        "description": "## Why this exists\n\nOperator session at http://localhost:5173/sessions/14 shows two distinct failure modes on the default playground prompt (no custom instructions, nothing fancy):\n\n1. **Silent drops** — the operator asked the bot to \"tell us the progress for the upcoming week\" and the bot just ignored the question. No reply, no error, no visible reason in the chat or decisions surfaces.\n2. **Decision ↔ utterance divergence** — the decisions panel recommended one phrasing, but the bot actually spoke something different in the chat. Repeatedly. The operator cannot tell whether the decision system is being bypassed, overridden, or simply ignored downstream.\n\nThese are not \"tune the prompt\" problems. The operator already noted the instructions were defaults. The complaint is that the pipeline + decision-making layer is unreliable AND opaque — and the right fix is to take the whole pipeline + decision plumbing apart, find the gaps (silent drops, divergence, missing audit trail), redesign so divergence is impossible by construction, and surface a \"what the bot is thinking\" timeline so the operator can read the bots reasoning per turn the same way they read a debugger.\n\nThis is the scope captured here. Sub-tasks under this issue carve it into independently shippable pieces; the parent is the place to discuss the overall design and the dependency order between them.\n\n## Operator’s ask, restated structurally\n\n- An agent picking this up MUST first analyse session 14 end-to-end (transcripts, decisions, bot utterances, pipeline event log, LLM traces) before proposing any refactor. The bug is concrete and reproducible there; everything downstream depends on understanding what actually went wrong.\n- The agent MUST then catalogue every observed gap between (a) what the user said, (b) what the router/decision system decided, (c) what the LLM was asked to produce, and (d) what the bot actually spoke. Each gap is a candidate for being made impossible by construction OR loudly visible in the UI.\n- The agent MUST propose a redesign of the pipeline + decision-making layer that closes those gaps. The PRD shape (Context / Goals / Non-goals / Architecture / Acceptance) used by tasks/prd-piper-tts-runtime-options.md is the canonical example.\n- The operator’s priority order, in their words: **decisions** matter most → **observability** of the bots reasoning second → **performance** a distant third. Optimise the refactor accordingly.\n\n## Sub-tasks (filed as children below)\n\n1. Root-cause analysis from session 14 — replay the session, document every silent drop + every decision/utterance divergence with exact pipeline-event timestamps, deliver a written failure-mode catalogue. **MUST happen first.**\n2. Decision ↔ utterance parity: single source of truth for the spoken text — the decisions surface and the chat surface read from the same canonical record, or any divergence raises a visible error rather than going to the speaker.\n3. Pipeline reliability: never silently drop a user turn — every transcribed user utterance ends in either (a) a final spoken reply, (b) an approved-but-not-yet-spoken suggestion, or (c) a recorded reason for not replying, surfaced to the operator. No turn falls off the floor invisibly.\n4. \"What is the bot thinking\" — per-turn reasoning timeline surfaced in the session UI. STT in → router classification → context selection → LLM prompt → LLM raw output → guard/filter decisions → final spoken text. Customer-readable, not just dev logs.\n5. Offline replay harness against persisted session history — take any past session id, replay its transcript through the current pipeline offline, assert the produced decisions and utterances match the recorded ones; lights up regressions in CI.\n\n## Cross-links — earlier work that informs this\n\nClosed issues whose context the agent should re-read before refactoring:\n\n- **Johnny-vgl** — \"Review and standardize bot free mode speech decision logic\". The previous attempt at this exact territory; whatever decision logic landed there is the starting point for what to refactor here.\n- **Johnny-cdw** — \"Approving a pending suggestion doesn’t make the bot actually speak it\". Same divergence pattern (decisions panel says one thing, bot does another) at a different point in the pipeline.\n- **Johnny-arh** — \"Bot speaks over user mid-sentence\". Floor-management / partial-transcript gating; relevant to the silent-drop symptom because the same gate can over-suppress legitimate turns.\n- **Johnny-ckz.14** — \"STT artifacts trigger AI replies — no noise-floor gate\". Same gate, opposite failure mode (false-positive replies). The redesign has to balance both.\n- **Johnny-har** — \"STT transcription of participants must never pause while bot is speaking or thinking\". Relevant to the \"Where did my question go?\" silent-drop symptom.\n- **Johnny-7qp** — \"Bot loses conversation context mid-session\". Reliability precedent.\n- **Johnny-ckz.7** — \"Per-session activity / timing log surfaced in chat history\". Observability precedent — likely the substrate the new reasoning timeline (sub-task 4) extends.\n- **Johnny-klh** — \"Playground transcripts mislabel speakers\". Reliability precedent.\n\nStill-open issue that WILL collide with this refactor:\n\n- **Johnny-ckz.25** — \"Consolidate free_auto_speak into autonomous — remove FREE_AUTO_SPEAK BotMode\". Touches the same decision-mode plumbing; sequence with sub-task 2 (parity) or absorb into it.\n\n## Acceptance for the umbrella\n\n- All five sub-tasks closed.\n- Session 14 replays end-to-end through the new pipeline with no silent drops; every user turn lands in one of the three documented outcomes.\n- The decisions surface and the chat surface for any given turn either show the same text, or the divergence is rendered as an explicit \"spoke X instead of recommended Y because Z\" line — never silently.\n- A new operator opening any session can read the per-turn reasoning timeline and explain why the bot spoke what it spoke, without reading the source code or docker logs.\n- The offline replay harness runs in CI against at least three persisted sessions including session 14, and gates merges.\n\n## Non-goals\n\n- Not changing the LLM / STT / TTS providers. Provider choice is orthogonal.\n- Not tuning the default playground prompt. The complaint is that even with sane defaults the pipeline misbehaves; prompt tuning hides that.\n- Not adding new bot modes. Consolidating the existing ones (Johnny-ckz.25) is in scope; inventing new ones is not.\n\n## Reference for the agent picking this up\n\n- Session under investigation: http://localhost:5173/sessions/14\n- Canonical PRD shape: `tasks/prd-piper-tts-runtime-options.md`\n- Pipeline source (current): `backend/johnny/voice_pipeline/`, `backend/app/services/browser_pipeline_runner.py`, `backend/app/services/session_scheduler.py`\n- Decisions persistence: search `backend/app/db/models.py` for the decisions / approvals / utterances tables\n- Session UI: `frontend/src/routes/sessions/[id]/+page.svelte` (and the playground page) — where the reasoning timeline needs to land\n",
         "metadata": {
           "dependencyCount": 0,
           "dependentCount": 0
         }
       }
     ],
-    "totalTasks": 9,
+    "totalTasks": 16,
     "tasks": [
       {
-        "id": "Johnny-wks.1",
-        "title": "[BUILD] Workspace entity — first-class execution environments, default workspace, agent attachment threading",
+        "id": "Johnny-ckz.28.1",
+        "title": "Root-cause analysis from session 14: failure-mode catalogue (silent drops + decision/utterance divergence) + redesign proposal",
         "status": "completed",
         "completedInSession": false
       },
       {
-        "id": "Johnny-wks.2",
-        "title": "[BUILD] Workspace container lifecycle — lazy launch, idle-TTL stop, labels, sweep, per-workspace state dir",
+        "id": "Johnny-ckz.28.2",
+        "title": "Decision ↔ utterance parity: single source of truth so the chat and the decisions panel cannot diverge silently",
         "status": "completed",
         "completedInSession": false
       },
       {
-        "id": "Johnny-wks.3",
-        "title": "[BUILD] Per-workspace routing — exec, capability snapshot, catalog, and install flow target the agent's workspace",
+        "id": "Johnny-ckz.28.3",
+        "title": "Pipeline reliability: never silently drop a user turn — every transcribed utterance ends in reply / approved-pending / explicit-no-reply",
         "status": "completed",
         "completedInSession": false
       },
       {
-        "id": "Johnny-wks.4",
-        "title": "[BUILD] Workspace account connect — gog OAuth into a workspace's keyring",
+        "id": "Johnny-ckz.28.4",
+        "title": "'What is the bot thinking' — per-turn reasoning timeline in the session UI (STT in → router → context → LLM → guard → speak)",
         "status": "completed",
         "completedInSession": false
       },
       {
-        "id": "Johnny-wks.5",
-        "title": "[BUILD] Workspaces UI — list/detail pages + agent edit attachment picker",
+        "id": "Johnny-ckz.28.5",
+        "title": "Offline replay harness: feed any persisted session transcript through the pipeline and assert decisions + utterances match",
         "status": "completed",
         "completedInSession": false
       },
       {
-        "id": "Johnny-wks.6",
-        "title": "[CHORE] Capstone: canonical least-privilege scenario live — Finance workspace vs default, isolation and sharing proven end-to-end",
+        "id": "Johnny-etu.1",
+        "title": "Pipeline architecture doc (technical): full deep-dive into how STT → router → decisions → LLM → guards → TTS actually work today",
         "status": "completed",
         "completedInSession": false
       },
       {
-        "id": "Johnny-wks.7",
-        "title": "[BUILD] Accounts = Meeting Bots only — keep meeting-bot account (done) + google-calendar skill; remove the gog-account backend + UI",
+        "id": "Johnny-etu.2",
+        "title": "Pipeline overview (non-technical): plain-language explainer + simple schematic so the operator understands what the bot does between hearing and speaking",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
-        "id": "Johnny-wks.8",
-        "title": "[BUILD] Per-workspace MCP servers — move MCP from global to workspace-attached (no global MCP)",
-        "status": "completed",
-        "completedInSession": true
+        "id": "Johnny-etu.3",
+        "title": "[SPIKE] Phase 0: Root-cause the session-runtime regression — replay session #1 + trt.60, pin what Phase 6/7 broke",
+        "status": "open",
+        "completedInSession": false
       },
       {
-        "id": "Johnny-wks.9",
-        "title": "[BUILD] Remove the global capabilities page — tool-access becomes a per-workspace concern (no global capabilities)",
+        "id": "Johnny-etu.4",
+        "title": "[BUILD] Phase 0: 'What is the bot thinking' — per-turn reasoning timeline + tool-call traces in /sessions/[id]",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-etu.5",
+        "title": "[BUILD] Phase 0: Default workspace lazy-launched at ~/.johnny/workspaces/default/ (like finance/ops)",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-etu.6",
+        "title": "[BUILD] Phase 1: Restore the tool catalog — session.end always callable on the agents/workspaces model",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-etu.7",
+        "title": "[BUILD] Phase 1: Restore answer grounding — reply LLM sees tool results incl. errors (0qw redux)",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-etu.8",
+        "title": "[CHORE] Phase 1 capstone: re-run trt.60 calendar scenario + session #1 clean (ask->ack->execute->spoken)",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-etu.9",
+        "title": "[BUILD] Phase 2: General gog CLI skill replacing the narrow google-calendar skill",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-etu.10",
+        "title": "[BUILD] Phase 2: Stop exposing 'sandbox' to the LLM — neutral/'playground' wording in tool + skill text",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-etu.11",
+        "title": "[CHORE] Phase 3 capstone: clean-install e2e + wire the replay harness as a CI regression gate",
         "status": "open",
         "completedInSession": false
       }
     ]
   },
-  "iterations": [
-    {
-      "iteration": 1,
-      "status": "completed",
-      "taskId": "Johnny-wks.7",
-      "taskTitle": "[BUILD] Accounts = Meeting Bots only — keep meeting-bot account (done) + google-calendar skill; remove the gog-account backend + UI",
-      "taskCompleted": true,
-      "durationMs": 1239813,
-      "startedAt": "2026-06-13T11:30:22.377Z",
-      "endedAt": "2026-06-13T11:51:02.190Z"
-    },
-    {
-      "iteration": 2,
-      "status": "completed",
-      "taskId": "Johnny-wks.8",
-      "taskTitle": "[BUILD] Per-workspace MCP servers — move MCP from global to workspace-attached (no global MCP)",
-      "taskCompleted": true,
-      "durationMs": 1960914,
-      "startedAt": "2026-06-13T11:51:10.383Z",
-      "endedAt": "2026-06-13T12:23:51.297Z"
-    }
-  ],
+  "iterations": [],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
-  "activeTaskIds": [],
+  "activeTaskIds": [
+    "Johnny-etu.3"
+  ],
   "subagentPanelVisible": false
 }
