@@ -177,8 +177,10 @@ INTERNAL_TOOLS: tuple[InternalToolSpec, ...] = (
         ),
         keywords=(
             "end the session",
+            "end this session",
             "end session",
             "stop the session",
+            "end the call",
             "shut down",
             "wrap up",
             "log off",

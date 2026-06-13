@@ -1421,10 +1421,10 @@ class RouterGate:
         composing the ``task`` object it meant to delegate (session 3: a
         "look up my calendar" ask labelled status, then answered with the canned
         :data:`~johnny.agent.tasks.STATUS_NOTHING_IN_FLIGHT` over the model's
-        real composed reply). When there is **nothing in flight to report** —
-        the 0qw registry snapshot is empty, so :meth:`_handle_status` would
-        speak the empty-registry line — that task object is the actual intent,
-        so rewrite the verdict to ``delegate`` and let the standard delegate
+        real composed reply). When the registry holds **no live work of that
+        task's kind** — nothing in flight and no held result the user could be
+        asking the status *of* — that task object is the actual intent, so
+        rewrite the verdict to ``delegate`` and let the standard delegate
         degrades take it: a deterministic decline for an unavailable kind
         (:meth:`_degrade_unavailable_delegate`), or queue+ack for an available
         one. A real answer beats a hollow nothing-in-flight line, the same
@@ -1433,21 +1433,29 @@ class RouterGate:
         Guards keep it surgical so a genuine status query is never disturbed:
         only a ``status`` action, only with a coordinator wired (without one the
         honest no-coordinator stance is the empty-registry line, not a dead
-        delegate), only when the registry holds nothing the user could be asking
-        the *status* of (``task_context.empty`` — a "how's the calendar check
-        going?" with work in flight keeps its status summary), and only when
-        ``raw["task"]`` parses to a real :class:`TaskRequest` (a bare status
-        verdict has no task object and falls straight through). The marker is
-        stashed before the decision emit (the trt.50 ride-along) so the row
-        records the re-route; ``decision.raw["action"]`` stays the model's
-        original ``"status"``, exactly like the other degrades leave it.
+        delegate), only when ``raw["task"]`` parses to a real
+        :class:`TaskRequest` (a bare status verdict has no task object and falls
+        straight through), and only when that task's ``kind`` is **not** in
+        :attr:`~johnny.agent.tasks.AnswerTaskContext.occupied_kinds`
+        (Johnny-etu.14). The kind gate — not bare ``task_context.empty`` — is
+        what keeps "how's the calendar check going?" with a calendar task in
+        flight (or a held calendar result) on its status summary, while a
+        DIFFERENT-kind command ("end the session" while a calendar result is
+        held — session 2) re-routes instead of speaking the stale held result
+        over it. The marker is stashed before the decision emit (the trt.50
+        ride-along) so the row records the re-route; ``decision.raw["action"]``
+        stays the model's original ``"status"``, exactly like the other degrades
+        leave it.
         """
         if decision.action != STATUS_ACTION or self._tasks is None:
             return decision
-        if not task_context.empty:
-            return decision
         task_request = _reasoning._parse_task_request(decision.raw.get("task"))
         if task_request is None:
+            return decision
+        if task_request.kind in task_context.occupied_kinds:
+            # A genuine status query about live work of exactly this kind (an
+            # in-flight task or a held result the user is asking about) keeps its
+            # status summary — only a fresh, different-kind intent re-routes.
             return decision
         decision.raw[STATUS_REROUTE_KEY] = {
             "from_action": STATUS_ACTION,
@@ -1502,10 +1510,16 @@ class RouterGate:
           means no delegate to recover) and only on ``speak`` / ``status``
           (a ``delegate`` verdict already expresses the intent; the degrades and
           the etu.14 re-route own it);
-        * only when the registry is empty (``task_context.empty``) — a real
-          "how's the calendar check going?" status with work in flight keeps its
-          summary, and an undelivered result routes through the grounded answer
-          path, never a fresh duplicate delegate;
+        * only when the matched kind is **not** already represented in the
+          registry (``kind not in task_context.occupied_kinds``, Johnny-etu.14)
+          — a real "how's the calendar check going?" / "what did it find?" that
+          keyword-matches the SAME kind that is running or held keeps its status
+          summary or grounded answer, never a duplicate delegate; but a
+          DIFFERENT-kind command ("end the session" while a calendar result is
+          held — session 2) still recovers, so the held result is never
+          substituted for the user's real intent. The earlier code gated on a
+          bare empty registry, which let any held/in-flight work swallow an
+          unrelated explicit command;
         * only when the verdict carries no ``task_request`` already (the etu.14
           re-route handled the model's own composed task);
         * a SPEAK verdict on a **meeting** surface is left untouched
@@ -1527,8 +1541,6 @@ class RouterGate:
             return decision
         if decision.task_request is not None:
             return decision
-        if not task_context.empty:
-            return decision
         if decision.action == SPEAK_ACTION and self._config.meeting_backed:
             return decision
         text = (new_message.text_content or "").strip()
@@ -1541,6 +1553,14 @@ class RouterGate:
         if len(matched) != 1:
             return decision
         kind = matched[0]
+        if kind in task_context.occupied_kinds:
+            # The registry already holds live work of this exact kind — a
+            # running task or a held result the user is asking about. A
+            # same-kind "how's it going?" / "what did it find?" stays on its
+            # status summary or the grounded answer path; recovering here would
+            # queue a duplicate delegate. Only a kind ABSENT from the registry
+            # is an unambiguous fresh request (Johnny-etu.14).
+            return decision
         task_request = TaskRequest(kind=kind, ack=_recovered_ack(kind), args={})
         decision.raw[KEYWORD_DELEGATE_KEY] = {
             "from_action": decision.action,

@@ -3750,6 +3750,62 @@ async def test_status_with_task_but_work_in_flight_keeps_status_summary() -> Non
     await h.drain()
 
 
+async def test_status_with_different_kind_task_held_result_reroutes() -> None:
+    """A status verdict carrying a DIFFERENT-kind task re-routes even with a held
+    result (Johnny-etu.14): a held calendar result must not keep a model-composed
+    session.end task on the status path, re-speaking the held calendar over the
+    real end intent. The task's kind (session.end) is absent from the registry's
+    held work (google-calendar), so re-route to delegate."""
+    h = _TaskGateHarness(
+        [_status_with_task("session.end", ack="Wrapping up now.")],
+        config=RouterGateConfig(task_catalog=_capability_catalog()),
+    )
+    assert h.coordinator is not None
+    h.coordinator.note_task_settled(
+        3, status="done", kind="google-calendar", result_text="You have 3 events this week."
+    )
+    msg = _user_msg("okay, that's all — end the session")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    assert len(h.sink.snapshot()) == 1  # re-routed and queued
+    assert h.sink.snapshot()[0].spec.kind == "session.end"
+    assert h.say.texts == ["Wrapping up now."]
+    assert all("3 events" not in text for text in h.say.texts)  # held result not re-spoken
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "delegate"
+    assert decision.raw[STATUS_REROUTE_KEY]["kind"] == "session.end"
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_status_with_same_kind_task_held_result_keeps_summary() -> None:
+    """A status verdict carrying the SAME kind as a held result is a genuine
+    status query about that work — keep the summary, do not re-route into a
+    duplicate delegate (Johnny-etu.14)."""
+    h = _TaskGateHarness(
+        [_status_with_task("google-calendar")],
+        config=RouterGateConfig(task_catalog=_capability_catalog()),
+    )
+    assert h.coordinator is not None
+    h.coordinator.note_task_settled(
+        3, status="done", kind="google-calendar", result_text="You have 3 events this week."
+    )
+    msg = _user_msg("what did the calendar check find?")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    assert h.sink.snapshot() == []  # not re-routed — no duplicate delegate
+    assert "3 events" in h.say.texts[0]  # the held result is reported
+    decision, _turn = h.obs.decisions[0]
+    assert STATUS_REROUTE_KEY not in decision.raw
+    assert decision.action == "status"
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
 async def test_bare_status_without_task_still_speaks_nothing_in_flight() -> None:
     """The guard is precise: a status verdict with NO task object is a real
     status query and keeps the empty-registry line — the re-route only catches
@@ -3913,9 +3969,12 @@ async def test_recover_skips_ambiguous_multi_kind_match() -> None:
     assert KEYWORD_DELEGATE_KEY not in decision.raw
 
 
-async def test_recover_skips_when_work_in_flight() -> None:
-    """A real status query with work in flight keeps its summary — recovery only
-    fires on an empty registry (nothing to report)."""
+async def test_recover_fires_for_different_kind_with_work_in_flight() -> None:
+    """A DIFFERENT-kind explicit command recovers even with work in flight
+    (Johnny-etu.14): a calendar check running must not make "end the session"
+    speak a "still working on the calendar" status — the matched kind
+    (session.end) is absent from the registry, so it is an unambiguous fresh
+    intent. The recovery gate is kind-aware now, not bare ``task_context.empty``."""
     h = _TaskGateHarness(
         [_status_decision()],
         config=RouterGateConfig(task_catalog=_keyword_catalog()),
@@ -3927,9 +3986,134 @@ async def test_recover_skips_when_work_in_flight() -> None:
     with pytest.raises(StopResponse):
         await h.gate.run_turn(ChatContext.empty(), msg)
 
+    # Recovered to session.end — NOT the calendar status summary.
+    assert h.sink.snapshot()[0].spec.kind == "session.end"
+    assert "Still working on" not in " ".join(h.say.texts)
     decision, _turn = h.obs.decisions[0]
-    assert KEYWORD_DELEGATE_KEY not in decision.raw
+    assert decision.raw[KEYWORD_DELEGATE_KEY]["kind"] == "session.end"
+    assert decision.action == "delegate"
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_recover_skips_same_kind_status_query_with_work_in_flight() -> None:
+    """The genuine-status protection, now keyed on KIND: a query that
+    keyword-matches the SAME kind that is in flight keeps its status summary —
+    "how's the calendar coming along?" with a calendar task running must not
+    queue a duplicate calendar delegate (Johnny-etu.14)."""
+    h = _TaskGateHarness(
+        [_status_decision()],
+        config=RouterGateConfig(task_catalog=_keyword_catalog()),
+    )
+    assert h.coordinator is not None
+    h.coordinator.note_task_running(42, kind="google-calendar")
+    msg = _user_msg("how's the calendar coming along?")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    decision, _turn = h.obs.decisions[0]
+    assert KEYWORD_DELEGATE_KEY not in decision.raw  # same kind — not recovered
     assert decision.action == "status"
+    assert "Still working on the google calendar task" in h.say.texts[0]
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_recover_fires_for_different_kind_with_held_result() -> None:
+    """THE Johnny-etu.14 reopen fix (live session 2): a held (completed-but-
+    undelivered) calendar result must NOT be substituted for an explicit "end the
+    session" command. The boundary delivery was barged-in, so task #3 stayed
+    undelivered; every subsequent end request came back ``status`` and re-spoke
+    the held calendar result instead of ending. The matched kind (session.end)
+    is absent from the registry's held work (google-calendar), so recover the
+    dropped session.end delegate — delivered == decided, no held result
+    substituted."""
+    h = _TaskGateHarness(
+        [_status_decision()],
+        config=RouterGateConfig(task_catalog=_keyword_catalog()),
+    )
+    assert h.coordinator is not None
+    # A held result, exactly the session-2 shape: done, undelivered, with text.
+    h.coordinator.note_task_settled(
+        3,
+        status="done",
+        kind="google-calendar",
+        result_text="You have 3 events in the next 7 days.",
+    )
+    msg = _user_msg("thank you, can you end the session?")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    # Recovered session.end — the held calendar result was NOT re-spoken.
+    assert h.sink.snapshot()[0].spec.kind == "session.end"
+    assert all("3 events" not in text for text in h.say.texts)
+    assert STATUS_NOTHING_IN_FLIGHT not in h.say.texts
+    decision, _turn = h.obs.decisions[0]
+    assert decision.raw[KEYWORD_DELEGATE_KEY]["kind"] == "session.end"
+    assert decision.action == "delegate"
+    # The held result was still snapshotted (the boundary deliverer owns it).
+    assert decision.raw[TASK_CONTEXT_KEY] == {"undelivered": [3], "in_flight": []}
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_recover_skips_same_kind_with_held_result() -> None:
+    """A same-kind follow-up about a held result is NOT recovered into a
+    duplicate delegate (Johnny-etu.14): "what's on my calendar?" with a held
+    calendar result keeps today's behaviour — the status verdict reports it (or
+    the grounded answer reflects it), never a second calendar run."""
+    h = _TaskGateHarness(
+        [_status_decision()],
+        config=RouterGateConfig(task_catalog=_keyword_catalog()),
+    )
+    assert h.coordinator is not None
+    h.coordinator.note_task_settled(
+        3,
+        status="done",
+        kind="google-calendar",
+        result_text="You have 3 events in the next 7 days.",
+    )
+    msg = _user_msg("so what's on my calendar?")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    decision, _turn = h.obs.decisions[0]
+    assert KEYWORD_DELEGATE_KEY not in decision.raw  # same kind held — not recovered
+    assert h.sink.snapshot() == []  # no duplicate delegate
+    # The held result is spoken by the status path (carried verbatim).
+    assert "3 events" in h.say.texts[0]
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_end_this_session_phrasing_recovers_with_held_result() -> None:
+    """The verbatim session-2 turn-4 utterance: "Can you end this session?" with a
+    held calendar result. "end this session" is now a session.end keyword
+    (Johnny-etu.14/etu.6) AND the recovery is kind-aware, so it recovers the end
+    delegate instead of re-speaking the held calendar result a third time."""
+    h = _TaskGateHarness(
+        [_status_decision()],
+        config=RouterGateConfig(task_catalog=_keyword_catalog()),
+    )
+    assert h.coordinator is not None
+    h.coordinator.note_task_settled(
+        6,
+        status="done",
+        kind="google-calendar",
+        result_text="You have 3 events in the next 7 days.",
+    )
+    msg = _user_msg("Can you end this session?")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    assert h.sink.snapshot()[0].spec.kind == "session.end"
+    assert all("3 events" not in text for text in h.say.texts)
+    decision, _turn = h.obs.decisions[0]
+    assert decision.raw[KEYWORD_DELEGATE_KEY]["kind"] == "session.end"
     h.say.handles[0].fire_done()
     await h.drain()
 

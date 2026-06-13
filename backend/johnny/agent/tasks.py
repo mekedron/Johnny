@@ -487,6 +487,26 @@ class AnswerTaskContext:
         """True when the registry held nothing the answer model must know."""
         return not (self.undelivered or self.in_flight)
 
+    @property
+    def occupied_kinds(self) -> frozenset[str]:
+        """The kinds the registry currently has live work for (Johnny-etu.14).
+
+        Every in-flight task's kind plus every completed-but-undelivered (held)
+        result's kind. The decision↔utterance parity gate reads this to tell a
+        genuine status query about *this* work apart from a fresh command for
+        something else: a keyword/task intent whose kind is ABSENT here is
+        unambiguously a new request, so the status→delegate re-route and the
+        keyword delegate-recovery fire even with a non-empty registry. The held
+        result is still delivered by the trt.28 boundary deliverer — it is never
+        substituted for a turn whose decided action is a different kind (session
+        2: "end the session" spoke the held calendar result instead of ending).
+        A kind that IS here keeps today's behaviour: a same-kind status query is
+        reported, an undelivered same-kind result routes through the grounded
+        answer path — never a duplicate delegate."""
+        return frozenset(
+            entry.kind for entry in (*self.undelivered, *self.in_flight)
+        )
+
 
 def unsupported_kind_text(kind: str) -> str:
     """Speech-ready failure phrase for a task kind nothing can run yet.
