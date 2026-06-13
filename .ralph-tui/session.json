@@ -1,13 +1,13 @@
 {
   "version": 1,
   "sessionId": "6ec15a51-28c5-41a4-903d-3d4c0559e077",
-  "status": "running",
+  "status": "paused",
   "startedAt": "2026-06-13T21:29:06.563Z",
-  "updatedAt": "2026-06-13T22:37:15.423Z",
-  "currentIteration": 2,
+  "updatedAt": "2026-06-13T22:37:20.614Z",
+  "currentIteration": 3,
   "maxIterations": 0,
-  "tasksCompleted": 2,
-  "isPaused": false,
+  "tasksCompleted": 3,
+  "isPaused": true,
   "agentPlugin": "claude",
   "model": "opus",
   "trackerState": {
@@ -105,8 +105,8 @@
       {
         "id": "Johnny-etu.8",
         "title": "[CHORE] Phase 1 capstone: re-run trt.60 calendar scenario + session #1 clean (ask->ack->execute->spoken)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-etu.9",
@@ -166,10 +166,21 @@
       "durationMs": 879548,
       "startedAt": "2026-06-13T21:57:41.928Z",
       "endedAt": "2026-06-13T22:12:21.476Z"
+    },
+    {
+      "iteration": 3,
+      "status": "completed",
+      "taskId": "Johnny-etu.8",
+      "taskTitle": "[CHORE] Phase 1 capstone: re-run trt.60 calendar scenario + session #1 clean (ask->ack->execute->spoken)",
+      "taskCompleted": true,
+      "durationMs": 1481304,
+      "startedAt": "2026-06-13T22:12:33.256Z",
+      "endedAt": "2026-06-13T22:37:14.560Z"
     }
   ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],
-  "subagentPanelVisible": false
+  "subagentPanelVisible": false,
+  "pausedAt": "2026-06-13T22:37:20.614Z"
 }
