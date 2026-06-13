@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "sessionId": "b1830317-46f0-4387-8002-9689817ad279",
+  "sessionId": "a4b8b257-f885-4df9-986b-8b98f86f035d",
   "status": "running",
-  "startedAt": "2026-06-13T17:35:36.635Z",
-  "updatedAt": "2026-06-13T18:36:53.689Z",
+  "startedAt": "2026-06-13T19:58:17.274Z",
+  "updatedAt": "2026-06-13T19:58:17.274Z",
   "currentIteration": 0,
   "maxIterations": 0,
   "tasksCompleted": 0,
@@ -141,7 +141,7 @@
       {
         "id": "Johnny-etu.14",
         "title": "[BUILD] Phase 1: Fix decision->utterance divergence — delivered reply discards the decided response + tool result (sessions 3 & 4)",
-        "status": "open",
+        "status": "completed",
         "completedInSession": false
       }
     ]

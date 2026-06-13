@@ -1,8 +1,8 @@
 {
-  "id": "b1830317-46f0-4387-8002-9689817ad279",
+  "id": "a4b8b257-f885-4df9-986b-8b98f86f035d",
   "status": "running",
-  "startedAt": "2026-06-13T17:35:29.976Z",
-  "updatedAt": "2026-06-13T17:35:29.976Z",
+  "startedAt": "2026-06-13T19:58:09.327Z",
+  "updatedAt": "2026-06-13T19:58:09.327Z",
   "agentPlugin": "claude",
   "trackerPlugin": "beads-bv",
   "epicId": "Johnny-etu",
