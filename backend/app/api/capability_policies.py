@@ -1,8 +1,9 @@
-"""Capability-policy HTTP endpoints (Johnny-trt.38).
+"""Capability-policy HTTP endpoints (Johnny-trt.38; per-workspace base in
+Johnny-wks.9).
 
-CRUD over the four policy scope layers (global / per-agent / per-session-mode
-/ per-session override) plus the two read surfaces the trt.37 management UI
-is built on:
+CRUD over the four policy scope layers (per-workspace base / per-agent /
+per-session-mode / per-session override) plus the two read surfaces the
+management UI is built on:
 
 * ``GET /capability-policies/effective`` — the layers matching a set of
   session coordinates and the resolved summary (effective safe-bins, denies,
@@ -10,6 +11,12 @@ is built on:
 * ``POST /capability-policies/resolve`` — THE effective-policy inspector
   (the trt.38 acceptance API): give it a tool kind or an exec binary plus
   scope coordinates, get back allowed/denied **and the deciding layer**.
+
+The base layer is the WORKSPACE (Johnny-wks.9) — there is no global policy.
+Coordinates without an explicit ``workspace_id`` derive it the way dispatch
+does: an ``agent_id`` resolves the agent's workspace, and nothing at all
+resolves the default workspace (the row the 0035 migration mapped the old
+global policy onto), so the read surfaces stay byte-identical for the default.
 
 Writes take effect without a restart by construction: dispatch surfaces
 re-resolve per session start, the worker re-resolves per claimed task
@@ -30,6 +37,7 @@ from app.db.models import (
     Agent,
     BotSession,
     CapabilityPolicy,
+    Workspace,
 )
 from app.services.capability_policies import (
     builtin_baseline_safe_bins,
@@ -38,11 +46,12 @@ from app.services.capability_policies import (
     load_policy_layers,
     upsert_policy_row,
 )
+from app.services.workspaces import resolve_agent_workspace
 from johnny.skills.capability_policy import (
     POLICY_SCOPE_AGENT,
-    POLICY_SCOPE_GLOBAL,
     POLICY_SCOPE_SESSION,
     POLICY_SCOPE_SESSION_MODE,
+    POLICY_SCOPE_WORKSPACE,
     resolve_policy,
 )
 
@@ -73,6 +82,7 @@ class PolicyDocumentIn(BaseModel):
 class PolicyRowOut(BaseModel):
     id: int
     scope: str
+    workspace_id: int | None = None
     agent_id: int | None = None
     session_mode: str | None = None
     bot_session_id: int | None = None
@@ -83,6 +93,7 @@ def _row_out(row: CapabilityPolicy) -> PolicyRowOut:
     return PolicyRowOut(
         id=row.id,
         scope=row.scope,
+        workspace_id=row.workspace_id,
         agent_id=row.agent_id,
         session_mode=row.session_mode,
         bot_session_id=row.bot_session_id,
@@ -104,6 +115,7 @@ class ResolveIn(BaseModel):
 
     tool: str | None = None
     bin: str | None = None
+    workspace_id: int | None = None
     agent_id: int | None = None
     session_mode: SessionModeLiteral | None = None
     bot_session_id: int | None = None
@@ -144,6 +156,31 @@ class EffectiveOut(BaseModel):
     allow_layer: str = ""
 
 
+def _require_workspace(db: Session, workspace_id: int) -> None:
+    if db.get(Workspace, workspace_id) is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"workspace {workspace_id} not found",
+        )
+
+
+def _coords_workspace_id(
+    db: Session, workspace_id: int | None, agent_id: int | None
+) -> int | None:
+    """The base-layer workspace for read coordinates (Johnny-wks.9).
+
+    Explicit ``workspace_id`` wins; otherwise an ``agent_id`` resolves the
+    agent's workspace exactly as dispatch does, and neither resolves the
+    default workspace — so a parameterless read shows the default's base
+    layer (the old global view, byte-identical post-0035).
+    """
+    if workspace_id is not None:
+        return workspace_id
+    agent = db.get(Agent, agent_id) if agent_id is not None else None
+    workspace = resolve_agent_workspace(db, agent)
+    return int(workspace.id) if workspace is not None else None
+
+
 def _require_agent(db: Session, agent_id: int) -> None:
     if db.get(Agent, agent_id) is None:
         raise HTTPException(
@@ -164,6 +201,7 @@ def _upsert(
     scope: str,
     payload: PolicyDocumentIn,
     *,
+    workspace_id: int | None = None,
     agent_id: int | None = None,
     session_mode: str | None = None,
     bot_session_id: int | None = None,
@@ -173,6 +211,7 @@ def _upsert(
             db,
             scope,
             payload.model_dump(),
+            workspace_id=workspace_id,
             agent_id=agent_id,
             session_mode=session_mode,
             bot_session_id=bot_session_id,
@@ -188,6 +227,7 @@ def _delete(
     db: Session,
     scope: str,
     *,
+    workspace_id: int | None = None,
     agent_id: int | None = None,
     session_mode: str | None = None,
     bot_session_id: int | None = None,
@@ -196,6 +236,7 @@ def _delete(
         deleted = delete_policy_row(
             db,
             scope,
+            workspace_id=workspace_id,
             agent_id=agent_id,
             session_mode=session_mode,
             bot_session_id=bot_session_id,
@@ -218,12 +259,14 @@ def list_policies(db: Annotated[Session, Depends(get_session)]) -> PolicyListOut
 @router.get("/effective", response_model=EffectiveOut)
 def effective_policy(
     db: Annotated[Session, Depends(get_session)],
+    workspace_id: int | None = None,
     agent_id: int | None = None,
     session_mode: SessionModeLiteral | None = None,
     bot_session_id: int | None = None,
 ) -> EffectiveOut:
     layers = load_policy_layers(
         db,
+        workspace_id=_coords_workspace_id(db, workspace_id, agent_id),
         agent_id=agent_id,
         session_mode=session_mode,
         bot_session_id=bot_session_id,
@@ -259,6 +302,7 @@ def resolve_capability(
     """
     layers = load_policy_layers(
         db,
+        workspace_id=_coords_workspace_id(db, payload.workspace_id, payload.agent_id),
         agent_id=payload.agent_id,
         session_mode=payload.session_mode,
         bot_session_id=payload.bot_session_id,
@@ -282,17 +326,26 @@ def resolve_capability(
     )
 
 
-@router.put("/global", response_model=PolicyRowOut)
-def put_global_policy(
-    payload: PolicyDocumentIn, db: Annotated[Session, Depends(get_session)]
+@router.put("/workspaces/{workspace_id}", response_model=PolicyRowOut)
+def put_workspace_policy(
+    workspace_id: int,
+    payload: PolicyDocumentIn,
+    db: Annotated[Session, Depends(get_session)],
 ) -> PolicyRowOut:
-    return _upsert(db, POLICY_SCOPE_GLOBAL, payload)
+    """Upsert a workspace's base policy layer (Johnny-wks.9 — replaces the
+    old global layer; one base row per workspace)."""
+    _require_workspace(db, workspace_id)
+    return _upsert(db, POLICY_SCOPE_WORKSPACE, payload, workspace_id=workspace_id)
 
 
-@router.delete("/global")
-def delete_global_policy(db: Annotated[Session, Depends(get_session)]) -> dict[str, bool]:
-    """Reset the global layer — including safe-bins back to the trt.35 baseline."""
-    return _delete(db, POLICY_SCOPE_GLOBAL)
+@router.delete("/workspaces/{workspace_id}")
+def delete_workspace_policy(
+    workspace_id: int, db: Annotated[Session, Depends(get_session)]
+) -> dict[str, bool]:
+    """Reset a workspace's base layer — including safe-bins back to the trt.35
+    baseline."""
+    _require_workspace(db, workspace_id)
+    return _delete(db, POLICY_SCOPE_WORKSPACE, workspace_id=workspace_id)
 
 
 @router.put("/agents/{agent_id}", response_model=PolicyRowOut)

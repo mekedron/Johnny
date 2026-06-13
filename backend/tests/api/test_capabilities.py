@@ -2,10 +2,10 @@
 
 The Skills read (fresh registry scan + per-kind policy verdicts), the
 merged Tools catalog (internal → skills → MCP with the policy projected
-on), the per-kind toggle that writes the global layer's ``tools_deny``
-— including the honest-enable case where a glob keeps the kind denied —
-plus the Johnny-wks.3 per-workspace keying of both reads and the skill
-install flow with its workspace target.
+on), the per-kind toggle that writes the workspace base layer's
+``tools_deny`` (Johnny-wks.9) — including the honest-enable case where a glob
+keeps the kind denied — plus the Johnny-wks.3 per-workspace keying of both
+reads and the skill install flow with its workspace target.
 """
 
 from __future__ import annotations
@@ -163,21 +163,23 @@ def test_skills_lists_verdicts_and_names_missing_bins(
     assert any("himalaya" in reason for reason in calmail["reasons"])
 
 
-def test_skills_reflect_policy_disable(client: TestClient, skills_volume: Path) -> None:
+def test_skills_reflect_policy_disable(
+    client: TestClient, skills_volume: Path, default_workspace: Workspace
+) -> None:
     toggled = client.post("/capabilities/tools/toggle", json={"kind": "echoer", "enabled": False})
     assert toggled.status_code == 200, toggled.text
     assert toggled.json() == {
         "kind": "echoer",
         "enabled": False,
-        "layer": "global",
+        "layer": "workspace",
         "rule": "echoer",
-        "detail": "",
+        "detail": "Default",
     }
 
     body = client.get("/capabilities/skills").json()
     echoer = _skill(body, "echoer")
     assert echoer["enabled"] is False
-    assert echoer["policy_layer"] == "global"
+    assert echoer["policy_layer"] == "workspace"
     assert echoer["policy_rule"] == "echoer"
     assert echoer["toggle_managed"] is True
     # Eligibility is orthogonal to the policy switch.
@@ -260,14 +262,16 @@ def test_tools_browser_mode_marks_meeting_leave_unavailable(
     assert _tool(body, "session.end")["available"] is True
 
 
-def test_tools_deny_hides_kind_from_catalog(client: TestClient, skills_volume: Path) -> None:
+def test_tools_deny_hides_kind_from_catalog(
+    client: TestClient, skills_volume: Path, default_workspace: Workspace
+) -> None:
     toggled = client.post("/capabilities/tools/toggle", json={"kind": "echoer", "enabled": False})
     assert toggled.status_code == 200
 
     body = client.get("/capabilities/tools").json()
     echoer = _tool(body, "echoer")
     assert echoer["allowed"] is False
-    assert echoer["policy_layer"] == "global"
+    assert echoer["policy_layer"] == "workspace"
     assert echoer["policy_rule"] == "echoer"
     assert echoer["toggle_managed"] is True
 
@@ -280,7 +284,9 @@ def test_toggle_unknown_kind_404(client: TestClient, skills_volume: Path) -> Non
     assert res.status_code == 404
 
 
-def test_toggle_round_trip_restores_enabled(client: TestClient, skills_volume: Path) -> None:
+def test_toggle_round_trip_restores_enabled(
+    client: TestClient, skills_volume: Path, default_workspace: Workspace
+) -> None:
     client.post("/capabilities/tools/toggle", json={"kind": "echoer", "enabled": False})
     back = client.post("/capabilities/tools/toggle", json={"kind": "echoer", "enabled": True})
     assert back.status_code == 200
@@ -289,9 +295,12 @@ def test_toggle_round_trip_restores_enabled(client: TestClient, skills_volume: P
 
 
 def test_toggle_enable_honest_when_glob_still_denies(
-    client: TestClient, skills_volume: Path
+    client: TestClient, skills_volume: Path, default_workspace: Workspace
 ) -> None:
-    put = client.put("/capability-policies/global", json={"tools_deny": ["ech*"]})
+    put = client.put(
+        f"/capability-policies/workspaces/{default_workspace.id}",
+        json={"tools_deny": ["ech*"]},
+    )
     assert put.status_code == 200, put.text
 
     res = client.post("/capabilities/tools/toggle", json={"kind": "echoer", "enabled": True})
@@ -300,22 +309,24 @@ def test_toggle_enable_honest_when_glob_still_denies(
     # The exact-kind entry was never there; the glob still denies — the
     # response says so instead of pretending the switch flipped.
     assert body["enabled"] is False
-    assert body["layer"] == "global"
+    assert body["layer"] == "workspace"
     assert body["rule"] == "ech*"
 
 
-def test_toggle_preserves_other_document_fields(client: TestClient, skills_volume: Path) -> None:
+def test_toggle_preserves_other_document_fields(
+    client: TestClient, skills_volume: Path, default_workspace: Workspace
+) -> None:
     put = client.put(
-        "/capability-policies/global",
+        f"/capability-policies/workspaces/{default_workspace.id}",
         json={"bins_deny": ["curl"], "tools_deny": ["mcp__shady__*"]},
     )
     assert put.status_code == 200, put.text
 
     client.post("/capabilities/tools/toggle", json={"kind": "echoer", "enabled": False})
     rows = client.get("/capability-policies").json()["rows"]
-    [global_row] = [r for r in rows if r["scope"] == "global"]
-    assert global_row["document"]["bins_deny"] == ["curl"]
-    assert global_row["document"]["tools_deny"] == ["mcp__shady__*", "echoer"]
+    [workspace_row] = [r for r in rows if r["scope"] == "workspace"]
+    assert workspace_row["document"]["bins_deny"] == ["curl"]
+    assert workspace_row["document"]["tools_deny"] == ["mcp__shady__*", "echoer"]
 
 
 def test_toggle_mcp_kind_uses_cached_tools(
@@ -435,10 +446,16 @@ def test_tools_parameterless_view_never_leaks_workspace_skills(
 def test_toggle_addresses_workspace_local_kinds(
     client: TestClient, finance_workspace: Workspace
 ) -> None:
-    """A deny on a workspace-local kind is placeable from the global tab."""
-    res = client.post("/capabilities/tools/toggle", json={"kind": "ledger", "enabled": False})
+    """A workspace-local kind is deniable on its OWN workspace's base layer
+    (Johnny-wks.9): the toggle is workspace-scoped, and ``_known_kinds`` scans
+    every workspace's volume so the kind is addressable."""
+    res = client.post(
+        "/capabilities/tools/toggle",
+        json={"kind": "ledger", "enabled": False, "workspace_id": finance_workspace.id},
+    )
     assert res.status_code == 200, res.text
     assert res.json()["enabled"] is False
+    assert res.json()["layer"] == "workspace"
 
 
 # --- POST /capabilities/skills/install (Johnny-trt.32 seam · wks.3) ----------------

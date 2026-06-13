@@ -81,20 +81,21 @@ describe('normalizePolicyDocument', () => {
 
 describe('findPolicyRow', () => {
 	const rows: PolicyRow[] = [
-		{ id: 1, scope: 'global', agent_id: null, session_mode: null, bot_session_id: null, document: {} },
-		{ id: 2, scope: 'agent', agent_id: 7, session_mode: null, bot_session_id: null, document: {} },
-		{ id: 3, scope: 'session_mode', agent_id: null, session_mode: 'meet', bot_session_id: null, document: {} },
-		{ id: 4, scope: 'session', agent_id: null, session_mode: null, bot_session_id: 42, document: {} }
+		{ id: 1, scope: 'workspace', workspace_id: 3, agent_id: null, session_mode: null, bot_session_id: null, document: {} },
+		{ id: 2, scope: 'agent', workspace_id: null, agent_id: 7, session_mode: null, bot_session_id: null, document: {} },
+		{ id: 3, scope: 'session_mode', workspace_id: null, agent_id: null, session_mode: 'meet', bot_session_id: null, document: {} },
+		{ id: 4, scope: 'session', workspace_id: null, agent_id: null, session_mode: null, bot_session_id: 42, document: {} }
 	];
 
 	it('matches each scope by its own target key', () => {
-		expect(findPolicyRow(rows, { scope: 'global' })?.id).toBe(1);
+		expect(findPolicyRow(rows, { scope: 'workspace', workspaceId: 3 })?.id).toBe(1);
 		expect(findPolicyRow(rows, { scope: 'agent', agentId: 7 })?.id).toBe(2);
 		expect(findPolicyRow(rows, { scope: 'session_mode', sessionMode: 'meet' })?.id).toBe(3);
 		expect(findPolicyRow(rows, { scope: 'session', botSessionId: 42 })?.id).toBe(4);
 	});
 
 	it('returns null for absent targets', () => {
+		expect(findPolicyRow(rows, { scope: 'workspace', workspaceId: 9 })).toBeNull();
 		expect(findPolicyRow(rows, { scope: 'agent', agentId: 8 })).toBeNull();
 		expect(findPolicyRow(rows, { scope: 'session_mode', sessionMode: 'browser' })).toBeNull();
 	});
@@ -109,8 +110,8 @@ describe('describeDecision', () => {
 
 	it('names the deciding layer and rule for a deny', () => {
 		expect(
-			describeDecision(resolveOut({ allowed: false, layer: 'global', rule: 'mcp__shady__*' }))
-		).toBe('Denied by the global layer (rule "mcp__shady__*").');
+			describeDecision(resolveOut({ allowed: false, layer: 'workspace', rule: 'mcp__shady__*' }))
+		).toBe('Denied by the workspace layer (rule "mcp__shady__*").');
 	});
 
 	it('explains allow-list denials without pretending a pattern matched', () => {
@@ -125,10 +126,10 @@ describe('describeDecision', () => {
 				resolveOut({
 					capability_kind: 'bin',
 					allowed: false,
-					layer: 'global',
+					layer: 'workspace',
 					rule: 'removed from safe-bins'
 				})
 			)
-		).toBe('Denied — removed from the safe-bins baseline on the global layer.');
+		).toBe('Denied — removed from the safe-bins baseline on the workspace layer.');
 	});
 });

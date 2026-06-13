@@ -67,11 +67,11 @@ export interface SkillRead {
 	unavailable_reason: string;
 	keywords: string[];
 	body_preview: string;
-	/** Resolved policy verdict for the kind at global coordinates. */
+	/** Resolved policy verdict for the kind at the workspace's coordinates. */
 	enabled: boolean;
 	policy_layer: string;
 	policy_rule: string;
-	/** True when the exact kind sits in the global deny list (the toggle owns it). */
+	/** True when the exact kind sits in the workspace base deny list (the toggle owns it). */
 	toggle_managed: boolean;
 }
 
@@ -175,10 +175,22 @@ export interface ToolToggleOut {
 	detail: string;
 }
 
-export function toggleTool(kind: string, enabled: boolean): Promise<ToolToggleOut> {
+/**
+ * Flip one kind on/off on a workspace's base policy layer (Johnny-wks.9).
+ * No `workspaceId` flips the default workspace (the pre-wks.9 behavior).
+ */
+export function toggleTool(
+	kind: string,
+	enabled: boolean,
+	workspaceId?: number | null
+): Promise<ToolToggleOut> {
 	return request<ToolToggleOut>('/capabilities/tools/toggle', {
 		method: 'POST',
-		body: JSON.stringify({ kind, enabled })
+		body: JSON.stringify({
+			kind,
+			enabled,
+			...(workspaceId != null ? { workspace_id: workspaceId } : {})
+		})
 	});
 }
 
@@ -189,13 +201,14 @@ export interface PolicyDocument {
 	tools_also_allow: string[];
 	tools_deny: string[];
 	bins_deny: string[];
-	/** Global layer only; null = the built-in baseline (reset state). */
+	/** Workspace layer only; null = the built-in baseline (reset state). */
 	safe_bins?: string[] | null;
 }
 
 export interface PolicyRow {
 	id: number;
 	scope: string;
+	workspace_id: number | null;
 	agent_id: number | null;
 	session_mode: string | null;
 	bot_session_id: number | null;
@@ -248,6 +261,7 @@ export function resolveCapability(
 		method: 'POST',
 		body: JSON.stringify({
 			...capability,
+			workspace_id: coords.workspaceId ?? null,
 			agent_id: coords.agentId ?? null,
 			session_mode: coords.sessionMode ?? null,
 			bot_session_id: coords.botSessionId ?? null
@@ -255,17 +269,22 @@ export function resolveCapability(
 	});
 }
 
-/** The editable scopes; `agent` appears only when the panel is agent-embedded. */
+/**
+ * The editable scopes (Johnny-wks.9): `workspace` is the base layer the
+ * workspace detail page edits; `agent` is the per-agent override the agent
+ * edit page embeds. The global/session-mode/session editors went away with
+ * the /capabilities page.
+ */
 export type PolicyScope =
-	| { scope: 'global' }
+	| { scope: 'workspace'; workspaceId: number }
 	| { scope: 'agent'; agentId: number }
 	| { scope: 'session_mode'; sessionMode: 'meet' | 'browser' }
 	| { scope: 'session'; botSessionId: number };
 
 function scopePath(target: PolicyScope): string {
 	switch (target.scope) {
-		case 'global':
-			return '/capability-policies/global';
+		case 'workspace':
+			return `/capability-policies/workspaces/${target.workspaceId}`;
 		case 'agent':
 			return `/capability-policies/agents/${target.agentId}`;
 		case 'session_mode':
@@ -292,8 +311,8 @@ export function findPolicyRow(rows: PolicyRow[], target: PolicyScope): PolicyRow
 		rows.find((row) => {
 			if (row.scope !== target.scope) return false;
 			switch (target.scope) {
-				case 'global':
-					return true;
+				case 'workspace':
+					return row.workspace_id === target.workspaceId;
 				case 'agent':
 					return row.agent_id === target.agentId;
 				case 'session_mode':
@@ -358,7 +377,7 @@ export function describeDecision(out: ResolveOut): string {
 		return `Denied — not on the allow-list the ${out.layer} layer put in force.`;
 	}
 	if (out.rule === 'removed from safe-bins') {
-		return 'Denied — removed from the safe-bins baseline on the global layer.';
+		return 'Denied — removed from the safe-bins baseline on the workspace layer.';
 	}
 	return `Denied by the ${out.layer} layer${out.rule ? ` (rule "${out.rule}")` : ''}.`;
 }

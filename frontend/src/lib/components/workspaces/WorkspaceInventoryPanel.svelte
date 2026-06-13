@@ -5,7 +5,8 @@
   catalog that workspace's agents render into their prompts.
 
   Read-only by design: policy editing (enable/disable, allow/deny layers)
-  stays on the /capabilities page — this is inventory, not governance.
+  lives in the Capability policy section on this same page (Johnny-wks.9) —
+  this panel is inventory, not governance.
 
   The capabilities GET is the refresh (wks.3) and lazily STARTS a
   non-default workspace's container, so when the parent says the container
@@ -108,7 +109,7 @@
 			{#if skillsDir}<span class="font-mono text-xs">({skillsDir})</span>{/if}
 			and the tool catalog its agents see. Probed live
 			{#if sandboxKey}against <span class="font-mono text-xs">{sandboxKey}</span>{/if}
-			— manage policy on the <a href="/capabilities" class="underline">Capabilities</a> page.
+			— allow/deny it in the Capability policy section below.
 		</p>
 		<Button
 			variant="outline"

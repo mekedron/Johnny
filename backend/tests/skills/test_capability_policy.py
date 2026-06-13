@@ -1,8 +1,8 @@
 """Unit pins for the layered capability-policy engine (Johnny-trt.38).
 
-THE resolution-order matrix lives here: GLOBAL → PER-AGENT →
+THE resolution-order matrix lives here: WORKSPACE → PER-AGENT →
 PER-SESSION-MODE → PER-SESSION OVERRIDE with deny winning at every merge —
-the acceptance examples verbatim (global-deny beats mode-allow, mode-deny
+the acceptance examples verbatim (workspace-deny beats mode-allow, mode-deny
 beats session-allow), allow-list redefinition + alsoAllow extension, glob
 matching (``mcp__<server>__*``), layer attribution, the editable safe-bins
 baseline (removal blocks, reset restores trt.35), the snapshot payload
@@ -23,9 +23,9 @@ from johnny.skills.capability_policy import (
     DEFAULT_ALLOW_LAYER,
     POLICY_DENIED_SPOKEN_REASON,
     POLICY_SCOPE_AGENT,
-    POLICY_SCOPE_GLOBAL,
     POLICY_SCOPE_SESSION,
     POLICY_SCOPE_SESSION_MODE,
+    POLICY_SCOPE_WORKSPACE,
     SAFE_BINS_REMOVED_RULE,
     UNRESTRICTED_POLICY,
     CapabilityPolicyLayer,
@@ -58,17 +58,17 @@ def test_unrestricted_default_allows_everything() -> None:
     assert policy.tools_unrestricted
 
 
-def test_global_deny_beats_mode_allow() -> None:
-    """The acceptance example: a global deny survives a mode-layer allow."""
+def test_workspace_deny_beats_mode_allow() -> None:
+    """The acceptance example: a workspace deny survives a mode-layer allow."""
     policy = resolve_policy(
         [
-            _layer(POLICY_SCOPE_GLOBAL, {"tools_deny": ["gmail.search"]}),
+            _layer(POLICY_SCOPE_WORKSPACE, {"tools_deny": ["gmail.search"]}),
             _layer(POLICY_SCOPE_SESSION_MODE, {"tools_allow": ["gmail.search"]}, "browser"),
         ]
     )
     decision = policy.check_tool("gmail.search")
     assert not decision.allowed
-    assert decision.layer == POLICY_SCOPE_GLOBAL
+    assert decision.layer == POLICY_SCOPE_WORKSPACE
     assert decision.rule == "gmail.search"
 
 
@@ -104,20 +104,20 @@ def test_agent_deny_beats_session_layers() -> None:
 def test_earliest_layer_wins_deny_attribution() -> None:
     policy = resolve_policy(
         [
-            _layer(POLICY_SCOPE_GLOBAL, {"tools_deny": ["gmail.*"]}),
+            _layer(POLICY_SCOPE_WORKSPACE, {"tools_deny": ["gmail.*"]}),
             _layer(POLICY_SCOPE_AGENT, {"tools_deny": ["gmail.search"]}, "A"),
         ]
     )
     decision = policy.check_tool("gmail.search")
     assert not decision.allowed
-    assert decision.layer == POLICY_SCOPE_GLOBAL
+    assert decision.layer == POLICY_SCOPE_WORKSPACE
 
 
 def test_layers_resolve_in_normative_order_regardless_of_input_order() -> None:
     """Rows may arrive in any order; resolution sorts by POLICY_SCOPE_ORDER."""
     shuffled = [
         _layer(POLICY_SCOPE_SESSION, {"tools_also_allow": ["extra.kind"]}),
-        _layer(POLICY_SCOPE_GLOBAL, {"tools_deny": ["denied.kind"]}),
+        _layer(POLICY_SCOPE_WORKSPACE, {"tools_deny": ["denied.kind"]}),
         _layer(POLICY_SCOPE_AGENT, {"tools_allow": ["calendar*"]}, "A"),
     ]
     policy = resolve_policy(shuffled)
@@ -156,7 +156,7 @@ def test_canonical_scenario_progress_agent_allows_only_calendar_and_tasks() -> N
 def test_later_allow_redefines_the_list_openclaw_scope_override() -> None:
     policy = resolve_policy(
         [
-            _layer(POLICY_SCOPE_GLOBAL, {"tools_allow": ["calendar*"]}),
+            _layer(POLICY_SCOPE_WORKSPACE, {"tools_allow": ["calendar*"]}),
             _layer(POLICY_SCOPE_AGENT, {"tools_allow": ["gmail.*"]}, "A"),
         ]
     )
@@ -201,7 +201,7 @@ def test_allow_list_denial_names_the_defining_layer() -> None:
 
 def test_glob_matching_is_fnmatch_style() -> None:
     policy = resolve_policy(
-        [_layer(POLICY_SCOPE_GLOBAL, {"tools_deny": ["mcp__server__*", "task?"]})]
+        [_layer(POLICY_SCOPE_WORKSPACE, {"tools_deny": ["mcp__server__*", "task?"]})]
     )
     assert not policy.check_tool("mcp__server__send").allowed
     assert policy.check_tool("mcp__other__send").allowed
@@ -219,10 +219,10 @@ def test_default_safe_bins_is_the_trt35_baseline() -> None:
 
 def test_removing_a_baseline_bin_denies_it_even_against_skill_grants() -> None:
     edited = tuple(b for b in BASELINE_BINS if b != "curl")
-    policy = resolve_policy([_layer(POLICY_SCOPE_GLOBAL, {"safe_bins": list(edited)})])
+    policy = resolve_policy([_layer(POLICY_SCOPE_WORKSPACE, {"safe_bins": list(edited)})])
     decision = policy.check_bin("curl")
     assert not decision.allowed
-    assert decision.layer == POLICY_SCOPE_GLOBAL
+    assert decision.layer == POLICY_SCOPE_WORKSPACE
     assert decision.rule == SAFE_BINS_REMOVED_RULE
 
     # A skill declaring requires.bins: [curl] cannot resurrect it — the
@@ -235,7 +235,7 @@ def test_removing_a_baseline_bin_denies_it_even_against_skill_grants() -> None:
 
 def test_adding_a_bin_to_safe_bins_grants_it() -> None:
     policy = resolve_policy(
-        [_layer(POLICY_SCOPE_GLOBAL, {"safe_bins": [*BASELINE_BINS, "node"]})]
+        [_layer(POLICY_SCOPE_WORKSPACE, {"safe_bins": [*BASELINE_BINS, "node"]})]
     )
     assert policy.check_bin("node").allowed
     assert "node" in compute_allowed_bins(policy=policy)
@@ -244,10 +244,10 @@ def test_adding_a_bin_to_safe_bins_grants_it() -> None:
 def test_reset_to_default_restores_the_baseline() -> None:
     """Deleting the edit (safe_bins back to None) restores trt.35 exactly."""
     edited = resolve_policy(
-        [_layer(POLICY_SCOPE_GLOBAL, {"safe_bins": ["bash", "cat"]})]
+        [_layer(POLICY_SCOPE_WORKSPACE, {"safe_bins": ["bash", "cat"]})]
     )
     assert set(edited.removed_baseline_bins) == set(BASELINE_BINS) - {"bash", "cat"}
-    reset = resolve_policy([_layer(POLICY_SCOPE_GLOBAL, {})])
+    reset = resolve_policy([_layer(POLICY_SCOPE_WORKSPACE, {})])
     assert reset.safe_bins == BASELINE_BINS
     assert reset.removed_baseline_bins == ()
     assert compute_allowed_bins(policy=reset) == compute_allowed_bins()
@@ -256,12 +256,12 @@ def test_reset_to_default_restores_the_baseline() -> None:
 def test_bins_deny_accumulates_with_layer_attribution() -> None:
     policy = resolve_policy(
         [
-            _layer(POLICY_SCOPE_GLOBAL, {"bins_deny": ["nmap*"]}),
+            _layer(POLICY_SCOPE_WORKSPACE, {"bins_deny": ["nmap*"]}),
             _layer(POLICY_SCOPE_AGENT, {"bins_deny": ["git"]}, "Strict Bot"),
         ]
     )
     global_denied = policy.check_bin("nmap")
-    assert not global_denied.allowed and global_denied.layer == POLICY_SCOPE_GLOBAL
+    assert not global_denied.allowed and global_denied.layer == POLICY_SCOPE_WORKSPACE
     agent_denied = policy.check_bin("git")
     assert not agent_denied.allowed and agent_denied.layer == POLICY_SCOPE_AGENT
     assert agent_denied.detail == "Strict Bot"
@@ -270,7 +270,7 @@ def test_bins_deny_accumulates_with_layer_attribution() -> None:
     assert "nmap" not in allowed and "git" not in allowed
 
 
-def test_safe_bins_on_a_non_global_layer_is_ignored() -> None:
+def test_safe_bins_on_a_non_workspace_layer_is_ignored() -> None:
     policy = resolve_policy(
         [_layer(POLICY_SCOPE_AGENT, {"safe_bins": ["bash"]}, "A")]
     )
@@ -281,7 +281,7 @@ def test_denied_skills_grants_are_excluded_by_the_caller_filter() -> None:
     """The worker's pre-filter: a policy-denied skill's requires.bins never
     enter the union (the executor_for composition)."""
     policy = resolve_policy(
-        [_layer(POLICY_SCOPE_GLOBAL, {"tools_deny": ["shady-skill"]})]
+        [_layer(POLICY_SCOPE_WORKSPACE, {"tools_deny": ["shady-skill"]})]
     )
     skills = {
         "shady-skill": SkillRequirements(bins=("exfiltool",)),
@@ -303,7 +303,7 @@ def test_denied_skills_grants_are_excluded_by_the_caller_filter() -> None:
 def test_payload_round_trip_preserves_decisions_and_attribution() -> None:
     policy = resolve_policy(
         [
-            _layer(POLICY_SCOPE_GLOBAL, {"tools_deny": ["mcp__shady__*"], "bins_deny": ["nc"]}),
+            _layer(POLICY_SCOPE_WORKSPACE, {"tools_deny": ["mcp__shady__*"], "bins_deny": ["nc"]}),
             _layer(POLICY_SCOPE_AGENT, {"tools_allow": ["calendar*"]}, "Progress"),
             _layer(POLICY_SCOPE_SESSION_MODE, {"tools_also_allow": ["session.end"]}, "meet"),
         ]
@@ -328,12 +328,12 @@ def test_unknown_scope_layers_are_dropped_but_valid_layers_survive() -> None:
         "version": 1,
         "layers": [
             {"scope": "galaxy", "document": {"tools_deny": ["*"]}},
-            {"scope": "global", "document": {"tools_deny": ["gmail.*"]}},
+            {"scope": "workspace", "document": {"tools_deny": ["gmail.*"]}},
         ],
     }
     rebuilt = ResolvedCapabilityPolicy.from_payload(payload)
     assert rebuilt.check_tool("anything").allowed  # the galaxy deny-all is dropped
-    assert not rebuilt.check_tool("gmail.search").allowed  # the global deny holds
+    assert not rebuilt.check_tool("gmail.search").allowed  # the workspace deny holds
 
 
 # --- catalog transform (enforcement point #1) --------------------------------
@@ -394,7 +394,7 @@ def test_hidden_entries_render_nowhere_canonical_scenario() -> None:
 
 
 def test_all_hidden_catalog_renders_empty() -> None:
-    policy = resolve_policy([_layer(POLICY_SCOPE_GLOBAL, {"tools_deny": ["*"]})])
+    policy = resolve_policy([_layer(POLICY_SCOPE_WORKSPACE, {"tools_deny": ["*"]})])
     transformed = apply_policy_to_catalog(_ENTRIES, policy)
     assert render_task_catalog(transformed) == ""
     assert render_capability_notes(transformed) == ""
@@ -406,7 +406,7 @@ def test_all_hidden_catalog_renders_empty() -> None:
 def test_exec_bin_policy_attributes_policy_denials() -> None:
     edited = tuple(b for b in BASELINE_BINS if b != "curl")
     policy = resolve_policy(
-        [_layer(POLICY_SCOPE_GLOBAL, {"safe_bins": list(edited), "bins_deny": ["nc*"]})]
+        [_layer(POLICY_SCOPE_WORKSPACE, {"safe_bins": list(edited), "bins_deny": ["nc*"]})]
     )
     bin_policy = ExecBinPolicy(
         allowed=compute_allowed_bins(policy=policy), policy_check=policy.check_bin
@@ -414,7 +414,7 @@ def test_exec_bin_policy_attributes_policy_denials() -> None:
 
     removed = bin_policy.check_argv_detailed(["curl", "https://x"])
     assert removed is not None
-    assert removed.policy_layer == POLICY_SCOPE_GLOBAL
+    assert removed.policy_layer == POLICY_SCOPE_WORKSPACE
     assert removed.policy_rule == SAFE_BINS_REMOVED_RULE
     assert "capability policy" in removed.message
 

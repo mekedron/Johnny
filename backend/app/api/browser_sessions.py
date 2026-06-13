@@ -630,19 +630,29 @@ def _effective_agent_snapshot(
     synthetic snapshot carrying the browser surface's autonomous default
     (a mute playground would read as broken).
 
-    The resolved capability policy (Johnny-trt.38: global → agent →
-    'browser' mode → this session's override) is stamped in for BOTH
-    branches — an agent-less playground is still policy-bound. A resolution
-    failure degrades to no key (= unrestricted downstream), never a blocked
-    start.
+    The resolved capability policy (Johnny-trt.38: the agent's workspace →
+    agent → 'browser' mode → this session's override — Johnny-wks.9) is
+    stamped in for BOTH branches — an agent-less playground is still
+    policy-bound (no workspace base, just the browser-mode/session layers). A
+    resolution failure degrades to no key (= unrestricted downstream), never
+    a blocked start.
     """
     effective_context = (context or "").strip() or resolution.assignment_context
     capability_policy: dict[str, Any] | None = None
     try:
         from app.services.capability_policies import resolve_capability_policy
+        from app.services.workspaces import resolve_agent_workspace
 
+        policy_workspace = (
+            resolve_agent_workspace(session, resolution.agent)
+            if resolution.agent is not None
+            else None
+        )
         capability_policy = resolve_capability_policy(
             session,
+            workspace_id=(
+                int(policy_workspace.id) if policy_workspace is not None else None
+            ),
             agent_id=resolution.agent.id if resolution.agent is not None else None,
             session_mode=BotSessionSource.BROWSER.value,
             bot_session_id=bot_session_id,

@@ -18,11 +18,12 @@ the per-kind enable/disable toggle:
   session's prompts, with the deciding layer/rule attached.
 * ``POST /capabilities/tools/toggle`` — per-kind enable/disable, expressed
   through the trt.38 policy engine exactly as its module doc prescribes
-  (deny the kind on the GLOBAL layer's ``tools_deny``). The write is
-  read-modify-write server-side so the UI never round-trips the whole
-  policy document for a one-kind flip. Enabling removes the exact kind
-  entry; if a glob or another layer still denies it, the response says so
-  (the UI explains instead of showing a toggle that lies).
+  (deny the kind on the WORKSPACE base layer's ``tools_deny`` — Johnny-wks.9;
+  the toggle is workspace-scoped, ``workspace_id`` absent = the default
+  workspace). The write is read-modify-write server-side so the UI never
+  round-trips the whole policy document for a one-kind flip. Enabling removes
+  the exact kind entry; if a glob or another layer still denies it, the
+  response says so (the UI explains instead of showing a toggle that lies).
 
 Inventory is a property of a SANDBOX, not of the app (the Phase-7 note on
 the bead) — and since Johnny-wks.3 the sandboxes are WORKSPACES: both reads
@@ -65,6 +66,7 @@ from app.db.models import Agent, Workspace
 from app.services.capability_policies import (
     get_policy_row,
     resolve_capability_policy,
+    resolve_policy_workspace_id,
     upsert_policy_row,
 )
 from app.services.mcp_servers import (
@@ -84,7 +86,7 @@ from johnny.agent.task_catalog import TaskCatalogEntry
 from johnny.mcp.catalog import mcp_catalog_entries
 from johnny.mcp.config import McpConfigError, is_mcp_kind, qualified_tool_name
 from johnny.skills.capability_policy import (
-    POLICY_SCOPE_GLOBAL,
+    POLICY_SCOPE_WORKSPACE,
     apply_policy_to_catalog,
 )
 from johnny.skills.frontmatter import parse_skill_markdown
@@ -170,6 +172,9 @@ class ToolToggleIn(BaseModel):
 
     kind: str
     enabled: bool
+    # The workspace whose base layer the flip writes (Johnny-wks.9). Absent =
+    # the default workspace (byte-identical to the pre-wks.9 global toggle).
+    workspace_id: int | None = None
 
 
 class ToolToggleOut(BaseModel):
@@ -253,9 +258,15 @@ async def _load_registry(workspace: Workspace | None = None) -> SkillRegistry:
         await client.aclose()
 
 
-def _global_deny_list(db: Session) -> list[str]:
-    """The global layer's ``tools_deny`` as stored (empty when no row)."""
-    row = get_policy_row(db, POLICY_SCOPE_GLOBAL)
+def _workspace_deny_list(db: Session, workspace_id: int | None) -> list[str]:
+    """A workspace base layer's ``tools_deny`` as stored (empty when no row).
+
+    Drives ``toggle_managed`` — the exact kinds the workspace's enable/disable
+    switch owns (vs glob/allow-list denials the editor must reach).
+    """
+    if workspace_id is None:
+        return []
+    row = get_policy_row(db, POLICY_SCOPE_WORKSPACE, workspace_id=workspace_id)
     if row is None or not isinstance(row.document, dict):
         return []
     raw = row.document.get("tools_deny")
@@ -269,8 +280,15 @@ async def list_skills(db: SessionDep, workspace_id: int | None = None) -> Skills
     ``global`` view byte-identical."""
     workspace = _workspace_or_404(db, workspace_id)
     registry = await _load_registry(workspace)
-    policy = resolve_capability_policy(db)
-    deny_list = set(_global_deny_list(db))
+    # The workspace's OWN base policy (Johnny-wks.9): the default view / the
+    # default workspace resolve onto the seeded default's base row.
+    policy_workspace_id = resolve_policy_workspace_id(
+        db,
+        workspace_id=workspace.id if workspace is not None else None,
+        is_default=workspace.is_default if workspace is not None else True,
+    )
+    policy = resolve_capability_policy(db, workspace_id=policy_workspace_id)
+    deny_list = set(_workspace_deny_list(db, policy_workspace_id))
     skills: list[SkillRead] = []
     for skill in registry.skills:
         decision = policy.check_tool(skill.name)
@@ -358,13 +376,22 @@ async def list_tools(
         registry.catalog_entries(),
         mcp_catalog_entries(load_server_snapshots(db, workspace_id=mcp_workspace_id)),
     )
+    # The base policy layer is this same workspace (Johnny-wks.9) — resolved
+    # identically to the MCP set above, so the catalog and its policy verdicts
+    # describe exactly what that workspace's next session renders.
+    policy_workspace_id = resolve_policy_workspace_id(
+        db,
+        workspace_id=workspace.id if workspace is not None else None,
+        is_default=workspace.is_default if workspace is not None else True,
+    )
     policy = resolve_capability_policy(
         db,
+        workspace_id=policy_workspace_id,
         agent_id=agent_id,
         session_mode=session_mode,
         bot_session_id=bot_session_id,
     )
-    deny_list = set(_global_deny_list(db))
+    deny_list = set(_workspace_deny_list(db, policy_workspace_id))
     tools = [_catalog_read(entry, deny_list) for entry in apply_policy_to_catalog(merged, policy)]
     return CatalogOut(
         sandbox=_sandbox_key(workspace),
@@ -431,10 +458,12 @@ def _known_kinds(db: Session) -> frozenset[str]:
 
 @router.post("/tools/toggle", response_model=ToolToggleOut)
 def toggle_tool(payload: ToolToggleIn, db: SessionDep) -> ToolToggleOut:
-    """Flip one kind on/off via the global layer's ``tools_deny`` (trt.38).
+    """Flip one kind on/off via the workspace base layer's ``tools_deny``
+    (trt.38; per-workspace in Johnny-wks.9).
 
     Body-based (not a path param) so kinds keep their exact spelling —
     ``meeting.leave``, ``mcp__server__tool`` — without URL-encoding rules.
+    ``workspace_id`` absent flips the default workspace's base layer.
     """
     kind = payload.kind.strip()
     if not kind:
@@ -447,7 +476,19 @@ def toggle_tool(payload: ToolToggleIn, db: SessionDep) -> ToolToggleOut:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"unknown capability kind {kind!r}",
         )
-    row = get_policy_row(db, POLICY_SCOPE_GLOBAL)
+    if payload.workspace_id is not None:
+        _workspace_or_404(db, payload.workspace_id)
+    workspace_id = resolve_policy_workspace_id(
+        db,
+        workspace_id=payload.workspace_id,
+        is_default=payload.workspace_id is None,
+    )
+    if workspace_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="no workspace to write the toggle onto (unseeded schema)",
+        )
+    row = get_policy_row(db, POLICY_SCOPE_WORKSPACE, workspace_id=workspace_id)
     document = dict(row.document) if row is not None and isinstance(row.document, dict) else {}
     raw = document.get("tools_deny")
     deny = [str(item) for item in raw] if isinstance(raw, list) else []
@@ -456,9 +497,9 @@ def toggle_tool(payload: ToolToggleIn, db: SessionDep) -> ToolToggleOut:
     elif kind not in deny:
         deny.append(kind)
     document["tools_deny"] = deny
-    upsert_policy_row(db, POLICY_SCOPE_GLOBAL, document)
+    upsert_policy_row(db, POLICY_SCOPE_WORKSPACE, document, workspace_id=workspace_id)
 
-    decision = resolve_capability_policy(db).check_tool(kind)
+    decision = resolve_capability_policy(db, workspace_id=workspace_id).check_tool(kind)
     return ToolToggleOut(
         kind=kind,
         enabled=decision.allowed,

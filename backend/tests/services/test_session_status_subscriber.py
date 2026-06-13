@@ -2055,7 +2055,7 @@ def test_conversation_event_types_constant_matches_wire_names() -> None:
         TurnClaimWon(bucket="b", timestamp_ms=0).type,
         TurnClaimLost(bucket="b", timestamp_ms=0).type,
         PeerSpeechSuppressed(peer="x", timestamp_ms=0).type,
-        PolicyDenied(capability="x", layer="global", timestamp_ms=0).type,
+        PolicyDenied(capability="x", layer="workspace", timestamp_ms=0).type,
     }
     assert CONVERSATION_EVENT_TYPES == wire_names
     assert set(DB_VALUES) == wire_names
@@ -2249,7 +2249,7 @@ def test_apply_policy_denied_bin_surface(db_session: Session) -> None:
             "type": "policy_denied",
             "capability": "curl",
             "capability_kind": "bin",
-            "layer": "global",
+            "layer": "workspace",
             "rule": "removed from safe-bins",
             "surface": "sandbox_exec",
             "timestamp_ms": 100,
@@ -2257,7 +2257,7 @@ def test_apply_policy_denied_bin_surface(db_session: Session) -> None:
         },
     )
     event = db_session.scalars(sa.select(ConversationEvent)).one()
-    assert event.reason == "global"
+    assert event.reason == "workspace"
     assert event.details["capability_kind"] == "bin"
     assert event.details["surface"] == "sandbox_exec"
     assert event.turn_id is None

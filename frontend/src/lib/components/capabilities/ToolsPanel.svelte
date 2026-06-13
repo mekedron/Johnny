@@ -26,16 +26,15 @@
 		type PolicyScope
 	} from '$lib/capabilities';
 
-	// Embeddable by design (the trt.37 agents pivot): the global
-	// /capabilities page renders this with no agentId and edits the
-	// global / session-mode / session layers; the agent edit page
-	// (Johnny-trt.44) passes agentId and the SAME component edits that
-	// agent's layer only.
-	let { agentId = null }: { agentId?: number | null } = $props();
-
-	type ScopeKey = 'global' | 'meet' | 'browser' | 'session';
-	let scopeKey = $state<ScopeKey>('global');
-	let sessionIdText = $state('');
+	// Embeddable by design (Johnny-wks.9): the workspace detail page passes
+	// workspaceId and this edits that workspace's BASE policy layer; the agent
+	// edit page (Johnny-trt.44) passes agentId and the SAME component edits
+	// that agent's override layer. Exactly one is set — the standalone global
+	// page (with its session-mode/session scope pills) was removed in wks.9.
+	let {
+		agentId = null,
+		workspaceId = null
+	}: { agentId?: number | null; workspaceId?: number | null } = $props();
 
 	let rows = $state<PolicyRow[]>([]);
 	let baselineSafeBins = $state<string[]>([]);
@@ -64,35 +63,24 @@
 	let inspectAllowed = $state<boolean | null>(null);
 	let inspecting = $state(false);
 
-	const sessionId = $derived.by(() => {
-		const parsed = Number.parseInt(sessionIdText, 10);
-		return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-	});
-
 	const target = $derived.by<PolicyScope | null>(() => {
 		if (agentId != null) return { scope: 'agent', agentId };
-		if (scopeKey === 'global') return { scope: 'global' };
-		if (scopeKey === 'meet') return { scope: 'session_mode', sessionMode: 'meet' };
-		if (scopeKey === 'browser') return { scope: 'session_mode', sessionMode: 'browser' };
-		return sessionId != null ? { scope: 'session', botSessionId: sessionId } : null;
+		if (workspaceId != null) return { scope: 'workspace', workspaceId };
+		return null;
 	});
 
 	const coords = $derived.by<PolicyCoordinates>(() => {
 		if (agentId != null) return { agentId };
-		if (scopeKey === 'meet') return { sessionMode: 'meet' };
-		if (scopeKey === 'browser') return { sessionMode: 'browser' };
-		if (scopeKey === 'session' && sessionId != null) return { botSessionId: sessionId };
+		if (workspaceId != null) return { workspaceId };
 		return {};
 	});
 
-	const isGlobalTarget = $derived(target?.scope === 'global');
+	const isWorkspaceTarget = $derived(target?.scope === 'workspace');
 
 	function scopeLabel(): string {
 		if (agentId != null) return `agent #${agentId}`;
-		if (scopeKey === 'global') return 'global';
-		if (scopeKey === 'meet') return 'Meet mode';
-		if (scopeKey === 'browser') return 'browser mode';
-		return sessionId != null ? `session #${sessionId}` : 'session';
+		if (workspaceId != null) return 'workspace';
+		return 'scope';
 	}
 
 	function loadEditorFromRows() {
@@ -127,21 +115,13 @@
 		}
 	}
 
-	function selectScope(key: ScopeKey) {
-		scopeKey = key;
-		statusMessage = null;
-		inspectResult = null;
-		inspectAllowed = null;
-		void refreshAll();
-	}
-
 	function editorDocument(): PolicyDocument {
 		return {
 			tools_allow: parsePatterns(allowText),
 			tools_also_allow: parsePatterns(alsoAllowText),
 			tools_deny: parsePatterns(denyText),
 			bins_deny: parsePatterns(binsDenyText),
-			safe_bins: isGlobalTarget && safeBinsCustomized ? parsePatterns(safeBinsText) : null
+			safe_bins: isWorkspaceTarget && safeBinsCustomized ? parsePatterns(safeBinsText) : null
 		};
 	}
 
@@ -169,7 +149,7 @@
 		try {
 			const out = await deletePolicy(target);
 			statusMessage = out.deleted
-				? `Cleared the ${scopeLabel()} layer${isGlobalTarget ? ' (safe-bins back to the built-in baseline)' : ''}.`
+				? `Cleared the ${scopeLabel()} layer${isWorkspaceTarget ? ' (safe-bins back to the built-in baseline)' : ''}.`
 				: `The ${scopeLabel()} layer had nothing stored.`;
 			await refreshAll();
 		} catch (err) {
@@ -184,7 +164,7 @@
 		togglingKinds = new Set([...togglingKinds, tool.kind]);
 		quickToggleNote = null;
 		try {
-			const out = await toggleTool(tool.kind, wantEnabled);
+			const out = await toggleTool(tool.kind, wantEnabled, workspaceId);
 			if (wantEnabled && !out.enabled) {
 				quickToggleNote = `${tool.kind}: still denied by the ${out.layer} layer (rule "${out.rule}").`;
 			}
@@ -223,6 +203,7 @@
 		if (rows.length === 0) return 'none';
 		return rows
 			.map((row) => {
+				if (row.scope === 'workspace') return `workspace #${row.workspace_id}`;
 				if (row.scope === 'agent') return `agent #${row.agent_id}`;
 				if (row.scope === 'session_mode') return `${row.session_mode} mode`;
 				if (row.scope === 'session') return `session #${row.bot_session_id}`;
@@ -291,7 +272,7 @@
 					<span class="text-muted-foreground min-w-0 flex-1 truncate text-xs" title={tool.one_liner}>
 						{tool.one_liner}
 					</span>
-					{#if agentId == null}
+					{#if workspaceId != null}
 						<Button
 							variant="ghost"
 							size="sm"
@@ -315,53 +296,21 @@
 	<div class="border-border bg-card flex flex-col gap-4 rounded-lg border p-4">
 		<div class="flex flex-wrap items-center justify-between gap-2">
 			<h2 class="text-foreground m-0 text-sm font-semibold">Policy editor</h2>
-			{#if agentId == null}
-				<div class="flex flex-wrap items-center gap-1" role="group" aria-label="Policy scope">
-					{#each [
-						{ key: 'global', label: 'Global' },
-						{ key: 'meet', label: 'Meet mode' },
-						{ key: 'browser', label: 'Browser mode' },
-						{ key: 'session', label: 'Session' }
-					] as const as pill (pill.key)}
-						<Button
-							variant={scopeKey === pill.key ? 'default' : 'outline'}
-							size="sm"
-							class="h-7 px-2.5 text-xs"
-							onclick={() => selectScope(pill.key)}
-							data-testid="scope-pill-{pill.key}"
-						>
-							{pill.label}
-						</Button>
-					{/each}
-					{#if scopeKey === 'session'}
-						<Input
-							type="number"
-							min="1"
-							placeholder="session id"
-							class="h-7 w-28 text-xs"
-							bind:value={sessionIdText}
-							onchange={() => void refreshAll()}
-							data-testid="scope-session-id"
-						/>
-					{/if}
-				</div>
-			{:else}
-				<Badge variant="outline" class="text-muted-foreground">
-					editing the agent #{agentId} layer
-				</Badge>
-			{/if}
+			<Badge variant="outline" class="text-muted-foreground" data-testid="scope-badge">
+				editing the {scopeLabel()} layer
+			</Badge>
 		</div>
 
 		<p class="text-muted-foreground m-0 text-xs">
-			Resolution order: global → per-agent → per-mode → per-session. Deny wins at every merge;
-			a non-empty allow-list redefines what is allowed from that layer on; patterns are
+			Resolution order: workspace → per-agent → per-mode → per-session. Deny wins at every
+			merge; a non-empty allow-list redefines what is allowed from that layer on; patterns are
 			<span class="font-mono">fnmatch</span> globs (<span class="font-mono">mcp__shady__*</span>
 			denies a whole server). Stored layers: {storedScopes()}.
 		</p>
 
 		{#if target == null}
-			<p class="text-warning m-0 text-sm" data-testid="scope-session-hint">
-				Enter a session id to edit a per-session override.
+			<p class="text-warning m-0 text-sm" data-testid="scope-empty-hint">
+				Save the workspace or agent first to edit its policy layer.
 			</p>
 		{:else}
 			<div class="grid gap-3 md:grid-cols-2">
@@ -415,7 +364,7 @@
 				</label>
 			</div>
 
-			{#if isGlobalTarget}
+			{#if isWorkspaceTarget}
 				<div class="flex flex-col gap-2" data-testid="safe-bins-editor">
 					<label class="flex items-center gap-2 text-xs font-medium">
 						<input type="checkbox" bind:checked={safeBinsCustomized} data-testid="safe-bins-customize" />

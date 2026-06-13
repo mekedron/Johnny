@@ -21,7 +21,14 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.db import Base
-from app.db.models import AgentTask, AgentTaskStatus, BotSession, CapabilityPolicy
+from app.db.models import (
+    Agent,
+    AgentTask,
+    AgentTaskStatus,
+    BotSession,
+    CapabilityPolicy,
+    Workspace,
+)
 from app.services.task_worker import (
     ClaimedTask,
     TaskWorker,
@@ -43,17 +50,20 @@ def engine() -> sa.Engine:
         connect_args={"check_same_thread": False},
         poolclass=sa.pool.StaticPool,
     )
-    # agent_tasks plus the two tables the per-claim capability-policy
-    # resolution reads (Johnny-trt.38: bot_sessions for the session's
-    # coordinates, capability_policies for the layer rows — empty = the
-    # unrestricted default). SQLite doesn't enforce the remaining FKs (the
-    # task-sink tests' fixture pattern).
+    # agent_tasks plus the tables the per-claim capability-policy resolution
+    # reads (Johnny-trt.38 / wks.9: bot_sessions for the session's coordinates,
+    # workspaces + agents for the base-layer workspace the agent resolves onto,
+    # capability_policies for the layer rows — empty = the unrestricted
+    # default). SQLite doesn't enforce the remaining FKs (the task-sink tests'
+    # fixture pattern).
     Base.metadata.create_all(
         bind=eng,
         tables=[
             AgentTask.__table__,  # type: ignore[list-item]
             BotSession.__table__,  # type: ignore[list-item]
             CapabilityPolicy.__table__,  # type: ignore[list-item]
+            Workspace.__table__,  # type: ignore[list-item]
+            Agent.__table__,  # type: ignore[list-item]
         ],
     )
     return eng
@@ -840,8 +850,8 @@ async def test_claimed_task_dataclass_is_event_ready() -> None:
 #
 # Enforcement point #2: the worker resolves the policy FRESH per claimed task
 # and refuses denied kinds before any executor work — the no-restart
-# acceptance ("globally denying a tool blocks executor use on the next turn")
-# at unit level, plus the policy_denied announcement naming the layer.
+# acceptance ("denying a tool on the workspace blocks executor use on the next
+# turn") at unit level, plus the policy_denied announcement naming the layer.
 
 
 def _insert_session(
@@ -861,10 +871,22 @@ def _insert_session(
     return int(row.id)
 
 
+def _seed_default_workspace(db: Session) -> int:
+    """The default workspace the base policy layer attaches to (Johnny-wks.9).
+
+    A session with no agent resolves onto it, exactly as dispatch does, so the
+    worker loads the ``workspace`` base layer keyed by its id.
+    """
+    row = Workspace(name="Default", slug="default", is_default=True)
+    db.add(row)
+    db.commit()
+    return int(row.id)
+
+
 def _insert_policy(
     db: Session,
     *,
-    scope: str = "global",
+    scope: str = "workspace",
     document: dict | None = None,
     **target: Any,
 ) -> None:
@@ -886,8 +908,13 @@ def _capture_events(worker: TaskWorker) -> list[Any]:
 async def test_loop_denies_policy_blocked_kind_without_running_executor(
     db: Session, session_factory: sessionmaker[Session]
 ) -> None:
+    workspace_id = _seed_default_workspace(db)
     session_id = _insert_session(db)
-    _insert_policy(db, document={"tools_deny": ["calendar.upcoming_events"]})
+    _insert_policy(
+        db,
+        workspace_id=workspace_id,
+        document={"tools_deny": ["calendar.upcoming_events"]},
+    )
     task_id = _insert(db, bot_session_id=session_id)
 
     async def executor(task: QueuedTask) -> TaskResult:
@@ -900,11 +927,11 @@ async def test_loop_denies_policy_blocked_kind_without_running_executor(
     )
     row = _row(db, task_id)
     assert "policy" in (row.result_text or "")
-    assert "global" in (row.error or "")  # the denying layer is recorded
+    assert "workspace" in (row.error or "")  # the denying layer is recorded
 
     denied = [e for e in events if getattr(e, "type", "") == "policy_denied"]
     assert len(denied) == 1
-    assert denied[0].layer == "global"
+    assert denied[0].layer == "workspace"
     assert denied[0].capability == "calendar.upcoming_events"
     assert denied[0].surface == "worker"
     assert denied[0].turn_id == 4
@@ -915,6 +942,7 @@ async def test_policy_edit_bites_the_next_claim_without_restart(
 ) -> None:
     """THE no-restart acceptance, unit-pinned: the same live worker runs a
     kind, the operator denies it, the very next row settles policy-failed."""
+    workspace_id = _seed_default_workspace(db)
     session_id = _insert_session(db)
     first_id = _insert(db, bot_session_id=session_id)
 
@@ -930,7 +958,9 @@ async def test_policy_edit_bites_the_next_claim_without_restart(
             await asyncio.sleep(0.02)
 
         # The operator denies the kind — no restart, same worker loop.
-        _insert_policy(db, document={"tools_deny": ["calendar.*"]})
+        _insert_policy(
+            db, workspace_id=workspace_id, document={"tools_deny": ["calendar.*"]}
+        )
         second_id = _insert(db, bot_session_id=session_id)
         deadline = asyncio.get_running_loop().time() + 5.0
         while _row(db, second_id).status != AgentTaskStatus.FAILED:

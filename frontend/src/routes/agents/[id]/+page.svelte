@@ -783,9 +783,9 @@
 				</h2>
 				<p class="text-muted-foreground m-0 text-xs">
 					This agent's tool scope in the layered policy engine. Rules here apply to
-					<em>this agent only</em>, on top of the global policy — deny a tool here and
-					other agents keep it. The global catalog, skills, and MCP servers are managed on
-					the <a href="/capabilities" class="underline">Capabilities</a> page.
+					<em>this agent only</em>, on top of its workspace's base policy — deny a tool here
+					and other agents on the same workspace keep it. The catalog, skills, MCP servers,
+					and base policy all live on the agent's <strong>workspace</strong> (set below).
 				</p>
 			</header>
 

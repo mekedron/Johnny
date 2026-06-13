@@ -39,12 +39,13 @@ from app.db.models import (
     BotSession,
     BotSessionSource,
     CapabilityPolicy,
+    Workspace,
 )
 from johnny.skills.capability_policy import (
     POLICY_SCOPE_AGENT,
-    POLICY_SCOPE_GLOBAL,
     POLICY_SCOPE_SESSION,
     POLICY_SCOPE_SESSION_MODE,
+    POLICY_SCOPE_WORKSPACE,
     CapabilityPolicyLayer,
     ResolvedCapabilityPolicy,
     resolve_policy,
@@ -62,22 +63,47 @@ def builtin_baseline_safe_bins() -> tuple[str, ...]:
     return BASELINE_BINS
 
 
+def resolve_policy_workspace_id(
+    db: Session, *, workspace_id: int | None, is_default: bool
+) -> int | None:
+    """The concrete workspace id whose BASE policy layer applies (Johnny-wks.9).
+
+    The policy twin of :func:`app.services.mcp_servers.resolve_mcp_workspace_id`:
+    a NON-default stamp owns its base layer by its own id; the DEFAULT
+    workspace — and every legacy snapshot with no stamp (``workspace_id is
+    None`` / ``is_default``) — resolves to the seeded default workspace's id,
+    the row the behavior-preserving 0035 migration mapped the old global
+    policy onto. ``None`` only on an unseeded schema with no default workspace
+    — callers then load NO base layer (the unrestricted-base degrade, never a
+    crash), mirroring the skills-dir / MCP resolvers.
+    """
+    if workspace_id is not None and not is_default:
+        return workspace_id
+    from app.services.workspaces import select_default_workspace
+
+    default = select_default_workspace(db)
+    return int(default.id) if default is not None else None
+
+
 def _validate_target(
     scope: str,
     *,
+    workspace_id: int | None,
     agent_id: int | None,
     session_mode: str | None,
     bot_session_id: int | None,
 ) -> None:
-    """Mirror the 0030 CHECK constraints with actionable errors."""
+    """Mirror the 0035 CHECK constraints with actionable errors."""
     if scope not in CAPABILITY_POLICY_SCOPES:
         raise ValueError(f"unknown capability-policy scope {scope!r}")
     expected: dict[str, bool] = {
+        "workspace_id": scope == POLICY_SCOPE_WORKSPACE,
         "agent_id": scope == POLICY_SCOPE_AGENT,
         "session_mode": scope == POLICY_SCOPE_SESSION_MODE,
         "bot_session_id": scope == POLICY_SCOPE_SESSION,
     }
     actual = {
+        "workspace_id": workspace_id is not None,
         "agent_id": agent_id is not None,
         "session_mode": session_mode is not None,
         "bot_session_id": bot_session_id is not None,
@@ -98,16 +124,22 @@ def get_policy_row(
     db: Session,
     scope: str,
     *,
+    workspace_id: int | None = None,
     agent_id: int | None = None,
     session_mode: str | None = None,
     bot_session_id: int | None = None,
 ) -> CapabilityPolicy | None:
     """The single row for one scope target, or ``None``."""
     _validate_target(
-        scope, agent_id=agent_id, session_mode=session_mode, bot_session_id=bot_session_id
+        scope,
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        session_mode=session_mode,
+        bot_session_id=bot_session_id,
     )
     stmt = select(CapabilityPolicy).where(
         CapabilityPolicy.scope == scope,
+        CapabilityPolicy.workspace_id == workspace_id,
         CapabilityPolicy.agent_id == agent_id,
         CapabilityPolicy.session_mode == session_mode,
         CapabilityPolicy.bot_session_id == bot_session_id,
@@ -116,12 +148,13 @@ def get_policy_row(
 
 
 def list_policy_rows(db: Session) -> list[CapabilityPolicy]:
-    """Every stored layer row, global first (the resolution order, then target)."""
+    """Every stored layer row, workspace first (the resolution order, then target)."""
     rows = list(db.scalars(select(CapabilityPolicy)))
     order = {scope: index for index, scope in enumerate(CAPABILITY_POLICY_SCOPES)}
     rows.sort(
         key=lambda row: (
             order.get(row.scope, len(order)),
+            row.workspace_id or 0,
             row.agent_id or 0,
             row.session_mode or "",
             row.bot_session_id or 0,
@@ -135,26 +168,32 @@ def upsert_policy_row(
     scope: str,
     document: dict[str, Any],
     *,
+    workspace_id: int | None = None,
     agent_id: int | None = None,
     session_mode: str | None = None,
     bot_session_id: int | None = None,
 ) -> CapabilityPolicy:
     """Create or replace THE row for one scope target (canonicalized document).
 
-    ``safe_bins`` is global-only by design (the one curated baseline per
-    install) — rejected here with :class:`ValueError` so the API surfaces a
+    ``safe_bins`` is workspace-only by design (the one curated baseline per
+    workspace) — rejected here with :class:`ValueError` so the API surfaces a
     422 instead of the resolver silently ignoring it. The caller commits.
     """
     _validate_target(
-        scope, agent_id=agent_id, session_mode=session_mode, bot_session_id=bot_session_id
+        scope,
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        session_mode=session_mode,
+        bot_session_id=bot_session_id,
     )
     layer = CapabilityPolicyLayer.from_document(scope, document)
-    if layer.safe_bins is not None and scope != POLICY_SCOPE_GLOBAL:
-        raise ValueError("safe_bins is only editable on the global layer")
+    if layer.safe_bins is not None and scope != POLICY_SCOPE_WORKSPACE:
+        raise ValueError("safe_bins is only editable on the workspace layer")
     canonical = layer.to_document()
     row = get_policy_row(
         db,
         scope,
+        workspace_id=workspace_id,
         agent_id=agent_id,
         session_mode=session_mode,
         bot_session_id=bot_session_id,
@@ -162,6 +201,7 @@ def upsert_policy_row(
     if row is None:
         row = CapabilityPolicy(
             scope=scope,
+            workspace_id=workspace_id,
             agent_id=agent_id,
             session_mode=session_mode,
             bot_session_id=bot_session_id,
@@ -173,9 +213,10 @@ def upsert_policy_row(
         row.updated_at = datetime.now(UTC)
     db.flush()
     logger.info(
-        "capability policy: upserted scope=%s agent_id=%s session_mode=%s "
-        "bot_session_id=%s (%s)",
+        "capability policy: upserted scope=%s workspace_id=%s agent_id=%s "
+        "session_mode=%s bot_session_id=%s (%s)",
         scope,
+        workspace_id,
         agent_id,
         session_mode,
         bot_session_id,
@@ -188,6 +229,7 @@ def delete_policy_row(
     db: Session,
     scope: str,
     *,
+    workspace_id: int | None = None,
     agent_id: int | None = None,
     session_mode: str | None = None,
     bot_session_id: int | None = None,
@@ -196,6 +238,7 @@ def delete_policy_row(
     row = get_policy_row(
         db,
         scope,
+        workspace_id=workspace_id,
         agent_id=agent_id,
         session_mode=session_mode,
         bot_session_id=bot_session_id,
@@ -205,8 +248,10 @@ def delete_policy_row(
     db.delete(row)
     db.flush()
     logger.info(
-        "capability policy: deleted scope=%s agent_id=%s session_mode=%s bot_session_id=%s",
+        "capability policy: deleted scope=%s workspace_id=%s agent_id=%s "
+        "session_mode=%s bot_session_id=%s",
         scope,
+        workspace_id,
         agent_id,
         session_mode,
         bot_session_id,
@@ -221,25 +266,40 @@ def _agent_detail(db: Session, agent_id: int | None) -> str:
     return str(name) if name else f"agent-{agent_id}"
 
 
+def _workspace_detail(db: Session, workspace_id: int | None) -> str:
+    if workspace_id is None:
+        return ""
+    name = db.scalar(select(Workspace.name).where(Workspace.id == workspace_id))
+    return str(name) if name else f"workspace-{workspace_id}"
+
+
 def load_policy_layers(
     db: Session,
     *,
+    workspace_id: int | None = None,
     agent_id: int | None = None,
     session_mode: str | None = None,
     bot_session_id: int | None = None,
 ) -> tuple[CapabilityPolicyLayer, ...]:
     """The stored layers matching one session's coordinates, resolution-ordered.
 
-    Missing rows are simply absent (an empty layer constrains nothing);
-    ``scope_detail`` carries the human-readable target (agent name, mode,
-    session id) for decision/event attribution copy.
+    The base layer is the WORKSPACE row (Johnny-wks.9) — ``workspace_id`` is
+    the agent's resolved workspace. Missing rows are simply absent (an empty
+    layer constrains nothing); ``scope_detail`` carries the human-readable
+    target (workspace name, agent name, mode, session id) for decision/event
+    attribution copy.
     """
     layers: list[CapabilityPolicyLayer] = []
-    row = get_policy_row(db, POLICY_SCOPE_GLOBAL)
-    if row is not None:
-        layers.append(
-            CapabilityPolicyLayer.from_document(POLICY_SCOPE_GLOBAL, row.document)
-        )
+    if workspace_id is not None:
+        row = get_policy_row(db, POLICY_SCOPE_WORKSPACE, workspace_id=workspace_id)
+        if row is not None:
+            layers.append(
+                CapabilityPolicyLayer.from_document(
+                    POLICY_SCOPE_WORKSPACE,
+                    row.document,
+                    scope_detail=_workspace_detail(db, workspace_id),
+                )
+            )
     if agent_id is not None:
         row = get_policy_row(db, POLICY_SCOPE_AGENT, agent_id=agent_id)
         if row is not None:
@@ -274,14 +334,22 @@ def load_policy_layers(
 def resolve_capability_policy(
     db: Session,
     *,
+    workspace_id: int | None = None,
     agent_id: int | None = None,
     session_mode: str | None = None,
     bot_session_id: int | None = None,
 ) -> ResolvedCapabilityPolicy:
-    """Resolve the effective policy for one set of session coordinates."""
+    """Resolve the effective policy for one set of session coordinates.
+
+    ``workspace_id`` selects the base layer (Johnny-wks.9). Callers that hold
+    only an agent resolve it first (the dispatch surfaces / the worker via
+    :func:`app.services.workspaces.resolve_agent_workspace`); the parameterless
+    call resolves nothing (the unrestricted base, for policy-less fixtures).
+    """
     return resolve_policy(
         load_policy_layers(
             db,
+            workspace_id=workspace_id,
             agent_id=agent_id,
             session_mode=session_mode,
             bot_session_id=bot_session_id,
@@ -311,10 +379,15 @@ def resolve_policy_for_bot_session(
 
     Reads the live ``bot_sessions`` row for the agent / surface coordinates
     (NOT the snapshot — the whole point of the worker-side check is picking
-    up edits made after dispatch). An unknown session resolves the global +
-    nothing else (defensive: the claim already proved the row existed, so
-    this leg is unreachable outside test fixtures).
+    up edits made after dispatch). The base layer is the agent's CURRENT
+    workspace (Johnny-wks.9), resolved fresh the same way dispatch does so a
+    workspace re-attachment or its policy edit bites the next claim. An
+    unknown session resolves the default workspace + nothing else (defensive:
+    the claim already proved the row existed, so this leg is unreachable
+    outside test fixtures).
     """
+    from app.services.workspaces import resolve_agent_workspace
+
     row = db.get(BotSession, bot_session_id)
     agent_id: int | None = None
     session_mode: str | None = None
@@ -324,8 +397,12 @@ def resolve_policy_for_bot_session(
         source = row.source
         session_mode = source.value if isinstance(source, BotSessionSource) else str(source)
         started_at = row.started_at
+    agent = db.get(Agent, agent_id) if agent_id is not None else None
+    workspace = resolve_agent_workspace(db, agent)
+    workspace_id = int(workspace.id) if workspace is not None else None
     policy = resolve_capability_policy(
         db,
+        workspace_id=workspace_id,
         agent_id=agent_id,
         session_mode=session_mode,
         bot_session_id=bot_session_id,
@@ -351,5 +428,6 @@ __all__ = [
     "load_policy_layers",
     "resolve_capability_policy",
     "resolve_policy_for_bot_session",
+    "resolve_policy_workspace_id",
     "upsert_policy_row",
 ]

@@ -36,7 +36,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_session
-from app.db.models import Agent, McpServer, Workspace
+from app.db.models import Agent, CapabilityPolicy, McpServer, Workspace
 from app.services.docker_launcher import should_use_docker_launcher
 from app.services.workspace_containers import (
     WORKSPACE_STATE_RUNNING,
@@ -434,12 +434,16 @@ def delete_workspace(
                 "manually."
             ),
         )
-    # MCP servers are owned content of the workspace (Johnny-wks.8): the FK is
-    # ON DELETE CASCADE, but SQLite (the test harness) does not enforce FKs, so
-    # remove them explicitly to keep deletion behavior identical on both
-    # backends. (Agents already blocked the delete above; MCP servers never do
-    # — they go with the workspace.)
+    # MCP servers (Johnny-wks.8) and the base capability-policy layer
+    # (Johnny-wks.9) are owned content of the workspace: both FKs are ON DELETE
+    # CASCADE, but SQLite (the test harness) does not enforce FKs, so remove
+    # them explicitly to keep deletion behavior identical on both backends.
+    # (Agents already blocked the delete above; these never do — they go with
+    # the workspace.)
     session.execute(delete(McpServer).where(McpServer.workspace_id == row.id))
+    session.execute(
+        delete(CapabilityPolicy).where(CapabilityPolicy.workspace_id == row.id)
+    )
     session.delete(row)
 
 

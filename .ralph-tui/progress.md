@@ -51,6 +51,36 @@ after each iteration and it's included in prompts for context.
   new unique + create FK). SQLite does NOT enforce FKs in the test harness, so
   `ON DELETE CASCADE` also needs an explicit `delete()` in the owning endpoint
   (the DB-level CASCADE is the prod guarantee).
+- **Renaming a CHECK-constrained scope-enum VALUE in a migration (e.g.
+  `global`→`workspace` in `capability_policies`, wks.9) — one SQLite recreate,
+  not two.** The old scope CHECK rejects the new value, so you can't `UPDATE`
+  before the recreate; the new CHECK rejects the old value, so a plain
+  `copy_from` recreate (which copies data UNDER the new schema) fails too.
+  Resolve it in ONE pass: dialect-branch (Postgres = drop CHECKs → `UPDATE` →
+  re-add CHECKs → swap index → add FK), and for SQLite do a MANUAL recreate
+  whose `INSERT … SELECT` transforms the value inline
+  (`CASE WHEN scope='global' THEN 'workspace' ELSE scope END`, plus
+  `CASE … THEN :default_id`) so rows land already-valid under the new CHECK —
+  no transitional value ever violates a constraint. Build the new table with
+  `op.create_table(name, *cols, *constraints)` (NOT `Table.create(bind)` /
+  `MetaData`): `op.create_table` emits raw DDL so cross-table FK string refs
+  (`["agents.id"]`) need no referent table in a local `MetaData`
+  (`NoReferencedTableError` otherwise). `op.drop_table` drops the old indexes;
+  recreate all four partial-unique indexes after `op.rename_table`. Migration
+  tests that import the module and run `upgrade()`/`downgrade()` directly use a
+  FILE-backed SQLite engine (not `:memory:`) so the recreate survives across
+  alembic's connections.
+- **Capability POLICY base layer is per-workspace, same shared seam as MCP
+  (wks.9).** The base (formerly `global`) layer resolves via
+  `app.services.capability_policies.resolve_policy_workspace_id` — the literal
+  twin of `resolve_mcp_workspace_id` (non-default → own id; default/legacy/None
+  → seeded default's id). Dispatch (`session_scheduler`/`browser_sessions`)
+  passes the agent's resolved `workspace_id` into `resolve_capability_policy`
+  for the snapshot; the worker's per-claim `resolve_policy_for_bot_session`
+  resolves the agent's CURRENT workspace (`resolve_agent_workspace`) fresh so a
+  re-attach/policy edit bites the next claim. The agent/session_mode/session
+  OVERRIDE layers were never "global" — they stay untouched; only the base
+  re-homed. `safe_bins` is now workspace-layer-only.
 
 ---
 
@@ -82,6 +112,42 @@ after each iteration and it's included in prompts for context.
 - chrome-devtools MCP (artifacts under `.validation/Johnny-wks.7/`): agent edit page has no Workspace accounts panel (MEETING BOT picker + ToolsPanel intact); workspace detail page has no Connected accounts section (ENVIRONMENT/ATTACHED AGENTS/INVENTORY intact, google-calendar Available); neither page fires `GET /workspaces/{id}/accounts` (only `/auth/google/accounts`, the kept bot-account list).
 
 **Learnings:** see the prod-vs-dev-stack and two-Google-account-concepts patterns added to Codebase Patterns above.
+
+---
+
+
+## 2026-06-13 - Johnny-wks.9
+
+**Drop the global Capabilities surface; policy is WORKSPACE-ONLY.** Removed the
+`/capabilities` page entirely (route, nav entry, every link) and re-homed the
+capability-policy BASE layer from a single global row to a per-workspace row —
+so skills (wks.3), MCP (wks.8), and now tool-access policy ALL live inside the
+workspace. The workspace is the sole governance + tooling boundary; there is
+no global capability/skill/policy UI or data anywhere.
+
+**Backend (base layer global → per-workspace):**
+- `johnny/skills/capability_policy.py` — `POLICY_SCOPE_GLOBAL` → `POLICY_SCOPE_WORKSPACE`; resolution order is now `workspace → agent → session_mode → session`; `safe_bins` + the `removed from safe-bins` attribution are workspace-layer-only.
+- `models.py` — `CapabilityPolicy.workspace_id` (FK `workspaces.id` `ON DELETE CASCADE`, NULL except on the base layer); swapped `uq_capability_policies_global` (unique on `scope`) for `uq_capability_policies_workspace` (unique on `workspace_id` where `scope='workspace'`); `CAPABILITY_POLICY_SCOPES` updated.
+- `alembic/versions/0035_capability_policies_workspace.py` — re-scopes the single `global` row → `workspace` + the seeded default's id; swaps the index, retargets the scope + target-shape CHECKs, adds the CASCADE FK. Dialect-branched: Postgres ALTERs; SQLite ONE manual recreate whose `INSERT … SELECT` renames the scope with a `CASE` so rows land valid under the new CHECK (no two-recreate dance). Idempotent + reversible.
+- `services/capability_policies.py` — `workspace_id` threaded through `get/upsert/delete_policy_row`, `load_policy_layers`, `resolve_capability_policy`; new `resolve_policy_workspace_id` (twin of `resolve_mcp_workspace_id`); `resolve_policy_for_bot_session` resolves the agent's CURRENT workspace (`resolve_agent_workspace`) fresh per claim; `_validate_target` enforces the workspace shape.
+- `api/capability_policies.py` — `/capability-policies/global` PUT/DELETE → `/capability-policies/workspaces/{id}`; `effective`/`resolve` derive the base workspace from `workspace_id` → `agent_id` → default (`_coords_workspace_id`); rows carry `workspace_id`.
+- `api/capabilities.py` — `toggle_tool` is workspace-scoped (writes the base layer; `workspace_id` absent = default); `list_skills`/`list_tools` resolve the workspace's own base policy + deny list.
+- Dispatch sites (`session_scheduler.py`, `browser_sessions.py`) pass the agent's resolved `workspace_id` into the snapshot policy resolution; `workspaces.py delete_workspace` explicitly deletes the workspace's `CapabilityPolicy` rows (SQLite FK-CASCADE parity, the wks.8 precedent).
+
+**Frontend:**
+- Deleted `routes/capabilities/` + `components/capabilities/SkillsPanel.svelte`; removed the Capabilities nav entry.
+- `lib/capabilities.ts` — `PolicyScope` `global` → `{scope:'workspace', workspaceId}`; `scopePath`/`findPolicyRow`/`PolicyRow.workspace_id`; `toggleTool(kind, enabled, workspaceId?)`; `resolveCapability` sends `workspace_id`; safe-bins copy → "workspace layer".
+- `components/capabilities/ToolsPanel.svelte` — now embeds with `workspaceId` OR `agentId` only (no scope pills); workspace mode edits the base layer + shows the quick-toggle + safe-bins editor.
+- `routes/workspaces/[id]/+page.svelte` — new CAPABILITY POLICY section (`<ToolsPanel workspaceId={…} />`); INVENTORY link → "Capability policy section below".
+- Agent edit page copy: "on top of its workspace's base policy … all live on the agent's workspace" (no `/capabilities` link).
+
+**Validation:**
+- Backend `pytest`: 4474 passed, 7 skipped; 8 pre-existing env failures (provider e2e → API keys, OAuth callback, wizard → docker CLI) — none touch policy/workspace. New: migration 0035 (re-scope/backfill, per-workspace unique, retargeted CHECK, idempotent, downgrade), policy CRUD + capabilities + worker enforcement updated to the workspace base.
+- Frontend `svelte-check`: 0/0. `vitest`: 168 passed.
+- Postgres: 0035 up + down + up round-trip; **clean install** `./stop.sh && ./run.sh` → fresh DB reached `0035` via the full chain on the prod image; app boots healthy.
+- chrome-devtools (`.validation/Johnny-wks.9/`): `/capabilities` → 404 + no nav entry (01,03 dev / prod); workspace page CAPABILITY POLICY section edits the workspace layer; a Deny POST `/capabilities/tools/toggle {workspace_id:1}` → `layer="workspace"`, catalog shows "denied · workspace", editor "Stored layers: workspace #1", effective "deny rules active" (02); agent page per-agent editor layers on "workspace #1" (04 prod clean-install).
+
+**Learnings:** see the rename-a-CHECK-constrained-scope-in-one-recreate pattern added to Codebase Patterns above.
 
 ---
 

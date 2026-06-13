@@ -11,12 +11,17 @@ tables.
 THE RESOLUTION ORDER (normative, unit-pinned by
 ``tests/skills/test_capability_policy.py``)::
 
-    GLOBAL  →  PER-AGENT  →  PER-SESSION-MODE  →  PER-SESSION OVERRIDE
+    WORKSPACE  →  PER-AGENT  →  PER-SESSION-MODE  →  PER-SESSION OVERRIDE
+
+The base layer is the WORKSPACE (Johnny-wks.9): policy is a property of the
+workspace an agent runs in, not a single global install-wide row. There is
+NO global policy — the old global layer maps onto the default workspace's
+base layer (the 0035 migration), so default-workspace agents are unchanged.
 
 Merge rules, applied walking the layers in that order:
 
 * ``tools_deny`` **accumulates** — a deny matching at ANY layer denies the
-  tool; **deny wins at every merge** (a global deny beats an agent/mode/
+  tool; **deny wins at every merge** (a workspace deny beats an agent/mode/
   session allow; a mode deny beats a session allow). When several layers
   deny, the EARLIEST layer in the order wins attribution.
 * ``tools_allow`` non-empty **redefines** the restrictive allow-list (the
@@ -33,8 +38,8 @@ Merge rules, applied walking the layers in that order:
 * ``bins_deny`` accumulates exactly like ``tools_deny``, over sandbox exec
   binaries (``argv[0]`` basenames).
 * ``safe_bins`` — the editable trt.35 baseline toolset — is honored on the
-  **global layer only** (one curated list per install, the operator
-  requirement). ``None`` means the built-in
+  **workspace layer only** (one curated list per workspace, the wks.9
+  governance boundary). ``None`` means the built-in
   :data:`johnny.skills.policy.BASELINE_BINS`. A baseline bin REMOVED from
   the edited list is hard-denied (it beats skill ``requires.bins`` grants);
   a bin added is granted alongside the baseline. Resetting to default =
@@ -72,7 +77,7 @@ documented on :class:`johnny.skills.policy.ExecBinPolicy`.
 
 Identity is never policy (the Phase-7 invariant): WHO an agent acts as lives
 in sandbox state (gog keyring …), so the same policy stays valid whether the
-agent runs in the global or a personal sandbox.
+agent runs in the default or another workspace's sandbox.
 
 Stdlib-only and import-cheap, like :mod:`johnny.agent.task_catalog` (which
 it imports for the transform) — both ends of the wire (api dispatch surfaces
@@ -93,20 +98,20 @@ from johnny.skills.policy import BASELINE_BINS
 
 logger = logging.getLogger(__name__)
 
-POLICY_SCOPE_GLOBAL = "global"
+POLICY_SCOPE_WORKSPACE = "workspace"
 POLICY_SCOPE_AGENT = "agent"
 POLICY_SCOPE_SESSION_MODE = "session_mode"
 POLICY_SCOPE_SESSION = "session"
 
 POLICY_SCOPE_ORDER: tuple[str, ...] = (
-    POLICY_SCOPE_GLOBAL,
+    POLICY_SCOPE_WORKSPACE,
     POLICY_SCOPE_AGENT,
     POLICY_SCOPE_SESSION_MODE,
     POLICY_SCOPE_SESSION,
 )
-"""THE resolution order — global → per-agent → per-session-mode →
-per-session override. :func:`resolve_policy` sorts incoming layers by this
-order, so callers may pass rows in any order."""
+"""THE resolution order — workspace → per-agent → per-session-mode →
+per-session override (Johnny-wks.9). :func:`resolve_policy` sorts incoming
+layers by this order, so callers may pass rows in any order."""
 
 DEFAULT_ALLOW_LAYER = "default"
 """Attribution label when no layer decided (the unrestricted default-allow)."""
@@ -148,10 +153,11 @@ class CapabilityPolicyLayer:
     """One scope layer's policy document (one ``capability_policies`` row).
 
     ``scope`` is a :data:`POLICY_SCOPE_ORDER` member; ``scope_detail`` is the
-    human-readable target for attribution copy (the agent's name, the mode
-    value, the session id) — it rides decisions and events, never prompts.
-    ``safe_bins`` is meaningful on the global layer only (enforced by the
-    API; :func:`resolve_policy` ignores it elsewhere with a warning).
+    human-readable target for attribution copy (the workspace name, the
+    agent's name, the mode value, the session id) — it rides decisions and
+    events, never prompts. ``safe_bins`` is meaningful on the workspace layer
+    only (enforced by the API; :func:`resolve_policy` ignores it elsewhere
+    with a warning).
     """
 
     scope: str
@@ -293,7 +299,7 @@ class ResolvedCapabilityPolicy:
         if candidate in self.removed_baseline_bins:
             return PolicyDecision(
                 allowed=False,
-                layer=POLICY_SCOPE_GLOBAL,
+                layer=POLICY_SCOPE_WORKSPACE,
                 rule=SAFE_BINS_REMOVED_RULE,
                 detail="",
             )
@@ -363,7 +369,7 @@ def resolve_policy(
     :data:`POLICY_SCOPE_ORDER` (stable — unknown scopes are dropped with a
     warning), denies accumulate (earliest layer wins attribution),
     ``tools_allow`` redefines the allow-list, ``tools_also_allow`` extends
-    the one in force, and the global layer's ``safe_bins`` (when set)
+    the one in force, and the workspace layer's ``safe_bins`` (when set)
     replaces ``baseline`` with removals hard-denied.
     """
     known = [layer for layer in layers if layer.scope in POLICY_SCOPE_ORDER]
@@ -395,12 +401,12 @@ def resolve_policy(
                 (pat, layer.scope, layer.scope_detail) for pat in layer.tools_also_allow
             )
         if layer.safe_bins is not None:
-            if layer.scope == POLICY_SCOPE_GLOBAL:
+            if layer.scope == POLICY_SCOPE_WORKSPACE:
                 safe_bins = layer.safe_bins
             else:
                 logger.warning(
                     "capability policy: safe_bins on the %r layer is ignored — "
-                    "the edited baseline is global-only by design",
+                    "the edited baseline is workspace-only by design",
                     layer.scope,
                 )
 
@@ -474,10 +480,10 @@ __all__ = [
     "DEFAULT_ALLOW_LAYER",
     "POLICY_DENIED_SPOKEN_REASON",
     "POLICY_SCOPE_AGENT",
-    "POLICY_SCOPE_GLOBAL",
     "POLICY_SCOPE_ORDER",
     "POLICY_SCOPE_SESSION",
     "POLICY_SCOPE_SESSION_MODE",
+    "POLICY_SCOPE_WORKSPACE",
     "SAFE_BINS_REMOVED_RULE",
     "UNRESTRICTED_POLICY",
     "CapabilityPolicyLayer",

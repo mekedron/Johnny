@@ -1140,10 +1140,16 @@ class ConversationEvent(Base):
     )
 
 
-CAPABILITY_POLICY_SCOPES: tuple[str, ...] = ("global", "agent", "session_mode", "session")
-"""Legal ``capability_policies.scope`` values (Johnny-trt.38) — identical to
+CAPABILITY_POLICY_SCOPES: tuple[str, ...] = (
+    "workspace",
+    "agent",
+    "session_mode",
+    "session",
+)
+"""Legal ``capability_policies.scope`` values (Johnny-trt.38; ``workspace``
+replaced ``global`` in Johnny-wks.9) — identical to
 :data:`johnny.skills.capability_policy.POLICY_SCOPE_ORDER`, CHECK-enforced by
-the 0030 migration. Resolution merges rows in exactly this order."""
+the 0035 migration. Resolution merges rows in exactly this order."""
 
 CAPABILITY_POLICY_SESSION_MODES: tuple[str, ...] = ("meet", "browser")
 """Legal ``capability_policies.session_mode`` values — the
@@ -1152,39 +1158,45 @@ playground/conversation surface), CHECK-enforced by the 0030 migration."""
 
 
 class CapabilityPolicy(TimestampMixin, Base):
-    """One capability-policy scope layer (Johnny-trt.38).
+    """One capability-policy scope layer (Johnny-trt.38; per-workspace base
+    in Johnny-wks.9).
 
     DB-backed like provider settings: at most ONE row per scope target —
-    the single global row, one per agent, one per session mode (``meet`` /
-    ``browser``), one per bot session (the per-session override) — enforced
-    by partial unique indexes; the target-shape rules (exactly the matching
-    key column set for each scope) are CHECK-enforced by the 0030 migration.
+    one ``workspace`` row per workspace (the base layer; the wks.9 governance
+    boundary that replaced the single global row), one per agent, one per
+    session mode (``meet`` / ``browser``), one per bot session (the
+    per-session override) — enforced by partial unique indexes; the
+    target-shape rules (exactly the matching key column set for each scope)
+    are CHECK-enforced by the 0030 + 0035 migrations.
 
     ``document`` is the policy document
     (:meth:`johnny.skills.capability_policy.CapabilityPolicyLayer.to_document`):
     ``tools_allow`` / ``tools_also_allow`` / ``tools_deny`` / ``bins_deny``
-    glob lists, plus ``safe_bins`` (the edited trt.35 baseline; global row
+    glob lists, plus ``safe_bins`` (the edited trt.35 baseline; workspace row
     only — its absence means the built-in baseline, so "reset to default"
     is deleting the key). Resolution
     (:func:`johnny.skills.capability_policy.resolve_policy`) merges the
-    matching rows global → agent → session_mode → session with deny winning
-    at every merge; the resolved policy rides ``bot_sessions.agent_snapshot``
-    to turn-time enforcement and is re-read fresh per claimed task by the
-    worker — there is no cache to invalidate, so edits bite without a
-    restart (the provider-settings update model).
+    matching rows workspace → agent → session_mode → session with deny
+    winning at every merge; the resolved policy rides
+    ``bot_sessions.agent_snapshot`` to turn-time enforcement and is re-read
+    fresh per claimed task by the worker — there is no cache to invalidate,
+    so edits bite without a restart (the provider-settings update model).
 
-    Deleting an agent / session cascades its layer rows away; the global and
-    session-mode rows have no parent to cascade from.
+    ``workspace_id`` is set on (and only on) the ``workspace`` base layer —
+    one base row per workspace, ``ON DELETE CASCADE`` (a workspace's policy
+    is owned content; the 0035 migration mapped the old global row onto the
+    seeded default). Deleting an agent / session cascades its override layer
+    rows away; the session-mode rows have no parent to cascade from.
     """
 
     __tablename__ = "capability_policies"
     __table_args__ = (
         Index(
-            "uq_capability_policies_global",
-            "scope",
+            "uq_capability_policies_workspace",
+            "workspace_id",
             unique=True,
-            postgresql_where=text("scope = 'global'"),
-            sqlite_where=text("scope = 'global'"),
+            postgresql_where=text("scope = 'workspace'"),
+            sqlite_where=text("scope = 'workspace'"),
         ),
         Index(
             "uq_capability_policies_agent",
@@ -1211,6 +1223,9 @@ class CapabilityPolicy(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=True
+    )
     agent_id: Mapped[int | None] = mapped_column(
         ForeignKey("agents.id", ondelete="CASCADE"), nullable=True
     )

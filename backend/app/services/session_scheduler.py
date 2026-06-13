@@ -618,18 +618,24 @@ async def _start_one_session(
     if agent is not None:
         row.agent_id = agent.id
         row.bot_name = agent.name
-        # Resolved capability policy (Johnny-trt.38): global → this agent →
-        # the 'meet' mode → this session's override, frozen at dispatch so
-        # turn-time enforcement reads the snapshot. Guarded separately from
+        # Resolved capability policy (Johnny-trt.38): the agent's workspace →
+        # this agent → the 'meet' mode → this session's override (Johnny-wks.9),
+        # frozen at dispatch so turn-time enforcement reads the snapshot. The
+        # workspace base layer is resolved here too. Guarded separately from
         # the snapshot freeze below: a policy-resolution failure degrades to
         # no key (= unrestricted downstream, the pre-trt.38 behavior), never
         # to a contract-defaults launch.
         capability_policy: dict[str, Any] | None = None
         try:
             from app.services.capability_policies import resolve_capability_policy
+            from app.services.workspaces import resolve_agent_workspace
 
+            policy_workspace = resolve_agent_workspace(session, agent)
             capability_policy = resolve_capability_policy(
                 session,
+                workspace_id=(
+                    int(policy_workspace.id) if policy_workspace is not None else None
+                ),
                 agent_id=agent.id,
                 session_mode=BotSessionSource.MEET.value,
                 bot_session_id=row.id,

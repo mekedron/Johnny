@@ -1,13 +1,16 @@
 <!--
   Workspace detail (Johnny-wks.5) — everything ONE execution environment
   holds: container lifecycle controls (start/stop with the idle-TTL story),
-  the agents that effectively run here, and the sandbox-keyed capability
-  inventory (skills + tool catalog probed against THIS container).
+  the agents that effectively run here, the sandbox-keyed capability
+  inventory (skills + tool catalog probed against THIS container), its MCP
+  connectors, and its capability POLICY.
 
-  Policy editing stays on /capabilities; attachment changes happen on the
-  agent's edit page — this page is inventory + controls. The workspace is a
-  pure tools container: it has no account UI (the meeting-bot Google identity
-  lives on the agent; gog is an optional developer-configured CLI).
+  The workspace is the sole governance + tooling boundary (Johnny-wks.9):
+  skills, MCP, and tool-access policy ALL live here — there is no global
+  capability surface. Per-agent overrides are edited on the agent's edit page;
+  this page owns the workspace base layer. The workspace has no account UI
+  (the meeting-bot Google identity lives on the agent; gog is an optional
+  developer-configured CLI).
 -->
 <script lang="ts">
 	import { page } from '$app/state';
@@ -21,6 +24,7 @@
 	import PageHeader from '$lib/components/page-header.svelte';
 	import WorkspaceInventoryPanel from '$lib/components/workspaces/WorkspaceInventoryPanel.svelte';
 	import McpPanel from '$lib/components/workspaces/McpPanel.svelte';
+	import ToolsPanel from '$lib/components/capabilities/ToolsPanel.svelte';
 	import { listAgents, type Agent } from '$lib/agents';
 	import {
 		agentsAttachedTo,
@@ -307,6 +311,24 @@
 				</p>
 			</header>
 			<McpPanel workspaceId={workspace.id} />
+		</section>
+
+		<!-- ─── CAPABILITY POLICY ─────────────────────────────────────────── -->
+		<section
+			class="border-border bg-surface-2 flex flex-col gap-4 rounded-md border p-5"
+			data-testid="section-policy"
+		>
+			<header class="flex flex-col gap-0.5">
+				<h2 class="text-foreground m-0 text-xs font-semibold tracking-widest uppercase">
+					Capability policy
+				</h2>
+				<p class="text-muted-foreground m-0 text-xs">
+					This workspace's base tool-access policy — layered allow/deny over the catalog plus the
+					editable safe-bins baseline. It applies to every agent that runs here; per-agent
+					overrides layer on top (edited on the agent's page). There is no global policy.
+				</p>
+			</header>
+			<ToolsPanel workspaceId={workspace.id} />
 		</section>
 	{/if}
 </Page>

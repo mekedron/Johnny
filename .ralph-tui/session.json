@@ -3,10 +3,10 @@
   "sessionId": "aced5d83-4a38-43cf-99a6-d43a830ede43",
   "status": "running",
   "startedAt": "2026-06-13T11:30:13.669Z",
-  "updatedAt": "2026-06-13T12:23:52.148Z",
-  "currentIteration": 1,
+  "updatedAt": "2026-06-13T13:18:44.145Z",
+  "currentIteration": 2,
   "maxIterations": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 2,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "opus",
@@ -75,8 +75,8 @@
       {
         "id": "Johnny-wks.8",
         "title": "[BUILD] Per-workspace MCP servers — move MCP from global to workspace-attached (no global MCP)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-wks.9",
@@ -96,6 +96,16 @@
       "durationMs": 1239813,
       "startedAt": "2026-06-13T11:30:22.377Z",
       "endedAt": "2026-06-13T11:51:02.190Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "Johnny-wks.8",
+      "taskTitle": "[BUILD] Per-workspace MCP servers — move MCP from global to workspace-attached (no global MCP)",
+      "taskCompleted": true,
+      "durationMs": 1960914,
+      "startedAt": "2026-06-13T11:51:10.383Z",
+      "endedAt": "2026-06-13T12:23:51.297Z"
     }
   ],
   "skippedTaskIds": [],
