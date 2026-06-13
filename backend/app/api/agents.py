@@ -34,7 +34,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_crypto, get_session
-from app.db.models import Agent, BotMode, MeetingAgent, ProviderCredential, Workspace
+from app.db.models import (
+    Agent,
+    BotMode,
+    GoogleAccount,
+    MeetingAgent,
+    ProviderCredential,
+    Workspace,
+)
 from app.providers.base import ProviderKind
 from app.security.crypto import CredentialCrypto
 
@@ -77,6 +84,10 @@ class AgentCreate(BaseModel):
     # Workspace attachment (Johnny-wks.1): which execution environment the
     # agent's delegated work runs in. None/omitted = the default workspace.
     workspace_id: int | None = None
+    # Meeting-bot identity (Johnny-wks.7): the Google account this agent JOINS
+    # meetings as. None/omitted = no agent-level identity (per-meeting
+    # resolution unchanged). NOT the workspace and NOT the gog keyring.
+    meeting_bot_account_id: int | None = None
 
     @field_validator("allowed_replies")
     @classmethod
@@ -109,6 +120,9 @@ class AgentUpdate(BaseModel):
     tts_options: dict[str, Any] | None = None
     # Send ``null`` to reattach the agent to the default workspace.
     workspace_id: int | None = None
+    # Send ``null`` to clear the agent-level meeting-bot identity (Johnny-wks.7)
+    # — meetings then resolve the join identity per-assignment / per-meeting.
+    meeting_bot_account_id: int | None = None
 
     @field_validator("allowed_replies")
     @classmethod
@@ -142,6 +156,10 @@ class AgentRead(BaseModel):
     # (the provider-pin NULL-inherits convention); the snapshot stamped at
     # dispatch always carries the resolved effective workspace.
     workspace_id: int | None
+    # Meeting-bot identity (Johnny-wks.7): the Google account this agent joins
+    # meetings as. None = no agent-level identity; the join falls back to the
+    # per-assignment / per-meeting account (Johnny-trt.45/46).
+    meeting_bot_account_id: int | None
     created_at: datetime
     updated_at: datetime
     # How many meetings currently assign this agent (``meeting_agents``
@@ -234,6 +252,30 @@ def _validate_workspace_fk(session: Session, data: dict[str, Any]) -> None:
         )
 
 
+def _validate_meeting_bot_account_fk(session: Session, data: dict[str, Any]) -> None:
+    """Reject a ``meeting_bot_account_id`` that names no Google account (422).
+
+    ``None`` is always legal — it means no agent-level meeting-bot identity, so
+    the join falls back to the per-assignment / per-meeting account
+    (Johnny-wks.7). The row's bot-session capability (a ``storage_state.json``
+    on disk) is *not* required here: a row can be picked before its session is
+    seeded, and a missing session degrades exactly as it always has (the
+    meet-worker lands on Google's sign-in screen). ``google_accounts`` rows are
+    global and dual-capability, so any existing row is a valid pick.
+    """
+    value = data.get("meeting_bot_account_id")
+    if value is None:
+        return
+    if session.get(GoogleAccount, value) is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"meeting_bot_account_id={value} does not reference an "
+                "existing Google account"
+            ),
+        )
+
+
 def _validate_behavior(
     *,
     mode: BotMode,
@@ -319,6 +361,7 @@ def create_agent(payload: AgentCreate, session: SessionDep) -> AgentRead:
     data = payload.model_dump()
     _validate_provider_fks(session, data)
     _validate_workspace_fk(session, data)
+    _validate_meeting_bot_account_fk(session, data)
     _validate_behavior(
         mode=payload.mode,
         allowed_replies=payload.allowed_replies,
@@ -361,6 +404,7 @@ def clone_agent(agent_id: int, session: SessionDep) -> AgentRead:
         tts_voice_id=src.tts_voice_id,
         tts_options=dict(src.tts_options or {}),
         workspace_id=src.workspace_id,
+        meeting_bot_account_id=src.meeting_bot_account_id,
         is_default=False,
     )
     session.add(row)
@@ -409,6 +453,7 @@ def update_agent(
 
     _validate_provider_fks(session, data)
     _validate_workspace_fk(session, data)
+    _validate_meeting_bot_account_fk(session, data)
 
     effective: dict[str, Any] = {
         "mode": row.mode,

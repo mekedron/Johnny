@@ -124,6 +124,7 @@ def _seed_agent(
     allowed_replies: list[str] | None = None,
     confidence_threshold: float = 0.7,
     is_default: bool = False,
+    meeting_bot_account_id: int | None = None,
 ) -> Agent:
     row = Agent(
         name=name,
@@ -132,6 +133,7 @@ def _seed_agent(
         allowed_replies=allowed_replies or [],
         confidence_threshold=confidence_threshold,
         is_default=is_default,
+        meeting_bot_account_id=meeting_bot_account_id,
     )
     sess.add(row)
     sess.flush()
@@ -735,6 +737,147 @@ async def test_per_assignment_identity_account_with_meeting_fallback(
     identities = {c.agent_id: c.identity_account_id for c in launcher.started}
     assert identities[aria.id] == second_account.id
     assert identities[finn.id] == cfg.identity_account_id
+
+
+# --- Johnny-wks.7: per-AGENT meeting-bot identity ---------------------------
+
+
+def _seed_extra_account(sess: Session, *, email: str) -> GoogleAccount:
+    account = GoogleAccount(email=email, refresh_token_encrypted="x")
+    sess.add(account)
+    sess.flush()
+    return account
+
+
+@pytest.mark.asyncio
+async def test_agent_meeting_bot_account_overrides_meeting_default(
+    db_session: Session,
+) -> None:
+    """Johnny-wks.7: an agent with its own meeting-bot account joins as that
+    account, overriding the meeting-level identity (no per-assignment pin)."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    bot_account = _seed_extra_account(db_session, email="agent-bot@example.com")
+    agent = _seed_agent(
+        db_session, name="Aria", meeting_bot_account_id=bot_account.id
+    )
+    _assign_agent(db_session, meeting=cfg, agent=agent, position=0)
+
+    launcher = NoopContainerLauncher()
+    await start_sessions_for_meeting(db_session, meeting=cfg, launcher=launcher)
+
+    assert launcher.started[0].identity_account_id == bot_account.id
+    # The meeting-level account was NOT used — the agent carries its own.
+    assert bot_account.id != cfg.identity_account_id
+
+
+@pytest.mark.asyncio
+async def test_null_agent_account_preserves_meeting_resolution(
+    db_session: Session,
+) -> None:
+    """Behavior-preserving: a NULL agent-level account resolves exactly as
+    before wks.7 — the meeting-level identity account."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    agent = _seed_agent(db_session, name="Aria", meeting_bot_account_id=None)
+    _assign_agent(db_session, meeting=cfg, agent=agent, position=0)
+
+    launcher = NoopContainerLauncher()
+    await start_sessions_for_meeting(db_session, meeting=cfg, launcher=launcher)
+
+    assert launcher.started[0].identity_account_id == cfg.identity_account_id
+
+
+@pytest.mark.asyncio
+async def test_per_assignment_pin_still_beats_agent_level_account(
+    db_session: Session,
+) -> None:
+    """The per-assignment pin (trt.45) is the most specific — the agent-level
+    account is only the default it sources from, so an explicit pin wins."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    agent_account = _seed_extra_account(db_session, email="agent-bot@example.com")
+    pinned_account = _seed_extra_account(db_session, email="pinned@example.com")
+    agent = _seed_agent(
+        db_session, name="Aria", meeting_bot_account_id=agent_account.id
+    )
+    _assign_agent(
+        db_session,
+        meeting=cfg,
+        agent=agent,
+        position=0,
+        identity_account_id=pinned_account.id,
+    )
+
+    launcher = NoopContainerLauncher()
+    await start_sessions_for_meeting(db_session, meeting=cfg, launcher=launcher)
+
+    assert launcher.started[0].identity_account_id == pinned_account.id
+
+
+@pytest.mark.asyncio
+async def test_two_agents_distinct_meeting_bot_accounts_are_distinct(
+    db_session: Session,
+) -> None:
+    """Acceptance: two agents in ONE meeting, each with its own meeting-bot
+    account, join as two distinct identities — no single-account collision."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    aria_account = _seed_extra_account(db_session, email="aria-bot@example.com")
+    finn_account = _seed_extra_account(db_session, email="finn-bot@example.com")
+    aria = _seed_agent(
+        db_session, name="Aria", meeting_bot_account_id=aria_account.id
+    )
+    finn = _seed_agent(
+        db_session, name="Finn", meeting_bot_account_id=finn_account.id
+    )
+    _assign_agent(db_session, meeting=cfg, agent=aria, position=0)
+    _assign_agent(db_session, meeting=cfg, agent=finn, position=1)
+
+    launcher = NoopContainerLauncher()
+    await start_sessions_for_meeting(db_session, meeting=cfg, launcher=launcher)
+
+    identities = {c.agent_id: c.identity_account_id for c in launcher.started}
+    assert identities[aria.id] == aria_account.id
+    assert identities[finn.id] == finn_account.id
+    assert identities[aria.id] != identities[finn.id]
+
+
+@pytest.mark.asyncio
+async def test_two_agents_may_share_one_meeting_bot_account(
+    db_session: Session,
+) -> None:
+    """Acceptance: opt-in shared identity — two agents MAY point at the SAME
+    meeting-bot account (the operator's choice, never workspace-driven)."""
+    cfg = _seed_full_meeting(
+        db_session,
+        start_offset=timedelta(seconds=30),
+        end_offset=timedelta(minutes=30),
+    )
+    shared = _seed_extra_account(db_session, email="shared-bot@example.com")
+    aria = _seed_agent(db_session, name="Aria", meeting_bot_account_id=shared.id)
+    finn = _seed_agent(db_session, name="Finn", meeting_bot_account_id=shared.id)
+    _assign_agent(db_session, meeting=cfg, agent=aria, position=0)
+    _assign_agent(db_session, meeting=cfg, agent=finn, position=1)
+
+    launcher = NoopContainerLauncher()
+    await start_sessions_for_meeting(db_session, meeting=cfg, launcher=launcher)
+
+    identities = {c.agent_id: c.identity_account_id for c in launcher.started}
+    assert identities[aria.id] == shared.id
+    assert identities[finn.id] == shared.id
 
 
 @pytest.mark.asyncio

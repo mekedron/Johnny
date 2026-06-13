@@ -29,6 +29,11 @@ export interface Agent {
 	tts_options: Record<string, unknown> | null;
 	/** Workspace attachment (Johnny-wks.1); null = the default workspace. */
 	workspace_id: number | null;
+	/**
+	 * Meeting-bot identity (Johnny-wks.7): the Google account this agent joins
+	 * meetings as. null = no agent-level identity (per-meeting resolution).
+	 */
+	meeting_bot_account_id: number | null;
 	created_at: string;
 	updated_at: string;
 	/** Meetings currently assigning this agent — drives the delete warning. */
@@ -55,6 +60,8 @@ export interface AgentPayload {
 	tts_voice_id?: string | null;
 	/** Explicit `null` reattaches to the default workspace (Johnny-wks.1). */
 	workspace_id?: number | null;
+	/** Meeting-bot identity (Johnny-wks.7); explicit `null` clears it. */
+	meeting_bot_account_id?: number | null;
 }
 
 const API_BASE: string = import.meta.env?.VITE_API_BASE ?? 'http://localhost:8000';
@@ -203,6 +210,8 @@ export interface AgentDraft {
 	tts_voice_id: string | null;
 	/** Workspace attachment; null = the default workspace (Johnny-wks.5). */
 	workspace_id: number | null;
+	/** Meeting-bot identity (Johnny-wks.7); null = per-meeting resolution. */
+	meeting_bot_account_id: number | null;
 }
 
 /** A draft mirroring `agent`, or the blank create-mode draft for `null`. */
@@ -220,7 +229,8 @@ export function draftFromAgent(agent: Agent | null): AgentDraft {
 		reasoning_llm_provider_id: agent?.reasoning_llm_provider_id ?? null,
 		tts_provider_id: agent?.tts_provider_id ?? null,
 		tts_voice_id: agent?.tts_voice_id ?? null,
-		workspace_id: agent?.workspace_id ?? null
+		workspace_id: agent?.workspace_id ?? null,
+		meeting_bot_account_id: agent?.meeting_bot_account_id ?? null
 	};
 }
 
@@ -283,7 +293,8 @@ export function draftToCreatePayload(draft: AgentDraft): AgentPayload {
 		reasoning_llm_provider_id: draft.reasoning_llm_provider_id,
 		tts_provider_id: draft.tts_provider_id,
 		tts_voice_id: draft.tts_voice_id,
-		workspace_id: draft.workspace_id
+		workspace_id: draft.workspace_id,
+		meeting_bot_account_id: draft.meeting_bot_account_id
 	};
 }
 
@@ -324,6 +335,9 @@ export function diffAgentPayload(saved: Agent, draft: AgentDraft): AgentPayload 
 	if (draftVoice !== savedVoice) patch.tts_voice_id = draftVoice;
 	if ((full.workspace_id ?? null) !== saved.workspace_id) {
 		patch.workspace_id = full.workspace_id ?? null;
+	}
+	if ((full.meeting_bot_account_id ?? null) !== saved.meeting_bot_account_id) {
+		patch.meeting_bot_account_id = full.meeting_bot_account_id ?? null;
 	}
 	return patch;
 }

@@ -34,6 +34,7 @@
 	import ToolsPanel from '$lib/components/capabilities/ToolsPanel.svelte';
 	import VoicePicker from '$lib/components/settings/VoicePicker.svelte';
 	import WorkspaceAccountsPanel from '$lib/components/workspaces/WorkspaceAccountsPanel.svelte';
+	import MeetingBotAccountPicker from '$lib/components/agents/MeetingBotAccountPicker.svelte';
 	import { BOT_MODES, BOT_MODE_LABEL } from '$lib/sessionDetail';
 	import { listProviders, playSample, type ProviderList } from '$lib/providers';
 	import { listSkills, skillStatus } from '$lib/capabilities';
@@ -299,6 +300,7 @@
 
 	const SECTIONS = [
 		{ id: 'identity', label: 'Identity' },
+		{ id: 'meeting-bot', label: 'Meeting bot' },
 		{ id: 'character', label: 'Character' },
 		{ id: 'behavior', label: 'Behavior' },
 		{ id: 'voice-brain', label: 'Voice & brain' },
@@ -460,6 +462,40 @@
 					bind:value={draft.description}
 					data-testid="identity-description"
 				></textarea>
+			</div>
+		</section>
+
+		<!-- ─── MEETING BOT ──────────────────────────────────────────────── -->
+		<!-- The Google identity this agent JOINS Meet calls as (Johnny-wks.7).
+		     The ONLY place an agent's meeting-bot identity is managed — the
+		     Settings page no longer carries a Meeting Bots section. Distinct
+		     from the workspace's gog keyring (Capabilities, below): that is
+		     container-only CLI tooling; this is the meeting join identity. -->
+		<section
+			id="meeting-bot"
+			class="border-border bg-surface-2 flex scroll-mt-6 flex-col gap-4 rounded-md border p-5"
+			data-testid="section-meeting-bot"
+		>
+			<header class="flex flex-col gap-0.5">
+				<h2 class="text-foreground m-0 text-xs font-semibold tracking-widest uppercase">
+					Meeting bot
+				</h2>
+				<p class="text-muted-foreground m-0 text-xs">
+					The Google account this agent signs in as when it joins a Meet call. Each agent
+					carries its own identity, so two agents in one meeting are two distinct
+					participants. Connect a new bot session or pick an existing one.
+				</p>
+			</header>
+			<div class="flex items-start gap-2">
+				<div class="min-w-0 flex-1">
+					<MeetingBotAccountPicker
+						value={draft.meeting_bot_account_id}
+						onChange={(id) => (draft.meeting_bot_account_id = id)}
+					/>
+				</div>
+				{#if agent !== null && patch.meeting_bot_account_id !== undefined}
+					<Badge variant="outline" data-testid="meeting-bot-unsaved-badge">applies after save</Badge>
+				{/if}
 			</div>
 		</section>
 

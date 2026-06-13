@@ -438,11 +438,30 @@ class Agent(TimestampMixin, Base):
     workspace_id: Mapped[int | None] = mapped_column(
         ForeignKey("workspaces.id", ondelete="RESTRICT"), nullable=True
     )
+    # Meeting-bot identity (Johnny-wks.7): the Google account this agent
+    # JOINS its meetings as — the Playwright ``storage_state.json`` the
+    # meet-worker mounts so Chromium opens already signed in. Set on the
+    # agent edit page; it is the agent-level default the per-assignment join
+    # identity (:attr:`MeetingAgent.identity_account_id`, Johnny-trt.45)
+    # sources from, which in turn falls back to the meeting-level
+    # :attr:`MeetingConfig.identity_account_id`. ``NULL`` = no agent-level
+    # identity, so resolution is byte-identical to pre-wks.7 (behavior
+    # preserving). Two agents MAY point at the same account (opt-in shared
+    # identity); distinct accounts make co-attending agents distinct Meet
+    # participants. ``SET NULL`` — deleting the account detaches the agent
+    # rather than blocking the delete or orphaning the row. NOT the gog
+    # workspace keyring (wks.4) and NOT a workspace attachment.
+    meeting_bot_account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("google_accounts.id", ondelete="SET NULL"), nullable=True
+    )
 
     meeting_assignments: Mapped[list[MeetingAgent]] = relationship(
         back_populates="agent", cascade="all, delete-orphan"
     )
     workspace: Mapped[Workspace | None] = relationship(back_populates="agents")
+    meeting_bot_account: Mapped[GoogleAccount | None] = relationship(
+        foreign_keys=[meeting_bot_account_id]
+    )
 
 
 class MeetingConfig(TimestampMixin, Base):

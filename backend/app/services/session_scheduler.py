@@ -723,11 +723,22 @@ async def _start_one_session(
     calendar_description = (event.description or "") if event is not None else ""
     calendar_attachments = (event.attachments_text or "") if event is not None else ""
 
-    # Per-assignment identity (Johnny-trt.45): each agent joins the Meet as
-    # its own Google account so two agents appear as two participants — a
-    # single account cannot join one Meet twice. The meeting-level identity
-    # account remains the fallback for assignments that pin none.
+    # Meeting-bot join identity, most-specific wins (Johnny-wks.7 layered on
+    # Johnny-trt.45). Each agent joins the Meet as its own Google account so
+    # two agents appear as two participants — a single account cannot join one
+    # Meet twice:
+    #   1. meeting-level default (MeetingConfig.identity_account_id) — base.
+    #   2. agent-level identity (Agent.meeting_bot_account_id, wks.7) — the
+    #      account the agent joins meetings as, set on the agent edit page.
+    #      Two agents with distinct accounts are distinct participants; two
+    #      MAY share one account (opt-in). NULL here keeps step 1, so an agent
+    #      with no meeting-bot account resolves exactly as before wks.7.
+    #   3. per-assignment override (MeetingAgent.identity_account_id, trt.45) —
+    #      the most specific pin; the agent-level account is the default it
+    #      sources from, so an explicit per-assignment pin still wins.
     identity_account_id = meeting.identity_account_id
+    if agent is not None and agent.meeting_bot_account_id is not None:
+        identity_account_id = agent.meeting_bot_account_id
     if assignment is not None and assignment.identity_account_id is not None:
         identity_account_id = assignment.identity_account_id
 

@@ -91,9 +91,11 @@ def test_agents_table_shape() -> None:
         "tts_options",
         # Johnny-wks.1: the workspace attachment (NULL = default workspace).
         "workspace_id",
+        # Johnny-wks.7: the meeting-bot join identity (NULL = per-meeting).
+        "meeting_bot_account_id",
     }.issubset(columns)
     fk_targets = {fk.column.table.name for fk in table.foreign_keys}
-    assert fk_targets == {"provider_credentials", "workspaces"}
+    assert fk_targets == {"provider_credentials", "workspaces", "google_accounts"}
 
 
 def test_workspaces_table_shape() -> None:

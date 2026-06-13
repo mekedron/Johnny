@@ -47,6 +47,7 @@ function makeAgent(overrides: Partial<Agent> = {}): Agent {
 		tts_voice_id: null,
 		tts_options: null,
 		workspace_id: null,
+		meeting_bot_account_id: null,
 		created_at: '2026-01-01T00:00:00Z',
 		updated_at: '2026-01-01T00:00:00Z',
 		meeting_count: 0,
@@ -138,6 +139,14 @@ describe('draftFromAgent', () => {
 	it('carries the workspace attachment (null = the default workspace)', () => {
 		assert.equal(draftFromAgent(null).workspace_id, null);
 		assert.equal(draftFromAgent(makeAgent({ workspace_id: 4 })).workspace_id, 4);
+	});
+
+	it('carries the meeting-bot account (null = per-meeting resolution)', () => {
+		assert.equal(draftFromAgent(null).meeting_bot_account_id, null);
+		assert.equal(
+			draftFromAgent(makeAgent({ meeting_bot_account_id: 7 })).meeting_bot_account_id,
+			7
+		);
 	});
 });
 
@@ -266,6 +275,19 @@ describe('diffAgentPayload', () => {
 		back.workspace_id = null; // picked the default → store null, not its id
 		assert.deepEqual(diffAgentPayload(attached, back), { workspace_id: null });
 		assert.deepEqual(diffAgentPayload(attached, draftFromAgent(attached)), {});
+	});
+
+	it('patches the meeting-bot account, with explicit null to clear it', () => {
+		const agent = makeAgent({ character_prompt: 'p', meeting_bot_account_id: null });
+		const draft = draftFromAgent(agent);
+		draft.meeting_bot_account_id = 7;
+		assert.deepEqual(diffAgentPayload(agent, draft), { meeting_bot_account_id: 7 });
+
+		const bound = makeAgent({ character_prompt: 'p', meeting_bot_account_id: 7 });
+		const cleared = draftFromAgent(bound);
+		cleared.meeting_bot_account_id = null; // None → per-meeting resolution
+		assert.deepEqual(diffAgentPayload(bound, cleared), { meeting_bot_account_id: null });
+		assert.deepEqual(diffAgentPayload(bound, draftFromAgent(bound)), {});
 	});
 });
 

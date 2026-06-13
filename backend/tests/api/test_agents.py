@@ -407,6 +407,90 @@ def test_clone_carries_the_workspace_attachment(
     assert clone["workspace_id"] == ws.id
 
 
+# --- meeting-bot account (Johnny-wks.7) --------------------------------------
+
+
+def _seed_google_account(db_session: Session, *, email: str = "bot@example.com") -> Any:
+    from app.db.models import GoogleAccount
+
+    row = GoogleAccount(email=email, refresh_token_encrypted="enc")
+    db_session.add(row)
+    db_session.flush()
+    return row
+
+
+def test_create_defaults_to_null_meeting_bot_account(client: TestClient) -> None:
+    body = client.post("/agents", json=_create_payload()).json()
+    # None = no agent-level identity; resolution falls back per-meeting.
+    assert body["meeting_bot_account_id"] is None
+
+
+def test_meeting_bot_account_round_trips_via_create_patch_and_null(
+    client: TestClient, db_session: Session
+) -> None:
+    account = _seed_google_account(db_session)
+    created = client.post(
+        "/agents", json=_create_payload(meeting_bot_account_id=account.id)
+    ).json()
+    assert created["meeting_bot_account_id"] == account.id
+    assert (
+        client.get(f"/agents/{created['id']}").json()["meeting_bot_account_id"]
+        == account.id
+    )
+
+    # Explicit null clears the agent-level identity.
+    patched = client.patch(
+        f"/agents/{created['id']}", json={"meeting_bot_account_id": None}
+    ).json()
+    assert patched["meeting_bot_account_id"] is None
+
+    patched = client.patch(
+        f"/agents/{created['id']}", json={"meeting_bot_account_id": account.id}
+    ).json()
+    assert patched["meeting_bot_account_id"] == account.id
+
+
+def test_meeting_bot_account_unknown_422(
+    client: TestClient, db_session: Session
+) -> None:
+    resp = client.post("/agents", json=_create_payload(meeting_bot_account_id=999))
+    assert resp.status_code == 422
+    assert "meeting_bot_account_id=999" in resp.json()["detail"]
+
+    created = client.post("/agents", json=_create_payload()).json()
+    resp = client.patch(
+        f"/agents/{created['id']}", json={"meeting_bot_account_id": 999}
+    )
+    assert resp.status_code == 422
+
+
+def test_two_agents_may_share_one_meeting_bot_account(
+    client: TestClient, db_session: Session
+) -> None:
+    # Opt-in shared identity: pointing two agents at the same account is
+    # allowed (no uniqueness on the FK).
+    account = _seed_google_account(db_session)
+    a = client.post(
+        "/agents", json=_create_payload(name="A", meeting_bot_account_id=account.id)
+    ).json()
+    b = client.post(
+        "/agents", json=_create_payload(name="B", meeting_bot_account_id=account.id)
+    ).json()
+    assert a["meeting_bot_account_id"] == account.id
+    assert b["meeting_bot_account_id"] == account.id
+
+
+def test_clone_carries_the_meeting_bot_account(
+    client: TestClient, db_session: Session
+) -> None:
+    account = _seed_google_account(db_session)
+    created = client.post(
+        "/agents", json=_create_payload(meeting_bot_account_id=account.id)
+    ).json()
+    clone = client.post(f"/agents/{created['id']}/clone").json()
+    assert clone["meeting_bot_account_id"] == account.id
+
+
 # --- test_voice endpoint (Johnny-trt.42) -------------------------------------
 
 

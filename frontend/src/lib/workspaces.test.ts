@@ -53,6 +53,7 @@ function makeAgent(overrides: Partial<Agent> = {}): Agent {
 		tts_voice_id: null,
 		tts_options: null,
 		workspace_id: null,
+		meeting_bot_account_id: null,
 		created_at: '2026-01-01T00:00:00Z',
 		updated_at: '2026-01-01T00:00:00Z',
 		meeting_count: 0,
