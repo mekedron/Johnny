@@ -61,6 +61,7 @@ import-safe top-level :mod:`johnny.agent` package.
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import re
 import time
@@ -75,13 +76,14 @@ from livekit.agents.voice import SpeechHandle
 from app.providers.base import ChatMessage, LLMProvider
 from johnny.agent.answer import uses_allowlist
 from johnny.agent.approval import ApprovalCoordinator, ApprovalRound
-from johnny.agent.complexity import SHADOW_KEY, score_complexity
+from johnny.agent.complexity import SHADOW_KEY, matched_catalog_kinds, score_complexity
 from johnny.agent.gate import (
     GateAction,
     TerminalTracker,
     TurnLedger,
     run_gate,
 )
+from johnny.agent.internal_tools import is_internal_kind
 from johnny.agent.interruptions import InterruptionMonitor
 from johnny.agent.observability import (
     RecordDecision,
@@ -156,6 +158,50 @@ ROUTER_DECISION_SCHEMA = _reasoning._ROUTER_SCHEMA
 # catalog prompt block another ~+560 ms (longer delegation-aware reasoning) —
 # both paid only where a coordinator can honour a delegate verdict.
 ROUTER_DECISION_SCHEMA_NO_CATALOG = _reasoning._ROUTER_SCHEMA_NO_CATALOG
+
+
+def build_router_decision_schema(
+    task_catalog: tuple[TaskCatalogEntry, ...],
+) -> dict[str, object]:
+    """:data:`ROUTER_DECISION_SCHEMA` with ``task.kind`` pinned to the catalog (Johnny-etu.6).
+
+    The base schema leaves ``task.kind`` a free-form ``{"type": "string"}``,
+    so a grammar-constrained local decoder (Ollama / llama.cpp, the canonical
+    ``llama3.2:3b`` router) is free to emit a **hallucinated** kind that names
+    the *intent* but matches no catalog slug — session 9's
+    ``upcoming_events_summary`` for the ``google-calendar`` skill. The gate
+    then degrades that unknown kind to SPEAK
+    (:meth:`RouterGate._degrade_unknown_kind_delegate`) and the answer model
+    fabricates events instead of running the real skill. Constraining
+    ``task.kind`` to an ``enum`` of the catalog's named kinds — exactly the way
+    ``action`` is already an enum (the reason the model never emits an invalid
+    *action*) — makes the hallucination *unrepresentable*: a ``delegate``
+    verdict MUST carry a real slug, so the calendar ask delegates to
+    ``google-calendar`` and "end the session" to ``session.end``.
+
+    The enum mirrors precisely what the prompt advertises — every NON-hidden
+    entry (the delegatable block plus the unavailable-decline block;
+    :func:`~johnny.agent.task_catalog.render_task_catalog`). Policy-hidden
+    kinds (Johnny-trt.38) stay out: the prompt never names them, so the schema
+    must not either. The existing delegate-degrade chain is unchanged behind
+    this — a verdict for an unavailable-but-listed kind still speaks the
+    trt.55 decline, an ackless one still degrades to SPEAK — so this only
+    removes the *off-catalog* failure mode. Falls back to the free-form base
+    schema when no kind is nameable (an empty or all-hidden catalog) so the
+    constraint never emits an empty ``enum`` the decoder would reject; in
+    practice ``session.end`` is always available, so any session with a
+    coordinator has at least one nameable kind.
+    """
+    kinds = [entry.kind for entry in task_catalog if not entry.hidden]
+    if not kinds:
+        return ROUTER_DECISION_SCHEMA
+    schema = copy.deepcopy(ROUTER_DECISION_SCHEMA)
+    schema["properties"]["task"]["properties"]["kind"] = {
+        "type": "string",
+        "enum": kinds,
+        "description": "Task kind — MUST be exactly one of the catalog kinds named in the prompt.",
+    }
+    return schema
 
 
 def _default_clock() -> int:
@@ -315,6 +361,24 @@ unavailable kind, queue+ack for an available one). Stashed before the decision
 emit (the trt.50 ride-along) with ``{from_action, to_action, kind}``, so the
 decision row records the re-route exactly like the delegate-degrade markers."""
 
+KEYWORD_DELEGATE_KEY = "keyword_delegate"
+"""``decision.raw`` key marking a ``speak`` / ``status`` verdict the gate
+re-routed to ``delegate`` by recovering the kind from the utterance's catalog
+keywords (Johnny-etu.6). The local 3B router unreliably emits ``delegate`` even
+for an explicit capability ask: "end the session" comes back ``status`` (and
+only sometimes carries the ``session.end`` task object the etu.14 re-route
+needs), and "check my calendar" comes back ``speak`` — the answer model then
+fabricates instead of running the skill (session 9's invented events). When the
+utterance unambiguously matches exactly ONE *available* catalog kind's keywords
+(:func:`johnny.agent.complexity.matched_catalog_kinds`) and nothing is in flight
+to report, that kind IS the intent, so the verdict is rewritten to ``delegate``
+with a synthesized ack and the standard degrades take it. Stashed before the
+decision emit (the trt.50 ride-along) with ``{from_action, to_action, kind}``,
+the same shape as :data:`STATUS_REROUTE_KEY`. A SPEAK verdict on a meeting
+surface is left alone (the trt.50 over-delegation guard — ambient meeting talk
+must not trigger an unasked skill run); empty-registry STATUS recovers on every
+surface."""
+
 DECIDED_REPLY_MAX_CHARS = 48
 """Upper bound on a ``suggested_reply`` the gate will speak VERBATIM
 (Johnny-etu.14). The reported divergence is a SHORT acknowledgement the answer
@@ -419,6 +483,22 @@ def delegate_failure_correction(result_text: str) -> str:
     return f"Actually — I can't do that yet: {spoken}"
 
 
+def _recovered_ack(kind: str) -> str:
+    """The spoken ack for a keyword-recovered delegate (Johnny-etu.6).
+
+    A speak/status verdict the gate re-routes to ``delegate``
+    (:meth:`RouterGate._recover_keyword_delegate`) carries no model-authored
+    ack, so the gate supplies one — non-blank so it survives
+    :meth:`RouterGate._degrade_ackless_delegate`, and brief/honest so a real
+    result spoken right after it beats the fabricated answer the SPEAK would
+    have produced. Internal session-control kinds read as a sign-off ("on it,
+    wrapping up"); a skill is the generic check-and-report. Deliberately plain
+    (no character voice) — the immediate filler before the real settle speaks."""
+    if is_internal_kind(kind):
+        return "Okay — taking care of that now."
+    return "On it — let me look that up for you."
+
+
 @dataclass(frozen=True, slots=True)
 class RouterGateConfig:
     """The router-decision knobs, mirrored from the ``PipelineConfig`` subset.
@@ -471,6 +551,15 @@ class RouterGateConfig:
     # delegates. Empty = validation disabled (hand-built gates and the
     # replay harness keep the trt.57 ride-to-the-executor stance).
     executor_kinds: frozenset[str] = frozenset()
+    # Whether this session is connected to a meeting (Johnny-etu.6): the
+    # ``calendar_event_id is not None`` predicate the assembly already derives
+    # for surface-scoping the internal tools. The keyword delegate-recovery
+    # (:meth:`RouterGate._recover_keyword_delegate`) leaves a SPEAK verdict
+    # untouched on a meeting surface — a participant's ambient "good meeting" /
+    # "let's schedule" must never trigger an unasked skill run — while the
+    # playground (direct commands to the bot) and the always-degenerate
+    # empty-registry STATUS are safe to recover. Default False = playground.
+    meeting_backed: bool = False
 
 
 class RouterGate:
@@ -831,6 +920,20 @@ class RouterGate:
         # degrades so a re-routed verdict flows through them; stashes its marker
         # before the decision emit like every other degrade.
         decision = self._reroute_status_with_task(decision, task_context, turn_id)
+
+        # Keyword delegate-recovery (Johnny-etu.6): the small router unreliably
+        # chooses ``delegate`` even for an explicit capability ask — "end the
+        # session" comes back ``status`` without the session.end task object the
+        # re-route above needs, "check my calendar" comes back ``speak`` and the
+        # answer model fabricates. When the utterance unambiguously matches one
+        # available catalog kind and nothing is in flight, recover the dropped
+        # delegate so the real skill/tool runs. Runs after the etu.14 re-route
+        # (so the model's own composed task wins) and before the degrades (so a
+        # recovered verdict flows through them); stashes its marker before the
+        # decision emit like every other re-route.
+        decision = self._recover_keyword_delegate(
+            decision, task_context, new_message, turn_id
+        )
 
         # Delegate-verdict degrades, in precedence order. Availability FIRST
         # (Johnny-trt.55): an unavailable catalog kind becomes the
@@ -1359,6 +1462,113 @@ class RouterGate:
             task_request.kind,
         )
         return replace(decision, action=DELEGATE_ACTION, task_request=task_request)
+
+    def _recover_keyword_delegate(
+        self,
+        decision: RouterDecision,
+        task_context: AnswerTaskContext,
+        new_message: LKChatMessage,
+        turn_id: str,
+    ) -> RouterDecision:
+        """Recover the delegate the small router dropped to speak/status (Johnny-etu.6).
+
+        The local 3B router unreliably emits ``delegate`` even for an explicit
+        capability ask (.validation/Johnny-etu.6 replay, llama3.2:3b): "end the
+        session" comes back ``status`` every time, carrying the ``session.end``
+        task object the :meth:`_reroute_status_with_task` re-route needs only
+        ~3/5 of the time; "can you check my calendar" comes back ``speak`` ~4/5
+        — and a SPEAK on a capability the session HAS lets the answer model
+        fabricate (session 9 invented calendar events while ``gog`` held the
+        real ones). The schema kind-enum (:func:`build_router_decision_schema`)
+        fixes a *hallucinated* kind once the model delegates, but cannot make it
+        choose ``delegate`` at all; this is the action-selection backstop.
+
+        When the utterance unambiguously matches exactly ONE *available* catalog
+        kind's keywords (:func:`~johnny.agent.complexity.matched_catalog_kinds`
+        — the same delegate-prior matching the trt.50 scorer uses, here read as
+        the matched kinds) and nothing is in flight to report, that kind IS the
+        intent: rewrite the verdict to ``delegate`` with a synthesized ack and
+        let the standard degrades take it (a deterministic decline if the kind
+        somehow reads unavailable, queue+ack otherwise). The ack is synthesized
+        because the model authored none on a speak/status verdict; an
+        ack-bearing reroute then survives :meth:`_degrade_ackless_delegate`, and
+        a real result spoken after a brief honest ack beats a fabricated answer
+        — the inverse of the trt.53 ackless-degrade, justified because here the
+        capability is KNOWN to be wanted and available.
+
+        Guards keep it surgical:
+
+        * runs only with a coordinator wired (``self._tasks`` — no coordinator
+          means no delegate to recover) and only on ``speak`` / ``status``
+          (a ``delegate`` verdict already expresses the intent; the degrades and
+          the etu.14 re-route own it);
+        * only when the registry is empty (``task_context.empty``) — a real
+          "how's the calendar check going?" status with work in flight keeps its
+          summary, and an undelivered result routes through the grounded answer
+          path, never a fresh duplicate delegate;
+        * only when the verdict carries no ``task_request`` already (the etu.14
+          re-route handled the model's own composed task);
+        * a SPEAK verdict on a **meeting** surface is left untouched
+          (``meeting_backed`` — a participant's ambient "good meeting" / "let's
+          schedule next week" must never trigger an unasked skill run, the
+          trt.50 over-delegation guard); the playground's direct commands and
+          the always-degenerate empty-registry STATUS recover on every surface;
+        * exactly ONE available kind must match — zero leaves the verdict alone,
+          and an ambiguous multi-kind hit ("end the session and check my
+          calendar") defers to the model rather than guess.
+
+        The marker is stashed before the decision emit (the trt.50 ride-along)
+        so the row records the recovery, identical in shape to the other
+        re-route/degrade markers.
+        """
+        if self._tasks is None:
+            return decision
+        if decision.action not in (SPEAK_ACTION, STATUS_ACTION):
+            return decision
+        if decision.task_request is not None:
+            return decision
+        if not task_context.empty:
+            return decision
+        if decision.action == SPEAK_ACTION and self._config.meeting_backed:
+            return decision
+        text = (new_message.text_content or "").strip()
+        if not text:
+            return decision
+        available = tuple(
+            entry for entry in self._config.task_catalog if entry.available
+        )
+        matched = list(dict.fromkeys(matched_catalog_kinds(text, available)))
+        if len(matched) != 1:
+            return decision
+        kind = matched[0]
+        task_request = TaskRequest(kind=kind, ack=_recovered_ack(kind), args={})
+        decision.raw[KEYWORD_DELEGATE_KEY] = {
+            "from_action": decision.action,
+            "to_action": DELEGATE_ACTION,
+            "kind": kind,
+        }
+        logger.info(
+            "agent.router.gate: turn=%s %s verdict for an empty registry matched "
+            "exactly one available catalog kind=%r by keyword — recovering the "
+            "DELEGATE the small router dropped (Johnny-etu.6)",
+            turn_id,
+            decision.action,
+            kind,
+        )
+        # Confidence is forced to full: the recovery fires on a DETERMINISTIC
+        # exact-keyword match to exactly one available kind — a more reliable
+        # "the user asked for this" signal than the 3B model's own confidence
+        # self-report, which it sometimes returns as 0 on the very status/speak
+        # verdict being recovered (live: "end the session" came back
+        # confidence=0, which the threshold gate below would suppress, leaving
+        # the session LIVE). The keyword match IS the confidence.
+        return replace(
+            decision,
+            action=DELEGATE_ACTION,
+            should_speak=True,
+            confidence=1.0,
+            task_request=task_request,
+        )
 
     def _decided_reply_to_speak(
         self, decision: RouterDecision, task_context: AnswerTaskContext
@@ -2212,9 +2422,11 @@ class RouterGate:
         # Schema mirrors the prompt's catalog condition (Johnny-trt.59): no
         # catalog ⇒ no delegation vocabulary anywhere — the model can neither
         # read about nor emit delegate/status, and the constrained decode
-        # stays Phase-2-sized.
+        # stays Phase-2-sized. With a catalog, ``task.kind`` is pinned to the
+        # catalog's kinds (Johnny-etu.6) so a grammar-constrained local decoder
+        # cannot hallucinate an off-catalog kind the gate would have to degrade.
         schema = (
-            ROUTER_DECISION_SCHEMA
+            build_router_decision_schema(self._config.task_catalog)
             if self._config.task_catalog
             else ROUTER_DECISION_SCHEMA_NO_CATALOG
         )

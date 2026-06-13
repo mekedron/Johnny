@@ -624,6 +624,38 @@ def _score_catalog(text: str, catalog: tuple[TaskCatalogEntry, ...]) -> Dimensio
     return DimensionScore(name="catalog_match", score=score, signal=signal)
 
 
+def matched_catalog_kinds(
+    text: str, catalog: tuple[TaskCatalogEntry, ...]
+) -> list[str]:
+    """The catalog kinds whose keywords hit ``text`` — the delegate prior (Johnny-etu.6).
+
+    Same matching as the shadow-only :func:`_score_catalog` (English keywords
+    per the task_catalog contract, plus :data:`CATALOG_KEYWORD_TRANSLATIONS`
+    RU/FI stems, left-word-boundary prefix) but returned as the matched kinds
+    so the gate can recover the kind the user clearly asked for when the small
+    local router declined to ``delegate`` and fell back to ``speak`` / ``status``
+    (:meth:`johnny.agent.router_gate.RouterGate._recover_keyword_delegate`). The
+    score ladder is irrelevant here — the caller wants *which* kinds matched, not
+    how complex the turn is. Order follows the catalog; each kind appears at most
+    once; an entry with no keywords (every unavailable entry, by the
+    catalog-assembly contract) never matches, so passing the full catalog or only
+    its available slice is equivalent. Kept beside :func:`_score_catalog` so the
+    two never drift on what "a catalog keyword hit" means.
+    """
+    folded = text.casefold()
+    matched: list[str] = []
+    for entry in catalog:
+        for keyword in entry.keywords:
+            if not keyword:
+                continue
+            kw = keyword.casefold()
+            variants = (kw, *CATALOG_KEYWORD_TRANSLATIONS.get(kw, ()))
+            if any(_keyword_pattern(variant).search(folded) for variant in variants):
+                matched.append(entry.kind)
+                break
+    return matched
+
+
 def _score_token_estimate(text: str, config: ComplexityConfig) -> DimensionScore:
     """Length prior (rules.ts ``scoreTokenCount``), word-based for multiscript.
 
@@ -793,5 +825,6 @@ __all__ = [
     "SHADOW_KEY",
     "SIMPLE_KEYWORDS",
     "SIMPLE_TIER",
+    "matched_catalog_kinds",
     "score_complexity",
 ]

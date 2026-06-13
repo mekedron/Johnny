@@ -983,6 +983,11 @@ async def build_agent_runtime(
         executor_kinds=executor_kinds,
         agent_name=agent_display_name,
         peer_agent_names=config.peer_names,
+        # Surface predicate for keyword delegate-recovery (Johnny-etu.6): a
+        # meeting-backed session leaves a SPEAK verdict untouched so ambient
+        # meeting talk never triggers an unasked skill run; the playground
+        # (calendar_event_id is None) recovers dropped capability asks.
+        meeting_backed=config.calendar_event_id is not None,
     )
     gate = RouterGate(
         router_llm,

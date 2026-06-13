@@ -49,6 +49,7 @@ from johnny.agent.router_gate import (  # noqa: E402
     DECIDED_REPLY_KEY,
     DECIDED_REPLY_MAX_CHARS,
     DEFAULT_DELEGATE_ACK,
+    KEYWORD_DELEGATE_KEY,
     ROUTER_DECISION_SCHEMA,
     ROUTER_DECISION_SCHEMA_NO_CATALOG,
     STATUS_REROUTE_KEY,
@@ -56,6 +57,7 @@ from johnny.agent.router_gate import (  # noqa: E402
     UNKNOWN_KIND_KEY,
     RouterGate,
     RouterGateConfig,
+    build_router_decision_schema,
     capability_decline_speech,
     delegate_failure_correction,
 )
@@ -757,10 +759,22 @@ async def test_router_schema_follows_catalog_both_ways() -> None:
         decisions, config=RouterGateConfig(task_catalog=catalog)
     )
     await gate_with.run_turn(ChatContext.empty(), _user_msg("check my calendar"))
-    assert router_with.last_response_format is ROUTER_DECISION_SCHEMA
+    # A catalog-wired gate requests the full Phase-3 schema with task.kind
+    # pinned to the catalog's kinds (Johnny-etu.6) — delegation stays
+    # expressible, but the model can no longer hallucinate an off-catalog kind.
+    schema_with = router_with.last_response_format
+    assert schema_with is not None
+    assert schema_with["properties"]["task"]["properties"]["kind"]["enum"] == [
+        "calendar.upcoming_events"
+    ]
+    assert schema_with["properties"]["action"]["enum"] == ROUTER_DECISION_SCHEMA[
+        "properties"
+    ]["action"]["enum"]
 
     # An all-unavailable catalog still teaches the honest decline through the
-    # prompt, so the action vocabulary must stay expressible too.
+    # prompt, so the action vocabulary must stay expressible too — and the kind
+    # is still pinned (an unavailable-but-listed kind enters the enum so the
+    # trt.55 unavailable-decline degrade still fires on it).
     unavailable = (
         TaskCatalogEntry(
             kind="gmail.search",
@@ -773,7 +787,66 @@ async def test_router_schema_follows_catalog_both_ways() -> None:
         decisions, config=RouterGateConfig(task_catalog=unavailable)
     )
     await gate_unavail.run_turn(ChatContext.empty(), _user_msg("any new email?"))
-    assert router_unavail.last_response_format is ROUTER_DECISION_SCHEMA
+    schema_unavail = router_unavail.last_response_format
+    assert schema_unavail is not None
+    assert schema_unavail["properties"]["task"]["properties"]["kind"]["enum"] == [
+        "gmail.search"
+    ]
+
+
+def test_build_router_decision_schema_pins_kind_to_catalog() -> None:
+    """task.kind is constrained to the catalog kinds, hidden kinds excluded (Johnny-etu.6).
+
+    The base schema leaves kind free-form, which let the local 3B router emit a
+    hallucinated slug (session 9: ``upcoming_events_summary`` for
+    ``google-calendar``); pinning kind to an enum makes that unrepresentable.
+    Policy-hidden kinds (Johnny-trt.38) stay out of the enum because the prompt
+    never names them. An empty/all-hidden catalog falls back to the free-form
+    base schema so the enum is never empty.
+    """
+    from johnny.agent.task_catalog import TaskCatalogEntry
+
+    catalog = (
+        TaskCatalogEntry(kind="session.end", one_liner="End the session.", internal=True),
+        TaskCatalogEntry(
+            kind="meeting.leave",
+            one_liner="Leave the meeting.",
+            available=False,
+            unavailable_reason="not in a meeting",
+            internal=True,
+        ),
+        TaskCatalogEntry(kind="google-calendar", one_liner="Look up upcoming events."),
+        TaskCatalogEntry(
+            kind="finance.transfer",
+            one_liner="Move money.",
+            available=False,
+            hidden=True,
+            policy_layer="workspace",
+        ),
+    )
+    schema = build_router_decision_schema(catalog)
+    kind_field = schema["properties"]["task"]["properties"]["kind"]
+    # Every non-hidden kind is selectable (delegatable + unavailable-decline
+    # blocks); the policy-hidden finance kind is excluded.
+    assert kind_field["enum"] == ["session.end", "meeting.leave", "google-calendar"]
+    assert "finance.transfer" not in kind_field["enum"]
+    # The builder never mutates the shared base schema.
+    assert ROUTER_DECISION_SCHEMA["properties"]["task"]["properties"]["kind"] == {
+        "type": "string",
+        "description": "Task kind from the catalog.",
+    }
+    # Empty / all-hidden catalogs fall back to the free-form base (no empty enum).
+    assert build_router_decision_schema(()) is ROUTER_DECISION_SCHEMA
+    hidden_only = (
+        TaskCatalogEntry(
+            kind="finance.transfer",
+            one_liner="Move money.",
+            available=False,
+            hidden=True,
+            policy_layer="workspace",
+        ),
+    )
+    assert build_router_decision_schema(hidden_only) is ROUTER_DECISION_SCHEMA
 
 
 # --------------------------------------------------------------------------- #
@@ -3702,3 +3775,227 @@ async def test_status_with_task_no_coordinator_keeps_nothing_in_flight() -> None
     assert h.say.texts == [STATUS_NOTHING_IN_FLIGHT]
     decision, _turn = h.obs.decisions[0]
     assert STATUS_REROUTE_KEY not in decision.raw
+
+
+# --- (3) keyword delegate-recovery (Johnny-etu.6) ---------------------------
+
+
+def _keyword_catalog(*, meeting_backed: bool = False) -> tuple[Any, ...]:
+    """The default playground catalog WITH keywords — internal kinds + a real
+    google-calendar skill entry, the shape the keyword recovery matches against."""
+    from johnny.agent.internal_tools import internal_catalog_entries
+    from johnny.agent.task_catalog import TaskCatalogEntry
+
+    return (
+        *internal_catalog_entries(meeting_backed=meeting_backed),
+        TaskCatalogEntry(
+            kind="google-calendar",
+            one_liner="Look up upcoming events on the connected Google calendar.",
+            keywords=("calendar", "schedule", "event", "events", "agenda"),
+        ),
+    )
+
+
+async def test_bare_status_recovers_session_end_by_keyword() -> None:
+    """THE etu.6 session.end fix: the local router returns ``status`` for "end the
+    session" and drops the task object ~2/5 of the time (.validation/Johnny-etu.6),
+    so the etu.14 task re-route can't fire. With an empty registry and the
+    utterance matching exactly one available kind by keyword, recover the dropped
+    delegate so session.end actually runs instead of the nothing-in-flight line."""
+    h = _TaskGateHarness(
+        [_status_decision()],
+        config=RouterGateConfig(task_catalog=_keyword_catalog()),
+    )
+    msg = _user_msg("end the session now.")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    # Recovered to a real delegate: queued + the synthesized internal ack spoken,
+    # never the canned nothing-in-flight line.
+    assert len(h.sink.snapshot()) == 1
+    assert h.sink.snapshot()[0].spec.kind == "session.end"
+    assert h.say.texts == ["Okay — taking care of that now."]
+    assert STATUS_NOTHING_IN_FLIGHT not in h.say.texts
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "delegate"
+    marker = decision.raw[KEYWORD_DELEGATE_KEY]
+    assert marker == {
+        "from_action": "status",
+        "to_action": "delegate",
+        "kind": "session.end",
+    }
+    json.dumps(marker)  # JSON-safe as persisted by the subscriber
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_speak_recovers_calendar_in_playground() -> None:
+    """THE etu.6 calendar fix (session 9): "check my calendar" comes back ``speak``
+    and the answer model fabricates events; in a playground session recover the
+    dropped google-calendar delegate so the real skill runs."""
+    h = _TaskGateHarness(
+        [_speak_decision()],
+        config=RouterGateConfig(task_catalog=_keyword_catalog(), meeting_backed=False),
+    )
+    msg = _user_msg("what is gonna be in the upcoming week in our Google calendar?")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    assert len(h.sink.snapshot()) == 1
+    assert h.sink.snapshot()[0].spec.kind == "google-calendar"
+    assert h.say.texts == ["On it — let me look that up for you."]
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "delegate"
+    assert decision.raw[KEYWORD_DELEGATE_KEY]["kind"] == "google-calendar"
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_speak_not_recovered_on_meeting_surface() -> None:
+    """The over-delegation guard (trt.50): on a MEETING surface a SPEAK verdict is
+    left alone — a participant's ambient "good meeting" / "let's schedule" must not
+    trigger an unasked skill run. The model's speak answer stands."""
+    h = _TaskGateHarness(
+        [_speak_decision()],
+        config=RouterGateConfig(
+            task_catalog=_keyword_catalog(meeting_backed=True), meeting_backed=True
+        ),
+    )
+    msg = _user_msg("that was a productive meeting, glad we synced on the schedule")
+
+    await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK fallthrough — no raise
+
+    assert h.sink.snapshot() == []  # nothing queued — no unasked skill run
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "speak"
+    assert KEYWORD_DELEGATE_KEY not in decision.raw
+    assert msg.id in h.gate._pending_speak_turns
+
+
+async def test_empty_registry_status_recovers_even_on_meeting_surface() -> None:
+    """STATUS recovery is surface-agnostic: an empty-registry status is already a
+    degenerate mis-emission (the model said 'let me report progress' with nothing
+    running), so "end the session" recovers in a meeting too — only SPEAK is
+    surface-gated."""
+    h = _TaskGateHarness(
+        [_status_decision()],
+        config=RouterGateConfig(
+            task_catalog=_keyword_catalog(meeting_backed=True), meeting_backed=True
+        ),
+    )
+    msg = _user_msg("please end the session")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    assert h.sink.snapshot()[0].spec.kind == "session.end"
+    decision, _turn = h.obs.decisions[0]
+    assert decision.raw[KEYWORD_DELEGATE_KEY]["kind"] == "session.end"
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_recover_skips_ambiguous_multi_kind_match() -> None:
+    """Exactly-one-kind guard: an utterance hitting two available kinds is left to
+    the model rather than guessing which to run."""
+    h = _TaskGateHarness(
+        [_speak_decision()],
+        config=RouterGateConfig(task_catalog=_keyword_catalog()),
+    )
+    msg = _user_msg("end the session, but first check my calendar")
+
+    await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK fallthrough — no raise
+
+    assert h.sink.snapshot() == []
+    decision, _turn = h.obs.decisions[0]
+    assert KEYWORD_DELEGATE_KEY not in decision.raw
+
+
+async def test_recover_skips_when_work_in_flight() -> None:
+    """A real status query with work in flight keeps its summary — recovery only
+    fires on an empty registry (nothing to report)."""
+    h = _TaskGateHarness(
+        [_status_decision()],
+        config=RouterGateConfig(task_catalog=_keyword_catalog()),
+    )
+    assert h.coordinator is not None
+    h.coordinator.note_task_running(42, kind="google-calendar")
+    msg = _user_msg("end the session")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    decision, _turn = h.obs.decisions[0]
+    assert KEYWORD_DELEGATE_KEY not in decision.raw
+    assert decision.action == "status"
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_recover_leaves_model_authored_delegate_untouched() -> None:
+    """When the model DID delegate, recovery is a no-op — its composed task wins,
+    no synthesized ack, no double-handling."""
+    h = _TaskGateHarness(
+        [_delegate_decision("google-calendar", ack="Checking now.")],
+        config=RouterGateConfig(task_catalog=_keyword_catalog()),
+    )
+    msg = _user_msg("check my calendar")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    decision, _turn = h.obs.decisions[0]
+    assert KEYWORD_DELEGATE_KEY not in decision.raw
+    assert h.say.texts == ["Checking now."]  # the model's ack, not the synthesized one
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+def test_matched_catalog_kinds_returns_keyword_hits() -> None:
+    """The structured delegate prior: which catalog kinds the utterance hits, used
+    by the gate's keyword recovery (Johnny-etu.6)."""
+    from johnny.agent.complexity import matched_catalog_kinds
+
+    catalog = _keyword_catalog()
+    assert matched_catalog_kinds("end the session now", catalog) == ["session.end"]
+    assert matched_catalog_kinds("what's on my calendar?", catalog) == ["google-calendar"]
+    # No keyword → no match (a knowledge question that needs no tool).
+    assert matched_catalog_kinds("what's the capital of France?", catalog) == []
+    # Russian stem (CATALOG_KEYWORD_TRANSLATIONS) still resolves the kind.
+    assert matched_catalog_kinds("проверь мой календарь", catalog) == ["google-calendar"]
+
+
+async def test_recovered_delegate_overrides_zero_confidence() -> None:
+    """A recovered delegate carries FULL confidence so the threshold gate can't
+    suppress it (Johnny-etu.6). Live: the 3B router returned "end the session" as
+    status with confidence=0, which — once recovered to delegate — the confidence
+    gate would have suppressed, leaving the session LIVE. The deterministic
+    keyword match is the confidence, so it overrides the model's self-report."""
+    zero_conf_status = {
+        "should_speak": True,
+        "confidence": 0.0,
+        "reason": "Session is ending",
+        "action": "status",
+    }
+    h = _TaskGateHarness(
+        [zero_conf_status],
+        config=RouterGateConfig(
+            task_catalog=_keyword_catalog(), confidence_threshold=0.5
+        ),
+    )
+    msg = _user_msg("end the session now.")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    # Not suppressed: the delegate queued and the ack spoke despite confidence 0.
+    assert len(h.sink.snapshot()) == 1
+    assert h.sink.snapshot()[0].spec.kind == "session.end"
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "delegate"
+    assert decision.confidence == 1.0
+    assert decision.raw[KEYWORD_DELEGATE_KEY]["kind"] == "session.end"
+    h.say.handles[0].fire_done()
+    await h.drain()
