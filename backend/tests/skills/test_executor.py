@@ -398,3 +398,102 @@ async def test_skill_without_check_pays_no_recheck_exec(tmp_path: Path) -> None:
     result = await executor(_task("fetch-news"))
     assert result.status == "done"
     assert [body["argv"] for body in bodies] == [["bash", "/skills/fetch-news/run.sh"]]
+
+
+# --- per-tool-call trace persistence (Johnny-etu.4) ------------------------
+
+
+class _CollectingTraceSink:
+    """A test ToolCallTraceSink that just records what it was handed."""
+
+    def __init__(self) -> None:
+        self.traces: list[Any] = []
+
+    async def record(self, trace: Any) -> None:
+        self.traces.append(trace)
+
+
+async def test_trace_sink_records_the_run_call_with_args_and_output(
+    tmp_path: Path,
+) -> None:
+    """A skill with no availability check makes exactly one traced call: the run
+    argv, with the exact args sent and the full stdout/stderr/exit/duration."""
+    registry = await _registry_with_runner(tmp_path)
+    reply = dict(_BASE_REPLY, stdout="Here are the headlines.\n", stderr="warn: cache miss\n")
+    sink = _CollectingTraceSink()
+    executor = build_skill_task_executor(registry, _tool(registry, reply), trace_sink=sink)
+
+    result = await executor(_task("fetch-news", {"topic": "ai"}))
+
+    assert result.status == "done"
+    assert len(sink.traces) == 1
+    trace = sink.traces[0]
+    assert trace.tool_name == "sandbox.exec"
+    assert trace.phase == "run"
+    assert trace.ok is True
+    assert trace.exit_code == 0
+    assert trace.stdout == "Here are the headlines.\n"
+    assert trace.stderr == "warn: cache miss\n"
+    assert trace.duration_ms == 40
+    assert trace.timed_out is False
+    assert trace.denied is False
+    # The exact args the runner sent ride the trace verbatim — the task kind +
+    # args the model chose are recoverable from the env it stamped.
+    assert trace.request["argv"] == ["bash", "/skills/fetch-news/run.sh"]
+    assert trace.request["env"][TASK_KIND_ENV] == "fetch-news"
+    assert json.loads(trace.request["env"][TASK_ARGS_ENV]) == {"topic": "ai"}
+
+
+async def test_trace_sink_records_both_phases_for_a_checked_skill(
+    tmp_path: Path,
+) -> None:
+    """A skill declaring an availability check produces two traces in order:
+    the claim-time check, then the run (Johnny-trt.55 legs, both observable)."""
+    registry = await _registry_with_check(tmp_path)
+    sink = _CollectingTraceSink()
+    tool = _sequenced_tool(
+        registry,
+        [dict(_BASE_REPLY), dict(_BASE_REPLY, stdout="Two events tomorrow.\n")],
+        [],
+    )
+    executor = build_skill_task_executor(registry, tool, trace_sink=sink)
+
+    result = await executor(_task("cal"))
+
+    assert result.status == "done"
+    assert [t.phase for t in sink.traces] == ["availability_check", "run"]
+    assert sink.traces[0].request["argv"] == ["bash", "/skills/cal/check.sh"]
+    assert sink.traces[1].request["argv"] == ["bash", "/skills/cal/run.sh"]
+    assert sink.traces[1].stdout == "Two events tomorrow.\n"
+
+
+async def test_trace_sink_records_a_failed_call_with_stderr(tmp_path: Path) -> None:
+    registry = await _registry_with_runner(tmp_path)
+    reply = dict(_BASE_REPLY, exit_code=1, stdout="", stderr="google: no account connected")
+    sink = _CollectingTraceSink()
+    executor = build_skill_task_executor(registry, _tool(registry, reply), trace_sink=sink)
+
+    result = await executor(_task("fetch-news"))
+
+    assert result.status == "failed"
+    assert len(sink.traces) == 1
+    assert sink.traces[0].ok is False
+    assert sink.traces[0].exit_code == 1
+    assert sink.traces[0].stderr == "google: no account connected"
+
+
+async def test_trace_sink_failure_never_breaks_the_task(tmp_path: Path) -> None:
+    """Tracing is best-effort: a sink that raises must not fail the task."""
+    registry = await _registry_with_runner(tmp_path)
+    reply = dict(_BASE_REPLY, stdout="ok\n")
+
+    class _BoomSink:
+        async def record(self, trace: Any) -> None:
+            raise RuntimeError("db down")
+
+    executor = build_skill_task_executor(registry, _tool(registry, reply), trace_sink=_BoomSink())
+
+    result = await executor(_task("fetch-news"))
+
+    assert result.status == "done"
+    assert result.result_text == "ok"

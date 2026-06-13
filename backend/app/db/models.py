@@ -998,6 +998,73 @@ class AgentTask(TimestampMixin, Base):
     decision: Mapped[AgentDecision | None] = relationship()
 
 
+class AgentToolCall(Base):
+    """One tool invocation a delegated task made, with its full trace (Johnny-etu.4).
+
+    The deterministic skill runner (and future tool-calling passes) execute
+    ``sandbox.exec`` calls whose args + stdout/stderr/exit/duration were
+    previously ephemeral — visible only in worker logs and gone once the task
+    settled. This row persists each call so the session detail page's reasoning
+    timeline can show *what the bot actually ran and got back* — including the
+    real tool output even when the spoken reply diverged from it, the
+    observability foundation Phase-1 regression debugging needs (Johnny-etu).
+
+    ``agent_task_id`` links to the delegating ``agent_tasks`` row (``ON DELETE
+    SET NULL`` — the trace outlives a pruned task); ``turn_id`` is the same
+    durable per-session counter the decision/task/timing rows carry, so the UI
+    groups a turn's calls with its decision. ``phase`` distinguishes the
+    claim-time availability recheck (Johnny-trt.55) from the skill's run argv.
+    ``request_json`` snapshots the exact ``sandbox.exec`` arguments
+    (``argv``/``cmd``, ``timeout_s``, ``cwd``, ``env``); ``stdout``/``stderr``
+    carry the captured output (size-capped at write time — ``truncated`` flags
+    either the daemon's cap or ours). No relationship back to ``BotSession`` (the
+    ``SessionTiming`` convention): the detail API queries by ``bot_session_id``.
+    """
+
+    __tablename__ = "agent_tool_calls"
+    __table_args__ = (
+        Index("ix_agent_tool_calls_session_created", "bot_session_id", "created_at"),
+        Index("ix_agent_tool_calls_task", "agent_task_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_session_id: Mapped[int] = mapped_column(
+        ForeignKey("bot_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    agent_task_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_tasks.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    turn_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The tool that ran — ``sandbox.exec`` in v1; MCP tools (``mcp__server__tool``)
+    # when that path is traced too.
+    tool_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    # The skill kind whose runner made the call (``google-calendar``); None for
+    # calls not bound to a skill kind.
+    kind: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Which leg of the runner produced this call: ``availability_check`` (the
+    # trt.55 claim-time recheck) or ``run`` (the skill's declared run argv).
+    phase: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    request_json: Mapped[dict[str, Any]] = mapped_column(_json_column(), nullable=False)
+    ok: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stdout: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stderr: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    timed_out: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    truncated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # The bin policy refused the call before it left the process (Johnny-trt.38);
+    # ``exit_code``/``stdout``/``stderr`` are then empty — ``error`` says why.
+    denied: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
 class SessionTiming(Base):
     """One measured stage event in one turn of the voice pipeline (Johnny-ckz.7).
 

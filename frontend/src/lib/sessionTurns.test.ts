@@ -20,6 +20,7 @@ import {
 	parsePromptMessages,
 	summarizeTurn,
 	turnMatchesFilter,
+	type ToolCallInfo,
 	type TurnSource,
 	type TurnTiming
 } from '$lib/sessionTurns';
@@ -68,6 +69,7 @@ function makeSource(overrides: Partial<TurnSource> = {}): TurnSource {
 		]),
 		audioDurationMs: 4200,
 		task: null,
+		toolCalls: [],
 		...overrides
 	};
 }
@@ -623,5 +625,94 @@ describe('assembleTurns', () => {
 		const views = assembleTurns([makeSource({ turnId: 1 })], map);
 		assert.equal(views.length, 1);
 		assert.equal(views[0].steps.find((s) => s.key === 'heard')?.durationMs, 120);
+	});
+});
+
+describe('tool-call traces (Johnny-etu.4)', () => {
+	function makeToolCall(overrides: Partial<ToolCallInfo> = {}): ToolCallInfo {
+		return {
+			id: 1,
+			toolName: 'sandbox.exec',
+			kind: 'google-calendar',
+			phase: 'run',
+			request: {
+				argv: ['bash', '/skills/google-calendar/run.sh'],
+				timeout_s: 45,
+				env: { JOHNNY_TASK_KIND: 'google-calendar' }
+			},
+			ok: true,
+			exitCode: 0,
+			stdout: 'No events found for the upcoming week.',
+			stderr: '',
+			durationMs: 412,
+			timedOut: false,
+			truncated: false,
+			denied: false,
+			error: null,
+			...overrides
+		};
+	}
+
+	it('renders a "Ran the tool" step whose disclosure carries the REAL stdout', () => {
+		const view = buildTurnView(makeDelegateSource({ toolCalls: [makeToolCall()] }), undefined);
+		const tools = view.steps.find((s) => s.key === 'tools');
+		assert.ok(tools, 'expected a tools step');
+		assert.equal(tools?.title, 'Ran the tool');
+		assert.equal(tools?.status, 'done');
+		assert.equal(tools?.tone, 'default');
+		assert.match(tools?.body ?? '', /sandbox\.exec/);
+		assert.match(tools?.body ?? '', /exit 0/);
+		// The disclosure exposes the real tool output + the exact command run —
+		// the grounding gap (spoken reply can diverge from this) is now visible.
+		assert.equal(tools?.disclosures.length, 1);
+		assert.match(tools?.disclosures[0].content ?? '', /No events found for the upcoming week\./);
+		assert.match(tools?.disclosures[0].content ?? '', /bash \/skills\/google-calendar\/run\.sh/);
+		assert.match(tools?.disclosures[0].label ?? '', /run/);
+	});
+
+	it('marks the step as an error and surfaces stderr when a call failed', () => {
+		const view = buildTurnView(
+			makeDelegateSource({
+				toolCalls: [
+					makeToolCall({
+						ok: false,
+						exitCode: 1,
+						stdout: '',
+						stderr: 'google: no account connected',
+						error: 'exit 1: google: no account connected'
+					})
+				]
+			}),
+			undefined
+		);
+		const tools = view.steps.find((s) => s.key === 'tools');
+		assert.equal(tools?.tone, 'error');
+		assert.match(tools?.disclosures[0].content ?? '', /google: no account connected/);
+		assert.match(tools?.disclosures[0].content ?? '', /exit 1/);
+	});
+
+	it('renders one disclosure per call and counts them in the title', () => {
+		const view = buildTurnView(
+			makeDelegateSource({
+				toolCalls: [
+					makeToolCall({
+						id: 1,
+						phase: 'availability_check',
+						request: { argv: ['google-calendar', 'check'], timeout_s: 10 }
+					}),
+					makeToolCall({ id: 2, phase: 'run' })
+				]
+			}),
+			undefined
+		);
+		const tools = view.steps.find((s) => s.key === 'tools');
+		assert.equal(tools?.title, 'Ran the tools (2)');
+		assert.equal(tools?.disclosures.length, 2);
+		assert.match(tools?.disclosures[0].label ?? '', /availability_check/);
+	});
+
+	it('has no tools step when the turn made no tool calls', () => {
+		const view = buildTurnView(makeSource(), undefined);
+		assert.equal(view.steps.find((s) => s.key === 'tools'), undefined);
 	});
 });

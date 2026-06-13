@@ -61,6 +61,26 @@ sandbox. Frontend twin: `lib/workspaces.ts::workspaceDisplayState` + the per-pag
 `STATE_DOT_CLASS`/`CONTAINER_STATE_LABEL` maps are `Record<WorkspaceDisplayState,…>`, so the
 display-state union is type-coupled across 3 files — add/remove a member in all of them at once.
 
+### Per-tool-call traces: trace at the executor, bind context on the sink (Johnny-etu.4)
+Every `sandbox.exec` flows through `SandboxExecTool.run()`, but the tool has NO session/task
+context. So persist tool-call traces at the EXECUTOR seam
+(`johnny/skills/executor.py::build_skill_task_executor(trace_sink=)` → `_run_traced` wraps BOTH
+the trt.55 availability recheck AND the run argv), which knows kind/phase/args + the
+`QueuedTask`; the session/task/turn/kind binding lives on the SINK
+(`app/services/agent_tasks.py::SqlAlchemyToolCallTraceSink`, built per-task in
+`task_worker.executor_for` from the `ClaimedTask`). Layering mirrors the `TaskSink` split —
+`ToolCallTrace`/`ToolCallTraceSink` Protocol in the pure `johnny` layer, concrete SQLAlchemy
+sink in `app.services` (johnny.skills imports NO `app.*`). Tracing is best-effort: `_run_traced`
+swallows+logs any sink raise so a write hiccup never fails a task. exec_tool is rebuilt per task
+(task_worker comment), so a per-task sink can't cross-contaminate. Rows land in
+`agent_tool_calls` (model `AgentToolCall`, migration 0036), exposed via
+`SessionDetailResponse.tool_calls`, grouped onto a turn by `turn_id` (fallback `agent_task_id`)
+and rendered as a "Ran the tools" timeline step. KEY: `SessionTurnTimeline.svelte` is generic
+over a step's `disclosures`, so new timeline content needs only a new step in `sessionTurns.ts`
+(+ enrich the page's `DecisionEntry`→`TurnSource`) — NO Svelte component edits. Tasks execute
+ONLY in the worker (`executor_for` is called there alone; browser + Meet both delegate to it),
+so one trace seam covers every session source; the MCP-executor path is untraced (follow-up).
+
 ---
 
 ## 2026-06-13 - Johnny-etu.3 [SPIKE] root-cause the "session-runtime regression"
@@ -189,3 +209,65 @@ unaffected). Screenshots: `.validation/Johnny-etu.5/01..03-*.png`.
 
 ---
 
+
+## 2026-06-13 - Johnny-etu.4 [BUILD] 'What is the bot thinking' — tool-call traces + reasoning timeline
+
+Persisted per-tool-call traces (sandbox.exec args + full stdout/stderr/exit/duration —
+previously ephemeral) and rendered them in the `/sessions/[id]` reasoning timeline. **AC#1**
+(router `input_window`/`raw_output` + answer-LLM prompt) was ALREADY shipped by ckz.28.4's
+timeline disclosures (verified in-browser); the genuine gap was **AC#2/#3** — the tool calls.
+
+**What was implemented:**
+- NEW table `agent_tool_calls` (migration 0036) + model `AgentToolCall`: per call —
+  bot_session_id, agent_task_id (SET NULL), turn_id, tool_name, kind, phase
+  (`availability_check`|`run`), request_json (argv/cmd/timeout/cwd/env), ok, exit_code,
+  stdout, stderr, duration_ms, timed_out, truncated, denied, error.
+- Trace seam in the PURE skills layer: `ToolCallTrace` + `ToolCallTraceSink` Protocol in
+  `johnny/skills/executor.py`; `build_skill_task_executor(..., trace_sink=)` records a trace
+  after EVERY `exec_tool.run()` (the trt.55 availability recheck AND the run argv) via a
+  `_run_traced` helper that SWALLOWS sink failures (best-effort — tracing never fails a task).
+- Concrete sink `SqlAlchemyToolCallTraceSink` (`app/services/agent_tasks.py`, mirrors
+  SqlAlchemyTaskSink): bound per-task to session/task/turn/kind, opens a short-lived session
+  per trace (durable the moment the call returns), caps stdout/stderr at 16k.
+- Worker wiring: `task_worker.executor_for` builds the sink from the `ClaimedTask`.
+- API: `AgentToolCallRead` + `tool_calls` on `SessionDetailResponse`, queried asc by id.
+- Frontend: `AgentToolCallRecord` (sessionDetail.ts) → page maps to `ToolCallInfo` (grouped by
+  turn_id, fallback agent_task_id) → `sessionTurns.ts` renders a "Ran the tools" step with one
+  disclosure per call (command + env + exit/duration + stdout + stderr + error). ZERO changes
+  to `SessionTurnTimeline.svelte` — it renders step disclosures generically.
+
+**Files changed:** backend — `app/db/models.py`, `alembic/versions/0036_agent_tool_calls.py`,
+`johnny/skills/executor.py`, `app/services/agent_tasks.py`, `app/services/task_worker.py`,
+`app/api/sessions.py`; frontend — `lib/sessionDetail.ts`, `lib/sessionTurns.ts`,
+`routes/sessions/[id]/+page.svelte`; tests — `tests/skills/test_executor.py`,
+`tests/api/test_sessions.py`, `tests/test_migration_0036.py`, `lib/sessionTurns.test.ts`.
+
+**Validation:** backend ruff + mypy clean; pytest 98 (executor/sessions-API/migration-0036/
+task_worker) + 850 (skills/services/db_models sweep) pass — no regressions; frontend 42 vitest
++ svelte-check clean. Migration applied on dev Postgres (alembic `0036 (head)`, table present).
+chrome-devtools on the real UI (`/sessions/1`, seeded delegate turn, deleted after): timeline
+shows Heard→Sized(catalog signal)→Decided(delegate)→Context (**View router prompt** =
+input_window)→router ack (**View raw output**)→Queued task→**Ran the tools (2)**→Spoke;
+expanding the run call shows `$ bash /skills/google-calendar/run.sh`, env, `exit 0 · 412 ms`,
+stdout "No events found for the upcoming week." + stderr — the REAL output even though the
+spoken reply ("Let me check…") diverged (the etu.7 grounding gap this now exposes).
+Screenshots `.validation/Johnny-etu.4/01..02-*.png`.
+
+**Learnings / gotchas:**
+- AC#1 was already done (ckz.28.4): input_window/raw_output/answer-prompt render as timeline
+  disclosures. Don't re-implement — verify in-browser. The real deliverable was the tool layer.
+- `SandboxExecTool.run()` is the single tool chokepoint but carries NO session/task context →
+  trace at the EXECUTOR (knows kind/phase/args + QueuedTask), bind session/task/turn on the
+  SINK (built per-task in `executor_for`). exec_tool is rebuilt per task, so a per-task sink
+  can't cross-contaminate.
+- Layering: `johnny/skills` must stay SQLAlchemy-free (the TaskSink split) — Protocol in
+  `johnny`, concrete sink in `app.services`, injected by the worker. No `app.*` import in skills.
+- `SessionTurnTimeline.svelte` is generic over step `disclosures` → new timeline content = new
+  step in `sessionTurns.ts` (+ DecisionEntry/TurnSource field on the page), zero Svelte edits.
+- Tasks execute ONLY in the worker (`executor_for` called there alone; browser + Meet both
+  delegate to it) → one trace seam covers every source. MCP-executor path untraced (follow-up).
+- etu.3 established session #1 ran ZERO tasks, so AC#3's literal "session #1" had no trace to
+  show; validated rendering on a seeded delegate turn (deleted after) — persistence/executor
+  paths are covered by backend tests, not the seed.
+
+---

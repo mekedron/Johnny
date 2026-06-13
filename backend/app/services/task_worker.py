@@ -650,6 +650,7 @@ class SandboxExecutorProvider:
     async def executor_for(
         self, claimed: ClaimedTask, *, policy: Any | None = None
     ) -> TaskExecutor:
+        from app.services.agent_tasks import SqlAlchemyToolCallTraceSink
         from johnny.mcp.executor import build_mcp_task_executor
         from johnny.skills.executor import build_skill_task_executor
         from johnny.skills.policy import ExecBinPolicy, compute_allowed_bins
@@ -706,7 +707,22 @@ class SandboxExecutorProvider:
             sandbox_url=url,
             fallback=stub_executor,
         )
-        return build_skill_task_executor(registry, exec_tool, fallback=mcp_executor)
+        # Per-tool-call trace persistence (Johnny-etu.4): every sandbox.exec the
+        # runner makes for THIS claim — the availability recheck and the run
+        # argv alike — is recorded to agent_tool_calls bound to this session /
+        # task / turn / kind, so the session timeline can show the real tool
+        # args + output even when the spoken reply diverged. Best-effort: a
+        # trace write failure is swallowed inside the executor, never failing
+        # the task.
+        trace_sink = SqlAlchemyToolCallTraceSink(
+            bot_session_id=claimed.bot_session_id,
+            agent_task_id=claimed.task_id,
+            turn_id=claimed.turn_id,
+            kind=claimed.kind,
+        )
+        return build_skill_task_executor(
+            registry, exec_tool, fallback=mcp_executor, trace_sink=trace_sink
+        )
 
     async def _ensure_workspace_container(self, claimed: ClaimedTask) -> None:
         """Lazy workspace launch on claim (Johnny-wks.2 / Johnny-etu.5).

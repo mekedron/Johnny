@@ -39,6 +39,7 @@ from app.db.models import (
     AgentDecision,
     AgentTask,
     AgentTaskStatus,
+    AgentToolCall,
     AgentUtterance,
     BotMode,
     BotSession,
@@ -244,6 +245,40 @@ class AgentTaskRead(BaseModel):
     updated_at: datetime
 
 
+class AgentToolCallRead(BaseModel):
+    """One persisted tool-call trace for the reasoning timeline (Johnny-etu.4).
+
+    Mirrors ``agent_tool_calls`` so the session detail page can render, under a
+    delegate turn's task step, exactly what the bot ran and got back: the
+    ``sandbox.exec`` arguments (``request_json``) and the full captured result —
+    ``stdout``/``stderr`` (size-capped, ``truncated`` flags it), ``exit_code``,
+    ``duration_ms`` — even when the spoken reply diverged from the output. Linked
+    to its turn by the durable ``turn_id`` (and to its task by ``agent_task_id``),
+    the same keys the decision/task rows carry.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    bot_session_id: int
+    agent_task_id: int | None
+    turn_id: int | None
+    tool_name: str
+    kind: str | None
+    phase: str | None
+    request_json: dict[str, Any]
+    ok: bool
+    exit_code: int | None
+    stdout: str | None
+    stderr: str | None
+    duration_ms: int | None
+    timed_out: bool
+    truncated: bool
+    denied: bool
+    error: str | None
+    created_at: datetime
+
+
 class SessionTimingRead(BaseModel):
     """One persisted activity-log timing row (Johnny-ckz.7).
 
@@ -326,7 +361,9 @@ class SessionDetailResponse(BaseModel):
     paint; new events arrive over the WebSocket and are merged client-side.
     ``tasks`` (Johnny-trt.54) carries the session's delegated ``agent_tasks``
     rows so the decision-pipeline view links each delegate turn to the work
-    its ack promised.
+    its ack promised. ``tool_calls`` (Johnny-etu.4) carries the per-tool-call
+    traces (args + full output) the runner made, grouped onto a turn by the
+    shared ``turn_id`` so the timeline shows what actually ran.
     """
 
     session: BotSessionRead
@@ -335,6 +372,7 @@ class SessionDetailResponse(BaseModel):
     utterances: list[AgentUtteranceRead]
     pending_decisions: list[AgentDecisionRead]
     tasks: list[AgentTaskRead] = []
+    tool_calls: list[AgentToolCallRead] = []
     meeting_bot_state: MeetingBotParticipationRead | None = None
 
 
@@ -490,6 +528,16 @@ def get_session_detail(
             .limit(limit)
         ).all()
     )
+    # Per-tool-call traces (Johnny-etu.4) — ascending so the timeline shows a
+    # turn's calls in execution order (availability recheck before run).
+    tool_calls = list(
+        session.scalars(
+            select(AgentToolCall)
+            .where(AgentToolCall.bot_session_id == row.id)
+            .order_by(AgentToolCall.id.asc())
+            .limit(limit)
+        ).all()
+    )
     pending = [d for d in decisions if d.outcome == DecisionOutcome.PENDING]
 
     # Meeting-level participation state (Johnny-trt.56) so the page can
@@ -526,6 +574,7 @@ def get_session_detail(
         utterances=[AgentUtteranceRead.model_validate(u) for u in utterances],
         pending_decisions=[AgentDecisionRead.model_validate(d) for d in pending],
         tasks=[AgentTaskRead.model_validate(t) for t in tasks],
+        tool_calls=[AgentToolCallRead.model_validate(c) for c in tool_calls],
         meeting_bot_state=meeting_state,
     )
 

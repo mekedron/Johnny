@@ -42,6 +42,30 @@ export interface TurnTaskInfo {
 	resultText: string | null;
 }
 
+/**
+ * One persisted tool-call trace (Johnny-etu.4) — what a delegate turn's task
+ * actually ran (`sandbox.exec` args) and got back (full stdout/stderr/exit/
+ * duration). Matched to the turn by the shared durable `turn_id` (or its task
+ * id) so the timeline can show the real tool output even when the spoken reply
+ * diverged from it. The page maps the snake_case `AgentToolCallRecord` to this.
+ */
+export interface ToolCallInfo {
+	id: number;
+	toolName: string;
+	kind: string | null;
+	phase: string | null;
+	request: Record<string, unknown>;
+	ok: boolean;
+	exitCode: number | null;
+	stdout: string;
+	stderr: string;
+	durationMs: number | null;
+	timedOut: boolean;
+	truncated: boolean;
+	denied: boolean;
+	error: string | null;
+}
+
 /** The enriched per-turn record the timeline consumes (the page's `DecisionEntry`). */
 export interface TurnSource {
 	key: string;
@@ -74,6 +98,9 @@ export interface TurnSource {
 	// The delegate turn's linked agent_tasks row (Johnny-trt.54); null for
 	// non-delegate turns and on live turns until the next detail refresh.
 	task: TurnTaskInfo | null;
+	// The per-tool-call traces this turn's task made (Johnny-etu.4); empty for
+	// non-delegate turns and on live turns until the next detail refresh.
+	toolCalls: ToolCallInfo[];
 }
 
 export type TurnStepStatus = 'done' | 'skipped' | 'missing';
@@ -523,6 +550,73 @@ function reachedModel(src: TurnSource): boolean {
 	return src.shouldSpeak;
 }
 
+// --- Tool-call rendering (Johnny-etu.4) -------------------------------------
+
+/** The command a `sandbox.exec` request ran: argv joined, or the cmd string. */
+function toolCommand(request: Record<string, unknown>): string {
+	const argv = request?.argv;
+	if (Array.isArray(argv) && argv.length > 0) {
+		return argv.map((a) => String(a)).join(' ');
+	}
+	const cmd = request?.cmd;
+	if (typeof cmd === 'string' && cmd.trim().length > 0) return cmd;
+	return '(no command)';
+}
+
+/** A short outcome label for one tool call: `exit 0`, `timed out`, `denied`… */
+function toolOutcomeLabel(call: ToolCallInfo): string {
+	if (call.denied) return 'denied by policy';
+	if (call.timedOut) return 'timed out';
+	if (call.exitCode !== null) return `exit ${call.exitCode}`;
+	return call.ok ? 'ok' : 'failed';
+}
+
+function truncateOneLine(text: string, max: number): string {
+	const oneLine = text.replace(/\s+/g, ' ').trim();
+	return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max - 1)}…`;
+}
+
+/** The collapsed one-line summary of all of a turn's tool calls. */
+function summarizeToolCalls(calls: ToolCallInfo[]): string {
+	if (calls.length === 1) {
+		const c = calls[0];
+		return `${c.toolName} (${toolOutcomeLabel(c)}) — ${truncateOneLine(toolCommand(c.request), 72)}`;
+	}
+	return `${calls.length} calls — ${calls.map(toolOutcomeLabel).join(', ')}`;
+}
+
+/** The expandable disclosure title for one tool call. */
+function toolCallLabel(call: ToolCallInfo): string {
+	const phase = call.phase ? ` · ${call.phase}` : '';
+	const dur = call.durationMs !== null ? ` · ${call.durationMs} ms` : '';
+	return `${call.toolName}${phase} — ${toolOutcomeLabel(call)}${dur}`;
+}
+
+/** The full disclosure body for one tool call: command, env, meta, stdout, stderr, error. */
+function formatToolCall(call: ToolCallInfo): string {
+	const lines: string[] = [`$ ${toolCommand(call.request)}`];
+	const env = call.request?.env;
+	if (env && typeof env === 'object' && !Array.isArray(env)) {
+		const entries = Object.entries(env as Record<string, unknown>);
+		if (entries.length > 0) {
+			lines.push(`env: ${entries.map(([k, v]) => `${k}=${String(v)}`).join('  ')}`);
+		}
+	}
+	const meta: string[] = [];
+	if (call.exitCode !== null) meta.push(`exit ${call.exitCode}`);
+	if (call.durationMs !== null) meta.push(`${call.durationMs} ms`);
+	if (call.timedOut) meta.push('timed out');
+	if (call.denied) meta.push('denied');
+	if (call.truncated) meta.push('output truncated');
+	if (meta.length > 0) lines.push(meta.join(' · '));
+	lines.push('', '── stdout ──', call.stdout.trim().length > 0 ? call.stdout : '(empty)');
+	lines.push('', '── stderr ──', call.stderr.trim().length > 0 ? call.stderr : '(empty)');
+	if (call.error && call.error.trim().length > 0) {
+		lines.push('', '── error ──', call.error);
+	}
+	return lines.join('\n');
+}
+
 function buildSteps(src: TurnSource): TurnStep[] {
 	const heard = extractHeard(src.inputWindow);
 	// Noise-gated turns store their dropped transcript flat in
@@ -747,6 +841,34 @@ function buildSteps(src: TurnSource): TurnStep[] {
 			durationMs: null,
 			elapsedMs: null,
 			disclosures: [],
+			guards: []
+		});
+	}
+
+	// Ran the tools (Johnny-etu.4) ---------------------------------------
+	// The actual sandbox.exec calls the task made — full args + stdout/stderr/
+	// exit/duration, previously ephemeral. One disclosure per call so the
+	// operator can see the REAL tool output even when the spoken reply
+	// diverged from it (the grounding gap this observability exposes).
+	if (src.toolCalls.length > 0) {
+		const calls = src.toolCalls;
+		const anyFailed = calls.some((c) => !c.ok);
+		steps.push({
+			key: 'tools',
+			index: 0,
+			title: calls.length === 1 ? 'Ran the tool' : `Ran the tools (${calls.length})`,
+			structuredName: 'agent_tool_calls',
+			status: 'done',
+			tone: anyFailed ? 'error' : 'default',
+			body: summarizeToolCalls(calls),
+			detail: null,
+			confidence: null,
+			durationMs: null,
+			elapsedMs: null,
+			disclosures: calls.map((c) => ({
+				label: toolCallLabel(c),
+				content: formatToolCall(c)
+			})),
 			guards: []
 		});
 	}

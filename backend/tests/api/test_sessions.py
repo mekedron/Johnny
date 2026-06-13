@@ -17,6 +17,7 @@ from app.db.models import (
     Agent,
     AgentDecision,
     AgentTask,
+    AgentToolCall,
     AgentUtterance,
     BotMode,
     BotSession,
@@ -60,6 +61,7 @@ def engine() -> sa.Engine:
             AgentDecision.__table__,  # type: ignore[list-item]
             AgentUtterance.__table__,  # type: ignore[list-item]
             AgentTask.__table__,  # type: ignore[list-item]
+            AgentToolCall.__table__,  # type: ignore[list-item]
             SessionTiming.__table__,  # type: ignore[list-item]
             ConversationEvent.__table__,  # type: ignore[list-item]
         ],
@@ -366,6 +368,121 @@ def test_get_session_detail_empty_lists(
     assert body["decisions"] == []
     assert body["utterances"] == []
     assert body["pending_decisions"] == []
+    assert body["tool_calls"] == []
+
+
+def test_get_session_detail_exposes_tool_call_traces(
+    client: TestClient, db_session: Session
+) -> None:
+    """Johnny-etu.4: persisted per-tool-call traces are returned by the detail
+    API, grouped to a turn by turn_id, with the full args + stdout/stderr/exit so
+    the timeline can show the real tool output (even when the reply diverged)."""
+    _, cfg = _seed_meeting(db_session)
+    row = BotSession(meeting_config_id=cfg.id, status=BotSessionStatus.JOINED)
+    db_session.add(row)
+    db_session.flush()
+    task = AgentTask(
+        bot_session_id=row.id,
+        turn_id=7,
+        kind="google-calendar",
+        request_json={"kind": "google-calendar", "args": {}, "ack": "Checking."},
+        status="done",
+        result_text="No events found for the upcoming week.",
+    )
+    db_session.add(task)
+    db_session.flush()
+    db_session.add(
+        AgentToolCall(
+            bot_session_id=row.id,
+            agent_task_id=task.id,
+            turn_id=7,
+            tool_name="sandbox.exec",
+            kind="google-calendar",
+            phase="run",
+            request_json={
+                "argv": ["bash", "/skills/google-calendar/run.sh"],
+                "timeout_s": 45,
+                "env": {"JOHNNY_TASK_KIND": "google-calendar"},
+            },
+            ok=True,
+            exit_code=0,
+            stdout="No events found for the upcoming week.",
+            stderr="warning: cache miss",
+            duration_ms=412,
+            timed_out=False,
+            truncated=False,
+            denied=False,
+        )
+    )
+    db_session.commit()
+
+    res = client.get(f"/sessions/{row.id}")
+    assert res.status_code == 200, res.text
+    calls = res.json()["tool_calls"]
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["tool_name"] == "sandbox.exec"
+    assert call["kind"] == "google-calendar"
+    assert call["phase"] == "run"
+    assert call["turn_id"] == 7
+    assert call["agent_task_id"] == task.id
+    assert call["exit_code"] == 0
+    assert call["stdout"] == "No events found for the upcoming week."
+    assert call["stderr"] == "warning: cache miss"
+    assert call["duration_ms"] == 412
+    assert call["request_json"]["argv"] == ["bash", "/skills/google-calendar/run.sh"]
+
+
+def test_tool_call_trace_sink_persists_and_is_exposed(
+    client: TestClient, db_session: Session, engine: sa.Engine
+) -> None:
+    """End-to-end: the production sink writes an agent_tool_calls row the detail
+    API then returns — the 'tool-call traces persisted + exposed' acceptance."""
+    import asyncio
+
+    from app.services.agent_tasks import SqlAlchemyToolCallTraceSink
+    from johnny.skills.executor import ToolCallTrace
+
+    _, cfg = _seed_meeting(db_session)
+    row = BotSession(meeting_config_id=cfg.id, status=BotSessionStatus.JOINED)
+    db_session.add(row)
+    db_session.commit()
+
+    sink = SqlAlchemyToolCallTraceSink(
+        bot_session_id=row.id,
+        turn_id=3,
+        kind="google-calendar",
+        session_factory=lambda: Session(engine),
+    )
+    asyncio.run(
+        sink.record(
+            ToolCallTrace(
+                tool_name="sandbox.exec",
+                phase="run",
+                request={"argv": ["bash", "/skills/google-calendar/run.sh"]},
+                ok=False,
+                exit_code=1,
+                stdout="",
+                stderr="google: no account connected",
+                duration_ms=88,
+                timed_out=False,
+                truncated=False,
+                denied=False,
+                error="exit 1: google: no account connected",
+            )
+        )
+    )
+
+    res = client.get(f"/sessions/{row.id}")
+    assert res.status_code == 200, res.text
+    calls = res.json()["tool_calls"]
+    assert len(calls) == 1
+    assert calls[0]["ok"] is False
+    assert calls[0]["exit_code"] == 1
+    assert calls[0]["stderr"] == "google: no account connected"
+    assert calls[0]["kind"] == "google-calendar"
+    assert calls[0]["turn_id"] == 3
+    assert calls[0]["error"] == "exit 1: google: no account connected"
 
 
 def test_get_session_detail_includes_recent_history(

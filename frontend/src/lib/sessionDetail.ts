@@ -153,6 +153,34 @@ export interface AgentTaskRecord {
 	updated_at: string;
 }
 
+/**
+ * One persisted tool-call trace (Johnny-etu.4). The reasoning timeline groups a
+ * turn's calls by the shared `turn_id` (falling back to `agent_task_id`) and
+ * renders, under the delegate turn's task step, exactly what `sandbox.exec` ran
+ * (`request_json`) and got back — `stdout`/`stderr` (size-capped; `truncated`
+ * flags it), `exit_code`, `duration_ms` — even when the spoken reply diverged.
+ */
+export interface AgentToolCallRecord {
+	id: number;
+	bot_session_id: number;
+	agent_task_id: number | null;
+	turn_id: number | null;
+	tool_name: string;
+	kind: string | null;
+	phase: string | null;
+	request_json: Record<string, unknown>;
+	ok: boolean;
+	exit_code: number | null;
+	stdout: string | null;
+	stderr: string | null;
+	duration_ms: number | null;
+	timed_out: boolean;
+	truncated: boolean;
+	denied: boolean;
+	error: string | null;
+	created_at: string;
+}
+
 export type SessionTimingStage =
 	| 'stt'
 	| 'router_llm'
@@ -201,6 +229,9 @@ export interface SessionDetail {
 	// Delegated agent_tasks rows for the turn-chain linkage (Johnny-trt.54).
 	// Optional so a cached/older API response without the field still parses.
 	tasks?: AgentTaskRecord[];
+	// Per-tool-call traces (args + full output) for the timeline (Johnny-etu.4).
+	// Optional so a cached/older API response without the field still parses.
+	tool_calls?: AgentToolCallRecord[];
 	// Bot-participation state of the session's meeting; null/absent for
 	// playground sessions (Johnny-trt.56).
 	meeting_bot_state?: MeetingBotParticipation | null;

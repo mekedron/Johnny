@@ -30,6 +30,7 @@
 		sessionAudioUrl,
 		type AgentDecisionRecord,
 		type AgentTaskRecord,
+		type AgentToolCallRecord,
 		type AgentUtteranceRecord,
 		type ConversationEventRecord,
 		type DecisionOutcome,
@@ -71,6 +72,7 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 	import {
 		assembleTurns,
 		extractHeard,
+		type ToolCallInfo,
 		type TurnSource,
 		type TurnTaskInfo,
 		type TurnTiming
@@ -131,6 +133,9 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 		// The delegate turn's linked agent_tasks row (Johnny-trt.54); null for
 		// non-delegate turns and live turns until the next detail refresh.
 		task: TurnTaskInfo | null;
+		// The per-tool-call traces this turn's task made (Johnny-etu.4); empty for
+		// non-delegate turns and live turns until the next detail refresh.
+		toolCalls: ToolCallInfo[];
 	}
 
 	interface PendingApproval {
@@ -331,13 +336,29 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 				taskByTurn.set(t.turn_id, t);
 			}
 		}
-		decisions = detail.decisions.map((d) =>
-			decisionRecordToEntry(
-				d,
-				utteranceMap.get(d.id) ?? null,
-				d.turn_id !== null ? (taskByTurn.get(d.turn_id) ?? null) : null
-			)
-		);
+		// Per-tool-call traces (Johnny-etu.4): grouped onto a turn by the shared
+		// turn_id, falling back to the matched task's id when a trace carries no
+		// turn_id (legacy / hand-queued). Preserves execution order (API is asc).
+		const toolCallsByTurn = new Map<number, AgentToolCallRecord[]>();
+		const toolCallsByTask = new Map<number, AgentToolCallRecord[]>();
+		for (const c of detail.tool_calls ?? []) {
+			if (c.turn_id !== null) {
+				(toolCallsByTurn.get(c.turn_id) ?? toolCallsByTurn.set(c.turn_id, []).get(c.turn_id)!).push(c);
+			} else if (c.agent_task_id !== null) {
+				(
+					toolCallsByTask.get(c.agent_task_id) ??
+					toolCallsByTask.set(c.agent_task_id, []).get(c.agent_task_id)!
+				).push(c);
+			}
+		}
+		decisions = detail.decisions.map((d) => {
+			const matchedTask = d.turn_id !== null ? (taskByTurn.get(d.turn_id) ?? null) : null;
+			const calls =
+				(d.turn_id !== null ? toolCallsByTurn.get(d.turn_id) : undefined) ??
+				(matchedTask ? toolCallsByTask.get(matchedTask.id) : undefined) ??
+				[];
+			return decisionRecordToEntry(d, utteranceMap.get(d.id) ?? null, matchedTask, calls);
+		});
 	}
 
 	function transcriptToLine(t: TranscriptChunk): TranscriptLine {
@@ -387,7 +408,8 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 	function decisionRecordToEntry(
 		d: AgentDecisionRecord,
 		matchedUtterance: AgentUtteranceRecord | null,
-		matchedTask: AgentTaskRecord | null = null
+		matchedTask: AgentTaskRecord | null = null,
+		matchedToolCalls: AgentToolCallRecord[] = []
 	): DecisionEntry {
 		const heard = extractHeard(d.input_window);
 		return {
@@ -423,7 +445,29 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 						ackText: matchedTask.ack_text,
 						resultText: matchedTask.result_text
 					}
-				: null
+				: null,
+			toolCalls: matchedToolCalls.map(toolCallRecordToInfo)
+		};
+	}
+
+	// Map the API's snake_case tool-call record to the camelCase shape the
+	// timeline consumes (Johnny-etu.4).
+	function toolCallRecordToInfo(c: AgentToolCallRecord): ToolCallInfo {
+		return {
+			id: c.id,
+			toolName: c.tool_name,
+			kind: c.kind,
+			phase: c.phase,
+			request: c.request_json,
+			ok: c.ok,
+			exitCode: c.exit_code,
+			stdout: c.stdout ?? '',
+			stderr: c.stderr ?? '',
+			durationMs: c.duration_ms,
+			timedOut: c.timed_out,
+			truncated: c.truncated,
+			denied: c.denied,
+			error: c.error
 		};
 	}
 
@@ -699,7 +743,8 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 			rawOutput: null,
 			answerPrompt: null,
 			audioDurationMs: null,
-			task: null
+			task: null,
+			toolCalls: []
 		};
 		decisions = [entry, ...decisions];
 	}

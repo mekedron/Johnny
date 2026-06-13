@@ -39,6 +39,8 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 from johnny.agent.internal_tools import is_internal_kind
 from johnny.agent.tasks import QueuedTask, TaskExecutor, TaskResult, stub_executor
@@ -57,6 +59,102 @@ into a minutes-long monologue; skills should format well under this."""
 
 TASK_KIND_ENV = "JOHNNY_TASK_KIND"
 TASK_ARGS_ENV = "JOHNNY_TASK_ARGS_JSON"
+
+PHASE_AVAILABILITY_CHECK = "availability_check"
+"""The claim-time availability recheck leg (Johnny-trt.55)."""
+PHASE_RUN = "run"
+"""The skill's declared run argv leg."""
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallTrace:
+    """One tool invocation's full record for the reasoning timeline (Johnny-etu.4).
+
+    What ``sandbox.exec`` (or a future tool) was asked to do and what it
+    returned — the previously-ephemeral args + stdout/stderr/exit/duration the
+    session detail page now persists and renders. The session/task/turn/kind
+    binding is the *sink's* job (it knows the executing context); the trace
+    carries only what one call produced. ``request`` is the exact arguments
+    dict handed to the tool; ``error`` is the operator diagnostic, never spoken.
+    """
+
+    tool_name: str
+    phase: str
+    request: dict[str, Any]
+    ok: bool
+    exit_code: int | None
+    stdout: str
+    stderr: str
+    duration_ms: int | None
+    timed_out: bool
+    truncated: bool
+    denied: bool
+    error: str
+
+
+class ToolCallTraceSink(Protocol):
+    """Durable persistence for per-tool-call traces (the ``agent_tool_calls`` table).
+
+    Mirrors the :class:`~johnny.agent.tasks.TaskSink` split so the skills layer
+    stays SQLAlchemy-free: production wires
+    :class:`app.services.agent_tasks.SqlAlchemyToolCallTraceSink`; tests pass a
+    simple collector. The executor calls :meth:`record` after every tool call;
+    a sink that raises must never break the task (the caller swallows + logs).
+    """
+
+    async def record(self, trace: ToolCallTrace) -> None: ...
+
+
+def _int_or_none(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _trace_from_outcome(
+    tool_name: str, phase: str, request: dict[str, Any], outcome: ToolOutcome
+) -> ToolCallTrace:
+    """Build a :class:`ToolCallTrace` from the args sent and the outcome returned."""
+    data = outcome.data
+    return ToolCallTrace(
+        tool_name=tool_name,
+        phase=phase,
+        request=dict(request),
+        ok=outcome.ok,
+        exit_code=_int_or_none(data.get("exit_code")),
+        stdout=str(data.get("stdout") or ""),
+        stderr=str(data.get("stderr") or ""),
+        duration_ms=_int_or_none(data.get("duration_ms")),
+        timed_out=bool(data.get("timed_out", False)),
+        truncated=bool(data.get("truncated", False)),
+        denied=bool(data.get("denied", False)),
+        error=outcome.error or "",
+    )
+
+
+async def _run_traced(
+    exec_tool: SandboxExecTool,
+    request: dict[str, Any],
+    *,
+    phase: str,
+    trace_sink: ToolCallTraceSink | None,
+) -> ToolOutcome:
+    """Run one tool call and persist its trace (Johnny-etu.4).
+
+    Tracing is best-effort observability and must NEVER affect execution: a
+    sink failure is logged and swallowed so a write hiccup can't fail a task.
+    """
+    outcome = await exec_tool.run(request)
+    if trace_sink is not None:
+        try:
+            await trace_sink.record(
+                _trace_from_outcome(exec_tool.name, phase, request, outcome)
+            )
+        except Exception:  # pragma: no cover - defensive: tracing is best-effort
+            logger.warning(
+                "skill executor: tool-call trace sink failed (phase=%s) — continuing",
+                phase,
+                exc_info=True,
+            )
+    return outcome
 
 
 def _cap_speech(text: str) -> str:
@@ -84,7 +182,10 @@ def _result_json(kind: str, outcome: ToolOutcome) -> dict[str, object]:
 
 
 async def _revalidate_availability(
-    skill: LoadedSkill, exec_tool: SandboxExecTool
+    skill: LoadedSkill,
+    exec_tool: SandboxExecTool,
+    *,
+    trace_sink: ToolCallTraceSink | None = None,
 ) -> TaskResult | None:
     """Re-run the skill's declared availability check at claim time (Johnny-trt.55).
 
@@ -105,11 +206,14 @@ async def _revalidate_availability(
         return None
     check = availability.check
     kind = skill.name
-    outcome = await exec_tool.run(
+    outcome = await _run_traced(
+        exec_tool,
         {
             "argv": list(check.argv),
             "timeout_s": check.timeout_s or DEFAULT_AVAILABILITY_CHECK_TIMEOUT_S,
-        }
+        },
+        phase=PHASE_AVAILABILITY_CHECK,
+        trace_sink=trace_sink,
     )
     if outcome.ok:
         return None
@@ -155,8 +259,15 @@ def build_skill_task_executor(
     exec_tool: SandboxExecTool,
     *,
     fallback: TaskExecutor = stub_executor,
+    trace_sink: ToolCallTraceSink | None = None,
 ) -> TaskExecutor:
-    """The session's executor: skills run in the sandbox, the rest fail fast."""
+    """The session's executor: skills run in the sandbox, the rest fail fast.
+
+    ``trace_sink`` (Johnny-etu.4), when given, receives a :class:`ToolCallTrace`
+    after every ``sandbox.exec`` this executor makes — the availability recheck
+    and the run argv alike — so the previously-ephemeral tool args + output are
+    persisted for the session detail timeline. Tracing never affects the settle.
+    """
 
     async def _execute(task: QueuedTask) -> TaskResult:
         kind = task.spec.kind
@@ -211,7 +322,9 @@ def build_skill_task_executor(
                 error=f"skill unavailable at session snapshot: {skill.unavailable_reason}",
             )
 
-        recheck = await _revalidate_availability(skill, exec_tool)
+        recheck = await _revalidate_availability(
+            skill, exec_tool, trace_sink=trace_sink
+        )
         if recheck is not None:
             return recheck
 
@@ -233,12 +346,15 @@ def build_skill_task_executor(
             args_json = json.dumps(task.spec.args, separators=(",", ":"), default=str)
         except (TypeError, ValueError):
             args_json = "{}"
-        outcome = await exec_tool.run(
+        outcome = await _run_traced(
+            exec_tool,
             {
                 "argv": list(run.argv),
                 "timeout_s": run.timeout_s,
                 "env": {TASK_KIND_ENV: kind, TASK_ARGS_ENV: args_json},
-            }
+            },
+            phase=PHASE_RUN,
+            trace_sink=trace_sink,
         )
 
         spoken = _cap_speech(outcome.output)
@@ -290,8 +406,12 @@ def build_skill_task_executor(
 
 
 __all__ = [
+    "PHASE_AVAILABILITY_CHECK",
+    "PHASE_RUN",
     "RESULT_TEXT_CAP_CHARS",
     "TASK_ARGS_ENV",
     "TASK_KIND_ENV",
+    "ToolCallTrace",
+    "ToolCallTraceSink",
     "build_skill_task_executor",
 ]

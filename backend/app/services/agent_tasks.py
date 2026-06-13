@@ -18,11 +18,12 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from app.db.models import AgentTask, AgentTaskStatus
+from app.db.models import AgentTask, AgentTaskStatus, AgentToolCall
 from johnny.agent.tasks import TaskSink, TaskSnapshot, TaskSpec, TaskStatus
+from johnny.skills.executor import ToolCallTrace, ToolCallTraceSink
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from sqlalchemy.orm import Session
 
@@ -156,6 +157,86 @@ class SqlAlchemyTaskSink(TaskSink):
             self._session.rollback()
 
 
+TOOL_OUTPUT_CAP_CHARS = 16_000
+"""Defensive per-stream cap on persisted tool output (Johnny-etu.4). The sandbox
+daemon already size-caps its capture; this is a backstop so one pathological call
+can never write an unbounded ``stdout``/``stderr`` blob into the timeline."""
+
+
+def _cap_output(value: str) -> tuple[str | None, bool]:
+    """Return (stored text or None, was_capped) for one captured stream."""
+    if not value:
+        return (None, False)
+    if len(value) <= TOOL_OUTPUT_CAP_CHARS:
+        return (value, False)
+    return (value[:TOOL_OUTPUT_CAP_CHARS] + "\n…[truncated]", True)
+
+
+class SqlAlchemyToolCallTraceSink(ToolCallTraceSink):
+    """Persist per-tool-call traces to ``agent_tool_calls`` (Johnny-etu.4).
+
+    One sink per executing task: the session / task / turn / kind binding is
+    fixed at construction (the worker builds it from the
+    :class:`~app.services.task_worker.ClaimedTask`), so the skills executor hands
+    over only what each ``sandbox.exec`` produced. Each :meth:`record` opens its
+    own short-lived session and commits independently — a trace is durable the
+    moment the call returns, even if the task later fails or the worker dies
+    before the settle. Best-effort by contract: the executor swallows + logs any
+    raise (:func:`johnny.skills.executor._run_traced`) so observability never
+    breaks a task. Mirrors :class:`SqlAlchemyTaskSink`'s SQLAlchemy-free split.
+    """
+
+    def __init__(
+        self,
+        *,
+        bot_session_id: int,
+        agent_task_id: int | None = None,
+        turn_id: int | None = None,
+        kind: str | None = None,
+        session_factory: Callable[[], Session] | None = None,
+    ) -> None:
+        self._bot_session_id = bot_session_id
+        self._agent_task_id = agent_task_id
+        self._turn_id = turn_id
+        self._kind = kind
+        self._session_factory = session_factory
+
+    async def record(self, trace: ToolCallTrace) -> None:
+        stdout, stdout_capped = _cap_output(trace.stdout)
+        stderr, stderr_capped = _cap_output(trace.stderr)
+        row = AgentToolCall(
+            bot_session_id=self._bot_session_id,
+            agent_task_id=self._agent_task_id,
+            turn_id=self._turn_id,
+            tool_name=trace.tool_name,
+            kind=self._kind,
+            phase=trace.phase,
+            request_json=dict(trace.request),
+            ok=trace.ok,
+            exit_code=trace.exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            duration_ms=trace.duration_ms,
+            timed_out=trace.timed_out,
+            truncated=trace.truncated or stdout_capped or stderr_capped,
+            denied=trace.denied,
+            error=trace.error or None,
+        )
+        factory = self._session_factory
+        if factory is None:
+            from app.db.session import SessionLocal
+
+            factory = SessionLocal
+            self._session_factory = factory
+        db = factory()
+        try:
+            db.add(row)
+            db.commit()
+        finally:
+            db.close()
+
+
 __all__ = [
     "SqlAlchemyTaskSink",
+    "SqlAlchemyToolCallTraceSink",
 ]
