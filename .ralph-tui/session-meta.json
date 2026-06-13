@@ -1,8 +1,8 @@
 {
-  "id": "368ff11b-20d5-4eb0-bfb5-dc0ee5fa8fba",
+  "id": "b1830317-46f0-4387-8002-9689817ad279",
   "status": "running",
-  "startedAt": "2026-06-13T14:47:42.049Z",
-  "updatedAt": "2026-06-13T17:17:43.173Z",
+  "startedAt": "2026-06-13T17:35:29.976Z",
+  "updatedAt": "2026-06-13T17:35:29.976Z",
   "agentPlugin": "claude",
   "trackerPlugin": "beads-bv",
   "epicId": "Johnny-etu",
@@ -21,9 +21,9 @@
       }
     }
   ],
-  "currentIteration": 4,
+  "currentIteration": 0,
   "maxIterations": 0,
   "totalTasks": 0,
-  "tasksCompleted": 4,
+  "tasksCompleted": 0,
   "cwd": "/Users/nikita/Projects/Johnny"
 }

@@ -1,13 +1,13 @@
 {
   "version": 1,
-  "sessionId": "368ff11b-20d5-4eb0-bfb5-dc0ee5fa8fba",
-  "status": "paused",
-  "startedAt": "2026-06-13T14:47:46.989Z",
-  "updatedAt": "2026-06-13T17:17:44.173Z",
-  "currentIteration": 4,
+  "sessionId": "b1830317-46f0-4387-8002-9689817ad279",
+  "status": "running",
+  "startedAt": "2026-06-13T17:35:36.635Z",
+  "updatedAt": "2026-06-13T18:36:53.689Z",
+  "currentIteration": 0,
   "maxIterations": 0,
-  "tasksCompleted": 4,
-  "isPaused": true,
+  "tasksCompleted": 0,
+  "isPaused": false,
   "agentPlugin": "claude",
   "model": "opus",
   "trackerState": {
@@ -28,7 +28,7 @@
         }
       }
     ],
-    "totalTasks": 16,
+    "totalTasks": 19,
     "tasks": [
       {
         "id": "Johnny-ckz.28.1",
@@ -76,19 +76,19 @@
         "id": "Johnny-etu.3",
         "title": "[SPIKE] Phase 0: Root-cause the session-runtime regression — replay session #1 + trt.60, pin what Phase 6/7 broke",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-etu.4",
         "title": "[BUILD] Phase 0: 'What is the bot thinking' — per-turn reasoning timeline + tool-call traces in /sessions/[id]",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-etu.5",
         "title": "[BUILD] Phase 0: Default workspace lazy-launched at ~/.johnny/workspaces/default/ (like finance/ops)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-etu.6",
@@ -100,7 +100,7 @@
         "id": "Johnny-etu.7",
         "title": "[BUILD] Phase 1: Restore answer grounding — reply LLM sees tool results incl. errors (0qw redux)",
         "status": "completed",
-        "completedInSession": true
+        "completedInSession": false
       },
       {
         "id": "Johnny-etu.8",
@@ -125,54 +125,30 @@
         "title": "[CHORE] Phase 3 capstone: clean-install e2e + wire the replay harness as a CI regression gate",
         "status": "open",
         "completedInSession": false
+      },
+      {
+        "id": "Johnny-etu.12",
+        "title": "[BUILD] Phase 4: Demo tool/skill/MCP fixtures + mic-driven tool-calling regression tests",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-etu.13",
+        "title": "[BUILD] Phase 4: Multi-agent same-meeting test — task pickup, shared context, per-agent tool calling",
+        "status": "open",
+        "completedInSession": false
+      },
+      {
+        "id": "Johnny-etu.14",
+        "title": "[BUILD] Phase 1: Fix decision->utterance divergence — delivered reply discards the decided response + tool result (sessions 3 & 4)",
+        "status": "open",
+        "completedInSession": false
       }
     ]
   },
-  "iterations": [
-    {
-      "iteration": 1,
-      "status": "completed",
-      "taskId": "Johnny-etu.3",
-      "taskTitle": "[SPIKE] Phase 0: Root-cause the session-runtime regression — replay session #1 + trt.60, pin what Phase 6/7 broke",
-      "taskCompleted": true,
-      "durationMs": 1954054,
-      "startedAt": "2026-06-13T14:47:56.345Z",
-      "endedAt": "2026-06-13T15:20:30.399Z"
-    },
-    {
-      "iteration": 2,
-      "status": "completed",
-      "taskId": "Johnny-etu.5",
-      "taskTitle": "[BUILD] Phase 0: Default workspace lazy-launched at ~/.johnny/workspaces/default/ (like finance/ops)",
-      "taskCompleted": true,
-      "durationMs": 2577743,
-      "startedAt": "2026-06-13T15:20:40.845Z",
-      "endedAt": "2026-06-13T16:03:38.588Z"
-    },
-    {
-      "iteration": 3,
-      "status": "completed",
-      "taskId": "Johnny-etu.4",
-      "taskTitle": "[BUILD] Phase 0: 'What is the bot thinking' — per-turn reasoning timeline + tool-call traces in /sessions/[id]",
-      "taskCompleted": true,
-      "durationMs": 2243735,
-      "startedAt": "2026-06-13T16:03:48.852Z",
-      "endedAt": "2026-06-13T16:41:12.587Z"
-    },
-    {
-      "iteration": 4,
-      "status": "completed",
-      "taskId": "Johnny-etu.7",
-      "taskTitle": "[BUILD] Phase 1: Restore answer grounding — reply LLM sees tool results incl. errors (0qw redux)",
-      "taskCompleted": true,
-      "durationMs": 2172781,
-      "startedAt": "2026-06-13T16:41:23.517Z",
-      "endedAt": "2026-06-13T17:17:36.298Z"
-    }
-  ],
+  "iterations": [],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],
-  "subagentPanelVisible": false,
-  "pausedAt": "2026-06-13T17:17:44.173Z"
+  "subagentPanelVisible": false
 }

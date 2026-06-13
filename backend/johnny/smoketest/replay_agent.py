@@ -156,6 +156,32 @@ class _ReplaySpeechHandle:
             cb(self)
 
 
+class _ReplaySayStub:
+    """A ``say()`` stand-in so the replay can execute say()-path verdicts.
+
+    The gate speaks delegate acks, status summaries, and decided-reply parity
+    turns (Johnny-etu.14) through ``session.say()`` — raising ``StopResponse``,
+    not the answer-LLM reply path. Without a ``say()`` attached those verdicts
+    terminalize ``no_reply(stage_error)``, so the replay could not reproduce
+    them at all. This records each spoken text and returns a
+    :class:`_ReplaySpeechHandle` whose done-callback :func:`run_agent_replay`
+    fires, mirroring the live ``SpeechHandle`` completion that
+    :meth:`RouterGate._on_say_done` terminalizes (``replied`` + ``AgentSpoke``).
+    The spoken text is the say argument itself (the gate passes it to
+    ``AgentSpoke`` directly), not a chat item, so the handle carries none.
+    """
+
+    def __init__(self) -> None:
+        self.handles: list[_ReplaySpeechHandle] = []
+        self.texts: list[str] = []
+
+    def __call__(self, text: str) -> SpeechHandle:
+        handle = _ReplaySpeechHandle(handle_id=f"item_say_{len(self.handles)}")
+        self.texts.append(text)
+        self.handles.append(handle)
+        return cast(SpeechHandle, handle)
+
+
 async def run_agent_replay(fixture: ReplayFixture) -> ReplayResult:
     """Drive ``fixture`` through the AgentSession engine and capture its events.
 
@@ -216,6 +242,12 @@ async def run_agent_replay(fixture: ReplayFixture) -> ReplayResult:
         record_spoke=obs.record_spoke,
         record_suggested=obs.record_suggested,
     )
+    # Attach a say() stub so say()-path verdicts (delegate ack / status /
+    # decided-reply parity, Johnny-etu.14) replay as their real ``replied``
+    # terminal instead of ``no_reply(stage_error)``; the answer-LLM reply path
+    # is still driven below via bind_reply.
+    say_stub = _ReplaySayStub()
+    gate.attach_say(say_stub)
 
     # Accumulate the chat context across turns exactly as the SDK does: the new
     # message is NOT in turn_ctx when the hook runs (the SDK copies the ctx before
@@ -235,6 +267,7 @@ async def run_agent_replay(fixture: ReplayFixture) -> ReplayResult:
             )
         )
         msg = LKChatMessage(role="user", content=[turn.text])
+        say_before = len(say_stub.handles)
         spoke = False
         try:
             await gate.run_turn(ctx, msg)
@@ -242,6 +275,21 @@ async def run_agent_replay(fixture: ReplayFixture) -> ReplayResult:
         except StopResponse:
             spoke = False
         ctx.add_message(role="user", content=turn.text)
+
+        # A say()-path verdict (delegate ack / status / decided-reply parity,
+        # Johnny-etu.14) speaks inside run_turn via say() and raises
+        # StopResponse; fire the say handle's done so the gate emits that path's
+        # terminal + AgentSpoke, mirroring the live SpeechHandle completion. The
+        # spoken text is the say text itself (not a chat item), so it rides into
+        # the rolling context as the bot's turn — and we skip the answer-LLM
+        # bind_reply path below (this turn had no answer hop).
+        if len(say_stub.handles) > say_before:
+            say_handle = say_stub.handles[-1]
+            say_handle.fire_done()
+            if gate._reply_tasks:
+                await asyncio.gather(*tuple(gate._reply_tasks))
+            ctx.add_message(role="assistant", content=say_stub.texts[-1])
+            continue
 
         if not spoke:
             continue

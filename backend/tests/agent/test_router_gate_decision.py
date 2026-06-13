@@ -46,9 +46,12 @@ from johnny.agent.gate import GateTerminal, TurnIndex, TurnLedger  # noqa: E402
 from johnny.agent.router_gate import (  # noqa: E402
     ACK_FALLBACK_KEY,
     CAPABILITY_GAP_KEY,
+    DECIDED_REPLY_KEY,
+    DECIDED_REPLY_MAX_CHARS,
     DEFAULT_DELEGATE_ACK,
     ROUTER_DECISION_SCHEMA,
     ROUTER_DECISION_SCHEMA_NO_CATALOG,
+    STATUS_REROUTE_KEY,
     TASK_CONTEXT_KEY,
     UNKNOWN_KIND_KEY,
     RouterGate,
@@ -3378,3 +3381,324 @@ async def test_duplicate_interrupted_done_callbacks_emit_one_interruption() -> N
 
     assert len(emitter.records) == 1
     assert len(obs.interruptions) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Decision↔utterance parity (Johnny-etu.14)                                   #
+# --------------------------------------------------------------------------- #
+# Two divergences seen live (sessions 3 & 4): a `status` verdict that still
+# carried the `task` object it meant to delegate spoke the canned
+# nothing-in-flight line over the real ask (session 3), and a plain `speak`
+# verdict whose `suggested_reply` the router authored was rephrased by the
+# answer LLM into an unrelated greeting (session 4). Both fixes make
+# DELIVERED == DECIDED by construction.
+
+
+def _speak_decision(
+    reply: str | None = None,
+    *,
+    confidence: float = 0.95,
+    reply_type: str = "acknowledgement",
+) -> dict[str, Any]:
+    """A plain ``speak`` verdict, optionally carrying a router-authored reply."""
+    decision: dict[str, Any] = {
+        "should_speak": True,
+        "confidence": confidence,
+        "reason": "addressed",
+        "action": "speak",
+    }
+    if reply is not None:
+        decision["reply_type"] = reply_type
+        decision["suggested_reply"] = reply
+    return decision
+
+
+def _status_with_task(
+    kind: str = "google-calendar",
+    *,
+    ack: str = "Checking the calendar now — one moment.",
+) -> dict[str, Any]:
+    """The session-3 mis-emission shape: ``status`` action carrying a ``task``.
+
+    ``should_speak`` is the model's literal ``false`` (a status action makes the
+    parser normalise it to ``True``) so the test exercises the real recorded
+    shape end-to-end.
+    """
+    return {
+        "should_speak": False,
+        "confidence": 0.7,
+        "reason": "No google-calendar task available.",
+        "action": "status",
+        "task": {"kind": kind, "ack": ack},
+    }
+
+
+# --- (1) decided-reply parity: speak suggested_reply verbatim (session 4) ---
+
+
+async def test_speak_with_suggested_reply_speaks_verbatim_no_answer_hop() -> None:
+    """THE session-4 fix: a speak verdict the router authored is spoken VERBATIM
+    via say() — no answer-LLM hop that could rephrase "Got it." into a greeting.
+    DELIVERED == DECIDED, one replied terminal owned by the speech."""
+    h = _TaskGateHarness([_speak_decision("Got it.")])
+    msg = _user_msg("check the calendar in the background")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    decision, _turn = h.obs.decisions[0]
+    # DELIVERED == DECIDED: the spoken text is the router's recommended reply.
+    assert h.say.texts == ["Got it."]
+    assert h.say.texts == [decision.suggested_reply]
+    # The answer LLM never ran: no SPEAK turn was queued for generate_reply.
+    assert list(h.gate._pending_speak_turns) == []
+    # The verbatim-speak marker rode decision.raw into the decision emit.
+    assert decision.raw[DECIDED_REPLY_KEY] == {"source": "suggested_reply"}
+    json.dumps(decision.raw[DECIDED_REPLY_KEY])  # JSON-safe for the subscriber
+
+    # The speech owns the single terminal (INV-1); AgentSpoke kind="reply" so
+    # the subscriber stamps this turn's final_text == recommended (no divergence).
+    h.say.handles[0].fire_done()
+    await h.drain()
+    assert h.emitter.states == ["replied"]
+    assert "decided reply verbatim" in h.emitter.records[0][1].detail
+    assert h.obs.spoke_calls == [("Got it.", msg.id, "reply")]
+
+
+async def test_speak_with_suggested_reply_verbatim_in_autonomous_mode() -> None:
+    """The playground default is free-form autonomous — the verbatim parity path
+    fires there too (free-form always bypasses the allowlist coercion)."""
+    h = _TaskGateHarness(
+        [_speak_decision("On it.")],
+        config=RouterGateConfig(mode="autonomous"),
+    )
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("look into that"))
+
+    assert h.say.texts == ["On it."]
+    decision, _turn = h.obs.decisions[0]
+    assert DECIDED_REPLY_KEY in decision.raw
+
+
+async def test_speak_without_suggested_reply_runs_the_answer_llm() -> None:
+    """No router-authored reply ⇒ the gate defers composition to the answer LLM:
+    the SPEAK fallthrough (no raise), the turn queued for generate_reply, nothing
+    said via say(), and no verbatim marker."""
+    h = _TaskGateHarness([_speak_decision(reply=None)])
+    msg = _user_msg("what's the weather like on Mars?")
+
+    await h.gate.run_turn(ChatContext.empty(), msg)  # must NOT raise
+
+    assert h.say.texts == []
+    assert list(h.gate._pending_speak_turns) == [msg.id]
+    decision, _turn = h.obs.decisions[0]
+    assert DECIDED_REPLY_KEY not in decision.raw
+
+
+async def test_speak_with_suggested_reply_but_allowlist_runs_the_answer_llm() -> None:
+    """When the answer path coerces to an allow-list (a separate parity
+    mechanism), the gate leaves it alone — no verbatim say(), the answer node
+    runs and coerces."""
+    h = _TaskGateHarness(
+        [_speak_decision("Got it.")],
+        config=RouterGateConfig(
+            mode="limited_auto_speak",
+            allowed_replies=("Yes.", "No.", "On track for Friday."),
+        ),
+    )
+    msg = _user_msg("are we on track?")
+
+    await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK fallthrough — no raise
+
+    assert h.say.texts == []
+    assert list(h.gate._pending_speak_turns) == [msg.id]
+    decision, _turn = h.obs.decisions[0]
+    assert DECIDED_REPLY_KEY not in decision.raw
+
+
+async def test_speak_with_suggested_reply_but_held_result_grounds_via_answer_llm() -> None:
+    """The 0qw safety interlock: a held/undelivered task result must be reflected,
+    so a speak verdict lands on the GROUNDED answer path (the result is injected),
+    never the blind verbatim preview."""
+    h = _TaskGateHarness([_speak_decision("Got it.")])
+    assert h.coordinator is not None
+    h.coordinator.note_task_settled(
+        7, status="done", kind="google-calendar", result_text="You have 2 events this week."
+    )
+    msg = _user_msg("so what's on my calendar?")
+
+    await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK fallthrough — no raise
+
+    assert h.say.texts == []  # not spoken verbatim — the grounded answer LLM runs
+    assert list(h.gate._pending_speak_turns) == [msg.id]
+    decision, _turn = h.obs.decisions[0]
+    assert DECIDED_REPLY_KEY not in decision.raw
+    # The held result was snapshotted for injection (the 0qw ride-along).
+    assert decision.raw[TASK_CONTEXT_KEY] == {"undelivered": [7], "in_flight": []}
+
+
+async def test_speak_with_json_wrapped_suggested_reply_falls_back_to_answer_llm() -> None:
+    """The weak router sometimes double-encodes its output into the string field
+    (llama3.2:3b emitted suggested_reply='{"text": "…"}', truncated to invalid
+    JSON — session 5). Speaking that raw object is strictly worse than the answer
+    LLM's clean prose, so a reply opening with a JSON delimiter falls back to the
+    answer path rather than being spoken verbatim."""
+    h = _TaskGateHarness(
+        [_speak_decision('{"text": "Sorry chum, I can\'t see the Google calendar yet')]
+    )
+    msg = _user_msg("can you check the calendar?")
+
+    await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK fallthrough — no raise
+
+    assert h.say.texts == []  # never spoke the raw JSON
+    assert list(h.gate._pending_speak_turns) == [msg.id]
+    decision, _turn = h.obs.decisions[0]
+    assert DECIDED_REPLY_KEY not in decision.raw
+
+
+async def test_speak_with_long_substantive_suggested_reply_runs_answer_llm() -> None:
+    """The verbatim path is scoped to SHORT acknowledgements (session 4's
+    "Got it."). A long, substantive suggested_reply is the answer LLM's domain —
+    the streaming composer stays canonical and any divergence is audited
+    (ckz.28.2), not pre-empted — so it falls through to the answer path."""
+    long_reply = "Sure — let me pull up the calendar and check what's coming up this week."
+    assert len(long_reply) > DECIDED_REPLY_MAX_CHARS
+    h = _TaskGateHarness([_speak_decision(long_reply)])
+    msg = _user_msg("what's on the calendar?")
+
+    await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK fallthrough — no raise
+
+    assert h.say.texts == []  # not spoken verbatim — the answer LLM composes
+    assert list(h.gate._pending_speak_turns) == [msg.id]
+    decision, _turn = h.obs.decisions[0]
+    assert DECIDED_REPLY_KEY not in decision.raw
+
+
+async def test_speak_with_short_reply_at_the_boundary_speaks_verbatim() -> None:
+    """A reply exactly at DECIDED_REPLY_MAX_CHARS still counts as a short ack and
+    is spoken verbatim — the boundary is inclusive."""
+    reply = "x" * DECIDED_REPLY_MAX_CHARS
+    h = _TaskGateHarness([_speak_decision(reply)])
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("ok"))
+
+    assert h.say.texts == [reply]
+    decision, _turn = h.obs.decisions[0]
+    assert DECIDED_REPLY_KEY in decision.raw
+
+
+# --- (2) status→delegate re-route (session 3) -------------------------------
+
+
+async def test_status_carrying_unavailable_task_declines_not_nothing_in_flight() -> None:
+    """THE session-3 fix: a status verdict that still carries the task it meant
+    to delegate, with an empty registry, is re-routed to delegate — and an
+    UNAVAILABLE kind then speaks the honest decline, never the canned
+    nothing-in-flight line over the real calendar ask."""
+    h = _TaskGateHarness(
+        [_status_with_task("google-calendar")],
+        config=RouterGateConfig(task_catalog=_capability_catalog()),
+    )
+    msg = _user_msg("look up what's on my google calendar")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    # The decline, NOT STATUS_NOTHING_IN_FLIGHT.
+    assert h.say.texts == [_UNAVAILABLE_REASON]
+    assert STATUS_NOTHING_IN_FLIGHT not in h.say.texts
+    assert h.sink.snapshot() == []  # unavailable ⇒ nothing queued
+
+    decision, _turn = h.obs.decisions[0]
+    # The re-route marker AND the capability-gap marker both rode the raw_output.
+    reroute = decision.raw[STATUS_REROUTE_KEY]
+    assert reroute == {
+        "from_action": "status",
+        "to_action": "delegate",
+        "kind": "google-calendar",
+    }
+    json.dumps(reroute)  # JSON-safe as persisted by the subscriber
+    assert decision.raw[CAPABILITY_GAP_KEY]["kind"] == "google-calendar"
+    # Effective action after the availability degrade is the say()-path status.
+    assert decision.action == "status"
+
+    h.say.handles[0].fire_done()
+    await h.drain()
+    assert h.emitter.states == ["replied"]
+    assert h.obs.spoke_calls == [(_UNAVAILABLE_REASON, msg.id, "status")]
+
+
+async def test_status_carrying_available_task_queues_and_acks() -> None:
+    """An available kind on the re-route queues the task and speaks the
+    router-authored ack — the model's task object honoured as the delegate it
+    was, not dropped for nothing-in-flight."""
+    h = _TaskGateHarness(
+        [_status_with_task("session.end", ack="Wrapping up now.")],
+        config=RouterGateConfig(task_catalog=_capability_catalog()),
+    )
+    msg = _user_msg("are we done here?")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    assert len(h.sink.snapshot()) == 1  # queued via the normal delegate path
+    assert h.say.texts == ["Wrapping up now."]
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "delegate"
+    assert decision.raw[STATUS_REROUTE_KEY]["kind"] == "session.end"
+    assert CAPABILITY_GAP_KEY not in decision.raw
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_status_with_task_but_work_in_flight_keeps_status_summary() -> None:
+    """A genuine status query about RUNNING work is never re-routed: with a task
+    in flight the registry has something to report, so the status summary wins
+    even when the model also filled a task object."""
+    h = _TaskGateHarness(
+        [_status_with_task("google-calendar")],
+        config=RouterGateConfig(task_catalog=_capability_catalog()),
+    )
+    assert h.coordinator is not None
+    h.coordinator.note_task_running(31, kind="google-calendar")
+    msg = _user_msg("how's that calendar check going?")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    assert len(h.say.texts) == 1
+    assert "Still working on the google calendar task" in h.say.texts[0]
+    decision, _turn = h.obs.decisions[0]
+    assert STATUS_REROUTE_KEY not in decision.raw  # not re-routed
+    assert decision.action == "status"
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_bare_status_without_task_still_speaks_nothing_in_flight() -> None:
+    """The guard is precise: a status verdict with NO task object is a real
+    status query and keeps the empty-registry line — the re-route only catches
+    the fill-task-but-emit-status mis-emission."""
+    h = _TaskGateHarness([_status_decision()])
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("any progress?"))
+
+    assert h.say.texts == [STATUS_NOTHING_IN_FLIGHT]
+    decision, _turn = h.obs.decisions[0]
+    assert STATUS_REROUTE_KEY not in decision.raw
+
+
+async def test_status_with_task_no_coordinator_keeps_nothing_in_flight() -> None:
+    """Without a coordinator the honest stance is still the fixed line — the
+    re-route must never strand a delegate where nothing can run it."""
+    h = _TaskGateHarness([_status_with_task("google-calendar")], wire_coordinator=False)
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("look at my calendar"))
+
+    assert h.say.texts == [STATUS_NOTHING_IN_FLIGHT]
+    decision, _turn = h.obs.decisions[0]
+    assert STATUS_REROUTE_KEY not in decision.raw

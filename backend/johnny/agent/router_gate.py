@@ -73,6 +73,7 @@ from livekit.agents.llm.chat_context import ChatMessage as LKChatMessage
 from livekit.agents.voice import SpeechHandle
 
 from app.providers.base import ChatMessage, LLMProvider
+from johnny.agent.answer import uses_allowlist
 from johnny.agent.approval import ApprovalCoordinator, ApprovalRound
 from johnny.agent.complexity import SHADOW_KEY, score_complexity
 from johnny.agent.gate import (
@@ -300,6 +301,45 @@ nothing reportable. On the SPEAK fallthrough the same snapshot's render
 into the reply's generation context — the settle→delivery / ack→settle
 blind-window fix — so a row carrying this key with ``action == "speak"``
 identifies a grounded-by-injection reply."""
+
+STATUS_REROUTE_KEY = "status_reroute"
+"""``decision.raw`` key marking a ``status`` verdict the gate re-routed to
+``delegate`` (Johnny-etu.14). The small router sometimes labels a capability
+request ``status`` while still composing the ``task`` object it meant to
+delegate (the "fill-task-but-emit-wrong-action" shape — session 3 spoke the
+canned :data:`~johnny.agent.tasks.STATUS_NOTHING_IN_FLIGHT` over a real
+"look up my calendar" ask). When nothing is in flight to report, that task
+object IS the intent, so the gate rewrites the verdict to ``delegate`` and lets
+the standard delegate degrades take it (deterministic decline for an
+unavailable kind, queue+ack for an available one). Stashed before the decision
+emit (the trt.50 ride-along) with ``{from_action, to_action, kind}``, so the
+decision row records the re-route exactly like the delegate-degrade markers."""
+
+DECIDED_REPLY_MAX_CHARS = 48
+"""Upper bound on a ``suggested_reply`` the gate will speak VERBATIM
+(Johnny-etu.14). The reported divergence is a SHORT acknowledgement the answer
+LLM ballooned — the router decided ``"Got it."`` and the answer model spoke an
+unrelated greeting (session 4); the bead scopes the fix to "background-delegate
+acks". A longer ``suggested_reply`` is a substantive reply, where the streaming
+answer LLM stays the canonical composer (the ``speak → answer LLM`` design in
+``docs/ROUTING.md`` §1) and any divergence is *audited* rather than pre-empted
+(Johnny-ckz.28.2). The bound sits in the gap between observed acks (≤ ~35 chars)
+and substantive replies (the Phase-3 replay baselines' shortest is 57), so the
+parity speak-path never swallows a real answer turn."""
+
+DECIDED_REPLY_KEY = "decided_reply"
+"""``decision.raw`` key marking a ``speak`` verdict the gate spoke VERBATIM from
+the router's ``suggested_reply`` instead of running the answer LLM
+(Johnny-etu.14 — the decision↔utterance parity guarantee). When the router
+already authored the reply and the answer path would otherwise run
+UNCONSTRAINED (``not uses_allowlist``), the answer LLM is a second, divergent
+generation — it rephrased "Got it." into an unrelated greeting in session 4.
+Speaking the decided text through say() makes DELIVERED == DECIDED by
+construction (``final_text == decision_recommended_text``, so the INV-2 parity
+guard sees no divergence) and drops the answer-LLM hop. Only set when the 0qw
+registry snapshot is empty — a held/in-flight result must still route through
+the grounded answer path so it is reflected, never dropped for a blind
+preview."""
 
 
 def capability_decline_speech(kind: str, reason: str) -> str:
@@ -670,6 +710,18 @@ class RouterGate:
         the rate limiter treat a delegate/status verdict exactly like a speak
         verdict (unchanged behaviour).
 
+        Decision↔utterance parity (Johnny-etu.14) closes two divergences seen
+        live (sessions 3 & 4). (1) A ``status`` verdict that still carries the
+        ``task`` object the model meant to delegate, with **nothing in flight to
+        report**, is re-routed to ``delegate`` (:meth:`_reroute_status_with_task`)
+        instead of speaking the canned nothing-in-flight line over the real ask.
+        (2) A plain ``speak`` verdict whose ``suggested_reply`` the router
+        authored, when the answer path would otherwise run unconstrained and no
+        held task result needs reflecting, is spoken VERBATIM through ``say()``
+        (:meth:`_decided_reply_to_speak`) — no second answer-LLM generation that
+        could rephrase the decided text into something else. Both make
+        DELIVERED == DECIDED by construction; both raise ``StopResponse``.
+
         Shadow complexity pre-score (Johnny-trt.50): before awaiting the
         router LLM the gate runs the pure-python heuristic scorer
         (:func:`~johnny.agent.complexity.score_complexity`) over the latest
@@ -748,6 +800,38 @@ class RouterGate:
         if shadow is not None:
             decision.raw[SHADOW_KEY] = shadow
 
+        # Answer-context snapshot (Johnny-0qw): what the task registry holds
+        # right now — completed-but-undelivered results and in-flight tasks.
+        # Computed once per turn BEFORE the verdict degrades (Johnny-etu.14
+        # moved it up): the status→delegate re-route and the decided-reply
+        # parity branch below both read it, and nothing in the degrades mutates
+        # the registry. Stashed in decision.raw (the trt.50 ride-along) so the
+        # decision row records what was visible, and injected into the reply's
+        # generation context on the SPEAK fallthrough below so the answer model
+        # can never answer blind in the settle→delivery or ack→settle windows.
+        # A settle landing after this snapshot is missed for this turn only —
+        # the next turn sees it, and the boundary deliverer speaks it regardless.
+        task_context = (
+            self._tasks.answer_task_context()
+            if self._tasks is not None
+            else AnswerTaskContext()
+        )
+        if not task_context.empty:
+            decision.raw[TASK_CONTEXT_KEY] = {
+                "undelivered": [entry.task_id for entry in task_context.undelivered],
+                "in_flight": [entry.task_id for entry in task_context.in_flight],
+            }
+
+        # Status→delegate re-route (Johnny-etu.14): the small router sometimes
+        # labels a capability request ``status`` while still composing the
+        # ``task`` object it should have delegated — session 3 spoke the canned
+        # nothing-in-flight line over a real calendar ask. When nothing is in
+        # flight to report, that task object IS the intent, so re-route to
+        # delegate and let the degrades below handle it. Runs BEFORE the
+        # degrades so a re-routed verdict flows through them; stashes its marker
+        # before the decision emit like every other degrade.
+        decision = self._reroute_status_with_task(decision, task_context, turn_id)
+
         # Delegate-verdict degrades, in precedence order. Availability FIRST
         # (Johnny-trt.55): an unavailable catalog kind becomes the
         # deterministic spoken decline — never the answer pipeline, which
@@ -763,25 +847,18 @@ class RouterGate:
         decision = self._degrade_unknown_kind_delegate(decision, turn_id)
         decision = self._degrade_ackless_delegate(decision, turn_id)
 
-        # Answer-context snapshot (Johnny-0qw): what the task registry holds
-        # right now — completed-but-undelivered results and in-flight tasks.
-        # Computed once per turn: stashed in decision.raw (the trt.50
-        # ride-along) so the decision row records what was visible, and
-        # injected into the reply's generation context on the SPEAK
-        # fallthrough below so the answer model can never answer blind in the
-        # settle→delivery or ack→settle windows. A settle landing after this
-        # snapshot is missed for this turn only — the next turn sees it, and
-        # the boundary deliverer speaks it regardless.
-        task_context = (
-            self._tasks.answer_task_context()
-            if self._tasks is not None
-            else AnswerTaskContext()
-        )
-        if not task_context.empty:
-            decision.raw[TASK_CONTEXT_KEY] = {
-                "undelivered": [entry.task_id for entry in task_context.undelivered],
-                "in_flight": [entry.task_id for entry in task_context.in_flight],
-            }
+        # Decided-reply parity (Johnny-etu.14): when the router authored the
+        # reply itself (``suggested_reply``) and the answer path would otherwise
+        # run UNCONSTRAINED, the gate speaks that decided text verbatim rather
+        # than a second, divergent answer-LLM generation — see
+        # :meth:`_decided_reply_to_speak`. Resolved here (before the decision
+        # emit) so the marker lands in ``raw_output``; acted on at the speak
+        # branch below, after the never-speaks / approval / floor gates so it
+        # respects rate-limiting and multi-agent turn arbitration exactly like
+        # a normal reply.
+        decided_reply = self._decided_reply_to_speak(decision, task_context)
+        if decided_reply is not None:
+            decision.raw[DECIDED_REPLY_KEY] = {"source": "suggested_reply"}
 
         # Triage-stage timing (Johnny-trt.19): one ``router_llm`` row per turn
         # the router actually decided (timed-out / barged / errored gates leave
@@ -941,6 +1018,32 @@ class RouterGate:
             # task registry and speak it through the same say() machinery
             # (deterministic, no answer-LLM hop, no DB read).
             await self._handle_status(tracker, turn_id)
+            raise StopResponse()
+
+        if decided_reply is not None:
+            # Decided-reply parity (Johnny-etu.14): speak the router-authored
+            # reply VERBATIM through say() — DELIVERED == DECIDED, with no
+            # answer-LLM hop that could rephrase it (session 4 turned "Got it."
+            # into an unrelated greeting). Mirrors the delegate/status say()
+            # paths: the speech handle's completion owns the turn's single
+            # terminal, and the AgentSpoke (kind="reply") stamps this turn's
+            # ``final_text`` — equal to ``decision_recommended_text``, so the
+            # INV-2 parity guard sees no divergence by construction.
+            logger.info(
+                "agent.router.gate: turn=%s SPEAK decided reply verbatim (no answer "
+                "hop) confidence=%.2f reply=%r",
+                turn_id,
+                decision.confidence,
+                decided_reply,
+            )
+            await self._say_with_terminal(
+                tracker,
+                turn_id,
+                decided_reply,
+                kind="reply",
+                replied_detail="spoke the router's decided reply verbatim (no answer hop)",
+                interrupted_detail="decided reply interrupted before completion",
+            )
             raise StopResponse()
 
         # Shared speech floor (Johnny-trt.46): in a multi-agent meeting the
@@ -1205,6 +1308,113 @@ class RouterGate:
             task_request.kind,
         )
         return replace(decision, action=SPEAK_ACTION, task_request=None)
+
+    def _reroute_status_with_task(
+        self, decision: RouterDecision, task_context: AnswerTaskContext, turn_id: str
+    ) -> RouterDecision:
+        """Re-route a ``status`` verdict that carries a task object to ``delegate`` (Johnny-etu.14).
+
+        The small router sometimes emits ``action="status"`` while still
+        composing the ``task`` object it meant to delegate (session 3: a
+        "look up my calendar" ask labelled status, then answered with the canned
+        :data:`~johnny.agent.tasks.STATUS_NOTHING_IN_FLIGHT` over the model's
+        real composed reply). When there is **nothing in flight to report** —
+        the 0qw registry snapshot is empty, so :meth:`_handle_status` would
+        speak the empty-registry line — that task object is the actual intent,
+        so rewrite the verdict to ``delegate`` and let the standard delegate
+        degrades take it: a deterministic decline for an unavailable kind
+        (:meth:`_degrade_unavailable_delegate`), or queue+ack for an available
+        one. A real answer beats a hollow nothing-in-flight line, the same
+        stance as the ackless-delegate degrade (Johnny-trt.53).
+
+        Guards keep it surgical so a genuine status query is never disturbed:
+        only a ``status`` action, only with a coordinator wired (without one the
+        honest no-coordinator stance is the empty-registry line, not a dead
+        delegate), only when the registry holds nothing the user could be asking
+        the *status* of (``task_context.empty`` — a "how's the calendar check
+        going?" with work in flight keeps its status summary), and only when
+        ``raw["task"]`` parses to a real :class:`TaskRequest` (a bare status
+        verdict has no task object and falls straight through). The marker is
+        stashed before the decision emit (the trt.50 ride-along) so the row
+        records the re-route; ``decision.raw["action"]`` stays the model's
+        original ``"status"``, exactly like the other degrades leave it.
+        """
+        if decision.action != STATUS_ACTION or self._tasks is None:
+            return decision
+        if not task_context.empty:
+            return decision
+        task_request = _reasoning._parse_task_request(decision.raw.get("task"))
+        if task_request is None:
+            return decision
+        decision.raw[STATUS_REROUTE_KEY] = {
+            "from_action": STATUS_ACTION,
+            "to_action": DELEGATE_ACTION,
+            "kind": task_request.kind,
+        }
+        logger.info(
+            "agent.router.gate: turn=%s STATUS verdict carried task kind=%r with an "
+            "empty registry — re-routing to DELEGATE (Johnny-etu.14: the task object "
+            "is the intent, not a nothing-in-flight status)",
+            turn_id,
+            task_request.kind,
+        )
+        return replace(decision, action=DELEGATE_ACTION, task_request=task_request)
+
+    def _decided_reply_to_speak(
+        self, decision: RouterDecision, task_context: AnswerTaskContext
+    ) -> str | None:
+        """The router-authored reply to speak VERBATIM, else ``None`` (Johnny-etu.14).
+
+        The decision↔utterance parity guarantee: when the router already
+        authored the reply in ``suggested_reply`` and the answer path would
+        otherwise run **unconstrained** (``not uses_allowlist`` — an allowlist
+        mode coerces to its own canonical set, a separate parity mechanism the
+        gate leaves alone), the gate speaks that decided text rather than
+        running the answer LLM a second time. That second generation is the
+        divergence the operator hit: the router decided "Got it." and the answer
+        model spoke an unrelated greeting (session 4, audited as
+        ``override_actor="answer_llm"``). Speaking the decided text makes
+        DELIVERED == DECIDED by construction and drops the answer-LLM hop.
+
+        Returns ``None`` (answer normally) unless ALL hold: the verdict is a
+        plain ``speak`` (delegate/status own their say() paths), it carries a
+        non-blank, CLEAN, SHORT ``suggested_reply``, the answer path is
+        unconstrained, and the 0qw registry snapshot is **empty**. Three guards
+        matter. The registry interlock: a held/in-flight task result must still
+        route through the grounded answer path (:meth:`_inject_task_context`) so
+        the result is reflected — never dropped for a preview blind to it. The
+        clean-prose interlock: a weak router sometimes double-encodes its output
+        into the string field (llama3.2:3b emitted
+        ``suggested_reply='{"text": "…"}'`` — sometimes truncated to invalid
+        JSON — in session 5), and speaking that raw object verbatim is strictly
+        worse than the answer LLM's clean streaming prose, so a reply opening
+        with a JSON delimiter falls back. The length interlock: the reported
+        divergence is a SHORT acknowledgement (session 4's ``"Got it."``) — the
+        bead scopes the fix to "background-delegate acks"; a ``suggested_reply``
+        longer than :data:`DECIDED_REPLY_MAX_CHARS` is a substantive reply where
+        the answer LLM stays the canonical composer and any divergence is merely
+        audited (Johnny-ckz.28.2), so it falls through to the answer path.
+        """
+        if decision.action != SPEAK_ACTION:
+            return None
+        if not task_context.empty:
+            return None
+        if uses_allowlist(self._config.mode, self._config.allowed_replies):
+            return None
+        decided = (decision.suggested_reply or "").strip()
+        if not decided:
+            return None
+        if decided[0] in "{[":
+            # The router double-encoded structured output into the string field
+            # — not clean prose. Answer normally rather than speak a raw/partial
+            # JSON object (Johnny-etu.14, session 5).
+            return None
+        if len(decided) > DECIDED_REPLY_MAX_CHARS:
+            # A substantive reply, not a short ack — the answer LLM composes it
+            # (the speak → answer-LLM design); its divergence is audited, not
+            # pre-empted (Johnny-etu.14, scoped to acks; ckz.28.2 for the audit).
+            return None
+        return decided
 
     async def _handle_capability_decline(
         self, tracker: TerminalTracker, turn_id: str, gap: dict[str, object]

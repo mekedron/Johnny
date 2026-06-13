@@ -266,12 +266,19 @@ class HarnessStubLLMProvider(LLMProvider):
     ) -> LLMResponse:
         if response_format is not None:
             await asyncio.sleep(self._router_delay_s)
+            # No ``suggested_reply``: this harness measures the ANSWER-LLM +
+            # TTS pipeline, so the speak verdict must defer composition to the
+            # answer stage (the SPEAK fallthrough). A router-authored
+            # ``suggested_reply`` would instead be spoken verbatim through say()
+            # (Johnny-etu.14 decided-reply parity), skipping the answer LLM and
+            # erasing the very ``router_ms`` / ``llm_*`` / ``sentence_gap_ms``
+            # timings this benchmark exists to report. The answer text below
+            # (:attr:`_reply`) is what the answer LLM "produces".
             verdict = {
                 "should_speak": True,
                 "confidence": 0.95,
                 "reason": "latency harness stub always speaks",
                 "reply_type": "answer",
-                "suggested_reply": self._reply,
             }
             return LLMResponse(
                 text=json.dumps(verdict),
