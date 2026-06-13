@@ -1,13 +1,13 @@
 {
   "version": 1,
   "sessionId": "a4b8b257-f885-4df9-986b-8b98f86f035d",
-  "status": "running",
+  "status": "paused",
   "startedAt": "2026-06-13T19:58:17.274Z",
-  "updatedAt": "2026-06-13T21:04:29.666Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-13T21:04:35.211Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
-  "isPaused": false,
+  "tasksCompleted": 1,
+  "isPaused": true,
   "agentPlugin": "claude",
   "model": "opus",
   "trackerState": {
@@ -93,8 +93,8 @@
       {
         "id": "Johnny-etu.6",
         "title": "[BUILD] Phase 1: Restore the tool catalog — session.end always callable on the agents/workspaces model",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-etu.7",
@@ -146,9 +146,21 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-etu.6",
+      "taskTitle": "[BUILD] Phase 1: Restore the tool catalog — session.end always callable on the agents/workspaces model",
+      "taskCompleted": true,
+      "durationMs": 3316497,
+      "startedAt": "2026-06-13T20:09:12.108Z",
+      "endedAt": "2026-06-13T21:04:28.605Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],
-  "subagentPanelVisible": false
+  "subagentPanelVisible": false,
+  "pausedAt": "2026-06-13T21:04:35.211Z"
 }
