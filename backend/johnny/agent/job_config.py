@@ -186,10 +186,12 @@ SNAPSHOT_PEER_NAMES_KEY = "peer_names"
 SNAPSHOT_CAPABILITY_POLICY_KEY = "capability_policy"
 # Workspace attachment (Johnny-wks.1): the agent's effective execution
 # environment, resolved + stamped at dispatch. ``workspace_id`` is the key
-# the sandbox resolver seams consume (trt.63 / trt.24); ``workspace`` is the
-# identity object ({id, name, slug, is_default}) — ``is_default`` decides
-# whether the key maps to the global skills-sandbox (byte-identical legacy
-# behavior) or to that workspace's own container endpoint.
+# the sandbox resolver seams consume (trt.63 / trt.24) — a present id routes
+# to that workspace's OWN container endpoint, the default (id 1) included
+# (Johnny-etu.5: lazy-launched like finance/ops); only a stampless snapshot
+# (no ``workspace_id``) falls back to the global skills-sandbox. ``workspace``
+# is the identity object ({id, name, slug, is_default}); ``is_default`` still
+# keys the policy/MCP DB-row resolution, not the sandbox routing.
 SNAPSHOT_WORKSPACE_ID_KEY = "workspace_id"
 SNAPSHOT_WORKSPACE_KEY = "workspace"
 

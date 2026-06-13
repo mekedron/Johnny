@@ -17,10 +17,12 @@ fi
 # same survive-a-reset reasoning.
 # Create idempotently on first boot so the very first run does not
 # fail mounting a missing directory.
-# workspaces holds one dir per non-default workspace
+# workspaces holds one dir per workspace
 # (~/.johnny/workspaces/<slug>/skills — Johnny-wks.3 per-workspace skill
 # packages; wks.4 adds the keyring next to it), same survive-a-reset
-# reasoning.
+# reasoning. The DEFAULT workspace (slug `default`) is lazy-launched like
+# finance/ops now (Johnny-etu.5), so it gets its OWN dir here too — its
+# skills + gog state no longer live in the legacy shared sandbox-home.
 mkdir -p \
   "${HOME}/.johnny/piper-models" \
   "${HOME}/.johnny/whisper-models" \
@@ -31,16 +33,24 @@ mkdir -p \
   "${HOME}/.johnny/session-audio" \
   "${HOME}/.johnny/skills" \
   "${HOME}/.johnny/workspaces" \
+  "${HOME}/.johnny/workspaces/default/skills" \
+  "${HOME}/.johnny/workspaces/default/gog" \
   "${HOME}/.johnny/sandbox-home"
 
-# Seed the first-party skill packages (Johnny-trt.23) into the skills volume.
-# The repo ./skills tree is the source of truth for these directories, so a
-# clean checkout boots with the google-calendar skill present — re-copied on
-# every start (repo wins for first-party dirs); operator-added skill dirs in
-# ~/.johnny/skills are never touched.
+# Seed the first-party skill packages (Johnny-trt.23) into BOTH the shared
+# skills volume (the skills-sandbox image-build + image-contract test target
+# + legacy no-stamp fallback) AND the default workspace's OWN skills dir
+# (Johnny-etu.5: the default lazy-launches `johnny-workspace-1` and mounts
+# ~/.johnny/workspaces/default/skills at /skills, exactly like finance/ops).
+# The repo ./skills tree is the source of truth, so a clean checkout boots
+# with the google-calendar skill present in the default workspace — re-copied
+# on every start (repo wins for first-party dirs); operator-added skill dirs
+# are never touched.
 if [[ -d skills ]]; then
-  find skills -mindepth 1 -maxdepth 1 -type d \
-    -exec cp -Rf {} "${HOME}/.johnny/skills/" \;
+  for dest in "${HOME}/.johnny/skills" "${HOME}/.johnny/workspaces/default/skills"; do
+    find skills -mindepth 1 -maxdepth 1 -type d \
+      -exec cp -Rf {} "${dest}/" \;
+  done
 fi
 
 # Legacy migration hint: older installs kept the models in named Docker

@@ -63,11 +63,14 @@ def workspace_container_name(workspace_id: int) -> str:
 
 
 def sandbox_url_for_workspace(workspace_id: int) -> str:
-    """The exec API base URL for a NON-DEFAULT workspace's own container.
+    """The exec API base URL for a workspace's own lazily-launched container.
 
-    The default workspace never routes here — its endpoint stays
-    :func:`sandbox_url_from_env` (today's shared compose service), keeping
-    every pre-workspaces dispatch byte-identical.
+    EVERY workspace with a real identity stamp routes here now — the default
+    workspace (id 1) included (Johnny-etu.5: the default is lazy-launched like
+    finance/ops, ``johnny-workspace-1``, instead of special-cased to the
+    always-on ``skills-sandbox`` compose service). Only a TRULY stampless
+    config (a pre-workspaces snapshot / claim with no ``workspace_id``) falls
+    back to :func:`sandbox_url_from_env`; the resolver seams own that gate.
     """
     return f"http://{workspace_container_name(workspace_id)}:{WORKSPACE_SANDBOX_PORT}"
 

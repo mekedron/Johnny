@@ -76,9 +76,9 @@ def client(db_session: Session, crypto: CredentialCrypto) -> Iterator[TestClient
 def workspace(db_session: Session) -> Workspace:
     """The seeded default workspace these servers attach to (Johnny-wks.8).
 
-    Default ``is_default=True`` so the probe spawns in the shared
-    skills-sandbox (no container ensure) — byte-identical to the pre-wks.8
-    global probe path."""
+    Since Johnny-etu.5 the default lazy-launches its own ``johnny-workspace-1``
+    like finance/ops, so its stdio probe spawns there too (the ensure no-ops
+    in this test env, which doesn't drive docker)."""
     row = Workspace(name="Default", slug="default", is_default=True)
     db_session.add(row)
     db_session.commit()

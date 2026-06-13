@@ -40,8 +40,9 @@ logger = logging.getLogger("alembic.runtime.migration")
 DEFAULT_WORKSPACE_NAME = "Default"
 DEFAULT_WORKSPACE_SLUG = "default"
 DEFAULT_WORKSPACE_DESCRIPTION = (
-    "The shared execution environment every agent starts on — today's "
-    "skills-sandbox container and its connected accounts. Non-deletable."
+    "The execution environment every agent starts on — its own "
+    "lazily-launched sandbox container under ~/.johnny/workspaces/default, "
+    "like every other workspace. Non-deletable."
 )
 
 

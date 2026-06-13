@@ -668,12 +668,13 @@ def test_session_sandbox_resolver_returns_the_global_url(
 def test_session_sandbox_resolver_keys_by_workspace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Johnny-wks.1: the snapshot's workspace stamp keys the endpoint.
+    """Johnny-wks.1 / Johnny-etu.5: the snapshot's workspace stamp keys the
+    endpoint.
 
-    Default workspace → the global URL (every existing agent unchanged);
-    non-default → its own container's canonical endpoint, which until
-    Johnny-wks.2 ships resolves to nothing and degrades to an empty
-    availability snapshot for that key."""
+    EVERY stamped workspace → its own container's canonical endpoint, the
+    DEFAULT (id 1) included now (lazy-launched like finance/ops). Only a
+    legacy snapshot with no stamp falls back to the global URL (covered by
+    :func:`test_session_sandbox_resolver_returns_the_global_url`)."""
     monkeypatch.setenv(SANDBOX_URL_ENV, "http://sandbox-global:8088")
 
     default_stamped = _job(
@@ -683,7 +684,7 @@ def test_session_sandbox_resolver_keys_by_workspace(
             "workspace": {"id": 1, "name": "Default", "slug": "default", "is_default": True},
         },
     )
-    assert resolve_session_sandbox_url(default_stamped) == "http://sandbox-global:8088"
+    assert resolve_session_sandbox_url(default_stamped) == "http://johnny-workspace-1:8088"
 
     finance = _job(
         mode=AUTONOMOUS_MODE,
@@ -698,10 +699,11 @@ def test_session_sandbox_resolver_keys_by_workspace(
 def test_session_skills_dir_resolver_keys_by_workspace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Johnny-wks.3: catalog DISCOVERY is keyed by the same workspace stamp
-    as the probes — default/legacy scans the shared volume byte-identically;
-    a non-default workspace scans its own packages dir; a stamp with no
-    usable slug resolves to None (load nothing rather than guess)."""
+    """Johnny-wks.3 / Johnny-etu.5: catalog DISCOVERY is keyed by the same
+    workspace stamp as the probes — EVERY stamped workspace scans its own
+    packages dir, the DEFAULT (slug ``default``) included now; a legacy stamp
+    with no workspace scans the shared volume; a stamp with no usable slug
+    resolves to None (load nothing rather than guess)."""
     from johnny.agent.job_session import resolve_session_skills_dir
     from johnny.skills.sandbox import SKILLS_DIR_ENV, WORKSPACES_DIR_ENV
 
@@ -716,7 +718,7 @@ def test_session_skills_dir_resolver_keys_by_workspace(
             "workspace": {"id": 1, "name": "Default", "slug": "default", "is_default": True},
         },
     )
-    assert resolve_session_skills_dir(default_stamped) == "/shared-skills"
+    assert resolve_session_skills_dir(default_stamped) == "/ws-root/default/skills"
     finance = _job(
         mode=AUTONOMOUS_MODE,
         agent_snapshot={

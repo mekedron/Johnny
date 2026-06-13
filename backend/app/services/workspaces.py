@@ -41,8 +41,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_WORKSPACE_NAME = "Default"
 DEFAULT_WORKSPACE_SLUG = "default"
 DEFAULT_WORKSPACE_DESCRIPTION = (
-    "The shared execution environment every agent starts on — today's "
-    "skills-sandbox container. Non-deletable."
+    "The execution environment every agent starts on — its own "
+    "lazily-launched sandbox container under ~/.johnny/workspaces/default, "
+    "like every other workspace. Non-deletable."
 )
 
 _SLUG_STRIP_RE = re.compile(r"[^a-z0-9]+")
@@ -136,10 +137,13 @@ def resolve_agent_workspace(session: Session, agent: Agent | None) -> Workspace 
 def workspace_snapshot_payload(workspace: Workspace) -> dict[str, Any]:
     """The identity blob ``build_agent_snapshot`` stamps at dispatch.
 
-    Plain JSON-able types only. ``is_default`` is what the resolver seams
-    key on (default → the global skills-sandbox URL, byte-identical to
-    pre-workspaces dispatches); ``id`` is the per-workspace endpoint key;
-    ``name``/``slug`` ride for rendering and diagnostics.
+    Plain JSON-able types only. ``id`` is the per-workspace endpoint +
+    skills-dir key the resolver seams consume — for EVERY workspace including
+    the default (Johnny-etu.5: the default lazy-launches ``johnny-workspace-1``
+    like finance/ops, so its stamp routes the same way). ``slug`` keys the
+    host skills/gog dirs; ``name``/``is_default`` ride for rendering,
+    diagnostics, and the policy/MCP DB-row resolution (which still maps the
+    default's rows by ``is_default``).
     """
     return {
         "id": int(workspace.id),
@@ -152,17 +156,16 @@ def workspace_snapshot_payload(workspace: Workspace) -> dict[str, Any]:
 def workspace_storage_dir_display(workspace: Workspace) -> str | None:
     """The operator-facing HOST path of the workspace's state dir (Johnny-wks.5).
 
-    Non-default workspaces keep host-side state under
+    EVERY workspace keeps host-side state under
     ``<JOHNNY_WORKSPACES_HOST_DIR>/<slug>/`` (skill packages, the gog
-    credential keyring — the wks.3/wks.4 storage convention). Compose passes
-    the host truth in that env var; a docker-less deployment falls back to
-    the documented ``~/.johnny/workspaces`` default so the UI still shows
-    where the convention puts things. The default workspace returns ``None``
-    — its state is the always-on sandbox's home volume plus the shared
-    ``~/.johnny/skills`` mount, not a per-workspace dir.
+    credential keyring — the wks.3/wks.4 storage convention) — the DEFAULT
+    (slug ``default``) included now (Johnny-etu.5: lazy-launched like
+    finance/ops, so its skills + gog live under ``~/.johnny/workspaces/default``
+    rather than the old shared sandbox-home). Compose passes the host truth
+    in that env var; a docker-less deployment falls back to the documented
+    ``~/.johnny/workspaces`` default so the UI still shows where the
+    convention puts things.
     """
-    if workspace.is_default:
-        return None
     base = os.environ.get("JOHNNY_WORKSPACES_HOST_DIR", "").strip()
     if not base or base.lower() == "none":
         base = "~/.johnny/workspaces"

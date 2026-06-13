@@ -51,10 +51,10 @@
 	let loaded = $state(false);
 	let errorMessage = $state<string | null>(null);
 
-	// 'managed' = the default's always-on sandbox; null = state unknown
-	// (docker not driven — the GET still answers with honest verdicts).
-	// Only a known-idle container ('stopped' / 'never-started') withholds
-	// the auto-fetch, because fetching would start it.
+	// null = state unknown (docker not driven — the GET still answers with
+	// honest verdicts). Only a known-idle container ('stopped' /
+	// 'never-started') withholds the auto-fetch, because fetching would start
+	// it — true for EVERY workspace now, the default included (Johnny-etu.5).
 	const probeStartsContainer = $derived(
 		displayState === 'stopped' || displayState === 'never-started'
 	);

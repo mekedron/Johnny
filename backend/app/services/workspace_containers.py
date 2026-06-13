@@ -1081,15 +1081,18 @@ async def ensure_workspace_container_for_stamp(
     """Lazy-launch hook for the dispatch surfaces and the worker claim loop.
 
     ``stamp`` is the wks.1 workspace identity blob ({id, name, slug,
-    is_default}) as found in the agent snapshot / ``request_json``. Default,
-    absent, or malformed stamps no-op (the always-on compose service serves
-    those); deployments that don't drive docker
-    (:func:`should_use_docker_launcher` false — every test runner) no-op too.
-    NEVER raises: a launch problem leaves the caller on the documented
+    is_default}) as found in the agent snapshot / ``request_json``. EVERY
+    stamp carrying a usable id launches its own ``johnny-workspace-<id>``
+    container now — the DEFAULT workspace (id 1) included (Johnny-etu.5: the
+    default is lazy-launched like finance/ops instead of special-cased to the
+    always-on ``skills-sandbox`` compose service). Absent or malformed stamps
+    (no parseable id) no-op, as do deployments that don't drive docker
+    (:func:`should_use_docker_launcher` false — every test runner). NEVER
+    raises: a launch problem leaves the caller on the documented
     unreachable-probe degrade path.
     """
     try:
-        if not isinstance(stamp, Mapping) or stamp.get("is_default", True):
+        if not isinstance(stamp, Mapping):
             return False
         try:
             workspace_id = int(stamp.get("id"))  # type: ignore[arg-type]

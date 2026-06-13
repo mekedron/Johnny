@@ -57,7 +57,6 @@
 
 	const STATE_DOT_CLASS: Record<WorkspaceDisplayState, string> = {
 		running: 'bg-success',
-		managed: 'bg-success',
 		stopped: 'bg-warning',
 		'never-started': 'bg-border-strong'
 	};
@@ -195,13 +194,7 @@
 				</dd>
 				<dt class="text-ink-subtle text-xs leading-6">Container</dt>
 				<dd class="m-0 flex flex-wrap items-center gap-2 text-xs leading-6">
-					{#if workspace.is_default}
-						<span class="text-muted-foreground" data-testid="detail-container-managed">
-							the always-on <span class="font-mono">skills-sandbox</span> compose service —
-							lifecycle belongs to <span class="font-mono">./run.sh</span> /
-							<span class="font-mono">./stop.sh</span>
-						</span>
-					{:else if containerStates !== null && !containerStates.available}
+					{#if containerStates !== null && !containerStates.available}
 						<span class="text-muted-foreground" data-testid="detail-container-unavailable">
 							state unavailable: {containerStates.reason}
 						</span>

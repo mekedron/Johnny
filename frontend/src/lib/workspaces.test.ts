@@ -65,17 +65,19 @@ describe('workspaceDisplayState', () => {
 	const states: WorkspaceContainerStates = {
 		available: true,
 		reason: '',
-		states: { '2': 'running', '3': 'stopped' }
+		states: { '1': 'running', '2': 'running', '3': 'stopped' }
 	};
 
-	it('always reports the default workspace as managed (always on)', () => {
+	it('projects the api state for the default workspace too (Johnny-etu.5)', () => {
+		// The default lazy-launches its own container like the others now —
+		// no special 'managed'/always-on state.
 		assert.equal(
 			workspaceDisplayState(makeWorkspace({ id: 1, is_default: true }), states),
-			'managed'
+			'running'
 		);
 		assert.equal(
 			workspaceDisplayState(makeWorkspace({ id: 1, is_default: true }), null),
-			'managed'
+			null
 		);
 	});
 
@@ -98,7 +100,7 @@ describe('workspaceDisplayState', () => {
 	});
 
 	it('has a label for every display state', () => {
-		assert.equal(CONTAINER_STATE_LABEL.managed, 'Always on');
+		assert.equal(CONTAINER_STATE_LABEL.running, 'Running');
 		assert.equal(CONTAINER_STATE_LABEL['never-started'], 'Never started');
 	});
 });

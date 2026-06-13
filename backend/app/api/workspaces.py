@@ -97,8 +97,9 @@ class WorkspaceRead(BaseModel):
     # and explains the 409.
     agent_count: int = 0
     # Operator-facing host path of the workspace's state dir (skills, gog
-    # keyring) — the wks.3/wks.4 storage convention. None for the default
-    # workspace (its state is the always-on sandbox's volume, not a dir).
+    # keyring) — the wks.3/wks.4 storage convention. Set for EVERY workspace
+    # now, the default included (Johnny-etu.5: it carries its own
+    # ~/.johnny/workspaces/default dir like finance/ops).
     storage_dir: str | None = None
 
 
@@ -107,10 +108,10 @@ class WorkspaceContainerStatesRead(BaseModel):
 
     ``available=False`` means state could not be determined at all (docker
     isn't driven here, or the daemon refused) — the UI says "unavailable"
-    instead of guessing. ``states`` carries every NON-default workspace id →
-    running / stopped / never-started; the default workspace is deliberately
-    absent (its sandbox is the always-on compose service, ``managed`` —
-    lifecycle belongs to ./run.sh, not this launcher).
+    instead of guessing. ``states`` carries every workspace id → running /
+    stopped / never-started; the DEFAULT (id 1) is included now
+    (Johnny-etu.5: it lazy-launches ``johnny-workspace-1`` like finance/ops,
+    so its state is real, not an always-on constant).
     """
 
     available: bool
@@ -151,21 +152,13 @@ _CONTAINERS_UNMANAGED_DETAIL = (
 def _container_target_or_409(session: Session, workspace_id: int) -> Workspace:
     """The workspace whose container a manual start/stop may touch.
 
-    404 for unknown rows; 409 for the default workspace (its sandbox is the
-    always-on compose service — ./run.sh owns that lifecycle, and stopping
-    it would take every NULL-attached agent down with it) and for
-    deployments that don't drive docker.
+    404 for unknown rows; 409 only for deployments that don't drive docker.
+    EVERY workspace's container is manageable now — the DEFAULT (id 1)
+    included (Johnny-etu.5: it lazy-launches ``johnny-workspace-1`` like
+    finance/ops, so start/stop is the same affordance), no longer special-
+    cased to the always-on compose service.
     """
     row = _get_row_or_404(session, workspace_id)
-    if row.is_default:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "the default workspace's sandbox is the always-on compose "
-                "service — its lifecycle is managed by ./run.sh / ./stop.sh, "
-                "not from here"
-            ),
-        )
     if not should_use_docker_launcher():
         raise HTTPException(status_code=409, detail=_CONTAINERS_UNMANAGED_DETAIL)
     return row
@@ -257,19 +250,20 @@ def create_workspace(payload: WorkspaceCreate, session: SessionDep) -> Workspace
 # declaration order and "containers" would otherwise be parsed as an id.
 @router.get("/containers", response_model=WorkspaceContainerStatesRead)
 def workspace_container_states(session: SessionDep) -> WorkspaceContainerStatesRead:
-    """Container state per NON-default workspace, in one daemon round-trip.
+    """Container state per workspace, in one daemon round-trip.
 
-    Degrades to ``available=False`` (never an error response) when this
-    deployment doesn't drive docker or the daemon can't answer — the list
-    page renders "state unavailable" and everything else still works.
+    EVERY workspace is included — the DEFAULT (id 1) included now
+    (Johnny-etu.5: it lazy-launches ``johnny-workspace-1`` like finance/ops,
+    so its container state is real, not an always-on constant). Degrades to
+    ``available=False`` (never an error response) when this deployment
+    doesn't drive docker or the daemon can't answer — the list page renders
+    "state unavailable" and everything else still works.
     """
     if not should_use_docker_launcher():
         return WorkspaceContainerStatesRead(
             available=False, reason=_CONTAINERS_UNMANAGED_DETAIL
         )
-    ids = list(
-        session.scalars(select(Workspace.id).where(Workspace.is_default.is_(False)))
-    )
+    ids = list(session.scalars(select(Workspace.id)))
     try:
         states = get_workspace_container_manager().container_states(ids)
     except WorkspaceContainerError as exc:

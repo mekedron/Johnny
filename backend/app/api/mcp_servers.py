@@ -47,7 +47,7 @@ from app.services.mcp_servers import (
     secret_key_names,
 )
 from johnny.mcp.config import McpConfigError, McpServerConfig, qualified_tool_name
-from johnny.skills.sandbox import sandbox_url_for_workspace, sandbox_url_from_env
+from johnny.skills.sandbox import sandbox_url_for_workspace
 
 router = APIRouter(
     prefix="/workspaces/{workspace_id}/mcp-servers", tags=["mcp-servers"]
@@ -254,13 +254,12 @@ def _name_conflict(name: str, workspace_id: int) -> HTTPException:
 async def _probe_sandbox_url(workspace: Workspace) -> str:
     """Where this workspace's stdio probe spawns — its own sandbox container.
 
-    The default workspace uses the shared skills-sandbox (byte-identical to
-    pre-wks.8); a non-default workspace's container is lazily ensured first
-    (the capabilities-read precedent — ensure never raises, and an
-    unreachable sandbox degrades the probe to ``ok=false`` with reason,
-    never an error response) then dialed at its canonical endpoint."""
-    if workspace.is_default:
-        return sandbox_url_from_env()
+    EVERY workspace's container is lazily ensured first — the DEFAULT (id 1)
+    included now (Johnny-etu.5: lazy-launched like finance/ops, no longer
+    special-cased to the shared skills-sandbox) — following the
+    capabilities-read precedent: ensure never raises, and an unreachable
+    sandbox degrades the probe to ``ok=false`` with reason, never an error
+    response, then the container is dialed at its canonical endpoint."""
     from app.services.workspace_containers import (
         ensure_workspace_container_for_stamp,
     )

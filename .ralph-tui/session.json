@@ -3,10 +3,10 @@
   "sessionId": "368ff11b-20d5-4eb0-bfb5-dc0ee5fa8fba",
   "status": "running",
   "startedAt": "2026-06-13T14:47:46.989Z",
-  "updatedAt": "2026-06-13T15:20:31.627Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-13T16:03:39.501Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "opus",
@@ -75,8 +75,8 @@
       {
         "id": "Johnny-etu.3",
         "title": "[SPIKE] Phase 0: Root-cause the session-runtime regression — replay session #1 + trt.60, pin what Phase 6/7 broke",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-etu.4",
@@ -128,7 +128,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-etu.3",
+      "taskTitle": "[SPIKE] Phase 0: Root-cause the session-runtime regression — replay session #1 + trt.60, pin what Phase 6/7 broke",
+      "taskCompleted": true,
+      "durationMs": 1954054,
+      "startedAt": "2026-06-13T14:47:56.345Z",
+      "endedAt": "2026-06-13T15:20:30.399Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

@@ -246,30 +246,32 @@ def test_claim_threads_the_workspace_stamp(db: Session) -> None:
 def test_resolve_sandbox_url_keys_by_workspace(
     db: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Default / legacy claims → the global sandbox URL (byte-identical);
-    a non-default workspace → its own container's canonical endpoint."""
+    """A legacy claim with no stamp → the global sandbox URL; EVERY stamped
+    workspace → its own container's canonical endpoint, the DEFAULT (id 1)
+    included now (Johnny-etu.5: lazy-launched like finance/ops)."""
     from app.services.task_worker import resolve_sandbox_url
     from johnny.skills.sandbox import SANDBOX_URL_ENV
 
     monkeypatch.setenv(SANDBOX_URL_ENV, "http://sandbox-global:8088")
 
     _insert(db)
-    _insert(db, workspace={"id": 1, "is_default": True})
+    _insert(db, workspace={"id": 1, "slug": "default", "is_default": True})
     _insert(db, workspace={"id": 7, "name": "Finance", "is_default": False})
     legacy, default_stamped, finance = claim_queued_tasks(db, limit=10, now=_NOW)
     db.commit()
 
     assert resolve_sandbox_url(legacy) == "http://sandbox-global:8088"
-    assert resolve_sandbox_url(default_stamped) == "http://sandbox-global:8088"
+    assert resolve_sandbox_url(default_stamped) == "http://johnny-workspace-1:8088"
     assert resolve_sandbox_url(finance) == "http://johnny-workspace-7:8088"
 
 
 def test_resolve_skills_dir_keys_by_workspace(
     db: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The discovery twin (Johnny-wks.3): default / legacy claims scan the
-    shared volume; a non-default workspace scans its own packages dir; a
-    non-default stamp with no slug resolves to None (promise nothing)."""
+    """The discovery twin (Johnny-wks.3 / Johnny-etu.5): a legacy claim with
+    no stamp scans the shared volume; EVERY stamped workspace scans its own
+    packages dir, the DEFAULT (slug ``default``) included now; a stamp with
+    no slug resolves to None (promise nothing)."""
     from app.services.task_worker import resolve_skills_dir
     from johnny.skills.sandbox import SKILLS_DIR_ENV, WORKSPACES_DIR_ENV
 
@@ -277,7 +279,7 @@ def test_resolve_skills_dir_keys_by_workspace(
     monkeypatch.setenv(WORKSPACES_DIR_ENV, "/ws-root")
 
     _insert(db)
-    _insert(db, workspace={"id": 1, "is_default": True})
+    _insert(db, workspace={"id": 1, "slug": "default", "is_default": True})
     _insert(db, workspace={"id": 7, "name": "Finance", "slug": "finance", "is_default": False})
     _insert(db, workspace={"id": 9, "is_default": False})  # no slug stamped
     legacy, default_stamped, finance, slugless = claim_queued_tasks(
@@ -286,7 +288,7 @@ def test_resolve_skills_dir_keys_by_workspace(
     db.commit()
 
     assert resolve_skills_dir(legacy) == "/shared-skills"
-    assert resolve_skills_dir(default_stamped) == "/shared-skills"
+    assert resolve_skills_dir(default_stamped) == "/ws-root/default/skills"
     assert resolve_skills_dir(finance) == "/ws-root/finance/skills"
     assert resolve_skills_dir(slugless) is None
 
@@ -294,8 +296,9 @@ def test_resolve_skills_dir_keys_by_workspace(
 async def test_executor_for_lazily_ensures_the_workspace_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A non-default claim triggers the wks.2 lazy launch (and activity
-    touch) BEFORE the registry probe; default/legacy claims never do."""
+    """EVERY stamped claim triggers the wks.2 lazy launch (and activity
+    touch) BEFORE the registry probe — the DEFAULT (id 1) included now
+    (Johnny-etu.5); only a legacy claim with no stamp skips it."""
     from app.services import workspace_containers
     from app.services.task_worker import SandboxExecutorProvider, _ExecutorEntry
     from johnny.skills.registry import EMPTY_SKILL_REGISTRY
@@ -334,23 +337,29 @@ async def test_executor_for_lazily_ensures_the_workspace_container(
             **kwargs,
         )
 
-    await provider.executor_for(_claimed())  # legacy → no launch
+    await provider.executor_for(_claimed())  # legacy (no stamp) → no launch
+    assert ensured == []
+    # The DEFAULT claim launches johnny-workspace-1 now (Johnny-etu.5).
     await provider.executor_for(
         _claimed(workspace_id=1, workspace_is_default=True, workspace_slug="default")
     )
-    assert ensured == []
+    assert ensured == [{"id": 1, "is_default": True, "slug": "default"}]
     await provider.executor_for(
         _claimed(workspace_id=7, workspace_is_default=False, workspace_slug="finance")
     )
-    assert ensured == [{"id": 7, "is_default": False, "slug": "finance"}]
+    assert ensured == [
+        {"id": 1, "is_default": True, "slug": "default"},
+        {"id": 7, "is_default": False, "slug": "finance"},
+    ]
 
 
 async def test_executor_for_loads_the_workspaces_own_skills_dir(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The provider's registry load scans the claim's workspace dir
-    (Johnny-wks.3) and caches per URL — the default claim never sees a
-    workspace dir and vice versa."""
+    (Johnny-wks.3) and caches per URL — a legacy claim with no stamp scans
+    the shared volume, a stamped workspace scans its own dir, and vice
+    versa."""
     from app.services.task_worker import SandboxExecutorProvider
     from johnny.skills.sandbox import SKILLS_DIR_ENV, WORKSPACES_DIR_ENV
 

@@ -433,22 +433,27 @@ def test_container_states_unavailable_without_docker(
     assert body["states"] == {}
 
 
-def test_container_states_cover_non_default_workspaces_only(
+def test_container_states_cover_every_workspace_including_default(
     client: TestClient,
     fake_manager: _FakeManager,
     default_workspace: Workspace,
 ) -> None:
-    """Per-id states for every non-default workspace; the default is absent
-    (its sandbox is the compose service — 'managed', not ours to report)."""
+    """Per-id states for EVERY workspace — the default included now
+    (Johnny-etu.5: it lazy-launches johnny-workspace-1 like finance/ops, so
+    its state is real, not an always-on constant)."""
     finance = _create(client, "Finance")
     ops = _create(client, "Ops")
-    fake_manager.states = {finance["id"]: "running"}
+    fake_manager.states = {default_workspace.id: "running", finance["id"]: "running"}
 
     body = client.get("/workspaces/containers").json()
     assert body["available"] is True
     states = {int(k): v for k, v in body["states"].items()}
-    assert states == {finance["id"]: "running", ops["id"]: "never-started"}
-    assert default_workspace.id not in states
+    assert states == {
+        default_workspace.id: "running",
+        finance["id"]: "running",
+        ops["id"]: "never-started",
+    }
+    assert default_workspace.id in states
 
 
 def test_container_states_degrade_when_the_daemon_refuses(
@@ -502,15 +507,21 @@ def test_stop_container_survivor_is_a_409(
     assert "container stop failed" in resp.json()["detail"]
 
 
-def test_container_actions_refuse_the_default_workspace(
+def test_container_actions_manage_the_default_workspace_like_the_others(
     client: TestClient, fake_manager: _FakeManager, default_workspace: Workspace
 ) -> None:
-    for action in ("start", "stop"):
-        resp = client.post(f"/workspaces/{default_workspace.id}/container/{action}")
-        assert resp.status_code == 409
-        assert "always-on compose service" in resp.json()["detail"]
-    assert fake_manager.ensure_calls == []
-    assert fake_manager.stop_calls == []
+    """The default's container is start/stop-able like any workspace now
+    (Johnny-etu.5: johnny-workspace-1, no longer the always-on service)."""
+    start = client.post(f"/workspaces/{default_workspace.id}/container/start")
+    assert start.status_code == 200
+    assert start.json() == {"workspace_id": default_workspace.id, "state": "running"}
+    assert fake_manager.ensure_calls == [(default_workspace.id, "default")]
+
+    fake_manager.states = {default_workspace.id: "stopped"}
+    stop = client.post(f"/workspaces/{default_workspace.id}/container/stop")
+    assert stop.status_code == 200
+    assert stop.json() == {"workspace_id": default_workspace.id, "state": "stopped"}
+    assert fake_manager.stop_calls == [default_workspace.id]
 
 
 def test_container_actions_refuse_without_docker(
@@ -543,8 +554,10 @@ def test_storage_dir_uses_the_host_truth_env(
     created = _create(client, "Finance Team")
     assert created["storage_dir"] == "/Users/op/.johnny/workspaces/finance-team"
     by_name = {row["name"]: row for row in client.get("/workspaces").json()}
-    # The default's state is the sandbox volume, not a per-workspace dir.
-    assert by_name["Default"]["storage_dir"] is None
+    # The default keeps its state under its own per-workspace dir now
+    # (Johnny-etu.5: lazy-launched like finance/ops), not the legacy shared
+    # sandbox-home.
+    assert by_name["Default"]["storage_dir"] == "/Users/op/.johnny/workspaces/default"
 
 
 def test_storage_dir_falls_back_to_the_documented_convention(

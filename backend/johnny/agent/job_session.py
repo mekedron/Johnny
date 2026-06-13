@@ -539,23 +539,24 @@ def resolve_session_sandbox_url(config: SessionJobConfig) -> str:
     The session-assembly twin of
     :func:`app.services.task_worker.resolve_sandbox_url` (Johnny-trt.63):
     ONE function on purpose. Keyed by the agent snapshot's workspace stamp
-    (Johnny-wks.1): the DEFAULT workspace — and every legacy snapshot with
-    no stamp — resolves to the global skills-sandbox from
-    ``JOHNNY_SKILLS_SANDBOX_URL`` (byte-identical pre-workspaces behavior);
-    a non-default workspace resolves to its own container's canonical
-    endpoint. Until that container exists (Johnny-wks.2), probes against it
-    degrade through ``SandboxUnavailableError`` to an EMPTY availability
-    snapshot for that key — the catalog promises nothing, never a crash.
-    Nothing downstream needs to change, because the availability snapshot
-    and the task catalog are already derived per session from whatever
-    client this resolves — there is no cross-session snapshot cache on the
-    session side to re-key (the worker's URL-keyed cache lives in
+    (Johnny-wks.1): EVERY stamped workspace — the DEFAULT (id 1) included
+    (Johnny-etu.5: lazy-launched like finance/ops, no longer special-cased to
+    the always-on ``skills-sandbox``) — resolves to its own container's
+    canonical endpoint; only a legacy snapshot with no stamp
+    (``workspace_id is None``) falls back to the global skills-sandbox from
+    ``JOHNNY_SKILLS_SANDBOX_URL``. Until that container exists (Johnny-wks.2),
+    probes against it degrade through ``SandboxUnavailableError`` to an EMPTY
+    availability snapshot for that key — the catalog promises nothing, never
+    a crash. Nothing downstream needs to change, because the availability
+    snapshot and the task catalog are already derived per session from
+    whatever client this resolves — there is no cross-session snapshot cache
+    on the session side to re-key (the worker's URL-keyed cache lives in
     :class:`app.services.task_worker.SandboxExecutorProvider`).
     """
     from johnny.skills.sandbox import sandbox_url_for_workspace, sandbox_url_from_env
 
     workspace_id = config.workspace_id
-    if workspace_id is None or config.workspace_is_default:
+    if workspace_id is None:
         return sandbox_url_from_env()
     return sandbox_url_for_workspace(workspace_id)
 
@@ -565,24 +566,23 @@ def resolve_session_skills_dir(config: SessionJobConfig) -> str | None:
     keyed by WORKSPACE (Johnny-wks.3).
 
     The discovery twin of :func:`resolve_session_sandbox_url` (its worker
-    sibling is :func:`app.services.task_worker.resolve_skills_dir`): the
-    DEFAULT workspace — and every legacy snapshot — scans the shared volume
-    from ``JOHNNY_SKILLS_DIR`` (byte-identical pre-workspaces behavior); a
-    non-default workspace scans its OWN packages under
+    sibling is :func:`app.services.task_worker.resolve_skills_dir`): a legacy
+    snapshot with no stamp (``workspace_id is None``) scans the shared volume
+    from ``JOHNNY_SKILLS_DIR``; EVERY stamped workspace — the DEFAULT (slug
+    ``default``) included (Johnny-etu.5) — scans its OWN packages under
     ``~/.johnny/workspaces/<slug>/skills`` (mounted at the same ``/skills``
     path inside that workspace's container, so packages stay relocatable).
     A skill installed only in the Finance workspace is therefore promised
     only in sessions of agents attached to it — and a workspace dir that
     does not exist yet simply yields an empty catalog.
 
-    ``None`` (a non-default stamp with no usable slug — hand-built or
-    corrupted) means the directory cannot be located: the caller loads NO
-    skills rather than guessing, the same promise-nothing degrade as an
-    unreachable sandbox.
+    ``None`` (a stamp with no usable slug — hand-built or corrupted) means
+    the directory cannot be located: the caller loads NO skills rather than
+    guessing, the same promise-nothing degrade as an unreachable sandbox.
     """
     from johnny.skills.sandbox import skills_dir_from_env, workspace_skills_dir
 
-    if config.workspace_id is None or config.workspace_is_default:
+    if config.workspace_id is None:
         return skills_dir_from_env()
     slug = config.workspace_slug
     if not slug:

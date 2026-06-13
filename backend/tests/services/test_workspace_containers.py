@@ -714,17 +714,23 @@ async def test_stamp_helper_gates_and_routes(
     assert calls == []
 
     monkeypatch.setenv("JOHNNY_USE_DOCKER_LAUNCHER", "true")
-    # Default / absent / malformed stamps never launch.
+    # Absent / malformed stamps (no parseable id) never launch.
     assert await ensure_workspace_container_for_stamp(None) is False
-    assert (
-        await ensure_workspace_container_for_stamp({"id": 1, "is_default": True})
-        is False
-    )
     assert await ensure_workspace_container_for_stamp({"id": "junk"}) is False
     assert calls == []
-    # A non-default stamp launches with id + slug.
+    # EVERY stamp with a usable id launches with id + slug — the DEFAULT
+    # (id 1) included now (Johnny-etu.5: lazy-launched like finance/ops,
+    # no longer special-cased to the always-on skills-sandbox service).
+    assert (
+        await ensure_workspace_container_for_stamp(
+            {"id": 1, "slug": "default", "is_default": True}
+        )
+        is True
+    )
+    assert calls == [(1, "default")]
+    # A non-default stamp launches the same way.
     assert await ensure_workspace_container_for_stamp(stamp) is True
-    assert calls == [(7, "finance")]
+    assert calls == [(1, "default"), (7, "finance")]
 
 
 @pytest.mark.usefixtures("_reset_singleton")

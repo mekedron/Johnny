@@ -6,8 +6,9 @@
  * A WORKSPACE is a named execution environment — its own sandbox container
  * and host state dir (skill packages, tool dotfiles, scratch space) — that
  * agents attach to via `agents.workspace_id` (null = the default workspace).
- * The default workspace's sandbox is the always-on compose service;
- * non-default containers launch lazily and stop on idle. The workspace is a
+ * EVERY workspace's container launches lazily and stops on idle — the
+ * default included (Johnny-etu.5: `johnny-workspace-1` like finance/ops, no
+ * longer the always-on compose service). The workspace is a
  * pure tools container: it carries no account UI and no app-managed Google
  * identity. (The meeting-bot Google identity lives on the AGENT — see
  * `$lib/accounts`; `gog` is an optional CLI a developer configures by hand
@@ -26,21 +27,21 @@ export interface Workspace {
 	is_default: boolean;
 	/** Effective attachments — the default also counts NULL-attached agents. */
 	agent_count: number;
-	/** Operator-facing host state dir; null for the default workspace. */
+	/** Operator-facing host state dir; set for every workspace (Johnny-etu.5). */
 	storage_dir: string | null;
 	created_at: string;
 	updated_at: string;
 }
 
-/** The api's per-container lifecycle states (non-default workspaces only). */
+/** The api's per-container lifecycle states (every workspace — Johnny-etu.5). */
 export type WorkspaceContainerState = 'running' | 'stopped' | 'never-started';
 
 /**
- * What the UI renders per workspace: the api states plus 'managed' for the
- * default workspace (its sandbox is the always-on compose service — there
- * is nothing to start or stop from here).
+ * What the UI renders per workspace — the api's real container states for
+ * EVERY workspace now (Johnny-etu.5: the default lazy-launches its own
+ * container like finance/ops, so there is no 'managed'/always-on state).
  */
-export type WorkspaceDisplayState = WorkspaceContainerState | 'managed';
+export type WorkspaceDisplayState = WorkspaceContainerState;
 
 export interface WorkspaceContainerStates {
 	/** False = state could not be determined (docker not driven / daemon down). */
@@ -167,20 +168,19 @@ export function stopWorkspaceContainer(id: number): Promise<WorkspaceContainerAc
 export const CONTAINER_STATE_LABEL: Record<WorkspaceDisplayState, string> = {
 	running: 'Running',
 	stopped: 'Stopped',
-	'never-started': 'Never started',
-	managed: 'Always on'
+	'never-started': 'Never started'
 };
 
 /**
- * The display state for one workspace given the bulk states response:
- * the default workspace is always 'managed'; null = unknown (states
- * unavailable, or the id missing from the map).
+ * The display state for one workspace given the bulk states response.
+ * EVERY workspace reads its real container state now — the default included
+ * (Johnny-etu.5: it lazy-launches `johnny-workspace-1` like finance/ops).
+ * null = unknown (states unavailable, or the id missing from the map).
  */
 export function workspaceDisplayState(
 	workspace: Pick<Workspace, 'id' | 'is_default'>,
 	states: WorkspaceContainerStates | null
 ): WorkspaceDisplayState | null {
-	if (workspace.is_default) return 'managed';
 	if (states === null || !states.available) return null;
 	return states.states[String(workspace.id)] ?? null;
 }

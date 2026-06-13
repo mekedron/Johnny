@@ -56,7 +56,6 @@
 
 	const STATE_DOT_CLASS: Record<WorkspaceDisplayState, string> = {
 		running: 'bg-success',
-		managed: 'bg-success',
 		stopped: 'bg-warning',
 		'never-started': 'bg-border-strong'
 	};
@@ -174,7 +173,7 @@
 <Page testId="workspaces-page">
 	<PageHeader
 		title="Workspaces"
-		description="Isolated execution environments agents attach to — each non-default workspace runs its own sandbox container with its own skill packages and state volume. Open one for its inventory and container controls."
+		description="Isolated execution environments agents attach to — each workspace runs its own lazily-launched sandbox container with its own skill packages and state volume. Open one for its inventory and container controls."
 	>
 		{#snippet actions()}
 			<Button onclick={openCreate} data-testid="new-workspace-button">

@@ -207,15 +207,25 @@ def _workspace_or_404(db: Session, workspace_id: int | None) -> Workspace | None
 
 
 def _sandbox_key(workspace: Workspace | None) -> str:
-    """The inventory key responses carry — ``global`` is the default's name."""
-    if workspace is None or workspace.is_default:
+    """The inventory key responses carry.
+
+    ``global`` is the parameterless view's name (no ``workspace_id``); EVERY
+    named workspace row — the DEFAULT (id 1) included (Johnny-etu.5:
+    lazy-launched like finance/ops) — keys by its own container.
+    """
+    if workspace is None:
         return SANDBOX_KEY
     return f"workspace-{workspace.id}"
 
 
 def _workspace_skills_root(workspace: Workspace | None) -> str:
-    """Where this workspace's packages are discovered/installed (api view)."""
-    if workspace is None or workspace.is_default:
+    """Where this workspace's packages are discovered/installed (api view).
+
+    The parameterless view (no row) scans the shared volume; EVERY named
+    workspace — the DEFAULT (slug ``default``) included (Johnny-etu.5) —
+    scans its own ``~/.johnny/workspaces/<slug>/skills`` dir.
+    """
+    if workspace is None:
         return skills_dir_from_env()
     return workspace_skills_dir(workspace.slug)
 
@@ -225,13 +235,15 @@ async def _load_registry(workspace: Workspace | None = None) -> SkillRegistry:
     workspace's sandbox (Johnny-wks.3: discovery AND probes are keyed by
     workspace, mirroring the session/worker resolver seams).
 
-    A non-default workspace's container is lazily ensured first — the GET
-    is the refresh, and an inventory probed against a stopped container
-    would report could-not-verify for everything. Ensure never raises and
-    no-ops where docker isn't driven; an unreachable sandbox still degrades
-    to honest unavailable verdicts, never an error response.
+    A named workspace's container is lazily ensured first — the DEFAULT (id
+    1) included now (Johnny-etu.5) — the GET is the refresh, and an inventory
+    probed against a stopped container would report could-not-verify for
+    everything. Ensure never raises and no-ops where docker isn't driven; an
+    unreachable sandbox still degrades to honest unavailable verdicts, never
+    an error response. Only the parameterless view (no row) reads the shared
+    skills-sandbox.
     """
-    if workspace is None or workspace.is_default:
+    if workspace is None:
         client = SandboxClient()
     else:
         from app.services.workspace_containers import (
@@ -434,14 +446,16 @@ def _known_kinds(db: Session) -> frozenset[str]:
     Skills come from a parse-only scan (no sandbox probes — ineligible and
     unavailable skills are still toggleable, the management point) of the
     shared volume AND every workspace's own volume (Johnny-wks.3): a deny on
-    a workspace-local kind must be placeable from the global tab. MCP kinds
-    come from every row's cached tools with the row's filters applied,
+    a workspace-local kind must be placeable from the global tab. EVERY
+    workspace is scanned — the DEFAULT included now (Johnny-etu.5: it carries
+    its own ``~/.johnny/workspaces/default/skills`` like finance/ops). MCP
+    kinds come from every row's cached tools with the row's filters applied,
     DISABLED servers included: a deny written while a server is off must be
     placeable, and it keeps holding when the server is re-enabled.
     """
     kinds: set[str] = set(INTERNAL_TOOL_KINDS)
     kinds |= _volume_kinds(skills_dir_from_env())
-    for workspace in db.scalars(select(Workspace).where(Workspace.is_default.is_(False))):
+    for workspace in db.scalars(select(Workspace)):
         kinds |= _volume_kinds(workspace_skills_dir(workspace.slug))
     for row in list_server_rows(db):
         tools = cached_tools(row)

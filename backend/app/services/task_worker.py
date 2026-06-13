@@ -342,9 +342,11 @@ def _workspace_from_request(
     """Parse the row's workspace stamp (Johnny-wks.1) → ``(id, is_default, slug)``.
 
     Lenient like the rest of the claim parse: a missing / malformed stamp
-    degrades to ``(None, True, None)`` — the default workspace, exactly what
-    every pre-workspaces row meant. The slug is decoration (container/volume
-    labels for the wks.2 lazy launch); only the id/is_default pair routes.
+    degrades to ``(None, True, None)`` — a legacy row with no stamp, which
+    falls back to the shared skills-sandbox. The id routes the sandbox +
+    skills dir (every stamped workspace, the default included since
+    Johnny-etu.5); the slug names the container/volume + locates the
+    per-workspace skills dir; ``is_default`` routes the policy/MCP DB rows.
     """
     entry = request.get("workspace")
     if not isinstance(entry, dict):
@@ -497,22 +499,23 @@ def sweep_stale_tasks(
 def resolve_sandbox_url(claimed: ClaimedTask) -> str:
     """Which sandbox runs this task's CLI work — keyed by WORKSPACE (Johnny-wks.1).
 
-    Keyed by the claimed row's workspace stamp: the DEFAULT workspace — and
-    every legacy row with no stamp — gets the global skills-sandbox from
-    ``JOHNNY_SKILLS_SANDBOX_URL`` (byte-identical pre-workspaces behavior);
-    a non-default workspace gets its own container's canonical endpoint.
-    Until that container exists (Johnny-wks.2), the registry probe against
-    it degrades to all-skills-unavailable and the task settles ``failed``
-    with honest speech — never a crash. The claim/run/settle loop never
-    needed to change (the Phase-7 promise of this seam). The
-    session-assembly twin is
+    Keyed by the claimed row's workspace stamp: EVERY stamped workspace —
+    the DEFAULT (id 1) included (Johnny-etu.5: lazy-launched like finance/ops,
+    no longer special-cased to the always-on ``skills-sandbox``) — gets its
+    own container's canonical endpoint; only a legacy row with no stamp
+    (``workspace_id is None``) falls back to the global skills-sandbox from
+    ``JOHNNY_SKILLS_SANDBOX_URL``. Until that container exists (Johnny-wks.2),
+    the registry probe against it degrades to all-skills-unavailable and the
+    task settles ``failed`` with honest speech — never a crash. The
+    claim/run/settle loop never needed to change (the Phase-7 promise of this
+    seam). The session-assembly twin is
     :func:`johnny.agent.job_session.resolve_session_sandbox_url`
     (Johnny-trt.63) — re-keying sandbox identity means changing exactly
     these two functions.
     """
     from johnny.skills.sandbox import sandbox_url_for_workspace, sandbox_url_from_env
 
-    if claimed.workspace_id is None or claimed.workspace_is_default:
+    if claimed.workspace_id is None:
         return sandbox_url_from_env()
     return sandbox_url_for_workspace(claimed.workspace_id)
 
@@ -522,18 +525,19 @@ def resolve_skills_dir(claimed: ClaimedTask) -> str | None:
     keyed by WORKSPACE (Johnny-wks.3).
 
     The discovery twin of :func:`resolve_sandbox_url` (its session sibling
-    is :func:`johnny.agent.job_session.resolve_session_skills_dir`): default
-    / legacy rows scan the shared volume from ``JOHNNY_SKILLS_DIR``
-    (byte-identical pre-workspaces behavior); a non-default row scans its
-    workspace's own packages under ``~/.johnny/workspaces/<slug>/skills`` —
-    the same set the session's catalog promised, so the worker can never run
-    a kind the workspace doesn't carry. ``None`` (a non-default stamp with
-    no slug) means the directory cannot be located: the registry loads empty
-    and the task settles with the honest unsupported-kind speech.
+    is :func:`johnny.agent.job_session.resolve_session_skills_dir`): a legacy
+    row with no stamp (``workspace_id is None``) scans the shared volume from
+    ``JOHNNY_SKILLS_DIR``; EVERY stamped workspace — the DEFAULT (slug
+    ``default``) included (Johnny-etu.5) — scans its own packages under
+    ``~/.johnny/workspaces/<slug>/skills``, the same set the session's
+    catalog promised, so the worker can never run a kind the workspace
+    doesn't carry. ``None`` (a stamp with no slug) means the directory cannot
+    be located: the registry loads empty and the task settles with the honest
+    unsupported-kind speech.
     """
     from johnny.skills.sandbox import skills_dir_from_env, workspace_skills_dir
 
-    if claimed.workspace_id is None or claimed.workspace_is_default:
+    if claimed.workspace_id is None:
         return skills_dir_from_env()
     if not claimed.workspace_slug:
         logger.warning(
@@ -705,17 +709,19 @@ class SandboxExecutorProvider:
         return build_skill_task_executor(registry, exec_tool, fallback=mcp_executor)
 
     async def _ensure_workspace_container(self, claimed: ClaimedTask) -> None:
-        """Lazy workspace launch on claim (Johnny-wks.2).
+        """Lazy workspace launch on claim (Johnny-wks.2 / Johnny-etu.5).
 
-        A non-default claim means this task executes against
-        ``johnny-workspace-<id>`` — start (or transparently restart after an
-        idle-TTL stop) that container before the registry probe touches it.
-        Doubles as the activity touch that keeps a busy workspace from being
-        idle-swept. The helper never raises; on failure the probe degrades to
-        all-skills-unavailable and the task settles with honest speech,
-        exactly the pre-wks.2 containerless behavior.
+        EVERY stamped claim executes against ``johnny-workspace-<id>`` — the
+        DEFAULT (id 1) included now (lazy-launched like finance/ops) — so
+        start (or transparently restart after an idle-TTL stop) that container
+        before the registry probe touches it. Doubles as the activity touch
+        that keeps a busy workspace from being idle-swept. Only a legacy claim
+        with no stamp (``workspace_id is None``) skips the launch — it runs
+        against the shared skills-sandbox. The helper never raises; on failure
+        the probe degrades to all-skills-unavailable and the task settles with
+        honest speech, exactly the pre-wks.2 containerless behavior.
         """
-        if claimed.workspace_id is None or claimed.workspace_is_default:
+        if claimed.workspace_id is None:
             return
         from app.services.workspace_containers import (
             ensure_workspace_container_for_stamp,
