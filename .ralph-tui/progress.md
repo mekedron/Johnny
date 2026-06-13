@@ -34,6 +34,25 @@ after each iteration and it's included in prompts for context.
   `--reload` KILLS in-process browser sessions — start a fresh session after any backend edit.
   Persisted truth: `agent_decisions` (`raw_output->>'action'`, `raw_output->'keyword_delegate'`,
   `raw_output->'task_context'`, `final_text`) + `agent_utterances` (`interrupted`).
+- **Delegate ack provenance (two paths, two ack qualities)**: the gate "speaks the
+  model-authored ack" verbatim for a DIRECT delegate (`action=delegate`, `task.ack` from the
+  3B model); only an ACKLESS delegate degrades to `DEFAULT_DELEGATE_ACK`. The keyword-RECOVERY
+  path (`action=speak`/`status` → `keyword_delegate.kind`) substitutes its OWN clean canned ack.
+  Consequence: a DIRECT delegate occasionally (~25% on llama3.2:3b) authors a deflection-shaped
+  `task.ack` ("Can't do that… not connected") that is SPOKEN before the real result — while the
+  recovery path is immune. This is NOT an INV-2 divergence (delivered==decided; the bad ack is
+  the decided text faithfully delivered) and NOT a catalog/grounding/parity bug — the real result
+  is still delivered correctly. To check ack provenance per run:
+  `raw_output->'task'->>'kind'` (direct) vs `raw_output->'keyword_delegate'->>'kind'` (recovered).
+  Fix direction (Johnny-etu.15): guard/sanitize the direct-delegate ack, or pin a capable router model.
+- **Capstone validation recipe (clean prod + browser + DB truth)**: tests need the DEV stack
+  (pytest is NOT in the prod-baked image; `uv run pytest …` inside `api`, tests reach via bind
+  mount). Browser scenarios need a PROD clean install (`./stop.sh && ./run.sh` → fresh DB, sessions
+  start at #1). gog calendar auth lives in a host bind-mount and SURVIVES `down -v` (the wiped
+  `johnny_google_auth_state` volume is the bot's Meet sign-in, not the gog CLI tokens). The
+  session-detail page's **"Only divergences N"** button is the formal INV-2 verdict; **"Only
+  no-replies N"** shows phantom-STT turns correctly suppressed. The playground mic catches ambient/
+  TTS bleed as phantom "Okay." turns — MUTE the mic (per-session toggle) for clean captures.
 
 ---
 
@@ -135,6 +154,52 @@ Verification:
   in-process in `api` (which IS hot-reloaded) — so playground validation works in dev mode. A
   backend save triggers uvicorn `--reload`, which kills live in-process sessions: always start
   a fresh session to validate after editing.
+
+---
+
+## 2026-06-14 - Johnny-etu.8 (Phase 1 CAPSTONE: PASS)
+
+**Re-ran trt.60's calendar scenario + session #1 + all 4 hardened operator scenarios on
+FRESH prod sessions (clean `./stop.sh && ./run.sh`, llama3.2:3b) and proved the full
+ask→ack→execute→spoken-result loop end-to-end. No source changes — this is the verify-only
+capstone. Closed PASS; filed one orthogonal non-blocking follow-up (Johnny-etu.15).**
+
+What was verified (default agent Johnny / Autonomous / llama3.2:3b, prod-baked image):
+- **Scenario 1** (plain `end the session` → ENDS): session #1 `status=ended`.
+- **Scenario 2** (held-result + `end` → ENDS, no event re-speak): session #2 `ended`,
+  **"Only divergences 0"**, decision "User asked to stop the session" @100%; the held
+  calendar result was NOT re-spoken — the etu.14 kind-aware gate cleared `session.end`
+  (∉ `occupied_kinds={google-calendar}`, `undelivered=[3]`).
+- **Scenario 3** (delegate → clean ack THEN real result, no deflection): sessions #3/#4,
+  clean acks ("On it — let me look that up for you." / "Let me check your Google Calendar
+  for you.") THEN the real 3 events; session #3 detail "Only divergences 0".
+- **Scenario 4** (calendar → REAL events, not fabricated): sessions #1/#3/#4 each spoke the
+  exact gog ground truth (3 events: Monday TTAll catch-up / IT meeting / Feel Good Coffee Break).
+- Backend: 262 tests green (72 catalog/internal/complexity + 173 router-decision + 17 replay)
+  AND `johnny-replay --all --mode invariants` → all 4 fixtures hold INV-1/INV-2.
+- Live INV-2 parity: all 4 sessions `delivered == decided` (`parity_ok=t`).
+
+Files changed: none (verify-only). Artifacts: `.validation/Johnny-etu.8/00-…06-…`.
+Unblocks: Johnny-etu.9, Johnny-etu.10 (Phase 2).
+
+**Learnings:**
+- The capstone's "diverges → reject" condition is about the 4 ENUMERATED failure modes
+  ("no tasks in flight", held-result re-speak, no-result deflection, fabricated events) —
+  ALL absent. A separate, milder 3B blemish surfaced: a DIRECT delegate (`action=delegate`)
+  intermittently authors a deflection-shaped `task.ack` ("Can't do that… not connected")
+  that is spoken before the real result. Root-caused (gate speaks model-authored ack
+  verbatim; recovery path is immune), characterized (~25%, direct-path only, real result
+  still correct, INV-2 parity holds), and filed as **Johnny-etu.15** (non-blocking, orthogonal
+  to the catalog/grounding/parity deps; same root cause as etu.6's "pin a capable router model"
+  redirect). Closing transparently with a filed follow-up beats either burying it or
+  reopening a Phase-1 BUILD bead for a model-content issue the deps never owned.
+- gog calendar auth survives `down -v`: the wiped `johnny_google_auth_state` volume is the
+  bot's MEET sign-in, NOT the gog CLI tokens (host bind-mount) — so a clean prod install still
+  returns real events. Confirmed ground truth identical pre- and post-`./stop.sh`.
+- Don't trust the playground CHAT transcript for verdicts — it interleaves partial/interrupted/
+  re-delivered utterances and phantom mic STT. The authoritative read is `agent_decisions` +
+  `agent_utterances` in postgres + the session-detail "Only divergences N" / "Only no-replies N"
+  counters.
 
 ---
 
