@@ -1248,12 +1248,29 @@ class McpServer(TimestampMixin, Base):
     globs at read time. ``last_probe_ok=False`` keeps the cached tools in
     the catalog but renders them unavailable-with-reason (Johnny-trt.55):
     a dead connector declines honestly instead of silently vanishing.
+
+    Per-workspace (Johnny-wks.8): every MCP server is OWNED by exactly one
+    workspace (``workspace_id`` — NOT NULL, the 0034 migration maps the old
+    global rows onto the seeded default). An agent's MCP toolset is exactly
+    its workspace's servers (the executor/assembly resolve them by the
+    agent's workspace, the wks.3 routing precedent). Names are unique
+    PER WORKSPACE (``uq_mcp_servers_workspace_name``) — two workspaces may
+    each have a ``github`` connector; resolution is workspace-keyed so the
+    ``mcp__github__<tool>`` kinds never collide at runtime. ``ON DELETE
+    CASCADE``: a workspace's servers are owned content and go with it (the
+    delete endpoint additionally removes them explicitly, since SQLite does
+    not enforce FKs in the test harness).
     """
 
     __tablename__ = "mcp_servers"
-    __table_args__ = (UniqueConstraint("name", name="uq_mcp_servers_name"),)
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "name", name="uq_mcp_servers_workspace_name"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
     name: Mapped[str] = mapped_column(String(64), nullable=False)
     transport: Mapped[str] = mapped_column(String(16), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

@@ -133,25 +133,82 @@ def cached_tools(row: McpServer) -> tuple[McpToolInfo, ...]:
     return tuple(infos)
 
 
-def list_server_rows(db: Session) -> list[McpServer]:
-    return list(db.scalars(select(McpServer).order_by(McpServer.name)).all())
+def resolve_mcp_workspace_id(
+    db: Session, *, workspace_id: int | None, is_default: bool
+) -> int | None:
+    """The concrete workspace id whose MCP servers apply (Johnny-wks.8).
+
+    The MCP twin of the sandbox-URL / skills-dir resolver seams: a NON-default
+    stamp owns its servers by its own id; the DEFAULT workspace — and every
+    legacy snapshot with no stamp (``workspace_id is None`` / ``is_default``)
+    — resolves to the seeded default workspace's id, the rows the
+    behavior-preserving 0034 migration mapped the old global servers onto.
+
+    Returns ``None`` only on an unseeded schema with no default workspace —
+    callers then load NO MCP servers (the promise-nothing degrade, never a
+    crash), mirroring the skills-dir resolver's ``None``.
+    """
+    if workspace_id is not None and not is_default:
+        return workspace_id
+    from app.services.workspaces import select_default_workspace
+
+    default = select_default_workspace(db)
+    return int(default.id) if default is not None else None
 
 
-def get_server_row(db: Session, server_id: int) -> McpServer | None:
-    return db.get(McpServer, server_id)
+def list_server_rows(
+    db: Session, *, workspace_id: int | None = None
+) -> list[McpServer]:
+    """Server rows, optionally scoped to one workspace.
+
+    ``workspace_id=None`` lists EVERY workspace's servers — the global
+    capability-toggle's known-kinds view (a deny on an MCP kind must be
+    placeable regardless of which workspace owns the server). The
+    per-workspace management API passes a concrete id.
+    """
+    stmt = select(McpServer)
+    if workspace_id is not None:
+        stmt = stmt.where(McpServer.workspace_id == workspace_id)
+    return list(db.scalars(stmt.order_by(McpServer.name)).all())
+
+
+def get_server_row(
+    db: Session, server_id: int, *, workspace_id: int | None = None
+) -> McpServer | None:
+    """One server row by id, optionally requiring it to belong to a workspace.
+
+    The per-workspace API passes ``workspace_id`` so a server reached through
+    the wrong workspace's URL is a 404 (ownership scoping), never a
+    cross-workspace edit.
+    """
+    row = db.get(McpServer, server_id)
+    if row is None:
+        return None
+    if workspace_id is not None and int(row.workspace_id) != workspace_id:
+        return None
+    return row
 
 
 def load_server_configs(
-    db: Session, crypto: CredentialCrypto
+    db: Session, crypto: CredentialCrypto, *, workspace_id: int | None
 ) -> tuple[McpServerConfig, ...]:
-    """Every server's full config — the worker's fresh per-claim read.
+    """One workspace's full server configs — the worker's fresh per-claim read.
 
-    Disabled rows are INCLUDED (``enabled=False`` on the value object): the
-    executor distinguishes "connector isn't enabled" from "isn't configured"
-    in its spoken degrade. Catalog assembly filters enabled rows itself.
+    Scoped to ``workspace_id`` (Johnny-wks.8): the worker resolves it from the
+    claimed row's workspace stamp, so a task runs exactly its workspace's MCP
+    set. ``None`` (an unseeded schema) yields no configs. Disabled rows are
+    INCLUDED (``enabled=False`` on the value object): the executor
+    distinguishes "connector isn't enabled" from "isn't configured" in its
+    spoken degrade. Catalog assembly filters enabled rows itself.
     """
+    if workspace_id is None:
+        return ()
     configs: list[McpServerConfig] = []
-    for row in db.scalars(select(McpServer).order_by(McpServer.name)):
+    for row in db.scalars(
+        select(McpServer)
+        .where(McpServer.workspace_id == workspace_id)
+        .order_by(McpServer.name)
+    ):
         try:
             configs.append(row_to_config(row, crypto=crypto))
         except (McpConfigError, CryptoError, ValueError, json.JSONDecodeError):
@@ -161,11 +218,22 @@ def load_server_configs(
     return tuple(configs)
 
 
-def load_server_snapshots(db: Session) -> tuple[McpServerSnapshot, ...]:
-    """Catalog assembly's view: secretless configs + cached tools + probe state."""
+def load_server_snapshots(
+    db: Session, *, workspace_id: int | None
+) -> tuple[McpServerSnapshot, ...]:
+    """One workspace's catalog view: secretless configs + cached tools + probe state.
+
+    Scoped to ``workspace_id`` (Johnny-wks.8): session assembly resolves it
+    from the agent's workspace stamp, so the catalog promises exactly that
+    workspace's MCP tools. ``None`` (an unseeded schema) yields no snapshots.
+    """
+    if workspace_id is None:
+        return ()
     snapshots: list[McpServerSnapshot] = []
     for row in db.scalars(
-        select(McpServer).where(McpServer.enabled.is_(True)).order_by(McpServer.name)
+        select(McpServer)
+        .where(McpServer.workspace_id == workspace_id, McpServer.enabled.is_(True))
+        .order_by(McpServer.name)
     ):
         try:
             config = row_to_config(row, crypto=None)
@@ -222,6 +290,7 @@ __all__ = [
     "load_server_configs",
     "load_server_snapshots",
     "probe_server_row",
+    "resolve_mcp_workspace_id",
     "row_to_config",
     "secret_key_names",
 ]

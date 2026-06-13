@@ -1,5 +1,11 @@
+<!--
+  Per-workspace MCP connectors (Johnny-wks.8). An MCP server is OWNED by this
+  workspace — its tools (`mcp__<server>__<tool>`) are available only to agents
+  attached here. The flow is add → probe → enable; a server that has never
+  been probed contributes nothing. Lives on the workspace detail page (there
+  is no global MCP registry).
+-->
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import PlusIcon from '@lucide/svelte/icons/plus';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Badge } from '$lib/components/ui/badge/index.js';
@@ -22,6 +28,8 @@
 		type McpServerUpdate,
 		type McpTransport
 	} from '$lib/mcpServers';
+
+	let { workspaceId }: { workspaceId: number } = $props();
 
 	let servers = $state<McpServerRead[]>([]);
 	let loading = $state(false);
@@ -57,7 +65,7 @@
 		loading = true;
 		errorMessage = null;
 		try {
-			const res = await listMcpServers();
+			const res = await listMcpServers(workspaceId);
 			servers = res.servers;
 		} catch (err) {
 			errorMessage = err instanceof Error ? err.message : 'Failed to load MCP servers';
@@ -65,6 +73,14 @@
 			loading = false;
 		}
 	}
+
+	// Reload whenever the workspace changes (and on mount). Closing the form
+	// keeps stale edit state from leaking across a workspace switch.
+	$effect(() => {
+		workspaceId;
+		closeForm();
+		void refresh();
+	});
 
 	function openCreate() {
 		editing = null;
@@ -143,7 +159,7 @@
 				idle_ttl_s: parseTimeout(idleTtlText, 'Idle TTL')
 			};
 			if (editing == null) {
-				await createMcpServer({
+				await createMcpServer(workspaceId, {
 					name,
 					transport,
 					command: commandText.trim(),
@@ -174,7 +190,7 @@
 					payload.env = env.values;
 					payload.headers = headers.values;
 				}
-				await updateMcpServer(editing.id, payload);
+				await updateMcpServer(workspaceId, editing.id, payload);
 			}
 			closeForm();
 			await refresh();
@@ -189,7 +205,7 @@
 		probing = new Set([...probing, server.id]);
 		errorMessage = null;
 		try {
-			probeResults = { ...probeResults, [server.id]: await probeMcpServer(server.id) };
+			probeResults = { ...probeResults, [server.id]: await probeMcpServer(workspaceId, server.id) };
 			await refresh();
 		} catch (err) {
 			errorMessage = err instanceof Error ? err.message : 'Probe failed';
@@ -204,7 +220,7 @@
 		togglingIds = new Set([...togglingIds, server.id]);
 		errorMessage = null;
 		try {
-			await updateMcpServer(server.id, { enabled: !server.enabled });
+			await updateMcpServer(workspaceId, server.id, { enabled: !server.enabled });
 			await refresh();
 		} catch (err) {
 			errorMessage = err instanceof Error ? err.message : 'Failed to toggle server';
@@ -223,7 +239,7 @@
 		deleteArmedId = null;
 		deletingIds = new Set([...deletingIds, server.id]);
 		try {
-			await deleteMcpServer(server.id);
+			await deleteMcpServer(workspaceId, server.id);
 			const remainingResults = { ...probeResults };
 			delete remainingResults[server.id];
 			probeResults = remainingResults;
@@ -237,10 +253,6 @@
 		}
 	}
 
-	onMount(() => {
-		void refresh();
-	});
-
 	const textareaClass =
 		'border-input bg-background min-h-16 w-full rounded-md border px-3 py-2 font-mono text-xs shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]';
 </script>
@@ -249,8 +261,9 @@
 	<div class="flex flex-wrap items-center justify-between gap-2">
 		<p class="text-muted-foreground m-0 text-sm">
 			MCP connectors contribute tools as
-			<span class="font-mono">mcp__&lt;server&gt;__&lt;tool&gt;</span> kinds. The flow is add →
-			probe → enable: a server that has never been probed contributes nothing.
+			<span class="font-mono">mcp__&lt;server&gt;__&lt;tool&gt;</span> kinds to agents in this
+			workspace. The flow is add → probe → enable: a server that has never been probed contributes
+			nothing.
 		</p>
 		<Button size="sm" onclick={openCreate} data-testid="mcp-add">
 			<PlusIcon class="size-3.5" />
@@ -293,7 +306,7 @@
 						bind:value={transport}
 						data-testid="mcp-form-transport"
 					>
-						<option value="stdio">stdio (spawned in the skills sandbox)</option>
+						<option value="stdio">stdio (spawned in this workspace's sandbox)</option>
 						<option value="http">http (dialed directly)</option>
 					</select>
 				</div>
@@ -457,7 +470,7 @@
 
 	{#if !loading && servers.length === 0}
 		<p class="text-muted-foreground text-sm italic" data-testid="mcp-empty">
-			No MCP servers configured.
+			No MCP servers configured for this workspace.
 		</p>
 	{/if}
 

@@ -12,6 +12,7 @@ import {
 function server(overrides: Partial<McpServerRead>): McpServerRead {
 	return {
 		id: 1,
+		workspace_id: 1,
 		name: 'fixture',
 		transport: 'stdio',
 		enabled: true,

@@ -1,19 +1,26 @@
-"""MCP server management endpoints (Johnny-trt.36).
+"""Per-workspace MCP server management endpoints (Johnny-trt.36 · Johnny-wks.8).
 
-CRUD over ``mcp_servers`` (the provider-settings pattern) plus the probe
-the trt.37 management UI's add → probe → enable flow drives:
+CRUD over ``mcp_servers`` (the provider-settings pattern) scoped to ONE
+workspace, plus the probe the management UI's add → probe → enable flow
+drives. Every route lives under ``/workspaces/{workspace_id}/mcp-servers``:
+an MCP server is OWNED by a workspace, and an agent's MCP toolset is exactly
+its workspace's servers (there is no global MCP registry — Johnny-wks.8). A
+server reached through the wrong workspace's URL is a 404 (ownership
+scoping), never a cross-workspace edit.
 
-* ``POST /mcp-servers/{id}/probe`` — connect with the row's live config
-  (stdio servers spawn inside the skills-sandbox, http servers are dialed
-  directly), initialize, ``tools/list``, persist the verdict + tool cache
-  on the row, and report every tool with its filter verdict and the
-  qualified catalog kind (``mcp__<server>__<tool>``) it will contribute.
+* ``POST .../{id}/probe`` — connect with the row's live config (stdio servers
+  spawn inside the WORKSPACE'S sandbox container — the default workspace's
+  shared skills-sandbox, or a non-default workspace's ``johnny-workspace-<id>``
+  lazily ensured first; http servers are dialed directly), initialize,
+  ``tools/list``, persist the verdict + tool cache on the row, and report
+  every tool with its filter verdict and the qualified catalog kind
+  (``mcp__<server>__<tool>``) it will contribute.
 
 Secrets (the env/headers values) are Fernet-encrypted at rest and NEVER
 rendered back — responses carry key names only (``env_keys`` /
 ``header_keys``), the provider-credentials masking model. Catalog liveness
-needs no push: assembly reads rows fresh per session and the worker reads
-them fresh per claimed task.
+needs no push: assembly reads rows fresh per session (scoped to the agent's
+workspace) and the worker reads them fresh per claimed task.
 """
 
 from __future__ import annotations
@@ -27,7 +34,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_crypto, get_session
-from app.db.models import McpServer
+from app.db.models import McpServer, Workspace
 from app.security.crypto import CredentialCrypto, CryptoError
 from app.services.mcp_servers import (
     cached_tools,
@@ -40,9 +47,11 @@ from app.services.mcp_servers import (
     secret_key_names,
 )
 from johnny.mcp.config import McpConfigError, McpServerConfig, qualified_tool_name
-from johnny.skills.sandbox import sandbox_url_from_env
+from johnny.skills.sandbox import sandbox_url_for_workspace, sandbox_url_from_env
 
-router = APIRouter(prefix="/mcp-servers", tags=["mcp-servers"])
+router = APIRouter(
+    prefix="/workspaces/{workspace_id}/mcp-servers", tags=["mcp-servers"]
+)
 
 SessionDep = Annotated[Session, Depends(get_session)]
 CryptoDep = Annotated[CredentialCrypto, Depends(get_crypto)]
@@ -97,6 +106,7 @@ class McpToolRead(BaseModel):
 
 class McpServerRead(BaseModel):
     id: int
+    workspace_id: int
     name: str
     transport: str
     enabled: bool
@@ -180,6 +190,7 @@ def _row_to_read(row: McpServer, crypto: CredentialCrypto | None) -> McpServerRe
     tools = _tool_reads(row)
     return McpServerRead(
         id=int(row.id),
+        workspace_id=int(row.workspace_id),
         name=row.name,
         transport=row.transport,
         enabled=bool(row.enabled),
@@ -205,28 +216,86 @@ def _row_to_read(row: McpServer, crypto: CredentialCrypto | None) -> McpServerRe
     )
 
 
-def _get_row_or_404(db: Session, server_id: int) -> McpServer:
-    row = get_server_row(db, server_id)
+def _workspace_or_404(db: Session, workspace_id: int) -> Workspace:
+    row = db.get(Workspace, workspace_id)
     if row is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"mcp server {server_id} not found",
+            detail=f"workspace {workspace_id} not found",
         )
     return row
 
 
+def _get_row_or_404(db: Session, workspace_id: int, server_id: int) -> McpServer:
+    """The server row, requiring it to belong to ``workspace_id`` (else 404).
+
+    Reaching a server through the wrong workspace's URL is a not-found, never
+    a cross-workspace read/edit — the ownership boundary the per-workspace
+    relocation establishes (Johnny-wks.8)."""
+    row = get_server_row(db, server_id, workspace_id=workspace_id)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"mcp server {server_id} not found in workspace {workspace_id}",
+        )
+    return row
+
+
+def _name_conflict(name: str, workspace_id: int) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            f"an mcp server named {name!r} already exists in workspace "
+            f"{workspace_id}"
+        ),
+    )
+
+
+async def _probe_sandbox_url(workspace: Workspace) -> str:
+    """Where this workspace's stdio probe spawns — its own sandbox container.
+
+    The default workspace uses the shared skills-sandbox (byte-identical to
+    pre-wks.8); a non-default workspace's container is lazily ensured first
+    (the capabilities-read precedent — ensure never raises, and an
+    unreachable sandbox degrades the probe to ``ok=false`` with reason,
+    never an error response) then dialed at its canonical endpoint."""
+    if workspace.is_default:
+        return sandbox_url_from_env()
+    from app.services.workspace_containers import (
+        ensure_workspace_container_for_stamp,
+    )
+
+    await ensure_workspace_container_for_stamp(
+        {
+            "id": workspace.id,
+            "is_default": workspace.is_default,
+            "slug": workspace.slug,
+        },
+        context_label=f"mcp probe (workspace {workspace.id})",
+    )
+    return sandbox_url_for_workspace(workspace.id)
+
+
 @router.get("", response_model=McpServerListOut)
-def list_mcp_servers(db: SessionDep, crypto: CryptoDep) -> McpServerListOut:
+def list_mcp_servers(
+    workspace_id: int, db: SessionDep, crypto: CryptoDep
+) -> McpServerListOut:
+    _workspace_or_404(db, workspace_id)
     return McpServerListOut(
-        servers=[_row_to_read(row, crypto) for row in list_server_rows(db)]
+        servers=[
+            _row_to_read(row, crypto)
+            for row in list_server_rows(db, workspace_id=workspace_id)
+        ]
     )
 
 
 @router.post("", response_model=McpServerRead, status_code=status.HTTP_201_CREATED)
 def create_mcp_server(
-    payload: McpServerCreate, db: SessionDep, crypto: CryptoDep
+    workspace_id: int, payload: McpServerCreate, db: SessionDep, crypto: CryptoDep
 ) -> McpServerRead:
+    _workspace_or_404(db, workspace_id)
     row = McpServer(
+        workspace_id=workspace_id,
         name=payload.name.strip(),
         transport=payload.transport,
         enabled=payload.enabled,
@@ -253,24 +322,27 @@ def create_mcp_server(
         db.flush()
     except IntegrityError as exc:
         db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"an mcp server named {row.name!r} already exists",
-        ) from exc
+        raise _name_conflict(row.name, workspace_id) from exc
     db.refresh(row)
     return _row_to_read(row, crypto)
 
 
 @router.get("/{server_id}", response_model=McpServerRead)
-def get_mcp_server(server_id: int, db: SessionDep, crypto: CryptoDep) -> McpServerRead:
-    return _row_to_read(_get_row_or_404(db, server_id), crypto)
+def get_mcp_server(
+    workspace_id: int, server_id: int, db: SessionDep, crypto: CryptoDep
+) -> McpServerRead:
+    return _row_to_read(_get_row_or_404(db, workspace_id, server_id), crypto)
 
 
 @router.patch("/{server_id}", response_model=McpServerRead)
 def update_mcp_server(
-    server_id: int, payload: McpServerUpdate, db: SessionDep, crypto: CryptoDep
+    workspace_id: int,
+    server_id: int,
+    payload: McpServerUpdate,
+    db: SessionDep,
+    crypto: CryptoDep,
 ) -> McpServerRead:
-    row = _get_row_or_404(db, server_id)
+    row = _get_row_or_404(db, workspace_id, server_id)
     secrets_touched = payload.env is not None or payload.headers is not None
     env: dict[str, str] = {}
     headers: dict[str, str] = {}
@@ -332,26 +404,24 @@ def update_mcp_server(
         db.flush()
     except IntegrityError as exc:
         db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"an mcp server named {row.name!r} already exists",
-        ) from exc
+        raise _name_conflict(row.name, workspace_id) from exc
     db.refresh(row)
     return _row_to_read(row, crypto)
 
 
 @router.delete("/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_mcp_server(server_id: int, db: SessionDep) -> None:
-    row = _get_row_or_404(db, server_id)
+def delete_mcp_server(workspace_id: int, server_id: int, db: SessionDep) -> None:
+    row = _get_row_or_404(db, workspace_id, server_id)
     db.delete(row)
     db.flush()
 
 
 @router.post("/{server_id}/probe", response_model=McpProbeOut)
 async def probe_mcp_server_endpoint(
-    server_id: int, db: SessionDep, crypto: CryptoDep
+    workspace_id: int, server_id: int, db: SessionDep, crypto: CryptoDep
 ) -> McpProbeOut:
-    """Connect + initialize + list tools with the row's LIVE config.
+    """Connect + initialize + list tools with the row's LIVE config, in THIS
+    workspace's sandbox.
 
     Persists the verdict on the row (success refreshes ``tools_cache``;
     failure keeps the stale cache and records the error) and reports every
@@ -359,11 +429,11 @@ async def probe_mcp_server_endpoint(
     Probing never raises for server-side failures — ``ok=false`` + the
     operator-facing error is the contract the management UI renders inline.
     """
-    row = _get_row_or_404(db, server_id)
+    workspace = _workspace_or_404(db, workspace_id)
+    row = _get_row_or_404(db, workspace_id, server_id)
+    sandbox_url = await _probe_sandbox_url(workspace)
     try:
-        result = await probe_server_row(
-            db, row, crypto, sandbox_url=sandbox_url_from_env()
-        )
+        result = await probe_server_row(db, row, crypto, sandbox_url=sandbox_url)
     except (McpConfigError, CryptoError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)

@@ -31,12 +31,12 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_session
-from app.db.models import Agent, Workspace
+from app.db.models import Agent, McpServer, Workspace
 from app.services.docker_launcher import should_use_docker_launcher
 from app.services.workspace_containers import (
     WORKSPACE_STATE_RUNNING,
@@ -434,6 +434,12 @@ def delete_workspace(
                 "manually."
             ),
         )
+    # MCP servers are owned content of the workspace (Johnny-wks.8): the FK is
+    # ON DELETE CASCADE, but SQLite (the test harness) does not enforce FKs, so
+    # remove them explicitly to keep deletion behavior identical on both
+    # backends. (Agents already blocked the delete above; MCP servers never do
+    # — they go with the workspace.)
+    session.execute(delete(McpServer).where(McpServer.workspace_id == row.id))
     session.delete(row)
 
 

@@ -187,8 +187,19 @@ def test_skills_reflect_policy_disable(client: TestClient, skills_volume: Path) 
 # --- GET /capabilities/tools ----------------------------------------------------
 
 
-def _mcp_row(**overrides: Any) -> McpServer:
+@pytest.fixture
+def default_workspace(db_session: Session) -> Workspace:
+    """The seeded default workspace MCP rows attach to (Johnny-wks.8): the
+    parameterless ``/capabilities/tools`` view resolves MCP onto it."""
+    row = Workspace(name="Default", slug="default", is_default=True)
+    db_session.add(row)
+    db_session.commit()
+    return row
+
+
+def _mcp_row(workspace_id: int, **overrides: Any) -> McpServer:
     fields: dict[str, Any] = {
+        "workspace_id": workspace_id,
         "name": "fixture",
         "transport": "stdio",
         "enabled": True,
@@ -207,9 +218,14 @@ def _mcp_row(**overrides: Any) -> McpServer:
 
 
 def test_tools_merges_three_sources_with_policy(
-    client: TestClient, skills_volume: Path, db_session: Session
+    client: TestClient,
+    skills_volume: Path,
+    db_session: Session,
+    default_workspace: Workspace,
 ) -> None:
-    db_session.add(_mcp_row(tool_exclude=["always-fail"]))
+    db_session.add(
+        _mcp_row(default_workspace.id, tool_exclude=["always-fail"])
+    )
     db_session.commit()
 
     res = client.get("/capabilities/tools")
@@ -303,9 +319,12 @@ def test_toggle_preserves_other_document_fields(client: TestClient, skills_volum
 
 
 def test_toggle_mcp_kind_uses_cached_tools(
-    client: TestClient, skills_volume: Path, db_session: Session
+    client: TestClient,
+    skills_volume: Path,
+    db_session: Session,
+    default_workspace: Workspace,
 ) -> None:
-    db_session.add(_mcp_row(enabled=False))
+    db_session.add(_mcp_row(default_workspace.id, enabled=False))
     db_session.commit()
 
     # Disabled server: its cached kinds are still toggle-addressable.
@@ -370,6 +389,37 @@ def test_tools_catalog_derives_from_the_agents_workspace(
         params={"agent_id": agent.id, "workspace_id": finance_workspace.id},
     ).json()
     assert [t["kind"] for t in explicit["tools"]] == kinds
+
+
+def test_tools_mcp_catalog_is_workspace_scoped(
+    client: TestClient,
+    default_workspace: Workspace,
+    finance_workspace: Workspace,
+    db_session: Session,
+) -> None:
+    """An MCP server on one workspace contributes its kind only to that
+    workspace's catalog — two workspaces, two MCP sets (Johnny-wks.8)."""
+    db_session.add(_mcp_row(default_workspace.id, name="shared", tool_exclude=["always-fail"]))
+    db_session.add(_mcp_row(finance_workspace.id, name="ledgermcp", tool_exclude=["always-fail"]))
+    db_session.commit()
+    agent = Agent(name="FinanceBot", workspace_id=finance_workspace.id)
+    db_session.add(agent)
+    db_session.commit()
+
+    finance_kinds = [
+        t["kind"]
+        for t in client.get(
+            "/capabilities/tools", params={"agent_id": agent.id}
+        ).json()["tools"]
+    ]
+    assert "mcp__ledgermcp__echo" in finance_kinds  # finance's own server
+    assert "mcp__shared__echo" not in finance_kinds  # the default's never leaks in
+
+    default_kinds = [
+        t["kind"] for t in client.get("/capabilities/tools").json()["tools"]
+    ]
+    assert "mcp__shared__echo" in default_kinds  # default view = default's servers
+    assert "mcp__ledgermcp__echo" not in default_kinds
 
 
 def test_tools_parameterless_view_never_leaks_workspace_skills(

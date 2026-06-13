@@ -1,6 +1,9 @@
 /**
- * Typed client + form helpers for the /mcp-servers endpoints (Johnny-trt.36),
- * driving the management UI's add → probe → enable flow (Johnny-trt.37).
+ * Typed client + form helpers for the per-workspace MCP endpoints
+ * (`/workspaces/{id}/mcp-servers`, Johnny-trt.36 · Johnny-wks.8), driving the
+ * workspace detail page's add → probe → enable flow. An MCP server is OWNED by
+ * a workspace — there is no global MCP registry — so every call is scoped by
+ * `workspaceId`.
  *
  * Secrets are write-only by API contract: requests may carry `env` /
  * `headers` values, responses only ever name the keys (`env_keys` /
@@ -68,6 +71,8 @@ export interface McpToolRead {
 
 export interface McpServerRead {
 	id: number;
+	/** The workspace that owns this server (Johnny-wks.8). */
+	workspace_id: number;
 	name: string;
 	transport: McpTransport;
 	enabled: boolean;
@@ -133,30 +138,42 @@ export interface McpProbeOut {
 	catalog_kinds: string[];
 }
 
-export function listMcpServers(): Promise<{ servers: McpServerRead[] }> {
-	return request<{ servers: McpServerRead[] }>('/mcp-servers');
+/** The collection URL for one workspace's MCP servers. */
+function base(workspaceId: number): string {
+	return `/workspaces/${workspaceId}/mcp-servers`;
 }
 
-export function createMcpServer(payload: McpServerCreate): Promise<McpServerRead> {
-	return request<McpServerRead>('/mcp-servers', {
+export function listMcpServers(workspaceId: number): Promise<{ servers: McpServerRead[] }> {
+	return request<{ servers: McpServerRead[] }>(base(workspaceId));
+}
+
+export function createMcpServer(
+	workspaceId: number,
+	payload: McpServerCreate
+): Promise<McpServerRead> {
+	return request<McpServerRead>(base(workspaceId), {
 		method: 'POST',
 		body: JSON.stringify(payload)
 	});
 }
 
-export function updateMcpServer(id: number, payload: McpServerUpdate): Promise<McpServerRead> {
-	return request<McpServerRead>(`/mcp-servers/${id}`, {
+export function updateMcpServer(
+	workspaceId: number,
+	id: number,
+	payload: McpServerUpdate
+): Promise<McpServerRead> {
+	return request<McpServerRead>(`${base(workspaceId)}/${id}`, {
 		method: 'PATCH',
 		body: JSON.stringify(payload)
 	});
 }
 
-export function deleteMcpServer(id: number): Promise<void> {
-	return request<void>(`/mcp-servers/${id}`, { method: 'DELETE' });
+export function deleteMcpServer(workspaceId: number, id: number): Promise<void> {
+	return request<void>(`${base(workspaceId)}/${id}`, { method: 'DELETE' });
 }
 
-export function probeMcpServer(id: number): Promise<McpProbeOut> {
-	return request<McpProbeOut>(`/mcp-servers/${id}/probe`, { method: 'POST' });
+export function probeMcpServer(workspaceId: number, id: number): Promise<McpProbeOut> {
+	return request<McpProbeOut>(`${base(workspaceId)}/${id}/probe`, { method: 'POST' });
 }
 
 // --- form plumbing -------------------------------------------------------------

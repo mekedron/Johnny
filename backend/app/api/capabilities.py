@@ -71,6 +71,7 @@ from app.services.mcp_servers import (
     cached_tools,
     list_server_rows,
     load_server_snapshots,
+    resolve_mcp_workspace_id,
     row_to_config,
 )
 from app.services.workspaces import resolve_agent_workspace
@@ -343,10 +344,19 @@ async def list_tools(
         if agent is not None:
             workspace = resolve_agent_workspace(db, agent)
     registry = await _load_registry(workspace)
+    # MCP is workspace-keyed too (Johnny-wks.8): the same workspace the skills
+    # leg resolved above owns the MCP set, so this mirrors what that agent's
+    # next session renders. No workspace/agent → the default workspace's
+    # servers (the parameterless ``global`` view, byte-identical to pre-wks.8).
+    mcp_workspace_id = resolve_mcp_workspace_id(
+        db,
+        workspace_id=workspace.id if workspace is not None else None,
+        is_default=workspace.is_default if workspace is not None else True,
+    )
     merged = merge_task_catalog(
         internal_catalog_entries(meeting_backed=session_mode != "browser"),
         registry.catalog_entries(),
-        mcp_catalog_entries(load_server_snapshots(db)),
+        mcp_catalog_entries(load_server_snapshots(db, workspace_id=mcp_workspace_id)),
     )
     policy = resolve_capability_policy(
         db,

@@ -546,22 +546,31 @@ def resolve_skills_dir(claimed: ClaimedTask) -> str | None:
     return workspace_skills_dir(claimed.workspace_slug)
 
 
-def load_mcp_server_configs() -> tuple[McpServerConfig, ...]:
-    """Fresh enabled MCP server configs (Johnny-trt.36), read per execution.
+def load_mcp_server_configs(claimed: ClaimedTask) -> tuple[McpServerConfig, ...]:
+    """Fresh MCP server configs for the claimed task's WORKSPACE (Johnny-wks.8).
 
     The MCP twin of the per-claim policy resolution: never cached, so an
     operator's enable/disable/filter edit bites the very next claimed task
-    without a worker restart. Raises on a failed read — the executor's
-    config leg settles the task with could-not-verify speech (fail closed),
-    mirroring :meth:`TaskWorker._resolve_policy`.
+    without a worker restart. Scoped to the claim's workspace stamp (the wks.3
+    routing precedent — :func:`resolve_sandbox_url`/:func:`resolve_skills_dir`
+    have the sandbox/skills twins): the task sees exactly its workspace's MCP
+    set, the default/legacy stamp resolving to the seeded default workspace's
+    servers (byte-identical to the pre-wks.8 global set). Raises on a failed
+    read — the executor's config leg settles the task with could-not-verify
+    speech (fail closed), mirroring :meth:`TaskWorker._resolve_policy`.
     """
     from app.db.session import SessionLocal
     from app.security.crypto import get_crypto
-    from app.services.mcp_servers import load_server_configs
+    from app.services.mcp_servers import load_server_configs, resolve_mcp_workspace_id
 
     db = SessionLocal()
     try:
-        configs = load_server_configs(db, get_crypto())
+        workspace_id = resolve_mcp_workspace_id(
+            db,
+            workspace_id=claimed.workspace_id,
+            is_default=claimed.workspace_is_default,
+        )
+        configs = load_server_configs(db, get_crypto(), workspace_id=workspace_id)
         db.commit()
         return configs
     except Exception:
@@ -610,7 +619,8 @@ class SandboxExecutorProvider:
         *,
         registry_ttl_s: float | None = None,
         mcp_manager: Any | None = None,
-        mcp_config_loader: Callable[[], tuple[McpServerConfig, ...]] | None = None,
+        mcp_config_loader: Callable[[ClaimedTask], tuple[McpServerConfig, ...]]
+        | None = None,
     ) -> None:
         self._registry_ttl_s = (
             registry_ttl_s if registry_ttl_s is not None else get_task_registry_ttl_seconds()
@@ -681,10 +691,14 @@ class SandboxExecutorProvider:
         # stub. The MCP leg is the skill runner's fallback: configs re-read
         # fresh per execution (the no-restart pattern), connections lazy +
         # cached on the manager, stdio servers spawned in THIS task's
-        # resolved sandbox (the Phase-7 per-agent seam rides ``url``).
+        # resolved sandbox (the Phase-7 per-agent seam rides ``url``). The
+        # loader is scoped to THIS claim's workspace (Johnny-wks.8): the
+        # executor's no-arg ``load_servers`` contract is preserved by the
+        # per-claim closure capturing ``claimed`` (the workspace resolution
+        # lives in the caller, never the executor).
         mcp_executor = build_mcp_task_executor(
             self._mcp_manager_lazy(),
-            load_servers=self._mcp_config_loader,
+            load_servers=lambda: self._mcp_config_loader(claimed),
             sandbox_url=url,
             fallback=stub_executor,
         )

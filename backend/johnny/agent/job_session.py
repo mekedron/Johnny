@@ -690,9 +690,21 @@ def _load_mcp_snapshots(
     if db_session is None:
         return ()
     try:
-        from app.services.mcp_servers import load_server_snapshots
+        from app.services.mcp_servers import (
+            load_server_snapshots,
+            resolve_mcp_workspace_id,
+        )
 
-        snapshots = load_server_snapshots(db_session)
+        # Workspace-keyed (Johnny-wks.8): the catalog promises exactly the
+        # agent's workspace's MCP tools — the same set the worker resolves at
+        # claim time — the default/legacy stamp resolving to the seeded
+        # default workspace's servers.
+        workspace_id = resolve_mcp_workspace_id(
+            db_session,
+            workspace_id=config.workspace_id,
+            is_default=config.workspace_is_default,
+        )
+        snapshots = load_server_snapshots(db_session, workspace_id=workspace_id)
     except Exception:
         logger.exception(
             "agent runtime: mcp server snapshot load failed for %s — "

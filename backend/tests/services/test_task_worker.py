@@ -301,7 +301,7 @@ async def test_executor_for_lazily_ensures_the_workspace_container(
     )
 
     provider = SandboxExecutorProvider(
-        registry_ttl_s=3600.0, mcp_manager=object(), mcp_config_loader=tuple
+        registry_ttl_s=3600.0, mcp_manager=object(), mcp_config_loader=lambda _claimed: ()
     )
 
     async def fake_load(url: str, *, skills_dir: Any = None, reuse: Any = None) -> Any:
@@ -352,7 +352,7 @@ async def test_executor_for_loads_the_workspaces_own_skills_dir(
     monkeypatch.delenv("JOHNNY_USE_DOCKER_LAUNCHER", raising=False)
 
     provider = SandboxExecutorProvider(
-        registry_ttl_s=3600.0, mcp_manager=object(), mcp_config_loader=tuple
+        registry_ttl_s=3600.0, mcp_manager=object(), mcp_config_loader=lambda _claimed: ()
     )
     loads: list[tuple[str, Any]] = []
 
@@ -398,7 +398,7 @@ async def test_invalidate_workspace_ages_only_that_key(
     from johnny.skills.sandbox import sandbox_url_for_workspace
 
     provider = SandboxExecutorProvider(
-        registry_ttl_s=3600.0, mcp_manager=object(), mcp_config_loader=tuple
+        registry_ttl_s=3600.0, mcp_manager=object(), mcp_config_loader=lambda _claimed: ()
     )
     finance_url = sandbox_url_for_workspace(7)
     other_url = sandbox_url_for_workspace(8)
@@ -1015,7 +1015,7 @@ def test_kind_ready_bypasses_registry_refresh_for_mcp_kinds() -> None:
             raise AssertionError("mcp kinds must not consult the skill registry")
 
     provider = SandboxExecutorProvider(
-        registry_ttl_s=60.0, mcp_manager=object(), mcp_config_loader=tuple
+        registry_ttl_s=60.0, mcp_manager=object(), mcp_config_loader=lambda _claimed: ()
     )
     entry = _ExecutorEntry(registry=ExplodingRegistry(), client=None, loaded_at=0.0)
     assert provider._kind_ready(entry, "mcp__fixture__echo") is True
@@ -1048,10 +1048,10 @@ async def test_executor_for_chains_skills_then_mcp(
             self.calls.append((sandbox_url, tool))
             return McpCallResult(text="echo: hi", is_error=False, duration_ms=1)
 
-    loads: list[int] = []
+    loads: list[ClaimedTask] = []
 
-    def loader() -> tuple[McpServerConfig, ...]:
-        loads.append(1)
+    def loader(claimed: ClaimedTask) -> tuple[McpServerConfig, ...]:
+        loads.append(claimed)  # wks.8: the loader is handed the claim to scope by
         return (McpServerConfig(name="fixture", transport="stdio", command="python3"),)
 
     manager = FakeManager()
@@ -1086,12 +1086,13 @@ async def test_executor_for_chains_skills_then_mcp(
     assert result.status == "done"
     assert result.result_text == "echo: hi"
     assert manager.calls == [("http://sb-test:8088", "echo")]
-    assert loads == [1]  # configs were read fresh for this execution
+    assert len(loads) == 1  # configs were read fresh for this execution
+    assert loads[0].kind == "mcp__fixture__echo"  # the claim is handed to the loader
 
     # A second execution re-reads configs (the no-restart freshness model).
     result = await executor(_claimed("mcp__fixture__echo").as_queued_task())
     assert result.status == "done"
-    assert loads == [1, 1]
+    assert len(loads) == 2
 
     # Unknown non-mcp kinds still fall through to the fail-fast stub.
     stubbed = await executor(_claimed("never-heard-of-it").as_queued_task())

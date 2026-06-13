@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session, sessionmaker
 import app.services.mcp_servers as mcp_service
 from app.api.deps import get_crypto, get_session
 from app.db import Base
-from app.db.models import McpServer
+from app.db.models import McpServer, Workspace
 from app.main import app
 from app.security.crypto import CredentialCrypto
 from johnny.mcp.catalog import McpToolInfo
@@ -72,6 +72,25 @@ def client(db_session: Session, crypto: CredentialCrypto) -> Iterator[TestClient
     app.dependency_overrides.pop(get_crypto, None)
 
 
+@pytest.fixture
+def workspace(db_session: Session) -> Workspace:
+    """The seeded default workspace these servers attach to (Johnny-wks.8).
+
+    Default ``is_default=True`` so the probe spawns in the shared
+    skills-sandbox (no container ensure) — byte-identical to the pre-wks.8
+    global probe path."""
+    row = Workspace(name="Default", slug="default", is_default=True)
+    db_session.add(row)
+    db_session.commit()
+    return row
+
+
+@pytest.fixture
+def base(workspace: Workspace) -> str:
+    """The per-workspace MCP collection URL the routes now live under."""
+    return f"/workspaces/{workspace.id}/mcp-servers"
+
+
 def _stdio_payload(**overrides: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "name": "fixture",
@@ -84,35 +103,83 @@ def _stdio_payload(**overrides: Any) -> dict[str, Any]:
     return payload
 
 
-def test_create_masks_secrets_and_lists(client: TestClient) -> None:
-    created = client.post("/mcp-servers", json=_stdio_payload())
+def test_create_masks_secrets_and_lists(
+    client: TestClient, base: str, workspace: Workspace
+) -> None:
+    created = client.post(base, json=_stdio_payload())
     assert created.status_code == 201, created.text
     body = created.json()
     assert body["name"] == "fixture"
+    assert body["workspace_id"] == workspace.id  # owned by the workspace
     assert body["env_keys"] == ["API_TOKEN"]
     assert "secret-value" not in created.text  # the masking contract
     assert body["tools"] is None  # never probed
     assert body["last_probe_ok"] is None
 
-    listed = client.get("/mcp-servers")
+    listed = client.get(base)
     assert listed.status_code == 200
     assert [s["name"] for s in listed.json()["servers"]] == ["fixture"]
     assert "secret-value" not in listed.text
 
 
-def test_create_validates_through_runtime_config(client: TestClient) -> None:
-    bad_name = client.post("/mcp-servers", json=_stdio_payload(name="has_underscore"))
+def test_unknown_workspace_404(client: TestClient) -> None:
+    assert client.get("/workspaces/999/mcp-servers").status_code == 404
+    assert (
+        client.post("/workspaces/999/mcp-servers", json=_stdio_payload()).status_code
+        == 404
+    )
+
+
+def test_servers_are_isolated_per_workspace(
+    client: TestClient, db_session: Session, base: str, workspace: Workspace
+) -> None:
+    """A server on one workspace is invisible — and 404 — through another's URL
+    (the ownership boundary the relocation establishes, Johnny-wks.8)."""
+    other = Workspace(name="Finance", slug="finance", is_default=False)
+    db_session.add(other)
+    db_session.commit()
+    other_base = f"/workspaces/{other.id}/mcp-servers"
+
+    server_id = client.post(base, json=_stdio_payload()).json()["id"]
+
+    # The other workspace's list is empty; its scoped reads/edits 404.
+    assert client.get(other_base).json()["servers"] == []
+    assert client.get(f"{other_base}/{server_id}").status_code == 404
+    assert client.patch(f"{other_base}/{server_id}", json={"enabled": False}).status_code == 404
+    assert client.delete(f"{other_base}/{server_id}").status_code == 404
+    assert client.post(f"{other_base}/{server_id}/probe").status_code == 404
+
+    # The owning workspace still sees it.
+    assert [s["id"] for s in client.get(base).json()["servers"]] == [server_id]
+
+
+def test_same_name_allowed_in_different_workspaces(
+    client: TestClient, db_session: Session, base: str
+) -> None:
+    """Uniqueness is PER WORKSPACE — two workspaces may each own a ``fixture``."""
+    other = Workspace(name="Finance", slug="finance", is_default=False)
+    db_session.add(other)
+    db_session.commit()
+    assert client.post(base, json=_stdio_payload()).status_code == 201
+    assert (
+        client.post(
+            f"/workspaces/{other.id}/mcp-servers", json=_stdio_payload()
+        ).status_code
+        == 201
+    )
+
+
+def test_create_validates_through_runtime_config(client: TestClient, base: str) -> None:
+    bad_name = client.post(base, json=_stdio_payload(name="has_underscore"))
     assert bad_name.status_code == 422
     assert "underscores" in bad_name.json()["detail"]
 
-    no_url = client.post(
-        "/mcp-servers", json={"name": "remote", "transport": "http"}
-    )
+    no_url = client.post(base, json={"name": "remote", "transport": "http"})
     assert no_url.status_code == 422
     assert "url" in no_url.json()["detail"]
 
     mixed = client.post(
-        "/mcp-servers",
+        base,
         json={
             "name": "remote",
             "transport": "http",
@@ -123,19 +190,19 @@ def test_create_validates_through_runtime_config(client: TestClient) -> None:
     assert mixed.status_code == 422
 
 
-def test_duplicate_name_conflicts(client: TestClient) -> None:
-    assert client.post("/mcp-servers", json=_stdio_payload()).status_code == 201
-    duplicate = client.post("/mcp-servers", json=_stdio_payload())
+def test_duplicate_name_conflicts(client: TestClient, base: str) -> None:
+    assert client.post(base, json=_stdio_payload()).status_code == 201
+    duplicate = client.post(base, json=_stdio_payload())
     assert duplicate.status_code == 409
 
 
 def test_patch_updates_and_preserves_untouched_secrets(
-    client: TestClient, db_session: Session, crypto: CredentialCrypto
+    client: TestClient, db_session: Session, crypto: CredentialCrypto, base: str
 ) -> None:
-    server_id = client.post("/mcp-servers", json=_stdio_payload()).json()["id"]
+    server_id = client.post(base, json=_stdio_payload()).json()["id"]
 
     patched = client.patch(
-        f"/mcp-servers/{server_id}", json={"enabled": False, "tool_exclude": ["add"]}
+        f"{base}/{server_id}", json={"enabled": False, "tool_exclude": ["add"]}
     )
     assert patched.status_code == 200
     body = patched.json()
@@ -148,37 +215,35 @@ def test_patch_updates_and_preserves_untouched_secrets(
     env, _headers = mcp_service.decrypt_secrets(crypto, row.secrets_encrypted)
     assert env == {"API_TOKEN": "secret-value"}
 
-    cleared = client.patch(
-        f"/mcp-servers/{server_id}", json={"env": {}, "headers": {}}
-    )
+    cleared = client.patch(f"{base}/{server_id}", json={"env": {}, "headers": {}})
     assert cleared.status_code == 200
     assert cleared.json()["env_keys"] == []
     db_session.refresh(row)
     assert row.secrets_encrypted is None
 
 
-def test_patch_invalid_shape_rejected(client: TestClient) -> None:
-    server_id = client.post("/mcp-servers", json=_stdio_payload()).json()["id"]
-    bad = client.patch(f"/mcp-servers/{server_id}", json={"command": ""})
+def test_patch_invalid_shape_rejected(client: TestClient, base: str) -> None:
+    server_id = client.post(base, json=_stdio_payload()).json()["id"]
+    bad = client.patch(f"{base}/{server_id}", json={"command": ""})
     assert bad.status_code == 422
     assert "command" in bad.json()["detail"]
 
 
-def test_delete_and_404s(client: TestClient) -> None:
-    assert client.get("/mcp-servers/999").status_code == 404
-    assert client.delete("/mcp-servers/999").status_code == 404
-    assert client.post("/mcp-servers/999/probe").status_code == 404
+def test_delete_and_404s(client: TestClient, base: str) -> None:
+    assert client.get(f"{base}/999").status_code == 404
+    assert client.delete(f"{base}/999").status_code == 404
+    assert client.post(f"{base}/999/probe").status_code == 404
 
-    server_id = client.post("/mcp-servers", json=_stdio_payload()).json()["id"]
-    assert client.delete(f"/mcp-servers/{server_id}").status_code == 204
-    assert client.get(f"/mcp-servers/{server_id}").status_code == 404
+    server_id = client.post(base, json=_stdio_payload()).json()["id"]
+    assert client.delete(f"{base}/{server_id}").status_code == 204
+    assert client.get(f"{base}/{server_id}").status_code == 404
 
 
 def test_probe_happy_path_persists_cache_and_reports_kinds(
-    client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch, base: str
 ) -> None:
     server_id = client.post(
-        "/mcp-servers", json=_stdio_payload(tool_exclude=["always-fail"])
+        base, json=_stdio_payload(tool_exclude=["always-fail"])
     ).json()["id"]
 
     async def fake_probe(config: Any, *, sandbox_url: str, http_client: Any = None) -> Any:
@@ -197,7 +262,7 @@ def test_probe_happy_path_persists_cache_and_reports_kinds(
 
     monkeypatch.setattr("johnny.mcp.client.probe_mcp_server", fake_probe)
 
-    probed = client.post(f"/mcp-servers/{server_id}/probe")
+    probed = client.post(f"{base}/{server_id}/probe")
     assert probed.status_code == 200, probed.text
     body = probed.json()
     assert body["ok"] is True
@@ -213,15 +278,15 @@ def test_probe_happy_path_persists_cache_and_reports_kinds(
     assert [t["name"] for t in row.tools_cache] == ["echo", "add", "always-fail"]
 
     # The cached view now renders on reads too.
-    read = client.get(f"/mcp-servers/{server_id}").json()
+    read = client.get(f"{base}/{server_id}").json()
     assert read["catalog_kinds"] == ["mcp__fixture__echo", "mcp__fixture__add"]
     assert read["last_probe_ok"] is True
 
 
 def test_probe_sad_path_records_error_keeps_stale_cache(
-    client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch, base: str
 ) -> None:
-    server_id = client.post("/mcp-servers", json=_stdio_payload()).json()["id"]
+    server_id = client.post(base, json=_stdio_payload()).json()["id"]
     row = db_session.get(McpServer, server_id)
     assert row is not None
     row.tools_cache = [{"name": "echo", "description": "from a better day"}]
@@ -235,7 +300,7 @@ def test_probe_sad_path_records_error_keeps_stale_cache(
 
     monkeypatch.setattr("johnny.mcp.client.probe_mcp_server", failing_probe)
 
-    probed = client.post(f"/mcp-servers/{server_id}/probe")
+    probed = client.post(f"{base}/{server_id}/probe")
     assert probed.status_code == 200
     body = probed.json()
     assert body["ok"] is False

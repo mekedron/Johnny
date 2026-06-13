@@ -3,14 +3,14 @@
 	import PageHeader from '$lib/components/page-header.svelte';
 	import SkillsPanel from '$lib/components/capabilities/SkillsPanel.svelte';
 	import ToolsPanel from '$lib/components/capabilities/ToolsPanel.svelte';
-	import McpPanel from '$lib/components/capabilities/McpPanel.svelte';
 	import { cn } from '$lib/utils.js';
 
-	type Tab = 'skills' | 'tools' | 'mcp';
+	// MCP servers moved to the per-workspace detail page (Johnny-wks.8) — an
+	// MCP connector is owned by a workspace, there is no global MCP registry.
+	type Tab = 'skills' | 'tools';
 	const TABS: { key: Tab; label: string }[] = [
 		{ key: 'skills', label: 'Skills' },
-		{ key: 'tools', label: 'Tools' },
-		{ key: 'mcp', label: 'MCP servers' }
+		{ key: 'tools', label: 'Tools' }
 	];
 
 	let activeTab = $state<Tab>('skills');
@@ -23,7 +23,7 @@
 <Page testId="capabilities-page">
 	<PageHeader
 		title="Capabilities"
-		description="What Johnny can do and what policy allows: skill packages on the sandbox volume, the merged tool catalog with layered allow/deny rules, and MCP connectors."
+		description="What Johnny can do and what policy allows: skill packages on the sandbox volume and the merged tool catalog with layered allow/deny rules. MCP connectors are configured per workspace."
 	/>
 
 	<div
@@ -52,9 +52,7 @@
 
 	{#if activeTab === 'skills'}
 		<SkillsPanel />
-	{:else if activeTab === 'tools'}
-		<ToolsPanel />
 	{:else}
-		<McpPanel />
+		<ToolsPanel />
 	{/if}
 </Page>

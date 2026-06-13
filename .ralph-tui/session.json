@@ -3,10 +3,10 @@
   "sessionId": "aced5d83-4a38-43cf-99a6-d43a830ede43",
   "status": "running",
   "startedAt": "2026-06-13T11:30:13.669Z",
-  "updatedAt": "2026-06-13T11:51:03.064Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-13T12:23:52.148Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "opus",
@@ -69,8 +69,8 @@
       {
         "id": "Johnny-wks.7",
         "title": "[BUILD] Accounts = Meeting Bots only — keep meeting-bot account (done) + google-calendar skill; remove the gog-account backend + UI",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-wks.8",
@@ -86,7 +86,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-wks.7",
+      "taskTitle": "[BUILD] Accounts = Meeting Bots only — keep meeting-bot account (done) + google-calendar skill; remove the gog-account backend + UI",
+      "taskCompleted": true,
+      "durationMs": 1239813,
+      "startedAt": "2026-06-13T11:30:22.377Z",
+      "endedAt": "2026-06-13T11:51:02.190Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

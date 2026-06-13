@@ -20,6 +20,7 @@
 	import Page from '$lib/components/page.svelte';
 	import PageHeader from '$lib/components/page-header.svelte';
 	import WorkspaceInventoryPanel from '$lib/components/workspaces/WorkspaceInventoryPanel.svelte';
+	import McpPanel from '$lib/components/workspaces/McpPanel.svelte';
 	import { listAgents, type Agent } from '$lib/agents';
 	import {
 		agentsAttachedTo,
@@ -289,6 +290,23 @@
 				{displayState}
 				onProbed={() => void refreshStates()}
 			/>
+		</section>
+
+		<!-- ─── MCP SERVERS ───────────────────────────────────────────────── -->
+		<section
+			class="border-border bg-surface-2 flex flex-col gap-4 rounded-md border p-5"
+			data-testid="section-mcp"
+		>
+			<header class="flex flex-col gap-0.5">
+				<h2 class="text-foreground m-0 text-xs font-semibold tracking-widest uppercase">
+					MCP servers
+				</h2>
+				<p class="text-muted-foreground m-0 text-xs">
+					Model Context Protocol connectors for this workspace. Agents attached here see these
+					servers' tools; other workspaces do not.
+				</p>
+			</header>
+			<McpPanel workspaceId={workspace.id} />
 		</section>
 	{/if}
 </Page>

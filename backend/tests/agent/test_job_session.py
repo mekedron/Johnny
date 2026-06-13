@@ -560,7 +560,7 @@ async def test_delegation_capable_runtime_catalogs_mcp_tools() -> None:
     from sqlalchemy.orm import sessionmaker
 
     from app.db import Base
-    from app.db.models import McpServer
+    from app.db.models import McpServer, Workspace
 
     engine = sa.create_engine(
         "sqlite:///:memory:",
@@ -570,8 +570,16 @@ async def test_delegation_capable_runtime_catalogs_mcp_tools() -> None:
     Base.metadata.create_all(bind=engine)
     maker = sessionmaker(bind=engine)
     seed = maker()
+    # Per-workspace MCP (Johnny-wks.8): the servers attach to the seeded
+    # default workspace — the legacy/default session stamp _job carries
+    # resolves there, so assembly promises exactly this set.
+    default_ws = Workspace(name="Default", slug="default", is_default=True)
+    seed.add(default_ws)
+    seed.flush()
+    ws_id = int(default_ws.id)
     seed.add(
         McpServer(
+            workspace_id=ws_id,
             name="fixture",
             transport="stdio",
             command="python3",
@@ -585,6 +593,7 @@ async def test_delegation_capable_runtime_catalogs_mcp_tools() -> None:
     )
     seed.add(
         McpServer(
+            workspace_id=ws_id,
             name="downed",
             transport="http",
             url="https://down.test/mcp",
@@ -595,6 +604,7 @@ async def test_delegation_capable_runtime_catalogs_mcp_tools() -> None:
     )
     seed.add(
         McpServer(
+            workspace_id=ws_id,
             name="off",
             transport="stdio",
             command="python3",
