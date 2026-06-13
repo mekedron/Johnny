@@ -126,15 +126,22 @@ class InternalToolSpec:
     unavailable_reason: str = ""
 
     def catalog_entry(self, *, available: bool = True) -> TaskCatalogEntry:
+        # ``internal=True`` (Johnny-etu.7) so the answer-prompt positive block
+        # never advertises a session-control verb as a user-facing capability;
+        # the router catalog and the gate backstop read it unchanged.
         if available:
             return TaskCatalogEntry(
-                kind=self.kind, one_liner=self.one_liner, keywords=self.keywords
+                kind=self.kind,
+                one_liner=self.one_liner,
+                keywords=self.keywords,
+                internal=True,
             )
         return TaskCatalogEntry(
             kind=self.kind,
             one_liner=self.one_liner,
             keywords=(),
             available=False,
+            internal=True,
             unavailable_reason=self.unavailable_reason,
         )
 

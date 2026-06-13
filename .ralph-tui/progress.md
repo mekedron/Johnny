@@ -81,9 +81,95 @@ over a step's `disclosures`, so new timeline content needs only a new step in `s
 ONLY in the worker (`executor_for` is called there alone; browser + Meet both delegate to it),
 so one trace seam covers every session source; the MCP-executor path is untraced (follow-up).
 
+### Answer-prompt capability grounding: positive block, frame as BACKGROUND-TOOL not "you can do X" (Johnny-etu.7)
+The answer LLM never sees the router catalog, so on a capability ask the router routes to
+`speak`, the answer model knows nothing about what the session can/can't do. `render_capability_notes`
+(`task_catalog.py`, rendered ONCE into the static system prompt via `session.build_agent_instructions`
+← `job_session.py` `capability_notes=`) is the seam. It now renders TWO blocks: AVAILABLE
+non-internal kinds (anti-denial) + UNAVAILABLE gaps (trt.55 anti-pretend-check). KEY GOTCHA proven
+live on llama3.2:3b: a "Things you CAN do: google-calendar — look up events" framing makes the weak
+model role-play the lookup and FABRICATE events ("2pm meeting at Ono-Sendai Tower") — strictly worse
+than the original denial. Fix = frame the block as "requests handled for you by BACKGROUND TOOLS, not
+answered by you directly" and lead with the anti-fabrication rule ("you do NOT have its result yet,
+never state/guess specifics") BEFORE the anti-denial rule. Internal session-control kinds
+(`session.end`/`meeting.leave`) are excluded from the positive block via a new `TaskCatalogEntry.internal`
+flag (set in `internal_tools.InternalToolSpec.catalog_entry`; `task_catalog.py` is stdlib-only and
+CANNOT import `is_internal_kind` — circular — so the flag rides the entry). Hidden (policy) entries
+render nowhere. The deeper "reply reflects the REAL result incl. errors" (0qw) is INTACT + unit-tested
+(`router_gate` `_inject_task_context` / `test_speak_with_undelivered_result_injects_and_never_consumes`)
+and fires once delegation lands — residual speak-path non-answers on the 3B are delegation reliability
+(Johnny-etu.6), NOT this bead. Caps mirror the unavailable block (`_AVAILABLE_RENDER_CAP=12`).
+
+### Make a credential-gated skill AVAILABLE for a REAL browser session (validation fixture)
+To browser-validate google-calendar (needs a Google account) WITHOUT real OAuth, shadow the real `gog`
+on the WORKSPACE SANDBOX's default PATH: `docker exec -u 0 johnny-workspace-1 bash -c 'cp -f
+/usr/local/bin/gog /usr/local/bin/gog.real-bak; cat > /usr/local/bin/gog <<SHIM ...'` — a fake that
+answers `gog auth list` (no "no tokens stored") + `gog calendar events list --json`. The default
+workspace routes to `johnny-workspace-1` (etu.5); `resolve_session_sandbox_url(ws=1)` →
+`http://johnny-workspace-1:8088`. NOTE: `test_calendar_correctness.py`'s PATH-shim does NOT work for a
+real session — it relies on the TEST client's PATH overlay; a real session execs the sandbox's default
+PATH, so you must replace the actual binary. Availability is probed at SESSION ASSEMBLY (catalog entry
+comes from the host skills-dir FILESYSTEM scan, `available` from the sandbox probe — a transient probe
+failure right after an api `--reload` marks it unavailable → DELEGATE degrades to the trt.55 decline;
+just start a fresh session once the container is warm). `-u 0` needed (`/usr/local/bin` non-root-owned).
+Always restore the real binary after.
+
 ---
 
-## 2026-06-13 - Johnny-etu.3 [SPIKE] root-cause the "session-runtime regression"
+## 2026-06-13 - Johnny-etu.7 [BUILD] Phase 1: Restore answer grounding (positive capability grounding + 0qw)
+
+Acted on etu.3's reframe: the 0qw mechanism (reply reflects the real tool result incl. errors when
+the registry holds one) was already INTACT + unit-tested at HEAD — NOT the failure. The live "wrong
+sandbox / no calendar" fabrication was a **first-ask positive-grounding gap**: `render_capability_notes`
+emitted ONLY unavailable kinds, so the answer model had no signal that google-calendar was available
+and overgeneralized a nearby gap note into a blanket denial.
+
+**What was implemented:**
+- `render_capability_notes` (`johnny/agent/task_catalog.py`) now renders a SECOND, positive block for
+  available, NON-internal capabilities — so a speak-verdict on an available capability can never deny
+  it. New `TaskCatalogEntry.internal` flag (default False; set True in
+  `internal_tools.InternalToolSpec.catalog_entry`) excludes session-control verbs from the positive
+  block (their one-liners are router-facing; the user never asks the answer model to run them).
+  `_AVAILABLE_RENDER_CAP=12` + overflow line mirrors the unavailable block's anti-bloat cap.
+- **Wording rework after a live finding:** the first cut ("Things you CAN do: …") made llama3.2:3b
+  FABRICATE events on the speak path (worse than denial). Reframed to "requests handled for you by
+  BACKGROUND TOOLS, not answered by you directly", leading with the anti-fabrication rule (no
+  result yet → never state/guess specifics) then the anti-denial rule. Live re-test: no fabrication.
+- Docstring/comment updates in `session.py` (`AgentInstructionsConfig.capability_notes` +
+  `build_agent_instructions`) and `job_session.py` (the `render_capability_notes` call site).
+- 0qw left untouched (intact); covered by existing `_inject_task_context` tests.
+
+**Files changed:** backend — `johnny/agent/task_catalog.py`, `johnny/agent/internal_tools.py`,
+`johnny/agent/session.py`, `johnny/agent/job_session.py`; tests — `tests/agent/test_task_catalog.py`
+(rewrote the all-available-empty test; added positive-block / internal-exclusion / both-blocks /
+cap tests), `tests/agent/test_internal_tools.py` (assert `internal=True` on internal entries +
+an assembly-level answer-blind regression test). No frontend changes.
+
+**Validation:** backend `tests/agent` + `tests/skills` + `tests/mcp` = 1429 passed; ruff + mypy clean
+on the 4 changed source files. Browser (chrome-devtools MCP, default autonomous Johnny on llama3.2:3b,
+google-calendar made available via a workspace-1 `gog` shim — see pattern above; shim restored after):
+  - Natural "check the Google calendar" → no "wrong sandbox" denial AND no fabricated events (the
+    reworked prompt; `01-playground-natural-ask-no-fabrication.png`).
+  - When the router delegated (`Hand off as a background task`), the worker ran the real skill and the
+    trt.28 deliverer SPOKE the real result verbatim — tool-call trace stdout
+    `"You have 2 events in the next 7 days: 'Dentist appointment' tomorrow at 15:00, and 'Team standup'
+    on Tuesday June 16 at 09:30."` == the task result == the delivered transcript (zero fabrication).
+    Screens `02-session-real-delegated-result-reflected.png`, `03-tool-stdout-matches-spoken-result-zero-fabrication.png`.
+
+**Learnings / gotchas:**
+- Positive capability grounding is genuinely two-edged on a weak router model: it kills the denial but
+  a "you can do X" framing INVITES fabrication. The background-tool framing (work is the tool's, not
+  the model's) + anti-fabrication-first ordering is the fix. See the pattern at the top.
+- The 3B (llama3.2:3b) is non-deterministic across speak/delegate/status for the SAME natural ask
+  (saw all three across 4 sessions) — exactly etu.3's finding. Reliable delegation is etu.6; don't
+  try to "fix" the speak path's non-answer here.
+- `task_catalog.py` is stdlib-only and `internal_tools` imports FROM it → the internal/user-facing
+  split must ride a flag ON the entry, never an `is_internal_kind` import (circular).
+- Browser-session availability is probed at ASSEMBLY against the per-workspace sandbox; the catalog
+  ENTRY comes from the host skills-dir filesystem scan (so the kind shows even when the probe fails).
+  A transient probe miss right after an api `--reload` degrades a DELEGATE to the trt.55 decline.
+
+---
 
 **Outcome: the bead's hypothesis is REFUTED — there is NO Phase-6/7 tool-calling regression.**
 Full write-up: `.validation/Johnny-etu.3/00-ROOT-CAUSE.md` (+ `01-session1-live-symptom.png`).

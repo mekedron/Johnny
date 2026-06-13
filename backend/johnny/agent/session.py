@@ -164,11 +164,12 @@ class AgentInstructionsConfig:
     Every field defaults to ``""`` and an empty field renders nothing, so an
     unconfigured session degrades to the base framing alone (regression guard).
 
-    ``capability_notes`` (Johnny-trt.55) is the unavailable-capabilities
-    honesty block (:func:`johnny.agent.task_catalog.render_capability_notes`),
-    filled by the runtime assembly from the session's task catalog — the
-    answer model must decline an impossible ask with the reason and the fix
-    rather than improvising a pretend-check.
+    ``capability_notes`` (Johnny-trt.55 + Johnny-etu.7) is the
+    capability-grounding block (:func:`johnny.agent.task_catalog.render_capability_notes`),
+    filled by the runtime assembly from the session's task catalog: what the
+    session CAN do (so the answer model never denies an available capability)
+    and what it CANNOT (so it declines an impossible ask with the reason and
+    the fix rather than improvising a pretend-check).
     """
 
     character_prompt: str = ""
@@ -185,8 +186,9 @@ def build_agent_instructions(config: AgentInstructionsConfig) -> str:
     Reuses the legacy answer-stage assembly order from
     the legacy split pipeline: base framing → character (FIRST, so
     the model adopts the character before it reads the job) → history note →
-    capability notes (Johnny-trt.55 — unavailable-capability honesty, absent
-    when the session has no gaps so the prompt stays byte-identical) →
+    capability notes (Johnny-trt.55 + Johnny-etu.7 — what the session CAN and
+    CANNOT do, absent only when it has no user-facing capability and no gap, so
+    the prompt stays byte-identical) →
     context (the per-assignment brief — the documented Johnny-trt.45 slot)
     → calendar description → calendar attachments → last-session summary.
     The retired "Meeting instructions" line rendered between capability
@@ -201,10 +203,10 @@ def build_agent_instructions(config: AgentInstructionsConfig) -> str:
         system += f"\n\n{config.character_prompt}"
     system += f"\n\n{_HISTORY_NOTE}"
     if config.capability_notes:
-        # Capability honesty (Johnny-trt.55): rendered AFTER the character so
-        # the no-pretend-check rule outranks roleplay habits, and before the
-        # assignment brief so that can refine rather than be contradicted
-        # (the router prompt's catalog-ordering rationale).
+        # Capability grounding (Johnny-trt.55 + Johnny-etu.7): rendered AFTER
+        # the character so the can-do / no-pretend-check rules outrank roleplay
+        # habits, and before the assignment brief so that can refine rather than
+        # be contradicted (the router prompt's catalog-ordering rationale).
         system += f"\n\n{config.capability_notes}"
     if config.context:
         system += f"\n\nContext: {config.context}"

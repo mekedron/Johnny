@@ -180,17 +180,88 @@ def test_unavailable_blank_reason_gets_generic_copy() -> None:
     assert "- x.y: not available in this session right now" in rendered
 
 
-def test_capability_notes_empty_when_everything_available() -> None:
-    """The answer prompt stays byte-identical when the session has no gaps."""
+def test_capability_notes_empty_only_without_user_facing_caps_or_gaps() -> None:
+    """Byte-identical empty when the session has neither a user-facing
+    available capability nor a gap (Johnny-etu.7)."""
+    # No catalog at all (non-delegation mode).
     assert render_capability_notes(()) == ""
-    assert render_capability_notes(STUB_TASK_CATALOG) == ""
+    # Only internal session-control kinds, all available: not user-facing, no
+    # gap → still empty (advertising "you can end the session" is noise).
+    internal_only = (
+        TaskCatalogEntry(kind="session.end", one_liner="End the session.", internal=True),
+        TaskCatalogEntry(kind="meeting.leave", one_liner="Leave the meeting.", internal=True),
+    )
+    assert render_capability_notes(internal_only) == ""
+
+
+def test_capability_notes_positive_block_grounds_available_capability() -> None:
+    """The Johnny-etu.7 fix: an available, user-facing capability is grounded
+    as a background-tool request so the answer model never denies it ('wrong
+    sandbox') AND never fabricates a result for it on a speak turn."""
+    notes = render_capability_notes(STUB_TASK_CATALOG)  # all available, non-internal
+    assert "handled for you by background tools" in notes
+    assert "- calendar.upcoming_events: Look up upcoming events on the connected calendar." in notes
+    assert "- gmail.search: Search the connected mailbox for messages." in notes
+    # The two guardrails: never deny an available capability, never invent its result.
+    assert "never tell them you can't do" in notes
+    assert "never state or guess any specifics" in notes
+    # No gap → no CANNOT block, and never router vocabulary.
+    assert "CANNOT do" not in notes
+    assert "delegate" not in notes
+
+
+def test_capability_notes_excludes_internal_kinds_from_positive_block() -> None:
+    """Internal session-control kinds are not user-facing capabilities — the
+    answer model is never told 'you can end the session' (Johnny-etu.7)."""
+    entries = (
+        TaskCatalogEntry(kind="session.end", one_liner="End the session.", internal=True),
+        TaskCatalogEntry(kind="google-calendar", one_liner="Look up events."),
+    )
+    notes = render_capability_notes(entries)
+    assert "handled for you by background tools" in notes
+    assert "- google-calendar: Look up events." in notes
+    assert "session.end" not in notes
+    assert "End the session." not in notes
+
+
+def test_capability_notes_render_both_blocks_positive_before_negative() -> None:
+    """A session with both a working and a broken capability grounds the
+    answer model on each: the background-tool block first, then the decline."""
+    entries = (
+        TaskCatalogEntry(kind="google-calendar", one_liner="Look up events."),
+        TaskCatalogEntry(
+            kind="gmail.search",
+            one_liner="Search the mailbox.",
+            available=False,
+            unavailable_reason="no Google account is connected — link one in settings.",
+        ),
+    )
+    notes = render_capability_notes(entries)
+    assert "- google-calendar: Look up events." in notes
+    assert "- gmail.search: no Google account is connected — link one in settings." in notes
+    # Positive grounding leads, the gap honesty follows.
+    assert notes.index("background tools") < notes.index("CANNOT do in this session")
+
+
+def test_capability_notes_positive_block_is_capped_against_prompt_bloat() -> None:
+    """A skill-rich workspace collapses the tail into a count line (the
+    openclaw 150-skill precedent applied to the CAN-do block)."""
+    entries = tuple(
+        TaskCatalogEntry(kind=f"skill-{i}", one_liner=f"Do thing {i}.")
+        for i in range(20)
+    )
+    notes = render_capability_notes(entries)
+    assert "- skill-0: Do thing 0." in notes
+    assert "- skill-11: Do thing 11." in notes
+    assert "- skill-12: Do thing 12." not in notes  # past the 12-row cap
+    assert "…and 8 more you can do" in notes
 
 
 def test_capability_notes_carry_reasons_without_router_vocabulary() -> None:
     """The answer-side block speaks the same reasons but knows nothing about
     router actions — 'delegate' is triage vocabulary, not answer vocabulary."""
     entries = (
-        TaskCatalogEntry(kind="session.end", one_liner="End the session."),
+        TaskCatalogEntry(kind="session.end", one_liner="End the session.", internal=True),
         TaskCatalogEntry(
             kind="google-calendar",
             one_liner="Look up events.",
@@ -203,7 +274,7 @@ def test_capability_notes_carry_reasons_without_router_vocabulary() -> None:
     assert "- google-calendar: no Google account is connected — link one in settings." in notes
     assert "Never pretend to check" in notes
     assert "delegate" not in notes
-    assert "session.end" not in notes  # available kinds are not the answer model's business
+    assert "session.end" not in notes  # internal kinds are not the answer model's business
 
 
 def test_stub_catalog_entries_are_prompt_and_scorer_ready() -> None:

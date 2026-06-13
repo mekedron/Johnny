@@ -3,10 +3,10 @@
   "sessionId": "368ff11b-20d5-4eb0-bfb5-dc0ee5fa8fba",
   "status": "running",
   "startedAt": "2026-06-13T14:47:46.989Z",
-  "updatedAt": "2026-06-13T16:41:14.020Z",
-  "currentIteration": 2,
+  "updatedAt": "2026-06-13T17:17:38.095Z",
+  "currentIteration": 3,
   "maxIterations": 0,
-  "tasksCompleted": 2,
+  "tasksCompleted": 3,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "opus",
@@ -81,8 +81,8 @@
       {
         "id": "Johnny-etu.4",
         "title": "[BUILD] Phase 0: 'What is the bot thinking' — per-turn reasoning timeline + tool-call traces in /sessions/[id]",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-etu.5",
@@ -148,6 +148,16 @@
       "durationMs": 2577743,
       "startedAt": "2026-06-13T15:20:40.845Z",
       "endedAt": "2026-06-13T16:03:38.588Z"
+    },
+    {
+      "iteration": 3,
+      "status": "completed",
+      "taskId": "Johnny-etu.4",
+      "taskTitle": "[BUILD] Phase 0: 'What is the bot thinking' — per-turn reasoning timeline + tool-call traces in /sessions/[id]",
+      "taskCompleted": true,
+      "durationMs": 2243735,
+      "startedAt": "2026-06-13T16:03:48.852Z",
+      "endedAt": "2026-06-13T16:41:12.587Z"
     }
   ],
   "skippedTaskIds": [],

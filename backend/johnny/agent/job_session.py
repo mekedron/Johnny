@@ -1159,11 +1159,14 @@ async def build_agent_runtime(
     async def _publish_transcript_filtered(event: TranscriptFiltered) -> None:
         await bus.publish(event)
 
-    # Capability honesty for the ANSWER side (Johnny-trt.55): the router's
-    # unavailable block stops bad delegations, but an unavailable ask routed
-    # to speak is answered by the answer model — which must see the same
-    # gaps + reasons or it improvises a pretend-check. Empty when nothing is
-    # unavailable, leaving the prompt byte-identical.
+    # Capability grounding for the ANSWER side (Johnny-trt.55 + Johnny-etu.7):
+    # the router's catalog stops bad delegations, but a capability ask routed
+    # to speak is answered by the answer model — which never sees that catalog.
+    # It must learn what the session CAN do (so a speak-verdict on an available
+    # capability never denies it — the etu.7 "wrong sandbox" fabrication) and
+    # what it CANNOT (the same gaps + reasons or it improvises a pretend-check).
+    # Empty only when the session has no user-facing capability and no gap,
+    # leaving the prompt byte-identical.
     prompt_config = replace(
         instructions_config_from_job(config),
         capability_notes=render_capability_notes(task_catalog),

@@ -58,6 +58,17 @@ class TaskCatalogEntry:
     spoken decline. ``policy_layer`` / ``policy_rule`` carry the deciding
     layer for the ``policy_denied`` observability event — machine fields,
     never rendered.
+
+    ``internal`` (Johnny-etu.7): an internal session-control kind
+    (``meeting.leave`` / ``session.end``) rather than a user-facing capability.
+    Set by :func:`johnny.agent.internal_tools.InternalToolSpec.catalog_entry`;
+    skill- and MCP-backed entries leave it ``False``. The answer-prompt
+    positive block (:func:`render_capability_notes`) renders only NON-internal
+    available kinds — "you can check the calendar" grounds the answer model,
+    but advertising "you can end the session" as a capability is noise (its
+    one-liner is router-facing guidance, and the user never asks the answer
+    model to run it). The router catalog and the gate backstop still see
+    internal entries unchanged.
     """
 
     kind: str
@@ -66,6 +77,7 @@ class TaskCatalogEntry:
     available: bool = True
     unavailable_reason: str = ""
     hidden: bool = False
+    internal: bool = False
     policy_layer: str = ""
     policy_rule: str = ""
 
@@ -122,6 +134,12 @@ precedent applied to the unavailable block."""
 _UNAVAILABLE_REASON_CAP = 160
 """Per-entry cap on the rendered reason — the loader's one-liner discipline
 applied to the spoken-form gap copy."""
+
+_AVAILABLE_RENDER_CAP = 12
+"""Most available capabilities rendered in the answer-prompt positive block
+(Johnny-etu.7). A long tail collapses into one summary count line so a
+skill-rich workspace cannot bloat the answer prompt — the openclaw 150-skill
+precedent applied to the available block, mirroring :data:`_UNAVAILABLE_RENDER_CAP`."""
 
 
 def render_task_catalog(entries: tuple[TaskCatalogEntry, ...]) -> str:
@@ -233,32 +251,87 @@ def _render_unavailable(
     return "\n".join([header, *_unavailable_rows(unavailable)])
 
 
-def render_capability_notes(entries: tuple[TaskCatalogEntry, ...]) -> str:
-    """The ANSWER-prompt honesty block for unavailable capabilities (Johnny-trt.55).
+def _available_rows(available: tuple[TaskCatalogEntry, ...]) -> list[str]:
+    """The capped ``- kind: one-liner`` rows for the positive capability block."""
+    lines = [
+        f"- {entry.kind}: {entry.one_liner}"
+        for entry in available[:_AVAILABLE_RENDER_CAP]
+    ]
+    overflow = len(available) - _AVAILABLE_RENDER_CAP
+    if overflow > 0:
+        lines.append(f"- …and {overflow} more you can do — treat those the same way.")
+    return lines
 
-    The router's unavailable block (:func:`render_task_catalog`) keeps the
-    triage model from delegating an impossible kind — but an unavailable ask
-    the router (correctly) routes to ``speak`` is then answered by the
-    *answer* model, which never sees the catalog. Without this note the
-    answer model improvises a pretend-check ("let me look — give me a sec"),
-    the exact failure the bead removes. Rendered into the agent's persistent
-    system prompt by :func:`johnny.agent.session.build_agent_instructions`;
-    returns ``""`` when every entry is available so the no-gaps prompt stays
-    byte-identical (the replay-parity stance). Same rows and caps as the
-    router block — one source of truth for the spoken reasons.
+
+def render_capability_notes(entries: tuple[TaskCatalogEntry, ...]) -> str:
+    """The ANSWER-prompt capability-grounding block (Johnny-trt.55 + Johnny-etu.7).
+
+    The answer model never sees the router catalog, so on a capability ask the
+    router (correctly) routes to ``speak`` it answers with no idea what this
+    session can or cannot do. Two failures follow:
+
+    * an UNAVAILABLE ask → the model improvises a pretend-check ("let me
+      look — give me a sec"), the Johnny-trt.55 failure; and
+    * an AVAILABLE ask → with no POSITIVE signal that the capability exists,
+      the weak answer model overgeneralizes nearby gap copy into a blanket
+      denial ("we're in the wrong sandbox, I can't check the calendar") —
+      the Johnny-etu.7 fabrication, even though the real result was e.g. "No
+      events found for the upcoming week."
+
+    So this renders TWO blocks. First the available, NON-internal kinds, framed
+    as BACKGROUND-TOOL requests the model does not answer itself — two rules:
+    never deny one (the anti-"wrong sandbox" grounding), and, because no result
+    exists yet on a speak turn, never state or invent specifics either. The
+    framing leads with the no-invention rule on purpose: a bare "you CAN check
+    the calendar" line invites a weak model to role-play the lookup and
+    fabricate events (seen live on llama3.2:3b), so the block frames the work as
+    the tool's, not the model's — the trt.28/0qw deliverer and the per-turn
+    answer-context injection carry the REAL result once delegation fires
+    (Johnny-etu.6). Then what the session CANNOT do (the trt.55 honesty block —
+    decline with the reason and the fix). Internal session-control kinds
+    (``session.end``/``meeting.leave``) are excluded from the first block
+    (``entry.internal`` — not user-facing capabilities, and their one-liners are
+    router-facing). Hidden (policy-denied) entries render NOWHERE either way
+    (the trt.38 least-privilege guarantee).
+
+    Rendered into the agent's persistent system prompt by
+    :func:`johnny.agent.session.build_agent_instructions`. Returns ``""`` only
+    when the session has neither a user-facing available capability nor a gap
+    (e.g. the empty catalog of a non-delegation mode), so that prompt stays
+    byte-identical. Same rows/caps as the router block — one source of truth.
     """
+    blocks: list[str] = []
+    available = tuple(
+        entry
+        for entry in entries
+        if entry.available and not entry.hidden and not entry.internal
+    )
+    if available:
+        intro = (
+            "Some requests are handled for you by background tools — not "
+            "answered by you directly. These include:"
+        )
+        rules = (
+            "When the user asks for one of these: never tell them you can't do "
+            "it, that you lack access, or that you're in the wrong place — the "
+            "tool can. But you do NOT have its result yet, so never state or "
+            "guess any specifics (events, times, names, counts, outcomes) and "
+            "never pretend to look it up live — just briefly say you're on it; "
+            "the real result is delivered the moment the tool finishes."
+        )
+        blocks.append("\n".join([intro, *_available_rows(available), rules]))
     unavailable = tuple(
         entry for entry in entries if not entry.available and not entry.hidden
     )
-    if not unavailable:
-        return ""
-    header = (
-        "Things you CANNOT do in this session right now. If asked for one of "
-        "these, say so plainly in the user's language — give the reason below "
-        "and tell them the fix it names. Never pretend to check, never "
-        "promise to do it later, never invent results:"
-    )
-    return "\n".join([header, *_unavailable_rows(unavailable)])
+    if unavailable:
+        header = (
+            "Things you CANNOT do in this session right now. If asked for one of "
+            "these, say so plainly in the user's language — give the reason below "
+            "and tell them the fix it names. Never pretend to check, never "
+            "promise to do it later, never invent results:"
+        )
+        blocks.append("\n".join([header, *_unavailable_rows(unavailable)]))
+    return "\n\n".join(blocks)
 
 
 __all__ = [

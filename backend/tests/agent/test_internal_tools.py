@@ -29,7 +29,7 @@ from johnny.agent.internal_tools import (
     is_internal_kind,
     merge_task_catalog,
 )
-from johnny.agent.task_catalog import TaskCatalogEntry
+from johnny.agent.task_catalog import TaskCatalogEntry, render_capability_notes
 from johnny.agent.tasks import QueuedTask, TaskResult, TaskSpec
 
 
@@ -79,6 +79,9 @@ def test_catalog_meeting_backed_has_both_kinds_internal_first() -> None:
         assert entry.one_liner
         assert entry.keywords
         assert entry.available is True
+        # Johnny-etu.7: internal session-control kinds are flagged so the
+        # answer-prompt positive block never advertises them as user capabilities.
+        assert entry.internal is True
 
 
 def test_catalog_playground_carries_meeting_leave_as_unavailable() -> None:
@@ -92,8 +95,10 @@ def test_catalog_playground_carries_meeting_leave_as_unavailable() -> None:
     assert leave.available is False
     assert "no meeting to leave" in leave.unavailable_reason
     assert leave.keywords == ()
+    assert leave.internal is True  # internal even when unavailable (Johnny-etu.7)
     assert end.available is True
     assert end.keywords
+    assert end.internal is True
 
 
 def test_merge_puts_internal_first_and_drops_shadowing_skill_kinds() -> None:
@@ -110,6 +115,29 @@ def test_merge_puts_internal_first_and_drops_shadowing_skill_kinds() -> None:
     ]
     # The surviving session.end is the internal one, not the imposter.
     assert merged[1].one_liner != "Imposter."
+
+
+def test_assembled_answer_notes_ground_calendar_and_hide_internal_kinds() -> None:
+    """Johnny-etu.7 answer-blind regression at the assembly seam: the catalog
+    job_session builds (internal kinds + an available google-calendar skill),
+    rendered for the ANSWER prompt, grounds the user-facing capability so a
+    speak-verdict can never deny it ('wrong sandbox'), while the internal
+    session-control verbs are NOT advertised as capabilities."""
+    internal = internal_catalog_entries(meeting_backed=False)  # playground shape
+    skills = (
+        TaskCatalogEntry(
+            kind="google-calendar",
+            one_liner="Look up upcoming events on the connected calendar.",
+        ),
+    )
+    notes = render_capability_notes(merge_task_catalog(internal, skills))
+    # Positive grounding for the real capability (background-tool framing).
+    assert "handled for you by background tools" in notes
+    assert "- google-calendar: Look up upcoming events on the connected calendar." in notes
+    # Internal kinds are excluded as capabilities (session-control, not a user
+    # capability): the available session.end is never advertised at all.
+    assert SESSION_END_KIND not in notes
+    assert "never tell them you can't do" in notes
 
 
 def test_executor_known_kinds_composes_internal_plus_skills() -> None:
