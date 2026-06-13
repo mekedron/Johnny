@@ -3,10 +3,10 @@
   "sessionId": "6ec15a51-28c5-41a4-903d-3d4c0559e077",
   "status": "running",
   "startedAt": "2026-06-13T21:29:06.563Z",
-  "updatedAt": "2026-06-13T21:57:31.598Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-13T22:12:22.367Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "opus",
@@ -141,12 +141,23 @@
       {
         "id": "Johnny-etu.14",
         "title": "[BUILD] Phase 1: Fix decision->utterance divergence — delivered reply discards the decided response + tool result (sessions 3 & 4)",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-etu.14",
+      "taskTitle": "[BUILD] Phase 1: Fix decision->utterance divergence — delivered reply discards the decided response + tool result (sessions 3 & 4)",
+      "taskCompleted": true,
+      "durationMs": 1685326,
+      "startedAt": "2026-06-13T21:29:25.005Z",
+      "endedAt": "2026-06-13T21:57:30.331Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

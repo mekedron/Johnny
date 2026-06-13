@@ -37,6 +37,53 @@ after each iteration and it's included in prompts for context.
 
 ---
 
+## 2026-06-14 - Johnny-etu.6 (CLOSE: verify + clean-install validation)
+
+**Closed the twice-reopened catalog/delegation-reliability bead. No new code needed —
+the fix was already committed (etu.6 kind-enum + keyword-recovery + confidence override;
+etu.14 kind-aware `occupied_kinds` gate). This iteration VERIFIED the live behavior end-to-end
+and sealed the reopen close condition on a clean prod-shape rebuild.**
+
+The etu.3 spike had REFUTED the "empty catalog" premise: the catalog IS populated for normal
+speaking agents (`session.end` + `google-calendar` callable, `task_sink`/`task_coordinator`
+wired). The real failure was 3B-router delegation reliability, fixed in-gate. The reopen
+(session 2: held calendar result preempts an explicit "end the session") was fixed by the
+etu.14 kind-aware gate; this close validates that fix under etu.6's hardened close condition.
+
+Verification (no source changes this iteration):
+- pytest (baked prod image): `test_router_gate_decision.py`+`test_complexity.py` 205 passed;
+  `test_task_catalog.py`+`test_internal_tools.py` 40 passed.
+- Clean-install reproducibility: `./stop.sh && ./run.sh` → backend NOT bind-mounted (baked),
+  `occupied_kinds` present 4× in the COPYed `router_gate.py`. The fix survives the rebuild.
+- Browser (chrome-devtools), held-result→end→ENDS reproduced on BOTH the dev stack (session #6)
+  and a clean prod install (session #1, fresh DB): ask calendar (real gog events), then ask
+  calendar again + immediately "end the session" — the 2nd result is HELD
+  (`task_context.undelivered=[N]`) when the end lands; `keyword_delegate.kind=session.end`
+  recovers (session.end ∉ `occupied_kinds={google-calendar}`) → `session.end` task done →
+  `bot_sessions.status=ended`; held calendar result delivered out-of-band, NEVER substituted.
+  Session #1 detail: **"Only divergences 0"**. Real events throughout (no fabrication).
+  Both delegation paths exercised live on prod: direct kind-enum delegate AND keyword recovery.
+- Artifacts: `.validation/Johnny-etu.6/10-`…`15-` (dev #6 + clean-prod #1 captures).
+
+**Learnings:**
+- The kind-enum schema and keyword-recovery are complementary on the 3B router: in one fresh
+  prod session the SAME calendar ask came back as a clean `action=delegate` (kind-enum let it
+  carry the real slug) one turn and as `action=speak` (recovered by keyword) the next — neither
+  alone is sufficient; both backstops earn their place.
+- The held-result→end repro is trivial to stage in the text playground: send the calendar
+  request and the "end" request back-to-back (no wait). The 2nd calendar result is still
+  mid-delivery ("· partial") when the end turn is classified, so it sits in `undelivered`
+  (held) — exactly the `occupied_kinds` condition the kind-gate must clear for a different-kind
+  command. No precise barge-in timing needed.
+- A delegation recovery legitimately shows as a "SPOKE INSTEAD" divergence in the etu.4 session
+  timeline when the model authored fabricated speak text (e.g. "you have no upcoming events"):
+  the gate replaces it with the honest ack + real delegate. That divergence is the FIX working,
+  logged via the `keyword_delegate` marker — not an etu.14 parity regression. When the model
+  emits a clean direct delegate or an empty-text speak, the recovery produces zero divergences
+  (prod session #1).
+
+---
+
 ## 2026-06-14 - Johnny-etu.14
 
 **Fixed the held-result-preempt (the reopen): a completed-but-undelivered task result no
