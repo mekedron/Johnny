@@ -1,296 +1,358 @@
-"""MCP server rows ↔ runtime configs + the probe orchestration (Johnny-trt.36).
+"""Per-workspace MCP server CRUD — the api's file-backed service (Johnny-hp1).
 
-The DB row (:class:`app.db.models.McpServer`) is the operator's source of
-truth; this module is the only place rows become
-:class:`johnny.mcp.config.McpServerConfig` value objects:
+The source of truth is each workspace's ``.johnny/.mcp.json`` (FastMCP
+``mcpServers`` format — see :mod:`johnny.mcp.store`); there is no DB table
+anymore. This module is the api's view over that file: list / get / create /
+update / delete + the probe the management UI's add → probe → enable flow
+drives. It returns :class:`ServerRecord` value objects (a validated
+:class:`~johnny.mcp.config.McpServerConfig` + masked secret-key names + probe
+state) that :mod:`app.api.mcp_servers` maps to its read schema.
 
-* :func:`load_server_configs` — the worker's per-claim read (the
-  trt.38 no-restart pattern: enable/disable/filter edits bite the very next
-  claimed task) and the probe path. Decrypts the env/headers blob.
-* :func:`load_server_snapshots` — catalog assembly's read: configs WITHOUT
-  secrets (the catalog only needs names/filters/cache, so session assembly
-  never touches the Fernet key) plus the cached tool list + probe verdict.
-* :func:`probe_server_row` — connect + initialize + ``tools/list`` against
-  the row's live config, then persist the verdict: ``tools_cache`` updates
-  only on success (a failed probe keeps the stale list so the catalog can
-  render unavailable-with-reason instead of forgetting the tools,
-  Johnny-trt.55), ``last_probe_*`` update always.
+The worker (claim-time configs) and session assembly (catalog snapshots) read
+the store DIRECTLY (:func:`johnny.mcp.store.load_server_configs` /
+:func:`~johnny.mcp.store.load_server_snapshots`) — they never come through
+here, so the hot paths carry no app-layer dependency.
 
-Rows that fail validation or decryption are SKIPPED with a log by the bulk
-loaders — one corrupt row must never take down catalog assembly or the
-worker's claim pass; the executor's per-kind degrade speaks honestly for it.
+Secrets are PLAINTEXT / ``${VAR}`` on disk (the operator's chosen trade) but
+never echoed back: responses carry key names only (``env_keys`` /
+``header_keys``), the provider-credentials masking model preserved across the
+DB→file cutover.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import McpServer
-from app.security.crypto import CredentialCrypto, CryptoError
-from johnny.mcp.catalog import McpServerSnapshot, McpToolInfo
+from johnny.mcp import store
+from johnny.mcp.catalog import McpToolInfo
 from johnny.mcp.config import McpConfigError, McpServerConfig
 
 logger = logging.getLogger(__name__)
 
 
-def _str_list(raw: Any) -> tuple[str, ...]:
-    if not isinstance(raw, list):
-        return ()
-    return tuple(str(item) for item in raw)
+class McpServerNotFoundError(LookupError):
+    """No server with that name in the workspace's config file (api → 404)."""
 
 
-def _str_dict(raw: Any) -> dict[str, str]:
-    if not isinstance(raw, dict):
-        return {}
-    return {str(k): str(v) for k, v in raw.items()}
+class McpServerNameExistsError(ValueError):
+    """A server with that name already exists in the file (api → 409)."""
 
 
-def encrypt_secrets(
-    crypto: CredentialCrypto, *, env: dict[str, str], headers: dict[str, str]
-) -> str | None:
-    """The ``secrets_encrypted`` blob for a row; ``None`` when there are none."""
-    if not env and not headers:
-        return None
-    payload = {"env": dict(env), "headers": dict(headers)}
-    return crypto.encrypt(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+@dataclass(frozen=True, slots=True)
+class ServerRecord:
+    """One server as the api renders it: validated config + masked secrets +
+    probe state.
 
-
-def decrypt_secrets(
-    crypto: CredentialCrypto, secrets_encrypted: str | None
-) -> tuple[dict[str, str], dict[str, str]]:
-    """``(env, headers)`` out of the blob. Raises :class:`CryptoError` on a bad key."""
-    if not secrets_encrypted:
-        return {}, {}
-    payload = json.loads(crypto.decrypt(secrets_encrypted))
-    if not isinstance(payload, dict):
-        raise CryptoError("mcp secrets blob is not a JSON object")
-    return _str_dict(payload.get("env")), _str_dict(payload.get("headers"))
-
-
-def secret_key_names(
-    crypto: CredentialCrypto | None, secrets_encrypted: str | None
-) -> tuple[list[str], list[str]]:
-    """``(env_keys, header_keys)`` for masked API responses; never raises."""
-    if crypto is None or not secrets_encrypted:
-        return [], []
-    try:
-        env, headers = decrypt_secrets(crypto, secrets_encrypted)
-    except (CryptoError, ValueError, json.JSONDecodeError):
-        return [], []
-    return sorted(env), sorted(headers)
-
-
-def row_to_config(
-    row: McpServer, *, crypto: CredentialCrypto | None = None
-) -> McpServerConfig:
-    """One row as the validated runtime value object.
-
-    ``crypto=None`` builds the SECRETLESS view (catalog assembly); passing a
-    crypto decrypts env/headers for the connecting paths (worker, probe).
-    Raises :class:`McpConfigError` / :class:`CryptoError` — bulk loaders
-    catch and skip, API paths surface them.
+    ``config.env`` / ``config.headers`` are EMPTY here (the secretless view);
+    only the key names survive, in ``env_keys`` / ``header_keys``.
+    ``has_probe_cache`` distinguishes never-probed (api ``tools=null``) from
+    probed-zero-tools (``tools=[]``).
     """
-    env: dict[str, str] = {}
-    headers: dict[str, str] = {}
-    if crypto is not None:
-        env, headers = decrypt_secrets(crypto, row.secrets_encrypted)
-    include_raw = row.tool_include
-    return McpServerConfig(
-        name=row.name,
-        transport=row.transport,
-        enabled=bool(row.enabled),
-        command=row.command or "",
-        args=_str_list(row.args),
-        env=env,
-        url=row.url or "",
-        headers=headers,
-        tool_include=None if include_raw is None else _str_list(include_raw),
-        tool_exclude=_str_list(row.tool_exclude),
-        connect_timeout_s=float(row.connect_timeout_s),
-        call_timeout_s=float(row.call_timeout_s),
-        idle_ttl_s=float(row.idle_ttl_s),
-    )
+
+    config: McpServerConfig
+    env_keys: list[str]
+    header_keys: list[str]
+    tools: tuple[McpToolInfo, ...]
+    has_probe_cache: bool
+    last_probe_at: datetime | None
+    last_probe_ok: bool | None
+    last_probe_error: str
 
 
-def cached_tools(row: McpServer) -> tuple[McpToolInfo, ...]:
-    """The row's ``tools_cache`` as value objects (empty when never probed)."""
-    if not isinstance(row.tools_cache, list):
-        return ()
-    infos: list[McpToolInfo] = []
-    for item in row.tools_cache:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "").strip()
-        if not name:
-            continue
-        infos.append(McpToolInfo(name=name, description=str(item.get("description") or "")))
-    return tuple(infos)
+def slug_for_stamp(workspace_id: int | None, slug: str | None) -> str | None:
+    """The ``.mcp.json`` slug for a workspace STAMP (worker claim / session config).
 
-
-def resolve_mcp_workspace_id(
-    db: Session, *, workspace_id: int | None, is_default: bool
-) -> int | None:
-    """The concrete workspace id whose MCP servers apply (Johnny-wks.8).
-
-    The MCP twin of the sandbox-URL / skills-dir resolver seams: a NON-default
-    stamp owns its servers by its own id; the DEFAULT workspace — and every
-    legacy snapshot with no stamp (``workspace_id is None`` / ``is_default``)
-    — resolves to the seeded default workspace's id, the rows the
-    behavior-preserving 0034 migration mapped the old global servers onto.
-
-    Returns ``None`` only on an unseeded schema with no default workspace —
-    callers then load NO MCP servers (the promise-nothing degrade, never a
-    crash), mirroring the skills-dir resolver's ``None``.
+    The file twin of the old ``resolve_mcp_workspace_id`` for the hot paths,
+    minus the DB hit: a stampless legacy claim (``workspace_id is None``)
+    resolves to the default workspace's servers (where the old global set was
+    mapped / where n8n is seeded); every stamped workspace — the default
+    (slug ``default``) included — uses its OWN slug. A stamped row with no
+    usable slug yields ``None`` (the file can't be located; load nothing — the
+    skills-dir resolver's ``None`` branch), never a wrong-workspace read.
     """
-    if workspace_id is not None and not is_default:
-        return workspace_id
+    if workspace_id is None:
+        from app.services.workspaces import DEFAULT_WORKSPACE_SLUG
+
+        return DEFAULT_WORKSPACE_SLUG
+    return slug or None
+
+
+def resolve_mcp_slug(db: Session, workspace: Any | None) -> str | None:
+    """The slug whose ``.mcp.json`` applies — the file twin of the old
+    ``resolve_mcp_workspace_id``.
+
+    A concrete workspace owns its servers by its own (frozen) slug; ``None``
+    (the parameterless capability catalog view) resolves to the default
+    workspace's slug — where n8n is seeded — byte-for-byte the behavior the
+    DB resolver gave by mapping the default/legacy stamp onto the default
+    workspace. ``None`` only on an unseeded schema with no default workspace:
+    callers then load no servers (the promise-nothing degrade).
+    """
+    if workspace is not None:
+        return workspace.slug
     from app.services.workspaces import select_default_workspace
 
     default = select_default_workspace(db)
-    return int(default.id) if default is not None else None
+    return default.slug if default is not None else None
 
 
-def list_server_rows(
-    db: Session, *, workspace_id: int | None = None
-) -> list[McpServer]:
-    """Server rows, optionally scoped to one workspace.
-
-    ``workspace_id=None`` lists EVERY workspace's servers — the global
-    capability-toggle's known-kinds view (a deny on an MCP kind must be
-    placeable regardless of which workspace owns the server). The
-    per-workspace management API passes a concrete id.
-    """
-    stmt = select(McpServer)
-    if workspace_id is not None:
-        stmt = stmt.where(McpServer.workspace_id == workspace_id)
-    return list(db.scalars(stmt.order_by(McpServer.name)).all())
-
-
-def get_server_row(
-    db: Session, server_id: int, *, workspace_id: int | None = None
-) -> McpServer | None:
-    """One server row by id, optionally requiring it to belong to a workspace.
-
-    The per-workspace API passes ``workspace_id`` so a server reached through
-    the wrong workspace's URL is a 404 (ownership scoping), never a
-    cross-workspace edit.
-    """
-    row = db.get(McpServer, server_id)
-    if row is None:
+def _probe_at(state: dict[str, Any]) -> datetime | None:
+    raw = store.state_probe_at(state)
+    if not raw:
         return None
-    if workspace_id is not None and int(row.workspace_id) != workspace_id:
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
         return None
-    return row
 
 
-def load_server_configs(
-    db: Session, crypto: CredentialCrypto, *, workspace_id: int | None
-) -> tuple[McpServerConfig, ...]:
-    """One workspace's full server configs — the worker's fresh per-claim read.
+def _validate_intent(name: str, fields: dict[str, Any]) -> None:
+    """Run the RAW intended fields through the one validator.
 
-    Scoped to ``workspace_id`` (Johnny-wks.8): the worker resolves it from the
-    claimed row's workspace stamp, so a task runs exactly its workspace's MCP
-    set. ``None`` (an unseeded schema) yields no configs. Disabled rows are
-    INCLUDED (``enabled=False`` on the value object): the executor
-    distinguishes "connector isn't enabled" from "isn't configured" in its
-    spoken degrade. Catalog assembly filters enabled rows itself.
+    ``store.serialize_entry`` writes only transport-appropriate keys (it drops
+    a command on an http server, a url on a stdio one), so a contradictory
+    payload would otherwise be silently sanitized instead of rejected. Validate
+    the operator's actual intent first → 422 on http+command, stdio+url, a bad
+    name, etc.
     """
-    if workspace_id is None:
-        return ()
-    configs: list[McpServerConfig] = []
-    for row in db.scalars(
-        select(McpServer)
-        .where(McpServer.workspace_id == workspace_id)
-        .order_by(McpServer.name)
-    ):
+    McpServerConfig(
+        name=name,
+        transport=fields["transport"],
+        enabled=fields["enabled"],
+        command=fields["command"],
+        args=tuple(fields["args"]),
+        url=fields["url"],
+        tool_include=(
+            None if fields["tool_include"] is None else tuple(fields["tool_include"])
+        ),
+        tool_exclude=tuple(fields["tool_exclude"]),
+        connect_timeout_s=fields["connect_timeout_s"],
+        call_timeout_s=fields["call_timeout_s"],
+        idle_ttl_s=fields["idle_ttl_s"],
+    )
+
+
+def _record(name: str, entry: dict[str, Any], state: dict[str, Any]) -> ServerRecord:
+    """Assemble one :class:`ServerRecord`; raises :class:`McpConfigError` if the
+    stored entry is not a valid config (list skips it, get/create/update
+    surface it)."""
+    config = store.entry_to_config(name, entry, resolve_secrets=False)
+    env_keys, header_keys = store.entry_secret_keys(entry)
+    return ServerRecord(
+        config=config,
+        env_keys=env_keys,
+        header_keys=header_keys,
+        tools=store.state_tools(state),
+        has_probe_cache=store.state_has_cache(state),
+        last_probe_at=_probe_at(state),
+        last_probe_ok=store.state_probe_ok(state),
+        last_probe_error=str(state.get("last_probe_error") or ""),
+    )
+
+
+def list_servers(slug: str | None) -> list[ServerRecord]:
+    """Every renderable server in the workspace (malformed entries skipped)."""
+    if not slug:
+        return []
+    states = store.read_states(slug)
+    records: list[ServerRecord] = []
+    for name, entry in store.read_servers_raw(slug).items():
         try:
-            configs.append(row_to_config(row, crypto=crypto))
-        except (McpConfigError, CryptoError, ValueError, json.JSONDecodeError):
-            logger.exception(
-                "mcp: skipping unusable server row id=%s name=%r", row.id, row.name
-            )
-    return tuple(configs)
-
-
-def load_server_snapshots(
-    db: Session, *, workspace_id: int | None
-) -> tuple[McpServerSnapshot, ...]:
-    """One workspace's catalog view: secretless configs + cached tools + probe state.
-
-    Scoped to ``workspace_id`` (Johnny-wks.8): session assembly resolves it
-    from the agent's workspace stamp, so the catalog promises exactly that
-    workspace's MCP tools. ``None`` (an unseeded schema) yields no snapshots.
-    """
-    if workspace_id is None:
-        return ()
-    snapshots: list[McpServerSnapshot] = []
-    for row in db.scalars(
-        select(McpServer)
-        .where(McpServer.workspace_id == workspace_id, McpServer.enabled.is_(True))
-        .order_by(McpServer.name)
-    ):
-        try:
-            config = row_to_config(row, crypto=None)
+            records.append(_record(name, entry, states.get(name, {})))
         except McpConfigError:
             logger.exception(
-                "mcp: skipping invalid server row id=%s name=%r in catalog",
-                row.id,
-                row.name,
+                "mcp: skipping unrenderable server %r in workspace %r", name, slug
             )
-            continue
-        snapshots.append(
-            McpServerSnapshot(
-                config=config,
-                tools=cached_tools(row),
-                probe_ok=row.last_probe_ok,
-                probe_error=row.last_probe_error or "",
-            )
-        )
-    return tuple(snapshots)
+    return sorted(records, key=lambda r: r.config.name)
 
 
-async def probe_server_row(
-    db: Session, row: McpServer, crypto: CredentialCrypto, *, sandbox_url: str
-) -> Any:
-    """Probe one row's live config and persist the verdict on the row.
+def get_server(slug: str, name: str) -> ServerRecord:
+    """One server by name; raises :class:`McpServerNotFoundError` if absent."""
+    entries = store.read_servers_raw(slug)
+    if name not in entries:
+        raise McpServerNotFoundError(name)
+    return _record(name, entries[name], store.read_states(slug).get(name, {}))
 
-    Returns the :class:`johnny.mcp.client.McpProbeResult`. Works for
-    disabled rows on purpose — the management flow is add → probe → enable.
-    The ``johnny.mcp.client`` import stays lazy: the api process only pays
-    the SDK import when an operator actually probes.
+
+def create_server(
+    slug: str,
+    *,
+    name: str,
+    transport: str,
+    enabled: bool,
+    command: str,
+    args: list[str],
+    env: dict[str, str],
+    url: str,
+    headers: dict[str, str],
+    tool_include: list[str] | None,
+    tool_exclude: list[str],
+    connect_timeout_s: float,
+    call_timeout_s: float,
+    idle_ttl_s: float,
+) -> ServerRecord:
+    """Add a server to the workspace's config file.
+
+    Validates the shape first (invalid → :class:`McpConfigError`), then guards
+    the per-workspace name uniqueness (dup → :class:`McpServerNameExistsError`),
+    then writes — so an invalid name is a 422, a duplicate a 409.
     """
+    name = name.strip()
+    fields = {
+        "transport": transport,
+        "enabled": enabled,
+        "command": command.strip(),
+        "args": list(args),
+        "env": dict(env),
+        "url": url.strip(),
+        "headers": dict(headers),
+        "tool_include": tool_include,
+        "tool_exclude": list(tool_exclude),
+        "connect_timeout_s": connect_timeout_s,
+        "call_timeout_s": call_timeout_s,
+        "idle_ttl_s": idle_ttl_s,
+    }
+    _validate_intent(name, fields)  # raises McpConfigError before any write
+    entry = store.serialize_entry(**fields)
+    entries = store.read_servers_raw(slug)
+    if name in entries:
+        raise McpServerNameExistsError(name)
+    entries[name] = entry
+    store.write_servers_raw(slug, entries)
+    return _record(name, entry, {})
+
+
+def update_server(
+    slug: str,
+    name: str,
+    *,
+    new_name: str | None = None,
+    transport: str | None = None,
+    enabled: bool | None = None,
+    command: str | None = None,
+    args: list[str] | None = None,
+    env: dict[str, str] | None = None,
+    url: str | None = None,
+    headers: dict[str, str] | None = None,
+    tool_include: list[str] | None = None,
+    clear_tool_include: bool = False,
+    tool_exclude: list[str] | None = None,
+    connect_timeout_s: float | None = None,
+    call_timeout_s: float | None = None,
+    idle_ttl_s: float | None = None,
+) -> ServerRecord:
+    """Patch one server (omitted fields stay).
+
+    ``env`` / ``headers`` replace the whole map when present (send ``{}`` to
+    clear; omit to keep what's on disk — the write-only-secrets contract). A
+    rename moves the entry key and carries its probe state. Raises
+    :class:`McpServerNotFoundError`, :class:`McpConfigError` (422), or
+    :class:`McpServerNameExistsError` (409).
+    """
+    entries = store.read_servers_raw(slug)
+    if name not in entries:
+        raise McpServerNotFoundError(name)
+    fields = store.read_entry_fields(entries[name])
+    if transport is not None:
+        fields["transport"] = transport
+    if enabled is not None:
+        fields["enabled"] = enabled
+    if command is not None:
+        fields["command"] = command.strip()
+    if args is not None:
+        fields["args"] = list(args)
+    if env is not None:
+        fields["env"] = dict(env)
+    if url is not None:
+        fields["url"] = url.strip()
+    if headers is not None:
+        fields["headers"] = dict(headers)
+    if clear_tool_include:
+        fields["tool_include"] = None
+    elif tool_include is not None:
+        fields["tool_include"] = list(tool_include)
+    if tool_exclude is not None:
+        fields["tool_exclude"] = list(tool_exclude)
+    if connect_timeout_s is not None:
+        fields["connect_timeout_s"] = connect_timeout_s
+    if call_timeout_s is not None:
+        fields["call_timeout_s"] = call_timeout_s
+    if idle_ttl_s is not None:
+        fields["idle_ttl_s"] = idle_ttl_s
+
+    target = new_name.strip() if new_name is not None else name
+    _validate_intent(target, fields)  # raises McpConfigError before any write
+    new_entry = store.serialize_entry(**fields)
+    record = _record(target, new_entry, store.read_states(slug).get(name, {}))
+    if target != name and target in entries:
+        raise McpServerNameExistsError(target)
+    if target != name:
+        del entries[name]
+    entries[target] = new_entry
+    store.write_servers_raw(slug, entries)
+    if target != name:
+        store.rename_state(slug, name, target)
+    return record
+
+
+def delete_server(slug: str, name: str) -> None:
+    """Remove a server (and its probe state); raises :class:`McpServerNotFoundError`."""
+    entries = store.read_servers_raw(slug)
+    if name not in entries:
+        raise McpServerNotFoundError(name)
+    del entries[name]
+    store.write_servers_raw(slug, entries)
+    store.remove_state(slug, name)
+
+
+async def probe_and_store(slug: str, name: str, *, sandbox_url: str) -> Any:
+    """Probe one server's LIVE config and persist the verdict to ``.mcp-state.json``.
+
+    Returns the :class:`johnny.mcp.client.McpProbeResult`. Works for disabled
+    servers on purpose (add → probe → enable). Success refreshes the tool
+    cache; failure keeps the stale cache and records the error (Johnny-trt.55).
+    Raises :class:`McpServerNotFoundError` / :class:`McpConfigError`. The
+    ``johnny.mcp.client`` import stays lazy — the api pays the SDK import only
+    when an operator actually probes.
+    """
+    entries = store.read_servers_raw(slug)
+    if name not in entries:
+        raise McpServerNotFoundError(name)
+    config = store.entry_to_config(name, entries[name], resolve_secrets=True)
+
     from johnny.mcp.client import probe_mcp_server
 
-    config = row_to_config(row, crypto=crypto)
     result = await probe_mcp_server(config, sandbox_url=sandbox_url)
-    row.last_probe_at = datetime.now(UTC)
-    row.last_probe_ok = bool(result.ok)
-    row.last_probe_error = "" if result.ok else (result.error or "probe failed")
-    if result.ok:
-        row.tools_cache = [
-            {"name": tool.name, "description": tool.description}
-            for tool in result.tools
-        ]
-    db.flush()
+    tools = (
+        [{"name": tool.name, "description": tool.description} for tool in result.tools]
+        if result.ok
+        else None
+    )
+    store.write_state(
+        slug,
+        name,
+        ok=result.ok,
+        error="" if result.ok else (result.error or "probe failed"),
+        tools=tools,
+    )
     return result
 
 
 __all__ = [
-    "cached_tools",
-    "decrypt_secrets",
-    "encrypt_secrets",
-    "get_server_row",
-    "list_server_rows",
-    "load_server_configs",
-    "load_server_snapshots",
-    "probe_server_row",
-    "resolve_mcp_workspace_id",
-    "row_to_config",
-    "secret_key_names",
+    "McpServerNameExistsError",
+    "McpServerNotFoundError",
+    "ServerRecord",
+    "create_server",
+    "delete_server",
+    "get_server",
+    "list_servers",
+    "probe_and_store",
+    "resolve_mcp_slug",
+    "slug_for_stamp",
+    "update_server",
 ]

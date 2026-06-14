@@ -12,10 +12,10 @@ must not contain ``__``; the validation below forbids underscores entirely
 (lowercase slug, hyphens only) so :func:`parse_qualified_tool_name` splits
 unambiguously even when the *tool* name itself contains ``__``.
 
-Config rows live in Johnny's DB (``mcp_servers``, the provider-settings
-pattern — :mod:`app.services.mcp_servers` maps rows to this frozen value
-object, decrypting ``env`` / ``headers`` on the way out). This module never
-reads the DB.
+Configs live in each workspace's ``.johnny/.mcp.json`` (the FastMCP
+``mcpServers`` file — :mod:`johnny.mcp.store` maps entries to this frozen
+value object, expanding ``${VAR}`` in ``env`` / ``headers`` on the way out,
+Johnny-hp1). This module never reads any store.
 """
 
 from __future__ import annotations
@@ -107,10 +107,10 @@ def _clamped(value: float, *, minimum: float, maximum: float) -> float:
 class McpServerConfig:
     """One configured MCP server, validated and ready for the client layer.
 
-    ``env`` / ``headers`` are PLAINTEXT here (decrypted by the service layer
-    on the way out of the DB) — this object stays in process memory only and
-    must never be logged whole or serialized into API responses; responses
-    mask values to key names (the provider-settings pattern).
+    ``env`` / ``headers`` are PLAINTEXT here (``${VAR}`` expanded by the store
+    on the way out of ``.mcp.json``) — this object stays in process memory
+    only and must never be logged whole or serialized into API responses;
+    responses mask values to key names (the provider-settings pattern).
     """
 
     name: str

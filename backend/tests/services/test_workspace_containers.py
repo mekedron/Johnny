@@ -227,8 +227,8 @@ def _container_side_workspaces_dir(
 ) -> Path:
     """Point the api/worker-side /workspaces view at a scratch dir.
 
-    The launcher pre-creates ``<root>/<slug>/skills`` through this view
-    before bind-mounting it (wks.3); tests must never write the real mount.
+    The launcher pre-creates ``<root>/<slug>/.johnny/skills`` through this view
+    before bind-mounting it (wks.3/hp1); tests must never write the real mount.
     """
     root = tmp_path / "workspaces-view"
     monkeypatch.setenv("JOHNNY_WORKSPACES_DIR", str(root))
@@ -321,7 +321,7 @@ async def test_ensure_launches_with_the_full_run_contract(
         "bind": WORKSPACE_HOME_TARGET,
         "mode": "rw",
     }
-    assert kwargs["volumes"]["/host/.johnny/workspaces/finance/skills"] == {
+    assert kwargs["volumes"]["/host/.johnny/workspaces/finance/.johnny/skills"] == {
         "bind": "/skills",
         "mode": "ro",
     }
@@ -335,13 +335,13 @@ async def test_ensure_launches_with_the_full_run_contract(
     assert kwargs["environment"]["GOG_HOME"] == WORKSPACE_GOG_TARGET
     # No other mounts sneak in: state volume + skills + gog is the contract.
     assert sorted(kwargs["volumes"]) == [
+        "/host/.johnny/workspaces/finance/.johnny/skills",
         "/host/.johnny/workspaces/finance/gog",
-        "/host/.johnny/workspaces/finance/skills",
         "johnny-workspace-7-home",
     ]
     # The api/worker-side twins of the per-workspace dirs were pre-created
     # so the docker daemon never auto-creates the host dirs root-owned.
-    assert (_container_side_workspaces_dir / "finance" / "skills").is_dir()
+    assert (_container_side_workspaces_dir / "finance" / ".johnny" / "skills").is_dir()
     assert (_container_side_workspaces_dir / "finance" / "gog").is_dir()
     # Resource caps mirror the compose service defaults.
     assert kwargs["pids_limit"] == 256

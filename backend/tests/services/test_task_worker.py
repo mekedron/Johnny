@@ -288,8 +288,8 @@ def test_resolve_skills_dir_keys_by_workspace(
     db.commit()
 
     assert resolve_skills_dir(legacy) == "/shared-skills"
-    assert resolve_skills_dir(default_stamped) == "/ws-root/default/skills"
-    assert resolve_skills_dir(finance) == "/ws-root/finance/skills"
+    assert resolve_skills_dir(default_stamped) == "/ws-root/default/.johnny/skills"
+    assert resolve_skills_dir(finance) == "/ws-root/finance/.johnny/skills"
     assert resolve_skills_dir(slugless) is None
 
 
@@ -402,7 +402,7 @@ async def test_executor_for_loads_the_workspaces_own_skills_dir(
     await provider.executor_for(
         _claimed(workspace_id=7, workspace_is_default=False, workspace_slug="finance")
     )
-    assert [d for _, d in loads] == ["/shared-skills", "/ws-root/finance/skills"]
+    assert [d for _, d in loads] == ["/shared-skills", "/ws-root/finance/.johnny/skills"]
     await provider.aclose()
 
 

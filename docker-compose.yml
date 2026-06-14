@@ -13,6 +13,15 @@ x-backend-env: &backend-env
   GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
   DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
   ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+  # n8n MCP connector secrets (Johnny-hp1): the vendored stdio server seeded
+  # into the default workspace references these as ${VAR} placeholders in its
+  # .johnny/.mcp.json env. The config builder (api on probe, worker on exec)
+  # expands them from THIS process's env and hands the resolved values to the
+  # sandbox stdio bridge — the sandbox container itself needs nothing. Resolve
+  # from 1Password at launch: `op run --env-file=.env -- ./run.sh`.
+  N8N_API_KEY: ${N8N_API_KEY:-}
+  CF_ACCESS_CLIENT_ID: ${CF_ACCESS_CLIENT_ID:-}
+  CF_ACCESS_CLIENT_SECRET: ${CF_ACCESS_CLIENT_SECRET:-}
   JOHNNY_CALENDAR_POLL_INTERVAL_SECONDS: ${JOHNNY_CALENDAR_POLL_INTERVAL_SECONDS:-300}
   JOHNNY_PROVIDERS_FILE: ${JOHNNY_PROVIDERS_FILE:-/config/providers.json}
   JOHNNY_PROVIDERS_SEED_MODE: ${JOHNNY_PROVIDERS_SEED_MODE:-insert-only}

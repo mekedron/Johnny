@@ -1397,72 +1397,10 @@ class CapabilityPolicy(TimestampMixin, Base):
     agent: Mapped[Agent | None] = relationship()
 
 
-class McpServer(TimestampMixin, Base):
-    """One configured MCP server (Johnny-trt.36) — a tool-contributing connector.
-
-    DB-backed like provider settings, not a JSON file. ``name`` is the
-    operator-chosen slug that prefixes every contributed kind
-    (``mcp__<name>__<tool>``) — lowercase/hyphens only, no underscores, so
-    the qualified name parses unambiguously (validated by
-    :class:`johnny.mcp.config.McpServerConfig`, which the service layer
-    builds from this row).
-
-    Transport shape (CHECK-enforced by the 0031 migration): ``stdio`` rows
-    carry ``command``(+``args``) and spawn inside the skills-sandbox
-    container; ``http`` rows carry ``url`` and are dialed directly from the
-    worker/api. ``secrets_encrypted`` is the Fernet-encrypted JSON blob
-    ``{"env": {...}, "headers": {...}}`` (the provider-credentials model;
-    ``NULL`` = no secrets) — API responses surface key names only.
-
-    ``tools_cache`` is the last successful probe's *unfiltered* tool list
-    (``[{"name", "description"}, …]``; ``NULL`` = never probed) — catalog
-    assembly reads it instead of connecting, applying the include/exclude
-    globs at read time. ``last_probe_ok=False`` keeps the cached tools in
-    the catalog but renders them unavailable-with-reason (Johnny-trt.55):
-    a dead connector declines honestly instead of silently vanishing.
-
-    Per-workspace (Johnny-wks.8): every MCP server is OWNED by exactly one
-    workspace (``workspace_id`` — NOT NULL, the 0034 migration maps the old
-    global rows onto the seeded default). An agent's MCP toolset is exactly
-    its workspace's servers (the executor/assembly resolve them by the
-    agent's workspace, the wks.3 routing precedent). Names are unique
-    PER WORKSPACE (``uq_mcp_servers_workspace_name``) — two workspaces may
-    each have a ``github`` connector; resolution is workspace-keyed so the
-    ``mcp__github__<tool>`` kinds never collide at runtime. ``ON DELETE
-    CASCADE``: a workspace's servers are owned content and go with it (the
-    delete endpoint additionally removes them explicitly, since SQLite does
-    not enforce FKs in the test harness).
-    """
-
-    __tablename__ = "mcp_servers"
-    __table_args__ = (
-        UniqueConstraint("workspace_id", "name", name="uq_mcp_servers_workspace_name"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    workspace_id: Mapped[int] = mapped_column(
-        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
-    )
-    name: Mapped[str] = mapped_column(String(64), nullable=False)
-    transport: Mapped[str] = mapped_column(String(16), nullable=False)
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    command: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    args: Mapped[list[Any]] = mapped_column(_json_column(), nullable=False, default=list)
-    url: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    secrets_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
-    tool_include: Mapped[list[Any] | None] = mapped_column(_json_column(), nullable=True)
-    tool_exclude: Mapped[list[Any]] = mapped_column(
-        _json_column(), nullable=False, default=list
-    )
-    connect_timeout_s: Mapped[float] = mapped_column(Float, nullable=False, default=10.0)
-    call_timeout_s: Mapped[float] = mapped_column(Float, nullable=False, default=60.0)
-    idle_ttl_s: Mapped[float] = mapped_column(Float, nullable=False, default=300.0)
-    tools_cache: Mapped[list[Any] | None] = mapped_column(_json_column(), nullable=True)
-    last_probe_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    last_probe_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    last_probe_error: Mapped[str] = mapped_column(Text, nullable=False, default="")
+# MCP servers are no longer DB-backed (Johnny-hp1). The source of truth is each
+# workspace's ``.johnny/.mcp.json`` (FastMCP ``mcpServers`` format) — see
+# :mod:`johnny.mcp.store` and :mod:`app.services.mcp_servers`. The old
+# ``mcp_servers`` table is dropped by migration 0039.
 
 
 class ProviderCredential(TimestampMixin, Base):

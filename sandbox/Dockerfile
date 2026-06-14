@@ -116,10 +116,18 @@ COPY execd.py /opt/sandbox/execd.py
 # (and the integration suite) can register as command=python3
 # args=["/opt/sandbox/mcp_fixture_server.py"] to verify the MCP plumbing.
 COPY mcp_fixture_server.py /opt/sandbox/mcp_fixture_server.py
+# Vendored n8n MCP server launcher (Johnny-hp1): the stdio connector seeded
+# into the default workspace spawns `node /opt/sandbox/n8n/n8n-mcp-launcher.mjs`
+# here — Node + n8n-mcp are installed by setup.d/30-install-node.sh above.
+# The launcher + its CF-Access proxy are byte-identical to the host originals.
+COPY n8n/ /opt/sandbox/n8n/
 
 USER sandbox
 WORKDIR /home/sandbox
 ENV HOME=/home/sandbox
+# npx (the n8n launcher) resolves the build-warmed n8n-mcp package from this
+# cache, kept OFF /home/sandbox so the runtime home bind mount can't shadow it.
+ENV NPM_CONFIG_CACHE=/opt/npm-cache
 
 # Internal-only — compose adds no `ports:` mapping for this service.
 EXPOSE 8088

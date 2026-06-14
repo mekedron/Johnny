@@ -69,13 +69,7 @@ from app.services.capability_policies import (
     resolve_policy_workspace_id,
     upsert_policy_row,
 )
-from app.services.mcp_servers import (
-    cached_tools,
-    list_server_rows,
-    load_server_snapshots,
-    resolve_mcp_workspace_id,
-    row_to_config,
-)
+from app.services.mcp_servers import resolve_mcp_slug
 from app.services.workspaces import resolve_agent_workspace
 from johnny.agent.internal_tools import (
     INTERNAL_TOOL_KINDS,
@@ -84,7 +78,8 @@ from johnny.agent.internal_tools import (
 )
 from johnny.agent.task_catalog import TaskCatalogEntry
 from johnny.mcp.catalog import mcp_catalog_entries
-from johnny.mcp.config import McpConfigError, is_mcp_kind, qualified_tool_name
+from johnny.mcp.config import is_mcp_kind
+from johnny.mcp.store import load_cached_kinds, load_server_snapshots
 from johnny.skills.capability_policy import (
     POLICY_SCOPE_WORKSPACE,
     apply_policy_to_catalog,
@@ -378,15 +373,11 @@ async def list_tools(
     # leg resolved above owns the MCP set, so this mirrors what that agent's
     # next session renders. No workspace/agent → the default workspace's
     # servers (the parameterless ``global`` view, byte-identical to pre-wks.8).
-    mcp_workspace_id = resolve_mcp_workspace_id(
-        db,
-        workspace_id=workspace.id if workspace is not None else None,
-        is_default=workspace.is_default if workspace is not None else True,
-    )
+    mcp_slug = resolve_mcp_slug(db, workspace)
     merged = merge_task_catalog(
         internal_catalog_entries(meeting_backed=session_mode != "browser"),
         registry.catalog_entries(),
-        mcp_catalog_entries(load_server_snapshots(db, workspace_id=mcp_workspace_id)),
+        mcp_catalog_entries(load_server_snapshots(mcp_slug)),
     )
     # The base policy layer is this same workspace (Johnny-wks.9) — resolved
     # identically to the MCP set above, so the catalog and its policy verdicts
@@ -448,25 +439,17 @@ def _known_kinds(db: Session) -> frozenset[str]:
     shared volume AND every workspace's own volume (Johnny-wks.3): a deny on
     a workspace-local kind must be placeable from the global tab. EVERY
     workspace is scanned — the DEFAULT included now (Johnny-etu.5: it carries
-    its own ``~/.johnny/workspaces/default/skills`` like finance/ops). MCP
-    kinds come from every row's cached tools with the row's filters applied,
-    DISABLED servers included: a deny written while a server is off must be
-    placeable, and it keeps holding when the server is re-enabled.
+    its own ``~/.johnny/workspaces/default/.johnny/skills`` like finance/ops).
+    MCP kinds come from each workspace's ``.mcp.json`` cached tools with the
+    server's filters applied, DISABLED servers included (Johnny-hp1): a deny
+    written while a server is off must be placeable, and it keeps holding when
+    the server is re-enabled.
     """
     kinds: set[str] = set(INTERNAL_TOOL_KINDS)
     kinds |= _volume_kinds(skills_dir_from_env())
     for workspace in db.scalars(select(Workspace)):
         kinds |= _volume_kinds(workspace_skills_dir(workspace.slug))
-    for row in list_server_rows(db):
-        tools = cached_tools(row)
-        if not tools:
-            continue
-        try:
-            config = row_to_config(row, crypto=None)
-        except McpConfigError:
-            continue
-        for name in config.filtered_tool_names([t.name for t in tools]):
-            kinds.add(qualified_tool_name(row.name, name))
+        kinds |= load_cached_kinds(workspace.slug)
     return frozenset(kinds)
 
 

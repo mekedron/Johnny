@@ -18,11 +18,30 @@ fi
 # Create idempotently on first boot so the very first run does not
 # fail mounting a missing directory.
 # workspaces holds one dir per workspace
-# (~/.johnny/workspaces/<slug>/skills — Johnny-wks.3 per-workspace skill
-# packages; wks.4 adds the keyring next to it), same survive-a-reset
+# (~/.johnny/workspaces/<slug>/.johnny/skills — Johnny-wks.3 per-workspace skill
+# packages, relocated under .johnny/ by Johnny-hp1; wks.4 keeps the gog keyring
+# at <slug>/gog next to it), same survive-a-reset
 # reasoning. The DEFAULT workspace (slug `default`) is lazy-launched like
 # finance/ops now (Johnny-etu.5), so it gets its OWN dir here too — its
 # skills + gog state no longer live in the legacy shared sandbox-home.
+#
+# One-time relocation (Johnny-hp1): per-workspace skills moved from
+# ~/.johnny/workspaces/<slug>/skills to ~/.johnny/workspaces/<slug>/.johnny/skills
+# so a single .johnny/ dir holds all Johnny-managed per-workspace state (skills
+# + the new .mcp.json). Idempotent: only moves when the OLD dir exists and the
+# NEW one does not, so fresh installs and re-runs are no-ops. The host bind
+# mount survives `docker compose down -v`, so this converges once per install.
+if [[ -d "${HOME}/.johnny/workspaces" ]]; then
+  for ws in "${HOME}/.johnny/workspaces"/*/; do
+    [[ -d "${ws}" ]] || continue
+    if [[ -d "${ws}skills" && ! -e "${ws}.johnny/skills" ]]; then
+      echo "[run.sh] Relocating ${ws}skills -> ${ws}.johnny/skills (Johnny-hp1)" >&2
+      mkdir -p "${ws}.johnny"
+      mv "${ws}skills" "${ws}.johnny/skills"
+    fi
+  done
+fi
+
 mkdir -p \
   "${HOME}/.johnny/piper-models" \
   "${HOME}/.johnny/whisper-models" \
@@ -33,9 +52,22 @@ mkdir -p \
   "${HOME}/.johnny/session-audio" \
   "${HOME}/.johnny/skills" \
   "${HOME}/.johnny/workspaces" \
-  "${HOME}/.johnny/workspaces/default/skills" \
+  "${HOME}/.johnny/workspaces/default/.johnny/skills" \
   "${HOME}/.johnny/workspaces/default/gog" \
   "${HOME}/.johnny/sandbox-home"
+
+# Seed the n8n MCP server into the default workspace's MCP config (Johnny-hp1).
+# Insert-only: copy the repo template to the host bind mount ONLY when the
+# operator has no file yet, so UI edits / added servers are never clobbered.
+# The bind mount survives `docker compose down -v`, so a clean
+# ./stop.sh && ./run.sh keeps the operator's servers; a brand-new ~/.johnny
+# gets n8n-mcp seeded so it renders in the default workspace's MCP panel.
+if [[ -f config/seed/default.mcp.json \
+   && ! -f "${HOME}/.johnny/workspaces/default/.johnny/.mcp.json" ]]; then
+  echo "[run.sh] Seeding default workspace MCP servers (n8n-mcp) into .johnny/.mcp.json" >&2
+  cp config/seed/default.mcp.json \
+    "${HOME}/.johnny/workspaces/default/.johnny/.mcp.json"
+fi
 
 # Seed the first-party skill packages (Johnny-trt.23) into BOTH the shared
 # skills volume (the skills-sandbox image-build + image-contract test target
@@ -55,13 +87,13 @@ mkdir -p \
 # converges to the repo on the next start. Only exact first-party names are
 # swept; operator-added skills have different names and are untouched.
 RETIRED_SKILLS=("google-calendar")
-for dest in "${HOME}/.johnny/skills" "${HOME}/.johnny/workspaces/default/skills"; do
+for dest in "${HOME}/.johnny/skills" "${HOME}/.johnny/workspaces/default/.johnny/skills"; do
   for retired in "${RETIRED_SKILLS[@]}"; do
     rm -rf "${dest:?}/${retired}"
   done
 done
 if [[ -d skills ]]; then
-  for dest in "${HOME}/.johnny/skills" "${HOME}/.johnny/workspaces/default/skills"; do
+  for dest in "${HOME}/.johnny/skills" "${HOME}/.johnny/workspaces/default/.johnny/skills"; do
     find skills -mindepth 1 -maxdepth 1 -type d \
       -exec cp -Rf {} "${dest}/" \;
   done
