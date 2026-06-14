@@ -130,6 +130,21 @@ def _trace_from_outcome(
     )
 
 
+def build_tool_call_trace(
+    tool_name: str, phase: str, request: dict[str, Any], outcome: ToolOutcome
+) -> ToolCallTrace:
+    """Public builder for an ``agent_tool_calls`` trace (Johnny-3ow).
+
+    The task executor traces through :func:`_run_traced`; the agent's native
+    sandbox tools (:mod:`johnny.agent.sandbox_tools`) run the SAME
+    :class:`~johnny.skills.tools.SandboxExecTool` outside the task queue and
+    persist through the SAME :class:`ToolCallTraceSink`, so they need this one
+    seam to shape a trace from an outcome without reaching into the private
+    helper. Identical output to :func:`_trace_from_outcome`.
+    """
+    return _trace_from_outcome(tool_name, phase, request, outcome)
+
+
 async def _run_traced(
     exec_tool: SandboxExecTool,
     request: dict[str, Any],
@@ -413,5 +428,6 @@ __all__ = [
     "TASK_KIND_ENV",
     "ToolCallTrace",
     "ToolCallTraceSink",
+    "build_tool_call_trace",
     "build_skill_task_executor",
 ]

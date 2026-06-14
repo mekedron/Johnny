@@ -90,6 +90,12 @@ x-backend-env: &backend-env
   # skill directory needs no per-container path translation.
   JOHNNY_SKILLS_SANDBOX_URL: ${JOHNNY_SKILLS_SANDBOX_URL:-http://skills-sandbox:8088}
   JOHNNY_SKILLS_DIR: ${JOHNNY_SKILLS_DIR:-/skills}
+  # Native tool-calling cutover (Johnny-3ow): give the answer agent generic
+  # exec/read/write/list_dir tools bound to its sandbox container so it composes
+  # the user's REAL arguments and runs skills as files (openclaw model), instead
+  # of the keyword router firing one fixed argv with empty args. ON by default;
+  # set to 0 to fall back to the legacy keyword-delegate path.
+  JOHNNY_SANDBOX_FULL_ACCESS: ${JOHNNY_SANDBOX_FULL_ACCESS:-1}
   # Internal tools (Johnny-trt.57): where the agent process (api for the
   # playground, agent-worker for Meet) reaches Johnny's own api for
   # first-party actions — meeting.leave posts the bot-dismissal endpoint,

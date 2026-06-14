@@ -233,9 +233,24 @@ class ExecBinPolicy:
 
     allowed: frozenset[str]
     policy_check: Callable[[str], Any] | None = None
+    allow_all: bool = False
+
+    @classmethod
+    def permit_all(cls) -> ExecBinPolicy:
+        """Allow ANY binary and ANY shell construct — full sandbox-container
+        access (Johnny-3ow, ``JOHNNY_SANDBOX_FULL_ACCESS``). The container
+        itself is the security boundary (non-root, resource-limited, no host
+        mounts, per-workspace), so this visibility layer collapses to
+        "everything is reachable"; command substitution is permitted too.
+        :attr:`allowed` is left empty because membership is short-circuited —
+        the daemon's own timeout ceiling + output caps still bound every call,
+        and the trace sink still records every command for the audit trail."""
+        return cls(allowed=frozenset(), allow_all=True)
 
     def check_argv_detailed(self, argv: Iterable[str]) -> ExecDenial | None:
         """Vet an argv-form exec: the executable is ``argv[0]``'s basename."""
+        if self.allow_all:
+            return None
         head = next(iter(argv), "")
         name = basename(head.strip()) if head.strip() else ""
         if not name:
@@ -259,6 +274,8 @@ class ExecBinPolicy:
         ``VAR=value`` assignments, redirections, shell keywords and builtins —
         must be in the allow set.
         """
+        if self.allow_all:
+            return None
         for marker in _SUBSTITUTION_MARKERS:
             if marker in cmd:
                 return ExecDenial(

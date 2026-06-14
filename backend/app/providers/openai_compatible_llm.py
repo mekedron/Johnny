@@ -535,6 +535,12 @@ class OpenAICompatibleLLM(LLMProvider):
             body["reasoning_effort"] = self._reasoning_effort
         if tools and self._tool_format == "openai":
             body["tools"] = [_tool_to_dict(t) for t in tools]
+            # gpt-5.x rejects `reasoning_effort` together with function tools on
+            # /v1/chat/completions ("Please use /v1/responses instead" — HTTP
+            # 400). Drop it ONLY on tool-carrying turns so the native tool loop
+            # (Johnny-3ow) works on the chat/completions endpoint; tool-less
+            # turns keep the operator's reasoning_effort untouched.
+            body.pop("reasoning_effort", None)
         if response_format is not None:
             body["response_format"] = _coerce_response_format(response_format)
 

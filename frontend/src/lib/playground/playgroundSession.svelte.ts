@@ -1153,6 +1153,18 @@ export class PlaygroundController {
 				this.clearDiagnostic('tts');
 				break;
 			}
+			case 'turn_terminal': {
+				// Every turn ends with a terminal — including one that produced
+				// NO speech (the answer LLM errored/retried out, a no_reply, or a
+				// barge-in). The 'agent_spoke' that would clear 'thinking' never
+				// comes on those, so reset here or the member badge stays stuck on
+				// 'Thinking' forever (Johnny-3ow). 'speaking'/floor states are left
+				// alone — their own floor_released resets them.
+				if (member.state === 'thinking') {
+					this.updateMember(memberId, { state: 'idle' });
+				}
+				break;
+			}
 			case 'floor_acquired': {
 				this.updateMember(memberId, {
 					holdsFloor: true,

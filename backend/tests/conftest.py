@@ -18,3 +18,10 @@ from __future__ import annotations
 import os
 
 os.environ.setdefault("JOHNNY_DB_BOOTSTRAP", "off")
+
+# Johnny-3ow: the running api/agent containers set JOHNNY_SANDBOX_FULL_ACCESS=1
+# (the native-tool cutover is on in the product). Tests must NOT inherit that
+# ambient value — they assert the legacy keyword-router behaviour by default and
+# opt INTO the cutover explicitly (monkeypatch.setenv). Clear it once so the
+# suite is deterministic regardless of the container it runs in.
+os.environ.pop("JOHNNY_SANDBOX_FULL_ACCESS", None)

@@ -571,6 +571,60 @@ async def test_answer_prompt_grounds_capability_self_awareness_in_live_catalog(
     assert db.closed is True
 
 
+async def test_cutover_flag_narrows_router_and_wires_native_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Johnny-3ow Phase 3 cutover: with JOHNNY_SANDBOX_FULL_ACCESS the router
+    catalog collapses to the internal session-control kinds (skills drop out —
+    the model discovers them as files via list_dir), the agent carries the
+    native exec/read/write/list_dir tools, and the prompt grounds on the
+    openclaw tool-use recipe instead of the keyword capability notes."""
+    from johnny.agent.adapters.johnny_llm import tools_to_definitions
+    from johnny.agent.internal_tools import INTERNAL_TOOL_KINDS
+    from johnny.skills.registry import load_skill_registry
+
+    monkeypatch.setenv("JOHNNY_SANDBOX_FULL_ACCESS", "1")
+
+    (tmp_path / "fetch-news").mkdir()
+    (tmp_path / "fetch-news" / "SKILL.md").write_text(
+        "---\nname: fetch-news\ndescription: \"Fetch today's news.\"\n---\nInstructions.\n",
+        encoding="utf-8",
+    )
+
+    async def no_probe(names: list[str]) -> dict[str, bool]:
+        raise AssertionError("baseline-only skill must not probe the sandbox")
+
+    registry_obj = await load_skill_registry(tmp_path, check_bins=no_probe)
+    db = _FakeDbSession()
+    runtime = await build_agent_runtime(
+        _job(mode=AUTONOMOUS_MODE, redis_url="redis://r:6379/0"),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: db,
+        skill_registry=registry_obj,
+    )
+
+    # Router catalog is internal-only: fetch-news is gone from the router (it is
+    # discovered as a file), and the executor set is the internal kinds.
+    assert [e.kind for e in runtime.gate._config.task_catalog] == [
+        "meeting.leave",
+        "session.end",
+    ]
+    assert runtime.gate._config.executor_kinds == INTERNAL_TOOL_KINDS
+    # The agent carries the native sandbox tools, surfaced as provider tools.
+    names = {d.name for d in (tools_to_definitions(list(runtime.agent.tools)) or [])}
+    assert names == {"exec", "read", "write", "list_dir"}
+    # Grounding moved to the openclaw tool recipe; the keyword capability block
+    # (and the skill one-liner) is suppressed so the two never contradict.
+    instructions = runtime.agent.instructions
+    assert "list_dir('/skills')" in instructions
+    assert "Never substitute a placeholder" in instructions
+    assert "handled for you by background tools" not in instructions
+    assert "- fetch-news:" not in instructions
+    await runtime.aclose()
+    assert db.closed is True
+
+
 async def test_meet_backed_runtime_advertises_meeting_leave() -> None:
     """Surface scoping (Johnny-trt.57): a job with a calendar_event_id is a
     Meet-backed session — meeting.leave joins the catalog ahead of

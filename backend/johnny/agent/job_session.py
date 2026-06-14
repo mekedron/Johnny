@@ -59,6 +59,7 @@ from johnny.agent.answer import degrade_speaking_mode_if_no_tts
 from johnny.agent.barge_in import BargeInClassifier, BargeInClassifierConfig
 from johnny.agent.gate import TurnIndex, TurnLedger
 from johnny.agent.internal_tools import (
+    INTERNAL_TOOL_KINDS,
     InternalToolContext,
     build_internal_task_executor,
     executor_known_kinds,
@@ -93,13 +94,18 @@ from johnny.agent.observability import (
     build_triage_timing_emitter,
 )
 from johnny.agent.router_gate import RouterGate, RouterGateConfig
-from johnny.agent.session import JohnnyAgent, build_johnny_agent
+from johnny.agent.session import TOOL_USE_NOTES, JohnnyAgent, build_johnny_agent
 from johnny.agent.speech_floor import (
     DEFAULT_CLAIM_WINDOW_MS,
     FloorBackend,
     RedisFloorBackend,
     SpeechFloor,
     session_relative_ms,
+)
+from johnny.agent.sandbox_tools import (
+    build_sandbox_tools,
+    resolve_sandbox_policy,
+    sandbox_full_access_enabled,
 )
 from johnny.agent.task_catalog import render_capability_notes
 from johnny.agent.tasks import TaskCoordinator, stub_executor
@@ -930,6 +936,19 @@ async def build_agent_runtime(
         if task_coordinator is not None
         else ()
     )
+    # Johnny-3ow cutover switch: when the answer agent will carry native
+    # sandbox tools (full-access flag + a real sandbox), skill/MCP execution
+    # moves to the model's own tool loop. The ROUTER then keeps ONLY its
+    # should-speak job plus the two internal session-control kinds — session.end
+    # / meeting.leave stay on the router path so their farewell→teardown
+    # sequence is preserved (making them native tools would race the reply's
+    # TTS). Skills/MCP drop out of the router catalog: the model discovers them
+    # as files via list_dir('/skills'), and the answer prompt's grounding comes
+    # from TOOL_USE_NOTES instead of render_capability_notes. The flag is off by
+    # default, so the legacy keyword-delegate path below is byte-identical until
+    # the cutover is flipped on.
+    native_tools_active = sandbox_client is not None and sandbox_full_access_enabled()
+
     task_catalog = (
         apply_policy_to_catalog(
             merge_task_catalog(
@@ -960,6 +979,17 @@ async def build_agent_runtime(
         if task_coordinator is not None
         else frozenset()
     )
+
+    if native_tools_active:
+        # Cutover: the router sees only the internal session-control kinds; the
+        # gate's degrade chain (_degrade_unavailable / _recover_keyword /
+        # _reroute_status) then no-ops on everything else and the turn lands on
+        # SPEAK, where the answer model uses its native tools. Skills/MCP are
+        # still loaded for the sandbox — just not advertised to the router.
+        task_catalog = internal_catalog_entries(
+            meeting_backed=config.calendar_event_id is not None
+        )
+        executor_kinds = INTERNAL_TOOL_KINDS
 
     # Behavior knobs ride the dispatch payload from the session's frozen
     # agent snapshot (Johnny-trt.41) — the gate never re-reads config tables
@@ -1172,9 +1202,37 @@ async def build_agent_runtime(
     # what it CANNOT (the same gaps + reasons or it improvises a pretend-check).
     # Empty only when the session has no user-facing capability and no gap,
     # leaving the prompt byte-identical.
+    # Native sandbox tools (Johnny-3ow): under the cutover flag the answer
+    # agent is handed exec/read/write/list_dir bound to THIS session's sandbox
+    # container with full access (the container is the security boundary), so
+    # it composes the user's REAL arguments and runs skills as files — instead
+    # of the keyword router firing a fixed argv with JOHNNY_TASK_ARGS_JSON="{}".
+    # Every call traces to agent_tool_calls through the SAME sink the worker
+    # uses, so the reasoning timeline renders native calls unchanged. Off the
+    # flag (or with no sandbox) → None → the tool-less prompt/behaviour is
+    # byte-identical.
+    sandbox_tools = None
+    if native_tools_active:
+        from app.services.agent_tasks import SqlAlchemyToolCallTraceSink
+
+        sandbox_tools = build_sandbox_tools(
+            sandbox_client,
+            policy=resolve_sandbox_policy(full_access=True),
+            trace_sink=SqlAlchemyToolCallTraceSink(bot_session_id=config.bot_session_id),
+        )
+
     prompt_config = replace(
         instructions_config_from_job(config),
-        capability_notes=render_capability_notes(task_catalog),
+        # Under the cutover the catalog is internal-only, so its capability
+        # grounding moves to TOOL_USE_NOTES; force the catalog notes empty so a
+        # playground's unavailable meeting.leave can't leak a "CANNOT" line and
+        # the two blocks never contradict each other (Johnny-3ow).
+        capability_notes=(
+            "" if native_tools_active else render_capability_notes(task_catalog)
+        ),
+        # Teach the model the native tool surface + skill-discovery recipe only
+        # when it actually has those tools. Empty otherwise → byte-identical.
+        tool_use_notes=TOOL_USE_NOTES if native_tools_active else "",
     )
 
     agent = await build_johnny_agent(
@@ -1194,6 +1252,7 @@ async def build_agent_runtime(
         metrics_listener=metrics_translator.on_metrics_collected,
         peer_floor=speech_floor,
         agent_display_name=agent_display_name,
+        sandbox_tools=sandbox_tools,
     )
 
     return AgentRuntime(

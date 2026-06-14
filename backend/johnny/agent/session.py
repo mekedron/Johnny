@@ -188,6 +188,38 @@ _SELF_AWARENESS_NOTE = (
 )
 
 
+# openclaw-style native tool-use guidance (Johnny-3ow). Rendered ONLY when the
+# agent carries the sandbox tools (the cutover flag), so a tool-less session's
+# prompt stays byte-identical. Teaches the model the generic tool surface
+# (exec/read/write/list_dir), the "skills are files you discover and run" model
+# (list_dir → read SKILL.md → exec with the user's REAL args — the fix for the
+# always-London arg-drop bug), and the etu.7 grounding rules (call the tool,
+# answer from its real output, never fabricate a result, report failures).
+# Worded for spoken delivery; deliberately avoids the answer-notes token
+# "CANNOT" so the byte-stability/ordering guards stay stable.
+TOOL_USE_NOTES = (
+    "You have real tools wired into this session, and you call them yourself:\n"
+    "- exec: run a command inside your own private sandbox container.\n"
+    "- read: read a file from that sandbox.\n"
+    "- write: create or overwrite a file in that sandbox.\n"
+    "- list_dir: list a directory in that sandbox.\n"
+    "Your skills live as files under /skills. When a request matches something a "
+    "skill can do, discover and run it: call list_dir('/skills') to see what you "
+    "have, read the matching /skills/<name>/SKILL.md to learn how it runs, then "
+    "run it with exec — passing the person's REAL values (a city, a ticker, a "
+    "date) as the command's arguments. Never substitute a placeholder or fall "
+    "back to a default: if they asked about Helsinki, pass Helsinki. "
+    "When you actually need to do one of these things, call the tool — do not "
+    "merely say you will, and do not make up the answer. Then answer the person "
+    "from what the tool actually returned, out loud and concise. If a tool fails "
+    "or returns nothing useful, say plainly what went wrong and offer to try "
+    "again; never invent a result you did not get. These tools are part of your "
+    "real capabilities, so when asked what you can do you may name them and "
+    "offer to use them, and you can always check /skills first if you are unsure "
+    "what is installed."
+)
+
+
 @dataclass(frozen=True, slots=True)
 class AgentInstructionsConfig:
     """Static prompt components assembled into ``Agent.instructions``.
@@ -222,6 +254,7 @@ class AgentInstructionsConfig:
     calendar_attachments_text: str = ""
     prior_session_context: str = ""
     capability_notes: str = ""
+    tool_use_notes: str = ""
 
 
 def build_agent_instructions(config: AgentInstructionsConfig) -> str:
@@ -236,6 +269,9 @@ def build_agent_instructions(config: AgentInstructionsConfig) -> str:
     outranks roleplay habits) → capability notes (Johnny-trt.55 + Johnny-etu.7
     — what the session CAN and CANNOT do, absent only when it has no user-facing
     capability and no gap, so that block stays byte-identical) →
+    tool-use notes (Johnny-3ow — the openclaw skill-discovery + native
+    exec/read/write/list_dir guidance, present only when the agent carries the
+    sandbox tools) →
     context (the per-assignment brief — the documented Johnny-trt.45 slot)
     → calendar description → calendar attachments → last-session summary.
     The retired "Meeting instructions" line rendered between capability
@@ -261,6 +297,14 @@ def build_agent_instructions(config: AgentInstructionsConfig) -> str:
         # habits, and before the assignment brief so that can refine rather than
         # be contradicted (the router prompt's catalog-ordering rationale).
         system += f"\n\n{config.capability_notes}"
+    if config.tool_use_notes:
+        # Native tool-use guidance (Johnny-3ow): after the capability notes
+        # (the catalog grounding) and before the assignment brief, so the
+        # "call your real tools, pass real args, answer from the result" rules
+        # outrank a roleplay persona while the per-assignment context can still
+        # refine them. Empty unless the agent carries sandbox tools, so a
+        # tool-less session's prompt stays byte-identical.
+        system += f"\n\n{config.tool_use_notes}"
     if config.context:
         system += f"\n\nContext: {config.context}"
     if config.calendar_context:
@@ -350,6 +394,12 @@ def _speech_alt_duration_ms(alt: SpeechData | None) -> int | None:
     return round(span_s * 1000)
 
 
+MAX_TOOL_STEPS = 8
+"""Cap on native tool-loop steps per turn (Johnny-3ow). Above the openclaw
+discovery recipe's 3 steps (list_dir → read SKILL.md → exec) with headroom for
+a retry, below an unbounded loop a weak model could spin in."""
+
+
 def build_agent_session(
     *,
     stt: STT[Any],
@@ -429,6 +479,13 @@ def build_agent_session(
         llm=llm,
         tts=tts if tts is not None else NOT_GIVEN,
         vad=vad if vad is not None else load_vad(),
+        # Native tool loop depth (Johnny-3ow): the SDK default (3) is too low
+        # for the openclaw discovery recipe — list_dir('/skills') → read the
+        # SKILL.md → exec the run script is already 3 steps, leaving no room
+        # for a retry or a follow-up read. 8 bounds a runaway loop while
+        # leaving headroom; tool-less sessions never reach a tool step, so this
+        # is inert for them.
+        max_tool_steps=MAX_TOOL_STEPS,
         turn_handling=build_turn_handling(
             turn_detection=turn_detection,
             preemptive_generation=preemptive_generation,
@@ -537,6 +594,7 @@ class JohnnyAgent(Agent):
         session_id: str | None = None,
         peer_floor: PeerFloorReader | None = None,
         agent_display_name: str = "",
+        sandbox_tools: list[Tool] | None = None,
     ) -> None:
         if instructions is None:
             instructions = (
@@ -547,7 +605,13 @@ class JohnnyAgent(Agent):
         # Only build a ChatContext when there is history to seed; ``None`` lets
         # the base Agent start from ``ChatContext.empty()``.
         chat_ctx = transcripts_to_chat_ctx(chat_history) if chat_history else None
-        super().__init__(instructions=instructions, chat_ctx=chat_ctx)
+        # ``sandbox_tools`` (Johnny-3ow) are the native exec/read/write/list_dir
+        # tools the answer LLM calls directly; LiveKit surfaces them to
+        # :meth:`llm_node` and runs the tool loop. ``None`` (the default / no
+        # cutover flag) keeps the tool-less behaviour byte-identical.
+        super().__init__(
+            instructions=instructions, chat_ctx=chat_ctx, tools=sandbox_tools or None
+        )
         self._router_gate = router_gate
         self._barge_in = barge_in
         # Answer-path config (Johnny-5ag). ``answer_llm`` is the raw answer
@@ -1058,8 +1122,15 @@ class JohnnyAgent(Agent):
         if (
             config is not None
             and self._answer_llm is not None
+            and not tools
             and uses_allowlist(config.mode, config.allowed_replies)
         ):
+            # ``not tools`` (Johnny-3ow): the allowlist coercion bypasses the
+            # LLM and yields a verbatim reply. Inside a NATIVE TOOL LOOP this
+            # re-entrant call (after each FunctionCallOutput) would coerce a
+            # canned line and silently drop the tool result. When the agent
+            # carries sandbox tools, the loop wins — fall through to the
+            # default node, which forwards ``tools`` to the provider.
             picked = await coerce_allowed_reply(
                 self._answer_llm,
                 chat_ctx_to_messages(chat_ctx),
@@ -1169,6 +1240,7 @@ async def build_johnny_agent(
     metrics_listener: MetricsListener | None = None,
     peer_floor: PeerFloorReader | None = None,
     agent_display_name: str = "",
+    sandbox_tools: list[Tool] | None = None,
 ) -> JohnnyAgent:
     """Build a :class:`JohnnyAgent`, rehydrating prior transcripts if available.
 
@@ -1224,6 +1296,7 @@ async def build_johnny_agent(
         session_id=session_id,
         peer_floor=peer_floor,
         agent_display_name=agent_display_name,
+        sandbox_tools=sandbox_tools,
     )
 
 
