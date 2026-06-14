@@ -6,6 +6,10 @@ baseline toolset; stdlib only). Reads JSON on stdin, prints one short spoken
 paragraph on stdout — for the ear, not the eye: no IDs, no URLs, no raw
 timestamps.
 
+Importable: :func:`summarize` is the core (reused by ``gog_run.py``); the CLI
+(stdin -> stdout, ``--days N``) is preserved so the calendar correctness suite
+can pipe events straight through it.
+
 Tolerant on shape: accepts a bare list of events or an object wrapping them
 under ``events`` / ``items``; per event, the Google API shape
 (``start: {dateTime|date}``) or a flat ``start`` string both work, and the
@@ -74,27 +78,21 @@ def _spoken_event(event: dict, today: date) -> str:
     return f"'{title}'"
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--days", type=int, default=7, help="window size for the phrasing")
-    args = parser.parse_args()
-
-    raw = sys.stdin.read().strip()
+def summarize(raw: str, days: int, *, today: date | None = None) -> str:
+    """The speech-ready calendar summary for ``raw`` (gog JSON) over ``days``."""
+    raw = (raw or "").strip()
     if not raw:
-        print(f"Your calendar is clear for the next {args.days} days.")
-        return 0
+        return f"Your calendar is clear for the next {days} days."
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
-        print("I fetched the calendar but couldn't make sense of the result.")
-        return 1
+        return "I fetched the calendar but couldn't make sense of the result."
 
     events = _events_from_payload(payload)
     if not events:
-        print(f"Your calendar is clear for the next {args.days} days.")
-        return 0
+        return f"Your calendar is clear for the next {days} days."
 
-    today = date.today()
+    today = today or date.today()
     spoken = [_spoken_event(event, today) for event in events[:SPOKEN_EVENT_CAP]]
     remainder = len(events) - len(spoken)
     if remainder > 0:
@@ -108,8 +106,19 @@ def main() -> int:
         tail = "."
     count = len(events)
     plural = "event" if count == 1 else "events"
-    print(f"You have {count} {plural} in the next {args.days} days: {listing}{tail}")
-    return 0
+    return f"You have {count} {plural} in the next {days} days: {listing}{tail}"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--days", type=int, default=7, help="window size for the phrasing")
+    args = parser.parse_args()
+
+    raw = sys.stdin.read()
+    summary = summarize(raw, args.days)
+    print(summary)
+    # The only non-zero leg is an unparseable payload (mirrors the prior CLI).
+    return 1 if summary.startswith("I fetched the calendar but couldn't") else 0
 
 
 if __name__ == "__main__":

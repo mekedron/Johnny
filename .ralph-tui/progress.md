@@ -3,6 +3,73 @@
 This file tracks progress across iterations. Agents update this file
 after each iteration and it's included in prompts for context.
 
+## 2026-06-14 - Johnny-etu.9 — General gog CLI skill (replaces the narrow google-calendar skill)
+
+**What was implemented:** the calendar-only `google-calendar` skill (hardcoded
+`gog calendar events list`, task args ignored) is replaced by a GENERAL `gog`
+skill at `skills/gog/` that turns the delegated task's args into a gog
+subcommand (calendar / Gmail / Drive / Contacts / Tasks / …), **read-only by
+policy**, keeping the ask→ack→execute→spoken-result contract. Runtime-only: gog
+stays the OPTIONAL, developer-configured CLI (no gog-account backend, per
+johnny-account-model); the skill shows unavailable until gog is connected.
+
+- `skills/gog/SKILL.md` — name `gog`, broad keywords (calendar+gmail+drive+
+  contacts+tasks+…), run→`run.sh`, availability→`check.sh`, requires `gog`.
+- `skills/gog/run.sh` — thin bash that `exec python3 gog_run.py`.
+- `skills/gog/gog_run.py` — orchestrator with PURE, unit-tested functions:
+  `build_gog_argv` (args→argv: explicit `argv` list / `command` string / default
+  calendar agenda honoring `days`/`max`), `classify_safety` (read-only gate —
+  deny if a mutating verb sits in the bounded command path; free-text query
+  tails after search/find/query are never scanned), `inject_flags`
+  (`--json`/`--no-input`, `--gmail-no-send` for gmail). Auth check + run +
+  format. The no-command DEFAULT is the calendar agenda (the proven path + the
+  3B rarely fills argv), so calendar Q&A keeps working unchanged.
+- `skills/gog/format_events.py` — calendar formatter (now exposes `summarize`).
+- `skills/gog/format_result.py` — NEW generic JSON→speech summarizer for every
+  other read (finds the result list, counts, reads labels — no IDs/URLs).
+- `skills/google-calendar/` DELETED; `run.sh` gained a `RETIRED_SKILLS` sweep so
+  existing installs converge (the skills bind mount survives `down -v`, and the
+  seed loop only copies — a removed first-party dir would linger forever).
+- Migrated `tests/integration/test_calendar_correctness.py` (trt.60) and
+  `tests/integration/test_skill_registry_sandbox.py` (trt.23) to `gog`; each
+  gained a non-calendar case (arg-forwarding + generic formatter). New hermetic
+  `tests/skills/test_gog_argv.py` (36) pins the pure functions.
+
+**Verification:** 36 unit + 13 integration + 274 skills/agent tests pass; ruff +
+mypy clean; bash `-n` clean. REAL account checks (johnny-workspace-1): default→
+real agenda, explicit argv forwarded, generic formatter on real data, gmail
+send / drive rm refused (exit 3). **Browser (chrome-devtools, playground #19,
+llama3.2:3b):** "What's on my calendar this week?" → delegate kind=`gog` →
+spoken reply = the REAL live calendar (3 events, byte-identical to direct gog),
+trace shows pre-scorer signal `catalog (gog: calendar)`, `gog → completed`, and
+the expanded run tool call (`bash /skills/gog/run.sh`, `JOHNNY_TASK_KIND=gog`,
+exit 0, real stdout). DB row #45 kind=`gog` done. Retirement re-verified on a
+dirtied volume. Artifacts in `.validation/Johnny-etu.9/`.
+
+**Learnings:**
+- The router (3B) targets the kind by keyword and almost always emits `args={}`;
+  a general kind named `gog` therefore loses the implicit "this is calendar"
+  signal the old `google-calendar` kind carried. Resolved by defaulting the
+  no-command path to the calendar agenda — the skill is general (honors explicit
+  `argv`/`command` from tests/stronger routers) but degrades to the dominant
+  spoken request, so the hard close condition (calendar) keeps passing while
+  gmail/drive work when args are filled.
+- Skill stdout is reported ~verbatim into the spoken answer (result_text is
+  "speech-ready" and the grounding rule forbids embellishing), so a general
+  skill needs speech-ready output for EVERY read, not just calendar — hence the
+  generic `format_result.py` (count + labels) alongside the rich calendar one.
+- Retiring a first-party skill needs an explicit `run.sh` sweep: `~/.johnny/
+  skills` + `~/.johnny/workspaces/default/skills` are HOST bind mounts, so
+  `./stop.sh`'s `down -v` does NOT clear them and the copy-only seed loop never
+  removes a dir deleted from the repo. Proven by dirtying the volume and
+  re-running the stack.
+- gog ships agent-safety flags worth using: `--gmail-no-send` (documented
+  "agent safety"), `--no-input` (never hang), `--enable/--disable-commands`,
+  `--dry-run`. The runner's own read-only allowlist is the primary gate;
+  `--gmail-no-send` is cheap defense-in-depth for the gmail family.
+
+---
+
 ## 2026-06-14 - Johnny-etu.13 — Multi-agent meeting test harness + demos (per-agent tools, turn order, cross-agent reaction)
 
 **What was implemented:** a REAL, runnable multi-agent test harness + demos proving
@@ -210,6 +277,7 @@ no roleplay, no deflection; calendar query → real delegate+result (worker task
 - **History detail == live detail wire shape (etu.16).** `GET /history/sessions/{id}` (`HistoryDetailResponse`) serves `tasks`/`tool_calls`/`timings`/`conversation_events` using the SAME `AgentTaskRead`/`AgentToolCallRead`/`SessionTimingRead`/`ConversationEventRead` DTOs the live `/sessions/{id}` detail does (imported from `app.api.sessions` into `app.api.history` — no circular import; sessions never imports history). `services/history.py::get_session_full_detail` returns the full 8-tuple `(session, transcripts, decisions, utterances, tasks, tool_calls, timings, conversation_events)` — all observability is ALREADY persisted (router `input_window`/`raw_output`, answer `prompt`, `SessionTiming.details` w/ model+TTFT, `AgentToolCall`, `ConversationEvent`); the history endpoint just had to serve it. No migration was needed.
 - **Browser playground = in-API-process session** (`browser_session.py` runs `build_agent_runtime` in the API), but **skill tasks execute in the `worker` container** (`app.services.task_worker`). To confirm a delegate ran, grep `docker compose logs worker` for `claimed task_id=… kind=… settled done`; the catalog availability summary (`N/N skills available`) is logged there too, not in the api logs.
 - **Run a skill end-to-end WITHOUT a live session (etu.13):** INSERT an `agent_tasks` row (`bot_session_id` FK to any `bot_sessions` row — `BotSession(status="ended", source="browser")` works; `kind=<skill>`; `request_json={"kind","args","ack","workspace":{"id":1,"slug":"default","name":"Default","is_default":true}}`; `status="queued"`). The PRODUCTION worker auto-claims any queued NON-internal kind (no session-liveness filter) and settles `result_text`; poll the row to a terminal state. The `workspace` stamp routes the sandbox: **id=1 (default) → `johnny-workspace-1` sandbox, which mounts `~/.johnny/workspaces/default/skills` at `/skills` (ro) and `~/.johnny/workspaces/default/gog` (where gog is logged in)** — NOT the shared `~/.johnny/skills` (that's the `workspace_id=None`/legacy path, calendar-only). So install demo skills with `workspace_id=1` via `POST /capabilities/skills/install` and stamp tasks `workspace.id=1` to match. ClawHub skills (`clawhub.ai/<owner>/<slug>`) download as a zip from `https://wry-manatee-359.convex.site/api/v1/download?slug=<slug>`; they're openclaw "instructional" SKILL.md packages with NO `johnny.run` block, so overlay a `metadata.johnny.run` + `run.sh` (like the in-repo `google-calendar` skill) hitting the real data source with sandbox bins (curl/python3/jq) — the sandbox has internet egress.
+- **General `gog` skill = args-driven, read-only, calendar-default (etu.9).** `skills/gog/` is the reference for a single skill spanning many gog subcommands: `run.sh` is a thin `exec python3 gog_run.py`; the orchestration lives in PURE, importable functions (`build_gog_argv`, `classify_safety`, `inject_flags`) so they unit-test without the sandbox (`tests/skills/test_gog_argv.py` loads them via importlib from `/skills/gog` — the api/worker mount `~/.johnny/skills` at `/skills`, so a repo-relative `parents[3]/skills/gog` resolves there in-container). Three load-bearing choices: (1) the no-command DEFAULT is the calendar agenda because the 3B router targets the kind by keyword but emits `args={}` — a general kind loses the old kind's implicit intent, so degrade to the dominant spoken request; (2) skill stdout is reported ~verbatim into the spoken answer (result_text is speech-ready + the grounding rule forbids embellishment), so EVERY read needs speech-ready output — `format_events.py` (rich calendar) + `format_result.py` (generic count+labels); (3) the read-only gate denies if a mutating verb (send/delete/rm/create/update/…) sits in the **bounded command path** (positionals[1:4]), and skips the free-text tail after search/find/query so a query containing "delete" isn't refused; gog's own `--gmail-no-send` is cheap defense-in-depth. **Retiring a first-party skill needs a `run.sh` sweep** (`RETIRED_SKILLS`): `~/.johnny/skills` + `~/.johnny/workspaces/default/skills` are HOST bind mounts that survive `./stop.sh`'s `down -v`, and the seed loop only `cp`s — a dir deleted from the repo lingers forever otherwise. Migrate the trt.60 (`test_calendar_correctness.py`) + trt.23 (`test_skill_registry_sandbox.py`) integration suites' KIND/paths when you rename the reference skill.
 - **Per-agent DISTINCT skills in ONE meeting (etu.13):** stamp a per-agent capability policy. `SNAPSHOT_CAPABILITY_POLICY_KEY="capability_policy"` in the agent_snapshot scopes the catalog (`ResolvedCapabilityPolicy.from_payload`, payload `{"tools_allow":["<kind>","meeting.leave","session.end"]}`). Via the API: `PUT /capability-policies/agents/{id}` with `{"tools_allow":[...]}`; the group-start (`POST /sessions/browser/groups/start`, agents=`[{agent_id,context}]`) reuses `_build_spec_playground` which resolves+stamps each agent's policy. All agents stay on workspace 1 (gog works); the policy makes each prompt carry only its own skill. **Reusable multi-agent test harness:** `johnny.agent.ensemble_scenario` (real `BrowserAgentSession`×N + `GroupAudioRouter` + shared `SpeechFloor` + Silero VAD on cross-fed audio) — its `ScenarioSelectiveLLMProvider` parses the agent's name/peers back out of the rendered router prompt (`render_peer_selectivity`) to make selectivity deterministic; reuse `RecordingBus`, `_collect_member`, `_wait_for_step_settle`, `_intervals_overlap`. The REAL router prompt + response schema are reconstructable for offline routing tests via `render_peer_selectivity` + `render_task_catalog` + `build_router_decision_schema(catalog)` (catalog `TaskCatalogEntry(kind,one_liner,keywords=…)`). **3B caveat:** the local `llama3.2:3b` floor-claim arbitration does NOT reliably honour name-addressing in a live group (a non-addressed agent can win the floor); name-addressing routes cleanly through the OpenAI provider (id=1, gpt-5.4-nano; works even with `is_active=false` when explicitly pinned/instantiated).
 
 ---

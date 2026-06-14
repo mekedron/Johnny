@@ -43,9 +43,23 @@ mkdir -p \
 # (Johnny-etu.5: the default lazy-launches `johnny-workspace-1` and mounts
 # ~/.johnny/workspaces/default/skills at /skills, exactly like finance/ops).
 # The repo ./skills tree is the source of truth, so a clean checkout boots
-# with the google-calendar skill present in the default workspace — re-copied
-# on every start (repo wins for first-party dirs); operator-added skill dirs
-# are never touched.
+# with the gog skill present in the default workspace — re-copied on every
+# start (repo wins for first-party dirs); operator-added skill dirs are never
+# touched.
+#
+# Retired first-party skills (Johnny-etu.9: the calendar-only `google-calendar`
+# skill was replaced by the general `gog` skill). The seed loop only COPIES, so
+# a dir removed from the repo would otherwise linger forever in the host bind
+# mount (it survives `docker compose down -v` — it is not a compose volume).
+# Remove retired first-party names from both dests so an existing install
+# converges to the repo on the next start. Only exact first-party names are
+# swept; operator-added skills have different names and are untouched.
+RETIRED_SKILLS=("google-calendar")
+for dest in "${HOME}/.johnny/skills" "${HOME}/.johnny/workspaces/default/skills"; do
+  for retired in "${RETIRED_SKILLS[@]}"; do
+    rm -rf "${dest:?}/${retired}"
+  done
+done
 if [[ -d skills ]]; then
   for dest in "${HOME}/.johnny/skills" "${HOME}/.johnny/workspaces/default/skills"; do
     find skills -mindepth 1 -maxdepth 1 -type d \

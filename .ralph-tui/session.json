@@ -3,10 +3,10 @@
   "sessionId": "5bcaf19f-aee2-42b2-868e-bbf4e2ae7192",
   "status": "running",
   "startedAt": "2026-06-13T22:55:12.465Z",
-  "updatedAt": "2026-06-14T01:38:31.278Z",
-  "currentIteration": 2,
+  "updatedAt": "2026-06-14T02:09:46.028Z",
+  "currentIteration": 3,
   "maxIterations": 0,
-  "tasksCompleted": 2,
+  "tasksCompleted": 3,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "opus",
@@ -135,8 +135,8 @@
       {
         "id": "Johnny-etu.13",
         "title": "[BUILD] Phase 4: Multi-agent same-meeting test — task pickup, shared context, per-agent tool calling",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-etu.14",
@@ -172,6 +172,16 @@
       "durationMs": 1779436,
       "startedAt": "2026-06-14T00:07:14.496Z",
       "endedAt": "2026-06-14T00:36:53.932Z"
+    },
+    {
+      "iteration": 3,
+      "status": "completed",
+      "taskId": "Johnny-etu.13",
+      "taskTitle": "[BUILD] Multi-agent meeting test harness + demos (per-agent tools, turn order, cross-agent reaction)",
+      "taskCompleted": true,
+      "durationMs": 3684980,
+      "startedAt": "2026-06-14T00:37:05.026Z",
+      "endedAt": "2026-06-14T01:38:30.006Z"
     }
   ],
   "skippedTaskIds": [],

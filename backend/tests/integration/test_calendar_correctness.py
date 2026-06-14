@@ -1,15 +1,20 @@
 """Integration: calendar tool-output correctness end-to-end (Johnny-trt.60).
 
 THE final Phase-5 correctness gate for the reference skill: what the session
-persists (and later speaks) for a ``google-calendar`` task must reproduce
-EXACTLY what the gog CLI emitted — event count, names, times; zero invented
-events. Playground session 4 (history/4) showed the stakes: the task produced
-the right ``result_text`` while the user only ever heard a hallucinated
-speak-turn. This suite pins the truth chain at every seam below the voice:
+persists (and later speaks) for a ``gog`` task must reproduce EXACTLY what the
+gog CLI emitted — event count, names, times; zero invented events. Playground
+session 4 (history/4) showed the stakes: the task produced the right
+``result_text`` while the user only ever heard a hallucinated speak-turn. This
+suite pins the truth chain at every seam below the voice:
 
-    fake gog (PATH-shim, real sandbox) → run.sh → format_events.py
+    fake gog (PATH-shim, real sandbox) → run.sh → gog_run.py → format_events.py
     → SandboxExecTool → build_skill_task_executor → TaskCoordinator
     → sink row == registry entry == TaskCompleted event == status summary
+
+Johnny-etu.9 migrated the calendar-only ``google-calendar`` skill to the
+general ``gog`` skill (task args choose the subcommand); the calendar default
+and the truth chain are unchanged, and a forwarding case proves explicit task
+args reach the CLI.
 
 Hermetic by construction: a ``gog`` shim is written into the REAL
 skills-sandbox container and resolved first on ``PATH`` for every exec this
@@ -62,15 +67,15 @@ from johnny.skills.sandbox import (
 from johnny.skills.tools import SandboxExecTool
 
 SANDBOX_URL = sandbox_url_from_env()
-KIND = "google-calendar"
+KIND = "gog"
 SETTLE_TIMEOUT_S = 60.0
 
 AUTHED_LINE = "Account: fixture@example.com (default)\n"
 UNAUTHED_LINE = "No tokens stored\n"
 NO_ACCOUNT_COPY = (
-    "I can't see the Google calendar yet — no Google account is connected to "
-    "my tools. Connect one with 'gog auth add' in the skills sandbox, then "
-    "ask me again."
+    "I can't reach your Google account yet — no account is connected to my "
+    "tools. Connect one with 'gog auth add' in the skills sandbox, then ask "
+    "me again."
 )
 
 
@@ -89,6 +94,13 @@ pytestmark = pytest.mark.skipif(
         "tests/integration/test_calendar_correctness.py"
     ),
 )
+
+
+# The forwarding case (Johnny-etu.9) exercises a non-calendar read, so the shim
+# answers a generic family too; the canned payload reads back through the
+# generic JSON->speech summarizer (format_result.py).
+GENERIC_MESSAGES = {"messages": [{"subject": "Hello there"}, {"subject": "Second note"}]}
+GENERIC_SPEECH = "I found 2 messages: Hello there, and Second note."
 
 
 def _raw_exec(payload: dict[str, Any]) -> dict[str, Any]:
@@ -136,6 +148,10 @@ class _Shim:
             '  cat "$STATE/events.json"\n'
             "  exit 0\n"
             "fi\n"
+            'if [ "${1:-}" = "gmail" ]; then\n'
+            '  cat "$STATE/generic.json"\n'
+            "  exit 0\n"
+            "fi\n"
             'echo "trt60 gog shim: unexpected invocation: $*" >&2\n'
             "exit 64\n"
         )
@@ -156,14 +172,18 @@ class _Shim:
         except AssertionError:
             pass  # best-effort teardown
 
-    def set_state(self, *, authed: bool, events: object | None = None) -> None:
+    def set_state(
+        self, *, authed: bool, events: object | None = None, generic: object | None = None
+    ) -> None:
         auth = AUTHED_LINE if authed else UNAUTHED_LINE
         events_json = json.dumps(events if events is not None else [])
+        generic_json = json.dumps(generic if generic is not None else [])
         _raw_exec(
             {
                 "cmd": (
                     f"cat > {self.state_dir}/auth.txt <<'TRT60A'\n{auth}TRT60A\n"
                     f"cat > {self.state_dir}/events.json <<'TRT60E'\n{events_json}\nTRT60E\n"
+                    f"cat > {self.state_dir}/generic.json <<'TRT60G'\n{generic_json}\nTRT60G\n"
                     f": > {self.state_dir}/calls.log"
                 )
             }
@@ -231,9 +251,12 @@ class _Settled:
 
 async def _run_calendar_task(
     shim: _Shim,
+    *,
+    args: dict[str, Any] | None = None,
 ) -> tuple[InMemoryTaskSink, TaskCoordinator, _Settled, int]:
     """The production assembly (task_worker ``_load`` verbatim), shim-resolved,
-    driven through one TaskCoordinator begin → settle cycle."""
+    driven through one TaskCoordinator begin → settle cycle. ``args`` rides the
+    TaskSpec to gog_run.py as JOHNNY_TASK_ARGS_JSON (default: the agenda)."""
     client = _PathShimSandboxClient(SANDBOX_URL, shim_path=shim.path)
     try:
         registry = await load_skill_registry(
@@ -257,7 +280,11 @@ async def _run_calendar_task(
             report_failed=seams.report_failed,
         )
         queued = await coordinator.begin(
-            TaskSpec(kind=KIND, ack_text="Give me a sec to dig through the calendar.")
+            TaskSpec(
+                kind=KIND,
+                ack_text="Give me a sec to dig through the calendar.",
+                args=args or {},
+            )
         )
         assert queued is not None, "begin() failed to persist the queued row"
         await asyncio.wait_for(coordinator.join(), timeout=SETTLE_TIMEOUT_S)
@@ -301,7 +328,7 @@ def _assert_truth_chain(
     )
 
 
-# --- speech-expectation mirror of skills/google-calendar/format_events.py ---
+# --- speech-expectation mirror of skills/gog/format_events.py ---
 # Deliberately reimplemented (not imported — the formatter lives on the
 # skills volume, outside the package tree): an independent computation of
 # the sentence the CLI fixture must produce. If either side drifts, the
@@ -379,7 +406,7 @@ async def test_multi_event_window_exact_speech(shim: _Shim) -> None:
         {
             "cmd": (
                 f"cat {shim.state_dir}/events.json | "
-                "python3 /skills/google-calendar/format_events.py --days 7"
+                "python3 /skills/gog/format_events.py --days 7"
             )
         }
     )["stdout"].strip()
@@ -528,7 +555,7 @@ async def test_run_script_owns_the_auth_missing_leg_directly(shim: _Shim) -> Non
     body = httpx.post(
         f"{SANDBOX_URL}/exec",
         json={
-            "argv": ["bash", "/skills/google-calendar/run.sh"],
+            "argv": ["bash", "/skills/gog/run.sh"],
             "env": {"PATH": shim.path},
             "timeout": 30,
         },
@@ -537,3 +564,34 @@ async def test_run_script_owns_the_auth_missing_leg_directly(shim: _Shim) -> Non
     assert body["exit_code"] == 2, body
     assert body["stdout"].strip() == NO_ACCOUNT_COPY
     assert _calendar_calls(shim.calls()) == []
+
+
+# --- 7. explicit task args forwarded to gog (Johnny-etu.9) -------------------------
+
+
+def _gmail_calls(calls: list[str]) -> list[str]:
+    return [line for line in calls if line.startswith("gmail ")]
+
+
+async def test_explicit_args_forward_to_gog_and_summarize_generic(shim: _Shim) -> None:
+    """The general-skill contract: task args choose the gog subcommand.
+
+    A delegate carrying ``args.argv`` for a non-calendar read must reach the
+    CLI verbatim (plus the runner's always-on safety/format flags), and the
+    output must read back through the generic JSON->speech summarizer — proving
+    one ``gog`` skill answers beyond the calendar."""
+    shim.set_state(authed=True, events=[], generic=GENERIC_MESSAGES)
+
+    sink, coordinator, seams, task_id = await _run_calendar_task(
+        shim, args={"argv": ["gmail", "search", "is:unread"]}
+    )
+    _assert_truth_chain(
+        sink, coordinator, seams, task_id, status="done", expected_text=GENERIC_SPEECH
+    )
+    assert not seams.failures
+
+    # The forwarded argv reached gog exactly, with the injected safety/format
+    # flags (--json, --no-input, and gmail's --gmail-no-send); no calendar fetch.
+    gmail_calls = _gmail_calls(shim.calls())
+    assert gmail_calls == ["gmail search is:unread --json --no-input --gmail-no-send"], shim.calls()
+    assert _calendar_calls(shim.calls()) == [], shim.calls()

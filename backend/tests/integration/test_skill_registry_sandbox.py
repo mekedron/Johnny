@@ -113,18 +113,18 @@ async def test_fixture_skill_dropped_into_volume_appears_in_catalog() -> None:
         await client.aclose()
 
 
-async def test_google_calendar_skill_end_to_end_through_executor() -> None:
-    """The first skill, against the real gog in the real sandbox.
+async def test_gog_skill_end_to_end_through_executor() -> None:
+    """The general gog skill (Johnny-etu.9), against the real gog in the real sandbox.
 
     All auth states are valid acceptance legs (Johnny-trt.55 added the
     availability snapshot, so the registry is loaded with the full
     production seam set — ``check_env`` + the declared-check runner, same
     as both production assemblies): an AVAILABLE skill runs — authed gog
-    settles ``done`` with a speech-ready calendar summary, a mid-run auth
-    break settles ``failed`` with the skill-authored graceful copy; an
-    UNAVAILABLE-at-snapshot skill (gog not linked) never runs and settles
-    ``failed`` with the same spoken-form reason the catalog declined with.
-    Never a dead promise, no raw diagnostics in the speech.
+    settles ``done`` with a speech-ready calendar summary (the no-args
+    default), a mid-run auth break settles ``failed`` with the skill-authored
+    graceful copy; an UNAVAILABLE-at-snapshot skill (gog not linked) never runs
+    and settles ``failed`` with the same spoken-form reason the catalog declined
+    with. Never a dead promise, no raw diagnostics in the speech.
     """
     client = SandboxClient()
     try:
@@ -134,19 +134,17 @@ async def test_google_calendar_skill_end_to_end_through_executor() -> None:
             check_env=client.check_env,
             run_check=build_sandbox_availability_runner(client),
         )
-        skill = registry.get("google-calendar")
+        skill = registry.get("gog")
         assert skill is not None, (
-            f"google-calendar skill not on the volume ({SKILLS_DIR}) — "
+            f"gog skill not on the volume ({SKILLS_DIR}) — "
             "run ./run-dev.sh (or ./run.sh) to seed the first-party skills"
         )
         assert skill.eligible is True, skill.reasons
-        assert "google-calendar" in [entry.kind for entry in registry.catalog_entries()]
+        assert "gog" in [entry.kind for entry in registry.catalog_entries()]
 
         tool = SandboxExecTool(client, policy=ExecBinPolicy(allowed=registry.allowed_bins))
         executor = build_skill_task_executor(registry, tool)
-        result = await executor(
-            QueuedTask(task_id=0, spec=TaskSpec(kind="google-calendar"))
-        )
+        result = await executor(QueuedTask(task_id=0, spec=TaskSpec(kind="gog")))
 
         assert result.status in {"done", "failed"}
         assert result.result_text, "result_text must always be speech-ready"
@@ -158,12 +156,12 @@ async def test_google_calendar_skill_end_to_end_through_executor() -> None:
             assert result.status == "failed"
             assert result.result_text == (
                 skill.unavailable_reason
-                or "The google-calendar skill isn't available in this session right now."
+                or "The gog skill isn't available in this session right now."
             )
             assert result.result_json is None
             return
         assert result.result_json is not None
-        assert result.result_json.get("kind") == "google-calendar"
+        assert result.result_json.get("kind") == "gog"
         if result.status == "done":
             # Authed: a real summary ("You have N events..." / "clear").
             assert "calendar" in result.result_text.lower() or "event" in result.result_text.lower()
@@ -177,7 +175,7 @@ async def test_google_calendar_skill_end_to_end_through_executor() -> None:
 
 
 async def test_run_script_formats_synthetic_events_speech_ready() -> None:
-    """The done-leg formatter, deterministic regardless of gog auth state."""
+    """The calendar done-leg formatter, deterministic regardless of gog auth state."""
     client = SandboxClient()
     try:
         events = (
@@ -187,7 +185,7 @@ async def test_run_script_formats_synthetic_events_speech_ready() -> None:
         result = await client.exec(
             cmd=(
                 "printf '%s' \"$EVENTS\" | "
-                "python3 /skills/google-calendar/format_events.py --days 7"
+                "python3 /skills/gog/format_events.py --days 7"
             ),
             env={"EVENTS": events},
         )
@@ -195,5 +193,23 @@ async def test_run_script_formats_synthetic_events_speech_ready() -> None:
         assert result.stdout.strip() == (
             "You have 1 event in the next 7 days: 'Standup' on Friday June 12 at 10:00."
         )
+    finally:
+        await client.aclose()
+
+
+async def test_generic_formatter_summarizes_non_calendar_json() -> None:
+    """The generic JSON->speech summarizer (format_result.py) reads any read."""
+    client = SandboxClient()
+    try:
+        messages = '{"messages": [{"subject": "Alpha"}, {"subject": "Beta"}]}'
+        result = await client.exec(
+            cmd=(
+                "printf '%s' \"$MSGS\" | "
+                "python3 /skills/gog/format_result.py --noun messages"
+            ),
+            env={"MSGS": messages},
+        )
+        assert result.exit_code == 0, result.stderr
+        assert result.stdout.strip() == "I found 2 messages: Alpha, and Beta."
     finally:
         await client.aclose()
