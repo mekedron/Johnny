@@ -26,6 +26,17 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_session
+
+# Reuse the live session-detail Read models for the per-call + pipeline
+# observability lists (Johnny-etu.16) so the history detail serves the
+# byte-identical shape the live /sessions/{id} detail does — the frontend
+# renders both from the same shared per-turn trace components.
+from app.api.sessions import (
+    AgentTaskRead,
+    AgentToolCallRead,
+    ConversationEventRead,
+    SessionTimingRead,
+)
 from app.db.models import (
     BotMode,
     BotSessionSource,
@@ -222,12 +233,26 @@ class HistoryDetailResponse(BaseModel):
 
     Unlike the live detail endpoint, these lists are unbounded — the
     history view expects the full session to be browsable.
+
+    ``tasks`` / ``tool_calls`` / ``timings`` / ``conversation_events``
+    (Johnny-etu.16) carry the same per-call + pipeline observability the
+    live ``/sessions/{id}`` detail serves — every model call's prompt + raw
+    response lives on ``decisions`` (router ``input_window`` / ``raw_output``)
+    and ``utterances`` (answer ``prompt`` / ``output_text``), the delegated
+    work on ``tasks`` + ``tool_calls``, and the per-stage costs + the redis /
+    pipeline events on ``timings`` + ``conversation_events`` — so the history
+    page renders the identical shared per-turn trace + activity log the live
+    view does, after the session has ended.
     """
 
     session: HistorySessionRead
     transcripts: list[HistoryTranscriptRead]
     decisions: list[HistoryDecisionRead]
     utterances: list[HistoryUtteranceRead]
+    tasks: list[AgentTaskRead] = []
+    tool_calls: list[AgentToolCallRead] = []
+    timings: list[SessionTimingRead] = []
+    conversation_events: list[ConversationEventRead] = []
 
 
 class TranscriptSearchPayload(BaseModel):
@@ -316,9 +341,16 @@ def get_history_detail(
 ) -> HistoryDetailResponse:
     """Return the full audit trail for one session."""
     try:
-        row, transcripts, decisions, utterances = get_session_full_detail(
-            session, bot_session_id
-        )
+        (
+            row,
+            transcripts,
+            decisions,
+            utterances,
+            tasks,
+            tool_calls,
+            timings,
+            conversation_events,
+        ) = get_session_full_detail(session, bot_session_id)
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -332,6 +364,12 @@ def get_history_detail(
         ],
         utterances=[
             HistoryUtteranceRead.model_validate(u) for u in utterances
+        ],
+        tasks=[AgentTaskRead.model_validate(t) for t in tasks],
+        tool_calls=[AgentToolCallRead.model_validate(c) for c in tool_calls],
+        timings=[SessionTimingRead.model_validate(t) for t in timings],
+        conversation_events=[
+            ConversationEventRead.model_validate(e) for e in conversation_events
         ],
     )
 

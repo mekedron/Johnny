@@ -34,6 +34,8 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     AgentDecision,
+    AgentTask,
+    AgentToolCall,
     AgentUtterance,
     BotMode,
     BotSession,
@@ -44,6 +46,7 @@ from app.db.models import (
     DecisionOutcome,
     GoogleAccount,
     MeetingConfig,
+    SessionTiming,
     TranscriptChunk,
 )
 from app.services.session_audio import delete_session_audio
@@ -357,12 +360,32 @@ def get_session_full_detail(
     list[TranscriptChunk],
     list[AgentDecision],
     list[AgentUtterance],
+    list[AgentTask],
+    list[AgentToolCall],
+    list[SessionTiming],
+    list[ConversationEvent],
 ]:
-    """Load a session row plus *all* related transcripts/decisions/utterances.
+    """Load a session row plus *all* its persisted observability rows.
 
     Unlike :func:`app.api.sessions.get_session_detail`, this is for the
     audit view and is unbounded — the caller is the history detail page
     which expects the full session to be browsable.
+
+    Returns, in order: the session row, then every transcript / decision /
+    utterance / delegated task / tool-call trace / pipeline timing /
+    conversation-dynamics event for the session (Johnny-etu.16). The
+    decision rows carry the full router prompt (``input_window``) + raw
+    response (``raw_output``); the utterance rows carry the answer-LLM
+    ``prompt`` + ``output_text``; the timing rows carry per-stage cost +
+    ``details`` (model, TTFT, tokens). Together they are the same data the
+    live ``/sessions/{id}`` detail serves, so the history page can render
+    the identical per-turn trace + activity log from shared components.
+
+    Ordering mirrors the live detail / timings / conversation-events
+    endpoints so the shared frontend assembly behaves identically: tasks
+    and tool calls ascending by id (execution order); timings by
+    ``turn_id`` then ``started_at_ms``; conversation events by
+    ``timestamp_ms``.
     """
     row = session.get(BotSession, bot_session_id)
     if row is None:
@@ -390,7 +413,50 @@ def get_session_full_detail(
             .order_by(AgentUtterance.created_at.asc(), AgentUtterance.id.asc())
         ).all()
     )
-    return row, transcripts, decisions, utterances
+    tasks = list(
+        session.scalars(
+            select(AgentTask)
+            .where(AgentTask.bot_session_id == row.id)
+            .order_by(AgentTask.id.asc())
+        ).all()
+    )
+    tool_calls = list(
+        session.scalars(
+            select(AgentToolCall)
+            .where(AgentToolCall.bot_session_id == row.id)
+            .order_by(AgentToolCall.id.asc())
+        ).all()
+    )
+    timings = list(
+        session.scalars(
+            select(SessionTiming)
+            .where(SessionTiming.bot_session_id == row.id)
+            .order_by(
+                SessionTiming.turn_id.asc(),
+                SessionTiming.started_at_ms.asc(),
+                SessionTiming.id.asc(),
+            )
+        ).all()
+    )
+    conversation_events = list(
+        session.scalars(
+            select(ConversationEvent)
+            .where(ConversationEvent.bot_session_id == row.id)
+            .order_by(
+                ConversationEvent.timestamp_ms.asc(), ConversationEvent.id.asc()
+            )
+        ).all()
+    )
+    return (
+        row,
+        transcripts,
+        decisions,
+        utterances,
+        tasks,
+        tool_calls,
+        timings,
+        conversation_events,
+    )
 
 
 def delete_session(session: Session, bot_session_id: int) -> None:
@@ -488,6 +554,65 @@ def _serialise_utterance(row: AgentUtterance) -> dict[str, Any]:
     }
 
 
+def _serialise_task(row: AgentTask) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "bot_session_id": row.bot_session_id,
+        "agent_decision_id": row.agent_decision_id,
+        "turn_id": row.turn_id,
+        "kind": row.kind,
+        "status": (
+            row.status.value
+            if hasattr(row.status, "value")
+            else row.status
+        ),
+        "ack_text": row.ack_text,
+        "result_text": row.result_text,
+        "result_json": row.result_json,
+        "error": row.error,
+        "attempts": row.attempts,
+        "created_at": _serialise_datetime(row.created_at),
+        "updated_at": _serialise_datetime(row.updated_at),
+    }
+
+
+def _serialise_tool_call(row: AgentToolCall) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "bot_session_id": row.bot_session_id,
+        "agent_task_id": row.agent_task_id,
+        "turn_id": row.turn_id,
+        "tool_name": row.tool_name,
+        "kind": row.kind,
+        "phase": row.phase,
+        "request_json": row.request_json,
+        "ok": row.ok,
+        "exit_code": row.exit_code,
+        "stdout": row.stdout,
+        "stderr": row.stderr,
+        "duration_ms": row.duration_ms,
+        "timed_out": row.timed_out,
+        "truncated": row.truncated,
+        "denied": row.denied,
+        "error": row.error,
+        "created_at": _serialise_datetime(row.created_at),
+    }
+
+
+def _serialise_timing(row: SessionTiming) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "bot_session_id": row.bot_session_id,
+        "turn_id": row.turn_id,
+        "stage": row.stage,
+        "started_at_ms": row.started_at_ms,
+        "duration_ms": row.duration_ms,
+        "provider_name": row.provider_name,
+        "details": row.details,
+        "created_at": _serialise_datetime(row.created_at),
+    }
+
+
 def _serialise_conversation_event(row: ConversationEvent) -> dict[str, Any]:
     return {
         "id": row.id,
@@ -511,20 +636,21 @@ def export_session(session: Session, bot_session_id: int) -> dict[str, Any]:
     auditable JSON dump. Embeddings are included as plain lists so the
     consumer can reproduce similarity scores offline if desired.
     """
-    row, transcripts, decisions, utterances = get_session_full_detail(
-        session, bot_session_id
-    )
-    # The conversation-dynamics record (Johnny-trt.49) rides the export so
-    # offline analysis sees interruptions / floor handoffs next to the turns.
-    conversation_events = list(
-        session.scalars(
-            select(ConversationEvent)
-            .where(ConversationEvent.bot_session_id == bot_session_id)
-            .order_by(
-                ConversationEvent.timestamp_ms.asc(), ConversationEvent.id.asc()
-            )
-        ).all()
-    )
+    (
+        row,
+        transcripts,
+        decisions,
+        utterances,
+        tasks,
+        tool_calls,
+        timings,
+        conversation_events,
+    ) = get_session_full_detail(session, bot_session_id)
+    # The full observability record (Johnny-etu.16) rides the export so an
+    # offline dump matches what the history page shows: every model call's
+    # prompt + raw response (decisions / utterances), the delegated tasks and
+    # tool-call traces, per-stage timings, and the conversation-dynamics events
+    # (interruptions / floor handoffs, Johnny-trt.49) next to the turns.
     return {
         "session": {
             "id": row.id,
@@ -545,6 +671,9 @@ def export_session(session: Session, bot_session_id: int) -> dict[str, Any]:
         "transcripts": [_serialise_transcript(t) for t in transcripts],
         "decisions": [_serialise_decision(d) for d in decisions],
         "utterances": [_serialise_utterance(u) for u in utterances],
+        "tasks": [_serialise_task(t) for t in tasks],
+        "tool_calls": [_serialise_tool_call(c) for c in tool_calls],
+        "timings": [_serialise_timing(t) for t in timings],
         "conversation_events": [
             _serialise_conversation_event(e) for e in conversation_events
         ],

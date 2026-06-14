@@ -10,8 +10,12 @@
 import type { BotSessionStatus, BotSessionSource } from '$lib/sessions';
 import type {
 	AgentDecisionRecord,
+	AgentTaskRecord,
+	AgentToolCallRecord,
 	AgentUtteranceRecord,
 	BotMode,
+	ConversationEventRecord,
+	SessionTimingRecord,
 	TranscriptChunk
 } from '$lib/sessionDetail';
 
@@ -91,6 +95,14 @@ export interface HistoryDetail {
 	transcripts: TranscriptChunk[];
 	decisions: AgentDecisionRecord[];
 	utterances: AgentUtteranceRecord[];
+	// Full per-call + pipeline observability (Johnny-etu.16) — the same lists
+	// the live /sessions/{id} detail serves, so the history page renders the
+	// identical shared per-turn trace (reasoning timeline + activity log).
+	// Optional so an older cached response without the fields still parses.
+	tasks?: AgentTaskRecord[];
+	tool_calls?: AgentToolCallRecord[];
+	timings?: SessionTimingRecord[];
+	conversation_events?: ConversationEventRecord[];
 }
 
 /** Historical default bot name for sessions with no agent snapshot. */

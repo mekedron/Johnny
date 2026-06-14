@@ -3,6 +3,81 @@
 This file tracks progress across iterations. Agents update this file
 after each iteration and it's included in prompts for context.
 
+## 2026-06-14 - Johnny-etu.16 — Full per-call observability, unified live/history via SHARED components
+
+**What was implemented:** the LIVE session view and the HISTORY view now render the
+per-turn trace (reasoning timeline + activity log) from ONE shared component, and the
+history endpoint serves the full per-call + pipeline observability the live detail does —
+so every model call (router prompt+response, answer prompt+response, timings) and every
+redis/pipeline event (STT finals, interruptions, floor handoffs) is visible, persisted,
+and drillable to raw prompt+response on BOTH live and ended sessions, at the same detail.
+
+The data was already persisted (router `AgentDecision.input_window`/`raw_output`, answer
+`AgentUtterance.prompt`/`output_text`, `AgentTask`, `AgentToolCall`, `SessionTiming` with
+model/TTFT in `details`, `ConversationEvent`); the gap was (a) the history endpoint only
+served session/transcripts/decisions/utterances, and (b) the history page rendered flat
+tabs while the live page rendered the rich timeline — two divergent layouts. This UNIFIES
+them; no schema change, no migration, no new deps.
+
+**Files changed:**
+- `backend/app/services/history.py` — `get_session_full_detail` now also returns tasks /
+  tool_calls / timings / conversation_events (ordered exactly like the live endpoints);
+  `export_session` includes them; added `_serialise_task/_tool_call/_timing`.
+- `backend/app/api/history.py` — `HistoryDetailResponse` gains `tasks`/`tool_calls`/
+  `timings`/`conversation_events`, REUSING the live `AgentTaskRead`/`AgentToolCallRead`/
+  `SessionTimingRead`/`ConversationEventRead` DTOs (imported from `app.api.sessions`) so
+  the wire shape is byte-identical to the live detail.
+- `frontend/src/lib/sessionTrace.ts` (NEW) — the single source of truth that maps the raw
+  records → `DecisionEntry[]` (`buildDecisionEntries`) + `buildTimingByTurn`, extracted
+  verbatim from the live page so both pages assemble turns identically.
+- `frontend/src/lib/components/SessionActivityLog.svelte` (NEW) — the activity-log card,
+  extracted from the live page (self-manages expand state).
+- `frontend/src/lib/components/SessionTrace.svelte` (NEW) — renders the timeline +
+  activity log from `decisions`/`timings`/`conversationEvents`; rendered by BOTH pages.
+- `frontend/src/routes/sessions/[id]/+page.svelte` — removed its inline mapping +
+  assembly + activity-log markup; now renders `<SessionTrace>` (live `decisions` still
+  mutated reactively by WS, passed straight in).
+- `frontend/src/routes/history/[id]/+page.svelte` — builds entries via the shared
+  `buildDecisionEntries` and renders `<SessionTrace>` above the existing tabs (kept for
+  the history-only flat browse + search + export).
+- `frontend/src/lib/history.ts` — `HistoryDetail` gains the optional new lists.
+- Tests: backend `test_history.py` (api+services) assert the detail/export serve every
+  model call's prompt+response + redis events; new `sessionTrace.test.ts` (4) locks the
+  shared assembly; repaired a PRE-EXISTING fixture gap in `test_browser_sessions.py`
+  (missing `agent_tool_calls` table — the live detail has queried it since etu.4).
+
+**Verification:** backend ruff clean; 1225 api+services tests pass (mypy: only 3
+PRE-EXISTING errors in untouched `list_past_sessions`). Frontend svelte-check 0/0; lint
+clean on my files; 176 vitest tests pass. Browser-validated (chrome-devtools, session #6):
+`/history/6` AND `/sessions/6` render the IDENTICAL shared `SessionTrace`; expanded a turn
+→ full chain top-to-bottom; drilled "View router prompt" → full prompt + "View raw output"
+→ full raw response; activity log shows per-stage timings (Router LLM 1.23s · provider;
+TTS · TTFA) and the redis interruption event ("user spoke over the reply · 859 ms"); no
+console errors. Artifacts in `.validation/Johnny-etu.16/`.
+
+**Learnings:**
+- Requirements 1-3 (capture every model call + pipeline event, persist) were ALREADY met
+  by the etu.4/trt.54/trt.49/ckz.7/d5z substrate — the real, operator-visible gap was the
+  unification (req 4-6): history didn't *serve* the persisted tasks/tool_calls/timings/
+  events, and the two pages had divergent layouts. The fix is mostly "serve what's already
+  there + render via one component," not new capture. Verify what's persisted before
+  building new capture pipelines.
+- The live page keeps an enriched, WS-mutated `DecisionEntry[]` (not raw records), while
+  history has raw records. The shared boundary that fits both is `<SessionTrace>` taking
+  `decisions: DecisionEntry[]` (+ timings + conversationEvents) and doing the turn/activity
+  ASSEMBLY internally — live passes its reactive array, history passes
+  `buildDecisionEntries(records)`. Don't try to make the shared component take raw records
+  (live doesn't have them).
+- `DecisionEntry` and `sessionTurns.TurnSource` were structurally identical; aliasing
+  `DecisionEntry = TurnSource` in the shared module let the live page's WS-handler literals
+  and the history mapping share one type with zero churn.
+- Barge-in classifier (a guard-model call) prompt/response is still NOT persisted — it's
+  the one model call without full capture. The etu.16 test plan only required triage/
+  reasoning/answer + redis events (all met); persisting the classifier needs a new column/
+  emitter/subscriber and is a separate, gated follow-up (left unfiled — note for etu epic).
+
+---
+
 ## 2026-06-14 - Johnny-etu.17 — Bot capability self-awareness
 
 **What was implemented:** an always-present capability self-awareness guard in the
@@ -71,6 +146,8 @@ no roleplay, no deflection; calendar query → real delegate+result (worker task
 - **`render_capability_notes(task_catalog)` (task_catalog.py) is the DYNAMIC tool list**, built in `job_session.py::build_agent_runtime` from `internal + skills + MCP` catalog entries. It returns `""` whenever the catalog has no user-facing available/unavailable entry (task_coordinator None, empty skill registry, missing workspace stamp). Anything that must ALWAYS be present (identity, anti-roleplay/anti-deflection guards) belongs in `build_agent_instructions` as an unconditional constant, NOT in render_capability_notes (its `""`-on-empty parity is load-bearing and unit-pinned).
 - **Prompt parity tests use substring (`in`/`index`/`startswith`) assertions, NOT full-prompt equality** (test_johnny_agent.py, test_job_runtime.py, test_job_session.py). Safe to add an always-on block as long as it avoids the optional-section markers (`"Context:"`, `"Calendar event description:"`, `"Calendar attachments"`, `"Last session summary:"`, `"Meeting instructions:"`) and the answer-notes token `"CANNOT"` (the byte-identical guard `test_empty_capability_notes_leave_prompt_byte_identical` checks `"CANNOT" not in ...`).
 - **Running backend tests / lint / mypy:** the prod stack (`./run.sh`) bakes source via COPY and excludes `tests/` — `docker compose exec api` then has no tests and stale code. Use `./run-dev.sh` (bind-mounts `./backend`, hot-reloads via uvicorn `--reload`). Tooling is the venv at **`/opt/venv/bin`** inside the api container (`python -m pytest` on bare `python` fails — no pytest on the system interpreter). Browser validation ALSO needs the dev stack (so host edits are live in the in-process browser session).
+- **Per-turn trace = ONE shared component for live AND history (`SessionTrace.svelte`, etu.16).** The live session page and the history page BOTH render `frontend/src/lib/components/SessionTrace.svelte` (which composes `SessionTurnTimeline` + `SessionActivityLog`). It takes `decisions: DecisionEntry[]` + `timings` + `conversationEvents` and does the turn/activity ASSEMBLY internally via `frontend/src/lib/sessionTrace.ts` (`buildDecisionEntries`, `buildTimingByTurn`) — the single source of truth for "raw records → renderable turns". Live passes its reactive WS-mutated `decisions`; history passes `buildDecisionEntries(detail)`. Do NOT re-inline turn assembly or the activity-log markup in a page — change `sessionTrace.ts` / `SessionTrace.svelte` and both views update. `DecisionEntry` is an alias of `sessionTurns.TurnSource` (structurally identical).
+- **History detail == live detail wire shape (etu.16).** `GET /history/sessions/{id}` (`HistoryDetailResponse`) serves `tasks`/`tool_calls`/`timings`/`conversation_events` using the SAME `AgentTaskRead`/`AgentToolCallRead`/`SessionTimingRead`/`ConversationEventRead` DTOs the live `/sessions/{id}` detail does (imported from `app.api.sessions` into `app.api.history` — no circular import; sessions never imports history). `services/history.py::get_session_full_detail` returns the full 8-tuple `(session, transcripts, decisions, utterances, tasks, tool_calls, timings, conversation_events)` — all observability is ALREADY persisted (router `input_window`/`raw_output`, answer `prompt`, `SessionTiming.details` w/ model+TTFT, `AgentToolCall`, `ConversationEvent`); the history endpoint just had to serve it. No migration was needed.
 - **Browser playground = in-API-process session** (`browser_session.py` runs `build_agent_runtime` in the API), but **skill tasks execute in the `worker` container** (`app.services.task_worker`). To confirm a delegate ran, grep `docker compose logs worker` for `claimed task_id=… kind=… settled done`; the catalog availability summary (`N/N skills available`) is logged there too, not in the api logs.
 
 ---

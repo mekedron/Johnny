@@ -14,6 +14,7 @@ from app.db.models import (
     EMBEDDING_DIM,
     AgentDecision,
     AgentTask,
+    AgentToolCall,
     AgentUtterance,
     BotMode,
     BotSession,
@@ -24,6 +25,7 @@ from app.db.models import (
     DecisionOutcome,
     GoogleAccount,
     MeetingConfig,
+    SessionTiming,
     TranscriptChunk,
 )
 from app.services.history import (
@@ -60,6 +62,8 @@ def engine() -> sa.Engine:
             AgentDecision.__table__,  # type: ignore[list-item]
             AgentUtterance.__table__,  # type: ignore[list-item]
             AgentTask.__table__,  # type: ignore[list-item]
+            AgentToolCall.__table__,  # type: ignore[list-item]
+            SessionTiming.__table__,  # type: ignore[list-item]
             ConversationEvent.__table__,  # type: ignore[list-item]
         ],
     )
@@ -441,12 +445,25 @@ def test_get_session_full_detail_returns_all_rows(db_session: Session) -> None:
             )
         )
     db_session.commit()
-    _row, transcripts, _decisions, _utterances = get_session_full_detail(
-        db_session, row.id
-    )
+    (
+        _row,
+        transcripts,
+        _decisions,
+        _utterances,
+        tasks,
+        tool_calls,
+        timings,
+        conversation_events,
+    ) = get_session_full_detail(db_session, row.id)
     assert len(transcripts) == 150
     assert transcripts[0].text == "t-0"
     assert transcripts[-1].text == "t-149"
+    # Johnny-etu.16: the audit detail now also returns the per-call + pipeline
+    # observability collections (empty here — none seeded for this session).
+    assert tasks == []
+    assert tool_calls == []
+    assert timings == []
+    assert conversation_events == []
 
 
 # --- delete_session --------------------------------------------------------

@@ -26,11 +26,8 @@
 		getSessionDetail,
 		getSessionTimings,
 		noReplyReasonLabel,
-		SESSION_TIMING_STAGE_LABEL,
 		sessionAudioUrl,
 		type AgentDecisionRecord,
-		type AgentTaskRecord,
-		type AgentToolCallRecord,
 		type AgentUtteranceRecord,
 		type ConversationEventRecord,
 		type DecisionOutcome,
@@ -38,16 +35,8 @@
 		type NoReplyReason,
 		type SessionDetail,
 		type SessionTimingRecord,
-		type TerminalState,
 		type TranscriptChunk
 	} from '$lib/sessionDetail';
-	import {
-		buildActivityTurns,
-		conversationEventLabel,
-		conversationEventSummary,
-		interruptionWhoLabel,
-		isFloorEvent
-	} from '$lib/sessionActivity';
 	import { dismissBot, undismissBot } from '$lib/meetingConfigs';
 	import UtteranceAudioButton from '$lib/components/UtteranceAudioButton.svelte';
 	import {
@@ -67,16 +56,9 @@
 		type TurnTerminalEvent
 	} from '$lib/sessionEvents';
 	import { approveDecision, rejectDecision } from '$lib/decisions';
-	import SessionTurnTimeline from '$lib/components/SessionTurnTimeline.svelte';
-import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
-	import {
-		assembleTurns,
-		extractHeard,
-		type ToolCallInfo,
-		type TurnSource,
-		type TurnTaskInfo,
-		type TurnTiming
-	} from '$lib/sessionTurns';
+	import SessionTrace from '$lib/components/SessionTrace.svelte';
+	import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
+	import { buildDecisionEntries, type DecisionEntry } from '$lib/sessionTrace';
 
 	interface TranscriptLine {
 		key: string;
@@ -100,43 +82,9 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 		turnId?: number | null;
 	}
 
-	interface DecisionEntry {
-		key: string;
-		decisionId: number | null;
-		turnId: number | null;
-		shouldSpeak: boolean;
-		confidence: number;
-		reason: string;
-		replyType: string | null;
-		suggestedReply: string | null;
-		// Canonical per-turn record (INV-2, Johnny-ckz.28.2).
-		recommendedText: string | null;
-		finalText: string | null;
-		divergenceReason: string | null;
-		overrideActor: string | null;
-		// Terminal-state-per-turn (INV-1, Johnny-ckz.28.3).
-		terminalState: TerminalState | null;
-		noReplyReason: NoReplyReason | null;
-		outcome: DecisionOutcome | 'spoken';
-		matchedReply: string | null;
-		timestampMs: number;
-		// Reasoning timeline (Johnny-ckz.28.4): deep per-turn fields that feed the
-		// "what is the bot thinking" steps. Null on a live router_decision until
-		// the next detail refresh (the WS event omits the prompt context).
-		heardText: string | null;
-		heardConfidence: number | null;
-		heardTimestampMs: number | null;
-		inputWindow: Record<string, unknown> | null;
-		rawOutput: Record<string, unknown> | null;
-		answerPrompt: string | null;
-		audioDurationMs: number | null;
-		// The delegate turn's linked agent_tasks row (Johnny-trt.54); null for
-		// non-delegate turns and live turns until the next detail refresh.
-		task: TurnTaskInfo | null;
-		// The per-tool-call traces this turn's task made (Johnny-etu.4); empty for
-		// non-delegate turns and live turns until the next detail refresh.
-		toolCalls: ToolCallInfo[];
-	}
+	// `DecisionEntry` (the enriched per-turn record the timeline renders) is the
+	// shared `$lib/sessionTrace` type — identical to the history page's, so both
+	// views build their turns through `buildDecisionEntries` / `SessionTrace`.
 
 	interface PendingApproval {
 		decisionId: number;
@@ -184,7 +132,6 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 	// Conversation-dynamics rows (Johnny-trt.49): interruptions / floor /
 	// claims / suppression, interleaved into the activity log.
 	let conversationEvents = $state<ConversationEventRecord[]>([]);
-	let expandedTurnIds = $state<Set<number | null>>(new Set());
 
 	let connected = $state(false);
 	let connectError = $state<string | null>(null);
@@ -322,42 +269,13 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 		transcripts = [...transcriptLines, ...utteranceLines, ...noReplyLines].sort(
 			(a, b) => a.timestampMs - b.timestampMs
 		);
-		const utteranceMap = new Map<number, AgentUtteranceRecord>();
-		for (const u of detail.utterances) {
-			if (u.agent_decision_id !== null) {
-				utteranceMap.set(u.agent_decision_id, u);
-			}
-		}
-		// Delegate-turn task linkage (Johnny-trt.54): agent_tasks rows share the
-		// turn's durable turn_id with the decision row.
-		const taskByTurn = new Map<number, AgentTaskRecord>();
-		for (const t of detail.tasks ?? []) {
-			if (t.turn_id !== null) {
-				taskByTurn.set(t.turn_id, t);
-			}
-		}
-		// Per-tool-call traces (Johnny-etu.4): grouped onto a turn by the shared
-		// turn_id, falling back to the matched task's id when a trace carries no
-		// turn_id (legacy / hand-queued). Preserves execution order (API is asc).
-		const toolCallsByTurn = new Map<number, AgentToolCallRecord[]>();
-		const toolCallsByTask = new Map<number, AgentToolCallRecord[]>();
-		for (const c of detail.tool_calls ?? []) {
-			if (c.turn_id !== null) {
-				(toolCallsByTurn.get(c.turn_id) ?? toolCallsByTurn.set(c.turn_id, []).get(c.turn_id)!).push(c);
-			} else if (c.agent_task_id !== null) {
-				(
-					toolCallsByTask.get(c.agent_task_id) ??
-					toolCallsByTask.set(c.agent_task_id, []).get(c.agent_task_id)!
-				).push(c);
-			}
-		}
-		decisions = detail.decisions.map((d) => {
-			const matchedTask = d.turn_id !== null ? (taskByTurn.get(d.turn_id) ?? null) : null;
-			const calls =
-				(d.turn_id !== null ? toolCallsByTurn.get(d.turn_id) : undefined) ??
-				(matchedTask ? toolCallsByTask.get(matchedTask.id) : undefined) ??
-				[];
-			return decisionRecordToEntry(d, utteranceMap.get(d.id) ?? null, matchedTask, calls);
+		// Build the enriched per-turn entries through the shared assembly so the
+		// live view and the history view render identical turns (Johnny-etu.16).
+		decisions = buildDecisionEntries({
+			decisions: detail.decisions,
+			utterances: detail.utterances,
+			tasks: detail.tasks,
+			toolCalls: detail.tool_calls
 		});
 	}
 
@@ -405,199 +323,16 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 		};
 	}
 
-	function decisionRecordToEntry(
-		d: AgentDecisionRecord,
-		matchedUtterance: AgentUtteranceRecord | null,
-		matchedTask: AgentTaskRecord | null = null,
-		matchedToolCalls: AgentToolCallRecord[] = []
-	): DecisionEntry {
-		const heard = extractHeard(d.input_window);
-		return {
-			key: `db-d-${d.id}`,
-			decisionId: d.id,
-			turnId: d.turn_id,
-			shouldSpeak: d.should_speak,
-			confidence: d.confidence,
-			reason: d.reason,
-			replyType: d.reply_type,
-			suggestedReply: d.suggested_reply,
-			recommendedText: d.decision_recommended_text ?? d.suggested_reply,
-			finalText: d.final_text ?? matchedUtterance?.output_text ?? null,
-			divergenceReason: d.divergence_reason,
-			overrideActor: d.override_actor,
-			terminalState: d.terminal_state,
-			noReplyReason: d.no_reply_reason,
-			outcome: d.outcome,
-			matchedReply: matchedUtterance?.matched_allowed_reply ?? null,
-			timestampMs: Date.parse(d.created_at) || 0,
-			heardText: heard?.text ?? null,
-			heardConfidence: heard?.confidence ?? null,
-			heardTimestampMs: heard?.timestampMs ?? null,
-			inputWindow: d.input_window,
-			rawOutput: d.raw_output,
-			answerPrompt: matchedUtterance?.prompt ?? null,
-			audioDurationMs: matchedUtterance?.audio_duration_ms ?? null,
-			task: matchedTask
-				? {
-						id: matchedTask.id,
-						kind: matchedTask.kind,
-						status: matchedTask.status,
-						ackText: matchedTask.ack_text,
-						resultText: matchedTask.result_text
-					}
-				: null,
-			toolCalls: matchedToolCalls.map(toolCallRecordToInfo)
-		};
-	}
-
-	// Map the API's snake_case tool-call record to the camelCase shape the
-	// timeline consumes (Johnny-etu.4).
-	function toolCallRecordToInfo(c: AgentToolCallRecord): ToolCallInfo {
-		return {
-			id: c.id,
-			toolName: c.tool_name,
-			kind: c.kind,
-			phase: c.phase,
-			request: c.request_json,
-			ok: c.ok,
-			exitCode: c.exit_code,
-			stdout: c.stdout ?? '',
-			stderr: c.stderr ?? '',
-			durationMs: c.duration_ms,
-			timedOut: c.timed_out,
-			truncated: c.truncated,
-			denied: c.denied,
-			error: c.error
-		};
-	}
-
 	// Trivial reflow (whitespace) is not a divergence — mirrors the backend
 	// parity guard's normalisation so the live UI and the persisted record agree.
 	function normalizeSpoken(value: string | null): string {
 		return (value ?? '').split(/\s+/).filter(Boolean).join(' ');
 	}
 
-	interface TimingTurn {
-		turnId: number;
-		events: SessionTimingRecord[];
-		endToEndMs: number | null;
-		hasError: boolean;
-	}
-
-	// Activity log (Johnny-ckz.7 + trt.49): per-turn pipeline timings
-	// interleaved with the conversation-dynamics rows.
-	const activityTurns = $derived(buildActivityTurns(timings, conversationEvents));
-	const activityTurnCount = $derived(
-		activityTurns.filter((t) => t.turnId !== null).length
-	);
-
-	// Per-turn reasoning timeline (Johnny-ckz.28.4). Derived from the same
-	// reactive `decisions` + `timings` the panels read, so the timeline updates
-	// live as WS events mutate them — a turn opened mid-session fills in
-	// step-by-step (heard → classified → terminal → spoke) without a reload.
-	const timingByTurn = $derived.by(() => {
-		const map = new Map<number, TurnTiming>();
-		for (const t of groupTimingsByTurn(timings)) {
-			map.set(t.turnId, {
-				events: t.events,
-				endToEndMs: t.endToEndMs,
-				hasError: t.hasError
-			});
-		}
-		return map;
-	});
-	const turns = $derived(assembleTurns(decisions as TurnSource[], timingByTurn));
-
-	function groupTimingsByTurn(rows: SessionTimingRecord[]): TimingTurn[] {
-		const byTurn = new Map<number, SessionTimingRecord[]>();
-		for (const row of rows) {
-			const list = byTurn.get(row.turn_id);
-			if (list === undefined) {
-				byTurn.set(row.turn_id, [row]);
-			} else {
-				list.push(row);
-			}
-		}
-		const turns: TimingTurn[] = [];
-		for (const [turnId, events] of byTurn.entries()) {
-			events.sort((a, b) => {
-				if (a.started_at_ms !== b.started_at_ms) {
-					return a.started_at_ms - b.started_at_ms;
-				}
-				return a.id - b.id;
-			});
-			const endToEnd = events.find((e) => e.stage === 'end_to_end');
-			const hasError = events.some((e) => e.stage === 'error');
-			turns.push({
-				turnId,
-				events,
-				endToEndMs: endToEnd ? endToEnd.duration_ms : null,
-				hasError
-			});
-		}
-		turns.sort((a, b) => a.turnId - b.turnId);
-		return turns;
-	}
-
-	function stageLabel(stage: string): string {
-		return SESSION_TIMING_STAGE_LABEL[stage] ?? stage;
-	}
-
-	function isErrorStage(stage: string): boolean {
-		return stage === 'error';
-	}
-
-	function isInterruptStage(stage: string): boolean {
-		return stage === 'interrupt_fast' || stage === 'interrupt_slow';
-	}
-
-	function formatTimingMs(ms: number | null | undefined): string {
-		if (ms === null || ms === undefined || !Number.isFinite(ms)) return '—';
-		if (ms < 1000) return `${ms} ms`;
-		return `${(ms / 1000).toFixed(2)} s`;
-	}
-
-	function formatStartedAtMs(ms: number): string {
-		if (!Number.isFinite(ms)) return '';
-		const totalSeconds = Math.floor(ms / 1000);
-		const minutes = Math.floor(totalSeconds / 60);
-		const seconds = totalSeconds % 60;
-		const millis = ms % 1000;
-		const pad = (n: number, width: number) => String(n).padStart(width, '0');
-		return `${pad(minutes, 2)}:${pad(seconds, 2)}.${pad(millis, 3)}`;
-	}
-
-	function detailSummary(row: SessionTimingRecord): string {
-		const d = row.details ?? {};
-		const parts: string[] = [];
-		const ttft = (d as { time_to_first_token_ms?: unknown }).time_to_first_token_ms;
-		if (typeof ttft === 'number') parts.push(`TTFT ${formatTimingMs(ttft)}`);
-		const ttfa = (d as { time_to_first_audio_ms?: unknown }).time_to_first_audio_ms;
-		if (typeof ttfa === 'number') parts.push(`TTFA ${formatTimingMs(ttfa)}`);
-		const chars = (d as { char_count?: unknown }).char_count;
-		if (typeof chars === 'number') parts.push(`${chars} chars`);
-		const audioMs = (d as { audio_duration_ms?: unknown }).audio_duration_ms;
-		if (typeof audioMs === 'number') parts.push(`audio ${formatTimingMs(audioMs)}`);
-		const finishReason = (d as { finish_reason?: unknown }).finish_reason;
-		if (typeof finishReason === 'string' && finishReason) {
-			parts.push(`finish=${finishReason}`);
-		}
-		const failedStage = (d as { failed_stage?: unknown }).failed_stage;
-		if (typeof failedStage === 'string') parts.push(`failed stage=${failedStage}`);
-		const category = (d as { category?: unknown }).category;
-		if (typeof category === 'string') parts.push(`category=${category}`);
-		return parts.join(' · ');
-	}
-
-	function toggleTurn(turnId: number | null): void {
-		const next = new Set(expandedTurnIds);
-		if (next.has(turnId)) {
-			next.delete(turnId);
-		} else {
-			next.add(turnId);
-		}
-		expandedTurnIds = next;
-	}
+	// The per-turn reasoning timeline + activity log are assembled and rendered
+	// by the shared <SessionTrace> component (Johnny-etu.16) from the reactive
+	// `decisions` / `timings` / `conversationEvents` below — so the live view
+	// and the history view render the SAME per-turn trace from one place.
 
 	async function loadTimings() {
 		timingsLoadError = null;
@@ -1517,7 +1252,12 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 			</section>
 		{/if}
 
-		<SessionTurnTimeline turns={turns} />
+		<SessionTrace
+			{decisions}
+			{timings}
+			{conversationEvents}
+			activityError={timingsLoadError}
+		/>
 
 		<SessionReplayPanel {sessionId} />
 
@@ -1773,171 +1513,5 @@ import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 			</Card.Root>
 		</div>
 
-		<Card.Root class="flex flex-col gap-0 py-0" data-testid="activity-pane">
-			<Card.Header
-				class="flex flex-row items-baseline justify-between border-b border-border px-4 py-3"
-			>
-				<Card.Title class="text-sm font-semibold tracking-wide"
-					>Activity log</Card.Title
-				>
-				<span
-					class="font-mono text-xs text-muted-foreground"
-					data-testid="activity-turn-count"
-				>
-					{activityTurnCount} {activityTurnCount === 1 ? 'turn' : 'turns'}
-				</span>
-			</Card.Header>
-			<div class="px-4 py-3">
-				{#if timingsLoadError}
-					<p class="text-sm text-warning" data-testid="activity-load-error">
-						Activity log unavailable: {timingsLoadError}
-					</p>
-				{:else if activityTurns.length === 0}
-					<p class="text-sm text-muted-foreground italic">
-						No activity events yet. The activity log captures per-turn pipeline timings (STT, router LLM, answer LLM, TTS, interrupts) as the session progresses.
-					</p>
-				{:else}
-					<ul class="m-0 flex list-none flex-col gap-2 p-0">
-						{#each activityTurns as turn (turn.turnId ?? 'session')}
-							{@const expanded = expandedTurnIds.has(turn.turnId)}
-							<li
-								class="rounded-md border border-border bg-surface-2"
-								data-testid="activity-turn"
-								data-turn-id={turn.turnId ?? 'session'}
-							>
-								<button
-									type="button"
-									class="flex w-full items-center gap-3 px-3 py-2 text-left text-sm hover:bg-muted/40 transition"
-									data-testid="activity-turn-header"
-									aria-expanded={expanded}
-									onclick={() => toggleTurn(turn.turnId)}
-								>
-									<span
-										class="font-mono text-xs text-muted-foreground"
-										style="min-width: 4ch"
-									>
-										{turn.turnId === null ? 'Session' : `#${turn.turnId}`}
-									</span>
-									<span class="font-mono text-xs">
-										{turn.rows.length}
-										{turn.rows.length === 1 ? 'event' : 'events'}
-									</span>
-									{#if turn.turnId !== null}
-										<span
-											class="font-mono text-xs font-medium text-foreground"
-											data-testid="activity-turn-end-to-end"
-											title="End-to-end (user speech end → first audio out)"
-										>
-											end-to-end {formatTimingMs(turn.endToEndMs)}
-										</span>
-									{/if}
-									{#if turn.interruption}
-										<span
-											class="inline-flex items-center gap-1 rounded-sm border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[0.65rem] font-semibold tracking-wide uppercase text-warning"
-											data-testid="activity-turn-interruption-badge"
-											title="The bot's speech was cut mid-utterance (speech onset → audio stop)"
-										>
-											<span>{interruptionWhoLabel(turn.interruption.reason)}</span>
-											{#if turn.interruption.duration_ms !== null}
-												<span>· {formatTimingMs(turn.interruption.duration_ms)}</span>
-											{/if}
-										</span>
-									{/if}
-									{#if turn.hasError}
-										<span
-											class="inline-flex items-center rounded-sm border border-destructive/40 bg-destructive/10 px-1.5 py-0.5 text-[0.65rem] font-semibold tracking-wide uppercase text-foreground"
-											data-testid="activity-turn-error-badge"
-										>
-											Error
-										</span>
-									{/if}
-									<span
-										class="ml-auto font-mono text-xs text-muted-foreground"
-										aria-hidden="true"
-									>
-										{expanded ? '▾' : '▸'}
-									</span>
-								</button>
-								{#if expanded}
-									<div class="border-t border-border px-3 py-2">
-										<ul
-											class="m-0 flex list-none flex-col gap-1 p-0 text-xs"
-											data-testid="activity-events"
-										>
-											{#each turn.rows as row (row.key)}
-												{#if row.kind === 'timing'}
-													{@const ev = row.timing}
-													<li
-														class="grid grid-cols-[6ch_minmax(0,9rem)_minmax(0,7rem)_minmax(0,1fr)] items-baseline gap-x-3 gap-y-0.5"
-														data-testid="activity-event"
-														data-stage={ev.stage}
-													>
-														<time
-															class="font-mono text-muted-foreground"
-															title="Offset from session start"
-														>
-															{formatStartedAtMs(ev.started_at_ms)}
-														</time>
-														<span
-															class="font-medium text-foreground"
-															class:text-destructive={isErrorStage(ev.stage)}
-															class:text-warning={isInterruptStage(ev.stage)}
-														>
-															{stageLabel(ev.stage)}
-														</span>
-														<span class="font-mono text-foreground">
-															{formatTimingMs(ev.duration_ms)}
-														</span>
-														<span class="text-muted-foreground">
-															{#if ev.provider_name}
-																<span class="font-mono">{ev.provider_name}</span>
-																{#if detailSummary(ev)}
-																	<span class="mx-1" aria-hidden="true">·</span>
-																{/if}
-															{/if}
-															{#if detailSummary(ev)}
-																<span>{detailSummary(ev)}</span>
-															{/if}
-														</span>
-													</li>
-												{:else}
-													{@const ev = row.event}
-													<li
-														class="grid grid-cols-[6ch_minmax(0,9rem)_minmax(0,7rem)_minmax(0,1fr)] items-baseline gap-x-3 gap-y-0.5"
-														data-testid="activity-dynamics-event"
-														data-event-type={ev.event_type}
-													>
-														<time
-															class="font-mono text-muted-foreground"
-															title="Offset from session start"
-														>
-															{formatStartedAtMs(ev.timestamp_ms)}
-														</time>
-														<span
-															class="font-medium"
-															class:text-warning={ev.event_type === 'interruption_recorded'}
-															class:text-info={isFloorEvent(ev.event_type)}
-															class:text-foreground={ev.event_type !== 'interruption_recorded' && !isFloorEvent(ev.event_type)}
-														>
-															{conversationEventLabel(ev.event_type)}
-														</span>
-														<span class="font-mono text-foreground">
-															{formatTimingMs(ev.duration_ms)}
-														</span>
-														<span class="text-muted-foreground">
-															{conversationEventSummary(ev)}
-														</span>
-													</li>
-												{/if}
-											{/each}
-										</ul>
-									</div>
-								{/if}
-							</li>
-						{/each}
-					</ul>
-				{/if}
-			</div>
-		</Card.Root>
 	{/if}
 </Page>

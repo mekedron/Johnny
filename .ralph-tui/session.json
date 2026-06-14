@@ -3,10 +3,10 @@
   "sessionId": "5bcaf19f-aee2-42b2-868e-bbf4e2ae7192",
   "status": "running",
   "startedAt": "2026-06-13T22:55:12.465Z",
-  "updatedAt": "2026-06-14T00:07:03.735Z",
-  "currentIteration": 0,
+  "updatedAt": "2026-06-14T00:36:54.838Z",
+  "currentIteration": 1,
   "maxIterations": 0,
-  "tasksCompleted": 0,
+  "tasksCompleted": 1,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "opus",
@@ -152,7 +152,18 @@
       }
     ]
   },
-  "iterations": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "Johnny-etu.17",
+      "taskTitle": "[BUILD] Bot capability self-awareness — accurately states its real skills/tools",
+      "taskCompleted": true,
+      "durationMs": 2010879,
+      "startedAt": "2026-06-13T23:33:31.605Z",
+      "endedAt": "2026-06-14T00:07:02.484Z"
+    }
+  ],
   "skippedTaskIds": [],
   "cwd": "/Users/nikita/Projects/Johnny",
   "activeTaskIds": [],

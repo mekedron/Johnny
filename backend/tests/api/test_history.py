@@ -18,6 +18,8 @@ from app.db.models import (
     EMBEDDING_DIM,
     AgentDecision,
     AgentTask,
+    AgentTaskStatus,
+    AgentToolCall,
     AgentUtterance,
     BotMode,
     BotSession,
@@ -28,6 +30,8 @@ from app.db.models import (
     DecisionOutcome,
     GoogleAccount,
     MeetingConfig,
+    SessionTiming,
+    TerminalState,
     TranscriptChunk,
 )
 from app.main import app
@@ -52,6 +56,8 @@ def engine() -> sa.Engine:
             AgentDecision.__table__,  # type: ignore[list-item]
             AgentUtterance.__table__,  # type: ignore[list-item]
             AgentTask.__table__,  # type: ignore[list-item]
+            AgentToolCall.__table__,  # type: ignore[list-item]
+            SessionTiming.__table__,  # type: ignore[list-item]
             ConversationEvent.__table__,  # type: ignore[list-item]
         ],
     )
@@ -368,6 +374,127 @@ def test_get_history_detail_returns_full_lists(
     assert body["transcripts"][0]["text"] == "t-0"
 
 
+def test_get_history_detail_includes_full_observability(
+    client: TestClient, db_session: Session
+) -> None:
+    """The history detail serves the same per-call + pipeline observability
+    the live /sessions/{id} detail does (Johnny-etu.16): every model call's
+    full prompt + raw response, the delegated task + tool-call traces, the
+    per-stage timings, and the redis/pipeline (conversation) events — so the
+    history page can render the identical shared per-turn trace after the
+    session has ended."""
+    row = _seed_session(db_session, status=BotSessionStatus.ENDED)
+    # Router model call: full prompt context (input_window) + raw response.
+    decision = AgentDecision(
+        bot_session_id=row.id,
+        turn_id=1,
+        should_speak=True,
+        confidence=0.92,
+        reason="participant asked the bot to check the calendar",
+        reply_type="answer",
+        suggested_reply="Sure, checking now.",
+        decision_recommended_text="Sure, checking now.",
+        final_text="Sure, checking now.",
+        terminal_state=TerminalState.REPLIED,
+        outcome=DecisionOutcome.SPOKEN,
+        input_window={
+            "transcript_window": [
+                {"text": "what's on my calendar?", "is_current": True}
+            ],
+            "mode": "autonomous",
+        },
+        raw_output={"action": "delegate", "finish_reason": "stop"},
+    )
+    db_session.add(decision)
+    db_session.flush()
+    # Answer model call: full serialised prompt + spoken text.
+    db_session.add(
+        AgentUtterance(
+            bot_session_id=row.id,
+            agent_decision_id=decision.id,
+            mode=BotMode.AUTONOMOUS,
+            prompt='[{"role": "system", "content": "You are Johnny."}]',
+            output_text="Sure, checking now.",
+        )
+    )
+    # Delegated task + the tool-call trace it ran.
+    task = AgentTask(
+        bot_session_id=row.id,
+        agent_decision_id=decision.id,
+        turn_id=1,
+        kind="google-calendar",
+        request_json={"kind": "google-calendar", "args": {}},
+        status=AgentTaskStatus.DONE,
+        ack_text="Sure, checking now.",
+        result_text="You have one event today.",
+    )
+    db_session.add(task)
+    db_session.flush()
+    db_session.add(
+        AgentToolCall(
+            bot_session_id=row.id,
+            agent_task_id=task.id,
+            turn_id=1,
+            tool_name="sandbox.exec",
+            kind="google-calendar",
+            phase="run",
+            request_json={"argv": ["gog", "calendar", "list"]},
+            ok=True,
+            exit_code=0,
+            stdout="1 event",
+            stderr="",
+        )
+    )
+    # Per-stage timing (carries the model + TTFT in details) + a redis/pipeline
+    # event (an interruption) — both shown in the activity log.
+    db_session.add(
+        SessionTiming(
+            bot_session_id=row.id,
+            turn_id=1,
+            stage="answer_llm",
+            started_at_ms=1200,
+            duration_ms=340,
+            provider_name="Ollama",
+            details={"model": "llama3.2:3b", "time_to_first_token_ms": 110},
+        )
+    )
+    db_session.add(
+        ConversationEvent(
+            bot_session_id=row.id,
+            event_type="interruption_recorded",
+            timestamp_ms=1500,
+            turn_id=1,
+            reason="user_over_bot",
+            duration_ms=80,
+            details={"speech_kind": "reply"},
+        )
+    )
+    db_session.commit()
+
+    body = client.get(f"/history/sessions/{row.id}").json()
+
+    # Router call: full prompt context + raw response are present + drillable.
+    assert body["decisions"][0]["input_window"]["mode"] == "autonomous"
+    assert body["decisions"][0]["raw_output"]["action"] == "delegate"
+    # Answer call: full serialised prompt + spoken text.
+    assert "You are Johnny" in body["utterances"][0]["prompt"]
+    assert body["utterances"][0]["output_text"] == "Sure, checking now."
+    # Delegated work: task + tool-call trace.
+    assert body["tasks"][0]["kind"] == "google-calendar"
+    assert body["tasks"][0]["turn_id"] == 1
+    assert body["tool_calls"][0]["tool_name"] == "sandbox.exec"
+    assert body["tool_calls"][0]["request_json"]["argv"] == [
+        "gog",
+        "calendar",
+        "list",
+    ]
+    # Per-stage timing with model + TTFT, and the redis/pipeline event.
+    assert body["timings"][0]["stage"] == "answer_llm"
+    assert body["timings"][0]["details"]["model"] == "llama3.2:3b"
+    assert body["conversation_events"][0]["event_type"] == "interruption_recorded"
+    assert body["conversation_events"][0]["turn_id"] == 1
+
+
 # --- DELETE /history/sessions/{id} ----------------------------------------
 
 
@@ -438,6 +565,9 @@ def test_export_history_returns_json_attachment(
     body = json.loads(res.text)
     assert body["session"]["id"] == row.id
     assert body["transcripts"][0]["text"] == "hello"
+    # Johnny-etu.16: the export dump carries the full observability record.
+    for key in ("tasks", "tool_calls", "timings", "conversation_events"):
+        assert key in body
 
 
 # --- POST /history/transcripts/search -------------------------------------
