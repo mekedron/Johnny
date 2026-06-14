@@ -94,6 +94,11 @@ from johnny.agent.observability import (
     build_triage_timing_emitter,
 )
 from johnny.agent.router_gate import RouterGate, RouterGateConfig
+from johnny.agent.sandbox_tools import (
+    build_sandbox_tools,
+    resolve_sandbox_policy,
+    sandbox_full_access_enabled,
+)
 from johnny.agent.session import TOOL_USE_NOTES, JohnnyAgent, build_johnny_agent
 from johnny.agent.speech_floor import (
     DEFAULT_CLAIM_WINDOW_MS,
@@ -101,11 +106,6 @@ from johnny.agent.speech_floor import (
     RedisFloorBackend,
     SpeechFloor,
     session_relative_ms,
-)
-from johnny.agent.sandbox_tools import (
-    build_sandbox_tools,
-    resolve_sandbox_policy,
-    sandbox_full_access_enabled,
 )
 from johnny.agent.task_catalog import render_capability_notes
 from johnny.agent.tasks import TaskCoordinator, stub_executor
@@ -675,42 +675,31 @@ async def _build_skill_pieces(
 
 def _load_mcp_snapshots(
     config: SessionJobConfig,
-    db_session: Session | None,
 ) -> tuple[McpServerSnapshot, ...]:
     """The MCP servers' cached capability view for this session (Johnny-trt.36).
 
-    One small DB read per delegation-capable assembly: enabled ``mcp_servers``
-    rows → secretless configs + the last successful probe's tool list + the
-    latest probe verdict. Assembly NEVER connects to MCP servers — the probe
-    endpoint and the worker's lazy claim-time client own connections; a
-    server whose latest probe failed contributes its cached tools as
-    unavailable-with-reason entries (Johnny-trt.55) instead of vanishing.
+    Reads the agent's workspace's ``.johnny/.mcp.json`` (Johnny-hp1, no DB):
+    enabled servers → secretless configs + the last successful probe's cached
+    tool list + the latest probe verdict (from the sibling ``.mcp-state.json``).
+    Assembly NEVER connects to MCP servers — the probe endpoint and the
+    worker's lazy claim-time client own connections; a server whose latest
+    probe failed contributes its cached tools as unavailable-with-reason
+    entries (Johnny-trt.55) instead of vanishing.
 
-    Reads on the sinks' shared session (every delegation-capable assembly
-    has one — the one-connection-per-runtime contract stays intact), then
-    rolls the read transaction back so the otherwise-idle session is left
-    exactly as the sinks expect, even when the read failed mid-transaction.
-    Defensive like the skill loader: any failure degrades to no MCP entries,
-    never a broken assembly.
+    Workspace-keyed (Johnny-wks.8): the catalog promises exactly the agent's
+    workspace's MCP tools — the same set the worker resolves at claim time
+    via :func:`app.services.mcp_servers.slug_for_stamp`, the default/legacy
+    stamp resolving to the seeded default workspace's servers. Defensive like
+    the skill loader: any failure degrades to no MCP entries, never a broken
+    assembly.
     """
-    if db_session is None:
-        return ()
     try:
-        from app.services.mcp_servers import (
-            load_server_snapshots,
-            resolve_mcp_workspace_id,
-        )
+        from app.services.mcp_servers import slug_for_stamp
+        from johnny.mcp.store import load_server_snapshots
 
-        # Workspace-keyed (Johnny-wks.8): the catalog promises exactly the
-        # agent's workspace's MCP tools — the same set the worker resolves at
-        # claim time — the default/legacy stamp resolving to the seeded
-        # default workspace's servers.
-        workspace_id = resolve_mcp_workspace_id(
-            db_session,
-            workspace_id=config.workspace_id,
-            is_default=config.workspace_is_default,
+        snapshots = load_server_snapshots(
+            slug_for_stamp(config.workspace_id, config.workspace_slug)
         )
-        snapshots = load_server_snapshots(db_session, workspace_id=workspace_id)
     except Exception:
         logger.exception(
             "agent runtime: mcp server snapshot load failed for %s — "
@@ -718,11 +707,6 @@ def _load_mcp_snapshots(
             config.bot_session_id,
         )
         return ()
-    finally:
-        try:
-            db_session.rollback()
-        except Exception:  # noqa: BLE001 — a fake/closed session ends the read too
-            logger.debug("mcp snapshot read: rollback unavailable", exc_info=True)
     if snapshots:
         logger.info(
             "agent runtime: mcp catalog loaded for %s (%d server(s))",
@@ -927,14 +911,13 @@ async def build_agent_runtime(
     # and emits the policy_denied event naming the layer.
     capability_policy = config.capability_policy()
     # MCP-contributed tools (Johnny-trt.36): the third catalog source —
-    # cached probe results read from the DB (no connections at assembly),
-    # one entry per enabled server's filter-surviving tool, qualified as
+    # cached probe results read from the workspace's .johnny/.mcp.json
+    # (Johnny-hp1; no connections at assembly), one entry per enabled
+    # server's filter-surviving tool, qualified as
     # mcp__<server>__<tool>. Policy filtering below applies to them exactly
     # like skills (deny globs such as mcp__shady__* hide a whole server).
     mcp_snapshots = (
-        _load_mcp_snapshots(config, db_session)
-        if task_coordinator is not None
-        else ()
+        _load_mcp_snapshots(config) if task_coordinator is not None else ()
     )
     # Johnny-3ow cutover switch: when the answer agent will carry native
     # sandbox tools (full-access flag + a real sandbox), skill/MCP execution

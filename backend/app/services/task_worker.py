@@ -551,37 +551,27 @@ def resolve_skills_dir(claimed: ClaimedTask) -> str | None:
 
 
 def load_mcp_server_configs(claimed: ClaimedTask) -> tuple[McpServerConfig, ...]:
-    """Fresh MCP server configs for the claimed task's WORKSPACE (Johnny-wks.8).
+    """Fresh MCP server configs for the claimed task's WORKSPACE (Johnny-hp1).
 
-    The MCP twin of the per-claim policy resolution: never cached, so an
-    operator's enable/disable/filter edit bites the very next claimed task
-    without a worker restart. Scoped to the claim's workspace stamp (the wks.3
-    routing precedent — :func:`resolve_sandbox_url`/:func:`resolve_skills_dir`
-    have the sandbox/skills twins): the task sees exactly its workspace's MCP
-    set, the default/legacy stamp resolving to the seeded default workspace's
-    servers (byte-identical to the pre-wks.8 global set). Raises on a failed
-    read — the executor's config leg settles the task with could-not-verify
-    speech (fail closed), mirroring :meth:`TaskWorker._resolve_policy`.
+    The MCP twin of the per-claim policy resolution: read straight from the
+    workspace's ``.johnny/.mcp.json`` every claim (no cache, no DB), so an
+    operator's enable/disable/filter edit — or a hand-edit of the file — bites
+    the very next claimed task without a worker restart. Scoped to the claim's
+    workspace stamp (the wks.3 routing precedent — :func:`resolve_sandbox_url`
+    / :func:`resolve_skills_dir` have the sandbox/skills twins) via
+    :func:`app.services.mcp_servers.slug_for_stamp`: the task sees exactly its
+    workspace's MCP set, the default/legacy stamp resolving to the seeded
+    default workspace's servers. ``${VAR}`` env/header placeholders are
+    expanded from this worker process's environment at read time. Raises on a
+    failed read — the executor's config leg settles the task with
+    could-not-verify speech (fail closed).
     """
-    from app.db.session import SessionLocal
-    from app.security.crypto import get_crypto
-    from app.services.mcp_servers import load_server_configs, resolve_mcp_workspace_id
+    from app.services.mcp_servers import slug_for_stamp
+    from johnny.mcp.store import load_server_configs
 
-    db = SessionLocal()
-    try:
-        workspace_id = resolve_mcp_workspace_id(
-            db,
-            workspace_id=claimed.workspace_id,
-            is_default=claimed.workspace_is_default,
-        )
-        configs = load_server_configs(db, get_crypto(), workspace_id=workspace_id)
-        db.commit()
-        return configs
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
+    return load_server_configs(
+        slug_for_stamp(claimed.workspace_id, claimed.workspace_slug)
+    )
 
 
 @dataclass(slots=True)

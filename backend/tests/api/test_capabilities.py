@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session, sessionmaker
 import app.api.capabilities as capabilities_api
 from app.api.deps import get_session
 from app.db import Base
-from app.db.models import Agent, McpServer, Workspace
+from app.db.models import Agent, Workspace
 from app.main import app
 
 # --- fixtures -----------------------------------------------------------------
@@ -122,7 +122,9 @@ def finance_workspace(
     row = Workspace(name="Finance", slug="finance", is_default=False)
     db_session.add(row)
     db_session.commit()
-    _write_skill(tmp_path / "workspaces" / "finance" / "skills", "ledger", name="ledger")
+    _write_skill(
+        tmp_path / "workspaces" / "finance" / ".johnny" / "skills", "ledger", name="ledger"
+    )
     return row
 
 
@@ -199,24 +201,51 @@ def default_workspace(db_session: Session) -> Workspace:
     return row
 
 
-def _mcp_row(workspace_id: int, **overrides: Any) -> McpServer:
-    fields: dict[str, Any] = {
-        "workspace_id": workspace_id,
-        "name": "fixture",
-        "transport": "stdio",
-        "enabled": True,
-        "command": "python3",
-        "args": ["/opt/sandbox/mcp_fixture_server.py"],
-        "url": "",
-        "tools_cache": [
+def _write_mcp_server(
+    slug: str,
+    *,
+    name: str = "fixture",
+    enabled: bool = True,
+    tool_exclude: list[str] | None = None,
+    tools_cache: list[dict[str, str]] | None = None,
+    command: str = "python3",
+    args: list[str] | None = None,
+) -> None:
+    """Write one MCP server (+ its probed tool cache) to a workspace's
+    ``.johnny/.mcp.json`` — the file twin of the old ``_mcp_row`` DB insert
+    (Johnny-hp1). The store reads ``JOHNNY_WORKSPACES_DIR`` (set by the
+    ``skills_volume`` fixture), so this lands under the tmp workspaces root."""
+    from johnny.mcp import store
+
+    entry = store.serialize_entry(
+        transport="stdio",
+        enabled=enabled,
+        command=command,
+        args=args or ["/opt/sandbox/mcp_fixture_server.py"],
+        env={},
+        url="",
+        headers={},
+        tool_include=None,
+        tool_exclude=tool_exclude or [],
+        connect_timeout_s=10.0,
+        call_timeout_s=60.0,
+        idle_ttl_s=300.0,
+    )
+    servers = store.read_servers_raw(slug)
+    servers[name] = entry
+    store.write_servers_raw(slug, servers)
+    store.write_state(
+        slug,
+        name,
+        ok=True,
+        error="",
+        tools=tools_cache
+        if tools_cache is not None
+        else [
             {"name": "echo", "description": "Echo a message back."},
             {"name": "always-fail", "description": "Always errors."},
         ],
-        "last_probe_ok": True,
-        "last_probe_error": "",
-    }
-    fields.update(overrides)
-    return McpServer(**fields)
+    )
 
 
 def test_tools_merges_three_sources_with_policy(
@@ -225,10 +254,7 @@ def test_tools_merges_three_sources_with_policy(
     db_session: Session,
     default_workspace: Workspace,
 ) -> None:
-    db_session.add(
-        _mcp_row(default_workspace.id, tool_exclude=["always-fail"])
-    )
-    db_session.commit()
+    _write_mcp_server(default_workspace.slug, tool_exclude=["always-fail"])
 
     res = client.get("/capabilities/tools")
     assert res.status_code == 200, res.text
@@ -335,8 +361,7 @@ def test_toggle_mcp_kind_uses_cached_tools(
     db_session: Session,
     default_workspace: Workspace,
 ) -> None:
-    db_session.add(_mcp_row(default_workspace.id, enabled=False))
-    db_session.commit()
+    _write_mcp_server(default_workspace.slug, enabled=False)
 
     # Disabled server: its cached kinds are still toggle-addressable.
     res = client.post(
@@ -361,7 +386,7 @@ def test_skills_workspace_view_lists_only_its_own_packages(
     assert body["sandbox"] == f"workspace-{finance_workspace.id}"
     assert body["workspace_id"] == finance_workspace.id
     assert body["workspace_slug"] == "finance"
-    assert body["skills_dir"].endswith("workspaces/finance/skills")
+    assert body["skills_dir"].endswith("workspaces/finance/.johnny/skills")
     assert [s["kind"] for s in body["skills"]] == ["ledger"]
 
     default_body = client.get("/capabilities/skills").json()
@@ -410,9 +435,8 @@ def test_tools_mcp_catalog_is_workspace_scoped(
 ) -> None:
     """An MCP server on one workspace contributes its kind only to that
     workspace's catalog — two workspaces, two MCP sets (Johnny-wks.8)."""
-    db_session.add(_mcp_row(default_workspace.id, name="shared", tool_exclude=["always-fail"]))
-    db_session.add(_mcp_row(finance_workspace.id, name="ledgermcp", tool_exclude=["always-fail"]))
-    db_session.commit()
+    _write_mcp_server(default_workspace.slug, name="shared", tool_exclude=["always-fail"])
+    _write_mcp_server(finance_workspace.slug, name="ledgermcp", tool_exclude=["always-fail"])
     agent = Agent(name="FinanceBot", workspace_id=finance_workspace.id)
     db_session.add(agent)
     db_session.commit()
@@ -493,7 +517,7 @@ def test_install_into_a_workspace_lands_only_there(
     assert body["sandbox"] == f"workspace-{finance_workspace.id}"
     assert body["replaced"] is False
 
-    target = tmp_path / "workspaces" / "finance" / "skills" / "reports"
+    target = tmp_path / "workspaces" / "finance" / ".johnny" / "skills" / "reports"
     assert (target / "SKILL.md").is_file()
     assert (target / "lib" / "helper.py").is_file()
     # The executable flag landed on the script.

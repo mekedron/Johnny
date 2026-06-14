@@ -34,11 +34,13 @@
 	let servers = $state<McpServerRead[]>([]);
 	let loading = $state(false);
 	let errorMessage = $state<string | null>(null);
-	let probing = $state<Set<number>>(new Set());
-	let probeResults = $state<Record<number, McpProbeOut>>({});
-	let togglingIds = $state<Set<number>>(new Set());
-	let deleteArmedId = $state<number | null>(null);
-	let deletingIds = $state<Set<number>>(new Set());
+	// Keyed by server NAME (the per-workspace identity now that the store is a
+	// `.johnny/.mcp.json` file — Johnny-hp1), not a surrogate id.
+	let probing = $state<Set<string>>(new Set());
+	let probeResults = $state<Record<string, McpProbeOut>>({});
+	let togglingNames = $state<Set<string>>(new Set());
+	let deleteArmedName = $state<string | null>(null);
+	let deletingNames = $state<Set<string>>(new Set());
 
 	// --- add/edit form ----------------------------------------------------
 	let formOpen = $state(false);
@@ -190,7 +192,7 @@
 					payload.env = env.values;
 					payload.headers = headers.values;
 				}
-				await updateMcpServer(workspaceId, editing.id, payload);
+				await updateMcpServer(workspaceId, editing.name, payload);
 			}
 			closeForm();
 			await refresh();
@@ -202,54 +204,54 @@
 	}
 
 	async function probe(server: McpServerRead) {
-		probing = new Set([...probing, server.id]);
+		probing = new Set([...probing, server.name]);
 		errorMessage = null;
 		try {
-			probeResults = { ...probeResults, [server.id]: await probeMcpServer(workspaceId, server.id) };
+			probeResults = { ...probeResults, [server.name]: await probeMcpServer(workspaceId, server.name) };
 			await refresh();
 		} catch (err) {
 			errorMessage = err instanceof Error ? err.message : 'Probe failed';
 		} finally {
 			const next = new Set(probing);
-			next.delete(server.id);
+			next.delete(server.name);
 			probing = next;
 		}
 	}
 
 	async function toggleEnabled(server: McpServerRead) {
-		togglingIds = new Set([...togglingIds, server.id]);
+		togglingNames = new Set([...togglingNames, server.name]);
 		errorMessage = null;
 		try {
-			await updateMcpServer(workspaceId, server.id, { enabled: !server.enabled });
+			await updateMcpServer(workspaceId, server.name, { enabled: !server.enabled });
 			await refresh();
 		} catch (err) {
 			errorMessage = err instanceof Error ? err.message : 'Failed to toggle server';
 		} finally {
-			const next = new Set(togglingIds);
-			next.delete(server.id);
-			togglingIds = next;
+			const next = new Set(togglingNames);
+			next.delete(server.name);
+			togglingNames = next;
 		}
 	}
 
 	async function removeServer(server: McpServerRead) {
-		if (deleteArmedId !== server.id) {
-			deleteArmedId = server.id;
+		if (deleteArmedName !== server.name) {
+			deleteArmedName = server.name;
 			return;
 		}
-		deleteArmedId = null;
-		deletingIds = new Set([...deletingIds, server.id]);
+		deleteArmedName = null;
+		deletingNames = new Set([...deletingNames, server.name]);
 		try {
-			await deleteMcpServer(workspaceId, server.id);
+			await deleteMcpServer(workspaceId, server.name);
 			const remainingResults = { ...probeResults };
-			delete remainingResults[server.id];
+			delete remainingResults[server.name];
 			probeResults = remainingResults;
 			await refresh();
 		} catch (err) {
 			errorMessage = err instanceof Error ? err.message : 'Failed to delete server';
 		} finally {
-			const next = new Set(deletingIds);
-			next.delete(server.id);
-			deletingIds = next;
+			const next = new Set(deletingNames);
+			next.delete(server.name);
+			deletingNames = next;
 		}
 	}
 
@@ -475,9 +477,9 @@
 	{/if}
 
 	<ul class="m-0 flex list-none flex-col gap-3 p-0">
-		{#each servers as server (server.id)}
+		{#each servers as server (server.name)}
 			{@const state = probeState(server)}
-			{@const liveProbe = probeResults[server.id]}
+			{@const liveProbe = probeResults[server.name]}
 			<li
 				class="border-border bg-card rounded-lg border p-4"
 				data-testid="mcp-server-{server.name}"
@@ -512,21 +514,21 @@
 							variant="outline"
 							size="sm"
 							class="h-7 px-2 text-xs"
-							disabled={probing.has(server.id)}
+							disabled={probing.has(server.name)}
 							onclick={() => void probe(server)}
 							data-testid="mcp-server-{server.name}-probe-btn"
 						>
-							{probing.has(server.id) ? 'Probing…' : 'Probe'}
+							{probing.has(server.name) ? 'Probing…' : 'Probe'}
 						</Button>
 						<Button
 							variant="outline"
 							size="sm"
 							class="h-7 px-2 text-xs"
-							disabled={togglingIds.has(server.id)}
+							disabled={togglingNames.has(server.name)}
 							onclick={() => void toggleEnabled(server)}
 							data-testid="mcp-server-{server.name}-toggle"
 						>
-							{togglingIds.has(server.id) ? '…' : server.enabled ? 'Disable' : 'Enable'}
+							{togglingNames.has(server.name) ? '…' : server.enabled ? 'Disable' : 'Enable'}
 						</Button>
 						<Button
 							variant="ghost"
@@ -541,13 +543,13 @@
 							variant="ghost"
 							size="sm"
 							class="text-destructive hover:bg-destructive/10 hover:text-destructive h-7 px-2 text-xs"
-							disabled={deletingIds.has(server.id)}
+							disabled={deletingNames.has(server.name)}
 							onclick={() => void removeServer(server)}
 							data-testid="mcp-server-{server.name}-delete"
 						>
-							{deletingIds.has(server.id)
+							{deletingNames.has(server.name)
 								? '…'
-								: deleteArmedId === server.id
+								: deleteArmedName === server.name
 									? 'Really delete?'
 									: 'Delete'}
 						</Button>

@@ -60,6 +60,7 @@ from johnny.skills.sandbox import (  # noqa: E402
     DEFAULT_SANDBOX_URL,
     SANDBOX_URL_ENV,
     SKILLS_DIR_ENV,
+    WORKSPACES_DIR_ENV,
 )
 
 
@@ -67,15 +68,20 @@ from johnny.skills.sandbox import (  # noqa: E402
 def _isolated_skills_volume(
     monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
-    """Point the skill loader at an empty tmp volume (Johnny-trt.23).
+    """Point the skill loader AND the MCP store at empty tmp volumes.
 
-    These tests run inside the api container, where ``JOHNNY_SKILLS_DIR``
-    targets the real operator volume — a delegation-capable assembly would
-    otherwise load whatever skills the host happens to have (and probe the
-    live sandbox). An empty dir keeps the default path deterministic: zero
-    skills, zero sandbox round-trips.
+    These tests run inside the api container, where ``JOHNNY_SKILLS_DIR`` /
+    ``JOHNNY_WORKSPACES_DIR`` target the real operator volumes — a
+    delegation-capable assembly would otherwise load whatever skills the host
+    happens to have (and probe the live sandbox) AND read the real default
+    workspace's ``.johnny/.mcp.json`` (Johnny-hp1: the MCP snapshot read is
+    file-based now, not a fake DB session). Empty dirs keep the default path
+    deterministic: zero skills, zero MCP servers, zero sandbox round-trips.
+    Tests that want specific skills/MCP set these env vars themselves (their
+    body runs after this fixture, so their setenv wins).
     """
     monkeypatch.setenv(SKILLS_DIR_ENV, str(tmp_path_factory.mktemp("skills")))
+    monkeypatch.setenv(WORKSPACES_DIR_ENV, str(tmp_path_factory.mktemp("workspaces")))
 
 
 # --- Fakes (mirror tests/agent/test_job_runtime.py) -------------------------
@@ -648,16 +654,21 @@ async def test_meet_backed_runtime_advertises_meeting_leave() -> None:
     assert db.closed is True
 
 
-async def test_delegation_capable_runtime_catalogs_mcp_tools() -> None:
+async def test_delegation_capable_runtime_catalogs_mcp_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The third catalog source (Johnny-trt.36): enabled MCP servers' cached
     probe results become mcp__<server>__<tool> entries (filters applied,
-    probe-failed servers unavailable-with-reason) and join executor_kinds —
-    all read on the sinks' shared session, no second factory call."""
+    probe-failed servers unavailable-with-reason) and join executor_kinds.
+    Read straight from the workspace's .johnny/.mcp.json (Johnny-hp1, no DB),
+    so assembly never spends a second factory session on MCP."""
     import sqlalchemy as sa
     from sqlalchemy.orm import sessionmaker
 
     from app.db import Base
-    from app.db.models import McpServer, Workspace
+    from johnny.mcp import store
+
+    monkeypatch.setenv("JOHNNY_WORKSPACES_DIR", str(tmp_path))
 
     engine = sa.create_engine(
         "sqlite:///:memory:",
@@ -666,52 +677,65 @@ async def test_delegation_capable_runtime_catalogs_mcp_tools() -> None:
     )
     Base.metadata.create_all(bind=engine)
     maker = sessionmaker(bind=engine)
-    seed = maker()
-    # Per-workspace MCP (Johnny-wks.8): the servers attach to the seeded
-    # default workspace — the legacy/default session stamp _job carries
-    # resolves there, so assembly promises exactly this set.
-    default_ws = Workspace(name="Default", slug="default", is_default=True)
-    seed.add(default_ws)
-    seed.flush()
-    ws_id = int(default_ws.id)
-    seed.add(
-        McpServer(
-            workspace_id=ws_id,
-            name="fixture",
-            transport="stdio",
-            command="python3",
-            tools_cache=[
-                {"name": "echo", "description": "Echo a message."},
-                {"name": "add", "description": "Add two numbers."},
-            ],
-            tool_exclude=["add"],
-            last_probe_ok=True,
+
+    # MCP servers now live in the workspace's .johnny/.mcp.json keyed by slug
+    # (Johnny-hp1); the _job stamp carries no workspace_id, so it resolves to
+    # the default workspace's file. Probe verdicts + tool cache live alongside.
+    def _entry(
+        transport: str,
+        *,
+        enabled: bool = True,
+        command: str = "",
+        url: str = "",
+        tool_exclude: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return store.serialize_entry(
+            transport=transport,
+            enabled=enabled,
+            command=command,
+            args=[],
+            env={},
+            url=url,
+            headers={},
+            tool_include=None,
+            tool_exclude=tool_exclude or [],
+            connect_timeout_s=10.0,
+            call_timeout_s=60.0,
+            idle_ttl_s=300.0,
         )
+
+    store.write_servers_raw(
+        "default",
+        {
+            "fixture": _entry("stdio", command="python3", tool_exclude=["add"]),
+            "downed": _entry("http", url="https://down.test/mcp"),
+            "off": _entry("stdio", enabled=False, command="python3"),
+        },
     )
-    seed.add(
-        McpServer(
-            workspace_id=ws_id,
-            name="downed",
-            transport="http",
-            url="https://down.test/mcp",
-            tools_cache=[{"name": "search", "description": "Search things."}],
-            last_probe_ok=False,
-            last_probe_error="connect refused",
-        )
+    store.write_state(
+        "default",
+        "fixture",
+        ok=True,
+        error="",
+        tools=[
+            {"name": "echo", "description": "Echo a message."},
+            {"name": "add", "description": "Add two numbers."},
+        ],
     )
-    seed.add(
-        McpServer(
-            workspace_id=ws_id,
-            name="off",
-            transport="stdio",
-            command="python3",
-            enabled=False,
-            tools_cache=[{"name": "ghost", "description": "Never appears."}],
-            last_probe_ok=True,
-        )
+    store.write_state(
+        "default",
+        "downed",
+        ok=False,
+        error="connect refused",
+        tools=[{"name": "search", "description": "Search things."}],
     )
-    seed.commit()
-    seed.close()
+    store.write_state(
+        "default",
+        "off",
+        ok=True,
+        error="",
+        tools=[{"name": "ghost", "description": "Never appears."}],
+    )
 
     sessions: list[Any] = []
 
@@ -725,7 +749,7 @@ async def test_delegation_capable_runtime_catalogs_mcp_tools() -> None:
         registry=_registry(),
         db_session_factory=factory,
     )
-    assert len(sessions) == 1  # the MCP read rode the sinks' session
+    assert len(sessions) == 1  # the sinks' session; MCP reads the file, not the DB
     catalog = {entry.kind: entry for entry in runtime.gate._config.task_catalog}
     # Filter-surviving tool from the healthy server: available.
     assert catalog["mcp__fixture__echo"].available
@@ -815,7 +839,7 @@ def test_session_skills_dir_resolver_keys_by_workspace(
             "workspace": {"id": 1, "name": "Default", "slug": "default", "is_default": True},
         },
     )
-    assert resolve_session_skills_dir(default_stamped) == "/ws-root/default/skills"
+    assert resolve_session_skills_dir(default_stamped) == "/ws-root/default/.johnny/skills"
     finance = _job(
         mode=AUTONOMOUS_MODE,
         agent_snapshot={
@@ -823,7 +847,7 @@ def test_session_skills_dir_resolver_keys_by_workspace(
             "workspace": {"id": 7, "name": "Finance", "slug": "finance", "is_default": False},
         },
     )
-    assert resolve_session_skills_dir(finance) == "/ws-root/finance/skills"
+    assert resolve_session_skills_dir(finance) == "/ws-root/finance/.johnny/skills"
     slugless = _job(
         mode=AUTONOMOUS_MODE,
         agent_snapshot={"workspace_id": 9, "workspace": {"id": 9, "is_default": False}},
@@ -870,7 +894,7 @@ async def test_assembly_catalog_derives_from_the_agents_workspace(
     shared = tmp_path / "shared-skills"
     shared.mkdir()
     _write_skill(shared, "sharedskill")
-    _write_skill(tmp_path / "workspaces" / "finance" / "skills", "financeskill")
+    _write_skill(tmp_path / "workspaces" / "finance" / ".johnny" / "skills", "financeskill")
     monkeypatch.setenv("JOHNNY_SKILLS_DIR", str(shared))
     monkeypatch.setenv("JOHNNY_WORKSPACES_DIR", str(tmp_path / "workspaces"))
 

@@ -83,8 +83,8 @@ def skills_dir_from_env() -> str:
 
 # --- Per-workspace skill packages (Johnny-wks.3) ------------------------------
 # A NON-DEFAULT workspace's skills live in its OWN host directory
-# (~/.johnny/workspaces/<slug>/skills — the epic's storage convention),
-# mounted read-only at /skills inside that workspace's container. The same
+# (~/.johnny/workspaces/<slug>/.johnny/skills — the storage convention,
+# Johnny-hp1), mounted read-only at /skills inside that workspace's container. The same
 # package therefore works unchanged in any workspace: a SKILL.md argv like
 # ``bash /skills/<name>/run.sh`` resolves against whichever skills dir the
 # executing container mounts. api/worker (discovery + the install flow) see
@@ -94,7 +94,12 @@ def skills_dir_from_env() -> str:
 # byte-identical.
 WORKSPACES_DIR_ENV = "JOHNNY_WORKSPACES_DIR"
 DEFAULT_WORKSPACES_DIR = "/workspaces"
-WORKSPACE_SKILLS_SUBDIR = "skills"
+# A single ``.johnny/`` dir under each workspace root holds all Johnny-managed
+# per-workspace state: skill packages (``.johnny/skills``) and the MCP server
+# config (``.johnny/.mcp.json``, Johnny-hp1). Skills moved here from the bare
+# ``skills`` subdir so the workspace root carries one Johnny-owned folder.
+WORKSPACE_DOTJOHNNY_SUBDIR = ".johnny"
+WORKSPACE_SKILLS_SUBDIR = f"{WORKSPACE_DOTJOHNNY_SUBDIR}/skills"
 
 
 def workspaces_dir_from_env() -> str:
@@ -115,6 +120,21 @@ def workspace_skills_dir(slug: str) -> str:
     Inside the workspace's own container this directory is ``/skills``.
     """
     return f"{workspaces_dir_from_env()}/{slug}/{WORKSPACE_SKILLS_SUBDIR}"
+
+
+def workspace_mcp_config_path(slug: str) -> str:
+    """The per-workspace MCP server config file (Johnny-hp1).
+
+    A FastMCP ``mcpServers`` JSON file beside the workspace's skills under
+    ``.johnny/`` — ``~/.johnny/workspaces/<slug>/.johnny/.mcp.json`` on the
+    host, reachable by api/worker through the same ``/workspaces`` mount that
+    serves discovery. Slug-keyed for the same continuity reason as
+    :func:`workspace_skills_dir`: renames never re-key a workspace's servers.
+    This file is the SOURCE OF TRUTH for MCP servers (no DB table anymore).
+    """
+    return (
+        f"{workspaces_dir_from_env()}/{slug}/{WORKSPACE_DOTJOHNNY_SUBDIR}/.mcp.json"
+    )
 
 
 # --- Per-workspace gog state (Johnny-wks.4) ------------------------------------
@@ -329,6 +349,7 @@ __all__ = [
     "SKILLS_DIR_ENV",
     "WORKSPACES_DIR_ENV",
     "WORKSPACE_CONTAINER_PREFIX",
+    "WORKSPACE_DOTJOHNNY_SUBDIR",
     "WORKSPACE_GOG_SUBDIR",
     "WORKSPACE_SANDBOX_PORT",
     "WORKSPACE_SKILLS_SUBDIR",
@@ -342,6 +363,7 @@ __all__ = [
     "skills_dir_from_env",
     "workspace_container_name",
     "workspace_gog_dir",
+    "workspace_mcp_config_path",
     "workspace_skills_dir",
     "workspaces_dir_from_env",
 ]

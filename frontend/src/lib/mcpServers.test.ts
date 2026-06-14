@@ -11,7 +11,6 @@ import {
 
 function server(overrides: Partial<McpServerRead>): McpServerRead {
 	return {
-		id: 1,
 		workspace_id: 1,
 		name: 'fixture',
 		transport: 'stdio',
@@ -31,8 +30,6 @@ function server(overrides: Partial<McpServerRead>): McpServerRead {
 		last_probe_at: null,
 		last_probe_ok: null,
 		last_probe_error: '',
-		created_at: '2026-06-12T00:00:00Z',
-		updated_at: '2026-06-12T00:00:00Z',
 		...overrides
 	};
 }

@@ -1,0 +1,58 @@
+{
+  "mcpServers": {
+    "n8n-mcp": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/opt/sandbox/n8n/n8n-mcp-launcher.mjs"],
+      "env": {
+        "MCP_MODE": "stdio",
+        "LOG_LEVEL": "error",
+        "DISABLE_CONSOLE_OUTPUT": "true",
+        "N8N_API_URL": "http://127.0.0.1:5680",
+        "N8N_API_KEY": "${N8N_API_KEY}",
+        "WEBHOOK_SECURITY_MODE": "moderate",
+        "N8N_CF_UPSTREAM": "https://n8n.timetravels.com",
+        "N8N_CF_LISTEN_PORT": "5680",
+        "CF_ACCESS_CLIENT_ID": "${CF_ACCESS_CLIENT_ID}",
+        "CF_ACCESS_CLIENT_SECRET": "${CF_ACCESS_CLIENT_SECRET}"
+      },
+      "johnny": {
+        "enabled": true,
+        "tool_include": null,
+        "tool_exclude": [],
+        "connect_timeout_s": 30.0,
+        "call_timeout_s": 120.0,
+        "idle_ttl_s": 300.0
+      }
+    },
+    "mcp-metabase-server": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://mcp-metabase.timetravels.com/sse",
+        "--header",
+        "CF-Access-Client-Id:${CF_ACCESS_CLIENT_ID}",
+        "--header",
+        "CF-Access-Client-Secret:${CF_ACCESS_CLIENT_SECRET}",
+        "--header",
+        "X-Metabase-Api-Key:${METABASE_API_KEY}",
+        "--header",
+        "X-API-KEY:${METABASE_API_KEY}",
+        "--debug"
+      ],
+      "env": {
+        "METABASE_URL": "${METABASE_URL}",
+        "METABASE_API_KEY": "${METABASE_API_KEY}"
+      },
+      "johnny": {
+        "enabled": true,
+        "tool_include": null,
+        "tool_exclude": [],
+        "connect_timeout_s": 45.0,
+        "call_timeout_s": 120.0,
+        "idle_ttl_s": 300.0
+      }
+    }
+  }
+}

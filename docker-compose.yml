@@ -13,6 +13,20 @@ x-backend-env: &backend-env
   GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
   DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
   ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+  # MCP connector secrets (Johnny-hp1): the stdio servers seeded into the
+  # default workspace reference these as ${VAR} placeholders in their
+  # .johnny/.mcp.json env AND args (e.g. mcp-remote's --header flags). The
+  # config builder (api on probe, worker on exec) expands them from THIS
+  # process's env and hands the resolved values to the sandbox stdio bridge —
+  # the sandbox container itself needs nothing. Resolve from 1Password at
+  # launch: `op run --env-file=.env -- ./run.sh`.
+  # n8n connector + the shared Cloudflare Access service token (n8n + metabase):
+  N8N_API_KEY: ${N8N_API_KEY:-}
+  CF_ACCESS_CLIENT_ID: ${CF_ACCESS_CLIENT_ID:-}
+  CF_ACCESS_CLIENT_SECRET: ${CF_ACCESS_CLIENT_SECRET:-}
+  # metabase connector (mcp-remote → mcp-metabase.timetravels.com):
+  METABASE_URL: ${METABASE_URL:-}
+  METABASE_API_KEY: ${METABASE_API_KEY:-}
   JOHNNY_CALENDAR_POLL_INTERVAL_SECONDS: ${JOHNNY_CALENDAR_POLL_INTERVAL_SECONDS:-300}
   JOHNNY_PROVIDERS_FILE: ${JOHNNY_PROVIDERS_FILE:-/config/providers.json}
   JOHNNY_PROVIDERS_SEED_MODE: ${JOHNNY_PROVIDERS_SEED_MODE:-insert-only}

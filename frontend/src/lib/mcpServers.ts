@@ -70,8 +70,8 @@ export interface McpToolRead {
 }
 
 export interface McpServerRead {
-	id: number;
-	/** The workspace that owns this server (Johnny-wks.8). */
+	/** The workspace that owns this server (Johnny-wks.8). Identity is `name`
+	 * now that the store is a per-workspace `.johnny/.mcp.json` file (Johnny-hp1). */
 	workspace_id: number;
 	name: string;
 	transport: McpTransport;
@@ -92,8 +92,6 @@ export interface McpServerRead {
 	last_probe_at: string | null;
 	last_probe_ok: boolean | null;
 	last_probe_error: string;
-	created_at: string;
-	updated_at: string;
 }
 
 export interface McpServerCreate {
@@ -159,21 +157,25 @@ export function createMcpServer(
 
 export function updateMcpServer(
 	workspaceId: number,
-	id: number,
+	name: string,
 	payload: McpServerUpdate
 ): Promise<McpServerRead> {
-	return request<McpServerRead>(`${base(workspaceId)}/${id}`, {
+	return request<McpServerRead>(`${base(workspaceId)}/${encodeURIComponent(name)}`, {
 		method: 'PATCH',
 		body: JSON.stringify(payload)
 	});
 }
 
-export function deleteMcpServer(workspaceId: number, id: number): Promise<void> {
-	return request<void>(`${base(workspaceId)}/${id}`, { method: 'DELETE' });
+export function deleteMcpServer(workspaceId: number, name: string): Promise<void> {
+	return request<void>(`${base(workspaceId)}/${encodeURIComponent(name)}`, {
+		method: 'DELETE'
+	});
 }
 
-export function probeMcpServer(workspaceId: number, id: number): Promise<McpProbeOut> {
-	return request<McpProbeOut>(`${base(workspaceId)}/${id}/probe`, { method: 'POST' });
+export function probeMcpServer(workspaceId: number, name: string): Promise<McpProbeOut> {
+	return request<McpProbeOut>(`${base(workspaceId)}/${encodeURIComponent(name)}/probe`, {
+		method: 'POST'
+	});
 }
 
 // --- form plumbing -------------------------------------------------------------

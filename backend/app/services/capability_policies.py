@@ -68,7 +68,7 @@ def resolve_policy_workspace_id(
 ) -> int | None:
     """The concrete workspace id whose BASE policy layer applies (Johnny-wks.9).
 
-    The policy twin of :func:`app.services.mcp_servers.resolve_mcp_workspace_id`:
+    The policy twin of :func:`app.services.mcp_servers.resolve_mcp_slug`:
     a NON-default stamp owns its base layer by its own id; the DEFAULT
     workspace — and every legacy snapshot with no stamp (``workspace_id is
     None`` / ``is_default``) — resolves to the seeded default workspace's id,

@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.deps import get_session
 from app.db import Base
-from app.db.models import Agent, McpServer, Workspace
+from app.db.models import Agent, Workspace
 from app.main import app
 from app.services.workspaces import seed_default_workspace
 
@@ -217,30 +217,12 @@ def test_delete_with_attached_agents_409_then_succeeds_after_detach(
     assert client.get(f"/workspaces/{created['id']}").status_code == 404
 
 
-def test_delete_removes_the_workspace_mcp_servers(
-    client: TestClient, db_session: Session
-) -> None:
-    """A workspace owns its MCP servers (Johnny-wks.8): deleting it removes
-    them (the FK is ON DELETE CASCADE; the endpoint deletes them explicitly so
-    the behavior holds on SQLite too, which does not enforce FKs)."""
-    created = _create(client, "Finance")
-    db_session.add(
-        McpServer(
-            workspace_id=created["id"],
-            name="ledger",
-            transport="stdio",
-            command="python3",
-        )
-    )
-    db_session.flush()
-
-    resp = client.delete(f"/workspaces/{created['id']}")
-    assert resp.status_code == 204
-    # The owned server is gone — no orphan row left behind.
-    remaining = db_session.scalars(
-        sa.select(McpServer).where(McpServer.workspace_id == created["id"])
-    ).all()
-    assert remaining == []
+# MCP servers are no longer DB-backed (Johnny-hp1): a workspace's connectors
+# live in its ``.johnny/.mcp.json`` host file (scoped per slug — see
+# tests/mcp/test_store.py and tests/services/test_mcp_servers_service.py) and
+# follow that host dir's lifecycle, so there is no DB-cascade to assert on
+# delete anymore. The old test_delete_removes_the_workspace_mcp_servers was
+# removed with the table.
 
 
 # --- delete × container/volume teardown (Johnny-wks.2) -------------------------
