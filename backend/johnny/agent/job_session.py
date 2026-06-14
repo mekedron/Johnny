@@ -1021,6 +1021,11 @@ async def build_agent_runtime(
         # meeting talk never triggers an unasked skill run; the playground
         # (calendar_event_id is None) recovers dropped capability asks.
         meeting_backed=config.calendar_event_id is not None,
+        # Johnny-3gx: tell the gate the answer agent has native tools so it can
+        # drop a misrouted session-control delegate (a data request the
+        # internal-only router catalog forced onto meeting.leave/session.end) to
+        # SPEAK instead of declining or ending the session.
+        native_tools_active=native_tools_active,
     )
     gate = RouterGate(
         router_llm,

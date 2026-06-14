@@ -227,7 +227,15 @@ TOOL_USE_NOTES = (
     "mcp-metabase-server, not metabase). Actually CALL these tools — never just "
     "describe a call or write it out as text — and after loading a connector's "
     "tools, pick the single best one and call it instead of listing again. Answer "
-    "from what the connector actually returns."
+    "from what the connector actually returns.\n"
+    "When you are asked for actual data — a number, a total, a report, a status — "
+    "do NOT stop at listing things or promise to do it later, and do not ask which "
+    "item when you can find out yourself: drill all the way in and fetch the real "
+    "value. For a metabase question, that means chaining calls in the same turn — "
+    "find the relevant dashboard, get its cards/questions, run the one that holds "
+    "the metric (apply the date range the person asked for), and report the number "
+    "the tool returns. Keep calling tools until you have the real answer; only ask "
+    "the person when you genuinely cannot proceed without their input."
 )
 
 
@@ -405,10 +413,16 @@ def _speech_alt_duration_ms(alt: SpeechData | None) -> int | None:
     return round(span_s * 1000)
 
 
-MAX_TOOL_STEPS = 8
-"""Cap on native tool-loop steps per turn (Johnny-3ow). Above the openclaw
-discovery recipe's 3 steps (list_dir → read SKILL.md → exec) with headroom for
-a retry, below an unbounded loop a weak model could spin in."""
+MAX_TOOL_STEPS = 25
+"""Cap on native tool-loop steps per turn (Johnny-3ow, raised Johnny-3gx).
+
+8 was sized for the openclaw skill-discovery recipe (list_dir → read SKILL.md →
+exec). It is far too low for an agentic MCP data query, which legitimately chains
+``list_mcp_servers`` → ``list_mcp_tools`` → a discovery call → a fetch call → a
+query call (e.g. metabase: find dashboard → get cards → run the card) — easily
+6-12 steps before the model can report a real number. The old cap forced the
+model to give up and promise ("I'll query Metabase…") instead of delivering. 25
+leaves headroom for real multi-step work while still bounding a spinning loop."""
 
 
 def build_agent_session(

@@ -50,6 +50,7 @@ from johnny.agent.router_gate import (  # noqa: E402
     DECIDED_REPLY_MAX_CHARS,
     DEFAULT_DELEGATE_ACK,
     KEYWORD_DELEGATE_KEY,
+    MISROUTED_INTERNAL_KEY,
     ROUTER_DECISION_SCHEMA,
     ROUTER_DECISION_SCHEMA_NO_CATALOG,
     STATUS_REROUTE_KEY,
@@ -60,6 +61,10 @@ from johnny.agent.router_gate import (  # noqa: E402
     build_router_decision_schema,
     capability_decline_speech,
     delegate_failure_correction,
+)
+from johnny.agent.internal_tools import (  # noqa: E402
+    INTERNAL_TOOL_KINDS,
+    internal_catalog_entries,
 )
 from johnny.agent.speech_queue import (  # noqa: E402
     ItemState,
@@ -1798,6 +1803,99 @@ async def test_delegate_with_ack_carries_no_fallback_marker() -> None:
     decision, _turn = h.obs.decisions[0]
     assert decision.action == "delegate"
     assert ACK_FALLBACK_KEY not in decision.raw
+
+
+# --- native-mode misrouted internal delegate (Johnny-3gx) --------------------
+
+
+def _native_internal_config() -> RouterGateConfig:
+    """A native-tools gate: router catalog internal-only, answer agent carries the
+    MCP gateway + sandbox tools (the session-9/10 shape)."""
+    return RouterGateConfig(
+        task_catalog=internal_catalog_entries(meeting_backed=False),
+        executor_kinds=INTERNAL_TOOL_KINDS,
+        native_tools_active=True,
+    )
+
+
+async def test_native_data_request_misrouted_to_meeting_leave_degrades_to_speak() -> None:
+    """The session-10 bug: in native mode the router maps a data request onto
+    meeting.leave (the only kind it has) and the session declined. The guard drops
+    it to SPEAK so the answer model runs its MCP tools instead."""
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="meeting.leave", ack="Queueing a Metabase pull for sales…")],
+        config=_native_internal_config(),
+    )
+    msg = _user_msg("What were our total sales since January 2026?")
+
+    await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK — no raise
+
+    assert h.say.texts == []  # no canned decline spoken
+    assert h.sink.snapshot() == []  # never honored as a task
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "speak"
+    assert decision.task_request is None
+    marker = decision.raw[MISROUTED_INTERNAL_KEY]
+    assert marker["from_action"] == "delegate"
+    assert marker["to_action"] == "speak"
+    assert marker["kind"] == "meeting.leave"
+    json.dumps(marker)  # JSON-safe for the agent_decisions row
+
+
+async def test_native_data_request_misrouted_to_session_end_degrades_to_speak() -> None:
+    """The dangerous variant (session 9): a misroute to session.end (available)
+    used to END the session on a data question. The guard drops it to SPEAK."""
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="session.end", ack="Wrapping a sales pull…")],
+        config=_native_internal_config(),
+    )
+    msg = _user_msg("How many CO2 compensation sales did we have?")
+
+    await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK — no raise, no end
+
+    assert h.sink.snapshot() == []
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "speak"
+    assert decision.raw[MISROUTED_INTERNAL_KEY]["kind"] == "session.end"
+
+
+async def test_native_genuine_end_request_is_honored() -> None:
+    """A real 'end the session' command matches the keyword and is NOT degraded —
+    session control still works in native mode."""
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="session.end", ack="Sure — wrapping up.")],
+        config=_native_internal_config(),
+    )
+    try:
+        await h.gate.run_turn(
+            ChatContext.empty(), _user_msg("please end the session now")
+        )
+    except StopResponse:
+        pass  # honored delegate acks then raises, like any delegate
+
+    decision, _turn = h.obs.decisions[0]
+    assert MISROUTED_INTERNAL_KEY not in decision.raw
+    assert decision.action == "delegate"
+
+
+async def test_legacy_mode_leaves_internal_delegate_untouched() -> None:
+    """native_tools_active False (legacy keyword path) → the guard no-ops, so the
+    existing degrade chain handles the verdict unchanged (no new marker)."""
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="meeting.leave", ack="…")],
+        config=RouterGateConfig(
+            task_catalog=internal_catalog_entries(meeting_backed=False),
+            executor_kinds=INTERNAL_TOOL_KINDS,
+        ),
+    )
+    try:
+        await h.gate.run_turn(
+            ChatContext.empty(), _user_msg("what were our sales since january?")
+        )
+    except StopResponse:
+        pass
+    decision, _turn = h.obs.decisions[0]
+    assert MISROUTED_INTERNAL_KEY not in decision.raw
 
 
 # --- capability-gap backstop (Johnny-trt.55) ---------------------------------

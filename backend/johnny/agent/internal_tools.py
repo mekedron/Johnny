@@ -194,6 +194,29 @@ the skill-executor locality guard, and the catalog-shadow merge all follow
 from :data:`INTERNAL_TOOL_KINDS` / this tuple automatically."""
 
 
+def session_control_keyword_entries() -> tuple[TaskCatalogEntry, ...]:
+    """Internal kinds as catalog entries with keywords ALWAYS populated (Johnny-3gx).
+
+    The gate's native-mode misroute guard
+    (:meth:`~johnny.agent.router_gate.RouterGate._degrade_misrouted_internal_delegate`)
+    must detect end/leave intent in an utterance even where the kind is
+    *unavailable* — e.g. ``meeting.leave`` in a playground, whose normal catalog
+    entry carries no keywords (the catalog-assembly contract). These entries
+    ignore availability so :func:`~johnny.agent.complexity.matched_catalog_kinds`
+    can tell "the user actually asked to stop/leave" from "the small router
+    mis-mapped a data request onto a session-control kind".
+    """
+    return tuple(
+        TaskCatalogEntry(
+            kind=spec.kind,
+            one_liner=spec.one_liner,
+            keywords=spec.keywords,
+            internal=True,
+        )
+        for spec in INTERNAL_TOOLS
+    )
+
+
 def internal_catalog_entries(*, meeting_backed: bool) -> tuple[TaskCatalogEntry, ...]:
     """The internal kinds as this session's catalog entries, availability-scoped.
 

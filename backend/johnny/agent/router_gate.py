@@ -84,7 +84,10 @@ from johnny.agent.gate import (
     TurnLedger,
     run_gate,
 )
-from johnny.agent.internal_tools import is_internal_kind
+from johnny.agent.internal_tools import (
+    is_internal_kind,
+    session_control_keyword_entries,
+)
 from johnny.agent.interruptions import InterruptionMonitor
 from johnny.agent.observability import (
     RecordDecision,
@@ -383,6 +386,18 @@ surface is left alone (the trt.50 over-delegation guard — ambient meeting talk
 must not trigger an unasked skill run); empty-registry STATUS recovers on every
 surface."""
 
+MISROUTED_INTERNAL_KEY = "misrouted_internal"
+"""``decision.raw`` key marking a session-control delegate the gate degraded to
+SPEAK as a native-mode misroute (Johnny-3gx). In native-tools mode the router
+catalog is internal-only (meeting.leave / session.end), so the small router maps
+a data request ("total sales since January 2026") onto the only kinds it has and
+the session then declines or ENDS instead of answering. When the utterance shows
+no end/leave intent
+(:func:`~johnny.agent.complexity.matched_catalog_kinds` over the internal
+keywords), the delegate is dropped to SPEAK so the answer model handles it with
+its native tools. ``{from_action, to_action, kind, reason}``, the same ride-along
+shape as :data:`UNKNOWN_KIND_KEY`."""
+
 DECIDED_REPLY_MAX_CHARS = 48
 """Upper bound on a ``suggested_reply`` the gate will speak VERBATIM
 (Johnny-etu.14). The reported divergence is a SHORT acknowledgement the answer
@@ -574,6 +589,14 @@ class RouterGateConfig:
     # playground (direct commands to the bot) and the always-degenerate
     # empty-registry STATUS are safe to recover. Default False = playground.
     meeting_backed: bool = False
+    # Whether the answer agent carries the native tool surface (Johnny-3gx):
+    # sandbox tools + the MCP gateway. When True the router catalog is
+    # internal-only, so a delegate to a session-control kind that the utterance
+    # never asked for is a misroute the gate drops to SPEAK
+    # (:meth:`RouterGate._degrade_misrouted_internal_delegate`) — the answer
+    # model has the real tools to handle it. Default False = legacy keyword path,
+    # byte-identical (the guard no-ops).
+    native_tools_active: bool = False
 
 
 class RouterGate:
@@ -966,6 +989,9 @@ class RouterGate:
         # from delegate); every helper stashes its raw marker before the
         # emits below, so the timing row carries the *effective* action and
         # the decision row records the degrade.
+        decision = self._degrade_misrouted_internal_delegate(
+            decision, new_message, turn_id
+        )
         decision = self._degrade_unavailable_delegate(decision, turn_id)
         decision = self._degrade_unknown_kind_delegate(decision, turn_id)
         decision = self._degrade_ackless_delegate(decision, turn_id)
@@ -1323,6 +1349,54 @@ class RouterGate:
             "agent.router.gate: turn=%s delegate verdict for kind=%r carried no "
             "ack — degrading to SPEAK (Johnny-trt.53: a real answer beats a "
             "hollow promise)",
+            turn_id,
+            task_request.kind,
+        )
+        return replace(decision, action=SPEAK_ACTION, task_request=None)
+
+    def _degrade_misrouted_internal_delegate(
+        self, decision: RouterDecision, new_message: LKChatMessage, turn_id: str
+    ) -> RouterDecision:
+        """Drop a misrouted session-control delegate to SPEAK in native mode (Johnny-3gx).
+
+        In native-tools mode the router catalog is internal-only
+        (meeting.leave / session.end), so the small router maps a data request it
+        cannot delegate — "what were our total sales since January 2026?",
+        "how many CO2-compensation sales?" — onto the only kinds it has. The gate
+        then either declines (meeting.leave unavailable) or ENDS the session
+        (session.end), instead of letting the answer model run its real tools
+        (the user-reported "it just session-ends / declines"). The raw verdict
+        proves the misroute: ``{"kind": "meeting.leave", "ack": "I'm queueing a
+        Metabase pull to total sales…"}``.
+
+        Guard: only in native mode, only a delegate to an internal kind, and only
+        when the utterance carries NO end/leave intent (no internal-tool keyword
+        hit). A genuine "end the session" / "leave" / "wrap up" matches a keyword
+        and is honored unchanged, so real session control still works; everything
+        else falls through to SPEAK and the answer model handles it with the MCP
+        gateway + sandbox tools. ``should_speak`` stays True and ``task_request``
+        is cleared, exactly like :meth:`_degrade_unknown_kind_delegate`.
+        """
+        if not self._config.native_tools_active:
+            return decision
+        task_request = decision.task_request
+        if decision.action != DELEGATE_ACTION or task_request is None:
+            return decision
+        if not is_internal_kind(task_request.kind):
+            return decision
+        text = (new_message.text_content or "").strip()
+        if text and matched_catalog_kinds(text, session_control_keyword_entries()):
+            return decision  # the user really asked to end/leave — honor it
+        decision.raw[MISROUTED_INTERNAL_KEY] = {
+            "from_action": DELEGATE_ACTION,
+            "to_action": SPEAK_ACTION,
+            "kind": task_request.kind,
+            "reason": "session-control delegate with no end/leave intent (native-mode misroute)",
+        }
+        logger.warning(
+            "agent.router.gate: turn=%s delegate verdict targets session-control "
+            "kind=%r with no end/leave intent in the utterance — degrading to SPEAK "
+            "so the answer model handles it with its native tools (Johnny-3gx)",
             turn_id,
             task_request.kind,
         )
