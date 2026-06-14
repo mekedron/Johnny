@@ -53,6 +53,8 @@
 		getAgent,
 		providerOptionLabel,
 		repliesToText,
+		ROUTER_TIMEOUT_FALLBACK_MODE_HINT,
+		ROUTER_TIMEOUT_FALLBACK_MODES,
 		testAgentVoice,
 		textToReplies,
 		updateAgent,
@@ -609,6 +611,111 @@
 					(0 lets everything through, 1 keeps only the most certain).
 				</p>
 			</div>
+			<!-- Router-triage timeout + on-timeout fallback (Johnny-xql) -->
+			<div class="flex flex-col gap-1.5">
+				<label class="text-foreground text-xs font-medium" for="agent-router-timeout">
+					Router timeout
+					<span class="text-muted-foreground font-normal">— seconds</span>
+				</label>
+				<input
+					id="agent-router-timeout"
+					type="number"
+					min="0"
+					max="120"
+					step="0.5"
+					bind:value={draft.router_llm_timeout_s}
+					data-testid="behavior-router-timeout"
+					class={`${inputClass} max-w-[12rem]`}
+					aria-invalid={fieldErrors.router_llm_timeout_s !== undefined}
+				/>
+				{#if fieldErrors.router_llm_timeout_s}
+					<p class="text-destructive m-0 text-xs" data-testid="error-router-timeout">
+						{fieldErrors.router_llm_timeout_s}
+					</p>
+				{:else}
+					<p class="text-muted-foreground m-0 text-xs">
+						Wall-clock budget for the per-turn triage call. A triage slower than this is
+						treated as a timeout; <span class="font-mono">0</span> disables the bound.
+					</p>
+				{/if}
+			</div>
+			<div class="flex flex-col gap-1.5">
+				<label class="text-foreground text-xs font-medium" for="agent-router-retries">
+					Timeout retries
+				</label>
+				<input
+					id="agent-router-retries"
+					type="number"
+					min="0"
+					max="5"
+					step="1"
+					bind:value={draft.router_timeout_retries}
+					data-testid="behavior-router-retries"
+					class={`${inputClass} max-w-[12rem]`}
+					aria-invalid={fieldErrors.router_timeout_retries !== undefined}
+				/>
+				{#if fieldErrors.router_timeout_retries}
+					<p class="text-destructive m-0 text-xs" data-testid="error-router-retries">
+						{fieldErrors.router_timeout_retries}
+					</p>
+				{:else}
+					<p class="text-muted-foreground m-0 text-xs">
+						How many times to re-run the triage after a timeout before giving up (0 = a
+						single attempt). Each retry can add up to one more timeout of delay.
+					</p>
+				{/if}
+			</div>
+			<div class="flex flex-col gap-1.5">
+				<label class="text-foreground text-xs font-medium" for="agent-router-fallback-mode">
+					On-timeout fallback
+				</label>
+				<select
+					id="agent-router-fallback-mode"
+					class={inputClass}
+					bind:value={draft.router_timeout_fallback_mode}
+					data-testid="behavior-router-fallback-mode"
+				>
+					{#each ROUTER_TIMEOUT_FALLBACK_MODES as opt (opt.value)}
+						<option value={opt.value}>{opt.label}</option>
+					{/each}
+				</select>
+				<p
+					class="text-muted-foreground m-0 text-xs"
+					data-testid="behavior-router-fallback-hint"
+				>
+					{ROUTER_TIMEOUT_FALLBACK_MODE_HINT[draft.router_timeout_fallback_mode]}
+				</p>
+			</div>
+			{#if draft.router_timeout_fallback_mode !== 'disabled'}
+				<div class="flex flex-col gap-1.5">
+					<label
+						class="text-foreground text-xs font-medium"
+						for="agent-router-fallback-text"
+					>
+						Fallback line
+					</label>
+					<textarea
+						id="agent-router-fallback-text"
+						class={`${inputClass} min-h-16 resize-y text-xs leading-relaxed`}
+						bind:value={draft.router_timeout_fallback_text}
+						data-testid="behavior-router-fallback-text"
+						aria-invalid={fieldErrors.router_timeout_fallback_text !== undefined}
+					></textarea>
+					{#if fieldErrors.router_timeout_fallback_text}
+						<p
+							class="text-destructive m-0 text-xs"
+							data-testid="error-router-fallback-text"
+						>
+							{fieldErrors.router_timeout_fallback_text}
+						</p>
+					{:else}
+						<p class="text-muted-foreground m-0 text-xs">
+							Spoken when the triage times out. In “LLM-generated” mode this is the safety
+							net if the apology can't be produced in time.
+						</p>
+					{/if}
+				</div>
+			{/if}
 		</section>
 
 		<!-- ─── VOICE & BRAIN ────────────────────────────────────────────── -->

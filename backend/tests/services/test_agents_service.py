@@ -202,6 +202,14 @@ def test_snapshot_shape_and_values(db_session: Session) -> None:
         "mode": "limited_auto_speak",
         "allowed_replies": ["Yes.", "No."],
         "confidence_threshold": 0.85,
+        # Router-triage timeout + on-timeout fallback (Johnny-xql); _agent left
+        # these unset so they ride the model defaults.
+        "router_llm_timeout_s": 8.0,
+        "router_timeout_retries": 0,
+        "router_timeout_fallback_mode": "static",
+        "router_timeout_fallback_text": (
+            "Sorry, I didn't catch that in time — could you say that again?"
+        ),
         "providers": {
             "router_llm_provider_id": None,
             "answer_llm_provider_id": None,

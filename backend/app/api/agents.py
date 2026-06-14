@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -75,6 +75,16 @@ class AgentCreate(BaseModel):
     mode: BotMode = BotMode.LISTEN_ONLY
     allowed_replies: list[str] = Field(default_factory=list)
     confidence_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
+    # Router-triage timeout + on-timeout fallback (Johnny-xql). ``<= 0`` on the
+    # timeout disables the wall-clock bound; retries are clamped to a small
+    # ceiling so a turn can never freeze for minutes.
+    router_llm_timeout_s: float = Field(default=8.0, ge=0.0, le=120.0)
+    router_timeout_retries: int = Field(default=0, ge=0, le=5)
+    router_timeout_fallback_mode: Literal["disabled", "static", "llm"] = "static"
+    router_timeout_fallback_text: str = Field(
+        default="Sorry, I didn't catch that in time — could you say that again?",
+        max_length=500,
+    )
     router_llm_provider_id: int | None = None
     answer_llm_provider_id: int | None = None
     reasoning_llm_provider_id: int | None = None
@@ -112,6 +122,13 @@ class AgentUpdate(BaseModel):
     mode: BotMode | None = None
     allowed_replies: list[str] | None = None
     confidence_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    # Router-triage timeout + on-timeout fallback (Johnny-xql). Non-nullable
+    # columns: an explicit ``null`` is popped in ``update_agent`` (parity with
+    # confidence_threshold) so only a concrete value ever patches the row.
+    router_llm_timeout_s: float | None = Field(default=None, ge=0.0, le=120.0)
+    router_timeout_retries: int | None = Field(default=None, ge=0, le=5)
+    router_timeout_fallback_mode: Literal["disabled", "static", "llm"] | None = None
+    router_timeout_fallback_text: str | None = Field(default=None, max_length=500)
     router_llm_provider_id: int | None = None
     answer_llm_provider_id: int | None = None
     reasoning_llm_provider_id: int | None = None
@@ -145,6 +162,10 @@ class AgentRead(BaseModel):
     mode: BotMode
     allowed_replies: list[str]
     confidence_threshold: float
+    router_llm_timeout_s: float
+    router_timeout_retries: int
+    router_timeout_fallback_mode: str
+    router_timeout_fallback_text: str
     is_default: bool
     router_llm_provider_id: int | None
     answer_llm_provider_id: int | None
@@ -448,6 +469,16 @@ def update_agent(
         data.pop("mode", None)
     if data.get("confidence_threshold") is None:
         data.pop("confidence_threshold", None)
+    # Router-timeout fallback NOT NULL columns (Johnny-xql): an explicit null
+    # means "unchanged", same as confidence_threshold / mode above.
+    for _timeout_key in (
+        "router_llm_timeout_s",
+        "router_timeout_retries",
+        "router_timeout_fallback_mode",
+        "router_timeout_fallback_text",
+    ):
+        if data.get(_timeout_key) is None:
+            data.pop(_timeout_key, None)
     if data.get("name") is None:
         data.pop("name", None)
 

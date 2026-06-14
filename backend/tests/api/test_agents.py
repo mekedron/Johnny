@@ -92,6 +92,13 @@ def test_create_minimal_agent_defaults(client: TestClient) -> None:
     assert body["mode"] == "listen_only"
     assert body["allowed_replies"] == []
     assert body["confidence_threshold"] == 0.7
+    # Router-triage timeout + on-timeout fallback defaults (Johnny-xql).
+    assert body["router_llm_timeout_s"] == 8.0
+    assert body["router_timeout_retries"] == 0
+    assert body["router_timeout_fallback_mode"] == "static"
+    assert body["router_timeout_fallback_text"] == (
+        "Sorry, I didn't catch that in time — could you say that again?"
+    )
     assert body["is_default"] is False
     assert body["character_prompt"] == ""
     assert body["tts_options"] == {}
@@ -105,6 +112,66 @@ def test_create_minimal_agent_defaults(client: TestClient) -> None:
         "description",
     ):
         assert body[field] is None
+
+
+def test_router_timeout_fields_create_update_read_round_trip(
+    client: TestClient,
+) -> None:
+    """Johnny-xql: the four on-timeout knobs survive create → patch → read."""
+    created = client.post(
+        "/agents",
+        json=_create_payload(
+            router_llm_timeout_s=15.0,
+            router_timeout_retries=3,
+            router_timeout_fallback_mode="llm",
+            router_timeout_fallback_text="Hang on — please repeat?",
+        ),
+    )
+    assert created.status_code == 201
+    agent_id = created.json()["id"]
+    assert created.json()["router_timeout_fallback_mode"] == "llm"
+
+    patched = client.patch(
+        f"/agents/{agent_id}",
+        json={
+            "router_llm_timeout_s": 4.5,
+            "router_timeout_retries": 1,
+            "router_timeout_fallback_mode": "disabled",
+            "router_timeout_fallback_text": "Different line.",
+        },
+    )
+    assert patched.status_code == 200
+    body = patched.json()
+    assert body["router_llm_timeout_s"] == 4.5
+    assert body["router_timeout_retries"] == 1
+    assert body["router_timeout_fallback_mode"] == "disabled"
+    assert body["router_timeout_fallback_text"] == "Different line."
+
+    # A null on a NOT NULL knob means "unchanged" (parity with confidence).
+    untouched = client.patch(
+        f"/agents/{agent_id}", json={"router_timeout_fallback_mode": None}
+    )
+    assert untouched.status_code == 200
+    assert untouched.json()["router_timeout_fallback_mode"] == "disabled"
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"router_timeout_fallback_mode": "shout"},  # not in the enum
+        {"router_timeout_retries": 99},  # above the ceiling
+        {"router_timeout_retries": -1},  # below zero
+        {"router_llm_timeout_s": -2.0},  # below zero
+        {"router_llm_timeout_s": 999.0},  # above the cap
+    ],
+)
+def test_router_timeout_fields_reject_out_of_range(
+    client: TestClient, patch: dict[str, Any]
+) -> None:
+    created = client.post("/agents", json=_create_payload())
+    agent_id = created.json()["id"]
+    resp = client.patch(f"/agents/{agent_id}", json=patch)
+    assert resp.status_code == 422
 
 
 def test_create_duplicate_name_409(client: TestClient) -> None:

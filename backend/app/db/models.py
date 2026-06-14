@@ -413,6 +413,25 @@ class Agent(TimestampMixin, Base):
         _json_column(), nullable=False, default=list
     )
     confidence_threshold: Mapped[float] = mapped_column(Float, nullable=False, default=0.7)
+    # Router-triage timeout + on-timeout fallback (Johnny-xql). ``router_llm_timeout_s``
+    # is the wall-clock bound on the per-turn triage LLM call (mirrors
+    # ``voice_pipeline.reasoning.DEFAULT_ROUTER_LLM_TIMEOUT_S``); ``<= 0`` disables
+    # the bound. On timeout the gate re-runs the triage up to
+    # ``router_timeout_retries`` times, then applies ``router_timeout_fallback_mode``:
+    # ``disabled`` = stay silent (no_reply/stage_error, the pre-xql behavior),
+    # ``static`` = speak ``router_timeout_fallback_text`` verbatim,
+    # ``llm`` = generate a one-line apology (degrading to the static text).
+    # Sessions read these from ``bot_sessions.agent_snapshot`` captured at dispatch.
+    router_llm_timeout_s: Mapped[float] = mapped_column(Float, nullable=False, default=8.0)
+    router_timeout_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    router_timeout_fallback_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="static"
+    )
+    router_timeout_fallback_text: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="Sorry, I didn't catch that in time — could you say that again?",
+    )
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     router_llm_provider_id: Mapped[int | None] = mapped_column(
         ForeignKey("provider_credentials.id", ondelete="SET NULL"), nullable=True

@@ -92,6 +92,43 @@ Two regimes in one bound:
 
 A value ``<= 0`` disables the bound (the abandon race stays active).
 """
+DEFAULT_ROUTER_TIMEOUT_RETRIES = 0
+"""How many times the gate re-runs the triage LLM after a timeout before it
+gives up and applies the fallback (Johnny-xql).
+
+``0`` (the default) preserves the single-attempt behavior: one timeout goes
+straight to the fallback. A positive value re-runs the *whole* triage call
+(fresh prompt + fresh LLM request) up to this many extra times, each bounded
+by the same :data:`DEFAULT_ROUTER_LLM_TIMEOUT_S` budget — so the worst-case
+added latency is ``retries × timeout_s`` of silence before the user hears the
+fallback. Clamped to :data:`MAX_ROUTER_TIMEOUT_RETRIES` upstream (the agent
+schema + snapshot coercion) so a fat-fingered value can't freeze a turn for
+minutes. Retries fire on *timeout* only — a barge-in still abandons
+immediately and a provider error still terminates ``stage_error`` on the first
+attempt.
+"""
+MAX_ROUTER_TIMEOUT_RETRIES = 5
+"""Upper bound on :data:`DEFAULT_ROUTER_TIMEOUT_RETRIES` (at most ``1 + 5``
+triage attempts per turn), enforced by the agent schema and snapshot coercion."""
+DEFAULT_ROUTER_TIMEOUT_FALLBACK_MODE = "static"
+"""What the gate speaks when the triage times out after all retries (Johnny-xql).
+
+* ``"disabled"`` — stay silent; the turn terminates ``no_reply(stage_error)``
+  exactly like the pre-xql behavior.
+* ``"static"`` — speak :data:`DEFAULT_ROUTER_TIMEOUT_FALLBACK_TEXT` (or the
+  agent's configured text) verbatim through the out-of-band ``say()`` seam; the
+  turn resolves ``replied`` (spoken kind ``fallback``).
+* ``"llm"`` — generate a one-sentence apology with the router LLM under its own
+  short bound, degrading to the static text on any failure/timeout/empty, then
+  speak it the same way.
+"""
+ROUTER_TIMEOUT_FALLBACK_MODES = ("disabled", "static", "llm")
+"""The accepted :data:`DEFAULT_ROUTER_TIMEOUT_FALLBACK_MODE` values (validation)."""
+DEFAULT_ROUTER_TIMEOUT_FALLBACK_TEXT = (
+    "Sorry, I didn't catch that in time — could you say that again?"
+)
+"""Default spoken line for the ``static`` fallback (and the ``llm`` degrade
+target). Per-agent editable (Johnny-xql)."""
 DEFAULT_BARGE_IN_MIN_SPEECH_MS = 160
 """Confirmed speech duration that triggers a fast (VAD-driven) barge-in (Johnny-ze3).
 

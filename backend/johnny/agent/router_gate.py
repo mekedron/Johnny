@@ -80,6 +80,7 @@ from johnny.agent.complexity import SHADOW_KEY, matched_catalog_kinds, score_com
 from johnny.agent.gate import (
     GateAction,
     TerminalTracker,
+    TimeoutFallback,
     TurnLedger,
     run_gate,
 )
@@ -129,6 +130,9 @@ from johnny.voice_pipeline.reasoning import (
     DEFAULT_RATE_LIMIT_MAX_UTTERANCES,
     DEFAULT_RATE_LIMIT_WINDOW_MS,
     DEFAULT_ROUTER_LLM_TIMEOUT_S,
+    DEFAULT_ROUTER_TIMEOUT_FALLBACK_MODE,
+    DEFAULT_ROUTER_TIMEOUT_FALLBACK_TEXT,
+    DEFAULT_ROUTER_TIMEOUT_RETRIES,
     DELEGATE_ACTION,
     LISTEN_ONLY_MODE,
     SPEAK_ACTION,
@@ -535,6 +539,16 @@ class RouterGateConfig:
     rate_limit_max_utterances: int = DEFAULT_RATE_LIMIT_MAX_UTTERANCES
     rate_limit_window_ms: int = DEFAULT_RATE_LIMIT_WINDOW_MS
     router_llm_timeout_s: float = DEFAULT_ROUTER_LLM_TIMEOUT_S
+    # On-timeout behavior (Johnny-xql). After the triage exceeds
+    # ``router_llm_timeout_s``, re-run it up to ``router_timeout_retries`` times,
+    # then apply ``router_timeout_fallback_mode``: ``disabled`` stays silent
+    # (no_reply/stage_error, the pre-xql behavior), ``static`` speaks
+    # ``router_timeout_fallback_text`` verbatim, ``llm`` generates a one-line
+    # apology (degrading to that text). Defaults keep an unconfigured gate
+    # behaving like a single-attempt static fallback.
+    router_timeout_retries: int = DEFAULT_ROUTER_TIMEOUT_RETRIES
+    router_timeout_fallback_mode: str = DEFAULT_ROUTER_TIMEOUT_FALLBACK_MODE
+    router_timeout_fallback_text: str = DEFAULT_ROUTER_TIMEOUT_FALLBACK_TEXT
     approval_timeout_seconds: float = DEFAULT_APPROVAL_TIMEOUT_SECONDS
     # Delegatable task kinds rendered into the router prompt (Johnny-trt.19).
     # Empty = no catalog block at all (the prompt stays byte-identical to the
@@ -863,12 +877,18 @@ class RouterGate:
             lambda: self._decide(turn_ctx, new_message),
             tracker=tracker,
             timeout_s=self._config.router_llm_timeout_s,
+            retries=self._config.router_timeout_retries,
             abandon=self._abandon,
+            # On-timeout fallback (Johnny-xql): None in ``disabled`` mode so
+            # run_gate keeps the legacy stage_error terminal; otherwise the
+            # closure speaks the static / LLM line and owns the terminal.
+            on_timeout=self._timeout_fallback(tracker, turn_id),
         )
         triage_ended = time.time()
 
         if action is GateAction.STAY_SILENT:
-            # run_gate already emitted the terminal (stage_error / barge_in).
+            # run_gate (or the timeout fallback) already emitted the terminal
+            # (stage_error / barge_in / the spoken-fallback replied terminal).
             raise StopResponse()
         if decision is None:
             # Defensive: SPEAK always carries a decision. Account for the turn
@@ -2221,6 +2241,100 @@ class RouterGate:
             return
         if self._record_spoke is not None:
             await self._record_spoke(text, turn_id=None, kind="task_result")
+
+    def _timeout_fallback(
+        self, tracker: TerminalTracker, turn_id: str
+    ) -> TimeoutFallback | None:
+        """Build the on-timeout fallback for :func:`run_gate`, or ``None`` (Johnny-xql).
+
+        ``None`` in ``disabled`` mode (run_gate keeps the legacy
+        ``no_reply(stage_error)`` terminal — pre-xql behavior). In ``static`` /
+        ``llm`` mode returns an async callback that speaks the configured line
+        through the :meth:`_say_with_terminal` seam and emits the turn's own
+        ``replied`` terminal (spoken kind ``fallback``). The callback receives
+        run_gate's audit detail (the bound + attempt count) for the terminal
+        record. ``say()`` not attached / a peer holding the floor / ``say()``
+        raising all terminalize inside :meth:`_say_with_terminal`, so the turn
+        is always accounted exactly once.
+        """
+        mode = self._config.router_timeout_fallback_mode
+        if mode not in ("static", "llm"):
+            return None  # "disabled" (or an unknown value) → run_gate stage_error
+
+        async def _fallback(detail: str) -> None:
+            text = self._config.router_timeout_fallback_text.strip()
+            if mode == "llm":
+                generated = await self._generate_timeout_apology()
+                if generated:
+                    text = generated
+            if not text:
+                # Defensive: a cleared field + an empty/failed LLM apology must
+                # never speak an empty utterance.
+                text = DEFAULT_ROUTER_TIMEOUT_FALLBACK_TEXT
+            logger.warning(
+                "agent.router.gate: triage timed out for turn=%s — speaking %s "
+                "fallback (%s)",
+                turn_id,
+                mode,
+                detail,
+            )
+            await self._say_with_terminal(
+                tracker,
+                turn_id,
+                text,
+                kind="fallback",
+                replied_detail=f"spoke the router-timeout {mode} fallback — {detail}",
+                interrupted_detail=(
+                    "router-timeout fallback interrupted before completion"
+                ),
+            )
+
+        return _fallback
+
+    async def _generate_timeout_apology(self) -> str | None:
+        """Generate a one-sentence timeout apology via the router LLM (Johnny-xql).
+
+        Bounded by the same ``router_llm_timeout_s`` budget (a positive floor
+        when the bound is disabled) so it can never re-introduce the hang it is
+        apologizing for. ANY failure — its own timeout, a provider error, empty
+        output — returns ``None`` so the caller degrades to the static text.
+        """
+        timeout_s = self._config.router_llm_timeout_s
+        bound = (
+            timeout_s if timeout_s and timeout_s > 0 else DEFAULT_ROUTER_LLM_TIMEOUT_S
+        )
+        agent_name = self._config.agent_name or "the assistant"
+        messages = [
+            ChatMessage(
+                role="system",
+                content=(
+                    f"You are {agent_name}, a voice assistant. Your triage step "
+                    "just timed out, so you could not process the user's latest "
+                    "request. Reply with ONE short spoken sentence: briefly "
+                    "apologize and ask them to repeat the request. No preamble, "
+                    "no markdown — plain spoken text only."
+                ),
+            ),
+        ]
+        try:
+            response = await asyncio.wait_for(
+                self._router_llm.chat(messages), timeout=bound
+            )
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.warning(
+                "agent.router.gate: timeout-apology LLM call itself timed out "
+                "(%.1fs) — degrading to static text",
+                bound,
+            )
+            return None
+        except Exception:
+            logger.exception(
+                "agent.router.gate: timeout-apology LLM call failed — degrading "
+                "to static text"
+            )
+            return None
+        text = (response.text or "").strip()
+        return text or None
 
     async def _say_with_terminal(
         self,

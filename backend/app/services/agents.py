@@ -208,6 +208,13 @@ def _snapshot_base(
         "mode": _mode_value(agent.mode),
         "allowed_replies": [str(r) for r in (agent.allowed_replies or [])],
         "confidence_threshold": float(agent.confidence_threshold),
+        # Router-triage timeout + on-timeout fallback (Johnny-xql). Frozen here
+        # so the live session bounds/degrades the triage from the snapshot, never
+        # a turn-time row read. SessionJobConfig coerces these leniently.
+        "router_llm_timeout_s": float(agent.router_llm_timeout_s),
+        "router_timeout_retries": int(agent.router_timeout_retries),
+        "router_timeout_fallback_mode": str(agent.router_timeout_fallback_mode),
+        "router_timeout_fallback_text": str(agent.router_timeout_fallback_text or ""),
         "providers": {
             "router_llm_provider_id": agent.router_llm_provider_id,
             "answer_llm_provider_id": agent.answer_llm_provider_id,

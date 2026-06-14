@@ -1009,6 +1009,12 @@ async def build_agent_runtime(
         prior_session_context=config.prior_session_context,
         allowed_replies=tuple(config.allowed_replies),
         confidence_threshold=config.confidence_threshold,
+        # Router-triage timeout + on-timeout fallback (Johnny-xql), read from
+        # the frozen agent snapshot like the other behavior knobs.
+        router_llm_timeout_s=config.router_llm_timeout_s,
+        router_timeout_retries=config.router_timeout_retries,
+        router_timeout_fallback_mode=config.router_timeout_fallback_mode,
+        router_timeout_fallback_text=config.router_timeout_fallback_text,
         task_catalog=task_catalog,
         executor_kinds=executor_kinds,
         agent_name=agent_display_name,

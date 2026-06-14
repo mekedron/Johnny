@@ -19,6 +19,11 @@ import pytest
 from johnny.agent.job_config import (
     DEFAULT_CONFIDENCE_THRESHOLD,
     DEFAULT_MODE,
+    DEFAULT_ROUTER_LLM_TIMEOUT_S,
+    DEFAULT_ROUTER_TIMEOUT_FALLBACK_MODE,
+    DEFAULT_ROUTER_TIMEOUT_FALLBACK_TEXT,
+    DEFAULT_ROUTER_TIMEOUT_RETRIES,
+    MAX_ROUTER_TIMEOUT_RETRIES,
     SUPPORTED_MODES,
     SessionJobConfig,
     agent_identity_for_session,
@@ -37,6 +42,10 @@ def _snapshot() -> dict[str, Any]:
         "mode": "approval_required",
         "allowed_replies": ["Yes.", "No.", "Could you repeat that?"],
         "confidence_threshold": 0.62,
+        "router_llm_timeout_s": 12.5,
+        "router_timeout_retries": 2,
+        "router_timeout_fallback_mode": "llm",
+        "router_timeout_fallback_text": "One moment — could you repeat that?",
         "providers": {"tts_provider_id": 3, "tts_voice_id": "amy"},
         "assignment_context": "Quarterly review.",
     }
@@ -97,6 +106,11 @@ def test_behavior_derives_from_snapshot() -> None:
     assert cfg.context == "Quarterly review."
     assert cfg.allowed_replies == ("Yes.", "No.", "Could you repeat that?")
     assert cfg.confidence_threshold == pytest.approx(0.62)
+    # Router-triage timeout + on-timeout fallback (Johnny-xql).
+    assert cfg.router_llm_timeout_s == pytest.approx(12.5)
+    assert cfg.router_timeout_retries == 2
+    assert cfg.router_timeout_fallback_mode == "llm"
+    assert cfg.router_timeout_fallback_text == "One moment — could you repeat that?"
 
 
 def test_minimal_config_uses_safe_defaults() -> None:
@@ -106,11 +120,49 @@ def test_minimal_config_uses_safe_defaults() -> None:
     assert cfg.context == ""
     assert cfg.allowed_replies == ()
     assert cfg.confidence_threshold == DEFAULT_CONFIDENCE_THRESHOLD
+    # Router-triage timeout + on-timeout fallback (Johnny-xql) defaults.
+    assert cfg.router_llm_timeout_s == DEFAULT_ROUTER_LLM_TIMEOUT_S
+    assert cfg.router_timeout_retries == DEFAULT_ROUTER_TIMEOUT_RETRIES
+    assert cfg.router_timeout_fallback_mode == DEFAULT_ROUTER_TIMEOUT_FALLBACK_MODE
+    assert cfg.router_timeout_fallback_text == DEFAULT_ROUTER_TIMEOUT_FALLBACK_TEXT
     assert cfg.agent_id is None
     assert cfg.agent_snapshot == {}
     assert cfg.provider_config == {}
     assert cfg.redis_url is None
     assert SessionJobConfig.from_metadata(cfg.to_metadata()) == cfg
+
+
+def test_router_timeout_fields_are_lenient_and_clamped() -> None:
+    """Johnny-xql: a corrupt snapshot degrades / clamps, never crashes."""
+
+    def _cfg(snapshot: dict[str, Any]) -> SessionJobConfig:
+        return SessionJobConfig(
+            bot_session_id=1, room_name="r", agent_snapshot=snapshot
+        )
+
+    # Unparseable / missing → defaults.
+    assert _cfg({"router_llm_timeout_s": "nope"}).router_llm_timeout_s == (
+        DEFAULT_ROUTER_LLM_TIMEOUT_S
+    )
+    assert _cfg({"router_timeout_retries": "nope"}).router_timeout_retries == (
+        DEFAULT_ROUTER_TIMEOUT_RETRIES
+    )
+    # timeout is floored at 0 (<= 0 means "disable the bound" downstream) but not
+    # capped; retries clamp into [0, MAX].
+    assert _cfg({"router_llm_timeout_s": -3}).router_llm_timeout_s == 0.0
+    assert _cfg({"router_llm_timeout_s": 0}).router_llm_timeout_s == 0.0
+    assert _cfg({"router_timeout_retries": 99}).router_timeout_retries == (
+        MAX_ROUTER_TIMEOUT_RETRIES
+    )
+    assert _cfg({"router_timeout_retries": -5}).router_timeout_retries == 0
+    # An unknown mode degrades to the default; a blank text degrades to the
+    # canonical line (never an empty utterance).
+    assert _cfg({"router_timeout_fallback_mode": "shout"}).router_timeout_fallback_mode == (
+        DEFAULT_ROUTER_TIMEOUT_FALLBACK_MODE
+    )
+    assert _cfg({"router_timeout_fallback_text": "   "}).router_timeout_fallback_text == (
+        DEFAULT_ROUTER_TIMEOUT_FALLBACK_TEXT
+    )
 
 
 def test_with_mode_rewrites_the_snapshot_copy_only() -> None:

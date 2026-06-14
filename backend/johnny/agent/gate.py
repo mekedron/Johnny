@@ -94,6 +94,20 @@ logger = logging.getLogger(__name__)
 # (or a ``None`` timeout) disables the wall-clock bound but keeps the abandon
 # race.
 DEFAULT_ROUTER_GATE_TIMEOUT_S = 8.0
+# Mirror of reasoning.DEFAULT_ROUTER_TIMEOUT_RETRIES (Johnny-xql): how many
+# times run_gate re-runs the router call on timeout before it settles the final
+# timeout. 0 = single attempt (pre-xql behavior). Stdlib-only here; a
+# drift-guard test pins it to the reasoning canonical.
+DEFAULT_ROUTER_GATE_TIMEOUT_RETRIES = 0
+
+# Invoked by run_gate when the router times out after the LAST retry and the
+# caller opted to handle it (the static / LLM fallback path, Johnny-xql).
+# Receives the audit detail string ("router exceeded the 8.0s gate bound",
+# possibly " after N attempts"). The callback OWNS the turn's terminal: it
+# speaks the fallback through say() and emits a replied terminal (or re-emits
+# stage_error itself), so run_gate emits NOTHING in this case and the audit is
+# never doubled.
+TimeoutFallback = Callable[[str], Awaitable[None]]
 
 # Local mirrors of voice_pipeline.events.{TerminalState,NoReplyReason}. Kept
 # stdlib-only on purpose (see module docstring); a drift-guard test asserts
@@ -765,50 +779,69 @@ async def run_gate[T](
     *,
     tracker: TerminalTracker,
     timeout_s: float | None = DEFAULT_ROUTER_GATE_TIMEOUT_S,
+    retries: int = DEFAULT_ROUTER_GATE_TIMEOUT_RETRIES,
     abandon: asyncio.Event | None = None,
+    on_timeout: TimeoutFallback | None = None,
 ) -> tuple[GateAction, T | None]:
     """Run the should-speak gate's bounded router call with INV-1 terminals.
 
     Composes :func:`run_router_call` with ``tracker`` so every *silent* exit
     leaves exactly one terminal:
 
-    * **timeout** → ``no_reply(stage_error)`` → ``STAY_SILENT``
+    * **timeout** (after ``retries`` re-runs) → ``no_reply(stage_error)`` →
+      ``STAY_SILENT``, UNLESS ``on_timeout`` is supplied — then the caller's
+      fallback owns the terminal (Johnny-xql) and run_gate emits nothing
     * **barge-in** (``abandon`` set) → ``no_reply(barge_in)`` → ``STAY_SILENT``
-    * **router raised** → ``no_reply(stage_error)`` → ``STAY_SILENT``
+    * **router raised** → ``no_reply(stage_error)`` → ``STAY_SILENT`` (NOT
+      retried — retries are a timeout remedy, not an error-retry loop)
     * **cancelled** (outer task teardown) → best-effort ``no_reply(barge_in)``
       via :meth:`TerminalTracker.ensure_terminal`, then ``CancelledError`` is
       re-raised (cooperative cancellation is never swallowed)
     * **router approved** → ``SPEAK`` with the decision and **no terminal**
       (the caller owns the decline / speak terminals)
 
+    ``retries`` re-runs the WHOLE router call (fresh prompt + LLM request) on a
+    timeout, up to that many extra attempts, each bounded by ``timeout_s`` and
+    racing the same ``abandon`` — a barge-in mid-retry abandons immediately.
+    When ``timeout_s <= 0`` the bound is disabled, so a timeout never occurs and
+    retries never fire.
+
     The caller maps ``STAY_SILENT`` → ``raise StopResponse`` in the real hook.
     """
-    try:
-        status, decision = await run_router_call(router_call, timeout_s=timeout_s, abandon=abandon)
-    except asyncio.CancelledError as exc:
-        # Outer task cancelled (hard teardown). Emit a best-effort terminal,
-        # then never swallow the cancellation.
-        await tracker.ensure_terminal(exc=exc)
-        raise
-    except Exception as exc:
-        # The router itself raised within the bound (provider error). Mirror
-        # the legacy stage_error terminal; stay silent rather than letting the
-        # SDK swallow it audit-less.
-        await tracker.emit(
-            terminal_state="no_reply",
-            no_reply_reason="stage_error",
-            detail=f"{type(exc).__name__}: {exc}",
-        )
-        return GateAction.STAY_SILENT, None
+    attempts = 1 + max(0, retries)
+    status = RouterStatus.TIMED_OUT
+    decision: T | None = None
+    for attempt in range(attempts):
+        try:
+            status, decision = await run_router_call(
+                router_call, timeout_s=timeout_s, abandon=abandon
+            )
+        except asyncio.CancelledError as exc:
+            # Outer task cancelled (hard teardown). Emit a best-effort terminal,
+            # then never swallow the cancellation.
+            await tracker.ensure_terminal(exc=exc)
+            raise
+        except Exception as exc:
+            # The router itself raised within the bound (provider error). Mirror
+            # the legacy stage_error terminal; stay silent rather than letting
+            # the SDK swallow it audit-less. Not retried (see docstring).
+            await tracker.emit(
+                terminal_state="no_reply",
+                no_reply_reason="stage_error",
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+            return GateAction.STAY_SILENT, None
+        if status is not RouterStatus.TIMED_OUT:
+            break  # OK or ABANDONED — settle below; only a timeout is retried.
+        if attempt + 1 < attempts:
+            logger.warning(
+                "agent.gate: router timed out (attempt %d/%d) — retrying",
+                attempt + 1,
+                attempts,
+            )
 
-    if status is RouterStatus.TIMED_OUT:
-        bound = "disabled" if not timeout_s or timeout_s <= 0 else f"{timeout_s:.1f}s"
-        await tracker.emit(
-            terminal_state="no_reply",
-            no_reply_reason="stage_error",
-            detail=f"router exceeded the {bound} gate bound",
-        )
-        return GateAction.STAY_SILENT, None
+    if status is RouterStatus.OK:
+        return GateAction.SPEAK, decision
 
     if status is RouterStatus.ABANDONED:
         await tracker.emit(
@@ -818,10 +851,25 @@ async def run_gate[T](
         )
         return GateAction.STAY_SILENT, None
 
-    return GateAction.SPEAK, decision
+    # Final TIMED_OUT after every attempt.
+    bound = "disabled" if not timeout_s or timeout_s <= 0 else f"{timeout_s:.1f}s"
+    attempt_note = "" if attempts == 1 else f" after {attempts} attempts"
+    detail = f"router exceeded the {bound} gate bound{attempt_note}"
+    if on_timeout is not None:
+        # The caller speaks a fallback (static / LLM) and emits its OWN terminal
+        # (Johnny-xql); run_gate stays out of the audit so it is never doubled.
+        await on_timeout(detail)
+        return GateAction.STAY_SILENT, None
+    await tracker.emit(
+        terminal_state="no_reply",
+        no_reply_reason="stage_error",
+        detail=detail,
+    )
+    return GateAction.STAY_SILENT, None
 
 
 __all__ = [
+    "DEFAULT_ROUTER_GATE_TIMEOUT_RETRIES",
     "DEFAULT_ROUTER_GATE_TIMEOUT_S",
     "GateAction",
     "GateNoReplyReason",
@@ -831,6 +879,7 @@ __all__ = [
     "SessionTerminalEmitter",
     "TerminalEmitter",
     "TerminalTracker",
+    "TimeoutFallback",
     "TurnIndex",
     "TurnLedger",
     "TurnNoReplyReason",

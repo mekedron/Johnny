@@ -577,7 +577,12 @@ async def test_router_timeout_raises_and_emits_stage_error() -> None:
 
     gate = RouterGate(
         _Hanging(),
-        config=RouterGateConfig(router_llm_timeout_s=0.05),
+        # disabled fallback (Johnny-xql): a timeout stays silent with the legacy
+        # no_reply(stage_error) terminal — the static/llm spoken fallbacks have
+        # their own tests below.
+        config=RouterGateConfig(
+            router_llm_timeout_s=0.05, router_timeout_fallback_mode="disabled"
+        ),
         ledger=ledger,
     )
     msg = _user_msg("slow router")
@@ -589,6 +594,170 @@ async def test_router_timeout_raises_and_emits_stage_error() -> None:
     _, term = emitter.records[0]
     assert term.no_reply_reason == "stage_error"
     assert "gate bound" in term.detail
+
+
+# --------------------------------------------------------------------------- #
+# On-timeout fallback (Johnny-xql): static / disabled / llm modes             #
+# --------------------------------------------------------------------------- #
+
+
+class _HangingRouterLLM(_FakeRouterLLM):
+    """A router whose every chat() hangs until cancelled — forces the timeout."""
+
+    async def chat(
+        self,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
+        response_format: dict[str, Any] | None = None,  # noqa: ARG002
+    ) -> LLMResponse:
+        self.calls.append(list(messages))
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+class _HangThenReply(_FakeRouterLLM):
+    """Hang the first chat() (the triage) then answer the apology call.
+
+    The second call returns ``reply`` as free text — or raises
+    ``apology_raises`` — so the ``llm`` fallback's generate-then-degrade logic
+    is exercised without a real provider.
+    """
+
+    def __init__(
+        self, reply: str = "", *, apology_raises: BaseException | None = None
+    ) -> None:
+        super().__init__(None)
+        self._reply = reply
+        self._apology_raises = apology_raises
+
+    async def chat(
+        self,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[ToolDefinition] | None = None,  # noqa: ARG002
+        response_format: dict[str, Any] | None = None,  # noqa: ARG002
+    ) -> LLMResponse:
+        self.calls.append(list(messages))
+        if len(self.calls) == 1:
+            await asyncio.Event().wait()  # triage hangs → gate timeout
+            raise AssertionError("unreachable")
+        if self._apology_raises is not None:
+            raise self._apology_raises
+        return LLMResponse(text=self._reply, finish_reason="stop")
+
+
+def _timeout_gate(
+    router: LLMProvider,
+    *,
+    mode: str,
+    text: str = "Please say that again.",
+    retries: int = 0,
+) -> tuple[RouterGate, _RecordingEmitter, _RecordingObservability, _FakeSay]:
+    emitter = _RecordingEmitter()
+    obs = _RecordingObservability()
+    gate = RouterGate(
+        router,
+        config=RouterGateConfig(
+            router_llm_timeout_s=0.05,
+            router_timeout_retries=retries,
+            router_timeout_fallback_mode=mode,
+            router_timeout_fallback_text=text,
+        ),
+        ledger=TurnLedger(emitter),
+        record_spoke=obs.record_spoke,
+    )
+    say = _FakeSay()
+    gate.attach_say(say)
+    return gate, emitter, obs, say
+
+
+async def _drain_say(gate: RouterGate) -> None:
+    if gate._reply_tasks:
+        await asyncio.gather(*gate._reply_tasks)
+
+
+async def test_static_fallback_speaks_configured_text_on_timeout() -> None:
+    gate, emitter, obs, say = _timeout_gate(
+        _HangingRouterLLM(None), mode="static", text="Sorry, could you repeat that?"
+    )
+    msg = _user_msg("slow router")
+
+    with pytest.raises(StopResponse):
+        await gate.run_turn(ChatContext.empty(), msg)
+
+    # The configured line is spoken via say() — no answer-LLM hop, no terminal yet.
+    assert say.texts == ["Sorry, could you repeat that?"]
+    assert emitter.records == []
+
+    # The speech completing drives the single replied terminal (kind "fallback").
+    say.handles[0].fire_done()
+    await _drain_say(gate)
+    assert emitter.states == ["replied"]
+    assert obs.spoke_calls == [("Sorry, could you repeat that?", msg.id, "fallback")]
+
+
+async def test_static_fallback_blank_text_degrades_to_default_line() -> None:
+    from johnny.voice_pipeline.reasoning import DEFAULT_ROUTER_TIMEOUT_FALLBACK_TEXT
+
+    gate, _emitter, _obs, say = _timeout_gate(
+        _HangingRouterLLM(None), mode="static", text="   "
+    )
+    with pytest.raises(StopResponse):
+        await gate.run_turn(ChatContext.empty(), _user_msg("slow router"))
+    assert say.texts == [DEFAULT_ROUTER_TIMEOUT_FALLBACK_TEXT]
+
+
+async def test_disabled_fallback_stays_silent_on_timeout() -> None:
+    gate, emitter, _obs, say = _timeout_gate(_HangingRouterLLM(None), mode="disabled")
+    with pytest.raises(StopResponse):
+        await gate.run_turn(ChatContext.empty(), _user_msg("slow router"))
+    assert say.texts == []  # nothing spoken
+    assert emitter.states == ["no_reply"]
+    _, term = emitter.records[0]
+    assert term.no_reply_reason == "stage_error"
+    assert "gate bound" in term.detail
+
+
+async def test_llm_fallback_speaks_generated_apology() -> None:
+    apology = "Apologies — my triage stalled. Could you repeat that?"
+    router = _HangThenReply(apology)
+    gate, _emitter, _obs, say = _timeout_gate(router, mode="llm", text="static line")
+
+    with pytest.raises(StopResponse):
+        await gate.run_turn(ChatContext.empty(), _user_msg("slow router"))
+
+    assert say.texts == [apology]  # the generated apology, not the static line
+    assert len(router.calls) == 2  # triage (hung) + apology generation
+
+
+async def test_llm_fallback_degrades_to_static_when_apology_raises() -> None:
+    router = _HangThenReply(apology_raises=RuntimeError("apology model down"))
+    gate, _emitter, _obs, say = _timeout_gate(
+        router, mode="llm", text="static please repeat"
+    )
+    with pytest.raises(StopResponse):
+        await gate.run_turn(ChatContext.empty(), _user_msg("slow router"))
+    assert say.texts == ["static please repeat"]  # degraded to the static text
+
+
+async def test_llm_fallback_degrades_to_static_when_apology_empty() -> None:
+    router = _HangThenReply("   ")  # whitespace-only apology
+    gate, _emitter, _obs, say = _timeout_gate(
+        router, mode="llm", text="static please repeat"
+    )
+    with pytest.raises(StopResponse):
+        await gate.run_turn(ChatContext.empty(), _user_msg("slow router"))
+    assert say.texts == ["static please repeat"]
+
+
+async def test_retries_then_static_fallback_on_persistent_timeout() -> None:
+    router = _HangingRouterLLM(None)
+    gate, _emitter, _obs, say = _timeout_gate(
+        router, mode="static", text="repeat please", retries=2
+    )
+    with pytest.raises(StopResponse):
+        await gate.run_turn(ChatContext.empty(), _user_msg("slow router"))
+    assert len(router.calls) == 3  # 1 initial + 2 retries
+    assert say.texts == ["repeat please"]
 
 
 # --------------------------------------------------------------------------- #

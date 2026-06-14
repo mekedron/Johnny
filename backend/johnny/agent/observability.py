@@ -128,11 +128,15 @@ RecordSuggested = Callable[[RouterDecision, str], Awaitable[None]]
 :class:`RecordDecision`'s positional pair; the ``suggested`` decision row is the
 ``RouterDecisionMade`` the gate already emitted, so no decision id is needed here."""
 
-SpokenKind = Literal["reply", "ack", "status", "correction", "task_result"]
+SpokenKind = Literal[
+    "reply", "ack", "status", "correction", "task_result", "fallback"
+]
 """Which speech path produced an utterance (Johnny-trt.54) — see
 :class:`~johnny.voice_pipeline.events.AgentSpoke.kind`. ``task_result`` is the
 Phase-5 out-of-band result delivery (Johnny-trt.28): bound to no turn, exactly
-like ``correction``."""
+like ``correction``. ``fallback`` is the router-timeout spoken fallback
+(Johnny-xql): the static / LLM line spoken via ``say()`` when the triage times
+out after all retries."""
 
 
 class RecordSpoke(Protocol):

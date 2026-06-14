@@ -60,6 +60,17 @@ DEFAULT_MODE = LISTEN_ONLY_MODE
 # router gate's own default) — re-declared to keep this module
 # dependency-free; the drift guard test pins the two together.
 DEFAULT_CONFIDENCE_THRESHOLD = 0.7
+# Router-triage timeout + on-timeout fallback defaults (Johnny-xql), mirrored
+# from johnny.voice_pipeline.reasoning to keep this contract module
+# dependency-free; a drift-guard test pins them to the reasoning canonicals.
+DEFAULT_ROUTER_LLM_TIMEOUT_S = 8.0
+DEFAULT_ROUTER_TIMEOUT_RETRIES = 0
+MAX_ROUTER_TIMEOUT_RETRIES = 5
+DEFAULT_ROUTER_TIMEOUT_FALLBACK_MODE = "static"
+ROUTER_TIMEOUT_FALLBACK_MODES: tuple[str, ...] = ("disabled", "static", "llm")
+DEFAULT_ROUTER_TIMEOUT_FALLBACK_TEXT = (
+    "Sorry, I didn't catch that in time — could you say that again?"
+)
 
 # --- Provider-config role keys (Johnny-trt.42) -------------------------------
 # ``provider_config`` is keyed by provider kind (``stt`` / ``llm`` / ``tts``,
@@ -181,6 +192,11 @@ SNAPSHOT_MODE_KEY = "mode"
 SNAPSHOT_CHARACTER_PROMPT_KEY = "character_prompt"
 SNAPSHOT_ALLOWED_REPLIES_KEY = "allowed_replies"
 SNAPSHOT_CONFIDENCE_THRESHOLD_KEY = "confidence_threshold"
+# Router-triage timeout + on-timeout fallback (Johnny-xql).
+SNAPSHOT_ROUTER_LLM_TIMEOUT_S_KEY = "router_llm_timeout_s"
+SNAPSHOT_ROUTER_TIMEOUT_RETRIES_KEY = "router_timeout_retries"
+SNAPSHOT_ROUTER_TIMEOUT_FALLBACK_MODE_KEY = "router_timeout_fallback_mode"
+SNAPSHOT_ROUTER_TIMEOUT_FALLBACK_TEXT_KEY = "router_timeout_fallback_text"
 SNAPSHOT_ASSIGNMENT_CONTEXT_KEY = "assignment_context"
 SNAPSHOT_PEER_NAMES_KEY = "peer_names"
 SNAPSHOT_CAPABILITY_POLICY_KEY = "capability_policy"
@@ -335,6 +351,55 @@ class SessionJobConfig:
         return _coerce_threshold(
             self.agent_snapshot.get(SNAPSHOT_CONFIDENCE_THRESHOLD_KEY)
         )
+
+    @property
+    def router_llm_timeout_s(self) -> float:
+        """The triage LLM wall-clock budget from the snapshot (Johnny-xql).
+
+        Lenient: missing / blank / unparseable degrade to
+        :data:`DEFAULT_ROUTER_LLM_TIMEOUT_S` (8.0 s). ``<= 0`` is preserved
+        (it disables the bound downstream); negatives clamp to 0.0.
+        """
+        return _coerce_timeout(
+            self.agent_snapshot.get(SNAPSHOT_ROUTER_LLM_TIMEOUT_S_KEY)
+        )
+
+    @property
+    def router_timeout_retries(self) -> int:
+        """Triage re-runs on timeout from the snapshot (Johnny-xql).
+
+        Lenient + clamped into ``[0, MAX_ROUTER_TIMEOUT_RETRIES]`` so a corrupt
+        snapshot can never freeze a turn for minutes.
+        """
+        return _coerce_retries(
+            self.agent_snapshot.get(SNAPSHOT_ROUTER_TIMEOUT_RETRIES_KEY)
+        )
+
+    @property
+    def router_timeout_fallback_mode(self) -> str:
+        """The on-timeout fallback mode from the snapshot (Johnny-xql).
+
+        One of :data:`ROUTER_TIMEOUT_FALLBACK_MODES`; anything else degrades to
+        :data:`DEFAULT_ROUTER_TIMEOUT_FALLBACK_MODE` (``static``).
+        """
+        raw = str(
+            self.agent_snapshot.get(SNAPSHOT_ROUTER_TIMEOUT_FALLBACK_MODE_KEY) or ""
+        ).strip()
+        return raw if raw in ROUTER_TIMEOUT_FALLBACK_MODES else (
+            DEFAULT_ROUTER_TIMEOUT_FALLBACK_MODE
+        )
+
+    @property
+    def router_timeout_fallback_text(self) -> str:
+        """The spoken line for the ``static`` fallback (Johnny-xql).
+
+        Blank / missing degrades to :data:`DEFAULT_ROUTER_TIMEOUT_FALLBACK_TEXT`
+        so a cleared field still speaks something rather than an empty utterance.
+        """
+        raw = str(
+            self.agent_snapshot.get(SNAPSHOT_ROUTER_TIMEOUT_FALLBACK_TEXT_KEY) or ""
+        ).strip()
+        return raw or DEFAULT_ROUTER_TIMEOUT_FALLBACK_TEXT
 
     @property
     def peer_names(self) -> tuple[str, ...]:
@@ -608,6 +673,36 @@ def _coerce_threshold(value: Any) -> float:
     except (TypeError, ValueError):
         return DEFAULT_CONFIDENCE_THRESHOLD
     return max(0.0, min(1.0, threshold))
+
+
+def _coerce_timeout(value: Any) -> float:
+    """Coerce a decoded JSON / env value to the triage timeout (Johnny-xql).
+
+    ``None`` / blank / unparseable degrade to :data:`DEFAULT_ROUTER_LLM_TIMEOUT_S`.
+    A parsed value is floored at ``0.0`` but NOT capped — ``<= 0`` is meaningful
+    (it disables the wall-clock bound in the gate)."""
+    if value is None or value == "":
+        return DEFAULT_ROUTER_LLM_TIMEOUT_S
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_ROUTER_LLM_TIMEOUT_S
+    return max(0.0, timeout)
+
+
+def _coerce_retries(value: Any) -> int:
+    """Coerce a decoded JSON / env value to the triage retry count (Johnny-xql).
+
+    ``None`` / blank / unparseable degrade to :data:`DEFAULT_ROUTER_TIMEOUT_RETRIES`
+    (0); parsed values clamp into ``[0, MAX_ROUTER_TIMEOUT_RETRIES]`` so a corrupt
+    snapshot can never schedule minutes of retries."""
+    if value is None or value == "":
+        return DEFAULT_ROUTER_TIMEOUT_RETRIES
+    try:
+        retries = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_ROUTER_TIMEOUT_RETRIES
+    return max(0, min(MAX_ROUTER_TIMEOUT_RETRIES, retries))
 
 
 def _id_to_env(value: int | None) -> str:

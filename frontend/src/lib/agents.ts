@@ -11,6 +11,30 @@
 
 import type { BotMode } from '$lib/sessionDetail';
 
+/**
+ * What the agent does when the router-triage call times out after all retries
+ * (Johnny-xql): stay silent, speak a fixed line, or generate a one-line apology.
+ */
+export type RouterTimeoutFallbackMode = 'disabled' | 'static' | 'llm';
+
+/** Default spoken line for the static fallback — mirrors the backend (Johnny-xql). */
+export const DEFAULT_TIMEOUT_FALLBACK_TEXT =
+	"Sorry, I didn't catch that in time — could you say that again?";
+
+/** One-line hint per fallback mode, for the Behavior section's select. */
+export const ROUTER_TIMEOUT_FALLBACK_MODE_HINT: Record<RouterTimeoutFallbackMode, string> = {
+	disabled: 'Stay silent on timeout — the turn is dropped (no spoken fallback).',
+	static: 'Speak the fixed fallback line below.',
+	llm: 'Generate a one-line apology with the LLM, falling back to the line below.'
+};
+
+/** Ordered (value, label) options for the fallback-mode select. */
+export const ROUTER_TIMEOUT_FALLBACK_MODES: { value: RouterTimeoutFallbackMode; label: string }[] = [
+	{ value: 'disabled', label: 'Disabled (stay silent)' },
+	{ value: 'static', label: 'Static text' },
+	{ value: 'llm', label: 'LLM-generated' }
+];
+
 export interface Agent {
 	id: number;
 	name: string;
@@ -20,6 +44,11 @@ export interface Agent {
 	mode: BotMode;
 	allowed_replies: string[] | null;
 	confidence_threshold: number | null;
+	/** Router-triage timeout + on-timeout fallback (Johnny-xql). */
+	router_llm_timeout_s: number | null;
+	router_timeout_retries: number | null;
+	router_timeout_fallback_mode: RouterTimeoutFallbackMode | null;
+	router_timeout_fallback_text: string | null;
 	is_default: boolean;
 	router_llm_provider_id: number | null;
 	answer_llm_provider_id: number | null;
@@ -53,6 +82,10 @@ export interface AgentPayload {
 	mode?: BotMode;
 	allowed_replies?: string[];
 	confidence_threshold?: number;
+	router_llm_timeout_s?: number;
+	router_timeout_retries?: number;
+	router_timeout_fallback_mode?: RouterTimeoutFallbackMode;
+	router_timeout_fallback_text?: string;
 	router_llm_provider_id?: number | null;
 	answer_llm_provider_id?: number | null;
 	reasoning_llm_provider_id?: number | null;
@@ -203,6 +236,11 @@ export interface AgentDraft {
 	mode: BotMode;
 	allowed_replies: string[];
 	confidence_threshold: number;
+	/** Router-triage timeout + on-timeout fallback (Johnny-xql). */
+	router_llm_timeout_s: number;
+	router_timeout_retries: number;
+	router_timeout_fallback_mode: RouterTimeoutFallbackMode;
+	router_timeout_fallback_text: string;
 	router_llm_provider_id: number | null;
 	answer_llm_provider_id: number | null;
 	reasoning_llm_provider_id: number | null;
@@ -224,6 +262,11 @@ export function draftFromAgent(agent: Agent | null): AgentDraft {
 		mode: agent?.mode ?? 'listen_only',
 		allowed_replies: [...(agent?.allowed_replies ?? [])],
 		confidence_threshold: agent?.confidence_threshold ?? 0.7,
+		router_llm_timeout_s: agent?.router_llm_timeout_s ?? 8,
+		router_timeout_retries: agent?.router_timeout_retries ?? 0,
+		router_timeout_fallback_mode: agent?.router_timeout_fallback_mode ?? 'static',
+		router_timeout_fallback_text:
+			agent?.router_timeout_fallback_text ?? DEFAULT_TIMEOUT_FALLBACK_TEXT,
 		router_llm_provider_id: agent?.router_llm_provider_id ?? null,
 		answer_llm_provider_id: agent?.answer_llm_provider_id ?? null,
 		reasoning_llm_provider_id: agent?.reasoning_llm_provider_id ?? null,
@@ -275,6 +318,26 @@ export function validateAgentDraft(draft: AgentDraft): Record<string, string> {
 	) {
 		errors.tts_voice_id = 'tts_voice_id requires tts_provider_id — voice ids are provider-specific';
 	}
+	// Router-triage timeout + on-timeout fallback ranges (Johnny-xql) — mirror
+	// the API's Field bounds so inline errors match a would-be 422.
+	if (
+		!Number.isFinite(draft.router_llm_timeout_s) ||
+		draft.router_llm_timeout_s < 0 ||
+		draft.router_llm_timeout_s > 120
+	) {
+		errors.router_llm_timeout_s =
+			'router timeout must be between 0 and 120 seconds (0 disables the bound)';
+	}
+	if (
+		!Number.isInteger(draft.router_timeout_retries) ||
+		draft.router_timeout_retries < 0 ||
+		draft.router_timeout_retries > 5
+	) {
+		errors.router_timeout_retries = 'retries must be a whole number between 0 and 5';
+	}
+	if (draft.router_timeout_fallback_text.length > 500) {
+		errors.router_timeout_fallback_text = 'fallback text must be at most 500 characters';
+	}
 	return errors;
 }
 
@@ -288,6 +351,10 @@ export function draftToCreatePayload(draft: AgentDraft): AgentPayload {
 		mode: draft.mode,
 		allowed_replies: draft.allowed_replies,
 		confidence_threshold: draft.confidence_threshold,
+		router_llm_timeout_s: draft.router_llm_timeout_s,
+		router_timeout_retries: draft.router_timeout_retries,
+		router_timeout_fallback_mode: draft.router_timeout_fallback_mode,
+		router_timeout_fallback_text: draft.router_timeout_fallback_text,
 		router_llm_provider_id: draft.router_llm_provider_id,
 		answer_llm_provider_id: draft.answer_llm_provider_id,
 		reasoning_llm_provider_id: draft.reasoning_llm_provider_id,
@@ -317,6 +384,21 @@ export function diffAgentPayload(saved: Agent, draft: AgentDraft): AgentPayload 
 	}
 	if (full.confidence_threshold !== (saved.confidence_threshold ?? 0.7)) {
 		patch.confidence_threshold = full.confidence_threshold;
+	}
+	if (full.router_llm_timeout_s !== (saved.router_llm_timeout_s ?? 8)) {
+		patch.router_llm_timeout_s = full.router_llm_timeout_s;
+	}
+	if (full.router_timeout_retries !== (saved.router_timeout_retries ?? 0)) {
+		patch.router_timeout_retries = full.router_timeout_retries;
+	}
+	if (full.router_timeout_fallback_mode !== (saved.router_timeout_fallback_mode ?? 'static')) {
+		patch.router_timeout_fallback_mode = full.router_timeout_fallback_mode;
+	}
+	if (
+		full.router_timeout_fallback_text !==
+		(saved.router_timeout_fallback_text ?? DEFAULT_TIMEOUT_FALLBACK_TEXT)
+	) {
+		patch.router_timeout_fallback_text = full.router_timeout_fallback_text;
 	}
 	if (full.router_llm_provider_id !== saved.router_llm_provider_id) {
 		patch.router_llm_provider_id = full.router_llm_provider_id;

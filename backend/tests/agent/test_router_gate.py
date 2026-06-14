@@ -27,6 +27,7 @@ from typing import Any
 import pytest
 
 from johnny.agent.gate import (
+    DEFAULT_ROUTER_GATE_TIMEOUT_RETRIES,
     DEFAULT_ROUTER_GATE_TIMEOUT_S,
     GateAction,
     GateTerminal,
@@ -338,6 +339,128 @@ async def test_strict_mode_does_not_raise_on_cancellation() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Retries + on-timeout fallback (Johnny-xql)                                  #
+# --------------------------------------------------------------------------- #
+
+
+async def test_retries_rerun_the_router_then_emit_stage_error() -> None:
+    """A persistently-hanging router is re-run ``1 + retries`` times before the
+    final stage_error; the detail records the attempt count."""
+    emitter = RecordingEmitter()
+    tracker = _tracker(emitter)
+    router = FakeRouter(block=True)  # hangs on every attempt
+
+    action, _ = await run_gate(router, tracker=tracker, timeout_s=0.02, retries=2)
+
+    assert action is GateAction.STAY_SILENT
+    assert router.calls == 3  # 1 initial + 2 retries
+    assert router.cancelled is True  # each in-flight attempt torn down
+    assert len(emitter.terminals) == 1
+    term = emitter.terminals[0]
+    assert term.no_reply_reason == "stage_error"
+    assert "after 3 attempts" in term.detail
+
+
+async def test_retry_succeeds_after_a_first_timeout() -> None:
+    """A retry that resolves promptly speaks — no terminal on the speak path."""
+    decision = object()
+
+    class _SlowThenFast:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                await asyncio.Event().wait()  # first attempt hangs → timeout
+            return decision
+
+    emitter = RecordingEmitter()
+    router = _SlowThenFast()
+
+    action, got = await run_gate(
+        router, tracker=_tracker(emitter), timeout_s=0.05, retries=1
+    )
+
+    assert action is GateAction.SPEAK
+    assert got is decision
+    assert router.calls == 2
+    assert emitter.terminals == []
+
+
+async def test_on_timeout_owns_the_terminal_and_run_gate_stays_silent() -> None:
+    """With ``on_timeout`` supplied, run_gate delegates the timeout terminal to
+    the caller and emits nothing itself (no double audit)."""
+    emitter = RecordingEmitter()
+    tracker = _tracker(emitter)
+    router = FakeRouter(block=True)
+    seen: list[str] = []
+
+    async def _fallback(detail: str) -> None:
+        seen.append(detail)
+
+    action, _ = await run_gate(
+        router, tracker=tracker, timeout_s=0.02, on_timeout=_fallback
+    )
+
+    assert action is GateAction.STAY_SILENT
+    assert seen and "gate bound" in seen[0]
+    assert emitter.terminals == []  # the fallback owns the terminal
+
+
+async def test_on_timeout_not_invoked_on_barge_in() -> None:
+    """A barge-in is not a timeout — the fallback must never fire."""
+    emitter = RecordingEmitter()
+    tracker = _tracker(emitter)
+    router = FakeRouter(block=True)
+    abandon = asyncio.Event()
+    called = False
+
+    async def _fallback(detail: str) -> None:  # noqa: ARG001
+        nonlocal called
+        called = True
+
+    gate = asyncio.ensure_future(
+        run_gate(
+            router,
+            tracker=tracker,
+            timeout_s=5.0,
+            abandon=abandon,
+            on_timeout=_fallback,
+        )
+    )
+    await router.started.wait()
+    abandon.set()
+    action, _ = await asyncio.wait_for(gate, timeout=1.0)
+
+    assert action is GateAction.STAY_SILENT
+    assert called is False
+    assert emitter.terminals[0].no_reply_reason == "barge_in"
+
+
+async def test_router_exception_is_not_retried_and_skips_fallback() -> None:
+    """Retries are a timeout remedy only — a provider error terminates
+    stage_error on the first attempt and never reaches ``on_timeout``."""
+    emitter = RecordingEmitter()
+    tracker = _tracker(emitter)
+    router = FakeRouter(raises=RuntimeError("provider exploded"))
+    called = False
+
+    async def _fallback(detail: str) -> None:  # noqa: ARG001
+        nonlocal called
+        called = True
+
+    action, _ = await run_gate(
+        router, tracker=tracker, timeout_s=5.0, retries=3, on_timeout=_fallback
+    )
+
+    assert action is GateAction.STAY_SILENT
+    assert called is False
+    assert router.calls == 1  # NOT retried
+    assert emitter.terminals[0].no_reply_reason == "stage_error"
+
+
+# --------------------------------------------------------------------------- #
 # Drift guard — local literals must mirror the canonical event literals       #
 # --------------------------------------------------------------------------- #
 
@@ -356,6 +479,13 @@ def test_default_timeout_matches_legacy_router_bound() -> None:
     from johnny.voice_pipeline.reasoning import DEFAULT_ROUTER_LLM_TIMEOUT_S
 
     assert DEFAULT_ROUTER_GATE_TIMEOUT_S == DEFAULT_ROUTER_LLM_TIMEOUT_S
+
+
+def test_default_gate_retries_matches_reasoning() -> None:
+    """Johnny-xql: the stdlib-only gate mirror must equal the reasoning canonical."""
+    from johnny.voice_pipeline.reasoning import DEFAULT_ROUTER_TIMEOUT_RETRIES
+
+    assert DEFAULT_ROUTER_GATE_TIMEOUT_RETRIES == DEFAULT_ROUTER_TIMEOUT_RETRIES
 
 
 def test_default_timeout_is_the_phase3_triage_budget() -> None:

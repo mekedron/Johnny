@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 import {
 	agentGlyph,
 	agentLabel,
+	DEFAULT_TIMEOUT_FALLBACK_TEXT,
 	deleteWarning,
 	diffAgentPayload,
 	draftFromAgent,
@@ -39,6 +40,10 @@ function makeAgent(overrides: Partial<Agent> = {}): Agent {
 		mode: 'autonomous',
 		allowed_replies: null,
 		confidence_threshold: null,
+		router_llm_timeout_s: null,
+		router_timeout_retries: null,
+		router_timeout_fallback_mode: null,
+		router_timeout_fallback_text: null,
 		is_default: false,
 		router_llm_provider_id: null,
 		answer_llm_provider_id: null,
@@ -147,6 +152,67 @@ describe('draftFromAgent', () => {
 			draftFromAgent(makeAgent({ meeting_bot_account_id: 7 })).meeting_bot_account_id,
 			7
 		);
+	});
+
+	it('applies the router-timeout fallback defaults from null (Johnny-xql)', () => {
+		const draft = draftFromAgent(null);
+		assert.equal(draft.router_llm_timeout_s, 8);
+		assert.equal(draft.router_timeout_retries, 0);
+		assert.equal(draft.router_timeout_fallback_mode, 'static');
+		assert.equal(draft.router_timeout_fallback_text, DEFAULT_TIMEOUT_FALLBACK_TEXT);
+	});
+
+	it('carries saved router-timeout fallback values (Johnny-xql)', () => {
+		const draft = draftFromAgent(
+			makeAgent({
+				router_llm_timeout_s: 12,
+				router_timeout_retries: 2,
+				router_timeout_fallback_mode: 'llm',
+				router_timeout_fallback_text: 'Repeat please?'
+			})
+		);
+		assert.equal(draft.router_llm_timeout_s, 12);
+		assert.equal(draft.router_timeout_retries, 2);
+		assert.equal(draft.router_timeout_fallback_mode, 'llm');
+		assert.equal(draft.router_timeout_fallback_text, 'Repeat please?');
+	});
+});
+
+describe('router-timeout fallback fields (Johnny-xql)', () => {
+	it('diffs only the changed knobs', () => {
+		const agent = makeAgent({
+			character_prompt: 'p',
+			router_llm_timeout_s: 8,
+			router_timeout_retries: 0,
+			router_timeout_fallback_mode: 'static',
+			router_timeout_fallback_text: DEFAULT_TIMEOUT_FALLBACK_TEXT
+		});
+		const draft = draftFromAgent(agent);
+		assert.deepEqual(diffAgentPayload(agent, draft), {});
+		draft.router_timeout_fallback_mode = 'llm';
+		draft.router_timeout_retries = 3;
+		assert.deepEqual(diffAgentPayload(agent, draft), {
+			router_timeout_fallback_mode: 'llm',
+			router_timeout_retries: 3
+		});
+	});
+
+	it('flags an out-of-range timeout and retry count', () => {
+		const draft = draftFromAgent(null);
+		draft.router_llm_timeout_s = 999;
+		draft.router_timeout_retries = 9;
+		const errors = validateAgentDraft(draft);
+		assert.ok(errors.router_llm_timeout_s);
+		assert.ok(errors.router_timeout_retries);
+	});
+
+	it('accepts a 0 timeout (disables the bound) and the retry ceiling', () => {
+		const draft = draftFromAgent(null);
+		draft.router_llm_timeout_s = 0;
+		draft.router_timeout_retries = 5;
+		const errors = validateAgentDraft(draft);
+		assert.equal(errors.router_llm_timeout_s, undefined);
+		assert.equal(errors.router_timeout_retries, undefined);
 	});
 });
 
