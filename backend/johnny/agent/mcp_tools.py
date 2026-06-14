@@ -67,13 +67,65 @@ TOOLS_LISTED_CAP = 100
 hundreds of tools (n8n-mcp) must not flood the model's context; the rest are
 summarised as a count with a refine hint."""
 
+CALL_RESULT_CAP_CHARS = 8000
+"""Bound on one tool result handed back to the model — a single huge payload
+(e.g. a 16 KB metabase dump) bloats the tool loop and derails the reply; the
+overflow is dropped with a refine hint so the model can narrow and re-call."""
 
-def _config_by_name(slug: str | None, server: str) -> McpServerConfig | None:
-    """The secrets-resolved config for one server (``None`` if not configured)."""
-    for config in load_server_configs(slug):
-        if config.name == server:
-            return config
-    return None
+
+def _resolve_server(
+    slug: str | None, server: str
+) -> tuple[McpServerConfig | None, list[str]]:
+    """Resolve a connector name tolerantly; return ``(config, all_names)``.
+
+    The model often abbreviates (``metabase`` for ``mcp-metabase-server``), which
+    used to dead-end on "no such connector" and send it floundering. Match
+    exact → case-insensitive → unique case-insensitive substring; an ambiguous or
+    absent name returns ``None`` plus every configured name so the caller can show
+    the model the exact spellings. Disabled servers are INCLUDED (the caller
+    reports "turned off" after resolving). ``all_names`` is secrets-free.
+    """
+    configs = load_server_configs(slug)
+    names = [c.name for c in configs]
+    wanted = (server or "").strip()
+    if not wanted:
+        return None, names
+    for config in configs:  # exact
+        if config.name == wanted:
+            return config, names
+    low = wanted.lower()
+    insensitive = [c for c in configs if c.name.lower() == low]
+    if len(insensitive) == 1:
+        return insensitive[0], names
+    substring = [c for c in configs if low in c.name.lower()]
+    if len(substring) == 1:
+        return substring[0], names
+    return None, names
+
+
+def _unknown_server_msg(name: str, available: list[str]) -> str:
+    """A not-found message that names the real connectors so the model retries right."""
+    if not available:
+        return (
+            f'No MCP connector named "{name}". No MCP connectors are configured '
+            "for this workspace."
+        )
+    return (
+        f'No MCP connector named "{name}". Available connectors: '
+        + ", ".join(available)
+        + ". Use one of those exact names."
+    )
+
+
+def _cap_result(text: str) -> str:
+    """Bound one tool result so a huge payload can't swamp the tool loop."""
+    if len(text) <= CALL_RESULT_CAP_CHARS:
+        return text
+    return (
+        text[:CALL_RESULT_CAP_CHARS].rstrip()
+        + f"\n[result truncated at {CALL_RESULT_CAP_CHARS} chars — narrow your "
+        "request or ask for a specific item to see the rest]"
+    )
 
 
 def _first_line(text: str, *, cap: int = 160) -> str:
@@ -205,28 +257,25 @@ def build_mcp_tools(
         return text
 
     async def _do_list_tools(name: str) -> str:
-        config = _config_by_name(slug, name)
+        config, available = _resolve_server(slug, name)
         if config is None:
-            return (
-                f'No MCP connector named "{name}". '
-                "Call list_mcp_servers to see what is available."
-            )
+            return _unknown_server_msg(name, available)
         if not config.enabled:
-            return f'The "{name}" connector is turned off in this workspace.'
+            return f'The "{config.name}" connector is turned off in this workspace.'
         try:
             tools = await manager.list_tools(config, sandbox_url=sandbox_url)
         except (McpUnavailableError, McpCallTimeoutError, McpToolError) as exc:
-            logger.info("mcp tool: list_mcp_tools(%s) failed: %s", name, exc)
-            return f'ERROR: couldn\'t load tools from "{name}" — {exc}'
+            logger.info("mcp tool: list_mcp_tools(%s) failed: %s", config.name, exc)
+            return f'ERROR: couldn\'t load tools from "{config.name}" — {exc}'
         kept_names = set(config.filtered_tool_names([t.name for t in tools]))
         kept = [t for t in tools if t.name in kept_names]
         if not kept:
-            return f'The "{name}" connector exposes no tools you can use right now.'
+            return f'The "{config.name}" connector exposes no tools you can use right now.'
         shown = kept[:TOOLS_LISTED_CAP]
         lines = [_tool_line(t) for t in shown]
         header = (
-            f'The "{name}" connector exposes {len(kept)} tool(s). Call '
-            f'call_mcp_tool("{name}", "<tool>", {{…}}) to use one:'
+            f'The "{config.name}" connector exposes {len(kept)} tool(s). Call '
+            f'call_mcp_tool("{config.name}", "<tool>", {{…}}) to use one:'
         )
         body = "\n".join(lines)
         if len(kept) > len(shown):
@@ -275,20 +324,17 @@ def build_mcp_tools(
         srv = (server or "").strip()
         tname = (tool or "").strip()
         args = dict(arguments) if isinstance(arguments, dict) else {}
-        config = _config_by_name(slug, srv)
+        config, available = _resolve_server(slug, srv)
         if config is None:
-            return (
-                f'No MCP connector named "{srv}". '
-                "Call list_mcp_servers to see what is available."
-            )
+            return _unknown_server_msg(srv, available)
         if not config.enabled:
-            return f'The "{srv}" connector is turned off in this workspace.'
+            return f'The "{config.name}" connector is turned off in this workspace.'
         if not config.allows_tool(tname):
             return (
-                f'The "{tname}" tool on "{srv}" is not available — it is filtered '
-                "out by this workspace's policy."
+                f'The "{tname}" tool on "{config.name}" is not available — it is '
+                "filtered out by this workspace's policy."
             )
-
+        srv = config.name  # canonical name for the call, the kind, and the trace
         kind = qualified_tool_name(srv, tname)
         started_at = datetime.now(timezone.utc)
         t0 = time.monotonic()
@@ -299,11 +345,13 @@ def build_mcp_tools(
             result = await manager.call_tool(
                 config, sandbox_url=sandbox_url, tool=tname, arguments=args
             )
-            text = result.text
             ok = not bool(result.is_error)
-            if not ok:
+            if ok:
+                text = _cap_result(result.text)
+            else:
+                inner = result.text
                 error = "tool reported an error (isError)"
-                text = f"ERROR: {text}" if text else "ERROR: the tool reported a problem."
+                text = f"ERROR: {inner}" if inner else "ERROR: the tool reported a problem."
         except McpCallTimeoutError as exc:
             timed_out = True
             error = str(exc)

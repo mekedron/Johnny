@@ -306,5 +306,13 @@ async def test_gateway_tools_drive_real_demo_server(
             server="demo-tools", tool="base64_encode", arguments={"text": "Johnny"}
         )
         assert encoded == base64.b64encode(b"Johnny").decode("ascii")
+
+        # Johnny-3gx: an abbreviated connector name ("tools") resolves to the
+        # canonical "demo-tools" against the real store + server (the session-5
+        # "No MCP connector named metabase" dead-end is gone).
+        abbreviated = await tools["call_mcp_tool"](
+            server="tools", tool="base64_encode", arguments={"text": "abc"}
+        )
+        assert abbreviated == base64.b64encode(b"abc").decode("ascii")
     finally:
         await manager.aclose()

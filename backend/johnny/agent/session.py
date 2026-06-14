@@ -223,8 +223,11 @@ TOOL_USE_NOTES = (
     "call list_mcp_servers to see what is available. To use one, call "
     "list_mcp_tools('<server>') to load that connector's tools and their argument "
     "signatures, then call_mcp_tool('<server>', '<tool>', {…}) with the person's "
-    "REAL values. Discover the tools first rather than guessing a tool name, and "
-    "answer from what the connector actually returns."
+    "REAL values. Use the EXACT connector name from list_mcp_servers (for example "
+    "mcp-metabase-server, not metabase). Actually CALL these tools — never just "
+    "describe a call or write it out as text — and after loading a connector's "
+    "tools, pick the single best one and call it instead of listing again. Answer "
+    "from what the connector actually returns."
 )
 
 
