@@ -519,6 +519,37 @@ services:
       retries: 5
       start_period: 10s
 
+  # Demo HTTP-transport MCP server (Johnny-3gx). A secret-free streamable-HTTP
+  # connector seeded ENABLED into the default workspace so a clean install can
+  # drive the answer agent's MCP gateway over the *http* transport (the stdio
+  # demos cover the other path). Reuses the backend image — ``mcp`` is already
+  # pinned there, so no extra dependency and no runtime install (clean-install
+  # rule). No published host port: reachable only as
+  # ``http://mcp-demo-http:9000/mcp`` from api/worker/agent on the compose
+  # network, exactly like the skills-sandbox exec API.
+  mcp-demo-http:
+    build:
+      context: ./backend
+    command: ["python", "-m", "johnny.mcp.demo.http_server"]
+    environment:
+      JOHNNY_DEMO_MCP_HOST: "0.0.0.0"
+      JOHNNY_DEMO_MCP_PORT: "9000"
+    expose:
+      - "9000"
+    restart: unless-stopped
+    healthcheck:
+      # Liveness = the streamable-HTTP port is accepting connections; the MCP
+      # handshake itself is exercised by the probe/gateway, not the healthcheck.
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import socket,sys; s=socket.create_connection(('localhost',9000),2); s.close()"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   # Base image for per-session meet-worker containers (Playwright +
   # Chromium + Xvfb + PulseAudio). The "meet-worker" profile keeps the
   # service out of `docker compose up` — the scheduler spawns one of

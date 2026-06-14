@@ -24,8 +24,11 @@ No database access — this file talks HTTP to the sandbox only.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
+import socket
+from urllib.parse import urlparse
 
 import httpx
 import pytest
@@ -38,6 +41,20 @@ SANDBOX_URL = os.environ.get(
 ).rstrip("/")
 
 FIXTURE_ARGV = ["python3", "/opt/sandbox/mcp_fixture_server.py"]
+DEMO_TOOLS_ARGV = ["python3", "/opt/sandbox/mcp_demo_server.py"]
+DEMO_HTTP_URL = os.environ.get("JOHNNY_DEMO_MCP_URL", "http://mcp-demo-http:9000/mcp")
+
+
+def _http_demo_available() -> bool:
+    """The mcp-demo-http service's port is accepting connections (in-stack)."""
+    try:
+        parsed = urlparse(DEMO_HTTP_URL)
+        with socket.create_connection(
+            (parsed.hostname or "", parsed.port or 80), timeout=5
+        ):
+            return True
+    except OSError:
+        return False
 
 
 def _bridge_available() -> bool:
@@ -164,3 +181,130 @@ async def test_probe_of_instantly_exiting_command_degrades() -> None:
     result = await probe_mcp_server(config, sandbox_url=SANDBOX_URL)
     assert not result.ok
     assert "exited" in result.error or "timed out" in result.error
+
+
+# --- Johnny-3gx: the seeded demo connectors + the gateway over real servers ---
+
+
+def _demo_tools_config() -> McpServerConfig:
+    return McpServerConfig(
+        name="demo-tools",
+        transport="stdio",
+        command=DEMO_TOOLS_ARGV[0],
+        args=tuple(DEMO_TOOLS_ARGV[1:]),
+        connect_timeout_s=15.0,
+        call_timeout_s=15.0,
+    )
+
+
+async def test_demo_tools_stdio_server_lists_and_calls() -> None:
+    """The seeded demo-tools stdio server works over the real bridge — and its
+    tools' input schemas come back (Johnny-3gx)."""
+    config = _demo_tools_config()
+    probe = await probe_mcp_server(config, sandbox_url=SANDBOX_URL)
+    assert probe.ok, probe.error
+    names = {tool.name for tool in probe.tools}
+    assert {
+        "current_time",
+        "uuid",
+        "base64_encode",
+        "base64_decode",
+        "random_number",
+    } <= names
+    encode_tool = next(t for t in probe.tools if t.name == "base64_encode")
+    assert encode_tool.input_schema is not None
+    assert "text" in encode_tool.input_schema.get("properties", {})
+
+    manager = McpClientManager()
+    try:
+        encoded = await manager.call_tool(
+            config, sandbox_url=SANDBOX_URL, tool="base64_encode", arguments={"text": "Johnny"}
+        )
+        assert encoded.text == base64.b64encode(b"Johnny").decode("ascii")
+        roundtrip = await manager.call_tool(
+            config, sandbox_url=SANDBOX_URL, tool="base64_decode", arguments={"data": encoded.text}
+        )
+        assert roundtrip.text == "Johnny"
+        assert not roundtrip.is_error
+    finally:
+        await manager.aclose()
+
+
+@pytest.mark.skipif(
+    not _http_demo_available(),
+    reason=(
+        f"mcp-demo-http not reachable at {DEMO_HTTP_URL} — start it with "
+        "docker compose up -d mcp-demo-http"
+    ),
+)
+async def test_demo_http_server_lists_and_calls() -> None:
+    """The seeded demo-http streamable-HTTP server works end-to-end (the http
+    transport path, no sandbox hop)."""
+    config = McpServerConfig(
+        name="demo-http",
+        transport="http",
+        url=DEMO_HTTP_URL,
+        connect_timeout_s=15.0,
+        call_timeout_s=15.0,
+    )
+    probe = await probe_mcp_server(config, sandbox_url=SANDBOX_URL)
+    assert probe.ok, probe.error
+    assert {"ping", "reverse_text", "word_count", "server_time"} <= {
+        tool.name for tool in probe.tools
+    }
+    manager = McpClientManager()
+    try:
+        pong = await manager.call_tool(
+            config, sandbox_url=SANDBOX_URL, tool="ping", arguments={}
+        )
+        assert pong.text == "pong"
+        reversed_ = await manager.call_tool(
+            config, sandbox_url=SANDBOX_URL, tool="reverse_text", arguments={"text": "abc"}
+        )
+        assert reversed_.text == "cba"
+    finally:
+        await manager.aclose()
+
+
+async def test_gateway_tools_drive_real_demo_server(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole feature (Johnny-3gx): build_mcp_tools → a real McpClientManager
+    → the real demo-tools server. list_mcp_servers/list_mcp_tools/call_mcp_tool
+    return live results, exactly what the answer LLM gets in a session."""
+    from johnny.agent.mcp_tools import build_mcp_tools
+    from johnny.mcp import store
+
+    monkeypatch.setenv("JOHNNY_WORKSPACES_DIR", str(tmp_path))
+    store.write_servers_raw(
+        "default",
+        {
+            "demo-tools": {
+                "type": "stdio",
+                "command": "python3",
+                "args": ["/opt/sandbox/mcp_demo_server.py"],
+                "johnny": {"enabled": True},
+            }
+        },
+    )
+    manager = McpClientManager()
+    tools = {
+        tool.info.name: tool._func
+        for tool in build_mcp_tools(
+            slug="default", manager=manager, sandbox_url=SANDBOX_URL
+        )
+    }
+    try:
+        servers = await tools["list_mcp_servers"]()
+        assert "demo-tools" in servers
+
+        listed = await tools["list_mcp_tools"](server="demo-tools")
+        assert "current_time" in listed
+        assert "base64_encode(text: string)" in listed
+
+        encoded = await tools["call_mcp_tool"](
+            server="demo-tools", tool="base64_encode", arguments={"text": "Johnny"}
+        )
+        assert encoded == base64.b64encode(b"Johnny").decode("ascii")
+    finally:
+        await manager.aclose()

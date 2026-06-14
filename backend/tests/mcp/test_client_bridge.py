@@ -26,8 +26,14 @@ from johnny.mcp.client import (
 from johnny.mcp.config import McpServerConfig
 
 _SCHEMA = {"type": "object", "properties": {}, "additionalProperties": True}
+_ECHO_SCHEMA = {
+    "type": "object",
+    "properties": {"message": {"type": "string"}},
+    "required": ["message"],
+    "additionalProperties": False,
+}
 FIXTURE_TOOLS = [
-    {"name": "echo", "description": "Echo the message back.", "inputSchema": _SCHEMA},
+    {"name": "echo", "description": "Echo the message back.", "inputSchema": _ECHO_SCHEMA},
     {"name": "add", "description": "Add two numbers.", "inputSchema": _SCHEMA},
     {"name": "always-fail", "description": "Always errors.", "inputSchema": _SCHEMA},
 ]
@@ -205,6 +211,10 @@ async def test_probe_lists_tools_through_real_sdk_session() -> None:
     assert result.ok, result.error
     assert [t.name for t in result.tools] == ["echo", "add", "always-fail"]
     assert result.tools[0].description == "Echo the message back."
+    # Johnny-3gx: the live listing path carries each tool's inputSchema so the
+    # answer agent's list_mcp_tools can show the model how to call it.
+    assert result.tools[0].input_schema == _ECHO_SCHEMA
+    assert result.tools[1].input_schema == _SCHEMA
     assert "fake-fixture" in result.server_info
     # The spawn crossed the bridge with argv + env, and the session was
     # stopped on the way out (no orphan processes in the sandbox).

@@ -116,6 +116,10 @@ COPY execd.py /opt/sandbox/execd.py
 # (and the integration suite) can register as command=python3
 # args=["/opt/sandbox/mcp_fixture_server.py"] to verify the MCP plumbing.
 COPY mcp_fixture_server.py /opt/sandbox/mcp_fixture_server.py
+# Demo stdio MCP server (Johnny-3gx): a secret-free, genuinely-useful connector
+# (current_time/uuid/base64/random) seeded ENABLED into the default workspace so
+# a clean install can drive the answer agent's MCP gateway end to end.
+COPY mcp_demo_server.py /opt/sandbox/mcp_demo_server.py
 # Vendored n8n MCP server launcher (Johnny-hp1): the stdio connector seeded
 # into the default workspace spawns `node /opt/sandbox/n8n/n8n-mcp-launcher.mjs`
 # here — Node + n8n-mcp are installed by setup.d/30-install-node.sh above.

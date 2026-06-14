@@ -53,6 +53,44 @@
         "call_timeout_s": 120.0,
         "idle_ttl_s": 300.0
       }
+    },
+    "demo-fixture": {
+      "type": "stdio",
+      "command": "python3",
+      "args": ["/opt/sandbox/mcp_fixture_server.py"],
+      "johnny": {
+        "enabled": true,
+        "tool_include": null,
+        "tool_exclude": [],
+        "connect_timeout_s": 10.0,
+        "call_timeout_s": 30.0,
+        "idle_ttl_s": 300.0
+      }
+    },
+    "demo-tools": {
+      "type": "stdio",
+      "command": "python3",
+      "args": ["/opt/sandbox/mcp_demo_server.py"],
+      "johnny": {
+        "enabled": true,
+        "tool_include": null,
+        "tool_exclude": [],
+        "connect_timeout_s": 10.0,
+        "call_timeout_s": 30.0,
+        "idle_ttl_s": 300.0
+      }
+    },
+    "demo-http": {
+      "type": "http",
+      "url": "http://mcp-demo-http:9000/mcp",
+      "johnny": {
+        "enabled": true,
+        "tool_include": null,
+        "tool_exclude": [],
+        "connect_timeout_s": 10.0,
+        "call_timeout_s": 30.0,
+        "idle_ttl_s": 300.0
+      }
     }
   }
 }
