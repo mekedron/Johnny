@@ -20,7 +20,11 @@ from typing import Any
 import pytest
 
 from johnny.agent.adapters.johnny_llm import tools_to_definitions
-from johnny.agent.mcp_tools import TOOLS_LISTED_CAP, build_mcp_tools
+from johnny.agent.mcp_tools import (
+    CALL_RESULT_CAP_CHARS,
+    TOOLS_LISTED_CAP,
+    build_mcp_tools,
+)
 from johnny.mcp.catalog import McpToolInfo
 from johnny.mcp.client import (
     McpCallResult,
@@ -380,3 +384,79 @@ async def test_call_filtered_tool_declined_without_calling() -> None:
     assert "not available" in out and "filtered" in out
     assert manager.call_calls == []
     assert sink.traces == []
+
+
+# --- Johnny-3gx fixes: tolerant server-name resolution + result cap ---------
+# (sessions 5/6 failures: the model abbreviated 'mcp-metabase-server' to
+# 'metabase' and dead-ended; one tool result was 16 KB and derailed the loop.)
+
+
+async def test_list_tools_resolves_abbreviated_server_name() -> None:
+    """'metabase' must resolve to 'mcp-metabase-server' (the session-5 dead-end),
+    connecting under the canonical name rather than erroring out."""
+    _seed_servers({"mcp-metabase-server": _stdio_entry()})
+    manager = FakeManager()
+    manager.list_result = (McpToolInfo(name="list_dashboards", description="List dashboards."),)
+    fns, _ = _tools(manager)
+    out = await fns["list_mcp_tools"](server="metabase")
+    assert manager.list_calls == [{"server": "mcp-metabase-server", "sandbox_url": SANDBOX_URL}]
+    assert "mcp-metabase-server" in out and "list_dashboards" in out
+
+
+async def test_list_tools_case_insensitive_server_name() -> None:
+    _seed_servers({"demo-tools": _stdio_entry()})
+    manager = FakeManager()
+    manager.list_result = (McpToolInfo(name="uuid", description="id"),)
+    fns, _ = _tools(manager)
+    out = await fns["list_mcp_tools"](server="Demo-Tools")
+    assert manager.list_calls[0]["server"] == "demo-tools"
+    assert "uuid" in out
+
+
+async def test_call_resolves_abbreviated_server_name_and_traces_canonical() -> None:
+    _seed_servers({"mcp-metabase-server": _stdio_entry()})
+    manager = FakeManager()
+    manager.call_result = McpCallResult(text="[]", is_error=False, duration_ms=4)
+    sink = _Recorder()
+    fns, _ = _tools(manager, sink)
+    out = await fns["call_mcp_tool"](server="metabase", tool="list_dashboards", arguments={})
+    assert out == "[]"
+    assert manager.call_calls[0]["server"] == "mcp-metabase-server"
+    assert sink.traces[0].tool_name == "mcp__mcp-metabase-server__list_dashboards"
+
+
+async def test_unknown_server_lists_available_names() -> None:
+    """A genuinely-unknown name returns the real connector names so the model can
+    retry in one step instead of floundering (session-5 recovery)."""
+    _seed_servers({"demo-tools": _stdio_entry(), "mcp-metabase-server": _stdio_entry()})
+    fns, _ = _tools(FakeManager())
+    out = await fns["list_mcp_tools"](server="salesforce")
+    assert 'No MCP connector named "salesforce"' in out
+    assert "demo-tools" in out and "mcp-metabase-server" in out
+
+
+async def test_ambiguous_abbreviation_lists_candidates_without_guessing() -> None:
+    """An abbreviation matching >1 connector is never silently picked — the model
+    is shown the options and nothing is connected."""
+    _seed_servers({"demo-tools": _stdio_entry(), "demo-http": _stdio_entry()})
+    manager = FakeManager()
+    fns, _ = _tools(manager)
+    out = await fns["list_mcp_tools"](server="demo")
+    assert "No MCP connector named" in out
+    assert "demo-tools" in out and "demo-http" in out
+    assert manager.list_calls == []
+
+
+async def test_call_large_result_is_capped() -> None:
+    """A huge tool result is bounded with a refine hint so it can't swamp the loop
+    (the session-6 16 KB dump)."""
+    _seed_servers({"demo-tools": _stdio_entry()})
+    manager = FakeManager()
+    manager.call_result = McpCallResult(text="x" * 20000, is_error=False, duration_ms=9)
+    sink = _Recorder()
+    fns, _ = _tools(manager, sink)
+    out = await fns["call_mcp_tool"](server="demo-tools", tool="dump", arguments={})
+    assert len(out) < 20000
+    assert "truncated" in out
+    assert CALL_RESULT_CAP_CHARS <= len(out) <= CALL_RESULT_CAP_CHARS + 200
+    assert "truncated" in sink.traces[0].stdout
