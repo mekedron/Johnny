@@ -38,6 +38,7 @@ from app.providers.base import (  # noqa: E402
 )
 from johnny.agent.adapters.johnny_tts import JohnnyTTS  # noqa: E402
 from johnny.agent.session import (  # noqa: E402
+    _SELF_AWARENESS_NOTE,
     DEFAULT_INSTRUCTIONS,
     AgentInstructionsConfig,
     AnswerConfig,
@@ -84,6 +85,10 @@ def test_empty_config_renders_base_framing_and_history_note_only() -> None:
     assert text.startswith("You are an AI meeting participant.")
     # The history note is always present (explains assistant=own speech).
     assert "assistant turns are your own prior speech" in text
+    # The self-awareness guard is ALSO always present (Johnny-etu.17) — even
+    # with an empty config the model must never be left to roleplay/deflect on
+    # a capability ask.
+    assert _SELF_AWARENESS_NOTE in text
     # Nothing optional leaked when all fields are empty.
     assert "Meeting instructions:" not in text
     assert "Context:" not in text
@@ -226,6 +231,53 @@ def test_empty_capability_notes_leave_prompt_byte_identical() -> None:
     with_empty = AgentInstructionsConfig(context="Be brief.", capability_notes="")
     assert build_agent_instructions(base) == build_agent_instructions(with_empty)
     assert "CANNOT" not in build_agent_instructions(base)
+
+
+# --- self-awareness guard (Johnny-etu.17) ----------------------------------
+
+
+def test_self_awareness_note_is_always_present_even_with_empty_catalog() -> None:
+    """The guard renders with NO capability notes (the empty-catalog path that
+    used to leave the answer model with nothing to ground on — the roleplay /
+    deflection root cause)."""
+    text = build_agent_instructions(AgentInstructionsConfig())
+    assert _SELF_AWARENESS_NOTE in text
+    # The three failure modes are explicitly forbidden.
+    assert "Never invent or role-play abilities you do not have" in text  # session-7
+    assert "'just a bot'" in text and "'not connected'" in text  # session-1
+    assert "repeating the result of an earlier task" in text  # session-6
+    # Honest no-skills fallback (AC: zero skills → says so, no fabrication).
+    assert "don't have any special tools set up in this session" in text
+
+
+def test_self_awareness_note_renders_after_character_before_capability_notes() -> None:
+    """Ordering: the honest-identity rules outrank a roleplay persona (after the
+    character) and defer to the real tool list (before the capability notes)."""
+    notes = (
+        "Some requests are handled for you by background tools:\n"
+        "- calendar.upcoming_events: Look up events."
+    )
+    config = AgentInstructionsConfig(
+        character_prompt="You are a cyberpunk netrunner.",
+        capability_notes=notes,
+        context="Be brief.",
+    )
+    rendered = build_agent_instructions(config)
+    assert rendered.index("netrunner") < rendered.index(_SELF_AWARENESS_NOTE)
+    assert rendered.index(_SELF_AWARENESS_NOTE) < rendered.index(notes)
+
+
+def test_self_awareness_note_defers_to_real_catalog_when_present() -> None:
+    """With a real capability block, both are present: the guard says to answer
+    from the listed tools, and the listed tools follow."""
+    notes = (
+        "Some requests are handled for you by background tools:\n"
+        "- calendar.upcoming_events: Look up upcoming events on the connected calendar."
+    )
+    rendered = build_agent_instructions(AgentInstructionsConfig(capability_notes=notes))
+    assert "are YOUR OWN skills" in rendered
+    assert "Do not retreat to listing generic chat abilities" in rendered
+    assert "- calendar.upcoming_events: Look up upcoming events" in rendered
 
 
 def test_chat_history_seeds_chat_ctx() -> None:

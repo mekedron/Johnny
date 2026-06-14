@@ -143,6 +143,50 @@ _HISTORY_NOTE = (
     "participants, sometimes prefixed with the speaker's name."
 )
 
+# Capability self-awareness guard (Johnny-etu.17). ALWAYS rendered into the
+# answer-side system prompt, even when the dynamic capability block below is
+# empty — so the small answer model can never be left with nothing to ground a
+# "what can you do?" answer on and fill the gap with either a roleplay
+# (session-7 cyberpunk "hacking, surveillance") or a deflection (session-1
+# "I'm just a bot / not connected"). It also disambiguates a capability ask
+# from a tool RUN, so the model describes its tools instead of replaying an
+# earlier task's result (the session-6 stale-result repeat). Worded for spoken
+# delivery. It pairs with the dynamic capability notes
+# (:func:`johnny.agent.task_catalog.render_capability_notes`): this note is the
+# behavior guard + honest baseline, the notes are the real tool list when the
+# session's catalog has one. Deliberately avoids the optional-section markers
+# ("Context:", "Calendar …", "Last session summary:", "Meeting instructions:")
+# and the answer-notes token "CANNOT" so the assembly-order/parity guards stay
+# byte-stable.
+_SELF_AWARENESS_NOTE = (
+    "Know what you actually are, and answer honestly when asked about it. You "
+    "are a real AI assistant taking part in this live meeting through actual "
+    "software, with a real — possibly small — set of tools wired into this "
+    "session. You are not a fictional character and not a generic chatbot, "
+    "whatever personality or tone of voice you adopt. "
+    "When someone asks what you can do, what skills or tools you have, or "
+    "whether you can do something, answer it yourself, plainly and out loud. "
+    "The capabilities listed below are YOUR OWN skills: name them and say what "
+    "each one is for (for example, that you can look up the calendar), and "
+    "offer to use them. Naming a tool and its purpose is exactly what is "
+    "wanted — it is NOT the same as inventing a result, so the rule against "
+    "stating specifics covers only a tool's actual results (events, times, "
+    "names, counts), never whether the tool exists. Do not retreat to listing "
+    "generic chat abilities when you have real tools listed below, and never "
+    "answer by repeating the result of an earlier task. "
+    "Never invent or role-play abilities you do not have: you have no powers "
+    "beyond your listed tools, so do not present yourself as a hacker, a spy, "
+    "a surveillance system, or any other fictional operator. "
+    "Never go the other way and deny yourself either — do not say you are "
+    "'just a bot', that you are 'not really here', 'not connected', or unable "
+    "to do anything; you are a working assistant and at minimum you can hear, "
+    "talk, and help think things through. "
+    "If no specific tools are listed below, say plainly that you don't have "
+    "any special tools set up in this session right now and that you're a "
+    "voice meeting assistant who can listen, discuss, and answer questions — "
+    "but still never invent tools and never claim you can do nothing at all."
+)
+
 
 @dataclass(frozen=True, slots=True)
 class AgentInstructionsConfig:
@@ -186,9 +230,12 @@ def build_agent_instructions(config: AgentInstructionsConfig) -> str:
     Reuses the legacy answer-stage assembly order from
     the legacy split pipeline: base framing → character (FIRST, so
     the model adopts the character before it reads the job) → history note →
-    capability notes (Johnny-trt.55 + Johnny-etu.7 — what the session CAN and
-    CANNOT do, absent only when it has no user-facing capability and no gap, so
-    the prompt stays byte-identical) →
+    self-awareness guard (Johnny-etu.17 — ALWAYS present: who you really are,
+    answer capability asks from your real tools, never roleplay a fake ability
+    and never deflect "I'm just a bot"; rendered after the character so it
+    outranks roleplay habits) → capability notes (Johnny-trt.55 + Johnny-etu.7
+    — what the session CAN and CANNOT do, absent only when it has no user-facing
+    capability and no gap, so that block stays byte-identical) →
     context (the per-assignment brief — the documented Johnny-trt.45 slot)
     → calendar description → calendar attachments → last-session summary.
     The retired "Meeting instructions" line rendered between capability
@@ -202,6 +249,12 @@ def build_agent_instructions(config: AgentInstructionsConfig) -> str:
     if config.character_prompt:
         system += f"\n\n{config.character_prompt}"
     system += f"\n\n{_HISTORY_NOTE}"
+    # Self-awareness guard (Johnny-etu.17): always present so a capability ask
+    # is never answered from an empty prompt — the small model's roleplay /
+    # deflection / stale-result failure modes. Sits after the character (so the
+    # honest-identity rules outrank a roleplay persona) and before the dynamic
+    # capability notes, which it explicitly defers to for the real tool list.
+    system += f"\n\n{_SELF_AWARENESS_NOTE}"
     if config.capability_notes:
         # Capability grounding (Johnny-trt.55 + Johnny-etu.7): rendered AFTER
         # the character so the can-do / no-pretend-check rules outrank roleplay

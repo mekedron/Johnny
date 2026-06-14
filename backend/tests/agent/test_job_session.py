@@ -528,6 +528,49 @@ async def test_delegation_capable_runtime_catalogs_injected_skills(tmp_path: Pat
     assert db.closed is True
 
 
+async def test_answer_prompt_grounds_capability_self_awareness_in_live_catalog(
+    tmp_path: Path,
+) -> None:
+    """Johnny-etu.17: the answer model's persistent instructions ground a
+    capability ask in the session's REAL catalog — the available skill's
+    one-liner is present (catalog → capability_notes → instructions path), and
+    the always-present self-awareness guard rides alongside it so the small
+    model can never roleplay a fake skill or deflect 'I'm just a bot'."""
+    from johnny.agent.session import _SELF_AWARENESS_NOTE
+    from johnny.skills.registry import load_skill_registry
+
+    (tmp_path / "fetch-news").mkdir()
+    (tmp_path / "fetch-news" / "SKILL.md").write_text(
+        "---\nname: fetch-news\ndescription: \"Fetch today's news.\"\n---\nInstructions.\n",
+        encoding="utf-8",
+    )
+
+    async def no_probe(names: list[str]) -> dict[str, bool]:
+        raise AssertionError("baseline-only skill must not probe the sandbox")
+
+    registry_obj = await load_skill_registry(tmp_path, check_bins=no_probe)
+    db = _FakeDbSession()
+    runtime = await build_agent_runtime(
+        _job(mode=AUTONOMOUS_MODE, redis_url="redis://r:6379/0"),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: db,
+        skill_registry=registry_obj,
+    )
+
+    instructions = runtime.agent.instructions
+    # Regression guard (AC): a non-empty catalog yields non-empty capability
+    # notes, and the real skill is named in the prompt the answer model reads.
+    assert "- fetch-news: Fetch today's news." in instructions
+    assert "handled for you by background tools" in instructions
+    # The self-awareness guard is always present and tells the model the listed
+    # tools are its own skills to name, rather than inventing or deflecting.
+    assert _SELF_AWARENESS_NOTE in instructions
+    assert "are YOUR OWN skills" in instructions
+    await runtime.aclose()
+    assert db.closed is True
+
+
 async def test_meet_backed_runtime_advertises_meeting_leave() -> None:
     """Surface scoping (Johnny-trt.57): a job with a calendar_event_id is a
     Meet-backed session — meeting.leave joins the catalog ahead of
