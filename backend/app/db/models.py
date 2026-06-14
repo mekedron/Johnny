@@ -1058,6 +1058,77 @@ class AgentToolCall(Base):
     # ``exit_code``/``stdout``/``stderr`` are then empty — ``error`` says why.
     denied: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Wall-clock bounds of the call (Johnny-oeq), stamped by the tool wrapper
+    # around the sandbox round-trip so the timeline can show *when* a call
+    # started and returned, not just its ``duration_ms``. Nullable: legacy rows
+    # and any path that does not stamp them fall back to ``created_at``.
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class AgentModelCall(Base):
+    """One LLM call the answer agent made inside its native tool loop (Johnny-gal).
+
+    A speak turn is not one model call — it is a *loop*: the answer model is
+    asked, emits a tool call (``exec``/``read``/``list_dir``), sees the result,
+    is asked again, and so on up to ``MAX_TOOL_STEPS`` before it produces the
+    final spoken text. Each of those asks is one row here, ordered by
+    ``step_index`` within the turn, so the reasoning timeline can itemise *every*
+    prompt the bot ran and what came back — the answer-loop observability the
+    operator could not see (the router call is already captured in
+    ``agent_decisions``; this fills the answer-side gap).
+
+    ``prompt_json`` is the full messages array sent for this step;
+    ``response_text`` the model's text; ``tool_calls_json`` the tool calls it
+    emitted (name + arguments). Token usage / TTFT / wall-clock timing come from
+    the provider response. No relationship back to ``BotSession`` (the
+    ``SessionTiming`` / ``AgentToolCall`` convention): the detail API queries by
+    ``bot_session_id``.
+    """
+
+    __tablename__ = "agent_model_calls"
+    __table_args__ = (
+        Index("ix_agent_model_calls_session_turn", "bot_session_id", "turn_id"),
+        Index("ix_agent_model_calls_session_created", "bot_session_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_session_id: Mapped[int] = mapped_column(
+        ForeignKey("bot_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    turn_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # "router" | "answer" — v1 records the answer loop; the router stays in
+    # agent_decisions. Kept open so the router can be mirrored here later.
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    # 0-based ordering of this call within its turn (the answer loop's steps).
+    step_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    model_provider: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    prompt_json: Mapped[Any | None] = mapped_column(_json_column(), nullable=True)
+    response_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tool_calls_json: Mapped[Any | None] = mapped_column(_json_column(), nullable=True)
+    finish_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    time_to_first_token_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

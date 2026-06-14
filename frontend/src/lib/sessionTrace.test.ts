@@ -155,6 +155,47 @@ describe('buildDecisionEntries', () => {
 		assert.equal(entries[0].toolCalls[0].toolName, 'sandbox.exec');
 	});
 
+	it('never drops a tool call with no turn_id and no task id — attributes it by timestamp (Johnny-5sm)', () => {
+		// The "black box": inline native-tool rows persisted before the turn-link
+		// fix carry neither key. They must slot into the turn live at their
+		// timestamp, not vanish from the timeline.
+		const d1 = makeDecision({ id: 1, turn_id: 1, created_at: '2026-06-14T00:00:00Z' });
+		const d2 = makeDecision({ id: 2, turn_id: 2, created_at: '2026-06-14T00:05:00Z' });
+		const entries = buildDecisionEntries({
+			decisions: [d1, d2],
+			utterances: [],
+			toolCalls: [
+				makeToolCall({
+					id: 31,
+					turn_id: null,
+					agent_task_id: null,
+					created_at: '2026-06-14T00:05:02Z',
+					request_json: { argv: ['bash', '/skills/weather/run.sh', 'Helsinki'] }
+				})
+			]
+		});
+		const byId = new Map(entries.map((e) => [e.decisionId, e]));
+		// Attributed to turn 2 (the decision live at 00:05:02), not turn 1, not dropped.
+		assert.equal(byId.get(1)?.toolCalls.length, 0);
+		assert.equal(byId.get(2)?.toolCalls.length, 1);
+		assert.deepEqual(byId.get(2)?.toolCalls[0].request.argv, [
+			'bash',
+			'/skills/weather/run.sh',
+			'Helsinki'
+		]);
+	});
+
+	it('attributes a pre-decision orphan call to the earliest decision rather than dropping it', () => {
+		const entries = buildDecisionEntries({
+			decisions: [makeDecision({ id: 1, turn_id: 1, created_at: '2026-06-14T00:01:00Z' })],
+			utterances: [],
+			toolCalls: [
+				makeToolCall({ id: 32, turn_id: null, agent_task_id: null, created_at: '2026-06-14T00:00:00Z' })
+			]
+		});
+		assert.equal(entries[0].toolCalls.length, 1);
+	});
+
 	it('leaves task/toolCalls empty for a plain turn and tolerates missing collections', () => {
 		const entries = buildDecisionEntries({
 			decisions: [makeDecision({ turn_id: 2, raw_output: {} })],

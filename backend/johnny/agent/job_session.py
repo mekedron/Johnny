@@ -1211,6 +1211,20 @@ async def build_agent_runtime(
     # uses, so the reasoning timeline renders native calls unchanged. Off the
     # flag (or with no sandbox) → None → the tool-less prompt/behaviour is
     # byte-identical.
+    # Per-model-call observability (Johnny-gal): every answer-loop LLM call
+    # (each step of the native tool loop) records one agent_model_calls row with
+    # its prompt, response, tool calls, tokens and timing — the answer-side
+    # itemisation the operator could not see. Bound onto the JohnnyLLM the
+    # AgentSession uses (adapters.llm); the resolver attributes each call to its
+    # issuing turn. The router call stays captured in agent_decisions.
+    if hasattr(adapters.llm, "bind_model_call_sink"):
+        from app.services.model_calls import SqlAlchemyModelCallSink
+
+        adapters.llm.bind_model_call_sink(
+            SqlAlchemyModelCallSink(bot_session_id=config.bot_session_id),
+            _resolve_speech_turn,
+        )
+
     sandbox_tools = None
     if native_tools_active:
         from app.services.agent_tasks import SqlAlchemyToolCallTraceSink
@@ -1218,7 +1232,15 @@ async def build_agent_runtime(
         sandbox_tools = build_sandbox_tools(
             sandbox_client,
             policy=resolve_sandbox_policy(full_access=True),
-            trace_sink=SqlAlchemyToolCallTraceSink(bot_session_id=config.bot_session_id),
+            # One sink spans the whole session, so it resolves the issuing turn
+            # per call off the gate's live reply→turn binding (the same seam the
+            # metrics translator uses). Without this every inline tool call
+            # persisted turn_id=NULL and the timeline silently dropped it
+            # (Johnny-5sm — the "black box").
+            trace_sink=SqlAlchemyToolCallTraceSink(
+                bot_session_id=config.bot_session_id,
+                resolve_turn_id=_resolve_speech_turn,
+            ),
         )
 
     prompt_config = replace(

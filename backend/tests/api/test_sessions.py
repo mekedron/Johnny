@@ -16,6 +16,7 @@ from app.db import Base
 from app.db.models import (
     Agent,
     AgentDecision,
+    AgentModelCall,
     AgentTask,
     AgentToolCall,
     AgentUtterance,
@@ -62,6 +63,7 @@ def engine() -> sa.Engine:
             AgentUtterance.__table__,  # type: ignore[list-item]
             AgentTask.__table__,  # type: ignore[list-item]
             AgentToolCall.__table__,  # type: ignore[list-item]
+            AgentModelCall.__table__,  # type: ignore[list-item]
             SessionTiming.__table__,  # type: ignore[list-item]
             ConversationEvent.__table__,  # type: ignore[list-item]
         ],

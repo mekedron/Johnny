@@ -37,6 +37,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_session
 from app.db.models import (
     AgentDecision,
+    AgentModelCall,
     AgentTask,
     AgentTaskStatus,
     AgentToolCall,
@@ -276,6 +277,41 @@ class AgentToolCallRead(BaseModel):
     truncated: bool
     denied: bool
     error: str | None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime
+
+
+class AgentModelCallRead(BaseModel):
+    """One persisted LLM call for the reasoning timeline (Johnny-gal).
+
+    Mirrors ``agent_model_calls``: the answer agent's per-step tool-loop calls,
+    each with the full ``prompt_json`` it was sent, the ``response_text`` and the
+    ``tool_calls_json`` it emitted, the model id, token usage, TTFT and
+    wall-clock timing. Linked to its turn by ``turn_id`` and ordered by
+    ``step_index`` so the timeline can itemise every prompt the bot ran.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    bot_session_id: int
+    turn_id: int | None
+    role: str
+    step_index: int
+    model_provider: str | None
+    model_name: str | None
+    prompt_json: Any | None
+    response_text: str | None
+    tool_calls_json: Any | None
+    finish_reason: str | None
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    total_tokens: int | None
+    time_to_first_token_ms: int | None
+    duration_ms: int | None
+    started_at: datetime | None
+    finished_at: datetime | None
     created_at: datetime
 
 
@@ -373,6 +409,9 @@ class SessionDetailResponse(BaseModel):
     pending_decisions: list[AgentDecisionRead]
     tasks: list[AgentTaskRead] = []
     tool_calls: list[AgentToolCallRead] = []
+    # Per-LLM-call audit (Johnny-gal): the answer agent's tool-loop steps,
+    # grouped onto a turn by ``turn_id`` and ordered by ``step_index``.
+    model_calls: list[AgentModelCallRead] = []
     meeting_bot_state: MeetingBotParticipationRead | None = None
 
 
@@ -538,6 +577,14 @@ def get_session_detail(
             .limit(limit)
         ).all()
     )
+    model_calls = list(
+        session.scalars(
+            select(AgentModelCall)
+            .where(AgentModelCall.bot_session_id == row.id)
+            .order_by(AgentModelCall.id.asc())
+            .limit(limit)
+        ).all()
+    )
     pending = [d for d in decisions if d.outcome == DecisionOutcome.PENDING]
 
     # Meeting-level participation state (Johnny-trt.56) so the page can
@@ -575,6 +622,7 @@ def get_session_detail(
         pending_decisions=[AgentDecisionRead.model_validate(d) for d in pending],
         tasks=[AgentTaskRead.model_validate(t) for t in tasks],
         tool_calls=[AgentToolCallRead.model_validate(c) for c in tool_calls],
+        model_calls=[AgentModelCallRead.model_validate(c) for c in model_calls],
         meeting_bot_state=meeting_state,
     )
 

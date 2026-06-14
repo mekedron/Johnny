@@ -17,6 +17,7 @@ from app.db import Base
 from app.db.models import (
     EMBEDDING_DIM,
     AgentDecision,
+    AgentModelCall,
     AgentTask,
     AgentTaskStatus,
     AgentToolCall,
@@ -57,6 +58,7 @@ def engine() -> sa.Engine:
             AgentUtterance.__table__,  # type: ignore[list-item]
             AgentTask.__table__,  # type: ignore[list-item]
             AgentToolCall.__table__,  # type: ignore[list-item]
+            AgentModelCall.__table__,  # type: ignore[list-item]
             SessionTiming.__table__,  # type: ignore[list-item]
             ConversationEvent.__table__,  # type: ignore[list-item]
         ],

@@ -39,7 +39,8 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Any, Protocol
 
 from johnny.agent.internal_tools import is_internal_kind
@@ -90,6 +91,11 @@ class ToolCallTrace:
     truncated: bool
     denied: bool
     error: str
+    # Wall-clock bounds of the call (Johnny-oeq). Stamped by the caller that
+    # owns the timing (the native tool wrapper brackets the sandbox round-trip);
+    # None when not stamped → the sink/UI fall back to ``created_at``.
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
 
 
 class ToolCallTraceSink(Protocol):
@@ -131,7 +137,13 @@ def _trace_from_outcome(
 
 
 def build_tool_call_trace(
-    tool_name: str, phase: str, request: dict[str, Any], outcome: ToolOutcome
+    tool_name: str,
+    phase: str,
+    request: dict[str, Any],
+    outcome: ToolOutcome,
+    *,
+    started_at: datetime | None = None,
+    finished_at: datetime | None = None,
 ) -> ToolCallTrace:
     """Public builder for an ``agent_tool_calls`` trace (Johnny-3ow).
 
@@ -140,9 +152,13 @@ def build_tool_call_trace(
     :class:`~johnny.skills.tools.SandboxExecTool` outside the task queue and
     persist through the SAME :class:`ToolCallTraceSink`, so they need this one
     seam to shape a trace from an outcome without reaching into the private
-    helper. Identical output to :func:`_trace_from_outcome`.
+    helper. ``started_at``/``finished_at`` are the wall-clock bounds the native
+    wrapper measured around the call (Johnny-oeq); omitted on the worker path.
     """
-    return _trace_from_outcome(tool_name, phase, request, outcome)
+    trace = _trace_from_outcome(tool_name, phase, request, outcome)
+    if started_at is not None or finished_at is not None:
+        trace = replace(trace, started_at=started_at, finished_at=finished_at)
+    return trace
 
 
 async def _run_traced(

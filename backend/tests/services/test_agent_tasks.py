@@ -16,8 +16,9 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from app.db import Base
-from app.db.models import AgentTask, AgentTaskStatus
-from app.services.agent_tasks import SqlAlchemyTaskSink
+from app.db.models import AgentTask, AgentTaskStatus, AgentToolCall
+from app.services.agent_tasks import SqlAlchemyTaskSink, SqlAlchemyToolCallTraceSink
+from johnny.skills.executor import ToolCallTrace
 from johnny.agent.tasks import (
     TaskCoordinator,
     TaskSpec,
@@ -296,3 +297,110 @@ async def test_fetch_status_sees_other_session_commits(engine: sa.Engine) -> Non
     finally:
         reader.close()
         writer.close()
+
+
+# --- SqlAlchemyToolCallTraceSink: turn-id binding (Johnny-5sm) -----------------
+
+
+@pytest.fixture
+def tool_engine() -> sa.Engine:
+    eng = sa.create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=sa.pool.StaticPool,
+    )
+    Base.metadata.create_all(bind=eng, tables=[AgentToolCall.__table__])  # type: ignore[list-item]
+    return eng
+
+
+def _tool_trace(**overrides: object) -> ToolCallTrace:
+    base: dict[str, object] = {
+        "tool_name": "sandbox.exec",
+        "phase": "exec",
+        "request": {"argv": ["bash", "/skills/weather/run.sh", "Helsinki"]},
+        "ok": True,
+        "exit_code": 0,
+        "stdout": "Right now in Helsinki: Partly cloudy +12°C",
+        "stderr": "",
+        "duration_ms": 180,
+        "timed_out": False,
+        "truncated": False,
+        "denied": False,
+        "error": "",
+    }
+    base.update(overrides)
+    return ToolCallTrace(**base)  # type: ignore[arg-type]
+
+
+def _only_row(engine: sa.Engine) -> AgentToolCall:
+    with Session(engine) as sess:
+        rows = sess.scalars(sa.select(AgentToolCall)).all()
+        assert len(rows) == 1
+        return rows[0]
+
+
+async def test_tool_sink_resolver_stamps_the_live_turn(tool_engine: sa.Engine) -> None:
+    """The inline native-tool loop (one session-scoped sink) resolves the
+    issuing turn per call — the fix for the 'black box' where every inline call
+    landed turn_id=NULL and the timeline dropped it."""
+    sink = SqlAlchemyToolCallTraceSink(
+        bot_session_id=36,
+        resolve_turn_id=lambda: 7,
+        session_factory=lambda: Session(tool_engine),
+    )
+    await sink.record(_tool_trace())
+    row = _only_row(tool_engine)
+    assert row.turn_id == 7
+    assert row.bot_session_id == 36
+    assert row.request_json["argv"][-1] == "Helsinki"  # args round-trip intact
+
+
+async def test_tool_sink_resolver_none_falls_back_to_fixed_turn(
+    tool_engine: sa.Engine,
+) -> None:
+    """A resolver that returns None (no active reply) keeps the fixed binding so
+    a resolver miss never costs us the row's attribution."""
+    sink = SqlAlchemyToolCallTraceSink(
+        bot_session_id=36,
+        turn_id=3,
+        resolve_turn_id=lambda: None,
+        session_factory=lambda: Session(tool_engine),
+    )
+    await sink.record(_tool_trace())
+    assert _only_row(tool_engine).turn_id == 3
+
+
+async def test_tool_sink_resolver_raise_falls_back_and_persists(
+    tool_engine: sa.Engine,
+) -> None:
+    """A raising resolver must not lose the trace — it falls back to the fixed
+    binding and still persists the row."""
+
+    def _boom() -> int:
+        raise RuntimeError("gate gone")
+
+    sink = SqlAlchemyToolCallTraceSink(
+        bot_session_id=36,
+        turn_id=5,
+        resolve_turn_id=_boom,
+        session_factory=lambda: Session(tool_engine),
+    )
+    await sink.record(_tool_trace())
+    assert _only_row(tool_engine).turn_id == 5
+
+
+async def test_tool_sink_worker_path_keeps_fixed_turn(tool_engine: sa.Engine) -> None:
+    """The worker builds one sink per task with a fixed turn_id and NO resolver —
+    that path is unchanged."""
+    sink = SqlAlchemyToolCallTraceSink(
+        bot_session_id=36,
+        agent_task_id=11,
+        turn_id=4,
+        kind="web_search",
+        session_factory=lambda: Session(tool_engine),
+    )
+    await sink.record(_tool_trace())
+    row = _only_row(tool_engine)
+    assert row.turn_id == 4
+    assert row.agent_task_id == 11
+    assert row.kind == "web_search"

@@ -128,9 +128,11 @@ export interface TraceRecords {
  * Links each decision to: its utterance (by `agent_decision_id`), its delegate
  * task (by the shared durable `turn_id`, Johnny-trt.54), and that task's
  * tool-call traces (by `turn_id`, falling back to the matched task's id when a
- * trace carries no turn_id — legacy / hand-queued). Extracted verbatim from the
- * live session page's `applyCoreDetail` so live and history assemble turns
- * identically.
+ * trace carries no turn_id). Tool calls with NEITHER a turn_id nor a task id
+ * (legacy inline-loop rows persisted before the Johnny-5sm turn-link fix) are
+ * never dropped — {@link attributeOrphanToolCalls} slots each into the turn that
+ * was live at its timestamp. Extracted from the live session page's
+ * `applyCoreDetail` so live and history assemble turns identically.
  */
 export function buildDecisionEntries(records: TraceRecords): DecisionEntry[] {
 	const utteranceMap = new Map<number, AgentUtteranceRecord>();
@@ -147,6 +149,7 @@ export function buildDecisionEntries(records: TraceRecords): DecisionEntry[] {
 	}
 	const toolCallsByTurn = new Map<number, AgentToolCallRecord[]>();
 	const toolCallsByTask = new Map<number, AgentToolCallRecord[]>();
+	const orphans: AgentToolCallRecord[] = [];
 	for (const c of records.toolCalls ?? []) {
 		if (c.turn_id !== null) {
 			(
@@ -158,16 +161,58 @@ export function buildDecisionEntries(records: TraceRecords): DecisionEntry[] {
 				toolCallsByTask.get(c.agent_task_id) ??
 				toolCallsByTask.set(c.agent_task_id, []).get(c.agent_task_id)!
 			).push(c);
+		} else {
+			orphans.push(c);
 		}
 	}
+	const orphansByDecisionId = attributeOrphanToolCalls(orphans, records.decisions);
 	return records.decisions.map((d) => {
 		const matchedTask = d.turn_id !== null ? (taskByTurn.get(d.turn_id) ?? null) : null;
-		const calls =
+		const linked =
 			(d.turn_id !== null ? toolCallsByTurn.get(d.turn_id) : undefined) ??
 			(matchedTask ? toolCallsByTask.get(matchedTask.id) : undefined) ??
 			[];
+		const orphaned = orphansByDecisionId.get(d.id) ?? [];
+		const calls = orphaned.length > 0 ? [...linked, ...orphaned] : linked;
 		return decisionRecordToEntry(d, utteranceMap.get(d.id) ?? null, matchedTask, calls);
 	});
+}
+
+/**
+ * Never-drop safety net for tool calls that carry no turn_id and no task id.
+ * Each is attributed to the most recent decision at-or-before its `created_at`
+ * (or the earliest decision when it predates them all), preserving execution
+ * order. New inline calls carry a real turn_id (Johnny-5sm) and never reach
+ * here; this only catches legacy rows so a regression can't silently hide tool
+ * activity again. Returns a decision-id → calls map.
+ */
+function attributeOrphanToolCalls(
+	orphans: AgentToolCallRecord[],
+	decisions: AgentDecisionRecord[]
+): Map<number, AgentToolCallRecord[]> {
+	const byDecision = new Map<number, AgentToolCallRecord[]>();
+	if (orphans.length === 0 || decisions.length === 0) {
+		return byDecision;
+	}
+	const sortedDecisions = decisions
+		.map((d) => ({ id: d.id, at: Date.parse(d.created_at) || 0 }))
+		.sort((a, b) => a.at - b.at);
+	const sortedOrphans = [...orphans].sort(
+		(a, b) => (Date.parse(a.created_at) || 0) - (Date.parse(b.created_at) || 0)
+	);
+	for (const call of sortedOrphans) {
+		const at = Date.parse(call.created_at) || 0;
+		let targetId = sortedDecisions[0].id;
+		for (const d of sortedDecisions) {
+			if (d.at <= at) {
+				targetId = d.id;
+			} else {
+				break;
+			}
+		}
+		(byDecision.get(targetId) ?? byDecision.set(targetId, []).get(targetId)!).push(call);
+	}
+	return byDecision;
 }
 
 /**

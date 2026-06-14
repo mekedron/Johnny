@@ -36,6 +36,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from livekit.agents.llm import function_tool
@@ -119,11 +120,20 @@ def build_sandbox_tools(
     exec_tool = SandboxExecTool(sandbox, policy=policy)
 
     async def _run(phase: str, request: dict[str, Any], *, empty_ok: str) -> str:
+        started_at = datetime.now(timezone.utc)
         outcome = await exec_tool.run(request)
+        finished_at = datetime.now(timezone.utc)
         if trace_sink is not None:
             try:
                 await trace_sink.record(
-                    build_tool_call_trace(exec_tool.name, phase, request, outcome)
+                    build_tool_call_trace(
+                        exec_tool.name,
+                        phase,
+                        request,
+                        outcome,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                    )
                 )
             except Exception:  # pragma: no cover - tracing is best-effort
                 logger.warning(

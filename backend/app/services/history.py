@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     AgentDecision,
+    AgentModelCall,
     AgentTask,
     AgentToolCall,
     AgentUtterance,
@@ -364,6 +365,7 @@ def get_session_full_detail(
     list[AgentToolCall],
     list[SessionTiming],
     list[ConversationEvent],
+    list[AgentModelCall],
 ]:
     """Load a session row plus *all* its persisted observability rows.
 
@@ -447,6 +449,13 @@ def get_session_full_detail(
             )
         ).all()
     )
+    model_calls = list(
+        session.scalars(
+            select(AgentModelCall)
+            .where(AgentModelCall.bot_session_id == row.id)
+            .order_by(AgentModelCall.id.asc())
+        ).all()
+    )
     return (
         row,
         transcripts,
@@ -456,6 +465,7 @@ def get_session_full_detail(
         tool_calls,
         timings,
         conversation_events,
+        model_calls,
     )
 
 
@@ -595,6 +605,32 @@ def _serialise_tool_call(row: AgentToolCall) -> dict[str, Any]:
         "truncated": row.truncated,
         "denied": row.denied,
         "error": row.error,
+        "started_at": _serialise_datetime(row.started_at),
+        "finished_at": _serialise_datetime(row.finished_at),
+        "created_at": _serialise_datetime(row.created_at),
+    }
+
+
+def _serialise_model_call(row: AgentModelCall) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "bot_session_id": row.bot_session_id,
+        "turn_id": row.turn_id,
+        "role": row.role,
+        "step_index": row.step_index,
+        "model_provider": row.model_provider,
+        "model_name": row.model_name,
+        "prompt_json": row.prompt_json,
+        "response_text": row.response_text,
+        "tool_calls_json": row.tool_calls_json,
+        "finish_reason": row.finish_reason,
+        "prompt_tokens": row.prompt_tokens,
+        "completion_tokens": row.completion_tokens,
+        "total_tokens": row.total_tokens,
+        "time_to_first_token_ms": row.time_to_first_token_ms,
+        "duration_ms": row.duration_ms,
+        "started_at": _serialise_datetime(row.started_at),
+        "finished_at": _serialise_datetime(row.finished_at),
         "created_at": _serialise_datetime(row.created_at),
     }
 
@@ -645,6 +681,7 @@ def export_session(session: Session, bot_session_id: int) -> dict[str, Any]:
         tool_calls,
         timings,
         conversation_events,
+        model_calls,
     ) = get_session_full_detail(session, bot_session_id)
     # The full observability record (Johnny-etu.16) rides the export so an
     # offline dump matches what the history page shows: every model call's
@@ -677,6 +714,7 @@ def export_session(session: Session, bot_session_id: int) -> dict[str, Any]:
         "conversation_events": [
             _serialise_conversation_event(e) for e in conversation_events
         ],
+        "model_calls": [_serialise_model_call(c) for c in model_calls],
     }
 
 

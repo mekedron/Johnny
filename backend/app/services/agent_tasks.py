@@ -175,15 +175,24 @@ def _cap_output(value: str) -> tuple[str | None, bool]:
 class SqlAlchemyToolCallTraceSink(ToolCallTraceSink):
     """Persist per-tool-call traces to ``agent_tool_calls`` (Johnny-etu.4).
 
-    One sink per executing task: the session / task / turn / kind binding is
-    fixed at construction (the worker builds it from the
-    :class:`~app.services.task_worker.ClaimedTask`), so the skills executor hands
-    over only what each ``sandbox.exec`` produced. Each :meth:`record` opens its
-    own short-lived session and commits independently — a trace is durable the
-    moment the call returns, even if the task later fails or the worker dies
-    before the settle. Best-effort by contract: the executor swallows + logs any
-    raise (:func:`johnny.skills.executor._run_traced`) so observability never
-    breaks a task. Mirrors :class:`SqlAlchemyTaskSink`'s SQLAlchemy-free split.
+    Two binding shapes share this sink:
+
+    * The **worker** builds one sink per task from the
+      :class:`~app.services.task_worker.ClaimedTask` — the session / task / turn
+      / kind binding is fixed at construction.
+    * The **inline native-tool loop** (Johnny-3ow) reuses ONE session-scoped
+      sink across every turn of the session, so a fixed ``turn_id`` cannot work.
+      It passes ``resolve_turn_id`` — a callable read at record time off the
+      gate's live reply→turn binding — so each call lands on the turn that
+      actually issued it. Without it the inline calls persisted ``turn_id=NULL``
+      and the reasoning timeline dropped every one (the "black box" — Johnny-5sm).
+
+    Each :meth:`record` opens its own short-lived session and commits
+    independently — a trace is durable the moment the call returns, even if the
+    task later fails or the worker dies before the settle. Best-effort by
+    contract: the executor swallows + logs any raise
+    (:func:`johnny.skills.executor._run_traced`) so observability never breaks a
+    task. Mirrors :class:`SqlAlchemyTaskSink`'s SQLAlchemy-free split.
     """
 
     def __init__(
@@ -193,21 +202,34 @@ class SqlAlchemyToolCallTraceSink(ToolCallTraceSink):
         agent_task_id: int | None = None,
         turn_id: int | None = None,
         kind: str | None = None,
+        resolve_turn_id: Callable[[], int | None] | None = None,
         session_factory: Callable[[], Session] | None = None,
     ) -> None:
         self._bot_session_id = bot_session_id
         self._agent_task_id = agent_task_id
         self._turn_id = turn_id
         self._kind = kind
+        self._resolve_turn_id = resolve_turn_id
         self._session_factory = session_factory
 
     async def record(self, trace: ToolCallTrace) -> None:
         stdout, stdout_capped = _cap_output(trace.stdout)
         stderr, stderr_capped = _cap_output(trace.stderr)
+        # A live resolver (the inline loop) wins over the fixed binding; a None
+        # result (no active reply) falls back so a resolver hiccup never costs us
+        # the row. The worker path passes no resolver and keeps its fixed turn_id.
+        turn_id = self._turn_id
+        if self._resolve_turn_id is not None:
+            try:
+                resolved = self._resolve_turn_id()
+            except Exception:  # pragma: no cover - resolver is best-effort
+                resolved = None
+            if resolved is not None:
+                turn_id = resolved
         row = AgentToolCall(
             bot_session_id=self._bot_session_id,
             agent_task_id=self._agent_task_id,
-            turn_id=self._turn_id,
+            turn_id=turn_id,
             tool_name=trace.tool_name,
             kind=self._kind,
             phase=trace.phase,
@@ -221,6 +243,8 @@ class SqlAlchemyToolCallTraceSink(ToolCallTraceSink):
             truncated=trace.truncated or stdout_capped or stderr_capped,
             denied=trace.denied,
             error=trace.error or None,
+            started_at=trace.started_at,
+            finished_at=trace.finished_at,
         )
         factory = self._session_factory
         if factory is None:

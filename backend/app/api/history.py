@@ -32,6 +32,7 @@ from app.api.deps import get_session
 # byte-identical shape the live /sessions/{id} detail does — the frontend
 # renders both from the same shared per-turn trace components.
 from app.api.sessions import (
+    AgentModelCallRead,
     AgentTaskRead,
     AgentToolCallRead,
     ConversationEventRead,
@@ -251,6 +252,8 @@ class HistoryDetailResponse(BaseModel):
     utterances: list[HistoryUtteranceRead]
     tasks: list[AgentTaskRead] = []
     tool_calls: list[AgentToolCallRead] = []
+    # Per-LLM-call audit (Johnny-gal): the answer agent's tool-loop steps.
+    model_calls: list[AgentModelCallRead] = []
     timings: list[SessionTimingRead] = []
     conversation_events: list[ConversationEventRead] = []
 
@@ -350,6 +353,7 @@ def get_history_detail(
             tool_calls,
             timings,
             conversation_events,
+            model_calls,
         ) = get_session_full_detail(session, bot_session_id)
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -367,6 +371,7 @@ def get_history_detail(
         ],
         tasks=[AgentTaskRead.model_validate(t) for t in tasks],
         tool_calls=[AgentToolCallRead.model_validate(c) for c in tool_calls],
+        model_calls=[AgentModelCallRead.model_validate(c) for c in model_calls],
         timings=[SessionTimingRead.model_validate(t) for t in timings],
         conversation_events=[
             ConversationEventRead.model_validate(e) for e in conversation_events
