@@ -84,11 +84,14 @@ claim pass.
 
 ### Secrets — plaintext or `${VAR}`
 
-Values in `env` / `headers` are stored **plaintext on disk** (the file lives
-under `~/.johnny` on the operator's host) OR as `${VAR}` placeholders. At
-*connect* time (the api on a probe, the worker on an exec) `${VAR}` is expanded
-from **that process's environment** — the same semantics FastMCP/Claude use —
-and the resolved values are passed to the server (for stdio, through the
+Values are stored **plaintext on disk** (the file lives under `~/.johnny` on
+the operator's host) OR as `${VAR}` placeholders. At *connect* time (the api on
+a probe, the worker on an exec) `${VAR}` is expanded from **that process's
+environment** — the same semantics FastMCP/Claude use — across **every
+operator-facing field: `env`, `headers`, AND `command` / `args` / `url`**
+(some servers carry secrets in argv, e.g.
+`mcp-remote … --header CF-Access-Client-Id:${CF_ACCESS_CLIENT_ID}`, not just
+env). The resolved values are passed to the server (for stdio, through the
 sandbox bridge's env overlay; the sandbox container itself needs no secrets).
 An unset `${VAR}` expands to empty. So a secret can live in your `.env` / a
 secrets manager and be referenced by name, never written into the file.
@@ -207,6 +210,15 @@ in the dockerized sandbox:
 * **Seeded, reproducibly** — `run.sh` copies `config/seed/default.mcp.json` to
   `~/.johnny/workspaces/default/.johnny/.mcp.json` if absent (insert-only;
   operator edits are never clobbered).
+
+The default workspace also ships **`mcp-metabase-server`** — a remote
+Metabase MCP server reached through `npx mcp-remote <sse-url> --header …`. No
+files to vendor (just `npm i -g mcp-remote` in the same sandbox setup hook);
+its Cloudflare-Access + Metabase-API-key secrets ride as `${VAR}` in the
+`--header` **args** (expanded at connect time) plus `METABASE_URL` /
+`METABASE_API_KEY` in `env`. The same `op run` launch resolves them; without
+them the probe reaches `mcp-remote` (proof Node + the package ran) and fails on
+the remote's auth.
 
 ## Reference fixture
 

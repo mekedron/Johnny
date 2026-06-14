@@ -99,6 +99,21 @@ def test_unset_var_expands_to_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resolved.env == {"X": ""}
 
 
+def test_args_expand_secrets_on_connecting_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Some servers carry secrets in argv (e.g. `mcp-remote … --header H:${VAR}`),
+    # not just env — the connecting path must expand those too.
+    monkeypatch.setenv("CF_ID", "id-123")
+    entry = {
+        "command": "npx",
+        "args": ["mcp-remote", "https://x.test/sse", "--header", "CF-Access-Client-Id:${CF_ID}"],
+        "johnny": {"enabled": True},
+    }
+    secretless = store.entry_to_config("remote", entry, resolve_secrets=False)
+    assert secretless.args[-1] == "CF-Access-Client-Id:${CF_ID}"  # catalog view: literal
+    resolved = store.entry_to_config("remote", entry, resolve_secrets=True)
+    assert resolved.args[-1] == "CF-Access-Client-Id:id-123"  # connecting view: expanded
+
+
 def test_load_configs_includes_disabled_skips_invalid_sorted(workspaces_root: Path) -> None:
     _write(
         workspaces_root,

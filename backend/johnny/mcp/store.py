@@ -172,10 +172,10 @@ def _str_dict(raw: Any, *, expand: bool) -> dict[str, str]:
     }
 
 
-def _str_tuple(raw: Any) -> tuple[str, ...]:
+def _str_tuple(raw: Any, *, expand: bool = False) -> tuple[str, ...]:
     if not isinstance(raw, list):
         return ()
-    return tuple(str(x) for x in raw)
+    return tuple((_expand_env(str(x)) if expand else str(x)) for x in raw)
 
 
 def _float(raw: Any, default: float) -> float:
@@ -190,22 +190,27 @@ def entry_to_config(
 ) -> McpServerConfig:
     """One stored entry as the validated runtime value object.
 
-    ``resolve_secrets=True`` expands ``${VAR}`` in env/header values from
-    ``os.environ`` — the connecting paths (worker exec, api probe). ``False``
-    is the secretless catalog view (env/headers left empty; assembly never
-    needs them). Raises :class:`McpConfigError` on an invalid shape — bulk
-    loaders catch and skip, the api surfaces it.
+    ``resolve_secrets=True`` expands ``${VAR}`` from ``os.environ`` across
+    EVERY operator-facing field — env, headers, AND command/args/url — the
+    connecting paths (worker exec, api probe). Some servers carry secrets in
+    args (e.g. ``mcp-remote … --header CF-Access-Client-Id:${CF_ACCESS_CLIENT_ID}``),
+    not just env. ``False`` is the secretless catalog view (env/headers left
+    empty, command/args/url kept literal — they are not executed there). Raises
+    :class:`McpConfigError` on an invalid shape — bulk loaders catch and skip,
+    the api surfaces it.
     """
     block = _johnny_block(entry)
     include_raw = block.get("tool_include")
+    command = str(entry.get("command") or "")
+    url = str(entry.get("url") or "")
     return McpServerConfig(
         name=name,
         transport=_transport_of(entry),
         enabled=bool(block.get("enabled", True)),
-        command=str(entry.get("command") or ""),
-        args=_str_tuple(entry.get("args")),
+        command=_expand_env(command) if resolve_secrets else command,
+        args=_str_tuple(entry.get("args"), expand=resolve_secrets),
         env=_str_dict(entry.get("env"), expand=True) if resolve_secrets else {},
-        url=str(entry.get("url") or ""),
+        url=_expand_env(url) if resolve_secrets else url,
         headers=_str_dict(entry.get("headers"), expand=True) if resolve_secrets else {},
         tool_include=None if include_raw is None else _str_tuple(include_raw),
         tool_exclude=_str_tuple(block.get("tool_exclude")),

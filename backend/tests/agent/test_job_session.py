@@ -60,6 +60,7 @@ from johnny.skills.sandbox import (  # noqa: E402
     DEFAULT_SANDBOX_URL,
     SANDBOX_URL_ENV,
     SKILLS_DIR_ENV,
+    WORKSPACES_DIR_ENV,
 )
 
 
@@ -67,15 +68,20 @@ from johnny.skills.sandbox import (  # noqa: E402
 def _isolated_skills_volume(
     monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
-    """Point the skill loader at an empty tmp volume (Johnny-trt.23).
+    """Point the skill loader AND the MCP store at empty tmp volumes.
 
-    These tests run inside the api container, where ``JOHNNY_SKILLS_DIR``
-    targets the real operator volume — a delegation-capable assembly would
-    otherwise load whatever skills the host happens to have (and probe the
-    live sandbox). An empty dir keeps the default path deterministic: zero
-    skills, zero sandbox round-trips.
+    These tests run inside the api container, where ``JOHNNY_SKILLS_DIR`` /
+    ``JOHNNY_WORKSPACES_DIR`` target the real operator volumes — a
+    delegation-capable assembly would otherwise load whatever skills the host
+    happens to have (and probe the live sandbox) AND read the real default
+    workspace's ``.johnny/.mcp.json`` (Johnny-hp1: the MCP snapshot read is
+    file-based now, not a fake DB session). Empty dirs keep the default path
+    deterministic: zero skills, zero MCP servers, zero sandbox round-trips.
+    Tests that want specific skills/MCP set these env vars themselves (their
+    body runs after this fixture, so their setenv wins).
     """
     monkeypatch.setenv(SKILLS_DIR_ENV, str(tmp_path_factory.mktemp("skills")))
+    monkeypatch.setenv(WORKSPACES_DIR_ENV, str(tmp_path_factory.mktemp("workspaces")))
 
 
 # --- Fakes (mirror tests/agent/test_job_runtime.py) -------------------------
