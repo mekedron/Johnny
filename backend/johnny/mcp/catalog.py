@@ -29,10 +29,20 @@ ONE_LINER_CAP_CHARS = 160
 
 @dataclass(frozen=True, slots=True)
 class McpToolInfo:
-    """One tool as the last successful probe reported it (cached in the DB row)."""
+    """One tool as the last successful probe reported it (cached in the DB row).
+
+    ``input_schema`` is the tool's JSON-Schema for its arguments, as the server
+    reported it (``tools/list`` ``inputSchema``). It is populated only on the
+    LIVE listing path (:func:`johnny.mcp.client._list_all_tools` →
+    ``list_mcp_tools``), so the answer model can compose correct ``call_mcp_tool``
+    arguments; the cached catalog path leaves it ``None`` (the trt.36 catalog and
+    the ``.mcp-state.json`` tool cache never stored schemas — only name +
+    description). Kept out of equality is unnecessary: nothing hashes this value.
+    """
 
     name: str
     description: str = ""
+    input_schema: dict | None = None
 
 
 @dataclass(frozen=True, slots=True)

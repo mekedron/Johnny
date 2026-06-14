@@ -216,7 +216,15 @@ TOOL_USE_NOTES = (
     "again; never invent a result you did not get. These tools are part of your "
     "real capabilities, so when asked what you can do you may name them and "
     "offer to use them, and you can always check /skills first if you are unsure "
-    "what is installed."
+    "what is installed.\n"
+    "You may also have external MCP connectors wired in (a workflow engine, a "
+    "database, an analytics tool, and so on). When a request might need an "
+    "outside system — or when asked what connectors or integrations you have — "
+    "call list_mcp_servers to see what is available. To use one, call "
+    "list_mcp_tools('<server>') to load that connector's tools and their argument "
+    "signatures, then call_mcp_tool('<server>', '<tool>', {…}) with the person's "
+    "REAL values. Discover the tools first rather than guessing a tool name, and "
+    "answer from what the connector actually returns."
 )
 
 

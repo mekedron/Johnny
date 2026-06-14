@@ -304,6 +304,11 @@ class AgentRuntime:
     # wiring so a mid-delivery lease settles before the backend closes.
     speech_floor: SpeechFloor | None = None
     _sandbox_client: SandboxClient | None = None
+    # MCP gateway client manager (Johnny-3gx): the per-session McpClientManager
+    # that the list_mcp_tools / call_mcp_tool gateway tools connect through.
+    # Built only for native-tools sessions whose workspace has enabled MCP
+    # servers; closed at teardown so held-open connections don't leak.
+    _mcp_manager: Any = None
     _task_wake: Any = None
     _db_session: Session | None = None
     _owns_event_bus: bool = True
@@ -388,6 +393,15 @@ class AgentRuntime:
                 await self._sandbox_client.aclose()
             except Exception:
                 logger.exception("agent runtime: sandbox client close failed for %s", sid)
+        # MCP gateway connections (Johnny-3gx): close any held-open connector
+        # sessions the list_mcp_tools / call_mcp_tool gateway tools opened —
+        # after the sandbox close, since a stdio connector's process lives in
+        # that sandbox container.
+        if self._mcp_manager is not None:
+            try:
+                await self._mcp_manager.aclose()
+            except Exception:
+                logger.exception("agent runtime: mcp manager close failed for %s", sid)
         # Same ordering rationale for the internal-tool control client
         # (Johnny-trt.57): an in-flight meeting.leave / session.end resolver
         # may be mid-POST until the coordinator drain settles it.
@@ -1218,23 +1232,49 @@ async def build_agent_runtime(
         )
 
     sandbox_tools = None
+    mcp_manager = None
     if native_tools_active:
         from app.services.agent_tasks import SqlAlchemyToolCallTraceSink
 
+        # One sink spans the whole session, so it resolves the issuing turn
+        # per call off the gate's live reply→turn binding (the same seam the
+        # metrics translator uses). Without this every inline tool call
+        # persisted turn_id=NULL and the timeline silently dropped it
+        # (Johnny-5sm — the "black box"). Shared by the sandbox tools AND the
+        # MCP gateway tools so both render in the timeline identically.
+        native_trace_sink = SqlAlchemyToolCallTraceSink(
+            bot_session_id=config.bot_session_id,
+            resolve_turn_id=_resolve_speech_turn,
+            publish_observed=bus.publish,
+        )
         sandbox_tools = build_sandbox_tools(
             sandbox_client,
             policy=resolve_sandbox_policy(full_access=True),
-            # One sink spans the whole session, so it resolves the issuing turn
-            # per call off the gate's live reply→turn binding (the same seam the
-            # metrics translator uses). Without this every inline tool call
-            # persisted turn_id=NULL and the timeline silently dropped it
-            # (Johnny-5sm — the "black box").
-            trace_sink=SqlAlchemyToolCallTraceSink(
-                bot_session_id=config.bot_session_id,
-                resolve_turn_id=_resolve_speech_turn,
-                publish_observed=bus.publish,
-            ),
+            trace_sink=native_trace_sink,
         )
+        # MCP gateway tools (Johnny-3gx): the cutover dropped the workspace's
+        # configured MCP servers from the model's reach (router catalog forced
+        # internal-only above; sandbox tools never advertised MCP), so the bot
+        # could not list or call any connector. Re-add them as the three
+        # discover→load→call meta-tools (list_mcp_servers / list_mcp_tools /
+        # call_mcp_tool) — built only when the workspace actually has enabled
+        # servers (mcp_snapshots non-empty). stdio servers spawn in the session's
+        # skills-sandbox; the manager is owned by the runtime and closed at aclose.
+        if mcp_snapshots:
+            from app.services.mcp_servers import slug_for_stamp
+            from johnny.agent.mcp_tools import build_mcp_tools
+            from johnny.mcp.client import McpClientManager
+
+            mcp_manager = McpClientManager()
+            sandbox_tools = [
+                *sandbox_tools,
+                *build_mcp_tools(
+                    slug=slug_for_stamp(config.workspace_id, config.workspace_slug),
+                    manager=mcp_manager,
+                    sandbox_url=sandbox_client.base_url,
+                    trace_sink=native_trace_sink,
+                ),
+            ]
 
     prompt_config = replace(
         instructions_config_from_job(config),
@@ -1290,6 +1330,7 @@ async def build_agent_runtime(
         internal_tools=internal_tools,
         speech_floor=speech_floor,
         _sandbox_client=sandbox_client,
+        _mcp_manager=mcp_manager,
         _task_wake=task_wake,
         _db_session=db_session,
         _owns_event_bus=owns_bus,

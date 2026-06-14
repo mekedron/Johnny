@@ -631,6 +631,67 @@ async def test_cutover_flag_narrows_router_and_wires_native_tools(
     assert db.closed is True
 
 
+async def test_native_tools_include_mcp_gateway_when_servers_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Johnny-3gx: in native-tools mode a workspace with enabled MCP servers
+    gives the answer LLM the three gateway tools (list_mcp_servers /
+    list_mcp_tools / call_mcp_tool) alongside exec/read/write/list_dir, and the
+    runtime owns the connection manager (closed at aclose)."""
+    from johnny.agent.adapters.johnny_llm import tools_to_definitions
+    from johnny.mcp import store
+
+    monkeypatch.setenv("JOHNNY_SANDBOX_FULL_ACCESS", "1")
+    monkeypatch.setenv("JOHNNY_WORKSPACES_DIR", str(tmp_path))
+    # _job carries no workspace_id, so the snapshot read resolves to "default".
+    store.write_servers_raw(
+        "default",
+        {
+            "demo-tools": {
+                "type": "stdio",
+                "command": "python3",
+                "args": ["/opt/sandbox/mcp_demo_server.py"],
+                "johnny": {"enabled": True},
+            }
+        },
+    )
+    db = _FakeDbSession()
+    runtime = await build_agent_runtime(
+        _job(mode=AUTONOMOUS_MODE, redis_url="redis://r:6379/0"),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: db,
+    )
+    names = {d.name for d in (tools_to_definitions(list(runtime.agent.tools)) or [])}
+    assert {"exec", "read", "write", "list_dir"} <= names
+    assert {"list_mcp_servers", "list_mcp_tools", "call_mcp_tool"} <= names
+    assert runtime._mcp_manager is not None
+    await runtime.aclose()  # must not raise — closes the (unconnected) manager
+    assert db.closed is True
+
+
+async def test_native_tools_omit_mcp_gateway_without_servers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No MCP servers configured → no gateway tools and no manager to own (the
+    _isolated_skills_volume fixture points the store at an empty workspace)."""
+    from johnny.agent.adapters.johnny_llm import tools_to_definitions
+
+    monkeypatch.setenv("JOHNNY_SANDBOX_FULL_ACCESS", "1")
+    db = _FakeDbSession()
+    runtime = await build_agent_runtime(
+        _job(mode=AUTONOMOUS_MODE, redis_url="redis://r:6379/0"),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: db,
+    )
+    names = {d.name for d in (tools_to_definitions(list(runtime.agent.tools)) or [])}
+    assert names == {"exec", "read", "write", "list_dir"}
+    assert runtime._mcp_manager is None
+    await runtime.aclose()
+    assert db.closed is True
+
+
 async def test_meet_backed_runtime_advertises_meeting_leave() -> None:
     """Surface scoping (Johnny-trt.57): a job with a calendar_event_id is a
     Meet-backed session — meeting.leave joins the catalog ahead of

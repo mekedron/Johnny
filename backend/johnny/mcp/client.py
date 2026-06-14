@@ -296,7 +296,18 @@ async def _list_all_tools(session: ClientSession) -> tuple[McpToolInfo, ...]:
             if not name or any(ch.isspace() for ch in name):
                 logger.warning("mcp: skipping oddly-named tool %r", tool.name)
                 continue
-            infos.append(McpToolInfo(name=name, description=tool.description or ""))
+            # The SDK's Tool.inputSchema is a plain JSON-Schema dict; carry it so
+            # the live ``list_mcp_tools`` path can show the model how to call the
+            # tool. Defensive: only attach a dict (never a stray non-mapping).
+            raw_schema = getattr(tool, "inputSchema", None)
+            input_schema = raw_schema if isinstance(raw_schema, dict) else None
+            infos.append(
+                McpToolInfo(
+                    name=name,
+                    description=tool.description or "",
+                    input_schema=input_schema,
+                )
+            )
         cursor = result.nextCursor
         if not cursor:
             break

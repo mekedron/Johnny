@@ -69,6 +69,40 @@ if [[ -f config/seed/default.mcp.json \
     "${HOME}/.johnny/workspaces/default/.johnny/.mcp.json"
 fi
 
+# Ensure the first-party demo MCP connectors (Johnny-3gx: demo-fixture /
+# demo-tools / demo-http) are present even when the operator already has a
+# .mcp.json — the copy above is insert-only on a brand-new file, but ~/.johnny
+# survives `docker compose down -v`, so a pre-existing install would otherwise
+# never see the new demos. Insert-only PER SERVER: a demo key absent from the
+# operator's file is added; every existing key, secret, UI edit, and non-demo
+# server is left untouched. Mirrors the first-party-skills "repo wins" re-seed.
+# Best-effort: a hiccup here never blocks the stack.
+target_mcp="${HOME}/.johnny/workspaces/default/.johnny/.mcp.json"
+if [[ -f config/seed/default.mcp.json && -f "${target_mcp}" ]] \
+   && command -v python3 >/dev/null 2>&1; then
+  python3 - "config/seed/default.mcp.json" "${target_mcp}" <<'PY' || \
+    echo "[run.sh] WARN: could not merge demo MCP servers (continuing)" >&2
+import json, sys
+
+seed_path, target_path = sys.argv[1], sys.argv[2]
+with open(seed_path) as f:
+    seed = json.load(f)
+with open(target_path) as f:
+    target = json.load(f)
+seed_servers = seed.get("mcpServers", {})
+servers = target.setdefault("mcpServers", {})
+added = []
+for name, entry in seed_servers.items():
+    if name.startswith("demo-") and name not in servers:
+        servers[name] = entry
+        added.append(name)
+if added:
+    with open(target_path, "w") as f:
+        f.write(json.dumps(target, indent=2) + "\n")
+    print("[run.sh] Added demo MCP servers: " + ", ".join(added), file=sys.stderr)
+PY
+fi
+
 # Seed the first-party skill packages (Johnny-trt.23) into BOTH the shared
 # skills volume (the skills-sandbox image-build + image-contract test target
 # + legacy no-stamp fallback) AND the default workspace's OWN skills dir
