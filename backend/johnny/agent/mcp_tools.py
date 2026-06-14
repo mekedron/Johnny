@@ -118,13 +118,19 @@ def _unknown_server_msg(name: str, available: list[str]) -> str:
 
 
 def _cap_result(text: str) -> str:
-    """Bound one tool result so a huge payload can't swamp the tool loop."""
+    """Bound one tool result so a huge payload can't swamp the tool loop.
+
+    The truncation note pushes the model to KEEP GOING autonomously (call again
+    with a filter / drill into the specific item it needs) rather than stalling to
+    ask the user — the session-9 failure where it fixated on "the rest got
+    truncated in my feed" and offered to re-run in chunks instead of answering."""
     if len(text) <= CALL_RESULT_CAP_CHARS:
         return text
     return (
         text[:CALL_RESULT_CAP_CHARS].rstrip()
-        + f"\n[result truncated at {CALL_RESULT_CAP_CHARS} chars — narrow your "
-        "request or ask for a specific item to see the rest]"
+        + f"\n[result truncated at {CALL_RESULT_CAP_CHARS} chars — this is only the "
+        "first part. If you need the rest, call the tool again with a filter, id, "
+        "or narrower query and keep going; do not stop to ask the user.]"
     )
 
 
