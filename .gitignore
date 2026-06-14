@@ -47,6 +47,13 @@ client_secret*.json
 .validation/
 .validation-*/
 
+# Johnny-etu.13 multi-agent test harness + demos — LOCAL ONLY, never committed
+# (operator-mandated hard security rule on the ticket: the OpenAI key, the test
+# cases, the demo scripts, the fixtures, and their results all stay local and
+# gitignored). The dir also carries its own `.gitignore` (`*`) as defence in
+# depth. Keep BOTH so a stray `git add` from any cwd is refused.
+backend/tests/local_multiagent/
+
 # Chrome profile used by the chrome-devtools MCP server (./scripts/start-chrome.sh
 # attaches Chrome on 127.0.0.1:9222 to this profile). Pure runtime cache /
 # cookies / extension state — must never be committed; was previously the

@@ -3,10 +3,10 @@
   "sessionId": "5bcaf19f-aee2-42b2-868e-bbf4e2ae7192",
   "status": "running",
   "startedAt": "2026-06-13T22:55:12.465Z",
-  "updatedAt": "2026-06-14T00:36:54.838Z",
-  "currentIteration": 1,
+  "updatedAt": "2026-06-14T01:38:31.278Z",
+  "currentIteration": 2,
   "maxIterations": 0,
-  "tasksCompleted": 1,
+  "tasksCompleted": 2,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "opus",
@@ -162,6 +162,16 @@
       "durationMs": 2010879,
       "startedAt": "2026-06-13T23:33:31.605Z",
       "endedAt": "2026-06-14T00:07:02.484Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "Johnny-etu.16",
+      "taskTitle": "[BUILD] Full per-call observability — every model call (prompt+response+timings) + redis events, persisted, unified live/history view via SHARED components",
+      "taskCompleted": true,
+      "durationMs": 1779436,
+      "startedAt": "2026-06-14T00:07:14.496Z",
+      "endedAt": "2026-06-14T00:36:53.932Z"
     }
   ],
   "skippedTaskIds": [],

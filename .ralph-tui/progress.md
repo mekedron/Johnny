@@ -3,6 +3,66 @@
 This file tracks progress across iterations. Agents update this file
 after each iteration and it's included in prompts for context.
 
+## 2026-06-14 - Johnny-etu.13 — Multi-agent meeting test harness + demos (per-agent tools, turn order, cross-agent reaction)
+
+**What was implemented:** a REAL, runnable multi-agent test harness + demos proving
+several agents in ONE meeting, each with a DIFFERENT tool set, route correctly, take
+turns without interrupting, use their OWN tools, and react to each other — with REAL
+skills, the REAL logged-in Google account, and a REAL OpenAI model. Three layers:
+
+1. **Real per-skill execution** — installs the 3 ClawHub skills (weather, stock-analysis,
+   blogwatcher) via the real `POST /capabilities/skills/install` flow (provenance-checked
+   against ClawHub) + drives all 4 skills (incl. in-repo gog calendar) through the
+   PRODUCTION worker path (queue `agent_tasks` → worker claims → `run.sh` in the workspace
+   sandbox → settle), asserting live tool-backed data (REAL calendar events, London weather
+   `+12°C`, AAPL `291.13 USD`, current xkcd posts). No mocks, no LLM in the skill path.
+2. **Multi-agent meeting** — 3 agents (Cal/Sky/Quill), each scoped to ONE real skill, on
+   the SAME real machinery the in-repo `ensemble_scenario` uses (real `BrowserAgentSession`
+   ×3, `GroupAudioRouter`, shared `SpeechFloor`, Silero VAD on cross-fed audio) + a
+   skill-aware router. Asserts per-agent tool routing, name-addressing (trt.52),
+   non-interruption (floor never overlaps), turn order, cross-agent reaction, correct replies.
+3. **Real OpenAI routing** — each agent's routing decision through the real `openai`
+   provider (gpt-5.4-nano) using the production prompt/schema builders; name-addressed
+   questions route cleanly, owners always route to their own tool.
+
+Plus **browser validation** (chrome-devtools, playground group #14): Cal → real calendar,
+Sky → real weather, Quill → real stock, each via real delegation spoken in the UI; peers
+"heard" each other + were suppressed (non-interruption). Honest finding captured: the weak
+local 3B's turn-claim sometimes lets a non-addressed agent win the floor — the deterministic
+harness + OpenAI run guard exactly this.
+
+**Files changed (ALL gitignored — operator hard security rule; nothing committed/pushed):**
+- `backend/tests/local_multiagent/` (NEW, gitignored via root `.gitignore` + own `.gitignore`
+  `*`): `_lib/{clawhub,skill_specs,install,real_run,multiagent,browser_setup,openai_routing}.py`,
+  `test_real_skills.py` (8), `test_multiagent_meeting.py` (7), `test_openai_routing.py` (3),
+  `demo.py`, `conftest.py` (opt-in skip guard), `README.md`.
+- `.gitignore` (the ONLY committed change): added `backend/tests/local_multiagent/`.
+- `.validation/Johnny-etu.13/` (gitignored): demo output, OpenAI routing capture, browser
+  transcript + 6 screenshots.
+
+**Verification:** 18/18 pytest pass (opt-in, ~93s); demo OVERALL PASS (4 parts); browser
+validated (all 3 agents answered via real tools); **SECURITY: `git status` confirmed clean
+of all task files — no `.env`, no key, no test code, no demo, no results tracked or staged;
+the only committed change is the protective `.gitignore` line.** The `sk-test`/`sk-abc` git
+grep hits are PRE-EXISTING fake fixtures in `tests/smoketest/test_runner.py`, not this work.
+
+**Learnings:**
+- The "REAL tool-backed answer" was easiest + strongest via the production worker path
+  (queue a row, let the running worker settle it) — no live session needed. The blocker was
+  the workspace/skills-dir layout: workspace **id=1** (default) → `johnny-workspace-1` sandbox
+  → `~/.johnny/workspaces/default/skills` (where gog is logged in), NOT the shared
+  `~/.johnny/skills`. Install with `workspace_id=1` to match.
+- ClawHub skills are openclaw "instructional" SKILL.md docs (no `johnny.run`); making them
+  Johnny-runnable = overlay a `run.sh` hitting the real source with sandbox bins. Python 3.11
+  in the sandbox forbids backslashes in f-strings — use a variable, not `f"{\"up\"...}"`.
+- Per-agent distinct skills in one group = per-agent capability policy (`tools_allow`), all on
+  workspace 1 — avoids per-workspace sandbox containers + keeps gog working for the cal agent.
+- The deterministic skill-aware harness (parsing identity/skill back out of the rendered
+  prompt) is the reliable proof; the live 3B reveals a real floor-claim weakness the strong
+  model doesn't have. Both are honest + complementary.
+
+---
+
 ## 2026-06-14 - Johnny-etu.16 — Full per-call observability, unified live/history via SHARED components
 
 **What was implemented:** the LIVE session view and the HISTORY view now render the
@@ -149,6 +209,8 @@ no roleplay, no deflection; calendar query → real delegate+result (worker task
 - **Per-turn trace = ONE shared component for live AND history (`SessionTrace.svelte`, etu.16).** The live session page and the history page BOTH render `frontend/src/lib/components/SessionTrace.svelte` (which composes `SessionTurnTimeline` + `SessionActivityLog`). It takes `decisions: DecisionEntry[]` + `timings` + `conversationEvents` and does the turn/activity ASSEMBLY internally via `frontend/src/lib/sessionTrace.ts` (`buildDecisionEntries`, `buildTimingByTurn`) — the single source of truth for "raw records → renderable turns". Live passes its reactive WS-mutated `decisions`; history passes `buildDecisionEntries(detail)`. Do NOT re-inline turn assembly or the activity-log markup in a page — change `sessionTrace.ts` / `SessionTrace.svelte` and both views update. `DecisionEntry` is an alias of `sessionTurns.TurnSource` (structurally identical).
 - **History detail == live detail wire shape (etu.16).** `GET /history/sessions/{id}` (`HistoryDetailResponse`) serves `tasks`/`tool_calls`/`timings`/`conversation_events` using the SAME `AgentTaskRead`/`AgentToolCallRead`/`SessionTimingRead`/`ConversationEventRead` DTOs the live `/sessions/{id}` detail does (imported from `app.api.sessions` into `app.api.history` — no circular import; sessions never imports history). `services/history.py::get_session_full_detail` returns the full 8-tuple `(session, transcripts, decisions, utterances, tasks, tool_calls, timings, conversation_events)` — all observability is ALREADY persisted (router `input_window`/`raw_output`, answer `prompt`, `SessionTiming.details` w/ model+TTFT, `AgentToolCall`, `ConversationEvent`); the history endpoint just had to serve it. No migration was needed.
 - **Browser playground = in-API-process session** (`browser_session.py` runs `build_agent_runtime` in the API), but **skill tasks execute in the `worker` container** (`app.services.task_worker`). To confirm a delegate ran, grep `docker compose logs worker` for `claimed task_id=… kind=… settled done`; the catalog availability summary (`N/N skills available`) is logged there too, not in the api logs.
+- **Run a skill end-to-end WITHOUT a live session (etu.13):** INSERT an `agent_tasks` row (`bot_session_id` FK to any `bot_sessions` row — `BotSession(status="ended", source="browser")` works; `kind=<skill>`; `request_json={"kind","args","ack","workspace":{"id":1,"slug":"default","name":"Default","is_default":true}}`; `status="queued"`). The PRODUCTION worker auto-claims any queued NON-internal kind (no session-liveness filter) and settles `result_text`; poll the row to a terminal state. The `workspace` stamp routes the sandbox: **id=1 (default) → `johnny-workspace-1` sandbox, which mounts `~/.johnny/workspaces/default/skills` at `/skills` (ro) and `~/.johnny/workspaces/default/gog` (where gog is logged in)** — NOT the shared `~/.johnny/skills` (that's the `workspace_id=None`/legacy path, calendar-only). So install demo skills with `workspace_id=1` via `POST /capabilities/skills/install` and stamp tasks `workspace.id=1` to match. ClawHub skills (`clawhub.ai/<owner>/<slug>`) download as a zip from `https://wry-manatee-359.convex.site/api/v1/download?slug=<slug>`; they're openclaw "instructional" SKILL.md packages with NO `johnny.run` block, so overlay a `metadata.johnny.run` + `run.sh` (like the in-repo `google-calendar` skill) hitting the real data source with sandbox bins (curl/python3/jq) — the sandbox has internet egress.
+- **Per-agent DISTINCT skills in ONE meeting (etu.13):** stamp a per-agent capability policy. `SNAPSHOT_CAPABILITY_POLICY_KEY="capability_policy"` in the agent_snapshot scopes the catalog (`ResolvedCapabilityPolicy.from_payload`, payload `{"tools_allow":["<kind>","meeting.leave","session.end"]}`). Via the API: `PUT /capability-policies/agents/{id}` with `{"tools_allow":[...]}`; the group-start (`POST /sessions/browser/groups/start`, agents=`[{agent_id,context}]`) reuses `_build_spec_playground` which resolves+stamps each agent's policy. All agents stay on workspace 1 (gog works); the policy makes each prompt carry only its own skill. **Reusable multi-agent test harness:** `johnny.agent.ensemble_scenario` (real `BrowserAgentSession`×N + `GroupAudioRouter` + shared `SpeechFloor` + Silero VAD on cross-fed audio) — its `ScenarioSelectiveLLMProvider` parses the agent's name/peers back out of the rendered router prompt (`render_peer_selectivity`) to make selectivity deterministic; reuse `RecordingBus`, `_collect_member`, `_wait_for_step_settle`, `_intervals_overlap`. The REAL router prompt + response schema are reconstructable for offline routing tests via `render_peer_selectivity` + `render_task_catalog` + `build_router_decision_schema(catalog)` (catalog `TaskCatalogEntry(kind,one_liner,keywords=…)`). **3B caveat:** the local `llama3.2:3b` floor-claim arbitration does NOT reliably honour name-addressing in a live group (a non-addressed agent can win the floor); name-addressing routes cleanly through the OpenAI provider (id=1, gpt-5.4-nano; works even with `is_active=false` when explicitly pinned/instantiated).
 
 ---
 
