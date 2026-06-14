@@ -14,6 +14,7 @@ import { describe, it } from 'vitest';
 import assert from 'node:assert/strict';
 import type {
 	AgentDecisionRecord,
+	AgentModelCallRecord,
 	AgentTaskRecord,
 	AgentToolCallRecord,
 	AgentUtteranceRecord,
@@ -106,6 +107,31 @@ function makeToolCall(overrides: Partial<AgentToolCallRecord> = {}): AgentToolCa
 	};
 }
 
+function makeModelCall(overrides: Partial<AgentModelCallRecord> = {}): AgentModelCallRecord {
+	return {
+		id: 50,
+		bot_session_id: 9,
+		turn_id: 1,
+		role: 'answer',
+		step_index: 0,
+		model_provider: 'openai-compatible',
+		model_name: 'gpt-5.5',
+		prompt_json: [{ role: 'user', content: 'weather?' }],
+		response_text: null,
+		tool_calls_json: [{ id: 'c1', name: 'list_dir', arguments: { path: '/skills' } }],
+		finish_reason: 'tool_calls',
+		prompt_tokens: 1748,
+		completion_tokens: 112,
+		total_tokens: 1860,
+		time_to_first_token_ms: null,
+		duration_ms: 6252,
+		started_at: '2026-06-14T00:00:01Z',
+		finished_at: '2026-06-14T00:00:07Z',
+		created_at: '2026-06-14T00:00:07Z',
+		...overrides
+	};
+}
+
 function makeTiming(overrides: Partial<SessionTimingRecord> = {}): SessionTimingRecord {
 	return {
 		id: 40,
@@ -194,6 +220,40 @@ describe('buildDecisionEntries', () => {
 			]
 		});
 		assert.equal(entries[0].toolCalls.length, 1);
+	});
+
+	it('links model calls to their turn, ordered by step_index, with tokens (Johnny-gal)', () => {
+		const entries = buildDecisionEntries({
+			decisions: [makeDecision({ id: 1, turn_id: 1 })],
+			utterances: [],
+			modelCalls: [
+				makeModelCall({ id: 51, step_index: 1, finish_reason: 'stop', tool_calls_json: null, response_text: 'Helsinki: +12°C' }),
+				makeModelCall({ id: 50, step_index: 0, finish_reason: 'tool_calls' })
+			]
+		});
+		const mc = entries[0].modelCalls;
+		assert.equal(mc.length, 2);
+		// Sorted by step_index regardless of input order.
+		assert.equal(mc[0].stepIndex, 0);
+		assert.equal(mc[1].stepIndex, 1);
+		// Tokens + model id carried through (the always-0 fix surfaces here).
+		assert.equal(mc[0].totalTokens, 1860);
+		assert.equal(mc[0].modelName, 'gpt-5.5');
+		assert.equal(mc[1].responseText, 'Helsinki: +12°C');
+	});
+
+	it('never drops a turn-less model call — attributes it by timestamp', () => {
+		const entries = buildDecisionEntries({
+			decisions: [
+				makeDecision({ id: 1, turn_id: 1, created_at: '2026-06-14T00:00:00Z' }),
+				makeDecision({ id: 2, turn_id: 2, created_at: '2026-06-14T00:05:00Z' })
+			],
+			utterances: [],
+			modelCalls: [makeModelCall({ id: 52, turn_id: null, created_at: '2026-06-14T00:05:03Z' })]
+		});
+		const byId = new Map(entries.map((e) => [e.decisionId, e]));
+		assert.equal(byId.get(1)?.modelCalls.length, 0);
+		assert.equal(byId.get(2)?.modelCalls.length, 1);
 	});
 
 	it('leaves task/toolCalls empty for a plain turn and tolerates missing collections', () => {

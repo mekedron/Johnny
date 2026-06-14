@@ -70,6 +70,7 @@ function makeSource(overrides: Partial<TurnSource> = {}): TurnSource {
 		audioDurationMs: 4200,
 		task: null,
 		toolCalls: [],
+		modelCalls: [],
 		...overrides
 	};
 }
@@ -649,6 +650,8 @@ describe('tool-call traces (Johnny-etu.4)', () => {
 			truncated: false,
 			denied: false,
 			error: null,
+			startedAt: null,
+			finishedAt: null,
 			...overrides
 		};
 	}

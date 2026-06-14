@@ -689,3 +689,6 @@
 {"id":"int-459d04da","kind":"field_change","created_at":"2026-06-14T10:10:19.691837Z","actor":"Nikita R","issue_id":"Johnny-5sm","extra":{"field":"status","new_value":"closed","old_value":"in_progress"}}
 {"id":"int-d77ba35b","kind":"field_change","created_at":"2026-06-14T10:10:20.892709Z","actor":"Nikita R","issue_id":"Johnny-oeq","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
 {"id":"int-9a90f383","kind":"field_change","created_at":"2026-06-14T10:10:21.062789Z","actor":"Nikita R","issue_id":"Johnny-gal","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
+{"id":"int-bb898257","kind":"field_change","created_at":"2026-06-14T11:06:03.483113Z","actor":"Nikita R","issue_id":"Johnny-oeq","extra":{"field":"status","new_value":"closed","old_value":"in_progress"}}
+{"id":"int-da5cff33","kind":"field_change","created_at":"2026-06-14T11:06:03.6602Z","actor":"Nikita R","issue_id":"Johnny-gal","extra":{"field":"status","new_value":"closed","old_value":"in_progress"}}
+{"id":"int-85400c91","kind":"field_change","created_at":"2026-06-14T11:06:03.842016Z","actor":"Nikita R","issue_id":"Johnny-8qk","extra":{"field":"status","new_value":"closed","old_value":"open"}}

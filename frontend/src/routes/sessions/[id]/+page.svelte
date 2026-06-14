@@ -275,7 +275,8 @@
 			decisions: detail.decisions,
 			utterances: detail.utterances,
 			tasks: detail.tasks,
-			toolCalls: detail.tool_calls
+			toolCalls: detail.tool_calls,
+			modelCalls: detail.model_calls
 		});
 	}
 
@@ -479,7 +480,8 @@
 			answerPrompt: null,
 			audioDurationMs: null,
 			task: null,
-			toolCalls: []
+			toolCalls: [],
+			modelCalls: []
 		};
 		decisions = [entry, ...decisions];
 	}

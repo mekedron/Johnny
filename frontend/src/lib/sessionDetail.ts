@@ -178,6 +178,38 @@ export interface AgentToolCallRecord {
 	truncated: boolean;
 	denied: boolean;
 	error: string | null;
+	// Wall-clock bounds of the call (Johnny-oeq); null on legacy rows.
+	started_at?: string | null;
+	finished_at?: string | null;
+	created_at: string;
+}
+
+/**
+ * One persisted LLM call the answer agent made inside its native tool loop
+ * (Johnny-gal). Ordered by `step_index` within a turn; carries the full
+ * `prompt_json` sent, the `response_text` + `tool_calls_json` it emitted, the
+ * model id, token usage, TTFT and wall-clock timing — so the timeline can
+ * itemise every prompt the bot ran and what came back.
+ */
+export interface AgentModelCallRecord {
+	id: number;
+	bot_session_id: number;
+	turn_id: number | null;
+	role: string;
+	step_index: number;
+	model_provider: string | null;
+	model_name: string | null;
+	prompt_json: unknown;
+	response_text: string | null;
+	tool_calls_json: unknown;
+	finish_reason: string | null;
+	prompt_tokens: number | null;
+	completion_tokens: number | null;
+	total_tokens: number | null;
+	time_to_first_token_ms: number | null;
+	duration_ms: number | null;
+	started_at: string | null;
+	finished_at: string | null;
 	created_at: string;
 }
 
@@ -232,6 +264,9 @@ export interface SessionDetail {
 	// Per-tool-call traces (args + full output) for the timeline (Johnny-etu.4).
 	// Optional so a cached/older API response without the field still parses.
 	tool_calls?: AgentToolCallRecord[];
+	// Per-LLM-call audit — the answer agent's tool-loop steps (Johnny-gal).
+	// Optional so a cached/older API response without the field still parses.
+	model_calls?: AgentModelCallRecord[];
 	// Bot-participation state of the session's meeting; null/absent for
 	// playground sessions (Johnny-trt.56).
 	meeting_bot_state?: MeetingBotParticipation | null;

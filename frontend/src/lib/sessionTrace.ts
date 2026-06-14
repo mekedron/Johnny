@@ -18,12 +18,14 @@
 
 import {
 	extractHeard,
+	type ModelCallInfo,
 	type ToolCallInfo,
 	type TurnSource,
 	type TurnTiming
 } from '$lib/sessionTurns';
 import type {
 	AgentDecisionRecord,
+	AgentModelCallRecord,
 	AgentTaskRecord,
 	AgentToolCallRecord,
 	AgentUtteranceRecord,
@@ -58,7 +60,35 @@ export function toolCallRecordToInfo(c: AgentToolCallRecord): ToolCallInfo {
 		timedOut: c.timed_out,
 		truncated: c.truncated,
 		denied: c.denied,
-		error: c.error
+		error: c.error,
+		startedAt: c.started_at ?? null,
+		finishedAt: c.finished_at ?? null
+	};
+}
+
+/**
+ * Map the API's snake_case model-call record to the camelCase shape the timeline
+ * consumes (Johnny-gal).
+ */
+export function modelCallRecordToInfo(c: AgentModelCallRecord): ModelCallInfo {
+	return {
+		id: c.id,
+		turnId: c.turn_id,
+		role: c.role,
+		stepIndex: c.step_index,
+		modelProvider: c.model_provider,
+		modelName: c.model_name,
+		prompt: c.prompt_json,
+		responseText: c.response_text,
+		toolCalls: c.tool_calls_json,
+		finishReason: c.finish_reason,
+		promptTokens: c.prompt_tokens,
+		completionTokens: c.completion_tokens,
+		totalTokens: c.total_tokens,
+		timeToFirstTokenMs: c.time_to_first_token_ms,
+		durationMs: c.duration_ms,
+		startedAt: c.started_at,
+		finishedAt: c.finished_at
 	};
 }
 
@@ -73,7 +103,8 @@ export function decisionRecordToEntry(
 	d: AgentDecisionRecord,
 	matchedUtterance: AgentUtteranceRecord | null,
 	matchedTask: AgentTaskRecord | null = null,
-	matchedToolCalls: AgentToolCallRecord[] = []
+	matchedToolCalls: AgentToolCallRecord[] = [],
+	matchedModelCalls: AgentModelCallRecord[] = []
 ): DecisionEntry {
 	const heard = extractHeard(d.input_window);
 	return {
@@ -110,7 +141,11 @@ export function decisionRecordToEntry(
 					resultText: matchedTask.result_text
 				}
 			: null,
-		toolCalls: matchedToolCalls.map(toolCallRecordToInfo)
+		toolCalls: matchedToolCalls.map(toolCallRecordToInfo),
+		modelCalls: matchedModelCalls
+			.slice()
+			.sort((a, b) => a.step_index - b.step_index)
+			.map(modelCallRecordToInfo)
 	};
 }
 
@@ -120,6 +155,7 @@ export interface TraceRecords {
 	utterances: AgentUtteranceRecord[];
 	tasks?: AgentTaskRecord[] | null;
 	toolCalls?: AgentToolCallRecord[] | null;
+	modelCalls?: AgentModelCallRecord[] | null;
 }
 
 /**
@@ -165,7 +201,22 @@ export function buildDecisionEntries(records: TraceRecords): DecisionEntry[] {
 			orphans.push(c);
 		}
 	}
-	const orphansByDecisionId = attributeOrphanToolCalls(orphans, records.decisions);
+	const orphansByDecisionId = attributeOrphansByTimestamp(orphans, records.decisions);
+	// Model calls link by turn_id; suppressed/candidate-turn rows can carry a
+	// null turn_id, so the same never-drop timestamp net catches them.
+	const modelCallsByTurn = new Map<number, AgentModelCallRecord[]>();
+	const modelOrphans: AgentModelCallRecord[] = [];
+	for (const c of records.modelCalls ?? []) {
+		if (c.turn_id !== null) {
+			(
+				modelCallsByTurn.get(c.turn_id) ??
+				modelCallsByTurn.set(c.turn_id, []).get(c.turn_id)!
+			).push(c);
+		} else {
+			modelOrphans.push(c);
+		}
+	}
+	const modelOrphansByDecisionId = attributeOrphansByTimestamp(modelOrphans, records.decisions);
 	return records.decisions.map((d) => {
 		const matchedTask = d.turn_id !== null ? (taskByTurn.get(d.turn_id) ?? null) : null;
 		const linked =
@@ -174,23 +225,27 @@ export function buildDecisionEntries(records: TraceRecords): DecisionEntry[] {
 			[];
 		const orphaned = orphansByDecisionId.get(d.id) ?? [];
 		const calls = orphaned.length > 0 ? [...linked, ...orphaned] : linked;
-		return decisionRecordToEntry(d, utteranceMap.get(d.id) ?? null, matchedTask, calls);
+		const linkedModel = (d.turn_id !== null ? modelCallsByTurn.get(d.turn_id) : undefined) ?? [];
+		const orphanedModel = modelOrphansByDecisionId.get(d.id) ?? [];
+		const modelCalls = orphanedModel.length > 0 ? [...linkedModel, ...orphanedModel] : linkedModel;
+		return decisionRecordToEntry(d, utteranceMap.get(d.id) ?? null, matchedTask, calls, modelCalls);
 	});
 }
 
 /**
- * Never-drop safety net for tool calls that carry no turn_id and no task id.
- * Each is attributed to the most recent decision at-or-before its `created_at`
- * (or the earliest decision when it predates them all), preserving execution
- * order. New inline calls carry a real turn_id (Johnny-5sm) and never reach
- * here; this only catches legacy rows so a regression can't silently hide tool
- * activity again. Returns a decision-id → calls map.
+ * Never-drop safety net for tool/model calls that carry no turn_id (and, for
+ * tool calls, no task id). Each is attributed to the most recent decision
+ * at-or-before its `created_at` (or the earliest decision when it predates them
+ * all), preserving execution order. New inline calls carry a real turn_id
+ * (Johnny-5sm/gal) and rarely reach here; this catches legacy / suppressed-turn
+ * rows so a regression can't silently hide tool or model activity again.
+ * Returns a decision-id → calls map.
  */
-function attributeOrphanToolCalls(
-	orphans: AgentToolCallRecord[],
+function attributeOrphansByTimestamp<T extends { created_at: string }>(
+	orphans: T[],
 	decisions: AgentDecisionRecord[]
-): Map<number, AgentToolCallRecord[]> {
-	const byDecision = new Map<number, AgentToolCallRecord[]>();
+): Map<number, T[]> {
+	const byDecision = new Map<number, T[]>();
 	if (orphans.length === 0 || decisions.length === 0) {
 		return byDecision;
 	}

@@ -64,6 +64,29 @@ export interface ToolCallInfo {
 	truncated: boolean;
 	denied: boolean;
 	error: string | null;
+	startedAt: string | null;
+	finishedAt: string | null;
+}
+
+/** One LLM call the answer agent made in its tool loop (Johnny-gal). */
+export interface ModelCallInfo {
+	id: number;
+	turnId: number | null;
+	role: string;
+	stepIndex: number;
+	modelProvider: string | null;
+	modelName: string | null;
+	prompt: unknown;
+	responseText: string | null;
+	toolCalls: unknown;
+	finishReason: string | null;
+	promptTokens: number | null;
+	completionTokens: number | null;
+	totalTokens: number | null;
+	timeToFirstTokenMs: number | null;
+	durationMs: number | null;
+	startedAt: string | null;
+	finishedAt: string | null;
 }
 
 /** The enriched per-turn record the timeline consumes (the page's `DecisionEntry`). */
@@ -101,6 +124,9 @@ export interface TurnSource {
 	// The per-tool-call traces this turn's task made (Johnny-etu.4); empty for
 	// non-delegate turns and on live turns until the next detail refresh.
 	toolCalls: ToolCallInfo[];
+	// The per-LLM-call audit for this turn's answer loop (Johnny-gal); empty
+	// until the next detail refresh on a live turn.
+	modelCalls: ModelCallInfo[];
 }
 
 export type TurnStepStatus = 'done' | 'skipped' | 'missing';
@@ -585,6 +611,15 @@ function summarizeToolCalls(calls: ToolCallInfo[]): string {
 	return `${calls.length} calls — ${calls.map(toolOutcomeLabel).join(', ')}`;
 }
 
+function summarizeModelCalls(calls: ModelCallInfo[]): string {
+	const tokens = calls.reduce((sum, c) => sum + (c.totalTokens ?? 0), 0);
+	const ms = calls.reduce((sum, c) => sum + (c.durationMs ?? 0), 0);
+	const step = calls.length === 1 ? '1 LLM call' : `${calls.length} LLM calls`;
+	const tok = tokens > 0 ? `, ${tokens} tokens` : '';
+	const dur = ms > 0 ? `, ${ms} ms total` : '';
+	return `${step}${tok}${dur}`;
+}
+
 /** The expandable disclosure title for one tool call. */
 function toolCallLabel(call: ToolCallInfo): string {
 	const phase = call.phase ? ` · ${call.phase}` : '';
@@ -609,11 +644,74 @@ function formatToolCall(call: ToolCallInfo): string {
 	if (call.denied) meta.push('denied');
 	if (call.truncated) meta.push('output truncated');
 	if (meta.length > 0) lines.push(meta.join(' · '));
+	const when = clockRange(call.startedAt, call.finishedAt);
+	if (when) lines.push(when);
 	lines.push('', '── stdout ──', call.stdout.trim().length > 0 ? call.stdout : '(empty)');
 	lines.push('', '── stderr ──', call.stderr.trim().length > 0 ? call.stderr : '(empty)');
 	if (call.error && call.error.trim().length > 0) {
 		lines.push('', '── error ──', call.error);
 	}
+	return lines.join('\n');
+}
+
+/** "started HH:MM:SS.mmm → returned HH:MM:SS.mmm" for a call, or '' if unknown. */
+function clockRange(startedAt: string | null, finishedAt: string | null): string {
+	const fmt = (iso: string | null): string | null => {
+		if (!iso) return null;
+		const ms = Date.parse(iso);
+		if (Number.isNaN(ms)) return null;
+		const d = new Date(ms);
+		const p = (n: number, w = 2) => String(n).padStart(w, '0');
+		return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+	};
+	const s = fmt(startedAt);
+	const f = fmt(finishedAt);
+	if (s && f) return `started ${s} → returned ${f}`;
+	if (s) return `started ${s}`;
+	if (f) return `returned ${f}`;
+	return '';
+}
+
+/** The expandable disclosure title for one model call. */
+function modelCallLabel(call: ModelCallInfo): string {
+	const verb = call.toolCalls && Array.isArray(call.toolCalls) && call.toolCalls.length > 0 ? 'requested a tool' : 'answered';
+	const tok = call.totalTokens !== null ? ` · ${call.totalTokens} tok` : '';
+	const dur = call.durationMs !== null ? ` · ${call.durationMs} ms` : '';
+	const model = call.modelName && call.modelName !== 'unknown' ? ` · ${call.modelName}` : '';
+	return `step ${call.stepIndex}: ${verb}${model}${tok}${dur}`;
+}
+
+/** The full disclosure body for one model call: meta, the tool calls it emitted, prompt, response. */
+function formatModelCall(call: ModelCallInfo): string {
+	const lines: string[] = [];
+	const meta: string[] = [];
+	if (call.modelName) meta.push(call.modelName);
+	if (call.finishReason) meta.push(call.finishReason);
+	if (call.promptTokens !== null || call.completionTokens !== null || call.totalTokens !== null) {
+		meta.push(
+			`tokens ${call.promptTokens ?? '—'} in / ${call.completionTokens ?? '—'} out / ${call.totalTokens ?? '—'} total`
+		);
+	}
+	if (call.timeToFirstTokenMs !== null) meta.push(`TTFT ${call.timeToFirstTokenMs} ms`);
+	if (call.durationMs !== null) meta.push(`${call.durationMs} ms`);
+	if (meta.length > 0) lines.push(meta.join(' · '));
+	const when = clockRange(call.startedAt, call.finishedAt);
+	if (when) lines.push(when);
+	if (call.toolCalls && Array.isArray(call.toolCalls) && call.toolCalls.length > 0) {
+		lines.push('', '── requested tools ──', JSON.stringify(call.toolCalls, null, 2));
+	}
+	lines.push(
+		'',
+		'── prompt ──',
+		call.prompt !== null && call.prompt !== undefined
+			? JSON.stringify(call.prompt, null, 2)
+			: '(none)'
+	);
+	lines.push(
+		'',
+		'── response ──',
+		call.responseText && call.responseText.trim().length > 0 ? call.responseText : '(no text — tool call only)'
+	);
 	return lines.join('\n');
 }
 
@@ -868,6 +966,33 @@ function buildSteps(src: TurnSource): TurnStep[] {
 			disclosures: calls.map((c) => ({
 				label: toolCallLabel(c),
 				content: formatToolCall(c)
+			})),
+			guards: []
+		});
+	}
+
+	// Model calls (Johnny-gal) -------------------------------------------
+	// Every LLM call the answer agent made in its tool loop, ordered by
+	// step_index — each with the full prompt it ran, the response + tool calls
+	// it emitted, the model id, token usage and timing. This itemises "what
+	// prompts were executed" the operator could not see.
+	if (src.modelCalls.length > 0) {
+		const calls = src.modelCalls;
+		steps.push({
+			key: 'model-calls',
+			index: 0,
+			title: calls.length === 1 ? 'Model call' : `Model calls (${calls.length})`,
+			structuredName: 'agent_model_calls',
+			status: 'done',
+			tone: 'default',
+			body: summarizeModelCalls(calls),
+			detail: null,
+			confidence: null,
+			durationMs: null,
+			elapsedMs: null,
+			disclosures: calls.map((c) => ({
+				label: modelCallLabel(c),
+				content: formatModelCall(c)
 			})),
 			guards: []
 		});

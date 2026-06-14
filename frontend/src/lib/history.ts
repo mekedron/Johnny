@@ -10,6 +10,7 @@
 import type { BotSessionStatus, BotSessionSource } from '$lib/sessions';
 import type {
 	AgentDecisionRecord,
+	AgentModelCallRecord,
 	AgentTaskRecord,
 	AgentToolCallRecord,
 	AgentUtteranceRecord,
@@ -101,6 +102,7 @@ export interface HistoryDetail {
 	// Optional so an older cached response without the fields still parses.
 	tasks?: AgentTaskRecord[];
 	tool_calls?: AgentToolCallRecord[];
+	model_calls?: AgentModelCallRecord[];
 	timings?: SessionTimingRecord[];
 	conversation_events?: ConversationEventRecord[];
 }
