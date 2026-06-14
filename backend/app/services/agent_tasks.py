@@ -23,7 +23,7 @@ from johnny.agent.tasks import TaskSink, TaskSnapshot, TaskSpec, TaskStatus
 from johnny.skills.executor import ToolCallTrace, ToolCallTraceSink
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     from sqlalchemy.orm import Session
 
@@ -203,6 +203,7 @@ class SqlAlchemyToolCallTraceSink(ToolCallTraceSink):
         turn_id: int | None = None,
         kind: str | None = None,
         resolve_turn_id: Callable[[], int | None] | None = None,
+        publish_observed: Callable[[Any], Awaitable[None]] | None = None,
         session_factory: Callable[[], Session] | None = None,
     ) -> None:
         self._bot_session_id = bot_session_id
@@ -210,6 +211,10 @@ class SqlAlchemyToolCallTraceSink(ToolCallTraceSink):
         self._turn_id = turn_id
         self._kind = kind
         self._resolve_turn_id = resolve_turn_id
+        # Optional live signal (Johnny-iy6): a callback (the session event bus's
+        # publish) that streams a compact ToolCallObserved so the session view
+        # shows tool activity AS it happens, not only on the post-turn refresh.
+        self._publish_observed = publish_observed
         self._session_factory = session_factory
 
     async def record(self, trace: ToolCallTrace) -> None:
@@ -258,6 +263,30 @@ class SqlAlchemyToolCallTraceSink(ToolCallTraceSink):
             db.commit()
         finally:
             db.close()
+        await self._emit_observed(trace, turn_id)
+
+    async def _emit_observed(self, trace: ToolCallTrace, turn_id: int | None) -> None:
+        """Stream a compact live signal (best-effort) — never breaks the trace."""
+        if self._publish_observed is None:
+            return
+        try:
+            from johnny.voice_pipeline.events import ToolCallObserved
+
+            await self._publish_observed(
+                ToolCallObserved(
+                    turn_id=turn_id,
+                    tool_name=trace.tool_name,
+                    phase=trace.phase,
+                    ok=trace.ok,
+                    exit_code=trace.exit_code,
+                    duration_ms=trace.duration_ms,
+                    denied=trace.denied,
+                    timed_out=trace.timed_out,
+                    session_id=str(self._bot_session_id),
+                )
+            )
+        except Exception:  # pragma: no cover - live signal is best-effort
+            logger.debug("tool-call observed publish failed — continuing", exc_info=True)
 
 
 __all__ = [

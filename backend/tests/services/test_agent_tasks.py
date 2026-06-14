@@ -389,6 +389,29 @@ async def test_tool_sink_resolver_raise_falls_back_and_persists(
     assert _only_row(tool_engine).turn_id == 5
 
 
+async def test_tool_sink_emits_a_live_observed_signal(tool_engine: sa.Engine) -> None:
+    """With a publish callback the sink streams a compact ToolCallObserved after
+    the write (Johnny-iy6) — the live signal that drives the session view's
+    during-turn refresh; best-effort, so the row persists regardless."""
+    seen: list[object] = []
+
+    async def _publish(ev: object) -> None:
+        seen.append(ev)
+
+    sink = SqlAlchemyToolCallTraceSink(
+        bot_session_id=44,
+        resolve_turn_id=lambda: 7,
+        publish_observed=_publish,
+        session_factory=lambda: Session(tool_engine),
+    )
+    await sink.record(_tool_trace(phase="list"))
+    assert _only_row(tool_engine).turn_id == 7
+    assert len(seen) == 1
+    ev = seen[0]
+    assert ev.type == "tool_call_observed"  # type: ignore[attr-defined]
+    assert ev.turn_id == 7 and ev.phase == "list" and ev.ok is True  # type: ignore[attr-defined]
+
+
 async def test_tool_sink_worker_path_keeps_fixed_turn(tool_engine: sa.Engine) -> None:
     """The worker builds one sink per task with a fixed turn_id and NO resolver —
     that path is unchanged."""

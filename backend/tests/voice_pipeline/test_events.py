@@ -17,6 +17,7 @@ from johnny.voice_pipeline.events import (
     FloorExpired,
     FloorReleased,
     InterruptionRecorded,
+    ModelCallObserved,
     PeerSpeechSuppressed,
     RouterDecisionMade,
     SessionStatusChanged,
@@ -24,6 +25,7 @@ from johnny.voice_pipeline.events import (
     TaskProgress,
     TaskQueued,
     TaskResultExpired,
+    ToolCallObserved,
     TranscriptFiltered,
     TranscriptFinalized,
     TranscriptInterim,
@@ -915,3 +917,55 @@ def test_interruption_who_supports_all_documented_values() -> None:
     for who in values:
         ev = InterruptionRecorded(who=who, timestamp_ms=0)  # type: ignore[arg-type]
         assert ev.who == who
+
+
+def test_tool_call_observed_round_trips_to_wire() -> None:
+    """The live tool signal (Johnny-iy6) serialises with its turn-keyed payload."""
+    ev = ToolCallObserved(
+        turn_id=4,
+        tool_name="sandbox.exec",
+        phase="exec",
+        ok=True,
+        exit_code=0,
+        duration_ms=232,
+        session_id="37",
+    )
+    assert event_to_dict(ev) == {
+        "turn_id": 4,
+        "tool_name": "sandbox.exec",
+        "phase": "exec",
+        "ok": True,
+        "exit_code": 0,
+        "duration_ms": 232,
+        "denied": False,
+        "timed_out": False,
+        "session_id": "37",
+        "type": "tool_call_observed",
+    }
+
+
+def test_model_call_observed_round_trips_to_wire() -> None:
+    """The live model signal (Johnny-iy6) carries role/step/tokens for the ticker."""
+    ev = ModelCallObserved(
+        turn_id=4,
+        role="answer",
+        step_index=1,
+        model_name="gpt-5.5",
+        finish_reason="tool_calls",
+        total_tokens=1860,
+        duration_ms=6252,
+        tool_call_count=1,
+        session_id="37",
+    )
+    assert event_to_dict(ev) == {
+        "turn_id": 4,
+        "role": "answer",
+        "step_index": 1,
+        "model_name": "gpt-5.5",
+        "finish_reason": "tool_calls",
+        "total_tokens": 1860,
+        "duration_ms": 6252,
+        "tool_call_count": 1,
+        "session_id": "37",
+        "type": "model_call_observed",
+    }

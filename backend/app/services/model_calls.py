@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.db.models import AgentModelCall
 from johnny.agent.model_call_trace import ModelCallSink, ModelCallTrace
+from johnny.voice_pipeline.events import ModelCallObserved
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +59,13 @@ class SqlAlchemyModelCallSink(ModelCallSink):
         self,
         *,
         bot_session_id: int,
+        publish_observed: Callable[[Any], Awaitable[None]] | None = None,
         session_factory: Callable[[], Session] | None = None,
     ) -> None:
         self._bot_session_id = bot_session_id
+        # Optional live signal (Johnny-iy6): streams a compact ModelCallObserved
+        # so the session view shows each answer-loop step as it lands.
+        self._publish_observed = publish_observed
         self._session_factory = session_factory
 
     async def record(self, trace: ModelCallTrace) -> None:
@@ -93,6 +99,25 @@ class SqlAlchemyModelCallSink(ModelCallSink):
         # playground (Johnny-gal). The sync engine commit on the loop otherwise
         # serialises against the reply pipeline.
         await asyncio.to_thread(self._write, factory, row)
+        if self._publish_observed is not None:
+            try:
+                await self._publish_observed(
+                    ModelCallObserved(
+                        turn_id=trace.turn_id,
+                        role=trace.role,
+                        step_index=trace.step_index,
+                        model_name=trace.model_name,
+                        finish_reason=trace.finish_reason,
+                        total_tokens=trace.total_tokens,
+                        duration_ms=trace.duration_ms,
+                        tool_call_count=len(trace.tool_calls),
+                        session_id=str(self._bot_session_id),
+                    )
+                )
+            except Exception:  # pragma: no cover - live signal is best-effort
+                logger.debug(
+                    "model-call observed publish failed — continuing", exc_info=True
+                )
 
     @staticmethod
     def _write(factory: Callable[[], Session], row: AgentModelCall) -> None:

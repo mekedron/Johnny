@@ -13,6 +13,7 @@ from app.db import Base
 from app.db.models import (
     EMBEDDING_DIM,
     AgentDecision,
+    AgentModelCall,
     AgentTask,
     AgentToolCall,
     AgentUtterance,
@@ -63,6 +64,7 @@ def engine() -> sa.Engine:
             AgentUtterance.__table__,  # type: ignore[list-item]
             AgentTask.__table__,  # type: ignore[list-item]
             AgentToolCall.__table__,  # type: ignore[list-item]
+            AgentModelCall.__table__,  # type: ignore[list-item]
             SessionTiming.__table__,  # type: ignore[list-item]
             ConversationEvent.__table__,  # type: ignore[list-item]
         ],
@@ -454,16 +456,18 @@ def test_get_session_full_detail_returns_all_rows(db_session: Session) -> None:
         tool_calls,
         timings,
         conversation_events,
+        model_calls,
     ) = get_session_full_detail(db_session, row.id)
     assert len(transcripts) == 150
     assert transcripts[0].text == "t-0"
     assert transcripts[-1].text == "t-149"
-    # Johnny-etu.16: the audit detail now also returns the per-call + pipeline
+    # Johnny-etu.16 / gal: the audit detail also returns the per-call + pipeline
     # observability collections (empty here — none seeded for this session).
     assert tasks == []
     assert tool_calls == []
     assert timings == []
     assert conversation_events == []
+    assert model_calls == []
 
 
 # --- delete_session --------------------------------------------------------

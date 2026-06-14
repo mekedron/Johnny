@@ -42,6 +42,8 @@ TurnClaimWonEventType = Literal["turn_claim_won"]
 TurnClaimLostEventType = Literal["turn_claim_lost"]
 PeerSpeechSuppressedEventType = Literal["peer_speech_suppressed"]
 PolicyDeniedEventType = Literal["policy_denied"]
+ToolCallObservedEventType = Literal["tool_call_observed"]
+ModelCallObservedEventType = Literal["model_call_observed"]
 
 InterruptionWho = Literal["user_over_bot", "bot_cut_by_stop"]
 """Who cut the bot's speech off (Johnny-trt.49).
@@ -941,6 +943,51 @@ class PipelineTiming:
     type: PipelineTimingEventType = "pipeline_timing"
 
 
+@dataclass(frozen=True, slots=True)
+class ToolCallObserved:
+    """A native tool call just ran inside the answer loop (Johnny-iy6).
+
+    A compact live progress signal so the session view can show a turn's tool
+    activity AS it happens, instead of only after the post-turn detail refresh.
+    The full trace (args, stdout/stderr) lands in ``agent_tool_calls`` and the
+    timeline renders it on the next refresh; this event carries just enough to
+    show the step live, keyed to its ``turn_id``.
+    """
+
+    turn_id: int | None
+    tool_name: str
+    phase: str
+    ok: bool
+    exit_code: int | None
+    duration_ms: int | None
+    denied: bool = False
+    timed_out: bool = False
+    session_id: str | None = None
+    type: ToolCallObservedEventType = "tool_call_observed"
+
+
+@dataclass(frozen=True, slots=True)
+class ModelCallObserved:
+    """An answer-loop LLM call just completed (Johnny-iy6).
+
+    The model-side counterpart to :class:`ToolCallObserved` — a compact live
+    signal (role, step, model, tokens, timing, how many tools it asked for) so
+    the operator watches the tool loop progress step-by-step during the turn.
+    The full prompt/response audit lands in ``agent_model_calls``.
+    """
+
+    turn_id: int | None
+    role: str
+    step_index: int
+    model_name: str | None
+    finish_reason: str | None
+    total_tokens: int | None
+    duration_ms: int | None
+    tool_call_count: int = 0
+    session_id: str | None = None
+    type: ModelCallObservedEventType = "model_call_observed"
+
+
 PipelineEvent = (
     TranscriptFinalized
     | TranscriptInterim
@@ -968,6 +1015,8 @@ PipelineEvent = (
     | TurnClaimLost
     | PeerSpeechSuppressed
     | PolicyDenied
+    | ToolCallObserved
+    | ModelCallObserved
 )
 """Union of every event the pipeline emits."""
 
@@ -996,6 +1045,7 @@ __all__ = [
     "FloorReleased",
     "InterruptionRecorded",
     "InterruptionWho",
+    "ModelCallObserved",
     "PeerSpeechSuppressed",
     "PipelineEvent",
     "PipelineStageFailed",
@@ -1014,6 +1064,7 @@ __all__ = [
     "TaskQueued",
     "TaskResultExpired",
     "TerminalState",
+    "ToolCallObserved",
     "TranscriptFiltered",
     "TranscriptFilteredReason",
     "TranscriptFinalized",

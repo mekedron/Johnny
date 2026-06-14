@@ -397,7 +397,18 @@
 			case 'agent_suggested':
 				return handleAgentSuggested(event);
 			case 'turn_terminal':
-				return handleTurnTerminal(event);
+				handleTurnTerminal(event);
+				// The turn settled — pull the full per-call breakdown.
+				refreshDetailQuietly();
+				return;
+			case 'tool_call_observed':
+			case 'model_call_observed':
+				// Live signal (Johnny-iy6): a tool/model step just landed. The sink
+				// wrote the row before emitting, so a debounced detail refresh
+				// re-renders the timeline with the new call DURING the turn — no
+				// fragile per-entry merge, reuses the shared applyCoreDetail.
+				refreshDetailQuietly();
+				return;
 			case 'session_status_change':
 				return handleStatus(event);
 			case 'meeting_bot_state_changed':

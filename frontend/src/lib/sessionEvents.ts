@@ -42,6 +42,8 @@ export type SessionEventType =
 	| 'agent_tts_failed'
 	| 'pipeline_stage_failed'
 	| 'turn_terminal'
+	| 'tool_call_observed'
+	| 'model_call_observed'
 	| 'session_status_change'
 	| 'meeting_bot_state_changed';
 
@@ -282,6 +284,32 @@ export interface MeetingBotStateChangedEvent extends BaseEnvelope {
 	timestamp_ms: number;
 }
 
+/** A native tool call ran in the answer loop (Johnny-iy6) — compact live signal. */
+export interface ToolCallObservedEvent extends BaseEnvelope {
+	type: 'tool_call_observed';
+	turn_id: number | null;
+	tool_name: string;
+	phase: string;
+	ok: boolean;
+	exit_code: number | null;
+	duration_ms: number | null;
+	denied: boolean;
+	timed_out: boolean;
+}
+
+/** An answer-loop LLM call completed (Johnny-iy6) — compact live signal. */
+export interface ModelCallObservedEvent extends BaseEnvelope {
+	type: 'model_call_observed';
+	turn_id: number | null;
+	role: string;
+	step_index: number;
+	model_name: string | null;
+	finish_reason: string | null;
+	total_tokens: number | null;
+	duration_ms: number | null;
+	tool_call_count: number;
+}
+
 export type SessionEvent =
 	| TranscriptPartialEvent
 	| TranscriptFinalEvent
@@ -296,6 +324,8 @@ export type SessionEvent =
 	| AgentTTSFailedEvent
 	| PipelineStageFailedEvent
 	| TurnTerminalEvent
+	| ToolCallObservedEvent
+	| ModelCallObservedEvent
 	| SessionStatusChangeEvent
 	| MeetingBotStateChangedEvent;
 

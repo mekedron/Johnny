@@ -102,6 +102,28 @@ async def test_step_index_orders_a_tool_loop(engine: sa.Engine) -> None:
     assert rows[1].tool_calls_json is None  # empty list stored as NULL
 
 
+async def test_emits_a_live_observed_signal(engine: sa.Engine) -> None:
+    """When wired with a publish callback, the sink streams a compact
+    ModelCallObserved after the write (Johnny-iy6) so the session view updates
+    live — without it the row is still written (signal is best-effort)."""
+    seen: list[object] = []
+
+    async def _publish(ev: object) -> None:
+        seen.append(ev)
+
+    sink = SqlAlchemyModelCallSink(
+        bot_session_id=44,
+        publish_observed=_publish,
+        session_factory=lambda: Session(engine),
+    )
+    await sink.record(_trace(step_index=0, finish_reason="tool_calls"))
+    assert len(seen) == 1
+    ev = seen[0]
+    assert ev.type == "model_call_observed"  # type: ignore[attr-defined]
+    assert ev.turn_id == 4 and ev.step_index == 0  # type: ignore[attr-defined]
+    assert ev.total_tokens == 1860 and ev.tool_call_count == 1  # type: ignore[attr-defined]
+
+
 async def test_caps_an_oversized_prompt(engine: sa.Engine) -> None:
     sink = SqlAlchemyModelCallSink(
         bot_session_id=42, session_factory=lambda: Session(engine)

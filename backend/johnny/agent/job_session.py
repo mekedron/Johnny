@@ -1221,7 +1221,10 @@ async def build_agent_runtime(
         from app.services.model_calls import SqlAlchemyModelCallSink
 
         adapters.llm.bind_model_call_sink(
-            SqlAlchemyModelCallSink(bot_session_id=config.bot_session_id),
+            SqlAlchemyModelCallSink(
+                bot_session_id=config.bot_session_id,
+                publish_observed=bus.publish,
+            ),
             _resolve_speech_turn,
         )
 
@@ -1240,6 +1243,7 @@ async def build_agent_runtime(
             trace_sink=SqlAlchemyToolCallTraceSink(
                 bot_session_id=config.bot_session_id,
                 resolve_turn_id=_resolve_speech_turn,
+                publish_observed=bus.publish,
             ),
         )
 
