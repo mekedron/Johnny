@@ -258,6 +258,19 @@ export interface UnknownKindInfo {
 	reason: string;
 }
 
+/**
+ * The capability-policy degrade marker. In practice policy enforcement is a
+ * task-worker outcome surfaced on the workstream (US-106), but US-104 reads it
+ * defensively off the decision's `raw_output` so a `policy_denied` verdict — if
+ * the gate ever stamps one — renders in the Decisions column too.
+ */
+export interface PolicyDeniedInfo {
+	fromAction: string;
+	toAction: string;
+	kind: string;
+	reason: string;
+}
+
 /** The router's literal action verdict (`silent`/`speak`/`delegate`/`status`); null pre-trt.16 rows / live turns. */
 export function routerAction(rawOutput: Record<string, unknown> | null): string | null {
 	const action = rawOutput?.action;
@@ -336,6 +349,18 @@ export function unknownKind(rawOutput: Record<string, unknown> | null): UnknownK
 		toAction: String(info.to_action ?? 'speak'),
 		kind: String(info.kind ?? ''),
 		reason: String(info.reason ?? '')
+	};
+}
+
+export function policyDenied(rawOutput: Record<string, unknown> | null): PolicyDeniedInfo | null {
+	const raw = rawOutput?.policy_denied;
+	if (!raw || typeof raw !== 'object') return null;
+	const info = raw as Record<string, unknown>;
+	return {
+		fromAction: String(info.from_action ?? 'delegate'),
+		toAction: String(info.to_action ?? 'status'),
+		kind: String(info.kind ?? info.bin ?? ''),
+		reason: String(info.reason ?? info.rule ?? '')
 	};
 }
 

@@ -555,6 +555,74 @@ describe('buildSessionTraceView', () => {
 		assert.equal(byId.get(2)?.action, 'silent');
 	});
 
+	it('passes the decision raw_output / input_window / recommended / final through every turn (US-104)', () => {
+		const view = buildSessionTraceView({
+			decisions: [makeDecision({ id: 1, turn_id: 1 })],
+			utterances: []
+		});
+		const rt = view.routerTurns[0];
+		// makeDecision default: recommended === final === 'Sure.' (no divergence).
+		assert.equal(rt.recommendedText, 'Sure.');
+		assert.equal(rt.finalText, 'Sure.');
+		assert.equal(rt.divergenceReason, null);
+		assert.equal(rt.overrideActor, null);
+		assert.deepEqual(rt.rawOutput, { action: 'delegate', finish_reason: 'stop' });
+		assert.ok(rt.inputWindow);
+	});
+
+	it('carries the US-104 drill-through: raw_output verdict, divergence, and the router prompt/response', () => {
+		const view = buildSessionTraceView({
+			decisions: [
+				makeDecision({
+					id: 7,
+					turn_id: 7,
+					decision_recommended_text: 'On it.',
+					final_text: 'Hang on—',
+					divergence_reason: 'barge-in cut the reply',
+					override_actor: 'user',
+					input_window: { mode: 'autonomous', threshold: 0.5 },
+					raw_output: {
+						action: 'delegate',
+						complexity_shadow: {
+							tier: 'COMPLEX',
+							score: 0.42,
+							confidence: 0.8,
+							top_signals: ['multi_step']
+						},
+						ack_fallback: {
+							from_action: 'delegate',
+							to_action: 'speak',
+							kind: 'metabase',
+							reason: 'no ack'
+						}
+					}
+				})
+			],
+			utterances: [],
+			modelCalls: [
+				makeModelCall({
+					id: 60,
+					turn_id: 7,
+					role: 'router',
+					prompt_json: [{ role: 'system', content: 'route this' }],
+					response_text: '{"action":"delegate"}'
+				})
+			]
+		});
+		const rt = view.routerTurns[0];
+		assert.deepEqual(rt.inputWindow, { mode: 'autonomous', threshold: 0.5 });
+		assert.equal((rt.rawOutput as Record<string, unknown>)?.action, 'delegate');
+		assert.ok(rt.rawOutput && 'complexity_shadow' in rt.rawOutput);
+		assert.ok(rt.rawOutput && 'ack_fallback' in rt.rawOutput);
+		assert.equal(rt.recommendedText, 'On it.');
+		assert.equal(rt.finalText, 'Hang on—');
+		assert.equal(rt.divergenceReason, 'barge-in cut the reply');
+		assert.equal(rt.overrideActor, 'user');
+		assert.ok(rt.routerModelCall);
+		assert.deepEqual(rt.routerModelCall.promptJson, [{ role: 'system', content: 'route this' }]);
+		assert.equal(rt.routerModelCall.responseText, '{"action":"delegate"}');
+	});
+
 	it('returns four empty arrays for an empty session', () => {
 		const view = buildSessionTraceView({ decisions: [], utterances: [] });
 		assert.deepEqual(view.routerTurns, []);

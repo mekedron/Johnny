@@ -539,6 +539,12 @@ export interface RouterModelCallView {
 	timeToFirstTokenMs: number | null;
 	durationMs: number | null;
 	finishReason: string | null;
+	// Raw router LLM I/O (US-004), surfaced by the client-side projection for the
+	// Decisions column's expandable drill-through. Optional/additive: the lean
+	// server `GET /sessions/{id}/trace` summary omits them (raw lives in detail),
+	// so an object from `getSessionTrace()` still satisfies the type.
+	promptJson?: unknown;
+	responseText?: string | null;
 }
 
 /** One router decision with links to what it produced (Decisions column). */
@@ -558,6 +564,17 @@ export interface RouterTurnView {
 	routerModelCall: RouterModelCallView | null;
 	deliveryIds: number[];
 	workstreamIds: number[];
+	// Decisions-column drill-through (US-104), populated by the client-side
+	// `buildSessionTraceView()` from the already-fetched detail records. Optional/
+	// additive so the lean server trace summary and older cached responses still
+	// parse. `rawOutput` feeds the complexity_shadow + degrade-marker readers in
+	// `sessionTurns.ts`; the divergence fields render the recommended↔final swap.
+	rawOutput?: Record<string, unknown>;
+	inputWindow?: Record<string, unknown>;
+	recommendedText?: string | null;
+	finalText?: string | null;
+	divergenceReason?: string | null;
+	overrideActor?: string | null;
 }
 
 /** One thing the bot said, back-linked to the request it answered. */

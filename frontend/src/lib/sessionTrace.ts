@@ -472,11 +472,22 @@ export function buildSessionTraceView(records: SessionTraceInput): SessionTraceV
 						totalTokens: rc.total_tokens,
 						timeToFirstTokenMs: rc.time_to_first_token_ms,
 						durationMs: rc.duration_ms,
-						finishReason: rc.finish_reason
+						finishReason: rc.finish_reason,
+						promptJson: rc.prompt_json,
+						responseText: rc.response_text
 					}
 				: null,
 			deliveryIds: [...(uttIdsByDecision.get(d.id) ?? [])].sort((a, b) => a - b),
-			workstreamIds: [...workstreamIds].sort((a, b) => a - b)
+			workstreamIds: [...workstreamIds].sort((a, b) => a - b),
+			// US-104 Decisions-column drill-through: surface the raw verdict + the
+			// INV-2 divergence record the column expands into (kept out of the lean
+			// server trace summary, projected here from the detail records).
+			rawOutput: d.raw_output,
+			inputWindow: d.input_window,
+			recommendedText: d.decision_recommended_text,
+			finalText: d.final_text,
+			divergenceReason: d.divergence_reason,
+			overrideActor: d.override_actor
 		};
 	});
 	routerTurns.sort(
