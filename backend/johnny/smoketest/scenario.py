@@ -1,0 +1,567 @@
+"""Scenario harness — a real delegated, multi-speaker session (Johnny-d6w.1 / US-001).
+
+Sibling to :mod:`johnny.smoketest.replay`. The replay harness drives recorded
+single-speaker turns through :meth:`RouterGate.run_turn` against an in-memory
+event bus and asserts the decision/terminal invariants — but it deliberately
+never builds a :class:`~johnny.agent.tasks.TaskCoordinator` or a worker, so it
+cannot exercise the *delegate → queued row → worker → tool → terminal* path the
+Session-View redesign needs real data for (the DB has **0** ``agent_tasks`` rows
+today; PRD §11).
+
+This module adds exactly that, reusing the replay building blocks unchanged:
+
+* the pure checkers :func:`~johnny.smoketest.replay.check_invariants` and
+  :func:`~johnny.smoketest.replay.assemble_turns` (they read the captured event
+  stream, so they apply to any engine), and
+* the recorded-LLM / say() / reply doubles
+  (:class:`~johnny.smoketest.replay_agent._RecordedRouterLLM`,
+  :class:`~johnny.smoketest.replay_agent._ReplaySayStub`,
+  :class:`~johnny.smoketest.replay_agent._ReplaySpeechHandle`).
+
+On top it wires a **real** ``TaskCoordinator`` (with the production
+:class:`~app.services.agent_tasks.SqlAlchemyTaskSink`) and drives the **real**
+worker claim/settle functions (:func:`~app.services.task_worker.claim_queued_tasks`
+/ :func:`~app.services.task_worker.settle_claimed_task`) in-process, so a scripted
+``delegate`` verdict produces a genuine ``agent_tasks`` row, the four ``task_*``
+events fire on the bus, and the tool / terminal / result can be asserted.
+
+Two ways to run it (mirroring the replay "recorded-CLI vs real-LLM-UI" split):
+
+* **deterministic** (:func:`run_scenario`, the CI gate): recorded router verdicts
+  + fake say/reply + a SQLite session + a deterministic tool executor — hermetic,
+  no Redis, no network, no live LLM.
+* **generation** (the live stack, documented in
+  ``docs/session-view-redesign/SCENARIO-HARNESS.md``): drive the same script
+  through the browser-session endpoints against the running api + worker +
+  ``mcp-demo-http`` so the rows are committed for later browser validation.
+
+Requires the ``agent`` extra (``livekit-agents``) like
+:mod:`johnny.smoketest.replay_agent`; imported only by the CLI / tests.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from livekit.agents.llm import ChatContext, StopResponse
+from livekit.agents.llm.chat_context import ChatMessage as LKChatMessage
+from livekit.agents.voice import SpeechHandle
+from sqlalchemy.orm import Session
+
+from app.services.agent_tasks import SqlAlchemyTaskSink
+from app.services.task_worker import claim_queued_tasks, settle_claimed_task
+from johnny.agent.gate import TurnIndex, TurnLedger
+from johnny.agent.observability import build_observability
+from johnny.agent.router_gate import RouterGate, RouterGateConfig
+from johnny.agent.speech_queue import (
+    RESULT_DEFAULT_TTL_S,
+    SpeechPriority,
+    SpeechQueue,
+)
+from johnny.agent.task_catalog import TaskCatalogEntry
+from johnny.agent.task_wiring import (
+    build_publish_task_completed,
+    build_publish_task_queued,
+)
+from johnny.agent.tasks import QueuedTask, TaskCoordinator, TaskResult
+from johnny.smoketest.replay import (
+    SPLIT_RUNTIME,
+    ReplayTurn,
+    TurnRecord,
+    assemble_turns,
+    check_invariants,
+)
+from johnny.smoketest.replay_agent import (
+    SIMULATED_HANG_TIMEOUT_S,
+    _RecordedRouterLLM,
+    _ReplaySayStub,
+    _ReplaySpeechHandle,
+)
+from johnny.voice_pipeline import InMemoryEventBus, PipelineEvent, TranscriptFinalized
+from johnny.voice_pipeline.events import TaskProgress, TaskResultExpired
+
+# A monotonic-int clock for the task events, so timestamps are deterministic
+# across a run (no wall clock — the replay-parity stance).
+TaskExecutorFn = Callable[[QueuedTask], Awaitable[TaskResult]]
+
+
+# --- fixture model (a superset of the replay fixture) -----------------------
+
+
+@dataclass(frozen=True)
+class ScenarioTurn(ReplayTurn):
+    """One scripted utterance — a :class:`ReplayTurn` (``text`` / ``speaker`` /
+    ``confidence`` / ``router`` / ``answer`` / ``simulate``) plus per-turn
+    expectations the test asserts on for the delegating turn.
+
+    For a delegating turn ``router`` carries the Phase-3 shape ``{should_speak,
+    confidence, reason, action: "delegate", task: {kind, args, ack}}`` (parsed by
+    ``reasoning._parse_task_request``); ``expect`` documents the asserted outcome,
+    e.g. ``{"kind": "...", "terminal_status": "done"}``.
+    """
+
+    expect: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ScenarioFixture:
+    """A scripted multi-speaker scenario plus the delegatable-kind config that
+    lets the router emit ``delegate`` (the catalog + executor-known set)."""
+
+    session_id: str
+    label: str
+    bot_session_id: int = 1
+    mode: str = "autonomous"
+    confidence_threshold: float = 0.7
+    instructions: str = ""
+    task_catalog: tuple[TaskCatalogEntry, ...] = ()
+    executor_kinds: frozenset[str] = frozenset()
+    turns: tuple[ScenarioTurn, ...] = ()
+    runtime: str = SPLIT_RUNTIME
+
+    @property
+    def turn_count(self) -> int:
+        return len(self.turns)
+
+    @property
+    def speakers(self) -> tuple[str, ...]:
+        """Distinct speakers in first-seen order."""
+        seen: list[str] = []
+        for t in self.turns:
+            if t.speaker not in seen:
+                seen.append(t.speaker)
+        return tuple(seen)
+
+
+def scenario_from_dict(data: dict[str, Any]) -> ScenarioFixture:
+    """Parse a ``fixture.json`` dict into a :class:`ScenarioFixture`."""
+    turns = tuple(
+        ScenarioTurn(
+            text=str(t["text"]),
+            speaker=str(t.get("speaker", "user")),
+            confidence=float(t.get("confidence", 0.9)),
+            router=dict(t.get("router", {})),
+            answer=t.get("answer"),
+            simulate=t.get("simulate"),
+            expect=dict(t.get("expect", {})),
+        )
+        for t in data.get("turns", [])
+    )
+    catalog = tuple(
+        TaskCatalogEntry(
+            kind=str(e["kind"]),
+            one_liner=str(e.get("one_liner", "")),
+            keywords=tuple(e.get("keywords", []) or []),
+            available=bool(e.get("available", True)),
+            unavailable_reason=str(e.get("unavailable_reason", "")),
+            hidden=bool(e.get("hidden", False)),
+            internal=bool(e.get("internal", False)),
+        )
+        for e in data.get("task_catalog", [])
+    )
+    return ScenarioFixture(
+        session_id=str(data["session_id"]),
+        label=str(data.get("label", f"scenario-{data['session_id']}")),
+        bot_session_id=int(data.get("bot_session_id", 1)),
+        mode=str(data.get("mode", "autonomous")),
+        confidence_threshold=float(data.get("confidence_threshold", 0.7)),
+        instructions=str(data.get("instructions", "")),
+        task_catalog=catalog,
+        executor_kinds=frozenset(data.get("executor_kinds", []) or []),
+        turns=turns,
+        runtime=str(data.get("runtime", SPLIT_RUNTIME)),
+    )
+
+
+def load_scenario(path: Path) -> ScenarioFixture:
+    """Load a scenario from ``<dir>/fixture.json`` or a JSON file."""
+    fixture_path = path / "fixture.json" if path.is_dir() else path
+    with fixture_path.open("r", encoding="utf-8") as fh:
+        return scenario_from_dict(json.load(fh))
+
+
+# --- deterministic tool executor (the CI gate's stand-in for the demo MCP) --
+
+
+def reverse_text_executor(task: QueuedTask) -> Awaitable[TaskResult]:
+    """A pure, deterministic stand-in for the ``mcp__demo-http__reverse_text`` tool.
+
+    The CI gate is hermetic — no Redis, no MCP SDK, no network — so the default
+    executor mirrors the demo server's ``reverse_text`` tool (a pure string
+    reversal) and the ``result_json`` shape the real
+    :func:`johnny.mcp.executor.build_mcp_task_executor` produces
+    (``mcp_server`` / ``mcp_tool`` / ``is_error``). The **generation** run uses
+    the real worker against the running ``mcp-demo-http`` service instead (see
+    the module docstring), which is where the genuine MCP tool call happens.
+    """
+
+    async def _run() -> TaskResult:
+        text = str(task.spec.args.get("text", ""))
+        reversed_text = text[::-1]
+        return TaskResult(
+            status="done",
+            result_text=reversed_text,
+            result_json={
+                "mcp_server": "demo-http",
+                "mcp_tool": "reverse_text",
+                "output": reversed_text,
+                "is_error": False,
+            },
+        )
+
+    return _run()
+
+
+# --- result record ----------------------------------------------------------
+
+
+@dataclass
+class ScenarioResult:
+    """Everything one deterministic scenario run produced, for assertions."""
+
+    fixture: ScenarioFixture
+    events: list[PipelineEvent]
+    records: list[TurnRecord]
+    # The terminal ``agent_tasks`` rows, read back from the DB after settle:
+    # ``[{"task_id", "kind", "status", "result_text", "result_json", "turn_id"}]``.
+    task_rows: list[dict[str, Any]]
+
+    def events_of_type(self, type_name: str) -> list[PipelineEvent]:
+        return [e for e in self.events if getattr(e, "type", None) == type_name]
+
+    @property
+    def invariant_violations(self) -> list[Any]:
+        return check_invariants(self.events, self.fixture.runtime)
+
+
+# --- the deterministic engine -----------------------------------------------
+
+
+async def run_scenario(
+    fixture: ScenarioFixture,
+    *,
+    session: Session,
+    executor: TaskExecutorFn = reverse_text_executor,
+    bot_session_id: int | None = None,
+) -> ScenarioResult:
+    """Drive ``fixture`` through the real gate + coordinator + worker, in-process.
+
+    Assembles the gate / ledger / observability exactly as
+    :func:`johnny.smoketest.replay_agent.run_agent_replay` does, then adds a
+    real :class:`~johnny.agent.tasks.TaskCoordinator` (production SQLite-backed
+    sink + the live ``task_*`` publish seams) so a scripted ``delegate`` verdict:
+
+    1. writes a ``queued`` ``agent_tasks`` row (``TaskCoordinator.begin`` →
+       ``SqlAlchemyTaskSink.record_queued``) and publishes ``TaskQueued``;
+    2. speaks the ack (the turn's single ``replied`` terminal — INV-1);
+
+    and then, after the conversation, the **worker leg** runs in-process —
+    :func:`claim_queued_tasks` (publishes ``TaskProgress``) → ``executor`` →
+    :func:`settle_claimed_task` (terminal row) → ``TaskCompleted`` — so all the
+    happy-path ``task_*`` events fire and the row reaches ``done``.
+
+    ``session`` is a SQLAlchemy session (SQLite ``:memory:`` in the CI gate);
+    ``executor`` defaults to the deterministic ``reverse_text`` stand-in.
+    """
+    if fixture.runtime != SPLIT_RUNTIME:
+        raise ValueError(
+            f"the scenario engine is split-only; fixture {fixture.label!r} is "
+            f"runtime={fixture.runtime!r}"
+        )
+
+    bus = InMemoryEventBus()
+    turn_index = TurnIndex()
+    obs = build_observability(
+        bus,
+        turn_index,
+        mode=fixture.mode,
+        allowed_replies=(),
+        resolve_turn_id=lambda _speech_id: turn_index.last(),
+        session_id=fixture.session_id,
+    )
+    ledger = TurnLedger(obs.session_terminal_emitter)
+    router = _RecordedRouterLLM(fixture.turns)
+
+    # Deterministic monotonic-int clock for the task events.
+    _tick = {"v": 0}
+
+    def _clock() -> int:
+        _tick["v"] += 1
+        return _tick["v"]
+
+    sink = SqlAlchemyTaskSink(session, bot_session_id or fixture.bot_session_id)
+    coordinator = TaskCoordinator(
+        sink,
+        executor=executor,
+        publish_queued=build_publish_task_queued(
+            bus, session_id=fixture.session_id, clock=_clock
+        ),
+        publish_completed=build_publish_task_completed(
+            bus, session_id=fixture.session_id, clock=_clock
+        ),
+        # Worker-owned: leave the row queued for the worker leg below rather
+        # than resolving it in-session (matches production, where real kinds
+        # are claimed by the worker, not run in the session loop).
+        runs_in_session=lambda _kind: False,
+    )
+    # Suppress the poll watcher begin() would otherwise spawn for a worker-owned
+    # kind: this harness drives the worker leg itself, deterministically, so it
+    # needs no background polling task to clean up (the Phase-5 "push listener
+    # active" branch of begin()).
+    coordinator._remote_listener_active = True
+
+    has_timeout = any(t.simulate == "timeout" for t in fixture.turns)
+    config = RouterGateConfig(
+        confidence_threshold=fixture.confidence_threshold,
+        mode=fixture.mode,
+        instructions=fixture.instructions,
+        allowed_replies=(),
+        task_catalog=fixture.task_catalog,
+        executor_kinds=fixture.executor_kinds,
+        router_llm_timeout_s=(SIMULATED_HANG_TIMEOUT_S if has_timeout else 0.0),
+    )
+    gate = RouterGate(
+        router,
+        config=config,
+        ledger=ledger,
+        record_decision=obs.record_decision,
+        record_spoke=obs.record_spoke,
+        record_suggested=obs.record_suggested,
+        tasks=coordinator,
+        resolve_turn_id=lambda _speech_id: turn_index.last(),
+    )
+    say_stub = _ReplaySayStub()
+    gate.attach_say(say_stub)
+
+    await _drive_turns(fixture, gate, say_stub, obs, bus)
+    await gate.aclose()
+
+    # The worker leg: claim every queued row this run produced and carry it to a
+    # terminal status, firing TaskProgress (claim) + TaskCompleted (settle).
+    publish_completed = build_publish_task_completed(
+        bus, session_id=fixture.session_id, clock=_clock
+    )
+    task_rows = await _drive_worker(
+        session,
+        executor,
+        bus,
+        publish_completed,
+        fixture.session_id,
+        _clock,
+        # Scope the claim to the scenario's own kinds so a run against a SHARED
+        # Postgres (the `generate` path) never claims the operator's unrelated
+        # queued tasks. Empty → None disables the filter (the SQLite gate).
+        only_kinds=fixture.executor_kinds or None,
+    )
+
+    await coordinator.aclose(drain_grace_s=0.0)
+
+    events = bus.snapshot()
+    records = assemble_turns(events, SPLIT_RUNTIME)
+    return ScenarioResult(
+        fixture=fixture, events=events, records=records, task_rows=task_rows
+    )
+
+
+async def _drive_turns(
+    fixture: ScenarioFixture,
+    gate: RouterGate,
+    say_stub: _ReplaySayStub,
+    obs: Any,
+    bus: InMemoryEventBus,
+) -> None:
+    """Feed each scripted turn through ``gate.run_turn`` (the replay loop shape).
+
+    A ``delegate`` verdict speaks its ack via ``say()`` and raises
+    ``StopResponse``; the ack handle's done-callback emits the turn's ``replied``
+    terminal + ``AgentSpoke`` (and ``begin()`` already wrote the queued row +
+    published ``TaskQueued`` inside ``run_turn``). A plain SPEAK turn binds its
+    recorded answer through a reply handle, exactly like the replay harness.
+    """
+    ctx = ChatContext.empty()
+    for i, turn in enumerate(fixture.turns):
+        await obs.transcript_finalized_sink(
+            TranscriptFinalized(
+                text=turn.text,
+                timestamp_ms=(i + 1) * 1000,
+                speaker=turn.speaker,
+                confidence=turn.confidence,
+                session_id=fixture.session_id,
+            )
+        )
+        msg = LKChatMessage(role="user", content=[turn.text])
+        say_before = len(say_stub.handles)
+        spoke = False
+        try:
+            await gate.run_turn(ctx, msg)
+            spoke = True
+        except StopResponse:
+            spoke = False
+        ctx.add_message(role="user", content=turn.text)
+
+        # say()-path verdict (delegate ack / status): fire its done so the gate
+        # emits the replied terminal + AgentSpoke, then skip the reply path.
+        if len(say_stub.handles) > say_before:
+            say_handle = say_stub.handles[-1]
+            say_handle.fire_done()
+            if gate._reply_tasks:
+                await _gather(gate._reply_tasks)
+            ctx.add_message(role="assistant", content=say_stub.texts[-1])
+            continue
+
+        if not spoke:
+            continue
+        chat_items = (
+            [LKChatMessage(role="assistant", content=[turn.answer])]
+            if turn.answer
+            else []
+        )
+        handle = _ReplaySpeechHandle(handle_id=f"item_reply_{i}", chat_items=chat_items)
+        gate.bind_reply(_as_speech_handle(handle))
+        handle.fire_done()
+        if gate._reply_tasks:
+            await _gather(gate._reply_tasks)
+        if turn.answer:
+            ctx.add_message(role="assistant", content=turn.answer)
+
+
+async def _drive_worker(
+    session: Session,
+    executor: TaskExecutorFn,
+    bus: InMemoryEventBus,
+    publish_completed: Any,
+    session_id: str,
+    clock: Callable[[], int],
+    only_kinds: frozenset[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Run the real worker claim/settle path for every queued row, in-process."""
+    from app.db.models import AgentTask
+
+    claim_kwargs: dict[str, Any] = {"limit": 64}
+    if only_kinds:
+        claim_kwargs["only_kinds"] = only_kinds
+    claimed = claim_queued_tasks(session, **claim_kwargs)
+    session.commit()
+    rows: list[dict[str, Any]] = []
+    for ct in claimed:
+        await bus.publish(
+            TaskProgress(
+                task_id=ct.task_id,
+                kind=ct.kind,
+                timestamp_ms=clock(),
+                progress_text="",
+                turn_id=ct.turn_id,
+                session_id=session_id,
+            )
+        )
+        queued = ct.as_queued_task()
+        result = await executor(queued)
+        ok = settle_claimed_task(
+            session,
+            task_id=ct.task_id,
+            claim_attempts=ct.attempts,
+            status=result.status,
+            result_text=result.result_text or "",
+            result_json=result.result_json,
+            error=result.error or "",
+        )
+        session.commit()
+        if not ok:
+            continue
+        await publish_completed(queued, result.status, result)
+        # The deterministic harness has no live speech-delivery loop, so a done
+        # result is never spoken — drive it through the REAL SpeechQueue and let
+        # it expire past the 120s RESULT TTL. This fires the fourth task_* event
+        # (TaskResultExpired) through the real expiry trigger and models the
+        # PRD's "done but undelivered/expired" delivery state (§7).
+        if result.status == "done" and (result.result_text or "").strip():
+            await _expire_undelivered_result(
+                bus,
+                task_id=ct.task_id,
+                kind=ct.kind,
+                turn_id=ct.turn_id,
+                result_text=result.result_text or "",
+                session_id=session_id,
+                clock=clock,
+            )
+        row = session.get(AgentTask, ct.task_id)
+        rows.append(
+            {
+                "task_id": ct.task_id,
+                "kind": ct.kind,
+                "status": str(row.status.value) if row is not None else None,
+                "result_text": row.result_text if row is not None else None,
+                "result_json": row.result_json if row is not None else None,
+                "turn_id": ct.turn_id,
+            }
+        )
+    return rows
+
+
+async def _expire_undelivered_result(
+    bus: InMemoryEventBus,
+    *,
+    task_id: int,
+    kind: str,
+    turn_id: int | None,
+    result_text: str,
+    session_id: str,
+    clock: Callable[[], int],
+) -> None:
+    """Fire ``TaskResultExpired`` through the real :class:`SpeechQueue` expiry.
+
+    Enqueues the done result as a ``RESULT_UNSOLICITED`` item and sweeps past the
+    120 s RESULT TTL so the queue's own ``on_dropped`` fires with the real expiry
+    reason — the same drop trigger the Phase-5 ``TaskSpeechDeliverer`` wires to
+    ``TaskResultExpired`` (task_wiring.py). The harness publishes the resulting
+    event onto its bus so all four ``task_*`` event types are captured.
+    """
+    queue = SpeechQueue(now=0.0)
+    dropped: list[str] = []
+    queue.enqueue(
+        result_text,
+        SpeechPriority.RESULT_UNSOLICITED,
+        now=0.0,
+        on_dropped=lambda _item, reason: dropped.append(reason),
+        task_id=task_id,
+        kind=kind,
+    )
+    queue.sweep_expired(now=RESULT_DEFAULT_TTL_S + 1.0)
+    for reason in dropped:
+        await bus.publish(
+            TaskResultExpired(
+                task_id=task_id,
+                kind=kind,
+                timestamp_ms=clock(),
+                reason=reason,
+                turn_id=turn_id,
+                session_id=session_id,
+            )
+        )
+
+
+async def _gather(tasks: Iterable[Any]) -> None:
+    import asyncio
+
+    await asyncio.gather(*tuple(tasks))
+
+
+def _as_speech_handle(handle: _ReplaySpeechHandle) -> SpeechHandle:
+    from typing import cast
+
+    return cast(SpeechHandle, handle)
+
+
+__all__ = [
+    "ScenarioFixture",
+    "ScenarioResult",
+    "ScenarioTurn",
+    "load_scenario",
+    "reverse_text_executor",
+    "run_scenario",
+    "scenario_from_dict",
+]

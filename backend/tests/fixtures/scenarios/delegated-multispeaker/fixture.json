@@ -1,0 +1,88 @@
+{
+  "session_id": "delegated-multispeaker",
+  "label": "delegated-multispeaker (session-3 shape, US-001)",
+  "bot_session_id": 9001,
+  "mode": "autonomous",
+  "confidence_threshold": 0.7,
+  "instructions": "You are Johnny, a helpful meeting assistant.",
+  "task_catalog": [
+    {
+      "kind": "mcp__demo-http__reverse_text",
+      "one_liner": "Run a background data job on the connected analytics tool."
+    }
+  ],
+  "executor_kinds": ["mcp__demo-http__reverse_text"],
+  "turns": [
+    {
+      "speaker": "alice",
+      "text": "Hey Johnny, can you pull up our total sales since January from the dashboards?",
+      "confidence": 0.95,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.9,
+        "reason": "a data lookup the bot can speak to from context",
+        "action": "speak",
+        "reply_type": "informative"
+      },
+      "answer": "Sure — sales since January are tracking right around four million so far this quarter."
+    },
+    {
+      "speaker": "bob",
+      "text": "And what's the weather like out there today?",
+      "confidence": 0.93,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.88,
+        "reason": "a simple inline lookup, no delegation needed",
+        "action": "speak",
+        "reply_type": "informative"
+      },
+      "answer": "It's clear and about 22 degrees right now."
+    },
+    {
+      "speaker": "alice",
+      "text": "Can you work out our total CO2 compensation in the background and report back when it's ready?",
+      "confidence": 0.96,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.92,
+        "reason": "explicit background request matching a delegatable data-job kind",
+        "action": "delegate",
+        "task": {
+          "kind": "mcp__demo-http__reverse_text",
+          "args": { "text": "CO2 compensation total" },
+          "ack": "On it — I'll crunch the CO2 compensation total in the background and report back."
+        }
+      }
+    },
+    {
+      "speaker": "bob",
+      "text": "Are you still working on that CO2 number?",
+      "confidence": 0.94,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.86,
+        "reason": "a progress query about delegated work — answer from the task registry",
+        "action": "status"
+      }
+    },
+    {
+      "speaker": "alice",
+      "text": "Great. While that runs, how did Q1 revenue come in?",
+      "confidence": 0.95,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.9,
+        "reason": "another data request answerable inline",
+        "action": "speak",
+        "reply_type": "informative"
+      },
+      "answer": "Q1 revenue landed a little above plan — I'll have the exact figure in the recap."
+    }
+  ],
+  "expect": {
+    "delegate_turn_index": 2,
+    "kind": "mcp__demo-http__reverse_text",
+    "terminal_status": "done"
+  }
+}

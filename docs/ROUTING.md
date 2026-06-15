@@ -7,7 +7,10 @@ behavior. Sources: the Johnny-trt epic (Phases 3–6) and the operator-requested
 evaluation of [ClawRouter](https://github.com/BlockRunAI/ClawRouter) (2026-06-11).
 
 Related docs: [PIPELINE.md](PIPELINE.md) (session engine, events, invariants),
-[LATENCY.md](LATENCY.md) (stage budgets and measured numbers).
+[LATENCY.md](LATENCY.md) (stage budgets and measured numbers),
+[session-view-redesign/PRD.md](session-view-redesign/PRD.md) (the unified PRD
+to replace the turn-centric session/history trace with Decisions, Deliveries,
+and Workstreams views).
 
 ---
 

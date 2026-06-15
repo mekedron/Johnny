@@ -14,6 +14,12 @@ modes are gone **and** the previously-working sessions still work.
 
 The replay harness is that verification, and it runs in CI on every PR.
 
+> **Sibling:** for a *delegated, multi-speaker* session — where the router
+> **delegates** and the worker drives a task to terminal (the four `task_*`
+> events, genuine `agent_tasks` rows) — see the **scenario harness**
+> (`johnny-scenario`, `docs/session-view-redesign/SCENARIO-HARNESS.md`). It
+> reuses this harness's pure checkers and recorded-LLM doubles.
+
 ---
 
 ## TL;DR
