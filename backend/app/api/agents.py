@@ -85,6 +85,9 @@ class AgentCreate(BaseModel):
         default="Sorry, I didn't catch that in time — could you say that again?",
         max_length=500,
     )
+    # Native tool-loop depth (Johnny-3gx). 0 = unlimited tool calls per turn; a
+    # positive value caps the answer agent's native tool loop.
+    max_tool_steps: int = Field(default=0, ge=0, le=100)
     router_llm_provider_id: int | None = None
     answer_llm_provider_id: int | None = None
     reasoning_llm_provider_id: int | None = None
@@ -129,6 +132,9 @@ class AgentUpdate(BaseModel):
     router_timeout_retries: int | None = Field(default=None, ge=0, le=5)
     router_timeout_fallback_mode: Literal["disabled", "static", "llm"] | None = None
     router_timeout_fallback_text: str | None = Field(default=None, max_length=500)
+    # Native tool-loop depth (Johnny-3gx). NOT NULL column: an explicit null is
+    # popped in update_agent (parity with the router-timeout knobs). 0 = unlimited.
+    max_tool_steps: int | None = Field(default=None, ge=0, le=100)
     router_llm_provider_id: int | None = None
     answer_llm_provider_id: int | None = None
     reasoning_llm_provider_id: int | None = None
@@ -166,6 +172,7 @@ class AgentRead(BaseModel):
     router_timeout_retries: int
     router_timeout_fallback_mode: str
     router_timeout_fallback_text: str
+    max_tool_steps: int
     is_default: bool
     router_llm_provider_id: int | None
     answer_llm_provider_id: int | None
@@ -469,16 +476,18 @@ def update_agent(
         data.pop("mode", None)
     if data.get("confidence_threshold") is None:
         data.pop("confidence_threshold", None)
-    # Router-timeout fallback NOT NULL columns (Johnny-xql): an explicit null
-    # means "unchanged", same as confidence_threshold / mode above.
-    for _timeout_key in (
+    # NOT NULL behavior columns (Johnny-xql router timeout + Johnny-3gx
+    # max_tool_steps): an explicit null means "unchanged", same as
+    # confidence_threshold / mode above.
+    for _nonnull_key in (
         "router_llm_timeout_s",
         "router_timeout_retries",
         "router_timeout_fallback_mode",
         "router_timeout_fallback_text",
+        "max_tool_steps",
     ):
-        if data.get(_timeout_key) is None:
-            data.pop(_timeout_key, None)
+        if data.get(_nonnull_key) is None:
+            data.pop(_nonnull_key, None)
     if data.get("name") is None:
         data.pop("name", None)
 

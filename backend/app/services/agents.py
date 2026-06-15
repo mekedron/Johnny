@@ -215,6 +215,10 @@ def _snapshot_base(
         "router_timeout_retries": int(agent.router_timeout_retries),
         "router_timeout_fallback_mode": str(agent.router_timeout_fallback_mode),
         "router_timeout_fallback_text": str(agent.router_timeout_fallback_text or ""),
+        # Native tool-loop depth (Johnny-3gx). Frozen here so the live session
+        # bounds the answer tool loop from the snapshot; SessionJobConfig coerces
+        # leniently (0 = unlimited).
+        "max_tool_steps": int(agent.max_tool_steps),
         "providers": {
             "router_llm_provider_id": agent.router_llm_provider_id,
             "answer_llm_provider_id": agent.answer_llm_provider_id,

@@ -99,6 +99,8 @@ def test_create_minimal_agent_defaults(client: TestClient) -> None:
     assert body["router_timeout_fallback_text"] == (
         "Sorry, I didn't catch that in time — could you say that again?"
     )
+    # Native tool-loop default (Johnny-3gx): 0 = unlimited.
+    assert body["max_tool_steps"] == 0
     assert body["is_default"] is False
     assert body["character_prompt"] == ""
     assert body["tts_options"] == {}
@@ -155,6 +157,29 @@ def test_router_timeout_fields_create_update_read_round_trip(
     assert untouched.json()["router_timeout_fallback_mode"] == "disabled"
 
 
+def test_max_tool_steps_create_update_read_round_trip(client: TestClient) -> None:
+    """Johnny-3gx: the native tool-loop cap survives create → patch → read, and a
+    null patch leaves the NOT NULL column unchanged (0 = unlimited)."""
+    created = client.post("/agents", json=_create_payload(max_tool_steps=12))
+    assert created.status_code == 201
+    agent_id = created.json()["id"]
+    assert created.json()["max_tool_steps"] == 12
+
+    patched = client.patch(f"/agents/{agent_id}", json={"max_tool_steps": 30})
+    assert patched.status_code == 200
+    assert patched.json()["max_tool_steps"] == 30
+
+    # null = unchanged (parity with the router-timeout NOT NULL knobs).
+    untouched = client.patch(f"/agents/{agent_id}", json={"max_tool_steps": None})
+    assert untouched.status_code == 200
+    assert untouched.json()["max_tool_steps"] == 30
+
+    # 0 is a valid explicit value (unlimited), not "unchanged".
+    zeroed = client.patch(f"/agents/{agent_id}", json={"max_tool_steps": 0})
+    assert zeroed.status_code == 200
+    assert zeroed.json()["max_tool_steps"] == 0
+
+
 @pytest.mark.parametrize(
     "patch",
     [
@@ -163,6 +188,8 @@ def test_router_timeout_fields_create_update_read_round_trip(
         {"router_timeout_retries": -1},  # below zero
         {"router_llm_timeout_s": -2.0},  # below zero
         {"router_llm_timeout_s": 999.0},  # above the cap
+        {"max_tool_steps": 101},  # above the ceiling (Johnny-3gx)
+        {"max_tool_steps": -1},  # below zero
     ],
 )
 def test_router_timeout_fields_reject_out_of_range(

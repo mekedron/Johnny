@@ -666,6 +666,33 @@
 				{/if}
 			</div>
 			<div class="flex flex-col gap-1.5">
+				<label class="text-foreground text-xs font-medium" for="agent-max-tool-steps">
+					Tool-call limit
+				</label>
+				<input
+					id="agent-max-tool-steps"
+					type="number"
+					min="0"
+					max="100"
+					step="1"
+					bind:value={draft.max_tool_steps}
+					data-testid="behavior-max-tool-steps"
+					class={`${inputClass} max-w-[12rem]`}
+					aria-invalid={fieldErrors.max_tool_steps !== undefined}
+				/>
+				{#if fieldErrors.max_tool_steps}
+					<p class="text-destructive m-0 text-xs" data-testid="error-max-tool-steps">
+						{fieldErrors.max_tool_steps}
+					</p>
+				{:else}
+					<p class="text-muted-foreground m-0 text-xs">
+						Max tools the bot may call to answer one turn — an MCP data query chains
+						several (list connectors → load tools → run the query).
+						<span class="font-mono">0</span> = unlimited.
+					</p>
+				{/if}
+			</div>
+			<div class="flex flex-col gap-1.5">
 				<label class="text-foreground text-xs font-medium" for="agent-router-fallback-mode">
 					On-timeout fallback
 				</label>

@@ -413,16 +413,26 @@ def _speech_alt_duration_ms(alt: SpeechData | None) -> int | None:
     return round(span_s * 1000)
 
 
-MAX_TOOL_STEPS = 25
-"""Cap on native tool-loop steps per turn (Johnny-3ow, raised Johnny-3gx).
+DEFAULT_MAX_TOOL_STEPS = 0
+"""Native tool-loop cap when a session carries no per-agent value (the smoke /
+provider-test / hand-built paths). ``0`` = UNLIMITED. The real value is the
+per-agent ``max_tool_steps`` knob (Johnny-3gx), configurable on /agents/[id] like
+the router-triage timeout, threaded through
+:attr:`SessionJobConfig.max_tool_steps` → :class:`AgentRuntime` →
+:func:`build_agent_session`. An agentic MCP data query legitimately chains
+list_mcp_servers → list_mcp_tools → discover → fetch → query (metabase: find
+dashboard → get cards → run the card), so the old fixed cap (8) forced the model
+to give up and promise instead of delivering — hence unlimited by default."""
 
-8 was sized for the openclaw skill-discovery recipe (list_dir → read SKILL.md →
-exec). It is far too low for an agentic MCP data query, which legitimately chains
-``list_mcp_servers`` → ``list_mcp_tools`` → a discovery call → a fetch call → a
-query call (e.g. metabase: find dashboard → get cards → run the card) — easily
-6-12 steps before the model can report a real number. The old cap forced the
-model to give up and promise ("I'll query Metabase…") instead of delivering. 25
-leaves headroom for real multi-step work while still bounding a spinning loop."""
+_UNLIMITED_TOOL_STEPS = 100_000
+"""What we hand LiveKit's ``max_tool_steps`` (a plain int with no unbounded
+option) when the configured cap is 0/unlimited — far beyond any real turn's tool
+count, so the loop is bounded only by the model deciding it is done."""
+
+
+def resolve_max_tool_steps(configured: int) -> int:
+    """Map the per-agent cap (``0`` = unlimited) to the positive int LiveKit wants."""
+    return _UNLIMITED_TOOL_STEPS if configured <= 0 else configured
 
 
 def build_agent_session(
@@ -436,6 +446,7 @@ def build_agent_session(
     min_interruption_duration_s: float | None = None,
     turn_detection: Any = None,
     endpointing: EndpointingOptions | None = None,
+    max_tool_steps: int = DEFAULT_MAX_TOOL_STEPS,
 ) -> AgentSession[Any]:
     """Construct Johnny's ``AgentSession`` from provider adapter instances.
 
@@ -504,13 +515,12 @@ def build_agent_session(
         llm=llm,
         tts=tts if tts is not None else NOT_GIVEN,
         vad=vad if vad is not None else load_vad(),
-        # Native tool loop depth (Johnny-3ow): the SDK default (3) is too low
-        # for the openclaw discovery recipe — list_dir('/skills') → read the
-        # SKILL.md → exec the run script is already 3 steps, leaving no room
-        # for a retry or a follow-up read. 8 bounds a runaway loop while
-        # leaving headroom; tool-less sessions never reach a tool step, so this
-        # is inert for them.
-        max_tool_steps=MAX_TOOL_STEPS,
+        # Native tool loop depth (Johnny-3ow; per-agent configurable Johnny-3gx).
+        # The SDK default (3) is far too low for an agentic MCP data query; the
+        # cap is the agent's ``max_tool_steps`` (0 = unlimited, mapped to a large
+        # sentinel here). Tool-less sessions never reach a tool step, so this is
+        # inert for them.
+        max_tool_steps=resolve_max_tool_steps(max_tool_steps),
         turn_handling=build_turn_handling(
             turn_detection=turn_detection,
             preemptive_generation=preemptive_generation,

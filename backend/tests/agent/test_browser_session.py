@@ -487,6 +487,7 @@ def _patch_build_seams(
             adapters=SimpleNamespace(stt=object(), llm=object(), tts=None),
             enable_barge_in=True,
             min_interruption_duration_s=None,
+            max_tool_steps=0,
             needs_approval_wiring=False,
             approval_gate=None,
         )

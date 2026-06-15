@@ -269,6 +269,9 @@ class AgentRuntime:
     event_bus: EventBus
     enable_barge_in: bool
     min_interruption_duration_s: float | None
+    # Native tool-loop cap (Johnny-3gx) from the agent snapshot, threaded to
+    # build_agent_session by the worker / browser surfaces. 0 = unlimited.
+    max_tool_steps: int = 0
     # Live bot-reply caption emitter (Johnny-trt.39): the agent's tts_node
     # feeds it one sentence per flush; drained at aclose like the metrics
     # translator. ``None`` only on hand-built test runtimes.
@@ -1327,6 +1330,9 @@ async def build_agent_runtime(
         event_bus=bus,
         enable_barge_in=barge_in.enabled,
         min_interruption_duration_s=None,
+        # Per-agent native tool-loop cap (Johnny-3gx) from the frozen snapshot;
+        # the session surfaces hand it to build_agent_session. 0 = unlimited.
+        max_tool_steps=config.max_tool_steps,
         approval_gate=approval_gate,
         decision_sink=decision_sink,
         task_sink=task_sink,

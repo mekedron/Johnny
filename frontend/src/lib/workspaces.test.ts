@@ -49,6 +49,7 @@ function makeAgent(overrides: Partial<Agent> = {}): Agent {
 		router_timeout_retries: null,
 		router_timeout_fallback_mode: null,
 		router_timeout_fallback_text: null,
+		max_tool_steps: null,
 		is_default: false,
 		router_llm_provider_id: null,
 		answer_llm_provider_id: null,

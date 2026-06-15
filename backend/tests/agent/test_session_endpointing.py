@@ -30,12 +30,22 @@ pytest.importorskip("livekit.agents")
 
 from johnny.agent import session as session_mod  # noqa: E402
 from johnny.agent.session import (  # noqa: E402
+    _UNLIMITED_TOOL_STEPS,
     build_agent_session,
     build_turn_handling,
     load_vad,
+    resolve_max_tool_steps,
 )
 
 # asyncio_mode = "auto" — async tests need no mark.
+
+
+def test_resolve_max_tool_steps_zero_is_unlimited() -> None:
+    """Johnny-3gx: the per-agent cap (0 = unlimited) maps to LiveKit's int."""
+    assert resolve_max_tool_steps(0) == _UNLIMITED_TOOL_STEPS
+    assert resolve_max_tool_steps(-1) == _UNLIMITED_TOOL_STEPS  # defensive
+    assert resolve_max_tool_steps(12) == 12
+    assert resolve_max_tool_steps(1) == 1
 
 
 # --------------------------------------------------------------------------- #
