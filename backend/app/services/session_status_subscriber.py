@@ -380,6 +380,10 @@ def apply_router_decision_event(
     reply_type = payload.get("reply_type")
     suggested_reply = payload.get("suggested_reply")
     turn_id = _coerce_int_id(payload.get("turn_id"))
+    # Cross-turn correlation key (US-003): the UUID the gate minted for this
+    # turn, carried on the RouterDecisionMade event. Stored as-is; NULL for
+    # pre-US-003 events / bare gates.
+    request_id = payload.get("request_id")
     input_window_raw = payload.get("input_window") or {}
     input_window = input_window_raw if isinstance(input_window_raw, dict) else {}
     raw_output_raw = payload.get("raw_output") or {}
@@ -430,6 +434,7 @@ def apply_router_decision_event(
         # human, so stamp ``pending_approval`` immediately for operator
         # visibility; TurnTerminal flips it to replied / no_reply on resolution.
         turn_id=turn_id,
+        request_id=str(request_id) if isinstance(request_id, str) else None,
         terminal_state=(
             TerminalState.PENDING_APPROVAL
             if outcome == DecisionOutcome.PENDING
@@ -628,9 +633,19 @@ def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
                 reason,
             )
     audio_file = payload.get("audio_file")
+    # Durable delivery→request link (US-003): set from the event regardless of
+    # ``decision_id`` (which is NULL for fallback/timeout/correction speech), so
+    # the utterance still names the request it answered after agent_decision_id
+    # is SET NULL (AC#3). NULL for speech bound to no turn.
+    answers_request_id = payload.get("answers_request_id")
     row = AgentUtterance(
         bot_session_id=session_id,
         agent_decision_id=decision_id,
+        answers_request_id=(
+            str(answers_request_id)
+            if isinstance(answers_request_id, str)
+            else None
+        ),
         mode=mode,
         prompt=prompt,
         output_text=text,
@@ -1050,6 +1065,9 @@ def apply_task_event(db: Session, payload: dict[str, Any]) -> bool:
             agent_task_id=task_id,
             source_turn_id=_coerce_int_id(payload.get("turn_id")),
             source_decision_id=_coerce_int_id(payload.get("decision_id")),
+            request_id=(
+                str(payload["request_id"]) if payload.get("request_id") else None
+            ),
             title=(str(payload.get("kind")) if payload.get("kind") else None),
             status=WorkstreamStatus.QUEUED,
             delivery_status=WorkstreamDeliveryStatus.NOT_READY,
@@ -1059,6 +1077,15 @@ def apply_task_event(db: Session, payload: dict[str, Any]) -> bool:
         _append_workstream_event(
             db, ws, event_type="queued", payload_json={"task_id": task_id}
         )
+
+    # Backfill the correlation key (US-003) for both the just-created and the
+    # pre-existing row: if the envelope was created from a task event that
+    # lacked request_id (e.g. a worker ``task_progress`` that raced ahead of
+    # ``TaskQueued``), any later task event carrying it fills the gap. The
+    # ``agent_tasks`` row persists request_id and every task event echoes it, so
+    # this converges regardless of which event the single writer sees first.
+    if ws.request_id is None and payload.get("request_id"):
+        ws.request_id = str(payload["request_id"])
 
     now = datetime.now(UTC)
     terminal = ws.status in _WORKSTREAM_TERMINAL_STATUSES

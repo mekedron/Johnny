@@ -340,6 +340,9 @@ async def run_scenario(
         record_suggested=obs.record_suggested,
         tasks=coordinator,
         resolve_turn_id=lambda _speech_id: turn_index.last(),
+        # US-003: mint into the same TurnIndex the obs emitters read so request_id
+        # propagates to decisions, utterances, and the delegated workstream.
+        assign_request_id=turn_index.assign_request_id,
     )
     say_stub = _ReplaySayStub()
     gate.attach_say(say_stub)
@@ -433,6 +436,7 @@ def _persist_workstreams(
             "result_json": w.result_json,
             "title": w.title,
             "source_turn_id": w.source_turn_id,
+            "request_id": w.request_id,
         }
         for w in rows
     ]
@@ -526,6 +530,7 @@ async def _drive_worker(
                 timestamp_ms=clock(),
                 progress_text="",
                 turn_id=ct.turn_id,
+                request_id=ct.request_id,  # US-003: echo from the claimed row
                 session_id=session_id,
             )
         )

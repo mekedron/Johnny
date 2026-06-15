@@ -121,6 +121,11 @@ class TaskSpec:
     ack_text: str = ""
     turn_id: int | None = None
     decision_id: int | None = None
+    # Cross-turn correlation key (US-003): the UUID minted for the delegating
+    # turn. Persisted onto the ``agent_tasks`` row and echoed on every task
+    # event so the durable workstream envelope can be stamped with it. ``None``
+    # for tasks queued outside a gated turn.
+    request_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

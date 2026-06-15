@@ -390,6 +390,11 @@ def build_decision_emitter(
             input_window=window,
             raw_output=dict(decision.raw),
             turn_id=turn_index.resolve(turn_id),
+            # The turn's correlation id (US-003), minted at gate entry and read
+            # back from the same shared TurnIndex. NULL when no gate minted one
+            # (bare gate / pre-US-003 replay). Top-level field, never inside
+            # raw_output/input_window, so no diffed replay payload changes.
+            request_id=turn_index.request_id_for(turn_id),
         )
         try:
             await event_bus.publish(event)
@@ -516,6 +521,17 @@ def build_spoke_emitter(
             turn_id=(
                 turn_index.resolve(turn_id)
                 if turn_index is not None and turn_id is not None
+                else None
+            ),
+            # Which request this delivery answered (US-003): the minted id for
+            # the turn that owns the speech, read from the shared TurnIndex.
+            # ``request_id_for`` returns None for turn_id=None speech
+            # (corrections / task-result deliveries) and when no turn_index is
+            # wired — so it is set even for turn-bound fallback speech whose
+            # agent_decision_id will be NULL (AC#3).
+            answers_request_id=(
+                turn_index.request_id_for(turn_id)
+                if turn_index is not None
                 else None
             ),
             interrupted=interrupted,

@@ -208,6 +208,10 @@ class ClaimedTask:
     workspace_id: int | None = None
     workspace_is_default: bool = True
     workspace_slug: str | None = None
+    # Cross-turn correlation key (US-003), read from the agent_tasks row so the
+    # worker echoes it on every task event it emits → the durable workstream
+    # envelope is stamped regardless of which task event the writer sees first.
+    request_id: str | None = None
 
     def as_queued_task(self) -> QueuedTask:
         """The executor-facing shape (the trt.23 runner contract)."""
@@ -219,6 +223,7 @@ class ClaimedTask:
                 ack_text=self.ack_text,
                 turn_id=self.turn_id,
                 decision_id=self.decision_id,
+                request_id=self.request_id,
             ),
         )
 
@@ -306,6 +311,7 @@ def claim_queued_tasks(
             AgentTask.request_json,
             AgentTask.turn_id,
             AgentTask.agent_decision_id,
+            AgentTask.request_id,
             AgentTask.attempts,
             AgentTask.ack_text,
         )
@@ -327,6 +333,7 @@ def claim_queued_tasks(
                 ack_text=str(row.ack_text or ""),
                 turn_id=row.turn_id,
                 decision_id=row.agent_decision_id,
+                request_id=row.request_id,
                 attempts=int(row.attempts),
                 workspace_id=workspace_id,
                 workspace_is_default=workspace_is_default,
@@ -1203,6 +1210,7 @@ class TaskWorker:
             result_text=result.result_text,
             error=result.error,
             turn_id=claimed.turn_id,
+            request_id=claimed.request_id,
         )
         # Johnny-trt.38 enforcement point #3 surfaced: the run hit a
         # policy-blocked binary inside sandbox.exec (attribution rode the
@@ -1407,6 +1415,7 @@ class TaskWorker:
                 timestamp_ms=self._clock_ms(),
                 progress_text="",  # bare claim signal (the documented shape)
                 turn_id=claimed.turn_id,
+                request_id=claimed.request_id,
                 session_id=str(claimed.bot_session_id),
             )
         )
@@ -1421,6 +1430,7 @@ class TaskWorker:
         result_text: str,
         error: str,
         turn_id: int | None,
+        request_id: str | None = None,
     ) -> None:
         await self._publish(
             TaskCompleted(
@@ -1431,6 +1441,7 @@ class TaskWorker:
                 result_text=result_text,
                 error=error,
                 turn_id=turn_id,
+                request_id=request_id,
                 session_id=str(bot_session_id),
             )
         )

@@ -36,6 +36,8 @@ from app.db.models import (  # noqa: E402
 from johnny.smoketest.replay import discover_fixtures  # noqa: E402
 from johnny.smoketest.scenario import load_scenario, run_scenario  # noqa: E402
 from johnny.voice_pipeline.events import (  # noqa: E402
+    AgentSpoke,
+    RouterDecisionMade,
     TaskCompleted,
     TaskProgress,
     TaskQueued,
@@ -137,6 +139,51 @@ def test_scenario_produces_real_delegated_session(db: Session) -> None:
     assert ws["result_json"]["mcp_tool"] == "reverse_text"  # copied from the task row
     assert ws["source_turn_id"] == queued[0].turn_id  # bound to the delegating turn
     assert ws["title"] == "mcp__demo-http__reverse_text"
+
+
+def test_scenario_request_id_correlation(db: Session) -> None:
+    """US-003: a stable ``request_id`` minted once per opened turn, propagated to
+    the decision, the delivery (``answers_request_id``), and the delegated
+    workstream + every one of its task events — the cross-turn correlation key
+    the Deliveries column reads. Exercised through the SAME real gate + emitters
+    + single durable writer the live system runs.
+    """
+    fixture = load_scenario(SCENARIO_FIXTURE)
+    result = asyncio.run(run_scenario(fixture, session=db))
+
+    decisions = cast(
+        list[RouterDecisionMade], result.events_of_type("router_decision_made")
+    )
+    spokes = cast(list[AgentSpoke], result.events_of_type("agent_spoke"))
+    queued = cast(list[TaskQueued], result.events_of_type("task_queued"))
+    progress = cast(list[TaskProgress], result.events_of_type("task_progress"))
+    completed = cast(list[TaskCompleted], result.events_of_type("task_completed"))
+
+    # v1 mints exactly one id per opened turn — every decision carries one and
+    # they are all distinct (the documented one-per-turn semantics, AC#5).
+    assert decisions, "the scenario decides at least one turn"
+    assert all(d.request_id for d in decisions), "every decision mints a request_id"
+    assert len({d.request_id for d in decisions}) == len(decisions)
+
+    # Each turn-bound delivery names the request ITS OWN turn answered (AC#2/#3) —
+    # bound by the turn's request_id, not FIFO "oldest pending" (RED-TEAM C8).
+    rid_by_turn = {d.turn_id: d.request_id for d in decisions}
+    bound_spokes = [s for s in spokes if s.turn_id is not None]
+    assert bound_spokes, "the scenario speaks at least one turn-bound delivery"
+    for s in bound_spokes:
+        assert s.answers_request_id == rid_by_turn.get(s.turn_id)
+
+    # The delegated workstream + EVERY one of its task events carry the
+    # delegating turn's id — queued/progress/completed all agree, so the
+    # durable envelope is stamped regardless of task-event arrival order (AC#2).
+    deleg_turn_id = queued[0].turn_id
+    deleg_rid = rid_by_turn[deleg_turn_id]
+    assert deleg_rid is not None
+    assert queued[0].request_id == deleg_rid
+    assert progress[0].request_id == deleg_rid
+    assert completed[0].request_id == deleg_rid
+    assert len(result.workstream_rows) == 1
+    assert result.workstream_rows[0]["request_id"] == deleg_rid
 
 
 def test_scenario_fixture_outside_frozen_replay_suite() -> None:

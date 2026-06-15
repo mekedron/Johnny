@@ -809,6 +809,12 @@ class AgentDecision(Base):
     __tablename__ = "agent_decisions"
     __table_args__ = (
         Index("ix_agent_decisions_session_created", "bot_session_id", "created_at"),
+        # Cross-turn correlation lookups (US-003): "all decisions for request X".
+        Index("ix_agent_decisions_request_id", "request_id"),
+        # ``turn_id`` was unindexed (only the composite above existed); the
+        # subscriber binds a turn's TurnTerminal/utterance back to its decision
+        # by ``turn_id``, so index it for that point lookup (US-003 AC#4).
+        Index("ix_agent_decisions_turn_id", "turn_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -851,6 +857,13 @@ class AgentDecision(Base):
     # in-progress window between the router decision and its terminal stamp
     # are representable.
     turn_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Cross-turn correlation key (US-003): a 36-char UUID minted once per opened
+    # turn in ``RouterGate.run_turn`` and carried through ``RouterDecisionMade``
+    # to here. Distinct from ``turn_id`` (which is turn-bound by construction):
+    # stored turn-independent so a later cross-turn merge heuristic can group
+    # continuations of one request without a schema change. v1 is 1:1 with the
+    # turn. NULL for pre-US-003 history and bare-gate/listen-only paths.
+    request_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     terminal_state: Mapped[TerminalState | None] = mapped_column(
         SAEnum(
             TerminalState,
@@ -981,6 +994,9 @@ class AgentUtterance(Base):
     __tablename__ = "agent_utterances"
     __table_args__ = (
         Index("ix_agent_utterances_session_created", "bot_session_id", "created_at"),
+        # "Which deliveries answered request X" (US-003) — the read path that
+        # renders the Deliveries column groups utterances by the request answered.
+        Index("ix_agent_utterances_answers_request_id", "answers_request_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -992,6 +1008,14 @@ class AgentUtterance(Base):
         ForeignKey("agent_decisions.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Durable "which request did this delivery answer?" link (US-003). The
+    # 36-char request_id minted for the answered turn — set from the AgentSpoke
+    # event independently of ``agent_decision_id``, so it SURVIVES that FK being
+    # SET NULL and is present even for fallback/timeout speech (which writes a
+    # NULL decision link today). For turn-bound speech it equals the turn's
+    # decision ``request_id``; NULL for speech bound to no turn (corrections,
+    # task-result deliveries — those link to their request via the workstream).
+    answers_request_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     mode: Mapped[BotMode] = mapped_column(_bot_mode_column(), nullable=False)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     output_text: Mapped[str] = mapped_column(Text, nullable=False)
@@ -1053,6 +1077,12 @@ class AgentTask(TimestampMixin, Base):
         nullable=True,
     )
     turn_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Cross-turn correlation key (US-003), mirrored from the delegating turn's
+    # decision so the durable workstream envelope can be stamped on ANY task
+    # event (TaskQueued/TaskProgress/TaskCompleted) regardless of which the
+    # single durable writer sees first — closing the create-order race the
+    # in-session harness can't reproduce. Carried via ``TaskSpec.request_id``.
+    request_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     kind: Mapped[str] = mapped_column(String(128), nullable=False)
     request_json: Mapped[dict[str, Any]] = mapped_column(_json_column(), nullable=False)
     status: Mapped[AgentTaskStatus] = mapped_column(

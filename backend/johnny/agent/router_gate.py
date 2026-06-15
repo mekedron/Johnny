@@ -639,6 +639,7 @@ class RouterGate:
         reply_audio: SpokenAudioRecorder | None = None,
         tasks: TaskCoordinator | None = None,
         resolve_turn_id: Callable[[str], int] | None = None,
+        assign_request_id: Callable[[str], str] | None = None,
         abandon: asyncio.Event | None = None,
         clock: Callable[[], int] = _default_clock,
         wall_clock: Callable[[], int] = _default_wall_clock,
@@ -693,6 +694,14 @@ class RouterGate:
         # promising work nothing can record.
         self._tasks = tasks
         self._resolve_turn_id = resolve_turn_id
+        # Cross-turn correlation mint seam (US-003): bound to the shared
+        # ``TurnIndex.assign_request_id`` by the assemblies that wire one (prod
+        # job_session + the smoketest harnesses). Optional — a bare gate mints
+        # nothing, so ``request_id`` stays NULL end-to-end (backward compatible).
+        # Minting goes through the SAME TurnIndex the emitters read, so the
+        # minted id reaches every one of the turn's events with no signature
+        # change at the ~8 record_spoke call sites.
+        self._assign_request_id = assign_request_id
         # No dead promises (Johnny-trt.53): the gate owns say(), so it owns the
         # honest spoken walk-back when a delegated task fails fast — attach the
         # coordinator's failure-report seam right here so every assembly that
@@ -884,6 +893,19 @@ class RouterGate:
             # skip_reply paths documented on :meth:`TurnLedger.open`). Stay silent.
             raise StopResponse()
         tracker = self._ledger.gate_tracker(turn_id)  # opens the turn (INV-1)
+        # Mint this turn's cross-turn correlation id (US-003) the instant the
+        # turn opens — BEFORE the router await — and store it in the shared
+        # TurnIndex so the decision + spoke emitters stamp every one of this
+        # turn's events with it. Minting here (not at decision time) means even
+        # a router-timeout turn, whose only speech is the turn-bound fallback
+        # line and which writes NO decision row, still names its request
+        # (AC#3). ``None`` for a bare gate without the seam. The delegate branch
+        # carries this local onto the TaskSpec → agent_tasks → workstream.
+        request_id = (
+            self._assign_request_id(turn_id)
+            if self._assign_request_id is not None
+            else None
+        )
         # Turn-claim anchor (Johnny-trt.47), resolved at gate ENTRY — before
         # the router await — so co-agents' anchors differ by VAD/endpointing
         # skew, never by their router LLMs' latency spread.
@@ -1159,7 +1181,9 @@ class RouterGate:
             # task_request is set for a delegate action; the None guard means a
             # hand-built decision that violates the pair degrades to SPEAK below
             # (the parser's own malformed-task degrade) rather than crashing.
-            await self._begin_delegated_task(tracker, turn_id, decision.task_request)
+            await self._begin_delegated_task(
+                tracker, turn_id, decision.task_request, request_id=request_id
+            )
             raise StopResponse()
 
         if decision.action == STATUS_ACTION:
@@ -1881,7 +1905,12 @@ class RouterGate:
     # ------------------------------------------------------------------ #
 
     async def _begin_delegated_task(
-        self, tracker: TerminalTracker, turn_id: str, task_request: TaskRequest
+        self,
+        tracker: TerminalTracker,
+        turn_id: str,
+        task_request: TaskRequest,
+        *,
+        request_id: str | None = None,
     ) -> None:
         """Queue the delegated task, then speak the ack whose completion owns the terminal.
 
@@ -1948,6 +1977,10 @@ class RouterGate:
             # The non-approval decision row is written asynchronously by the
             # status subscriber, so no synchronous id exists to carry here.
             decision_id=None,
+            # The turn's correlation id (US-003), minted at gate entry; persisted
+            # on the agent_tasks row + echoed on every task event so the durable
+            # workstream envelope is stamped regardless of task-event order.
+            request_id=request_id,
         )
         queued = await self._tasks.begin(spec)
         if queued is None:

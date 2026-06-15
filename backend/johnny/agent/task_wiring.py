@@ -155,6 +155,7 @@ def build_publish_task_queued(
                 turn_id=queued.spec.turn_id,
                 decision_id=queued.spec.decision_id,
                 ack_text=queued.spec.ack_text,
+                request_id=queued.spec.request_id,
                 session_id=session_id,
             )
         )
@@ -195,6 +196,7 @@ def build_publish_task_completed(
                 result_text=result.result_text,
                 error=result.error,
                 turn_id=queued.spec.turn_id,
+                request_id=queued.spec.request_id,
                 session_id=session_id,
             )
         )

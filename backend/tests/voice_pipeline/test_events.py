@@ -159,6 +159,7 @@ def test_event_to_dict_task_queued() -> None:
         "turn_id": 4,
         "decision_id": 17,
         "ack_text": "on it",
+        "request_id": None,
         "session_id": "s",
         "type": "task_queued",
     }
@@ -199,6 +200,7 @@ def test_event_to_dict_task_progress() -> None:
         "timestamp_ms": 1_000,
         "progress_text": "step 2 of 3",
         "turn_id": 4,
+        "request_id": None,
         "session_id": "s",
         "type": "task_progress",
     }
@@ -242,6 +244,7 @@ def test_event_to_dict_task_completed() -> None:
         "result_text": "I couldn't reach your calendar.",
         "error": "gog: not authenticated",
         "turn_id": 4,
+        "request_id": None,
         "session_id": "s",
         "type": "task_completed",
     }

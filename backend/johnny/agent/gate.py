@@ -83,6 +83,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -660,6 +661,43 @@ class TurnIndex:
         self._ids: dict[str, int] = {}
         self._next = 1
         self._last = 0
+        # Per-turn correlation key (US-003): LiveKit ``str`` turn id → minted
+        # ``request_id`` (a 36-char UUID). Stored here — the one object shared by
+        # the gate (mint) and both the decision + spoke emitters (read) — so the
+        # id propagates to every one of a turn's events without threading it
+        # through any emit signature. Kept SEPARATE from ``_ids`` (the str→int
+        # map) so the correlation key stays turn-independent: v1 is one id per
+        # opened turn, but a later cross-turn merge heuristic can re-point these
+        # without disturbing the durable int turn ids. Single-loop-safe (plain
+        # dict writes, no await), exactly like ``_ids``.
+        self._request_ids: dict[str, str] = {}
+
+    def assign_request_id(self, turn_id: str) -> str:
+        """Mint (or return the existing) ``request_id`` for ``turn_id``.
+
+        Called once per opened turn at gate entry. Idempotent: the same ``str``
+        turn id always yields the same minted id, so a retried/re-entered turn
+        never splits its correlation. Returns the id so the caller can also
+        carry it onto the delegated ``TaskSpec`` (the workstream propagation
+        path), while the emitters read it back via :meth:`request_id_for`.
+        """
+        existing = self._request_ids.get(turn_id)
+        if existing is not None:
+            return existing
+        assigned = str(uuid4())
+        self._request_ids[turn_id] = assigned
+        return assigned
+
+    def request_id_for(self, turn_id: str | None) -> str | None:
+        """The ``request_id`` minted for ``turn_id``, or ``None``.
+
+        ``None`` for ``turn_id is None`` (speech bound to no turn — corrections,
+        task-result deliveries) and for any turn the gate never minted (a bare
+        gate without the mint seam, or pre-US-003 replay). Pure read, no assign.
+        """
+        if turn_id is None:
+            return None
+        return self._request_ids.get(turn_id)
 
     def resolve(self, turn_id: str) -> int:
         """Return ``turn_id``'s stable ``int``, assigning a fresh one on first sight.

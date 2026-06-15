@@ -132,6 +132,27 @@ def test_bot_sessions_carry_agent_snapshot() -> None:
     assert "agents" in fk_targets
 
 
+def test_request_id_correlation_columns() -> None:
+    """US-003 (Johnny-d6w.3): the cross-turn correlation key, its durable
+    delivery→request link, and the indexes. Boot drift only checks columns, so
+    the index assertions here lock what only the migration otherwise guarantees.
+    """
+    decisions = Base.metadata.tables["agent_decisions"]
+    assert "request_id" in {c.name for c in decisions.columns}
+    decision_indexes = {ix.name for ix in decisions.indexes}
+    assert "ix_agent_decisions_request_id" in decision_indexes
+    assert "ix_agent_decisions_turn_id" in decision_indexes
+
+    utterances = Base.metadata.tables["agent_utterances"]
+    assert "answers_request_id" in {c.name for c in utterances.columns}
+    assert "ix_agent_utterances_answers_request_id" in {
+        ix.name for ix in utterances.indexes
+    }
+
+    # Mirrored onto the execution row so the worker echoes it on task events.
+    assert "request_id" in {c.name for c in Base.metadata.tables["agent_tasks"].columns}
+
+
 def test_transcript_chunks_embedding_column() -> None:
     table = Base.metadata.tables["transcript_chunks"]
     embedding = table.columns["embedding"]

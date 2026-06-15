@@ -1980,6 +1980,111 @@ def test_task_completed_before_queued_converges_to_one_row(
     assert streams[0].status == WorkstreamStatus.DONE
 
 
+# --- US-003: request_id correlation writes (Johnny-d6w.3) ---------------------
+
+
+def test_router_decision_event_persists_request_id(db_session: Session) -> None:
+    """The minted request_id on RouterDecisionMade lands on agent_decisions (AC#1)."""
+    bot = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    apply_router_decision_event(
+        db_session,
+        {
+            **_router_decision_payload(session_id=bot.id, mode="autonomous"),
+            "turn_id": 7,
+            "request_id": "req-abc",
+        },
+    )
+    row = db_session.scalars(sa.select(AgentDecision)).one()
+    assert row.request_id == "req-abc"
+
+
+def test_router_decision_event_request_id_defaults_null(db_session: Session) -> None:
+    """A pre-US-003 / bare-gate event without request_id writes NULL (back-compat)."""
+    bot = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    apply_router_decision_event(
+        db_session, _router_decision_payload(session_id=bot.id, mode="autonomous")
+    )
+    row = db_session.scalars(sa.select(AgentDecision)).one()
+    assert row.request_id is None
+
+
+def test_agent_spoke_event_persists_answers_request_id_without_decision(
+    db_session: Session,
+) -> None:
+    """AC#3: answers_request_id is set from the event even with NO decision row to
+    link (the fallback/timeout case), so the delivery→request link SURVIVES
+    ``agent_decision_id`` being NULL."""
+    bot = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    apply_agent_spoke_event(
+        db_session,
+        {
+            **_agent_spoke_payload(session_id=bot.id),
+            "answers_request_id": "req-xyz",
+        },
+    )
+    utt = db_session.scalars(sa.select(AgentUtterance)).one()
+    assert utt.agent_decision_id is None  # no prior decision → link is NULL...
+    assert utt.answers_request_id == "req-xyz"  # ...but the request link survives
+
+
+def test_task_event_stamps_workstream_request_id(db_session: Session) -> None:
+    """AC#2: request_id on the task event lands on the workstream envelope."""
+    row = _seed(db_session)
+    db_session.commit()
+    payloads = {
+        p["type"]: {**p, "request_id": "req-ws"}
+        for p in _task_event_payloads(session_id=row.id)
+    }
+    assert apply_task_event(db_session, payloads["task_queued"]) is True
+    db_session.commit()
+    ws = db_session.scalars(sa.select(AgentWorkstream)).one()
+    assert ws.request_id == "req-ws"
+
+
+def test_workstream_request_id_stamped_when_progress_creates_envelope(
+    db_session: Session,
+) -> None:
+    """Robustness: if a worker ``task_progress`` (carrying request_id) RACES ahead
+    of ``task_queued`` and creates the envelope, request_id still lands — the
+    create reads it from whichever event is first. The in-session harness replays
+    a pre-ordered snapshot and cannot surface this race, so it is asserted here."""
+    row = _seed(db_session)
+    db_session.commit()
+    payloads = {
+        p["type"]: {**p, "request_id": "req-race"}
+        for p in _task_event_payloads(session_id=row.id)
+    }
+    # task_progress arrives FIRST and creates the envelope.
+    assert apply_task_event(db_session, payloads["task_progress"]) is True
+    db_session.commit()
+    ws = db_session.scalars(sa.select(AgentWorkstream)).one()
+    assert ws.request_id == "req-race"
+
+
+def test_workstream_request_id_backfilled_by_later_event(
+    db_session: Session,
+) -> None:
+    """Robustness: if the CREATING event lacked request_id, a later event carrying
+    it backfills the envelope (the backfill only sets a NULL, never overwrites)."""
+    row = _seed(db_session)
+    db_session.commit()
+    payloads = {p["type"]: dict(p) for p in _task_event_payloads(session_id=row.id)}
+    # The creating progress has NO request_id → nothing to stamp at create.
+    assert apply_task_event(db_session, payloads["task_progress"]) is True
+    db_session.commit()
+    ws = db_session.scalars(sa.select(AgentWorkstream)).one()
+    assert ws.request_id is None
+    # A later queued event carries it → backfilled onto the existing envelope.
+    payloads["task_queued"]["request_id"] = "req-late"
+    assert apply_task_event(db_session, payloads["task_queued"]) is True
+    db_session.commit()
+    db_session.refresh(ws)
+    assert ws.request_id == "req-late"
+
+
 def test_workstream_delivery_event_stamps_delivered(db_session: Session) -> None:
     """``workstream_delivery_changed(delivered)`` durably records delivery —
     the replacement for the in-memory ``TaskRegistryEntry.delivered`` flag."""

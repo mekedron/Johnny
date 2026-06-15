@@ -1099,6 +1099,10 @@ async def build_agent_runtime(
         # does not exist yet here).
         tasks=task_coordinator,
         resolve_turn_id=turn_index.resolve,
+        # Mint the per-turn correlation id (US-003) into the SAME shared
+        # TurnIndex the emitters read, so request_id reaches every one of the
+        # turn's events + the delegated task.
+        assign_request_id=turn_index.assign_request_id,
     )
 
     # Internal teardown tools wait for the farewell ack to finish playing

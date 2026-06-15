@@ -241,6 +241,11 @@ async def run_agent_replay(fixture: ReplayFixture) -> ReplayResult:
         record_decision=obs.record_decision,
         record_spoke=obs.record_spoke,
         record_suggested=obs.record_suggested,
+        # US-003: mint into the shared TurnIndex so replayed decision/spoke
+        # events carry request_id too. A pure correlation label — never compared
+        # in verdict-parity (diff is {should_speak, terminal_state, outcome,
+        # spoke_text}), so replay stays deterministic.
+        assign_request_id=turn_index.assign_request_id,
     )
     # Attach a say() stub so say()-path verdicts (delegate ack / status /
     # decided-reply parity, Johnny-etu.14) replay as their real ``replied``

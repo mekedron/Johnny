@@ -87,6 +87,10 @@ class SqlAlchemyTaskSink(TaskSink):
             bot_session_id=self._bot_session_id,
             agent_decision_id=spec.decision_id,
             turn_id=spec.turn_id,
+            # Cross-turn correlation key (US-003): persisted on the execution row
+            # so the worker can echo it on every task event and the durable
+            # workstream envelope is stamped regardless of task-event order.
+            request_id=spec.request_id,
             kind=spec.kind,
             request_json=request_json,
             status=AgentTaskStatus.QUEUED,

@@ -315,6 +315,11 @@ class RouterDecisionMade:
     # instead of a most-recent scan that races the concurrent transcribe loop
     # (INV-1, Johnny-ckz.28.3). ``None`` for callers that predate the field.
     turn_id: int | None = None
+    # Cross-turn correlation key (US-003): the UUID the gate minted for this
+    # opened turn, carried here so the subscriber stamps ``agent_decisions``.
+    # ``None`` for emitters that predate the field / bare gates (subscriber
+    # writes NULL).
+    request_id: str | None = None
     type: RouterEventType = "router_decision_made"
 
 
@@ -367,6 +372,12 @@ class AgentSpoke:
     kind: str = "reply"
     turn_id: int | None = None
     interrupted: bool = False
+    # Which request this delivery answered (US-003): the turn's minted
+    # ``request_id`` for turn-bound speech (reply / ack / status / fallback),
+    # ``None`` for speech bound to no turn (corrections, task-result
+    # deliveries). Set from the shared ``TurnIndex`` by the spoke emitter so it
+    # is present even when ``agent_decision_id`` ends up NULL (timeout speech).
+    answers_request_id: str | None = None
     type: AgentEventType = "agent_spoke"
 
 
@@ -625,6 +636,9 @@ class TaskQueued:
     decision_id: int | None = None
     ack_text: str = ""
     session_id: str | None = None
+    # The delegating turn's correlation key (US-003), echoed from ``TaskSpec``
+    # so the durable workstream envelope is stamped with it at create time.
+    request_id: str | None = None
     type: TaskQueuedEventType = "task_queued"
 
 
@@ -655,6 +669,10 @@ class TaskProgress:
     progress_text: str = ""
     turn_id: int | None = None
     session_id: str | None = None
+    # Correlation key (US-003), echoed from the row so the workstream envelope
+    # is stamped even when this event (not TaskQueued) is the first one the
+    # single writer sees — closing the create-order race.
+    request_id: str | None = None
     type: TaskProgressEventType = "task_progress"
 
 
@@ -688,6 +706,9 @@ class TaskCompleted:
     error: str = ""
     turn_id: int | None = None
     session_id: str | None = None
+    # Correlation key (US-003), echoed from the row — a second create/backfill
+    # source for the workstream envelope, robust to task-event arrival order.
+    request_id: str | None = None
     type: TaskCompletedEventType = "task_completed"
 
 
