@@ -1,19 +1,23 @@
 <script lang="ts">
 	/**
-	 * Minimal live Workstreams list (US-101, Johnny-d6w.6).
+	 * Workstreams column (US-101 Johnny-d6w.6 → folded into the three-column layout
+	 * by US-103 Johnny-d6w.8).
 	 *
 	 * Renders the `workstreams` projection of {@link buildSessionTraceView} so an
 	 * operator watching a live session sees each unit of delegated work move
 	 * `queued → running → done/failed` in real time, driven purely by the
-	 * `task_*`/`workstream_*` WS deltas the live page folds in (no full re-pull).
+	 * `task_*`/`workstream_*` WS deltas the live page folds in (no full re-pull),
+	 * and a history session reconstructs the same final state from the DB.
 	 *
-	 * Deliberately minimal — the full three-column layout is US-103 and the rich
-	 * Workstreams column (tool/model trace, timestamps, talk-back link, independent
-	 * multi-workstream rendering) is US-106. This component is the seam those grow
-	 * from. Each row exposes `data-workstream-status` so the lifecycle transition
-	 * is assertable from the real browser.
+	 * Deliberately minimal — the rich Workstreams column (tool/model trace,
+	 * timestamps, talk-back link, independent multi-workstream lanes reusing the
+	 * `LiveSession` parallel-actor strip) is US-106. This component is the seam that
+	 * story grows from. Now wrapped in the shared {@link TraceColumn} frame so it is
+	 * a persistent column with a header + empty state; each row keeps its
+	 * `data-workstream-status` so the lifecycle transition stays assertable from the
+	 * real browser.
 	 */
-	import * as Card from '$lib/components/ui/card/index.js';
+	import TraceColumn from '$lib/components/TraceColumn.svelte';
 	import type { WorkstreamView } from '$lib/sessionDetail';
 
 	let { workstreams }: { workstreams: WorkstreamView[] } = $props();
@@ -55,41 +59,42 @@
 	}
 </script>
 
-{#if workstreams.length > 0}
-	<Card.Root class="gap-0 py-0" data-testid="live-workstreams">
-		<Card.Header class="border-b border-border px-4 py-3">
-			<Card.Title class="text-sm font-semibold tracking-wide">Workstreams</Card.Title>
-		</Card.Header>
-		<ul class="divide-y divide-border">
-			{#each workstreams as w (w.id)}
-				<li
-					class="flex items-center justify-between gap-3 px-4 py-2.5"
-					data-testid="workstream-row"
-					data-workstream-id={w.id}
-					data-workstream-status={w.status}
-					data-workstream-delivery={w.deliveryStatus}
-				>
-					<div class="flex min-w-0 flex-col">
-						<span class="truncate text-sm font-medium">{title(w)}</span>
-						{#if w.sourceKind && w.sourceKind !== 'delegate'}
-							<span class="text-xs text-muted-foreground">{w.sourceKind}</span>
-						{/if}
-					</div>
-					<div class="flex shrink-0 items-center gap-2">
-						<span
-							class="rounded border px-1.5 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide {statusClass(
-								w.status
-							)}"
-							data-testid="workstream-status">{STATUS_LABEL[w.status] ?? w.status}</span
-						>
-						<span
-							class="rounded border border-border bg-muted px-1.5 py-0.5 text-[0.65rem] font-medium text-muted-foreground"
-							data-testid="workstream-delivery"
-							>{DELIVERY_LABEL[w.deliveryStatus] ?? w.deliveryStatus}</span
-						>
-					</div>
-				</li>
-			{/each}
-		</ul>
-	</Card.Root>
-{/if}
+<TraceColumn
+	title="Workstreams"
+	count={workstreams.length}
+	empty={workstreams.length === 0}
+	emptyText="No workstreams yet."
+	testid="live-workstreams"
+>
+	<ul class="divide-y divide-border">
+		{#each workstreams as w (w.id)}
+			<li
+				class="flex items-center justify-between gap-3 px-4 py-2.5"
+				data-testid="workstream-row"
+				data-workstream-id={w.id}
+				data-workstream-status={w.status}
+				data-workstream-delivery={w.deliveryStatus}
+			>
+				<div class="flex min-w-0 flex-col">
+					<span class="truncate text-sm font-medium">{title(w)}</span>
+					{#if w.sourceKind && w.sourceKind !== 'delegate'}
+						<span class="text-xs text-muted-foreground">{w.sourceKind}</span>
+					{/if}
+				</div>
+				<div class="flex shrink-0 items-center gap-2">
+					<span
+						class="rounded border px-1.5 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide {statusClass(
+							w.status
+						)}"
+						data-testid="workstream-status">{STATUS_LABEL[w.status] ?? w.status}</span
+					>
+					<span
+						class="rounded border border-border bg-muted px-1.5 py-0.5 text-[0.65rem] font-medium text-muted-foreground"
+						data-testid="workstream-delivery"
+						>{DELIVERY_LABEL[w.deliveryStatus] ?? w.deliveryStatus}</span
+					>
+				</div>
+			</li>
+		{/each}
+	</ul>
+</TraceColumn>

@@ -26,7 +26,7 @@
 	} from '$lib/sessionDetail';
 	import UtteranceAudioButton from '$lib/components/UtteranceAudioButton.svelte';
 	import SessionTrace from '$lib/components/SessionTrace.svelte';
-	import { buildDecisionEntries } from '$lib/sessionTrace';
+	import { buildDecisionEntries, buildSessionTraceView } from '$lib/sessionTrace';
 	import {
 		botDisplayName,
 		deleteHistorySession,
@@ -77,6 +77,25 @@
 					modelCalls: detail.model_calls
 				})
 			: []
+	);
+
+	// The three-column projection (US-102), built from the SAME fetched detail the
+	// live page mutates in place — so the Decisions / Deliveries / Workstreams
+	// columns (US-103) render identically live and historical. `workstream_events`
+	// is not served by the detail endpoint (it rides WS deltas / lands durably with
+	// US-202), so it is omitted and the projector tolerates that.
+	const traceView = $derived(
+		detail
+			? buildSessionTraceView({
+					decisions: detail.decisions,
+					utterances: detail.utterances,
+					tasks: detail.tasks ?? [],
+					toolCalls: detail.tool_calls ?? [],
+					modelCalls: detail.model_calls ?? [],
+					workstreams: detail.workstreams ?? [],
+					conversationEvents: detail.conversation_events ?? []
+				})
+			: { routerTurns: [], deliveries: [], workstreams: [], activity: [] }
 	);
 
 	async function loadDetail() {
@@ -513,6 +532,7 @@
 			history-only flat browse + search surface.
 		-->
 		<SessionTrace
+			view={traceView}
 			decisions={traceDecisions}
 			timings={detail.timings ?? []}
 			conversationEvents={detail.conversation_events ?? []}

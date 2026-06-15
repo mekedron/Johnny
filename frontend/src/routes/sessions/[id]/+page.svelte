@@ -57,7 +57,6 @@
 	} from '$lib/sessionEvents';
 	import { approveDecision, rejectDecision } from '$lib/decisions';
 	import SessionTrace from '$lib/components/SessionTrace.svelte';
-	import SessionWorkstreams from '$lib/components/SessionWorkstreams.svelte';
 	import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
 	import {
 		buildDecisionEntries,
@@ -1332,15 +1331,12 @@
 		{/if}
 
 		<SessionTrace
+			view={traceView}
 			{decisions}
 			{timings}
 			{conversationEvents}
 			activityError={timingsLoadError}
 		/>
-
-		<!-- US-101: minimal live Workstreams list, fed by the locally-mutated,
-		     re-projected trace view (US-103/US-106 grow this into the column). -->
-		<SessionWorkstreams workstreams={traceView.workstreams} />
 
 		<SessionReplayPanel {sessionId} />
 
