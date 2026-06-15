@@ -3,10 +3,10 @@
   "sessionId": "5bcaf19f-aee2-42b2-868e-bbf4e2ae7192",
   "status": "running",
   "startedAt": "2026-06-13T22:55:12.465Z",
-  "updatedAt": "2026-06-14T02:09:46.028Z",
-  "currentIteration": 3,
+  "updatedAt": "2026-06-14T02:09:50.858Z",
+  "currentIteration": 4,
   "maxIterations": 0,
-  "tasksCompleted": 3,
+  "tasksCompleted": 4,
   "isPaused": false,
   "agentPlugin": "claude",
   "model": "opus",
@@ -111,8 +111,8 @@
       {
         "id": "Johnny-etu.9",
         "title": "[BUILD] Phase 2: General gog CLI skill replacing the narrow google-calendar skill",
-        "status": "open",
-        "completedInSession": false
+        "status": "completed",
+        "completedInSession": true
       },
       {
         "id": "Johnny-etu.10",
@@ -182,6 +182,16 @@
       "durationMs": 3684980,
       "startedAt": "2026-06-14T00:37:05.026Z",
       "endedAt": "2026-06-14T01:38:30.006Z"
+    },
+    {
+      "iteration": 4,
+      "status": "completed",
+      "taskId": "Johnny-etu.9",
+      "taskTitle": "[BUILD] General gog CLI skill replacing the narrow google-calendar skill",
+      "taskCompleted": true,
+      "durationMs": 1859134,
+      "startedAt": "2026-06-14T01:38:45.986Z",
+      "endedAt": "2026-06-14T02:09:45.120Z"
     }
   ],
   "skippedTaskIds": [],
