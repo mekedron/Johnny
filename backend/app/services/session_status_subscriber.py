@@ -23,9 +23,10 @@ import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -33,7 +34,10 @@ from app.db.models import (
 )
 from app.db.models import (
     AgentDecision,
+    AgentTask,
     AgentUtterance,
+    AgentWorkstream,
+    AgentWorkstreamEvent,
     BotMode,
     BotSession,
     ConversationEvent,
@@ -43,6 +47,9 @@ from app.db.models import (
     SessionTiming,
     TerminalState,
     TranscriptChunk,
+    WorkstreamDeliveryStatus,
+    WorkstreamSourceKind,
+    WorkstreamStatus,
     decision_texts_diverge,
 )
 from app.db.session import session_scope
@@ -74,16 +81,18 @@ TASK_QUEUED_EVENT_TYPE = "task_queued"
 TASK_PROGRESS_EVENT_TYPE = "task_progress"
 TASK_COMPLETED_EVENT_TYPE = "task_completed"
 TASK_RESULT_EXPIRED_EVENT_TYPE = "task_result_expired"
+WORKSTREAM_DELIVERY_EVENT_TYPE = "workstream_delivery_changed"
 
-# Task lifecycle events the subscriber recognises but deliberately does NOT
-# persist (Johnny-trt.25). The durable record is the ``agent_tasks`` row,
-# owned end-to-end by whichever executor settles the task — the in-process
-# coordinator resolver (queued/terminal writes around these events) or the
-# Phase-4 worker pass (Johnny-trt.24). The subscriber persists only events
-# originating in components that cannot write their own rows; a task-event
-# write here would double-write executor-owned state. The WS fan-out still
-# delivers every one of these to the live UI (app/api/ws.py reads the same
-# Redis channel directly).
+# Task lifecycle events the subscriber consumes to write the durable
+# *workstream envelope* — ``agent_workstreams`` + ``agent_workstream_events``
+# (Johnny-d6w.2, US-002). IMPORTANT: the subscriber still NEVER writes the
+# ``agent_tasks`` row (the Johnny-trt.25 contract holds) — that row stays owned
+# end-to-end by whichever executor settles the task (the in-process coordinator
+# resolver or the Phase-4 worker pass, Johnny-trt.24). The envelope is the
+# record *on top* of the task row, written only here (the single durable
+# writer), so there is no second uncoordinated writer for either row. The WS
+# fan-out independently delivers every one of these to the live UI (app/api/ws.py
+# reads the same Redis channel directly), unaffected by this persistence.
 TASK_EVENT_TYPES = frozenset(
     {
         TASK_QUEUED_EVENT_TYPE,
@@ -92,6 +101,14 @@ TASK_EVENT_TYPES = frozenset(
         TASK_RESULT_EXPIRED_EVENT_TYPE,
     }
 )
+
+# How long a completed-but-unspoken result is *expected* to stay deliverable
+# before the speech queue drops it. Mirrors
+# :data:`~johnny.agent.speech_queue.RESULT_DEFAULT_TTL_S` — kept in sync
+# manually since the meet-worker module is not imported here (no SQLAlchemy on
+# that side). Only used to stamp the advisory ``result_expires_at``; the
+# authoritative expiry is the ``task_result_expired`` event.
+_RESULT_TTL_S = 120.0
 
 # Conversation-dynamics events persisted to ``conversation_events``
 # (Johnny-trt.49): interruptions (live today, single-agent barge-ins) plus
@@ -953,6 +970,199 @@ def _coerce_no_reply_reason(value: Any) -> NoReplyReason | None:
         return None
 
 
+# --- Workstream envelope (Johnny-d6w.2, US-002) ---------------------------
+
+_WORKSTREAM_TERMINAL_STATUSES = frozenset(
+    {WorkstreamStatus.DONE, WorkstreamStatus.FAILED, WorkstreamStatus.CANCELLED}
+)
+
+
+def _next_workstream_sequence(db: Session, workstream_id: int) -> int:
+    """Next per-workstream event ``sequence`` (events are applied serially)."""
+    current = db.scalar(
+        select(func.max(AgentWorkstreamEvent.sequence)).where(
+            AgentWorkstreamEvent.workstream_id == workstream_id
+        )
+    )
+    return (current + 1) if current is not None else 0
+
+
+def _append_workstream_event(
+    db: Session,
+    ws: AgentWorkstream,
+    *,
+    event_type: str,
+    text: str | None = None,
+    payload_json: dict[str, Any] | None = None,
+) -> None:
+    """Append one row to the workstream's append-only progress/audit log.
+
+    Flushes so a subsequent ``_next_workstream_sequence`` in the *same* session
+    sees this row — the harness applies every event in one ``autoflush=False``
+    session (production commits one event per transaction, where this is moot).
+    """
+    db.add(
+        AgentWorkstreamEvent(
+            workstream_id=ws.id,
+            bot_session_id=ws.bot_session_id,
+            sequence=_next_workstream_sequence(db, ws.id),
+            event_type=event_type,
+            text=text,
+            payload_json=payload_json,
+        )
+    )
+    db.flush()
+
+
+def apply_task_event(db: Session, payload: dict[str, Any]) -> bool:
+    """Create / advance the durable workstream envelope for a delegated task.
+
+    The single durable writer owns ``agent_workstreams`` but NEVER writes the
+    ``agent_tasks`` row — that stays executor-owned (the Johnny-trt.25
+    contract). Get-or-create by ``agent_task_id`` so out-of-order delivery
+    (e.g. ``task_completed`` before ``task_queued``) still converges onto one
+    envelope; a monotonic guard stops a late ``task_progress`` from regressing
+    a terminal status, and a terminal ``status`` is first-writer-wins (mirrors
+    the coordinator's settle chokepoint).
+    """
+    event_type = payload.get("type")
+    if event_type not in TASK_EVENT_TYPES:
+        return False
+    session_id = _coerce_int_id(payload.get("session_id"))
+    task_id = _coerce_int_id(payload.get("task_id"))
+    if session_id is None or task_id is None:
+        return False
+
+    ws = db.scalar(
+        select(AgentWorkstream).where(AgentWorkstream.agent_task_id == task_id)
+    )
+    if ws is None:
+        # agent_id is best-effort denormalisation; resolve it from the live
+        # session row when present (always, for a live meeting) and leave it
+        # NULL otherwise. We do NOT bail on a missing session row: in production
+        # the bot_session FK still blocks an orphan (the insert raises, the
+        # outer handler rolls back), and tests run FK-off SQLite.
+        bot = db.get(BotSession, session_id)
+        ws = AgentWorkstream(
+            bot_session_id=session_id,
+            agent_id=bot.agent_id if bot is not None else None,
+            source_kind=WorkstreamSourceKind.DELEGATE,
+            agent_task_id=task_id,
+            source_turn_id=_coerce_int_id(payload.get("turn_id")),
+            source_decision_id=_coerce_int_id(payload.get("decision_id")),
+            title=(str(payload.get("kind")) if payload.get("kind") else None),
+            status=WorkstreamStatus.QUEUED,
+            delivery_status=WorkstreamDeliveryStatus.NOT_READY,
+        )
+        db.add(ws)
+        db.flush()  # assign ws.id before the event log + sequence read
+        _append_workstream_event(
+            db, ws, event_type="queued", payload_json={"task_id": task_id}
+        )
+
+    now = datetime.now(UTC)
+    terminal = ws.status in _WORKSTREAM_TERMINAL_STATUSES
+
+    if event_type == TASK_PROGRESS_EVENT_TYPE:
+        if not terminal and ws.status == WorkstreamStatus.QUEUED:
+            ws.status = WorkstreamStatus.RUNNING
+            if ws.started_at is None:
+                ws.started_at = now
+            _append_workstream_event(
+                db,
+                ws,
+                event_type="running",
+                text=(str(payload.get("progress_text")) or None),
+            )
+    elif event_type == TASK_COMPLETED_EVENT_TYPE:
+        if not terminal:
+            done = str(payload.get("status") or "") == "done"
+            ws.status = WorkstreamStatus.DONE if done else WorkstreamStatus.FAILED
+            ws.completed_at = now
+            ws.result_text = (str(payload.get("result_text")) or None)
+            ws.error = (str(payload.get("error")) or None)
+            # result_json lives only on the executor-owned task row — copy it
+            # read-only (row-before-event discipline guarantees it is committed).
+            task_row = db.get(AgentTask, task_id)
+            if task_row is not None and task_row.result_json is not None:
+                ws.result_json = dict(task_row.result_json)
+            if (
+                done
+                and ws.delivery_status == WorkstreamDeliveryStatus.NOT_READY
+            ):
+                ws.delivery_status = WorkstreamDeliveryStatus.READY
+                ws.result_available_at = now
+                ws.result_expires_at = now + timedelta(seconds=_RESULT_TTL_S)
+            _append_workstream_event(
+                db,
+                ws,
+                event_type="completed",
+                text=ws.result_text,
+                payload_json={"status": ws.status.value},
+            )
+    elif event_type == TASK_RESULT_EXPIRED_EVENT_TYPE:
+        # The unspoken result aged out of the speech queue; execution status is
+        # unchanged (usually done). Don't override a result already delivered.
+        if ws.delivery_status != WorkstreamDeliveryStatus.DELIVERED:
+            ws.delivery_status = WorkstreamDeliveryStatus.EXPIRED
+            ws.expired_reason = (str(payload.get("reason")) or None)
+            _append_workstream_event(
+                db, ws, event_type="expired", text=ws.expired_reason
+            )
+    # TASK_QUEUED beyond the create branch is an idempotent no-op.
+    return True
+
+
+def apply_workstream_delivery_event(db: Session, payload: dict[str, Any]) -> bool:
+    """Stamp a workstream's durable delivery state (Johnny-d6w.2, US-002).
+
+    The durable replacement for the in-memory ``TaskRegistryEntry.delivered``
+    flip: resolves the workstream by ``agent_task_id`` and records
+    ``delivery_status`` + ``delivered_at``. ``delivered_utterance_id`` is
+    best-effort — the latest unlinked utterance for the session (corrections
+    and task results both bind to no decision row, and the producing
+    ``agent_spoke`` may not be persisted yet) — and never blocks the
+    delivery-state write. US-105/US-301 make the utterance link exact via the
+    request_id binding.
+    """
+    if payload.get("type") != WORKSTREAM_DELIVERY_EVENT_TYPE:
+        return False
+    session_id = _coerce_int_id(payload.get("session_id"))
+    task_id = _coerce_int_id(payload.get("task_id"))
+    if session_id is None or task_id is None:
+        return False
+    ws = db.scalar(
+        select(AgentWorkstream).where(AgentWorkstream.agent_task_id == task_id)
+    )
+    if ws is None:
+        logger.debug(
+            "status-sub: delivery event for unknown workstream task=%s", task_id
+        )
+        return False
+    status = str(payload.get("delivery_status") or "")
+    if status == "delivered":
+        ws.delivery_status = WorkstreamDeliveryStatus.DELIVERED
+        ws.delivered_at = datetime.now(UTC)
+        utt_id = db.scalar(
+            select(AgentUtterance.id)
+            .where(
+                AgentUtterance.bot_session_id == session_id,
+                AgentUtterance.agent_decision_id.is_(None),
+            )
+            .order_by(AgentUtterance.id.desc())
+            .limit(1)
+        )
+        if utt_id is not None:
+            ws.delivered_utterance_id = utt_id
+        _append_workstream_event(db, ws, event_type="delivered")
+    elif status == "interrupted":
+        ws.delivery_status = WorkstreamDeliveryStatus.INTERRUPTED
+        _append_workstream_event(db, ws, event_type="interrupted")
+    else:
+        return False
+    return True
+
+
 PendingEventPublisher = Callable[[_PendingApprovalEvent], Awaitable[None]]
 """Callback invoked after a PENDING decision row is committed.
 
@@ -993,21 +1203,13 @@ async def _apply_in_transaction(
     ``waiting_for_relogin`` status change is handled the same way via
     :class:`_ReloginEvent` / ``relogin_publisher`` (Johnny-ebf).
 
-    Task lifecycle events (:data:`TASK_EVENT_TYPES`) return early without
-    opening a DB session at all (Johnny-trt.25): the executor that emitted
-    them owns the ``agent_tasks`` row, so there is nothing for the
-    subscriber to write — see the constant's comment for the full contract.
+    Task lifecycle events (:data:`TASK_EVENT_TYPES`) and the
+    ``workstream_delivery_changed`` event write the durable *workstream
+    envelope* (``agent_workstreams`` + ``agent_workstream_events``,
+    Johnny-d6w.2) — but never the executor-owned ``agent_tasks`` row (the
+    Johnny-trt.25 contract holds); see the constant's comment for the contract.
     """
     event_type = payload.get("type")
-    if event_type in TASK_EVENT_TYPES:
-        logger.debug(
-            "status-sub: task event type=%s task_id=%s session_id=%s — "
-            "ephemeral, agent_tasks row is executor-owned; not persisting",
-            event_type,
-            payload.get("task_id"),
-            payload.get("session_id"),
-        )
-        return False
     pending_event: _PendingApprovalEvent | None = None
     relogin_event: _ReloginEvent | None = None
     applied = False
@@ -1030,6 +1232,10 @@ async def _apply_in_transaction(
                     applied = apply_turn_terminal_event(db, payload)
                 elif event_type == TRANSCRIPT_FILTERED_EVENT_TYPE:
                     applied = apply_transcript_filtered_event(db, payload)
+                elif event_type in TASK_EVENT_TYPES:
+                    applied = apply_task_event(db, payload)
+                elif event_type == WORKSTREAM_DELIVERY_EVENT_TYPE:
+                    applied = apply_workstream_delivery_event(db, payload)
                 elif event_type in CONVERSATION_EVENT_TYPES:
                     applied = apply_conversation_event(db, payload)
             except BotSessionNotFoundError as exc:

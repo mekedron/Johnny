@@ -46,6 +46,11 @@ johnny-tts-smoke = "johnny.smoketest.tts_cli:main"
 # pipeline and asserts the .28.x invariants (no silent drops, decision↔utterance
 # parity) — the offline regression harness for the pipeline (Johnny-ckz.28.5).
 johnny-replay = "johnny.smoketest.replay_cli:main"
+# `johnny-scenario` drives a scripted multi-speaker conversation through the real
+# pipeline so the router delegates and the worker drives the task to terminal
+# (Johnny-d6w.1 / US-001): `check` is the deterministic gate, `generate` commits
+# genuine agent_tasks rows to the real DB for the session-view browser validation.
+johnny-scenario = "johnny.smoketest.scenario_cli:main"
 
 [project.optional-dependencies]
 # Heavy ML dep for on-device STT. Only the meet-worker image needs it
