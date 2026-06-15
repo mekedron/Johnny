@@ -17,7 +17,10 @@ from sqlalchemy.orm import Session
 from app.db import Base
 from app.db.models import (
     AgentDecision,
+    AgentTask,
     AgentUtterance,
+    AgentWorkstream,
+    AgentWorkstreamEvent,
     BotMode,
     BotSession,
     BotSessionStatus,
@@ -29,6 +32,9 @@ from app.db.models import (
     NoReplyReason,
     SessionTiming,
     TerminalState,
+    WorkstreamDeliveryStatus,
+    WorkstreamSourceKind,
+    WorkstreamStatus,
 )
 from app.services import session_status_subscriber
 from app.services.bot_sessions import BotSessionNotFoundError
@@ -40,6 +46,7 @@ from app.services.session_status_subscriber import (
     SESSION_STATUS_EVENT_TYPE,
     TRANSCRIPT_FILTERED_EVENT_TYPE,
     TURN_TERMINAL_EVENT_TYPE,
+    WORKSTREAM_DELIVERY_EVENT_TYPE,
     _PendingApprovalEvent,
     _ReloginEvent,
     apply_agent_spoke_event,
@@ -47,8 +54,10 @@ from app.services.session_status_subscriber import (
     apply_pipeline_timing_event,
     apply_router_decision_event,
     apply_status_event,
+    apply_task_event,
     apply_transcript_filtered_event,
     apply_turn_terminal_event,
+    apply_workstream_delivery_event,
     run_subscriber,
 )
 
@@ -69,6 +78,9 @@ def engine() -> sa.Engine:
             BotSession.__table__,  # type: ignore[list-item]
             AgentDecision.__table__,  # type: ignore[list-item]
             AgentUtterance.__table__,  # type: ignore[list-item]
+            AgentTask.__table__,  # type: ignore[list-item]
+            AgentWorkstream.__table__,  # type: ignore[list-item]
+            AgentWorkstreamEvent.__table__,  # type: ignore[list-item]
             SessionTiming.__table__,  # type: ignore[list-item]
             ConversationEvent.__table__,  # type: ignore[list-item]
         ],
@@ -1876,7 +1888,7 @@ def _task_event_payloads(session_id: Any) -> list[dict[str, Any]]:
 
 
 def test_task_event_types_constant_covers_all_four_wire_names() -> None:
-    """Drift pin: the subscriber's ignore-set ≡ the events module vocabulary."""
+    """Drift pin: the subscriber's task-event set ≡ the events module vocabulary."""
     from johnny.voice_pipeline.events import (
         TaskCompleted,
         TaskProgress,
@@ -1893,30 +1905,119 @@ def test_task_event_types_constant_covers_all_four_wire_names() -> None:
     assert session_status_subscriber.TASK_EVENT_TYPES == wire_names
 
 
-@pytest.mark.asyncio
-async def test_task_events_route_without_touching_the_db(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Routing matrix: every task event type returns early, opening NO DB session.
+def test_task_events_write_workstream_envelope(db_session: Session) -> None:
+    """The four task_* events drive one durable workstream envelope (US-002).
 
-    The agent_tasks row is executor-owned (the in-process coordinator today,
-    the trt.24 worker pass later) — a subscriber write would double-write it.
-    The early return must fire before ``session_scope`` so chatty progress
-    events never cost a DB session either.
+    The subscriber now WRITES ``agent_workstreams`` from the task lifecycle
+    (reversing the trt.25 drop) — but still never the executor-owned
+    ``agent_tasks`` row. One row, FK'd to the task, walks
+    queued→running→done(+ready)→expired, ``agent_id`` resolved from the live
+    session row, and every transition appends one ``agent_workstream_events`` row.
     """
+    row = _seed(db_session)
+    row.agent_id = 77  # the live session's agent — the writer denormalises it
+    db_session.flush()
+    db_session.commit()
 
-    def exploding_scope() -> Any:
-        raise AssertionError(
-            "session_scope must not be opened for task lifecycle events"
+    for payload in _task_event_payloads(session_id=row.id):
+        assert apply_task_event(db_session, payload) is True, payload["type"]
+    db_session.commit()
+
+    streams = db_session.scalars(sa.select(AgentWorkstream)).all()
+    assert len(streams) == 1, "exactly one envelope per delegated task"
+    ws = streams[0]
+    assert ws.agent_task_id == 42
+    assert ws.bot_session_id == row.id
+    assert ws.agent_id == 77  # resolved from the session row at create time
+    assert ws.source_kind == WorkstreamSourceKind.DELEGATE
+    assert ws.source_turn_id == 4
+    assert ws.source_decision_id == 17
+    assert ws.title == "calendar.upcoming_events"
+    assert ws.status == WorkstreamStatus.DONE
+    assert ws.started_at is not None  # task_progress stamped running
+    assert ws.completed_at is not None
+    assert ws.result_text == "You have 3 events this week."
+    # done→ready→expired: result became available then aged out unspoken.
+    assert ws.delivery_status == WorkstreamDeliveryStatus.EXPIRED
+    assert ws.result_available_at is not None
+    assert ws.result_expires_at is not None
+    assert ws.expired_reason == "undelivered for 120s"
+    # request_id / user_request_text are NOT derivable from task events (US-003).
+    assert ws.request_id is None
+    assert ws.user_request_text is None
+
+    events = db_session.scalars(
+        sa.select(AgentWorkstreamEvent)
+        .where(AgentWorkstreamEvent.workstream_id == ws.id)
+        .order_by(AgentWorkstreamEvent.sequence)
+    ).all()
+    assert [e.event_type for e in events] == [
+        "queued",
+        "running",
+        "completed",
+        "expired",
+    ]
+    assert [e.sequence for e in events] == [0, 1, 2, 3]
+
+
+def test_task_completed_before_queued_converges_to_one_row(
+    db_session: Session,
+) -> None:
+    """Out-of-order delivery: ``task_completed`` arriving first still creates one
+    envelope (get-or-create by agent_task_id), and a late ``task_progress`` can't
+    regress the terminal status (the monotonic guard)."""
+    row = _seed(db_session)
+    db_session.commit()
+    payloads = {p["type"]: p for p in _task_event_payloads(session_id=row.id)}
+
+    assert apply_task_event(db_session, payloads["task_completed"]) is True
+    # A late progress event must NOT pull the workstream back to running.
+    assert apply_task_event(db_session, payloads["task_progress"]) is True
+    db_session.commit()
+
+    streams = db_session.scalars(sa.select(AgentWorkstream)).all()
+    assert len(streams) == 1
+    assert streams[0].status == WorkstreamStatus.DONE
+
+
+def test_workstream_delivery_event_stamps_delivered(db_session: Session) -> None:
+    """``workstream_delivery_changed(delivered)`` durably records delivery —
+    the replacement for the in-memory ``TaskRegistryEntry.delivered`` flag."""
+    row = _seed(db_session)
+    db_session.commit()
+    # Bring a workstream to done/ready first.
+    for ptype in ("task_queued", "task_completed"):
+        p = next(x for x in _task_event_payloads(session_id=row.id) if x["type"] == ptype)
+        apply_task_event(db_session, p)
+    # An unlinked (task_result) utterance the deliverer just spoke.
+    db_session.add(
+        AgentUtterance(
+            bot_session_id=row.id,
+            agent_decision_id=None,
+            mode=BotMode.AUTONOMOUS,
+            prompt="",
+            output_text="You have 3 events this week.",
         )
-
-    monkeypatch.setattr(
-        session_status_subscriber, "session_scope", exploding_scope
     )
+    db_session.flush()
 
-    for payload in _task_event_payloads(session_id=7):
-        applied = await session_status_subscriber._apply_in_transaction(payload)
-        assert applied is False, payload["type"]
+    applied = apply_workstream_delivery_event(
+        db_session,
+        {
+            "type": WORKSTREAM_DELIVERY_EVENT_TYPE,
+            "task_id": 42,
+            "kind": "calendar.upcoming_events",
+            "delivery_status": "delivered",
+            "timestamp_ms": 200,
+            "session_id": row.id,
+        },
+    )
+    db_session.commit()
+    assert applied is True
+    ws = db_session.scalars(sa.select(AgentWorkstream)).one()
+    assert ws.delivery_status == WorkstreamDeliveryStatus.DELIVERED
+    assert ws.delivered_at is not None
+    assert ws.delivered_utterance_id is not None  # best-effort utterance link
 
 
 @pytest.mark.asyncio
@@ -1970,12 +2071,13 @@ async def test_task_events_do_not_break_the_loop_for_later_events(
 
 
 @pytest.mark.asyncio
-async def test_task_events_leave_persisted_tables_untouched(
+async def test_task_events_write_only_the_workstream_envelope(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No-double-writes proof: running every task event through the subscriber
-    adds zero rows to any subscriber-owned table."""
+    """No-double-writes proof: task events write the workstream envelope but add
+    zero rows to the other subscriber-owned tables AND never the executor-owned
+    ``agent_tasks`` row (the trt.25 contract still holds)."""
     row = _seed(db_session)
     db_session.commit()
     engine = db_session.bind
@@ -2005,13 +2107,22 @@ async def test_task_events_leave_persisted_tables_untouched(
                 "decisions": len(s.scalars(sa.select(AgentDecision)).all()),
                 "utterances": len(s.scalars(sa.select(AgentUtterance)).all()),
                 "timings": len(s.scalars(sa.select(SessionTiming)).all()),
+                "tasks": len(s.scalars(sa.select(AgentTask)).all()),
+                "workstreams": len(s.scalars(sa.select(AgentWorkstream)).all()),
             }
 
     before = _counts()
     for payload in _task_event_payloads(session_id=row.id):
         applied = await session_status_subscriber._apply_in_transaction(payload)
-        assert applied is False
-    assert _counts() == before
+        assert applied is True
+    after = _counts()
+    # The envelope appeared; nothing else the subscriber doesn't own moved, and
+    # the agent_tasks row stays executor-owned (the subscriber never writes it).
+    assert after["workstreams"] == before["workstreams"] + 1
+    assert after["decisions"] == before["decisions"]
+    assert after["utterances"] == before["utterances"]
+    assert after["timings"] == before["timings"]
+    assert after["tasks"] == before["tasks"]
 
 
 # --- conversation-dynamics event persistence (Johnny-trt.49) ----------------

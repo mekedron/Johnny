@@ -44,6 +44,7 @@ PeerSpeechSuppressedEventType = Literal["peer_speech_suppressed"]
 PolicyDeniedEventType = Literal["policy_denied"]
 ToolCallObservedEventType = Literal["tool_call_observed"]
 ModelCallObservedEventType = Literal["model_call_observed"]
+WorkstreamDeliveryChangedEventType = Literal["workstream_delivery_changed"]
 
 InterruptionWho = Literal["user_over_bot", "bot_cut_by_stop"]
 """Who cut the bot's speech off (Johnny-trt.49).
@@ -53,6 +54,18 @@ InterruptionWho = Literal["user_over_bot", "bot_cut_by_stop"]
   (Johnny-k8t) stopped the audio because someone talked over it.
 * ``bot_cut_by_stop`` — an explicit stop request cut the bot: the
   playground Stop button / ``/stop`` endpoint (Johnny-ckz.13).
+"""
+
+WorkstreamDeliveredStatus = Literal["delivered", "interrupted"]
+"""How a workstream result's spoken delivery settled (Johnny-d6w.2, US-002).
+
+* ``delivered`` — the result was voiced (or consumed into a direct answer).
+* ``interrupted`` — a barge-in cut the spoken delivery; the result may yet be
+  re-queued and later ``delivered`` or ``expired`` (the queue owns that).
+
+Carried on :class:`WorkstreamDeliveryChanged` so the single durable writer can
+stamp the durable ``agent_workstreams.delivery_status`` (the replacement for the
+in-memory ``TaskRegistryEntry.delivered`` flag).
 """
 
 TaskCompletedStatus = Literal["done", "failed"]
@@ -706,6 +719,38 @@ class TaskResultExpired:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkstreamDeliveryChanged:
+    """A delegated workstream's result delivery settled (Johnny-d6w.2, US-002).
+
+    Emitted from the speech-delivery path where the originating ``task_id`` is
+    in scope (the ``TaskSpeechDeliverer`` ``on_spoken`` callback / the interrupt
+    branch) — *not* from the ``AgentSpoke`` it produces, which carries no
+    ``task_id``. Unlike the four ``task_*`` events (whose durable record is the
+    executor-owned ``agent_tasks`` row), this event has **no** other durable
+    home: the single durable writer consumes it to stamp
+    ``agent_workstreams.delivery_status`` / ``delivered_at`` — the durable
+    replacement for the in-memory ``TaskRegistryEntry.delivered`` flag. It also
+    fans out to the live UI on the session channel (forward-aligned with the
+    ``workstream_delivery_changed`` event US-101 ingests).
+
+    * ``task_id`` — the ``agent_tasks`` row id; the writer resolves the
+      workstream by ``agent_task_id``.
+    * ``delivery_status`` — :data:`WorkstreamDeliveredStatus`
+      (``delivered`` / ``interrupted``).
+    * ``turn_id`` — the delegating turn's durable id; ``None`` for results
+      delivered out of band (task results bind to no turn).
+    """
+
+    task_id: int
+    kind: str
+    delivery_status: WorkstreamDeliveredStatus
+    timestamp_ms: int
+    turn_id: int | None = None
+    session_id: str | None = None
+    type: WorkstreamDeliveryChangedEventType = "workstream_delivery_changed"
+
+
+@dataclass(frozen=True, slots=True)
 class InterruptionRecorded:
     """The bot's speech was cut mid-utterance — who did it and how fast (Johnny-trt.49).
 
@@ -1006,6 +1051,7 @@ PipelineEvent = (
     | TaskProgress
     | TaskCompleted
     | TaskResultExpired
+    | WorkstreamDeliveryChanged
     | TurnTerminal
     | InterruptionRecorded
     | FloorAcquired
@@ -1072,5 +1118,7 @@ __all__ = [
     "TurnClaimLost",
     "TurnClaimWon",
     "TurnTerminal",
+    "WorkstreamDeliveredStatus",
+    "WorkstreamDeliveryChanged",
     "event_to_dict",
 ]

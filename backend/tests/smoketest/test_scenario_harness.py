@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 import sqlalchemy as sa
@@ -26,12 +27,20 @@ from app.db import Base  # noqa: E402
 from app.db.models import (  # noqa: E402
     Agent,
     AgentTask,
+    AgentWorkstream,
+    AgentWorkstreamEvent,
     BotSession,
     CapabilityPolicy,
     Workspace,
 )
 from johnny.smoketest.replay import discover_fixtures  # noqa: E402
 from johnny.smoketest.scenario import load_scenario, run_scenario  # noqa: E402
+from johnny.voice_pipeline.events import (  # noqa: E402
+    TaskCompleted,
+    TaskProgress,
+    TaskQueued,
+    TaskResultExpired,
+)
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 SCENARIO_FIXTURE = _FIXTURES / "scenarios" / "delegated-multispeaker"
@@ -51,6 +60,8 @@ def db() -> Iterator[Session]:
         bind=engine,
         tables=[
             AgentTask.__table__,  # type: ignore[list-item]
+            AgentWorkstream.__table__,  # type: ignore[list-item]
+            AgentWorkstreamEvent.__table__,  # type: ignore[list-item]
             BotSession.__table__,  # type: ignore[list-item]
             CapabilityPolicy.__table__,  # type: ignore[list-item]
             Workspace.__table__,  # type: ignore[list-item]
@@ -82,10 +93,12 @@ def test_scenario_produces_real_delegated_session(db: Session) -> None:
     assert result.invariant_violations == []
 
     # The happy-path task_* events fired, all on one task_id.
-    queued = result.events_of_type("task_queued")
-    progress = result.events_of_type("task_progress")
-    completed = result.events_of_type("task_completed")
-    expired = result.events_of_type("task_result_expired")
+    queued = cast(list[TaskQueued], result.events_of_type("task_queued"))
+    progress = cast(list[TaskProgress], result.events_of_type("task_progress"))
+    completed = cast(list[TaskCompleted], result.events_of_type("task_completed"))
+    expired = cast(
+        list[TaskResultExpired], result.events_of_type("task_result_expired")
+    )
     assert len(queued) == 1, "delegate must write exactly one queued task"
     assert len(progress) == 1, "the worker claim must emit one TaskProgress"
     assert len(completed) == 1, "the settle must emit one TaskCompleted"
@@ -109,6 +122,21 @@ def test_scenario_produces_real_delegated_session(db: Session) -> None:
     assert row["result_text"] == sent_text[::-1]  # the deterministic tool output
     assert row["result_json"]["mcp_tool"] == "reverse_text"
     assert row["result_json"]["is_error"] is False
+
+    # US-002: the single durable writer produced exactly one workstream envelope
+    # for the delegated task, FK'd to its agent_tasks row, carrying the same
+    # terminal execution result. The fixture never voices the result (fake TTS)
+    # and lets it expire, so delivery_status settles at `expired`, not delivered.
+    assert len(result.workstream_rows) == 1, "one workstream per delegated task"
+    ws = result.workstream_rows[0]
+    assert ws["agent_task_id"] == task_id  # the envelope FKs to the task row
+    assert ws["source_kind"] == "delegate"
+    assert ws["status"] == "done"  # execution reached the same terminal as the task
+    assert ws["delivery_status"] == "expired"  # undelivered result aged out
+    assert ws["result_text"] == sent_text[::-1]  # mirrors the task result
+    assert ws["result_json"]["mcp_tool"] == "reverse_text"  # copied from the task row
+    assert ws["source_turn_id"] == queued[0].turn_id  # bound to the delegating turn
+    assert ws["title"] == "mcp__demo-http__reverse_text"
 
 
 def test_scenario_fixture_outside_frozen_replay_suite() -> None:

@@ -50,8 +50,10 @@ from typing import Any
 from livekit.agents.llm import ChatContext, StopResponse
 from livekit.agents.llm.chat_context import ChatMessage as LKChatMessage
 from livekit.agents.voice import SpeechHandle
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.db.models import AgentWorkstream
 from app.services.agent_tasks import SqlAlchemyTaskSink
 from app.services.task_worker import claim_queued_tasks, settle_claimed_task
 from johnny.agent.gate import TurnIndex, TurnLedger
@@ -229,6 +231,11 @@ class ScenarioResult:
     # The terminal ``agent_tasks`` rows, read back from the DB after settle:
     # ``[{"task_id", "kind", "status", "result_text", "result_json", "turn_id"}]``.
     task_rows: list[dict[str, Any]]
+    # The durable ``agent_workstreams`` rows (US-002) the single durable writer
+    # produced from the captured task_*/workstream events — the envelope on top
+    # of ``task_rows``. ``[{"id","agent_task_id","source_kind","status",
+    # "delivery_status","result_text","result_json","title","source_turn_id"}]``.
+    workstream_rows: list[dict[str, Any]] = field(default_factory=list)
 
     def events_of_type(self, type_name: str) -> list[PipelineEvent]:
         return [e for e in self.events if getattr(e, "type", None) == type_name]
@@ -362,9 +369,73 @@ async def run_scenario(
 
     events = bus.snapshot()
     records = assemble_turns(events, SPLIT_RUNTIME)
-    return ScenarioResult(
-        fixture=fixture, events=events, records=records, task_rows=task_rows
+    # US-002: replay the captured task_*/workstream events through the single
+    # durable writer's handlers (the same code path the live subscriber runs,
+    # invoked directly here — the harness has no Redis subscriber) to produce
+    # the durable ``agent_workstreams`` envelope later UI phases render.
+    workstream_rows = _persist_workstreams(
+        session, events, bot_session_id or fixture.bot_session_id
     )
+    return ScenarioResult(
+        fixture=fixture,
+        events=events,
+        records=records,
+        task_rows=task_rows,
+        workstream_rows=workstream_rows,
+    )
+
+
+def _persist_workstreams(
+    session: Session, events: list[PipelineEvent], bot_session_id: int
+) -> list[dict[str, Any]]:
+    """Feed captured task_*/workstream events through the durable writer (US-002).
+
+    Invokes the subscriber's pure handlers directly (no Redis here), committing
+    the durable ``agent_workstreams`` rows, then reads back this session's rows
+    for assertions. Scoped by ``bot_session_id`` so a run against a shared
+    Postgres (the ``generate`` path) returns only its own envelopes.
+    """
+    from app.services.session_status_subscriber import (
+        TASK_EVENT_TYPES,
+        WORKSTREAM_DELIVERY_EVENT_TYPE,
+        apply_task_event,
+        apply_workstream_delivery_event,
+    )
+    from johnny.voice_pipeline.events import event_to_dict
+
+    for event in events:
+        etype = getattr(event, "type", None)
+        if etype not in TASK_EVENT_TYPES and etype != WORKSTREAM_DELIVERY_EVENT_TYPE:
+            continue
+        payload = event_to_dict(event)
+        # In production an event's ``session_id`` IS the numeric bot_session_id;
+        # the harness labels sessions by name, so stamp the real int id (the
+        # same one the agent_tasks rows carry) before the durable writer coerces it.
+        payload["session_id"] = bot_session_id
+        if etype in TASK_EVENT_TYPES:
+            apply_task_event(session, payload)
+        else:
+            apply_workstream_delivery_event(session, payload)
+    session.commit()
+    rows = session.scalars(
+        select(AgentWorkstream)
+        .where(AgentWorkstream.bot_session_id == bot_session_id)
+        .order_by(AgentWorkstream.id)
+    ).all()
+    return [
+        {
+            "id": w.id,
+            "agent_task_id": w.agent_task_id,
+            "source_kind": w.source_kind.value,
+            "status": w.status.value,
+            "delivery_status": w.delivery_status.value,
+            "result_text": w.result_text,
+            "result_json": w.result_json,
+            "title": w.title,
+            "source_turn_id": w.source_turn_id,
+        }
+        for w in rows
+    ]
 
 
 async def _drive_turns(

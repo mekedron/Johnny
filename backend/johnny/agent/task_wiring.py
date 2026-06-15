@@ -83,7 +83,13 @@ from johnny.agent.tasks import (
     stub_executor,
 )
 from johnny.voice_pipeline.event_bus import EventBus
-from johnny.voice_pipeline.events import TaskCompleted, TaskQueued, TaskResultExpired
+from johnny.voice_pipeline.events import (
+    TaskCompleted,
+    TaskQueued,
+    TaskResultExpired,
+    WorkstreamDeliveredStatus,
+    WorkstreamDeliveryChanged,
+)
 
 if TYPE_CHECKING:
     from livekit.agents.voice import AgentSession
@@ -599,6 +605,12 @@ class TaskSpeechDeliverer:
 
         def _on_spoken(item: SpeechItem) -> None:
             self._coordinator.mark_result_delivered(task_id)
+            # Durable delivery (Johnny-d6w.2): the single durable writer stamps
+            # agent_workstreams.delivery_status=delivered from this — the durable
+            # replacement for the in-memory TaskRegistryEntry.delivered flip above.
+            self._publish_delivery_changed(
+                task_id=task_id, kind=kind, turn_id=turn_id, delivery_status="delivered"
+            )
             logger.info(
                 "task speech: result for task #%s (%s) delivered after %.1fs queued",
                 task_id,
@@ -745,6 +757,14 @@ class TaskSpeechDeliverer:
         if interrupted:
             # Requeue-once-then-drop is the queue's budget (trt.28 acceptance);
             # the drop fires on_dropped → TaskResultExpired("interrupted twice").
+            # Stamp the durable delivery_status=interrupted (Johnny-d6w.2); a
+            # later redelivery moves it to delivered, a second cut to expired.
+            self._publish_delivery_changed(
+                task_id=item.task_id,
+                kind=item.kind,
+                turn_id=None,
+                delivery_status="interrupted",
+            )
             self._queue.mark_interrupted(item, self._clock())
         else:
             self._queue.mark_spoken(item, self._clock())
@@ -780,12 +800,43 @@ class TaskSpeechDeliverer:
         self._publish_tasks.add(task)
         task.add_done_callback(self._publish_tasks.discard)
 
-    async def _publish_event(self, event: TaskResultExpired) -> None:
+    def _publish_delivery_changed(
+        self,
+        *,
+        task_id: int | None,
+        kind: str,
+        turn_id: int | None,
+        delivery_status: WorkstreamDeliveredStatus,
+    ) -> None:
+        """Announce a workstream delivery transition (Johnny-d6w.2, US-002).
+
+        Scheduled from the same sync callbacks as the expiry publish; carries
+        the originating ``task_id`` (absent on the ``AgentSpoke`` the delivery
+        produces) so the single durable writer can stamp the durable
+        ``agent_workstreams.delivery_status``. Best-effort like every other
+        event here — the row write, not this fan-out, is the record.
+        """
+        event = WorkstreamDeliveryChanged(
+            task_id=task_id if task_id is not None else 0,
+            kind=kind,
+            delivery_status=delivery_status,
+            timestamp_ms=self._clock_ms(),
+            turn_id=turn_id,
+            session_id=self._session_id,
+        )
+        task = asyncio.ensure_future(self._publish_event(event))
+        self._publish_tasks.add(task)
+        task.add_done_callback(self._publish_tasks.discard)
+
+    async def _publish_event(
+        self, event: TaskResultExpired | WorkstreamDeliveryChanged
+    ) -> None:
         try:
             await self._event_bus.publish(event)
         except Exception:  # noqa: BLE001 — events are best-effort; the row is the record
             logger.warning(
-                "task speech: TaskResultExpired publish failed for task_id=%s",
+                "task speech: %s publish failed for task_id=%s",
+                event.type,
                 event.task_id,
             )
 

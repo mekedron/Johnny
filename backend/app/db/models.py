@@ -171,6 +171,64 @@ class AgentTaskStatus(enum.StrEnum):
     EXPIRED = "expired"
 
 
+class WorkstreamSourceKind(enum.StrEnum):
+    """Where a workstream's work originates (Johnny-d6w.2 / US-002, PRD §6.1).
+
+    A *workstream* is the durable envelope over any unit of work, delegated or
+    inline. ``delegate`` is a router-``delegate`` task handed off the turn loop
+    (FK ``agent_task_id`` set); ``foreground_tool_loop`` is inline answer-loop
+    work that ran on-turn (no ``agent_tasks`` row — US-107 synthesises those in
+    the frontend from orphan tool/model calls, so US-002 writes no row for
+    them). Reserved for later phases — documented, no emitter, and deliberately
+    NOT in the migration CHECK so the enum, the CHECK, and the emitted set can't
+    drift: ``proactive`` (bot-initiated work), ``external_callback``
+    (out-of-process webhook re-entry, US-303).
+    """
+
+    DELEGATE = "delegate"
+    FOREGROUND_TOOL_LOOP = "foreground_tool_loop"
+
+
+class WorkstreamStatus(enum.StrEnum):
+    """Execution state of a workstream (Johnny-d6w.2 / US-002, PRD §7).
+
+    Trimmed to the states an emitter actually drives in v1: ``queued`` (the
+    task row exists, nothing has claimed it), ``running`` (an executor picked it
+    up), ``done`` / ``failed`` (execution settled), ``cancelled`` (cancelled
+    mid-flight or the session tore down). Reserved — documented, no emitter, and
+    deliberately NOT in the migration CHECK so the enum and CHECK can't drift:
+    ``waiting``, ``blocked``.
+    """
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class WorkstreamDeliveryStatus(enum.StrEnum):
+    """Delivery state of a workstream's result, decoupled from execution (PRD §7).
+
+    ``done`` execution ≠ ``delivered``: a finished result waits at ``ready``
+    until the speech queue voices it. v1 emitted states: ``not_ready`` (no
+    result yet), ``ready`` (available, not yet spoken), ``queued`` (enqueued for
+    spoken delivery), ``delivered`` (spoken / consumed), ``interrupted`` (a
+    barge-in cut the delivery), ``expired`` (the result aged out of the speech
+    queue before it could be voiced). This is the durable record that replaces
+    the in-memory ``TaskRegistryEntry.delivered`` flag (US-002 owns the write
+    side; US-203 switches the read side to registry-first with this as the
+    durable overlay). Reserved — no emitter, not in the CHECK: ``delivery_failed``.
+    """
+
+    NOT_READY = "not_ready"
+    READY = "ready"
+    QUEUED = "queued"
+    DELIVERED = "delivered"
+    INTERRUPTED = "interrupted"
+    EXPIRED = "expired"
+
+
 def _str_enum_values(enum_cls: type[enum.Enum]) -> list[str]:
     """Return enum members' ``.value`` strings — used so SAEnum stores the
     lowercase value (matching the migrations' CHECK constraints) instead of
@@ -1155,6 +1213,185 @@ class AgentModelCall(Base):
     )
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class AgentWorkstream(TimestampMixin, Base):
+    """The durable envelope over one unit of work — delegated or inline (US-002).
+
+    PRD §6.1: a workstream is the operator-facing record *on top* of the
+    execution row, unifying delegated work (``agent_tasks``, FK
+    ``agent_task_id``) and — in later phases — inline answer-loop work into one
+    queryable model. ``agent_tasks`` stays the executor-owned execution row;
+    this envelope is written *only* by the single durable writer
+    (``session_status_subscriber``) from the task lifecycle events, never by a
+    second writer.
+
+    Execution ``status`` (§7) and ``delivery_status`` are decoupled: a ``done``
+    workstream sits at ``delivery_status=ready`` until the speech queue voices
+    it (then ``delivered``), or it ``expired`` before it could be. The delivery
+    columns replace the in-memory ``TaskRegistryEntry.delivered`` flag as the
+    durable record.
+
+    ``request_id`` (US-003 correlation), ``user_request_text`` and
+    ``workspace_id`` are intentionally NULL in US-002 — they are not derivable
+    from the task lifecycle events and are populated by later stories. ``title``
+    is a crude ``kind`` stand-in until then.
+    """
+
+    __tablename__ = "agent_workstreams"
+    __table_args__ = (
+        # One workstream envelope per delegated task (C3 anti-duplication).
+        # NULL ``agent_task_id`` for inline rows; multiple NULLs are allowed on
+        # both PostgreSQL and SQLite, so inline workstreams don't collide.
+        UniqueConstraint(
+            "agent_task_id", name="uq_agent_workstreams_agent_task_id"
+        ),
+        Index(
+            "ix_agent_workstreams_session_created", "bot_session_id", "created_at"
+        ),
+        Index("ix_agent_workstreams_agent_task_id", "agent_task_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_session_id: Mapped[int] = mapped_column(
+        ForeignKey("bot_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    agent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_kind: Mapped[WorkstreamSourceKind] = mapped_column(
+        SAEnum(
+            WorkstreamSourceKind,
+            name="agent_workstream_source_kind",
+            native_enum=False,
+            length=32,
+            validate_strings=True,
+            values_callable=_str_enum_values,
+        ),
+        nullable=False,
+    )
+    # The delegating turn's durable per-session counter (matches
+    # ``agent_tasks.turn_id`` / ``agent_decisions.turn_id``); a plain int, not a FK.
+    source_turn_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_decision_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_decisions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # The delegated-execution backing row; NULL for inline workstreams. UNIQUE
+    # so the envelope is 1:1 with its task.
+    agent_task_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_tasks.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Cross-turn correlation key (US-003) — minted + propagated there, NULL
+    # until then. A 36-char UUID string; stored turn-independent so a later
+    # merge heuristic can group continuations without a schema change.
+    request_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The user's originating request text (US-003/US-101 populate via the
+    # decision/utterance join); NULL in US-002 — it is NOT the bot's ack.
+    user_request_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[WorkstreamStatus] = mapped_column(
+        SAEnum(
+            WorkstreamStatus,
+            name="agent_workstream_status",
+            native_enum=False,
+            length=16,
+            validate_strings=True,
+            values_callable=_str_enum_values,
+        ),
+        nullable=False,
+        default=WorkstreamStatus.QUEUED,
+        server_default=WorkstreamStatus.QUEUED.value,
+    )
+    delivery_status: Mapped[WorkstreamDeliveryStatus] = mapped_column(
+        SAEnum(
+            WorkstreamDeliveryStatus,
+            name="agent_workstream_delivery_status",
+            native_enum=False,
+            length=16,
+            validate_strings=True,
+            values_callable=_str_enum_values,
+        ),
+        nullable=False,
+        default=WorkstreamDeliveryStatus.NOT_READY,
+        server_default=WorkstreamDeliveryStatus.NOT_READY.value,
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    delivered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    result_available_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Advisory: when we *expect* an unspoken result to age out of the speech
+    # queue. The authoritative "it expired" signal is the ``task_result_expired``
+    # event (which flips ``delivery_status=expired``); this column is predictive.
+    result_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    expired_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delivered_utterance_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_utterances.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    result_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(
+        _json_column(), nullable=True
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class AgentWorkstreamEvent(Base):
+    """Append-only progress / audit log for a workstream (US-002, PRD §6.1).
+
+    One row per lifecycle transition or progress milestone (queued → running →
+    done/failed, delivery changes, expiry), written by the single durable writer
+    alongside the latest-state columns on ``agent_workstreams``. The columns
+    serve cheap reads; this log is the durable-resume substrate a later phase can
+    replay (PRD §13). ``sequence`` is a per-workstream monotonic counter computed
+    at write time (the subscriber applies events serially, so the
+    ``(workstream_id, sequence)`` uniqueness holds without locking).
+    """
+
+    __tablename__ = "agent_workstream_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "workstream_id", "sequence", name="uq_agent_workstream_events_seq"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workstream_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_workstreams.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    bot_session_id: Mapped[int] = mapped_column(
+        ForeignKey("bot_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(48), nullable=False)
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_json: Mapped[dict[str, Any] | None] = mapped_column(
+        _json_column(), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

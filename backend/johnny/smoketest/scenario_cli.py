@@ -69,7 +69,15 @@ def check_cmd(fixture_path: Path) -> None:
     from sqlalchemy.orm import sessionmaker
 
     from app.db import Base
-    from app.db.models import Agent, AgentTask, BotSession, CapabilityPolicy, Workspace
+    from app.db.models import (
+        Agent,
+        AgentTask,
+        AgentWorkstream,
+        AgentWorkstreamEvent,
+        BotSession,
+        CapabilityPolicy,
+        Workspace,
+    )
     from johnny.smoketest.scenario import load_scenario, run_scenario
 
     console = Console()
@@ -82,6 +90,8 @@ def check_cmd(fixture_path: Path) -> None:
         bind=engine,
         tables=[
             AgentTask.__table__,  # type: ignore[list-item]
+            AgentWorkstream.__table__,  # type: ignore[list-item]
+            AgentWorkstreamEvent.__table__,  # type: ignore[list-item]
             BotSession.__table__,  # type: ignore[list-item]
             CapabilityPolicy.__table__,  # type: ignore[list-item]
             Workspace.__table__,  # type: ignore[list-item]
@@ -98,10 +108,18 @@ def check_cmd(fixture_path: Path) -> None:
     violations = result.invariant_violations
     event_counts = {t: len(result.events_of_type(t)) for t in _TASK_EVENT_TYPES}
     done_rows = [r for r in result.task_rows if r["status"] == "done"]
+    # US-002: the single durable writer produced one workstream envelope per
+    # delegated task, FK'd to it and carrying the same terminal result.
+    done_streams = [
+        w
+        for w in result.workstream_rows
+        if w["status"] == "done" and w["agent_task_id"] is not None
+    ]
     ok = (
         not violations
         and all(event_counts[t] == 1 for t in _TASK_EVENT_TYPES)
         and len(done_rows) == 1
+        and len(done_streams) == 1
     )
 
     console.print(f"[bold]{fixture.label}[/bold]  speakers={list(fixture.speakers)}")
@@ -111,12 +129,17 @@ def check_cmd(fixture_path: Path) -> None:
             f"  agent_task #{r['task_id']} {r['kind']} → {r['status']} "
             f"· result_text={r['result_text']!r}"
         )
+    for w in done_streams:
+        console.print(
+            f"  workstream #{w['id']} (task #{w['agent_task_id']}, {w['source_kind']}) "
+            f"→ {w['status']}/{w['delivery_status']}"
+        )
     if violations:
         console.print(f"  [red]invariant violations:[/red] {violations}")
     if ok:
         console.print(
-            "  [green]PASS[/green] — delegate produced a done task, all four "
-            "task_* events fired, INV-1/INV-2 hold"
+            "  [green]PASS[/green] — delegate produced a done task + workstream "
+            "envelope, all four task_* events fired, INV-1/INV-2 hold"
         )
         sys.exit(0)
     console.print("  [red]FAIL[/red]")
