@@ -300,6 +300,7 @@ async def run_scenario(
     session: Session,
     executor: TaskExecutorFn = reverse_text_executor,
     bot_session_id: int | None = None,
+    bus: InMemoryEventBus | None = None,
 ) -> ScenarioResult:
     """Drive ``fixture`` through the real gate + coordinator + worker, in-process.
 
@@ -319,6 +320,14 @@ async def run_scenario(
 
     ``session`` is a SQLAlchemy session (SQLite ``:memory:`` in the CI gate);
     ``executor`` defaults to the deterministic ``reverse_text`` stand-in.
+
+    ``bus`` is an optional event bus to capture/forward the pipeline events. It
+    defaults to a fresh :class:`InMemoryEventBus` (the ``check``/``generate``
+    capture-then-persist path); the ``live`` CLI mode injects an
+    :class:`InMemoryEventBus` subclass that ALSO publishes each frame to Redis in
+    real time, so a browser on the live session page sees genuine
+    ``task_*`` transitions (US-101 browser validation). It must expose
+    ``snapshot()`` — the durable-writer replay reads it post-run.
     """
     if fixture.runtime != SPLIT_RUNTIME:
         raise ValueError(
@@ -326,7 +335,8 @@ async def run_scenario(
             f"runtime={fixture.runtime!r}"
         )
 
-    bus = InMemoryEventBus()
+    if bus is None:
+        bus = InMemoryEventBus()
     turn_index = TurnIndex()
     obs = build_observability(
         bus,

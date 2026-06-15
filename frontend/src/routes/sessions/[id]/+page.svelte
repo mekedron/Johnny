@@ -57,8 +57,15 @@
 	} from '$lib/sessionEvents';
 	import { approveDecision, rejectDecision } from '$lib/decisions';
 	import SessionTrace from '$lib/components/SessionTrace.svelte';
+	import SessionWorkstreams from '$lib/components/SessionWorkstreams.svelte';
 	import SessionReplayPanel from '$lib/components/SessionReplayPanel.svelte';
-	import { buildDecisionEntries, type DecisionEntry } from '$lib/sessionTrace';
+	import {
+		buildDecisionEntries,
+		buildSessionTraceView,
+		type DecisionEntry,
+		type SessionTraceInput
+	} from '$lib/sessionTrace';
+	import { applyLiveTraceEvent } from '$lib/liveTrace';
 
 	interface TranscriptLine {
 		key: string;
@@ -133,10 +140,34 @@
 	// claims / suppression, interleaved into the activity log.
 	let conversationEvents = $state<ConversationEventRecord[]>([]);
 
+	// Raw trace records (US-101, Johnny-d6w.6) — the live mirror of the records
+	// `GET /sessions/{id}` returns, patched IN PLACE by `applyLiveTraceEvent` on
+	// each task_*/workstream_* WS frame so the Workstreams view re-projects with
+	// NO full re-pull (AC2). Seeded / reconciled by `applyCoreDetail` (the
+	// authoritative durable read); `workstream_events` is not served by the
+	// detail endpoint (it arrives via WS / lands durably with US-202) so it stays
+	// empty here and the projector tolerates that.
+	let traceRecords = $state<SessionTraceInput>({
+		decisions: [],
+		utterances: [],
+		tasks: [],
+		toolCalls: [],
+		modelCalls: [],
+		workstreams: [],
+		workstreamEvents: []
+	});
+	// The three-column projection (US-102). US-101 renders only `.workstreams`
+	// (minimal live list, <SessionWorkstreams>); US-103/US-106 build the full
+	// layout + rich column on top of the same projection.
+	const traceView = $derived(buildSessionTraceView({ ...traceRecords, conversationEvents }));
+
 	let connected = $state(false);
 	let connectError = $state<string | null>(null);
 
 	let subscription: Subscription | null = null;
+	// US-101 (AC3): true once the WS has opened at least once, so a later open is
+	// a RE-connect that must reconcile against durable state.
+	let hasOpenedOnce = false;
 	let approvalTimers: Map<number, ReturnType<typeof setInterval>> = new Map();
 	let transcriptEl = $state<HTMLDivElement | null>(null);
 	let durationTimer: ReturnType<typeof setInterval> | null = null;
@@ -278,6 +309,21 @@
 			toolCalls: detail.tool_calls,
 			modelCalls: detail.model_calls
 		});
+		// US-101: seed/reconcile the raw records the live Workstreams view
+		// re-projects from. This durable read is authoritative — it runs on the
+		// initial load, on reconnect, and on the existing quiet refresh — and live
+		// task_*/workstream_* deltas patch on top of it via applyLiveTraceEvent.
+		// The backend keeps agent_workstreams.status current, so a re-pull never
+		// regresses a live-ahead status.
+		traceRecords = {
+			decisions: detail.decisions,
+			utterances: detail.utterances,
+			tasks: detail.tasks ?? [],
+			toolCalls: detail.tool_calls ?? [],
+			modelCalls: detail.model_calls ?? [],
+			workstreams: detail.workstreams ?? [],
+			workstreamEvents: []
+		};
 	}
 
 	function transcriptToLine(t: TranscriptChunk): TranscriptLine {
@@ -363,6 +409,12 @@
 			onOpen: () => {
 				connected = true;
 				connectError = null;
+				// On RE-connect, reconcile once against the durable trace to pick up
+				// any task_*/workstream_* deltas missed while offline (the WS replays
+				// no backlog of those frames). The initial open is already covered by
+				// loadInitialDetail; the reducer's idempotency makes this safe.
+				if (hasOpenedOnce) refreshDetailQuietly();
+				hasOpenedOnce = true;
 			},
 			onClose: () => {
 				connected = false;
@@ -408,6 +460,20 @@
 				// re-renders the timeline with the new call DURING the turn — no
 				// fragile per-entry merge, reuses the shared applyCoreDetail.
 				refreshDetailQuietly();
+				return;
+			case 'task_queued':
+			case 'task_progress':
+			case 'task_completed':
+			case 'task_result_expired':
+			case 'workstream_created':
+			case 'workstream_progress':
+			case 'workstream_completed':
+			case 'workstream_delivery_changed':
+				// US-101: mutate live workstream state IN PLACE and let the derived
+				// `traceView` re-project — NO debounced full re-pull (AC2). The
+				// reducer is idempotent + forward-only, and the WS layer drops
+				// already-seen seqs, so a redelivered frame is safe (AC3).
+				traceRecords = applyLiveTraceEvent(traceRecords, event);
 				return;
 			case 'session_status_change':
 				return handleStatus(event);
@@ -1271,6 +1337,10 @@
 			{conversationEvents}
 			activityError={timingsLoadError}
 		/>
+
+		<!-- US-101: minimal live Workstreams list, fed by the locally-mutated,
+		     re-projected trace view (US-103/US-106 grow this into the column). -->
+		<SessionWorkstreams workstreams={traceView.workstreams} />
 
 		<SessionReplayPanel {sessionId} />
 

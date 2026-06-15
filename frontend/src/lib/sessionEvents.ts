@@ -44,6 +44,14 @@ export type SessionEventType =
 	| 'turn_terminal'
 	| 'tool_call_observed'
 	| 'model_call_observed'
+	| 'task_queued'
+	| 'task_progress'
+	| 'task_completed'
+	| 'task_result_expired'
+	| 'workstream_created'
+	| 'workstream_progress'
+	| 'workstream_completed'
+	| 'workstream_delivery_changed'
 	| 'session_status_change'
 	| 'meeting_bot_state_changed';
 
@@ -310,6 +318,121 @@ export interface ModelCallObservedEvent extends BaseEnvelope {
 	tool_call_count: number;
 }
 
+// --- Workstream lifecycle (US-101, Johnny-d6w.6) ---------------------------
+// The live execution channel for a delegated workstream. The four `task_*`
+// events (backend `events.py:610-739`) all key by `task_id`; the single durable
+// writer resolves the workstream by `agent_task_id === task_id` and advances
+// `agent_workstreams.status` queued→running→done (`session_status_subscriber.py`).
+// The frontend mirrors that mapping in `applyLiveTraceEvent` (`$lib/liveTrace`),
+// patching live workstream state in place so the Workstreams view re-projects
+// with no full re-pull.
+
+/** A delegated async task was accepted and persisted `queued` (Johnny-trt.18). */
+export interface TaskQueuedEvent extends BaseEnvelope {
+	type: 'task_queued';
+	task_id: number;
+	kind: string;
+	timestamp_ms: number;
+	turn_id?: number | null;
+	decision_id?: number | null;
+	ack_text?: string;
+	request_id?: string | null;
+	session_id?: string | null;
+}
+
+/** A delegated task reported interim progress (claim / milestone). */
+export interface TaskProgressEvent extends BaseEnvelope {
+	type: 'task_progress';
+	task_id: number;
+	kind: string;
+	timestamp_ms: number;
+	progress_text?: string;
+	turn_id?: number | null;
+	request_id?: string | null;
+	session_id?: string | null;
+}
+
+/** A delegated task settled `done` or `failed`. */
+export interface TaskCompletedEvent extends BaseEnvelope {
+	type: 'task_completed';
+	task_id: number;
+	kind: string;
+	status: 'done' | 'failed';
+	timestamp_ms: number;
+	result_text?: string;
+	error?: string;
+	turn_id?: number | null;
+	request_id?: string | null;
+	session_id?: string | null;
+}
+
+/** A completed task's spoken delivery was dropped undelivered (expired). */
+export interface TaskResultExpiredEvent extends BaseEnvelope {
+	type: 'task_result_expired';
+	task_id: number;
+	kind: string;
+	timestamp_ms: number;
+	reason?: string;
+	turn_id?: number | null;
+	session_id?: string | null;
+}
+
+/**
+ * A delegated workstream's result delivery settled (Johnny-d6w.2, US-002).
+ * Carries the originating `task_id` (the writer resolves the workstream by
+ * `agent_task_id`); `delivery_status` is the delivered/interrupted subset of the
+ * full delivery-state machine.
+ */
+export interface WorkstreamDeliveryChangedEvent extends BaseEnvelope {
+	type: 'workstream_delivery_changed';
+	task_id: number;
+	kind: string;
+	delivery_status: 'delivered' | 'interrupted';
+	timestamp_ms: number;
+	turn_id?: number | null;
+	session_id?: string | null;
+}
+
+// Forward-compat workstream lifecycle events keyed by `workstream_id`. The
+// backend does NOT emit these three yet (only `task_*` + `workstream_delivery_changed`);
+// US-101 adds the wire types + idempotent ingestion so a later phase can emit
+// them with no frontend change. Shapes are minimal/additive until then.
+
+/** A workstream row was created (reserved; not yet emitted). */
+export interface WorkstreamCreatedEvent extends BaseEnvelope {
+	type: 'workstream_created';
+	workstream_id: number;
+	timestamp_ms: number;
+	source_kind?: string;
+	status?: string;
+	source_turn_id?: number | null;
+	request_id?: string | null;
+	title?: string | null;
+	session_id?: string | null;
+}
+
+/** A workstream reported progress (reserved; not yet emitted). */
+export interface WorkstreamProgressEvent extends BaseEnvelope {
+	type: 'workstream_progress';
+	workstream_id: number;
+	timestamp_ms: number;
+	status?: string;
+	text?: string;
+	sequence?: number;
+	session_id?: string | null;
+}
+
+/** A workstream settled `done`/`failed` (reserved; not yet emitted). */
+export interface WorkstreamCompletedEvent extends BaseEnvelope {
+	type: 'workstream_completed';
+	workstream_id: number;
+	status: 'done' | 'failed';
+	timestamp_ms: number;
+	result_text?: string;
+	error?: string;
+	session_id?: string | null;
+}
+
 export type SessionEvent =
 	| TranscriptPartialEvent
 	| TranscriptFinalEvent
@@ -326,6 +449,14 @@ export type SessionEvent =
 	| TurnTerminalEvent
 	| ToolCallObservedEvent
 	| ModelCallObservedEvent
+	| TaskQueuedEvent
+	| TaskProgressEvent
+	| TaskCompletedEvent
+	| TaskResultExpiredEvent
+	| WorkstreamCreatedEvent
+	| WorkstreamProgressEvent
+	| WorkstreamCompletedEvent
+	| WorkstreamDeliveryChangedEvent
 	| SessionStatusChangeEvent
 	| MeetingBotStateChangedEvent;
 
