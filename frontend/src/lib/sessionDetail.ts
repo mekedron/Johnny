@@ -309,6 +309,24 @@ export interface AgentWorkstreamRecord {
 	updated_at: string;
 }
 
+/**
+ * One append-only workstream progress/audit row (US-002). The snake_case input
+ * record the client-side `buildSessionTraceView()` (US-102) folds into each
+ * workstream's `events` list (mapped to the camelCase {@link WorkstreamEventView}).
+ * Not yet served by the detail endpoints; live rows arrive via WS deltas (US-101)
+ * and durable history lands with US-202, so the projector tolerates an empty list.
+ */
+export interface AgentWorkstreamEventRecord {
+	id: number;
+	workstream_id: number;
+	bot_session_id: number;
+	sequence: number;
+	event_type: string;
+	text: string | null;
+	payload_json: Record<string, unknown> | null;
+	created_at: string;
+}
+
 export interface SessionDetail {
 	session: BotSession;
 	transcripts: TranscriptChunk[];
