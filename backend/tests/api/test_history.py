@@ -22,6 +22,8 @@ from app.db.models import (
     AgentTaskStatus,
     AgentToolCall,
     AgentUtterance,
+    AgentWorkstream,
+    AgentWorkstreamEvent,
     BotMode,
     BotSession,
     BotSessionSource,
@@ -34,6 +36,9 @@ from app.db.models import (
     SessionTiming,
     TerminalState,
     TranscriptChunk,
+    WorkstreamDeliveryStatus,
+    WorkstreamSourceKind,
+    WorkstreamStatus,
 )
 from app.main import app
 from app.services.transcripts import StaticEmbeddingProvider
@@ -59,6 +64,8 @@ def engine() -> sa.Engine:
             AgentTask.__table__,  # type: ignore[list-item]
             AgentToolCall.__table__,  # type: ignore[list-item]
             AgentModelCall.__table__,  # type: ignore[list-item]
+            AgentWorkstream.__table__,  # type: ignore[list-item]
+            AgentWorkstreamEvent.__table__,  # type: ignore[list-item]
             SessionTiming.__table__,  # type: ignore[list-item]
             ConversationEvent.__table__,  # type: ignore[list-item]
         ],
@@ -495,6 +502,78 @@ def test_get_history_detail_includes_full_observability(
     assert body["timings"][0]["details"]["model"] == "llama3.2:3b"
     assert body["conversation_events"][0]["event_type"] == "interruption_recorded"
     assert body["conversation_events"][0]["turn_id"] == 1
+
+
+def test_get_history_detail_includes_workstreams_and_request_id(
+    client: TestClient, db_session: Session
+) -> None:
+    """US-005: the history detail evolves with the live detail — decisions carry
+    request_id, utterances carry answers_request_id, and the workstream envelopes
+    are served so the Workstreams column renders identically after the session."""
+    row = _seed_session(db_session, status=BotSessionStatus.ENDED)
+    decision = AgentDecision(
+        bot_session_id=row.id,
+        turn_id=2,
+        should_speak=True,
+        confidence=0.7,
+        reason="data lookup",
+        reply_type="delegate",
+        request_id="req-h2",
+        terminal_state=TerminalState.REPLIED,
+        outcome=DecisionOutcome.SPOKEN,
+        input_window={},
+        raw_output={},
+    )
+    db_session.add(decision)
+    db_session.flush()
+    db_session.add(
+        AgentUtterance(
+            bot_session_id=row.id,
+            agent_decision_id=None,
+            answers_request_id="req-h2",
+            mode=BotMode.AUTONOMOUS,
+            prompt="[]",
+            output_text="155 orders.",
+        )
+    )
+    task = AgentTask(
+        bot_session_id=row.id,
+        agent_decision_id=decision.id,
+        turn_id=2,
+        request_id="req-h2",
+        kind="metabase",
+        request_json={"kind": "metabase", "args": {}},
+        status=AgentTaskStatus.DONE,
+        result_text="155 orders.",
+    )
+    db_session.add(task)
+    db_session.flush()
+    db_session.add(
+        AgentWorkstream(
+            bot_session_id=row.id,
+            source_kind=WorkstreamSourceKind.DELEGATE,
+            source_turn_id=2,
+            source_decision_id=decision.id,
+            agent_task_id=task.id,
+            request_id="req-h2",
+            title="metabase",
+            status=WorkstreamStatus.DONE,
+            delivery_status=WorkstreamDeliveryStatus.READY,
+            result_text="155 orders.",
+        )
+    )
+    db_session.commit()
+
+    body = client.get(f"/history/sessions/{row.id}").json()
+    assert body["decisions"][0]["request_id"] == "req-h2"
+    assert body["utterances"][0]["answers_request_id"] == "req-h2"
+    assert body["tasks"][0]["request_id"] == "req-h2"
+    assert len(body["workstreams"]) == 1
+    ws = body["workstreams"][0]
+    assert ws["source_kind"] == "delegate"
+    assert ws["status"] == "done"
+    assert ws["delivery_status"] == "ready"
+    assert ws["request_id"] == "req-h2"
 
 
 # --- DELETE /history/sessions/{id} ----------------------------------------

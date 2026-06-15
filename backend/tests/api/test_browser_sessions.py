@@ -38,6 +38,8 @@ from app.db.models import (
     AgentTask,
     AgentToolCall,
     AgentUtterance,
+    AgentWorkstream,
+    AgentWorkstreamEvent,
     BotMode,
     BotSession,
     BotSessionSource,
@@ -92,6 +94,8 @@ def engine() -> sa.Engine:
             AgentTask.__table__,  # type: ignore[list-item]
             AgentToolCall.__table__,  # type: ignore[list-item]
             AgentModelCall.__table__,  # type: ignore[list-item]
+            AgentWorkstream.__table__,  # type: ignore[list-item]
+            AgentWorkstreamEvent.__table__,  # type: ignore[list-item]
         ],
     )
     return eng

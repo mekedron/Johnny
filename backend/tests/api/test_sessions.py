@@ -20,6 +20,8 @@ from app.db.models import (
     AgentTask,
     AgentToolCall,
     AgentUtterance,
+    AgentWorkstream,
+    AgentWorkstreamEvent,
     BotMode,
     BotSession,
     BotSessionStatus,
@@ -31,6 +33,9 @@ from app.db.models import (
     MeetingConfig,
     SessionTiming,
     TranscriptChunk,
+    WorkstreamDeliveryStatus,
+    WorkstreamSourceKind,
+    WorkstreamStatus,
 )
 from app.main import app
 from app.services.session_scheduler import (
@@ -64,6 +69,8 @@ def engine() -> sa.Engine:
             AgentTask.__table__,  # type: ignore[list-item]
             AgentToolCall.__table__,  # type: ignore[list-item]
             AgentModelCall.__table__,  # type: ignore[list-item]
+            AgentWorkstream.__table__,  # type: ignore[list-item]
+            AgentWorkstreamEvent.__table__,  # type: ignore[list-item]
             SessionTiming.__table__,  # type: ignore[list-item]
             ConversationEvent.__table__,  # type: ignore[list-item]
         ],
@@ -485,6 +492,236 @@ def test_tool_call_trace_sink_persists_and_is_exposed(
     assert calls[0]["kind"] == "google-calendar"
     assert calls[0]["turn_id"] == 3
     assert calls[0]["error"] == "exit 1: google: no account connected"
+
+
+def _seed_trace_session(db_session: Session) -> int:
+    """Build a two-turn session with the full US-005 substrate and return its id.
+
+    Turn 1 speaks a direct reply (``req-1``); turn 2 delegates a workstream
+    (``req-2``) whose result is delivered off-turn by a later utterance. Exercises
+    every cross-link the ``/trace`` projection computes.
+    """
+    _, cfg = _seed_meeting(db_session)
+    row = BotSession(meeting_config_id=cfg.id, status=BotSessionStatus.JOINED)
+    db_session.add(row)
+    db_session.flush()
+
+    d1 = AgentDecision(
+        bot_session_id=row.id,
+        should_speak=True,
+        confidence=0.91,
+        reason="direct answer",
+        reply_type="answer",
+        turn_id=1,
+        request_id="req-1",
+        outcome=DecisionOutcome.SPOKEN,
+        input_window={},
+        raw_output={},
+    )
+    d2 = AgentDecision(
+        bot_session_id=row.id,
+        should_speak=True,
+        confidence=0.74,
+        reason="needs a data lookup",
+        reply_type="delegate",
+        turn_id=2,
+        request_id="req-2",
+        outcome=DecisionOutcome.SPOKEN,
+        input_window={},
+        raw_output={},
+    )
+    db_session.add_all([d1, d2])
+    db_session.flush()
+
+    u1 = AgentUtterance(
+        bot_session_id=row.id,
+        agent_decision_id=d1.id,
+        answers_request_id="req-1",
+        mode=BotMode.APPROVAL_REQUIRED,
+        prompt="[]",
+        output_text="It is sunny.",
+        audio_file="reply-1.wav",
+        audio_duration_ms=1200,
+    )
+    u2 = AgentUtterance(
+        bot_session_id=row.id,
+        agent_decision_id=None,  # off-turn task result, no decision link
+        answers_request_id="req-2",
+        mode=BotMode.APPROVAL_REQUIRED,
+        prompt="[]",
+        output_text="Found 155 CO2 orders.",
+    )
+    db_session.add_all([u1, u2])
+    db_session.flush()
+
+    task = AgentTask(
+        bot_session_id=row.id,
+        agent_decision_id=d2.id,
+        turn_id=2,
+        request_id="req-2",
+        kind="metabase",
+        request_json={"kind": "metabase", "args": {}, "ack": "On it."},
+        status="done",
+        ack_text="On it.",
+        result_text="155 orders.",
+    )
+    db_session.add(task)
+    db_session.flush()
+
+    ws = AgentWorkstream(
+        bot_session_id=row.id,
+        source_kind=WorkstreamSourceKind.DELEGATE,
+        source_turn_id=2,
+        source_decision_id=d2.id,
+        agent_task_id=task.id,
+        request_id="req-2",
+        title="metabase",
+        user_request_text="how many CO2 orders?",
+        status=WorkstreamStatus.DONE,
+        delivery_status=WorkstreamDeliveryStatus.DELIVERED,
+        delivered_utterance_id=u2.id,
+        result_text="155 orders.",
+        result_json={"count": 155},
+    )
+    db_session.add(ws)
+    db_session.flush()
+    for seq, etype in ((1, "queued"), (2, "running"), (3, "done")):
+        db_session.add(
+            AgentWorkstreamEvent(
+                workstream_id=ws.id,
+                bot_session_id=row.id,
+                sequence=seq,
+                event_type=etype,
+            )
+        )
+    db_session.add(
+        AgentToolCall(
+            bot_session_id=row.id,
+            agent_task_id=task.id,
+            turn_id=2,
+            tool_name="execute_query",
+            request_json={},
+            ok=True,
+            timed_out=False,
+            truncated=False,
+            denied=False,
+        )
+    )
+    db_session.add_all(
+        [
+            AgentModelCall(
+                bot_session_id=row.id,
+                turn_id=1,
+                role="router",
+                model_name="gpt-5.5",
+                prompt_tokens=100,
+                total_tokens=108,
+                duration_ms=45,
+            ),
+            AgentModelCall(
+                bot_session_id=row.id,
+                turn_id=2,
+                role="router",
+                model_name="gpt-5.5",
+                duration_ms=52,
+            ),
+            AgentModelCall(
+                bot_session_id=row.id,
+                turn_id=2,
+                role="answer",
+                model_name="gpt-5.5",
+            ),
+        ]
+    )
+    db_session.add(
+        ConversationEvent(
+            bot_session_id=row.id,
+            event_type="interruption_recorded",
+            timestamp_ms=5000,
+            turn_id=1,
+            duration_ms=120,
+            reason="user_over_bot",
+            details={"speech_kind": "reply"},
+        )
+    )
+    db_session.commit()
+    return row.id
+
+
+def test_get_session_trace_404_for_unknown(client: TestClient) -> None:
+    res = client.get("/sessions/999999/trace")
+    assert res.status_code == 404
+
+
+def test_get_session_trace_projection(
+    client: TestClient, db_session: Session
+) -> None:
+    """US-005: GET /sessions/{id}/trace returns the camelCase SessionTraceView
+    with the router/delivery/workstream cross-links computed server-side."""
+    session_id = _seed_trace_session(db_session)
+
+    res = client.get(f"/sessions/{session_id}/trace")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert set(body) == {"routerTurns", "deliveries", "workstreams", "activity"}
+
+    # routerTurns: chronological, with the role='router' model call summarised.
+    turns = body["routerTurns"]
+    assert [t["turnId"] for t in turns] == [1, 2]
+    assert turns[0]["action"] == "speak"
+    assert turns[0]["requestId"] == "req-1"
+    assert turns[0]["deliveryIds"] and turns[0]["workstreamIds"] == []
+    assert turns[0]["routerModelCall"]["modelName"] == "gpt-5.5"
+    assert turns[0]["routerModelCall"]["durationMs"] == 45
+    assert turns[1]["action"] == "delegate"
+    assert turns[1]["workstreamIds"] == [body["workstreams"][0]["id"]]
+
+    # deliveries: the off-turn one is a task_result linked to its workstream.
+    deliveries = {d["utteranceId"]: d for d in body["deliveries"]}
+    reply = next(d for d in deliveries.values() if d["answersRequestId"] == "req-1")
+    assert reply["deliveryKind"] == "reply"
+    assert reply["turnId"] == 1
+    assert reply["sourceWorkstreamId"] is None
+    result = next(d for d in deliveries.values() if d["answersRequestId"] == "req-2")
+    assert result["deliveryKind"] == "task_result"
+    assert result["turnId"] is None
+    assert result["sourceWorkstreamId"] == body["workstreams"][0]["id"]
+
+    # workstreams: task linkage, tool/model counts, ordered progress events.
+    assert len(body["workstreams"]) == 1
+    ws = body["workstreams"][0]
+    assert ws["sourceKind"] == "delegate"
+    assert ws["status"] == "done"
+    assert ws["deliveryStatus"] == "delivered"
+    assert ws["taskKind"] == "metabase"
+    assert ws["ackText"] == "On it."
+    assert ws["toolCallCount"] == 1
+    assert ws["modelCallCount"] == 1
+    assert [e["eventType"] for e in ws["events"]] == ["queued", "running", "done"]
+
+    # activity strip.
+    assert [a["eventType"] for a in body["activity"]] == ["interruption_recorded"]
+
+
+def test_get_session_detail_includes_workstreams_and_request_id(
+    client: TestClient, db_session: Session
+) -> None:
+    """US-005: the legacy detail payload gains request_id + workstreams without
+    breaking its existing shape."""
+    session_id = _seed_trace_session(db_session)
+
+    res = client.get(f"/sessions/{session_id}")
+    assert res.status_code == 200, res.text
+    body = res.json()
+
+    assert {d["request_id"] for d in body["decisions"]} == {"req-1", "req-2"}
+    assert any(u["answers_request_id"] == "req-2" for u in body["utterances"])
+    assert any(t["request_id"] == "req-2" for t in body["tasks"])
+    assert len(body["workstreams"]) == 1
+    ws = body["workstreams"][0]
+    assert ws["source_kind"] == "delegate"
+    assert ws["delivery_status"] == "delivered"
+    assert ws["request_id"] == "req-2"
 
 
 def test_get_session_detail_includes_recent_history(

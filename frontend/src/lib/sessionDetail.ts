@@ -95,6 +95,9 @@ export interface AgentDecisionRecord {
 	// coarse bucket; `no_reply_reason` names the suppressor (set iff no_reply);
 	// `turn_id` ties this row to its transcript/timing rows.
 	turn_id: number | null;
+	// Cross-turn correlation id (US-003); optional/additive so an older cached
+	// response without the field still parses.
+	request_id?: string | null;
 	terminal_state: TerminalState | null;
 	no_reply_reason: NoReplyReason | null;
 	outcome: DecisionOutcome;
@@ -112,6 +115,9 @@ export interface AgentUtteranceRecord {
 	id: number;
 	bot_session_id: number;
 	agent_decision_id: number | null;
+	// Durable delivery→request link (US-003); survives `agent_decision_id` being
+	// nulled and covers fallback/timeout speech. Optional/additive.
+	answers_request_id?: string | null;
 	mode: BotMode;
 	// Serialised answer-LLM prompt (JSON array of role/content messages) that
 	// produced this utterance — drives the timeline "View prompt" disclosure
@@ -144,6 +150,8 @@ export interface AgentTaskRecord {
 	bot_session_id: number;
 	agent_decision_id: number | null;
 	turn_id: number | null;
+	// Cross-turn correlation id (US-003), mirrored from the decision. Optional.
+	request_id?: string | null;
 	kind: string;
 	status: AgentTaskStatus;
 	ack_text: string | null;
@@ -252,6 +260,55 @@ export interface MeetingBotParticipation {
 	dismissed_until: string | null;
 }
 
+/** Execution status of a workstream (US-002, PRD §7). */
+export type WorkstreamStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
+
+/** Delivery status of a workstream, decoupled from execution (US-002, PRD §7). */
+export type WorkstreamDeliveryStatus =
+	| 'not_ready'
+	| 'ready'
+	| 'queued'
+	| 'delivered'
+	| 'interrupted'
+	| 'expired';
+
+/** Origin of a workstream's work (US-002). */
+export type WorkstreamSourceKind = 'delegate' | 'foreground_tool_loop';
+
+/**
+ * One durable workstream envelope row (US-002/US-005) — the record the
+ * Workstreams column renders. Mirrors the snake_case `AgentWorkstreamRead`. The
+ * richer per-turn projection (task/tool/model cross-links + progress events) is
+ * served by `GET /sessions/{id}/trace` as a `WorkstreamView`.
+ */
+export interface AgentWorkstreamRecord {
+	id: number;
+	bot_session_id: number;
+	agent_id: number | null;
+	workspace_id: number | null;
+	source_kind: WorkstreamSourceKind;
+	source_turn_id: number | null;
+	source_decision_id: number | null;
+	agent_task_id: number | null;
+	request_id: string | null;
+	title: string | null;
+	user_request_text: string | null;
+	status: WorkstreamStatus;
+	delivery_status: WorkstreamDeliveryStatus;
+	started_at: string | null;
+	completed_at: string | null;
+	delivered_at: string | null;
+	result_available_at: string | null;
+	result_expires_at: string | null;
+	expired_reason: string | null;
+	delivered_utterance_id: number | null;
+	result_text: string | null;
+	result_json: Record<string, unknown> | null;
+	error: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
 export interface SessionDetail {
 	session: BotSession;
 	transcripts: TranscriptChunk[];
@@ -267,6 +324,9 @@ export interface SessionDetail {
 	// Per-LLM-call audit — the answer agent's tool-loop steps (Johnny-gal).
 	// Optional so a cached/older API response without the field still parses.
 	model_calls?: AgentModelCallRecord[];
+	// Durable workstream envelopes (US-002/US-005) — one per delegated task.
+	// Optional/additive; the per-turn projection is GET /sessions/{id}/trace.
+	workstreams?: AgentWorkstreamRecord[];
 	// Bot-participation state of the session's meeting; null/absent for
 	// playground sessions (Johnny-trt.56).
 	meeting_bot_state?: MeetingBotParticipation | null;
@@ -441,4 +501,130 @@ export function getConversationEvents(
 	return request<ConversationEventsResponse>(
 		`/sessions/${botSessionId}/conversation_events${qs}`
 	);
+}
+
+// --- Trace projection (US-005, PRD §6.3) ----------------------------------
+// `GET /sessions/{id}/trace` returns the three-column projection in **camelCase**
+// — the one endpoint that does, matching the PRD's named `SessionTraceView`
+// interface — so these types mirror the wire 1:1 with no field-mapping. The
+// same shape is produced client-side for live deltas by `buildSessionTraceView()`
+// (US-102).
+
+/** Headline cost of a turn's `role='router'` model call (US-004). */
+export interface RouterModelCallView {
+	id: number;
+	modelProvider: string | null;
+	modelName: string | null;
+	promptTokens: number | null;
+	completionTokens: number | null;
+	totalTokens: number | null;
+	timeToFirstTokenMs: number | null;
+	durationMs: number | null;
+	finishReason: string | null;
+}
+
+/** One router decision with links to what it produced (Decisions column). */
+export interface RouterTurnView {
+	decisionId: number;
+	turnId: number | null;
+	requestId: string | null;
+	createdAt: string;
+	action: string;
+	shouldSpeak: boolean;
+	confidence: number;
+	reason: string;
+	replyType: string | null;
+	outcome: string;
+	terminalState: string | null;
+	noReplyReason: string | null;
+	routerModelCall: RouterModelCallView | null;
+	deliveryIds: number[];
+	workstreamIds: number[];
+}
+
+/** One thing the bot said, back-linked to the request it answered. */
+export interface DeliveryView {
+	utteranceId: number;
+	createdAt: string;
+	turnId: number | null;
+	decisionId: number | null;
+	answersRequestId: string | null;
+	deliveryKind: string;
+	finalText: string;
+	interrupted: boolean;
+	mode: string;
+	audioFile: string | null;
+	audioDurationMs: number | null;
+	sourceWorkstreamId: number | null;
+}
+
+/** One append-only progress/audit row on a workstream (US-002). */
+export interface WorkstreamEventView {
+	id: number;
+	sequence: number;
+	eventType: string;
+	text: string | null;
+	payloadJson: Record<string, unknown> | null;
+	createdAt: string;
+}
+
+/** One unit of work as its own thread (Workstreams column). */
+export interface WorkstreamView {
+	id: number;
+	sourceKind: string;
+	sourceTurnId: number | null;
+	sourceDecisionId: number | null;
+	agentTaskId: number | null;
+	requestId: string | null;
+	title: string | null;
+	userRequestText: string | null;
+	status: string;
+	deliveryStatus: string;
+	createdAt: string;
+	startedAt: string | null;
+	completedAt: string | null;
+	deliveredAt: string | null;
+	resultAvailableAt: string | null;
+	resultExpiresAt: string | null;
+	expiredReason: string | null;
+	deliveredUtteranceId: number | null;
+	resultText: string | null;
+	resultJson: Record<string, unknown> | null;
+	error: string | null;
+	taskKind: string | null;
+	taskStatus: string | null;
+	ackText: string | null;
+	toolCallCount: number;
+	modelCallCount: number;
+	events: WorkstreamEventView[];
+}
+
+/** One conversation-dynamics event: interruption / floor / turn-claim. */
+export interface ActivityEventView {
+	id: number;
+	eventType: string;
+	timestampMs: number;
+	turnId: number | null;
+	agentName: string | null;
+	counterpartName: string | null;
+	durationMs: number | null;
+	reason: string;
+	details: Record<string, unknown>;
+}
+
+/** The three-column projection (PRD §6.3), consumed by live + history. */
+export interface SessionTraceView {
+	routerTurns: RouterTurnView[];
+	deliveries: DeliveryView[];
+	workstreams: WorkstreamView[];
+	activity: ActivityEventView[];
+}
+
+/**
+ * Fetch the server-computed three-column trace projection for a session
+ * (US-005). Consumed identically by the live and history detail views; the
+ * legacy `/sessions/{id}` shape keeps serving during migration.
+ */
+export function getSessionTrace(botSessionId: number): Promise<SessionTraceView> {
+	return request<SessionTraceView>(`/sessions/${botSessionId}/trace`);
 }

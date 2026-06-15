@@ -42,6 +42,8 @@ from app.db.models import (
     AgentTaskStatus,
     AgentToolCall,
     AgentUtterance,
+    AgentWorkstream,
+    AgentWorkstreamEvent,
     BotMode,
     BotSession,
     BotSessionSource,
@@ -54,6 +56,9 @@ from app.db.models import (
     SessionTiming,
     TerminalState,
     TranscriptChunk,
+    WorkstreamDeliveryStatus,
+    WorkstreamSourceKind,
+    WorkstreamStatus,
 )
 from app.services.bot_sessions import BotSessionNotFoundError
 from app.services.replay_session import load_replay_fixture
@@ -66,6 +71,7 @@ from app.services.session_scheduler import (
     start_session_for_meeting,
     stop_session_by_id,
 )
+from app.services.session_trace import SessionTraceView, build_session_trace_view
 from johnny.smoketest.replay import (
     check_invariants,
     diff_against_recorded,
@@ -179,6 +185,10 @@ class AgentDecisionRead(BaseModel):
     # no_reply); ``no_reply_reason`` names the suppressor that fired (set iff
     # no_reply); ``turn_id`` ties the row to its transcript/timing rows.
     turn_id: int | None
+    # Cross-turn correlation id (US-003): the request this turn belongs to,
+    # propagated to utterances/workstreams so a request can be tracked across
+    # interruptions. NULL for pre-US-003 history / bare-gate turns.
+    request_id: str | None = None
     terminal_state: TerminalState | None
     no_reply_reason: NoReplyReason | None
     outcome: DecisionOutcome
@@ -203,6 +213,10 @@ class AgentUtteranceRead(BaseModel):
     id: int
     bot_session_id: int
     agent_decision_id: int | None
+    # Durable "which request did this delivery answer?" link (US-003) — set
+    # from the AgentSpoke event independently of ``agent_decision_id`` so it
+    # survives that FK being SET NULL and covers fallback/timeout speech.
+    answers_request_id: str | None = None
     mode: BotMode
     # Serialised answer-LLM prompt (list of role/content messages) that
     # produced this utterance — drives the timeline's "Asked the model →
@@ -237,6 +251,9 @@ class AgentTaskRead(BaseModel):
     bot_session_id: int
     agent_decision_id: int | None
     turn_id: int | None
+    # Cross-turn correlation id (US-003), mirrored from the delegating decision
+    # so the workstream envelope can be stamped on any task event.
+    request_id: str | None = None
     kind: str
     status: AgentTaskStatus
     ack_text: str | None
@@ -313,6 +330,47 @@ class AgentModelCallRead(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
     created_at: datetime
+
+
+class AgentWorkstreamRead(BaseModel):
+    """One durable workstream envelope row (US-002, PRD §6.1).
+
+    The operator-facing record *on top* of the execution row: it unifies
+    delegated work (``agent_task_id`` FKs the backing ``agent_tasks`` row) and —
+    in later phases — inline answer-loop work into one queryable model, with the
+    execution ``status`` and ``delivery_status`` decoupled (§7). Carried on both
+    the live and history detail payloads (US-005) so the Workstreams column
+    renders identically; the richer per-turn projection (task / tool / model
+    cross-links + progress events) is served by ``GET /sessions/{id}/trace``.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    bot_session_id: int
+    agent_id: int | None
+    workspace_id: int | None
+    source_kind: WorkstreamSourceKind
+    source_turn_id: int | None
+    source_decision_id: int | None
+    agent_task_id: int | None
+    request_id: str | None
+    title: str | None
+    user_request_text: str | None
+    status: WorkstreamStatus
+    delivery_status: WorkstreamDeliveryStatus
+    started_at: datetime | None
+    completed_at: datetime | None
+    delivered_at: datetime | None
+    result_available_at: datetime | None
+    result_expires_at: datetime | None
+    expired_reason: str | None
+    delivered_utterance_id: int | None
+    result_text: str | None
+    result_json: dict[str, Any] | None
+    error: str | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class SessionTimingRead(BaseModel):
@@ -412,6 +470,10 @@ class SessionDetailResponse(BaseModel):
     # Per-LLM-call audit (Johnny-gal): the answer agent's tool-loop steps,
     # grouped onto a turn by ``turn_id`` and ordered by ``step_index``.
     model_calls: list[AgentModelCallRead] = []
+    # Durable workstream envelopes (US-002/US-005) — one per delegated task,
+    # the record the Workstreams column renders. Optional/additive so a cached
+    # older client still parses; the per-turn projection is GET /{id}/trace.
+    workstreams: list[AgentWorkstreamRead] = []
     meeting_bot_state: MeetingBotParticipationRead | None = None
 
 
@@ -585,6 +647,16 @@ def get_session_detail(
             .limit(limit)
         ).all()
     )
+    # Durable workstream envelopes (US-002/US-005) — ascending by id so the
+    # Workstreams column renders them in creation order.
+    workstreams = list(
+        session.scalars(
+            select(AgentWorkstream)
+            .where(AgentWorkstream.bot_session_id == row.id)
+            .order_by(AgentWorkstream.id.asc())
+            .limit(limit)
+        ).all()
+    )
     pending = [d for d in decisions if d.outcome == DecisionOutcome.PENDING]
 
     # Meeting-level participation state (Johnny-trt.56) so the page can
@@ -623,7 +695,105 @@ def get_session_detail(
         tasks=[AgentTaskRead.model_validate(t) for t in tasks],
         tool_calls=[AgentToolCallRead.model_validate(c) for c in tool_calls],
         model_calls=[AgentModelCallRead.model_validate(c) for c in model_calls],
+        workstreams=[AgentWorkstreamRead.model_validate(w) for w in workstreams],
         meeting_bot_state=meeting_state,
+    )
+
+
+@router.get("/{bot_session_id}/trace", response_model=SessionTraceView)
+def get_session_trace(
+    bot_session_id: int,
+    session: SessionDep,
+) -> SessionTraceView:
+    """Return the three-column trace projection for one session (US-005).
+
+    ``SessionTraceView { routerTurns, deliveries, workstreams, activity }``
+    (PRD §6.3) — the same projection the live ``/sessions/[id]`` and
+    ``/history/[id]`` views consume. Unlike the bounded ``/sessions/{id}``
+    detail, the rows are loaded **unbounded**: the projection cross-links the
+    full set (delivery → request, router turn → delivery/workstream ids,
+    workstream → tool/model counts), so a partial load would mis-link. The
+    legacy ``/sessions/{id}`` shape keeps serving during migration.
+    """
+    row = session.get(BotSession, bot_session_id)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="bot_session not found",
+        )
+
+    sid = row.id
+    decisions = list(
+        session.scalars(
+            select(AgentDecision)
+            .where(AgentDecision.bot_session_id == sid)
+            .order_by(AgentDecision.created_at.asc(), AgentDecision.id.asc())
+        ).all()
+    )
+    utterances = list(
+        session.scalars(
+            select(AgentUtterance)
+            .where(AgentUtterance.bot_session_id == sid)
+            .order_by(AgentUtterance.created_at.asc(), AgentUtterance.id.asc())
+        ).all()
+    )
+    tasks = list(
+        session.scalars(
+            select(AgentTask)
+            .where(AgentTask.bot_session_id == sid)
+            .order_by(AgentTask.id.asc())
+        ).all()
+    )
+    tool_calls = list(
+        session.scalars(
+            select(AgentToolCall)
+            .where(AgentToolCall.bot_session_id == sid)
+            .order_by(AgentToolCall.id.asc())
+        ).all()
+    )
+    model_calls = list(
+        session.scalars(
+            select(AgentModelCall)
+            .where(AgentModelCall.bot_session_id == sid)
+            .order_by(AgentModelCall.id.asc())
+        ).all()
+    )
+    workstreams = list(
+        session.scalars(
+            select(AgentWorkstream)
+            .where(AgentWorkstream.bot_session_id == sid)
+            .order_by(AgentWorkstream.id.asc())
+        ).all()
+    )
+    workstream_events = list(
+        session.scalars(
+            select(AgentWorkstreamEvent)
+            .where(AgentWorkstreamEvent.bot_session_id == sid)
+            .order_by(
+                AgentWorkstreamEvent.workstream_id.asc(),
+                AgentWorkstreamEvent.sequence.asc(),
+            )
+        ).all()
+    )
+    conversation_events = list(
+        session.scalars(
+            select(ConversationEvent)
+            .where(ConversationEvent.bot_session_id == sid)
+            .order_by(
+                ConversationEvent.timestamp_ms.asc(), ConversationEvent.id.asc()
+            )
+        ).all()
+    )
+
+    return build_session_trace_view(
+        decisions=decisions,
+        utterances=utterances,
+        tasks=tasks,
+        tool_calls=tool_calls,
+        model_calls=model_calls,
+        workstreams=workstreams,
+        workstream_events=workstream_events,
+        conversation_events=conversation_events,
     )
 
 

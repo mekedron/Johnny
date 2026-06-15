@@ -23,6 +23,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_session
@@ -35,10 +36,12 @@ from app.api.sessions import (
     AgentModelCallRead,
     AgentTaskRead,
     AgentToolCallRead,
+    AgentWorkstreamRead,
     ConversationEventRead,
     SessionTimingRead,
 )
 from app.db.models import (
+    AgentWorkstream,
     BotMode,
     BotSessionSource,
     BotSessionStatus,
@@ -181,6 +184,8 @@ class HistoryDecisionRead(BaseModel):
     # Terminal-state-per-turn (INV-1, Johnny-ckz.28.3) — same shape the live
     # session detail serves so the shared frontend type stays accurate.
     turn_id: int | None
+    # Cross-turn correlation id (US-003) — same shape the live detail serves.
+    request_id: str | None = None
     terminal_state: TerminalState | None
     no_reply_reason: NoReplyReason | None
     outcome: DecisionOutcome
@@ -198,6 +203,8 @@ class HistoryUtteranceRead(BaseModel):
     id: int
     bot_session_id: int
     agent_decision_id: int | None
+    # Durable delivery→request link (US-003) — same shape the live detail serves.
+    answers_request_id: str | None = None
     mode: BotMode
     # Answer-LLM prompt behind the utterance (Johnny-ckz.28.4) — kept in
     # lock-step with the live serializer for the shared frontend type.
@@ -254,6 +261,9 @@ class HistoryDetailResponse(BaseModel):
     tool_calls: list[AgentToolCallRead] = []
     # Per-LLM-call audit (Johnny-gal): the answer agent's tool-loop steps.
     model_calls: list[AgentModelCallRead] = []
+    # Durable workstream envelopes (US-002/US-005) — same shape the live detail
+    # serves; the per-turn projection is GET /sessions/{id}/trace.
+    workstreams: list[AgentWorkstreamRead] = []
     timings: list[SessionTimingRead] = []
     conversation_events: list[ConversationEventRead] = []
 
@@ -358,6 +368,17 @@ def get_history_detail(
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    # Durable workstream envelopes (US-002/US-005) — loaded here directly so the
+    # shared ``get_session_full_detail`` tuple signature stays unchanged. The
+    # session existence was already validated above.
+    workstreams = list(
+        session.scalars(
+            select(AgentWorkstream)
+            .where(AgentWorkstream.bot_session_id == bot_session_id)
+            .order_by(AgentWorkstream.id.asc())
+        ).all()
+    )
+
     return HistoryDetailResponse(
         session=HistorySessionRead.model_validate(row),
         transcripts=[
@@ -372,6 +393,9 @@ def get_history_detail(
         tasks=[AgentTaskRead.model_validate(t) for t in tasks],
         tool_calls=[AgentToolCallRead.model_validate(c) for c in tool_calls],
         model_calls=[AgentModelCallRead.model_validate(c) for c in model_calls],
+        workstreams=[
+            AgentWorkstreamRead.model_validate(w) for w in workstreams
+        ],
         timings=[SessionTimingRead.model_validate(t) for t in timings],
         conversation_events=[
             ConversationEventRead.model_validate(e) for e in conversation_events
