@@ -44,6 +44,7 @@ function makeAgent(overrides: Partial<Agent> = {}): Agent {
 		router_timeout_retries: null,
 		router_timeout_fallback_mode: null,
 		router_timeout_fallback_text: null,
+		max_tool_steps: null,
 		is_default: false,
 		router_llm_provider_id: null,
 		answer_llm_provider_id: null,
@@ -213,6 +214,35 @@ describe('router-timeout fallback fields (Johnny-xql)', () => {
 		const errors = validateAgentDraft(draft);
 		assert.equal(errors.router_llm_timeout_s, undefined);
 		assert.equal(errors.router_timeout_retries, undefined);
+	});
+});
+
+describe('max_tool_steps (Johnny-3gx)', () => {
+	it('defaults to 0 (unlimited) from null and carries a saved value', () => {
+		assert.equal(draftFromAgent(null).max_tool_steps, 0);
+		assert.equal(draftFromAgent(makeAgent({ max_tool_steps: 20 })).max_tool_steps, 20);
+	});
+
+	it('diffs only when the cap changes', () => {
+		const agent = makeAgent({ max_tool_steps: 0 });
+		const draft = draftFromAgent(agent);
+		assert.deepEqual(diffAgentPayload(agent, draft), {});
+		draft.max_tool_steps = 12;
+		assert.deepEqual(diffAgentPayload(agent, draft), { max_tool_steps: 12 });
+	});
+
+	it('flags an out-of-range cap but accepts 0 (unlimited) and the ceiling', () => {
+		const tooHigh = draftFromAgent(null);
+		tooHigh.max_tool_steps = 101;
+		assert.ok(validateAgentDraft(tooHigh).max_tool_steps);
+		const negative = draftFromAgent(null);
+		negative.max_tool_steps = -1;
+		assert.ok(validateAgentDraft(negative).max_tool_steps);
+		const ok = draftFromAgent(null);
+		ok.max_tool_steps = 0;
+		assert.equal(validateAgentDraft(ok).max_tool_steps, undefined);
+		ok.max_tool_steps = 100;
+		assert.equal(validateAgentDraft(ok).max_tool_steps, undefined);
 	});
 });
 

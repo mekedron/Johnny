@@ -432,6 +432,13 @@ class Agent(TimestampMixin, Base):
         nullable=False,
         default="Sorry, I didn't catch that in time — could you say that again?",
     )
+    # Native tool-loop depth (Johnny-3gx, configurable like router_llm_timeout_s).
+    # The answer agent composes + calls native tools in a loop (sandbox + the MCP
+    # gateway); this caps how many tool steps one turn may take. ``0`` = UNLIMITED
+    # (a metabase query can legitimately chain 6-12 calls — discover → fetch →
+    # query); a positive value bounds a runaway loop. Tool-less sessions never
+    # reach a tool step, so it is inert for them.
+    max_tool_steps: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     router_llm_provider_id: Mapped[int | None] = mapped_column(
         ForeignKey("provider_credentials.id", ondelete="SET NULL"), nullable=True
@@ -1099,8 +1106,9 @@ class AgentModelCall(Base):
 
     A speak turn is not one model call — it is a *loop*: the answer model is
     asked, emits a tool call (``exec``/``read``/``list_dir``), sees the result,
-    is asked again, and so on up to ``MAX_TOOL_STEPS`` before it produces the
-    final spoken text. Each of those asks is one row here, ordered by
+    is asked again, and so on up to the agent's ``max_tool_steps`` (0 = unlimited)
+    before it produces the final spoken text. Each of those asks is one row here,
+    ordered by
     ``step_index`` within the turn, so the reasoning timeline can itemise *every*
     prompt the bot ran and what came back — the answer-loop observability the
     operator could not see (the router call is already captured in

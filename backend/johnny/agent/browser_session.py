@@ -406,6 +406,7 @@ class BrowserAgentSession:
             min_interruption_duration_s=runtime.min_interruption_duration_s,
             turn_detection=detector if detector is not None else "vad",
             endpointing=endpointing,
+            max_tool_steps=runtime.max_tool_steps,
         )
         logger.info(
             "browser session %s turn detection: %s (endpointing=%s)",

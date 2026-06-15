@@ -86,6 +86,7 @@ def _fake_runtime(*, needs_approval: bool = False) -> SimpleNamespace:
         decision_sink=object() if needs_approval else None,
         enable_barge_in=True,
         min_interruption_duration_s=None,
+        max_tool_steps=0,
         needs_approval_wiring=needs_approval,
         aclose=_aclose,
         _aclose_calls=aclose_calls,

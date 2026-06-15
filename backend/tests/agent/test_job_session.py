@@ -692,6 +692,29 @@ async def test_native_tools_omit_mcp_gateway_without_servers(
     assert db.closed is True
 
 
+async def test_runtime_carries_per_agent_max_tool_steps() -> None:
+    """Johnny-3gx: the per-agent native tool-loop cap rides the snapshot onto the
+    runtime, which hands it to build_agent_session. Default is 0 (unlimited)."""
+    db = _FakeDbSession()
+    runtime = await build_agent_runtime(
+        _job(mode=AUTONOMOUS_MODE, agent_snapshot={"max_tool_steps": 13}),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: db,
+    )
+    assert runtime.max_tool_steps == 13
+    await runtime.aclose()
+
+    default_runtime = await build_agent_runtime(
+        _job(mode=AUTONOMOUS_MODE),
+        event_bus=InMemoryEventBus(),
+        registry=_registry(),
+        db_session_factory=lambda: _FakeDbSession(),
+    )
+    assert default_runtime.max_tool_steps == 0  # unlimited by default
+    await default_runtime.aclose()
+
+
 async def test_meet_backed_runtime_advertises_meeting_leave() -> None:
     """Surface scoping (Johnny-trt.57): a job with a calendar_event_id is a
     Meet-backed session — meeting.leave joins the catalog ahead of

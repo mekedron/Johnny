@@ -49,6 +49,8 @@ export interface Agent {
 	router_timeout_retries: number | null;
 	router_timeout_fallback_mode: RouterTimeoutFallbackMode | null;
 	router_timeout_fallback_text: string | null;
+	/** Native tool-loop cap (Johnny-3gx). 0 = unlimited. */
+	max_tool_steps: number | null;
 	is_default: boolean;
 	router_llm_provider_id: number | null;
 	answer_llm_provider_id: number | null;
@@ -86,6 +88,7 @@ export interface AgentPayload {
 	router_timeout_retries?: number;
 	router_timeout_fallback_mode?: RouterTimeoutFallbackMode;
 	router_timeout_fallback_text?: string;
+	max_tool_steps?: number;
 	router_llm_provider_id?: number | null;
 	answer_llm_provider_id?: number | null;
 	reasoning_llm_provider_id?: number | null;
@@ -241,6 +244,8 @@ export interface AgentDraft {
 	router_timeout_retries: number;
 	router_timeout_fallback_mode: RouterTimeoutFallbackMode;
 	router_timeout_fallback_text: string;
+	/** Native tool-loop cap (Johnny-3gx). 0 = unlimited. */
+	max_tool_steps: number;
 	router_llm_provider_id: number | null;
 	answer_llm_provider_id: number | null;
 	reasoning_llm_provider_id: number | null;
@@ -267,6 +272,7 @@ export function draftFromAgent(agent: Agent | null): AgentDraft {
 		router_timeout_fallback_mode: agent?.router_timeout_fallback_mode ?? 'static',
 		router_timeout_fallback_text:
 			agent?.router_timeout_fallback_text ?? DEFAULT_TIMEOUT_FALLBACK_TEXT,
+		max_tool_steps: agent?.max_tool_steps ?? 0,
 		router_llm_provider_id: agent?.router_llm_provider_id ?? null,
 		answer_llm_provider_id: agent?.answer_llm_provider_id ?? null,
 		reasoning_llm_provider_id: agent?.reasoning_llm_provider_id ?? null,
@@ -338,6 +344,15 @@ export function validateAgentDraft(draft: AgentDraft): Record<string, string> {
 	if (draft.router_timeout_fallback_text.length > 500) {
 		errors.router_timeout_fallback_text = 'fallback text must be at most 500 characters';
 	}
+	// Native tool-loop cap range (Johnny-3gx) — mirror the API's Field bounds.
+	if (
+		!Number.isInteger(draft.max_tool_steps) ||
+		draft.max_tool_steps < 0 ||
+		draft.max_tool_steps > 100
+	) {
+		errors.max_tool_steps =
+			'tool-call limit must be a whole number between 0 and 100 (0 = unlimited)';
+	}
 	return errors;
 }
 
@@ -355,6 +370,7 @@ export function draftToCreatePayload(draft: AgentDraft): AgentPayload {
 		router_timeout_retries: draft.router_timeout_retries,
 		router_timeout_fallback_mode: draft.router_timeout_fallback_mode,
 		router_timeout_fallback_text: draft.router_timeout_fallback_text,
+		max_tool_steps: draft.max_tool_steps,
 		router_llm_provider_id: draft.router_llm_provider_id,
 		answer_llm_provider_id: draft.answer_llm_provider_id,
 		reasoning_llm_provider_id: draft.reasoning_llm_provider_id,
@@ -399,6 +415,9 @@ export function diffAgentPayload(saved: Agent, draft: AgentDraft): AgentPayload 
 		(saved.router_timeout_fallback_text ?? DEFAULT_TIMEOUT_FALLBACK_TEXT)
 	) {
 		patch.router_timeout_fallback_text = full.router_timeout_fallback_text;
+	}
+	if (full.max_tool_steps !== (saved.max_tool_steps ?? 0)) {
+		patch.max_tool_steps = full.max_tool_steps;
 	}
 	if (full.router_llm_provider_id !== saved.router_llm_provider_id) {
 		patch.router_llm_provider_id = full.router_llm_provider_id;

@@ -119,6 +119,7 @@ async def entrypoint(ctx: JobContext) -> None:
         vad=vad,
         enable_barge_in=runtime.enable_barge_in,
         min_interruption_duration_s=runtime.min_interruption_duration_s,
+        max_tool_steps=runtime.max_tool_steps,
     )
 
     if runtime.needs_approval_wiring and runtime.approval_gate is not None:

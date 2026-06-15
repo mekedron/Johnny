@@ -18,11 +18,13 @@ import pytest
 
 from johnny.agent.job_config import (
     DEFAULT_CONFIDENCE_THRESHOLD,
+    DEFAULT_MAX_TOOL_STEPS,
     DEFAULT_MODE,
     DEFAULT_ROUTER_LLM_TIMEOUT_S,
     DEFAULT_ROUTER_TIMEOUT_FALLBACK_MODE,
     DEFAULT_ROUTER_TIMEOUT_FALLBACK_TEXT,
     DEFAULT_ROUTER_TIMEOUT_RETRIES,
+    MAX_MAX_TOOL_STEPS,
     MAX_ROUTER_TIMEOUT_RETRIES,
     SUPPORTED_MODES,
     SessionJobConfig,
@@ -46,6 +48,7 @@ def _snapshot() -> dict[str, Any]:
         "router_timeout_retries": 2,
         "router_timeout_fallback_mode": "llm",
         "router_timeout_fallback_text": "One moment — could you repeat that?",
+        "max_tool_steps": 12,
         "providers": {"tts_provider_id": 3, "tts_voice_id": "amy"},
         "assignment_context": "Quarterly review.",
     }
@@ -111,6 +114,8 @@ def test_behavior_derives_from_snapshot() -> None:
     assert cfg.router_timeout_retries == 2
     assert cfg.router_timeout_fallback_mode == "llm"
     assert cfg.router_timeout_fallback_text == "One moment — could you repeat that?"
+    # Native tool-loop cap (Johnny-3gx).
+    assert cfg.max_tool_steps == 12
 
 
 def test_minimal_config_uses_safe_defaults() -> None:
@@ -125,6 +130,7 @@ def test_minimal_config_uses_safe_defaults() -> None:
     assert cfg.router_timeout_retries == DEFAULT_ROUTER_TIMEOUT_RETRIES
     assert cfg.router_timeout_fallback_mode == DEFAULT_ROUTER_TIMEOUT_FALLBACK_MODE
     assert cfg.router_timeout_fallback_text == DEFAULT_ROUTER_TIMEOUT_FALLBACK_TEXT
+    assert cfg.max_tool_steps == DEFAULT_MAX_TOOL_STEPS == 0
     assert cfg.agent_id is None
     assert cfg.agent_snapshot == {}
     assert cfg.provider_config == {}
@@ -163,6 +169,23 @@ def test_router_timeout_fields_are_lenient_and_clamped() -> None:
     assert _cfg({"router_timeout_fallback_text": "   "}).router_timeout_fallback_text == (
         DEFAULT_ROUTER_TIMEOUT_FALLBACK_TEXT
     )
+
+
+def test_max_tool_steps_is_lenient_and_clamped() -> None:
+    """Johnny-3gx: a corrupt snapshot degrades / clamps; 0 (unlimited) preserved."""
+
+    def _cfg(snapshot: dict[str, Any]) -> SessionJobConfig:
+        return SessionJobConfig(bot_session_id=1, room_name="r", agent_snapshot=snapshot)
+
+    # Unparseable / missing → default (0 = unlimited).
+    assert _cfg({"max_tool_steps": "nope"}).max_tool_steps == DEFAULT_MAX_TOOL_STEPS
+    assert _cfg({}).max_tool_steps == 0
+    # 0 preserved (unlimited); a concrete value passes through.
+    assert _cfg({"max_tool_steps": 0}).max_tool_steps == 0
+    assert _cfg({"max_tool_steps": 15}).max_tool_steps == 15
+    # Negatives floor to 0; above the ceiling clamps to MAX.
+    assert _cfg({"max_tool_steps": -7}).max_tool_steps == 0
+    assert _cfg({"max_tool_steps": 9999}).max_tool_steps == MAX_MAX_TOOL_STEPS
 
 
 def test_with_mode_rewrites_the_snapshot_copy_only() -> None:

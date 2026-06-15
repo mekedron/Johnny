@@ -71,6 +71,12 @@ ROUTER_TIMEOUT_FALLBACK_MODES: tuple[str, ...] = ("disabled", "static", "llm")
 DEFAULT_ROUTER_TIMEOUT_FALLBACK_TEXT = (
     "Sorry, I didn't catch that in time — could you say that again?"
 )
+# Native tool-loop depth (Johnny-3gx). 0 = UNLIMITED tool calls per turn; a
+# positive value caps the answer agent's native tool loop. The upper clamp
+# mirrors the agents API range (le=100) so a corrupt snapshot can't request an
+# absurd bound; ``build_agent_session`` maps 0 to its own unlimited sentinel.
+DEFAULT_MAX_TOOL_STEPS = 0
+MAX_MAX_TOOL_STEPS = 100
 
 # --- Provider-config role keys (Johnny-trt.42) -------------------------------
 # ``provider_config`` is keyed by provider kind (``stt`` / ``llm`` / ``tts``,
@@ -197,6 +203,7 @@ SNAPSHOT_ROUTER_LLM_TIMEOUT_S_KEY = "router_llm_timeout_s"
 SNAPSHOT_ROUTER_TIMEOUT_RETRIES_KEY = "router_timeout_retries"
 SNAPSHOT_ROUTER_TIMEOUT_FALLBACK_MODE_KEY = "router_timeout_fallback_mode"
 SNAPSHOT_ROUTER_TIMEOUT_FALLBACK_TEXT_KEY = "router_timeout_fallback_text"
+SNAPSHOT_MAX_TOOL_STEPS_KEY = "max_tool_steps"
 SNAPSHOT_ASSIGNMENT_CONTEXT_KEY = "assignment_context"
 SNAPSHOT_PEER_NAMES_KEY = "peer_names"
 SNAPSHOT_CAPABILITY_POLICY_KEY = "capability_policy"
@@ -400,6 +407,18 @@ class SessionJobConfig:
             self.agent_snapshot.get(SNAPSHOT_ROUTER_TIMEOUT_FALLBACK_TEXT_KEY) or ""
         ).strip()
         return raw or DEFAULT_ROUTER_TIMEOUT_FALLBACK_TEXT
+
+    @property
+    def max_tool_steps(self) -> int:
+        """The native tool-loop cap from the snapshot (Johnny-3gx).
+
+        Lenient + clamped into ``[0, MAX_MAX_TOOL_STEPS]``. ``0`` is preserved and
+        means UNLIMITED downstream — :func:`johnny.agent.session.build_agent_session`
+        maps it to its own large sentinel for LiveKit's tool loop.
+        """
+        return _coerce_max_tool_steps(
+            self.agent_snapshot.get(SNAPSHOT_MAX_TOOL_STEPS_KEY)
+        )
 
     @property
     def peer_names(self) -> tuple[str, ...]:
@@ -703,6 +722,23 @@ def _coerce_retries(value: Any) -> int:
     except (TypeError, ValueError):
         return DEFAULT_ROUTER_TIMEOUT_RETRIES
     return max(0, min(MAX_ROUTER_TIMEOUT_RETRIES, retries))
+
+
+def _coerce_max_tool_steps(value: Any) -> int:
+    """Coerce a decoded JSON / env value to the native tool-loop cap (Johnny-3gx).
+
+    ``None`` / blank / unparseable degrade to :data:`DEFAULT_MAX_TOOL_STEPS`
+    (0 = unlimited); parsed values clamp into ``[0, MAX_MAX_TOOL_STEPS]`` so a
+    corrupt snapshot can never request an absurd bound. ``0`` is preserved — it
+    means unlimited downstream (``build_agent_session`` maps it to its sentinel);
+    negatives clamp to 0."""
+    if value is None or value == "":
+        return DEFAULT_MAX_TOOL_STEPS
+    try:
+        steps = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_TOOL_STEPS
+    return max(0, min(MAX_MAX_TOOL_STEPS, steps))
 
 
 def _id_to_env(value: int | None) -> str:
