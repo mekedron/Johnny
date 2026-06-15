@@ -1030,6 +1030,17 @@ async def build_agent_runtime(
         # SPEAK instead of declining or ending the session.
         native_tools_active=native_tools_active,
     )
+    from app.services.model_calls import SqlAlchemyModelCallSink
+
+    # Router-call observability (US-004 / Johnny-d6w.4): the gate records each
+    # decided turn's router LLM call as a ``role='router'`` agent_model_calls row,
+    # symmetric with the answer-loop ``role='answer'`` rows wired below. DB-only —
+    # no live ModelCallObserved publish here (surfacing the router call live is the
+    # Decisions-column story US-104); the gate resolves each call's durable turn id
+    # through the same shared TurnIndex as its decision row.
+    router_model_call_sink = SqlAlchemyModelCallSink(
+        bot_session_id=config.bot_session_id
+    )
     gate = RouterGate(
         router_llm,
         config=gate_config,
@@ -1103,6 +1114,7 @@ async def build_agent_runtime(
         # TurnIndex the emitters read, so request_id reaches every one of the
         # turn's events + the delegated task.
         assign_request_id=turn_index.assign_request_id,
+        model_call_sink=router_model_call_sink,
     )
 
     # Internal teardown tools wait for the farewell ack to finish playing
@@ -1233,8 +1245,6 @@ async def build_agent_runtime(
     # AgentSession uses (adapters.llm); the resolver attributes each call to its
     # issuing turn. The router call stays captured in agent_decisions.
     if hasattr(adapters.llm, "bind_model_call_sink"):
-        from app.services.model_calls import SqlAlchemyModelCallSink
-
         adapters.llm.bind_model_call_sink(
             SqlAlchemyModelCallSink(
                 bot_session_id=config.bot_session_id,

@@ -68,12 +68,14 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from typing import Any
 
 from livekit.agents.llm import ChatContext, StopResponse
 from livekit.agents.llm.chat_context import ChatMessage as LKChatMessage
 from livekit.agents.voice import SpeechHandle
 
-from app.providers.base import ChatMessage, LLMProvider
+from app.providers.base import ChatMessage, LLMProvider, LLMResponse
 from johnny.agent.answer import uses_allowlist
 from johnny.agent.approval import ApprovalCoordinator, ApprovalRound
 from johnny.agent.complexity import SHADOW_KEY, matched_catalog_kinds, score_complexity
@@ -89,6 +91,7 @@ from johnny.agent.internal_tools import (
     session_control_keyword_entries,
 )
 from johnny.agent.interruptions import InterruptionMonitor
+from johnny.agent.model_call_trace import ModelCallSink, ModelCallTrace
 from johnny.agent.observability import (
     RecordDecision,
     RecordInterruption,
@@ -147,6 +150,48 @@ from johnny.voice_pipeline.reasoning import (
 from johnny.voice_pipeline.transcript_history import BOT_SPEAKER_LABEL
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _RouterCallCapture:
+    """One router LLM call's raw inputs/outputs, stashed by :meth:`RouterGate._decide`
+    for :meth:`RouterGate.run_turn` to turn into a ``role='router'``
+    :class:`~johnny.agent.model_call_trace.ModelCallTrace` once the turn's durable
+    int id has been resolved (US-004 / Johnny-d6w.4).
+
+    Stash-then-consume, exactly like ``_last_prompt_chars``: built right after the
+    bounded ``chat()`` returns (so a timed-out / cancelled call leaves it unset and
+    writes no router row) and consumed once, after the decision is recorded.
+    """
+
+    messages: list[ChatMessage]
+    response: LLMResponse
+    started: datetime
+    finished: datetime
+
+
+def _router_usage_tokens(
+    response: LLMResponse,
+) -> tuple[int | None, int | None, int | None]:
+    """Pull (prompt, completion, total) tokens off the router response's raw payload.
+
+    Mirrors :func:`johnny.agent.adapters.johnny_llm._usage_tokens` (kept local so the
+    gate stays decoupled from the answer adapter module): OpenAI-compatible responses
+    carry a ``usage`` block on :attr:`LLMResponse.raw`. Absent / malformed → all
+    ``None`` (the recorded-LLM harness reports no usage, so router rows there carry
+    ``None`` tokens — best-effort by contract).
+    """
+    raw = response.raw
+    usage = raw.get("usage") if isinstance(raw, dict) else None
+    if not isinstance(usage, dict):
+        return (None, None, None)
+
+    def _int(key: str) -> int | None:
+        value = usage.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    return (_int("prompt_tokens"), _int("completion_tokens"), _int("total_tokens"))
+
 
 # Reuse the legacy router schema + parser verbatim (both private in the pipeline
 # module, accessed module-qualified) so the gate produces byte-for-byte
@@ -640,6 +685,7 @@ class RouterGate:
         tasks: TaskCoordinator | None = None,
         resolve_turn_id: Callable[[str], int] | None = None,
         assign_request_id: Callable[[str], str] | None = None,
+        model_call_sink: ModelCallSink | None = None,
         abandon: asyncio.Event | None = None,
         clock: Callable[[], int] = _default_clock,
         wall_clock: Callable[[], int] = _default_wall_clock,
@@ -702,6 +748,19 @@ class RouterGate:
         # minted id reaches every one of the turn's events with no signature
         # change at the ~8 record_spoke call sites.
         self._assign_request_id = assign_request_id
+        # Router-call observability (US-004 / Johnny-d6w.4): the optional sink the
+        # answer side already uses (``agent_model_calls``), wired by the assemblies
+        # that pair a gate with one (prod job_session + the scenario harness). When
+        # set, every decided turn writes a ``role='router'`` row mirroring the
+        # ``role='answer'`` rows — the raw router prompt/response/tokens/timing the
+        # Decisions column shows. ``None`` for a bare gate ⇒ nothing recorded.
+        # ``_last_router_call`` is the per-turn stash ``_decide`` fills and
+        # ``run_turn`` consumes once the durable int turn id is resolvable; the
+        # writes are fire-and-forget (never on the turn's hot path), strong-reffed
+        # here and drained in :meth:`aclose`.
+        self._model_call_sink = model_call_sink
+        self._last_router_call: _RouterCallCapture | None = None
+        self._model_call_tasks: set[asyncio.Task[None]] = set()
         # No dead promises (Johnny-trt.53): the gate owns say(), so it owns the
         # honest spoken walk-back when a delegated task fails fast — attach the
         # coordinator's failure-report seam right here so every assembly that
@@ -917,6 +976,7 @@ class RouterGate:
         # Observability only: nothing branches on it.
         shadow = self._complexity_shadow(new_message, turn_id)
         self._last_prompt_chars = None  # set by _decide once the prompt is built
+        self._last_router_call = None  # set by _decide once chat() returns (US-004)
         triage_started = time.time()
         action, decision = await run_gate(
             lambda: self._decide(turn_ctx, new_message),
@@ -1067,6 +1127,15 @@ class RouterGate:
                 turn_id,
                 transcript_window=self._transcript_window(turn_ctx, new_message),
             )
+
+        # Router model-call row (US-004 / Johnny-d6w.4): mirror the answer side and
+        # persist the router's raw prompt/response/tokens/timing as a
+        # ``role='router'`` agent_model_calls row. Placed here — after the decision
+        # emit resolved the turn's durable int id — so the row shares its decision's
+        # ``turn_id``. Covers every decided verdict (silent/speak/delegate) and all
+        # modes (approval too); a turn with no completed router call left the stash
+        # ``None`` and records nothing. Fire-and-forget; off the budget path.
+        self._record_router_model_call(turn_id)
 
         if not decision.should_speak:
             await tracker.emit(
@@ -2671,8 +2740,93 @@ class RouterGate:
             if self._config.task_catalog
             else ROUTER_DECISION_SCHEMA_NO_CATALOG
         )
+        # Router-call capture (US-004 / Johnny-d6w.4): time only the bounded
+        # chat() and stash the raw inputs/outputs. Two clock reads — no behaviour
+        # change — and the ModelCallTrace is built + persisted off the budget path
+        # back in run_turn, so the 8.0 s router budget wrapping this _decide is
+        # untouched. A cancelled / timed-out call never reaches the stash, so that
+        # turn writes no router row (correct: there was no router decision).
+        started = datetime.now(UTC)
         response = await self._router_llm.chat(messages, response_format=schema)
+        self._last_router_call = _RouterCallCapture(
+            messages=list(messages),
+            response=response,
+            started=started,
+            finished=datetime.now(UTC),
+        )
         return _reasoning._parse_router_response(response)
+
+    def _record_router_model_call(self, turn_id: str) -> None:
+        """Persist the just-decided turn's router LLM call as a ``role='router'``
+        ``agent_model_calls`` row (US-004 / Johnny-d6w.4).
+
+        Called from :meth:`run_turn` right after the decision is recorded, so the
+        turn's durable int id has been resolved through the shared ``TurnIndex``
+        (``resolve``/``last`` both name THIS turn here) and the router row carries
+        the same ``turn_id`` as its decision row. Mirrors the answer side
+        (:meth:`JohnnyLLM.schedule_model_call`): the trace is built synchronously
+        and the write is fire-and-forget, so the turn's hot path never blocks on the
+        DB and the 8.0 s router budget — which wraps only ``_decide`` — is
+        unaffected. Best-effort by contract: a sink raise is swallowed + logged,
+        never breaking a turn. No sink, or no completed router call this turn
+        (timeout/barge left the stash ``None``), records nothing.
+        """
+        sink = self._model_call_sink
+        capture = self._last_router_call
+        if sink is None or capture is None:
+            return
+        self._last_router_call = None
+        response = capture.response
+        prompt_tokens, completion_tokens, total_tokens = _router_usage_tokens(response)
+        prompt: list[dict[str, Any]] = [
+            {"role": m.role, "content": m.content} for m in capture.messages
+        ]
+        trace = ModelCallTrace(
+            role="router",
+            turn_id=(
+                self._resolve_turn_id(turn_id)
+                if self._resolve_turn_id is not None
+                else None
+            ),
+            # One router call per turn; ``role`` disambiguates it from the answer
+            # loop's own step 0.
+            step_index=0,
+            model_provider=self._router_llm.name,
+            model_name=getattr(self._router_llm, "model", None),
+            prompt=prompt,
+            response_text=response.text or None,
+            tool_calls=[
+                {"id": c.id, "name": c.name, "arguments": c.arguments}
+                for c in response.tool_calls
+            ],
+            finish_reason=response.finish_reason,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            # Non-streaming router call (``chat()``, not a token stream) → no TTFT.
+            time_to_first_token_ms=None,
+            duration_ms=int(
+                (capture.finished - capture.started).total_seconds() * 1000
+            ),
+            started_at=capture.started,
+            finished_at=capture.finished,
+        )
+
+        async def _safe_record() -> None:
+            try:
+                await sink.record(trace)
+            except Exception:  # pragma: no cover - tracing is best-effort
+                logger.warning(
+                    "agent.router.gate: router model-call sink failed — continuing",
+                    exc_info=True,
+                )
+
+        try:
+            task = asyncio.ensure_future(_safe_record())
+        except RuntimeError:  # pragma: no cover - no running loop (sync test path)
+            return
+        self._model_call_tasks.add(task)
+        task.add_done_callback(self._model_call_tasks.discard)
 
     # ------------------------------------------------------------------ #
     # Reply → turn correlation (the speak path's terminal)               #
@@ -3189,6 +3343,11 @@ class RouterGate:
             )
         if self._approval is not None:
             await self._approval.aclose()
+        # Drain the fire-and-forget router model-call writes (US-004) so a hermetic
+        # harness run has every ``role='router'`` row committed before it queries,
+        # and a real session never strands an in-flight observability write.
+        if self._model_call_tasks:
+            await asyncio.gather(*self._model_call_tasks, return_exceptions=True)
         await self._ledger.close()
 
     # ------------------------------------------------------------------ #

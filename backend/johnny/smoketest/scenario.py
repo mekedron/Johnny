@@ -53,10 +53,11 @@ from livekit.agents.voice import SpeechHandle
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import AgentWorkstream
+from app.db.models import AgentModelCall, AgentWorkstream
 from app.services.agent_tasks import SqlAlchemyTaskSink
 from app.services.task_worker import claim_queued_tasks, settle_claimed_task
 from johnny.agent.gate import TurnIndex, TurnLedger
+from johnny.agent.model_call_trace import ModelCallTrace
 from johnny.agent.observability import build_observability
 from johnny.agent.router_gate import RouterGate, RouterGateConfig
 from johnny.agent.speech_queue import (
@@ -218,6 +219,51 @@ def reverse_text_executor(task: QueuedTask) -> Awaitable[TaskResult]:
     return _run()
 
 
+# --- router model-call sink (US-004) ----------------------------------------
+
+
+class _ScenarioModelCallSink:
+    """Harness :class:`~johnny.agent.model_call_trace.ModelCallSink` (US-004).
+
+    Writes each router :class:`ModelCallTrace` as a ``role='router'``
+    ``agent_model_calls`` row through the scenario's SHARED session — the same way
+    :class:`~app.services.agent_tasks.SqlAlchemyTaskSink` is wired here. The
+    production :class:`~app.services.model_calls.SqlAlchemyModelCallSink` opens its
+    own short-lived session per write (correct for the live Postgres path), but on
+    the CI gate's in-memory SQLite ``StaticPool`` (a single shared connection) a
+    second session collides with the shared session's transaction, so the harness
+    shares the one session like every other writer.
+    """
+
+    def __init__(self, session: Session, bot_session_id: int) -> None:
+        self._session = session
+        self._bot_session_id = bot_session_id
+
+    async def record(self, trace: ModelCallTrace) -> None:
+        self._session.add(
+            AgentModelCall(
+                bot_session_id=self._bot_session_id,
+                turn_id=trace.turn_id,
+                role=trace.role,
+                step_index=trace.step_index,
+                model_provider=trace.model_provider,
+                model_name=trace.model_name,
+                prompt_json=trace.prompt or None,
+                response_text=trace.response_text,
+                tool_calls_json=trace.tool_calls or None,
+                finish_reason=trace.finish_reason,
+                prompt_tokens=trace.prompt_tokens,
+                completion_tokens=trace.completion_tokens,
+                total_tokens=trace.total_tokens,
+                time_to_first_token_ms=trace.time_to_first_token_ms,
+                duration_ms=trace.duration_ms,
+                started_at=trace.started_at,
+                finished_at=trace.finished_at,
+            )
+        )
+        self._session.commit()
+
+
 # --- result record ----------------------------------------------------------
 
 
@@ -331,6 +377,11 @@ async def run_scenario(
         executor_kinds=fixture.executor_kinds,
         router_llm_timeout_s=(SIMULATED_HANG_TIMEOUT_S if has_timeout else 0.0),
     )
+    # US-004: record each decided turn's router LLM call as a ``role='router'``
+    # agent_model_calls row, through the shared session (see _ScenarioModelCallSink).
+    model_call_sink = _ScenarioModelCallSink(
+        session, bot_session_id or fixture.bot_session_id
+    )
     gate = RouterGate(
         router,
         config=config,
@@ -343,6 +394,7 @@ async def run_scenario(
         # US-003: mint into the same TurnIndex the obs emitters read so request_id
         # propagates to decisions, utterances, and the delegated workstream.
         assign_request_id=turn_index.assign_request_id,
+        model_call_sink=model_call_sink,
     )
     say_stub = _ReplaySayStub()
     gate.attach_say(say_stub)

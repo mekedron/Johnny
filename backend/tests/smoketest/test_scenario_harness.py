@@ -26,6 +26,7 @@ pytest.importorskip("livekit.agents")
 from app.db import Base  # noqa: E402
 from app.db.models import (  # noqa: E402
     Agent,
+    AgentModelCall,
     AgentTask,
     AgentWorkstream,
     AgentWorkstreamEvent,
@@ -61,6 +62,7 @@ def db() -> Iterator[Session]:
     Base.metadata.create_all(
         bind=engine,
         tables=[
+            AgentModelCall.__table__,  # type: ignore[list-item]
             AgentTask.__table__,  # type: ignore[list-item]
             AgentWorkstream.__table__,  # type: ignore[list-item]
             AgentWorkstreamEvent.__table__,  # type: ignore[list-item]
@@ -184,6 +186,49 @@ def test_scenario_request_id_correlation(db: Session) -> None:
     assert completed[0].request_id == deleg_rid
     assert len(result.workstream_rows) == 1
     assert result.workstream_rows[0]["request_id"] == deleg_rid
+
+
+def test_scenario_captures_router_model_call(db: Session) -> None:
+    """US-004: every decided turn's router LLM call is captured as a
+    ``role='router'`` row in ``agent_model_calls`` — the Decisions-view symmetry
+    with the answer side — exercised through the REAL gate + the production
+    ``SqlAlchemyModelCallSink``. Verified via SQL that ``agent_model_calls.role``
+    returns ``router`` (today the live table is ``answer``-only). The deterministic
+    harness binds recorded answers without the answer adapter, so the ``answer``
+    half is asserted on the live/generation stack; here we pin the new router half.
+    """
+    fixture = load_scenario(SCENARIO_FIXTURE)
+    result = asyncio.run(run_scenario(fixture, session=db))
+
+    router_rows = db.scalars(
+        sa.select(AgentModelCall)
+        .where(AgentModelCall.bot_session_id == fixture.bot_session_id)
+        .where(AgentModelCall.role == "router")
+        .order_by(AgentModelCall.id)
+    ).all()
+
+    decisions = cast(
+        list[RouterDecisionMade], result.events_of_type("router_decision_made")
+    )
+    assert decisions, "the scenario decides at least one turn"
+    # Exactly one role='router' row per decided turn (silent / speak / delegate),
+    # each sharing its decision's durable int turn id.
+    assert len(router_rows) == len(decisions)
+    decided_turn_ids = {d.turn_id for d in decisions}
+    assert {row.turn_id for row in router_rows} == decided_turn_ids
+
+    for row in router_rows:
+        assert row.role == "router"
+        assert row.turn_id in decided_turn_ids
+        assert row.step_index == 0
+        assert row.prompt_json, "the router prompt (messages array) is persisted"
+        assert row.response_text, "the router's raw response text is persisted"
+        assert row.finish_reason == "stop"  # the recorded router LLM's finish_reason
+        assert row.model_provider, "the router provider name is recorded"
+    # The 8.0 s router budget is untouched: capture only stamps timing/clock reads,
+    # so the duration is a real, non-negative span (no assertion on its magnitude —
+    # the recorded LLM returns instantly and timestamps are wall-clock).
+    assert all(r.duration_ms is not None and r.duration_ms >= 0 for r in router_rows)
 
 
 def test_scenario_fixture_outside_frozen_replay_suite() -> None:
