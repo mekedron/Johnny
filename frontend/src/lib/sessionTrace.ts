@@ -38,6 +38,8 @@ import type {
 	SessionTimingRecord,
 	SessionTraceView,
 	WorkstreamEventView,
+	WorkstreamModelCallView,
+	WorkstreamToolCallView,
 	WorkstreamView
 } from '$lib/sessionDetail';
 
@@ -368,8 +370,11 @@ export function buildSessionTraceView(records: SessionTraceInput): SessionTraceV
 
 	// Router vs answer model calls keyed by turn (US-004 added the router rows).
 	// Router uses first-wins; answer calls are counted; other roles are ignored.
+	// `answerCallListByTurn` keeps the rows themselves for the Workstreams-column
+	// drill-through (US-106), using the identical role/turn keying as the count.
 	const routerCallByTurn = new Map<number, AgentModelCallRecord>();
 	const answerCallsByTurn = new Map<number, number>();
+	const answerCallListByTurn = new Map<number, AgentModelCallRecord[]>();
 	for (const mc of modelCalls) {
 		if (mc.turn_id === null) continue;
 		if (mc.role === 'router') {
@@ -378,14 +383,24 @@ export function buildSessionTraceView(records: SessionTraceInput): SessionTraceV
 			}
 		} else if (mc.role === 'answer') {
 			answerCallsByTurn.set(mc.turn_id, (answerCallsByTurn.get(mc.turn_id) ?? 0) + 1);
+			(
+				answerCallListByTurn.get(mc.turn_id) ??
+				answerCallListByTurn.set(mc.turn_id, []).get(mc.turn_id)!
+			).push(mc);
 		}
 	}
 
-	// Tool-call counts per delegated task (the workstream's execution row).
+	// Tool-call counts per delegated task (the workstream's execution row), plus
+	// the rows themselves for the US-106 drill-through (same `agent_task_id` keying).
 	const toolCallsByTask = new Map<number, number>();
+	const toolCallListByTask = new Map<number, AgentToolCallRecord[]>();
 	for (const tc of toolCalls) {
 		if (tc.agent_task_id !== null) {
 			toolCallsByTask.set(tc.agent_task_id, (toolCallsByTask.get(tc.agent_task_id) ?? 0) + 1);
+			(
+				toolCallListByTask.get(tc.agent_task_id) ??
+				toolCallListByTask.set(tc.agent_task_id, []).get(tc.agent_task_id)!
+			).push(tc);
 		}
 	}
 
@@ -554,6 +569,35 @@ export function buildSessionTraceView(records: SessionTraceInput): SessionTraceV
 			ws.agent_task_id !== null ? (toolCallsByTask.get(ws.agent_task_id) ?? 0) : 0;
 		const modelCallCount =
 			ws.source_turn_id !== null ? (answerCallsByTurn.get(ws.source_turn_id) ?? 0) : 0;
+		// Itemise the tool/model calls this workstream ran for the rich
+		// drill-through (US-106); same keying as the counts above.
+		const toolCalls: WorkstreamToolCallView[] = (
+			ws.agent_task_id !== null ? (toolCallListByTask.get(ws.agent_task_id) ?? []) : []
+		)
+			.slice()
+			.sort((a, b) => traceMs(a.created_at) - traceMs(b.created_at) || a.id - b.id)
+			.map((tc) => ({
+				id: tc.id,
+				toolName: tc.tool_name,
+				ok: tc.ok,
+				denied: tc.denied,
+				durationMs: tc.duration_ms,
+				error: tc.error
+			}));
+		const modelCalls: WorkstreamModelCallView[] = (
+			ws.source_turn_id !== null ? (answerCallListByTurn.get(ws.source_turn_id) ?? []) : []
+		)
+			.slice()
+			.sort((a, b) => a.step_index - b.step_index || a.id - b.id)
+			.map((mc) => ({
+				id: mc.id,
+				role: mc.role,
+				stepIndex: mc.step_index,
+				modelName: mc.model_name,
+				totalTokens: mc.total_tokens,
+				durationMs: mc.duration_ms,
+				finishReason: mc.finish_reason
+			}));
 		const events: WorkstreamEventView[] = [...(eventsByWs.get(ws.id) ?? [])]
 			.sort((a, b) => a.sequence - b.sequence)
 			.map((e) => ({
@@ -589,8 +633,11 @@ export function buildSessionTraceView(records: SessionTraceInput): SessionTraceV
 			taskKind: task ? task.kind : null,
 			taskStatus: task ? task.status : null,
 			ackText: task ? task.ack_text : null,
+			attempts: task ? (task.attempts ?? null) : null,
 			toolCallCount,
 			modelCallCount,
+			toolCalls,
+			modelCalls,
 			events
 		};
 	});

@@ -158,6 +158,9 @@ export interface AgentTaskRecord {
 	request_id?: string | null;
 	kind: string;
 	status: AgentTaskStatus;
+	// Retry counter on the execution row (US-106); optional so live-synthesized
+	// tasks from `task_*` events (which don't carry it) still typecheck.
+	attempts?: number;
 	ack_text: string | null;
 	result_text: string | null;
 	error: string | null;
@@ -617,6 +620,27 @@ export interface WorkstreamEventView {
 	createdAt: string;
 }
 
+/** One tool call a workstream's execution ran, compact for the drill-through (US-106). */
+export interface WorkstreamToolCallView {
+	id: number;
+	toolName: string;
+	ok: boolean;
+	denied: boolean;
+	durationMs: number | null;
+	error: string | null;
+}
+
+/** One answer-loop model call a workstream ran, compact for the drill-through (US-106). */
+export interface WorkstreamModelCallView {
+	id: number;
+	role: string;
+	stepIndex: number;
+	modelName: string | null;
+	totalTokens: number | null;
+	durationMs: number | null;
+	finishReason: string | null;
+}
+
 /** One unit of work as its own thread (Workstreams column). */
 export interface WorkstreamView {
 	id: number;
@@ -645,6 +669,14 @@ export interface WorkstreamView {
 	ackText: string | null;
 	toolCallCount: number;
 	modelCallCount: number;
+	// US-106 drill-through, populated client-side by `buildSessionTraceView()` from
+	// the already-fetched detail records — the actual tool/model calls this
+	// workstream ran and the backing task's retry counter. Optional/additive (like
+	// the RouterTurnView drill-through fields) so the lean server `/trace` summary
+	// and older cached responses still parse.
+	attempts?: number | null;
+	toolCalls?: WorkstreamToolCallView[];
+	modelCalls?: WorkstreamModelCallView[];
 	events: WorkstreamEventView[];
 }
 

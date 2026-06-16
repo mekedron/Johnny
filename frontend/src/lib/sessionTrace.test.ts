@@ -719,6 +719,109 @@ describe('buildSessionTraceView', () => {
 		assert.equal(rt.routerModelCall.responseText, '{"action":"delegate"}');
 	});
 
+	it('US-106: itemises the tool/model calls a workstream ran + carries attempts (rich drill-through)', () => {
+		const view = buildSessionTraceView({
+			decisions: [makeDecision({ id: 2, turn_id: 2 })],
+			utterances: [],
+			tasks: [makeTask({ id: 20, turn_id: 2, attempts: 2 })],
+			toolCalls: [
+				makeToolCall({
+					id: 31,
+					agent_task_id: 20,
+					turn_id: 2,
+					tool_name: 'mcp__demo-http__reverse_text',
+					created_at: '2026-06-14T00:00:13Z'
+				}),
+				makeToolCall({
+					id: 30,
+					agent_task_id: 20,
+					turn_id: 2,
+					tool_name: 'sandbox.exec',
+					ok: false,
+					denied: true,
+					error: 'policy denied',
+					created_at: '2026-06-14T00:00:12Z'
+				})
+			],
+			modelCalls: [
+				makeModelCall({ id: 50, turn_id: 2, role: 'router', model_name: 'router-llm' }), // excluded
+				makeModelCall({ id: 52, turn_id: 2, role: 'answer', step_index: 1, total_tokens: 900 }),
+				makeModelCall({ id: 51, turn_id: 2, role: 'answer', step_index: 0, total_tokens: 1860 })
+			],
+			workstreams: [
+				makeWorkstream({ id: 200, source_turn_id: 2, source_decision_id: 2, agent_task_id: 20 })
+			]
+		});
+		const ws = view.workstreams[0];
+		const toolCalls = ws.toolCalls ?? [];
+		const modelCalls = ws.modelCalls ?? [];
+		assert.equal(ws.attempts, 2);
+		// Tool calls itemised, sorted by created_at (id 30 @ :12 before id 31 @ :13).
+		assert.deepEqual(
+			toolCalls.map((t) => t.id),
+			[30, 31]
+		);
+		assert.equal(toolCalls[0].toolName, 'sandbox.exec');
+		assert.equal(toolCalls[0].ok, false);
+		assert.equal(toolCalls[0].denied, true);
+		assert.equal(toolCalls[1].toolName, 'mcp__demo-http__reverse_text');
+		assert.equal(ws.toolCallCount, toolCalls.length);
+		// Answer model calls only (router excluded), sorted by step_index.
+		assert.deepEqual(
+			modelCalls.map((m) => m.stepIndex),
+			[0, 1]
+		);
+		assert.equal(modelCalls[0].totalTokens, 1860);
+		assert.ok(modelCalls.every((m) => m.role === 'answer'));
+		assert.equal(ws.modelCallCount, modelCalls.length);
+	});
+
+	it('US-106: an expired-before-spoken result surfaces delivery_status=expired + reason, execution still done (AC2)', () => {
+		const view = buildSessionTraceView({
+			decisions: [],
+			utterances: [],
+			workstreams: [
+				makeWorkstream({
+					id: 200,
+					status: 'done',
+					delivery_status: 'expired',
+					expired_reason: 'undelivered for 120s',
+					delivered_utterance_id: null,
+					delivered_at: null
+				})
+			]
+		});
+		const ws = view.workstreams[0];
+		assert.equal(ws.status, 'done'); // execution terminal unchanged
+		assert.equal(ws.deliveryStatus, 'expired'); // the visibly-marked state
+		assert.equal(ws.expiredReason, 'undelivered for 120s');
+		assert.equal(ws.deliveredUtteranceId, null);
+	});
+
+	it('US-106: carries the talk-back utterance id; a no-task inline workstream has null attempts + empty calls', () => {
+		const view = buildSessionTraceView({
+			decisions: [],
+			utterances: [makeUtterance({ id: 11, agent_decision_id: null })],
+			workstreams: [
+				makeWorkstream({ id: 200, delivered_utterance_id: 11 }), // delegate, delivered
+				makeWorkstream({
+					id: 201,
+					source_kind: 'foreground_tool_loop',
+					agent_task_id: null,
+					source_turn_id: null,
+					delivered_utterance_id: null,
+					created_at: '2026-06-14T00:00:11Z'
+				})
+			]
+		});
+		const byId = new Map(view.workstreams.map((w) => [w.id, w]));
+		assert.equal(byId.get(200)!.deliveredUtteranceId, 11); // talk-back link target
+		const inline = byId.get(201)!;
+		assert.equal(inline.attempts, null); // no backing task row
+		assert.deepEqual(inline.toolCalls ?? [], []);
+		assert.deepEqual(inline.modelCalls ?? [], []);
+	});
+
 	it('returns four empty arrays for an empty session', () => {
 		const view = buildSessionTraceView({ decisions: [], utterances: [] });
 		assert.deepEqual(view.routerTurns, []);

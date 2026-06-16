@@ -260,6 +260,9 @@ class AgentTaskRead(BaseModel):
     request_id: str | None = None
     kind: str
     status: AgentTaskStatus
+    # Retry counter on the backing execution row (US-106): how many times the
+    # worker claimed/settled this task. Surfaced in the Workstreams column.
+    attempts: int = 0
     ack_text: str | None
     result_text: str | None
     error: str | None
