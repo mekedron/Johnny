@@ -25,6 +25,7 @@ from johnny.agent.tasks import (
     TaskCoordinator,
     TaskResult,
     TaskSpec,
+    WorkstreamOverlayRow,
     executor_error_text,
     stub_executor,
     unsupported_kind_text,
@@ -1610,4 +1611,148 @@ async def test_answer_task_context_injectable_now() -> None:
     assert queued is not None
     context = coordinator.answer_task_context(now=121.0)
     assert "about 20 seconds in" in context.text
+    await coordinator.aclose()
+
+
+# --- US-203: durable-overlay registry seeding --------------------------------
+
+
+class _OverlaySink(InMemoryTaskSink):
+    """InMemoryTaskSink that also serves a fixed durable workstream overlay."""
+
+    def __init__(self, rows: list[WorkstreamOverlayRow]) -> None:
+        super().__init__()
+        self._overlay_rows = rows
+
+    async def load_workstream_overlay(self) -> list[WorkstreamOverlayRow]:
+        return list(self._overlay_rows)
+
+
+class _BoomOverlaySink(InMemoryTaskSink):
+    async def load_workstream_overlay(self) -> list[WorkstreamOverlayRow]:
+        raise RuntimeError("overlay read failed")
+
+
+def _overlay_row(**overrides: Any) -> WorkstreamOverlayRow:
+    fields: dict[str, Any] = {
+        "task_id": 1,
+        "kind": "google-calendar",
+        "status": "running",
+        "result_text": "",
+        "error": "",
+        "delivered": False,
+        "age_seconds": 20.0,
+        "settled_age_seconds": None,
+    }
+    fields.update(overrides)
+    return WorkstreamOverlayRow(**fields)
+
+
+async def test_seed_registry_from_overlay_rebuilds_inflight_and_undelivered() -> None:
+    """US-203: a fresh (respawned) coordinator rebuilds in-flight + done-but-
+    undelivered work from the durable overlay so a status query reflects it
+    instead of speaking the empty-registry line — the same source the column
+    reads."""
+    now = [1000.0]
+    sink = _OverlaySink(
+        [
+            _overlay_row(task_id=7, kind="web_search", status="running", age_seconds=20.0),
+            _overlay_row(
+                task_id=8,
+                kind="google-calendar",
+                status="done",
+                result_text="42 tons of CO2",
+                delivered=False,
+                settled_age_seconds=5.0,
+            ),
+        ]
+    )
+    coordinator, _ = _registry_coordinator(sink, now=now)
+
+    seeded = await coordinator.seed_registry_from_overlay()
+
+    assert {e.task_id for e in seeded} == {7, 8}
+    assert {e.task_id for e in coordinator.registry_snapshot()} == {7, 8}
+    summary = coordinator.status_summary()
+    assert summary.text != STATUS_NOTHING_IN_FLIGHT
+    assert "The google calendar task is done: 42 tons of CO2." in summary.text
+    assert "Still working on the web search task, about 20 seconds in." in summary.text
+    assert [e.task_id for e in summary.carried_results] == [8]
+    await coordinator.aclose()
+
+
+async def test_seed_registry_from_overlay_preserves_elapsed_minutes_band() -> None:
+    """Wall-clock age from the overlay is re-derived against the monotonic clock,
+    so the spoken duration survives the respawn (185 s → minutes band)."""
+    now = [1000.0]
+    sink = _OverlaySink(
+        [_overlay_row(task_id=3, kind="web_search", status="running", age_seconds=185.0)]
+    )
+    coordinator, _ = _registry_coordinator(sink, now=now)
+    await coordinator.seed_registry_from_overlay()
+    assert "about 3 minutes in" in coordinator.status_summary().text
+    await coordinator.aclose()
+
+
+async def test_seed_registry_from_overlay_suppresses_delivered_and_expired() -> None:
+    """Already-delivered and expired results are never re-spoken as undelivered:
+    carried_results stays empty and their text is not voiced verbatim."""
+    now = [1000.0]
+    sink = _OverlaySink(
+        [
+            _overlay_row(
+                task_id=1,
+                kind="web_search",
+                status="done",
+                result_text="delivered already",
+                delivered=True,
+                settled_age_seconds=5.0,
+            ),
+            _overlay_row(
+                task_id=2,
+                kind="google-calendar",
+                status="done",
+                result_text="aged out",
+                delivered=True,
+                settled_age_seconds=5.0,
+            ),
+        ]
+    )
+    coordinator, _ = _registry_coordinator(sink, now=now)
+    await coordinator.seed_registry_from_overlay()
+    summary = coordinator.status_summary()
+    assert summary.carried_results == ()
+    assert "delivered already" not in summary.text
+    assert "aged out" not in summary.text
+    await coordinator.aclose()
+
+
+async def test_seed_registry_from_overlay_first_observer_wins() -> None:
+    """A live in-process entry is never clobbered by the overlay, so re-seeding
+    on every resubscribe is idempotent."""
+    now = [1000.0]
+    sink = _OverlaySink(
+        [_overlay_row(task_id=1, kind="web_search", status="done", result_text="stale")]
+    )
+    coordinator, _ = _registry_coordinator(sink, now=now)
+    coordinator.attach_remote_listener()  # begin() then spawns no poll watcher
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None and queued.task_id == 1
+
+    seeded = await coordinator.seed_registry_from_overlay()
+
+    assert seeded == []  # id already present — skipped
+    entry = coordinator.registry_entry(1)
+    assert entry is not None and entry.status == "queued"  # the live entry stands
+    await coordinator.aclose()
+
+
+async def test_seed_registry_from_overlay_contained_on_sink_failure() -> None:
+    """A sink read failure leaves the registry untouched and never raises."""
+    now = [1000.0]
+    coordinator, _ = _registry_coordinator(_BoomOverlaySink(), now=now)
+    seeded = await coordinator.seed_registry_from_overlay()
+    assert seeded == []
+    assert coordinator.registry_snapshot() == ()
+    assert coordinator.status_summary().text == STATUS_NOTHING_IN_FLIGHT
     await coordinator.aclose()

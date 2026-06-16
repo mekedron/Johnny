@@ -219,6 +219,38 @@ class TaskRegistryEntry:
         return self.status in TERMINAL_TASK_STATUSES
 
 
+@dataclass(frozen=True, slots=True)
+class WorkstreamOverlayRow:
+    """One durable ``agent_workstreams`` row, flattened for registry seeding (US-203).
+
+    The durable-overlay read the coordinator uses to rebuild its in-memory
+    registry from the durable store at task-listener (re)subscribe — so a
+    ``status`` query reflects delegated work that **outlived the registry** (a
+    respawned meet-worker, a reconnecting listener). The coordinator stays
+    SQLAlchemy-free: :class:`app.services.agent_tasks.SqlAlchemyTaskSink` reads
+    ``agent_workstreams`` and returns these plain rows;
+    :meth:`TaskCoordinator.seed_registry_from_overlay` maps them onto
+    :class:`TaskRegistryEntry`.
+
+    ``age_seconds`` / ``settled_age_seconds`` are wall-clock elapsed times the
+    sink computes at read time (``now - created_at`` / ``now - completed_at``) so
+    the coordinator can re-derive monotonic ``queued_at`` / ``settled_at`` and
+    keep ``"about 20 seconds in"`` and the :data:`STATUS_RECENT_SETTLE_S` window
+    honest across the respawn. ``delivered`` already folds the durable delivery
+    state (``delivered`` / ``expired`` → suppressed in a status reply;
+    ``ready`` / ``queued`` / ``not_ready`` → still speakable-undelivered).
+    """
+
+    task_id: int
+    kind: str
+    status: TaskStatus
+    result_text: str = ""
+    error: str = ""
+    delivered: bool = False
+    age_seconds: float = 0.0
+    settled_age_seconds: float | None = None
+
+
 class TaskSink(ABC):
     """Durable persistence for delegated tasks (the ``agent_tasks`` table).
 
@@ -264,6 +296,19 @@ class TaskSink(ABC):
         just no in-session correction for it).
         """
         return None
+
+    async def load_workstream_overlay(self) -> list[WorkstreamOverlayRow]:
+        """Read this session's durable workstreams for registry seeding (US-203).
+
+        The durable overlay (C5): :meth:`TaskCoordinator.seed_registry_from_overlay`
+        calls this at listener (re)subscribe to rebuild registry entries for
+        delegated work that outlived the in-memory registry. Default returns
+        ``[]`` — "this sink serves no durable overlay" — so test / noop sinks keep
+        working (the same opt-in shape as :meth:`fetch_status`). Production wires
+        :class:`app.services.agent_tasks.SqlAlchemyTaskSink`, which reads
+        ``agent_workstreams``.
+        """
+        return []
 
     async def close(self) -> None:  # noqa: B027 — intentional default no-op
         """Release any held connections. Default is a no-op."""
@@ -1083,6 +1128,70 @@ class TaskCoordinator:
                 if won is not None:
                     settled.append(won)
         return settled
+
+    async def seed_registry_from_overlay(self) -> list[TaskRegistryEntry]:
+        """Rebuild registry entries from the durable workstream overlay (US-203).
+
+        The durable-overlay half of status parity (C5): the ``status`` query
+        stays registry-first and in-memory (:meth:`status_summary`), but a
+        coordinator that just attached to a session — a respawned meet-worker, a
+        reconnecting listener — has an empty registry while ``agent_workstreams``
+        still holds the delegated work this session began. The task listener
+        calls this at every (re)subscribe (alongside :meth:`reconcile_in_flight`),
+        **off the speech path**, so a "what's the progress?" landing after the
+        respawn finds the work instead of speaking
+        :data:`STATUS_NOTHING_IN_FLIGHT` — and the spoken status then reads the
+        same durable source the Workstreams column does.
+
+        **First-observer-wins:** an id already in the registry is left untouched
+        (the live in-process entry is the authority — the same discipline as
+        :meth:`note_task_settled`), so re-seeding on every resubscribe is
+        idempotent. Wall-clock ages from the overlay are converted back to the
+        coordinator's monotonic clock so durations and the
+        :data:`STATUS_RECENT_SETTLE_S` staleness window survive the respawn.
+        ``delivered`` / ``expired`` rows seed as ``delivered`` so a status reply
+        never re-speaks them; terminal rows seed terminal so
+        :meth:`reconcile_in_flight` never re-settles them (no double-speak).
+        Returns the entries this call created (for logging / tests). A sink read
+        failure is contained: logged, empty list — the registry simply stays as
+        it was.
+        """
+        try:
+            rows = await self._sink.load_workstream_overlay()
+        except Exception:
+            logger.exception(
+                "tasks.seed: load_workstream_overlay failed — registry left unseeded"
+            )
+            return []
+        now = self._monotonic()
+        seeded: list[TaskRegistryEntry] = []
+        for row in rows:
+            if row.task_id in self._registry:
+                continue  # first-observer-wins: never clobber a live entry
+            entry = TaskRegistryEntry(
+                task_id=row.task_id,
+                kind=row.kind,
+                origin="worker",
+                queued_at=now - row.age_seconds,
+                status=row.status,
+                result_text=row.result_text,
+                error=row.error,
+                settled_at=(
+                    now - row.settled_age_seconds
+                    if row.settled_age_seconds is not None
+                    else None
+                ),
+                delivered=row.delivered,
+            )
+            self._registry[row.task_id] = entry
+            seeded.append(entry)
+        if seeded:
+            logger.info(
+                "tasks.seed: rebuilt %d registry entr%s from the durable overlay",
+                len(seeded),
+                "y" if len(seeded) == 1 else "ies",
+            )
+        return seeded
 
     # ------------------------------------------------------------------ #
     # The out-of-band resolver                                            #

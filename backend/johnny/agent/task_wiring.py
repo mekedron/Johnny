@@ -474,6 +474,13 @@ class TaskEventListener:
                 await pubsub.subscribe(self._channel)
                 self._coordinator.attach_remote_listener()
                 logger.info("task listener: subscribed to %s", self._channel)
+                # Rebuild the registry from the durable overlay (US-203): a
+                # respawned / reconnected coordinator starts empty while
+                # agent_workstreams still holds this session's delegated work, so
+                # a status query would otherwise speak "nothing in flight" while
+                # the column shows it. Off the speech path; first-observer-wins so
+                # live in-process entries are never clobbered (idempotent re-seed).
+                await self._coordinator.seed_registry_from_overlay()
                 # Close the no-replay window: deliver anything that settled
                 # while no subscription was live (including before the first).
                 for entry in await self._coordinator.reconcile_in_flight():

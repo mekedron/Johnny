@@ -36,6 +36,7 @@ from johnny.agent.tasks import (
     TaskResult,
     TaskSpec,
     TaskStatus,
+    WorkstreamOverlayRow,
     stub_executor,
     unsupported_kind_text,
 )
@@ -1172,4 +1173,45 @@ async def test_deliver_say_unavailable_releases_floor() -> None:
 
     assert floor.releases == [("task_result", "say_unavailable", "")]
     assert item.state.value == "dropped"
+    await coordinator.aclose()
+
+
+# --- US-203: the listener seeds the registry from the durable overlay ----------
+
+
+class _OverlaySink(InMemoryTaskSink):
+    """InMemoryTaskSink that also serves a fixed durable workstream overlay."""
+
+    def __init__(self, rows: list[WorkstreamOverlayRow]) -> None:
+        super().__init__()
+        self._overlay_rows = rows
+
+    async def load_workstream_overlay(self) -> list[WorkstreamOverlayRow]:
+        return list(self._overlay_rows)
+
+
+async def test_listener_seeds_registry_from_overlay_on_subscribe() -> None:
+    """US-203: the listener rebuilds the registry from the durable overlay at
+    subscribe (off the speech path), so a respawned coordinator's status query
+    reflects delegated work that outlived the in-memory registry. Seeding alone
+    settles/delivers nothing."""
+    sink = _OverlaySink(
+        [
+            WorkstreamOverlayRow(
+                task_id=55, kind="google-calendar", status="running", age_seconds=15.0
+            )
+        ]
+    )
+    coordinator, _ = _external_coordinator(sink)
+    recorder = _SettleRecorder()
+    listener, _frames = _listener(coordinator, recorder)
+    listener.start()
+    await _wait_until(lambda: coordinator.remote_listener_active)
+    await _wait_until(lambda: coordinator.registry_entry(55) is not None)
+    entry = coordinator.registry_entry(55)
+    assert entry is not None
+    assert entry.kind == "google-calendar"
+    assert entry.status == "running"
+    assert recorder.entries == []  # seeding alone settles/delivers nothing
+    await listener.aclose()
     await coordinator.aclose()

@@ -16,10 +16,25 @@ Tests of the coordinator use :class:`johnny.agent.tasks.InMemoryTaskSink`.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, cast
 
-from app.db.models import AgentTask, AgentTaskStatus, AgentToolCall
-from johnny.agent.tasks import TaskSink, TaskSnapshot, TaskSpec, TaskStatus
+from sqlalchemy import select
+
+from app.db.models import (
+    AgentTask,
+    AgentTaskStatus,
+    AgentToolCall,
+    AgentWorkstream,
+    WorkstreamDeliveryStatus,
+)
+from johnny.agent.tasks import (
+    TaskSink,
+    TaskSnapshot,
+    TaskSpec,
+    TaskStatus,
+    WorkstreamOverlayRow,
+)
 from johnny.skills.executor import ToolCallTrace, ToolCallTraceSink
 
 if TYPE_CHECKING:
@@ -28,6 +43,16 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
+
+
+def _as_utc(dt: datetime) -> datetime:
+    """Coerce a possibly-naive timestamp to aware UTC for elapsed-time math.
+
+    Production stamps ``agent_workstreams`` with ``datetime.now(UTC)`` (aware),
+    but the ``TimestampMixin`` server defaults can read back naive under SQLite;
+    treating a naive value as UTC keeps the overlay's age math from raising.
+    """
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
 class SqlAlchemyTaskSink(TaskSink):
@@ -159,6 +184,71 @@ class SqlAlchemyTaskSink(TaskSink):
             )
         finally:
             self._session.rollback()
+
+    async def load_workstream_overlay(self) -> list[WorkstreamOverlayRow]:
+        """Flatten this session's delegated workstreams for registry seeding (US-203).
+
+        The SQLAlchemy side of the durable overlay (C5), called by
+        :meth:`~johnny.agent.tasks.TaskCoordinator.seed_registry_from_overlay`.
+        Reads ``agent_workstreams`` for this bound
+        session, outer-joined to ``agent_tasks`` for the authoritative ``kind``,
+        and returns plain :class:`~johnny.agent.tasks.WorkstreamOverlayRow` rows
+        (the coordinator stays SQLAlchemy-free). Inline (``foreground_tool_loop``,
+        NULL ``agent_task_id``) rows are skipped — they carry no task id the
+        registry can key on, and live inline tracking is Johnny-d6w.24. Wall-clock
+        ages are computed here so the coordinator can re-derive its monotonic
+        clock; ``delivered`` folds the durable delivery state (delivered / expired
+        → suppressed in a status reply).
+        """
+        now = datetime.now(UTC)
+        overlay: list[WorkstreamOverlayRow] = []
+        try:
+            rows = self._session.execute(
+                select(AgentWorkstream, AgentTask.kind)
+                .join(
+                    AgentTask,
+                    AgentWorkstream.agent_task_id == AgentTask.id,
+                    isouter=True,
+                )
+                .where(
+                    AgentWorkstream.bot_session_id == self._bot_session_id,
+                    AgentWorkstream.agent_task_id.is_not(None),
+                )
+                .order_by(AgentWorkstream.id.asc())
+            ).all()
+            for ws, task_kind in rows:
+                task_id = ws.agent_task_id
+                if task_id is None:
+                    continue  # the WHERE excludes these; narrow for the type checker
+                delivered = ws.delivery_status in (
+                    WorkstreamDeliveryStatus.DELIVERED,
+                    WorkstreamDeliveryStatus.EXPIRED,
+                )
+                settled_age = (
+                    max(0.0, (now - _as_utc(ws.completed_at)).total_seconds())
+                    if ws.completed_at is not None
+                    else None
+                )
+                overlay.append(
+                    WorkstreamOverlayRow(
+                        task_id=int(task_id),
+                        kind=str(task_kind or ws.title or ""),
+                        status=cast("TaskStatus", ws.status.value),
+                        result_text=ws.result_text or "",
+                        error=ws.error or "",
+                        delivered=delivered,
+                        age_seconds=max(
+                            0.0, (now - _as_utc(ws.created_at)).total_seconds()
+                        ),
+                        settled_age_seconds=settled_age,
+                    )
+                )
+        finally:
+            # End the read transaction promptly (the sink's session is long-lived;
+            # the same idle-in-transaction guard as fetch_status). The dataclasses
+            # above already hold plain values, so the rollback can't strand them.
+            self._session.rollback()
+        return overlay
 
 
 TOOL_OUTPUT_CAP_CHARS = 16_000

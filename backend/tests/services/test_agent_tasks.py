@@ -10,21 +10,32 @@ speech-ready error text stored.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from app.db import Base
-from app.db.models import AgentTask, AgentTaskStatus, AgentToolCall
+from app.db.models import (
+    AgentTask,
+    AgentTaskStatus,
+    AgentToolCall,
+    AgentWorkstream,
+    WorkstreamDeliveryStatus,
+    WorkstreamSourceKind,
+    WorkstreamStatus,
+)
 from app.services.agent_tasks import SqlAlchemyTaskSink, SqlAlchemyToolCallTraceSink
-from johnny.skills.executor import ToolCallTrace
+from app.services.session_trace import build_session_trace_view
 from johnny.agent.tasks import (
+    STATUS_NOTHING_IN_FLIGHT,
     TaskCoordinator,
     TaskSpec,
     stub_executor,
     unsupported_kind_text,
 )
+from johnny.skills.executor import ToolCallTrace
 from johnny.voice_pipeline.event_bus import InMemoryEventBus
 from johnny.voice_pipeline.events import TaskQueued
 
@@ -36,10 +47,13 @@ def engine() -> sa.Engine:
         connect_args={"check_same_thread": False},
         poolclass=sa.pool.StaticPool,
     )
-    # Only need the agent_tasks table — FKs point at bot_sessions /
-    # agent_decisions but SQLite doesn't enforce FKs by default, so the
-    # table-only fixture works (the decision-sink test's pattern).
-    Base.metadata.create_all(bind=eng, tables=[AgentTask.__table__])  # type: ignore[list-item]
+    # agent_tasks + agent_workstreams (US-203 overlay read joins them). FKs point
+    # at bot_sessions / agent_decisions but SQLite doesn't enforce FKs by default,
+    # so the table-only fixture works (the decision-sink test's pattern).
+    Base.metadata.create_all(
+        bind=eng,
+        tables=[AgentTask.__table__, AgentWorkstream.__table__],  # type: ignore[list-item]
+    )
     return eng
 
 
@@ -160,7 +174,9 @@ async def test_update_status_flips_through_lifecycle(db_session: Session) -> Non
         result_json={"temp_c": 21},
     )
     db_session.refresh(row)
-    assert row.status == AgentTaskStatus.DONE
+    # mypy narrows row.status from the earlier ``== RUNNING`` assert; the DB
+    # refresh has changed it, so the comparison is valid at runtime.
+    assert row.status == AgentTaskStatus.DONE  # type: ignore[comparison-overlap]
     assert row.result_text == "Sunny, 21 degrees."
     assert row.result_json == {"temp_c": 21}
     assert row.attempts == 1  # untouched by the terminal write
@@ -236,7 +252,9 @@ async def test_stub_delegation_end_to_end_queued_then_failed(db_session: Session
     await coordinator.join()
 
     db_session.refresh(row)
-    assert row.status == AgentTaskStatus.FAILED
+    # mypy narrows row.status from the earlier ``== QUEUED`` assert; the DB
+    # refresh has changed it, so the comparison is valid at runtime.
+    assert row.status == AgentTaskStatus.FAILED  # type: ignore[comparison-overlap]
     assert row.result_text == unsupported_kind_text("summarize_meeting")
     assert row.error is not None and "summarize_meeting" in row.error
     assert row.attempts == 1
@@ -427,3 +445,170 @@ async def test_tool_sink_worker_path_keeps_fixed_turn(tool_engine: sa.Engine) ->
     assert row.turn_id == 4
     assert row.agent_task_id == 11
     assert row.kind == "web_search"
+
+
+# --- US-203: durable-overlay read + status/column parity ----------------------
+
+
+def _delegated_workstream(
+    *,
+    bot_session_id: int,
+    agent_task_id: int,
+    kind: str,
+    status: WorkstreamStatus,
+    delivery_status: WorkstreamDeliveryStatus,
+    created_at: datetime,
+    started_at: datetime | None = None,
+    completed_at: datetime | None = None,
+    result_text: str | None = None,
+) -> AgentWorkstream:
+    return AgentWorkstream(
+        bot_session_id=bot_session_id,
+        source_kind=WorkstreamSourceKind.DELEGATE,
+        agent_task_id=agent_task_id,
+        title=kind,
+        status=status,
+        delivery_status=delivery_status,
+        created_at=created_at,
+        started_at=started_at,
+        completed_at=completed_at,
+        result_text=result_text,
+    )
+
+
+async def test_load_workstream_overlay_maps_delegated_rows(db_session: Session) -> None:
+    """US-203: the durable overlay flattens this session's delegated workstreams
+    (joined to agent_tasks for the kind), folds delivery state into ``delivered``,
+    and computes wall-clock ages; inline (NULL agent_task_id) and other-session
+    rows are excluded."""
+    now = datetime.now(UTC)
+    t1 = AgentTask(
+        bot_session_id=42, kind="mcp__demo-http__reverse_text",
+        request_json={}, status=AgentTaskStatus.RUNNING,
+    )
+    t2 = AgentTask(
+        bot_session_id=42, kind="google-calendar",
+        request_json={}, status=AgentTaskStatus.DONE,
+    )
+    t_other = AgentTask(
+        bot_session_id=99, kind="other", request_json={}, status=AgentTaskStatus.DONE,
+    )
+    db_session.add_all([t1, t2, t_other])
+    db_session.flush()
+    t1_id, t2_id = t1.id, t2.id
+    db_session.add_all(
+        [
+            _delegated_workstream(
+                bot_session_id=42, agent_task_id=t1.id,
+                kind="mcp__demo-http__reverse_text",
+                status=WorkstreamStatus.RUNNING,
+                delivery_status=WorkstreamDeliveryStatus.NOT_READY,
+                created_at=now - timedelta(seconds=30),
+                started_at=now - timedelta(seconds=25),
+            ),
+            _delegated_workstream(
+                bot_session_id=42, agent_task_id=t2.id, kind="google-calendar",
+                status=WorkstreamStatus.DONE,
+                delivery_status=WorkstreamDeliveryStatus.READY,
+                created_at=now - timedelta(seconds=12),
+                completed_at=now - timedelta(seconds=4),
+                result_text="3 events this week",
+            ),
+            # Inline (NULL agent_task_id) — excluded.
+            AgentWorkstream(
+                bot_session_id=42,
+                source_kind=WorkstreamSourceKind.FOREGROUND_TOOL_LOOP,
+                agent_task_id=None, title="inline", status=WorkstreamStatus.DONE,
+                delivery_status=WorkstreamDeliveryStatus.READY, created_at=now,
+            ),
+            # Another session — excluded.
+            _delegated_workstream(
+                bot_session_id=99, agent_task_id=t_other.id, kind="other",
+                status=WorkstreamStatus.DONE,
+                delivery_status=WorkstreamDeliveryStatus.READY, created_at=now,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    sink = SqlAlchemyTaskSink(db_session, bot_session_id=42)
+    overlay = await sink.load_workstream_overlay()
+
+    by_id = {r.task_id: r for r in overlay}
+    assert set(by_id) == {t1_id, t2_id}  # inline + other-session excluded
+    assert by_id[t1_id].kind == "mcp__demo-http__reverse_text"  # from agent_tasks
+    assert by_id[t1_id].status == "running"
+    assert by_id[t1_id].settled_age_seconds is None
+    assert by_id[t1_id].age_seconds >= 29.0
+    assert by_id[t1_id].delivered is False
+    assert by_id[t2_id].status == "done"
+    assert by_id[t2_id].result_text == "3 events this week"
+    assert by_id[t2_id].delivered is False  # delivery_status=ready → still speakable
+    assert (by_id[t2_id].settled_age_seconds or 0.0) >= 3.0
+
+
+async def test_status_overlay_and_column_read_the_same_source(db_session: Session) -> None:
+    """US-203 AC#2: the Workstreams column (build_session_trace_view over
+    agent_workstreams) and the spoken status (registry seeded from the overlay)
+    describe the same workstreams — both read agent_workstreams."""
+    now = datetime.now(UTC)
+    t1 = AgentTask(
+        bot_session_id=7, kind="mcp__demo-http__reverse_text",
+        request_json={}, status=AgentTaskStatus.RUNNING,
+    )
+    t2 = AgentTask(
+        bot_session_id=7, kind="google-calendar",
+        request_json={}, status=AgentTaskStatus.DONE,
+    )
+    db_session.add_all([t1, t2])
+    db_session.flush()
+    t1_id, t2_id = t1.id, t2.id
+    db_session.add_all(
+        [
+            _delegated_workstream(
+                bot_session_id=7, agent_task_id=t1.id,
+                kind="mcp__demo-http__reverse_text",
+                status=WorkstreamStatus.RUNNING,
+                delivery_status=WorkstreamDeliveryStatus.NOT_READY,
+                created_at=now - timedelta(seconds=10),
+                started_at=now - timedelta(seconds=8),
+            ),
+            _delegated_workstream(
+                bot_session_id=7, agent_task_id=t2.id, kind="google-calendar",
+                status=WorkstreamStatus.DONE,
+                delivery_status=WorkstreamDeliveryStatus.READY,
+                created_at=now - timedelta(seconds=6),
+                completed_at=now - timedelta(seconds=2),
+                result_text="3 events this week",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    # Column source: the durable projection the trace API serves.
+    ws_rows = db_session.scalars(
+        sa.select(AgentWorkstream).where(AgentWorkstream.bot_session_id == 7)
+    ).all()
+    task_rows = db_session.scalars(
+        sa.select(AgentTask).where(AgentTask.bot_session_id == 7)
+    ).all()
+    view = build_session_trace_view(
+        decisions=[], utterances=[], tasks=task_rows, tool_calls=[],
+        model_calls=[], workstreams=ws_rows, workstream_events=[],
+        conversation_events=[],
+    )
+    column = {(w.agent_task_id, w.status) for w in view.workstreams}
+
+    # Status source: a fresh coordinator seeded from the same durable overlay.
+    clock = [1000.0]
+    sink = SqlAlchemyTaskSink(db_session, bot_session_id=7)
+    coordinator = TaskCoordinator(
+        sink, executor=stub_executor,
+        runs_in_session=lambda _kind: False, monotonic=lambda: clock[0],
+    )
+    await coordinator.seed_registry_from_overlay()
+    status = {(e.task_id, e.status) for e in coordinator.registry_snapshot()}
+
+    assert column == status == {(t1_id, "running"), (t2_id, "done")}
+    assert coordinator.status_summary().text != STATUS_NOTHING_IN_FLIGHT
+    await coordinator.aclose()

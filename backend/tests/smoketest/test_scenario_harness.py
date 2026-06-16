@@ -35,7 +35,11 @@ from app.db.models import (  # noqa: E402
     Workspace,
 )
 from johnny.agent.router_gate import BACKGROUND_PROMOTION_KEY  # noqa: E402
-from johnny.agent.tasks import QueuedTask, TaskResult  # noqa: E402
+from johnny.agent.tasks import (  # noqa: E402
+    STATUS_NOTHING_IN_FLIGHT,
+    QueuedTask,
+    TaskResult,
+)
 from johnny.skills.executor import TaskProgressReporter  # noqa: E402
 from johnny.smoketest.replay import discover_fixtures  # noqa: E402
 from johnny.smoketest.scenario import (  # noqa: E402
@@ -176,6 +180,39 @@ def test_scenario_produces_real_delegated_session(db: Session) -> None:
     assert ws["result_json"]["mcp_tool"] == "reverse_text"  # copied from the task row
     assert ws["source_turn_id"] == queued[0].turn_id  # bound to the delegating turn
     assert ws["title"] == "mcp__demo-http__reverse_text"
+
+
+def test_scenario_status_query_reflects_inflight_workstream(db: Session) -> None:
+    """US-203 (AC#3): the progress query fired while the delegated workstream is
+    in flight speaks the in-flight task from the registry — never the empty
+    "nothing in flight" line — and names the same workstream the column renders
+    (the session-3 split-brain, reproduced and fixed)."""
+    fixture = load_scenario(SCENARIO_FIXTURE)
+    result = asyncio.run(run_scenario(fixture, session=db))
+
+    assert result.invariant_violations == []
+
+    # The turn-3 status verdict spoke exactly one status-kind delivery, rendered
+    # from the task registry (run_scenario drives all turns before the worker
+    # leg, so the CO2 task is still queued/in-flight at the status turn).
+    status_spokes = [
+        s
+        for s in cast(list[AgentSpoke], result.events_of_type("agent_spoke"))
+        if s.kind == "status"
+    ]
+    assert len(status_spokes) == 1, "the progress query must speak exactly one status"
+    spoken = status_spokes[0].text
+
+    # The bug fixed: not the empty-registry line while work runs.
+    assert spoken != STATUS_NOTHING_IN_FLIGHT
+    assert "don't have any tasks in flight" not in spoken
+    # It names the in-flight delegated workstream.
+    assert "Still working on the mcp demo http reverse text task" in spoken
+
+    # Parity: the same workstream the Workstreams column renders (the durable
+    # agent_workstreams envelope) is the one the status spoke about.
+    assert len(result.workstream_rows) == 1
+    assert result.workstream_rows[0]["title"] == "mcp__demo-http__reverse_text"
 
 
 def test_scenario_request_id_correlation(db: Session) -> None:
