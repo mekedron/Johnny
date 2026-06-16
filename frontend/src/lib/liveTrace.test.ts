@@ -178,6 +178,104 @@ describe('applyLiveTraceEvent', () => {
 		expect(ws.delivery_status).toBe('ready');
 	});
 
+	it('US-202: a sequence of task_progress milestones appends an ordered live feed', () => {
+		let r = applyLiveTraceEvent(empty(), queued());
+		r = applyLiveTraceEvent(r, progress({ step: 0, progress_text: '' })); // claim
+		r = applyLiveTraceEvent(
+			r,
+			progress({
+				seq: 3,
+				step: 1,
+				progress_text: 'cloning repo',
+				phase: 'availability_check',
+				timestamp_ms: 2500
+			})
+		);
+		r = applyLiveTraceEvent(
+			r,
+			progress({ seq: 4, step: 2, progress_text: 'running tests', phase: 'run', timestamp_ms: 2600 })
+		);
+
+		const events = r.workstreamEvents ?? [];
+		// claim (step 0) → 'running' start marker; milestones (1..n) → 'progress'.
+		expect(events.map((e) => e.event_type)).toEqual(['running', 'progress', 'progress']);
+		expect(events.map((e) => e.sequence)).toEqual([0, 1, 2]);
+		expect(events.map((e) => e.text)).toEqual([null, 'cloning repo', 'running tests']);
+		expect(events[2].payload_json).toEqual({ step: 2, phase: 'run' });
+		// every feed row folds onto the one (synthetic) workstream...
+		const wsId = wsFor(r).id;
+		expect(events.every((e) => e.workstream_id === wsId)).toBe(true);
+		// ...and the projector renders the timeline in order.
+		const view = buildSessionTraceView({ ...r, conversationEvents: [] });
+		expect(view.workstreams[0].events.map((e) => e.text)).toEqual([
+			null,
+			'cloning repo',
+			'running tests'
+		]);
+	});
+
+	it('US-202: idempotent — re-applying the same milestone frame does not duplicate the feed', () => {
+		let r = applyLiveTraceEvent(empty(), queued());
+		r = applyLiveTraceEvent(r, progress({ step: 1, progress_text: 'x' }));
+		const once = r.workstreamEvents;
+		r = applyLiveTraceEvent(r, progress({ step: 1, progress_text: 'x' }));
+		expect(r.workstreamEvents).toEqual(once);
+		expect(r.workstreamEvents).toHaveLength(1);
+	});
+
+	it('US-202: forward-only — a stale milestone after done appends no feed row', () => {
+		let r = applyLiveTraceEvent(empty(), queued());
+		r = applyLiveTraceEvent(r, progress({ step: 1, progress_text: 'early', timestamp_ms: 2000 }));
+		const before = (r.workstreamEvents ?? []).length;
+		r = applyLiveTraceEvent(r, completed());
+		// late straggler arrives after the terminal
+		r = applyLiveTraceEvent(
+			r,
+			progress({ seq: 99, step: 9, progress_text: 'late', timestamp_ms: 9000 })
+		);
+		expect(wsFor(r).status).toBe('done');
+		expect((r.workstreamEvents ?? []).length).toBe(before); // no new row
+		expect((r.workstreamEvents ?? []).some((e) => e.text === 'late')).toBe(false);
+	});
+
+	it('US-202: a live milestone keys to the workstream current id (real after re-pull)', () => {
+		const existing: AgentWorkstreamRecord = {
+			id: 7,
+			bot_session_id: 3,
+			agent_id: 1,
+			workspace_id: null,
+			source_kind: 'delegate',
+			source_turn_id: 5,
+			source_decision_id: 9,
+			agent_task_id: 100,
+			request_id: 'req-1',
+			title: KIND,
+			user_request_text: null,
+			status: 'running',
+			delivery_status: 'not_ready',
+			started_at: '2026-06-16T00:00:00Z',
+			completed_at: null,
+			delivered_at: null,
+			result_available_at: null,
+			result_expires_at: null,
+			expired_reason: null,
+			delivered_utterance_id: null,
+			result_text: null,
+			result_json: null,
+			error: null,
+			created_at: '2026-06-16T00:00:00Z',
+			updated_at: '2026-06-16T00:00:00Z'
+		};
+		const r = applyLiveTraceEvent(
+			{ ...empty(), workstreams: [existing] },
+			progress({ step: 1, progress_text: 'm' })
+		);
+		// the feed row folds onto the REAL id 7, not the synthetic -101.
+		expect((r.workstreamEvents ?? [])[0].workstream_id).toBe(7);
+		const view = buildSessionTraceView({ ...r, conversationEvents: [] });
+		expect(view.workstreams[0].events.map((e) => e.text)).toEqual(['m']);
+	});
+
 	it('patches a pre-existing (re-pulled) workstream by agent_task_id without duplicating', () => {
 		const existing: AgentWorkstreamRecord = {
 			id: 7,

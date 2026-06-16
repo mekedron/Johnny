@@ -317,11 +317,12 @@ export interface AgentWorkstreamRecord {
 }
 
 /**
- * One append-only workstream progress/audit row (US-002). The snake_case input
- * record the client-side `buildSessionTraceView()` (US-102) folds into each
- * workstream's `events` list (mapped to the camelCase {@link WorkstreamEventView}).
- * Not yet served by the detail endpoints; live rows arrive via WS deltas (US-101)
- * and durable history lands with US-202, so the projector tolerates an empty list.
+ * One append-only workstream progress/audit row (US-002 + US-202). The
+ * snake_case input record the client-side `buildSessionTraceView()` (US-102)
+ * folds into each workstream's `events` list (mapped to the camelCase
+ * {@link WorkstreamEventView}). Served on both detail endpoints since US-202
+ * (`workstream_events`); live rows also arrive via WS deltas (US-101), so the
+ * projector tolerates an empty list for legacy/inline sessions.
  */
 export interface AgentWorkstreamEventRecord {
 	id: number;
@@ -352,6 +353,10 @@ export interface SessionDetail {
 	// Durable workstream envelopes (US-002/US-005) — one per delegated task.
 	// Optional/additive; the per-turn projection is GET /sessions/{id}/trace.
 	workstreams?: AgentWorkstreamRecord[];
+	// Append-only per-milestone progress log for those workstreams (US-202),
+	// ordered by (workstream_id, sequence) — the historical progress timeline.
+	// Optional/additive so a cached/older API response still parses.
+	workstream_events?: AgentWorkstreamEventRecord[];
 	// Bot-participation state of the session's meeting; null/absent for
 	// playground sessions (Johnny-trt.56).
 	meeting_bot_state?: MeetingBotParticipation | null;

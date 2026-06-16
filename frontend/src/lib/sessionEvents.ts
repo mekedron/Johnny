@@ -350,6 +350,11 @@ export interface TaskProgressEvent extends BaseEnvelope {
 	turn_id?: number | null;
 	request_id?: string | null;
 	session_id?: string | null;
+	// US-202: monotonic per-task milestone index (0 = claim, 1..n = the
+	// executor's milestones) + its phase tag, so the live feed dedups by step
+	// and labels each row the same way the durable writer does.
+	step?: number;
+	phase?: string | null;
 }
 
 /** A delegated task settled `done` or `failed`. */

@@ -380,6 +380,28 @@ class AgentWorkstreamRead(BaseModel):
     updated_at: datetime
 
 
+class AgentWorkstreamEventRead(BaseModel):
+    """One append-only workstream progress/audit row (US-002 + US-202).
+
+    The durable per-milestone log a workstream accrues — ``queued`` / ``running``
+    / ``progress`` (US-202) / ``completed`` / ``delivered`` / ``interrupted`` /
+    ``expired`` — ordered by the per-workstream ``sequence``. Carried on both
+    detail payloads so the Workstreams column can replay "when each step
+    happened / when interrupted" for an ended session.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    workstream_id: int
+    bot_session_id: int
+    sequence: int
+    event_type: str
+    text: str | None
+    payload_json: dict[str, Any] | None
+    created_at: datetime
+
+
 class SessionTimingRead(BaseModel):
     """One persisted activity-log timing row (Johnny-ckz.7).
 
@@ -481,6 +503,10 @@ class SessionDetailResponse(BaseModel):
     # the record the Workstreams column renders. Optional/additive so a cached
     # older client still parses; the per-turn projection is GET /{id}/trace.
     workstreams: list[AgentWorkstreamRead] = []
+    # Append-only per-milestone progress/audit log (US-202) for those
+    # workstreams, ordered by (workstream_id, sequence), so the column can
+    # render a historical progress timeline for an ended session.
+    workstream_events: list[AgentWorkstreamEventRead] = []
     meeting_bot_state: MeetingBotParticipationRead | None = None
 
 
@@ -664,6 +690,20 @@ def get_session_detail(
             .limit(limit)
         ).all()
     )
+    # US-202: the append-only progress log for those workstreams, ordered the
+    # way the column replays it. Bounded by ``limit`` like its siblings (the
+    # full, unbounded history is GET /{id}/trace).
+    workstream_events = list(
+        session.scalars(
+            select(AgentWorkstreamEvent)
+            .where(AgentWorkstreamEvent.bot_session_id == row.id)
+            .order_by(
+                AgentWorkstreamEvent.workstream_id.asc(),
+                AgentWorkstreamEvent.sequence.asc(),
+            )
+            .limit(limit)
+        ).all()
+    )
     pending = [d for d in decisions if d.outcome == DecisionOutcome.PENDING]
 
     # Meeting-level participation state (Johnny-trt.56) so the page can
@@ -703,6 +743,9 @@ def get_session_detail(
         tool_calls=[AgentToolCallRead.model_validate(c) for c in tool_calls],
         model_calls=[AgentModelCallRead.model_validate(c) for c in model_calls],
         workstreams=[AgentWorkstreamRead.model_validate(w) for w in workstreams],
+        workstream_events=[
+            AgentWorkstreamEventRead.model_validate(e) for e in workstream_events
+        ],
         meeting_bot_state=meeting_state,
     )
 

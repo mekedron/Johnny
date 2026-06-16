@@ -45,7 +45,7 @@ import json
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from livekit.agents.llm import ChatContext, StopResponse
 from livekit.agents.llm.chat_context import ChatMessage as LKChatMessage
@@ -69,8 +69,14 @@ from johnny.agent.task_catalog import TaskCatalogEntry
 from johnny.agent.task_wiring import (
     build_publish_task_completed,
     build_publish_task_queued,
+    make_task_progress_reporter,
 )
 from johnny.agent.tasks import QueuedTask, TaskCoordinator, TaskResult
+from johnny.skills.executor import (
+    PHASE_AVAILABILITY_CHECK,
+    PHASE_RUN,
+    TaskProgressReporter,
+)
 from johnny.smoketest.replay import (
     SPLIT_RUNTIME,
     ReplayTurn,
@@ -87,9 +93,18 @@ from johnny.smoketest.replay_agent import (
 from johnny.voice_pipeline import InMemoryEventBus, PipelineEvent, TranscriptFinalized
 from johnny.voice_pipeline.events import TaskProgress, TaskResultExpired
 
+
 # A monotonic-int clock for the task events, so timestamps are deterministic
 # across a run (no wall clock — the replay-parity stance).
-TaskExecutorFn = Callable[[QueuedTask], Awaitable[TaskResult]]
+class TaskExecutorFn(Protocol):
+    """Harness executor contract: a deterministic stand-in for the worker's
+    real skill/MCP executor. Accepts an optional ``reporter`` (US-202) so a
+    multi-step variant narrates milestones through the SAME seam production
+    runs; single-call stand-ins accept-and-ignore it."""
+
+    def __call__(
+        self, task: QueuedTask, *, reporter: TaskProgressReporter | None = None
+    ) -> Awaitable[TaskResult]: ...
 
 
 # --- fixture model (a superset of the replay fixture) -----------------------
@@ -196,7 +211,24 @@ def load_scenario(path: Path) -> ScenarioFixture:
 # --- deterministic tool executor (the CI gate's stand-in for the demo MCP) --
 
 
-def reverse_text_executor(task: QueuedTask) -> Awaitable[TaskResult]:
+def _reverse_result(task: QueuedTask) -> TaskResult:
+    text = str(task.spec.args.get("text", ""))
+    reversed_text = text[::-1]
+    return TaskResult(
+        status="done",
+        result_text=reversed_text,
+        result_json={
+            "mcp_server": "demo-http",
+            "mcp_tool": "reverse_text",
+            "output": reversed_text,
+            "is_error": False,
+        },
+    )
+
+
+def reverse_text_executor(
+    task: QueuedTask, *, reporter: TaskProgressReporter | None = None
+) -> Awaitable[TaskResult]:
     """A pure, deterministic stand-in for the ``mcp__demo-http__reverse_text`` tool.
 
     The CI gate is hermetic — no Redis, no MCP SDK, no network — so the default
@@ -206,23 +238,43 @@ def reverse_text_executor(task: QueuedTask) -> Awaitable[TaskResult]:
     (``mcp_server`` / ``mcp_tool`` / ``is_error``). The **generation** run uses
     the real worker against the running ``mcp-demo-http`` service instead (see
     the module docstring), which is where the genuine MCP tool call happens.
+
+    ``reporter`` is accepted for the uniform harness executor contract but
+    ignored: a single-call stand-in narrates no mid-run milestones (the
+    multi-step variant below does). The worker still publishes the step-0 claim
+    signal, so this executor's workstream reaches ``running`` regardless.
     """
 
     async def _run() -> TaskResult:
-        text = str(task.spec.args.get("text", ""))
-        reversed_text = text[::-1]
-        return TaskResult(
-            status="done",
-            result_text=reversed_text,
-            result_json={
-                "mcp_server": "demo-http",
-                "mcp_tool": "reverse_text",
-                "output": reversed_text,
-                "is_error": False,
-            },
-        )
+        return _reverse_result(task)
 
     return _run()
+
+
+def make_multistep_reverse_executor(
+    *, steps: tuple[tuple[str, str], ...] = (
+        ("Fetching the input…", PHASE_AVAILABILITY_CHECK),
+        ("Reversing the text…", PHASE_RUN),
+    ),
+) -> TaskExecutorFn:
+    """A deterministic stand-in that narrates ≥2 milestones (US-202, Johnny-d6w.14).
+
+    Emits each ``(text, phase)`` in ``steps`` through the ``reporter`` — the SAME
+    milestone → ``TaskProgress`` → durable-writer seam the production skill/MCP
+    executors drive — then returns the same ``reverse_text`` result. Used by the
+    progress-fixture test to prove milestones emit (steps 1..n on top of the
+    worker's step-0 claim) and persist to ``agent_workstream_events`` in order.
+    """
+
+    async def _run(
+        task: QueuedTask, *, reporter: TaskProgressReporter | None = None
+    ) -> TaskResult:
+        if reporter is not None:
+            for text, phase in steps:
+                await reporter.report(text, phase=phase)
+        return _reverse_result(task)
+
+    return _run
 
 
 # --- router model-call sink (US-004) ----------------------------------------
@@ -592,6 +644,8 @@ async def _drive_worker(
     session.commit()
     rows: list[dict[str, Any]] = []
     for ct in claimed:
+        # Step-0 claim signal (queued→running), exactly like the worker's
+        # _claim_once. progress_text="" and step defaults to 0.
         await bus.publish(
             TaskProgress(
                 task_id=ct.task_id,
@@ -604,7 +658,19 @@ async def _drive_worker(
             )
         )
         queued = ct.as_queued_task()
-        result = await executor(queued)
+        # US-202: the SAME reporter the worker builds — milestones (step 1..n)
+        # the executor narrates flow through bus.publish as TaskProgress, then
+        # the durable writer turns each into an agent_workstream_events row.
+        reporter = make_task_progress_reporter(
+            bus.publish,
+            task_id=ct.task_id,
+            kind=ct.kind,
+            turn_id=ct.turn_id,
+            request_id=ct.request_id,
+            session_id=session_id,
+            clock=clock,
+        )
+        result = await executor(queued, reporter=reporter)
         ok = settle_claimed_task(
             session,
             task_id=ct.task_id,

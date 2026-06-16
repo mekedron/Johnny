@@ -232,7 +232,23 @@ def generate_cmd(fixture_path: Path) -> None:
     show_default=True,
     help="Leave the session JOINED after the run (default) or mark it ENDED.",
 )
-def live_cmd(fixture_path: Path, pace_s: float, grace_s: float, keep_active: bool) -> None:
+@click.option(
+    "--multistep/--single",
+    "multistep",
+    default=False,
+    show_default=True,
+    help=(
+        "Use the multi-step executor (US-202) so each delegate narrates several "
+        "TaskProgress milestones — the Workstreams progress feed populates live."
+    ),
+)
+def live_cmd(
+    fixture_path: Path,
+    pace_s: float,
+    grace_s: float,
+    keep_active: bool,
+    multistep: bool,
+) -> None:
     """Emit a REAL delegated task lifecycle to a LIVE session over Redis (US-101).
 
     Creates a fresh ``JOINED`` bot_session, then drives the SAME real gate +
@@ -250,7 +266,13 @@ def live_cmd(fixture_path: Path, pace_s: float, grace_s: float, keep_active: boo
     from app.config import get_settings
     from app.db.models import BotSession, BotSessionSource, BotSessionStatus
     from app.db.session import SessionLocal
-    from johnny.smoketest.scenario import ScenarioResult, load_scenario, run_scenario
+    from johnny.smoketest.scenario import (
+        ScenarioResult,
+        load_scenario,
+        make_multistep_reverse_executor,
+        reverse_text_executor,
+        run_scenario,
+    )
     from johnny.voice_pipeline.event_bus import InMemoryEventBus, RedisEventBus
     from johnny.voice_pipeline.events import PipelineEvent
 
@@ -300,9 +322,16 @@ def live_cmd(fixture_path: Path, pace_s: float, grace_s: float, keep_active: boo
             redis_bus = RedisEventBus(redis, default_session_id=str(sid))
             tee = _LiveTeeBus(redis_bus, pace_s)
             await asyncio.sleep(grace_s)
+            executor = (
+                make_multistep_reverse_executor() if multistep else reverse_text_executor
+            )
             try:
                 return await run_scenario(
-                    live_fixture, session=session, bot_session_id=sid, bus=tee
+                    live_fixture,
+                    session=session,
+                    bot_session_id=sid,
+                    bus=tee,
+                    executor=executor,
                 )
             finally:
                 await redis.aclose()

@@ -649,11 +649,13 @@ class TaskProgress:
     Emitted by whichever executor is driving the task — the Phase-4 worker
     pass (Johnny-trt.24) on claim and at multi-step milestones — on the
     session channel (live UI) and on ``johnny.tasks.<bot_session_id>`` (the
-    Phase-5 agent listener, Johnny-trt.28). Ephemeral like
-    :class:`TaskQueued`: the executor that emits it owns the ``agent_tasks``
-    row (durable progress goes in ``result_json`` per docs/TASK-ENGINE.md),
-    so the status subscriber deliberately persists nothing for this type —
-    a subscriber write would double-write executor-owned state.
+    Phase-5 agent listener, Johnny-trt.28). The executor owns the
+    ``agent_tasks`` row; the single durable writer owns the workstream
+    envelope. Since US-202 (Johnny-d6w.14) the status subscriber DOES persist
+    one ``agent_workstream_events`` row per milestone (the ``queued→running``
+    flip plus a ``progress`` row for each later milestone) so an ended session
+    can replay "when each step happened" — additive to the executor-owned row,
+    never a write to it.
 
     * ``task_id`` — the ``agent_tasks`` row id consumers correlate on.
     * ``kind`` — the task-kind identifier, denormalised for display.
@@ -661,6 +663,10 @@ class TaskProgress:
       calendar…", "step 2 of 3"); may be empty for a bare claim signal.
     * ``turn_id`` — the delegating turn's durable int id (echoed from the
       row); ``None`` for tasks queued outside a turn.
+    * ``step`` — monotonic per-task milestone index; ``0`` is the bare claim
+      signal, ``1..n`` the executor's reported milestones (US-202).
+    * ``phase`` — the executor milestone tag (``availability_check`` / ``run``
+      / ``mcp_call``); ``None`` for the claim signal.
     """
 
     task_id: int
@@ -673,6 +679,10 @@ class TaskProgress:
     # is stamped even when this event (not TaskQueued) is the first one the
     # single writer sees — closing the create-order race.
     request_id: str | None = None
+    # US-202: monotonic milestone index (0 = claim) + the executor's phase tag,
+    # so the durable progress log can order/label steps without re-parsing text.
+    step: int = 0
+    phase: str | None = None
     type: TaskProgressEventType = "task_progress"
 
 

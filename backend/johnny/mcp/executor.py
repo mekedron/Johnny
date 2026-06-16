@@ -27,7 +27,11 @@ from collections.abc import Callable, Sequence
 
 from johnny.agent.tasks import QueuedTask, TaskExecutor, TaskResult, stub_executor
 from johnny.mcp.config import McpServerConfig, parse_qualified_tool_name
-from johnny.skills.executor import RESULT_TEXT_CAP_CHARS
+from johnny.skills.executor import (
+    RESULT_TEXT_CAP_CHARS,
+    TaskProgressReporter,
+    _report,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +69,7 @@ def build_mcp_task_executor(
     load_servers: LoadServers,
     sandbox_url: str,
     fallback: TaskExecutor = stub_executor,
+    progress_reporter: TaskProgressReporter | None = None,
 ) -> TaskExecutor:
     """The worker's MCP leg: qualified kinds run their server tool, rest fall through.
 
@@ -73,6 +78,10 @@ def build_mcp_task_executor(
     the worker passes the real one, tests pass fakes). ``sandbox_url`` is the
     claimed task's resolved sandbox (stdio servers spawn there; the Phase-7
     per-agent resolver changes the caller, never this executor).
+
+    ``progress_reporter`` (US-202), when given, narrates one ``mcp_call``
+    milestone just before the tool call — a single-shot leg, so one milestone
+    is the honest count. Reporting never affects the settle.
     """
 
     async def _execute(task: QueuedTask) -> TaskResult:
@@ -141,6 +150,9 @@ def build_mcp_task_executor(
         except (TypeError, ValueError):
             arguments = {}
 
+        await _report(
+            progress_reporter, f"Running {tool} on {server_name}…", phase="mcp_call"
+        )
         try:
             result = await manager.call_tool(  # type: ignore[attr-defined]
                 config, sandbox_url=sandbox_url, tool=tool, arguments=arguments

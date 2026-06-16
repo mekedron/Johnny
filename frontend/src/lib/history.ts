@@ -14,6 +14,7 @@ import type {
 	AgentTaskRecord,
 	AgentToolCallRecord,
 	AgentUtteranceRecord,
+	AgentWorkstreamEventRecord,
 	AgentWorkstreamRecord,
 	BotMode,
 	ConversationEventRecord,
@@ -107,6 +108,8 @@ export interface HistoryDetail {
 	// Durable workstream envelopes (US-002/US-005) — same shape the live detail
 	// serves; the per-turn projection is GET /sessions/{id}/trace.
 	workstreams?: AgentWorkstreamRecord[];
+	// Append-only per-milestone progress log for those workstreams (US-202).
+	workstream_events?: AgentWorkstreamEventRecord[];
 	timings?: SessionTimingRecord[];
 	conversation_events?: ConversationEventRecord[];
 }

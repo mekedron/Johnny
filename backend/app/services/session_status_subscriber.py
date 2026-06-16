@@ -1033,6 +1033,23 @@ def _append_workstream_event(
     db.flush()
 
 
+def _progress_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Shape a ``task_progress`` event's step/phase into a durable event payload.
+
+    US-202: lets the Workstreams timeline order/label milestones without
+    re-parsing the human-facing text. Returns ``None`` when neither is present
+    (the bare claim signal), so the event row's ``payload_json`` stays NULL.
+    """
+    out: dict[str, Any] = {}
+    step = payload.get("step")
+    if isinstance(step, int) and not isinstance(step, bool):
+        out["step"] = step
+    phase = payload.get("phase")
+    if phase:
+        out["phase"] = str(phase)
+    return out or None
+
+
 def apply_task_event(db: Session, payload: dict[str, Any]) -> bool:
     """Create / advance the durable workstream envelope for a delegated task.
 
@@ -1104,6 +1121,19 @@ def apply_task_event(db: Session, payload: dict[str, Any]) -> bool:
                 ws,
                 event_type="running",
                 text=(str(payload.get("progress_text")) or None),
+                payload_json=_progress_payload(payload),
+            )
+        elif not terminal and ws.status == WorkstreamStatus.RUNNING:
+            # US-202: a subsequent milestone while already running appends a
+            # durable progress row — the timeline's "when each step happened".
+            # The terminal guard above still excludes a late progress racing a
+            # completed event: it can never append after done/failed/cancelled.
+            _append_workstream_event(
+                db,
+                ws,
+                event_type="progress",
+                text=(str(payload.get("progress_text")) or None),
+                payload_json=_progress_payload(payload),
             )
     elif event_type == TASK_COMPLETED_EVENT_TYPE:
         if not terminal:

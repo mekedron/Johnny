@@ -62,7 +62,11 @@ import sqlalchemy as sa
 
 from app.db.models import AgentTask, AgentTaskStatus
 from johnny.agent.internal_tools import INTERNAL_TOOL_KINDS
-from johnny.agent.task_wiring import TASKS_CHANNEL_PREFIX, TASKS_WAKE_CHANNEL
+from johnny.agent.task_wiring import (
+    TASKS_CHANNEL_PREFIX,
+    TASKS_WAKE_CHANNEL,
+    make_task_progress_reporter,
+)
 from johnny.agent.tasks import (
     EXECUTOR_RESULT_STATUSES,
     QueuedTask,
@@ -78,6 +82,8 @@ from johnny.voice_pipeline.events import PolicyDenied, TaskCompleted, TaskProgre
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
+
+    from johnny.skills.executor import TaskProgressReporter
 
 logger = logging.getLogger(__name__)
 
@@ -645,7 +651,11 @@ class SandboxExecutorProvider:
         return self._mcp_manager
 
     async def executor_for(
-        self, claimed: ClaimedTask, *, policy: Any | None = None
+        self,
+        claimed: ClaimedTask,
+        *,
+        policy: Any | None = None,
+        progress_reporter: TaskProgressReporter | None = None,
     ) -> TaskExecutor:
         from app.services.agent_tasks import SqlAlchemyToolCallTraceSink
         from johnny.mcp.executor import build_mcp_task_executor
@@ -703,6 +713,7 @@ class SandboxExecutorProvider:
             load_servers=lambda: self._mcp_config_loader(claimed),
             sandbox_url=url,
             fallback=stub_executor,
+            progress_reporter=progress_reporter,
         )
         # Per-tool-call trace persistence (Johnny-etu.4): every sandbox.exec the
         # runner makes for THIS claim — the availability recheck and the run
@@ -718,7 +729,11 @@ class SandboxExecutorProvider:
             kind=claimed.kind,
         )
         return build_skill_task_executor(
-            registry, exec_tool, fallback=mcp_executor, trace_sink=trace_sink
+            registry,
+            exec_tool,
+            fallback=mcp_executor,
+            trace_sink=trace_sink,
+            progress_reporter=progress_reporter,
         )
 
     async def _ensure_workspace_container(self, claimed: ClaimedTask) -> None:
@@ -1122,7 +1137,21 @@ class TaskWorker:
                     self._executor
                     if self._executor is not None
                     else await self._provider.executor_for(  # type: ignore[union-attr]
-                        claimed, policy=policy_ctx.policy
+                        claimed,
+                        policy=policy_ctx.policy,
+                        # US-202: the executor narrates milestones (step 1..n)
+                        # through this reporter; the step-0 claim signal was
+                        # already published in _claim_once. Routes through the
+                        # worker's dual-bus _publish (best-effort).
+                        progress_reporter=make_task_progress_reporter(
+                            self._publish,
+                            task_id=claimed.task_id,
+                            kind=claimed.kind,
+                            turn_id=claimed.turn_id,
+                            request_id=claimed.request_id,
+                            session_id=str(claimed.bot_session_id),
+                            clock=self._clock_ms,
+                        ),
                     )
                 )
                 result = await asyncio.wait_for(

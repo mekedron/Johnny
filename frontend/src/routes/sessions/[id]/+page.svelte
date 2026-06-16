@@ -143,9 +143,9 @@
 	// `GET /sessions/{id}` returns, patched IN PLACE by `applyLiveTraceEvent` on
 	// each task_*/workstream_* WS frame so the Workstreams view re-projects with
 	// NO full re-pull (AC2). Seeded / reconciled by `applyCoreDetail` (the
-	// authoritative durable read); `workstream_events` is not served by the
-	// detail endpoint (it arrives via WS / lands durably with US-202) so it stays
-	// empty here and the projector tolerates that.
+	// authoritative durable read). `workstreamEvents` starts empty pre-load and is
+	// seeded from the detail's durable `workstream_events` (US-202) in
+	// applyCoreDetail, with live task_progress deltas appended on top.
 	let traceRecords = $state<SessionTraceInput>({
 		decisions: [],
 		utterances: [],
@@ -321,7 +321,10 @@
 			toolCalls: detail.tool_calls ?? [],
 			modelCalls: detail.model_calls ?? [],
 			workstreams: detail.workstreams ?? [],
-			workstreamEvents: []
+			// US-202: durable progress log; live task_progress deltas append on top
+			// via applyLiveTraceEvent. A re-pull replaces this wholesale (the durable
+			// read is authoritative), discarding superseded live-synthetic rows.
+			workstreamEvents: detail.workstream_events ?? []
 		};
 	}
 

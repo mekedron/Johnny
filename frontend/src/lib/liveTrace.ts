@@ -33,6 +33,7 @@ import type { SessionTraceInput } from '$lib/sessionTrace';
 import type {
 	AgentTaskRecord,
 	AgentTaskStatus,
+	AgentWorkstreamEventRecord,
 	AgentWorkstreamRecord,
 	WorkstreamDeliveryStatus,
 	WorkstreamSourceKind,
@@ -46,6 +47,44 @@ const toIso = (ms: number): string => new Date(ms).toISOString();
 // (positive) id; stable per task so repeated task events patch the same row. A
 // durable re-pull replaces it (the real row is matched on `agent_task_id`).
 const synthWorkstreamId = (taskId: number): number => -taskId - 1;
+
+// Synthetic id for a live progress event (US-202): negative (disjoint from the
+// positive durable ids) and unique per (taskId, step), so a re-applied frame
+// dedups by id and a durable re-pull (positive ids, workstreamEvents replaced
+// wholesale) cleanly supersedes it.
+const synthEventId = (taskId: number, step: number): number => -(taskId * 100000 + step) - 1;
+
+// US-202: append a synthetic progress event for a live `task_progress` milestone
+// so buildSessionTraceView folds it into the workstream's `events` timeline in
+// real time. Idempotent (dedup by synthetic id, keyed by task+step); the caller
+// skips terminal workstreams (forward-only). step 0 is the claim (→ `running`,
+// the start marker), 1..n are milestones (→ `progress`) — mirroring the durable
+// writer so live and history render identically.
+function appendTaskProgressEvent(
+	events: AgentWorkstreamEventRecord[],
+	workstreamId: number,
+	taskId: number,
+	step: number,
+	text: string | null,
+	phase: string | null,
+	ts: number
+): AgentWorkstreamEventRecord[] {
+	const id = synthEventId(taskId, step);
+	if (events.some((e) => e.id === id)) return events; // idempotent re-apply
+	const payload: Record<string, unknown> = { step };
+	if (phase) payload.phase = phase;
+	const created: AgentWorkstreamEventRecord = {
+		id,
+		workstream_id: workstreamId,
+		bot_session_id: 0,
+		sequence: step,
+		event_type: step === 0 ? 'running' : 'progress',
+		text,
+		payload_json: payload,
+		created_at: toIso(ts)
+	};
+	return [...events, created];
+}
 
 // Execution-status rank for forward-only transitions (mirrors the subscriber's
 // `not terminal` guard): a late/replayed lower-rank frame never moves a
@@ -344,7 +383,25 @@ export function applyLiveTraceEvent(
 				event.timestamp_ms,
 				true
 			);
-			return { ...records, tasks, workstreams };
+			// US-202 live feed: append the milestone to the workstream's progress
+			// timeline. Keyed to the workstream's CURRENT id (synthetic pre-reconcile,
+			// real post) so it folds onto the right row; skipped once the workstream
+			// is terminal (forward-only, mirrors the subscriber's `not terminal` guard).
+			const ws = workstreams.find((w) => w.agent_task_id === event.task_id);
+			const workstreamEvents =
+				ws && (STATUS_RANK[ws.status] ?? 0) < 2
+					? appendTaskProgressEvent(
+							records.workstreamEvents ?? [],
+							ws.id,
+							event.task_id,
+							event.step ?? 0,
+							// empty claim text → null, mirroring the durable writer.
+							event.progress_text || null,
+							event.phase ?? null,
+							event.timestamp_ms
+						)
+					: (records.workstreamEvents ?? []);
+			return { ...records, tasks, workstreams, workstreamEvents };
 		}
 		case 'task_completed': {
 			const tasks = upsertTaskByTaskId(
@@ -401,10 +458,36 @@ export function applyLiveTraceEvent(
 			return { ...records, workstreams };
 		}
 		case 'workstream_created':
-		case 'workstream_progress':
 		case 'workstream_completed': {
 			const workstreams = upsertWorkstreamById(records.workstreams ?? [], event);
 			return { ...records, workstreams };
+		}
+		case 'workstream_progress': {
+			// Forward-compat (no backend emitter yet): a by-id progress frame
+			// upserts the workstream AND appends to the same feed the task_progress
+			// path uses, so a future emitter needs no further frontend change.
+			const workstreams = upsertWorkstreamById(records.workstreams ?? [], event);
+			const ws = workstreams.find((w) => w.id === event.workstream_id);
+			if (!ws || (STATUS_RANK[ws.status] ?? 0) >= 2) {
+				return { ...records, workstreams };
+			}
+			const seq = event.sequence ?? 0;
+			const id = synthEventId(event.workstream_id, seq);
+			const existing = records.workstreamEvents ?? [];
+			if (existing.some((e) => e.id === id)) {
+				return { ...records, workstreams };
+			}
+			const created: AgentWorkstreamEventRecord = {
+				id,
+				workstream_id: event.workstream_id,
+				bot_session_id: 0,
+				sequence: seq,
+				event_type: 'progress',
+				text: event.text ?? null,
+				payload_json: null,
+				created_at: toIso(event.timestamp_ms)
+			};
+			return { ...records, workstreams, workstreamEvents: [...existing, created] };
 		}
 		default:
 			return records;

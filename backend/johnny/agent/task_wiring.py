@@ -85,6 +85,7 @@ from johnny.agent.tasks import (
 from johnny.voice_pipeline.event_bus import EventBus
 from johnny.voice_pipeline.events import (
     TaskCompleted,
+    TaskProgress,
     TaskQueued,
     TaskResultExpired,
     WorkstreamDeliveredStatus,
@@ -96,6 +97,7 @@ if TYPE_CHECKING:
 
     from johnny.agent.job_session import AgentRuntime
     from johnny.agent.router_gate import RouterGate
+    from johnny.skills.executor import TaskProgressReporter
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +163,83 @@ def build_publish_task_queued(
         )
 
     return _publish
+
+
+class _TaskProgressReporter:
+    """A progress reporter bound to one claimed task (US-202, Johnny-d6w.14).
+
+    Structurally satisfies :class:`~johnny.skills.executor.TaskProgressReporter`.
+    Each :meth:`report` increments a monotonic ``step`` (starting at 1 — step 0
+    is the worker's bare claim signal) and publishes a :class:`TaskProgress`
+    through ``publish``.
+    """
+
+    def __init__(
+        self,
+        publish: Callable[[TaskProgress], Awaitable[None]],
+        *,
+        task_id: int,
+        kind: str,
+        turn_id: int | None,
+        request_id: str | None,
+        session_id: str | None,
+        clock: Callable[[], int],
+    ) -> None:
+        self._publish = publish
+        self._task_id = task_id
+        self._kind = kind
+        self._turn_id = turn_id
+        self._request_id = request_id
+        self._session_id = session_id
+        self._clock = clock
+        self._step = 0
+
+    async def report(self, text: str, *, phase: str | None = None) -> None:
+        self._step += 1
+        await self._publish(
+            TaskProgress(
+                task_id=self._task_id,
+                kind=self._kind,
+                timestamp_ms=self._clock(),
+                progress_text=text,
+                turn_id=self._turn_id,
+                request_id=self._request_id,
+                session_id=self._session_id,
+                step=self._step,
+                phase=phase,
+            )
+        )
+
+
+def make_task_progress_reporter(
+    publish: Callable[[TaskProgress], Awaitable[None]],
+    *,
+    task_id: int,
+    kind: str,
+    turn_id: int | None,
+    request_id: str | None,
+    session_id: str | None,
+    clock: Callable[[], int] = _default_clock_ms,
+) -> TaskProgressReporter:
+    """Bind a per-task progress reporter (US-202, Johnny-d6w.14).
+
+    Shared by the live worker (``publish`` fans the frame to the UI + agent
+    channels via its ``_publish``) and the scenario harness (``publish`` is the
+    in-memory bus), so both drive the identical milestone → ``TaskProgress`` →
+    durable-writer path — the harness exercises the production emission seam, not
+    a stand-in. ``publish`` is the only side-effect: a publish failure is the
+    caller's to swallow (the worker's ``_publish`` already does), so a bus hiccup
+    never fails a task.
+    """
+    return _TaskProgressReporter(
+        publish,
+        task_id=task_id,
+        kind=kind,
+        turn_id=turn_id,
+        request_id=request_id,
+        session_id=session_id,
+        clock=clock,
+    )
 
 
 def build_publish_task_completed(

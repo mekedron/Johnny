@@ -65,8 +65,8 @@
 	// The three-column projection (US-102), built from the SAME fetched detail the
 	// live page mutates in place — so the Decisions / Deliveries / Workstreams
 	// columns (US-103) render identically live and historical. `workstream_events`
-	// is not served by the detail endpoint (it rides WS deltas / lands durably with
-	// US-202), so it is omitted and the projector tolerates that.
+	// (US-202) is served on the history detail, so the Workstreams column replays
+	// the historical progress timeline.
 	const traceView = $derived(
 		detail
 			? buildSessionTraceView({
@@ -76,6 +76,7 @@
 					toolCalls: detail.tool_calls ?? [],
 					modelCalls: detail.model_calls ?? [],
 					workstreams: detail.workstreams ?? [],
+					workstreamEvents: detail.workstream_events ?? [],
 					conversationEvents: detail.conversation_events ?? []
 				})
 			: { routerTurns: [], deliveries: [], workstreams: [], activity: [] }

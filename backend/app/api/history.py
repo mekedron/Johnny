@@ -36,12 +36,14 @@ from app.api.sessions import (
     AgentModelCallRead,
     AgentTaskRead,
     AgentToolCallRead,
+    AgentWorkstreamEventRead,
     AgentWorkstreamRead,
     ConversationEventRead,
     SessionTimingRead,
 )
 from app.db.models import (
     AgentWorkstream,
+    AgentWorkstreamEvent,
     BotMode,
     BotSessionSource,
     BotSessionStatus,
@@ -267,6 +269,9 @@ class HistoryDetailResponse(BaseModel):
     # Durable workstream envelopes (US-002/US-005) — same shape the live detail
     # serves; the per-turn projection is GET /sessions/{id}/trace.
     workstreams: list[AgentWorkstreamRead] = []
+    # Append-only per-milestone progress log (US-202) for those workstreams,
+    # ordered by (workstream_id, sequence) — the historical progress timeline.
+    workstream_events: list[AgentWorkstreamEventRead] = []
     timings: list[SessionTimingRead] = []
     conversation_events: list[ConversationEventRead] = []
 
@@ -381,6 +386,18 @@ def get_history_detail(
             .order_by(AgentWorkstream.id.asc())
         ).all()
     )
+    # US-202: the append-only progress log for those workstreams (unbounded,
+    # like the workstreams query above — an ended session's full timeline).
+    workstream_events = list(
+        session.scalars(
+            select(AgentWorkstreamEvent)
+            .where(AgentWorkstreamEvent.bot_session_id == bot_session_id)
+            .order_by(
+                AgentWorkstreamEvent.workstream_id.asc(),
+                AgentWorkstreamEvent.sequence.asc(),
+            )
+        ).all()
+    )
 
     return HistoryDetailResponse(
         session=HistorySessionRead.model_validate(row),
@@ -398,6 +415,9 @@ def get_history_detail(
         model_calls=[AgentModelCallRead.model_validate(c) for c in model_calls],
         workstreams=[
             AgentWorkstreamRead.model_validate(w) for w in workstreams
+        ],
+        workstream_events=[
+            AgentWorkstreamEventRead.model_validate(e) for e in workstream_events
         ],
         timings=[SessionTimingRead.model_validate(t) for t in timings],
         conversation_events=[

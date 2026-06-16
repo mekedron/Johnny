@@ -111,6 +111,20 @@ class ToolCallTraceSink(Protocol):
     async def record(self, trace: ToolCallTrace) -> None: ...
 
 
+class TaskProgressReporter(Protocol):
+    """Best-effort per-step progress signal for a running task (US-202, Johnny-d6w.14).
+
+    Sibling to :class:`ToolCallTraceSink`: the worker binds a reporter to the
+    claimed task; the executor calls :meth:`report` at meaningful milestones.
+    The executor supplies only human-facing ``text`` + a ``phase`` tag — the
+    reporter owns the binding (session/task/turn/kind + the monotonic step
+    counter) and the publish. A reporter that raises must NEVER break the task
+    (the caller swallows + logs, exactly like the trace sink).
+    """
+
+    async def report(self, text: str, *, phase: str | None = None) -> None: ...
+
+
 def _int_or_none(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
@@ -186,6 +200,27 @@ async def _run_traced(
                 exc_info=True,
             )
     return outcome
+
+
+async def _report(
+    reporter: TaskProgressReporter | None, text: str, *, phase: str | None
+) -> None:
+    """Emit one best-effort progress milestone (US-202).
+
+    Mirrors :func:`_run_traced`'s swallow discipline: progress is observability,
+    never execution — a reporter failure is logged and swallowed so a publish
+    hiccup can't fail a task.
+    """
+    if reporter is None:
+        return
+    try:
+        await reporter.report(text, phase=phase)
+    except Exception:  # pragma: no cover - defensive: progress is best-effort
+        logger.warning(
+            "skill executor: progress reporter failed (phase=%s) — continuing",
+            phase,
+            exc_info=True,
+        )
 
 
 def _cap_speech(text: str) -> str:
@@ -291,6 +326,7 @@ def build_skill_task_executor(
     *,
     fallback: TaskExecutor = stub_executor,
     trace_sink: ToolCallTraceSink | None = None,
+    progress_reporter: TaskProgressReporter | None = None,
 ) -> TaskExecutor:
     """The session's executor: skills run in the sandbox, the rest fail fast.
 
@@ -298,6 +334,11 @@ def build_skill_task_executor(
     after every ``sandbox.exec`` this executor makes — the availability recheck
     and the run argv alike — so the previously-ephemeral tool args + output are
     persisted for the session detail timeline. Tracing never affects the settle.
+
+    ``progress_reporter`` (US-202), when given, receives a human-facing
+    milestone before the availability recheck (``availability_check``) and
+    before the run argv (``run``) — so the Workstreams column can narrate a
+    running task. Like tracing, reporting never affects the settle.
     """
 
     async def _execute(task: QueuedTask) -> TaskResult:
@@ -353,6 +394,15 @@ def build_skill_task_executor(
                 error=f"skill unavailable at session snapshot: {skill.unavailable_reason}",
             )
 
+        # US-202 milestone: only narrate the availability probe when the skill
+        # actually declares one (skills without a check emit just the run step).
+        availability = skill.document.availability
+        if availability is not None and availability.check is not None:
+            await _report(
+                progress_reporter,
+                f"Checking the {kind} connection…",
+                phase=PHASE_AVAILABILITY_CHECK,
+            )
         recheck = await _revalidate_availability(
             skill, exec_tool, trace_sink=trace_sink
         )
@@ -377,6 +427,9 @@ def build_skill_task_executor(
             args_json = json.dumps(task.spec.args, separators=(",", ":"), default=str)
         except (TypeError, ValueError):
             args_json = "{}"
+        await _report(
+            progress_reporter, f"Running the {kind} task…", phase=PHASE_RUN
+        )
         outcome = await _run_traced(
             exec_tool,
             {
@@ -444,6 +497,7 @@ __all__ = [
     "TASK_KIND_ENV",
     "ToolCallTrace",
     "ToolCallTraceSink",
+    "TaskProgressReporter",
     "build_tool_call_trace",
     "build_skill_task_executor",
 ]

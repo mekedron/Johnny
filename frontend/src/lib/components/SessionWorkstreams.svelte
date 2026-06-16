@@ -81,6 +81,23 @@
 		}
 	}
 
+	/** Badge colour for a progress-timeline event_type (US-202). */
+	function eventTypeClass(eventType: string): string {
+		switch (eventType) {
+			case 'running':
+			case 'progress':
+				return 'border-sky-500/40 bg-sky-500/10 text-sky-700 dark:text-sky-300';
+			case 'completed':
+			case 'delivered':
+				return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300';
+			case 'expired':
+			case 'interrupted':
+				return 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300';
+			default: // queued
+				return 'border-border bg-muted text-muted-foreground';
+		}
+	}
+
 	function deliveryClass(delivery: string): string {
 		switch (delivery) {
 			case 'delivered':
@@ -304,6 +321,53 @@
 									>
 								{/if}
 							</div>
+
+							<!-- Progress timeline (US-202): the per-milestone feed — live (live
+							     task_progress deltas append here) AND historical (durable
+							     agent_workstream_events). Nothing renders for legacy/inline
+							     sessions whose event log is empty. -->
+							{#if (w.events ?? []).length > 0}
+								<div class="flex flex-col gap-1" data-testid="workstream-progress">
+									<div class="text-muted-foreground text-xs font-medium">Progress</div>
+									<ul class="m-0 flex list-none flex-col gap-1 p-0">
+										{#each w.events as ev (ev.id)}
+											<li
+												class="border-border bg-surface-2 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 rounded-md border px-2 py-1 text-xs"
+												data-testid="workstream-progress-event"
+												data-event-id={ev.id}
+												data-event-sequence={ev.sequence}
+												data-event-type={ev.eventType}
+											>
+												<span
+													class="rounded border px-1.5 py-0.5 text-[0.6rem] font-semibold uppercase {eventTypeClass(
+														ev.eventType
+													)}"
+													data-testid="workstream-progress-type">{ev.eventType}</span
+												>
+												{#if ev.text}
+													<span
+														class="text-foreground min-w-0 flex-1 break-words"
+														data-testid="workstream-progress-text">{ev.text}</span
+													>
+												{/if}
+												<time
+													class="text-muted-foreground ml-auto shrink-0 font-mono"
+													title={ev.createdAt}>{fmtTime(ev.createdAt)}</time
+												>
+											</li>
+											{#if ev.payloadJson !== null}
+												<li class="pl-2">
+													{@render disclosure(
+														`${w.id}:ev:${ev.id}`,
+														'payload',
+														prettyJson(ev.payloadJson)
+													)}
+												</li>
+											{/if}
+										{/each}
+									</ul>
+								</div>
+							{/if}
 
 							<!-- Expired-before-spoken banner (AC2 / Johnny-trt.33). -->
 							{#if expired}

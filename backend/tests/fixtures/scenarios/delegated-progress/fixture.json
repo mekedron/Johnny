@@ -1,0 +1,51 @@
+{
+  "session_id": "delegated-progress",
+  "label": "delegated-progress (US-202: per-step milestones persist to agent_workstream_events)",
+  "bot_session_id": 9201,
+  "mode": "autonomous",
+  "confidence_threshold": 0.7,
+  "instructions": "You are Johnny, a helpful meeting assistant.",
+  "task_catalog": [
+    {
+      "kind": "mcp__demo-http__reverse_text",
+      "one_liner": "Run a multi-step background data job on the connected analytics tool."
+    }
+  ],
+  "executor_kinds": ["mcp__demo-http__reverse_text"],
+  "turns": [
+    {
+      "speaker": "alice",
+      "text": "Hey Johnny, are you with us today?",
+      "confidence": 0.95,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.9,
+        "reason": "a simple greeting answerable inline",
+        "action": "speak",
+        "reply_type": "informative"
+      },
+      "answer": "I'm here — ready when you are."
+    },
+    {
+      "speaker": "alice",
+      "text": "Can you crunch our total CO2 compensation in the background and report back when it's ready?",
+      "confidence": 0.96,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.92,
+        "reason": "explicit background request matching a delegatable multi-step data-job kind",
+        "action": "delegate",
+        "task": {
+          "kind": "mcp__demo-http__reverse_text",
+          "args": { "text": "CO2 compensation total" },
+          "ack": "On it — I'll work through the CO2 compensation total in the background and report back."
+        }
+      }
+    }
+  ],
+  "expect": {
+    "delegate_turn_index": 1,
+    "kind": "mcp__demo-http__reverse_text",
+    "terminal_status": "done"
+  }
+}

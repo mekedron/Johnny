@@ -1989,6 +1989,58 @@ def test_task_events_write_workstream_envelope(db_session: Session) -> None:
     assert [e.sequence for e in events] == [0, 1, 2, 3]
 
 
+def test_task_progress_while_running_appends_progress_row(
+    db_session: Session,
+) -> None:
+    """US-202: a milestone ``task_progress`` arriving while the workstream is
+    already RUNNING appends a durable ``progress`` row (text + step/phase
+    payload) without regressing status — the timeline's "when each step
+    happened". The first progress still owns the queued→running flip.
+    """
+    row = _seed(db_session)
+    db_session.commit()
+    base = {
+        "task_id": 42,
+        "kind": "calendar.upcoming_events",
+        "session_id": row.id,
+        "turn_id": 4,
+    }
+    # queued → step-0 claim (flips to running) → step-1 milestone (appends progress)
+    apply_task_event(db_session, {**base, "type": "task_queued", "timestamp_ms": 10})
+    apply_task_event(
+        db_session,
+        {**base, "type": "task_progress", "timestamp_ms": 20, "progress_text": "", "step": 0},
+    )
+    apply_task_event(
+        db_session,
+        {
+            **base,
+            "type": "task_progress",
+            "timestamp_ms": 25,
+            "progress_text": "Reversing the text…",
+            "step": 1,
+            "phase": "run",
+        },
+    )
+    db_session.commit()
+
+    ws = db_session.scalar(
+        sa.select(AgentWorkstream).where(AgentWorkstream.agent_task_id == 42)
+    )
+    assert ws is not None
+    assert ws.status == WorkstreamStatus.RUNNING  # the milestone did not regress it
+    events = db_session.scalars(
+        sa.select(AgentWorkstreamEvent)
+        .where(AgentWorkstreamEvent.workstream_id == ws.id)
+        .order_by(AgentWorkstreamEvent.sequence)
+    ).all()
+    assert [e.event_type for e in events] == ["queued", "running", "progress"]
+    assert [e.sequence for e in events] == [0, 1, 2]
+    prog = events[2]
+    assert prog.text == "Reversing the text…"
+    assert prog.payload_json == {"step": 1, "phase": "run"}
+
+
 def test_task_completed_before_queued_converges_to_one_row(
     db_session: Session,
 ) -> None:

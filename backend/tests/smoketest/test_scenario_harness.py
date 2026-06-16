@@ -36,8 +36,13 @@ from app.db.models import (  # noqa: E402
 )
 from johnny.agent.router_gate import BACKGROUND_PROMOTION_KEY  # noqa: E402
 from johnny.agent.tasks import QueuedTask, TaskResult  # noqa: E402
+from johnny.skills.executor import TaskProgressReporter  # noqa: E402
 from johnny.smoketest.replay import discover_fixtures  # noqa: E402
-from johnny.smoketest.scenario import load_scenario, run_scenario  # noqa: E402
+from johnny.smoketest.scenario import (  # noqa: E402
+    load_scenario,
+    make_multistep_reverse_executor,
+    run_scenario,
+)
 from johnny.voice_pipeline.events import (  # noqa: E402
     AgentSpoke,
     RouterDecisionMade,
@@ -50,6 +55,7 @@ from johnny.voice_pipeline.events import (  # noqa: E402
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 SCENARIO_FIXTURE = _FIXTURES / "scenarios" / "delegated-multispeaker"
 PROMOTION_FIXTURE = _FIXTURES / "scenarios" / "delegated-background-promotion"
+PROGRESS_FIXTURE = _FIXTURES / "scenarios" / "delegated-progress"
 SESSIONS_DIR = _FIXTURES / "sessions"
 
 # A deterministic stand-in for the demo MCP `server_time` tool (real wall-clock is
@@ -58,7 +64,9 @@ SESSIONS_DIR = _FIXTURES / "sessions"
 _SERVER_TIME_RESULT = "2026-06-16T12:00:00Z"
 
 
-async def _two_kind_executor(task: QueuedTask) -> TaskResult:
+async def _two_kind_executor(
+    task: QueuedTask, *, reporter: TaskProgressReporter | None = None
+) -> TaskResult:
     """Per-kind deterministic executor for the two-workstream promotion scenario.
 
     The promoted ``server_time`` task carries empty args (the gate synthesises the
@@ -256,6 +264,105 @@ def test_scenario_captures_router_model_call(db: Session) -> None:
     # so the duration is a real, non-negative span (no assertion on its magnitude —
     # the recorded LLM returns instantly and timestamps are wall-clock).
     assert all(r.duration_ms is not None and r.duration_ms >= 0 for r in router_rows)
+
+
+def test_scenario_emits_and_persists_per_step_progress(db: Session) -> None:
+    """US-202: the executor narrates milestones (step 1..n) through the SAME
+    reporter → ``TaskProgress`` → durable-writer seam production runs, and each is
+    persisted as an ordered ``agent_workstream_events`` row so an ended session
+    can replay "when each step happened". Exercised through the real gate +
+    coordinator + worker leg; the multi-step stand-in only supplies the
+    ``.report()`` calls (the live skill/MCP executors do that in production).
+    """
+    fixture = load_scenario(PROGRESS_FIXTURE)
+    result = asyncio.run(
+        run_scenario(fixture, session=db, executor=make_multistep_reverse_executor())
+    )
+
+    # Progress events emit NO turn terminal — INV-1 (one terminal/turn) and INV-2
+    # (decision↔utterance parity) still hold with the extra TaskProgress frames.
+    assert result.invariant_violations == []
+
+    # The worker's step-0 claim signal + the executor's two milestones, monotonic.
+    progress = cast(list[TaskProgress], result.events_of_type("task_progress"))
+    assert [p.step for p in progress] == [0, 1, 2]
+    assert progress[0].progress_text == "" and progress[0].phase is None  # claim
+    assert progress[1].progress_text == "Fetching the input…"
+    assert progress[1].phase == "availability_check"
+    assert progress[2].progress_text == "Reversing the text…"
+    assert progress[2].phase == "run"
+    task_id = progress[0].task_id
+    assert all(p.task_id == task_id for p in progress)
+    assert all(p.turn_id is not None for p in progress)  # the delegating turn
+
+    # The durable progress log: queued → running (the step-0 claim flip) →
+    # progress×2 (the milestones) → completed → expired, with a contiguous,
+    # monotonic per-workstream sequence.
+    assert len(result.workstream_rows) == 1
+    ws_id = result.workstream_rows[0]["id"]
+    rows = db.scalars(
+        sa.select(AgentWorkstreamEvent)
+        .where(AgentWorkstreamEvent.workstream_id == ws_id)
+        .order_by(AgentWorkstreamEvent.sequence)
+    ).all()
+    assert [r.event_type for r in rows] == [
+        "queued",
+        "running",
+        "progress",
+        "progress",
+        "completed",
+        "expired",
+    ]
+    assert [r.sequence for r in rows] == [0, 1, 2, 3, 4, 5]
+
+    # Each progress row carries its milestone text + step/phase payload, in order —
+    # the timeline can label/order steps without re-parsing the human text.
+    progress_rows = [r for r in rows if r.event_type == "progress"]
+    assert [r.text for r in progress_rows] == [
+        "Fetching the input…",
+        "Reversing the text…",
+    ]
+    assert progress_rows[0].payload_json == {"step": 1, "phase": "availability_check"}
+    assert progress_rows[1].payload_json == {"step": 2, "phase": "run"}
+
+    # Execution still reached the same terminal as without progress.
+    assert result.workstream_rows[0]["status"] == "done"
+
+
+def test_scenario_progress_after_terminal_appends_no_row(db: Session) -> None:
+    """US-202 guard: a late ``task_progress`` racing a settled workstream appends
+    NO durable row — the terminal status guard holds, so the monotonic-status
+    invariant (no regression to running, no orphan progress) is preserved.
+    """
+    from app.services.session_status_subscriber import apply_task_event
+
+    # No BotSession row needed: apply_task_event tolerates a missing session
+    # (agent_id stays NULL) and the harness runs FK-off SQLite.
+    session_id = 9202
+    # Queue → complete → THEN a late progress for the same task.
+    base = {"session_id": session_id, "task_id": 77, "kind": "mcp__demo-http__reverse_text"}
+    apply_task_event(db, {**base, "type": "task_queued", "turn_id": 1})
+    apply_task_event(
+        db, {**base, "type": "task_completed", "status": "done", "result_text": "ok"}
+    )
+    apply_task_event(
+        db,
+        {**base, "type": "task_progress", "progress_text": "late straggler", "step": 9},
+    )
+    db.commit()
+
+    ws = db.scalar(
+        sa.select(AgentWorkstream).where(AgentWorkstream.agent_task_id == 77)
+    )
+    assert ws is not None and ws.status.value == "done"
+    rows = db.scalars(
+        sa.select(AgentWorkstreamEvent)
+        .where(AgentWorkstreamEvent.workstream_id == ws.id)
+        .order_by(AgentWorkstreamEvent.sequence)
+    ).all()
+    # queued + completed only — the late progress added nothing.
+    assert [r.event_type for r in rows] == ["queued", "completed"]
+    assert all(r.text != "late straggler" for r in rows)
 
 
 def test_scenario_promotes_background_request(db: Session) -> None:
