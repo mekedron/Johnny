@@ -434,6 +434,102 @@ describe('buildSessionTraceView', () => {
 		assert.deepEqual(view.routerTurns[0].deliveryIds, [10]);
 	});
 
+	it('treats the persisted AgentSpoke delivery_kind as authoritative over the derivation (US-105)', () => {
+		const view = buildSessionTraceView({
+			decisions: [makeDecision({ id: 1, turn_id: 1 })],
+			utterances: [
+				// Decision-linked (would derive 'reply') but actually a delegate ack.
+				makeUtterance({ id: 10, agent_decision_id: 1, delivery_kind: 'ack' }),
+				// No persisted kind → falls back to the workstream-link derivation.
+				makeUtterance({ id: 11, agent_decision_id: null, created_at: '2026-06-14T00:00:30Z' })
+			],
+			workstreams: [makeWorkstream({ id: 200, delivered_utterance_id: 11 })]
+		});
+		const byId = new Map(view.deliveries.map((d) => [d.utteranceId, d]));
+		assert.equal(byId.get(10)!.deliveryKind, 'ack'); // persisted, not 'reply'
+		assert.equal(byId.get(11)!.deliveryKind, 'task_result'); // null → derived
+	});
+
+	it('projects recommended-vs-spoken divergence + the answer prompt onto the delivery (US-105 AC1)', () => {
+		const view = buildSessionTraceView({
+			decisions: [
+				makeDecision({
+					id: 1,
+					turn_id: 1,
+					decision_recommended_text: 'It is sunny today.',
+					final_text: 'It is sunny.',
+					divergence_reason: 'answer LLM trimmed the reply',
+					override_actor: 'answer_llm'
+				})
+			],
+			utterances: [
+				makeUtterance({ id: 10, agent_decision_id: 1, output_text: 'It is sunny.', prompt: '[A]' }),
+				// Off-turn task result: no decision → null divergence.
+				makeUtterance({ id: 11, agent_decision_id: null, created_at: '2026-06-14T00:00:30Z' })
+			],
+			workstreams: [makeWorkstream({ id: 200, delivered_utterance_id: 11 })]
+		});
+		const byId = new Map(view.deliveries.map((d) => [d.utteranceId, d]));
+		const reply = byId.get(10)!;
+		assert.equal(reply.decisionRecommendedText, 'It is sunny today.');
+		assert.equal(reply.finalText, 'It is sunny.');
+		assert.equal(reply.divergenceReason, 'answer LLM trimmed the reply');
+		assert.equal(reply.overrideActor, 'answer_llm');
+		assert.equal(reply.prompt, '[A]');
+		const taskResult = byId.get(11)!;
+		assert.equal(taskResult.decisionRecommendedText, null);
+		assert.equal(taskResult.divergenceReason, null);
+		assert.equal(taskResult.overrideActor, null);
+	});
+
+	it('reports which workstreams a status delivery read; non-status deliveries read none (US-105 AC3)', () => {
+		const view = buildSessionTraceView({
+			decisions: [],
+			utterances: [
+				// Status at t=20s while ws 200 is in flight (created :10, undelivered).
+				makeUtterance({
+					id: 12,
+					agent_decision_id: null,
+					delivery_kind: 'status',
+					output_text: 'Still working on the CO2 lookup.',
+					created_at: '2026-06-14T00:00:20Z'
+				}),
+				// A plain reply never computes a read-set.
+				makeUtterance({
+					id: 13,
+					agent_decision_id: null,
+					delivery_kind: 'reply',
+					created_at: '2026-06-14T00:00:21Z'
+				})
+			],
+			workstreams: [
+				makeWorkstream({ id: 200, delivered_utterance_id: null, created_at: '2026-06-14T00:00:10Z', delivered_at: null })
+			]
+		});
+		const byId = new Map(view.deliveries.map((d) => [d.utteranceId, d]));
+		assert.deepEqual(byId.get(12)!.statusReadWorkstreamIds, [200]);
+		assert.deepEqual(byId.get(13)!.statusReadWorkstreamIds, []);
+	});
+
+	it('a status spoken after its work was delivered reads zero — session-3 bug (US-105 AC3)', () => {
+		const view = buildSessionTraceView({
+			decisions: [],
+			utterances: [
+				makeUtterance({
+					id: 14,
+					agent_decision_id: null,
+					delivery_kind: 'status',
+					output_text: "I don't have any tasks in flight right now.",
+					created_at: '2026-06-14T00:00:40Z' // after ws 200 was delivered at :30
+				})
+			],
+			workstreams: [
+				makeWorkstream({ id: 200, delivered_utterance_id: 11, created_at: '2026-06-14T00:00:10Z', delivered_at: '2026-06-14T00:00:30Z' })
+			]
+		});
+		assert.deepEqual(view.deliveries[0].statusReadWorkstreamIds, []);
+	});
+
 	it('counts answer model calls per turn and tool calls per task; carries the router-call headline', () => {
 		const view = buildSessionTraceView({
 			decisions: [makeDecision({ id: 2, turn_id: 2 })],

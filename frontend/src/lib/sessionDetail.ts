@@ -133,6 +133,10 @@ export interface AgentUtteranceRecord {
 	// the partial delivered by cut time; render an interrupted marker.
 	// Optional so a cached/older API response without the field still parses.
 	interrupted?: boolean;
+	// Authoritative AgentSpoke kind (US-105): reply / ack / status / correction /
+	// task_result. Optional + nullable — absent/NULL on rows written before the
+	// column existed, where the projector falls back to task_result/reply.
+	delivery_kind?: string | null;
 	created_at: string;
 }
 
@@ -591,6 +595,16 @@ export interface DeliveryView {
 	audioFile: string | null;
 	audioDurationMs: number | null;
 	sourceWorkstreamId: number | null;
+	// US-105 drill-through. `prompt` is the answer-LLM prompt that produced this
+	// delivery (migrated off the legacy per-turn timeline). The divergence trio is
+	// pulled from the linked decision (INV-2): what the router recommended vs
+	// `finalText`, and why/who rewrote it. `statusReadWorkstreamIds` is — for a
+	// `status` delivery only — the workstreams it read (empty for every other kind).
+	prompt: string;
+	decisionRecommendedText: string | null;
+	divergenceReason: string | null;
+	overrideActor: string | null;
+	statusReadWorkstreamIds: number[];
 }
 
 /** One append-only progress/audit row on a workstream (US-002). */

@@ -218,6 +218,9 @@ class HistoryUtteranceRead(BaseModel):
     # Barge-in partial (Johnny-trt.58) — kept in lock-step with the live
     # serializer for the shared frontend type.
     interrupted: bool = False
+    # Authoritative AgentSpoke kind (US-105) — kept in lock-step with the live
+    # serializer so the Deliveries column classifies ack/status/correction rows.
+    delivery_kind: str | None = None
     created_at: datetime
 
 

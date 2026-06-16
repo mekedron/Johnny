@@ -494,24 +494,53 @@ export function buildSessionTraceView(records: SessionTraceInput): SessionTraceV
 		(a, b) => traceMs(a.createdAt) - traceMs(b.createdAt) || a.decisionId - b.decisionId
 	);
 
+	// US-105 AC#3: the workstreams a `status` delivery read — the durable proxy
+	// for "what the status should have reported" (every workstream live as of the
+	// delivery's timestamp, plus any it delivered). Mirrors
+	// `_status_read_workstream_ids` in backend/app/services/session_trace.py —
+	// keep the two derivations identical.
+	const statusReadWorkstreams = (u: AgentUtteranceRecord): number[] => {
+		const when = traceMs(u.created_at);
+		const ids = new Set<number>();
+		for (const ws of workstreams) {
+			if (ws.delivered_utterance_id === u.id) {
+				ids.add(ws.id);
+			} else if (
+				traceMs(ws.created_at) <= when &&
+				(ws.delivered_at === null || traceMs(ws.delivered_at) >= when)
+			) {
+				ids.add(ws.id);
+			}
+		}
+		return [...ids].sort((a, b) => a - b);
+	};
+
 	// --- deliveries ---------------------------------------------------------
 	const deliveries: DeliveryView[] = utterances.map((u) => {
 		const decision =
 			u.agent_decision_id !== null ? (decisionById.get(u.agent_decision_id) ?? null) : null;
 		const sourceWs = wsByDeliveredUtterance.get(u.id);
+		// Persisted AgentSpoke kind (US-105) is authoritative; legacy rows with no
+		// kind fall back to the old best-effort task_result/reply derivation.
+		const deliveryKind = u.delivery_kind ?? (sourceWs !== undefined ? 'task_result' : 'reply');
 		return {
 			utteranceId: u.id,
 			createdAt: u.created_at,
 			turnId: decision ? decision.turn_id : null,
 			decisionId: u.agent_decision_id,
 			answersRequestId: u.answers_request_id ?? null,
-			deliveryKind: sourceWs !== undefined ? 'task_result' : 'reply',
+			deliveryKind,
 			finalText: u.output_text,
 			interrupted: Boolean(u.interrupted),
 			mode: u.mode,
 			audioFile: u.audio_file,
 			audioDurationMs: u.audio_duration_ms,
-			sourceWorkstreamId: sourceWs ?? null
+			sourceWorkstreamId: sourceWs ?? null,
+			prompt: u.prompt ?? '',
+			decisionRecommendedText: decision ? decision.decision_recommended_text : null,
+			divergenceReason: decision ? decision.divergence_reason : null,
+			overrideActor: decision ? decision.override_actor : null,
+			statusReadWorkstreamIds: deliveryKind === 'status' ? statusReadWorkstreams(u) : []
 		};
 	});
 	deliveries.sort(

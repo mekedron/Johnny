@@ -657,6 +657,10 @@ def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
             str(audio_file) if isinstance(audio_file, str) and audio_file else None
         ),
         interrupted=interrupted,
+        # Persist the authoritative delivery classification (US-105) — the same
+        # ``kind`` that routes the final_text stamping above. The Deliveries
+        # column renders the full enum and keys its status read-set panel off it.
+        delivery_kind=kind,
     )
     db.add(row)
     db.flush()

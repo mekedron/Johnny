@@ -85,7 +85,12 @@ describe('getSessionTrace', () => {
 					mode: 'approval_required',
 					audioFile: null,
 					audioDurationMs: null,
-					sourceWorkstreamId: 200
+					sourceWorkstreamId: 200,
+					prompt: '',
+					decisionRecommendedText: null,
+					divergenceReason: null,
+					overrideActor: null,
+					statusReadWorkstreamIds: []
 				}
 			],
 			workstreams: [

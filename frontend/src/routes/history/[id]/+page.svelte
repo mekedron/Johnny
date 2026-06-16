@@ -26,7 +26,7 @@
 	} from '$lib/sessionDetail';
 	import UtteranceAudioButton from '$lib/components/UtteranceAudioButton.svelte';
 	import SessionTrace from '$lib/components/SessionTrace.svelte';
-	import { buildDecisionEntries, buildSessionTraceView } from '$lib/sessionTrace';
+	import { buildSessionTraceView } from '$lib/sessionTrace';
 	import {
 		botDisplayName,
 		deleteHistorySession,
@@ -61,23 +61,6 @@
 	// name). Legacy sessions carry a null snapshot and fall back to "Johnny",
 	// the historical default.
 	const botName = $derived(detail ? botDisplayName(detail.session) : 'Johnny');
-
-	// Build the enriched per-turn entries through the SAME shared assembly the
-	// live view uses (Johnny-etu.16), so the post-session reasoning timeline +
-	// activity log render from the identical <SessionTrace> component — every
-	// model call drillable to its full prompt + raw response, at the same level
-	// of detail as live.
-	const traceDecisions = $derived(
-		detail
-			? buildDecisionEntries({
-					decisions: detail.decisions,
-					utterances: detail.utterances,
-					tasks: detail.tasks,
-					toolCalls: detail.tool_calls,
-					modelCalls: detail.model_calls
-				})
-			: []
-	);
 
 	// The three-column projection (US-102), built from the SAME fetched detail the
 	// live page mutates in place — so the Decisions / Deliveries / Workstreams
@@ -533,7 +516,7 @@
 		-->
 		<SessionTrace
 			view={traceView}
-			decisions={traceDecisions}
+			botSessionId={sessionId}
 			timings={detail.timings ?? []}
 			conversationEvents={detail.conversation_events ?? []}
 		/>

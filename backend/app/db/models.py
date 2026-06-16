@@ -1030,6 +1030,13 @@ class AgentUtterance(Base):
     # render the row with an interrupted marker; the linked decision row's
     # terminal stays ``no_reply(barge_in)`` (INV-1 unchanged).
     interrupted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # The ``AgentSpoke.kind`` that produced this row (Johnny-d6w.10, US-105):
+    # ``reply`` / ``ack`` / ``status`` / ``correction`` / ``task_result`` — the
+    # authoritative delivery classification the router emits via
+    # ``_say_with_terminal(kind=…)``. NULL for rows written before this column
+    # existed; the Deliveries projector then falls back to the old best-effort
+    # derivation (``task_result`` when a workstream delivered it, else ``reply``).
+    delivery_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

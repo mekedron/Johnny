@@ -285,6 +285,104 @@ def test_deliveries_kind_and_request_linkage() -> None:
     assert task_result.source_workstream_id == 200
 
 
+def test_delivery_kind_persisted_is_authoritative_over_derivation() -> None:
+    """US-105: the persisted ``AgentSpoke.kind`` wins; NULL falls back to the
+    old best-effort task_result/reply derivation (legacy rows)."""
+    data = _scenario()
+    # utterance 10 is decision-linked (would derive ``reply``) but was actually
+    # a delegate ``ack``; utterance 11 has no persisted kind → fallback.
+    data["utterances"][0].delivery_kind = "ack"  # type: ignore[attr-defined]
+    data["utterances"][0].prompt = "[]"  # type: ignore[attr-defined]
+    data["utterances"][1].delivery_kind = None  # type: ignore[attr-defined]
+
+    view = build_session_trace_view(**data)  # type: ignore[arg-type]
+    by_id = {d.utterance_id: d for d in view.deliveries}
+
+    assert by_id[10].delivery_kind == "ack"  # persisted value, not "reply"
+    assert by_id[10].prompt == "[]"
+    assert by_id[11].delivery_kind == "task_result"  # NULL → derived from ws link
+
+
+def test_delivery_divergence_projected_from_linked_decision() -> None:
+    """US-105 AC#1: recommended-vs-spoken divergence is pulled off the linked
+    decision (INV-2); an off-turn task result with no decision carries None."""
+    data = _scenario()
+    decision = data["decisions"][1]  # decisions[1] is id=1 (turn 1 reply)
+    assert decision.id == 1  # type: ignore[attr-defined]
+    decision.decision_recommended_text = "It is sunny today."  # type: ignore[attr-defined]
+    decision.final_text = "It is sunny."  # type: ignore[attr-defined]
+    decision.divergence_reason = "answer LLM trimmed the reply"  # type: ignore[attr-defined]
+    decision.override_actor = "answer_llm"  # type: ignore[attr-defined]
+
+    view = build_session_trace_view(**data)  # type: ignore[arg-type]
+    by_id = {d.utterance_id: d for d in view.deliveries}
+
+    reply = by_id[10]
+    assert reply.decision_recommended_text == "It is sunny today."
+    assert reply.final_text == "It is sunny."  # the utterance's output_text
+    assert reply.divergence_reason == "answer LLM trimmed the reply"
+    assert reply.override_actor == "answer_llm"
+
+    task_result = by_id[11]  # off-turn, no decision link
+    assert task_result.decision_recommended_text is None
+    assert task_result.divergence_reason is None
+    assert task_result.override_actor is None
+
+
+def test_status_delivery_read_workstreams_derivation() -> None:
+    """US-105 AC#3: a ``status`` delivery reports the workstreams in flight at
+    its timestamp; non-status deliveries carry an empty read-set."""
+    data = _scenario()
+    # Insert a status delivery at t=20s — workstream 200 (created t=10, delivered
+    # t=30) is in flight, so the status SHOULD have read it.
+    status = AgentUtterance(
+        id=12,
+        bot_session_id=1,
+        agent_decision_id=None,
+        answers_request_id="req-3",
+        mode=BotMode.APPROVAL_REQUIRED,
+        output_text="Still working on the CO2 lookup.",
+        prompt="",
+        delivery_kind="status",
+        interrupted=False,
+        created_at=_at(20),
+    )
+    data["utterances"].append(status)  # type: ignore[attr-defined]
+
+    view = build_session_trace_view(**data)  # type: ignore[arg-type]
+    by_id = {d.utterance_id: d for d in view.deliveries}
+
+    assert by_id[12].delivery_kind == "status"
+    assert by_id[12].status_read_workstream_ids == [200]
+    # Non-status deliveries never compute a read-set.
+    assert by_id[10].status_read_workstream_ids == []
+    assert by_id[11].status_read_workstream_ids == []
+
+
+def test_status_delivery_reading_zero_workstreams_exposes_the_bug() -> None:
+    """US-105 AC#3: session-3's bug — a status spoken when no workstream is in
+    flight reads zero, even if work ran earlier and was already delivered."""
+    data = _scenario()
+    # Status at t=40s — workstream 200 was delivered at t=30, so it is no longer
+    # in flight: the read-set is empty (the honest "nothing to report" case).
+    status = AgentUtterance(
+        id=13,
+        bot_session_id=1,
+        agent_decision_id=None,
+        mode=BotMode.APPROVAL_REQUIRED,
+        output_text="I don't have any tasks in flight right now.",
+        prompt="",
+        delivery_kind="status",
+        interrupted=False,
+        created_at=_at(40),
+    )
+    data["utterances"].append(status)  # type: ignore[attr-defined]
+
+    view = build_session_trace_view(**data)  # type: ignore[arg-type]
+    by_id = {d.utterance_id: d for d in view.deliveries}
+    assert by_id[13].status_read_workstream_ids == []
+
+
 def test_workstream_projection_counts_and_events() -> None:
     view = build_session_trace_view(**_scenario())  # type: ignore[arg-type]
 
@@ -323,8 +421,14 @@ def test_serialises_camelcase_by_alias() -> None:
     assert "routerModelCall" in dumped["routerTurns"][0]
     assert "deliveryIds" in dumped["routerTurns"][0]
     assert "workstreamIds" in dumped["routerTurns"][0]
-    assert "deliveryKind" in dumped["deliveries"][0]
-    assert "answersRequestId" in dumped["deliveries"][0]
+    delivery = dumped["deliveries"][0]
+    assert "deliveryKind" in delivery
+    assert "answersRequestId" in delivery
+    assert "decisionRecommendedText" in delivery
+    assert "divergenceReason" in delivery
+    assert "overrideActor" in delivery
+    assert "statusReadWorkstreamIds" in delivery
+    assert "prompt" in delivery
     ws = dumped["workstreams"][0]
     assert ws["deliveryStatus"] == "delivered"
     assert ws["toolCallCount"] == 1

@@ -519,6 +519,35 @@ def test_apply_agent_spoke_event_audio_file_defaults_none(
     assert row.audio_file is None
 
 
+def test_apply_agent_spoke_event_persists_delivery_kind(db_session: Session) -> None:
+    """``kind`` from the event lands on the utterance row (US-105) — the
+    authoritative delivery classification the Deliveries column renders."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    payload = _agent_spoke_payload(session_id=bot_session.id)
+    payload["kind"] = "status"
+    assert apply_agent_spoke_event(db_session, payload) is True
+    row = db_session.scalars(sa.select(AgentUtterance)).one()
+    assert row.delivery_kind == "status"
+
+
+def test_apply_agent_spoke_event_delivery_kind_defaults_reply(
+    db_session: Session,
+) -> None:
+    """Events without ``kind`` (older workers) persist ``reply`` — the same
+    default the subscriber applies to the turn-binding logic."""
+    bot_session = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    assert (
+        apply_agent_spoke_event(
+            db_session, _agent_spoke_payload(session_id=bot_session.id)
+        )
+        is True
+    )
+    row = db_session.scalars(sa.select(AgentUtterance)).one()
+    assert row.delivery_kind == "reply"
+
+
 def test_apply_agent_spoke_event_carries_prompt(db_session: Session) -> None:
     """``prompt`` from the event lands on the utterance row (Johnny-awh)."""
     bot_session = _seed(db_session, status=BotSessionStatus.JOINED)

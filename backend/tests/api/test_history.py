@@ -424,6 +424,7 @@ def test_get_history_detail_includes_full_observability(
             mode=BotMode.AUTONOMOUS,
             prompt='[{"role": "system", "content": "You are Johnny."}]',
             output_text="Sure, checking now.",
+            delivery_kind="ack",
         )
     )
     # Delegated task + the tool-call trace it ran.
@@ -488,6 +489,10 @@ def test_get_history_detail_includes_full_observability(
     # Answer call: full serialised prompt + spoken text.
     assert "You are Johnny" in body["utterances"][0]["prompt"]
     assert body["utterances"][0]["output_text"] == "Sure, checking now."
+    # Authoritative delivery_kind (US-105) — kept in lock-step with the live
+    # /sessions/{id} detail so the Deliveries column classifies ack/status rows
+    # instead of falling back to "reply" (the bug browser-validation caught).
+    assert body["utterances"][0]["delivery_kind"] == "ack"
     # Delegated work: task + tool-call trace.
     assert body["tasks"][0]["kind"] == "google-calendar"
     assert body["tasks"][0]["turn_id"] == 1

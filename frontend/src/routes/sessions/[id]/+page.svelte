@@ -1332,7 +1332,7 @@
 
 		<SessionTrace
 			view={traceView}
-			{decisions}
+			botSessionId={sessionId}
 			{timings}
 			{conversationEvents}
 			activityError={timingsLoadError}

@@ -231,6 +231,10 @@ class AgentUtteranceRead(BaseModel):
     # A barge-in cut this utterance mid-speech (Johnny-trt.58): output_text is
     # the partial delivered by cut time; the UI renders an interrupted marker.
     interrupted: bool = False
+    # Authoritative AgentSpoke kind (US-105): reply / ack / status / correction /
+    # task_result. NULL for rows written before the column existed; the frontend
+    # Deliveries projector falls back to the legacy task_result/reply derivation.
+    delivery_kind: str | None = None
     created_at: datetime
 
 

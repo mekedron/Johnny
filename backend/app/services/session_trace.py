@@ -118,6 +118,17 @@ class DeliveryView(_CamelModel):
     audio_file: str | None
     audio_duration_ms: int | None
     source_workstream_id: int | None
+    # US-105 drill-through. ``prompt`` is the answer-LLM prompt that produced
+    # this delivery (migrated off the legacy per-turn timeline). The divergence
+    # trio is pulled from the linked decision (INV-2): what the router
+    # recommended vs ``final_text`` (the utterance's ``output_text``), and why /
+    # who rewrote it. ``status_read_workstream_ids`` is, for a ``status``
+    # delivery only, the workstreams it read — empty otherwise (PRD §7, AC#3).
+    prompt: str
+    decision_recommended_text: str | None
+    divergence_reason: str | None
+    override_actor: str | None
+    status_read_workstream_ids: list[int]
 
 
 class WorkstreamEventView(_CamelModel):
@@ -185,6 +196,35 @@ class SessionTraceView(_CamelModel):
     deliveries: list[DeliveryView]
     workstreams: list[WorkstreamView]
     activity: list[ActivityEventView]
+
+
+def _status_read_workstream_ids(
+    utterance: AgentUtterance,
+    workstreams: Sequence[AgentWorkstream],
+) -> list[int]:
+    """Workstreams a ``status`` delivery read (US-105 AC#3).
+
+    The durable proxy for "what the status should have reported": every
+    workstream that existed and was not yet delivered as of the status
+    delivery's timestamp, plus any whose result this very utterance delivered.
+    Rendering it beside the spoken text exposes session-3's bug — a status that
+    read **zero** workstreams while inline work was in flight. Called only for
+    ``status`` deliveries; the read model carries ``[]`` for every other kind.
+
+    Mirrors ``buildSessionTraceView`` in ``frontend/src/lib/sessionTrace.ts`` —
+    keep the two derivations identical.
+    """
+
+    when = utterance.created_at
+    ids: set[int] = set()
+    for ws in workstreams:
+        if ws.delivered_utterance_id == utterance.id:
+            ids.add(ws.id)
+        elif ws.created_at <= when and (
+            ws.delivered_at is None or ws.delivered_at >= when
+        ):
+            ids.add(ws.id)
+    return sorted(ids)
 
 
 def _enum_value(value: Any) -> Any:
@@ -319,6 +359,11 @@ def build_session_trace_view(
             else None
         )
         source_ws = ws_by_delivered_utterance.get(u.id)
+        # Persisted ``AgentSpoke.kind`` (US-105) is authoritative; rows written
+        # before the column existed fall back to the old best-effort derivation.
+        delivery_kind = u.delivery_kind or (
+            "task_result" if source_ws is not None else "reply"
+        )
         deliveries.append(
             DeliveryView(
                 utterance_id=u.id,
@@ -326,13 +371,28 @@ def build_session_trace_view(
                 turn_id=decision.turn_id if decision is not None else None,
                 decision_id=u.agent_decision_id,
                 answers_request_id=u.answers_request_id,
-                delivery_kind="task_result" if source_ws is not None else "reply",
+                delivery_kind=delivery_kind,
                 final_text=u.output_text,
                 interrupted=bool(u.interrupted),
                 mode=_enum_value(u.mode),
                 audio_file=u.audio_file,
                 audio_duration_ms=u.audio_duration_ms,
                 source_workstream_id=source_ws,
+                prompt=u.prompt or "",
+                decision_recommended_text=(
+                    decision.decision_recommended_text if decision is not None else None
+                ),
+                divergence_reason=(
+                    decision.divergence_reason if decision is not None else None
+                ),
+                override_actor=(
+                    decision.override_actor if decision is not None else None
+                ),
+                status_read_workstream_ids=(
+                    _status_read_workstream_ids(u, workstreams)
+                    if delivery_kind == "status"
+                    else []
+                ),
             )
         )
     deliveries.sort(key=lambda x: (x.created_at, x.utterance_id))

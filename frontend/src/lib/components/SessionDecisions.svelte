@@ -12,10 +12,9 @@
 	 * router prompt/response/input-window (US-004) as collapsible disclosures. A
 	 * filter row narrows by action or to divergences only.
 	 *
-	 * The raw-output readers + disclosure/filter markup are shared with the legacy
-	 * {@link SessionTurnTimeline}; rows expose `data-action` / `data-decision-id`
-	 * and the detail sub-parts carry `data-testid`s so the column is assertable from
-	 * the real browser.
+	 * The raw-output readers come from the shared `$lib/sessionTurns` helpers; rows
+	 * expose `data-action` / `data-decision-id` and the detail sub-parts carry
+	 * `data-testid`s so the column is assertable from the real browser.
 	 */
 	import TraceColumn from '$lib/components/TraceColumn.svelte';
 	import type { RouterTurnView, TerminalState } from '$lib/sessionDetail';
