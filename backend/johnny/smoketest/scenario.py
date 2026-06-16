@@ -123,6 +123,11 @@ class ScenarioFixture:
     instructions: str = ""
     task_catalog: tuple[TaskCatalogEntry, ...] = ()
     executor_kinds: frozenset[str] = frozenset()
+    # Meeting surface (Johnny-trt.50): suppresses keyword delegate-recovery for a
+    # bare SPEAK so ambient meeting chatter never triggers an unasked skill run.
+    # US-201 promotion (an EXPLICIT background request) overrides it, so a
+    # meeting-surface fixture is how the scenario exercises that override.
+    meeting_backed: bool = False
     turns: tuple[ScenarioTurn, ...] = ()
     runtime: str = SPLIT_RUNTIME
 
@@ -175,6 +180,7 @@ def scenario_from_dict(data: dict[str, Any]) -> ScenarioFixture:
         instructions=str(data.get("instructions", "")),
         task_catalog=catalog,
         executor_kinds=frozenset(data.get("executor_kinds", []) or []),
+        meeting_backed=bool(data.get("meeting_backed", False)),
         turns=turns,
         runtime=str(data.get("runtime", SPLIT_RUNTIME)),
     )
@@ -385,6 +391,7 @@ async def run_scenario(
         allowed_replies=(),
         task_catalog=fixture.task_catalog,
         executor_kinds=fixture.executor_kinds,
+        meeting_backed=fixture.meeting_backed,
         router_llm_timeout_s=(SIMULATED_HANG_TIMEOUT_S if has_timeout else 0.0),
     )
     # US-004: record each decided turn's router LLM call as a ``role='router'``

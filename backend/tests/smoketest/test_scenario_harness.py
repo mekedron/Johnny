@@ -34,6 +34,8 @@ from app.db.models import (  # noqa: E402
     CapabilityPolicy,
     Workspace,
 )
+from johnny.agent.router_gate import BACKGROUND_PROMOTION_KEY  # noqa: E402
+from johnny.agent.tasks import QueuedTask, TaskResult  # noqa: E402
 from johnny.smoketest.replay import discover_fixtures  # noqa: E402
 from johnny.smoketest.scenario import load_scenario, run_scenario  # noqa: E402
 from johnny.voice_pipeline.events import (  # noqa: E402
@@ -47,7 +49,32 @@ from johnny.voice_pipeline.events import (  # noqa: E402
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 SCENARIO_FIXTURE = _FIXTURES / "scenarios" / "delegated-multispeaker"
+PROMOTION_FIXTURE = _FIXTURES / "scenarios" / "delegated-background-promotion"
 SESSIONS_DIR = _FIXTURES / "sessions"
+
+# A deterministic stand-in for the demo MCP `server_time` tool (real wall-clock is
+# non-deterministic; the CI gate is hermetic). The reverse_text kind keeps the
+# pure-reversal contract of the default executor.
+_SERVER_TIME_RESULT = "2026-06-16T12:00:00Z"
+
+
+async def _two_kind_executor(task: QueuedTask) -> TaskResult:
+    """Per-kind deterministic executor for the two-workstream promotion scenario.
+
+    The promoted ``server_time`` task carries empty args (the gate synthesises the
+    task_request), so it cannot derive a result from ``args`` like the default
+    reverse_text executor — it returns a fixed deterministic timestamp instead.
+    """
+    kind = task.spec.kind
+    if kind == "mcp__demo-http__server_time":
+        out = _SERVER_TIME_RESULT
+    else:
+        out = str(task.spec.args.get("text", ""))[::-1]
+    return TaskResult(
+        status="done",
+        result_text=out,
+        result_json={"mcp_server": "demo-http", "mcp_tool": kind, "output": out},
+    )
 
 
 @pytest.fixture
@@ -231,6 +258,84 @@ def test_scenario_captures_router_model_call(db: Session) -> None:
     assert all(r.duration_ms is not None and r.duration_ms >= 0 for r in router_rows)
 
 
+def test_scenario_promotes_background_request(db: Session) -> None:
+    """US-201: an EXPLICIT background request promotes a dropped-delegate verdict to
+    an off-turn workstream that runs CONCURRENTLY with a router-delegated workstream
+    across interleaved user turns (the AC#5 demonstration).
+
+    The fixture is a meeting surface with two delegatable kinds. Turn 1 is a
+    router-emitted ``delegate`` (reverse_text); turn 3 is a recorded ``speak`` that
+    the gate must DETERMINISTICALLY promote to ``delegate`` (server_time) because
+    the utterance carries an explicit background request — keyword recovery is
+    suppressed on the meeting surface, so the promotion (not etu.6) is what fires.
+    Both workstreams reach ``done`` and both are open before either settles.
+    """
+    fixture = load_scenario(PROMOTION_FIXTURE)
+
+    # Shape: meeting surface, one recorded delegate + one recorded speak to promote,
+    # interleaved with inline speak turns and a status query.
+    assert fixture.meeting_backed is True
+    actions = [t.router.get("action") for t in fixture.turns]
+    assert actions.count("delegate") == 1  # turn 1: the router-emitted delegate
+    assert actions.count("speak") >= 3  # weather + revenue + the to-be-promoted turn
+    assert actions.count("status") == 1
+
+    result = asyncio.run(run_scenario(fixture, session=db, executor=_two_kind_executor))
+
+    # INV-1 (one terminal/turn) + INV-2 (decision↔utterance parity) across the
+    # whole interleaved conversation, including the promoted turn.
+    assert result.invariant_violations == []
+
+    # Two workstreams opened — one delegated, one promoted — both reached `done`.
+    queued = cast(list[TaskQueued], result.events_of_type("task_queued"))
+    completed = cast(list[TaskCompleted], result.events_of_type("task_completed"))
+    assert len(queued) == 2, "two workstreams: the router delegate + the promotion"
+    assert len(completed) == 2
+    assert {c.status for c in completed} == {"done"}
+    assert {q.kind for q in queued} == {
+        "mcp__demo-http__reverse_text",
+        "mcp__demo-http__server_time",
+    }
+
+    # Concurrency: BOTH tasks were open before EITHER settled — every task_queued
+    # precedes every task_completed (the worker leg runs after the conversation, so
+    # both workstreams are live in the registry during the interleaved turns).
+    events = result.events
+    last_queued = max(
+        i for i, e in enumerate(events) if getattr(e, "type", None) == "task_queued"
+    )
+    first_completed = min(
+        i for i, e in enumerate(events) if getattr(e, "type", None) == "task_completed"
+    )
+    assert last_queued < first_completed, "both workstreams open before either settles"
+
+    # The promotion is DETERMINISTIC: exactly one decision carries the
+    # BACKGROUND_PROMOTION marker — on the recorded-SPEAK turn, for server_time —
+    # proving the gate (not the recorded verdict) produced the second workstream.
+    decisions = cast(
+        list[RouterDecisionMade], result.events_of_type("router_decision_made")
+    )
+    promoted = [d for d in decisions if BACKGROUND_PROMOTION_KEY in d.raw_output]
+    assert len(promoted) == 1, "exactly one turn was promoted by the gate"
+    assert promoted[0].raw_output[BACKGROUND_PROMOTION_KEY] == {
+        "from_action": "speak",
+        "to_action": "delegate",
+        "kind": "mcp__demo-http__server_time",
+    }
+    server_time_q = next(q for q in queued if q.kind == "mcp__demo-http__server_time")
+    assert server_time_q.turn_id == promoted[0].turn_id  # task bound to the promoted turn
+
+    # Both durable workstream envelopes exist (US-002), FK'd to their tasks, with
+    # the deterministic per-kind tool results.
+    assert len(result.workstream_rows) == 2
+    by_kind = {row["kind"]: row for row in result.task_rows}
+    assert by_kind["mcp__demo-http__reverse_text"]["result_text"] == "Q3 launch tagline"[::-1]
+    assert by_kind["mcp__demo-http__server_time"]["result_text"] == _SERVER_TIME_RESULT
+    for ws in result.workstream_rows:
+        assert ws["source_kind"] == "delegate"
+        assert ws["status"] == "done"
+
+
 def test_scenario_fixture_outside_frozen_replay_suite() -> None:
     """The frozen replay fixtures (zero-verdict-drift guard) must stay untouched.
 
@@ -240,4 +345,5 @@ def test_scenario_fixture_outside_frozen_replay_suite() -> None:
     """
     discovered = discover_fixtures(SESSIONS_DIR)
     assert SCENARIO_FIXTURE not in discovered
+    assert PROMOTION_FIXTURE not in discovered
     assert all("scenarios" not in str(p) for p in discovered)

@@ -1,0 +1,97 @@
+{
+  "session_id": "delegated-background-promotion",
+  "label": "delegated-background-promotion (US-201 opt-in off-turn promotion)",
+  "bot_session_id": 9013,
+  "mode": "autonomous",
+  "confidence_threshold": 0.7,
+  "instructions": "You are Johnny, a helpful meeting assistant.",
+  "meeting_backed": true,
+  "task_catalog": [
+    {
+      "kind": "mcp__demo-http__reverse_text",
+      "one_liner": "Reverse a string on the connected demo analytics tool.",
+      "keywords": ["reverse", "backwards", "flip"]
+    },
+    {
+      "kind": "mcp__demo-http__server_time",
+      "one_liner": "Fetch the current server time from the connected demo tool.",
+      "keywords": ["time", "clock", "timezone"]
+    }
+  ],
+  "executor_kinds": ["mcp__demo-http__reverse_text", "mcp__demo-http__server_time"],
+  "turns": [
+    {
+      "speaker": "alice",
+      "text": "What's the weather like out there right now?",
+      "confidence": 0.95,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.9,
+        "reason": "a simple inline lookup, no delegation needed",
+        "action": "speak",
+        "reply_type": "informative"
+      },
+      "answer": "It's clear and about 22 degrees right now."
+    },
+    {
+      "speaker": "alice",
+      "text": "Reverse our Q3 launch tagline for the closing slide, please.",
+      "confidence": 0.96,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.92,
+        "reason": "an explicit reverse-text capability request the router delegated",
+        "action": "delegate",
+        "task": {
+          "kind": "mcp__demo-http__reverse_text",
+          "args": { "text": "Q3 launch tagline" },
+          "ack": "On it — I'll reverse the Q3 tagline and report back."
+        }
+      }
+    },
+    {
+      "speaker": "bob",
+      "text": "And while that runs, how did Q1 revenue come in?",
+      "confidence": 0.94,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.9,
+        "reason": "another data request answerable inline",
+        "action": "speak",
+        "reply_type": "informative"
+      },
+      "answer": "Q1 revenue landed a little above plan — exact figure's in the recap."
+    },
+    {
+      "speaker": "alice",
+      "text": "Keep working on the current server time in the background and report back when you have it.",
+      "confidence": 0.55,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.55,
+        "reason": "the small router labeled an explicit background request speak and dropped the delegate",
+        "action": "speak",
+        "reply_type": "informative"
+      },
+      "answer": "It's mid-afternoon, I think."
+    },
+    {
+      "speaker": "bob",
+      "text": "How's all that going?",
+      "confidence": 0.93,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.86,
+        "reason": "a progress query about delegated work — answer from the task registry",
+        "action": "status"
+      }
+    }
+  ],
+  "expect": {
+    "delegate_turn_index": 1,
+    "delegate_kind": "mcp__demo-http__reverse_text",
+    "promoted_turn_index": 3,
+    "promoted_kind": "mcp__demo-http__server_time",
+    "terminal_status": "done"
+  }
+}

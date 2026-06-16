@@ -78,7 +78,12 @@ from livekit.agents.voice import SpeechHandle
 from app.providers.base import ChatMessage, LLMProvider, LLMResponse
 from johnny.agent.answer import uses_allowlist
 from johnny.agent.approval import ApprovalCoordinator, ApprovalRound
-from johnny.agent.complexity import SHADOW_KEY, matched_catalog_kinds, score_complexity
+from johnny.agent.complexity import (
+    SHADOW_KEY,
+    detect_background_request,
+    matched_catalog_kinds,
+    score_complexity,
+)
 from johnny.agent.gate import (
     GateAction,
     TerminalTracker,
@@ -431,6 +436,23 @@ surface is left alone (the trt.50 over-delegation guard — ambient meeting talk
 must not trigger an unasked skill run); empty-registry STATUS recovers on every
 surface."""
 
+BACKGROUND_PROMOTION_KEY = "background_promotion"
+"""``decision.raw`` key marking a ``speak`` / ``status`` verdict the gate promoted
+to ``delegate`` because the user EXPLICITLY asked for off-turn handling — "do it
+in the background", "keep working on that" (US-201 / Johnny-d6w.13). The sibling
+of :data:`KEYWORD_DELEGATE_KEY`: same deterministic mechanism (exactly one
+*available* catalog kind matched by keyword, the kind free in the registry,
+rewrite to ``delegate`` with a synthesized ack, let the standard degrades take
+it), gated additionally on
+:func:`johnny.agent.complexity.detect_background_request`. The ONE deliberate
+difference: it fires even on a MEETING surface, because an explicit background
+request is the user directing the bot — strong enough to override the trt.50
+ambient-chatter suppression that :meth:`RouterGate._recover_keyword_delegate`
+applies to a bare SPEAK. The explicit-phrase detector is therefore the entire
+safety boundary on a meeting surface (it biases to false-negatives). Stashed
+before the decision emit (the trt.50 ride-along) with ``{from_action, to_action,
+kind}``, the same shape as :data:`KEYWORD_DELEGATE_KEY`."""
+
 MISROUTED_INTERNAL_KEY = "misrouted_internal"
 """``decision.raw`` key marking a session-control delegate the gate degraded to
 SPEAK as a native-mode misroute (Johnny-3gx). In native-tools mode the router
@@ -547,19 +569,25 @@ def delegate_failure_correction(result_text: str) -> str:
     return f"Actually — I can't do that yet: {spoken}"
 
 
-def _recovered_ack(kind: str) -> str:
-    """The spoken ack for a keyword-recovered delegate (Johnny-etu.6).
+def _recovered_ack(kind: str, *, background: bool = False) -> str:
+    """The spoken ack for a gate-recovered/-promoted delegate (Johnny-etu.6 / -d6w.13).
 
     A speak/status verdict the gate re-routes to ``delegate``
-    (:meth:`RouterGate._recover_keyword_delegate`) carries no model-authored
+    (:meth:`RouterGate._recover_keyword_delegate`,
+    :meth:`RouterGate._promote_background_request`) carries no model-authored
     ack, so the gate supplies one — non-blank so it survives
     :meth:`RouterGate._degrade_ackless_delegate`, and brief/honest so a real
     result spoken right after it beats the fabricated answer the SPEAK would
     have produced. Internal session-control kinds read as a sign-off ("on it,
-    wrapping up"); a skill is the generic check-and-report. Deliberately plain
-    (no character voice) — the immediate filler before the real settle speaks."""
+    wrapping up"); a skill is the generic check-and-report, or — when the user
+    EXPLICITLY asked to handle it in the background (``background=True``, US-201)
+    — the report-back-when-ready variant that matches the ask. Deliberately
+    plain (no character voice) — the immediate filler before the real settle
+    speaks."""
     if is_internal_kind(kind):
         return "Okay — taking care of that now."
+    if background:
+        return "On it — I'll work on that in the background and report back."
     return "On it — let me look that up for you."
 
 
@@ -1057,6 +1085,20 @@ class RouterGate:
         # recovered verdict flows through them); stashes its marker before the
         # decision emit like every other re-route.
         decision = self._recover_keyword_delegate(
+            decision, task_context, new_message, turn_id
+        )
+
+        # Opt-in off-turn promotion (US-201 / Johnny-d6w.13): when the user
+        # EXPLICITLY asked for background handling ("do it in the background",
+        # "keep working on that") and exactly one available catalog kind matches,
+        # promote the dropped speak/status verdict to delegate so the work runs
+        # off the turn loop. Runs after keyword-recovery (a playground capability
+        # ask is already recovered; this no-ops on its task_request) and before
+        # the degrades (so a promoted unavailable/unknown kind still degrades to
+        # the honest decline). The one difference from keyword recovery: it fires
+        # on a meeting surface too, because an explicit background request
+        # overrides the trt.50 ambient-chatter guard.
+        decision = self._promote_background_request(
             decision, task_context, new_message, turn_id
         )
 
@@ -1769,6 +1811,96 @@ class RouterGate:
         # verdict being recovered (live: "end the session" came back
         # confidence=0, which the threshold gate below would suppress, leaving
         # the session LIVE). The keyword match IS the confidence.
+        return replace(
+            decision,
+            action=DELEGATE_ACTION,
+            should_speak=True,
+            confidence=1.0,
+            task_request=task_request,
+        )
+
+    def _promote_background_request(
+        self,
+        decision: RouterDecision,
+        task_context: AnswerTaskContext,
+        new_message: LKChatMessage,
+        turn_id: str,
+    ) -> RouterDecision:
+        """Promote an explicit background request to an off-turn workstream (US-201).
+
+        The sibling of :meth:`_recover_keyword_delegate` for Johnny-d6w.13's
+        opt-in off-turn promotion. When the user EXPLICITLY asks for background
+        handling — "do it in the background", "keep working on that"
+        (:func:`~johnny.agent.complexity.detect_background_request`) — and the
+        utterance unambiguously names exactly ONE *available* catalog kind that
+        is not already in flight, rewrite the dropped ``speak`` / ``status``
+        verdict to ``delegate`` so the work runs off the turn loop: a fast
+        synthesized ack frees the floor (the turn's single terminal, INV-1) and
+        the real result is delivered later through the speech queue. The standard
+        delegate degrades then take the rewritten verdict — an unavailable /
+        unknown promoted kind still degrades to the honest spoken decline, never
+        a stub ack (trt.53 restraint preserved).
+
+        The ONE deliberate difference from :meth:`_recover_keyword_delegate`:
+        this fires even on a MEETING surface. Keyword recovery leaves a bare
+        SPEAK alone there (the trt.50 over-delegation guard — a participant's
+        ambient "good meeting, let's schedule next week" must not trigger an
+        unasked skill run), but an EXPLICIT background request is the user
+        directing the bot, a strong enough signal to override that guard.
+        :func:`~johnny.agent.complexity.detect_background_request` is therefore
+        the entire safety boundary on a meeting surface and biases to
+        false-negatives accordingly (a missed ask stays inline, answered
+        honestly).
+
+        Runs AFTER :meth:`_recover_keyword_delegate` (so a playground capability
+        ask is already recovered and this no-ops on its ``task_request``) and
+        BEFORE the ``_degrade_*`` chain (so the promoted verdict still flows
+        through the availability / membership / ackless degrades). Guards mirror
+        keyword recovery: coordinator wired, ``speak`` / ``status`` only, no
+        ``task_request`` already, the explicit background fact present, exactly
+        one available kind matched, the kind absent from the registry
+        (``occupied_kinds`` — a same-kind "how's it going?" keeps its status or
+        grounded answer, never a duplicate delegate). The marker
+        (:data:`BACKGROUND_PROMOTION_KEY`) is stashed before the decision emit,
+        the trt.50 ride-along shape.
+        """
+        if self._tasks is None:
+            return decision
+        if decision.action not in (SPEAK_ACTION, STATUS_ACTION):
+            return decision
+        if decision.task_request is not None:
+            return decision
+        text = (new_message.text_content or "").strip()
+        if not text or not detect_background_request(text):
+            return decision
+        available = tuple(entry for entry in self._config.task_catalog if entry.available)
+        matched = list(dict.fromkeys(matched_catalog_kinds(text, available)))
+        if len(matched) != 1:
+            # Zero leaves the verdict alone — restraint: a background ask with no
+            # matchable capability is answered honestly inline, never a dead
+            # promise (AC#4). An ambiguous multi-kind hit defers to the model.
+            return decision
+        kind = matched[0]
+        if kind in task_context.occupied_kinds:
+            return decision
+        task_request = TaskRequest(kind=kind, ack=_recovered_ack(kind, background=True), args={})
+        decision.raw[BACKGROUND_PROMOTION_KEY] = {
+            "from_action": decision.action,
+            "to_action": DELEGATE_ACTION,
+            "kind": kind,
+        }
+        logger.info(
+            "agent.router.gate: turn=%s %s verdict carried an explicit background "
+            "request and matched exactly one available catalog kind=%r — promoting "
+            "to an off-turn delegated workstream (Johnny-d6w.13)",
+            turn_id,
+            decision.action,
+            kind,
+        )
+        # Confidence forced to full for the same reason as keyword recovery: the
+        # promotion fires on a DETERMINISTIC explicit-phrase + exact-keyword
+        # match, a more reliable "the user asked for this" signal than the 3B
+        # model's own confidence self-report on the verdict being promoted.
         return replace(
             decision,
             action=DELEGATE_ACTION,
@@ -2496,7 +2628,7 @@ class RouterGate:
             response = await asyncio.wait_for(
                 self._router_llm.chat(messages), timeout=bound
             )
-        except (TimeoutError, asyncio.TimeoutError):
+        except TimeoutError:
             logger.warning(
                 "agent.router.gate: timeout-apology LLM call itself timed out "
                 "(%.1fs) — degrading to static text",

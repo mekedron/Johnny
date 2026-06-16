@@ -50,15 +50,22 @@ Stdlib-only and import-cheap (``re``/``math``/``dataclasses``), importable
 without livekit or the provider stack — the same contract as
 :mod:`johnny.agent.gate` and :mod:`johnny.agent.task_catalog`.
 
-SHADOW ONLY: the sole production caller is
-:meth:`johnny.agent.router_gate.RouterGate.run_turn`, which computes the
-verdict synchronously before awaiting the triage LLM and stashes
+SHADOW-ONLY VERDICT, REAL KEYWORD HELPERS: the complexity *verdict*
+(:func:`score_complexity` / :class:`ComplexityVerdict`) is observability only —
+its sole production caller is
+:meth:`johnny.agent.router_gate.RouterGate.run_turn`, which computes it
+synchronously before awaiting the triage LLM and stashes
 :meth:`ComplexityVerdict.shadow_payload` under :data:`SHADOW_KEY` inside the
 decision's raw payload (→ ``agent_decisions.raw_output`` JSON — no
 migration). Nothing reads the verdict back at runtime; its purpose is the
 labeled per-turn dataset (heuristic verdict × router action) that gates any
 later behavioral use (Johnny-trt.51 fast-paths, the Phase-6 name-addressing
-gate Johnny-trt.52).
+gate Johnny-trt.52). The module's *keyword helpers*, by contrast, ARE used for
+real post-router decisions: :func:`matched_catalog_kinds` (the Johnny-etu.6
+delegate recovery) and :func:`detect_background_request` (the Johnny-d6w.13
+off-turn promotion) — both pure, deterministic, and replay-safe, sharing the
+same left-word-boundary matching as the scorer's catalog dimension so the two
+never drift on what "a keyword hit" means.
 """
 
 from __future__ import annotations
@@ -512,6 +519,38 @@ no mapping — e.g. a Phase-4 skill's novel vocabulary — simply matches
 English-only until a stem is added here or the entry ships its own."""
 
 
+BACKGROUND_REQUEST_KEYWORDS: tuple[str, ...] = (
+    # English — explicit, directive "handle this off-turn" phrasing (the
+    # Johnny-d6w.13 / US-201 trigger phrases: "do it in the background", "keep
+    # working on that"). Ambient phrasing ("while we talk", "later", "when you
+    # get a chance") is DELIBERATELY excluded: on a meeting surface this
+    # detector is the only signal that lifts the trt.50 over-delegation
+    # suppression for an explicit request, so the set biases to false-negatives
+    # (a missed background ask stays inline, answered honestly) over
+    # false-positives (an unasked skill run mid-meeting).
+    "in the background",
+    "in background",
+    "keep working on",
+    "report back when",
+    # Russian
+    "на фоне",
+    "в фоновом режим",
+    "продолжай работ",
+    "доложи когда",
+    # Finnish
+    "taustal",
+    "jatka työ",
+    "raportoi kun",
+)
+"""Directive background-handling phrases (EN + RU/FI stems) for the Johnny-d6w.13
+off-turn promotion trigger (:func:`detect_background_request`). Matched with the
+same left-word-boundary primitive (:func:`_keyword_pattern`) as the catalog
+keywords. Kept SEPARATE from :data:`CATALOG_KEYWORD_TRANSLATIONS` (which is keyed
+by English catalog keywords) — these are a flat set of stand-alone phrases, not
+per-entry translations, and none collide with a catalog keyword so the two
+matchers never fight."""
+
+
 # --------------------------------------------------------------------------- #
 # Matching                                                                    #
 # --------------------------------------------------------------------------- #
@@ -654,6 +693,31 @@ def matched_catalog_kinds(
                 matched.append(entry.kind)
                 break
     return matched
+
+
+def detect_background_request(text: str) -> bool:
+    """Does the turn explicitly ask for off-turn / background handling? (US-201).
+
+    The deterministic, persisted-signal trigger for Johnny-d6w.13's opt-in
+    promotion: the user said "do it in the background" / "keep working on that"
+    (EN) or an RU/FI equivalent. A pure keyword match over the *transcript* with
+    the same left-word-boundary primitive (:func:`_keyword_pattern`) the catalog
+    matcher uses, so it is replay-deterministic and adds no prompt bytes — the
+    gate's :meth:`johnny.agent.router_gate.RouterGate._promote_background_request`
+    reads it to promote a dropped-delegate verdict to ``delegate`` and, on a
+    meeting surface, to lift the trt.50 ambient-chatter suppression for an
+    *explicit* request.
+
+    Conservative BY DESIGN: this is the SOLE signal that lets an explicit
+    background ask override the over-delegation guard on a meeting surface, so
+    :data:`BACKGROUND_REQUEST_KEYWORDS` carries only directive phrasing and the
+    function biases to false-negatives (miss → stay inline, answer honestly)
+    over false-positives (an unasked skill run mid-meeting). The downstream
+    promotion still requires exactly one *available* catalog kind to match and
+    that kind to be free — this detector only opens the door.
+    """
+    folded = text.casefold()
+    return any(_keyword_pattern(kw).search(folded) for kw in BACKGROUND_REQUEST_KEYWORDS)
 
 
 def _score_token_estimate(text: str, config: ComplexityConfig) -> DimensionScore:
@@ -809,6 +873,7 @@ def score_complexity(
 
 __all__ = [
     "AGENTIC_KEYWORDS",
+    "BACKGROUND_REQUEST_KEYWORDS",
     "CATALOG_KEYWORD_TRANSLATIONS",
     "COMPLEXITY_TIERS",
     "COMPLEX_TIER",
@@ -825,6 +890,7 @@ __all__ = [
     "SHADOW_KEY",
     "SIMPLE_KEYWORDS",
     "SIMPLE_TIER",
+    "detect_background_request",
     "matched_catalog_kinds",
     "score_complexity",
 ]

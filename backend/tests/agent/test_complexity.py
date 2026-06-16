@@ -25,6 +25,7 @@ from johnny.agent.complexity import (
     ComplexityConfig,
     _calibrate_confidence,
     _tier_for,
+    detect_background_request,
     score_complexity,
 )
 from johnny.agent.task_catalog import STUB_TASK_CATALOG, TaskCatalogEntry
@@ -315,3 +316,53 @@ def test_signals_ordered_by_weighted_contribution() -> None:
         "check my calendar, what meetings tomorrow", catalog=STUB_TASK_CATALOG
     )
     assert verdict.signals[0].startswith("catalog")
+
+
+# --- detect_background_request (Johnny-d6w.13 / US-201) ---------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "do it in the background",
+        "work that out in the background and let me know",
+        "keep working on that report",
+        "keep working on it while we wrap up here",
+        "look into it and report back when it's ready",
+        # Russian: "keep working on it in the background" / "report back when ready"
+        "продолжай работать над этим на фоне",
+        "посчитай это в фоновом режиме и доложи когда будет готово",
+        # Finnish: "handle it in the background" / "report back when done"
+        "hoida se taustalla",
+        "jatka työskentelyä ja raportoi kun valmista",
+    ],
+)
+def test_detect_background_request_fires_on_explicit_phrasing(text: str) -> None:
+    """The explicit off-turn trigger fires on directive EN/RU/FI background asks."""
+    assert detect_background_request(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "what's the weather like right now?",
+        "that was a productive meeting, glad we synced on the schedule",
+        "can you check my calendar?",
+        "let's keep talking about the roadmap for a bit",  # ambient, not directive
+        "i'll get back to you later",  # first-person, not a directive to the bot
+        "",
+    ],
+)
+def test_detect_background_request_silent_on_ambient_or_inline(text: str) -> None:
+    """Conservative by design: ambient / inline / first-person phrasing does NOT
+    fire — the detector biases to false-negatives so it never green-lights an
+    unasked skill run on a meeting surface."""
+    assert detect_background_request(text) is False
+
+
+def test_detect_background_request_left_boundary_blocks_midword() -> None:
+    """The left-word-boundary primitive blocks mid-word noise — "taustal" must not
+    fire inside an unrelated longer token, mirroring the catalog matcher contract."""
+    # "report back when" requires the phrase; a bare "back" never fires.
+    assert detect_background_request("hand that back to me") is False
+    assert detect_background_request("report back when you can") is True

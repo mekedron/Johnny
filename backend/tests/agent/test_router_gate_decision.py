@@ -45,6 +45,7 @@ from app.providers.base import (  # noqa: E402
 from johnny.agent.gate import GateTerminal, TurnIndex, TurnLedger  # noqa: E402
 from johnny.agent.router_gate import (  # noqa: E402
     ACK_FALLBACK_KEY,
+    BACKGROUND_PROMOTION_KEY,
     CAPABILITY_GAP_KEY,
     DECIDED_REPLY_KEY,
     DECIDED_REPLY_MAX_CHARS,
@@ -4450,3 +4451,164 @@ async def test_recovered_delegate_overrides_zero_confidence() -> None:
     assert decision.raw[KEYWORD_DELEGATE_KEY]["kind"] == "session.end"
     h.say.handles[0].fire_done()
     await h.drain()
+
+
+# --- US-201 opt-in off-turn promotion (Johnny-d6w.13) -----------------------
+
+
+async def test_promote_background_on_meeting_surface() -> None:
+    """THE US-201 delta over etu.6: an EXPLICIT background request promotes a
+    dropped-delegate verdict even on a MEETING surface, where bare keyword
+    recovery is suppressed. "keep working on my calendar in the background" →
+    delegate google-calendar with the report-back ack, marked BACKGROUND_PROMOTION
+    (not KEYWORD_DELEGATE — the keyword path stayed suppressed)."""
+    h = _TaskGateHarness(
+        [_speak_decision()],
+        config=RouterGateConfig(
+            task_catalog=_keyword_catalog(meeting_backed=True), meeting_backed=True
+        ),
+    )
+    msg = _user_msg("Keep working on my calendar in the background and report back.")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    assert len(h.sink.snapshot()) == 1
+    assert h.sink.snapshot()[0].spec.kind == "google-calendar"
+    assert h.say.texts == ["On it — I'll work on that in the background and report back."]
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "delegate"
+    assert decision.confidence == 1.0
+    marker = decision.raw[BACKGROUND_PROMOTION_KEY]
+    assert marker == {
+        "from_action": "speak",
+        "to_action": "delegate",
+        "kind": "google-calendar",
+    }
+    json.dumps(marker)  # JSON-safe as persisted by the subscriber
+    # The keyword path stayed suppressed on the meeting surface — promotion is
+    # what fired, deterministically, on the explicit request.
+    assert KEYWORD_DELEGATE_KEY not in decision.raw
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_no_promote_without_background_phrase_on_meeting() -> None:
+    """The over-delegation guard preserved (trt.50): ambient meeting chatter that
+    merely mentions a catalog keyword — with NO explicit background request — is
+    left as SPEAK. detect_background_request is the entire safety boundary here."""
+    h = _TaskGateHarness(
+        [_speak_decision()],
+        config=RouterGateConfig(
+            task_catalog=_keyword_catalog(meeting_backed=True), meeting_backed=True
+        ),
+    )
+    msg = _user_msg("that was a productive meeting, glad we synced on the calendar")
+
+    await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK fallthrough — no raise
+
+    assert h.sink.snapshot() == []  # nothing queued — no unasked skill run
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "speak"
+    assert BACKGROUND_PROMOTION_KEY not in decision.raw
+    assert KEYWORD_DELEGATE_KEY not in decision.raw
+    assert msg.id in h.gate._pending_speak_turns
+
+
+async def test_promote_no_catalog_match_answers_honestly() -> None:
+    """Restraint (trt.53 / AC#4): an explicit background request with NO matchable
+    capability is answered honestly inline — never a dead promise. The verdict
+    stays SPEAK; nothing is queued."""
+    h = _TaskGateHarness(
+        [_speak_decision()],
+        config=RouterGateConfig(
+            task_catalog=_keyword_catalog(meeting_backed=True), meeting_backed=True
+        ),
+    )
+    msg = _user_msg("Keep working on the team vibes in the background and report back.")
+
+    await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK fallthrough — no raise
+
+    assert h.sink.snapshot() == []
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "speak"
+    assert BACKGROUND_PROMOTION_KEY not in decision.raw
+
+
+async def test_promote_skips_ambiguous_multi_kind() -> None:
+    """Exactly-one-kind guard: a background request hitting two available kinds is
+    left to the model rather than guessing which to run off-turn."""
+    h = _TaskGateHarness(
+        [_speak_decision()],
+        config=RouterGateConfig(
+            task_catalog=_keyword_catalog(meeting_backed=True), meeting_backed=True
+        ),
+    )
+    # "leave" → meeting.leave, "calendar" → google-calendar: two available kinds.
+    msg = _user_msg("in the background, leave the meeting after you check the calendar")
+
+    await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK fallthrough — no raise
+
+    assert h.sink.snapshot() == []
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "speak"
+    assert BACKGROUND_PROMOTION_KEY not in decision.raw
+
+
+async def test_promote_skips_when_already_delegate() -> None:
+    """A model-authored delegate that already carries the intent (with a background
+    phrase in the utterance) is untouched — the model's own task wins, no
+    BACKGROUND_PROMOTION marker (the action-guard short-circuits)."""
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="google-calendar", ack="Checking the calendar now.")],
+        config=RouterGateConfig(task_catalog=_keyword_catalog()),
+    )
+    msg = _user_msg("check my calendar in the background")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    assert h.sink.snapshot()[0].spec.kind == "google-calendar"
+    assert h.say.texts == ["Checking the calendar now."]  # the model's ack, not the promotion ack
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "delegate"
+    assert BACKGROUND_PROMOTION_KEY not in decision.raw
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_promote_skips_occupied_kind() -> None:
+    """No duplicate delegate: a background request matching a kind already in flight
+    keeps its status/grounded path rather than queuing a second workstream."""
+    h = _TaskGateHarness(
+        [_speak_decision()],
+        config=RouterGateConfig(
+            task_catalog=_keyword_catalog(meeting_backed=True), meeting_backed=True
+        ),
+    )
+    assert h.coordinator is not None
+    h.coordinator.note_task_running(42, kind="google-calendar")
+    msg = _user_msg("keep working on my calendar in the background")
+
+    await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK fallthrough — no raise
+
+    assert h.sink.snapshot() == []  # the running google-calendar is not duplicated
+    decision, _turn = h.obs.decisions[0]
+    assert BACKGROUND_PROMOTION_KEY not in decision.raw
+
+
+async def test_promote_without_coordinator_is_noop() -> None:
+    """No coordinator wired (non-delegation runtime) → nothing to promote to, so an
+    explicit background request stays SPEAK and is answered inline."""
+    h = _TaskGateHarness(
+        [_speak_decision()],
+        config=RouterGateConfig(task_catalog=_keyword_catalog()),
+        wire_coordinator=False,
+    )
+    msg = _user_msg("check my calendar in the background and report back")
+
+    await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK fallthrough — no raise
+
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "speak"
+    assert BACKGROUND_PROMOTION_KEY not in decision.raw
