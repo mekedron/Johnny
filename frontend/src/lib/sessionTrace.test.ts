@@ -829,4 +829,217 @@ describe('buildSessionTraceView', () => {
 		assert.deepEqual(view.workstreams, []);
 		assert.deepEqual(view.activity, []);
 	});
+
+	// --- US-107: inline-activity synthesis (frontend-only, FR-6 / cue C7) ----
+
+	it('US-107: synthesizes one inline foreground_tool_loop workstream per turn from orphan calls (no workstream rows)', () => {
+		// Session-3 shape: 0 tasks, 0 workstreams; every tool call agent_task_id=null.
+		const view = buildSessionTraceView({
+			decisions: [makeDecision({ id: 1, turn_id: 1 }), makeDecision({ id: 2, turn_id: 2 })],
+			utterances: [],
+			toolCalls: [
+				makeToolCall({
+					id: 30,
+					agent_task_id: null,
+					turn_id: 1,
+					tool_name: 'mcp__metabase__list_dashboards',
+					created_at: '2026-06-14T00:00:02Z'
+				}),
+				makeToolCall({
+					id: 31,
+					agent_task_id: null,
+					turn_id: 2,
+					tool_name: 'mcp__metabase__execute_card',
+					created_at: '2026-06-14T00:00:12Z'
+				})
+			],
+			modelCalls: [
+				makeModelCall({ id: 50, turn_id: 1, role: 'answer', step_index: 0 }),
+				makeModelCall({ id: 51, turn_id: 2, role: 'answer', step_index: 0 })
+			]
+		});
+		assert.equal(view.workstreams.length, 2);
+		assert.ok(view.workstreams.every((w) => w.sourceKind === 'foreground_tool_loop'));
+		assert.ok(view.workstreams.every((w) => w.agentTaskId === null));
+		// Reserved synthetic-id range — never collides with a positive DB id.
+		assert.ok(view.workstreams.every((w) => w.id <= -1_000_000));
+		const byTurn = new Map(view.workstreams.map((w) => [w.sourceTurnId, w]));
+		const t1 = byTurn.get(1)!;
+		assert.deepEqual(
+			(t1.toolCalls ?? []).map((t) => t.toolName),
+			['mcp__metabase__list_dashboards']
+		);
+		assert.equal(t1.toolCallCount, 1);
+		assert.equal(t1.modelCallCount, 1); // counts mirror the itemised lists
+		assert.equal(t1.sourceDecisionId, 1);
+	});
+
+	it('US-107: a delegated turn is not double-synthesized; inline rows only for uncovered turns', () => {
+		const view = buildSessionTraceView({
+			decisions: [makeDecision({ id: 1, turn_id: 1 }), makeDecision({ id: 2, turn_id: 2 })],
+			utterances: [],
+			tasks: [makeTask({ id: 20, turn_id: 2 })],
+			toolCalls: [
+				makeToolCall({ id: 30, agent_task_id: 20, turn_id: 2 }), // delegated (turn 2 covered)
+				makeToolCall({ id: 31, agent_task_id: null, turn_id: 1, tool_name: 'mcp__metabase__list' })
+			],
+			modelCalls: [
+				makeModelCall({ id: 50, turn_id: 2, role: 'answer', step_index: 0 }), // delegated turn
+				makeModelCall({ id: 51, turn_id: 1, role: 'answer', step_index: 0 }) // inline turn
+			],
+			workstreams: [
+				makeWorkstream({ id: 200, source_turn_id: 2, source_decision_id: 2, agent_task_id: 20 })
+			]
+		});
+		assert.equal(view.workstreams.length, 2); // real delegated + 1 synthetic
+		const synth = view.workstreams.filter((w) => w.id <= -1_000_000);
+		assert.equal(synth.length, 1);
+		assert.equal(synth[0].sourceTurnId, 1); // turn 2 NOT re-synthesized
+		// Every answer model-call id appears exactly once across all rows (no double-count).
+		const allModelIds = view.workstreams.flatMap((w) => (w.modelCalls ?? []).map((m) => m.id));
+		assert.deepEqual([...allModelIds].sort((a, b) => a - b), [50, 51]);
+	});
+
+	it('US-107: orphan tools never appear under a delegated row sharing the same turn_id', () => {
+		const view = buildSessionTraceView({
+			decisions: [makeDecision({ id: 2, turn_id: 2 })],
+			utterances: [],
+			tasks: [makeTask({ id: 20, turn_id: 2 })],
+			toolCalls: [
+				makeToolCall({ id: 30, agent_task_id: 20, turn_id: 2, tool_name: 'sandbox.exec' }),
+				makeToolCall({ id: 99, agent_task_id: null, turn_id: 2, tool_name: 'orphan.tool' })
+			],
+			workstreams: [makeWorkstream({ id: 200, source_turn_id: 2, agent_task_id: 20 })]
+		});
+		const delegated = view.workstreams.find((w) => w.id === 200)!;
+		assert.deepEqual(
+			(delegated.toolCalls ?? []).map((t) => t.id),
+			[30] // task-linked tool only, never the orphan
+		);
+		// Uniform skip-covered rule: a covered turn's orphan tool is not re-synthesized.
+		assert.equal(view.workstreams.length, 1);
+	});
+
+	it('US-107: orphan calls with no turn_id fall into a single off-turn inline bucket', () => {
+		const view = buildSessionTraceView({
+			decisions: [],
+			utterances: [],
+			toolCalls: [
+				makeToolCall({ id: 30, agent_task_id: null, turn_id: null, tool_name: 'a' }),
+				makeToolCall({ id: 31, agent_task_id: null, turn_id: null, tool_name: 'b' })
+			],
+			modelCalls: [makeModelCall({ id: 50, turn_id: null, role: 'answer', step_index: 0 })]
+		});
+		assert.equal(view.workstreams.length, 1);
+		const ws = view.workstreams[0];
+		assert.equal(ws.id, -999_999);
+		assert.equal(ws.sourceTurnId, null);
+		assert.equal(ws.sourceDecisionId, null);
+		assert.equal(ws.requestId, null);
+		assert.equal(ws.toolCallCount, 2);
+		assert.equal(ws.modelCallCount, 1);
+	});
+
+	it('US-107: inline status is failed iff a tool failed; delivery is ready with no delivery link', () => {
+		const ok = buildSessionTraceView({
+			decisions: [makeDecision({ id: 1, turn_id: 1 })],
+			utterances: [],
+			toolCalls: [makeToolCall({ id: 30, agent_task_id: null, turn_id: 1, ok: true })]
+		}).workstreams[0];
+		assert.equal(ok.status, 'done');
+		assert.equal(ok.deliveryStatus, 'ready');
+		assert.equal(ok.deliveredUtteranceId, null);
+
+		const failed = buildSessionTraceView({
+			decisions: [makeDecision({ id: 1, turn_id: 1 })],
+			utterances: [],
+			toolCalls: [
+				makeToolCall({ id: 30, agent_task_id: null, turn_id: 1, ok: true }),
+				makeToolCall({ id: 31, agent_task_id: null, turn_id: 1, ok: false, error: 'boom' })
+			]
+		}).workstreams[0];
+		assert.equal(failed.status, 'failed');
+	});
+
+	it('US-107: synthesis is additive — it does not leak into the Deliveries or Decisions columns', () => {
+		const view = buildSessionTraceView({
+			decisions: [makeDecision({ id: 1, turn_id: 1, should_speak: true })],
+			utterances: [makeUtterance({ id: 10, agent_decision_id: 1 })],
+			toolCalls: [makeToolCall({ id: 30, agent_task_id: null, turn_id: 1 })],
+			modelCalls: [makeModelCall({ id: 50, turn_id: 1, role: 'answer', step_index: 0 })]
+		});
+		assert.equal(view.workstreams.length, 1); // the inline row exists
+		// The reply stays a plain reply (not task_result) and links no workstream.
+		assert.equal(view.deliveries[0].deliveryKind, 'reply');
+		assert.equal(view.deliveries[0].sourceWorkstreamId, null);
+		// The turn's action stays 'speak', NOT 'delegate'.
+		assert.equal(view.routerTurns[0].action, 'speak');
+		assert.deepEqual(view.routerTurns[0].workstreamIds, []);
+	});
+
+	it('US-107: a turn already covered by a real workstream row is not re-synthesized', () => {
+		const view = buildSessionTraceView({
+			decisions: [makeDecision({ id: 1, turn_id: 1 })],
+			utterances: [],
+			toolCalls: [makeToolCall({ id: 30, agent_task_id: null, turn_id: 1 })],
+			modelCalls: [makeModelCall({ id: 50, turn_id: 1, role: 'answer', step_index: 0 })],
+			workstreams: [
+				makeWorkstream({
+					id: 201,
+					source_kind: 'foreground_tool_loop',
+					agent_task_id: null,
+					source_turn_id: 1,
+					source_decision_id: 1,
+					delivered_utterance_id: null
+				})
+			]
+		});
+		assert.equal(view.workstreams.length, 1); // the real row only, no duplicate
+		assert.equal(view.workstreams[0].id, 201);
+	});
+
+	it('US-107: a turn with answer model calls but no inline tools produces no synthetic row', () => {
+		const view = buildSessionTraceView({
+			decisions: [makeDecision({ id: 1, turn_id: 1 })],
+			utterances: [],
+			modelCalls: [makeModelCall({ id: 50, turn_id: 1, role: 'answer', step_index: 0 })]
+		});
+		assert.deepEqual(view.workstreams, []); // plain reply, no work to surface
+	});
+
+	it('US-107: an inline row inherits request_id and decision id from its turn decision (US-003)', () => {
+		const view = buildSessionTraceView({
+			decisions: [makeDecision({ id: 9, turn_id: 9, request_id: 'req-9' })],
+			utterances: [],
+			toolCalls: [makeToolCall({ id: 30, agent_task_id: null, turn_id: 9 })]
+		});
+		const ws = view.workstreams[0];
+		assert.equal(ws.requestId, 'req-9');
+		assert.equal(ws.sourceDecisionId, 9);
+		assert.equal(ws.id, -1_000_000 - 9);
+	});
+
+	it('US-107: synthetic inline rows interleave with real rows by created_at', () => {
+		const view = buildSessionTraceView({
+			decisions: [makeDecision({ id: 1, turn_id: 1 }), makeDecision({ id: 2, turn_id: 2 })],
+			utterances: [],
+			tasks: [makeTask({ id: 20, turn_id: 2 })],
+			workstreams: [
+				makeWorkstream({
+					id: 200,
+					source_turn_id: 2,
+					agent_task_id: 20,
+					created_at: '2026-06-14T00:09:00Z' // late
+				})
+			],
+			toolCalls: [
+				makeToolCall({ id: 30, agent_task_id: null, turn_id: 1, created_at: '2026-06-14T00:00:01Z' }) // early
+			]
+		});
+		// Synthetic (early) sorts before the real delegated row (late).
+		assert.deepEqual(
+			view.workstreams.map((w) => w.id),
+			[-1_000_001, 200]
+		);
+	});
 });

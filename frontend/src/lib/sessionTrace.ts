@@ -337,6 +337,40 @@ export interface SessionTraceInput {
 
 const traceMs = (iso: string): number => Date.parse(iso) || 0;
 
+// Reserved synthetic-workstream id range for the inline (`foreground_tool_loop`)
+// rows US-107 synthesizes. Far from zero so it can never collide with a real
+// positive DB id, nor with the live reducer's `-taskId - 1` negatives
+// (`liveTrace.ts`). Derived purely from `turn_id`, so a synthetic row keeps a
+// stable id across live re-projection (the column keys expansion state by `id`).
+const INLINE_WS_ID_BASE = -1_000_000;
+// The single bucket for orphan inline calls that carry no `turn_id`.
+const INLINE_WS_NULL_TURN_ID = -999_999;
+
+/** Map one tool-call record to its compact Workstreams-column view (US-106). */
+function toWorkstreamToolCallView(tc: AgentToolCallRecord): WorkstreamToolCallView {
+	return {
+		id: tc.id,
+		toolName: tc.tool_name,
+		ok: tc.ok,
+		denied: tc.denied,
+		durationMs: tc.duration_ms,
+		error: tc.error
+	};
+}
+
+/** Map one answer-loop model-call record to its compact view (US-106). */
+function toWorkstreamModelCallView(mc: AgentModelCallRecord): WorkstreamModelCallView {
+	return {
+		id: mc.id,
+		role: mc.role,
+		stepIndex: mc.step_index,
+		modelName: mc.model_name,
+		totalTokens: mc.total_tokens,
+		durationMs: mc.duration_ms,
+		finishReason: mc.finish_reason
+	};
+}
+
 /**
  * Project one session's persisted records into the three-column trace view
  * (US-102, PRD §6.3) — `{ routerTurns, deliveries, workstreams, activity }`.
@@ -346,6 +380,13 @@ const traceMs = (iso: string): number => Date.parse(iso) || 0;
  * a locally-mutated live payload (US-101 WS deltas, no full re-pull) re-projects
  * to the exact same {@link SessionTraceView} the `GET /sessions/{id}/trace`
  * endpoint serves — keeping live, history and server output in agreement.
+ *
+ * **One intentional divergence (US-107, PRD FR-6 / cue C7):** this projector also
+ * SYNTHESIZES `foreground_tool_loop` ("inline") workstream rows from orphan
+ * tool/model calls (see the inline-synthesis block below), which the backend
+ * mirror deliberately does NOT — it scopes inline synthesis to the frontend so no
+ * backfill migration is needed for legacy/inline sessions. The synthetic rows are
+ * additive to the `workstreams` projection only; every other column is identical.
  *
  * Crucially, workstreams are a **flat per-row list** (one {@link WorkstreamView}
  * per input row), so two concurrent workstreams sharing a `source_turn_id` both
@@ -576,28 +617,13 @@ export function buildSessionTraceView(records: SessionTraceInput): SessionTraceV
 		)
 			.slice()
 			.sort((a, b) => traceMs(a.created_at) - traceMs(b.created_at) || a.id - b.id)
-			.map((tc) => ({
-				id: tc.id,
-				toolName: tc.tool_name,
-				ok: tc.ok,
-				denied: tc.denied,
-				durationMs: tc.duration_ms,
-				error: tc.error
-			}));
+			.map(toWorkstreamToolCallView);
 		const modelCalls: WorkstreamModelCallView[] = (
 			ws.source_turn_id !== null ? (answerCallListByTurn.get(ws.source_turn_id) ?? []) : []
 		)
 			.slice()
 			.sort((a, b) => a.step_index - b.step_index || a.id - b.id)
-			.map((mc) => ({
-				id: mc.id,
-				role: mc.role,
-				stepIndex: mc.step_index,
-				modelName: mc.model_name,
-				totalTokens: mc.total_tokens,
-				durationMs: mc.duration_ms,
-				finishReason: mc.finish_reason
-			}));
+			.map(toWorkstreamModelCallView);
 		const events: WorkstreamEventView[] = [...(eventsByWs.get(ws.id) ?? [])]
 			.sort((a, b) => a.sequence - b.sequence)
 			.map((e) => ({
@@ -641,6 +667,108 @@ export function buildSessionTraceView(records: SessionTraceInput): SessionTraceV
 			events
 		};
 	});
+
+	// --- inline-activity synthesis (US-107, PRD FR-6 / cue C7) --------------
+	// Inline sessions (the answer model looping over tools WITHIN the turn — no
+	// `delegate`) have NO `agent_workstreams` row, so the map above emits nothing
+	// for them and the column is empty even though real tool/model calls ran.
+	// Synthesize a `foreground_tool_loop` ("inline") entry per turn from the orphan
+	// tool calls (`agent_task_id === null`) plus that turn's answer model calls.
+	// Pure read projection of already-persisted rows — no backfill migration.
+	//
+	// SAFETY: push ONLY into `workstreamViews`, never the raw `workstreams` array,
+	// so the Deliveries column (`wsByDeliveredUtterance` / delivery kind), the
+	// Decisions column (`wsIdsByTurn` → `action: 'delegate'`) and
+	// `statusReadWorkstreamIds` stay untouched — an inline turn keeps its
+	// 'speak'/'silent' action and its reply stays a `reply`, not a `task_result`.
+	const coveredTurnIds = new Set<number>();
+	for (const ws of workstreams) {
+		if (ws.source_turn_id !== null) coveredTurnIds.add(ws.source_turn_id);
+	}
+	const decisionByTurn = new Map<number, AgentDecisionRecord>();
+	for (const d of decisions) {
+		if (d.turn_id !== null && !decisionByTurn.has(d.turn_id)) decisionByTurn.set(d.turn_id, d);
+	}
+	// Group orphan inline calls by turn (`null` turn → one catch-all bucket). Tool
+	// calls are the unit of work and gate the row; the turn's answer model calls
+	// ride along. Delegated tool calls are keyed by `agent_task_id` above, so the
+	// `agent_task_id === null` filter makes the two sets disjoint (no double-count);
+	// covered turns are skipped so a turn already shown as a real row isn't doubled.
+	const inlineToolsByTurn = new Map<number | null, AgentToolCallRecord[]>();
+	for (const tc of toolCalls) {
+		if (tc.agent_task_id !== null) continue;
+		if (tc.turn_id !== null && coveredTurnIds.has(tc.turn_id)) continue;
+		(inlineToolsByTurn.get(tc.turn_id) ?? inlineToolsByTurn.set(tc.turn_id, []).get(tc.turn_id)!).push(
+			tc
+		);
+	}
+	const inlineModelsByTurn = new Map<number | null, AgentModelCallRecord[]>();
+	for (const mc of modelCalls) {
+		if (mc.role !== 'answer') continue;
+		if (mc.turn_id !== null && coveredTurnIds.has(mc.turn_id)) continue;
+		(
+			inlineModelsByTurn.get(mc.turn_id) ?? inlineModelsByTurn.set(mc.turn_id, []).get(mc.turn_id)!
+		).push(mc);
+	}
+	for (const [turnId, tools] of inlineToolsByTurn) {
+		const models = inlineModelsByTurn.get(turnId) ?? [];
+		const toolViews = tools
+			.slice()
+			.sort((a, b) => traceMs(a.created_at) - traceMs(b.created_at) || a.id - b.id)
+			.map(toWorkstreamToolCallView);
+		const modelViews = models
+			.slice()
+			.sort((a, b) => a.step_index - b.step_index || a.id - b.id)
+			.map(toWorkstreamModelCallView);
+		// Real lifecycle bounds from the actual call timestamps. The group is
+		// non-empty (keyed off >=1 tool call) and `created_at` is non-null on both
+		// record types, so this min/max is always well-defined.
+		let earliest = tools[0].created_at;
+		let latest = tools[0].created_at;
+		for (const r of [...tools, ...models]) {
+			if (traceMs(r.created_at) < traceMs(earliest)) earliest = r.created_at;
+			if (traceMs(r.created_at) > traceMs(latest)) latest = r.created_at;
+		}
+		const decision = turnId !== null ? (decisionByTurn.get(turnId) ?? null) : null;
+		workstreamViews.push({
+			id: turnId !== null ? INLINE_WS_ID_BASE - turnId : INLINE_WS_NULL_TURN_ID,
+			sourceKind: 'foreground_tool_loop',
+			sourceTurnId: turnId,
+			sourceDecisionId: decision ? decision.id : null,
+			agentTaskId: null,
+			requestId: decision ? (decision.request_id ?? null) : null,
+			title: 'Inline tool loop',
+			userRequestText: null,
+			// Post-hoc reconstruction, so the execution status is terminal: a failed
+			// tool surfaces as `failed`, otherwise the loop ran to completion (`done`).
+			status: tools.some((t) => !t.ok) ? 'failed' : 'done',
+			// `ready` (not `delivered`): the inline answer was voiced as the turn's
+			// plain reply, not handed off as an async task_result — so we link no
+			// delivery (`deliveredUtteranceId: null`) and claim no green "Delivered".
+			deliveryStatus: 'ready',
+			createdAt: earliest,
+			startedAt: earliest,
+			completedAt: latest,
+			deliveredAt: null,
+			resultAvailableAt: null,
+			resultExpiresAt: null,
+			expiredReason: null,
+			deliveredUtteranceId: null,
+			resultText: null,
+			resultJson: null,
+			error: null,
+			taskKind: null,
+			taskStatus: null,
+			ackText: null,
+			attempts: null,
+			toolCallCount: toolViews.length,
+			modelCallCount: modelViews.length,
+			toolCalls: toolViews,
+			modelCalls: modelViews,
+			events: []
+		});
+	}
+
 	workstreamViews.sort((a, b) => traceMs(a.createdAt) - traceMs(b.createdAt) || a.id - b.id);
 
 	// --- activity -----------------------------------------------------------
