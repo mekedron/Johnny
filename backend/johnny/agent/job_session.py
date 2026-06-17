@@ -59,7 +59,6 @@ from johnny.agent.answer import degrade_speaking_mode_if_no_tts
 from johnny.agent.barge_in import BargeInClassifier, BargeInClassifierConfig
 from johnny.agent.gate import TurnIndex, TurnLedger
 from johnny.agent.internal_tools import (
-    INTERNAL_TOOL_KINDS,
     InternalToolContext,
     build_internal_task_executor,
     executor_known_kinds,
@@ -993,17 +992,17 @@ async def build_agent_runtime(
     mcp_snapshots = (
         _load_mcp_snapshots(config) if task_coordinator is not None else ()
     )
-    # Johnny-3ow cutover switch: when the answer agent will carry native
-    # sandbox tools (full-access flag + a real sandbox), skill/MCP execution
-    # moves to the model's own tool loop. The ROUTER then keeps ONLY its
-    # should-speak job plus the two internal session-control kinds — session.end
-    # / meeting.leave stay on the router path so their farewell→teardown
-    # sequence is preserved (making them native tools would race the reply's
-    # TTS). Skills/MCP drop out of the router catalog: the model discovers them
-    # as files via list_dir('/skills'), and the answer prompt's grounding comes
-    # from TOOL_USE_NOTES instead of render_capability_notes. The flag is off by
-    # default, so the legacy keyword-delegate path below is byte-identical until
-    # the cutover is flipped on.
+    # Johnny-3ow native-tools flag: when the answer agent carries native sandbox
+    # tools (full-access flag + a real sandbox) it can run exec/read/write/
+    # list_dir directly. Johnny-d6w.27 REVERSED the original cutover's
+    # router-blinding: the router KEEPS its full delegate catalog (internal +
+    # skills + MCP) regardless of this flag, so skill-shaped requests route to
+    # `delegate` (→ background worker) instead of being executed inline by the
+    # answer model. Under the operator's 2026-06-18 architecture the speak/answer
+    # LLM is a refiner/voicer, not a skill executor; the native tools that remain
+    # here are a vestigial fallback that Johnny-d6w.28 removes. The answer-side
+    # grounding still follows this flag (TOOL_USE_NOTES vs render_capability_notes,
+    # below) until d6w.28 lands.
     native_tools_active = sandbox_client is not None and sandbox_full_access_enabled()
 
     task_catalog = (
@@ -1037,16 +1036,15 @@ async def build_agent_runtime(
         else frozenset()
     )
 
-    if native_tools_active:
-        # Cutover: the router sees only the internal session-control kinds; the
-        # gate's degrade chain (_degrade_unavailable / _recover_keyword /
-        # _reroute_status) then no-ops on everything else and the turn lands on
-        # SPEAK, where the answer model uses its native tools. Skills/MCP are
-        # still loaded for the sandbox — just not advertised to the router.
-        task_catalog = internal_catalog_entries(
-            meeting_backed=config.calendar_event_id is not None
-        )
-        executor_kinds = INTERNAL_TOOL_KINDS
+    # Johnny-d6w.27: the native-tools flag intentionally NO LONGER strips skills/
+    # MCP from the router catalog. Capability awareness is the single source of
+    # delegation truth — the router must see the workspace's skills to choose
+    # `delegate` for skill-shaped work — so `task_catalog` / `executor_kinds`
+    # keep their full value (above) even when the answer agent also holds native
+    # tools. (Pre-d6w.27 a `if native_tools_active:` block overwrote them with
+    # internal_catalog_entries + INTERNAL_TOOL_KINDS, blinding the router and
+    # forcing skill-shaped asks onto the inline answer-model tool loop — the
+    # session-26 bug. That inline execution path is removed in Johnny-d6w.28.)
 
     # Behavior knobs ride the dispatch payload from the session's frozen
     # agent snapshot (Johnny-trt.41) — the gate never re-reads config tables

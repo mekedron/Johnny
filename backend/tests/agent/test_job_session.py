@@ -577,16 +577,16 @@ async def test_answer_prompt_grounds_capability_self_awareness_in_live_catalog(
     assert db.closed is True
 
 
-async def test_cutover_flag_narrows_router_and_wires_native_tools(
+async def test_native_tools_flag_wires_tools_without_blinding_the_router(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Johnny-3ow Phase 3 cutover: with JOHNNY_SANDBOX_FULL_ACCESS the router
-    catalog collapses to the internal session-control kinds (skills drop out —
-    the model discovers them as files via list_dir), the agent carries the
-    native exec/read/write/list_dir tools, and the prompt grounds on the
-    openclaw tool-use recipe instead of the keyword capability notes."""
+    """Johnny-d6w.27: JOHNNY_SANDBOX_FULL_ACCESS wires the answer agent's native
+    exec/read/write/list_dir tools, but it NO LONGER strips skills from the
+    router catalog — the router stays capability-aware so a skill-shaped ask can
+    route to `delegate` (the session-26 bug was the old internal-only collapse).
+    The answer-side grounding still follows the flag (openclaw tool recipe, not
+    the keyword capability notes) until Johnny-d6w.28 removes the inline tools."""
     from johnny.agent.adapters.johnny_llm import tools_to_definitions
-    from johnny.agent.internal_tools import INTERNAL_TOOL_KINDS
     from johnny.skills.registry import load_skill_registry
 
     monkeypatch.setenv("JOHNNY_SANDBOX_FULL_ACCESS", "1")
@@ -610,18 +610,25 @@ async def test_cutover_flag_narrows_router_and_wires_native_tools(
         skill_registry=registry_obj,
     )
 
-    # Router catalog is internal-only: fetch-news is gone from the router (it is
-    # discovered as a file), and the executor set is the internal kinds.
+    # Router catalog KEEPS the skill under the flag (Johnny-d6w.27): internal
+    # kinds first (trt.57 order), then the skill loader's entries — fetch-news is
+    # delegatable, not stripped, so the router can choose `delegate` for it.
     assert [e.kind for e in runtime.gate._config.task_catalog] == [
         "meeting.leave",
         "session.end",
+        "fetch-news",
     ]
-    assert runtime.gate._config.executor_kinds == INTERNAL_TOOL_KINDS
-    # The agent carries the native sandbox tools, surfaced as provider tools.
+    # The executor-known set carries the skill kind too (trt.62), so a delegate to
+    # fetch-news survives the pre-ack validation instead of degrading to SPEAK.
+    assert runtime.gate._config.executor_kinds == frozenset(
+        {"meeting.leave", "session.end", "fetch-news"}
+    )
+    # The agent still carries the native sandbox tools, surfaced as provider tools
+    # (the vestigial fallback removed in Johnny-d6w.28).
     names = {d.name for d in (tools_to_definitions(list(runtime.agent.tools)) or [])}
     assert names == {"exec", "read", "write", "list_dir"}
-    # Grounding moved to the openclaw tool recipe; the keyword capability block
-    # (and the skill one-liner) is suppressed so the two never contradict.
+    # Answer-side grounding is unchanged: still the openclaw tool recipe, with the
+    # keyword capability block (and the skill one-liner) suppressed under the flag.
     instructions = runtime.agent.instructions
     assert "list_dir('/skills')" in instructions
     assert "Never substitute a placeholder" in instructions
