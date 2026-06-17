@@ -1,0 +1,37 @@
+{
+  "session_id": "overlap-hearing-check",
+  "label": "overlap-hearing-check (session-3 cross-thread bleed, US-301 / C8)",
+  "bot_session_id": 9002,
+  "mode": "autonomous",
+  "confidence_threshold": 0.7,
+  "instructions": "You are Johnny, a helpful meeting assistant.",
+  "turns": [
+    {
+      "speaker": "alice",
+      "text": "Johnny, dig into the Metabase cohort breakdown and walk me through it.",
+      "confidence": 0.95,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.9,
+        "reason": "a long inline investigation the bot speaks to",
+        "action": "speak",
+        "reply_type": "informative"
+      },
+      "answer": "Small snag: Metabase didn't expand the cohort the way I expected, so I'm still digging.",
+      "simulate": "barge_before_bind"
+    },
+    {
+      "speaker": "bob",
+      "text": "Sorry — can you actually hear me?",
+      "confidence": 0.94,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.92,
+        "reason": "a quick hearing-check reply, answerable inline",
+        "action": "speak",
+        "reply_type": "informative"
+      },
+      "answer": "Yes, I can hear you fine."
+    }
+  ]
+}

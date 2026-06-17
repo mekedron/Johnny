@@ -182,6 +182,10 @@ export interface AgentSpokeEvent extends BaseEnvelope {
 	// router_decision / turn_terminal events carry); null/absent for unbound
 	// speech (corrections) and legacy emitters.
 	turn_id?: number | null;
+	// Stable UUID (US-003) of the request this delivery answered — carried even
+	// for fallback/timeout speech and across interruptions. The cross-turn
+	// correlation key the Deliveries column reads; absent on legacy emitters.
+	answers_request_id?: string | null;
 	// A barge-in cut this speech mid-utterance (Johnny-trt.58): `text` is the
 	// partial actually delivered (the caption sentences flushed by cut time).
 	// The turn's terminal stays no_reply(barge_in); the UI renders the line

@@ -645,11 +645,15 @@
 		// to NO turn — they must not stamp any decision's final text
 		// (Johnny-trt.54); they only land in the chat below.
 		if (kind !== 'correction' && kind !== 'task_result') {
-			// Prefer the exact turn the event names (Johnny-trt.54); fall back to
-			// the oldest still-pending decision for events without a turn id.
+			// Bind to the turn the event names (Johnny-trt.54 / US-301): a delivery
+			// stamps the decision of the turn that produced it, never FIFO "oldest
+			// pending". Only a genuinely turn-less event (a legacy emitter that
+			// sends no turn id) falls back to the oldest pending decision; a
+			// named-but-unmatched turn must NOT stamp an unrelated row (the
+			// session-3 cross-thread bleed, C8).
 			const turnId = typeof ev.turn_id === 'number' ? ev.turn_id : null;
 			let idx = turnId !== null ? decisions.findIndex((d) => d.turnId === turnId) : -1;
-			if (idx < 0) {
+			if (idx < 0 && turnId === null) {
 				idx = decisions.findIndex((d) => d.outcome === 'pending');
 			}
 			if (idx >= 0) {
@@ -704,7 +708,10 @@
 			timestampMs: Date.now(),
 			isBot: true,
 			audioFile: typeof ev.audio_file === 'string' && ev.audio_file ? ev.audio_file : null,
-			interrupted
+			interrupted,
+			// Attribute the rendered line to the turn that spoke it (US-301); null
+			// for unbound speech (corrections / task results) by construction.
+			turnId: typeof ev.turn_id === 'number' ? ev.turn_id : null
 		};
 		transcripts = [...transcripts, botLine];
 		void autoScrollTranscript();

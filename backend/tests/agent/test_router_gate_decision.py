@@ -264,6 +264,55 @@ async def test_speak_then_reply_completion_emits_exactly_one_replied() -> None:
     assert gate._ledger.open_turns == ()  # terminalized
 
 
+async def test_bind_reply_evicts_stale_pending_turn_then_binds_its_own_turn() -> None:
+    """US-301 / C8: a SPEAK turn whose reply never bound (it barged in before the
+    SDK created the handle) is evicted, so a later quick reply binds to ITS OWN
+    turn — not the stale head. This is the session-3 bleed in miniature: a long
+    inline turn's stranded id used to be popped FIFO by a later hearing-check
+    reply, stamping the hearing-check text onto the long turn.
+    """
+    gate, emitter, _ = _make_gate(
+        [
+            {"should_speak": True, "confidence": 0.95, "reason": "long investigation"},
+            {"should_speak": True, "confidence": 0.95, "reason": "hearing check"},
+        ]
+    )
+    # Turn A (long): decides SPEAK and is pushed, but its generate_reply never
+    # fires a speech_created — the user barges in first, terminalizing it
+    # no_reply(barge_in) via the interruption path (not its own reply callback).
+    long_msg = _user_msg("pull the full Metabase cohort breakdown")
+    await gate.run_turn(ChatContext.empty(), long_msg)
+    assert long_msg.id in gate._pending_turn_ids()
+    await gate._ledger.emit(
+        long_msg.id,
+        terminal_state="no_reply",
+        no_reply_reason="barge_in",
+        detail="cut before its reply bound",
+    )
+
+    # Turn B (quick): decides SPEAK and is pushed behind the now-stale A.
+    quick_msg = _user_msg("sorry — can you actually hear me?")
+    await gate.run_turn(ChatContext.empty(), quick_msg)
+
+    # B's reply binds: A is stale (already terminal) and is evicted, so the reply
+    # binds to B — pre-fix the FIFO popleft bound it to A.
+    handle = _handle(handle_id="item_reply_quick", chat_items=["Yes, I can hear you fine."])
+    gate.bind_reply(handle)
+    assert gate.active_reply is not None
+    assert gate.active_reply[0] == quick_msg.id  # NOT long_msg.id (the bleed)
+    assert not gate._pending_speak_turns  # A evicted, B popped
+
+    cast(_FakeSpeechHandle, handle).fire_done()
+    await asyncio.gather(*gate._reply_tasks)
+
+    # INV-1: exactly one terminal per turn — A's is the barge_in we emitted (the
+    # reply callback's late 'replied' for A never fires; it bound to B), B's is
+    # 'replied'.
+    states = {tid: term.terminal_state for tid, term in emitter.records}
+    assert states[long_msg.id] == "no_reply"
+    assert states[quick_msg.id] == "replied"
+
+
 # --------------------------------------------------------------------------- #
 # Scenario 2 — no-speak (router declined)                                     #
 # --------------------------------------------------------------------------- #
@@ -1776,7 +1825,7 @@ async def test_ackless_delegate_degrades_to_speak(ack: str | None) -> None:
     assert h.say.texts == []  # the canned DEFAULT_DELEGATE_ACK is never spoken
     assert h.sink.snapshot() == []  # nothing queued — no promise at all
     assert h.emitter.records == []  # the upcoming reply owns the terminal
-    assert msg.id in h.gate._pending_speak_turns
+    assert msg.id in h.gate._pending_turn_ids()
     # Instrumented: the marker rode decision.raw into the decision emit (the
     # trt.50 ride-along pattern), so agent_decisions.raw_output carries it.
     assert len(h.obs.decisions) == 1
@@ -2021,7 +2070,7 @@ async def test_ackless_delegate_on_unavailable_kind_declines_not_speaks() -> Non
 
     assert h.say.texts == [_UNAVAILABLE_REASON]
     assert h.sink.snapshot() == []
-    assert msg.id not in h.gate._pending_speak_turns  # no SPEAK fallthrough
+    assert msg.id not in h.gate._pending_turn_ids()  # no SPEAK fallthrough
     decision, _turn = h.obs.decisions[0]
     assert CAPABILITY_GAP_KEY in decision.raw
     assert ACK_FALLBACK_KEY not in decision.raw  # the gap degrade won
@@ -2178,7 +2227,7 @@ async def test_delegate_unknown_kind_degrades_to_speak_pre_ack(
     assert h.say.texts == []  # pre-ack: the promise was never spoken
     assert h.sink.snapshot() == []  # and nothing was queued
     assert h.emitter.records == []  # the upcoming reply owns the terminal
-    assert msg.id in h.gate._pending_speak_turns
+    assert msg.id in h.gate._pending_turn_ids()
     decision, _turn = h.obs.decisions[0]
     assert decision.action == "speak"
     assert decision.task_request is None
@@ -2272,7 +2321,7 @@ async def test_ackless_unknown_kind_carries_unknown_marker_not_ack_fallback() ->
 
     assert h.say.texts == []
     assert h.sink.snapshot() == []
-    assert msg.id in h.gate._pending_speak_turns
+    assert msg.id in h.gate._pending_turn_ids()
     decision, _turn = h.obs.decisions[0]
     assert UNKNOWN_KIND_KEY in decision.raw
     assert ACK_FALLBACK_KEY not in decision.raw  # membership won
@@ -2464,7 +2513,7 @@ async def test_delegate_with_malformed_task_degrades_to_speak_path() -> None:
     assert h.sink.snapshot() == []
     assert h.emitter.records == []
     assert h.gate._ledger.open_turns == (msg.id,)
-    assert msg.id in h.gate._pending_speak_turns
+    assert msg.id in h.gate._pending_turn_ids()
 
 
 async def test_explicit_speak_action_keeps_speak_path_identical() -> None:
@@ -2482,7 +2531,7 @@ async def test_explicit_speak_action_keeps_speak_path_identical() -> None:
 
     assert h.say.texts == []
     assert h.emitter.records == []
-    assert msg.id in h.gate._pending_speak_turns
+    assert msg.id in h.gate._pending_turn_ids()
 
 
 async def test_delegate_say_done_callback_double_fire_single_terminal() -> None:
@@ -3832,7 +3881,7 @@ async def test_speak_without_suggested_reply_runs_the_answer_llm() -> None:
     await h.gate.run_turn(ChatContext.empty(), msg)  # must NOT raise
 
     assert h.say.texts == []
-    assert list(h.gate._pending_speak_turns) == [msg.id]
+    assert [p.turn_id for p in h.gate._pending_speak_turns] == [msg.id]
     decision, _turn = h.obs.decisions[0]
     assert DECIDED_REPLY_KEY not in decision.raw
 
@@ -3853,7 +3902,7 @@ async def test_speak_with_suggested_reply_but_allowlist_runs_the_answer_llm() ->
     await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK fallthrough — no raise
 
     assert h.say.texts == []
-    assert list(h.gate._pending_speak_turns) == [msg.id]
+    assert [p.turn_id for p in h.gate._pending_speak_turns] == [msg.id]
     decision, _turn = h.obs.decisions[0]
     assert DECIDED_REPLY_KEY not in decision.raw
 
@@ -3872,7 +3921,7 @@ async def test_speak_with_suggested_reply_but_held_result_grounds_via_answer_llm
     await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK fallthrough — no raise
 
     assert h.say.texts == []  # not spoken verbatim — the grounded answer LLM runs
-    assert list(h.gate._pending_speak_turns) == [msg.id]
+    assert [p.turn_id for p in h.gate._pending_speak_turns] == [msg.id]
     decision, _turn = h.obs.decisions[0]
     assert DECIDED_REPLY_KEY not in decision.raw
     # The held result was snapshotted for injection (the 0qw ride-along).
@@ -3893,7 +3942,7 @@ async def test_speak_with_json_wrapped_suggested_reply_falls_back_to_answer_llm(
     await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK fallthrough — no raise
 
     assert h.say.texts == []  # never spoke the raw JSON
-    assert list(h.gate._pending_speak_turns) == [msg.id]
+    assert [p.turn_id for p in h.gate._pending_speak_turns] == [msg.id]
     decision, _turn = h.obs.decisions[0]
     assert DECIDED_REPLY_KEY not in decision.raw
 
@@ -3911,7 +3960,7 @@ async def test_speak_with_long_substantive_suggested_reply_runs_answer_llm() -> 
     await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK fallthrough — no raise
 
     assert h.say.texts == []  # not spoken verbatim — the answer LLM composes
-    assert list(h.gate._pending_speak_turns) == [msg.id]
+    assert [p.turn_id for p in h.gate._pending_speak_turns] == [msg.id]
     decision, _turn = h.obs.decisions[0]
     assert DECIDED_REPLY_KEY not in decision.raw
 
@@ -4195,7 +4244,7 @@ async def test_speak_not_recovered_on_meeting_surface() -> None:
     decision, _turn = h.obs.decisions[0]
     assert decision.action == "speak"
     assert KEYWORD_DELEGATE_KEY not in decision.raw
-    assert msg.id in h.gate._pending_speak_turns
+    assert msg.id in h.gate._pending_turn_ids()
 
 
 async def test_empty_registry_status_recovers_even_on_meeting_surface() -> None:
@@ -4512,7 +4561,7 @@ async def test_no_promote_without_background_phrase_on_meeting() -> None:
     assert decision.action == "speak"
     assert BACKGROUND_PROMOTION_KEY not in decision.raw
     assert KEYWORD_DELEGATE_KEY not in decision.raw
-    assert msg.id in h.gate._pending_speak_turns
+    assert msg.id in h.gate._pending_turn_ids()
 
 
 async def test_promote_no_catalog_match_answers_honestly() -> None:

@@ -60,6 +60,7 @@ _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 SCENARIO_FIXTURE = _FIXTURES / "scenarios" / "delegated-multispeaker"
 PROMOTION_FIXTURE = _FIXTURES / "scenarios" / "delegated-background-promotion"
 PROGRESS_FIXTURE = _FIXTURES / "scenarios" / "delegated-progress"
+OVERLAP_FIXTURE = _FIXTURES / "scenarios" / "overlap-hearing-check"
 SESSIONS_DIR = _FIXTURES / "sessions"
 
 # A deterministic stand-in for the demo MCP `server_time` tool (real wall-clock is
@@ -258,6 +259,50 @@ def test_scenario_request_id_correlation(db: Session) -> None:
     assert completed[0].request_id == deleg_rid
     assert len(result.workstream_rows) == 1
     assert result.workstream_rows[0]["request_id"] == deleg_rid
+
+
+def test_scenario_overlapping_reply_binds_to_its_own_turn(db: Session) -> None:
+    """US-301 / C8: a quick hearing-check reply that binds while a long inline
+    turn's reply is still outstanding (it barged out before binding) must stamp
+    ITS OWN turn — never the long turn's. This is the recorded session-3 bleed:
+    the hearing-check turn 'decided' its reply but 'spoke' a different thread's
+    Metabase partial, because ``bind_reply`` popped the long turn's STALE id FIFO.
+    """
+    fixture = load_scenario(OVERLAP_FIXTURE)
+    result = asyncio.run(run_scenario(fixture, session=db))
+
+    # INV-1 (one terminal/turn) + INV-2 (decision↔utterance parity) hold: the long
+    # turn ends no_reply(barge_in) with no spoke, the hearing-check turn replies
+    # with its own text — no spurious divergence from mis-attribution (AC#3).
+    assert result.invariant_violations == []
+
+    decisions = cast(
+        list[RouterDecisionMade], result.events_of_type("router_decision_made")
+    )
+    # Both turns decided SPEAK, in publication order: [0] the long Metabase turn,
+    # [1] the quick hearing-check turn.
+    assert len(decisions) == 2
+    long_turn, hearing_turn = decisions[0], decisions[1]
+
+    # Exactly one delivery was spoken — the hearing-check reply.
+    reply_spokes = [
+        s
+        for s in cast(list[AgentSpoke], result.events_of_type("agent_spoke"))
+        if s.kind == "reply"
+    ]
+    assert len(reply_spokes) == 1
+    spoke = reply_spokes[0]
+    assert spoke.text == "Yes, I can hear you fine."
+    assert "Metabase" not in spoke.text  # the swapped partial, pre-fix
+
+    # The fix: the delivery binds to the hearing-check turn that produced it — NOT
+    # the long turn whose reply barged out before binding (the stale head the FIFO
+    # popleft used to grab). Correlated by turn id AND request_id (US-003).
+    assert spoke.turn_id == hearing_turn.turn_id
+    assert spoke.turn_id != long_turn.turn_id
+    assert spoke.answers_request_id == hearing_turn.request_id
+    # Nothing is mis-attributed to the barged long turn.
+    assert all(s.turn_id != long_turn.turn_id for s in reply_spokes)
 
 
 def test_scenario_captures_router_model_call(db: Session) -> None:

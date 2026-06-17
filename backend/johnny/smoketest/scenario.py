@@ -611,6 +611,20 @@ async def _drive_turns(
 
         if not spoke:
             continue
+        if turn.simulate == "barge_before_bind":
+            # US-301 / C8 repro: this SPEAK turn is pushed onto the pending queue,
+            # but its generate_reply never binds — the user barges in first, so it
+            # terminalizes no_reply(barge_in) via the interruption path (not its
+            # own reply callback). Its id is left a STALE head that a LATER reply
+            # must not FIFO-pop (the session-3 cross-thread bleed: a long inline
+            # turn's stranded id was bound to a quick hearing-check reply).
+            await gate._ledger.emit(
+                msg.id,
+                terminal_state="no_reply",
+                no_reply_reason="barge_in",
+                detail="cut before its reply bound (US-301 overlap repro)",
+            )
+            continue
         chat_items = (
             [LKChatMessage(role="assistant", content=[turn.answer])]
             if turn.answer

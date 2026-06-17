@@ -672,6 +672,19 @@ class RouterGateConfig:
     native_tools_active: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingReply:
+    """A SPEAK turn awaiting its ``generate_reply`` reply's terminal (US-301).
+
+    Pushed on the SPEAK fallthrough and consumed by :meth:`RouterGate.bind_reply`
+    when the reply's ``speech_created`` fires. ``request_id`` (US-003) rides the
+    entry so the binding is self-describing without a ``TurnIndex`` round-trip.
+    """
+
+    turn_id: str
+    request_id: str | None
+
+
 class RouterGate:
     """Runs the should-speak router decision inside ``on_user_turn_completed``.
 
@@ -852,10 +865,14 @@ class RouterGate:
         # Timestamps (ms) of utterances the bot actually spoke, for the
         # per-session over-talk cap. Pruned in place by :meth:`_is_rate_limited`.
         self._recent_utterance_times: list[int] = []
-        # Turn ids that decided SPEAK and are awaiting their reply's terminal.
-        # The session ``speech_created`` listener pops the oldest to bind the
-        # reply SpeechHandle's done-callback (the reply→turn correlation).
-        self._pending_speak_turns: deque[str] = deque()
+        # Turns that decided SPEAK and are awaiting their reply's terminal, as
+        # ``(turn_id, request_id)`` entries. The session ``speech_created``
+        # listener (:meth:`bind_reply`) binds the reply SpeechHandle's
+        # done-callback to the oldest *still-open* entry — evicting any head whose
+        # turn already terminalized via another path (a barge-in before the SDK
+        # created the handle, the teardown sweep), so a stale id can never be
+        # mis-bound to a later reply (the session-3 FIFO bleed, US-301 / C8).
+        self._pending_speak_turns: deque[_PendingReply] = deque()
         # Strong refs to in-flight reply-done emit tasks so they aren't GC'd
         # mid-flight (and to avoid "task exception never retrieved" warnings).
         self._reply_tasks: set[asyncio.Task[None]] = set()
@@ -1357,7 +1374,7 @@ class RouterGate:
         # path), so the injected message reaches exactly this reply and never
         # the durable chat history.
         self._inject_task_context(turn_ctx, task_context, turn_id)
-        self._pending_speak_turns.append(turn_id)
+        self._pending_speak_turns.append(_PendingReply(turn_id, request_id))
         logger.info(
             "agent.router.gate: turn=%s SPEAK confidence=%.2f reason=%r",
             turn_id,
@@ -2964,8 +2981,12 @@ class RouterGate:
     # Reply → turn correlation (the speak path's terminal)               #
     # ------------------------------------------------------------------ #
 
+    def _pending_turn_ids(self) -> set[str]:
+        """The turn ids currently awaiting a reply bind (membership helper)."""
+        return {p.turn_id for p in self._pending_speak_turns}
+
     def bind_reply(self, speech_handle: SpeechHandle) -> None:
-        """Bind a ``generate_reply`` reply to the oldest pending SPEAK turn.
+        """Bind a ``generate_reply`` reply to the oldest still-open SPEAK turn.
 
         Called by the session ``speech_created`` listener (Johnny-xpa wires it
         in :meth:`JohnnyAgent.on_enter`) for each ``source == "generate_reply"``
@@ -2999,7 +3020,29 @@ class RouterGate:
             return
         if not self._pending_speak_turns:
             return
-        turn_id = self._pending_speak_turns.popleft()
+        # Evict any head whose turn already terminalized via a NON-reply path
+        # before its generate_reply ever fired a speech_created — a barge-in cut
+        # before the SDK created the handle, or the teardown sweep (US-301 / C8).
+        # Such a stale id must never be bound to THIS reply (the session-3 bleed,
+        # where a long inline turn's stranded id was popped by a later quick
+        # reply). The ledger is the authority on "already terminal"; a *live*
+        # reply's turn is still open here (its terminal is emitted only by
+        # _on_reply_done, after this bind), so it is never evicted, and FIFO
+        # order between live replies — guaranteed by the serial, non-preemptive
+        # hook — stays correct.
+        while self._pending_speak_turns and (
+            self._ledger.terminal_for(self._pending_speak_turns[0].turn_id) is not None
+        ):
+            stale = self._pending_speak_turns.popleft()
+            logger.warning(
+                "agent.router.gate: evicting stale pending SPEAK turn=%s "
+                "(already terminal; its generate_reply never bound) before "
+                "binding this reply",
+                stale.turn_id,
+            )
+        if not self._pending_speak_turns:
+            return
+        turn_id = self._pending_speak_turns.popleft().turn_id
         # Record the reply now playing so the barge-in classifier (Johnny-k8t)
         # can capture (turn_id, handle) as the interrupt target + generation
         # guard key. Cleared when the reply completes (_on_reply_done).
@@ -3296,10 +3339,11 @@ class RouterGate:
         ``superseded`` off-loop.
         """
         active = self._active_reply[0] if self._active_reply is not None else None
+        pending = self._pending_turn_ids()
         stale = [
             turn_id
             for turn_id in self._floor_leases
-            if turn_id != active and turn_id not in self._pending_speak_turns
+            if turn_id != active and turn_id not in pending
         ]
         for turn_id in stale:
             lease = self._floor_leases.pop(turn_id)
@@ -3481,6 +3525,10 @@ class RouterGate:
         if self._model_call_tasks:
             await asyncio.gather(*self._model_call_tasks, return_exceptions=True)
         await self._ledger.close()
+        # The ledger sweep above terminalized any still-open pushed turn; no live
+        # reply can bind now, so drop the pending entries (release refs; keep the
+        # ``idle`` signal honest if the gate object outlives the session).
+        self._pending_speak_turns.clear()
 
     # ------------------------------------------------------------------ #
     # Internals                                                          #

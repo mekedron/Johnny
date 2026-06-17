@@ -60,7 +60,11 @@ from johnny.agent.approval_wiring import (  # noqa: E402
     build_request_approval,
 )
 from johnny.agent.gate import GateTerminal, TurnLedger  # noqa: E402
-from johnny.agent.router_gate import RouterGate, RouterGateConfig  # noqa: E402
+from johnny.agent.router_gate import (  # noqa: E402
+    RouterGate,
+    RouterGateConfig,
+    _PendingReply,
+)
 from johnny.voice_pipeline.approval import (  # noqa: E402
     ApprovalGate,
     ApprovalOutcome,
@@ -437,7 +441,7 @@ async def test_bind_reply_skips_approval_owned_handle() -> None:
 
 async def test_bind_reply_still_binds_a_normal_speak_reply() -> None:
     gate, *_ = _wire(approval_gate=_BlockingApprovalGate())
-    gate._pending_speak_turns.append("item_speak")
+    gate._pending_speak_turns.append(_PendingReply("item_speak", None))
 
     normal = _FakeSpeechHandle(handle_id="normal-reply")
     gate.bind_reply(cast(SpeechHandle, normal))
