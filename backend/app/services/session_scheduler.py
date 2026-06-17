@@ -507,6 +507,34 @@ def _peer_agent_names(meeting: MeetingConfig, agent: Agent | None) -> list[str]:
     return names
 
 
+def _human_attendee_names(meeting: MeetingConfig) -> list[str]:
+    """Human attendee display names for live participant attribution (US-401).
+
+    Reads the linked calendar event's attendee roster (synced by
+    :mod:`app.services.calendar_sync`; shape ``{email, display_name, organizer,
+    self, ...}``), dropping the bot's own account (``self``) and entries with no
+    usable label. Each name is the attendee's ``display_name``, falling back to
+    its email. Stamped into the snapshot so the live session can attribute a
+    transcribed utterance to a named human in the common 1:1 case
+    (:meth:`johnny.agent.session.JohnnyAgent._resolve_human_speaker`). Empty when
+    the event has no attendees (ad-hoc rooms) — attribution then degrades to STT
+    diarization / "Unknown speaker".
+    """
+    event = meeting.calendar_event
+    attendees = getattr(event, "attendees", None) if event is not None else None
+    if not isinstance(attendees, list):
+        return []
+    names: list[str] = []
+    for attendee in attendees:
+        if not isinstance(attendee, dict) or attendee.get("self"):
+            continue
+        name = (str(attendee.get("display_name") or "").strip()
+                or str(attendee.get("email") or "").strip())
+        if name:
+            names.append(name)
+    return names
+
+
 def _build_base_provider_payload(session: Session) -> dict[str, Any]:
     """Materialise the global-active provider rows for the meet-worker.
 
@@ -679,6 +707,9 @@ async def _start_one_session(
                 # agents — drives the router's peer-selectivity prompt block
                 # in multi-agent meetings; empty for single-agent launches.
                 peer_names=_peer_agent_names(meeting, agent),
+                # Human meet roster (US-401): attendee names minus the bot, so the
+                # live session can attribute utterances to a named participant.
+                participants=_human_attendee_names(meeting),
                 capability_policy=capability_policy,
                 workspace=workspace_payload,
             )

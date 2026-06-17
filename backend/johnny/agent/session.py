@@ -629,6 +629,7 @@ class JohnnyAgent(Agent):
         session_id: str | None = None,
         peer_floor: PeerFloorReader | None = None,
         agent_display_name: str = "",
+        participants: Sequence[str] | None = None,
         sandbox_tools: list[Tool] | None = None,
     ) -> None:
         if instructions is None:
@@ -705,6 +706,12 @@ class JohnnyAgent(Agent):
         # replace the plain display-name match here.
         self._agent_display_name = agent_display_name.strip()
         self._peer_handoff_spent = False
+        # Human meet roster (US-401, Johnny-d6w.19): attendee display names minus
+        # the bot's own account, stamped at dispatch from the calendar event.
+        # Drives 1:1 participant attribution in :meth:`_resolve_human_speaker`;
+        # empty for ad-hoc rooms / playground / legacy snapshots (which then fall
+        # back to STT diarization or "Unknown speaker").
+        self._participants = tuple(n for n in (participants or ()) if str(n).strip())
         # Session-start reference for transcript ``timestamp_ms`` (Johnny-7g5.1).
         # The status subscriber writes ``timestamp_ms`` into
         # ``transcript_chunks.start_offset_ms`` (a 4-byte INTEGER) as an
@@ -1110,7 +1117,11 @@ class JohnnyAgent(Agent):
             return
         speaker = speaker_override
         if speaker is None:
-            speaker = alt.speaker_id if alt is not None else None
+            # US-401: resolve a human participant name from the meet roster
+            # (1:1) or fall back to the STT diarization label / "Unknown speaker".
+            speaker = self._resolve_human_speaker(
+                alt.speaker_id if alt is not None else None
+            )
         finalized = TranscriptFinalized(
             text=text,
             timestamp_ms=self._relative_ms(),
@@ -1125,6 +1136,29 @@ class JohnnyAgent(Agent):
                 "failed to publish transcript_finalized for session=%s",
                 self._session_id,
             )
+
+    def _resolve_human_speaker(self, diarized: str | None) -> str | None:
+        """The human speaker label for a kept STT final (US-401, Johnny-d6w.19).
+
+        The live Meet path mixes every participant into one audio track, so STT
+        alone cannot name a speaker. Priority:
+
+        1. A **1:1 meeting** — exactly one human in the meet roster — attributes
+           every (non-peer) human utterance to that participant by name. This is
+           the common, highest-value case and the only one a mixed track can name
+           without diarization + voice enrollment.
+        2. Otherwise the STT **diarization** label (``diarized``) when present —
+           the best available signal for a multi-human meeting (generic buckets
+           like ``speaker_0``, not names).
+        3. Otherwise ``None`` → the UI renders "Unknown speaker".
+
+        Peer-agent speech is attributed upstream via ``speaker_override`` and
+        never reaches here. Robust multi-human per-line naming (per-participant
+        tracks / enrollment) is a documented follow-up.
+        """
+        if len(self._participants) == 1:
+            return self._participants[0]
+        return diarized
 
     # ------------------------------------------------------------------ #
     # Answer-path nodes (Johnny-5ag)                                      #
@@ -1275,6 +1309,7 @@ async def build_johnny_agent(
     metrics_listener: MetricsListener | None = None,
     peer_floor: PeerFloorReader | None = None,
     agent_display_name: str = "",
+    participants: Sequence[str] | None = None,
     sandbox_tools: list[Tool] | None = None,
 ) -> JohnnyAgent:
     """Build a :class:`JohnnyAgent`, rehydrating prior transcripts if available.
@@ -1331,6 +1366,7 @@ async def build_johnny_agent(
         session_id=session_id,
         peer_floor=peer_floor,
         agent_display_name=agent_display_name,
+        participants=participants,
         sandbox_tools=sandbox_tools,
     )
 

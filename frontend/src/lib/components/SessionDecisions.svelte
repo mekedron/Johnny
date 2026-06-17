@@ -210,6 +210,7 @@
 				{@const shadow = complexityShadow(turn.rawOutput ?? null)}
 				{@const markers = degradeMarkers(turn)}
 				{@const diverged = isDivergent(turn)}
+					{@const who = turn.requestedBy ?? 'Unknown speaker'}
 				<li
 					data-testid="decision-trace-row"
 					data-decision-id={turn.decisionId}
@@ -242,6 +243,27 @@
 									data-testid="decision-divergence-badge">diverged</span
 								>
 							{/if}
+							<span
+								class="text-muted-foreground inline-flex max-w-[10rem] items-center gap-1 text-[0.7rem]"
+								class:italic={turn.requestedBy === null}
+								data-testid="decision-requested-by"
+								title="Requested by {who}"
+							>
+								<svg
+									aria-hidden="true"
+									viewBox="0 0 24 24"
+									class="size-3 shrink-0"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<circle cx="12" cy="8" r="4" />
+									<path d="M4 20c0-4 4-6 8-6s8 2 8 6" />
+								</svg>
+								<span class="truncate">{who}</span>
+							</span>
 							<span class="text-muted-foreground ml-auto font-mono text-[0.7rem]">
 								{(turn.confidence * 100).toFixed(0)}%
 							</span>

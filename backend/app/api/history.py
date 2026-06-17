@@ -188,6 +188,8 @@ class HistoryDecisionRead(BaseModel):
     turn_id: int | None
     # Cross-turn correlation id (US-003) — same shape the live detail serves.
     request_id: str | None = None
+    # Participant attribution (US-401) — same shape the live detail serves.
+    requested_by: str | None = None
     terminal_state: TerminalState | None
     no_reply_reason: NoReplyReason | None
     outcome: DecisionOutcome
@@ -207,6 +209,8 @@ class HistoryUtteranceRead(BaseModel):
     agent_decision_id: int | None
     # Durable delivery→request link (US-003) — same shape the live detail serves.
     answers_request_id: str | None = None
+    # Participant attribution (US-401) — same shape the live detail serves.
+    requested_by: str | None = None
     mode: BotMode
     # Answer-LLM prompt behind the utterance (Johnny-ckz.28.4) — kept in
     # lock-step with the live serializer for the shared frontend type.

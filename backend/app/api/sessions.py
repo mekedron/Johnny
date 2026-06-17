@@ -189,6 +189,9 @@ class AgentDecisionRead(BaseModel):
     # propagated to utterances/workstreams so a request can be tracked across
     # interruptions. NULL for pre-US-003 history / bare-gate turns.
     request_id: str | None = None
+    # Participant attribution (US-401): who asked — the speaker who opened this
+    # turn. NULL → the Decisions column renders "Unknown speaker".
+    requested_by: str | None = None
     terminal_state: TerminalState | None
     no_reply_reason: NoReplyReason | None
     outcome: DecisionOutcome
@@ -217,6 +220,8 @@ class AgentUtteranceRead(BaseModel):
     # from the AgentSpoke event independently of ``agent_decision_id`` so it
     # survives that FK being SET NULL and covers fallback/timeout speech.
     answers_request_id: str | None = None
+    # Participant attribution (US-401): the participant this delivery answered.
+    requested_by: str | None = None
     mode: BotMode
     # Serialised answer-LLM prompt (list of role/content messages) that
     # produced this utterance — drives the timeline's "Asked the model →
@@ -362,6 +367,8 @@ class AgentWorkstreamRead(BaseModel):
     source_decision_id: int | None
     agent_task_id: int | None
     request_id: str | None
+    # Participant attribution (US-401): who requested this workstream.
+    requested_by: str | None = None
     title: str | None
     user_request_text: str | None
     status: WorkstreamStatus

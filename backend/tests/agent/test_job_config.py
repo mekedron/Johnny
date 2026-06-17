@@ -226,6 +226,22 @@ def test_snapshot_peer_names_lenient_read(  # Johnny-trt.47
     )  # absent key — every single-agent session
 
 
+def test_snapshot_participants_lenient_read() -> None:  # US-401, Johnny-d6w.19
+    """The human meet roster degrades like every optional snapshot field."""
+
+    def cfg(value: Any) -> SessionJobConfig:
+        return SessionJobConfig(
+            bot_session_id=1, room_name="r", agent_snapshot={"participants": value}
+        )
+
+    assert cfg(["Alice", " Bob ", ""]).participants == ("Alice", "Bob")
+    assert cfg(None).participants == ()
+    assert cfg("Alice").participants == ()  # non-list shape degrades to absent
+    assert (
+        SessionJobConfig(bot_session_id=1, room_name="r").participants == ()
+    )  # absent key — ad-hoc / playground / legacy snapshots
+
+
 def test_snapshot_workspace_lenient_read() -> None:  # Johnny-wks.1
     """The workspace stamp degrades like every optional snapshot field:
     absent / malformed → (None, default) so legacy snapshots keep the

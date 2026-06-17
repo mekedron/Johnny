@@ -98,6 +98,9 @@ export interface AgentDecisionRecord {
 	// Cross-turn correlation id (US-003); optional/additive so an older cached
 	// response without the field still parses.
 	request_id?: string | null;
+	// Participant attribution (US-401): who asked. Optional/additive; null/absent
+	// → the Decisions column renders "Unknown speaker".
+	requested_by?: string | null;
 	terminal_state: TerminalState | null;
 	no_reply_reason: NoReplyReason | null;
 	outcome: DecisionOutcome;
@@ -118,6 +121,8 @@ export interface AgentUtteranceRecord {
 	// Durable delivery→request link (US-003); survives `agent_decision_id` being
 	// nulled and covers fallback/timeout speech. Optional/additive.
 	answers_request_id?: string | null;
+	// Participant attribution (US-401): the participant this delivery answered.
+	requested_by?: string | null;
 	mode: BotMode;
 	// Serialised answer-LLM prompt (JSON array of role/content messages) that
 	// produced this utterance — drives the timeline "View prompt" disclosure
@@ -298,6 +303,8 @@ export interface AgentWorkstreamRecord {
 	source_decision_id: number | null;
 	agent_task_id: number | null;
 	request_id: string | null;
+	// Participant attribution (US-401): who requested this workstream.
+	requested_by?: string | null;
 	title: string | null;
 	user_request_text: string | null;
 	status: WorkstreamStatus;
@@ -564,6 +571,8 @@ export interface RouterTurnView {
 	decisionId: number;
 	turnId: number | null;
 	requestId: string | null;
+	// Participant attribution (US-401): who asked. null → "Unknown speaker".
+	requestedBy: string | null;
 	createdAt: string;
 	action: string;
 	shouldSpeak: boolean;
@@ -596,6 +605,8 @@ export interface DeliveryView {
 	turnId: number | null;
 	decisionId: number | null;
 	answersRequestId: string | null;
+	// Participant attribution (US-401): the participant this delivery answered.
+	requestedBy: string | null;
 	deliveryKind: string;
 	finalText: string;
 	interrupted: boolean;
@@ -654,6 +665,8 @@ export interface WorkstreamView {
 	sourceDecisionId: number | null;
 	agentTaskId: number | null;
 	requestId: string | null;
+	// Participant attribution (US-401): who requested this workstream.
+	requestedBy: string | null;
 	title: string | null;
 	userRequestText: string | null;
 	status: string;

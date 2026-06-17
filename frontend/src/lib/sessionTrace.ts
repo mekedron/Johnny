@@ -509,6 +509,8 @@ export function buildSessionTraceView(records: SessionTraceInput): SessionTraceV
 			decisionId: d.id,
 			turnId: d.turn_id,
 			requestId: d.request_id ?? null,
+			// Participant attribution (US-401): who asked (null → "Unknown speaker").
+			requestedBy: d.requested_by ?? null,
 			createdAt: d.created_at,
 			action,
 			shouldSpeak: d.should_speak,
@@ -585,6 +587,10 @@ export function buildSessionTraceView(records: SessionTraceInput): SessionTraceV
 			turnId: decision ? decision.turn_id : null,
 			decisionId: u.agent_decision_id,
 			answersRequestId: u.answers_request_id ?? null,
+			// Participant attribution (US-401): the participant this delivery
+			// answered — the utterance's own value, falling back to its linked
+			// decision for resilience. null → "Unknown speaker".
+			requestedBy: u.requested_by ?? (decision?.requested_by ?? null),
 			deliveryKind,
 			finalText: u.output_text,
 			interrupted: Boolean(u.interrupted),
@@ -641,6 +647,8 @@ export function buildSessionTraceView(records: SessionTraceInput): SessionTraceV
 			sourceDecisionId: ws.source_decision_id,
 			agentTaskId: ws.agent_task_id,
 			requestId: ws.request_id,
+			// Participant attribution (US-401): who requested this workstream.
+			requestedBy: ws.requested_by ?? null,
 			title: ws.title,
 			userRequestText: ws.user_request_text,
 			status: ws.status,
@@ -737,6 +745,8 @@ export function buildSessionTraceView(records: SessionTraceInput): SessionTraceV
 			sourceDecisionId: decision ? decision.id : null,
 			agentTaskId: null,
 			requestId: decision ? (decision.request_id ?? null) : null,
+			// US-401: the inline workstream inherits its decision's requester.
+			requestedBy: decision ? (decision.requested_by ?? null) : null,
 			title: 'Inline tool loop',
 			userRequestText: null,
 			// Post-hoc reconstruction, so the execution status is terminal: a failed

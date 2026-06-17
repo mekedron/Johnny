@@ -206,6 +206,7 @@ SNAPSHOT_ROUTER_TIMEOUT_FALLBACK_TEXT_KEY = "router_timeout_fallback_text"
 SNAPSHOT_MAX_TOOL_STEPS_KEY = "max_tool_steps"
 SNAPSHOT_ASSIGNMENT_CONTEXT_KEY = "assignment_context"
 SNAPSHOT_PEER_NAMES_KEY = "peer_names"
+SNAPSHOT_PARTICIPANTS_KEY = "participants"
 SNAPSHOT_CAPABILITY_POLICY_KEY = "capability_policy"
 # Workspace attachment (Johnny-wks.1): the agent's effective execution
 # environment, resolved + stamped at dispatch. ``workspace_id`` is the key
@@ -431,6 +432,19 @@ class SessionJobConfig:
         degrade to absent.
         """
         return _coerce_replies(self.agent_snapshot.get(SNAPSHOT_PEER_NAMES_KEY))
+
+    @property
+    def participants(self) -> tuple[str, ...]:
+        """Human attendee display names from the meet roster (US-401, Johnny-d6w.19).
+
+        Stamped at dispatch from the calendar event's attendees (minus the bot's
+        own account). Drives live participant attribution in
+        :meth:`johnny.agent.session.JohnnyAgent._resolve_human_speaker`: a 1:1
+        meeting (exactly one human) attributes every human utterance to them.
+        Empty for ad-hoc rooms, the playground, and legacy snapshots — those fall
+        back to STT diarization or "Unknown speaker". Lenient like ``peer_names``.
+        """
+        return _coerce_replies(self.agent_snapshot.get(SNAPSHOT_PARTICIPANTS_KEY))
 
     @property
     def workspace_id(self) -> int | None:
@@ -784,6 +798,7 @@ __all__ = [
     "SNAPSHOT_CONFIDENCE_THRESHOLD_KEY",
     "SNAPSHOT_MODE_KEY",
     "SNAPSHOT_PEER_NAMES_KEY",
+    "SNAPSHOT_PARTICIPANTS_KEY",
     "SNAPSHOT_WORKSPACE_ID_KEY",
     "SNAPSHOT_WORKSPACE_KEY",
     "SUGGEST_ONLY_MODE",

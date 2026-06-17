@@ -1668,3 +1668,45 @@ async def test_agent_id_stamped_even_when_snapshot_fails(
     assert rows[0].agent_snapshot is None  # contract-default degrade preserved
     # And the meeting now reads as covered — no redispatch storm.
     assert pending_assignments(db_session, cfg) == []
+
+
+# --- US-401 (Johnny-d6w.19): human meet roster extraction -------------------
+
+
+def _event_with_attendees(attendees: object) -> CalendarEvent:
+    now = datetime.now(UTC)
+    return CalendarEvent(
+        account_id=1,
+        external_id="evt-roster",
+        start_time=now,
+        end_time=now + timedelta(minutes=30),
+        meet_link="https://meet.example/x",
+        attendees=attendees,
+    )
+
+
+def test_human_attendee_names_filters_self_and_resolves_label() -> None:
+    """Drops the bot's own account + blanks; display_name then email fallback."""
+    from app.services.session_scheduler import _human_attendee_names
+
+    event = _event_with_attendees(
+        [
+            {"email": "alice@example.com", "display_name": "Alice Smith", "self": False},
+            {"email": "bob@example.com", "display_name": None, "self": False},
+            {"email": "bot@example.com", "display_name": "Johnny Bot", "self": True},
+            {"email": "", "display_name": "", "self": False},
+            "not-a-dict",
+        ]
+    )
+    cfg = MeetingConfig(calendar_event_id=1, identity_account_id=1, enabled=True)
+    cfg.calendar_event = event
+    assert _human_attendee_names(cfg) == ["Alice Smith", "bob@example.com"]
+
+
+def test_human_attendee_names_empty_without_attendees() -> None:
+    """Ad-hoc rooms (no roster) → empty list → live attribution degrades."""
+    from app.services.session_scheduler import _human_attendee_names
+
+    cfg = MeetingConfig(calendar_event_id=1, identity_account_id=1, enabled=True)
+    cfg.calendar_event = _event_with_attendees(None)
+    assert _human_attendee_names(cfg) == []

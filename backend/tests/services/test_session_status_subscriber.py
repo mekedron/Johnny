@@ -32,6 +32,7 @@ from app.db.models import (
     NoReplyReason,
     SessionTiming,
     TerminalState,
+    TranscriptChunk,
     WorkstreamDeliveryStatus,
     WorkstreamSourceKind,
     WorkstreamStatus,
@@ -40,6 +41,7 @@ from app.services import session_status_subscriber
 from app.services.bot_sessions import BotSessionNotFoundError
 from app.services.session_status_subscriber import (
     AGENT_SPOKE_EVENT_TYPE,
+    BOT_SPEAKER_LABEL,
     CONVERSATION_EVENT_TYPES,
     PIPELINE_TIMING_EVENT_TYPE,
     ROUTER_DECISION_EVENT_TYPE,
@@ -76,6 +78,7 @@ def engine() -> sa.Engine:
             CalendarEvent.__table__,  # type: ignore[list-item]
             MeetingConfig.__table__,  # type: ignore[list-item]
             BotSession.__table__,  # type: ignore[list-item]
+            TranscriptChunk.__table__,  # type: ignore[list-item]
             AgentDecision.__table__,  # type: ignore[list-item]
             AgentUtterance.__table__,  # type: ignore[list-item]
             AgentTask.__table__,  # type: ignore[list-item]
@@ -2798,3 +2801,108 @@ def test_task_cancelled_after_done_is_first_writer_wins_noop(
     db_session.commit()
     ws = db_session.scalars(sa.select(AgentWorkstream)).one()
     assert ws.status == WorkstreamStatus.DONE  # cancel did not regress the terminal
+
+
+# --- requested_by participant attribution (Johnny-d6w.19, US-401) ---------
+
+
+def _seed_transcript(
+    db_session: Session, *, session_id: int, speaker: str | None, text: str = "hi"
+) -> TranscriptChunk:
+    row = TranscriptChunk(
+        bot_session_id=session_id,
+        start_offset_ms=0,
+        end_offset_ms=0,
+        speaker=speaker,
+        text=text,
+    )
+    db_session.add(row)
+    db_session.flush()
+    return row
+
+
+def test_decision_requested_by_from_latest_transcript_speaker(
+    db_session: Session,
+) -> None:
+    """The decision inherits the most recent non-bot transcript speaker (US-401)."""
+    bot = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    _seed_transcript(db_session, session_id=bot.id, speaker="alice", text="pull sales")
+    apply_router_decision_event(
+        db_session, _router_decision_payload(session_id=bot.id, mode="autonomous")
+    )
+    decision = db_session.scalars(sa.select(AgentDecision)).one()
+    assert decision.requested_by == "alice"
+
+
+def test_decision_requested_by_excludes_bot_label(db_session: Session) -> None:
+    """A bot-labelled transcript is never treated as the requester (US-401)."""
+    bot = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    _seed_transcript(
+        db_session, session_id=bot.id, speaker=BOT_SPEAKER_LABEL, text="(bot)"
+    )
+    apply_router_decision_event(
+        db_session, _router_decision_payload(session_id=bot.id, mode="autonomous")
+    )
+    decision = db_session.scalars(sa.select(AgentDecision)).one()
+    assert decision.requested_by is None  # → "Unknown speaker" in the UI
+
+
+def test_decision_requested_by_null_when_no_transcript(db_session: Session) -> None:
+    """No transcript → NULL requested_by (graceful fallback, US-401 AC#3)."""
+    bot = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    apply_router_decision_event(
+        db_session, _router_decision_payload(session_id=bot.id, mode="autonomous")
+    )
+    decision = db_session.scalars(sa.select(AgentDecision)).one()
+    assert decision.requested_by is None
+
+
+def test_utterance_inherits_requested_by_from_bound_decision(
+    db_session: Session,
+) -> None:
+    """A turn-bound delivery inherits the decision's requester (US-401)."""
+    bot = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    _seed_transcript(db_session, session_id=bot.id, speaker="bob")
+    apply_router_decision_event(
+        db_session,
+        {**_router_decision_payload(session_id=bot.id, mode="autonomous"), "turn_id": 7},
+    )
+    apply_agent_spoke_event(
+        db_session, {**_agent_spoke_payload(session_id=bot.id), "turn_id": 7}
+    )
+    utterance = db_session.scalars(sa.select(AgentUtterance)).one()
+    assert utterance.requested_by == "bob"
+
+
+def test_workstream_inherits_requested_by_from_source_decision(
+    db_session: Session,
+) -> None:
+    """A delegated workstream inherits the requester of its source turn (US-401)."""
+    bot = _seed(db_session, status=BotSessionStatus.JOINED)
+    db_session.commit()
+    _seed_transcript(
+        db_session, session_id=bot.id, speaker="alice", text="do it in the background"
+    )
+    apply_router_decision_event(
+        db_session,
+        {**_router_decision_payload(session_id=bot.id, mode="autonomous"), "turn_id": 9},
+    )
+    decision = db_session.scalars(sa.select(AgentDecision)).one()
+    apply_task_event(
+        db_session,
+        {
+            "type": "task_queued",
+            "task_id": 99,
+            "kind": "mcp__demo-http__reverse_text",
+            "turn_id": 9,
+            "decision_id": decision.id,
+            "session_id": bot.id,
+            "timestamp_ms": 0,
+        },
+    )
+    ws = db_session.scalars(sa.select(AgentWorkstream)).one()
+    assert ws.requested_by == "alice"

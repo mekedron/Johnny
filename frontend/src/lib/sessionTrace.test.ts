@@ -386,6 +386,44 @@ describe('buildSessionTraceView', () => {
 		assert.equal(view.routerTurns[0].action, 'delegate');
 	});
 
+	it('US-401: propagates requested_by → requestedBy on decisions, deliveries and delegated workstreams', () => {
+		const view = buildSessionTraceView({
+			decisions: [makeDecision({ id: 1, turn_id: 1, requested_by: 'alice' })],
+			utterances: [makeUtterance({ id: 10, agent_decision_id: 1, requested_by: 'alice' })],
+			workstreams: [
+				makeWorkstream({
+					id: 200,
+					source_turn_id: 1,
+					source_decision_id: 1,
+					requested_by: 'alice'
+				})
+			]
+		});
+		assert.equal(view.routerTurns[0].requestedBy, 'alice');
+		assert.equal(view.deliveries[0].requestedBy, 'alice');
+		assert.equal(view.workstreams.find((w) => w.id === 200)?.requestedBy, 'alice');
+	});
+
+	it('US-401: an inline-synthesised workstream inherits its decision requester (with US-107)', () => {
+		const view = buildSessionTraceView({
+			decisions: [makeDecision({ id: 1, turn_id: 1, requested_by: 'bob' })],
+			utterances: [],
+			toolCalls: [makeToolCall({ id: 30, agent_task_id: null, turn_id: 1 })],
+			modelCalls: [makeModelCall({ id: 50, turn_id: 1, role: 'answer', step_index: 0 })]
+		});
+		const inline = view.workstreams.find((w) => w.sourceKind === 'foreground_tool_loop');
+		assert.equal(inline?.requestedBy, 'bob');
+	});
+
+	it('US-401: falls back to null requestedBy when participant identity is unavailable (AC3)', () => {
+		const view = buildSessionTraceView({
+			decisions: [makeDecision({ id: 1, turn_id: 1 })],
+			utterances: [makeUtterance({ id: 10, agent_decision_id: 1 })]
+		});
+		assert.equal(view.routerTurns[0].requestedBy, null);
+		assert.equal(view.deliveries[0].requestedBy, null);
+	});
+
 	it('US-303: an external_callback workstream projects its origin to the view', () => {
 		// The webhook re-entry envelope flows through untouched, so the column can
 		// render it distinctly ("awaiting webhook") while it is non-terminal.

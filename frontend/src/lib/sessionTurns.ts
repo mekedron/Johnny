@@ -562,7 +562,11 @@ function summarizeContext(inputWindow: Record<string, unknown> | null): {
 	// (the full prompt lives under "Asked the model").
 	const lines: string[] = [];
 	for (const e of window) {
-		const who = e.speaker && e.speaker.toLowerCase().includes('bot') ? 'Bot' : 'Participant';
+		// US-401: label by the real speaker; bot lines stay "Bot", a user line
+		// with no resolved identity falls back to "Unknown speaker" (never the old
+		// generic "Participant" literal).
+		const isBot = e.speaker ? e.speaker.toLowerCase().includes('bot') : false;
+		const who = isBot ? 'Bot' : (e.speaker ?? 'Unknown speaker');
 		const marker = e.is_current ? '→ ' : '  ';
 		lines.push(`${marker}${who}: ${e.text}`);
 	}

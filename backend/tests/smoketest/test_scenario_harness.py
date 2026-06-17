@@ -26,6 +26,7 @@ pytest.importorskip("livekit.agents")
 from app.db import Base  # noqa: E402
 from app.db.models import (  # noqa: E402
     Agent,
+    AgentDecision,
     AgentModelCall,
     AgentTask,
     AgentWorkstream,
@@ -102,6 +103,7 @@ def db() -> Iterator[Session]:
     Base.metadata.create_all(
         bind=engine,
         tables=[
+            AgentDecision.__table__,  # type: ignore[list-item] — US-401 requester lookup
             AgentModelCall.__table__,  # type: ignore[list-item]
             AgentTask.__table__,  # type: ignore[list-item]
             AgentWorkstream.__table__,  # type: ignore[list-item]

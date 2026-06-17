@@ -210,6 +210,8 @@ def test_snapshot_shape_and_values(db_session: Session) -> None:
         "router_timeout_fallback_text": (
             "Sorry, I didn't catch that in time — could you say that again?"
         ),
+        # Native tool-loop depth (Johnny-3gx); 0 = unlimited (the model default).
+        "max_tool_steps": 0,
         "providers": {
             "router_llm_provider_id": None,
             "answer_llm_provider_id": None,
@@ -222,6 +224,9 @@ def test_snapshot_shape_and_values(db_session: Session) -> None:
         # Johnny-trt.47: the co-agent roster, blanks dropped; defaults to []
         # for every single-agent launch.
         "peer_names": ["Echo", "Nova"],
+        # US-401 (Johnny-d6w.19): the human meet roster; [] when no participants
+        # passed (single-agent / playground / ad-hoc launches).
+        "participants": [],
     }
     # Plain JSON-able — what bot_sessions.agent_snapshot stores verbatim.
     import json

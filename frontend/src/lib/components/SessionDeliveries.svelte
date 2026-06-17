@@ -187,6 +187,7 @@
 				{@const open = expanded.has(d.utteranceId)}
 				{@const diverged = isDivergent(d)}
 				{@const audio = audioUrl(d)}
+					{@const who = d.requestedBy ?? 'Unknown speaker'}
 				<li
 					data-testid="delivery-trace-row"
 					data-utterance-id={d.utteranceId}
@@ -219,6 +220,27 @@
 									data-testid="delivery-divergence-badge">diverged</span
 								>
 							{/if}
+							<span
+								class="text-muted-foreground inline-flex max-w-[10rem] items-center gap-1 text-[0.7rem]"
+								class:italic={d.requestedBy === null}
+								data-testid="delivery-requested-by"
+								title="Answered {who}"
+							>
+								<svg
+									aria-hidden="true"
+									viewBox="0 0 24 24"
+									class="size-3 shrink-0"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<circle cx="12" cy="8" r="4" />
+									<path d="M4 20c0-4 4-6 8-6s8 2 8 6" />
+								</svg>
+								<span class="truncate">{who}</span>
+							</span>
 							{#if audio}
 								<span aria-hidden="true" class="text-muted-foreground ml-auto text-xs">♪</span>
 							{/if}

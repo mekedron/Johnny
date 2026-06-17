@@ -964,6 +964,62 @@ async def test_attribution_failure_keeps_final_as_participant_speech() -> None:
     assert finalized.events[0].speaker is None
 
 
+# --- US-401 (Johnny-d6w.19): live meet-roster participant attribution -------
+
+
+async def test_one_to_one_roster_attributes_human_by_name() -> None:
+    """A 1:1 meeting (exactly one human in the roster) names every human final."""
+    finalized = _FinalizedRecorder()
+    agent = JohnnyAgent(
+        participants=["Alice Smith"], transcript_finalized_sink=finalized, session_id="s"
+    )
+    await _drain(agent._gate_stt_events(_source(_final("what's the status?"))))
+    assert finalized.events[0].speaker == "Alice Smith"
+
+
+async def test_one_to_one_roster_overrides_diarization_label() -> None:
+    """The 1:1 human name wins over a generic diarization bucket."""
+    finalized = _FinalizedRecorder()
+    agent = JohnnyAgent(
+        participants=["Alice Smith"], transcript_finalized_sink=finalized, session_id="s"
+    )
+    await _drain(agent._gate_stt_events(_source(_final("hello", speaker="speaker_0"))))
+    assert finalized.events[0].speaker == "Alice Smith"
+
+
+async def test_multi_human_roster_falls_back_to_diarization_label() -> None:
+    """With >1 human and no name mapping, keep the STT diarization label."""
+    finalized = _FinalizedRecorder()
+    agent = JohnnyAgent(
+        participants=["Alice", "Bob"], transcript_finalized_sink=finalized, session_id="s"
+    )
+    await _drain(agent._gate_stt_events(_source(_final("hi", speaker="speaker_1"))))
+    assert finalized.events[0].speaker == "speaker_1"
+
+
+async def test_multi_human_roster_without_diarization_is_unknown() -> None:
+    """AC3: >1 human and no diarization → NULL → the UI renders "Unknown speaker"."""
+    finalized = _FinalizedRecorder()
+    agent = JohnnyAgent(
+        participants=["Alice", "Bob"], transcript_finalized_sink=finalized, session_id="s"
+    )
+    await _drain(agent._gate_stt_events(_source(_final("hi"))))
+    assert finalized.events[0].speaker is None
+
+
+def test_resolve_human_speaker_priority() -> None:
+    """Unit: 1:1 roster name > diarization label > None (US-401)."""
+    one = JohnnyAgent(participants=["Alice"])
+    assert one._resolve_human_speaker(None) == "Alice"
+    assert one._resolve_human_speaker("speaker_0") == "Alice"  # name beats bucket
+    many = JohnnyAgent(participants=["Alice", "Bob"])
+    assert many._resolve_human_speaker("speaker_0") == "speaker_0"
+    assert many._resolve_human_speaker(None) is None
+    none = JohnnyAgent()  # empty roster (ad-hoc / playground)
+    assert none._resolve_human_speaker("speaker_0") == "speaker_0"
+    assert none._resolve_human_speaker(None) is None
+
+
 async def test_noise_gate_wins_over_peer_attribution() -> None:
     """A filler inside a peer window is noise, not peer speech — one
     TranscriptFiltered, no finalized row, no attribution call."""

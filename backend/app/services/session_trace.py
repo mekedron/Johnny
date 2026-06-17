@@ -85,6 +85,8 @@ class RouterTurnView(_CamelModel):
     decision_id: int
     turn_id: int | None
     request_id: str | None
+    # Participant attribution (US-401): who asked. NULL → "Unknown speaker".
+    requested_by: str | None
     created_at: datetime
     # Best-effort action chip: ``delegate`` when the turn spun up a workstream,
     # else ``speak`` / ``silent`` from ``should_speak``. ``status`` is not
@@ -111,6 +113,8 @@ class DeliveryView(_CamelModel):
     turn_id: int | None
     decision_id: int | None
     answers_request_id: str | None
+    # Participant attribution (US-401): the participant this delivery answered.
+    requested_by: str | None
     delivery_kind: str
     final_text: str
     interrupted: bool
@@ -151,6 +155,8 @@ class WorkstreamView(_CamelModel):
     source_decision_id: int | None
     agent_task_id: int | None
     request_id: str | None
+    # Participant attribution (US-401): who requested this workstream.
+    requested_by: str | None
     title: str | None
     user_request_text: str | None
     status: str
@@ -320,6 +326,7 @@ def build_session_trace_view(
                 decision_id=d.id,
                 turn_id=d.turn_id,
                 request_id=d.request_id,
+                requested_by=d.requested_by,
                 created_at=d.created_at,
                 action=action,
                 should_speak=d.should_speak,
@@ -371,6 +378,7 @@ def build_session_trace_view(
                 turn_id=decision.turn_id if decision is not None else None,
                 decision_id=u.agent_decision_id,
                 answers_request_id=u.answers_request_id,
+                requested_by=u.requested_by,
                 delivery_kind=delivery_kind,
                 final_text=u.output_text,
                 interrupted=bool(u.interrupted),
@@ -423,6 +431,7 @@ def build_session_trace_view(
                 source_decision_id=ws.source_decision_id,
                 agent_task_id=ws.agent_task_id,
                 request_id=ws.request_id,
+                requested_by=ws.requested_by,
                 title=ws.title,
                 user_request_text=ws.user_request_text,
                 status=_enum_value(ws.status),

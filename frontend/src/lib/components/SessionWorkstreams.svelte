@@ -304,6 +304,7 @@
 			{#each visibleWorkstreams as w (w.id)}
 				{@const open = expanded.has(w.id)}
 				{@const expired = isExpired(w)}
+					{@const who = w.requestedBy ?? 'Unknown speaker'}
 				{@const toolCalls = w.toolCalls ?? []}
 				{@const modelCalls = w.modelCalls ?? []}
 				{@const toolId = `${w.id}:tools`}
@@ -352,7 +353,28 @@
 									>Awaiting webhook</span
 								>
 							{/if}
-							<span class="text-muted-foreground ml-auto font-mono text-[0.65rem]"
+							<span
+								class="text-muted-foreground ml-auto inline-flex max-w-[10rem] items-center gap-1 text-[0.7rem]"
+								class:italic={w.requestedBy === null}
+								data-testid="workstream-requested-by"
+								title="Requested by {who}"
+							>
+								<svg
+									aria-hidden="true"
+									viewBox="0 0 24 24"
+									class="size-3 shrink-0"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<circle cx="12" cy="8" r="4" />
+									<path d="M4 20c0-4 4-6 8-6s8 2 8 6" />
+								</svg>
+								<span class="truncate">{who}</span>
+							</span>
+							<span class="text-muted-foreground font-mono text-[0.65rem]"
 								>{SOURCE_LABEL[w.sourceKind] ?? w.sourceKind}</span
 							>
 						</div>

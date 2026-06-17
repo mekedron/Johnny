@@ -869,6 +869,12 @@ class AgentDecision(Base):
     # continuations of one request without a schema change. v1 is 1:1 with the
     # turn. NULL for pre-US-003 history and bare-gate/listen-only paths.
     request_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # Participant attribution (US-401): the speaker whose utterance opened this
+    # turn, copied from the triggering ``transcript_chunks.speaker`` by the single
+    # durable writer. Surfaces as the "who asked" label on the Decisions column.
+    # NULL when identity is unavailable (no diarization / no roster match / legacy
+    # rows) — the frontend then renders "Unknown speaker".
+    requested_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     terminal_state: Mapped[TerminalState | None] = mapped_column(
         SAEnum(
             TerminalState,
@@ -1021,6 +1027,10 @@ class AgentUtterance(Base):
     # decision ``request_id``; NULL for speech bound to no turn (corrections,
     # task-result deliveries — those link to their request via the workstream).
     answers_request_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # Participant attribution (US-401): the participant this delivery answered,
+    # inherited from the turn's decision (or, for task-result/correction speech
+    # bound to no turn, from the originating workstream). NULL → "Unknown speaker".
+    requested_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     mode: Mapped[BotMode] = mapped_column(_bot_mode_column(), nullable=False)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     output_text: Mapped[str] = mapped_column(Text, nullable=False)
@@ -1341,6 +1351,10 @@ class AgentWorkstream(TimestampMixin, Base):
     # until then. A 36-char UUID string; stored turn-independent so a later
     # merge heuristic can group continuations without a schema change.
     request_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # Participant attribution (US-401): the participant who requested this
+    # workstream, inherited from its source decision/turn. NULL for source-less
+    # envelopes (e.g. external_callback) or unresolved identity → "Unknown speaker".
+    requested_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The user's originating request text (US-003/US-101 populate via the
     # decision/utterance join); NULL in US-002 — it is NOT the bot's ack.

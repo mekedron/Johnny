@@ -153,6 +153,7 @@ def build_agent_snapshot(
     *,
     assignment_context: str | None = None,
     peer_names: Sequence[str] | None = None,
+    participants: Sequence[str] | None = None,
     capability_policy: dict[str, Any] | None = None,
     workspace: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -186,7 +187,7 @@ def build_agent_snapshot(
     schema) stamps nothing, and downstream resolvers degrade to the global
     skills-sandbox — byte-identical pre-workspaces behavior.
     """
-    snapshot = _snapshot_base(agent, assignment_context, peer_names)
+    snapshot = _snapshot_base(agent, assignment_context, peer_names, participants)
     if capability_policy is not None:
         snapshot["capability_policy"] = dict(capability_policy)
     if workspace is not None and workspace.get("id") is not None:
@@ -199,6 +200,7 @@ def _snapshot_base(
     agent: Agent,
     assignment_context: str | None,
     peer_names: Sequence[str] | None,
+    participants: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "agent_id": agent.id,
@@ -229,6 +231,10 @@ def _snapshot_base(
         },
         "assignment_context": assignment_context,
         "peer_names": [str(n) for n in (peer_names or []) if str(n).strip()],
+        # Human meet roster (US-401): attendee display names minus the bot's own
+        # account; drives live 1:1 participant attribution. Empty for ad-hoc /
+        # playground launches.
+        "participants": [str(n) for n in (participants or []) if str(n).strip()],
     }
 
 

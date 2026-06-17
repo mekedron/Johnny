@@ -50,6 +50,7 @@ def _scenario() -> dict[str, list[object]]:
             reply_type="answer",
             turn_id=1,
             request_id="req-1",
+            requested_by="alice",
             terminal_state=TerminalState.REPLIED,
             no_reply_reason=None,
             outcome=DecisionOutcome.SPOKEN,
@@ -64,6 +65,7 @@ def _scenario() -> dict[str, list[object]]:
             reply_type="delegate",
             turn_id=2,
             request_id="req-2",
+            requested_by="bob",
             terminal_state=TerminalState.REPLIED,
             no_reply_reason=None,
             outcome=DecisionOutcome.SPOKEN,
@@ -76,6 +78,7 @@ def _scenario() -> dict[str, list[object]]:
             bot_session_id=1,
             agent_decision_id=1,
             answers_request_id="req-1",
+            requested_by="alice",
             mode=BotMode.APPROVAL_REQUIRED,
             output_text="It is sunny.",
             audio_file="reply-10.wav",
@@ -89,6 +92,7 @@ def _scenario() -> dict[str, list[object]]:
             bot_session_id=1,
             agent_decision_id=None,
             answers_request_id="req-2",
+            requested_by="bob",
             mode=BotMode.APPROVAL_REQUIRED,
             output_text="Found 155 CO2 orders.",
             audio_file=None,
@@ -173,6 +177,7 @@ def _scenario() -> dict[str, list[object]]:
             source_decision_id=2,
             agent_task_id=100,
             request_id="req-2",
+            requested_by="bob",
             title="metabase",
             user_request_text="how many CO2 orders?",
             status=WorkstreamStatus.DONE,
@@ -248,6 +253,8 @@ def test_router_turns_projection_and_links() -> None:
     speak, delegate = view.router_turns
     assert speak.action == "speak"
     assert speak.request_id == "req-1"
+    assert speak.requested_by == "alice"  # US-401
+    assert delegate.requested_by == "bob"  # US-401
     assert speak.delivery_ids == [10]
     assert speak.workstream_ids == []
     assert speak.router_model_call is not None
@@ -271,6 +278,7 @@ def test_deliveries_kind_and_request_linkage() -> None:
     reply = by_id[10]
     assert reply.delivery_kind == "reply"
     assert reply.answers_request_id == "req-1"
+    assert reply.requested_by == "alice"  # US-401
     assert reply.turn_id == 1
     assert reply.decision_id == 1
     assert reply.source_workstream_id is None
@@ -280,6 +288,7 @@ def test_deliveries_kind_and_request_linkage() -> None:
     task_result = by_id[11]
     assert task_result.delivery_kind == "task_result"
     assert task_result.answers_request_id == "req-2"
+    assert task_result.requested_by == "bob"  # US-401
     assert task_result.turn_id is None  # fallback/off-turn speech, no decision
     assert task_result.decision_id is None
     assert task_result.source_workstream_id == 200
@@ -421,9 +430,11 @@ def test_serialises_camelcase_by_alias() -> None:
     assert "routerModelCall" in dumped["routerTurns"][0]
     assert "deliveryIds" in dumped["routerTurns"][0]
     assert "workstreamIds" in dumped["routerTurns"][0]
+    assert "requestedBy" in dumped["routerTurns"][0]  # US-401 camelCase alias
     delivery = dumped["deliveries"][0]
     assert "deliveryKind" in delivery
     assert "answersRequestId" in delivery
+    assert "requestedBy" in delivery  # US-401
     assert "decisionRecommendedText" in delivery
     assert "divergenceReason" in delivery
     assert "overrideActor" in delivery
@@ -433,6 +444,7 @@ def test_serialises_camelcase_by_alias() -> None:
     assert ws["deliveryStatus"] == "delivered"
     assert ws["toolCallCount"] == 1
     assert ws["modelCallCount"] == 1
+    assert ws["requestedBy"] == "bob"  # US-401
 
 
 def test_empty_session_yields_empty_arrays() -> None:

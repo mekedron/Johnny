@@ -1329,6 +1329,8 @@ async def build_agent_runtime(
         metrics_listener=metrics_translator.on_metrics_collected,
         peer_floor=speech_floor,
         agent_display_name=agent_display_name,
+        # Human meet roster (US-401): calendar attendees, for 1:1 attribution.
+        participants=config.participants,
         sandbox_tools=sandbox_tools,
     )
 

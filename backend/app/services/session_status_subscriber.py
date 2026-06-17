@@ -65,6 +65,7 @@ from app.services.bot_sessions import (
     mark_session_joining,
     mark_session_waiting_for_relogin,
 )
+from johnny.voice_pipeline.transcript_history import BOT_SPEAKER_LABEL
 
 logger = logging.getLogger(__name__)
 
@@ -348,6 +349,59 @@ def apply_transcript_event(db: Session, payload: dict[str, Any]) -> bool:
     return True
 
 
+def _latest_requester_speaker(db: Session, session_id: int) -> str | None:
+    """The participant who most recently spoke a transcript for this session (US-401).
+
+    Identity lives only on ``transcript_chunks.speaker`` — populated by the live
+    STT / meet-roster attribution path, the playground ``"user"`` stamp, or the
+    scenario harness's scripted speaker. §3's concurrency ceiling processes turns
+    strictly serially and emits ``TranscriptFinalized`` before
+    ``RouterDecisionMade`` within a turn, so the most recent non-bot transcript is
+    the utterance that opened the turn being decided — its speaker is the turn's
+    requester. The bot's own label is excluded defensively (bot speech is an
+    ``agent_utterances`` row, never a transcript). ``None`` → "Unknown speaker".
+    """
+    return db.scalar(
+        select(TranscriptChunk.speaker)
+        .where(
+            TranscriptChunk.bot_session_id == session_id,
+            TranscriptChunk.speaker.is_not(None),
+            TranscriptChunk.speaker != BOT_SPEAKER_LABEL,
+        )
+        .order_by(TranscriptChunk.id.desc())
+        .limit(1)
+    )
+
+
+def _decision_requested_by(
+    db: Session, session_id: int, decision_id: int | None, turn_id: int | None
+) -> str | None:
+    """The requester of the decision a workstream sprang from (US-401).
+
+    Prefer the exact ``source_decision_id``; fall back to the turn's most recent
+    decision (covers an envelope created before its decision row landed, or a
+    decision_id that does not yet resolve). ``None`` when neither is known
+    (source-less envelopes) or the decision carries no resolved identity.
+    """
+    if decision_id is not None:
+        found = db.scalar(
+            select(AgentDecision.requested_by).where(AgentDecision.id == decision_id)
+        )
+        if found is not None:
+            return found
+    if turn_id is not None:
+        return db.scalar(
+            select(AgentDecision.requested_by)
+            .where(
+                AgentDecision.bot_session_id == session_id,
+                AgentDecision.turn_id == turn_id,
+            )
+            .order_by(AgentDecision.id.desc())
+            .limit(1)
+        )
+    return None
+
+
 def apply_router_decision_event(
     db: Session, payload: dict[str, Any]
 ) -> tuple[bool, _PendingApprovalEvent | None]:
@@ -437,6 +491,8 @@ def apply_router_decision_event(
         # visibility; TurnTerminal flips it to replied / no_reply on resolution.
         turn_id=turn_id,
         request_id=str(request_id) if isinstance(request_id, str) else None,
+        # Participant attribution (US-401): the speaker who opened this turn.
+        requested_by=_latest_requester_speaker(db, session_id),
         terminal_state=(
             TerminalState.PENDING_APPROVAL
             if outcome == DecisionOutcome.PENDING
@@ -640,6 +696,26 @@ def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
     # the utterance still names the request it answered after agent_decision_id
     # is SET NULL (AC#3). NULL for speech bound to no turn.
     answers_request_id = payload.get("answers_request_id")
+    # Participant attribution (US-401): inherit from the turn's decision; for
+    # speech bound to no turn (task_result / correction) resolve via the
+    # originating workstream's request_id. NULL → "Unknown speaker".
+    requested_by: str | None = (
+        linked_decision.requested_by if linked_decision is not None else None
+    )
+    if (
+        requested_by is None
+        and isinstance(answers_request_id, str)
+        and answers_request_id
+    ):
+        requested_by = db.scalar(
+            select(AgentWorkstream.requested_by)
+            .where(
+                AgentWorkstream.bot_session_id == session_id,
+                AgentWorkstream.request_id == answers_request_id,
+            )
+            .order_by(AgentWorkstream.id.desc())
+            .limit(1)
+        )
     row = AgentUtterance(
         bot_session_id=session_id,
         agent_decision_id=decision_id,
@@ -663,6 +739,7 @@ def apply_agent_spoke_event(db: Session, payload: dict[str, Any]) -> bool:
         # ``kind`` that routes the final_text stamping above. The Deliveries
         # column renders the full enum and keys its status read-set panel off it.
         delivery_kind=kind,
+        requested_by=requested_by,
     )
     db.add(row)
     db.flush()
@@ -1128,6 +1205,15 @@ def apply_task_event(db: Session, payload: dict[str, Any]) -> bool:
     # this converges regardless of which event the single writer sees first.
     if ws.request_id is None and payload.get("request_id"):
         ws.request_id = str(payload["request_id"])
+
+    # Participant attribution (US-401): inherit the requester from the source
+    # decision/turn, backfilled like request_id above so an envelope created from
+    # an out-of-order event (before its decision row landed) still resolves once
+    # the decision is present. NULL for source-less envelopes (external_callback).
+    if ws.requested_by is None:
+        ws.requested_by = _decision_requested_by(
+            db, session_id, ws.source_decision_id, ws.source_turn_id
+        )
 
     now = datetime.now(UTC)
     terminal = ws.status in _WORKSTREAM_TERMINAL_STATUSES
