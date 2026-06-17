@@ -1154,6 +1154,21 @@ def attach_task_speech_wiring(
     if attach_queue is not None:
         attach_queue(queue, clock=clock)
 
+    # In-session ``done`` talk-back (Johnny-d6w.24): a mid-loop-promoted
+    # continuation runs as an in-session resolver, whose ``done`` settle has no
+    # push-listener ``on_settled`` to enqueue its result. Attach the coordinator's
+    # delivery seam, scoped to the continuation kind so internal in-session kinds
+    # (meeting.leave / session.end) stay silent.
+    from johnny.agent.inline_promotion import INLINE_CONTINUATION_KIND
+
+    async def _on_in_session_done(entry: TaskRegistryEntry) -> None:
+        if entry.kind == INLINE_CONTINUATION_KIND:
+            deliverer.enqueue_result(entry)
+
+    attach_result_deliverer = getattr(coordinator, "attach_result_deliverer", None)
+    if attach_result_deliverer is not None:
+        attach_result_deliverer(_on_in_session_done)
+
     async def _on_settled(entry: TaskRegistryEntry) -> None:
         # The exactly-once side effects of a first-observed remote settle:
         # an honest spoken walk-back for failed (Johnny-trt.53 — same seam,

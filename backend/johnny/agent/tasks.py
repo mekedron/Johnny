@@ -474,6 +474,17 @@ or ``cancelled`` (the session is tearing down — nobody is listening). For
 worker-owned kinds (Johnny-trt.24) the watcher fires it from the polled row
 once the worker's terminal write lands — same contract, different settler."""
 
+ReportTaskDone = Callable[["TaskRegistryEntry"], Awaitable[None]]
+"""Deliver an **in-session** task's ``done`` result for spoken talk-back
+(Johnny-d6w.24). The worker-owned ``done`` path already reaches
+``TaskSpeechDeliverer.enqueue_result`` through the Phase-5 push listener's
+``on_settled`` hook, but the in-session resolver's ``done`` settle has no such
+path — it would persist + render but never speak. Called by :meth:`_run` after
+the terminal row update + ``TaskCompleted`` publish, with the registry entry
+:meth:`note_task_settled` returned (first-observer-wins → exactly once). The
+wiring scopes delivery to the kinds that want it (the mid-loop continuation),
+so internal in-session kinds stay silent. Best-effort and contained."""
+
 PublishCancelled = Callable[["QueuedTask", CancelActor], Awaitable[None]]
 """Publish ``TaskCancelled`` on the session EventBus channel (Johnny-d6w.17).
 
@@ -695,6 +706,11 @@ class TaskCoordinator:
         # *after* the coordinator in the runtime assembly, the attach_say
         # ordering pattern); the constructor arg serves directly-wired tests.
         self._report_failed = report_failed
+        # In-session ``done`` delivery seam (Johnny-d6w.24): attached after
+        # construction by the Phase-5 speech wiring (the deliverer exists only
+        # after ``session.start``). Until attached, an in-session ``done`` result
+        # is persisted + rendered but not spoken — the pre-d6w.24 behaviour.
+        self._report_done: ReportTaskDone | None = None
         # Locality split (Johnny-trt.24). None keeps the Phase-3 behaviour:
         # every kind resolved in-session by the injected executor.
         self._runs_in_session = runs_in_session
@@ -741,6 +757,18 @@ class TaskCoordinator:
         attached, failed settles are recorded but reported nowhere.
         """
         self._report_failed = report
+
+    def attach_result_deliverer(self, report: ReportTaskDone) -> None:
+        """Attach the in-session ``done`` delivery seam (Johnny-d6w.24).
+
+        Called by :func:`~johnny.agent.task_wiring.attach_task_speech_wiring`
+        once the :class:`~johnny.agent.task_wiring.TaskSpeechDeliverer` exists
+        (after ``session.start``) — the same post-construction attach the failure
+        reporter uses. The handler is scoped to the kinds that should talk back
+        (the mid-loop continuation, Johnny-d6w.24), so internal in-session kinds
+        stay silent.
+        """
+        self._report_done = report
 
     # ------------------------------------------------------------------ #
     # The entry point (called from the gate's delegate branch)            #
@@ -1423,7 +1451,7 @@ class TaskCoordinator:
                 result_json=result.result_json,
                 error=result.error or None,
             )
-            self.note_task_settled(
+            entry = self.note_task_settled(
                 queued.task_id,
                 status=status,
                 kind=queued.spec.kind,
@@ -1433,6 +1461,12 @@ class TaskCoordinator:
             await self._safe_publish_completed(queued, status, result)
             if status == "failed":
                 await self._safe_report_failed(queued, result)
+            elif status == "done" and entry is not None:
+                # In-session ``done`` talk-back (Johnny-d6w.24): the worker-owned
+                # path delivers via the push listener's on_settled, but an
+                # in-session resolver has no such hook — fire the (kind-scoped)
+                # delivery seam so a promoted continuation's result is spoken.
+                await self._safe_report_done(entry)
         except asyncio.CancelledError:
             # A user cancel raced the terminal settle (cancel_task cancelled the
             # resolver while it was writing the done/failed row). Convert to a
@@ -1606,6 +1640,18 @@ class TaskCoordinator:
                 "tasks.run: failure report raised for task_id=%s kind=%s",
                 queued.task_id,
                 queued.spec.kind,
+            )
+
+    async def _safe_report_done(self, entry: TaskRegistryEntry) -> None:
+        if self._report_done is None:
+            return
+        try:
+            await self._report_done(entry)
+        except Exception:
+            logger.exception(
+                "tasks.run: done delivery raised for task_id=%s kind=%s",
+                entry.task_id,
+                entry.kind,
             )
 
     async def _safe_publish_cancelled(

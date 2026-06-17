@@ -108,7 +108,13 @@ from johnny.agent.speech_floor import (
     session_relative_ms,
 )
 from johnny.agent.task_catalog import render_capability_notes
-from johnny.agent.tasks import TaskCoordinator, stub_executor
+from johnny.agent.tasks import (
+    QueuedTask,
+    TaskCoordinator,
+    TaskExecutor,
+    TaskResult,
+    stub_executor,
+)
 from johnny.mcp.catalog import McpServerSnapshot, mcp_catalog_entries, mcp_known_kinds
 from johnny.skills.capability_policy import apply_policy_to_catalog
 from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder, build_recorder_from_env
@@ -133,6 +139,33 @@ if TYPE_CHECKING:
     from johnny.voice_pipeline.transcript_history import TranscriptHistoryLoader
 
 logger = logging.getLogger(__name__)
+
+
+class _NativeToolInvoker:
+    """Off-turn :class:`~johnny.agent.inline_promotion.ToolInvoker` over the
+    session's native LiveKit ``function_tool``\\s (Johnny-d6w.24).
+
+    The mid-loop continuation re-runs the exact tools the inline loop uses —
+    sandbox ``exec``/``read``/``write``/``list_dir`` + the MCP gateway meta-tools
+    — by calling the same callables directly (``FunctionTool.__call__`` forwards
+    to the closure; Johnny's tools take no ``RunContext``, so they are reachable
+    off a live turn). Keyed by the tool name the model emits (``tool.info.name``,
+    the same name the schema builder advertises)."""
+
+    def __init__(self, tools: list[Any]) -> None:
+        self._by_name: dict[str, Any] = {}
+        for tool in tools:
+            name = getattr(getattr(tool, "info", None), "name", None)
+            if name:
+                self._by_name[str(name)] = tool
+
+    async def invoke(self, name: str, arguments: dict[str, Any]) -> str:
+        tool = self._by_name.get(name)
+        if tool is None:
+            return f"(no such tool: {name})"
+        result = await tool(**arguments)
+        return result if isinstance(result, str) else str(result)
+
 
 # Modes whose router verdict may turn into a spoken delegate ack + an async
 # task (Johnny-trt.18). Exactly ``johnny.voice_pipeline.reasoning.SPEAKING_MODES``
@@ -874,6 +907,11 @@ async def build_agent_runtime(
     task_coordinator = None
     task_wake = None
     internal_tools = None
+    # Mid-inline-loop off-turn promotion (Johnny-d6w.24): the promoted
+    # continuation runs as an in-session task whose executor needs the answer LLM
+    # + native tool surface assembled further below — bind it late through this
+    # one-slot holder, read by the coordinator's executor dispatcher.
+    inline_continuation_slot: list[TaskExecutor] = []
     if task_sink is not None:
         skill_registry, sandbox_client = await _build_skill_pieces(
             config,
@@ -892,7 +930,25 @@ async def build_agent_runtime(
             bot_session_id=config.bot_session_id,
             calendar_event_id=config.calendar_event_id,
         )
-        executor = build_internal_task_executor(internal_tools, fallback=stub_executor)
+        internal_executor = build_internal_task_executor(
+            internal_tools, fallback=stub_executor
+        )
+        # The coordinator's single executor dispatches the synthetic
+        # ``inline.continuation`` kind (Johnny-d6w.24) to the late-bound runner,
+        # falling through to the internal executor otherwise. The slot stays
+        # empty in non-native modes — but no inline.continuation task is ever
+        # begun without a promoter, so the fall-through is never exercised.
+        from johnny.agent.inline_promotion import INLINE_CONTINUATION_KIND
+        from johnny.agent.internal_tools import is_internal_kind
+
+        async def _session_task_executor(queued: QueuedTask) -> TaskResult:
+            if queued.spec.kind == INLINE_CONTINUATION_KIND and inline_continuation_slot:
+                return await inline_continuation_slot[0](queued)
+            return await internal_executor(queued)
+
+        def _runs_in_session(kind: str) -> bool:
+            return is_internal_kind(kind) or kind == INLINE_CONTINUATION_KIND
+
         from johnny.agent.task_wiring import build_task_coordinator
 
         task_coordinator, task_wake = build_task_coordinator(
@@ -900,7 +956,8 @@ async def build_agent_runtime(
             event_bus=bus,
             session_id=session_id,
             redis_url=config.redis_url,
-            executor=executor,
+            executor=_session_task_executor,
+            runs_in_session=_runs_in_session,
         )
     else:
         skill_registry = None
@@ -1194,6 +1251,14 @@ async def build_agent_runtime(
             return None
         return turn_index.resolve(active[0])
 
+    # The active turn's request_id (US-003 correlation), read at the mid-loop
+    # promotion seam so the promoted workstream carries it (Johnny-d6w.24).
+    def _resolve_request_id() -> str | None:
+        active = gate.active_reply
+        if active is None:
+            return None
+        return turn_index.request_id_for(active[0])
+
     speech_interim_forwarder = AgentSpeechInterimForwarder(
         bus,
         resolve_turn=_resolve_speech_turn,
@@ -1256,6 +1321,9 @@ async def build_agent_runtime(
     sandbox_tools = None
     mcp_manager = None
     if native_tools_active:
+        # ``native_tools_active`` already implies a live sandbox client; assert it
+        # so the type narrows for build_sandbox_tools / base_url below.
+        assert sandbox_client is not None
         from app.services.agent_tasks import SqlAlchemyToolCallTraceSink
 
         # One sink spans the whole session, so it resolves the issuing turn
@@ -1297,6 +1365,38 @@ async def build_agent_runtime(
                     trace_sink=native_trace_sink,
                 ),
             ]
+
+    # Mid-inline-loop off-turn promotion (Johnny-d6w.24): with native tools
+    # active, a coordinator to honour the delegate, and the threshold enabled,
+    # wire the promoter onto the answer adapter (the seam reads it) and register
+    # the continuation runner for the synthetic kind. The runner reuses the SAME
+    # native tool surface the inline loop ran, continuing the captured
+    # investigation off-turn until a final answer (delivered as a task_result).
+    if (
+        native_tools_active
+        and task_coordinator is not None
+        and sandbox_tools
+        and config.inline_promote_tool_step_threshold > 0
+        and hasattr(adapters.llm, "bind_inline_promoter")
+    ):
+        from johnny.agent.inline_promotion import build_inline_promotion
+
+        inline_promoter, inline_continuation_executor = build_inline_promotion(
+            coordinator=task_coordinator,
+            provider=answer_llm,
+            tool_invoker=_NativeToolInvoker(sandbox_tools),
+            threshold=config.inline_promote_tool_step_threshold,
+            resolve_request_id=_resolve_request_id,
+            max_steps=config.max_tool_steps,
+        )
+        inline_continuation_slot.append(inline_continuation_executor)
+        adapters.llm.bind_inline_promoter(inline_promoter)
+        logger.info(
+            "inline-promote: wired for session %s (threshold=%s, max_off_turn_steps=%s)",
+            session_id,
+            config.inline_promote_tool_step_threshold,
+            config.max_tool_steps or "default",
+        )
 
     prompt_config = replace(
         instructions_config_from_job(config),

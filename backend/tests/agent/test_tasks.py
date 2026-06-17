@@ -390,6 +390,52 @@ async def test_failed_settle_reports_after_row_update() -> None:
     assert row_status_at_report == ["failed"]
 
 
+async def test_in_session_done_invokes_result_deliverer() -> None:
+    """An in-session ``done`` settle fires the delivery seam with the registry
+    entry (Johnny-d6w.24) — the talk-back the worker-owned push listener gives
+    for free but the in-session resolver otherwise lacks."""
+    delivered: list[Any] = []
+
+    async def executor(queued: QueuedTask) -> TaskResult:
+        return TaskResult(status="done", result_text="the answer is 42")
+
+    coordinator = TaskCoordinator(InMemoryTaskSink(), executor=executor)
+
+    async def deliverer(entry: Any) -> None:
+        delivered.append(entry)
+
+    coordinator.attach_result_deliverer(deliverer)
+    queued = await coordinator.begin(_spec(kind="inline.continuation"))
+    assert queued is not None
+    await coordinator.join()
+
+    assert len(delivered) == 1
+    assert delivered[0].task_id == queued.task_id
+    assert delivered[0].status == "done"
+    assert delivered[0].result_text == "the answer is 42"
+
+
+async def test_in_session_failed_does_not_invoke_result_deliverer() -> None:
+    """``failed`` settles route to the trt.53 failure reporter, never the
+    done-delivery seam (Johnny-d6w.24)."""
+    delivered: list[Any] = []
+
+    async def executor(queued: QueuedTask) -> TaskResult:
+        return TaskResult(status="failed", result_text="nope", error="boom")
+
+    coordinator = TaskCoordinator(InMemoryTaskSink(), executor=executor)
+
+    async def deliverer(entry: Any) -> None:
+        delivered.append(entry)
+
+    coordinator.attach_result_deliverer(deliverer)
+    queued = await coordinator.begin(_spec())
+    assert queued is not None
+    await coordinator.join()
+
+    assert delivered == []
+
+
 async def test_executor_exception_reports_failure_with_spoken_text() -> None:
     reporter = _RecordingReporter()
 

@@ -139,3 +139,35 @@ path and the CI gate.
   `tests/fixtures/sessions/` — so the replay harness's `discover_fixtures` (which
   parametrizes `test_replay_harness_agent.py`) never picks it up, and the frozen
   `delegation-*` zero-verdict-drift guard is untouched. A guard test asserts this.
+
+## Mid-inline-loop off-turn promotion (Johnny-d6w.24)
+
+US-201's third deterministic promotion signal — a recorded **tool-step count** —
+fires **mid-flight** inside the answer agent's native tool loop, which is owned
+by LiveKit's `Agent.default.llm_node`. This hermetic harness drives **recorded**
+router/answer LLM output through a say-stub; it never spins LiveKit's real
+`AgentActivity` tool loop, so it **cannot** exercise the seam itself. The
+promotion is therefore covered by a layered strategy instead of a scenario
+fixture:
+
+- **The seam** (`JohnnyLLMStream._run_complete`, `backend/johnny/agent/adapters/johnny_llm.py`):
+  `tests/agent/test_johnny_llm.py` drives it with a fake provider + a fake
+  promoter and asserts that crossing the threshold emits the **ack** chunk,
+  **suppresses** the pending `tool_calls` (so LiveKit ends the loop → the ack is
+  the turn's single terminal, INV-1), and advances the per-turn step counter
+  exactly once (the promotion check and the model-call record read the same step).
+- **The promoter + continuation** (`backend/johnny/agent/inline_promotion.py`):
+  `tests/agent/test_inline_promotion.py` covers the deterministic gate
+  (threshold / pending tools / turn id / once-per-turn), and an end-to-end
+  integration test drives `maybe_promote → TaskCoordinator.begin → in-session
+  resolver → InlineContinuationRunner → done → result delivery` through the
+  **real** coordinator, asserting the workstream persists `source_kind=delegate`
+  and reaches `done` with the continuation's final answer.
+- **The in-session `done` delivery seam** (`TaskCoordinator.attach_result_deliverer`):
+  `tests/agent/test_tasks.py` asserts an in-session `done` settle fires the
+  delivery seam (the talk-back the worker-owned push listener gives for free) and
+  that `failed` settles do not.
+- **End-to-end with the real LiveKit loop**: the only place the seam + loop run
+  together is a **live browser run** (chrome-devtools), per `CLAUDE.md` — a heavy
+  inline request promotes mid-loop, the floor frees, and the result is delivered
+  later as a `task_result`.

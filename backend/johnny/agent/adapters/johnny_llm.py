@@ -83,6 +83,8 @@ from johnny.agent.model_call_trace import ModelCallSink, ModelCallTrace
 if TYPE_CHECKING:
     from livekit.agents.llm import Tool, ToolChoice
 
+    from johnny.agent.inline_promotion import InlinePromoter
+
 logger = logging.getLogger(__name__)
 
 
@@ -273,6 +275,8 @@ class JohnnyLLMStream(LLMStream):
             if first_delta_at is not None
             else None
         )
+        turn_id = self._johnny.resolve_turn()
+        step = self._johnny.next_step(turn_id)
         await self._record_model_call(
             messages,
             response=None,
@@ -282,6 +286,8 @@ class JohnnyLLMStream(LLMStream):
             started=started,
             finished=finished,
             ttft_ms=ttft,
+            turn_id=turn_id,
+            step=step,
         )
 
     async def _run_complete(
@@ -304,6 +310,8 @@ class JohnnyLLMStream(LLMStream):
         # the emitted tool call (observed). Recording here — between the provider
         # response and the channel send — leaves the emit → stream-end → tool-exec
         # path byte-for-byte as the un-instrumented version.
+        turn_id = self._johnny.resolve_turn()
+        step = self._johnny.next_step(turn_id)
         await self._record_model_call(
             messages,
             response=response,
@@ -316,7 +324,35 @@ class JohnnyLLMStream(LLMStream):
             started=started,
             finished=finished,
             ttft_ms=None,
+            turn_id=turn_id,
+            step=step,
         )
+        # Mid-inline-loop off-turn promotion (Johnny-d6w.24): when this turn's
+        # native tool loop has crossed the deterministic per-turn step threshold
+        # AND the model still wants more tools, promote the remaining work
+        # off-turn. ``maybe_promote_inline`` is synchronous (it fire-and-forgets
+        # the registration via TaskCoordinator) and returns the ack to speak as
+        # this turn's single terminal — emitted INSTEAD of the pending tool_calls
+        # chunk, which ends LiveKit's loop cleanly (no tool output → no recursion
+        # → the text is the reply, INV-1). It runs BEFORE any emit and never
+        # awaits (the johnny-llm-stream-record-before-emit hazard).
+        if response.tool_calls:
+            ack = self._johnny.maybe_promote_inline(
+                turn_id=turn_id,
+                step=step,
+                messages=messages,
+                assistant_text=response.text or None,
+                tool_calls=response.tool_calls,
+                tool_defs=tool_defs,
+            )
+            if ack is not None:
+                self._event_ch.send_nowait(
+                    ChatChunk(
+                        id=self._request_id,
+                        delta=ChoiceDelta(role="assistant", content=ack),
+                    )
+                )
+                return
         if text:
             self._event_ch.send_nowait(
                 ChatChunk(
@@ -354,6 +390,8 @@ class JohnnyLLMStream(LLMStream):
         started: datetime,
         finished: datetime,
         ttft_ms: int | None,
+        turn_id: int | None,
+        step: int,
     ) -> None:
         """Record one answer-loop LLM call (Johnny-gal).
 
@@ -363,11 +401,13 @@ class JohnnyLLMStream(LLMStream):
         (the model asks for ``list_dir`` but it never runs). So the trace is built
         synchronously (cheap, no I/O) and the write is FIRE-AND-FORGET via
         :meth:`JohnnyLLM.schedule_model_call`; ``_run`` returns exactly as the
-        un-instrumented path did. Best-effort by contract."""
+        un-instrumented path did. Best-effort by contract.
+
+        ``turn_id`` / ``step`` are computed ONCE by the caller (``next_step``
+        advances the per-turn counter and must fire exactly once per model
+        call — the mid-loop promotion check reads the same ``step``, Johnny-d6w.24)."""
         if self._johnny.model_call_sink is None:
             return
-        turn_id = self._johnny.resolve_turn()
-        step = self._johnny.next_step(turn_id)
         prompt_tokens, completion_tokens, total_tokens = _usage_tokens(response)
         self._johnny.schedule_model_call(
             ModelCallTrace(
@@ -415,6 +455,10 @@ class JohnnyLLM(LLM[Any]):
         # Live references to in-flight fire-and-forget record tasks so they are
         # not garbage-collected mid-write (asyncio holds only weak refs).
         self._record_tasks: set[asyncio.Task[None]] = set()
+        # Mid-inline-loop off-turn promotion (Johnny-d6w.24), wired
+        # post-construction by job_session when native tools are active and the
+        # threshold is enabled. None → no promotion (the loop runs unchanged).
+        self._inline_promoter: InlinePromoter | None = None
 
     @property
     def model(self) -> str:
@@ -457,6 +501,51 @@ class JohnnyLLM(LLM[Any]):
         else:
             self._step_n += 1
         return self._step_n
+
+    def bind_inline_promoter(self, promoter: InlinePromoter) -> None:
+        """Wire mid-inline-loop off-turn promotion (Johnny-d6w.24).
+
+        The :class:`~johnny.agent.inline_promotion.InlinePromoter` decides, at
+        the per-turn tool-step threshold, whether the answer loop's remaining
+        work should run off-turn; the stream calls :meth:`maybe_promote_inline`
+        at the seam."""
+        self._inline_promoter = promoter
+
+    def maybe_promote_inline(
+        self,
+        *,
+        turn_id: int | None,
+        step: int,
+        messages: list[ChatMessage],
+        assistant_text: str | None,
+        tool_calls: tuple[ToolCall, ...],
+        tool_defs: list[ToolDefinition] | None,
+    ) -> str | None:
+        """Ask the bound promoter whether to promote this step off-turn (Johnny-d6w.24).
+
+        Returns the ack to speak as the turn's terminal when the remaining
+        inline work was promoted (the promoter has fire-and-forgotten the
+        off-turn registration), else ``None`` to keep the loop running.
+        **Synchronous** and best-effort: the seam must not ``await`` before
+        emitting (the ``johnny-llm-stream-record-before-emit`` hazard)."""
+        promoter = self._inline_promoter
+        if promoter is None:
+            return None
+        try:
+            return promoter.maybe_promote(
+                turn_id=turn_id,
+                step=step,
+                messages=messages,
+                assistant_text=assistant_text,
+                tool_calls=tool_calls,
+                tool_defs=tool_defs,
+            )
+        except Exception:  # pragma: no cover - promotion is best-effort
+            logger.warning(
+                "johnny_llm: inline promoter raised — leaving the loop running",
+                exc_info=True,
+            )
+            return None
 
     def schedule_model_call(self, trace: ModelCallTrace) -> None:
         """Fire-and-forget persist of one model-call trace (Johnny-gal).

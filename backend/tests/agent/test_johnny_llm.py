@@ -285,3 +285,123 @@ async def test_llm_model_and_provider_labels() -> None:
     assert JohnnyLLM(provider).provider == "fake"
     assert JohnnyLLM(provider).model == "unknown"
     assert JohnnyLLM(provider, model="gpt-4o").model == "gpt-4o"
+
+
+# --- Mid-inline-loop off-turn promotion seam (Johnny-d6w.24) ----------------- #
+
+
+class _RecordingSink:
+    """Minimal ModelCallSink that captures the recorded step_index per call."""
+
+    def __init__(self) -> None:
+        self.steps: list[int] = []
+
+    async def record(self, trace: Any) -> None:
+        self.steps.append(trace.step_index)
+
+
+class _FakePromoter:
+    """Records maybe_promote calls; returns a fixed ack to force a promotion."""
+
+    def __init__(self, ack: str | None) -> None:
+        self._ack = ack
+        self.calls: list[dict[str, Any]] = []
+
+    def maybe_promote(
+        self,
+        *,
+        turn_id: int | None,
+        step: int,
+        messages: list[ChatMessage],
+        assistant_text: str | None,
+        tool_calls: Any,
+        tool_defs: Any,
+    ) -> str | None:
+        self.calls.append(
+            {"turn_id": turn_id, "step": step, "tool_calls": tuple(tool_calls)}
+        )
+        return self._ack
+
+
+def _tool_calls(chunks: list[ChatChunk]) -> list[Any]:
+    return [tc for ch in chunks if ch.delta for tc in (ch.delta.tool_calls or [])]
+
+
+def _tool_response() -> LLMResponse:
+    return LLMResponse(
+        text="",
+        finish_reason="tool_calls",
+        tool_calls=(ToolCall(id="c1", name="search", arguments={"q": "x"}),),
+    )
+
+
+@function_tool
+async def _search(q: str) -> str:
+    """Search.
+
+    Args:
+        q: The query.
+    """
+    return ""
+
+
+async def test_promotion_emits_ack_and_suppresses_tool_calls() -> None:
+    provider = FakeLLMProvider(response=_tool_response())
+    llm = JohnnyLLM(provider)
+    promoter = _FakePromoter(ack="Working on it in the background.")
+    llm.bind_inline_promoter(promoter)
+    ctx = ChatContext(items=[LKChatMessage(role="user", content=["dig in"])])
+
+    chunks = await _collect_chunks(llm.chat(chat_ctx=ctx, tools=[_search]))
+
+    # The ack is spoken as the turn's reply; the pending tool_calls are SUPPRESSED
+    # (no tool output -> LiveKit ends the loop -> the ack is the single terminal).
+    assert _contents(chunks) == ["Working on it in the background."]
+    assert _tool_calls(chunks) == []
+    assert len(promoter.calls) == 1
+    assert promoter.calls[0]["turn_id"] is None  # no resolver bound
+    assert promoter.calls[0]["step"] == 0
+    assert promoter.calls[0]["tool_calls"][0].name == "search"
+
+
+async def test_no_promotion_emits_tool_calls_normally() -> None:
+    provider = FakeLLMProvider(response=_tool_response())
+    llm = JohnnyLLM(provider)
+    llm.bind_inline_promoter(_FakePromoter(ack=None))  # declines to promote
+    ctx = ChatContext(items=[LKChatMessage(role="user", content=["dig in"])])
+
+    chunks = await _collect_chunks(llm.chat(chat_ctx=ctx, tools=[_search]))
+
+    emitted = _tool_calls(chunks)
+    assert len(emitted) == 1 and emitted[0].name == "search"
+
+
+async def test_no_promoter_bound_emits_tool_calls() -> None:
+    provider = FakeLLMProvider(response=_tool_response())
+    llm = JohnnyLLM(provider)  # no promoter bound at all
+    ctx = ChatContext(items=[LKChatMessage(role="user", content=["dig in"])])
+
+    chunks = await _collect_chunks(llm.chat(chat_ctx=ctx, tools=[_search]))
+
+    assert len(_tool_calls(chunks)) == 1
+
+
+async def test_step_counter_increments_once_per_model_call() -> None:
+    # The promotion check and the model-call record must read the SAME step
+    # (next_step fires exactly once per call — no double-increment, Johnny-d6w.24).
+    provider = FakeLLMProvider(response=_tool_response())
+    llm = JohnnyLLM(provider)
+    sink = _RecordingSink()
+    llm.bind_model_call_sink(sink, lambda: 7)  # turn_id resolver -> 7
+    promoter = _FakePromoter(ack=None)
+    llm.bind_inline_promoter(promoter)
+    ctx = ChatContext(items=[LKChatMessage(role="user", content=["go"])])
+
+    # Two model calls within the same turn (id 7): steps must be 0 then 1.
+    await _collect_chunks(llm.chat(chat_ctx=ctx, tools=[_search]))
+    await _collect_chunks(llm.chat(chat_ctx=ctx, tools=[_search]))
+
+    assert [c["turn_id"] for c in promoter.calls] == [7, 7]
+    assert [c["step"] for c in promoter.calls] == [0, 1]
+    # The recorded step_index matches what the promoter saw (single counter).
+    assert sink.steps == [0, 1]

@@ -78,6 +78,18 @@ DEFAULT_ROUTER_TIMEOUT_FALLBACK_TEXT = (
 DEFAULT_MAX_TOOL_STEPS = 0
 MAX_MAX_TOOL_STEPS = 100
 
+# Mid-inline-loop off-turn promotion threshold (Johnny-d6w.24, US-201 follow-up).
+# When the answer agent's native tool loop reaches this many model-call steps
+# WITHIN ONE TURN and still wants more tools, the remaining inline work is
+# promoted off-turn (fast ack now → floor freed → continuation runs as a
+# delegated workstream → result delivered later). The signal is the 0-based
+# per-turn ``agent_model_calls.step_index`` (deterministic + persisted), never a
+# wall-clock threshold — so replay verdict-parity stays green (C6). ``0`` =
+# DISABLED (no mid-loop promotion). The default is conservative: a trivial
+# lookup (weather) is 1-2 steps, while the session-3 Metabase hunt ran 7.
+DEFAULT_INLINE_PROMOTE_TOOL_STEP_THRESHOLD = 6
+MAX_INLINE_PROMOTE_TOOL_STEP_THRESHOLD = 100
+
 # --- Provider-config role keys (Johnny-trt.42) -------------------------------
 # ``provider_config`` is keyed by provider kind (``stt`` / ``llm`` / ``tts``,
 # the shape :func:`app.services.provider_payload.build_provider_payload`
@@ -204,6 +216,7 @@ SNAPSHOT_ROUTER_TIMEOUT_RETRIES_KEY = "router_timeout_retries"
 SNAPSHOT_ROUTER_TIMEOUT_FALLBACK_MODE_KEY = "router_timeout_fallback_mode"
 SNAPSHOT_ROUTER_TIMEOUT_FALLBACK_TEXT_KEY = "router_timeout_fallback_text"
 SNAPSHOT_MAX_TOOL_STEPS_KEY = "max_tool_steps"
+SNAPSHOT_INLINE_PROMOTE_TOOL_STEP_THRESHOLD_KEY = "inline_promote_tool_step_threshold"
 SNAPSHOT_ASSIGNMENT_CONTEXT_KEY = "assignment_context"
 SNAPSHOT_PEER_NAMES_KEY = "peer_names"
 SNAPSHOT_PARTICIPANTS_KEY = "participants"
@@ -419,6 +432,19 @@ class SessionJobConfig:
         """
         return _coerce_max_tool_steps(
             self.agent_snapshot.get(SNAPSHOT_MAX_TOOL_STEPS_KEY)
+        )
+
+    @property
+    def inline_promote_tool_step_threshold(self) -> int:
+        """Mid-inline-loop off-turn promotion threshold from the snapshot (Johnny-d6w.24).
+
+        Lenient + clamped into ``[0, MAX_INLINE_PROMOTE_TOOL_STEP_THRESHOLD]``.
+        ``0`` is preserved and means DISABLED (no mid-loop promotion); a positive
+        value is the 0-based per-turn model-call step index at/above which the
+        answer loop's remaining work is promoted off-turn.
+        """
+        return _coerce_inline_promote_tool_step_threshold(
+            self.agent_snapshot.get(SNAPSHOT_INLINE_PROMOTE_TOOL_STEP_THRESHOLD_KEY)
         )
 
     @property
@@ -753,6 +779,23 @@ def _coerce_max_tool_steps(value: Any) -> int:
     except (TypeError, ValueError):
         return DEFAULT_MAX_TOOL_STEPS
     return max(0, min(MAX_MAX_TOOL_STEPS, steps))
+
+
+def _coerce_inline_promote_tool_step_threshold(value: Any) -> int:
+    """Coerce a decoded JSON / env value to the mid-loop promotion threshold (Johnny-d6w.24).
+
+    ``None`` / blank / unparseable degrade to
+    :data:`DEFAULT_INLINE_PROMOTE_TOOL_STEP_THRESHOLD`; parsed values clamp into
+    ``[0, MAX_INLINE_PROMOTE_TOOL_STEP_THRESHOLD]`` so a corrupt snapshot can
+    never request an absurd bound. ``0`` is preserved — it disables mid-loop
+    promotion; negatives clamp to 0 (also disabled)."""
+    if value is None or value == "":
+        return DEFAULT_INLINE_PROMOTE_TOOL_STEP_THRESHOLD
+    try:
+        steps = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_INLINE_PROMOTE_TOOL_STEP_THRESHOLD
+    return max(0, min(MAX_INLINE_PROMOTE_TOOL_STEP_THRESHOLD, steps))
 
 
 def _id_to_env(value: int | None) -> str:
