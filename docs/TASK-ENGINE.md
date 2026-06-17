@@ -65,8 +65,9 @@ needs no services, and even pg-checkpointed overhead (+3 ms) is noise against a
    granularity: stale `running` rows re-queued after TTL, attempts
    incremented, rerun **from scratch**. LangGraph's checkpointer is a second,
    finer-grained source of truth (4 self-migrating non-alembic tables, 16
-   rows per trivial invoke) that the tasks panel, status turns, and Phase-5
-   re-entry never read. Mid-node resume pays off for long multi-minute
+   rows per trivial invoke) that none of Johnny's observability surfaces — the
+   Workstreams column (Johnny-d6w.11), the status query, Phase-5 re-entry — ever
+   read. Mid-node resume pays off for long multi-minute
    workflows; Phase 4–6 kinds are seconds-long, mostly idempotent CLI calls
    where requeue-from-scratch is simpler and already the spec.
 3. **Clean-install deps** — satisfiable if adopted (proven: a `task-engine`
@@ -154,8 +155,9 @@ call → tool calls} until done) is a **linear** loop, not a DAG.
     docs/MCP.md) → append
     results to the loop context;
   - write progress into `agent_tasks.result_json` + `TaskProgress` events
-    (the row stays the single observable truth; the tasks panel and status
-    turns read it);
+    (the row stays the single observable truth; the status query reads it, and
+    the durable subscriber projects the events into the Workstreams column —
+    Johnny-d6w);
   - retries at task granularity via `attempts`; per-call retry, if ever
     needed, is a ten-line stdlib backoff, not a framework.
 - **What we consciously don't get**: time-travel/forking checkpoints, graph

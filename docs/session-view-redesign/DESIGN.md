@@ -1,6 +1,6 @@
 # Session-View Re-Imagining — Decisions, Deliveries & Background Tasks
 
-**Status:** Design / pre-PRD. Investigation complete; solution shape pending operator answers (see §10).
+**Status:** ✅ Shipped — superseded by the unified [`PRD.md`](./PRD.md) (v2) and delivered by epic **Johnny-d6w** (US-002 → US-502). Retained as the current-state + problem + options investigation that led to the PRD; the build is complete — the three-column Decisions · Deliveries · Workstreams view + Activity strip is live on `/sessions/[id]` and `/history/[id]`.
 **Owner:** (TBD) · **Created:** 2026-06-15
 **Supersedes the framing of:** `Johnny-etu.4` (the "What is the bot thinking" timeline this doc proposes to break apart).
 **Relates to:** `Johnny-etu` (epic: expose the bot's reasoning), `Johnny-trt` Phase 6 (`trt.33` tasks panel, `trt.31` webhook), `Johnny-trt.65` (multi-agent state-freeze), `Johnny-fe` (frontend overhaul).
@@ -429,6 +429,12 @@ stamps the exact turn) — add correlation *alongside* the turn-centric record, 
 ---
 
 ## 12. Documentation that must be updated when this ships
+
+> ✅ **Completed by US-501 (Johnny-d6w.20), 2026-06-17.** The canonical docs below were
+> updated to the shipped state. Two scope notes versus this pre-PRD sketch: the events
+> landed as **six** task/workstream lifecycle events (not four), and the new tables are
+> `agent_workstreams` + `agent_workstream_events` (with `agent_tasks` documented
+> alongside in PIPELINE.md §6).
 
 - `docs/PIPELINE.md` — §3.14 (UI), §5 (add the four task events), §6 (add the `agent_tasks` table), retire the
   legacy-schema references in §4.

@@ -1,10 +1,12 @@
 # Routing: triage, complexity heuristics, and addressing
 
-**Status: design document, written ahead of implementation (2026-06-11).** Each section
-names the bead(s) that build it; the status table at the bottom says what is shipped
-versus planned. Until a section's bead is closed, this file describes intent, not
-behavior. Sources: the Johnny-trt epic (Phases 3–6) and the operator-requested
-evaluation of [ClawRouter](https://github.com/BlockRunAI/ClawRouter) (2026-06-11).
+**Status: as of 2026-06-17 the routing core and task engine have shipped; a handful of
+Phase-6 items remain planned.** Each section names the bead(s) that build it; the §8
+status table says what is shipped versus planned. Until a section's bead is closed, that
+section describes intent, not behavior. Sources: the Johnny-trt epic (Phases 3–6), the
+Johnny-d6w session-view epic (durable workstreams + correlation), and the
+operator-requested evaluation of
+[ClawRouter](https://github.com/BlockRunAI/ClawRouter) (2026-06-11).
 
 Related docs: [PIPELINE.md](PIPELINE.md) (session engine, events, invariants),
 [LATENCY.md](LATENCY.md) (stage budgets and measured numbers),
@@ -78,6 +80,18 @@ There is deliberately **no second router call** stacked on the first.
 Built by: trt.16 (schema/action vocabulary), trt.17 (gate branching + ack terminal),
 trt.18 (agent_tasks + TaskCoordinator), trt.19 (budget + catalog + observability),
 Phases 4–5 (executor, events, speech queue).
+
+**Durable projection (epic Johnny-d6w).** The "result re-enters later" flow above is no
+longer a single linear speech-queue entry in the UI: every delegated turn also
+materialises an `agent_workstreams` envelope (+ an append-only `agent_workstream_events`
+log), written by the single durable status subscriber from the task lifecycle events
+([PIPELINE.md](PIPELINE.md) §5). **Execution** state
+(`queued→running→done/failed/cancelled`) and **delivery** state
+(`ready→delivered/interrupted/expired`) are tracked separately, and a `request_id` minted
+in `RouterGate.run_turn` correlates the decision, the spoken delivery
+(`agent_utterances.answers_request_id`), and the workstream across turns. The
+session/history view renders this as the **Workstreams** column, superseding the old
+single-timeline projection ([PIPELINE.md](PIPELINE.md) §3.14).
 
 **Ack contract & decision transparency (trt.53 shipped 2026-06-11, trt.54).**
 Operator principle (2026-06-11, from live use of the freshly-landed delegate path):
@@ -551,7 +565,7 @@ re-prices the fast-path.
 
 ## 8. Status table
 
-| Piece | Bead | Status (2026-06-11) |
+| Piece | Bead | Status (as of 2026-06-17) |
 |---|---|---|
 | Router schema: `action` + `task` (parity-safe) | Johnny-trt.16 | **shipped** (2026-06-11) — `ROUTER_ACTIONS` enum + nullable `task {kind, args, ack}` in `_ROUTER_SCHEMA`; `RouterDecision.action`/`task_request` (`task_request` non-None iff `action='delegate'`); old outputs parse identically, malformed tasks degrade to speak/silent |
 | Gate branching + ack terminal | Johnny-trt.17 | **shipped** (2026-06-11) — `RouterGate.run_turn` branches on `decision.action` after the mode checks (suggest_only/approval_required/listen_only and the rate limiter unchanged): `delegate` → `TaskCoordinator.begin` (row-before-ack) + `session.say(ack)` whose SpeechHandle completion owns the turn terminal (`replied` / `no_reply(barge_in)`; coordinator/persist/say failure → nothing spoken + `no_reply(stage_error)`); `status` → fixed Phase-3 stub line via the same say machinery. No answer-LLM hop on either; `AgentSpoke` carries the ack text (INV-2); task results are session-scoped speech later, never turn terminals (INV-1) |
@@ -581,6 +595,10 @@ re-prices the fast-path.
 | Multi-agent turn arbitration (consumes addressing) | Johnny-trt.47 | **shipped** (2026-06-12) — (1) **turn claims**: every inline-speaking outcome (reply / delegate ack / status / capability decline) is claim-once per utterance bucket (`SpeechFloor.claim_turn`, Redis get-or-set keyed on the end-of-speech epoch anchor quantized by `JOHNNY_TURN_CLAIM_WINDOW_MS`, default 2000 ms; ±1-bucket peek + `(t_ms, session_id)` post-set tie-break tolerate per-bot VAD endpoint skew); the loser terminalizes `no_reply(peer_answered)` **immediately** — no duplicate queued behind the floor; backend failure fails open (benign sequential duplicates, never double-silence); claims run after every never-speaks exit and after the approval park (humans arbitrate those); (2) **by-name routing, two legs**: deterministic first — an utterance naming a peer (whole-word display-name match) and not me defers my claim `DEFAULT_CLAIM_DEFER_NAMED_PEER_S` (1.5 s), so the named agent wins the bucket even when a small router model speaks straight through the prompt (llama3.2:3b did exactly that in tuning — `.validation/Johnny-trt.47/`); prompt second — the `render_peer_selectivity` block (roster from the snapshot's `peer_names`, stamped by the per-assignment scheduler + the playground group start) teaches the router to decline peers' asks outright; unaddressed asks stay permissive (the claim dedups); zero peers ⇒ byte-identical prompt (replay parity); trt.52's alias matcher replaces the display-name match when it lands; (3) **deliberate handoffs**: peer speech naming THIS agent opens a turn (name-prefixed for the router), bounded to ONE hop per human utterance — the never-loops guarantee stays deterministic; trt.52's pre-LLM name gate will pre-empt the claim when it lands. Regression: `ensemble_addressing.json` (per-step exactly-one-responder assertions) + the `ensemble_arbitration.json` 20-turn tuning fixture |
 | Deferred: fast-path / prompt prior / micro-reply | Johnny-trt.51 | **decided** (2026-06-11), nothing ships — (a) fast-path no-go/deferred at 94% SIMPLE×speak agreement (30/32 post-restraint playground turns; both misses functional: a correctly-silenced fragment + `"Quit."` = a delegated internal-tool command), revisit gated on trt.41/42 + ≥50 turns @ ≥98% + a deterministic short-imperative pre-stage; (b) prompt prior rejected (catalog dim recall 81% / precision 65% post-restraint with zero prompt help — no gap left; residual errors aren't keyword-shaped; fixture-refresh + 3B prompt-pollution costs); (c) micro-reply rejected (same gate + answer authorship in the cheapest model slot + re-fattens the trt.59-slimmed schema). Evidence: §6 + `.validation/Johnny-trt.51/` |
 | Deferred: speculative-parallel router | Johnny-trt.20 | **decided** (2026-06-11), nothing ships — SDK `preemptive_generation` ruled out permanently for gated sessions (pre-gate `speech_created` + reuse-without-event starves the `bind_reply` FIFO → INV-1 hole + off-by-one terminal skew; `StopResponse` leaks the speculation; reuse swaps the user-message identity — all upstream semantics, verified in 1.5.17); the correlation-safe shape is a **gate-owned race** (speculative answer via the provider layer inside `run_turn`, cancel on every non-SPEAK leg, speak via `say(stream)` + the existing say-with-terminal engine — zero side effects until the gate commits). Deferred because Johnny-dny (answer streaming) captures most of the same win burn-free, the canonical all-local config provably cannot gain (single-Ollama contention), and the meeting surface maximizes burn (~29 % wasted even on playground rows; ≥ 80–90 % structurally in meetings). Full mechanics, cost model, cancel-safe terminal story + reopen triggers: docs/SPECULATIVE-ROUTER.md |
+| Durable Workstreams envelope + progress log | Johnny-d6w.2 | **shipped** (US-002/US-202) — `agent_workstreams` + `agent_workstream_events` (migration 0041); the single durable status subscriber get-or-creates one envelope per `agent_task_id` from the task lifecycle events, with decoupled execution/delivery state machines (PIPELINE.md §5/§6) |
+| `request_id` correlation across the turn | Johnny-d6w.3 | **shipped** (US-003) — `request_id` minted in `RouterGate.run_turn` (migration 0042), propagated to `agent_utterances.answers_request_id` + `agent_tasks.request_id` + the workstream envelope, so deliveries link cross-turn to the request they answered |
+| Router LLM call captured as a model call | Johnny-d6w.4 | **shipped** (US-004) — `agent_model_calls` row with `role='router'` (step 0, same `turn_id`), persisted best-effort by `_persist_router_model_call()` so the Decisions column can show the raw triage prompt/response/tokens |
+| Trace projection + three-column session view | Johnny-d6w.5–.12 | **shipped** (US-005/US-101…US-107) — `GET /sessions/{id}/trace` → `SessionTraceView`; the shared `/sessions/[id]` + `/history/[id]` view renders Decisions · Deliveries · Workstreams + an Activity strip (PIPELINE.md §3.14; PRD `session-view-redesign/PRD.md`) |
 
 Keeping this file current is acceptance criteria on trt.50, trt.51, trt.52, trt.53,
 trt.54, trt.55, trt.57 and part of the trt.34 docs capstone (cross-link with

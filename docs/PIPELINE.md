@@ -160,7 +160,7 @@ sequenceDiagram
 
 Every stage also emits a `PipelineTiming` event (`stt` / `router_llm` /
 `answer_llm` / `tts` / `end_to_end` / `interrupt_*`) consumed by the subscriber
-into `session_timings` and by the per-turn reasoning timeline in the UI.
+into `session_timings` and surfaced in the session trace UI (§3.14).
 
 ### 2.2 Unified (S2S) route — removed
 
@@ -186,7 +186,7 @@ from `events.py` / `app/providers/base.py`), **state owned**, **lifecycle**, and
 - **Outputs:** `PipelineEvent`s on the bus; audio frames to the transport.
 - **State owned (in-memory, per session):** `_transcript_history: list[TranscriptFinalized]` (unbounded since Johnny-ckz.3), `_last_decision`, `_response_queue`, `_interrupt_event`, `_recent_utterance_times`, `_history_summary`, `_utterance_count`, barge-in bookkeeping (`_response_in_flight`, `_response_generation`, `_barge_in_tasks`, `_fast_barge_in_count`), per-turn anchors (`_transcript_turn_ids`, `_current_response_turn_id`, `_turn_started_at_ms`, `_end_to_end_emitted_for_turn`), the TTS circuit breaker `_tts_tripped`, and `_turn_terminal_emitted`. Nothing is persisted by the pipeline itself.
 - **Lifecycle:** one instance **per session**, constructed by the meet-worker or browser runner; lives for the session; `run()` returns when the transport's capture stream ends.
-- **Surfaces:** every decision/utterance/timing/terminal is an event → subscriber → DB → session detail UI + reasoning timeline (§3.14, §8).
+- **Surfaces:** every decision/utterance/timing/terminal is an event → subscriber → DB → the three-column session trace (§3.14, §8).
 
 `run()` also spawns the transcribe/respond tasks, drains in-flight barge-in
 tasks on shutdown, and rehydrates history via the loader. Two text-injection /
@@ -226,7 +226,7 @@ control entry points worth knowing:
 - **Source:** `app/providers/base.py::LLMProvider` (ABC, L335). `chat(messages, tools?, response_format?) -> LLMResponse`; `stream_chat(messages) -> AsyncIterator[str]` (default yields the full `chat()` text as one delta so non-streaming adapters still satisfy the contract).
 - **`LLMResponse`** (L173): `{text, finish_reason, tool_calls, structured_output, raw}`.
 - **Gotcha — same instance for both roles.** Production wires `router_llm` **and** `answer_llm` to the **same** provider instance (`pipeline_runner.py::_assemble_pipeline` L515: `router_llm=llm, answer_llm=llm`). The two roles differ only by prompt + call: the router uses `chat(_ROUTER_SCHEMA)` (structured), the answer uses `stream_chat` (streamed). There is no way to point a different model at routing vs answering without a code change.
-- **Surfaces:** router output → `RouterDecisionMade.raw_output` + `agent_decisions.raw_output`; answer prompt → `AgentSpoke.prompt` + `agent_utterances.prompt`; both rendered in the reasoning timeline (§8).
+- **Surfaces:** router output → `RouterDecisionMade.raw_output` + `agent_decisions.raw_output`; answer prompt → `AgentSpoke.prompt` + `agent_utterances.prompt`; rendered in the Decisions and Deliveries columns respectively (§3.14).
 
 ### 3.6 TTS — `TTSProvider`
 
@@ -305,17 +305,42 @@ the deferred re-introduction (epic **Johnny-20h**) targets per-agent
 
 ### 3.14 Where pipeline decisions surface in the UI
 
-The session detail page (`frontend/src/routes/sessions/[id]/+page.svelte`) reads
-the API serializers and assembles a per-turn view client-side (Johnny-ckz.28.4,
-a pure derivation — no new tables):
+The session/history detail page renders a **three-column trace** — Decisions ·
+Deliveries · Workstreams — plus an Activity strip, shared byte-identically by the
+live `/sessions/[id]` and the `/history/[id]` routes. This replaced the old
+one-row-per-turn collapsed/expandable timeline; it shipped in epic **Johnny-d6w**
+(US-101…US-107). Full UI spec:
+[session-view-redesign/PRD.md](session-view-redesign/PRD.md).
 
-- **`frontend/src/lib/sessionDetail.ts`** — TS types mirroring the serializers (`AgentDecisionRecord`, `AgentUtteranceRecord`, `SessionTimingRecord`) plus the operator-facing string maps. `NO_REPLY_REASON_LABEL` glosses each `NoReplyReason` ("a processing step failed", "filtered as background noise", …); `SESSION_TIMING_STAGE_LABEL` glosses each stage.
-- **`frontend/src/lib/sessionTurns.ts`** — `assembleTurns(decisions, timingByTurn)` + `buildSteps` (the eight timeline steps), `classifyTurn`/`summarizeTurn`/`terminalLabel`, filter predicates. **Linkage keys:** decision↔timing by `turn_id`; utterance↔decision by `agent_decision_id`.
-- **`frontend/src/lib/components/SessionTurnTimeline.svelte`** — renders the collapsed row (classification chip + `TERMINAL_LABEL` chip {Replied / Awaiting approval / No reply} + "Spoke instead" divergence badge + heard text + summary) and the expandable eight-step timeline with `done` / `skipped` / `missing` states.
+- **Backend projection** — `GET /sessions/{id}/trace` returns `SessionTraceView
+  { router_turns, deliveries, workstreams, activity }`, built by
+  `build_session_trace_view()` (`backend/app/services/session_trace.py`) from the
+  durable rows (decisions, utterances, tasks, workstreams + workstream events,
+  tool/model calls, conversation events). It loads the **unbounded** set for
+  cross-linking; the legacy bounded `GET /sessions/{id}` shape keeps serving.
+- **Frontend projection** — `buildSessionTraceView()`
+  (`frontend/src/lib/sessionTrace.ts`) mirrors the backend builder exactly (the two
+  derivations are kept identical) and feeds the shared composition root
+  `frontend/src/lib/components/SessionTrace.svelte`.
+- **The three columns**, each its own component:
+  - **Decisions** (`SessionDecisions.svelte`) — the router verdict per turn: action,
+    confidence, reason, degrade markers, the `complexity_shadow`, and the raw router
+    prompt/response/tokens from the `role='router'` model call (§6).
+  - **Deliveries** (`SessionDeliveries.svelte`) — everything the bot **said**
+    (`reply` / `ack` / `status` / `correction` / `task_result`), back-linked
+    cross-turn to the request it answered via `answers_request_id` (§6.2), with
+    divergence + audio replay.
+  - **Workstreams** (`SessionWorkstreams.svelte`) — each unit of work as its own
+    thread: `queued → running → done/failed/cancelled` with delivery-state, per-step
+    progress, the tool/model trace (`agent_tool_calls` / `agent_model_calls`,
+    Johnny-etu.4), and the talk-back link to the utterance that voiced the result.
+- **Activity strip** (`SessionActivityLog.svelte`) — per-turn pipeline timings + the
+  conversation-dynamics events (§5).
 
-Live updates ride the WS `handleDecision` / `handleAgentSpoke` /
-`handleTurnTerminal` handlers off the same reactive state, so the timeline fills
-in step-by-step during a live session.
+Live updates ride the same WS stream the columns project from: decision and delivery
+events fill the first two columns, and the six task/workstream lifecycle events (§5)
+drive the Workstreams column's `queued→running→done` transitions without a full
+re-pull.
 
 ### 3.15 Shared speech floor — multi-agent meetings (Johnny-trt.46)
 
@@ -544,7 +569,7 @@ and writes:
 | `outcome` | router time (optimistic), demoted by `turn_terminal` | fine-grained `DecisionOutcome` |
 | `turn_id` | router time | binds the row to its `TurnTerminal` + `session_timings` rows |
 | `terminal_state` + `no_reply_reason` | `apply_turn_terminal_event` | coarse bucket + suppressor name |
-| `input_window` / `raw_output` | router time | full router prompt + raw LLM response (reasoning timeline) |
+| `input_window` / `raw_output` | router time | full router prompt + raw LLM response (Decisions column) |
 
 Parity is enforced centrally by **one ORM mapper event**,
 `_agent_decision_parity_guard` (`before_insert`/`before_update` on
@@ -565,7 +590,7 @@ Every event is a frozen `@dataclass` in
 `backend/johnny/voice_pipeline/events.py`, carries `timestamp_ms` (monotonic
 offset from session start) + optional `session_id`, and is serialised to JSON by
 `event_to_dict` (`dataclasses.asdict`). `PipelineEvent` is the union of all of
-them (the 12 originals + the task lifecycle events + the seven
+them (the 12 originals + the six task/workstream lifecycle events + the seven
 conversation-dynamics events, Johnny-trt.49).
 
 | Event (`type` string) | Key fields | Emitted by | Persisted? | UI surface |
@@ -580,8 +605,14 @@ conversation-dynamics events, Johnny-trt.49).
 | `SessionStatusChanged` (`session_status_changed`) | `status: SessionStatus, error_reason?` | meet-worker bootstrap | ✅ `bot_sessions` | calendar/session status; WS type → `session_status_change`; only type forwarded to `/ws/global` |
 | `ApprovalPending` (`approval_pending`) | `decision_id, suggested_reply, timeout_s, reason, reply_type?` | `_handle_approval_required` **and** the subscriber | ❌ (the `pending` decision row is the durable record) | approval card / push (live WS) |
 | `ApprovalResolved` (`approval_resolved`) | `decision_id, resolution: approved\|rejected\|timeout` | `_handle_approval_required` + API | ❌ | clears the approval card (live WS) |
-| `PipelineTiming` (`pipeline_timing`) | `turn_id, stage: PipelineTimingStage, started_at_ms, duration_ms, provider_name?, details` | `_emit_timing` | ✅ `session_timings` | per-turn activity log / reasoning timeline |
+| `PipelineTiming` (`pipeline_timing`) | `turn_id, stage: PipelineTimingStage, started_at_ms, duration_ms, provider_name?, details` | `_emit_timing` | ✅ `session_timings` | Activity strip + per-turn timings (§3.14) |
 | `TurnTerminal` (`turn_terminal`) | `turn_id, terminal_state: TerminalState, outcome, no_reply_reason?, detail` | `_emit_turn_terminal` | ✅ stamps/creates `agent_decisions` | terminal chip + "Final decision" step |
+| `TaskQueued` (`task_queued`) | `task_id, kind, turn_id?, decision_id?, ack_text, request_id?, source_kind` | `TaskCoordinator`, right after the `agent_tasks` row exists (row-before-ack) | ✅ get-or-creates the `agent_workstreams` envelope (`queued`) + a `queued` `agent_workstream_events` row | Workstreams column — new `queued` thread |
+| `TaskProgress` (`task_progress`) | `task_id, kind, progress_text, step, phase, turn_id?, request_id?` | the executor (worker pass / in-session resolver) on claim + each milestone | ✅ flips the envelope `queued→running`; one `running` then a `progress` event row per later milestone (US-202) | Workstreams column — live progress steps |
+| `TaskCompleted` (`task_completed`) | `task_id, kind, status: done\|failed, result_text, error, turn_id?, request_id?` | the executor after the terminal `agent_tasks` row write (row-before-event) | ✅ flips the envelope to `done`/`failed`, copies `result_text`/`result_json` (a `done` result goes `delivery_status=ready`) + a `completed` event row; the `agent_tasks` row stays the result's system of record | Workstreams column — terminal state + result |
+| `TaskCancelled` (`task_cancelled`) | `task_id, kind, actor: voice\|ui\|system, result_text, error, turn_id?, request_id?` | the cutting locus (resolver / worker) after the `cancelled` row write (US-302) | ✅ flips the envelope to `cancelled` + a `cancelled` event row | Workstreams column — `cancelled` |
+| `TaskResultExpired` (`task_result_expired`) | `task_id, kind, reason, turn_id?` | the Phase-5 speech queue when a queued RESULT is dropped undelivered | ✅ stamps `delivery_status=expired` + `expired_reason` + an `expired` event row (execution status unchanged) | Workstreams column — "result not spoken" banner |
+| `WorkstreamDeliveryChanged` (`workstream_delivery_changed`) | `task_id, kind, delivery_status: delivered\|interrupted, turn_id?` | the speech-delivery path when a result is spoken or cut (US-002) | ✅ stamps `delivery_status` + `delivered_at` (+ best-effort `delivered_utterance_id`); `delivered`/`interrupted` event row | Workstreams column — delivery state + talk-back link |
 | `InterruptionRecorded` (`interruption_recorded`) | `who: InterruptionWho, cut_latency_ms?, speech_kind, turn_id?, partial_kept` | `RouterGate` interrupted settle paths (every cut speech: reply / ack / status / correction / task result, Johnny-trt.49) | ✅ `conversation_events` | activity log row + turn-header barge-in badge with cut latency |
 | `FloorAcquired` (`floor_acquired`) | `holder, wait_ms` | trt.46 shared speech floor (vocabulary shipped ahead of the emitter) | ✅ `conversation_events` | activity log "Session" group |
 | `FloorReleased` (`floor_released`) | `holder, hold_ms, reason` | trt.46 shared speech floor | ✅ `conversation_events` | activity log "Session" group |
@@ -589,6 +620,18 @@ conversation-dynamics events, Johnny-trt.49).
 | `TurnClaimWon` (`turn_claim_won`) | `bucket, claimant, contenders` | trt.46/47 turn arbitration | ✅ `conversation_events` | activity log "Session" group |
 | `TurnClaimLost` (`turn_claim_lost`) | `bucket, claimant, winner, contenders` | trt.46/47 turn arbitration | ✅ `conversation_events` | activity log "Session" group |
 | `PeerSpeechSuppressed` (`peer_speech_suppressed`) | `peer, window_ms, text_match_hits` | trt.46 peer-awareness loop rule | ✅ `conversation_events` | activity log "Session" group |
+
+**Task & workstream lifecycle (epic Johnny-d6w).** The six rows above are the durable
+Workstreams substrate. The **single durable writer** (the subscriber, §3.12) owns the
+`agent_workstreams` envelope and its append-only `agent_workstream_events` log — it
+**never** writes the `agent_tasks` row, which stays executor-owned (the Johnny-trt.25
+contract). It get-or-creates the envelope by `agent_task_id` so out-of-order delivery
+(e.g. `task_completed` before `task_queued`) still converges onto one row, and a
+terminal-status guard stops a late `task_progress` from regressing a settled
+workstream. The persisted `agent_workstream_events.event_type` vocabulary is `queued`,
+`running`, `progress`, `completed`, `cancelled`, `expired`, `delivered`, `interrupted`
+(§6.2); the matching WS wire types (`task_queued` … `workstream_delivery_changed`) are
+what the live UI ingests (US-101) to animate the Workstreams column without a re-pull.
 
 **Conversation dynamics (Johnny-trt.49).** The last seven rows are the
 conversation-dynamics vocabulary — interruptions and "all those small
@@ -634,7 +677,9 @@ resume with `?since_seq=N`.
 
 All pipeline tables are SQLAlchemy models in `backend/app/db/models.py`; enums
 are `StrEnum` stored as `VARCHAR` + CHECK (no native PG enums). The subscriber
-(§3.12) is the only writer in production.
+(§3.12) is the only writer of the **event-sourced** pipeline tables in production
+(the executor owns `agent_tasks`, and the answer loop owns `agent_model_calls` /
+`agent_tool_calls` — see §6.2 and §3.14).
 
 ### 6.1 ER diagram
 
@@ -647,6 +692,12 @@ erDiagram
     bot_sessions ||--o{ session_timings : "CASCADE"
     bot_sessions ||--o{ conversation_events : "CASCADE"
     agent_decisions ||--o{ agent_utterances : "agent_decision_id (SET NULL)"
+    bot_sessions ||--o{ agent_tasks : "CASCADE"
+    bot_sessions ||--o{ agent_workstreams : "CASCADE"
+    agent_workstreams ||--o{ agent_workstream_events : "CASCADE"
+    agent_tasks ||--o| agent_workstreams : "agent_task_id (SET NULL, 1:1)"
+    agent_decisions ||--o| agent_workstreams : "source_decision_id (SET NULL)"
+    agent_utterances ||--o| agent_workstreams : "delivered_utterance_id (SET NULL)"
     agents ||--o{ meeting_agents : "agent_id (CASCADE)"
     meeting_configs ||--o{ meeting_agents : "meeting_config_id (CASCADE)"
     google_accounts ||--o{ meeting_agents : "identity_account_id (SET NULL)"
@@ -728,6 +779,44 @@ erDiagram
         string reason "who-cut / release reason / bucket"
         json details
     }
+    agent_tasks {
+        int id PK
+        int bot_session_id FK
+        string kind
+        string status "queued|running|done|failed|cancelled"
+        int attempts
+        string request_id "US-003, mirrored from the decision"
+        string callback_token "external re-entry (US-303)"
+        text result_text
+        json result_json
+    }
+    agent_workstreams {
+        int id PK
+        int bot_session_id FK
+        int agent_task_id FK "1:1 delegated only (UNIQUE, SET NULL)"
+        int source_decision_id FK "the delegating turn (SET NULL)"
+        int source_turn_id "the delegating turn's per-session counter"
+        string source_kind "delegate|foreground_tool_loop"
+        string request_id "US-003 correlation key"
+        string requested_by "participant attribution (US-401)"
+        text title
+        text user_request_text
+        string status "WorkstreamStatus (execution)"
+        string delivery_status "WorkstreamDeliveryStatus (decoupled)"
+        int delivered_utterance_id FK "voiced the result (SET NULL)"
+        text result_text
+        json result_json
+        text error
+    }
+    agent_workstream_events {
+        int id PK
+        int workstream_id FK "CASCADE"
+        int bot_session_id FK
+        int sequence "per-workstream monotonic (UNIQUE w/ workstream_id)"
+        string event_type "queued|running|progress|completed|cancelled|expired|delivered|interrupted"
+        text text
+        json payload_json
+    }
 ```
 
 There is **no `approvals` table** — the approval round is Redis-only
@@ -786,6 +875,36 @@ in `details` — the full per-type mapping is on the ORM model
 Served by `GET /sessions/{id}/conversation_events` and included in the
 history export.
 
+**`agent_tasks`** (added 0023, Johnny-trt.18) — the durable **delegated-execution**
+row, owned end-to-end by the executor (the in-session `TaskCoordinator` resolver for
+internal kinds, the `task_worker` pass for skill/MCP kinds); the subscriber never
+writes it. Lifecycle `queued → running → done|failed|cancelled` with `attempts`,
+`result_text`/`result_json`, `callback_token` (external re-entry, US-303), and
+`request_id` (US-003, mirrored from the decision). Full task-engine semantics live in
+[ROUTING.md](ROUTING.md) §2/§8 and [TASK-ENGINE.md](TASK-ENGINE.md); it appears here
+because the Workstreams view (§3.14) and the workstream envelope below both key off it.
+
+**`agent_workstreams`** (added 0041, Johnny-d6w.2 / US-002) — the **unifying envelope**
+for any unit of work, delegated or inline. The single durable writer (the subscriber)
+get-or-creates one row per `agent_task_id` from the task/workstream events (§5), so
+out-of-order delivery still converges; it stamps `source_kind`
+(`delegate` | `foreground_tool_loop`), `source_turn_id`/`source_decision_id`, the
+`request_id` correlation key (US-003, backfilled from whichever event carries it first),
+`requested_by` (US-401), and keeps **two decoupled state machines** — `status`
+(execution: `queued`/`running`/`done`/`failed`/`cancelled`) and `delivery_status`
+(`not_ready`/`ready`/`queued`/`delivered`/`interrupted`/`expired`). A terminal `status`
+is first-writer-wins (mirrors the coordinator's settle chokepoint); `result_json` is
+copied read-only from the executor-owned `agent_tasks` row; `delivered_utterance_id`
+back-references the utterance that voiced the result.
+
+**`agent_workstream_events`** (added 0041, Johnny-d6w.2 / US-202) — append-only
+progress/audit log, one row per lifecycle transition, written only by the single durable
+writer. Columns: `workstream_id`, `bot_session_id`, `sequence` (per-workstream
+monotonic), `event_type` (`queued`/`running`/`progress`/`completed`/`cancelled`/
+`expired`/`delivered`/`interrupted`), `text`, `payload_json`. It is the durable-resume
+substrate that lets an ended session replay "when each step happened" (US-202) —
+additive to the executor-owned `agent_tasks` row, never a write to it.
+
 **`bot_sessions`** (0001; `source`+`playground_overrides`+nullable
 `meeting_config_id` 0007; `session_summary` 0013; `bot_name` 0016) — UPDATEd by
 `apply_status_event` on lifecycle transitions. Browser sessions self-persist
@@ -803,6 +922,9 @@ removed.
 - **`NoReplyReason`** (0019): the 12 wire values **plus `legacy`** (backfill-only) = 13 in the DB.
 - **`BotMode`** (`listen_only | suggest_only | approval_required | limited_auto_speak | autonomous`; `autonomous` consolidated the dropped `free_auto_speak` in 0017).
 - **`BotSessionSource`** (`meet | browser`, 0007), **`BotSessionStatus`** (`scheduled | joining | joined | ended | failed`). (The `PipelineMode` enum from 0009 was removed with its table in 0026, Johnny-trt.43.)
+- **`WorkstreamSourceKind`** (0041): `delegate | foreground_tool_loop` (reserved, not yet emitted: `external_callback` for webhook re-entry, US-303). CHECK on `agent_workstreams.source_kind`.
+- **`WorkstreamStatus`** (0041): `queued | running | done | failed | cancelled` (reserved: `waiting`, `blocked`) — the execution state machine.
+- **`WorkstreamDeliveryStatus`** (0041): `not_ready | ready | queued | delivered | interrupted | expired` (reserved: `delivery_failed`) — decoupled from execution `status`, so a `done` workstream can still be undelivered.
 
 ### 6.4 Migration lineage (pipeline-relevant)
 
@@ -818,10 +940,13 @@ removed.
 | 0017 | `free_auto_speak → autonomous` data migration |
 | 0018 | `agent_decisions.decision_recommended_text / final_text / divergence_reason / override_actor` (INV-2) + legacy backfill |
 | 0019 | `agent_decisions.turn_id / terminal_state / no_reply_reason` (INV-1) + backfill (`legacy` reason on backfilled `no_reply` rows) |
+| 0023 | `agent_tasks` table — the durable delegated-execution row (Johnny-trt.18) |
 | 0026 | **drops** `pipeline_settings` + deactivates `kind='s2s'` provider rows (S2S surface removal, Johnny-trt.43) |
 | 0027 | agents rebuild: `agents` + `meeting_agents` tables, `bot_sessions.agent_id/agent_snapshot`, drops templates/personalities + the meeting override soup (Johnny-trt.41) |
 | 0028 | `meeting_agents.identity_account_id` — per-assignment join identity for multi-agent meetings (Johnny-trt.45) |
 | 0029 | `conversation_events` table — the conversation-dynamics record: interruptions + the multi-agent floor/claim/suppression vocabulary (Johnny-trt.49) |
+| 0041 | `agent_workstreams` + `agent_workstream_events` tables — the session-view Workstreams substrate (Johnny-d6w.2, US-002/US-202) |
+| 0042 | `request_id` correlation: `agent_decisions.request_id`, `agent_utterances.answers_request_id`, `agent_tasks.request_id` (+ indexes; Johnny-d6w.3, US-003) |
 
 > **Migrate-image gotcha:** the `migrate` compose service bakes its own image.
 > `docker compose build api worker frontend` does **not** rebuild it — a new
@@ -905,14 +1030,14 @@ production the sinks are `Noop`, so the real writes happen in the subscriber).
 | ckz.28.1 | closed | Session-14 root-cause + redesign proposal | `tasks/prd-pipeline-decision-revision.md` |
 | **ckz.28.2** | closed | **INV-2** decision↔utterance parity | `agent_decisions` parity columns + `_agent_decision_parity_guard` (`models.py`); subscriber stamps divergence; `0018` |
 | **ckz.28.3** | closed | **INV-1** terminal-state-per-turn, no silent drops | `TurnTerminal` event + `_emit_turn_terminal` (the retired split engine); `apply_turn_terminal_event` (subscriber); `0019` |
-| **ckz.28.4** | closed | "What is the bot thinking" reasoning timeline | `input_window`/`raw_output`/`prompt` serialized; `sessionTurns.ts` + `SessionTurnTimeline.svelte` |
+| **ckz.28.4** | closed | "What is the bot thinking" reasoning timeline (UI superseded by the three-column trace, §3.14) | `input_window`/`raw_output`/`prompt` serialized; assembled in `sessionTrace.ts` (the per-turn `SessionTurnTimeline.svelte` was retired in epic Johnny-d6w) |
 | ckz.28.5 | **open** | Offline replay harness (`johnny-replay` CLI + fixtures) | **not yet implemented** — no CLI, no fixtures, no Replay button |
 | **etu.1** | this doc | Technical pipeline reference | `docs/PIPELINE.md` |
 | etu.2 | closed | Non-technical overview | `docs/PIPELINE_OVERVIEW.md` |
 
-The reasoning timeline (ckz.28.4), the canonical record (ckz.28.2), and the
-terminal-state machine (ckz.28.3) are described in §3.14, §4.5, and §4.4
-respectively. When the replay harness (ckz.28.5) lands, document it here and
+The session-view UI (ckz.28.4, now the three-column trace), the canonical record
+(ckz.28.2), and the terminal-state machine (ckz.28.3) are described in §3.14, §4.5,
+and §4.4 respectively. When the replay harness (ckz.28.5) lands, document it here and
 cross-link the fixtures.
 
 ### 8.2 Closed issues reconciled against current code
@@ -926,7 +1051,7 @@ lives today (file + function; grep the issue id in comments to find the site):
 | Johnny-arh | only VAD-finalised utterances reach the router; `end_of_speech_ms` padding; clear `_interrupt_event` before the router call | `_utterances` (L949), `DEFAULT_END_OF_SPEECH_MS=800` (L97), `_respond_to_transcript_inner` L1655 |
 | Johnny-ckz.3 / Johnny-7qp | unbounded transcript history + bot recalls its own prior lines | `DEFAULT_TRANSCRIPT_WINDOW_SIZE=0` (L151), `_remember_bot_utterance` + `BOT_SPEAKER_LABEL` (L2655), `_rehydrate_transcript_history` (L837) |
 | Johnny-ckz.14 | noise gate (audio floor + stoplist + length + confidence) before the router | `_is_audio_below_noise_floor` (L1242), `_classify_transcript_as_noise` (L1257), `DEFAULT_NOISE_STOPLIST` (L210) |
-| Johnny-ckz.7 | per-turn activity/timing log | `PipelineTiming` + `_emit_timing` (L2484); `session_timings`; `SessionTurnTimeline.svelte` |
+| Johnny-ckz.7 | per-turn activity/timing log | `PipelineTiming` + `_emit_timing` (L2484); `session_timings`; Activity strip (`SessionActivityLog.svelte`, §3.14) |
 | Johnny-di9 / Johnny-ze3 / Johnny-ckz.13 | voice barge-in (classifier) end-to-end across meet + browser transports | `_maybe_barge_in` (L1345), `_classify_barge_in_intent` (L1406); browser `cancel_playback` interrupt-seq |
 | Johnny-wyd | bound the barge-in classifier so a slow local LLM can't wedge it | `barge_in_classifier_timeout_s` (L499), `asyncio.wait_for` in `_classify_barge_in_intent` |
 | Johnny-g2n | surface TTS quota/auth failure + per-session circuit breaker | `_respond_loop` TTSError path (L779), `_tts_tripped` (L730), `TERMINAL_TTS_FAILURE_CATEGORIES` (L390) |

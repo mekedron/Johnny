@@ -81,6 +81,21 @@ tell which one happened.
 The labels in the chat — **Replied**, **Awaiting approval**, **No reply** —
 match these three outcomes exactly.
 
+## When a reply means "I'm on it" — background work
+
+Sometimes the right answer is not a fact but a task: "add that to my calendar",
+"check my inbox for the invoice". When Johnny takes one of these on, its spoken
+reply is a short acknowledgement — "I'll look through your calendar, give me a
+moment" — and the actual work happens in the background, so the meeting keeps
+moving instead of freezing while it runs.
+
+That background work shows up as its own thread in the **Workstreams** panel on the
+session page, moving through plain stages: **queued**, then **running**, then **done**
+(or **failed**, or **cancelled** if you stop it). When the result is ready Johnny
+speaks it at a natural pause, and the thread records that it was delivered. If you
+ever ask "what's the progress on that?", Johnny answers from the very same panel — so
+what you see and what it says always match.
+
 ## The modes Johnny can be in
 
 You pick a mode when you set up a meeting or save a template. The mode decides
@@ -119,15 +134,21 @@ words. Reasons you might see include:
   recorded, not lost.
 
 When you want the full story of any turn — whether it just happened or it was
-days ago — open the session and expand its **reasoning timeline**. It walks you
+days ago — open the session and expand that turn in the **Decisions** view. It walks you
 through what Johnny heard, how it understood your turn, what context it looked
 at, what it asked the AI model, what the model answered, which checks fired, and
 what it finally did. Each step shows how long it took. Nothing is hidden and
 nothing is invented: if a step did not happen, the timeline says so plainly.
 
-So when Johnny stays silent, you have two places to look: the **No reply** line
-in the chat for the short reason, and the **reasoning timeline** on the session
-page for the full step-by-step story.
+And when Johnny is busy on a delegated task, you are never left guessing: the
+**Workstreams** panel shows each piece of background work moving through queued →
+running → done (or failed), with the time it took — so a long-running job reads as
+visible progress, not silence.
+
+So when Johnny is quiet, you have three places to look: the **No reply** line in
+the chat for the short reason, the **Decisions** view on the session page for the
+full step-by-step story of a turn, and the **Workstreams** panel for the live
+progress of any background work.
 
 ## For the curious: read on
 
