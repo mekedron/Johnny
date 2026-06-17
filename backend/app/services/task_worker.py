@@ -293,6 +293,12 @@ def claim_queued_tasks(
     locality guard at the SQL level — the worker must never even claim
     them). ``only_kinds`` scopes a non-production claimer (integration tests
     sharing the dev stack's table) to its own rows.
+
+    Rows carrying a ``callback_token`` are ``external_callback`` workstreams
+    (US-303, Johnny-d6w.18): out-of-process work that settles only via the
+    authenticated webhook, never an executor. They are excluded here at the SQL
+    level — the same never-even-claim guard as the internal kinds — so the
+    worker can't grab one, find no executor, and wrongly fail it.
     """
     if limit <= 0:
         return []
@@ -300,6 +306,7 @@ def claim_queued_tasks(
         sa.select(AgentTask.id)
         .where(
             AgentTask.status == AgentTaskStatus.QUEUED,
+            AgentTask.callback_token.is_(None),
             *_kind_filters(only_kinds, exclude_kinds),
         )
         .order_by(AgentTask.created_at, AgentTask.id)

@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
@@ -62,6 +63,14 @@ from typing import Any, Literal
 logger = logging.getLogger(__name__)
 
 TaskStatus = Literal["queued", "running", "done", "failed", "cancelled", "expired"]
+
+EXTERNAL_CALLBACK_SOURCE_KIND = "external_callback"
+"""``TaskSpec.source_kind`` marking an out-of-process workstream that re-enters
+the session through the US-303 webhook (Johnny-d6w.18). Mirrors
+:attr:`app.db.models.WorkstreamSourceKind.EXTERNAL_CALLBACK` (kept stdlib-only
+here so this module stays SQLAlchemy-free; a drift-guard test asserts equality).
+:meth:`TaskCoordinator.begin` queues such a spec with a minted ``callback_token``
+and no resolver/watcher — it settles only when the webhook posts the result."""
 
 CancelActor = Literal["voice", "ui", "system"]
 """Who asked to cancel a running task (Johnny-d6w.17, US-302).
@@ -146,6 +155,14 @@ class TaskSpec:
     # event so the durable workstream envelope can be stamped with it. ``None``
     # for tasks queued outside a gated turn.
     request_id: str | None = None
+    # Where this workstream's work originates (US-303, Johnny-d6w.18), echoed on
+    # the ``TaskQueued`` event so the single durable writer stamps the envelope's
+    # ``source_kind``. ``delegate`` is the default (a router-delegated task with
+    # an in-session resolver or worker executor); ``external_callback`` marks an
+    # out-of-process workstream that :meth:`TaskCoordinator.begin` queues with a
+    # minted ``callback_token`` and **no** resolver/watcher — it settles only
+    # when the webhook (US-303) POSTs the result.
+    source_kind: str = "delegate"
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,10 +171,14 @@ class QueuedTask:
 
     ``task_id`` is the durable ``agent_tasks`` row id (the correlation key for
     the status query, the ``TaskQueued`` event, and the wake ping).
+    ``callback_token`` is set only for ``external_callback`` workstreams
+    (US-303): the per-task secret the webhook authenticates with, returned so
+    the caller can hand it to the external system; ``None`` for every other kind.
     """
 
     task_id: int
     spec: TaskSpec
+    callback_token: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,10 +302,14 @@ class TaskSink(ABC):
     """
 
     @abstractmethod
-    async def record_queued(self, spec: TaskSpec) -> int | None:
+    async def record_queued(
+        self, spec: TaskSpec, *, callback_token: str | None = None
+    ) -> int | None:
         """Insert the ``queued`` row and return its primary key.
 
-        Returns ``None`` when the sink cannot produce a durable id (a noop
+        ``callback_token`` is the per-task webhook secret persisted on the row
+        for ``external_callback`` workstreams (US-303), ``None`` for every other
+        kind. Returns ``None`` when the sink cannot produce a durable id (a noop
         sink); the coordinator treats that the same as a raise — no row, no
         promise, no ack.
         """
@@ -345,6 +370,7 @@ class TaskRecord:
     result_json: dict[str, Any] | None = None
     error: str | None = None
     attempts: int = 0
+    callback_token: str | None = None
 
 
 class InMemoryTaskSink(TaskSink):
@@ -355,11 +381,15 @@ class InMemoryTaskSink(TaskSink):
         self._lock = asyncio.Lock()
         self._next_id = 1
 
-    async def record_queued(self, spec: TaskSpec) -> int | None:
+    async def record_queued(
+        self, spec: TaskSpec, *, callback_token: str | None = None
+    ) -> int | None:
         async with self._lock:
             task_id = self._next_id
             self._next_id += 1
-            self._records.append(TaskRecord(task_id=task_id, spec=spec))
+            self._records.append(
+                TaskRecord(task_id=task_id, spec=spec, callback_token=callback_token)
+            )
         return task_id
 
     async def update_status(
@@ -734,9 +764,21 @@ class TaskCoordinator:
         for the worker executor pass (the wake ping is its nudge) and only a
         read-only watcher is spawned, keeping the trt.53 failure correction
         alive until the Phase-5 listener replaces it.
+
+        Third locality (US-303, Johnny-d6w.18): an ``external_callback`` spec
+        has no local executor and no worker — it mints a ``callback_token``
+        onto the row, announces ``queued`` (externally pending), and spawns
+        **neither** resolver nor watcher, settling only when the webhook posts
+        its result. The token is returned on the :class:`QueuedTask` so the
+        caller can hand it to the external system. Its ``kind`` must not be a
+        worker-claimable kind (no wake nudge is sent for it).
         """
+        external = spec.source_kind == EXTERNAL_CALLBACK_SOURCE_KIND
+        callback_token = secrets.token_urlsafe(32) if external else None
         try:
-            task_id = await self._sink.record_queued(spec)
+            task_id = await self._sink.record_queued(
+                spec, callback_token=callback_token
+            )
         except Exception:
             logger.exception(
                 "tasks.begin: failed to persist queued row for kind=%s — not starting",
@@ -750,8 +792,13 @@ class TaskCoordinator:
             )
             return None
 
-        queued = QueuedTask(task_id=task_id, spec=spec)
-        in_session = self._runs_in_session is None or self._runs_in_session(spec.kind)
+        queued = QueuedTask(task_id=task_id, spec=spec, callback_token=callback_token)
+        # external_callback work is out-of-process by definition: never the
+        # in-session resolver (forced below), and its registry origin is
+        # ``worker`` so the status query still reports it in flight.
+        in_session = not external and (
+            self._runs_in_session is None or self._runs_in_session(spec.kind)
+        )
         # Registry seed (Johnny-trt.28): the in-memory view exists from the
         # same moment the durable row does, so a status ask landing right
         # after the ack still finds the task.
@@ -764,7 +811,9 @@ class TaskCoordinator:
             turn_id=spec.turn_id,
         )
         await self._safe_publish_queued(queued)
-        await self._safe_wake(queued)
+        # No wake nudge for external work — there is no worker pass to claim it.
+        if not external:
+            await self._safe_wake(queued)
 
         if in_session:
             runner = asyncio.ensure_future(self._run(queued))
@@ -779,6 +828,16 @@ class TaskCoordinator:
                 self._cancel_requests.pop(_tid, None)
 
             runner.add_done_callback(_on_resolver_done)
+        elif external:
+            # US-303: settled only by the webhook callback — spawn nothing. The
+            # always-on durable subscriber persists the envelope; the live
+            # listener (if any) speaks the result when the callback arrives.
+            logger.debug(
+                "tasks.begin: task_id=%s kind=%s is external_callback — no "
+                "resolver/watcher; awaits webhook re-entry (US-303)",
+                task_id,
+                spec.kind,
+            )
         elif self._remote_listener_active:
             # The Phase-5 push listener (Johnny-trt.28) observes worker-owned
             # settles on ``johnny.tasks.<session>`` — no poll watcher needed.

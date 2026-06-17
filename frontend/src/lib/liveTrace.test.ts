@@ -106,6 +106,32 @@ describe('applyLiveTraceEvent', () => {
 		expect(r.tasks?.[0]).toMatchObject({ id: 100, status: 'queued', kind: KIND, turn_id: 5 });
 	});
 
+	it('task_queued(source_kind=external_callback) renders external; the callback settles it', () => {
+		// US-303: the external_callback workstream is created queued/not_ready —
+		// the UI shows "awaiting webhook"…
+		let r = applyLiveTraceEvent(empty(), queued({ source_kind: 'external_callback' }));
+		let ws = wsFor(r);
+		expect(ws.source_kind).toBe('external_callback');
+		expect(ws.status).toBe('queued');
+		expect(ws.delivery_status).toBe('not_ready');
+		// …then the webhook's task_completed frame flips it done + ready live, with
+		// the origin preserved.
+		r = applyLiveTraceEvent(r, completed());
+		ws = wsFor(r);
+		expect(ws.source_kind).toBe('external_callback');
+		expect(ws.status).toBe('done');
+		expect(ws.delivery_status).toBe('ready');
+		expect(ws.result_text).toBe('latot noitasnepmoC O2C');
+		// The projected view carries the origin so the column renders it distinctly.
+		const view = buildSessionTraceView(r);
+		expect(view.workstreams[0].sourceKind).toBe('external_callback');
+	});
+
+	it('task_queued defaulting to delegate keeps the delegate origin', () => {
+		const r = applyLiveTraceEvent(empty(), queued());
+		expect(wsFor(r).source_kind).toBe('delegate');
+	});
+
 	it('task_progress advances queued → running and stamps started_at', () => {
 		let r = applyLiveTraceEvent(empty(), queued());
 		r = applyLiveTraceEvent(r, progress());

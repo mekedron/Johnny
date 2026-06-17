@@ -167,7 +167,11 @@ def test_check_constraints_match_model_enums(sqlite_engine: sa.Engine) -> None:
     assert set(_MODULE.WORKSTREAM_DELIVERY_STATUSES) == {
         m.value for m in WorkstreamDeliveryStatus
     }
-    assert set(_MODULE.WORKSTREAM_SOURCE_KINDS) == {
+    # 0041 is frozen at the INITIAL emitted source-kind set; ``external_callback``
+    # was promoted to emitted by migration 0044 (US-303), which widens this CHECK.
+    # So 0041's tuple is now a SUBSET of the enum; ``test_migration_0044`` asserts
+    # the head CHECK equals the full enum (the live no-drift contract).
+    assert set(_MODULE.WORKSTREAM_SOURCE_KINDS) <= {
         m.value for m in WorkstreamSourceKind
     }
 

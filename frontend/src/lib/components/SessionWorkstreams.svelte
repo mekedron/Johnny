@@ -61,8 +61,20 @@
 
 	const SOURCE_LABEL: Record<string, string> = {
 		delegate: 'delegate',
-		foreground_tool_loop: 'inline'
+		foreground_tool_loop: 'inline',
+		external_callback: 'webhook'
 	};
+
+	// US-303 (Johnny-d6w.18): an external_callback workstream that has not yet
+	// settled is *externally pending* — its result will arrive via the
+	// authenticated webhook, not an in-session executor. Rendered with a distinct
+	// "Awaiting webhook" badge; the callback flips it to done/failed live.
+	function isExternallyPending(w: WorkstreamView): boolean {
+		return (
+			w.sourceKind === 'external_callback' &&
+			(w.status === 'queued' || w.status === 'running')
+		);
+	}
 
 	let activeFilter = $state<FilterKey>('all');
 	let expanded = $state<Set<number>>(new Set());
@@ -330,6 +342,14 @@
 								<span
 									class="rounded border border-amber-500/40 bg-amber-500/10 px-1 py-0.5 text-[0.6rem] font-semibold uppercase text-amber-700 dark:text-amber-300"
 									data-testid="workstream-expired-badge">expired</span
+								>
+							{/if}
+							{#if isExternallyPending(w)}
+								<span
+									class="rounded border border-indigo-500/40 bg-indigo-500/10 px-1.5 py-0.5 text-[0.6rem] font-semibold uppercase tracking-wide text-indigo-700 dark:text-indigo-300"
+									data-testid="workstream-awaiting-webhook"
+									title="This workstream runs out of process and settles via the authenticated webhook callback (US-303)."
+									>Awaiting webhook</span
 								>
 							{/if}
 							<span class="text-muted-foreground ml-auto font-mono text-[0.65rem]"

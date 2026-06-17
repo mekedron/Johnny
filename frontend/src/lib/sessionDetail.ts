@@ -279,8 +279,8 @@ export type WorkstreamDeliveryStatus =
 	| 'interrupted'
 	| 'expired';
 
-/** Origin of a workstream's work (US-002). */
-export type WorkstreamSourceKind = 'delegate' | 'foreground_tool_loop';
+/** Origin of a workstream's work (US-002; `external_callback` added US-303). */
+export type WorkstreamSourceKind = 'delegate' | 'foreground_tool_loop' | 'external_callback';
 
 /**
  * One durable workstream envelope row (US-002/US-005) — the record the

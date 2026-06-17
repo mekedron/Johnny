@@ -95,7 +95,9 @@ class SqlAlchemyTaskSink(TaskSink):
     def bot_session_id(self) -> int:
         return self._bot_session_id
 
-    async def record_queued(self, spec: TaskSpec) -> int | None:
+    async def record_queued(
+        self, spec: TaskSpec, *, callback_token: str | None = None
+    ) -> int | None:
         # Snapshot of the validated request — the executor never has to
         # re-parse router output (the raw model output already lives in
         # agent_decisions.raw_output for audit).
@@ -120,6 +122,9 @@ class SqlAlchemyTaskSink(TaskSink):
             request_json=request_json,
             status=AgentTaskStatus.QUEUED,
             ack_text=spec.ack_text or None,
+            # US-303: the per-task webhook secret for ``external_callback``
+            # workstreams; NULL for every other kind (the column's prior state).
+            callback_token=callback_token,
         )
         self._session.add(row)
         self._session.commit()

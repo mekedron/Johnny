@@ -627,9 +627,8 @@ class TaskQueued:
     the ``agent_tasks`` row exists (the row is inserted synchronously
     *before* the ack is spoken, so by the time a subscriber sees this event
     the ``task_id`` is queryable). The live UI uses it to show "Johnny is
-    working on ..." chips; the durable record is the ``agent_tasks`` row
-    itself, so the status subscriber ignores this type (no extra
-    persistence — the same ephemeral contract as the interim events).
+    working on ..." chips; the single durable writer get-or-creates the
+    ``agent_workstreams`` envelope from it (``queued`` state, US-002/US-202).
 
     * ``task_id`` — the ``agent_tasks`` row id consumers correlate on.
     * ``kind`` — the task-kind identifier from the router's verdict.
@@ -639,6 +638,9 @@ class TaskQueued:
       when one was persisted synchronously; ``None`` otherwise.
     * ``ack_text`` — the ack phrase attached to the task (may be empty when
       the gate fell back to its own wording).
+    * ``source_kind`` — where the work originates (US-303); ``delegate`` for
+      a router-delegated task, ``external_callback`` for a webhook re-entry
+      workstream. Stamped onto the envelope's ``source_kind`` at create time.
     """
 
     task_id: int
@@ -651,6 +653,11 @@ class TaskQueued:
     # The delegating turn's correlation key (US-003), echoed from ``TaskSpec``
     # so the durable workstream envelope is stamped with it at create time.
     request_id: str | None = None
+    # Where this workstream's work originates (US-303, Johnny-d6w.18), echoed
+    # from ``TaskSpec.source_kind`` so the single durable writer stamps the
+    # envelope's ``source_kind`` and the live UI renders it distinctly. Defaults
+    # to ``delegate`` so every existing emitter is byte-unchanged.
+    source_kind: str = "delegate"
     type: TaskQueuedEventType = "task_queued"
 
 

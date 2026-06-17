@@ -160,6 +160,8 @@ def test_event_to_dict_task_queued() -> None:
         "decision_id": 17,
         "ack_text": "on it",
         "request_id": None,
+        # US-303: origin echoed onto the event; defaults to delegate.
+        "source_kind": "delegate",
         "session_id": "s",
         "type": "task_queued",
     }

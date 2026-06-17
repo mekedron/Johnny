@@ -354,5 +354,109 @@ def live_cmd(
     )
 
 
+@main.command("external")
+@click.option(
+    "--kind",
+    default="external.report",
+    show_default=True,
+    help="The task kind for the external_callback workstream.",
+)
+@click.option(
+    "--ack",
+    "ack_text",
+    default="Kicking off the external job — I'll report back when it lands.",
+    show_default=True,
+    help="Ack text recorded on the queued row.",
+)
+@click.option(
+    "--keep-active/--end",
+    "keep_active",
+    default=True,
+    show_default=True,
+    help="Leave the session JOINED (default) so talk-back can fire, or mark ENDED.",
+)
+def external_cmd(kind: str, ack_text: str, keep_active: bool) -> None:
+    """Begin a real ``external_callback`` workstream on a LIVE session (US-303).
+
+    The browser-validation enabler for the webhook re-entry path: creates a
+    fresh ``JOINED`` bot_session, then drives the REAL :class:`TaskCoordinator`
+    to ``begin`` an ``external_callback`` task — minting + persisting the
+    ``callback_token``, publishing ``TaskQueued(source_kind=external_callback)``
+    to ``johnny.session.<id>`` (so the always-on durable subscriber writes the
+    envelope and a browser renders it "awaiting webhook"), and spawning **no**
+    resolver/watcher. Prints the ``task_id`` + ``callback_token`` + a ready-to-run
+    curl so you can POST the callback and watch the Workstreams column flip to
+    ``done`` live.
+    """
+    from redis.asyncio import Redis
+
+    from app.config import get_settings
+    from app.db.models import BotSession, BotSessionSource, BotSessionStatus
+    from app.db.session import SessionLocal
+    from app.services.agent_tasks import SqlAlchemyTaskSink
+    from johnny.agent.task_wiring import build_publish_task_queued
+    from johnny.agent.tasks import TaskCoordinator, TaskSpec, stub_executor
+    from johnny.voice_pipeline.event_bus import RedisEventBus
+
+    console = Console()
+    session = SessionLocal()
+    try:
+        bot_session = BotSession(
+            source=BotSessionSource.BROWSER,
+            status=BotSessionStatus.JOINED,
+            bot_name="Johnny (scenario US-303 external)",
+        )
+        session.add(bot_session)
+        session.commit()
+        sid = int(bot_session.id)
+
+        async def _begin() -> tuple[int, str | None]:
+            redis = Redis.from_url(get_settings().redis_url, decode_responses=False)
+            redis_bus = RedisEventBus(redis, default_session_id=str(sid))
+            coordinator = TaskCoordinator(
+                SqlAlchemyTaskSink(session, sid),
+                executor=stub_executor,  # never invoked — external has no resolver
+                publish_queued=build_publish_task_queued(
+                    redis_bus, session_id=str(sid)
+                ),
+            )
+            try:
+                queued = await coordinator.begin(
+                    TaskSpec(
+                        kind=kind,
+                        ack_text=ack_text,
+                        source_kind="external_callback",
+                    )
+                )
+                if queued is None:
+                    raise click.ClickException("coordinator.begin returned None")
+                return queued.task_id, queued.callback_token
+            finally:
+                await coordinator.aclose()
+                await redis.aclose()
+
+        task_id, token = asyncio.run(_begin())
+        if not keep_active:
+            bot_session.status = BotSessionStatus.ENDED
+            session.commit()
+    finally:
+        session.close()
+
+    console.print(f"LIVE_SESSION_ID={sid}")
+    console.print(f"EXTERNAL_TASK_ID={task_id}")
+    console.print(f"CALLBACK_TOKEN={token}")
+    console.print(
+        f"[green]External[/green] workstream queued on session [bold]{sid}[/bold] — "
+        f"open http://localhost:5173/sessions/{sid} (Workstreams → 'awaiting webhook')."
+    )
+    console.print("[dim]Settle it with:[/dim]")
+    console.print(
+        f"  curl -X POST http://localhost:8000/sessions/{sid}/tasks/{task_id}/callback \\\n"
+        f"    -H 'Content-Type: application/json' \\\n"
+        f"    -d '{{\"callback_token\":\"{token}\",\"status\":\"done\","
+        f"\"result_text\":\"The external job finished: 42 records processed.\"}}'"
+    )
+
+
 if __name__ == "__main__":
     main()

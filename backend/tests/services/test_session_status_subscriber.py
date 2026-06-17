@@ -1991,6 +1991,67 @@ def test_task_events_write_workstream_envelope(db_session: Session) -> None:
     assert [e.sequence for e in events] == [0, 1, 2, 3]
 
 
+def test_external_callback_source_kind_is_threaded(db_session: Session) -> None:
+    """US-303: a ``task_queued`` carrying ``source_kind=external_callback`` stamps
+    the envelope ``external_callback`` (the webhook re-entry workstream the UI
+    renders "awaiting webhook"), sitting queued/not_ready until the callback."""
+    row = _seed(db_session)
+    db_session.commit()
+    apply_task_event(
+        db_session,
+        {
+            "task_id": 42,
+            "kind": "external.report",
+            "session_id": row.id,
+            "type": "task_queued",
+            "timestamp_ms": 10,
+            "source_kind": "external_callback",
+        },
+    )
+    db_session.commit()
+    ws = db_session.scalars(sa.select(AgentWorkstream)).one()
+    assert ws.source_kind == WorkstreamSourceKind.EXTERNAL_CALLBACK
+    assert ws.status == WorkstreamStatus.QUEUED
+    assert ws.delivery_status == WorkstreamDeliveryStatus.NOT_READY
+
+
+def test_unknown_or_missing_source_kind_degrades_to_delegate(
+    db_session: Session,
+) -> None:
+    """The create path never rejects a task event over an unrecognised
+    ``source_kind`` — it degrades to ``delegate`` (the legacy default)."""
+    row = _seed(db_session)
+    db_session.commit()
+    apply_task_event(
+        db_session,
+        {
+            "task_id": 51,
+            "kind": "x",
+            "session_id": row.id,
+            "type": "task_queued",
+            "timestamp_ms": 10,
+            "source_kind": "bogus_kind",
+        },
+    )
+    # A second task with no source_kind at all.
+    apply_task_event(
+        db_session,
+        {
+            "task_id": 52,
+            "kind": "y",
+            "session_id": row.id,
+            "type": "task_queued",
+            "timestamp_ms": 11,
+        },
+    )
+    db_session.commit()
+    for task_id in (51, 52):
+        ws = db_session.scalars(
+            sa.select(AgentWorkstream).where(AgentWorkstream.agent_task_id == task_id)
+        ).one()
+        assert ws.source_kind == WorkstreamSourceKind.DELEGATE
+
+
 def test_task_progress_while_running_appends_progress_row(
     db_session: Session,
 ) -> None:

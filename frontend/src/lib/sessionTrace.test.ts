@@ -386,6 +386,27 @@ describe('buildSessionTraceView', () => {
 		assert.equal(view.routerTurns[0].action, 'delegate');
 	});
 
+	it('US-303: an external_callback workstream projects its origin to the view', () => {
+		// The webhook re-entry envelope flows through untouched, so the column can
+		// render it distinctly ("awaiting webhook") while it is non-terminal.
+		const view = buildSessionTraceView({
+			decisions: [makeDecision({ id: 2, turn_id: 2 })],
+			utterances: [],
+			workstreams: [
+				makeWorkstream({
+					id: 202,
+					source_kind: 'external_callback',
+					status: 'running',
+					delivery_status: 'not_ready',
+					delivered_utterance_id: null
+				})
+			]
+		});
+		assert.equal(view.workstreams.length, 1);
+		assert.equal(view.workstreams[0].sourceKind, 'external_callback');
+		assert.equal(view.workstreams[0].status, 'running');
+	});
+
 	it('resolves an off-turn task_result delivery to its request cross-turn via answers_request_id (AC2)', () => {
 		const view = buildSessionTraceView({
 			decisions: [makeDecision({ id: 2, turn_id: 2, request_id: 'req-2' })],

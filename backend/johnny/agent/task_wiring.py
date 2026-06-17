@@ -84,15 +84,20 @@ from johnny.agent.tasks import (
     TaskStatus,
     stub_executor,
 )
-from johnny.voice_pipeline.event_bus import EventBus
+from johnny.voice_pipeline.event_bus import (
+    DEFAULT_CHANNEL_PREFIX,
+    EventBus,
+)
 from johnny.voice_pipeline.events import (
     TaskCancelled,
     TaskCompleted,
+    TaskCompletedStatus,
     TaskProgress,
     TaskQueued,
     TaskResultExpired,
     WorkstreamDeliveredStatus,
     WorkstreamDeliveryChanged,
+    event_to_dict,
 )
 
 if TYPE_CHECKING:
@@ -150,6 +155,58 @@ def _default_clock_ms() -> int:
     return int(time.time() * 1000)
 
 
+async def publish_task_completed_frames(
+    client: Any,
+    *,
+    session_id: str,
+    task_id: int,
+    kind: str,
+    status: TaskCompletedStatus,
+    result_text: str = "",
+    error: str = "",
+    turn_id: int | None = None,
+    request_id: str | None = None,
+    clock: Callable[[], int] = _default_clock_ms,
+) -> int:
+    """Publish one :class:`TaskCompleted` frame on **both** task surfaces.
+
+    The out-of-process re-entry analogue of the worker's dual ``_publish``
+    (:mod:`app.services.task_worker`): the same event, serialized identically
+    (:func:`~johnny.voice_pipeline.events.event_to_dict`), goes to —
+
+    * the **UI session channel** ``johnny.session.<id>`` — consumed by the
+      always-on single durable writer (:func:`apply_task_event` settles the
+      ``agent_workstreams`` envelope ``done``/``failed``, live *or* ended) and
+      by the per-session WS fan-out (a connected browser updates in place);
+    * the **agent task channel** ``johnny.tasks.<id>`` — the per-session
+      :class:`TaskEventListener`, which (only while the session is live) drives
+      :class:`TaskSpeechDeliverer` to speak the result as
+      ``AgentSpoke(kind="task_result", turn_id=None)`` — never a turn terminal.
+
+    Returns the agent-channel subscriber count: ``> 0`` means a live session
+    heard it and will talk the result back; ``0`` means the result was only
+    persisted + shown (an ended session — the trt.31 contract). Best-effort,
+    like every event publish: the durable ``agent_tasks`` row the webhook
+    already settled is the record.
+    """
+    event = TaskCompleted(
+        task_id=task_id,
+        kind=kind,
+        status=status,
+        timestamp_ms=clock(),
+        result_text=result_text,
+        error=error,
+        turn_id=turn_id,
+        session_id=session_id,
+        request_id=request_id,
+    )
+    payload = json.dumps(event_to_dict(event), separators=(",", ":"))
+    # UI + durable writer first (the persistence guarantee), talk-back second.
+    await client.publish(f"{DEFAULT_CHANNEL_PREFIX}.{session_id}", payload)
+    talk_back = await client.publish(f"{TASKS_CHANNEL_PREFIX}.{session_id}", payload)
+    return int(talk_back)
+
+
 def build_publish_task_queued(
     event_bus: EventBus,
     *,
@@ -173,6 +230,7 @@ def build_publish_task_queued(
                 decision_id=queued.spec.decision_id,
                 ack_text=queued.spec.ack_text,
                 request_id=queued.spec.request_id,
+                source_kind=queued.spec.source_kind,
                 session_id=session_id,
             )
         )
@@ -1151,4 +1209,5 @@ __all__ = [
     "build_publish_task_completed",
     "build_publish_task_queued",
     "build_task_coordinator",
+    "publish_task_completed_frames",
 ]

@@ -99,6 +99,7 @@ def _insert(
     created_at: datetime | None = None,
     args: dict[str, Any] | None = None,
     workspace: dict[str, Any] | None = None,
+    callback_token: str | None = None,
 ) -> int:
     request_json: dict[str, Any] = {"kind": kind, "args": args or {}, "ack": "on it"}
     if workspace is not None:
@@ -113,6 +114,7 @@ def _insert(
         attempts=attempts,
         created_at=created_at or _NOW,
         updated_at=updated_at or _NOW,
+        callback_token=callback_token,
     )
     db.add(row)
     db.commit()
@@ -162,6 +164,21 @@ def test_claim_skips_internal_kinds_by_default(db: Session) -> None:
     assert [task.task_id for task in claimed] == [skill_id]
     for row in db.scalars(sa.select(AgentTask).where(AgentTask.id != skill_id)):
         assert row.status == AgentTaskStatus.QUEUED
+
+
+def test_claim_skips_external_callback_tasks(db: Session) -> None:
+    """US-303: a row carrying a ``callback_token`` is an external_callback
+    workstream — it settles only via the webhook, so the worker must never claim
+    it (else it grabs a task with no executor and wrongly fails it)."""
+    external_id = _insert(db, kind="external.report", callback_token="tok-123")
+    skill_id = _insert(db, kind="calendar.upcoming_events")
+
+    claimed = claim_queued_tasks(db, limit=10, now=_NOW)
+    db.commit()
+
+    assert [task.task_id for task in claimed] == [skill_id]
+    # The external row is untouched — still queued, awaiting its webhook.
+    assert _row(db, external_id).status == AgentTaskStatus.QUEUED
 
 
 def test_claim_oldest_first_and_respects_limit(db: Session) -> None:

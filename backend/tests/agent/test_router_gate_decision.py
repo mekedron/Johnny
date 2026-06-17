@@ -1667,14 +1667,18 @@ class _FakeSay:
 class _NoIdTaskSink(InMemoryTaskSink):
     """A sink that persists nothing — ``record_queued`` yields no row id."""
 
-    async def record_queued(self, spec: TaskSpec) -> int | None:  # noqa: ARG002
+    async def record_queued(
+        self, spec: TaskSpec, *, callback_token: str | None = None
+    ) -> int | None:  # noqa: ARG002
         return None
 
 
 class _RaisingTaskSink(InMemoryTaskSink):
     """A sink whose insert blows up (DB down mid-turn)."""
 
-    async def record_queued(self, spec: TaskSpec) -> int | None:  # noqa: ARG002
+    async def record_queued(
+        self, spec: TaskSpec, *, callback_token: str | None = None
+    ) -> int | None:  # noqa: ARG002
         raise RuntimeError("db down")
 
 

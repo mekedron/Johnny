@@ -162,6 +162,9 @@ interface WorkstreamPatch {
 	resultText?: string | null;
 	error?: string | null;
 	requestId?: string | null;
+	// Origin stamped at create time (US-303): `external_callback` for a webhook
+	// re-entry workstream. Only `task_queued` carries it; defaults to `delegate`.
+	sourceKind?: WorkstreamSourceKind;
 	sourceTurnId?: number | null;
 	sourceDecisionId?: number | null;
 	setStartedAt?: boolean;
@@ -206,7 +209,7 @@ function upsertWorkstreamByTaskId(
 			bot_session_id: 0,
 			agent_id: null,
 			workspace_id: null,
-			source_kind: 'delegate',
+			source_kind: patch.sourceKind ?? 'delegate',
 			source_turn_id: patch.sourceTurnId ?? null,
 			source_decision_id: patch.sourceDecisionId ?? null,
 			agent_task_id: taskId,
@@ -355,6 +358,9 @@ export function applyLiveTraceEvent(
 					status: 'queued',
 					title: event.kind,
 					requestId: event.request_id ?? null,
+					// US-303: stamp the origin so an external_callback workstream
+					// renders "awaiting webhook" live; defaults to delegate.
+					sourceKind: (event.source_kind as WorkstreamSourceKind) ?? 'delegate',
 					sourceTurnId: event.turn_id ?? null,
 					sourceDecisionId: event.decision_id ?? null
 				},

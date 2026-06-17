@@ -973,6 +973,22 @@ def _coerce_int_id(value: Any) -> int | None:
         return None
 
 
+def _coerce_source_kind(value: Any) -> WorkstreamSourceKind:
+    """Map an event's ``source_kind`` to the enum, defaulting to ``delegate``.
+
+    US-303 threads ``source_kind`` onto ``TaskQueued`` so the envelope is
+    stamped ``external_callback`` at create time; every legacy emitter omits it
+    (or sends ``delegate``), and an unknown/reserved value degrades to
+    ``delegate`` rather than raising — the create path must never reject a task
+    event over a label it doesn't recognise."""
+    if not value:
+        return WorkstreamSourceKind.DELEGATE
+    try:
+        return WorkstreamSourceKind(str(value))
+    except ValueError:
+        return WorkstreamSourceKind.DELEGATE
+
+
 def _coerce_outcome(value: Any) -> DecisionOutcome | None:
     if not isinstance(value, str):
         return None
@@ -1084,7 +1100,10 @@ def apply_task_event(db: Session, payload: dict[str, Any]) -> bool:
         ws = AgentWorkstream(
             bot_session_id=session_id,
             agent_id=bot.agent_id if bot is not None else None,
-            source_kind=WorkstreamSourceKind.DELEGATE,
+            # US-303: stamp the envelope's origin from the event (``delegate``
+            # for legacy emitters; ``external_callback`` for a webhook re-entry
+            # workstream, which the live UI renders as "awaiting webhook").
+            source_kind=_coerce_source_kind(payload.get("source_kind")),
             agent_task_id=task_id,
             source_turn_id=_coerce_int_id(payload.get("turn_id")),
             source_decision_id=_coerce_int_id(payload.get("decision_id")),

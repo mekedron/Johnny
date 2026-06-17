@@ -179,14 +179,19 @@ class WorkstreamSourceKind(enum.StrEnum):
     (FK ``agent_task_id`` set); ``foreground_tool_loop`` is inline answer-loop
     work that ran on-turn (no ``agent_tasks`` row — US-107 synthesises those in
     the frontend from orphan tool/model calls, so US-002 writes no row for
-    them). Reserved for later phases — documented, no emitter, and deliberately
-    NOT in the migration CHECK so the enum, the CHECK, and the emitted set can't
-    drift: ``proactive`` (bot-initiated work), ``external_callback``
-    (out-of-process webhook re-entry, US-303).
+    them); ``external_callback`` is an out-of-process workstream that re-enters
+    the session through the authenticated webhook callback (US-303,
+    Johnny-d6w.18) — it has a backing ``agent_tasks`` row carrying the
+    ``callback_token`` but no in-session resolver or worker watcher, settling
+    only when the external system POSTs its result. Reserved for later phases —
+    documented, no emitter, and deliberately NOT in the migration CHECK so the
+    enum, the CHECK, and the emitted set can't drift: ``proactive``
+    (bot-initiated work).
     """
 
     DELEGATE = "delegate"
     FOREGROUND_TOOL_LOOP = "foreground_tool_loop"
+    EXTERNAL_CALLBACK = "external_callback"
 
 
 class WorkstreamStatus(enum.StrEnum):

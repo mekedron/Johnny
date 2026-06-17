@@ -53,8 +53,10 @@ class _RecordingSink(InMemoryTaskSink):
         super().__init__()
         self._events = events
 
-    async def record_queued(self, spec: TaskSpec) -> int | None:
-        task_id = await super().record_queued(spec)
+    async def record_queued(
+        self, spec: TaskSpec, *, callback_token: str | None = None
+    ) -> int | None:
+        task_id = await super().record_queued(spec, callback_token=callback_token)
         self._events.append(f"record_queued:{task_id}")
         return task_id
 
@@ -64,12 +66,16 @@ class _RecordingSink(InMemoryTaskSink):
 
 
 class _FailingSink(InMemoryTaskSink):
-    async def record_queued(self, spec: TaskSpec) -> int | None:
+    async def record_queued(
+        self, spec: TaskSpec, *, callback_token: str | None = None
+    ) -> int | None:
         raise RuntimeError("db down")
 
 
 class _NoIdSink(InMemoryTaskSink):
-    async def record_queued(self, spec: TaskSpec) -> int | None:
+    async def record_queued(
+        self, spec: TaskSpec, *, callback_token: str | None = None
+    ) -> int | None:
         return None
 
 
@@ -125,6 +131,73 @@ async def test_begin_returns_queued_task_with_sink_id_and_spec() -> None:
     assert queued.task_id == 1
     assert queued.spec is spec
     await coordinator.aclose()
+
+
+# --- begin: external_callback locality (US-303, Johnny-d6w.18) -----------------
+
+
+async def test_begin_external_mints_token_and_spawns_nothing() -> None:
+    """An ``external_callback`` spec mints + stores a ``callback_token``, announces
+    the origin, and spawns NO resolver/watcher and sends NO wake — it settles only
+    via the webhook (the executor must never run it)."""
+    sink = InMemoryTaskSink()
+    published: list[QueuedTask] = []
+    woke: list[QueuedTask] = []
+
+    async def publish(queued: QueuedTask) -> None:
+        published.append(queued)
+
+    async def wake(queued: QueuedTask) -> None:
+        woke.append(queued)
+
+    coordinator = TaskCoordinator(
+        sink, executor=stub_executor, publish_queued=publish, wake=wake
+    )
+    queued = await coordinator.begin(
+        _spec(kind="external.report", source_kind="external_callback")
+    )
+
+    assert queued is not None
+    # Token minted, returned, and persisted on the durable row.
+    assert isinstance(queued.callback_token, str)
+    assert len(queued.callback_token) >= 20
+    record = sink.get(queued.task_id)
+    assert record is not None
+    assert record.callback_token == queued.callback_token
+    assert record.spec.source_kind == "external_callback"
+    # No local execution machinery — and no worker nudge.
+    assert not coordinator._resolvers
+    assert not coordinator._watchers
+    assert woke == []
+    # The announce carried the origin so the durable writer + UI stamp it.
+    assert published[0].spec.source_kind == "external_callback"
+    # Yielding the loop does not settle it — nothing is running it.
+    await asyncio.sleep(0)
+    settled = sink.get(queued.task_id)
+    assert settled is not None and settled.status == "queued"
+    await coordinator.aclose()
+
+
+async def test_begin_delegate_mints_no_callback_token() -> None:
+    """The default (delegate) path never mints a token — the column stays NULL."""
+    sink = InMemoryTaskSink()
+    coordinator = TaskCoordinator(sink, executor=stub_executor)
+    queued = await coordinator.begin(_spec())
+    assert queued is not None
+    assert queued.callback_token is None
+    record = sink.get(queued.task_id)
+    assert record is not None and record.callback_token is None
+    await coordinator.aclose()
+
+
+def test_external_callback_source_kind_constant_matches_model() -> None:
+    """Drift guard: the stdlib-only constant mirrors the SQLAlchemy enum value."""
+    from app.db.models import WorkstreamSourceKind
+    from johnny.agent.tasks import EXTERNAL_CALLBACK_SOURCE_KIND
+
+    assert (
+        EXTERNAL_CALLBACK_SOURCE_KIND == WorkstreamSourceKind.EXTERNAL_CALLBACK.value
+    )
 
 
 # --- begin: persist failure = no promise --------------------------------------

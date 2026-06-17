@@ -342,6 +342,10 @@ export interface TaskQueuedEvent extends BaseEnvelope {
 	decision_id?: number | null;
 	ack_text?: string;
 	request_id?: string | null;
+	// Where the work originates (US-303). `external_callback` marks a webhook
+	// re-entry workstream the live UI renders as "awaiting webhook"; omitted /
+	// `delegate` for every legacy emitter.
+	source_kind?: string;
 	session_id?: string | null;
 }
 
