@@ -15,6 +15,7 @@ host port) — nothing here is reachable from outside the stack.
 from __future__ import annotations
 
 import datetime
+import json
 import os
 
 from mcp.server.fastmcp import FastMCP
@@ -55,7 +56,26 @@ def word_count(text: str) -> int:
 @mcp.tool()
 def server_time() -> str:
     """Return this server's current UTC time, ISO-8601 format."""
-    return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat()
+
+
+@mcp.tool()
+def list_inventory() -> str:
+    """List warehouse inventory as a JSON array (structured machine output).
+
+    Unlike the other demo tools (which return ear-ready scalars), this returns
+    structured JSON — the shape a third-party server like Metabase's
+    ``list_dashboards`` sends back. It exercises the Johnny-d6w.30 result
+    voicer: a delegated MCP result must be SUMMARIZED for the ear, never read
+    out as raw JSON. The data is fixed so a clean install reproduces it.
+    """
+    return json.dumps(
+        [
+            {"sku": "WID-1", "name": "Widget", "in_stock": 42},
+            {"sku": "GRO-7", "name": "Grommet", "in_stock": 8},
+            {"sku": "SPR-3", "name": "Spring", "in_stock": 0},
+        ]
+    )
 
 
 def main() -> None:

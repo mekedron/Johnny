@@ -52,7 +52,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -90,6 +90,7 @@ from johnny.voice_pipeline.events import (
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
+    from johnny.mcp.executor import Voicer
     from johnny.skills.executor import TaskProgressReporter
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,7 @@ DEFAULT_TASK_MAX_ATTEMPTS = 3
 DEFAULT_TASK_EXEC_TIMEOUT_S = 240.0
 DEFAULT_TASK_SWEEP_INTERVAL_S = 30.0
 DEFAULT_TASK_REGISTRY_TTL_S = 60.0
+DEFAULT_MCP_VOICER_TIMEOUT_S = 20.0
 
 _WAKE_RECONNECT_BACKOFF_S = 2.0
 
@@ -184,6 +186,15 @@ def get_task_sweep_interval_seconds() -> float:
 def get_task_registry_ttl_seconds() -> float:
     return _env_float(
         "JOHNNY_TASK_REGISTRY_TTL_SECONDS", DEFAULT_TASK_REGISTRY_TTL_S, minimum=0.0
+    )
+
+
+def get_mcp_voicer_timeout_seconds() -> float:
+    """Per-call hard bound on the Johnny-d6w.30 MCP result voicer. Kept small
+    and well under the per-task ``exec_timeout`` so a slow/hung voicing call
+    falls back to the raw result long before the worker's task timeout fires."""
+    return _env_float(
+        "JOHNNY_MCP_VOICER_TIMEOUT_SECONDS", DEFAULT_MCP_VOICER_TIMEOUT_S, minimum=1.0
     )
 
 
@@ -608,6 +619,152 @@ def load_mcp_server_configs(claimed: ClaimedTask) -> tuple[McpServerConfig, ...]
     )
 
 
+_VOICER_SYSTEM_PROMPT = (
+    "You convert a tool's raw output into a brief spoken reply for a voice "
+    "assistant. Reply with one or two natural sentences a person would say out "
+    "loud. Never read JSON, code, brackets, or field names aloud. State only "
+    "facts present in the output — never invent, guess, or add data. Be concise "
+    "and factual."
+)
+
+
+def _voicer_user_prompt(
+    raw_text: str,
+    *,
+    tool: str,
+    server: str,
+    arguments: Mapping[str, object],
+) -> str:
+    try:
+        args_json = json.dumps(dict(arguments), default=str)
+    except (TypeError, ValueError):
+        args_json = "{}"
+    return (
+        f"The tool `{tool}` on the `{server}` connector was called with "
+        f"arguments {args_json} and returned the output below. Summarize it as a "
+        f"spoken reply:\n\n{raw_text}"
+    )
+
+
+class _LlmVoicer:
+    """Voices a structured MCP payload into ear-ready prose via the active LLM
+    provider (Johnny-d6w.30 — the operator's "speak LLM = refiner/voicer").
+
+    Resolved per call (the trt.38 no-restart discipline: an operator swapping
+    the active LLM bites the next voiced task with no worker restart) and
+    best-effort: any failure — no active LLM, no ``FERNET_KEY``, a transport
+    error, a timeout, or an empty completion — returns ``None`` so the executor
+    speaks the raw (capped) text and the task still settles ``done``. The
+    decision of WHAT to voice lives in the executor (a generic JSON-shape gate);
+    this only performs the refine call, so it carries no skill/tool knowledge.
+    """
+
+    def __init__(
+        self,
+        session_factory: Callable[[], Session] | None,
+        *,
+        timeout_s: float,
+    ) -> None:
+        self._session_factory = session_factory
+        self._timeout_s = timeout_s
+
+    async def voice(
+        self,
+        raw_text: str,
+        *,
+        tool: str,
+        server: str,
+        arguments: Mapping[str, object],
+    ) -> str | None:
+        try:
+            from app.providers.base import ChatMessage, LLMProvider, ProviderKind
+            from app.providers.loader import load_active_providers
+            from app.security.crypto import decrypt_json, get_crypto
+        except Exception:  # pragma: no cover — providers ship in the worker image
+            logger.warning("mcp voicer: provider modules unavailable", exc_info=True)
+            return None
+
+        try:
+            crypto = get_crypto()
+        except Exception:
+            logger.warning(
+                "mcp voicer: credential crypto unavailable (FERNET_KEY?) — "
+                "speaking raw result",
+                exc_info=True,
+            )
+            return None
+
+        factory = self._session_factory
+        if factory is None:
+            from app.db.session import SessionLocal
+
+            factory = SessionLocal
+
+        db = factory()
+        try:
+            active = load_active_providers(
+                db,
+                decrypt=lambda blob: decrypt_json(crypto, blob),
+                kinds=(ProviderKind.LLM,),
+            )
+            provider = active.get(ProviderKind.LLM)
+        except Exception:
+            logger.warning(
+                "mcp voicer: active LLM load failed — speaking raw result",
+                exc_info=True,
+            )
+            return None
+        finally:
+            db.close()
+
+        # Scoped to ``kinds=(LLM,)`` so this is an LLMProvider; the isinstance
+        # narrows for typing and stays defensive if the active row is off-kind.
+        if not isinstance(provider, LLMProvider):
+            return None
+
+        messages = [
+            ChatMessage(role="system", content=_VOICER_SYSTEM_PROMPT),
+            ChatMessage(
+                role="user",
+                content=_voicer_user_prompt(
+                    raw_text, tool=tool, server=server, arguments=arguments
+                ),
+            ),
+        ]
+        try:
+            response = await asyncio.wait_for(
+                provider.chat(messages), timeout=self._timeout_s
+            )
+        except Exception:
+            logger.warning(
+                "mcp voicer: chat() failed or timed out — speaking raw result",
+                exc_info=True,
+            )
+            return None
+        finally:
+            try:
+                await provider.close()
+            except Exception:  # pragma: no cover — close is best-effort
+                logger.debug("mcp voicer: provider close failed", exc_info=True)
+
+        text = (response.text or "").strip()
+        return text or None
+
+
+def build_llm_voicer(
+    session_factory: Callable[[], Session] | None = None,
+    *,
+    timeout_s: float | None = None,
+) -> _LlmVoicer:
+    """Build the production MCP result voicer (Johnny-d6w.30)."""
+    return _LlmVoicer(
+        session_factory,
+        timeout_s=(
+            timeout_s if timeout_s is not None else get_mcp_voicer_timeout_seconds()
+        ),
+    )
+
+
 @dataclass(slots=True)
 class _ExecutorEntry:
     registry: Any
@@ -649,12 +806,22 @@ class SandboxExecutorProvider:
         mcp_manager: Any | None = None,
         mcp_config_loader: Callable[[ClaimedTask], tuple[McpServerConfig, ...]]
         | None = None,
+        voicer: Voicer | None = None,
+        session_factory: Callable[[], Session] | None = None,
+        voicer_timeout_s: float | None = None,
     ) -> None:
         self._registry_ttl_s = (
             registry_ttl_s if registry_ttl_s is not None else get_task_registry_ttl_seconds()
         )
         self._entries: dict[str, _ExecutorEntry] = {}
         self._lock = asyncio.Lock()
+        # Johnny-d6w.30 MCP result voicer. ``voicer`` is a test seam (inject a
+        # fake); production resolves the LLM-backed one lazily from
+        # ``session_factory`` (the worker's, so tests share one DB) and caches
+        # it on first use in :meth:`_resolve_voicer`.
+        self._voicer = voicer
+        self._session_factory = session_factory
+        self._voicer_timeout_s = voicer_timeout_s
         # MCP connector (Johnny-trt.36): connections live HERE — one manager
         # per worker process, lazily created on the first mcp__ claim so the
         # SDK import never taxes a worker that has no servers configured.
@@ -670,6 +837,16 @@ class SandboxExecutorProvider:
 
             self._mcp_manager = McpClientManager()
         return self._mcp_manager
+
+    def _resolve_voicer(self) -> Voicer:
+        """The MCP result voicer (Johnny-d6w.30): the injected fake if any, else
+        the lazily-built LLM-backed one (cached — it holds only the worker's
+        session factory + timeout; the active provider is resolved per call)."""
+        if self._voicer is None:
+            self._voicer = build_llm_voicer(
+                self._session_factory, timeout_s=self._voicer_timeout_s
+            )
+        return self._voicer
 
     async def executor_for(
         self,
@@ -735,6 +912,7 @@ class SandboxExecutorProvider:
             sandbox_url=url,
             fallback=stub_executor,
             progress_reporter=progress_reporter,
+            voicer=self._resolve_voicer(),
         )
         # Per-tool-call trace persistence (Johnny-etu.4): every sandbox.exec the
         # runner makes for THIS claim — the availability recheck and the run
@@ -900,7 +1078,11 @@ class TaskWorker:
         # Injected single executor = test seam; None = the production
         # sandbox-backed chain resolved per task (the Phase-7 seam).
         self._executor = executor
-        self._provider = SandboxExecutorProvider() if executor is None else None
+        self._provider = (
+            SandboxExecutorProvider(session_factory=session_factory)
+            if executor is None
+            else None
+        )
         self._poll_interval_s = (
             poll_interval_s if poll_interval_s is not None else get_task_poll_interval_seconds()
         )

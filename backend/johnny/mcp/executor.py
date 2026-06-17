@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from typing import Protocol
 
 from johnny.agent.tasks import QueuedTask, TaskExecutor, TaskResult, stub_executor
 from johnny.mcp.config import McpServerConfig, parse_qualified_tool_name
@@ -39,11 +40,45 @@ LoadServers = Callable[[], Sequence[McpServerConfig]]
 """Fresh enabled-server configs, read per execution (worker: a DB read)."""
 
 
+class Voicer(Protocol):
+    """Turns a structured tool payload into ear-ready prose (Johnny-d6w.30).
+
+    ``voice`` returns a short spoken-form summary of ``raw_text``, or ``None``
+    to fall back to the raw (capped) text. It is best-effort — it must never
+    raise — so a voicing failure costs only prose quality, never the settle.
+    Injected like ``progress_reporter`` (the worker passes the real LLM-backed
+    one; tests pass fakes), so this module stays importable without the SDK.
+    """
+
+    async def voice(
+        self,
+        raw_text: str,
+        *,
+        tool: str,
+        server: str,
+        arguments: Mapping[str, object],
+    ) -> str | None: ...
+
+
 def _cap_speech(text: str) -> str:
     cleaned = text.strip()
     if len(cleaned) <= RESULT_TEXT_CAP_CHARS:
         return cleaned
     return cleaned[: RESULT_TEXT_CAP_CHARS - 1].rstrip() + "…"
+
+
+def _looks_structured(text: str) -> bool:
+    """Whether ``text`` is a JSON object/array — a machine payload that needs
+    voicing for the ear. Prose (a JSON parse error) and bare JSON scalars
+    (already speakable, e.g. ``"42"`` / ``"done"``) return ``False``. The
+    decision is derived purely from payload SHAPE — no per-server/tool/kind
+    knowledge — so it stays correct as the workspace's skills and MCP servers
+    change (the no-hardcoded-skills rule)."""
+    try:
+        parsed = json.loads(text.strip())
+    except (ValueError, TypeError):
+        return False
+    return isinstance(parsed, (dict, list))
 
 
 def _result_json(
@@ -70,6 +105,7 @@ def build_mcp_task_executor(
     sandbox_url: str,
     fallback: TaskExecutor = stub_executor,
     progress_reporter: TaskProgressReporter | None = None,
+    voicer: Voicer | None = None,
 ) -> TaskExecutor:
     """The worker's MCP leg: qualified kinds run their server tool, rest fall through.
 
@@ -82,6 +118,12 @@ def build_mcp_task_executor(
     ``progress_reporter`` (US-202), when given, narrates one ``mcp_call``
     milestone just before the tool call — a single-shot leg, so one milestone
     is the honest count. Reporting never affects the settle.
+
+    ``voicer`` (Johnny-d6w.30), when given, turns a structured (JSON) success
+    payload into ear-ready prose so a third-party server's machine JSON is not
+    spoken verbatim; prose payloads pass through untouched, and any voicer
+    failure falls back to the raw (capped) text. Voicing never affects the
+    settle status.
     """
 
     async def _execute(task: QueuedTask) -> TaskResult:
@@ -218,10 +260,40 @@ def build_mcp_task_executor(
         logger.info(
             "mcp executor: kind=%s settled done (%sms)", kind, result.duration_ms
         )
+        fallback_text = (
+            _cap_speech(result.text)
+            or f"The {tool} task finished, but there was nothing to report."
+        )
+        result_text = fallback_text
+        # Johnny-d6w.30: a third-party MCP server returns machine JSON, which
+        # would otherwise be SPOKEN verbatim. When the payload looks structured,
+        # voice it into ear-ready prose; prose payloads (and bare scalars) pass
+        # through untouched. Best-effort — any voicer failure speaks the raw
+        # (capped) text and still settles ``done``.
+        if voicer is not None and _looks_structured(result.text):
+            try:
+                voiced = await voicer.voice(
+                    result.text,
+                    tool=tool,
+                    server=server_name,
+                    arguments=arguments,
+                )
+            except Exception:  # noqa: BLE001 — voicing never fails the task
+                logger.warning(
+                    "mcp executor: kind=%s voicer raised — speaking raw result",
+                    kind,
+                    exc_info=True,
+                )
+                voiced = None
+            voiced = _cap_speech(voiced) if voiced else ""
+            if voiced:
+                result_text = voiced
+                # Keep the raw payload for machine consumers / the trace UI; the
+                # spoken text is now the prose, never the JSON.
+                payload = {**payload, "raw_text": fallback_text, "voiced": True}
         return TaskResult(
             status="done",
-            result_text=_cap_speech(result.text)
-            or f"The {tool} task finished, but there was nothing to report.",
+            result_text=result_text,
             result_json=payload,
         )
 
