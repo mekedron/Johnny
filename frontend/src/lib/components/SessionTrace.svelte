@@ -58,7 +58,7 @@
 	<div class="grid grid-cols-1 gap-4 lg:grid-cols-3" data-testid="session-trace-columns">
 		<SessionDecisions routerTurns={view.routerTurns} />
 		<SessionDeliveries deliveries={view.deliveries} {botSessionId} />
-		<SessionWorkstreams workstreams={view.workstreams} />
+		<SessionWorkstreams workstreams={view.workstreams} {botSessionId} />
 	</div>
 	<SessionActivityLog {activityTurns} turnCount={activityTurnCount} loadError={activityError} />
 </div>

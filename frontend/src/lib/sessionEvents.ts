@@ -47,6 +47,7 @@ export type SessionEventType =
 	| 'task_queued'
 	| 'task_progress'
 	| 'task_completed'
+	| 'task_cancelled'
 	| 'task_result_expired'
 	| 'workstream_created'
 	| 'workstream_progress'
@@ -375,6 +376,23 @@ export interface TaskCompletedEvent extends BaseEnvelope {
 	session_id?: string | null;
 }
 
+/**
+ * A running delegated task was cancelled by the user (Johnny-d6w.17, US-302).
+ * Settles the workstream `cancelled` — execution cut, not just speech.
+ */
+export interface TaskCancelledEvent extends BaseEnvelope {
+	type: 'task_cancelled';
+	task_id: number;
+	kind: string;
+	timestamp_ms: number;
+	actor?: 'voice' | 'ui' | 'system';
+	result_text?: string;
+	error?: string;
+	turn_id?: number | null;
+	request_id?: string | null;
+	session_id?: string | null;
+}
+
 /** A completed task's spoken delivery was dropped undelivered (expired). */
 export interface TaskResultExpiredEvent extends BaseEnvelope {
 	type: 'task_result_expired';
@@ -461,6 +479,7 @@ export type SessionEvent =
 	| TaskQueuedEvent
 	| TaskProgressEvent
 	| TaskCompletedEvent
+	| TaskCancelledEvent
 	| TaskResultExpiredEvent
 	| WorkstreamCreatedEvent
 	| WorkstreamProgressEvent

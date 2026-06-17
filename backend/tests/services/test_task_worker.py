@@ -12,6 +12,7 @@ execution timeout, and that sweeps keep happening while slow tools run.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -1137,3 +1138,63 @@ async def test_executor_for_chains_skills_then_mcp(
     stubbed = await executor(_claimed("never-heard-of-it").as_queued_task())
     assert stubbed.status == "failed"
     assert manager.calls == [("http://sb-test:8088", "echo")] * 2
+
+
+# --- US-302: user cancel of a worker-owned task (Johnny-d6w.17) ---------------
+
+
+async def test_handle_cancel_message_cuts_inflight_runner_and_announces(
+    db: Session, session_factory: sessionmaker[Session]
+) -> None:
+    """A cancel signal for a task THIS worker is running cuts the executor
+    mid-run, settles the row ``cancelled`` (not failed), and announces one
+    ``TaskCancelled`` carrying the actor — the AC1 "cut execution" path."""
+    task_id = _insert(db, kind="skill.metabase")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_executor(task: QueuedTask) -> TaskResult:
+        started.set()
+        await release.wait()  # held until cancelled
+        return TaskResult(status="done", result_text="done")  # pragma: no cover
+
+    worker = _worker(session_factory, executor=blocking_executor)
+    events = _capture_events(worker)
+
+    runner = asyncio.ensure_future(worker.run())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5.0)
+        assert task_id in worker._inflight_by_id  # claimed, running, tracked by id
+        worker._handle_cancel_message(
+            json.dumps({"task_id": task_id, "actor": "voice"}).encode()
+        )
+        deadline = asyncio.get_running_loop().time() + 5.0
+        while _row(db, task_id).status != AgentTaskStatus.CANCELLED:
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("task did not settle cancelled in time")
+            await asyncio.sleep(0.02)
+    finally:
+        release.set()
+        worker.request_stop()
+        await asyncio.wait_for(runner, timeout=10.0)
+
+    row = _row(db, task_id)
+    assert row.status == AgentTaskStatus.CANCELLED
+    assert "stopped" in (row.result_text or "").lower()
+    cancels = [e for e in events if getattr(e, "type", None) == "task_cancelled"]
+    assert len(cancels) == 1
+    assert cancels[0].task_id == task_id
+    assert cancels[0].actor == "voice"
+
+
+def test_handle_cancel_message_ignores_unknown_task(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A cancel signal for a task this worker is NOT running is a safe no-op
+    (the shared channel reaches every worker; only the owner acts)."""
+    worker = _worker(session_factory, executor=None)
+    # never raises, nothing to cancel
+    worker._handle_cancel_message(json.dumps({"task_id": 4242}).encode())
+    worker._handle_cancel_message(b"not json")
+    worker._handle_cancel_message(json.dumps({"no_task_id": 1}).encode())
+    assert worker._cancel_requests == {}

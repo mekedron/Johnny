@@ -434,6 +434,40 @@ export function applyLiveTraceEvent(
 			);
 			return { ...records, tasks, workstreams };
 		}
+		case 'task_cancelled': {
+			// US-302 (Johnny-d6w.17): a user cancelled the running work. Settle
+			// both the task row and the workstream envelope to `cancelled`
+			// (terminal, rank 2 — forward-only, so a late progress can't reopen
+			// it). No delivery readiness: a cancelled task has nothing to speak.
+			const tasks = upsertTaskByTaskId(
+				records.tasks ?? [],
+				event.task_id,
+				{
+					kind: event.kind,
+					status: 'cancelled',
+					resultText: event.result_text ?? null,
+					error: event.error ?? null,
+					requestId: event.request_id ?? null
+				},
+				event.timestamp_ms
+			);
+			const workstreams = upsertWorkstreamByTaskId(
+				records.workstreams ?? [],
+				event.task_id,
+				{
+					status: 'cancelled',
+					title: event.kind,
+					resultText: event.result_text ?? null,
+					error: event.error ?? null,
+					setCompletedAt: true,
+					requestId: event.request_id ?? null,
+					sourceTurnId: event.turn_id ?? null
+				},
+				event.timestamp_ms,
+				true
+			);
+			return { ...records, tasks, workstreams };
+		}
 		case 'task_result_expired': {
 			const workstreams = upsertWorkstreamByTaskId(
 				records.workstreams ?? [],

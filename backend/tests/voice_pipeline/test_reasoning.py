@@ -435,7 +435,9 @@ def test_router_schema_action_and_task_shape() -> None:
     second hop. ``ack`` joined ``kind`` as required (Johnny-trt.53) so
     constrained decoders force the model to author the spoken ack; the
     parser stays lenient, so old outputs without it parse identically."""
-    assert ROUTER_ACTIONS == ("silent", "speak", "delegate", "status")
+    # ``cancel`` joined the vocabulary (Johnny-d6w.17, US-302) — additive, so a
+    # recorded fixture's old action still parses byte-identically (replay parity).
+    assert ROUTER_ACTIONS == ("silent", "speak", "delegate", "status", "cancel")
     action = _ROUTER_SCHEMA["properties"]["action"]
     assert action["enum"] == list(ROUTER_ACTIONS)
     task = _ROUTER_SCHEMA["properties"]["task"]

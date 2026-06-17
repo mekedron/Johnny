@@ -390,12 +390,14 @@ SILENT_ACTION = "silent"
 SPEAK_ACTION = "speak"
 DELEGATE_ACTION = "delegate"
 STATUS_ACTION = "status"
+CANCEL_ACTION = "cancel"
 
 ROUTER_ACTIONS: tuple[str, ...] = (
     SILENT_ACTION,
     SPEAK_ACTION,
     DELEGATE_ACTION,
     STATUS_ACTION,
+    CANCEL_ACTION,
 )
 """The router's Phase-3 triage action vocabulary (Johnny-trt.16).
 
@@ -403,9 +405,13 @@ ROUTER_ACTIONS: tuple[str, ...] = (
 action. ``delegate`` hands the request off as an async task (the verdict
 carries a :class:`TaskRequest`; the gate speaks the ack and the
 TaskCoordinator runs the work off the turn loop, Johnny-trt.17/.18).
-``status`` asks for a progress report on delegated work. The vocabulary is
-deliberately closed — one LLM call decides the whole triage, no second hop.
-"""
+``status`` asks for a progress report on delegated work. ``cancel`` stops
+delegated work the user asked to abort ("stop that task", Johnny-d6w.17,
+US-302); the gate resolves which running workstream from the registry and
+drives :meth:`~johnny.agent.tasks.TaskCoordinator.cancel_task`. The vocabulary
+is deliberately closed — one LLM call decides the whole triage, no second hop.
+Additive only: the value is new, so a recorded fixture carrying an old action
+parses byte-identically and the replay verdict never drifts (Johnny-d6w.1)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -483,8 +489,9 @@ _ROUTER_SCHEMA: dict[str, Any] = {
             "description": (
                 "silent = say nothing; speak = answer now; delegate = queue "
                 "a listed task kind (fill 'task'); status = report progress "
-                "or results of delegated work. When unsure between speak and "
-                "delegate, choose speak."
+                "or results of delegated work; cancel = stop running delegated "
+                "work the user asked to abort ('stop that task'). When unsure "
+                "between speak and delegate, choose speak."
             ),
         },
         "task": {

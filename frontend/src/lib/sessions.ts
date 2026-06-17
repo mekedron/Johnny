@@ -117,6 +117,32 @@ export function stopSession(botSessionId: number): Promise<BotSession> {
 	});
 }
 
+export interface CancelWorkstreamResponse {
+	task_id: number;
+	bot_session_id: number;
+	action: string;
+	prior_status: string;
+	/** Redis subscribers the cancel command reached; 0 ⇒ no live engine heard it. */
+	subscribers: number;
+}
+
+/**
+ * Cancel a running workstream — cut execution, not just speech (US-302,
+ * Johnny-d6w.17). Addresses the backing delegated task by id; the running
+ * engine settles it `cancelled` and the live `task_cancelled` event flips the
+ * Workstreams column. Throws (with `status`/`body`) on 404 (gone) / 409 (no
+ * longer running).
+ */
+export function cancelWorkstream(
+	botSessionId: number,
+	taskId: number
+): Promise<CancelWorkstreamResponse> {
+	return request<CancelWorkstreamResponse>(
+		`/sessions/${botSessionId}/tasks/${taskId}/cancel`,
+		{ method: 'POST' }
+	);
+}
+
 /** One invariant violation reported by an offline replay (Johnny-ckz.28.5). */
 export interface ReplayInvariantView {
 	invariant: string;

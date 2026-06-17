@@ -46,6 +46,7 @@ from johnny.agent.dispatch import AGENT_NAME
 from johnny.agent.job_config import SessionJobConfig
 from johnny.agent.job_session import build_agent_runtime
 from johnny.agent.session import build_agent_session, load_vad
+from johnny.agent.session_control import SessionControlListener
 from johnny.agent.task_wiring import attach_task_speech_wiring
 
 if TYPE_CHECKING:
@@ -141,6 +142,18 @@ async def entrypoint(ctx: JobContext) -> None:
     # approval-coordinator placement. No-op for non-delegating runtimes;
     # torn down by runtime.aclose via the shutdown callback above.
     attach_task_speech_wiring(runtime, session)
+    # US-302 (Johnny-d6w.17): subscribe the inbound control channel so the UI's
+    # workstream Cancel button reaches this running engine. cancel_task routes
+    # the cut (in-session resolver, or on to the worker for claimed kinds).
+    # Needs the delegating coordinator + a Redis URL; a no-op otherwise.
+    if runtime.task_coordinator is not None and config.redis_url:
+        control_listener = SessionControlListener(
+            redis_url=config.redis_url,
+            session_id=session_id,
+            coordinator=runtime.task_coordinator,
+        )
+        control_listener.start()
+        ctx.add_shutdown_callback(control_listener.aclose)
     _install_empty_room_shutdown(ctx, session_id)
     logger.info(
         "agent worker: session=%s started; agent joined room=%s",

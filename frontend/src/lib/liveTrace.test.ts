@@ -4,6 +4,7 @@ import { buildSessionTraceView, type SessionTraceInput } from './sessionTrace';
 import type { AgentWorkstreamRecord } from './sessionDetail';
 import type {
 	RouterDecisionEvent,
+	TaskCancelledEvent,
 	TaskCompletedEvent,
 	TaskProgressEvent,
 	TaskQueuedEvent,
@@ -65,6 +66,21 @@ const completed = (over: Partial<TaskCompletedEvent> = {}): TaskCompletedEvent =
 	...over
 });
 
+const cancelled = (over: Partial<TaskCancelledEvent> = {}): TaskCancelledEvent => ({
+	seq: 4,
+	type: 'task_cancelled',
+	task_id: 100,
+	kind: KIND,
+	timestamp_ms: 4000,
+	actor: 'ui',
+	result_text: 'Stopped the task — you asked me to cancel it.',
+	error: 'cancelled by ui request',
+	turn_id: 5,
+	request_id: 'req-1',
+	session_id: '3',
+	...over
+});
+
 const wsFor = (records: SessionTraceInput, taskId = 100): AgentWorkstreamRecord => {
 	const ws = (records.workstreams ?? []).find((w) => w.agent_task_id === taskId);
 	if (ws === undefined) throw new Error(`no workstream for task ${taskId}`);
@@ -119,6 +135,34 @@ describe('applyLiveTraceEvent', () => {
 		expect(ws.status).toBe('failed');
 		expect(ws.error).toBe('boom');
 		expect(ws.delivery_status).toBe('not_ready');
+	});
+
+	it('task_cancelled settles the workstream + task cancelled, delivery stays not_ready', () => {
+		// US-302: a user cancelled the running work — terminal, with nothing to
+		// deliver (the column flips to the cancelled badge live).
+		let r = applyLiveTraceEvent(empty(), queued());
+		r = applyLiveTraceEvent(r, progress());
+		r = applyLiveTraceEvent(r, cancelled());
+		const ws = wsFor(r);
+		expect(ws.status).toBe('cancelled');
+		expect(ws.completed_at).not.toBeNull();
+		expect(ws.delivery_status).toBe('not_ready');
+		expect(r.tasks?.[0].status).toBe('cancelled');
+		// and it projects into the Workstreams column as cancelled
+		const view = buildSessionTraceView(r);
+		expect(view.workstreams[0].status).toBe('cancelled');
+	});
+
+	it('task_cancelled is idempotent + forward-only (a late running never reopens it)', () => {
+		let r = applyLiveTraceEvent(empty(), queued());
+		r = applyLiveTraceEvent(r, progress());
+		r = applyLiveTraceEvent(r, cancelled());
+		const after = wsFor(r);
+		r = applyLiveTraceEvent(r, cancelled()); // re-applied frame is stable
+		expect(wsFor(r).status).toBe('cancelled');
+		expect(wsFor(r).completed_at).toBe(after.completed_at);
+		r = applyLiveTraceEvent(r, progress()); // a late lower-rank frame is ignored
+		expect(wsFor(r).status).toBe('cancelled');
 	});
 
 	it('task_result_expired marks delivery expired (only on an existing workstream)', () => {

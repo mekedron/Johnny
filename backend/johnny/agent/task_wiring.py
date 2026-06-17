@@ -70,6 +70,8 @@ from johnny.agent.speech_queue import (
     SpeechQueue,
 )
 from johnny.agent.tasks import (
+    CancelActor,
+    PublishCancelled,
     PublishCompleted,
     PublishQueued,
     QueuedTask,
@@ -84,6 +86,7 @@ from johnny.agent.tasks import (
 )
 from johnny.voice_pipeline.event_bus import EventBus
 from johnny.voice_pipeline.events import (
+    TaskCancelled,
     TaskCompleted,
     TaskProgress,
     TaskQueued,
@@ -120,6 +123,18 @@ itself; the durable queue is the ``agent_tasks`` table. Pinged for every
 queued task, internal kinds included (the worker's claim excludes those by
 kind, so the extra nudge is harmless).
 """
+
+TASKS_CANCEL_CHANNEL = "johnny.tasks.cancel"
+"""Redis pub/sub channel user-cancel signals for worker-owned tasks go out on
+(Johnny-d6w.17, US-302).
+
+Shared across sessions like :data:`TASKS_WAKE_CHANNEL`: the Phase-4 task worker
+subscribes once and cuts the in-flight runner for any ``{"task_id": N}`` it
+hears, settling the row ``cancelled``. Published by **both** the agent (a voice
+``cancel`` verdict over a worker-owned task) and the API (the UI Cancel button),
+so a worker-owned task can be stopped from either surface. ``.cancel`` shares
+the ``johnny.tasks`` prefix but is a reserved (non-numeric) suffix, never a
+session id."""
 
 TASKS_CHANNEL_PREFIX = "johnny.tasks"
 """Channel prefix for the per-session *agent* task channel (Johnny-trt.24):
@@ -283,6 +298,38 @@ def build_publish_task_completed(
     return _publish
 
 
+def build_publish_task_cancelled(
+    event_bus: EventBus,
+    *,
+    session_id: str | None = None,
+    clock: Callable[[], int] = _default_clock_ms,
+) -> PublishCancelled:
+    """Publish :class:`TaskCancelled` for a user-cancelled task (Johnny-d6w.17).
+
+    The in-session resolver invokes this *after* the terminal ``agent_tasks``
+    row write, only for a **user** cancel (see
+    :data:`~johnny.agent.tasks.PublishCancelled`), so the event always
+    describes durable, queryable ``cancelled`` state. The single durable writer
+    persists it onto the ``agent_workstreams`` envelope; the per-session WS fans
+    it to the browser so the Workstreams column flips to ``cancelled`` live.
+    """
+
+    async def _publish(queued: QueuedTask, actor: CancelActor) -> None:
+        await event_bus.publish(
+            TaskCancelled(
+                task_id=queued.task_id,
+                kind=queued.spec.kind,
+                timestamp_ms=clock(),
+                actor=actor,
+                turn_id=queued.spec.turn_id,
+                request_id=queued.spec.request_id,
+                session_id=session_id,
+            )
+        )
+
+    return _publish
+
+
 class RedisTaskWake:
     """Publish-only wake pings on :data:`TASKS_WAKE_CHANNEL`.
 
@@ -319,6 +366,22 @@ class RedisTaskWake:
             "session_id": self._session_id,
         }
         await client.publish(TASKS_WAKE_CHANNEL, json.dumps(payload, separators=(",", ":")))
+
+    async def request_worker_cancel(self, task_id: int) -> None:
+        """Publish a cancel signal for one worker-owned task (Johnny-d6w.17).
+
+        The voice ``cancel`` verdict path: the coordinator owns no worker row,
+        so it asks the worker — over the shared :data:`TASKS_CANCEL_CHANNEL` —
+        to cut its in-flight runner and settle the row ``cancelled``. Reuses
+        this session's wake client (same ``johnny.tasks.*`` namespace, one
+        connection per session). Publish-only and best-effort like the ping;
+        the coordinator's :meth:`_safe_request_worker_cancel` contains failures.
+        """
+        client = await self._connect()
+        payload = {"task_id": task_id, "session_id": self._session_id}
+        await client.publish(
+            TASKS_CANCEL_CHANNEL, json.dumps(payload, separators=(",", ":"))
+        )
 
     async def close(self) -> None:
         if self._client is None:
@@ -368,6 +431,15 @@ def build_task_coordinator(
         publish_queued=build_publish_task_queued(event_bus, session_id=session_id, clock=clock),
         publish_completed=build_publish_task_completed(
             event_bus, session_id=session_id, clock=clock
+        ),
+        publish_cancelled=build_publish_task_cancelled(
+            event_bus, session_id=session_id, clock=clock
+        ),
+        # The voice ``cancel`` verdict reaches worker-owned tasks over Redis
+        # (Johnny-d6w.17); reuse the wake client. ``None`` (no redis_url, e.g.
+        # in-process harnesses) makes worker cancel a logged no-op.
+        request_worker_cancel=(
+            wake.request_worker_cancel if wake is not None else None
         ),
         wake=wake,
         runs_in_session=runs_in_session,
@@ -1067,6 +1139,7 @@ def attach_task_speech_wiring(
 __all__ = [
     "DELIVERY_TICK_S",
     "LISTENER_RECONNECT_BACKOFF_S",
+    "TASKS_CANCEL_CHANNEL",
     "TASKS_CHANNEL_PREFIX",
     "TASKS_WAKE_CHANNEL",
     "RedisTaskWake",
@@ -1074,6 +1147,7 @@ __all__ = [
     "TaskSpeechDeliverer",
     "TaskSpeechWiring",
     "attach_task_speech_wiring",
+    "build_publish_task_cancelled",
     "build_publish_task_completed",
     "build_publish_task_queued",
     "build_task_coordinator",

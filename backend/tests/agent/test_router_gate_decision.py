@@ -43,6 +43,10 @@ from app.providers.base import (  # noqa: E402
     ToolDefinition,
 )
 from johnny.agent.gate import GateTerminal, TurnIndex, TurnLedger  # noqa: E402
+from johnny.agent.internal_tools import (  # noqa: E402
+    INTERNAL_TOOL_KINDS,
+    internal_catalog_entries,
+)
 from johnny.agent.router_gate import (  # noqa: E402
     ACK_FALLBACK_KEY,
     BACKGROUND_PROMOTION_KEY,
@@ -62,10 +66,6 @@ from johnny.agent.router_gate import (  # noqa: E402
     build_router_decision_schema,
     capability_decline_speech,
     delegate_failure_correction,
-)
-from johnny.agent.internal_tools import (  # noqa: E402
-    INTERNAL_TOOL_KINDS,
-    internal_catalog_entries,
 )
 from johnny.agent.speech_queue import (  # noqa: E402
     ItemState,
@@ -4661,3 +4661,96 @@ async def test_promote_without_coordinator_is_noop() -> None:
     decision, _turn = h.obs.decisions[0]
     assert decision.action == "speak"
     assert BACKGROUND_PROMOTION_KEY not in decision.raw
+
+
+# --- US-302: cancel verdict (_handle_cancel, Johnny-d6w.17) ------------------
+
+
+def _cancel_decision() -> dict[str, Any]:
+    return {
+        "should_speak": True,
+        "confidence": 0.9,
+        "reason": "asked to stop a task",
+        "action": "cancel",
+    }
+
+
+async def test_cancel_with_single_running_task_cuts_it_and_confirms() -> None:
+    """cancel with exactly one in-flight task drives cancel_task on it and
+    speaks the confirmation; the speech owns the single replied terminal."""
+    h = _TaskGateHarness([_cancel_decision()])
+    assert h.coordinator is not None
+    h.coordinator.note_task_running(31, kind="metabase-hunt")
+    calls: list[tuple[int, str]] = []
+    orig = h.coordinator.cancel_task
+
+    async def _spy(task_id: int, *, actor: str) -> Any:
+        calls.append((task_id, actor))
+        return await orig(task_id, actor=actor)
+
+    h.coordinator.cancel_task = _spy  # type: ignore[method-assign]
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("stop that task"))
+
+    assert calls == [(31, "voice")]  # the addressed running task, by voice
+    assert h.say.texts == ["Okay — I've stopped that task."]
+    h.say.handles[0].fire_done()
+    await h.drain()
+    assert h.emitter.states == ["replied"]  # exactly one terminal (INV-1)
+
+
+async def test_cancel_with_multiple_running_tasks_asks_which_and_cuts_nothing() -> None:
+    """The AC ambiguity branch: more than one in-flight task → ask which,
+    cancelling nothing so a vague "stop it" can't kill the wrong task."""
+    h = _TaskGateHarness([_cancel_decision()])
+    assert h.coordinator is not None
+    h.coordinator.note_task_running(31, kind="metabase-hunt")
+    h.coordinator.note_task_running(32, kind="calendar-check")
+    calls: list[tuple[int, str]] = []
+
+    async def _spy(task_id: int, *, actor: str) -> Any:  # pragma: no cover
+        calls.append((task_id, actor))
+        return "cancelling"
+
+    h.coordinator.cancel_task = _spy  # type: ignore[method-assign]
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("stop it"))
+
+    assert calls == []  # nothing cancelled while ambiguous
+    assert len(h.say.texts) == 1
+    spoken = h.say.texts[0]
+    assert "Which one should I stop?" in spoken
+    assert "2 tasks running" in spoken
+    h.say.handles[0].fire_done()
+    await h.drain()
+    assert h.emitter.states == ["replied"]
+
+
+async def test_cancel_with_nothing_running_speaks_graceful_line() -> None:
+    """cancel with an empty registry: the graceful nothing-to-stop line, one
+    replied terminal — never a silent drop (INV-1)."""
+    h = _TaskGateHarness([_cancel_decision()])
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("stop that"))
+
+    assert h.say.texts == ["There's nothing running for me to stop right now."]
+    h.say.handles[0].fire_done()
+    await h.drain()
+    assert h.emitter.states == ["replied"]
+
+
+async def test_cancel_without_say_attached_emits_no_reply_stage_error() -> None:
+    """No say() attached (session never entered / draining) → the cancel verdict
+    terminalizes no_reply(stage_error), like the status/delegate failure legs."""
+    h = _TaskGateHarness([_cancel_decision()], attach_say=False)
+    assert h.coordinator is not None
+    h.coordinator.note_task_running(31, kind="metabase-hunt")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), _user_msg("stop that task"))
+
+    await h.drain()
+    assert h.emitter.states == ["no_reply"]

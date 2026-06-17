@@ -88,6 +88,7 @@ def _fake_runtime(*, needs_approval: bool = False) -> SimpleNamespace:
         min_interruption_duration_s=None,
         max_tool_steps=0,
         needs_approval_wiring=needs_approval,
+        task_coordinator=None,
         aclose=_aclose,
         _aclose_calls=aclose_calls,
     )

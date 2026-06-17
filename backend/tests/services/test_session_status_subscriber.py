@@ -1916,9 +1916,10 @@ def _task_event_payloads(session_id: Any) -> list[dict[str, Any]]:
     ]
 
 
-def test_task_event_types_constant_covers_all_four_wire_names() -> None:
+def test_task_event_types_constant_covers_all_wire_names() -> None:
     """Drift pin: the subscriber's task-event set ≡ the events module vocabulary."""
     from johnny.voice_pipeline.events import (
+        TaskCancelled,
         TaskCompleted,
         TaskProgress,
         TaskQueued,
@@ -1929,6 +1930,7 @@ def test_task_event_types_constant_covers_all_four_wire_names() -> None:
         TaskQueued(task_id=1, kind="k", timestamp_ms=0).type,
         TaskProgress(task_id=1, kind="k", timestamp_ms=0).type,
         TaskCompleted(task_id=1, kind="k", status="done", timestamp_ms=0).type,
+        TaskCancelled(task_id=1, kind="k", timestamp_ms=0).type,
         TaskResultExpired(task_id=1, kind="k", timestamp_ms=0).type,
     }
     assert session_status_subscriber.TASK_EVENT_TYPES == wire_names
@@ -2656,3 +2658,82 @@ async def test_conversation_events_route_through_the_subscriber_loop(
         ]
         assert events[0].duration_ms == 320
         assert events[1].agent_name == "Echo B"
+
+
+def test_task_cancelled_event_flips_workstream_cancelled(db_session: Session) -> None:
+    """US-302 (Johnny-d6w.17): a ``task_cancelled`` event flips the durable
+    workstream envelope to ``cancelled`` and appends a ``cancelled`` event,
+    leaving delivery non-ready — a cancelled task has no deliverable result."""
+    row = _seed(db_session)
+    db_session.commit()
+    base = {
+        "task_id": 42,
+        "kind": "skill.metabase",
+        "session_id": row.id,
+        "turn_id": 4,
+    }
+    apply_task_event(db_session, {**base, "type": "task_queued", "timestamp_ms": 10})
+    apply_task_event(db_session, {**base, "type": "task_progress", "timestamp_ms": 20})
+    assert (
+        apply_task_event(
+            db_session,
+            {
+                **base,
+                "type": "task_cancelled",
+                "timestamp_ms": 30,
+                "actor": "ui",
+                "result_text": "Stopped the skill.metabase task — you asked me to cancel it.",
+                "error": "cancelled by ui request (Johnny-d6w.17)",
+            },
+        )
+        is True
+    )
+    db_session.commit()
+
+    ws = db_session.scalars(sa.select(AgentWorkstream)).one()
+    assert ws.status == WorkstreamStatus.CANCELLED
+    assert ws.completed_at is not None
+    # a cancelled task never becomes deliverable (nothing to speak)
+    assert ws.delivery_status == WorkstreamDeliveryStatus.NOT_READY
+    assert ws.result_text and "cancel" in ws.result_text.lower()
+    events = db_session.scalars(
+        sa.select(AgentWorkstreamEvent)
+        .where(AgentWorkstreamEvent.workstream_id == ws.id)
+        .order_by(AgentWorkstreamEvent.sequence)
+    ).all()
+    assert [e.event_type for e in events] == ["queued", "running", "cancelled"]
+    assert events[-1].payload_json == {"status": "cancelled", "actor": "ui"}
+
+
+def test_task_cancelled_after_done_is_first_writer_wins_noop(
+    db_session: Session,
+) -> None:
+    """A cancel racing a natural completion never overwrites the terminal —
+    the workstream stays ``done`` (first-writer-wins, US-302)."""
+    row = _seed(db_session)
+    db_session.commit()
+    base = {
+        "task_id": 42,
+        "kind": "skill.metabase",
+        "session_id": row.id,
+        "turn_id": 4,
+    }
+    apply_task_event(db_session, {**base, "type": "task_queued", "timestamp_ms": 10})
+    apply_task_event(db_session, {**base, "type": "task_progress", "timestamp_ms": 20})
+    apply_task_event(
+        db_session,
+        {
+            **base,
+            "type": "task_completed",
+            "status": "done",
+            "timestamp_ms": 30,
+            "result_text": "Found it.",
+        },
+    )
+    apply_task_event(
+        db_session,
+        {**base, "type": "task_cancelled", "timestamp_ms": 40, "actor": "ui"},
+    )
+    db_session.commit()
+    ws = db_session.scalars(sa.select(AgentWorkstream)).one()
+    assert ws.status == WorkstreamStatus.DONE  # cancel did not regress the terminal

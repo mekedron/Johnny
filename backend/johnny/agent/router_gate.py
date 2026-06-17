@@ -135,6 +135,7 @@ from johnny.voice_pipeline.audio_recorder import SpokenAudioRecorder
 from johnny.voice_pipeline.reasoning import (
     APPROVAL_REQUIRED_MODE,
     AUTONOMOUS_MODE,
+    CANCEL_ACTION,
     DEFAULT_APPROVAL_TIMEOUT_SECONDS,
     DEFAULT_CONFIDENCE_THRESHOLD,
     DEFAULT_MODE,
@@ -1321,6 +1322,14 @@ class RouterGate:
             await self._handle_status(tracker, turn_id)
             raise StopResponse()
 
+        if decision.action == CANCEL_ACTION:
+            # cancel (Johnny-d6w.17, US-302): resolve which running workstream
+            # from the same in-memory registry and cut its execution via
+            # cancel_task. Registry-first + say()-only, exactly like
+            # _handle_status — deterministic, no answer-LLM hop, one terminal.
+            await self._handle_cancel(tracker, turn_id)
+            raise StopResponse()
+
         if decided_reply is not None:
             # Decided-reply parity (Johnny-etu.14): speak the router-authored
             # reply VERBATIM through say() — DELIVERED == DECIDED, with no
@@ -2330,6 +2339,85 @@ class RouterGate:
                     queue.mark_spoken(item, self._speech_queue_clock())
                     continue
             tasks.mark_result_delivered(entry.task_id)
+
+    async def _handle_cancel(self, tracker: TerminalTracker, turn_id: str) -> None:
+        """Cut the running workstream the user asked to stop; speak the result.
+
+        US-302 (Johnny-d6w.17): "stop that task" resolves which delegated work
+        to abort from the coordinator's in-memory registry — registry-first and
+        say()-only, the same deterministic, no-answer-LLM-hop, exactly-one-
+        terminal (INV-1) shape as :meth:`_handle_status`:
+
+        * no coordinator / nothing in flight → speak the graceful nothing line;
+        * exactly one in-flight task → drive
+          :meth:`~johnny.agent.tasks.TaskCoordinator.cancel_task` (which cuts
+          execution: the in-session resolver, or the worker for claimed kinds)
+          and confirm;
+        * more than one in-flight → **ask which, cancelling nothing** (the AC's
+          ambiguity branch), so a vague "stop it" can never kill the wrong task.
+
+        The cancel's own ``TaskCancelled`` is async (``turn_id=None``) and never
+        this turn's terminal; the spoken confirmation / question owns it.
+        """
+        if self._say is None:
+            await tracker.emit(
+                terminal_state="no_reply",
+                no_reply_reason="stage_error",
+                detail="cancel verdict but say() is not attached — cannot speak",
+            )
+            return
+        running = (
+            [e for e in self._tasks.registry_snapshot() if not e.terminal]
+            if self._tasks is not None
+            else []
+        )
+        if not running:
+            await self._say_with_terminal(
+                tracker,
+                turn_id,
+                "There's nothing running for me to stop right now.",
+                kind="status",
+                replied_detail="cancel verdict with no in-flight task — nothing to cancel",
+                interrupted_detail="cancel nothing-to-stop reply interrupted",
+            )
+            return
+        if len(running) > 1:
+            labels = ", ".join((e.ack_text.strip() or e.kind) for e in running)
+            await self._say_with_terminal(
+                tracker,
+                turn_id,
+                f"You've got {len(running)} tasks running right now — {labels}. "
+                "Which one should I stop?",
+                kind="status",
+                replied_detail=(
+                    f"cancel ambiguous across {len(running)} in-flight tasks "
+                    f"{[e.task_id for e in running]} — asked which, cancelled nothing"
+                ),
+                interrupted_detail="cancel disambiguation question interrupted",
+            )
+            return
+        entry = running[0]
+        assert self._tasks is not None  # a non-empty registry implies a coordinator
+        outcome = await self._tasks.cancel_task(entry.task_id, actor="voice")
+        if outcome == "already_settled":
+            text = "That task just finished on its own, so there's nothing to stop."
+        else:
+            text = "Okay — I've stopped that task."
+        logger.info(
+            "agent.router.gate: turn=%s CANCEL task_id=%s kind=%s -> %s",
+            turn_id,
+            entry.task_id,
+            entry.kind,
+            outcome,
+        )
+        await self._say_with_terminal(
+            tracker,
+            turn_id,
+            text,
+            kind="status",
+            replied_detail=f"cancel of task #{entry.task_id} ({entry.kind}) -> {outcome}",
+            interrupted_detail="cancel confirmation reply interrupted",
+        )
 
     async def report_task_failure(self, queued: QueuedTask, result: TaskResult) -> None:
         """Speak the honest correction for a delegated task that settled ``failed``.

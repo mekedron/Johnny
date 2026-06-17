@@ -466,6 +466,7 @@
 			case 'task_queued':
 			case 'task_progress':
 			case 'task_completed':
+			case 'task_cancelled':
 			case 'task_result_expired':
 			case 'workstream_created':
 			case 'workstream_progress':

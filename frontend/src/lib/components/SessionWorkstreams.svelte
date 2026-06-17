@@ -26,8 +26,10 @@
 	 */
 	import TraceColumn from '$lib/components/TraceColumn.svelte';
 	import type { WorkstreamView } from '$lib/sessionDetail';
+	import { cancelWorkstream } from '$lib/sessions';
 
-	let { workstreams }: { workstreams: WorkstreamView[] } = $props();
+	let { workstreams, botSessionId }: { workstreams: WorkstreamView[]; botSessionId: number } =
+		$props();
 
 	type FilterKey = 'all' | 'queued' | 'running' | 'done' | 'failed' | 'expired';
 
@@ -65,6 +67,47 @@
 	let activeFilter = $state<FilterKey>('all');
 	let expanded = $state<Set<number>>(new Set());
 	let openDisclosures = $state<Set<string>>(new Set());
+
+	// US-302 (Johnny-d6w.17): per-running-workstream cancel, keyed by workstream
+	// `id`. An inline confirm guards the real execution-cut; the live
+	// `task_cancelled` event flips the row, so success needs no local mutation.
+	let confirmingCancel = $state<Set<number>>(new Set());
+	let cancelling = $state<Set<number>>(new Set());
+	let cancelErrors = $state<Record<number, string>>({});
+
+	function askCancel(wsId: number): void {
+		confirmingCancel = new Set([...confirmingCancel, wsId]);
+		if (cancelErrors[wsId]) {
+			const { [wsId]: _drop, ...rest } = cancelErrors;
+			cancelErrors = rest;
+		}
+	}
+
+	function dismissCancel(wsId: number): void {
+		const next = new Set(confirmingCancel);
+		next.delete(wsId);
+		confirmingCancel = next;
+	}
+
+	async function confirmCancel(wsId: number, taskId: number | null): Promise<void> {
+		if (taskId == null) return;
+		dismissCancel(wsId);
+		cancelling = new Set([...cancelling, wsId]);
+		try {
+			await cancelWorkstream(botSessionId, taskId);
+			// The running engine settles the task and the live `task_cancelled`
+			// event flips this row to `cancelled` — no optimistic local write.
+		} catch (err) {
+			cancelErrors = {
+				...cancelErrors,
+				[wsId]: err instanceof Error ? err.message : 'Cancel failed'
+			};
+		} finally {
+			const next = new Set(cancelling);
+			next.delete(wsId);
+			cancelling = next;
+		}
+	}
 
 	function statusClass(status: string): string {
 		switch (status) {
@@ -295,6 +338,46 @@
 						</div>
 						<p class="text-foreground truncate text-sm font-medium">{title(w)}</p>
 					</button>
+
+					{#if w.status === 'running' && w.agentTaskId != null}
+						<div
+							class="flex flex-wrap items-center gap-2 px-4 pb-2"
+							data-testid="workstream-cancel"
+						>
+							{#if cancelling.has(w.id)}
+								<span class="text-muted-foreground text-xs" data-testid="workstream-cancelling"
+									>Cancelling…</span
+								>
+							{:else if confirmingCancel.has(w.id)}
+								<span class="text-muted-foreground text-xs">Stop this workstream?</span>
+								<button
+									type="button"
+									class="rounded border border-red-500/50 bg-red-500/10 px-2 py-0.5 text-xs font-medium text-red-700 transition hover:bg-red-500/20 dark:text-red-300"
+									data-testid="workstream-cancel-confirm"
+									onclick={() => confirmCancel(w.id, w.agentTaskId)}>Yes, stop it</button
+								>
+								<button
+									type="button"
+									class="border-border hover:bg-muted rounded border px-2 py-0.5 text-xs transition"
+									data-testid="workstream-cancel-dismiss"
+									onclick={() => dismissCancel(w.id)}>No</button
+								>
+							{:else}
+								<button
+									type="button"
+									class="border-border rounded border px-2 py-0.5 text-xs font-medium transition hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-700 dark:hover:text-red-300"
+									data-testid="workstream-cancel-button"
+									onclick={() => askCancel(w.id)}>Cancel</button
+								>
+							{/if}
+							{#if cancelErrors[w.id]}
+								<span
+									class="text-xs text-red-600 dark:text-red-400"
+									data-testid="workstream-cancel-error">{cancelErrors[w.id]}</span
+								>
+							{/if}
+						</div>
+					{/if}
 
 					{#if open}
 						<div class="flex flex-col gap-2 px-4 pb-3 text-sm" data-testid="workstream-detail">

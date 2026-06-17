@@ -1756,3 +1756,104 @@ async def test_seed_registry_from_overlay_contained_on_sink_failure() -> None:
     assert coordinator.registry_snapshot() == ()
     assert coordinator.status_summary().text == STATUS_NOTHING_IN_FLIGHT
     await coordinator.aclose()
+
+
+# --- US-302: cancel_task (Johnny-d6w.17) -------------------------------------
+
+
+async def test_cancel_task_in_session_cuts_execution_and_announces() -> None:
+    """An in-session cancel cuts the running resolver, settles the row
+    ``cancelled`` (not failed), and announces exactly one ``TaskCancelled``
+    carrying the requesting actor (US-302, AC1)."""
+    sink = InMemoryTaskSink()
+    started = asyncio.Event()
+    cancelled: list[tuple[int, str]] = []
+    completed: list[Any] = []
+
+    async def executor(queued: QueuedTask) -> TaskResult:
+        started.set()
+        await asyncio.Event().wait()  # block until cancelled
+        return TaskResult(status="done")  # pragma: no cover - unreachable
+
+    async def publish_cancelled(queued: QueuedTask, actor: str) -> None:
+        cancelled.append((queued.task_id, actor))
+
+    async def publish_completed(queued: QueuedTask, status: Any, result: TaskResult) -> None:
+        completed.append((queued.task_id, status))
+
+    coordinator = TaskCoordinator(
+        sink,
+        executor=executor,
+        publish_cancelled=publish_cancelled,
+        publish_completed=publish_completed,
+    )
+    queued = await coordinator.begin(_spec())
+    assert queued is not None
+    await started.wait()  # the resolver is mid-executor (running)
+
+    outcome = await coordinator.cancel_task(queued.task_id, actor="voice")
+    assert outcome == "cancelling"
+    await coordinator.join()  # let the cancelled resolver settle
+
+    record = sink.get(queued.task_id)
+    assert record is not None and record.status == "cancelled"
+    entry = coordinator.registry_entry(queued.task_id)
+    assert entry is not None and entry.status == "cancelled"
+    # cancel is not a completion and not a failure
+    assert cancelled == [(queued.task_id, "voice")]
+    assert completed == []
+
+
+async def test_cancel_task_worker_owned_signals_worker() -> None:
+    """A worker-owned cancel publishes the worker cut-signal (the coordinator
+    owns no row to cut directly) and returns ``requested`` (US-302, AC1)."""
+    sink = InMemoryTaskSink()
+    signals: list[int] = []
+
+    async def request_worker_cancel(task_id: int) -> None:
+        signals.append(task_id)
+
+    coordinator = TaskCoordinator(
+        sink,
+        executor=stub_executor,
+        request_worker_cancel=request_worker_cancel,
+        runs_in_session=lambda kind: False,  # worker-owned locality
+    )
+    coordinator.attach_remote_listener()  # no poll watcher in the test
+    queued = await coordinator.begin(_spec())
+    assert queued is not None
+
+    outcome = await coordinator.cancel_task(queued.task_id, actor="ui")
+    assert outcome == "requested"
+    assert signals == [queued.task_id]
+    entry = coordinator.registry_entry(queued.task_id)
+    assert entry is not None and entry.origin == "worker" and not entry.terminal
+    await coordinator.aclose()
+
+
+async def test_cancel_task_idempotent_on_terminal_and_unknown() -> None:
+    """Cancelling an unknown id or an already-settled task is a safe no-op
+    (US-302): the engine command never double-settles."""
+    sink = InMemoryTaskSink()
+    coordinator = TaskCoordinator(sink, executor=stub_executor)
+    assert await coordinator.cancel_task(999, actor="ui") == "unknown"
+
+    queued = await coordinator.begin(_spec())  # stub_executor fails fast → terminal
+    assert queued is not None
+    await coordinator.join()
+    assert await coordinator.cancel_task(queued.task_id, actor="ui") == "already_settled"
+
+
+async def test_cancel_task_in_session_without_worker_seam_is_contained() -> None:
+    """A worker-owned cancel with no seam wired logs + no-ops, never raising
+    (the in-process / harness assembly has no Redis)."""
+    sink = InMemoryTaskSink()
+    coordinator = TaskCoordinator(
+        sink, executor=stub_executor, runs_in_session=lambda kind: False
+    )
+    coordinator.attach_remote_listener()
+    queued = await coordinator.begin(_spec())
+    assert queued is not None
+    # request_worker_cancel is None → contained no-op, still returns requested
+    assert await coordinator.cancel_task(queued.task_id, actor="ui") == "requested"
+    await coordinator.aclose()

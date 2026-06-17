@@ -62,6 +62,26 @@ from typing import Any, Literal
 logger = logging.getLogger(__name__)
 
 TaskStatus = Literal["queued", "running", "done", "failed", "cancelled", "expired"]
+
+CancelActor = Literal["voice", "ui", "system"]
+"""Who asked to cancel a running task (Johnny-d6w.17, US-302).
+
+Mirrors :data:`johnny.voice_pipeline.events.CancelActor`; kept local so this
+module stays import-light (the wiring maps it onto the event)."""
+
+CancelOutcome = Literal[
+    "cancelling", "requested", "settled", "already_settled", "unknown"
+]
+"""Result of :meth:`TaskCoordinator.cancel_task` (Johnny-d6w.17, US-302).
+
+* ``cancelling`` — an in-session resolver was cancelled; its CancelledError
+  path settles the row ``cancelled`` and announces ``TaskCancelled``.
+* ``requested`` — a worker-owned task: a cancel signal was published to the
+  worker, which cuts its in-flight runner and settles the row.
+* ``settled`` — a defensive in-session path (no live resolver) settled here.
+* ``already_settled`` — the task was already terminal (idempotent no-op).
+* ``unknown`` — no registry entry for this id in this session.
+"""
 """Lifecycle states of one delegated task. Mirror of
 :class:`app.db.models.AgentTaskStatus` (kept stdlib-only here; a drift-guard
 test asserts equality). ``expired`` is reserved for a future staleness sweep —
@@ -424,6 +444,22 @@ or ``cancelled`` (the session is tearing down — nobody is listening). For
 worker-owned kinds (Johnny-trt.24) the watcher fires it from the polled row
 once the worker's terminal write lands — same contract, different settler."""
 
+PublishCancelled = Callable[["QueuedTask", CancelActor], Awaitable[None]]
+"""Publish ``TaskCancelled`` on the session EventBus channel (Johnny-d6w.17).
+
+Called by the in-session resolver's CancelledError path *after* the terminal
+row update, only for a **user** cancel (a teardown cancel announces nothing).
+Unlike :data:`PublishCompleted` this fires for a ``cancelled`` settle, because
+cancel is a state the single durable writer must persist onto the workstream
+envelope. Best-effort and contained like the other announce seams."""
+
+RequestWorkerCancel = Callable[[int], Awaitable[None]]
+"""Ask the external worker (Phase 4) to cut a claimed task mid-run
+(Johnny-d6w.17, US-302). Publishes ``{task_id}`` on ``johnny.tasks.cancel``;
+the worker cancels its in-flight runner and settles the row ``cancelled``.
+The session coordinator owns no worker-owned row, so this seam is how a voice
+``cancel`` verdict reaches that work. Best-effort and contained."""
+
 RunsInSession = Callable[[str], bool]
 """Locality predicate (Johnny-trt.24): does this *kind* execute inside the
 session process? ``True`` → the classic resolver runs the injected executor
@@ -608,6 +644,8 @@ class TaskCoordinator:
         executor: TaskExecutor,
         publish_queued: PublishQueued | None = None,
         publish_completed: PublishCompleted | None = None,
+        publish_cancelled: PublishCancelled | None = None,
+        request_worker_cancel: RequestWorkerCancel | None = None,
         wake: WakePing | None = None,
         report_failed: ReportTaskFailed | None = None,
         runs_in_session: RunsInSession | None = None,
@@ -619,6 +657,8 @@ class TaskCoordinator:
         self._executor = executor
         self._publish_queued = publish_queued
         self._publish_completed = publish_completed
+        self._publish_cancelled = publish_cancelled
+        self._request_worker_cancel = request_worker_cancel
         self._wake = wake
         # The no-dead-promises seam (Johnny-trt.53). Usually attached after
         # construction via :meth:`attach_failure_reporter` (the gate is built
@@ -634,6 +674,14 @@ class TaskCoordinator:
         # (and to avoid "task exception never retrieved" warnings); also lets
         # aclose() drain them at teardown.
         self._tasks: set[asyncio.Task[None]] = set()
+        # In-session resolvers keyed by task_id so cancel_task can cut a
+        # specific running task (Johnny-d6w.17, US-302); the same handle also
+        # lives in ``_tasks`` for aclose's drain. Popped in the done-callback.
+        self._resolvers: dict[int, asyncio.Task[None]] = {}
+        # task_ids a user explicitly cancelled (voice/ui). Read by the
+        # resolver's CancelledError path to settle with user-cancel text and
+        # announce a ``TaskCancelled`` — vs a silent teardown cancel.
+        self._cancel_requests: dict[int, CancelActor] = {}
         # Watchers for worker-owned tasks (Johnny-trt.24) live apart from the
         # resolvers: they own no row, so aclose() must not spend its trt.57
         # drain grace on them — they are cancelled immediately at teardown.
@@ -721,7 +769,16 @@ class TaskCoordinator:
         if in_session:
             runner = asyncio.ensure_future(self._run(queued))
             self._tasks.add(runner)
-            runner.add_done_callback(self._tasks.discard)
+            self._resolvers[task_id] = runner
+
+            def _on_resolver_done(
+                task: asyncio.Task[None], _tid: int = task_id
+            ) -> None:
+                self._tasks.discard(task)
+                self._resolvers.pop(_tid, None)
+                self._cancel_requests.pop(_tid, None)
+
+            runner.add_done_callback(_on_resolver_done)
         elif self._remote_listener_active:
             # The Phase-5 push listener (Johnny-trt.28) observes worker-owned
             # settles on ``johnny.tasks.<session>`` — no poll watcher needed.
@@ -748,6 +805,60 @@ class TaskCoordinator:
         ]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def cancel_task(
+        self, task_id: int, *, actor: CancelActor
+    ) -> CancelOutcome:
+        """Cancel a running task — cut **execution**, not just speech (US-302).
+
+        The single engine command behind both the voice ``cancel`` verdict
+        (:meth:`~johnny.agent.router_gate.RouterGate._handle_cancel`) and the UI
+        ``POST /sessions/{id}/tasks/{task_id}/cancel``. Idempotent: a terminal
+        or unknown task is a no-op.
+
+        * **In-session** task (an internal kind): cancel the resolver's asyncio
+          task — the executor is cut at its next await and the resolver's
+          CancelledError path settles the row ``cancelled`` and announces a
+          ``TaskCancelled`` (``actor`` carried via ``_cancel_requests``).
+        * **Worker-owned** task: the coordinator owns no row, so it publishes a
+          cancel signal to the worker via :data:`RequestWorkerCancel`; the
+          worker cuts its in-flight runner and settles the row.
+
+        Returns a :data:`CancelOutcome` describing what happened so callers
+        (the gate's ack, the API's status code) can speak/respond honestly.
+        """
+        entry = self._registry.get(task_id)
+        if entry is None:
+            logger.info(
+                "tasks.cancel: unknown task_id=%s (actor=%s) — nothing to cancel",
+                task_id,
+                actor,
+            )
+            return "unknown"
+        if entry.terminal:
+            return "already_settled"
+        if entry.origin == "worker":
+            await self._safe_request_worker_cancel(task_id)
+            return "requested"
+        # In-session: cut the resolver. Its CancelledError path does the settle
+        # + announce, so the row and registry stay consistent under the race.
+        resolver = self._resolvers.get(task_id)
+        if resolver is not None and not resolver.done():
+            self._cancel_requests[task_id] = actor
+            resolver.cancel()
+            return "cancelling"
+        # Defensive: an in-session entry with no live resolver (the brief
+        # begin() window between registry-seed and resolver-spawn). Settle
+        # directly from the entry so the row never strands in running.
+        self._cancel_requests[task_id] = actor
+        synthetic = QueuedTask(
+            task_id=task_id,
+            spec=TaskSpec(
+                kind=entry.kind, ack_text=entry.ack_text, turn_id=entry.turn_id
+            ),
+        )
+        await self._settle_cancelled(synthetic)
+        return "settled"
 
     async def aclose(self, *, drain_grace_s: float = DEFAULT_ACLOSE_DRAIN_GRACE_S) -> None:
         """Drain in-flight resolvers briefly, then cancel the rest (teardown).
@@ -1218,20 +1329,10 @@ class TaskCoordinator:
         try:
             result = await self._executor(queued)
         except asyncio.CancelledError:
-            # Session teardown (aclose). Settle the row so it is not left
-            # dangling in running, then never swallow the cancellation.
-            await self._safe_update(
-                queued.task_id,
-                "cancelled",
-                result_text=f"The {queued.spec.kind} task was cancelled when the session ended.",
-                error="cancelled before completion (session teardown)",
-            )
-            self.note_task_settled(
-                queued.task_id,
-                status="cancelled",
-                kind=queued.spec.kind,
-                error="cancelled before completion (session teardown)",
-            )
+            # A user cancel (cancel_task tagged _cancel_requests and cancelled
+            # this resolver) or session teardown (aclose). Settle the row so it
+            # is not left dangling in running, then never swallow the cancel.
+            await self._settle_cancelled(queued)
             raise
         except Exception as exc:
             logger.exception(
@@ -1244,22 +1345,6 @@ class TaskCoordinator:
                 result_text=executor_error_text(queued.spec.kind),
                 error=f"executor error: {type(exc).__name__}: {exc}",
             )
-            await self._safe_update(
-                queued.task_id,
-                "failed",
-                result_text=result.result_text,
-                error=result.error,
-            )
-            self.note_task_settled(
-                queued.task_id,
-                status="failed",
-                kind=queued.spec.kind,
-                result_text=result.result_text,
-                error=result.error,
-            )
-            await self._safe_publish_completed(queued, "failed", result)
-            await self._safe_report_failed(queued, result)
-            return
 
         status: TaskStatus
         if result.status in EXECUTOR_RESULT_STATUSES:
@@ -1271,23 +1356,70 @@ class TaskCoordinator:
                 queued.task_id,
             )
             status = "failed"
+        try:
+            await self._safe_update(
+                queued.task_id,
+                status,
+                result_text=result.result_text or None,
+                result_json=result.result_json,
+                error=result.error or None,
+            )
+            self.note_task_settled(
+                queued.task_id,
+                status=status,
+                kind=queued.spec.kind,
+                result_text=result.result_text,
+                error=result.error,
+            )
+            await self._safe_publish_completed(queued, status, result)
+            if status == "failed":
+                await self._safe_report_failed(queued, result)
+        except asyncio.CancelledError:
+            # A user cancel raced the terminal settle (cancel_task cancelled the
+            # resolver while it was writing the done/failed row). Convert to a
+            # clean cancelled settle; note_task_settled's first-observer-wins
+            # keeps a partial done/failed from surviving (Johnny-d6w.17).
+            await self._settle_cancelled(queued)
+            raise
+
+    async def _settle_cancelled(self, queued: QueuedTask) -> None:
+        """Settle a cancelled task's row + registry once — first observer wins.
+
+        Shared by the executor-await and terminal-settle CancelledError paths
+        (Johnny-d6w.17, US-302). A **user** cancel (the task_id is in
+        ``_cancel_requests``) writes user-facing text and announces a
+        ``TaskCancelled``; a **teardown** cancel writes the session-ended text
+        and announces nothing (the trt.25 contract: ``cancelled`` is silent
+        unless a user asked for it). The :meth:`note_task_settled` chokepoint
+        makes the write a no-op when another observer already settled the task,
+        so a cancel racing a natural ``done``/``failed`` never overwrites the
+        durable terminal — and the publish stays after the row write
+        (row-before-event), so a consumer that sees ``TaskCancelled`` can read
+        the ``cancelled`` row.
+        """
+        task_id = queued.task_id
+        kind = queued.spec.kind
+        actor = self._cancel_requests.pop(task_id, None)
+        if actor is not None:
+            result_text = f"Stopped — you asked me to cancel the {kind} task."
+            error = f"cancelled by {actor} request (Johnny-d6w.17)"
+        else:
+            result_text = f"The {kind} task was cancelled when the session ended."
+            error = "cancelled before completion (session teardown)"
+        won = self.note_task_settled(
+            task_id,
+            status="cancelled",
+            kind=kind,
+            result_text=result_text,
+            error=error,
+        )
+        if won is None:
+            return
         await self._safe_update(
-            queued.task_id,
-            status,
-            result_text=result.result_text or None,
-            result_json=result.result_json,
-            error=result.error or None,
+            task_id, "cancelled", result_text=result_text, error=error
         )
-        self.note_task_settled(
-            queued.task_id,
-            status=status,
-            kind=queued.spec.kind,
-            result_text=result.result_text,
-            error=result.error,
-        )
-        await self._safe_publish_completed(queued, status, result)
-        if status == "failed":
-            await self._safe_report_failed(queued, result)
+        if actor is not None:
+            await self._safe_publish_cancelled(queued, actor)
 
     # ------------------------------------------------------------------ #
     # The worker-owned-task watcher (Johnny-trt.24)                       #
@@ -1417,6 +1549,35 @@ class TaskCoordinator:
                 queued.spec.kind,
             )
 
+    async def _safe_publish_cancelled(
+        self, queued: QueuedTask, actor: CancelActor
+    ) -> None:
+        if self._publish_cancelled is None:
+            return
+        try:
+            await self._publish_cancelled(queued, actor)
+        except Exception:
+            logger.exception(
+                "tasks.run: TaskCancelled publish failed for task_id=%s",
+                queued.task_id,
+            )
+
+    async def _safe_request_worker_cancel(self, task_id: int) -> None:
+        if self._request_worker_cancel is None:
+            logger.warning(
+                "tasks.cancel: no worker-cancel seam wired — cannot cut "
+                "worker-owned task_id=%s",
+                task_id,
+            )
+            return
+        try:
+            await self._request_worker_cancel(task_id)
+        except Exception:
+            logger.exception(
+                "tasks.cancel: worker cancel signal failed for task_id=%s",
+                task_id,
+            )
+
 
 __all__ = [
     "ANSWER_TASK_CONTEXT_HEADER",
@@ -1429,11 +1590,15 @@ __all__ = [
     "WATCH_POLL_INTERVAL_S",
     "WATCH_TIMEOUT_S",
     "AnswerTaskContext",
+    "CancelActor",
+    "CancelOutcome",
     "InMemoryTaskSink",
+    "PublishCancelled",
     "PublishCompleted",
     "PublishQueued",
     "QueuedTask",
     "ReportTaskFailed",
+    "RequestWorkerCancel",
     "RunsInSession",
     "StatusSummary",
     "TaskCoordinator",

@@ -80,6 +80,7 @@ TRANSCRIPT_FILTERED_EVENT_TYPE = "transcript_filtered"
 TASK_QUEUED_EVENT_TYPE = "task_queued"
 TASK_PROGRESS_EVENT_TYPE = "task_progress"
 TASK_COMPLETED_EVENT_TYPE = "task_completed"
+TASK_CANCELLED_EVENT_TYPE = "task_cancelled"
 TASK_RESULT_EXPIRED_EVENT_TYPE = "task_result_expired"
 WORKSTREAM_DELIVERY_EVENT_TYPE = "workstream_delivery_changed"
 
@@ -98,6 +99,7 @@ TASK_EVENT_TYPES = frozenset(
         TASK_QUEUED_EVENT_TYPE,
         TASK_PROGRESS_EVENT_TYPE,
         TASK_COMPLETED_EVENT_TYPE,
+        TASK_CANCELLED_EVENT_TYPE,
         TASK_RESULT_EXPIRED_EVENT_TYPE,
     }
 )
@@ -1160,6 +1162,28 @@ def apply_task_event(db: Session, payload: dict[str, Any]) -> bool:
                 event_type="completed",
                 text=ws.result_text,
                 payload_json={"status": ws.status.value},
+            )
+    elif event_type == TASK_CANCELLED_EVENT_TYPE:
+        # US-302 (Johnny-d6w.17): a user cancelled the running work. Flip the
+        # envelope to ``cancelled`` (first-writer-wins, same terminal guard as
+        # completed) and append a ``cancelled`` event. A cancelled task has no
+        # deliverable result — leave delivery_status untouched so it never goes
+        # READY (nothing to speak), and the row's existing not_ready/queued
+        # delivery is the honest "nothing was delivered" state.
+        if not terminal:
+            ws.status = WorkstreamStatus.CANCELLED
+            ws.completed_at = now
+            ws.result_text = (str(payload.get("result_text")) or None)
+            ws.error = (str(payload.get("error")) or None)
+            _append_workstream_event(
+                db,
+                ws,
+                event_type="cancelled",
+                text=ws.result_text,
+                payload_json={
+                    "status": ws.status.value,
+                    "actor": (str(payload.get("actor")) or None),
+                },
             )
     elif event_type == TASK_RESULT_EXPIRED_EVENT_TYPE:
         # The unspoken result aged out of the speech queue; execution status is

@@ -33,6 +33,7 @@ TurnTerminalEventType = Literal["turn_terminal"]
 TaskQueuedEventType = Literal["task_queued"]
 TaskProgressEventType = Literal["task_progress"]
 TaskCompletedEventType = Literal["task_completed"]
+TaskCancelledEventType = Literal["task_cancelled"]
 TaskResultExpiredEventType = Literal["task_result_expired"]
 InterruptionRecordedEventType = Literal["interruption_recorded"]
 FloorAcquiredEventType = Literal["floor_acquired"]
@@ -69,6 +70,17 @@ in-memory ``TaskRegistryEntry.delivered`` flag).
 """
 
 TaskCompletedStatus = Literal["done", "failed"]
+
+CancelActor = Literal["voice", "ui", "system"]
+"""Who requested a task cancel (Johnny-d6w.17, US-302).
+
+* ``voice`` — a participant said "stop that task"; the router's
+  ``cancel`` verdict routed it through ``RouterGate._handle_cancel``.
+* ``ui`` — the operator clicked Cancel on a running workstream in the
+  session view (``POST /sessions/{id}/tasks/{task_id}/cancel``).
+* ``system`` — reserved for non-user cancels (teardown / stale sweep)
+  should they ever want to announce one over this event; unused today.
+"""
 """How a delegated task settled (Johnny-trt.25, Phase 4).
 
 Mirrors :data:`johnny.agent.tasks.EXECUTOR_RESULT_STATUSES` — an executor
@@ -750,6 +762,47 @@ class TaskResultExpired:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskCancelled:
+    """A running delegated task was cancelled by the user (Johnny-d6w.17, US-302).
+
+    Emitted *after* the terminal ``agent_tasks`` row write by whichever
+    locus actually cut the work — the in-session
+    :class:`~johnny.agent.tasks.TaskCoordinator` resolver for internal kinds,
+    or the worker pass (``task_worker``) for claimed kinds — the same
+    row-before-event discipline as :class:`TaskCompleted`, so the row is
+    ``cancelled`` and queryable by the time a consumer sees this. Unlike
+    :class:`TaskCompleted` this type **is** persisted by the single durable
+    writer (``session_status_subscriber``): it flips the ``agent_workstreams``
+    envelope to ``cancelled`` and appends a workstream event, because cancel
+    is a state the executor-owned row alone doesn't replay onto the envelope.
+
+    Cancel is **not a failure** — no ``_report_failed`` correction is spoken;
+    the gate's ``cancel`` verdict already acknowledged it on the turn. Like an
+    async result it stays ``turn_id=None`` so it never becomes a turn's
+    terminal (INV-1).
+
+    * ``actor`` — :data:`CancelActor` (``voice`` / ``ui`` / ``system``).
+    * ``result_text`` — short speech-ready note stored on the row (may be
+      empty; cancel announces nothing on its own — trt.25 contract).
+    * ``error`` — diagnostic detail for the operator / logs; never spoken.
+    * ``turn_id`` — ``None``: a cancel settles off the turn loop.
+    """
+
+    task_id: int
+    kind: str
+    timestamp_ms: int
+    actor: CancelActor = "ui"
+    result_text: str = ""
+    error: str = ""
+    turn_id: int | None = None
+    session_id: str | None = None
+    # Correlation key (US-003), echoed from the row so the workstream envelope
+    # is matched even if the cancel event is the first one the writer sees.
+    request_id: str | None = None
+    type: TaskCancelledEventType = "task_cancelled"
+
+
+@dataclass(frozen=True, slots=True)
 class WorkstreamDeliveryChanged:
     """A delegated workstream's result delivery settled (Johnny-d6w.2, US-002).
 
@@ -1081,6 +1134,7 @@ PipelineEvent = (
     | TaskQueued
     | TaskProgress
     | TaskCompleted
+    | TaskCancelled
     | TaskResultExpired
     | WorkstreamDeliveryChanged
     | TurnTerminal
@@ -1115,6 +1169,7 @@ __all__ = [
     "AgentTTSFailed",
     "AgentTTSFailedCategory",
     "ApprovalPending",
+    "CancelActor",
     "ApprovalResolution",
     "ApprovalResolved",
     "FloorAcquired",
@@ -1135,6 +1190,7 @@ __all__ = [
     "RouterDecisionMade",
     "SessionStatus",
     "SessionStatusChanged",
+    "TaskCancelled",
     "TaskCompleted",
     "TaskCompletedStatus",
     "TaskProgress",

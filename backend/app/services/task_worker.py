@@ -63,6 +63,7 @@ import sqlalchemy as sa
 from app.db.models import AgentTask, AgentTaskStatus
 from johnny.agent.internal_tools import INTERNAL_TOOL_KINDS
 from johnny.agent.task_wiring import (
+    TASKS_CANCEL_CHANNEL,
     TASKS_CHANNEL_PREFIX,
     TASKS_WAKE_CHANNEL,
     make_task_progress_reporter,
@@ -78,7 +79,13 @@ from johnny.agent.tasks import (
 )
 from johnny.mcp.config import McpServerConfig, is_mcp_kind
 from johnny.voice_pipeline.event_bus import DEFAULT_CHANNEL_PREFIX, RedisEventBus
-from johnny.voice_pipeline.events import PolicyDenied, TaskCompleted, TaskProgress
+from johnny.voice_pipeline.events import (
+    CancelActor,
+    PolicyDenied,
+    TaskCancelled,
+    TaskCompleted,
+    TaskProgress,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -381,7 +388,7 @@ def settle_claimed_task(
     *,
     task_id: int,
     claim_attempts: int,
-    status: Literal["done", "failed"],
+    status: Literal["done", "failed", "cancelled"],
     result_text: str,
     result_json: dict[str, Any] | None = None,
     error: str = "",
@@ -393,9 +400,16 @@ def settle_claimed_task(
     Returns ``False`` when the row no longer belongs to this claim (the TTL
     sweep requeued it and someone else re-claimed, bumping ``attempts``) —
     the caller must then discard the result and publish **nothing**, which is
-    exactly the no-duplicate-completion-events acceptance. The caller
-    commits.
+    exactly the no-duplicate-completion-events acceptance. ``cancelled``
+    (Johnny-d6w.17, US-302) is the user-cancel terminal: same fence, so a
+    cancel that lost the race to a natural settle is the same harmless no-op.
+    The caller commits.
     """
+    terminal = {
+        "done": AgentTaskStatus.DONE,
+        "failed": AgentTaskStatus.FAILED,
+        "cancelled": AgentTaskStatus.CANCELLED,
+    }[status]
     result = db.execute(
         sa.update(AgentTask)
         .where(
@@ -404,7 +418,7 @@ def settle_claimed_task(
             AgentTask.attempts == claim_attempts,
         )
         .values(
-            status=AgentTaskStatus.DONE if status == "done" else AgentTaskStatus.FAILED,
+            status=terminal,
             result_text=result_text or None,
             result_json=result_json,
             error=error or None,
@@ -905,6 +919,15 @@ class TaskWorker:
         self._stop = asyncio.Event()
         self._semaphore = asyncio.Semaphore(self._concurrency)
         self._inflight: set[asyncio.Task[None]] = set()
+        # task_id -> in-flight runner, so a user cancel (Johnny-d6w.17) can cut
+        # one specific running task; populated in _claim_once, popped in the
+        # runner's done-callback.
+        self._inflight_by_id: dict[int, asyncio.Task[None]] = {}
+        # task_id -> requesting actor for tasks a user asked to cancel; read by
+        # _run_claimed's CancelledError path to settle ``cancelled`` and
+        # announce (vs a teardown cancel, which leaves the row running for the
+        # TTL requeue).
+        self._cancel_requests: dict[int, CancelActor] = {}
         self._redis_client: Any | None = None
         self._buses: tuple[RedisEventBus, ...] | None = None
 
@@ -1046,11 +1069,18 @@ class TaskWorker:
             await self._publish_progress(task)
             runner = asyncio.ensure_future(self._run_claimed(task))
             self._inflight.add(runner)
-            runner.add_done_callback(self._on_runner_done)
+            self._inflight_by_id[task.task_id] = runner
+
+            def _done(t: asyncio.Task[None], _tid: int = task.task_id) -> None:
+                self._on_runner_done(t, _tid)
+
+            runner.add_done_callback(_done)
         return bool(claimed)
 
-    def _on_runner_done(self, task: asyncio.Task[None]) -> None:
+    def _on_runner_done(self, task: asyncio.Task[None], task_id: int) -> None:
         self._inflight.discard(task)
+        self._inflight_by_id.pop(task_id, None)
+        self._cancel_requests.pop(task_id, None)
         # A freed slot is a claim opportunity — don't wait out the poll.
         self._wake.set()
 
@@ -1158,6 +1188,16 @@ class TaskWorker:
                     executor(claimed.as_queued_task()), timeout=self._exec_timeout_s
                 )
             except asyncio.CancelledError:
+                actor = self._cancel_requests.pop(claimed.task_id, None)
+                if actor is not None:
+                    # A user cancel (UI Cancel button / voice "stop that task",
+                    # Johnny-d6w.17): the executor was cut mid-run. Settle the
+                    # row ``cancelled`` and announce instead of leaving it to
+                    # the TTL requeue. The DB write inside _settle_cancelled is
+                    # synchronous (done before any await), so the durable
+                    # ``cancelled`` row survives even a racing teardown cancel.
+                    await self._settle_cancelled(claimed, actor)
+                    return
                 # Worker teardown mid-task: leave the row running — the TTL
                 # sweep requeues it with an attempts increment (crash model).
                 raise
@@ -1264,6 +1304,64 @@ class TaskWorker:
                 ),
             )
 
+    async def _settle_cancelled(
+        self, claimed: ClaimedTask, actor: CancelActor
+    ) -> None:
+        """Settle a user-cancelled worker task ``cancelled`` + announce (US-302).
+
+        Called from :meth:`_run_claimed`'s CancelledError path when the cancel
+        came from a user (the task_id was in ``_cancel_requests``), not worker
+        teardown. The terminal write is attempts-fenced like every settle
+        (:func:`settle_claimed_task`), so a cancel that lost the race to a
+        natural ``done``/``failed`` — or to a TTL requeue + reclaim — is a no-op
+        that announces nothing. The DB write is synchronous and lands before the
+        awaited announce, so the durable ``cancelled`` row is guaranteed even if
+        a concurrent teardown cancels this handler mid-publish.
+        """
+        result_text = f"Stopped the {claimed.kind} task — you asked me to cancel it."
+        error = f"cancelled by {actor} request (Johnny-d6w.17)"
+        try:
+            with self._scoped_db() as db:
+                settled = settle_claimed_task(
+                    db,
+                    task_id=claimed.task_id,
+                    claim_attempts=claimed.attempts,
+                    status="cancelled",
+                    result_text=result_text,
+                    error=error,
+                )
+        except Exception:
+            logger.exception(
+                "task worker: cancel write failed for task_id=%s — the TTL "
+                "sweep will recover the row",
+                claimed.task_id,
+            )
+            return
+        if not settled:
+            logger.info(
+                "task worker: task_id=%s cancel raced a settle/requeue — "
+                "announcing nothing",
+                claimed.task_id,
+            )
+            return
+        logger.info(
+            "task worker: task_id=%s kind=%s cancelled by %s (attempt %d)",
+            claimed.task_id,
+            claimed.kind,
+            actor,
+            claimed.attempts,
+        )
+        await self._publish_cancelled(
+            task_id=claimed.task_id,
+            bot_session_id=claimed.bot_session_id,
+            kind=claimed.kind,
+            actor=actor,
+            result_text=result_text,
+            error=error,
+            turn_id=claimed.turn_id,
+            request_id=claimed.request_id,
+        )
+
     # ------------------------------------------------------------------ #
     # TTL sweep                                                           #
     # ------------------------------------------------------------------ #
@@ -1338,11 +1436,16 @@ class TaskWorker:
             try:
                 client = Redis.from_url(redis_url, decode_responses=False)
                 pubsub = client.pubsub(ignore_subscribe_messages=True)
-                await pubsub.subscribe(TASKS_WAKE_CHANNEL, WORKSPACE_SANDBOX_EVENT_CHANNEL)
-                logger.info(
-                    "task worker: subscribed to %s + %s",
+                await pubsub.subscribe(
                     TASKS_WAKE_CHANNEL,
                     WORKSPACE_SANDBOX_EVENT_CHANNEL,
+                    TASKS_CANCEL_CHANNEL,
+                )
+                logger.info(
+                    "task worker: subscribed to %s + %s + %s",
+                    TASKS_WAKE_CHANNEL,
+                    WORKSPACE_SANDBOX_EVENT_CHANNEL,
+                    TASKS_CANCEL_CHANNEL,
                 )
                 while not self._stop.is_set():
                     try:
@@ -1358,6 +1461,8 @@ class TaskWorker:
                         channel = channel.decode("utf-8", "replace")
                     if channel == WORKSPACE_SANDBOX_EVENT_CHANNEL:
                         self._handle_workspace_event(message.get("data"))
+                    elif channel == TASKS_CANCEL_CHANNEL:
+                        self._handle_cancel_message(message.get("data"))
                     else:
                         self._wake.set()
             except asyncio.CancelledError:
@@ -1395,6 +1500,49 @@ class TaskWorker:
             logger.warning("task worker: unparseable workspace sandbox event %r", data)
             return
         self._provider.invalidate_workspace(workspace_id)
+
+    def _handle_cancel_message(self, data: Any) -> None:
+        """Cut one in-flight runner this worker owns, on a user cancel signal.
+
+        The shared :data:`TASKS_CANCEL_CHANNEL` (Johnny-d6w.17, US-302) reaches
+        every worker; only the one whose ``_inflight_by_id`` holds the task
+        acts — the rest see an unknown id and ignore it. Records the actor so
+        the settle announces the right ``TaskCancelled`` and cancels the
+        runner; :meth:`_run_claimed`'s CancelledError path settles ``cancelled``
+        and the executor (subprocess / MCP call) is cut at its next await. A
+        malformed payload or an already-done runner is dropped.
+        """
+        if isinstance(data, bytes | bytearray):
+            try:
+                data = data.decode("utf-8")
+            except UnicodeDecodeError:
+                return
+        if not isinstance(data, str):
+            return
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError:
+            logger.warning("task worker: dropping malformed cancel message %r", data[:200])
+            return
+        if not isinstance(payload, dict):
+            return
+        task_id = payload.get("task_id")
+        if not isinstance(task_id, int):
+            return
+        runner = self._inflight_by_id.get(task_id)
+        if runner is None or runner.done():
+            return  # not running here (another worker owns it, or it just settled)
+        actor_raw = payload.get("actor")
+        actor: CancelActor = (
+            actor_raw if actor_raw in ("voice", "ui", "system") else "ui"
+        )
+        self._cancel_requests[task_id] = actor
+        logger.info(
+            "task worker: cancelling in-flight task_id=%s (actor=%s) — Johnny-d6w.17",
+            task_id,
+            actor,
+        )
+        runner.cancel()
 
     def _event_buses(self) -> tuple[RedisEventBus, ...]:
         """Both announce surfaces, lazily: the UI session channel
@@ -1467,6 +1615,32 @@ class TaskWorker:
                 kind=kind,
                 status=status,
                 timestamp_ms=self._clock_ms(),
+                result_text=result_text,
+                error=error,
+                turn_id=turn_id,
+                request_id=request_id,
+                session_id=str(bot_session_id),
+            )
+        )
+
+    async def _publish_cancelled(
+        self,
+        *,
+        task_id: int,
+        bot_session_id: int,
+        kind: str,
+        actor: CancelActor,
+        result_text: str,
+        error: str,
+        turn_id: int | None,
+        request_id: str | None = None,
+    ) -> None:
+        await self._publish(
+            TaskCancelled(
+                task_id=task_id,
+                kind=kind,
+                timestamp_ms=self._clock_ms(),
+                actor=actor,
                 result_text=result_text,
                 error=error,
                 turn_id=turn_id,
