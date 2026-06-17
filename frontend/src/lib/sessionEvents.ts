@@ -106,6 +106,9 @@ export interface RouterDecisionEvent extends BaseEnvelope {
 	reply_type?: string | null;
 	suggested_reply?: string | null;
 	turn_id?: number | null;
+	/** Correlation id for this turn (US-003); the multi-agent strip keys the
+	 * "thinking" badge on it so concurrent agents don't cross-clear. */
+	request_id?: string | null;
 }
 
 export interface ApprovalPendingEvent extends BaseEnvelope {
@@ -259,6 +262,9 @@ export interface TurnTerminalEvent extends BaseEnvelope {
 	detail?: string;
 	timestamp_ms: number;
 	session_id?: string | null;
+	/** Correlation id (US-003), set by the terminal emitter — lets the strip
+	 * clear the right agent's "thinking" on a silent verdict (Johnny-d6w.21). */
+	request_id?: string | null;
 }
 
 export interface SessionStatusChangeEvent extends BaseEnvelope {

@@ -341,6 +341,10 @@ class MemberRecord:
     claim_lost_times: list[float] = field(default_factory=list)
     peer_answered_times: list[float] = field(default_factory=list)
     """Arrival stamps of no_reply(peer_answered) turn terminals (Johnny-trt.47)."""
+    terminal_request_ids: list[str | None] = field(default_factory=list)
+    """request_id (US-003) on each TurnTerminal — the correlation key the
+    multi-agent strip uses to clear the right agent's 'thinking' on a silent
+    verdict (Johnny-d6w.21 / US-502). One per emitted terminal, in order."""
     floor_expired: int = 0
 
     def count_in(self, times: list[float], window: tuple[float, float]) -> int:
@@ -712,6 +716,7 @@ def _collect_member(
             if not event.should_speak:
                 record.decline_times.append(t)
         elif isinstance(event, TurnTerminal):
+            record.terminal_request_ids.append(event.request_id)
             if event.no_reply_reason == "peer_answered":
                 record.peer_answered_times.append(t)
         elif isinstance(event, PeerSpeechSuppressed):
@@ -825,6 +830,7 @@ def result_to_json(result: EnsembleResult) -> dict[str, Any]:
                 "claims_lost": len(m.claims_lost),
                 "declines": len(m.decline_times),
                 "peer_answered_terminals": len(m.peer_answered_times),
+                "terminal_request_ids": list(m.terminal_request_ids),
                 "floor_expired": m.floor_expired,
             }
             for m in result.members

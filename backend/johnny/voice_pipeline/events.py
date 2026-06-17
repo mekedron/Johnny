@@ -545,6 +545,13 @@ class TurnTerminal:
       ``terminal_state == "no_reply"``.
     * ``detail`` — free-text extra (an exception message, the noise
       sub-reason) for the reasoning timeline (Johnny-ckz.28.4).
+    * ``request_id`` — the turn's correlation id (US-003), minted at gate
+      entry and read back from the shared ``TurnIndex`` (the same id
+      :class:`RouterDecisionMade` / :class:`AgentSpoke` carry). Lets the
+      multi-agent state strip disambiguate *which* concurrent agent turn a
+      terminal belongs to so a stale/cross-turn terminal can't clear the
+      wrong "Thinking…" badge (Johnny-d6w.21 / US-502). ``None`` when no gate
+      minted one (bare gate / pre-US-003 replay).
     """
 
     turn_id: int
@@ -554,6 +561,7 @@ class TurnTerminal:
     no_reply_reason: NoReplyReason | None = None
     detail: str = ""
     session_id: str | None = None
+    request_id: str | None = None
     type: TurnTerminalEventType = "turn_terminal"
 
 

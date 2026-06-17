@@ -315,6 +315,12 @@ def build_session_terminal_emitter(
             detail=terminal.detail,
             timestamp_ms=clock(),
             session_id=session_id,
+            # The turn's correlation id (US-003), read back from the shared
+            # TurnIndex — the same id the decision/spoke emitters stamp. Lets
+            # the multi-agent strip clear the right agent's "Thinking…" badge
+            # on a silent verdict (Johnny-d6w.21 / US-502). NULL when no gate
+            # minted one (bare gate / pre-US-003 replay).
+            request_id=turn_index.request_id_for(turn_id),
         )
         try:
             await event_bus.publish(event)

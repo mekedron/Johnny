@@ -86,7 +86,11 @@ vi.mock('$lib/sessionDetail', () => ({
 	getSessionDetail: vi.fn()
 }));
 
-import { PlaygroundController } from '$lib/playground/playgroundSession.svelte';
+import {
+	PlaygroundController,
+	terminalClearsThinking,
+	turnCorrelationKey
+} from '$lib/playground/playgroundSession.svelte';
 import { startBrowserSession } from '$lib/browserSessions';
 
 function browserSession(id: number): BrowserSession {
@@ -433,5 +437,124 @@ describe('playground multi-agent group mode (Johnny-trt.48)', () => {
 		await c.endSession();
 		assert.deepEqual(vi.mocked(stopBrowserSessionGroup).mock.calls, [[10]]);
 		assert.equal(c.liveGroup, null);
+	});
+});
+
+// --------------------------------------------------------------------------- //
+// Multi-agent "Thinking…" state-freeze de-risk (Johnny-d6w.21 / US-502)        //
+// --------------------------------------------------------------------------- //
+
+function groupRouterDecision(
+	seq: number,
+	opts: { shouldSpeak?: boolean; turnId: number; requestId?: string | null }
+): SessionEvent {
+	return {
+		seq,
+		type: 'router_decision',
+		should_speak: opts.shouldSpeak ?? true,
+		confidence: 0.9,
+		reason: 'test',
+		timestamp_ms: 0,
+		turn_id: opts.turnId,
+		request_id: opts.requestId ?? null
+	} as unknown as SessionEvent;
+}
+
+function turnTerminalEvent(
+	seq: number,
+	opts: {
+		turnId: number;
+		requestId?: string | null;
+		terminalState?: 'replied' | 'no_reply';
+		noReplyReason?: string | null;
+	}
+): SessionEvent {
+	const replied = opts.terminalState === 'replied';
+	return {
+		seq,
+		type: 'turn_terminal',
+		turn_id: opts.turnId,
+		terminal_state: opts.terminalState ?? 'no_reply',
+		outcome: replied ? 'spoken' : 'suppressed',
+		no_reply_reason: replied ? null : (opts.noReplyReason ?? 'router_declined'),
+		request_id: opts.requestId ?? null,
+		timestamp_ms: 0
+	} as unknown as SessionEvent;
+}
+
+describe('multi-agent Thinking de-risk via request_id (Johnny-d6w.21 / US-502)', () => {
+	beforeEach(() => {
+		vi.mocked(startBrowserSessionGroup).mockReset();
+		vi.mocked(stopBrowserSessionGroup).mockClear();
+		vi.mocked(postBrowserGroupText).mockClear();
+	});
+
+	// The literal trt.65 symptom: an agent addressed-then-declining (a silent
+	// no_reply verdict) must return to idle, not stay stuck on "Thinking…".
+	it("a silent verdict clears the declining agent's Thinking; the peer is untouched", async () => {
+		const c = new PlaygroundController();
+		await startGroup(c, 10, ['Alex', 'Echo']);
+		const alex = () => c.groupMembers.find((m) => m.sessionId === 10)!;
+		const echo = () => c.groupMembers.find((m) => m.sessionId === 11)!;
+
+		// Both agents open a turn for the same utterance. Note the per-session
+		// turn_id counters COLLIDE (both turn 1) — only request_id distinguishes
+		// the two concurrent agent states.
+		subFor(10).opts.onEvent(groupRouterDecision(1, { turnId: 1, requestId: 'alex-r1' }));
+		subFor(11).opts.onEvent(groupRouterDecision(1, { turnId: 1, requestId: 'echo-r1' }));
+		assert.equal(alex().state, 'thinking');
+		assert.equal(echo().state, 'thinking');
+
+		// Echo routes silent — its OWN no_reply terminal clears ONLY Echo.
+		subFor(11).opts.onEvent(
+			turnTerminalEvent(2, { turnId: 1, requestId: 'echo-r1', terminalState: 'no_reply' })
+		);
+		assert.equal(echo().state, 'idle');
+		assert.equal(alex().state, 'thinking');
+	});
+
+	// The disambiguation that pre-fix code lacked: a LATE terminal from a
+	// superseded turn must not clear a NEWER turn's Thinking. Pre-fix the
+	// reducer cleared on ANY terminal while thinking, stranding the badge in a
+	// wrong 'idle' while the agent was still working its current turn.
+	it('a late terminal from a superseded request does not clear a newer turn', async () => {
+		const c = new PlaygroundController();
+		await startGroup(c, 10, ['Alex', 'Echo']);
+		const echo = () => c.groupMembers.find((m) => m.sessionId === 11)!;
+
+		// Echo turn 5 opens (thinking owned by echo-r5); turn 6 opens before
+		// turn 5's terminal lands → thinking now owned by echo-r6.
+		subFor(11).opts.onEvent(groupRouterDecision(1, { turnId: 5, requestId: 'echo-r5' }));
+		subFor(11).opts.onEvent(groupRouterDecision(2, { turnId: 6, requestId: 'echo-r6' }));
+		assert.equal(echo().state, 'thinking');
+
+		// Turn 5's terminal lands LATE (WS reorder). It is NOT the owner of the
+		// current Thinking (echo-r6) → must leave the badge alone.
+		subFor(11).opts.onEvent(
+			turnTerminalEvent(3, { turnId: 5, requestId: 'echo-r5', terminalState: 'no_reply' })
+		);
+		assert.equal(echo().state, 'thinking');
+
+		// Turn 6's own terminal lands → clears correctly.
+		subFor(11).opts.onEvent(
+			turnTerminalEvent(4, { turnId: 6, requestId: 'echo-r6', terminalState: 'no_reply' })
+		);
+		assert.equal(echo().state, 'idle');
+	});
+});
+
+describe('thinking-correlation helpers (Johnny-d6w.21 / US-502)', () => {
+	it('turnCorrelationKey prefers request_id, falls back to a turn key, else null', () => {
+		assert.equal(turnCorrelationKey({ request_id: 'r1', turn_id: 5 }), 'r1');
+		assert.equal(turnCorrelationKey({ answers_request_id: 'a1' }), 'a1');
+		assert.equal(turnCorrelationKey({ turn_id: 7 }), 't:7');
+		assert.equal(turnCorrelationKey({}), null);
+	});
+
+	it('terminalClearsThinking: null owner preserves the legacy unconditional clear', () => {
+		assert.equal(terminalClearsThinking(null, 'anything'), true); // pre-US-003
+		assert.equal(terminalClearsThinking('r1', 'r1'), true); // owner matches
+		assert.equal(terminalClearsThinking('r1', 'r2'), false); // cross-turn → keep
+		assert.equal(terminalClearsThinking('t:5', 't:5'), true); // turn-key fallback
 	});
 });

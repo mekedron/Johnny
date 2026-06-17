@@ -76,7 +76,9 @@ from johnny.agent.observability import (  # noqa: E402
 )
 from johnny.voice_pipeline.event_bus import InMemoryEventBus  # noqa: E402
 from johnny.voice_pipeline.events import (  # noqa: E402
+    RouterDecisionMade,
     TranscriptFinalized,
+    TurnTerminal,
     event_to_dict,
 )
 from johnny.voice_pipeline.reasoning import RouterDecision  # noqa: E402
@@ -238,6 +240,40 @@ async def test_terminal_emitter_swallows_bus_failure() -> None:
     )
 
 
+async def test_terminal_emitter_carries_request_id() -> None:
+    """The terminal stamps the turn's request_id (US-003), read back from the
+    shared TurnIndex, so the multi-agent state strip can clear the *right*
+    agent's 'Thinking…' badge on a silent verdict (Johnny-d6w.21 / US-502)."""
+    bus = InMemoryEventBus()
+    index = TurnIndex()
+    request_id = index.assign_request_id("item_abc")
+    emit = build_session_terminal_emitter(bus, index, session_id="7")
+
+    await emit(
+        "item_abc",
+        GateTerminal(terminal_state="no_reply", no_reply_reason="router_declined", detail=""),
+    )
+
+    (event,) = bus.snapshot()
+    assert isinstance(event, TurnTerminal)
+    assert event.request_id is not None
+    assert event.request_id == request_id
+
+
+async def test_terminal_emitter_request_id_none_without_mint() -> None:
+    """No gate minted an id (bare gate / pre-US-003 replay) → request_id is None;
+    the strip then falls back to the turn key, preserving legacy behavior."""
+    bus = InMemoryEventBus()
+    emit = build_session_terminal_emitter(bus, TurnIndex(), session_id="1")
+    await emit(
+        "item_x",
+        GateTerminal(terminal_state="replied", no_reply_reason=None, detail=""),
+    )
+    (event,) = bus.snapshot()
+    assert isinstance(event, TurnTerminal)
+    assert event.request_id is None
+
+
 # --------------------------------------------------------------------------- #
 # build_decision_emitter                                                      #
 # --------------------------------------------------------------------------- #
@@ -285,9 +321,12 @@ async def test_decision_emitter_publishes_router_decision_made() -> None:
 
 
 async def test_decision_and_terminal_share_int_turn_id() -> None:
-    """The parity lynchpin: one str turn id → one int across decision + terminal."""
+    """The parity lynchpin: one str turn id → one int across decision + terminal,
+    and (US-003) the same request_id rides BOTH events so a delivery/terminal
+    correlates to its decision even across concurrent agents (Johnny-d6w.21)."""
     bus = InMemoryEventBus()
     index = TurnIndex()
+    request_id = index.assign_request_id("item_same")
     record = build_decision_emitter(bus, index, mode="autonomous", session_id="1")
     emit = build_session_terminal_emitter(bus, index, session_id="1")
 
@@ -298,7 +337,10 @@ async def test_decision_and_terminal_share_int_turn_id() -> None:
     )
 
     decision_ev, terminal_ev = bus.snapshot()
+    assert isinstance(decision_ev, RouterDecisionMade)
+    assert isinstance(terminal_ev, TurnTerminal)
     assert decision_ev.turn_id == terminal_ev.turn_id == 1
+    assert decision_ev.request_id == terminal_ev.request_id == request_id
 
 
 async def test_decision_emitter_merges_transcript_window(

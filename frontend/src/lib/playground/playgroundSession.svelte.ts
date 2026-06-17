@@ -84,6 +84,12 @@ export interface GroupMemberStrip {
 	/** Conversational state, floor-first: `speaking` while holding the floor,
 	 * `thinking` between a should-speak verdict and its speech. */
 	state: 'idle' | 'thinking' | 'speaking';
+	/** Correlation key (request_id, US-003; falls back to a `t:<turn_id>` key)
+	 * of the turn that put this member in `thinking`. Only that turn's own
+	 * terminal/speech clears the badge — a stale or cross-turn terminal from
+	 * another concurrent agent turn no longer false-clears it (Johnny-d6w.21 /
+	 * US-502). `null` when idle/speaking or when no correlation id was carried. */
+	thinkingRequestId: string | null;
 	holdsFloor: boolean;
 	/** How long the agent waited for the floor on its current/last hold. */
 	floorWaitMs: number | null;
@@ -152,6 +158,32 @@ function stageCategoryLabel(category: string): string {
 		default:
 			return 'failed';
 	}
+}
+
+/**
+ * The correlation key for a turn-scoped event (Johnny-d6w.21 / US-502): the
+ * `request_id` (US-003) when the backend carried one, else a synthetic
+ * `t:<turn_id>` key, else `null`. The multi-agent strip keys each member's
+ * "thinking" badge on this so a terminal/speech event from one concurrent
+ * agent turn can only clear the badge that the SAME turn set — a stale or
+ * cross-turn terminal can no longer false-clear it. `request_id` (decision /
+ * terminal) and `answers_request_id` (agent_spoke) are the same id.
+ */
+export function turnCorrelationKey(event: Record<string, unknown>): string | null {
+	const rid = event.request_id ?? event.answers_request_id;
+	if (typeof rid === 'string' && rid) return rid;
+	if (typeof event.turn_id === 'number') return `t:${event.turn_id}`;
+	return null;
+}
+
+/**
+ * Does a clearing event (key `eventKey`) own the member's current `thinking`
+ * (set by `ownerKey`)? A `null` owner key means "no correlation id was carried"
+ * and preserves the legacy unconditional clear (pre-US-003 / bare gate), so
+ * default-off paths and old replays behave exactly as before.
+ */
+export function terminalClearsThinking(ownerKey: string | null, eventKey: string | null): boolean {
+	return ownerKey === null || ownerKey === eventKey;
 }
 
 export class PlaygroundController {
@@ -554,6 +586,7 @@ export class PlaygroundController {
 			name: m.agent_name,
 			status: 'live',
 			state: 'idle',
+			thinkingRequestId: null,
 			holdsFloor: false,
 			floorWaitMs: null,
 			suppressedCount: 0,
@@ -1123,7 +1156,12 @@ export class PlaygroundController {
 				if ((event as RouterDecisionEvent).should_speak) {
 					this.lastDecisionAt = ts;
 					if (member.state !== 'speaking') {
-						this.updateMember(memberId, { state: 'thinking' });
+						// Remember WHICH turn put this member in 'thinking' so only
+						// that turn's own terminal/speech clears it (Johnny-d6w.21).
+						this.updateMember(memberId, {
+							state: 'thinking',
+							thinkingRequestId: turnCorrelationKey(raw)
+						});
 					}
 				}
 				break;
@@ -1145,8 +1183,11 @@ export class PlaygroundController {
 					sessionId: memberId
 				});
 				this.lastSpokenAt = ts;
-				if (member.state === 'thinking') {
-					this.updateMember(memberId, { state: 'idle' });
+				if (
+					member.state === 'thinking' &&
+					terminalClearsThinking(member.thinkingRequestId, turnCorrelationKey(raw))
+				) {
+					this.updateMember(memberId, { state: 'idle', thinkingRequestId: null });
 				}
 				this.clearDiagnostic('router_llm');
 				this.clearDiagnostic('answer_llm');
@@ -1159,9 +1200,15 @@ export class PlaygroundController {
 				// barge-in). The 'agent_spoke' that would clear 'thinking' never
 				// comes on those, so reset here or the member badge stays stuck on
 				// 'Thinking' forever (Johnny-3ow). 'speaking'/floor states are left
-				// alone — their own floor_released resets them.
-				if (member.state === 'thinking') {
-					this.updateMember(memberId, { state: 'idle' });
+				// alone — their own floor_released resets them. Clear only when THIS
+				// terminal owns the current 'thinking' (request_id, US-003): a stale
+				// or cross-turn terminal from another concurrent agent turn must not
+				// clear a newer turn's badge (Johnny-d6w.21 / US-502).
+				if (
+					member.state === 'thinking' &&
+					terminalClearsThinking(member.thinkingRequestId, turnCorrelationKey(raw))
+				) {
+					this.updateMember(memberId, { state: 'idle', thinkingRequestId: null });
 				}
 				break;
 			}
@@ -1169,13 +1216,18 @@ export class PlaygroundController {
 				this.updateMember(memberId, {
 					holdsFloor: true,
 					state: 'speaking',
+					thinkingRequestId: null,
 					floorWaitMs: typeof raw.wait_ms === 'number' ? raw.wait_ms : null
 				});
 				break;
 			}
 			case 'floor_released':
 			case 'floor_expired': {
-				this.updateMember(memberId, { holdsFloor: false, state: 'idle' });
+				this.updateMember(memberId, {
+					holdsFloor: false,
+					state: 'idle',
+					thinkingRequestId: null
+				});
 				break;
 			}
 			case 'peer_speech_suppressed': {
@@ -1213,7 +1265,8 @@ export class PlaygroundController {
 					this.updateMember(memberId, {
 						status: st.status,
 						holdsFloor: false,
-						state: 'idle'
+						state: 'idle',
+						thinkingRequestId: null
 					});
 					if (this.groupMembers.every((m) => m.status !== 'live')) {
 						this.teardownLive('ended', null);

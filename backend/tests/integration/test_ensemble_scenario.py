@@ -63,6 +63,15 @@ async def test_addressing_scenario_holds_the_arbitration_invariants() -> None:
         )
         assert member.suppressions, render_report(result)
         assert all(s.peer == peer for s in member.suppressions), render_report(result)
+        # US-502 (Johnny-d6w.21): every turn's terminal carries a non-null,
+        # per-turn-unique request_id (US-003) — the correlation key the
+        # multi-agent strip uses to clear the right agent's "Thinking…" on a
+        # silent verdict. Proven through the REAL two-agent engine here, not a
+        # stub event stream: one terminal per scripted turn, each with a
+        # distinct id minted by the shared TurnIndex.
+        assert len(member.terminal_request_ids) == steps, render_report(result)
+        assert all(rid for rid in member.terminal_request_ids), render_report(result)
+        assert len(set(member.terminal_request_ids)) == steps, render_report(result)
 
     # By-name selectivity: the named agent answered its own asks (the
     # per-step exactly-the-named-agent check lives in evaluate_result; this
