@@ -4410,6 +4410,62 @@ async def test_recover_skips_same_kind_with_held_result() -> None:
     await h.drain()
 
 
+async def test_recover_skips_recently_delivered_same_kind() -> None:
+    """Johnny-d6w.32: a status query about a recently-DELIVERED task ("have you
+    already checked my calendar?") must NOT be recovered into a re-run. Once
+    delivered, the kind drops out of occupied_kinds, but it stays in
+    recently_settled_kinds within the window — so the recovery leaves it on the
+    status path instead of spawning a second, arg-less run (live: a delivered
+    Tokyo weather check re-ran as LONDON)."""
+    h = _TaskGateHarness(
+        [_status_decision()],
+        config=RouterGateConfig(task_catalog=_keyword_catalog()),
+    )
+    assert h.coordinator is not None
+    h.coordinator.note_task_settled(
+        3,
+        status="done",
+        kind="google-calendar",
+        result_text="You have 3 events in the next 7 days.",
+    )
+    h.coordinator.mark_result_delivered(3)  # delivered ⇒ drops out of occupied_kinds
+    msg = _user_msg("hey, have you already checked my calendar?")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    decision, _turn = h.obs.decisions[0]
+    assert KEYWORD_DELEGATE_KEY not in decision.raw  # recently delivered — not re-run
+    assert h.sink.snapshot() == []  # no duplicate calendar delegate
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_recover_fires_for_different_kind_after_delivered() -> None:
+    """The d6w.32 block is per-kind: a recently-delivered calendar result does NOT
+    suppress recovering a DIFFERENT, unsettled kind ("end the session") — the
+    etu.14 fresh-request path still fires."""
+    h = _TaskGateHarness(
+        [_status_decision()],
+        config=RouterGateConfig(task_catalog=_keyword_catalog()),
+    )
+    assert h.coordinator is not None
+    h.coordinator.note_task_settled(
+        3, status="done", kind="google-calendar", result_text="3 events."
+    )
+    h.coordinator.mark_result_delivered(3)
+    msg = _user_msg("ok, end the session now.")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    assert h.sink.snapshot()[0].spec.kind == "session.end"
+    decision, _turn = h.obs.decisions[0]
+    assert decision.raw[KEYWORD_DELEGATE_KEY]["kind"] == "session.end"
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
 async def test_end_this_session_phrasing_recovers_with_held_result() -> None:
     """The verbatim session-2 turn-4 utterance: "Can you end this session?" with a
     held calendar result. "end this session" is now a session.end keyword
@@ -4502,6 +4558,114 @@ async def test_recovered_delegate_overrides_zero_confidence() -> None:
     assert decision.action == "delegate"
     assert decision.confidence == 1.0
     assert decision.raw[KEYWORD_DELEGATE_KEY]["kind"] == "session.end"
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+# --- Johnny-d6w.31: don't hijack a confident answer; keyword precision ------
+
+
+async def test_recover_skips_confident_answer_speak() -> None:
+    """B1: a deliberate, confident ANSWER (reply_type='answer', high confidence,
+    a non-empty recommended reply) is NOT a dropped delegate — the keyword
+    recovery leaves it alone even when the utterance matches exactly one available
+    kind. Session 35: gpt-5.5 reasoned AGAINST delegating and the gate hijacked it
+    into stock-analysis. Same utterance as the calendar-recovery test; only the
+    deliberate answer differs."""
+    h = _TaskGateHarness(
+        [
+            _speak_decision(
+                reply="I can pull the live dashboard list again if you'd like.",
+                reply_type="answer",
+                confidence=0.95,
+            )
+        ],
+        config=RouterGateConfig(task_catalog=_keyword_catalog(), meeting_backed=False),
+    )
+    msg = _user_msg("what is gonna be in the upcoming week in our Google calendar?")
+
+    await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK fallthrough — no raise
+
+    assert h.sink.snapshot() == []  # nothing queued — no hijack
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "speak"
+    assert KEYWORD_DELEGATE_KEY not in decision.raw
+    assert msg.id in h.gate._pending_turn_ids()
+
+
+async def test_recover_still_fires_for_non_answer_reply_type() -> None:
+    """B1 is scoped to reply_type='answer' (a deliberate answer). A short
+    acknowledgement that keyword-matches a real capability ask is still recovered
+    — the weak-router backstop stays intact."""
+    h = _TaskGateHarness(
+        [_speak_decision(reply="Got it.", reply_type="acknowledgement", confidence=0.95)],
+        config=RouterGateConfig(task_catalog=_keyword_catalog()),
+    )
+    msg = _user_msg("what is on our Google calendar this week?")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    assert h.sink.snapshot()[0].spec.kind == "google-calendar"
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "delegate"
+    assert decision.raw[KEYWORD_DELEGATE_KEY]["kind"] == "google-calendar"
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_recover_skips_sole_generic_verb_match() -> None:
+    """B2: a kind matched only by a generic verb/noun-collision keyword ('share')
+    is too weak to force a recovery — 'can you share it again?' must not spawn the
+    stock-analysis skill, even for a weak speak verdict."""
+    from johnny.agent.task_catalog import TaskCatalogEntry
+
+    catalog = (
+        TaskCatalogEntry(
+            kind="stock-analysis",
+            one_liner="Look up stock prices and market data.",
+            keywords=("stock", "stocks", "share", "shares", "price", "ticker"),
+        ),
+    )
+    h = _TaskGateHarness(
+        [_speak_decision()],  # weak speak, no reply_type — would otherwise recover
+        config=RouterGateConfig(task_catalog=catalog),
+    )
+    msg = _user_msg("can you share it again?")
+
+    await h.gate.run_turn(ChatContext.empty(), msg)  # SPEAK fallthrough — no raise
+
+    assert h.sink.snapshot() == []
+    decision, _turn = h.obs.decisions[0]
+    assert KEYWORD_DELEGATE_KEY not in decision.raw
+    assert msg.id in h.gate._pending_turn_ids()
+
+
+async def test_recover_fires_on_discriminating_keyword() -> None:
+    """B2 keeps real asks working: 'what's the Apple share price?' carries the
+    discriminating 'price' keyword, so the stock-analysis delegate still recovers
+    even though 'share' alone would not."""
+    from johnny.agent.task_catalog import TaskCatalogEntry
+
+    catalog = (
+        TaskCatalogEntry(
+            kind="stock-analysis",
+            one_liner="Look up stock prices and market data.",
+            keywords=("stock", "stocks", "share", "shares", "price", "ticker"),
+        ),
+    )
+    h = _TaskGateHarness(
+        [_speak_decision()],
+        config=RouterGateConfig(task_catalog=catalog),
+    )
+    msg = _user_msg("what's the Apple share price right now?")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    assert h.sink.snapshot()[0].spec.kind == "stock-analysis"
+    decision, _turn = h.obs.decisions[0]
+    assert decision.raw[KEYWORD_DELEGATE_KEY]["kind"] == "stock-analysis"
     h.say.handles[0].fire_done()
     await h.drain()
 

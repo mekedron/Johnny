@@ -26,6 +26,8 @@ from johnny.agent.complexity import (
     _calibrate_confidence,
     _tier_for,
     detect_background_request,
+    detect_redeliver_request,
+    matched_catalog_kinds,
     score_complexity,
 )
 from johnny.agent.task_catalog import STUB_TASK_CATALOG, TaskCatalogEntry
@@ -153,6 +155,55 @@ def test_single_catalog_hit_is_ambiguous_medium() -> None:
     assert verdict.tier == MEDIUM_TIER  # the ambiguous default, not the raw tier
     assert verdict.confidence < CFG.ambiguity_threshold
     assert _dimension(verdict, "catalog_match").score == pytest.approx(0.6)
+
+
+def test_matched_catalog_kinds_require_discriminating_drops_sole_generic_verb() -> None:
+    """Johnny-d6w.31 (B2): with ``require_discriminating``, a kind matched ONLY by
+    a generic verb/noun-collision keyword ("share") is dropped, while a
+    discriminating keyword on the same entry still recovers."""
+    catalog = (
+        TaskCatalogEntry(
+            kind="stock-analysis",
+            one_liner="Stock prices and market data.",
+            keywords=("stock", "stocks", "share", "shares", "price", "ticker"),
+        ),
+    )
+    # Default (raw) matcher is unchanged — a sole "share" still matches.
+    assert matched_catalog_kinds("can you share it again?", catalog) == ["stock-analysis"]
+    # require_discriminating: "share" alone is too weak ⇒ no kind.
+    assert (
+        matched_catalog_kinds(
+            "can you share it again?", catalog, require_discriminating=True
+        )
+        == []
+    )
+    # A discriminating keyword on the same entry still recovers.
+    assert (
+        matched_catalog_kinds(
+            "what's the Apple share price right now?",
+            catalog,
+            require_discriminating=True,
+        )
+        == ["stock-analysis"]
+    )
+    # A specific domain noun ("stock") is discriminating on its own.
+    assert (
+        matched_catalog_kinds("show me the stock", catalog, require_discriminating=True)
+        == ["stock-analysis"]
+    )
+
+
+def test_detect_redeliver_request() -> None:
+    """Johnny-d6w.31 (B3): re-deliver phrasing is detected; unrelated asks are not,
+    and the left-boundary primitive does not misfire on 'again' inside 'against'."""
+    assert detect_redeliver_request("can you share it again?")
+    assert detect_redeliver_request("what did it say?")
+    assert detect_redeliver_request("one more time please")
+    assert detect_redeliver_request("repeat that for me")
+    assert detect_redeliver_request("tell me again")
+    assert not detect_redeliver_request("what's on my calendar?")
+    assert not detect_redeliver_request("are you against this plan?")
+    assert not detect_redeliver_request("can you check the weather?")
 
 
 def test_catalog_dimension_is_sourced_dynamically() -> None:

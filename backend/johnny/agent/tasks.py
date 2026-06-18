@@ -608,6 +608,13 @@ class AnswerTaskContext:
     text: str = ""
     undelivered: tuple[TaskRegistryEntry, ...] = ()
     in_flight: tuple[TaskRegistryEntry, ...] = ()
+    # Kinds with a terminal result that settled within STATUS_RECENT_SETTLE_S but
+    # is NOT held/undelivered (delivered done, failed, or done-with-blank-result).
+    # Conversationally still alive but absent from occupied_kinds — the seam the
+    # keyword recovery reads so a status query about a *just-finished* kind is not
+    # re-run (Johnny-d6w.32). Carried as bare kinds only; never rendered into the
+    # answer prompt, so ``text`` / ``empty`` and replay parity are unaffected.
+    recently_settled_kinds: frozenset[str] = frozenset()
 
     @property
     def empty(self) -> bool:
@@ -1022,7 +1029,9 @@ class TaskCoordinator:
         """One registry entry by id (``None`` when this session never saw it)."""
         return self._registry.get(task_id)
 
-    def status_summary(self, *, now: float | None = None) -> StatusSummary:
+    def status_summary(
+        self, *, now: float | None = None, redeliver: bool = False
+    ) -> StatusSummary:
         """Render the registry into one speech-ready status reply (Johnny-trt.29).
 
         The real ``status`` query: a pure in-memory read (no DB on the hot
@@ -1047,6 +1056,13 @@ class TaskCoordinator:
         otherwise the plain :data:`STATUS_NOTHING_IN_FLIGHT`. ``cancelled`` /
         ``expired`` entries and stale settles are never mentioned. ``now``
         defaults to the coordinator's clock (injectable for tests).
+
+        ``redeliver`` (Johnny-d6w.31): the turn explicitly asked to re-hear the
+        last result ("share it again" / "what did it say?"). When set and the
+        most recent finished task still holds a non-blank ``result_text``, that
+        text is re-spoken in full instead of the "already shared" tail — a
+        re-read of the durable registry copy, so it is NOT carried (already
+        delivered, nothing to re-settle).
         """
         ts = self._monotonic() if now is None else now
         active: list[TaskRegistryEntry] = []
@@ -1086,7 +1102,21 @@ class TaskCoordinator:
                 f"{_ensure_sentence(failure)}"
             )
         if not sentences:
-            if finished_recent:
+            if (
+                redeliver
+                and finished_recent
+                and finished_recent[-1].result_text.strip()
+            ):
+                # Johnny-d6w.31: an explicit "share it again" / "what did it
+                # say?" re-speaks the held result_text rather than dead-ending at
+                # "already shared". Already delivered, so it is NOT carried (no
+                # re-settle) — a re-read of the durable copy the registry holds.
+                last = finished_recent[-1]
+                sentences.append(
+                    f"The {_spoken_kind(last.kind)} task said: "
+                    f"{_ensure_sentence(last.result_text.strip())}"
+                )
+            elif finished_recent:
                 last = finished_recent[-1]
                 tail = (
                     "I already shared the result"
@@ -1137,13 +1167,21 @@ class TaskCoordinator:
         ts = self._monotonic() if now is None else now
         undelivered: list[TaskRegistryEntry] = []
         in_flight: list[TaskRegistryEntry] = []
+        recently_settled: set[str] = set()
         for entry in self._registry.values():
             if not entry.terminal:
                 in_flight.append(entry)
             elif entry.status == "done" and not entry.delivered and entry.result_text.strip():
                 undelivered.append(entry)
+            elif entry.settled_at is not None and (ts - entry.settled_at) <= STATUS_RECENT_SETTLE_S:
+                # Terminal but not held/undelivered (delivered done, failed, or
+                # done-with-blank) and still inside the conversational window: a
+                # status/keyword ask about this kind must re-deliver or report
+                # done — never re-run it (Johnny-d6w.32). Tracked by kind only.
+                recently_settled.add(entry.kind)
+        settled = frozenset(recently_settled)
         if not undelivered and not in_flight:
-            return AnswerTaskContext()
+            return AnswerTaskContext(recently_settled_kinds=settled)
 
         lines: list[str] = [ANSWER_TASK_CONTEXT_HEADER]
         for entry in undelivered:
@@ -1162,6 +1200,7 @@ class TaskCoordinator:
             text="\n".join(lines),
             undelivered=tuple(undelivered),
             in_flight=tuple(in_flight),
+            recently_settled_kinds=settled,
         )
 
     def note_task_running(

@@ -1,0 +1,54 @@
+{
+  "session_id": "session-35-share-again",
+  "label": "session-35: a re-share ask must not hijack into a 'share'-keyworded skill (Johnny-d6w.31)",
+  "bot_session_id": 9035,
+  "mode": "autonomous",
+  "confidence_threshold": 0.7,
+  "instructions": "You are Johnny, a helpful assistant.",
+  "task_catalog": [
+    {
+      "kind": "mcp__demo-http__reverse_text",
+      "one_liner": "Run a background data job on the connected analytics tool."
+    },
+    {
+      "kind": "stock-analysis",
+      "one_liner": "Look up stock prices, shares, and market data.",
+      "keywords": ["stock", "stocks", "share", "shares", "price", "ticker", "market", "trading"]
+    }
+  ],
+  "executor_kinds": ["mcp__demo-http__reverse_text"],
+  "turns": [
+    {
+      "speaker": "alice",
+      "text": "Crunch our total sales since January in the background and report back.",
+      "confidence": 0.96,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.92,
+        "reason": "explicit background request matching a delegatable data-job kind",
+        "action": "delegate",
+        "task": {
+          "kind": "mcp__demo-http__reverse_text",
+          "args": { "text": "total sales since January" },
+          "ack": "On it — I'll crunch the sales total in the background and report back."
+        }
+      },
+      "expect": { "kind": "mcp__demo-http__reverse_text", "terminal_status": "done" }
+    },
+    {
+      "speaker": "alice",
+      "text": "Can you share it again?",
+      "confidence": 0.95,
+      "router": {
+        "should_speak": true,
+        "confidence": 0.95,
+        "reason": "The user wants the previous result re-shared; answer honestly rather than invent or delegate. 'share' here is the verb, not a stock request.",
+        "action": "speak",
+        "reply_type": "answer",
+        "suggested_reply": "I can pull the live dashboard list again if you'd like me to."
+      },
+      "answer": "I can pull the live dashboard list again if you'd like me to.",
+      "expect": { "no_keyword_delegate": true }
+    }
+  ]
+}

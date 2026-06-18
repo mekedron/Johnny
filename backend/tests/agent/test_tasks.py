@@ -1515,6 +1515,76 @@ async def test_status_summary_delivered_result_gets_aware_tail() -> None:
     await coordinator.aclose()
 
 
+async def test_status_summary_redeliver_respeaks_delivered_result() -> None:
+    """Johnny-d6w.31 (B3): an explicit "share it again" re-speaks the delivered
+    result_text in full instead of the "already shared" dead-end (the turn-2 fix).
+    It is a re-read of the held copy, so nothing is re-carried."""
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    queued = await coordinator.begin(_spec(kind="google-calendar"))
+    assert queued is not None
+    coordinator.note_task_settled(
+        queued.task_id, status="done", result_text="You have 3 events this week."
+    )
+    coordinator.mark_result_delivered(queued.task_id)
+    now[0] = 110.0
+    # Without the flag: the aware "already shared" tail.
+    assert "already shared the result" in coordinator.status_summary().text
+    # With redeliver: the full result is spoken again, nothing carried.
+    summary = coordinator.status_summary(redeliver=True)
+    assert summary.text == "The google calendar task said: You have 3 events this week."
+    assert summary.carried_results == ()
+    await coordinator.aclose()
+
+
+async def test_status_summary_redeliver_noop_without_held_result() -> None:
+    """redeliver only changes spoken text when a finished result is actually held
+    — an empty registry still says nothing-in-flight."""
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    assert coordinator.status_summary(redeliver=True).text == STATUS_NOTHING_IN_FLIGHT
+    await coordinator.aclose()
+
+
+async def test_answer_task_context_recently_settled_kinds() -> None:
+    """Johnny-d6w.32: a DELIVERED result within the window stays in
+    recently_settled_kinds even though it is no longer 'occupied'/undelivered, and
+    ages out after STATUS_RECENT_SETTLE_S — the seam the keyword recovery reads so
+    a status query about a just-finished kind is not re-run. The answer-prompt
+    render (text/undelivered/in_flight/empty) is unaffected."""
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    queued = await coordinator.begin(_spec(kind="google-calendar"))
+    assert queued is not None
+    coordinator.note_task_settled(
+        queued.task_id, status="done", result_text="You have 3 events this week."
+    )
+    coordinator.mark_result_delivered(queued.task_id)
+
+    ctx = coordinator.answer_task_context()
+    assert "google-calendar" not in ctx.occupied_kinds  # delivered ⇒ not occupied
+    assert "google-calendar" in ctx.recently_settled_kinds  # but still conversationally alive
+    assert ctx.empty  # rendering unchanged: nothing for the answer model to read
+
+    # Ages out of the window — no longer conversationally alive.
+    now[0] = 100.0 + STATUS_RECENT_SETTLE_S + 1.0
+    assert coordinator.answer_task_context().recently_settled_kinds == frozenset()
+    await coordinator.aclose()
+
+
+async def test_answer_task_context_recently_settled_includes_failures() -> None:
+    """A recently-FAILED task is also recently_settled — a "did the X work?" ask
+    must report the failure, not silently re-run it (Johnny-d6w.32)."""
+    now = [100.0]
+    coordinator = _status_coordinator(now)
+    queued = await coordinator.begin(_spec(kind="web_search"))
+    assert queued is not None
+    coordinator.note_task_settled(queued.task_id, status="failed", result_text="nope")
+    now[0] = 110.0
+    assert "web_search" in coordinator.answer_task_context().recently_settled_kinds
+    await coordinator.aclose()
+
+
 async def test_status_summary_blank_result_done_is_not_carried() -> None:
     """A done task with nothing speakable (UI-only) must not promise a result."""
     now = [100.0]

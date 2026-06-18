@@ -551,6 +551,40 @@ per-entry translations, and none collide with a catalog keyword so the two
 matchers never fight."""
 
 
+REDELIVER_REQUEST_KEYWORDS: tuple[str, ...] = (
+    # English — explicit "say the previous result again" phrasing (the
+    # Johnny-d6w.31 re-deliver trigger: "can you share it again?", "what did it
+    # say?"). Multi-word by design: the left-word-boundary primitive matches a
+    # free suffix, so a bare "again" would also hit "against" — every phrase
+    # here carries enough context to be unambiguous. Like
+    # :data:`BACKGROUND_REQUEST_KEYWORDS` this biases to false-negatives (a
+    # missed re-deliver ask just falls through to the normal status/answer
+    # path) over false-positives (re-reading a result nobody asked for).
+    "it again",
+    "that again",
+    "say again",
+    "once again",
+    "one more time",
+    "repeat that",
+    "repeat it",
+    "repeat the",
+    "tell me again",
+    "read it back",
+    "read that back",
+    "what did it say",
+    "what did you find",
+    "what was the result",
+    "what did it find",
+)
+"""Directive re-deliver phrases for the Johnny-d6w.31 "share it again" trigger
+(:func:`detect_redeliver_request`). Matched with the same left-word-boundary
+primitive (:func:`_keyword_pattern`) as the catalog keywords and
+:data:`BACKGROUND_REQUEST_KEYWORDS`, so it is replay-deterministic and adds no
+prompt bytes. Stand-alone phrases, kept SEPARATE from the per-entry catalog
+translations; English-only in v1 (RU/FI stems can be added the same way the
+background set carries them)."""
+
+
 # --------------------------------------------------------------------------- #
 # Matching                                                                    #
 # --------------------------------------------------------------------------- #
@@ -663,8 +697,50 @@ def _score_catalog(text: str, catalog: tuple[TaskCatalogEntry, ...]) -> Dimensio
     return DimensionScore(name="catalog_match", score=score, signal=signal)
 
 
+GENERIC_DELEGATE_STOPWORDS: frozenset[str] = frozenset(
+    {
+        # High-frequency English words that are common as BOTH an everyday verb
+        # and a noun, where the verb sense is generic and unrelated to any
+        # particular skill domain. A skill keyword that is ONLY one of these
+        # (e.g. the financial noun "share"/"shares") collides with the same word
+        # used as a plain verb ("can you share it again?") and must not, on its
+        # own, force a keyword delegate-recovery (Johnny-d6w.31). General and
+        # dynamic — never per-skill: it names no skill or skill keyword, only
+        # ambiguous English words. Curated conservatively, biased to
+        # false-negatives (under-suppress) so a discriminating domain keyword on
+        # the same entry still recovers; extend it with the same principle.
+        "share",
+        "shares",
+        "run",
+        "runs",
+        "book",
+        "books",
+        "order",
+        "orders",
+        "post",
+        "posts",
+        "play",
+        "plays",
+        "store",
+        "stores",
+        "set",
+        "sets",
+        "trade",
+        "trades",
+    }
+)
+"""Generic verb/noun-collision words that, alone, are too weak to force a
+keyword delegate-recovery (Johnny-d6w.31). Consulted only when
+:func:`matched_catalog_kinds` is called with ``require_discriminating=True`` (the
+gate's recovery path); the shadow scorer and the default raw matcher are
+unaffected."""
+
+
 def matched_catalog_kinds(
-    text: str, catalog: tuple[TaskCatalogEntry, ...]
+    text: str,
+    catalog: tuple[TaskCatalogEntry, ...],
+    *,
+    require_discriminating: bool = False,
 ) -> list[str]:
     """The catalog kinds whose keywords hit ``text`` — the delegate prior (Johnny-etu.6).
 
@@ -680,18 +756,35 @@ def matched_catalog_kinds(
     catalog-assembly contract) never matches, so passing the full catalog or only
     its available slice is equivalent. Kept beside :func:`_score_catalog` so the
     two never drift on what "a catalog keyword hit" means.
+
+    ``require_discriminating`` (Johnny-d6w.31) tightens the match for the gate's
+    recovery path: a kind qualifies only if it hit on at least one keyword that
+    is NOT in :data:`GENERIC_DELEGATE_STOPWORDS`. So an entry matched solely by a
+    generic verb/noun-collision word (the financial-noun keyword "share" while
+    the user meant the verb in "share it again") is dropped, while a
+    discriminating keyword on the same entry ("price", "calendar", "end the
+    session") still recovers. Default ``False`` keeps the raw matcher (and its
+    direct callers/tests) byte-for-byte unchanged.
     """
     folded = text.casefold()
     matched: list[str] = []
     for entry in catalog:
+        any_hit = False
+        discriminating = False
         for keyword in entry.keywords:
             if not keyword:
                 continue
             kw = keyword.casefold()
             variants = (kw, *CATALOG_KEYWORD_TRANSLATIONS.get(kw, ()))
             if any(_keyword_pattern(variant).search(folded) for variant in variants):
-                matched.append(entry.kind)
-                break
+                any_hit = True
+                if kw not in GENERIC_DELEGATE_STOPWORDS:
+                    discriminating = True
+                    break  # one discriminating hit settles the entry
+                # a stopword-only hit is too weak on its own — keep scanning
+                # this entry for a discriminating keyword.
+        if any_hit and (discriminating or not require_discriminating):
+            matched.append(entry.kind)
     return matched
 
 
@@ -718,6 +811,29 @@ def detect_background_request(text: str) -> bool:
     """
     folded = text.casefold()
     return any(_keyword_pattern(kw).search(folded) for kw in BACKGROUND_REQUEST_KEYWORDS)
+
+
+def detect_redeliver_request(text: str) -> bool:
+    """Does the turn explicitly ask to re-hear the previous result? (Johnny-d6w.31).
+
+    The deterministic trigger for re-delivering a durably-held task result: the
+    user said "can you share it again?", "what did it say?", "one more time"
+    (EN). A pure keyword match over the *transcript* with the same
+    left-word-boundary primitive (:func:`_keyword_pattern`) the catalog matcher
+    and :func:`detect_background_request` use, so it is replay-deterministic and
+    adds no prompt bytes — the gate
+    (:meth:`johnny.agent.router_gate.RouterGate._handle_status`) reads it to
+    re-speak the last finished result's ``result_text`` instead of the
+    "already shared" dead-end.
+
+    Conservative BY DESIGN, mirroring :data:`BACKGROUND_REQUEST_KEYWORDS`: the
+    function biases to false-negatives (a missed re-deliver ask just falls
+    through to the normal status/answer path) over false-positives (re-reading a
+    result nobody asked for). It only changes spoken text when a finished result
+    with non-blank ``result_text`` is actually held — see ``status_summary``.
+    """
+    folded = text.casefold()
+    return any(_keyword_pattern(kw).search(folded) for kw in REDELIVER_REQUEST_KEYWORDS)
 
 
 def _score_token_estimate(text: str, config: ComplexityConfig) -> DimensionScore:
@@ -882,15 +998,18 @@ __all__ = [
     "DEFAULT_COMPLEXITY_CONFIG",
     "DIMENSION_WEIGHTS",
     "DimensionScore",
+    "GENERIC_DELEGATE_STOPWORDS",
     "MAX_TOP_SIGNALS",
     "MEDIUM_TIER",
     "OUTPUT_FORMAT_KEYWORDS",
     "REASONING_KEYWORDS",
     "REASONING_TIER",
+    "REDELIVER_REQUEST_KEYWORDS",
     "SHADOW_KEY",
     "SIMPLE_KEYWORDS",
     "SIMPLE_TIER",
     "detect_background_request",
+    "detect_redeliver_request",
     "matched_catalog_kinds",
     "score_complexity",
 ]

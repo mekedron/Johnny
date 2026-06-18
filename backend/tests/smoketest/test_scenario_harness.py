@@ -35,7 +35,10 @@ from app.db.models import (  # noqa: E402
     CapabilityPolicy,
     Workspace,
 )
-from johnny.agent.router_gate import BACKGROUND_PROMOTION_KEY  # noqa: E402
+from johnny.agent.router_gate import (  # noqa: E402
+    BACKGROUND_PROMOTION_KEY,
+    KEYWORD_DELEGATE_KEY,
+)
 from johnny.agent.tasks import (  # noqa: E402
     STATUS_NOTHING_IN_FLIGHT,
     QueuedTask,
@@ -62,6 +65,7 @@ SCENARIO_FIXTURE = _FIXTURES / "scenarios" / "delegated-multispeaker"
 PROMOTION_FIXTURE = _FIXTURES / "scenarios" / "delegated-background-promotion"
 PROGRESS_FIXTURE = _FIXTURES / "scenarios" / "delegated-progress"
 OVERLAP_FIXTURE = _FIXTURES / "scenarios" / "overlap-hearing-check"
+SHARE_AGAIN_FIXTURE = _FIXTURES / "scenarios" / "session-35-share-again"
 SESSIONS_DIR = _FIXTURES / "sessions"
 
 # A deterministic stand-in for the demo MCP `server_time` tool (real wall-clock is
@@ -525,6 +529,42 @@ def test_scenario_promotes_background_request(db: Session) -> None:
     for ws in result.workstream_rows:
         assert ws["source_kind"] == "delegate"
         assert ws["status"] == "done"
+
+
+def test_scenario_reshare_does_not_hijack_into_share_keyword_skill(db: Session) -> None:
+    """Johnny-d6w.31 (B1 + B2) — session 35 end-to-end through the real gate.
+
+    After a delegated workstream, a confident "Can you share it again?" answer
+    (reply_type='answer') must NOT be hijacked by the keyword recovery into the
+    'share'-keyworded stock-analysis skill. The acceptance assertion: that turn's
+    decision carries NO ``keyword_delegate`` override marker, and no second task
+    is queued — only the turn-1 reverse_text workstream exists.
+    """
+    fixture = load_scenario(SHARE_AGAIN_FIXTURE)
+    result = asyncio.run(run_scenario(fixture, session=db))
+
+    # INV-1 (one terminal/turn) + INV-2 (decision↔utterance parity) hold.
+    assert result.invariant_violations == []
+
+    # Exactly one workstream — the turn-1 delegate. The re-share turn queued
+    # NOTHING (no stock-analysis hijack).
+    queued = cast(list[TaskQueued], result.events_of_type("task_queued"))
+    assert len(queued) == 1, "only the turn-1 delegate queues a task"
+    assert queued[0].kind == "mcp__demo-http__reverse_text"
+    assert all(q.kind != "stock-analysis" for q in queued)
+    assert len(result.task_rows) == 1
+    assert result.task_rows[0]["kind"] == "mcp__demo-http__reverse_text"
+
+    # The re-share decision (turn 2) carries NO keyword_delegate override marker:
+    # ``raw_output.keyword_delegate`` is null (the bead's explicit acceptance),
+    # and no decision anywhere was hijacked into stock-analysis.
+    decisions = cast(
+        list[RouterDecisionMade], result.events_of_type("router_decision_made")
+    )
+    assert len(decisions) == 2
+    reshare = decisions[1]
+    assert KEYWORD_DELEGATE_KEY not in reshare.raw_output
+    assert all(KEYWORD_DELEGATE_KEY not in d.raw_output for d in decisions)
 
 
 def test_scenario_fixture_outside_frozen_replay_suite() -> None:

@@ -81,6 +81,7 @@ from johnny.agent.approval import ApprovalCoordinator, ApprovalRound
 from johnny.agent.complexity import (
     SHADOW_KEY,
     detect_background_request,
+    detect_redeliver_request,
     matched_catalog_kinds,
     score_complexity,
 )
@@ -1318,8 +1319,14 @@ class RouterGate:
         if decision.action == STATUS_ACTION:
             # status (Johnny-trt.17/.29): render the coordinator's in-memory
             # task registry and speak it through the same say() machinery
-            # (deterministic, no answer-LLM hop, no DB read).
-            await self._handle_status(tracker, turn_id)
+            # (deterministic, no answer-LLM hop, no DB read). Johnny-d6w.31: a
+            # "share it again" / "what did it say?" ask re-speaks the last
+            # finished result instead of the "already shared" dead-end.
+            await self._handle_status(
+                tracker,
+                turn_id,
+                redeliver=detect_redeliver_request(new_message.text_content or ""),
+            )
             raise StopResponse()
 
         if decision.action == CANCEL_ACTION:
@@ -1798,23 +1805,56 @@ class RouterGate:
             return decision
         if decision.action == SPEAK_ACTION and self._config.meeting_backed:
             return decision
+        # Johnny-d6w.31: a confident, deliberate ANSWER is not a dropped
+        # delegate. This recovery is a weak-router backstop — small local routers
+        # (llama3.2:3b) drop delegate->speak/status with confidence~0 and no
+        # authored reply. When the router chose to answer ON PURPOSE
+        # (reply_type="answer", high confidence, a non-empty recommended reply),
+        # leave it alone: session 35 had gpt-5.5 explicitly reason AGAINST
+        # delegating ("answer honestly rather than invent or delegate") and the
+        # keyword layer hijacked it into an unrelated stock-analysis task. Only
+        # SPEAK is gated here — an empty-registry STATUS stays recoverable (it is
+        # already a degenerate mis-emission).
+        if (
+            decision.action == SPEAK_ACTION
+            and decision.reply_type == "answer"
+            and decision.confidence >= self._config.confidence_threshold
+            and (decision.suggested_reply or "").strip()
+        ):
+            return decision
         text = (new_message.text_content or "").strip()
         if not text:
             return decision
         available = tuple(
             entry for entry in self._config.task_catalog if entry.available
         )
-        matched = list(dict.fromkeys(matched_catalog_kinds(text, available)))
+        # require_discriminating (Johnny-d6w.31): a kind matched SOLELY by a
+        # generic verb/noun-collision keyword ("share" → a financial-skill noun
+        # while the user meant the verb in "share it again") is too weak to force
+        # a recovery; a discriminating keyword on the same entry still recovers.
+        matched = list(
+            dict.fromkeys(
+                matched_catalog_kinds(text, available, require_discriminating=True)
+            )
+        )
         if len(matched) != 1:
             return decision
         kind = matched[0]
-        if kind in task_context.occupied_kinds:
-            # The registry already holds live work of this exact kind — a
-            # running task or a held result the user is asking about. A
-            # same-kind "how's it going?" / "what did it find?" stays on its
-            # status summary or the grounded answer path; recovering here would
-            # queue a duplicate delegate. Only a kind ABSENT from the registry
-            # is an unambiguous fresh request (Johnny-etu.14).
+        if (
+            kind in task_context.occupied_kinds
+            or kind in task_context.recently_settled_kinds
+        ):
+            # The registry already holds — or just finished — work of this exact
+            # kind. occupied_kinds: a running task or a held (undelivered) result
+            # the user is asking about (Johnny-etu.14). recently_settled_kinds: a
+            # result that already DELIVERED (or failed) within the conversational
+            # window, so it dropped out of occupied_kinds but a follow-up
+            # "have you checked the weather?" is still a status query about it,
+            # NOT a fresh command — recovering would re-run it arg-less with wrong
+            # defaults (live: a delivered Tokyo check re-ran as LONDON,
+            # Johnny-d6w.32). A same-kind "how's it going?" / "what did it find?"
+            # stays on its status summary or grounded answer. Only a kind ABSENT
+            # from the registry is an unambiguous fresh request.
             return decision
         task_request = TaskRequest(kind=kind, ack=_recovered_ack(kind), args={})
         decision.raw[KEYWORD_DELEGATE_KEY] = {
@@ -2237,8 +2277,17 @@ class RouterGate:
             ),
         )
 
-    async def _handle_status(self, tracker: TerminalTracker, turn_id: str) -> None:
+    async def _handle_status(
+        self, tracker: TerminalTracker, turn_id: str, *, redeliver: bool = False
+    ) -> None:
         """Speak the real registry-rendered status; its completion owns the terminal.
+
+        ``redeliver`` (Johnny-d6w.31): the turn explicitly asked to re-hear the
+        previous result ("share it again", "what did it say?"). When set, a
+        finished result whose copy the registry still holds is re-spoken with its
+        full ``result_text`` instead of the "already shared" tail — the same
+        ``say()`` path, the same single terminal (INV-1). Already-undelivered
+        results re-speak regardless; this only changes the delivered-already case.
 
         The Phase-5 status query (Johnny-trt.29):
         :meth:`TaskCoordinator.status_summary` renders the in-memory task
@@ -2273,7 +2322,7 @@ class RouterGate:
         if self._tasks is None:
             summary = StatusSummary(text=STATUS_NOTHING_IN_FLIGHT)
         else:
-            summary = self._tasks.status_summary()
+            summary = self._tasks.status_summary(redeliver=redeliver)
         carried = summary.carried_results
         logger.info(
             "agent.router.gate: turn=%s STATUS registry-rendered (carried_results=%s) %r",
