@@ -51,6 +51,12 @@ johnny-replay = "johnny.smoketest.replay_cli:main"
 # (Johnny-d6w.1 / US-001): `check` is the deterministic gate, `generate` commits
 # genuine agent_tasks rows to the real DB for the session-view browser validation.
 johnny-scenario = "johnny.smoketest.scenario_cli:main"
+# `johnny-live-validate` builds a REAL BrowserAgentSession (task wiring on) and
+# times `session.interrupt()` onto a synthetic result delivery — validating the
+# Johnny-d6w.33 barge contract (heard=delivered vs short-cut-re-queues) end-to-end
+# through the real SpeechHandle/interrupt/audio path. Needs the ./run-dev.sh stack
+# (Postgres); run via `docker compose exec api johnny-live-validate`.
+johnny-live-validate = "johnny.smoketest.live_delivery_validate:main"
 
 [project.optional-dependencies]
 # Heavy ML dep for on-device STT. Only the meet-worker image needs it

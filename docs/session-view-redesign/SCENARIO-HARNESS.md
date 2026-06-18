@@ -171,3 +171,38 @@ fixture:
   together is a **live browser run** (chrome-devtools), per `CLAUDE.md` — a heavy
   inline request promotes mid-loop, the floor frees, and the result is delivered
   later as a `task_result`.
+
+## Real-engine delivery/barge validation (`johnny-live-validate`, Johnny-d6w.33)
+
+The scenario harness above drives the real gate + coordinator + worker but with
+a **fake `say()`** — so it can't model a *barge over a result delivery*. That
+gap is what `johnny-live-validate`
+(`backend/johnny/smoketest/live_delivery_validate.py`) closes: it builds a
+**real** `BrowserAgentSession` (task wiring on, so the real `TaskSpeechDeliverer`
++ the session's real `say()`/TTS/audio + `interrupt()` are all live), enqueues a
+synthetic result, lets the deliverer speak it as real paced audio, and times
+`session.interrupt()` onto the playout — the precise mid-result barge the
+chrome-devtools "Interrupt" button could never land.
+
+It asserts the d6w.33 contract through the REAL SpeechHandle/interrupt/audio
+path (the deliverer *unit* test in `tests/agent/test_task_wiring.py` covers the
+same logic with a fake handle):
+
+- barge **after** `TASK_RESULT_HEARD_AFTER_S` of playout → result marked
+  **delivered** (heard = delivered), never re-queued onto a later turn;
+- barge **before** the threshold → result **re-queues** (trt.28 "never lose a
+  result" default holds).
+
+Run it inside the api container against the `./run-dev.sh` stack (needs
+Postgres; no LLM/worker/Redis — only the delivery+barge path):
+
+```bash
+# works today; the `johnny-live-validate` console alias registers on the next image build
+docker compose exec api python -m johnny.smoketest.live_delivery_validate
+```
+
+It prints PASS/FAIL per case, exits non-zero on failure, and creates + deletes
+one throwaway `bot_sessions` row per case (writes nothing to git). The router
+decision bugs in this family (d6w.31 re-share hijack, d6w.32 status-re-run) are
+covered deterministically by the scenario fixtures + `tests/agent/` unit tests,
+not here — this harness is specifically the real-audio **barge** seam.
