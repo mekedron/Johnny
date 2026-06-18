@@ -172,32 +172,36 @@ def scenario_reshare(page: Page, sid: int) -> Check:
 def scenario_status_rerun(page: Page, sid: int) -> Check:
     """d6w.32: weather, then 'have you checked?' → exactly one weather task."""
     say(page, "Use your weather tool to check the weather in Tokyo.")
-    wait_for_reply(page, ["Tokyo"])
+    wait_for_reply(page, ["Right now in", "°C"])  # the RESULT, not the ack ("Checking Tokyo…")
+    page.wait_for_timeout(1_500)  # let the result settle into the registry before the follow-up
     say(page, "Have you checked the weather?")
-    wait_for_reply(page, ["already", "Tokyo", "finished", "shared", "London", "checked"])
-    page.wait_for_timeout(3_000)
-    # d6w.32 CONTRACT: the keyword RECOVERY must not re-run a recently-settled
-    # kind (the session-49 bug was a `status` verdict converted to a weather
-    # delegate). That is what was fixed; assert it precisely by mechanism.
+    wait_for_reply(page, ["already", "finished", "shared", "checked", "still", "London"])
+    page.wait_for_timeout(6_000)  # let any (wrongly) spawned re-run settle so the London query is accurate
+    # d6w.32: the keyword RECOVERY must not re-run a recently-settled kind.
     recovery_reruns = _psql(
         f"select count(*) from agent_decisions where bot_session_id={sid} "
         "and raw_output->'keyword_delegate'->>'kind'='weather'"
     )
-    # Residual (SEPARATE, model-routing — not d6w.32): gpt-5.5 may itself route a
-    # status follow-up to a fresh weather delegate that loses the city → London.
-    weather = _psql(
-        f"select count(*) from agent_tasks where bot_session_id={sid} and kind='weather'"
-    )
+    # d6w.34: a model argless re-delegate of the just-finished kind must be
+    # degraded to STATUS (REDUNDANT_SETTLED_KEY) — so the follow-up never re-runs
+    # from skill defaults (no London). London re-runs are the user-facing symptom.
     london = _psql(
         f"select count(*) from agent_tasks where bot_session_id={sid} and kind='weather' "
         "and result_text ilike '%London%'"
     )
-    ok = recovery_reruns == "0"
-    residual = f" | RESIDUAL (model-routing, not d6w.32): weather tasks={weather}, London re-runs={london}"
+    degrades = _psql(
+        f"select count(*) from agent_decisions where bot_session_id={sid} "
+        "and raw_output->'redundant_settled_delegate'->>'kind'='weather'"
+    )
+    weather = _psql(
+        f"select count(*) from agent_tasks where bot_session_id={sid} and kind='weather'"
+    )
+    ok = recovery_reruns == "0" and london == "0"
     return Check(
-        "d6w.32 status follow-up → keyword recovery does not re-run a settled kind",
+        "d6w.32/.34 status follow-up → no re-run, no London",
         ok,
-        f"keyword-recovery weather re-runs={recovery_reruns} (want 0){residual}",
+        f"recovery re-runs={recovery_reruns} (want 0), London re-runs={london} (want 0); "
+        f"weather tasks={weather}, d6w.34 degrades={degrades}",
     )
 
 
@@ -259,9 +263,13 @@ def main() -> int:
             try:
                 sid = start_session(page)
                 print(f"  live session #{sid}")
-                checks.append(scenario_reshare(page, sid))
-                checks.append(scenario_status_rerun(page, sid))
-                checks.append(scenario_barge(page, sid))
+                for fn in (scenario_reshare, scenario_status_rerun, scenario_barge):
+                    try:
+                        checks.append(fn(page, sid))
+                    except Exception as e:  # one flaky scenario must not abort the rest
+                        checks.append(
+                            Check(fn.__name__, False, f"ERROR: {type(e).__name__}: {e}")
+                        )
             finally:
                 end_session(page)
                 page.close()

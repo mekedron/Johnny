@@ -56,6 +56,7 @@ from johnny.agent.router_gate import (  # noqa: E402
     DEFAULT_DELEGATE_ACK,
     KEYWORD_DELEGATE_KEY,
     MISROUTED_INTERNAL_KEY,
+    REDUNDANT_SETTLED_KEY,
     ROUTER_DECISION_SCHEMA,
     ROUTER_DECISION_SCHEMA_NO_CATALOG,
     STATUS_REROUTE_KEY,
@@ -4463,6 +4464,102 @@ async def test_recover_fires_for_different_kind_after_delivered() -> None:
     decision, _turn = h.obs.decisions[0]
     assert decision.raw[KEYWORD_DELEGATE_KEY]["kind"] == "session.end"
     h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_argless_delegate_of_just_finished_kind_degrades_to_status() -> None:
+    """Johnny-d6w.34: a model DELEGATE of a just-finished kind with NO args is a
+    vague follow-up ('have you checked the weather?') — degrade to STATUS so the
+    held result is reported, not re-run from skill defaults (live: an empty-args
+    weather re-delegate returned LONDON after a Tokyo check)."""
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="weather", args=None)],
+        config=RouterGateConfig(task_catalog=_keyword_catalog()),
+    )
+    assert h.coordinator is not None
+    h.coordinator.note_task_settled(
+        5, status="done", kind="weather", result_text="Right now in Tokyo: clear."
+    )
+    h.coordinator.mark_result_delivered(5)
+    msg = _user_msg("have you checked the weather?")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "status"  # degraded, not re-run
+    assert decision.raw[REDUNDANT_SETTLED_KEY]["kind"] == "weather"
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_argless_delegate_of_inflight_kind_degrades_to_status() -> None:
+    """Johnny-d6w.34 also covers an IN-FLIGHT kind: an argless re-delegate while
+    the kind is still running degrades to STATUS (report progress), not a
+    duplicate run. This is the real-stack race the browser caught — the follow-up
+    turn fired before the prior weather check had settled."""
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="weather", args=None)],
+        config=RouterGateConfig(task_catalog=_keyword_catalog()),
+    )
+    assert h.coordinator is not None
+    h.coordinator.note_task_running(7, kind="weather")  # in flight ⇒ occupied
+    msg = _user_msg("have you checked the weather?")
+
+    with pytest.raises(StopResponse):
+        await h.gate.run_turn(ChatContext.empty(), msg)
+
+    decision, _turn = h.obs.decisions[0]
+    assert decision.action == "status"
+    assert decision.raw[REDUNDANT_SETTLED_KEY]["kind"] == "weather"
+    h.say.handles[0].fire_done()
+    await h.drain()
+
+
+async def test_delegate_with_args_of_just_finished_kind_is_honored() -> None:
+    """A re-delegate carrying NEW args (a different city) is a genuine request —
+    the d6w.34 guard must NOT degrade it."""
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="weather", args={"location": "Paris"})],
+        config=RouterGateConfig(task_catalog=_keyword_catalog()),
+    )
+    assert h.coordinator is not None
+    h.coordinator.note_task_settled(
+        5, status="done", kind="weather", result_text="Right now in Tokyo: clear."
+    )
+    h.coordinator.mark_result_delivered(5)
+    msg = _user_msg("now check the weather in Paris")
+
+    try:
+        await h.gate.run_turn(ChatContext.empty(), msg)
+    except StopResponse:
+        pass
+
+    decision, _turn = h.obs.decisions[0]
+    assert REDUNDANT_SETTLED_KEY not in decision.raw  # carries args ⇒ honored
+    for handle in h.say.handles:
+        handle.fire_done()
+    await h.drain()
+
+
+async def test_argless_delegate_of_unsettled_kind_is_honored() -> None:
+    """The d6w.34 guard only fires for a RECENTLY-SETTLED kind: an argless
+    delegate of a kind that did not just run is left alone."""
+    h = _TaskGateHarness(
+        [_delegate_decision(kind="weather", args=None)],
+        config=RouterGateConfig(task_catalog=_keyword_catalog()),
+    )
+    msg = _user_msg("check the weather")
+
+    try:
+        await h.gate.run_turn(ChatContext.empty(), msg)
+    except StopResponse:
+        pass
+
+    decision, _turn = h.obs.decisions[0]
+    assert REDUNDANT_SETTLED_KEY not in decision.raw  # not recently settled ⇒ honored
+    for handle in h.say.handles:
+        handle.fire_done()
     await h.drain()
 
 

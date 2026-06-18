@@ -420,6 +420,16 @@ unavailable kind, queue+ack for an available one). Stashed before the decision
 emit (the trt.50 ride-along) with ``{from_action, to_action, kind}``, so the
 decision row records the re-route exactly like the delegate-degrade markers."""
 
+REDUNDANT_SETTLED_KEY = "redundant_settled_delegate"
+"""``decision.raw`` key marking a ``delegate`` the gate degraded to ``status``
+because it targets a JUST-FINISHED kind with NO args (Johnny-d6w.34). The model
+sometimes routes a vague progress/recap follow-up ("have you checked the
+weather?") to a fresh delegate of a kind that just ran, carrying no new args — so
+the skill falls back to its defaults and loses the prior context (live: a
+``weather`` re-delegate with empty args returned LONDON after a Tokyo check). The
+MODEL-routing analogue of the Johnny-d6w.32 keyword-recovery guard. Stashed with
+``{from_action, to_action, kind}`` like the other degrade markers."""
+
 KEYWORD_DELEGATE_KEY = "keyword_delegate"
 """``decision.raw`` key marking a ``speak`` / ``status`` verdict the gate
 re-routed to ``delegate`` by recovering the kind from the utterance's catalog
@@ -1132,6 +1142,13 @@ class RouterGate:
         # from delegate); every helper stashes its raw marker before the
         # emits below, so the timing row carries the *effective* action and
         # the decision row records the degrade.
+        # Johnny-d6w.34: an argless re-delegate of a just-finished kind is a
+        # vague follow-up ("have you checked the weather?") that would re-run
+        # from skill defaults and lose context (→ LONDON) — degrade it to STATUS
+        # first so the held result is reported, not re-run.
+        decision = self._degrade_redundant_settled_delegate(
+            decision, task_context, turn_id
+        )
         decision = self._degrade_misrouted_internal_delegate(
             decision, new_message, turn_id
         )
@@ -1521,6 +1538,56 @@ class RouterGate:
             task_request.kind,
         )
         return replace(decision, action=SPEAK_ACTION, task_request=None)
+
+    def _degrade_redundant_settled_delegate(
+        self,
+        decision: RouterDecision,
+        task_context: AnswerTaskContext,
+        turn_id: str,
+    ) -> RouterDecision:
+        """Degrade an argless re-delegate of a JUST-FINISHED kind to STATUS (Johnny-d6w.34).
+
+        The model sometimes routes a vague progress/recap follow-up ("have you
+        checked the weather?") to a FRESH delegate of a kind that is already
+        in flight or just ran, carrying NO new args — so the skill falls back to
+        its defaults and loses the prior context (live: a ``weather`` re-delegate
+        with empty args returned LONDON after a Tokyo check, both while the Tokyo
+        check was still running AND just after it settled). When a delegate
+        targets a kind that is OCCUPIED (in-flight / held —
+        :attr:`AnswerTaskContext.occupied_kinds`) OR
+        :attr:`~AnswerTaskContext.recently_settled_kinds` AND carries no args,
+        treat it as that follow-up and degrade to STATUS so the live progress /
+        held result is reported instead of re-run from defaults. A delegate that
+        carries args (a new city) is a genuine parameterised request and is
+        honored; internal kinds (session.end / meeting.leave) take no args by
+        design and are left alone. The MODEL-routing analogue of the
+        Johnny-d6w.32 keyword-recovery guard — general, no per-skill knowledge.
+        """
+        task_request = decision.task_request
+        if decision.action != DELEGATE_ACTION or task_request is None:
+            return decision
+        if task_request.args:  # a new parameterised request — honor it
+            return decision
+        if is_internal_kind(task_request.kind):  # take no args by design
+            return decision
+        if (
+            task_request.kind not in task_context.occupied_kinds
+            and task_request.kind not in task_context.recently_settled_kinds
+        ):
+            return decision
+        decision.raw[REDUNDANT_SETTLED_KEY] = {
+            "from_action": DELEGATE_ACTION,
+            "to_action": STATUS_ACTION,
+            "kind": task_request.kind,
+        }
+        logger.info(
+            "agent.router.gate: turn=%s argless delegate for just-finished "
+            "kind=%r — degrading to STATUS so the held result is reported, not "
+            "re-run from defaults (Johnny-d6w.34)",
+            turn_id,
+            task_request.kind,
+        )
+        return replace(decision, action=STATUS_ACTION, task_request=None)
 
     def _degrade_misrouted_internal_delegate(
         self, decision: RouterDecision, new_message: LKChatMessage, turn_id: str
