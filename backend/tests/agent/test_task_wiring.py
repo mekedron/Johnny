@@ -18,6 +18,7 @@ from typing import Any, get_args
 
 from johnny.agent.speech_queue import ItemState, SpeechPriority, SpeechQueue
 from johnny.agent.task_wiring import (
+    TASK_RESULT_HEARD_AFTER_S,
     TASKS_WAKE_CHANNEL,
     RedisTaskWake,
     TaskEventListener,
@@ -703,6 +704,7 @@ def _deliverer(
     tick_s: float = 0.01,
     coordinator: TaskCoordinator | None = None,
     floor: Any = None,
+    clock: Any = None,
 ) -> tuple[
     TaskSpeechDeliverer,
     SpeechQueue,
@@ -713,7 +715,8 @@ def _deliverer(
 ]:
     if coordinator is None:
         coordinator, _ = _external_coordinator()
-    queue = SpeechQueue(time.monotonic(), grace_s=grace_s)
+    clk = clock if clock is not None else time.monotonic
+    queue = SpeechQueue(clk(), grace_s=grace_s)
     gate = _FakeGate()
     session = _FakeDeliverySession()
     bus = InMemoryEventBus()
@@ -724,6 +727,7 @@ def _deliverer(
         coordinator=coordinator,
         event_bus=bus,
         session_id="7",
+        clock=clk,
         clock_ms=lambda: 99,
         tick_s=tick_s,
         floor=floor,
@@ -848,6 +852,76 @@ async def test_interrupted_result_requeues_once_then_drops_with_expired_event() 
         # The registry keeps delivered=False — the UI row is the surface.
         registry = coordinator.registry_entry(queued.task_id)
         assert registry is not None and registry.delivered is False
+    finally:
+        await deliverer.aclose()
+        await coordinator.aclose()
+
+
+async def test_interrupted_after_substantial_playout_counts_delivered() -> None:
+    """Johnny-d6w.33: a barge-in only AFTER the result has played past the heard
+    threshold marks it DELIVERED (not re-queued), so it never re-surfaces on a
+    later, unrelated turn. Reproduces session 49 (a ~fully-played Helsinki weather
+    result was barged at the end, then re-spoken before a dashboards list)."""
+    t = [100.0]
+    deliverer, queue, gate, _session, bus, coordinator = _deliverer(clock=lambda: t[0])
+    queued = await coordinator.begin(TaskSpec(kind="weather", turn_id=3))
+    assert queued is not None
+    entry = coordinator.note_task_settled(
+        queued.task_id, status="done", result_text="Right now in Helsinki: Clear.", turn_id=3
+    )
+    assert entry is not None
+    item = deliverer.enqueue_result(entry)
+    assert item is not None
+    # Release from the queue (silence held past grace), then deliver directly.
+    t[0] += 1.0
+    popped = queue.pop_ready(t[0])
+    assert popped is item
+    deliver_task = asyncio.ensure_future(deliverer._deliver(popped))
+    try:
+        await _wait_until(lambda: len(gate.handles) == 1)
+        # The user let it play past the heard threshold, THEN barged in.
+        t[0] += TASK_RESULT_HEARD_AFTER_S + 0.5
+        gate.handles[0].finish(interrupted=True)
+        await deliver_task
+        # Heard = delivered: marked spoken, registry flipped, NOT re-queued.
+        assert item.state is ItemState.SPOKEN
+        registry = coordinator.registry_entry(queued.task_id)
+        assert registry is not None and registry.delivered is True
+        statuses = [getattr(e, "delivery_status", None) for e in bus.snapshot()]
+        assert "interrupted" not in statuses  # no re-queue stamp
+        assert "delivered" in statuses
+    finally:
+        await deliverer.aclose()
+        await coordinator.aclose()
+
+
+async def test_interrupted_before_heard_threshold_still_requeues() -> None:
+    """Symmetric guard (Johnny-d6w.33): a barge-in BEFORE the heard threshold
+    still re-queues the result (the trt.28 'never lose a result' default holds)."""
+    t = [100.0]
+    deliverer, queue, gate, _session, bus, coordinator = _deliverer(clock=lambda: t[0])
+    queued = await coordinator.begin(TaskSpec(kind="weather", turn_id=3))
+    assert queued is not None
+    entry = coordinator.note_task_settled(
+        queued.task_id, status="done", result_text="Right now in Helsinki: Clear.", turn_id=3
+    )
+    assert entry is not None
+    item = deliverer.enqueue_result(entry)
+    assert item is not None
+    t[0] += 1.0
+    popped = queue.pop_ready(t[0])
+    assert popped is item
+    deliver_task = asyncio.ensure_future(deliverer._deliver(popped))
+    try:
+        await _wait_until(lambda: len(gate.handles) == 1)
+        t[0] += 0.2  # barged almost immediately (< threshold)
+        gate.handles[0].finish(interrupted=True)
+        await deliver_task
+        assert item.state is ItemState.QUEUED  # re-queued, will re-deliver
+        registry = coordinator.registry_entry(queued.task_id)
+        assert registry is not None and registry.delivered is False
+        statuses = [getattr(e, "delivery_status", None) for e in bus.snapshot()]
+        assert "interrupted" in statuses
     finally:
         await deliverer.aclose()
         await coordinator.aclose()

@@ -515,6 +515,22 @@ DELIVERY_TICK_S = 0.15
 margin even with say() startup on top; large enough to be invisible next to
 the audio pipeline's own latencies."""
 
+TASK_RESULT_HEARD_AFTER_S = 2.5
+"""Playout-elapsed past which a barged-in task result counts as HEARD, and is
+marked delivered instead of re-queued (Johnny-d6w.33).
+
+The trt.28 default keeps an interrupted result for re-delivery so "a barge-in
+can never disappear a result" — but when the user barges in only AFTER the
+result has been playing this long (e.g. to ask the next thing), they already
+heard it; re-queuing it makes it re-surface at the NEXT boundary, which may be
+an unrelated later turn, bleeding a stale result before that turn's own result
+(live session 49: a fully-played Helsinki weather result re-spoken just before
+a dashboards list). A heuristic, not a fraction: there is no reliable total
+synthesized duration at barge-in time (TTS synthesis is cut too, and captions
+lead playout), so we threshold on elapsed playout. Tunable; biased so the
+common short result spoken for a couple seconds counts as heard while a
+barge in the first moment still re-delivers."""
+
 LISTENER_RECONNECT_BACKOFF_S = 2.0
 """How long the task-event listener waits before resubscribing after a
 dropped Redis connection (the wake-listener discipline)."""
@@ -960,19 +976,26 @@ class TaskSpeechDeliverer:
         # next item with no conversational gap.
         self._queue.note_speech_onset()
         self._was_speaking = True
+        started_s = self._clock()
         try:
             await handle
         finally:
-            self._queue.note_silence_onset(self._clock())
+            ended_s = self._clock()
+            self._queue.note_silence_onset(ended_s)
             self._was_speaking = False
         interrupted = bool(getattr(handle, "interrupted", False))
+        # Johnny-d6w.33: a barge-in only AFTER the result has been playing a
+        # substantial time means the user already heard it — treat it as
+        # delivered rather than re-queuing it to re-surface at a later, unrelated
+        # boundary (the stale-result bleed). A short cut still re-delivers.
+        heard_enough = (ended_s - started_s) >= TASK_RESULT_HEARD_AFTER_S
         if floor_lease is not None:
             await self._release_floor_lease(
                 floor_lease,
                 reason=RELEASE_INTERRUPTED if interrupted else RELEASE_COMPLETED,
                 spoken_text=item.text,
             )
-        if interrupted:
+        if interrupted and not heard_enough:
             # Requeue-once-then-drop is the queue's budget (trt.28 acceptance);
             # the drop fires on_dropped → TaskResultExpired("interrupted twice").
             # Stamp the durable delivery_status=interrupted (Johnny-d6w.2); a
@@ -985,6 +1008,9 @@ class TaskSpeechDeliverer:
             )
             self._queue.mark_interrupted(item, self._clock())
         else:
+            # Clean completion, OR an interruption past the heard threshold
+            # (Johnny-d6w.33): mark spoken so on_spoken flips the registry to
+            # delivered and the result is never re-spoken on a later turn.
             self._queue.mark_spoken(item, self._clock())
 
     async def _release_floor_lease(
