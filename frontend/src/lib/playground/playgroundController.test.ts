@@ -88,8 +88,10 @@ vi.mock('$lib/sessionDetail', () => ({
 
 import {
 	PlaygroundController,
+	deriveGroupLiveState,
 	terminalClearsThinking,
-	turnCorrelationKey
+	turnCorrelationKey,
+	type GroupMemberStrip
 } from '$lib/playground/playgroundSession.svelte';
 import { startBrowserSession } from '$lib/browserSessions';
 
@@ -556,5 +558,167 @@ describe('thinking-correlation helpers (Johnny-d6w.21 / US-502)', () => {
 		assert.equal(terminalClearsThinking('r1', 'r1'), true); // owner matches
 		assert.equal(terminalClearsThinking('r1', 'r2'), false); // cross-turn → keep
 		assert.equal(terminalClearsThinking('t:5', 't:5'), true); // turn-key fallback
+	});
+});
+
+// --------------------------------------------------------------------------- //
+// GROUP-header live-state aggregation — the second trt.65 latch (Johnny-d6w.26) //
+// --------------------------------------------------------------------------- //
+
+function groupMember(overrides: Partial<GroupMemberStrip>): GroupMemberStrip {
+	return {
+		sessionId: 1,
+		agentId: 1,
+		name: 'A',
+		status: 'live',
+		state: 'idle',
+		thinkingRequestId: null,
+		holdsFloor: false,
+		floorWaitMs: null,
+		suppressedCount: 0,
+		lastSuppressedPeer: null,
+		heardPeer: null,
+		claimsWon: 0,
+		claimsLost: 0,
+		lastClaim: null,
+		...overrides
+	};
+}
+
+describe('group header live-state aggregation (Johnny-d6w.26)', () => {
+	const quiet = { micMuted: false, micLevel: 0 };
+
+	it('a live group at rest reads "listening" (matches the idle cards), not a latched thinking/speaking', () => {
+		assert.equal(
+			deriveGroupLiveState([groupMember({}), groupMember({ sessionId: 2 })], quiet),
+			'listening'
+		);
+	});
+
+	it('any member holding the floor → speaking', () => {
+		assert.equal(
+			deriveGroupLiveState(
+				[groupMember({}), groupMember({ sessionId: 2, holdsFloor: true, state: 'speaking' })],
+				quiet
+			),
+			'speaking'
+		);
+	});
+
+	it('any member between verdict and speech → thinking', () => {
+		assert.equal(
+			deriveGroupLiveState([groupMember({}), groupMember({ sessionId: 2, state: 'thinking' })], quiet),
+			'thinking'
+		);
+	});
+
+	it('speaking outranks thinking', () => {
+		assert.equal(
+			deriveGroupLiveState(
+				[
+					groupMember({ state: 'thinking' }),
+					groupMember({ sessionId: 2, holdsFloor: true, state: 'speaking' })
+				],
+				quiet
+			),
+			'speaking'
+		);
+	});
+
+	it('a left/failed member with a stale thinking/floor state is ignored (release path)', () => {
+		assert.equal(
+			deriveGroupLiveState([groupMember({ status: 'ended', state: 'thinking' })], quiet),
+			'idle'
+		);
+		assert.equal(
+			deriveGroupLiveState(
+				[groupMember({ status: 'failed', holdsFloor: true, state: 'speaking' })],
+				quiet
+			),
+			'idle'
+		);
+	});
+
+	it('a live member outranks a left one → listening', () => {
+		assert.equal(
+			deriveGroupLiveState(
+				[groupMember({ status: 'ended', state: 'thinking' }), groupMember({ sessionId: 2 })],
+				quiet
+			),
+			'listening'
+		);
+	});
+
+	it('no live members + mic quiet → idle; empty → idle', () => {
+		assert.equal(deriveGroupLiveState([groupMember({ status: 'ended' })], quiet), 'idle');
+		assert.equal(deriveGroupLiveState([], quiet), 'idle');
+	});
+
+	it('no live members but mic hot → listening (single-session parity)', () => {
+		assert.equal(deriveGroupLiveState([], { micMuted: false, micLevel: 0.2 }), 'listening');
+	});
+});
+
+describe('group header releases with the turn — trt.65 latch #2 (Johnny-d6w.26)', () => {
+	beforeEach(() => {
+		vi.mocked(startBrowserSessionGroup).mockReset();
+		vi.mocked(stopBrowserSessionGroup).mockClear();
+		vi.mocked(postBrowserGroupText).mockClear();
+	});
+
+	// The literal repro: a 2-agent group, send a turn, let it settle. Pre-fix the
+	// group header (controller.liveState) stayed 'thinking' for minutes off the
+	// stale lastDecisionAt timer while BOTH cards returned to Listening. Now the
+	// header derives from the member strips and releases with them.
+	it('thinking → settles back to listening once every member clears (no latch)', async () => {
+		const c = new PlaygroundController();
+		await startGroup(c, 10, ['Alex', 'Echo']);
+		assert.equal(c.liveState, 'listening'); // live group at rest
+
+		subFor(10).opts.onEvent(groupRouterDecision(1, { turnId: 1, requestId: 'alex-r1' }));
+		subFor(11).opts.onEvent(groupRouterDecision(1, { turnId: 1, requestId: 'echo-r1' }));
+		assert.equal(c.liveState, 'thinking');
+
+		// Both turns reach a silent terminal → members clear to idle.
+		subFor(10).opts.onEvent(
+			turnTerminalEvent(2, { turnId: 1, requestId: 'alex-r1', terminalState: 'no_reply' })
+		);
+		subFor(11).opts.onEvent(
+			turnTerminalEvent(2, { turnId: 1, requestId: 'echo-r1', terminalState: 'no_reply' })
+		);
+		assert.equal(
+			c.groupMembers.every((m) => m.state === 'idle'),
+			true
+		);
+		assert.equal(c.liveState, 'listening'); // ← the latch is gone
+	});
+
+	it('tracks the floor: speaking while a member holds it, listening after release', async () => {
+		const c = new PlaygroundController();
+		await startGroup(c, 10, ['Alex', 'Echo']);
+
+		subFor(10).opts.onEvent(floorEvent(1, 'floor_acquired', 0));
+		assert.equal(c.liveState, 'speaking');
+
+		subFor(10).opts.onEvent(floorEvent(2, 'floor_released'));
+		assert.equal(c.liveState, 'listening');
+	});
+
+	it('one member still thinking keeps the header thinking until it too settles', async () => {
+		const c = new PlaygroundController();
+		await startGroup(c, 10, ['Alex', 'Echo']);
+
+		subFor(10).opts.onEvent(groupRouterDecision(1, { turnId: 1, requestId: 'alex-r1' }));
+		subFor(11).opts.onEvent(groupRouterDecision(1, { turnId: 1, requestId: 'echo-r1' }));
+		// Only Echo settles; Alex is still working.
+		subFor(11).opts.onEvent(
+			turnTerminalEvent(2, { turnId: 1, requestId: 'echo-r1', terminalState: 'no_reply' })
+		);
+		assert.equal(c.liveState, 'thinking');
+
+		subFor(10).opts.onEvent(
+			turnTerminalEvent(3, { turnId: 1, requestId: 'alex-r1', terminalState: 'no_reply' })
+		);
+		assert.equal(c.liveState, 'listening');
 	});
 });

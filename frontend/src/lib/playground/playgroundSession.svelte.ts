@@ -186,6 +186,35 @@ export function terminalClearsThinking(ownerKey: string | null, eventKey: string
 	return ownerKey === null || ownerKey === eventKey;
 }
 
+/**
+ * The aggregate live-state for a multi-agent GROUP header (Johnny-d6w.26),
+ * derived from the per-agent member strips rather than the single-session
+ * timestamp getter. US-502 (Johnny-d6w.21) fixed the per-agent "Thinking…"
+ * freeze via request_id correlation, but the group header kept reading the
+ * controller-level `lastDecisionAt`/`lastSpokenAt` timers: they reflect the
+ * last ANY-agent event (no "all members idle" release) and, being read off a
+ * non-reactive `Date.now()`, never re-evaluate once events stop — so the badge
+ * latched on "Thinking"/"Speaking" for minutes while the cards correctly
+ * settled. Aggregating the already-reactive, request_id-correlated member
+ * states gives the header a guaranteed release path that tracks the cards:
+ * `speaking` when any live member holds the floor, `thinking` when any is
+ * between verdict and speech, otherwise a LIVE group rests at `listening` (the
+ * same word its idle member cards show); `idle` only when no member is live and
+ * the mic is quiet. Members that have left/failed (`status !== 'live'`) are
+ * ignored, so a member ending mid-think cannot strand the header.
+ */
+export function deriveGroupLiveState(
+	members: GroupMemberStrip[],
+	opts: { micMuted: boolean; micLevel: number }
+): LiveState {
+	const live = members.filter((m) => m.status === 'live');
+	if (live.some((m) => m.holdsFloor || m.state === 'speaking')) return 'speaking';
+	if (live.some((m) => m.state === 'thinking')) return 'thinking';
+	if (live.length > 0) return 'listening';
+	if (!opts.micMuted && opts.micLevel > 0.05) return 'listening';
+	return 'idle';
+}
+
 export class PlaygroundController {
 	// --- Configuration -----------------------------------------------------
 	// Johnny-trt.45: a playground session is configured by picking an AGENT
@@ -300,6 +329,15 @@ export class PlaygroundController {
 	}
 
 	get liveState(): LiveState {
+		// Multi-agent group: derive from the per-agent member strips, which are
+		// reactive and request_id-correlated (US-502). The single-session timer
+		// logic below latched the group header on stale state (Johnny-d6w.26).
+		if (this.liveGroup) {
+			return deriveGroupLiveState(this.groupMembers, {
+				micMuted: this.micMuted,
+				micLevel: this.micLevel
+			});
+		}
 		if (this.isSpeaking) return 'speaking';
 		const now = Date.now();
 		if (this.lastSpokenAt > 0 && now - this.lastSpokenAt < 1500) return 'speaking';
